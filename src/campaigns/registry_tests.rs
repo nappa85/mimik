@@ -616,10 +616,19 @@ async fn populated_schema15_upgrade_preserves_registry_and_adds_unattributed_his
         .unwrap();
     store
         .run(|db| {
-            // Rewind exactly the registry-history migration, whatever its final number.
+            // Rewind exactly to before the registry-history migration, whatever its number;
+            // later (derived search) migrations are dropped and re-applied too.
+            let registry = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations"))
+                .map_err(AppError::from)?
+                .filter_map(Result::ok)
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .find(|name| name.ends_with("_registry_administration.sql"))
+                .and_then(|name| name[..3].parse::<i64>().ok())
+                .ok_or(AppError::Invalid("registry migration missing"))?;
+            crate::sources::search::drop_schema(db)?;
             db.execute_batch(&format!(
                 "DROP TABLE registry_web_events; DROP TABLE registry_events; PRAGMA user_version={};",
-                crate::store::SCHEMA_VERSION - 1
+                registry - 1
             ))?;
             Ok(())
         })

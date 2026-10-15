@@ -7,10 +7,10 @@ use std::{
 };
 
 /// Current database schema version; migration `N` sets `PRAGMA user_version=N`.
-pub const SCHEMA_VERSION: i64 = 16;
+pub const SCHEMA_VERSION: i64 = 17;
 
 /// Contiguous migrations in application order: index `N-1` holds migration `N`.
-const MIGRATIONS: [&str; 16] = [
+const MIGRATIONS: [&str; 17] = [
     include_str!("../migrations/001_characters.sql"),
     include_str!("../migrations/002_mork_borg.sql"),
     include_str!("../migrations/003_sources.sql"),
@@ -27,6 +27,7 @@ const MIGRATIONS: [&str; 16] = [
     include_str!("../migrations/014_account_administration.sql"),
     include_str!("../migrations/015_material_administration.sql"),
     include_str!("../migrations/016_registry_administration.sql"),
+    include_str!("../migrations/017_source_search.sql"),
 ];
 
 #[derive(Clone)]
@@ -96,6 +97,7 @@ impl Store {
                 tx.execute_batch(migration)?;
             }
         }
+        crate::sources::search::ensure(&tx)?;
         tx.commit()?;
         Ok(Self(Arc::new(Mutex::new(connection))))
     }

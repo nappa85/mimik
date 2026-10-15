@@ -132,6 +132,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(parent)?;
     }
     let store = Store::open(&path)?;
+    let unindexed = store.search_index_failures().await?;
+    if unindexed > 0 {
+        eprintln!(
+            "warning: {unindexed} source unit(s) could not be normalised for search and are excluded from lookup; review them as corrected or rejected (see docs/source-import-contract.md)."
+        );
+    }
     if let Some(command) = args.command {
         let Some(command) = publication_command(&store, command).await? else {
             return Ok(());

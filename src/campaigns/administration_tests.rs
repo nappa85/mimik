@@ -390,6 +390,7 @@ async fn populated_schema13_upgrade_and_exact_large_account_ids_are_preserved() 
     store.run(|db|{
         assert_eq!(db.query_row("SELECT count(*) FROM account_web_events",[],|r|r.get::<_,i64>(0))?,0);
         assert_eq!(db.query_row("SELECT count(*) FROM source_web_events",[],|r|r.get::<_,i64>(0))?,0);
+        crate::sources::search::drop_schema(db)?;
         db.execute_batch("DROP TABLE registry_web_events; DROP TABLE registry_events; DROP TABLE source_web_events; DROP INDEX source_review_page_history; DROP TABLE account_web_events; DROP VIEW account_web_request; PRAGMA user_version=13;")?;
         db.execute("INSERT INTO account_events(account_id,epoch,occurred_at,actor,action) VALUES(1,1,100,'local_operator','bootstrap')",[])?;
         db.execute("INSERT INTO accounts(id,login,display_name,state,epoch) VALUES(9007199254740993,'large-account','Exact large ID','pending',1)",[])?;

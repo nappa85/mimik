@@ -7,8 +7,20 @@ async fn seed(store: &Store) {
         db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES(1,'fixture','fixture','Material <title>','mork-borg','Fixture edition','en',?1,x'',x'',x'',2)",["a".repeat(64)])?;
         db.execute("INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(1,1,1,x'89504e47')",[])?;
         for id in 1..=51 {db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(?1,1,?2,'Text','[]','<p>Fixture</p><script>bad()</script>','Fixture')",params![id,format!("unit-{id}")])?;}
+        // Raw fixture rows get derived search text exactly as a legacy upgrade would.
+        crate::sources::search::ensure(db)?;
         Ok(())
     }).await.unwrap();
+}
+/// Raw HTML is immutable (migration trigger); fixtures replace the unreviewed unit instead.
+fn replace_unit(db: &rusqlite::Connection, block: &str, html: &str) -> Result<(), AppError> {
+    db.execute(
+        "DELETE FROM source_units WHERE id=1 AND state='unreviewed'",
+        [],
+    )?;
+    db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(1,1,?1,'Text','[]',?2,'Fixture')", params![block, html])?;
+    crate::sources::search::ensure(db)?;
+    Ok(())
 }
 fn decision(revision: i64) -> Vec<(String, String)> {
     vec![
@@ -358,7 +370,7 @@ async fn material_schema14_upgrade_preserves_source_account_and_private_history(
         )
         .await
         .unwrap();
-    store.run(|db|{assert_eq!(db.query_row("SELECT count(*) FROM source_web_events",[],|r|r.get::<_,i64>(0))?,0);db.execute_batch("DROP TABLE registry_web_events; DROP TABLE registry_events; DROP TABLE source_web_events; DROP INDEX source_review_page_history; PRAGMA user_version=14;")?;Ok(())}).await.unwrap();
+    store.run(|db|{assert_eq!(db.query_row("SELECT count(*) FROM source_web_events",[],|r|r.get::<_,i64>(0))?,0);crate::sources::search::drop_schema(db)?;db.execute_batch("DROP TABLE registry_web_events; DROP TABLE registry_events; DROP TABLE source_web_events; DROP INDEX source_review_page_history; PRAGMA user_version=14;")?;Ok(())}).await.unwrap();
     let reopened = Store::open(&dir.path().join("private.sqlite3")).unwrap();
     reopened
         .run(|db| {
@@ -440,10 +452,7 @@ async fn material_maximum_metadata_and_history_byte_guards() {
                 "UPDATE sources SET title=?1,edition=?2 WHERE id=1",
                 params!["x".repeat(200), "🦀".repeat(100)],
             )?;
-            db.execute(
-                "UPDATE source_units SET block_id=?1,raw_html=?2 WHERE id=1",
-                params!["x".repeat(512), "x".repeat(65536)],
-            )?;
+            replace_unit(db, &"x".repeat(512), &"x".repeat(65536))?;
             Ok(())
         })
         .await
@@ -997,10 +1006,7 @@ async fn material_byte_guards_csrf_and_revocation_fail_closed() {
     seed(&store).await;
     store
         .run(|db| {
-            db.execute(
-                "UPDATE source_units SET raw_html=?1 WHERE id=1",
-                [format!("\0{}", "x".repeat(65536))],
-            )?;
+            replace_unit(db, "unit-1", &format!("\0{}", "x".repeat(65536)))?;
             Ok(())
         })
         .await
@@ -1008,10 +1014,7 @@ async fn material_byte_guards_csrf_and_revocation_fail_closed() {
     assert!(store.material_page(auth[0].clone(), 1, 0, 0).await.is_err());
     store
         .run(|db| {
-            db.execute(
-                "UPDATE source_units SET raw_html=?1 WHERE id=1",
-                ["x".repeat(65536)],
-            )?;
+            replace_unit(db, "unit-1", &"x".repeat(65536))?;
             Ok(())
         })
         .await
@@ -1034,4 +1037,57 @@ async fn material_byte_guards_csrf_and_revocation_fail_closed() {
     clock.store(1000, Ordering::SeqCst);
     assert!(store.material_image(auth[0].clone(), 1).await.is_err());
     assert!(store.material_recheck(auth[0].clone()).await.is_err());
+}
+
+#[tokio::test]
+async fn material_review_path_maintains_the_search_index() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let fts = |store: &Store| {
+        let store = store.clone();
+        async move {
+            store
+                .run(|db| {
+                    let mut query = db.prepare(
+                        "SELECT rowid,body FROM source_search_fts WHERE rowid=1 ORDER BY rowid",
+                    )?;
+                    let rows = query
+                        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(rows)
+                })
+                .await
+                .unwrap()
+        }
+    };
+    assert!(fts(&store).await.is_empty());
+    for (revision, state, correction, expected) in [
+        (1, "accepted", "", Some("Fixture\n")),
+        (2, "corrected", "Owner correction", Some("Owner correction")),
+        (3, "rejected", "", None),
+    ] {
+        store
+            .material_review_unit(
+                auth[0].clone(),
+                auth[0].csrf_fixture(),
+                1,
+                1,
+                crate::sources::UnitReview {
+                    revision,
+                    state: state.into(),
+                    correction: correction.into(),
+                    actor: String::new(),
+                    rationale: "Compared synthetic original".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fts(&store).await,
+            expected
+                .map(|body| vec![(1, body.to_owned())])
+                .unwrap_or_default()
+        );
+    }
 }

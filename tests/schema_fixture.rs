@@ -20,10 +20,24 @@ fn snapshot(db: &Connection) -> Snapshot {
         .unwrap();
     let rows = schema
         .iter()
-        .filter(|(kind, _, _, _)| kind == "table")
-        .map(|(_, table, _, _)| {
+        .filter(|(kind, _, _, sql)| {
+            kind == "table"
+                && !sql
+                    .as_deref()
+                    .is_some_and(|sql| sql.starts_with("CREATE VIRTUAL TABLE"))
+        })
+        .map(|(_, table, _, sql)| {
+            // FTS5 shadow tables are WITHOUT ROWID; order those by primary key.
+            let order = if sql
+                .as_deref()
+                .is_some_and(|sql| sql.contains("WITHOUT ROWID"))
+            {
+                "1"
+            } else {
+                "rowid"
+            };
             let mut query = db
-                .prepare(&format!("SELECT * FROM \"{table}\" ORDER BY rowid"))
+                .prepare(&format!("SELECT * FROM \"{table}\" ORDER BY {order}"))
                 .unwrap();
             let columns = query.column_count();
             let rows = query

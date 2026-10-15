@@ -464,14 +464,13 @@ async fn corrections_invalidate_completeness_and_persist_with_history() {
             .len(),
         1
     );
-    assert!(
+    // A former LIKE wildcard has no searchable word: rejected, never match-all.
+    assert!(matches!(
         store
             .search_evidence("mork-borg".into(), "fixture-edition".into(), "%".into())
-            .await
-            .unwrap()
-            .matches
-            .is_empty()
-    );
+            .await,
+        Err(AppError::Invalid(_))
+    ));
 }
 
 #[tokio::test]

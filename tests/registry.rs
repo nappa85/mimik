@@ -279,15 +279,14 @@ async fn lookup_selectors_fail_closed_and_legacy_attachment_is_explicit() {
             .len(),
         1
     );
+    // Former LIKE wildcards carry no searchable word and are rejected, never match-all.
     for text in ["%", "_", "\\"] {
-        assert!(
+        assert!(matches!(
             store
                 .search_ruleset_evidence("mork-borg".into(), "fixture".into(), text.into())
-                .await
-                .unwrap()
-                .matches
-                .is_empty()
-        );
+                .await,
+            Err(mimik::AppError::Invalid(_))
+        ));
     }
     for query in [
         "system=mork-borg&query=capacity",

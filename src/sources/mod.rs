@@ -2,6 +2,8 @@
 mod import;
 pub(crate) mod materials;
 pub(crate) mod region;
+pub(crate) mod search;
+pub use search::SEARCH_SCHEMA;
 mod store;
 pub(crate) mod web;
 
@@ -88,11 +90,24 @@ pub struct PageReview {
     pub rationale: String,
 }
 
+/// One reviewed unit hit. Cite by `unit_id` + `unit_revision`; rank order is not stable
+/// across imports because bm25 statistics are corpus-wide.
 pub struct Evidence {
+    pub unit_id: i64,
+    pub unit_revision: i64,
+    pub block_id: String,
+    pub kind: String,
+    /// Stored polygon JSON (PDF points), as in [`UnitView`].
+    pub polygon: String,
+    /// `accepted` or `corrected`.
+    pub state: String,
     pub page_id: i64,
+    pub page_revision: i64,
+    pub source_id: i64,
     pub title: String,
     pub pdf_page: i64,
     pub printed_label: String,
+    /// Effective indexed text: the correction, or the unwrapped normalised extraction.
     pub text: String,
 }
 
@@ -100,6 +115,11 @@ pub struct EvidenceSearch {
     pub source_count: i64,
     pub incomplete_pages: i64,
     pub partial_runs: i64,
+    /// Accepted units on complete pages excluded because their text could not be
+    /// normalised for search (record a correction or rejection to resolve).
+    pub unindexed_units: i64,
+    /// More than the returned 50 matches exist.
+    pub truncated: bool,
     pub matches: Vec<Evidence>,
 }
 

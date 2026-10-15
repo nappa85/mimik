@@ -70,3 +70,6 @@ fresh license review `ses_ecfcce262ffeoxR1tVYwovgyoj`, approving locked borrow-o
 licenses/build/dev/transitive coverage remain unchanged. Actual notices include
 the crate/version/MIT No Attribution text. Re-review version/source/license changes;
 artifact gates remain separate from license-policy approval.
+## Lexical retrieval (2026-10-15)
+
+Rules lookup uses SQLite FTS5, already compiled into the bundled rusqlite/libsqlite3-sys build (`ENABLE_FTS5`, SQLite 3.50.2, verified in the CI container), with the built-in `unicode61 remove_diacritics 2` tokenizer (Italian manuals; English `porter` rejected) and bm25 ranking. Search text is produced by the existing html2text dependency in `plain_no_decorate` raw mode (unwrapped, one table cell per line); no new crate or SQLite feature was added. Custom code is limited to eligibility filtering, quoting-only query construction and index maintenance. A vector index (`sqlite-vec` or brute-force Rust cosine) is deferred until an embedding runtime is selected; see `docs/hybrid-retrieval-plan.md`.

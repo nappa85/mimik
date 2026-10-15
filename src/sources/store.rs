@@ -1,6 +1,6 @@
 use super::{
-    Evidence, EvidenceSearch, PageReview, PageSummary, PageView, ReviewEvent, SourceSummary,
-    UnitReview, UnitView, review_identity, sanitized,
+    EvidenceSearch, PageReview, PageSummary, PageView, ReviewEvent, SourceSummary, UnitReview,
+    UnitView, review_identity, sanitized,
 };
 use crate::{AppError, Store};
 use rusqlite::{OptionalExtension, params};
@@ -159,9 +159,9 @@ impl Store {
                 identity = tx.query_row("SELECT game_id,edition_id FROM registry_editions WHERE game_id=?1 AND label=?2", params![system,edition], |row| Ok(crate::registry::RulesetKey { game_id: row.get(0)?, edition_id: row.get(1)? })).optional()?;
             }
             let result = if let Some(key) = identity {
-                lookup(&tx, &key.game_id, &key.edition_id, &query, true)?
+                super::search::lookup(&tx, &key.game_id, &key.edition_id, &query, true, None)?
             } else {
-                lookup(&tx, &system, &edition, &query, false)?
+                super::search::lookup(&tx, &system, &edition, &query, false, None)?
             };
             tx.commit()?;
             Ok(result)
@@ -178,6 +178,28 @@ impl Store {
         edition_id: String,
         query: String,
     ) -> Result<EvidenceSearch, AppError> {
+        self.search_ruleset_sources(game_id, edition_id, None, query)
+            .await
+    }
+
+    /// Like [`Self::search_ruleset_evidence`], additionally restricted to an explicit
+    /// source set (1–32 local source ids) before ranking.
+    ///
+    /// # Errors
+    /// Rejects malformed IDs/queries/source sets or storage failures.
+    pub async fn search_ruleset_sources(
+        &self,
+        game_id: String,
+        edition_id: String,
+        sources: Option<Vec<i64>>,
+        query: String,
+    ) -> Result<EvidenceSearch, AppError> {
+        if sources
+            .as_ref()
+            .is_some_and(|set| set.is_empty() || set.len() > 32)
+        {
+            return Err(AppError::Invalid("Select 1–32 sources."));
+        }
         if !crate::registry::valid_id(&game_id)
             || !crate::registry::valid_id(&edition_id)
             || query.trim().is_empty()
@@ -189,9 +211,45 @@ impl Store {
         }
         self.run(move |db| {
             let tx = db.transaction()?;
-            let result = lookup(&tx, &game_id, &edition_id, &query, true)?;
+            let result = super::search::lookup(
+                &tx,
+                &game_id,
+                &edition_id,
+                &query,
+                true,
+                sources.as_deref(),
+            )?;
             tx.commit()?;
             Ok(result)
+        })
+        .await
+    }
+
+    /// Number of units whose raw HTML could not be normalised for search.
+    ///
+    /// # Errors
+    /// Storage failures.
+    pub async fn search_index_failures(&self) -> Result<i64, AppError> {
+        self.run(|db| {
+            Ok(db.query_row(
+                "SELECT count(*) FROM source_search_failures WHERE normaliser=?1",
+                [super::search::SEARCH_NORMALISER],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+    }
+
+    /// Rebuild the derived lexical index from reviewed units (explicit maintenance).
+    ///
+    /// # Errors
+    /// Fails on sanitisation/size errors of stored units or storage failures.
+    pub async fn rebuild_search_index(&self) -> Result<(), AppError> {
+        self.run(|db| {
+            let tx = db.transaction()?;
+            super::search::rebuild(&tx)?;
+            tx.commit()?;
+            Ok(())
         })
         .await
     }
@@ -299,52 +357,4 @@ fn next_revision(current: i64) -> Result<i64, AppError> {
         .ok_or(AppError::Invalid(
             "Source review revision is invalid or exhausted; no changes saved.",
         ))
-}
-
-fn lookup(
-    db: &rusqlite::Connection,
-    system: &str,
-    edition: &str,
-    query: &str,
-    registered: bool,
-) -> Result<EvidenceSearch, AppError> {
-    let predicate = if registered {
-        "r.game_id=?1 AND r.edition_id=?2"
-    } else {
-        "r.source_id IS NULL AND s.system_id=?1 AND s.edition=?2"
-    };
-    let sources = "sources s LEFT JOIN source_rulesets r ON r.source_id=s.id";
-    let source_count = db.query_row(
-        &format!("SELECT count(*) FROM {sources} WHERE {predicate}"),
-        params![system, edition],
-        |row| row.get(0),
-    )?;
-    let incomplete_pages = db.query_row(&format!("SELECT count(*) FROM {sources} JOIN source_pages p ON p.source_id=s.id WHERE {predicate} AND p.complete=0"), params![system,edition], |row| row.get(0))?;
-    let partial_runs = db.query_row(&format!("SELECT count(*) FROM {sources} WHERE {predicate} AND (s.total_pages=0 OR s.total_pages<>(SELECT count(*) FROM source_pages p WHERE p.source_id=s.id))"), params![system,edition], |row| row.get(0))?;
-    let pattern = format!(
-        "%{}%",
-        query
-            .trim()
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_")
-    );
-    let mut statement = db.prepare(&format!(r"SELECT p.id,s.title,p.pdf_page,p.printed_label,CASE WHEN u.state='corrected' THEN u.correction ELSE u.raw_text END AS text FROM {sources} JOIN source_pages p ON p.source_id=s.id JOIN source_units u ON u.page_id=p.id WHERE {predicate} AND p.complete=1 AND u.state IN ('accepted','corrected') AND text LIKE ?3 ESCAPE '\' ORDER BY s.id,p.pdf_page,u.id LIMIT 50"))?;
-    let matches = statement
-        .query_map(params![system, edition, pattern], |row| {
-            Ok(Evidence {
-                page_id: row.get(0)?,
-                title: row.get(1)?,
-                pdf_page: row.get(2)?,
-                printed_label: row.get(3)?,
-                text: row.get(4)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(EvidenceSearch {
-        source_count,
-        incomplete_pages,
-        partial_runs,
-        matches,
-    })
 }

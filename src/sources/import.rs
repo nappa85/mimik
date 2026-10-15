@@ -319,6 +319,7 @@ struct StoredUnit {
     polygon: String,
     html: String,
     text: String,
+    search: String,
 }
 
 fn normalized(page: &PreparedPage) -> Result<Vec<StoredUnit>, AppError> {
@@ -336,6 +337,7 @@ fn normalized(page: &PreparedPage) -> Result<Vec<StoredUnit>, AppError> {
                 polygon: serde_json::to_string(&unit.polygon)?,
                 html: unit.html.clone(),
                 text,
+                search: super::search::search_text(&unit.html)?,
             })
         })
         .collect()
@@ -562,6 +564,7 @@ impl Store {
                 let page_id = tx.last_insert_rowid();
                 for unit in units {
                     tx.execute("INSERT INTO source_units (page_id, block_id, kind, polygon, raw_html, raw_text) VALUES (?1,?2,?3,?4,?5,?6)", params![page_id, unit.block_id, unit.kind, unit.polygon, unit.html, unit.text])?;
+                    tx.execute("INSERT INTO source_search_text (unit_id,normaliser,search_text) VALUES (?1,?2,?3)", params![tx.last_insert_rowid(), super::search::SEARCH_NORMALISER, unit.search])?;
                 }
             }
             finalize(&tx, id, &data)?;

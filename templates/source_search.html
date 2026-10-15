@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Reviewed rules lookup</h1>
-<p>Literal lexical search of accepted/corrected units on explicitly complete pages. Results are evidence, not automatic action legality or certified model answers.</p>
+<p>Ranked word search (case- and accent-insensitive; words also match as prefixes; use "quotes" for an exact phrase) over accepted/corrected units on explicitly complete pages. Results are evidence, not automatic action legality or certified model answers. Compare each hit with its source region.</p>
 <form method="get" action="/sources/search" class="panel">
 <label for="system">Exact game/system ID</label><input id="system" name="system" value="{{ query.system }}" required maxlength="64">
 <p>Fill exactly one edition selector. Stable IDs search the whole registered edition, including its exact aliases. Labels resolve registered identities first; unresolved legacy fallback is separate.</p>
@@ -12,9 +12,11 @@
 {% match result %}{% when Some with (result) %}
 {% if result.source_count == 0 %}<p class="badge">Unsupported source/edition: no matching local source registered.</p>{% else %}
 {% if result.incomplete_pages > 0 %}<p class="badge">Coverage incomplete: {{ result.incomplete_pages }} page(s) still excluded from lookup.</p>{% endif %}
+{% if result.unindexed_units > 0 %}<p class="badge">Search index gap: {{ result.unindexed_units }} accepted unit(s) on complete pages could not be normalised for search and are excluded; record a correction or rejection for them.</p>{% endif %}
 {% if result.partial_runs > 0 %}<p class="badge">Partial or unknown original-PDF coverage: {{ result.partial_runs }} extraction run(s) contain selected-page subsets or lack a confirmed original total.</p>{% endif %}
 {% if result.matches.is_empty() %}<p>No reviewed match. This does not mean the rule or action does not exist.</p>{% endif %}
-{% for evidence in result.matches %}<article class="panel"><h2><a href="/sources/pages/{{ evidence.page_id }}">{{ evidence.title }} · printed {{ evidence.printed_label }} · PDF {{ evidence.pdf_page }}</a></h2><pre class="evidence-text">{{ evidence.text }}</pre></article>{% endfor %}
+{% if result.truncated %}<p class="badge">More than {{ result.matches.len() }} reviewed matches; only the best-ranked are shown. Refine the query.</p>{% endif %}
+{% for evidence in result.matches %}<article class="panel"><h2><a href="/sources/pages/{{ evidence.page_id }}">{{ evidence.title }} · printed {{ evidence.printed_label }} · PDF {{ evidence.pdf_page }}</a></h2><p>Unit {{ evidence.unit_id }} rev {{ evidence.unit_revision }} · {{ evidence.kind }}{% if evidence.state == "corrected" %} · <span class="badge">reviewer correction</span>{% endif %} · <a href="/sources/pages/{{ evidence.page_id }}/units/{{ evidence.unit_id }}/image">Compare source region</a></p><pre class="evidence-text">{{ evidence.text }}</pre></article>{% endfor %}
 {% endif %}
 {% when None %}{% endmatch %}
 {% endblock %}

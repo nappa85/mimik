@@ -658,6 +658,7 @@ async fn published_fixture(store: &Store) -> i64 {
         db.execute("INSERT INTO source_rulesets VALUES(1,'synthetic-game','first')",[])?;
         db.execute("INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(1,1,1,x'')",[])?;
         db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(1,1,'block','text','[[0,0],[1,0],[1,1],[0,1]]','','')",[])?;
+        crate::sources::search::ensure(db)?;
         db.execute("INSERT INTO source_page_hashes VALUES(1,1,?1)",[&zeros])?;db.execute("INSERT INTO source_finalizations VALUES(1,?1,?1)",[&zeros])?;Ok(())
     }).await.unwrap();
     let controls = [
@@ -2459,6 +2460,7 @@ async fn populated_schema12_upgrade_preserves_owner_development_records_and_sess
                     .next()
                     .unwrap(),
             )?;
+            crate::sources::search::drop_schema(db)?;
             db.execute_batch("PRAGMA user_version=12;")?;
             Ok(())
         })
