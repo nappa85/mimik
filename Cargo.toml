@@ -1,0 +1,63 @@
+[package]
+name = "mimik"
+version = "0.1.0"
+edition = "2024"
+description = "A sheet-first tabletop RPG companion"
+license = "AGPL-3.0-only"
+publish = false
+include = ["/Cargo.toml", "/Cargo.lock", "/rust-toolchain.toml", "/LICENSE", "/logo.png", "/README.md", "/AGENTS.md", "/TODO.md", "/about.toml", "/about.hbs", "/pyproject.toml", "/.env.example", "/.gitignore", "/.dockerignore", "/.github/workflows/*.yml", "/containers/**", "/src/**", "/templates/**", "/assets/*.css", "/assets/*.js", "/assets/*.md", "/assets/htmx-LICENSE", "/assets/response-targets-LICENSE", "/migrations/*.sql", "/tests/*.rs", "/tests/support/*.rs", "/examples/*.rs", "/examples/sheet-harness-demo/*.md", "/examples/sheet-harness-demo/*.json", "/examples/sheet-harness-demo/*.html", "/schemas/*.json", "/tools/*.py", "/tools/requirements*.txt", "/docs/**/*.md"]
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[features]
+# Deterministic integration-test rendezvous; excluded from shipping defaults.
+auth-test-support = []
+
+[dependencies]
+async-trait = "0.1"
+tower-sessions = { version = "=0.15.0", default-features = false, features = ["axum-core"] }
+time = { version = "0.3", features = ["serde", "formatting"] }
+qrcode = { version = "=0.14.1", default-features = false, features = ["svg"] }
+if-addrs = "=0.15.0"
+url = "2"
+subtle = "2"
+governor = { version = "=0.10.4", default-features = false, features = ["std"] }
+argon2 = { version = "=0.6.0", features = ["zeroize"] }
+getrandom = "=0.4.3"
+zeroize = "=1.9.1"
+askama = "0.14"
+ammonia = "4.1"
+axum = "0.8"
+clap = { version = "4.5", features = ["derive"] }
+html2text = "0.17"
+mime = "0.3"
+regex = "1"
+hex = "0.4"
+jsonschema = { version = "=0.58.6", default-features = false }
+lopdf = { version = "0.45", default-features = false }
+png = "0.18"
+rusqlite = { version = "0.37", features = ["bundled", "functions"] }
+rustix = { version = "1", features = ["fs", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_urlencoded = "0.7"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+
+[dev-dependencies]
+rqrr = { version = "=0.11.0", default-features = false }
+futures-util = "0.3"
+tokio = { version = "1", features = ["test-util"] }
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[[test]]
+name = "login_ui"
+required-features = ["auth-test-support"]

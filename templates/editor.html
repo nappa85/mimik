@@ -1,0 +1,13 @@
+<section id="editor" class="panel">
+  <h2>Identity and notes</h2>
+  <p role="status" aria-live="polite">{{ message }}</p>
+  <form method="post" action="/characters/{{ character.id }}" hx-post="/characters/{{ character.id }}" hx-target="#editor" hx-swap="outerHTML">
+    <input type="hidden" name="revision" value="{{ character.input.revision }}">
+    <input type="hidden" name="system_id" value="{{ character.input.system_id }}">
+    <input type="hidden" name="edition" value="{{ character.input.edition }}">
+    <label for="name">Character name</label><input id="name" name="name" value="{{ character.input.name }}" required maxlength="100">
+    <label for="notes">Notes</label><textarea id="notes" name="notes" rows="12" maxlength="20000">{{ character.input.notes }}</textarea>
+    <button type="submit">Save changes</button><span class="htmx-indicator">Saving…</span>
+    <small>Revision {{ character.input.revision }} · Game and edition are fixed for this record.</small>
+  </form>
+</section>

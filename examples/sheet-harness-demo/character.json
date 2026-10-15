@@ -1,0 +1,23 @@
+{
+  "encoding": 1,
+  "game_id": "lantern-reach-demo",
+  "edition_id": "demo-1",
+  "template": { "id": "lantern-reach-sheet", "version": 1 },
+  "sheet_id": "example-mira",
+  "revision": 1,
+  "values": {
+    "name": "Mira",
+    "vitality": 8,
+    "vitality_max": 10,
+    "focus": 3,
+    "focus_max": 5,
+    "armor": 1,
+    "pace": 5,
+    "notes": "Find the old lighthouse. Ask before spending shared supplies.",
+    "equipment": [
+      { "id": "coat-1", "name": "Padded coat", "kind": "outer-armor", "quantity": 1, "equipped": true, "armor": 1 },
+      { "id": "vest-1", "name": "Iron vest", "kind": "outer-armor", "quantity": 1, "equipped": false, "armor": 3 },
+      { "id": "lamp-1", "name": "Hand lamp", "kind": "tool", "quantity": 1, "equipped": false }
+    ]
+  }
+}

@@ -1,0 +1,802 @@
+use super::domain::{Detail, DetailPage, Workspace};
+use super::{
+    sheets::{HistorySummary, SheetSummary, SheetView},
+    snapshots::Pin,
+    values,
+};
+use crate::{
+    AppError,
+    auth::{self, AuthState},
+};
+use askama::Template;
+use axum::{
+    Extension,
+    extract::Request,
+    middleware::{self, Next},
+};
+use axum::{
+    Router,
+    extract::{DefaultBodyLimit, Path, Query, State},
+    http::StatusCode,
+    response::{Html, IntoResponse, Redirect, Response},
+    routing::{get, post},
+};
+use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use tokio::sync::OwnedSemaphorePermit;
+use tower_sessions::Session;
+
+#[derive(Clone)]
+struct RuntimeAdmission(Arc<Mutex<Option<OwnedSemaphorePermit>>>);
+impl RuntimeAdmission {
+    fn take(&self) -> Result<OwnedSemaphorePermit, StatusCode> {
+        self.0
+            .lock()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .take()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)
+    }
+}
+async fn runtime(mut request: Request, next: Next) -> Response {
+    let Ok(permit) = crate::definitions::admit() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(axum::http::header::RETRY_AFTER, "1")],
+            "Runtime worker busy.",
+        )
+            .into_response();
+    };
+    request
+        .extensions_mut()
+        .insert(RuntimeAdmission(Arc::new(Mutex::new(Some(permit)))));
+    next.run(request).await
+}
+
+#[derive(Clone)]
+pub(crate) struct PrivateTrustedEditor;
+
+pub(crate) fn routes() -> Router<AuthState> {
+    let sheets = Router::new()
+        .route(
+            "/campaigns/{id}/sheets/new",
+            get(new_sheet).post(create_sheet),
+        )
+        .route("/private-sheets/{id}", get(read_sheet).post(edit_sheet))
+        .route("/private-sheets/{id}/history/{revision}", get(read_history))
+        .layer(DefaultBodyLimit::max(1024 * 1024))
+        .layer(middleware::from_fn(runtime));
+    Router::new()
+        .route("/campaigns", get(index).post(create))
+        .route("/campaigns/{id}", get(detail))
+        .route("/campaigns/{id}/join", post(join))
+        .route("/campaigns/{id}/requests/{target}", post(decide))
+        .route("/campaigns/{id}/members/{target}", post(member))
+        .route("/private-sheets", get(personal))
+        .route("/private-sheets/{id}/history", get(history))
+        .layer(DefaultBodyLimit::max(8192))
+        .merge(sheets)
+}
+
+fn error(error: impl std::borrow::Borrow<AppError>) -> StatusCode {
+    match error.borrow() {
+        AppError::NotFound => StatusCode::FORBIDDEN,
+        AppError::Conflict => StatusCode::CONFLICT,
+        AppError::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        AppError::AuthStorageBusy => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+type ResultResponse = Result<Response, StatusCode>;
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct Page {
+    #[serde(default)]
+    after: i64,
+}
+
+#[derive(Template)]
+#[template(path = "campaigns.html")]
+struct IndexTemplate<'a> {
+    workspace: &'a Workspace,
+    csrf: &'a str,
+}
+
+#[derive(Template)]
+#[template(path = "campaign.html")]
+struct DetailTemplate<'a> {
+    detail: &'a Detail,
+    csrf: &'a str,
+    account_id: i64,
+    sheets: &'a [SheetSummary],
+    sheets_next: Option<i64>,
+    page: DetailPage,
+}
+
+async fn index(
+    State(state): State<AuthState>,
+    session: Session,
+    Query(page): Query<Page>,
+) -> ResultResponse {
+    if page.after < 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let auth = auth::request_auth(&state, &session).await?;
+    let workspace = state
+        .store()
+        .workspace(auth, page.after)
+        .await
+        .map_err(error)?;
+    let csrf = auth::token(&session)
+        .await?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    Ok(Html(
+        IndexTemplate {
+            workspace: &workspace,
+            csrf: &csrf,
+        }
+        .render()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    )
+    .into_response())
+}
+
+async fn detail(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(id): Path<i64>,
+    Query(page): Query<DetailPage>,
+) -> ResultResponse {
+    if !page.valid() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let auth = auth::request_auth(&state, &session).await?;
+    let account_id = auth.account_id();
+    let detail = state
+        .store()
+        .campaign_detail_page(auth.clone(), id, page)
+        .await
+        .map_err(error)?;
+    let sheets = if detail.role.is_empty() {
+        super::Listing {
+            rows: Vec::new(),
+            next: None,
+        }
+    } else {
+        state
+            .store()
+            .private_list_page(auth, Some(id), page.sheets)
+            .await
+            .map_err(error)?
+    };
+    let csrf = auth::token(&session)
+        .await?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    Ok(Html(
+        DetailTemplate {
+            detail: &detail,
+            csrf: &csrf,
+            account_id,
+            sheets: &sheets.rows,
+            sheets_next: sheets.next,
+            page,
+        }
+        .render()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    )
+    .into_response())
+}
+
+fn pairs(bytes: &[u8], keys: &[&str]) -> Result<BTreeMap<String, String>, StatusCode> {
+    super::transport::Pairs::parse(bytes)?.admit(keys)
+}
+
+async fn create(
+    State(state): State<AuthState>,
+    session: Session,
+    body: axum::body::Bytes,
+) -> ResultResponse {
+    let form = pairs(&body, &["csrf", "title", "game_id", "edition_id"])?;
+    auth::check_csrf(&session, &form["csrf"]).await?;
+    let auth = auth::request_auth(&state, &session).await?;
+    let id = state
+        .store()
+        .create_campaign(
+            auth,
+            form["title"].clone(),
+            form["game_id"].clone(),
+            form["edition_id"].clone(),
+        )
+        .await
+        .map_err(error)?;
+    Ok(Redirect::to(&format!("/campaigns/{id}")).into_response())
+}
+
+async fn join(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(id): Path<i64>,
+    body: axum::body::Bytes,
+) -> ResultResponse {
+    let form = pairs(&body, &["csrf"])?;
+    auth::check_csrf(&session, &form["csrf"]).await?;
+    let auth = auth::request_auth(&state, &session).await?;
+    state.store().request_join(auth, id).await.map_err(error)?;
+    Ok(Redirect::to(&format!("/campaigns/{id}")).into_response())
+}
+
+async fn decide(
+    State(state): State<AuthState>,
+    session: Session,
+    Path((id, target)): Path<(i64, i64)>,
+    body: axum::body::Bytes,
+) -> ResultResponse {
+    let form = pairs(&body, &["csrf", "revision", "action"])?;
+    auth::check_csrf(&session, &form["csrf"]).await?;
+    let revision = form["revision"]
+        .parse()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if !matches!(form["action"].as_str(), "accept" | "decline") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let auth = auth::request_auth(&state, &session).await?;
+    state
+        .store()
+        .decide_join(auth, id, target, revision, form["action"] == "accept")
+        .await
+        .map_err(error)?;
+    Ok(Redirect::to(&format!("/campaigns/{id}")).into_response())
+}
+
+async fn member(
+    State(state): State<AuthState>,
+    session: Session,
+    Path((id, target)): Path<(i64, i64)>,
+    body: axum::body::Bytes,
+) -> ResultResponse {
+    let form = pairs(&body, &["csrf", "revision", "action"])?;
+    auth::check_csrf(&session, &form["csrf"]).await?;
+    let revision = form["revision"]
+        .parse()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let auth = auth::request_auth(&state, &session).await?;
+    match form["action"].as_str() {
+        "promote" | "demote" => state
+            .store()
+            .change_role(auth, id, target, revision, form["action"] == "promote")
+            .await
+            .map_err(error)?,
+        "leave" if target == auth.account_id() => state
+            .store()
+            .depart(auth, id, target, revision)
+            .await
+            .map_err(error)?,
+        "remove" if target != auth.account_id() => state
+            .store()
+            .depart(auth, id, target, revision)
+            .await
+            .map_err(error)?,
+        _ => return Err(StatusCode::BAD_REQUEST),
+    }
+    Ok(Redirect::to(&format!("/campaigns/{id}")).into_response())
+}
+
+#[derive(Template)]
+#[template(path = "private_list.html")]
+struct PersonalTemplate<'a> {
+    sheets: &'a [SheetSummary],
+    next: Option<i64>,
+}
+#[derive(Template)]
+#[template(path = "private_history.html")]
+struct HistoryTemplate<'a> {
+    id: i64,
+    rows: &'a [DatedHistory],
+    next: Option<i64>,
+}
+struct DatedHistory {
+    summary: HistorySummary,
+    date: crate::presentation::DisplayTime,
+}
+
+async fn personal(
+    State(state): State<AuthState>,
+    session: Session,
+    Query(page): Query<Page>,
+) -> ResultResponse {
+    let auth = auth::request_auth(&state, &session).await?;
+    let sheets = state
+        .store()
+        .private_list_page(auth, None, page.after)
+        .await
+        .map_err(error)?;
+    Ok(Html(
+        PersonalTemplate {
+            sheets: &sheets.rows,
+            next: sheets.next,
+        }
+        .render()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    )
+    .into_response())
+}
+async fn history(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(id): Path<i64>,
+    Query(page): Query<Page>,
+) -> ResultResponse {
+    let auth = auth::request_auth(&state, &session).await?;
+    let rows = state
+        .store()
+        .private_history_page(auth, id, page.after)
+        .await
+        .map_err(error)?;
+    let dated = rows
+        .rows
+        .into_iter()
+        .map(|summary| DatedHistory {
+            date: crate::presentation::datetime(summary.occurred_at),
+            summary,
+        })
+        .collect::<Vec<_>>();
+    Ok(Html(
+        HistoryTemplate {
+            id,
+            rows: &dated,
+            next: rows.next,
+        }
+        .render()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    )
+    .into_response())
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct Version {
+    #[serde(default)]
+    version: i64,
+}
+
+struct FieldView {
+    id: String,
+    label: String,
+    help: String,
+    control: String,
+    nullable: bool,
+    value_state: String,
+    value: String,
+    options: Vec<(String, String)>,
+}
+
+impl FieldView {
+    fn valid_boolean(&self) -> bool {
+        matches!(self.value.as_str(), "" | "true" | "false")
+    }
+    fn valid_option(&self) -> bool {
+        self.options.iter().any(|option| option.0 == self.value)
+    }
+}
+struct GroupView {
+    label: String,
+    fields: Vec<FieldView>,
+}
+
+#[derive(Template)]
+#[template(path = "private_sheet.html")]
+struct PrivateTemplate<'a> {
+    view: &'a SheetView,
+    csrf: &'a str,
+    action: String,
+    draft: &'a crate::mork_form::SheetDraft,
+    sheet: &'a crate::mork_borg::Sheet,
+    groups: &'a [GroupView],
+    message: &'a str,
+    name: &'a str,
+    notes: &'a str,
+    revision: String,
+    native: bool,
+    create: bool,
+    pin: String,
+}
+
+fn native_draft(form: &BTreeMap<String, String>) -> crate::mork_form::SheetDraft {
+    let get = |key: &str| form.get(key).cloned().unwrap_or_default();
+    crate::mork_form::SheetDraft {
+        name: get("name"),
+        revision: get("revision"),
+        agility: get("agility"),
+        presence: get("presence"),
+        strength: get("strength"),
+        toughness: get("toughness"),
+        hp: get("hp"),
+        max_hp: get("max_hp"),
+        worn_armor: get("worn_armor"),
+        protection: get("protection"),
+        standard_items: get("standard_items"),
+        silver: get("silver"),
+        omens: get("omens"),
+        equipment: get("equipment"),
+        description: get("description"),
+        class_notes: get("class_notes"),
+        powers: get("powers"),
+        weapon_one: get("weapon_one"),
+        weapon_two: get("weapon_two"),
+        campaign_miseries: get("campaign_miseries"),
+    }
+}
+
+fn render_private(
+    view: &SheetView,
+    csrf: &str,
+    raw: Option<&BTreeMap<String, String>>,
+    message: &str,
+) -> Result<String, AppError> {
+    let native = matches!(view.snapshot.pin, Pin::Native { .. })
+        && super::snapshots::supported(&view.snapshot);
+    let sheet = if native {
+        serde_json::from_value(view.snapshot.data.clone())?
+    } else {
+        crate::mork_borg::Sheet::default()
+    };
+    let draft = if let Some(raw) = raw {
+        native_draft(raw)
+    } else {
+        crate::mork_form::SheetDraft::from_sheet(&view.snapshot.name, &sheet)
+    };
+    let groups = groups(view, raw)?;
+    let name = raw
+        .and_then(|r| r.get("name"))
+        .map_or(view.snapshot.name.as_str(), String::as_str);
+    let notes = raw
+        .and_then(|r| r.get("notes"))
+        .map_or(view.snapshot.notes.as_str(), String::as_str);
+    let revision = raw
+        .and_then(|r| r.get("revision"))
+        .cloned()
+        .unwrap_or_else(|| view.snapshot.revision.to_string());
+    let create = view.snapshot.sheet_id == 0;
+    let action = if create {
+        let version = match view.snapshot.pin {
+            Pin::Runtime { version_id, .. } => version_id,
+            Pin::Native { .. } => 0,
+        };
+        format!(
+            "/campaigns/{}/sheets/new?version={version}",
+            view.snapshot.campaign_id
+        )
+    } else {
+        format!("/private-sheets/{}", view.snapshot.sheet_id)
+    };
+    PrivateTemplate {
+        view,
+        csrf,
+        action,
+        draft: &draft,
+        sheet: &sheet,
+        groups: &groups,
+        message,
+        name,
+        notes,
+        revision,
+        native,
+        create,
+        pin: serde_json::to_string(&view.snapshot.pin)?,
+    }
+    .render()
+    .map_err(|_| AppError::Template)
+}
+
+fn groups(
+    view: &SheetView,
+    raw: Option<&BTreeMap<String, String>>,
+) -> Result<Vec<GroupView>, AppError> {
+    let mut groups = Vec::new();
+    if let Some(pin) = &view.immutable {
+        for group in &pin.definition().groups {
+            let mut fields = Vec::new();
+            for id in &group.fields {
+                let field = pin
+                    .definition()
+                    .fields
+                    .iter()
+                    .find(|f| &f.id == id)
+                    .ok_or(AppError::Invalid("Invalid pinned group."))?;
+                let saved = &view.snapshot.data[id];
+                let value = raw
+                    .and_then(|r| r.get(&format!("value-{id}")))
+                    .cloned()
+                    .unwrap_or_else(|| match saved {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Null => String::new(),
+                        v => v.to_string(),
+                    });
+                let value_state = raw
+                    .and_then(|r| r.get(&format!("null-{id}")))
+                    .cloned()
+                    .unwrap_or_else(|| if saved.is_null() { "unknown" } else { "known" }.into());
+                fields.push(FieldView {
+                    id: id.clone(),
+                    label: field.label.clone(),
+                    help: field.help.clone().unwrap_or_default(),
+                    control: match field.control {
+                        crate::definitions::Control::Text => "text",
+                        crate::definitions::Control::Multiline => "multiline",
+                        crate::definitions::Control::Integer => "integer",
+                        crate::definitions::Control::Boolean => "boolean",
+                        crate::definitions::Control::Enumeration => "enum",
+                    }
+                    .into(),
+                    nullable: field.nullable,
+                    value_state,
+                    value,
+                    options: field
+                        .options
+                        .as_ref()
+                        .map(|choices| {
+                            choices
+                                .iter()
+                                .map(|c| (c.id.clone(), c.label.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                });
+            }
+            groups.push(GroupView {
+                label: group.label.clone(),
+                fields,
+            });
+        }
+    }
+    Ok(groups)
+}
+
+async fn rendered(
+    view: SheetView,
+    permit: OwnedSemaphorePermit,
+    csrf: String,
+    raw: Option<BTreeMap<String, String>>,
+    status: StatusCode,
+    message: String,
+) -> ResultResponse {
+    let html = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        render_private(&view, &csrf, raw.as_ref(), &message)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(error)?;
+    let mut response = (status, Html(html)).into_response();
+    if matches!(
+        status,
+        StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY
+    ) {
+        response.extensions_mut().insert(PrivateTrustedEditor);
+    }
+    Ok(response)
+}
+
+async fn new_sheet(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(id): Path<i64>,
+    Query(version): Query<Version>,
+    Extension(admission): Extension<RuntimeAdmission>,
+) -> ResultResponse {
+    let permit = admission.take()?;
+    let auth = auth::request_auth(&state, &session).await?;
+    let (view, permit) = state
+        .store()
+        .private_create_context(auth, id, version.version, permit)
+        .await
+        .map_err(error)?;
+    let csrf = auth::token(&session)
+        .await?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    rendered(view, permit, csrf, None, StatusCode::OK, String::new()).await
+}
+
+async fn read_sheet(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(id): Path<i64>,
+    Extension(admission): Extension<RuntimeAdmission>,
+) -> ResultResponse {
+    read_private(state, session, id, None, admission).await
+}
+async fn read_history(
+    State(state): State<AuthState>,
+    session: Session,
+    Path((id, revision)): Path<(i64, i64)>,
+    Extension(admission): Extension<RuntimeAdmission>,
+) -> ResultResponse {
+    read_private(state, session, id, Some(revision), admission).await
+}
+async fn read_private(
+    state: AuthState,
+    session: Session,
+    id: i64,
+    history: Option<i64>,
+    admission: RuntimeAdmission,
+) -> ResultResponse {
+    let permit = admission.take()?;
+    let auth = auth::request_auth(&state, &session).await?;
+    let (view, permit) = state
+        .store()
+        .private_read(auth, id, history, permit)
+        .await
+        .map_err(error)?;
+    let csrf = auth::token(&session)
+        .await?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    rendered(view, permit, csrf, None, StatusCode::OK, String::new()).await
+}
+
+const NATIVE_KEYS: &[&str] = &[
+    "csrf",
+    "revision",
+    "name",
+    "notes",
+    "agility",
+    "presence",
+    "strength",
+    "toughness",
+    "hp",
+    "max_hp",
+    "worn_armor",
+    "protection",
+    "standard_items",
+    "silver",
+    "omens",
+    "equipment",
+    "description",
+    "class_notes",
+    "powers",
+    "weapon_one",
+    "weapon_two",
+    "campaign_miseries",
+];
+
+async fn create_sheet(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(id): Path<i64>,
+    Query(version): Query<Version>,
+    Extension(admission): Extension<RuntimeAdmission>,
+    body: axum::body::Bytes,
+) -> ResultResponse {
+    save_private(state, session, id, Some(version.version), admission, body).await
+}
+async fn edit_sheet(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(id): Path<i64>,
+    Extension(admission): Extension<RuntimeAdmission>,
+    body: axum::body::Bytes,
+) -> ResultResponse {
+    save_private(state, session, id, None, admission, body).await
+}
+
+async fn save_private(
+    state: AuthState,
+    session: Session,
+    id: i64,
+    version: Option<i64>,
+    admission: RuntimeAdmission,
+    body: axum::body::Bytes,
+) -> ResultResponse {
+    let permit = admission.take()?;
+    let (pairs, permit) = tokio::task::spawn_blocking(move || {
+        Ok::<_, StatusCode>((super::transport::Pairs::parse(&body)?, permit))
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+    auth::check_csrf(&session, pairs.csrf()?).await?;
+    let auth = auth::request_auth(&state, &session).await?;
+    let (mut view, permit) = load_editor(&state, auth.clone(), id, version, permit).await?;
+    if !view.editable {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let mut keys = vec![
+        "csrf".to_string(),
+        "revision".to_string(),
+        "name".to_string(),
+        "notes".to_string(),
+    ];
+    if let Some(pin) = &view.immutable {
+        for field in &pin.definition().fields {
+            keys.push(format!("value-{}", field.id));
+            if field.nullable {
+                keys.push(format!("null-{}", field.id));
+            }
+        }
+    } else {
+        keys = NATIVE_KEYS.iter().map(|s| (*s).into()).collect();
+    }
+    let form = pairs.admit(&keys.iter().map(String::as_str).collect::<Vec<_>>())?;
+    let csrf = auth::token(&session)
+        .await?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let (result, view, form, permit) = tokio::task::spawn_blocking(move || {
+        let result = (|| {
+            let revision = values::integer(&form["revision"])?;
+            let name = super::name_notes(&form["name"], &form["notes"])?;
+            let data = if let Some(pin) = &view.immutable {
+                let data = values::form(pin.definition(), &form)?;
+                pin.validate_values(&data)?;
+                data
+            } else {
+                serde_json::to_value(native_draft(&form).validate()?)?
+            };
+            if revision != view.snapshot.revision {
+                return Err(AppError::Conflict);
+            }
+            view.snapshot.name = name;
+            view.snapshot.notes.clone_from(&form["notes"]);
+            view.snapshot.data = data;
+            Ok(())
+        })();
+        (result, view, form, permit)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if let Err(failure) = result {
+        let message = match &failure {
+            AppError::Invalid(reason) => format!(
+                "No changes saved: {reason} Check the full draft and its submitted revision."
+            ),
+            _ => "No changes saved. Check the full draft and its submitted revision.".into(),
+        };
+        let (view, permit) = load_editor(&state, auth, id, version, permit).await?;
+        if !view.editable {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        return rendered(view, permit, csrf, Some(form), error(failure), message).await;
+    }
+    match state.store().private_save(auth.clone(), view, permit).await {
+        Ok(id) => Ok(Redirect::to(&format!("/private-sheets/{id}")).into_response()),
+        Err(failure @ (AppError::Conflict | AppError::Invalid(_))) => {
+            let permit =
+                crate::definitions::admit().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            let (view, permit) = load_editor(&state, auth, id, version, permit).await?;
+            if !view.editable {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            rendered(
+                view,
+                permit,
+                csrf,
+                Some(form),
+                error(failure),
+                "No changes saved. Copy your draft, reload and reassess the submitted revision."
+                    .into(),
+            )
+            .await
+        }
+        Err(failure) => Err(error(failure)),
+    }
+}
+
+async fn load_editor(
+    state: &AuthState,
+    auth: auth::RequestAuth,
+    id: i64,
+    version: Option<i64>,
+    permit: OwnedSemaphorePermit,
+) -> Result<(SheetView, OwnedSemaphorePermit), StatusCode> {
+    if let Some(version) = version {
+        state
+            .store()
+            .private_create_context(auth, id, version, permit)
+            .await
+            .map_err(error)
+    } else {
+        state
+            .store()
+            .private_read(auth, id, None, permit)
+            .await
+            .map_err(error)
+    }
+}

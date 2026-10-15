@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}{{ character.input.name }} · Context checklist · Mimik{% endblock %}
+{% block content %}
+<a href="/characters/{{ character.id }}/mork-borg">← Saved stats</a>
+<h1>Context checklist — {{ character.input.name }}</h1>
+<p>Ordinary classless base-rule references only. Declare known facts; unknowns stay unknown. This is not a complete legality check and it never spends resources, rolls dice, changes sheets, or approves sources.</p>
+<p role="status">{{ message }}</p>
+{% if !message.is_empty() %}<p>The supplied draft and expected revision are preserved. Copy it and reload/reassess current data before retrying; no advice was generated.</p>{% endif %}
+<form method="post" action="/characters/{{ character.id }}/context" class="panel">
+<input type="hidden" name="revision" value="{{ context.revision }}">
+<label for="goal">Your intent (not interpreted as confirmed facts)</label><textarea id="goal" name="goal" maxlength="1000">{{ context.goal }}</textarea>
+<div class="columns">
+{% for field in fields %}<div><label for="{{ field.name }}">{{ field.label }}</label><select id="{{ field.name }}" name="{{ field.name }}"><option value="unknown" {% if field.value == "unknown" %}selected{% endif %}>Unknown / not confirmed</option><option value="yes" {% if field.value == "yes" %}selected{% endif %}>Yes</option><option value="no" {% if field.value == "no" %}selected{% endif %}>No</option></select></div>{% endfor %}
+</div>
+<label for="power_uses">Known remaining daily power uses (blank = unknown)</label><input id="power_uses" name="power_uses" value="{{ context.power_uses }}" inputmode="numeric" maxlength="4">
+<p><small>Saved character revision {{ context.revision }}. Class features, special effects, injuries, terrain and GM rulings may require adjudication outside this checklist.</small></p>
+<button type="submit">Explain the standard options</button>
+</form>
+{% match advice %}{% when Some with (advice) %}
+<h2>Saved-sheet snapshot {{ advice.revision }}</h2><p>Intent: {{ advice.goal }}</p><ul>{% for note in advice.notes %}<li>{{ note }}</li>{% endfor %}</ul>
+{% for hint in advice.hints %}<article class="panel" data-option="{{ hint.key }}"><h2>{{ hint.title }} — {{ hint.status }}</h2>
+{% match hint.target %}{% when Some with (target) %}<p>{{ hint.ability }}: d20 + {% match hint.modifier %}{% when Some with (modifier) %}{{ modifier }}{% when None %}saved modifier{% endmatch %}, meet or exceed DR {{ target }}.</p>{% when None %}<p>No numerical success target endorsed for this card.</p>{% endmatch %}
+<p>{{ hint.explanation }}</p>
+{% if !hint.established.is_empty() %}<h3>Declared/established for this checklist</h3><ul>{% for fact in hint.established %}<li>{{ fact }}</li>{% endfor %}</ul>{% endif %}
+{% if !hint.blockers.is_empty() %}<h3>Standard-path blockers</h3><ul>{% for blocker in hint.blockers %}<li>{{ blocker }}</li>{% endfor %}</ul>{% endif %}
+{% if !hint.unknowns.is_empty() %}<h3>Still needs context</h3><ul>{% for unknown in hint.unknowns %}<li>{{ unknown }}</li>{% endfor %}</ul>{% endif %}
+<small>Source: {{ hint.citation }}</small></article>{% endfor %}
+{% when None %}{% endmatch %}
+{% endblock %}

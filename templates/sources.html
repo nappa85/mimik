@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Local sources</h1>
+<p>Imported evidence starts unreviewed. Compare every relevant unit with the original page, resolve corrections, then explicitly confirm page completeness.</p>
+<p><a href="/sources/search">Look up reviewed evidence →</a></p>
+{% if sources.is_empty() %}<p>No prepared sources registered. Use <code>mimik import-source --bundle PATH --pdf PATH</code> locally; see the source-import setup documentation.</p>{% endif %}
+{% for source in sources %}
+<section class="panel"><h2>{{ source.title }}</h2><p>{{ source.system_id }} · {{ source.edition }}</p><small>Original PDF SHA-256: {{ source.pdf_hash }}</small>
+<p>{% if source.finalized %}Importer-verified artifact assertion; not authentication or human review.{% else %}Artifact integrity unverified for publication. Reimport the same verified bundle/PDF to establish immutable evidence.{% endif %}</p>
+{% match source.ruleset %}{% when Some with (key) %}<p>Registered ruleset: <code>{{ key.game_id }} / {{ key.edition_id }}</code>. Identity registration is separate from evidence approval and sheet support.</p>{% when None %}<p>Legacy ruleset identity unresolved; no adapter is enabled by this label. Register an exact legacy alias to associate it.</p>{% endmatch %}
+<p>Selected original PDF pages: {{ source.pages.len() }} of {% if source.total_pages > 0 %}{{ source.total_pages }}{% else %}unknown{% endif %}. Review status is recorded separately for each selected page.</p>
+<ul>{% for page in source.pages %}<li><a href="/sources/pages/{{ page.id }}">PDF page {{ page.pdf_page }} · printed {{ page.printed_label }}</a> — {% if page.complete %}review complete{% else %}incomplete{% endif %}</li>{% endfor %}</ul></section>
+{% endfor %}
+{% endblock %}

@@ -1,0 +1,7 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Account {{ purpose }} · Mimik</title><script src="/assets/account-sharing.js"></script><link rel="stylesheet" href="/assets/app.css"></head><body><main>
+<h1>Account {{ purpose }}</h1>{% if !message.is_empty() %}<p role="alert">{{ message }}</p>{% endif %}{% if !csrf.is_empty() %}<form method="post" action="/auth/{{ purpose }}">
+<noscript>Paste the token from your invitation link (the value after #token=).</noscript>
+<input type="hidden" name="csrf" value="{{ csrf }}"><label>One-use token <input type="password" name="token" value="{{ token }}" required minlength="64" maxlength="64" autocomplete="off" spellcheck="false"></label>
+<label>New password <input type="password" name="password" required minlength="12" autocomplete="new-password"></label>
+<label>Confirm password <input type="password" name="confirmation" required minlength="12" autocomplete="new-password"></label><button>Complete {{ purpose }}</button></form>{% endif %}
+<p>Player passwords require12 Unicode scalars; Owner passwords15. No required character categories. Maximum128 scalars/512 UTF-8 bytes, no control characters or trimming. Completion does not sign you in.</p>{% if !token.is_empty() %}<p><a href="/auth/{{ purpose }}?fresh=1#token={{ token }}">Open a fresh form</a></p>{% endif %}<a href="/auth/login">Sign in</a></main></body></html>

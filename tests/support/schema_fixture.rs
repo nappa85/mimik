@@ -1,0 +1,134 @@
+//! Construct real pre-finalization fixtures; never disable guards on normal finalized tests.
+#[allow(
+    dead_code,
+    reason = "Shared support module; some integration suites only rewind accounts"
+)]
+pub fn pre_finalization(db: &rusqlite::Connection, remigrate: bool) {
+    let transaction = db.unchecked_transaction().unwrap();
+    remove_empty_accounts(&transaction);
+    rewind_finalization(&transaction, remigrate);
+    transaction.commit().unwrap();
+}
+
+/// Test-only rewind prerequisite, before any historical fixture drops.
+#[allow(
+    dead_code,
+    reason = "Shared support module; some integration suites only rewind finalization"
+)]
+pub fn remove_empty_account_tables(db: &rusqlite::Connection) {
+    let transaction = db.unchecked_transaction().unwrap();
+    remove_empty_accounts(&transaction);
+    transaction.commit().unwrap();
+}
+
+fn remove_empty_accounts(db: &rusqlite::Connection) {
+    let version: i64 = db
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        version, 15,
+        "Account fixture requires schema 15, found {version}"
+    );
+    let tables = [
+        "source_web_events",
+        "account_web_events",
+        "private_sheet_history",
+        "private_sheets",
+        "campaign_events",
+        "campaign_requests",
+        "campaign_members",
+        "campaigns",
+        "auth_sessions",
+        "account_events",
+        "account_credentials",
+        "account_owner",
+        "accounts",
+    ];
+    // Collect every count before validating or dropping any table.
+    let counts = tables.map(|table| {
+        db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap_or_else(|error| panic!("Unexpected account fixture schema ({table}): {error}"))
+    });
+    for (table, count) in tables.into_iter().zip(counts) {
+        assert_eq!(count, 0, "Refusing populated account fixture table {table}");
+    }
+    db.execute_batch("DROP VIEW account_web_request; DROP VIEW campaign_request_auth;")
+        .unwrap();
+    db.execute_batch("DROP VIEW private_sheet_events_valid;")
+        .unwrap();
+    for table in tables {
+        db.execute_batch(&format!("DROP TABLE {table};")).unwrap();
+    }
+    db.execute_batch("DROP INDEX source_review_page_history;")
+        .unwrap();
+}
+
+fn rewind_finalization(db: &rusqlite::Connection, remigrate: bool) {
+    db.execute_batch("DROP TRIGGER IF EXISTS page_completion_integrity; DROP TRIGGER IF EXISTS page_completion_event_integrity; DROP TRIGGER IF EXISTS definition_approvals_provenance;").unwrap();
+    db.execute_batch("DROP TABLE definition_withdrawals; DROP TABLE definition_approvals; DROP TABLE definition_versions;").unwrap();
+    let triggers = [
+        "source_page_hash_insert",
+        "source_finalize_insert",
+        "source_finalize_update",
+        "source_finalize_delete",
+        "source_page_hash_update",
+        "source_page_hash_delete",
+        "sources_finalized_insert",
+        "sources_finalized_update",
+        "sources_finalized_delete",
+        "pages_finalized_insert",
+        "pages_finalized_update",
+        "pages_finalized_delete",
+        "units_finalized_insert",
+        "units_finalized_update",
+        "units_finalized_delete",
+        "source_rulesets_finalized_insert",
+        "source_rulesets_finalized_update",
+        "source_rulesets_finalized_delete",
+        "page_review_revision",
+        "unit_review_revision",
+        "source_review_event_insert",
+        "source_review_event_update",
+        "source_review_event_delete",
+    ];
+    for trigger in triggers {
+        db.execute_batch(&format!("DROP TRIGGER {trigger};"))
+            .unwrap();
+    }
+    db.execute_batch(
+        "DROP TABLE source_page_hashes; DROP TABLE source_finalizations; PRAGMA user_version=6;",
+    )
+    .unwrap();
+    db.execute_batch("DROP TRIGGER unit_review_page_cascade;")
+        .unwrap();
+    if remigrate {
+        db.execute_batch(include_str!("../../migrations/007_source_finalization.sql"))
+            .unwrap();
+        db.execute_batch(include_str!(
+            "../../migrations/008_definition_publication.sql"
+        ))
+        .unwrap();
+        db.execute_batch(include_str!("../../migrations/009_review_integrity.sql"))
+            .unwrap();
+        db.execute_batch(include_str!("../../migrations/010_accounts.sql"))
+            .unwrap();
+        db.execute_batch(include_str!("../../migrations/011_auth_sessions.sql"))
+            .unwrap();
+        db.execute_batch(include_str!("../../migrations/012_campaigns.sql"))
+            .unwrap();
+        db.execute_batch(include_str!(
+            "../../migrations/013_owner_administration.sql"
+        ))
+        .unwrap();
+        db.execute_batch(include_str!(
+            "../../migrations/014_account_administration.sql"
+        ))
+        .unwrap();
+        db.execute_batch(include_str!(
+            "../../migrations/015_material_administration.sql"
+        ))
+        .unwrap();
+    }
+}

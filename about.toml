@@ -1,0 +1,18 @@
+accepted = ["AGPL-3.0-only", "Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
+targets = ["x86_64-unknown-linux-gnu"]
+ignore-build-dependencies = false
+ignore-dev-dependencies = false
+ignore-transitive-dependencies = false
+
+# Reviewed cssparser 0.38.0 and dtoa-short 0.3.5: MPL-2.0 permits AGPLv3
+# secondary licensing. Preserve their notices and accompany binary with source.
+[cssparser]
+accepted = ["MPL-2.0"]
+
+[dtoa-short]
+accepted = ["MPL-2.0"]
+
+# Independently reviewed application scope: borrow-or-share 0.2.4 (locked checksum).
+# MIT No Attribution is AGPL-compatible; re-review version/source/license changes.
+[borrow-or-share]
+accepted = ["MIT-0"]

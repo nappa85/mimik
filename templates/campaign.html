@@ -1,0 +1,30 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ detail.campaign.title }} · Mimik</title><link rel="stylesheet" href="/assets/app.css"></head><body><main>
+<a href="/campaigns">Campaign workspace</a><h1>{{ detail.campaign.title }}</h1><p>#{{ detail.campaign.id }} · {{ detail.campaign.game_id }} / {{ detail.campaign.edition_id }} · Original Master: {{ detail.campaign.creator }}</p>
+{% if detail.role.is_empty() %}
+<p>Join request status: {{ detail.request_state }}</p><form method="post" action="/campaigns/{{ detail.campaign.id }}/join"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Request to join</button></form>
+{% else %}
+<p>Your current role: {{ detail.role }}</p>
+<section class="panel"><h2>Private sheets</h2>
+{% if detail.native_available %}<a href="/campaigns/{{ detail.campaign.id }}/sheets/new">New native exploration sheet</a>{% endif %}
+<p>Runtime creation requires an immutable exact-pair version and current wiring approval; the full create form rechecks capability.</p>
+{% for version in detail.versions %}<p><a href="/campaigns/{{ detail.campaign.id }}/sheets/new?version={{ version.0 }}">New {{ version.2 }} sheet, version {{ version.1 }}</a></p>{% endfor %}
+{% if let Some(next) = detail.versions_next %}<a href="/campaigns/{{ detail.campaign.id }}?versions_after={{ next }}&amp;members_after={{ page.members }}&amp;requests_after={{ page.requests }}&amp;sheets_after={{ page.sheets }}">Next definition page</a>{% endif %}
+{% if !detail.native_available && detail.versions.is_empty() %}<p>Capability unavailable. A local operator must load the exact implemented native source pair, or register/import and explicitly approve an exact-pair runtime definition against source images. Registration alone does not enable sheet creation.</p>{% endif %}
+{% for sheet in sheets %}<article><a href="/private-sheets/{{ sheet.id }}">{{ sheet.name }}</a> · {{ sheet.state }} · revision {{ sheet.revision }}</article>{% endfor %}
+{% if let Some(next) = sheets_next %}<a href="/campaigns/{{ detail.campaign.id }}?sheets_after={{ next }}&amp;members_after={{ page.members }}&amp;requests_after={{ page.requests }}&amp;versions_after={{ page.versions }}">Next sheets page</a>{% endif %}
+</section>
+<section class="panel"><h2>Current members</h2>
+{% for member in detail.members %}<article><p>{{ member.display }} · {{ member.role }}</p>
+{% if member.account_id != detail.campaign.creator_id %}
+<form method="post" action="/campaigns/{{ detail.campaign.id }}/members/{{ member.account_id }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="revision" value="{{ member.revision }}">
+{% if account_id == detail.campaign.creator_id %}{% if member.role == "player" %}<button name="action" value="promote">Grant additional Master role</button>{% else %}<button name="action" value="demote">Demote to player</button>{% endif %}{% endif %}
+{% if member.account_id == account_id %}<button name="action" value="leave">Leave and freeze my active sheets</button>{% else if detail.role == "master" && member.role == "player" %}<button name="action" value="remove">Remove and freeze their active sheets</button>{% endif %}</form>
+{% endif %}</article>{% endfor %}
+{% if let Some(next) = detail.members_next %}<a href="/campaigns/{{ detail.campaign.id }}?members_after={{ next }}&amp;requests_after={{ page.requests }}&amp;versions_after={{ page.versions }}&amp;sheets_after={{ page.sheets }}">Next roster page</a>{% endif %}
+{% if page.members > 0 %}<a href="/campaigns/{{ detail.campaign.id }}?members_after=0&amp;requests_after={{ page.requests }}&amp;versions_after={{ page.versions }}&amp;sheets_after={{ page.sheets }}">First roster page</a>{% endif %}
+</section>
+{% if detail.role == "master" %}<section class="panel"><h2>Pending requests</h2>
+{% for request in detail.requests %}<form method="post" action="/campaigns/{{ detail.campaign.id }}/requests/{{ request.account_id }}"><p>{{ request.display }}</p><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="revision" value="{{ request.revision }}"><button name="action" value="accept">Accept as player</button><button name="action" value="decline">Decline</button></form>{% endfor %}
+{% if let Some(next) = detail.requests_next %}<a href="/campaigns/{{ detail.campaign.id }}?requests_after={{ next }}&amp;members_after={{ page.members }}&amp;versions_after={{ page.versions }}&amp;sheets_after={{ page.sheets }}">Next requests page</a>{% endif %}
+</section>{% endif %}
+{% endif %}</main></body></html>

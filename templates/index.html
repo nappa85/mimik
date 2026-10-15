@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Keep the story moving.</h1>
+<p class="intro">Your loaded materials and implemented sheet adapters determine which games are ready for character entry.</p>
+<div class="columns">
+<section class="panel">
+  <h2>Your characters</h2>
+  {% if characters.is_empty() %}<p>No characters yet.</p>{% endif %}
+  <ul class="characters">{% for character in characters %}<li><a href="{% if character.has_mork_borg_adapter() %}/characters/{{ character.id }}/mork-borg{% else %}/characters/{{ character.id }}{% endif %}">{{ character.input.name }}</a><small>{{ character.system_name() }} · {{ character.input.edition }}</small></li>{% endfor %}</ul>
+</section>
+<section class="panel">
+  <h2>Create character</h2>
+  <p role="status">{{ message }}</p>
+  {% if catalog.options.is_empty() %}
+    {% if catalog.source_count == 0 %}<p>No registered materials. Register a source to enable its implemented sheet adapter.</p>{% else %}<p>Materials are registered, but none match an implemented sheet adapter. They remain available for source review; character support is not enabled by a manual alone.</p>{% endif %}
+    <p><a href="/sources/setup">Source registration instructions</a> · <a href="/sources">Manage loaded sources</a></p>
+  {% else %}
+    <p>Manual entry for loaded, supported editions. Calculations cover the documented adapter slice; registration does not approve extracted evidence or enable unimplemented class/power rules.</p>
+    <form method="post" action="/characters">
+      <label for="name">Character name</label><input id="name" name="name" value="{{ draft.name }}" required maxlength="100" autocomplete="off">
+      <label for="adapter">Loaded game and edition</label><select id="adapter" name="adapter_id" required>{% for option in catalog.options %}<option value="{{ option.id }}" {% if draft.adapter_id == option.id %}selected{% endif %}>{{ option.label }}</option>{% endfor %}</select>
+      <label for="notes">Session notes (optional; separate from sheet description)</label><textarea id="notes" name="notes" rows="4" maxlength="20000">{{ draft.notes }}</textarea>
+      <button type="submit">Create character</button>
+    </form>
+  {% endif %}
+</section>
+</div>
+{% endblock %}

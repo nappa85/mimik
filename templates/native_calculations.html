@@ -1,0 +1,7 @@
+<details class="mork-calculations" open><summary>Checked base-rule references</summary>
+<p>{{ sheet.health_status() }}. IT2025 p.28 / PDF32.</p>
+<p>Carrying capacity: {{ sheet.carrying_limit() }} standard items; maximum {{ sheet.maximum_load() }}. IT2025 p.27 / PDF31.</p>
+{% if sheet.over_maximum() %}<p class="badge">Load exceeds the base-rule maximum; resolve with the GM.</p>{% else if sheet.overburdened() %}<p class="badge">Overburdened: Strength/Agility difficulties +2.</p>{% endif %}
+<p>Armor reduction: {{ sheet.armor_reduction() }}; original penalties remain after damage. IT2025 pp.24,29 / PDF28,33.</p>
+<ul><li>Melee: d20 + Strength ({{ sheet.strength }}) against DR {{ sheet.melee_dr() }}.</li><li>Ranged: d20 + Presence ({{ sheet.presence }}) against DR {{ sheet.ranged_dr() }}.</li><li>Defense: d20 + Agility ({{ sheet.agility }}) against DR {{ sheet.defense_dr() }}.</li><li>Other normal Agility tests: DR {{ sheet.agility_dr() }} before situation modifiers.</li></ul>
+<p>These are base-rule references, not complete legality or class/power-aware calculations.</p></details>

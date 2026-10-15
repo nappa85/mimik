@@ -1,0 +1,169 @@
+name: Deployability
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build isolated check environment
+        run: docker build -f containers/ci.Dockerfile -t mimik-ci .
+      - name: Lints, regressions, security, licensing and release inside container
+        env:
+          REVISION: ${{ github.sha }}
+        run: |
+          docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" \
+            -e REVISION mimik-ci bash -euxo pipefail -c '
+              cargo fmt --check
+              cargo clippy --locked --all-targets --all-features -- -D warnings
+              ruff check tools
+              ruff format --check tools
+              cargo test --locked --all-targets --all-features
+              cargo run --locked --example source_fixture -- target/smoke-source
+              python -m unittest discover -s tools -p "test_*.py"
+              actionlint .github/workflows/ci.yml
+              cargo audit --deny warnings
+              cargo about generate --locked --fail about.hbs -o target/THIRD-PARTY-NOTICES.md
+              cargo build --release --locked
+              cargo package --locked --allow-dirty
+              python tools/verify_source_package.py target/package/mimik-0.1.0.crate
+              cargo vendor --locked target/vendor > target/vendor-config.toml
+              python tools/package_release.py --version 0.1.0 --revision "$REVISION"
+            '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-release
+          path: |
+            target/dist/*.tar.gz
+            target/dist/*-source.crate
+            target/dist/SHA256SUMS
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: synthetic-smoke-inputs
+          path: target/smoke-source/
+          if-no-files-found: error
+
+  artifact-smoke:
+    needs: checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: linux-release
+          path: release
+      - name: Verify and unpack shipped artifact
+        working-directory: release
+        run: |
+          sha256sum --check SHA256SUMS
+          tar -xzf mimik-0.1.0-linux-x86_64.tar.gz
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: synthetic-smoke-inputs
+          path: smoke-source
+      - name: Run packaged binary from isolated working directory
+        run: python3 tools/smoke_release.py release/mimik-0.1.0-linux-x86_64/mimik --source-fixture smoke-source --auth
+      - name: Build isolated source-rebuild environment
+        run: docker build -f containers/ci.Dockerfile -t mimik-ci .
+      - name: Verify corresponding source builds offline without dependency cache
+        run: |
+          mkdir source-rebuild
+          tar -xzf release/mimik-0.1.0-source.crate -C source-rebuild
+          tar -xzf release/mimik-0.1.0-dependency-sources.tar.gz -C source-rebuild/mimik-0.1.0
+          docker run --rm --network=none --mount "type=bind,src=$PWD/source-rebuild/mimik-0.1.0,dst=/workspace" \
+            -e CARGO_HOME=/tmp/empty-cargo mimik-ci cargo build --release --offline --locked
+
+  browser-smoke:
+    needs: checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: linux-release
+          path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: synthetic-smoke-inputs
+          path: smoke-source
+      - name: Verify same release archive and unpack
+        working-directory: release
+        run: |
+          sha256sum --check SHA256SUMS
+          tar -xzf mimik-0.1.0-linux-x86_64.tar.gz
+      - name: Build isolated Chromium environment
+        run: docker build -f containers/browser.Dockerfile -t mimik-browser .
+      - name: Offline real-browser verification of shipped binary
+        run: |
+          docker run --rm --network=none --cpus=2 --memory=4g --shm-size=1g --pids-limit=1024 \
+            --cap-drop=ALL --security-opt=no-new-privileges \
+            --mount "type=bind,src=$PWD/release/mimik-0.1.0-linux-x86_64/mimik,dst=/app/mimik,readonly" \
+            --mount "type=bind,src=$PWD/smoke-source,dst=/fixture,readonly" \
+            mimik-browser /app/mimik --source-fixture /fixture --auth
+
+  lan-smoke:
+    needs: checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: linux-release
+          path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: synthetic-smoke-inputs
+          path: smoke-source
+      - name: Verify and unpack runtime and matching source
+        working-directory: release
+        run: |
+          sha256sum --check SHA256SUMS
+          tar -xzf mimik-0.1.0-linux-x86_64.tar.gz
+          mkdir lan-source
+          tar -xzf mimik-0.1.0-source.crate -C lan-source
+          tar -xzf mimik-0.1.0-dependency-sources.tar.gz -C lan-source/mimik-0.1.0
+      - name: Build isolated verification environments
+        run: |
+          docker build -f containers/ci.Dockerfile -t mimik-ci .
+          docker build -f containers/browser.Dockerfile -t mimik-browser .
+      - name: Unpacked separate-client LAN and HTTPS proxy acceptance
+        run: python3 tools/lan_smoke.py --binary release/mimik-0.1.0-linux-x86_64/mimik --source-root release/lan-source/mimik-0.1.0 --source-fixture smoke-source
+
+  deployable:
+    name: deployable
+    if: ${{ always() }}
+    needs: [checks, artifact-smoke, browser-smoke, lan-smoke]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Fail closed on any failed, cancelled, or skipped prerequisite
+        env:
+          CHECKS: ${{ needs.checks.result }}
+          SMOKE: ${{ needs.artifact-smoke.result }}
+          BROWSER: ${{ needs.browser-smoke.result }}
+          LAN: ${{ needs.lan-smoke.result }}
+        run: |
+          test "$CHECKS" = success
+          test "$SMOKE" = success
+          test "$BROWSER" = success
+          test "$LAN" = success

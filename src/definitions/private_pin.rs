@@ -1,0 +1,84 @@
+//! Immutable interpretation admission is independent of current source evidence.
+use super::{Definition, DefinitionError, WiringStatus, admission, publication};
+use crate::AppError;
+use rusqlite::{Connection, OptionalExtension, params};
+
+pub(crate) struct RawPin {
+    pub id: i64,
+    pub version: i64,
+    pub game: String,
+    pub edition: String,
+    pub content: String,
+    pub hash: String,
+}
+
+pub(crate) struct ImmutablePin {
+    pub raw: RawPin,
+    data: admission::Admitted,
+    validator: jsonschema::Validator,
+}
+
+pub(crate) fn load(db: &Connection, id: i64) -> Result<RawPin, AppError> {
+    let (version,game,edition,content,hash):(i64,String,String,Option<String>,String)=db.query_row("SELECT version,CASE WHEN length(CAST(game_id AS BLOB))<=64 THEN game_id END,CASE WHEN length(CAST(edition_id AS BLOB))<=64 THEN edition_id END,CASE WHEN length(CAST(content AS BLOB))<=262144 THEN content END,CASE WHEN length(CAST(content_hash AS BLOB))=64 THEN content_hash END FROM definition_versions WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?.ok_or(AppError::NotFound)?;
+    Ok(RawPin {
+        id,
+        version,
+        game,
+        edition,
+        content: content.ok_or(AppError::Invalid("Immutable definition exceeds limit."))?,
+        hash,
+    })
+}
+
+pub(crate) fn validate(raw: RawPin) -> Result<ImmutablePin, AppError> {
+    let data = admission::validate(raw.content.as_bytes())
+        .map_err(|_| AppError::Invalid("Corrupt immutable definition."))?;
+    if raw.version <= 0
+        || data.content != raw.content
+        || data.hash != raw.hash
+        || data.definition.game_id != raw.game
+        || data.definition.edition_id != raw.edition
+    {
+        return Err(AppError::Invalid("Immutable definition identity mismatch."));
+    }
+    let validator = crate::campaigns::values::schema(&data.definition)?;
+    Ok(ImmutablePin {
+        raw,
+        data,
+        validator,
+    })
+}
+
+impl ImmutablePin {
+    pub(crate) fn validate_values(&self, value: &serde_json::Value) -> Result<(), AppError> {
+        if !self.validator.is_valid(value) {
+            return Err(AppError::Invalid("Pinned value validation failed."));
+        }
+        for field in &self.data.definition.fields {
+            if field.control == super::Control::Integer
+                && !value[&field.id].is_null()
+                && value[&field.id].as_i64().is_none()
+            {
+                return Err(AppError::Invalid("Integer outside signed i64 range."));
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn definition(&self) -> &Definition {
+        &self.data.definition
+    }
+    pub(crate) fn unchanged(&self, db: &Connection) -> Result<(), AppError> {
+        let matches:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM definition_versions WHERE id=?1 AND version=?2 AND game_id=?3 AND edition_id=?4 AND content_hash=?5 AND content=?6)",params![self.raw.id,self.raw.version,self.raw.game,self.raw.edition,self.raw.hash,self.raw.content],|r|r.get(0))?;
+        if !matches {
+            return Err(AppError::Invalid("Immutable definition changed."));
+        }
+        Ok(())
+    }
+    pub(crate) fn readiness(&self, db: &Connection) -> Result<WiringStatus, AppError> {
+        self.unchanged(db)?;
+        publication::private_readiness(db, self.raw.id, &self.data).map_err(|error| match error {
+            DefinitionError::Storage(error) => error,
+            _ => AppError::Invalid("Definition approval/evidence integrity error."),
+        })
+    }
+}

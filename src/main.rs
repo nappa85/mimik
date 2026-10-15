@@ -1,0 +1,359 @@
+use clap::{Parser, Subcommand};
+use mimik::{Store, app};
+mod account_cli;
+
+#[derive(Parser)]
+#[command(version, about = "Local sheet-first RPG companion")]
+struct Args {
+    /// Development only: disable authentication and use the isolated loopback prototype.
+    #[arg(long)]
+    no_auth: bool,
+    /// Development only: allow the administrative Owner to use gameplay grants.
+    #[arg(long, conflicts_with = "no_auth")]
+    dev_owner_play: bool,
+    /// Development only: restrict authenticated serving to this machine.
+    #[arg(long, conflicts_with = "lan_address")]
+    loopback: bool,
+    /// Select a local private IPv4 LAN interface instead of automatic selection.
+    #[arg(long, conflicts_with = "no_auth")]
+    lan_address: Option<std::net::Ipv4Addr>,
+    /// Canonical HTTP(S) origin for links/QR, including behind a reverse proxy.
+    #[arg(long, conflicts_with = "no_auth")]
+    external_url: Option<String>,
+    /// `SQLite` database (default: data/mimik.sqlite3, overridden by `MIMIK_DATABASE`).
+    #[arg(long, global = true)]
+    database: Option<std::path::PathBuf>,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    #[command(flatten)]
+    Account(account_cli::AccountCommand),
+    /// Capture a redacted wiring comparison ticket; no automatic approval.
+    CompareDefinition {
+        #[arg(long)]
+        id: i64,
+        #[arg(long)]
+        published: bool,
+    },
+    /// Explicitly approve originals compared with the exact current ticket.
+    ApproveDefinition {
+        #[arg(long)]
+        id: i64,
+        #[arg(long)]
+        published: bool,
+        #[arg(long)]
+        comparison_hash: String,
+        #[arg(long)]
+        actor: String,
+        #[arg(long)]
+        rationale: String,
+        #[arg(long)]
+        originals_compared: bool,
+    },
+    /// Show an immutable published definition and current wiring status.
+    ShowDefinitionVersion {
+        #[arg(long)]
+        id: i64,
+    },
+    /// Withdraw only the current approval, retaining all history.
+    WithdrawDefinition {
+        #[arg(long)]
+        id: i64,
+        #[arg(long)]
+        expected_approval: i64,
+        #[arg(long)]
+        actor: String,
+        #[arg(long)]
+        rationale: String,
+    },
+    /// Import a strict proposal as a draft; zero expected revision means create only.
+    ImportDefinitionDraft {
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[arg(long)]
+        expected_revision: i64,
+    },
+    /// Show a stored proposal by its positive database row ID; never approves it.
+    ShowDefinitionDraft {
+        #[arg(long)]
+        id: i64,
+    },
+    /// List up to 100 drafts after an exclusive row-ID cursor.
+    ListDefinitionDrafts {
+        #[arg(long)]
+        game_id: String,
+        #[arg(long)]
+        edition_id: String,
+        #[arg(long, default_value_t = 0)]
+        after_id: i64,
+    },
+    /// Register a stable game/edition pair; this does not enable a generic sheet.
+    RegisterRuleset {
+        #[arg(long)]
+        game_id: String,
+        #[arg(long)]
+        game_label: String,
+        #[arg(long)]
+        edition_id: String,
+        #[arg(long)]
+        edition_label: String,
+    },
+    /// Associate an exact legacy edition label with a registered same-game edition.
+    RegisterRulesetAlias {
+        #[arg(long)]
+        game_id: String,
+        #[arg(long)]
+        edition_id: String,
+        #[arg(long)]
+        legacy_edition: String,
+    },
+    /// List stable identities and implemented adapter status as JSON.
+    ListRulesets,
+    /// Import a prepared source bundle, always unreviewed.
+    ImportSource {
+        #[arg(long)]
+        bundle: std::path::PathBuf,
+        #[arg(long)]
+        pdf: std::path::PathBuf,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+    validate_serving_args(&args)?;
+    let auth = !args.no_auth;
+    let options = server_options(&args, std::env::var("MIMIK_EXTERNAL_URL").ok())?;
+    let path = database_path(args.database, std::env::var_os("MIMIK_DATABASE"));
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let store = Store::open(&path)?;
+    if let Some(command) = args.command {
+        let Some(command) = publication_command(&store, command).await? else {
+            return Ok(());
+        };
+        match command {
+            Command::ImportDefinitionDraft {
+                file,
+                expected_revision,
+            } => println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &store
+                        .import_definition_draft(&file, expected_revision)
+                        .await?
+                )?
+            ),
+            Command::ShowDefinitionDraft { id } => println!(
+                "{}",
+                serde_json::to_string_pretty(&store.definition_draft(id).await?)?
+            ),
+            Command::ListDefinitionDrafts {
+                game_id,
+                edition_id,
+                after_id,
+            } => println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &store
+                        .definition_drafts(game_id, edition_id, after_id)
+                        .await?
+                )?
+            ),
+            Command::ImportSource { bundle, pdf } => {
+                let id = store.import_source(&bundle, &pdf).await?;
+                println!(
+                    "Registered source {id}. New imports are unreviewed; existing imports retain their review state. Open /sources."
+                );
+            }
+            Command::RegisterRuleset {
+                game_id,
+                game_label,
+                edition_id,
+                edition_label,
+            } => {
+                store
+                    .register_ruleset(mimik::registry::RegisterRuleset {
+                        game_id,
+                        game_label,
+                        edition_id,
+                        edition_label,
+                    })
+                    .await?;
+                println!(
+                    "Ruleset registered. Registration does not approve sources or provide a generic sheet."
+                );
+            }
+            Command::RegisterRulesetAlias {
+                game_id,
+                edition_id,
+                legacy_edition,
+            } => {
+                store
+                    .register_ruleset_alias(mimik::registry::RegisterAlias {
+                        game_id,
+                        edition_id,
+                        legacy_edition,
+                    })
+                    .await?;
+                println!(
+                    "Exact legacy alias registered; matching unresolved records associated without changing their data or review state."
+                );
+            }
+            Command::ListRulesets => println!(
+                "{}",
+                serde_json::to_string_pretty(&store.rulesets().await?)?
+            ),
+            _ => return Err("Unexpected command dispatcher state".into()),
+        }
+        return Ok(());
+    }
+    serve(store, auth, options, &path).await
+}
+
+fn validate_serving_args(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    if args.command.is_some()
+        && (args.no_auth
+            || args.loopback
+            || args.dev_owner_play
+            || args.lan_address.is_some()
+            || args.external_url.is_some())
+    {
+        return Err("Serving options cannot be combined with operator subcommands.".into());
+    }
+    Ok(())
+}
+fn database_path(
+    explicit: Option<std::path::PathBuf>,
+    environment: Option<std::ffi::OsString>,
+) -> std::path::PathBuf {
+    explicit
+        .or_else(|| environment.map(Into::into))
+        .unwrap_or_else(|| "data/mimik.sqlite3".into())
+}
+
+fn server_options(
+    args: &Args,
+    external_env: Option<String>,
+) -> Result<mimik::auth::AuthOptions, Box<dyn std::error::Error>> {
+    if args.command.is_some() {
+        return Ok(mimik::auth::AuthOptions::default());
+    }
+    let external_value = args
+        .external_url
+        .clone()
+        .or(external_env.filter(|value| !value.is_empty()));
+    if args.no_auth && external_value.is_some() {
+        return Err(
+            "external_url requires authentication; remove it before using --no-auth.".into(),
+        );
+    }
+    let network = if !args.no_auth && !args.loopback {
+        mimik::network::Network::discover(args.lan_address)?
+    } else {
+        mimik::network::Network::Loopback
+    };
+    let external_url = if args.no_auth {
+        None
+    } else {
+        external_value
+            .map(|value| mimik::network::external_url(&value, network))
+            .transpose()?
+    };
+    Ok(mimik::auth::AuthOptions {
+        development_owner_play: args.dev_owner_play,
+        network,
+        external_url,
+    })
+}
+
+async fn serve(
+    store: Store,
+    auth: bool,
+    options: mimik::auth::AuthOptions,
+    path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if auth {
+        match mimik::accounts::Accounts::new(store.clone()).require_owner_binding().await {
+            Ok(())=>{},
+            Err(mimik::AppError::Invalid(_))=>return Err(format!("Owner setup is required for database {}.\nRun: mimik bootstrap-owner --login owner --display-name Owner --password-file private/owner.password\nUse the same --database or MIMIK_DATABASE setting as this launch. See docs/accounts.md for preparing the private password file.",path.display()).into()),
+            Err(error)=>return Err(error.into()),
+        }
+    }
+    let listener = tokio::net::TcpListener::bind(options.network.bind_address()).await?;
+    if auth {
+        return mimik::auth::serve_with_options(listener, store, options).await;
+    }
+    println!(
+        "Mimik unauthenticated prototype — not secured by account setup: http://127.0.0.1:3000 (database: {})",
+        path.display()
+    );
+    axum::serve(listener, app(store))
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
+    Ok(())
+}
+
+async fn publication_command(
+    store: &Store,
+    command: Command,
+) -> Result<Option<Command>, Box<dyn std::error::Error>> {
+    match command {
+        Command::Account(command) => account_cli::run(store.clone(), command).await?,
+        Command::CompareDefinition { id, published } => println!(
+            "{}",
+            serde_json::to_string_pretty(&store.compare_definition(id, published).await?)?
+        ),
+        Command::ApproveDefinition {
+            id,
+            published,
+            comparison_hash,
+            actor,
+            rationale,
+            originals_compared,
+        } => println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &store
+                    .approve_definition(
+                        id,
+                        published,
+                        mimik::definitions::ApprovalRequest {
+                            comparison_hash,
+                            actor,
+                            rationale,
+                            originals_compared
+                        }
+                    )
+                    .await?
+            )?
+        ),
+        Command::ShowDefinitionVersion { id } => println!(
+            "{}",
+            serde_json::to_string_pretty(&store.definition_version(id).await?)?
+        ),
+        Command::WithdrawDefinition {
+            id,
+            expected_approval,
+            actor,
+            rationale,
+        } => {
+            store
+                .withdraw_definition(id, expected_approval, actor, rationale)
+                .await?;
+            println!("Current wiring approval withdrawn; immutable history retained.");
+        }
+        other => return Ok(Some(other)),
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod tests;

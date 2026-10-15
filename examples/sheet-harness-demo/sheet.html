@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Lantern Reach — demo sheet template</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { max-width: 60rem; margin: auto; padding: 1rem; }
+    h1, p, label, legend { overflow-wrap: anywhere; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,14rem),1fr)); gap: 1rem; }
+    fieldset { min-width: 0; margin: 1rem 0; padding: 1rem; }
+    label { display: block; margin: .6rem 0; }
+    input, textarea { box-sizing: border-box; width: 100%; font: inherit; padding: .5rem; }
+    input[type="checkbox"] { width: auto; }
+    textarea { min-height: 8rem; resize: vertical; }
+  </style>
+</head>
+<body data-template-id="lantern-reach-sheet" data-template-version="1">
+  <h1>Lantern Reach</h1>
+  <p>Original fictional demo template. Static preview only: no live bindings, model or saving yet.</p>
+  <fieldset data-section="identity">
+    <legend>Identity</legend>
+    <label>Name <input data-field="name" data-value-type="text"></label>
+  </fieldset>
+  <div class="grid">
+    <fieldset data-section="vitality">
+      <legend>Vitality</legend>
+      <label>Current vitality <input type="number" step="1" data-field="vitality" data-value-type="integer"></label>
+      <label>Maximum vitality <input type="number" step="1" data-field="vitality_max" data-value-type="integer"></label>
+    </fieldset>
+    <fieldset data-section="focus">
+      <legend>Focus</legend>
+      <label>Current focus <input type="number" step="1" data-field="focus" data-value-type="integer"></label>
+      <label>Maximum focus <input type="number" step="1" data-field="focus_max" data-value-type="integer"></label>
+    </fieldset>
+    <fieldset data-section="protection">
+      <legend>Protection and movement</legend>
+      <label>Armor <input type="number" step="1" data-field="armor" data-value-type="integer"></label>
+      <label>Pace <input type="number" step="1" data-field="pace" data-value-type="integer"></label>
+    </fieldset>
+  </div>
+  <fieldset data-section="equipment" data-repeat="equipment" data-value-type="array" data-entry-id="id">
+    <legend>Equipment</legend>
+    <p>The live renderer will show one entry per canonical equipment ID here.</p>
+    <template data-entry-template="equipment">
+      <fieldset>
+        <legend>Equipment entry</legend>
+        <label>Name <input data-entry-field="name" data-value-type="text"></label>
+        <label>Kind <input data-entry-field="kind" data-value-type="text"></label>
+        <label>Quantity <input type="number" step="1" data-entry-field="quantity" data-value-type="integer"></label>
+        <label><input type="checkbox" data-entry-field="equipped" data-value-type="boolean"> Equipped</label>
+        <label>Armor value (if supplied) <input type="number" step="1" data-entry-field="armor" data-value-type="integer" data-optional="true"></label>
+      </fieldset>
+    </template>
+  </fieldset>
+  <fieldset data-section="notes">
+    <legend>Notes</legend>
+    <label>Character notes <textarea data-field="notes" data-value-type="text"></textarea></label>
+  </fieldset>
+</body>
+</html>

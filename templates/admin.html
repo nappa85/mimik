@@ -1,0 +1,15 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Owner administration · Mimik</title><link rel="stylesheet" href="/assets/app.css"></head><body><main>
+<a href="/auth/session">Session</a><h1>Owner administration</h1>
+<p>Use a separate enrolled player account for campaigns. Administration grants no sheet or history access.</p>
+<section class="panel"><h2>Invite a player</h2><form method="post" action="/admin/invite">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="epoch" value="0">
+<label>Login <input name="login" required minlength="3" maxlength="64" autocomplete="off"></label>
+<label>Display name <input name="display_name" required maxlength="100"></label><button>Create invitation</button></form></section>
+<section class="panel"><h2>Accounts</h2>
+{% for row in rows %}<article><h3>{{ row.display_name }}</h3><p>#{{ row.id }} · {{ row.login }} · {{ row.state }} · epoch {{ row.epoch }}{% if row.owner %} · Owner{% endif %}</p>
+{% if row.state == "pending" %}<form method="post" action="/admin/invite"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="login" value="{{ row.login }}"><input type="hidden" name="display_name" value="{{ row.display_name }}"><input type="hidden" name="epoch" value="{{ row.epoch }}"><button>Reissue invitation</button></form>
+{% else if row.state == "enabled" && !row.owner %}<form method="post" action="/admin/accounts/{{ row.id }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="epoch" value="{{ row.epoch }}"><button name="action" value="reset">Issue password reset</button><button name="action" value="disable">Disable account permanently</button></form>{% endif %}</article>{% endfor %}
+{% if let Some(next) = next %}<a href="/admin?after={{ next }}">Next accounts page</a>{% endif %}<a href="/admin">First accounts page</a></section>
+<p>Invitations expire after24h; resets after1h. Reissue/reset revokes old tokens and sessions. Reset issuance keeps the old password usable for new login until completion. Disablement is irreversible here and preserves custody/history. Owner reset issuance/disablement requires local CLI.</p>
+<section class="panel"><h2>Local materials</h2><p><a href="/admin/materials">Inspect sources and review evidence</a>. Ingestion, registry registration, finalization and definition publication use the local operator workflows in docs/source-review-setup.md and docs/definition-publication.md. Imported materials stay local.</p></section>
+</main></body></html>

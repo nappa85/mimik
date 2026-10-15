@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "game_id", "edition_id", "definition_id", "title", "sources", "fields", "groups"],
+  "properties": {
+    "contract_version": {"const": 1},
+    "game_id": {"$ref": "#/$defs/id"},
+    "edition_id": {"$ref": "#/$defs/id"},
+    "definition_id": {"$ref": "#/$defs/id"},
+    "title": {"$ref": "#/$defs/label"},
+    "sources": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/source"}},
+    "fields": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"$ref": "#/$defs/field"}},
+    "groups": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/group"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 64},
+    "label": {"type": "string", "minLength": 1, "maxLength": 100},
+    "db_id": {"type": "integer", "minimum": 1},
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_id", "pdf_sha256", "roles"],
+      "properties": {
+        "source_id": {"$ref": "#/$defs/db_id"},
+        "pdf_sha256": {"type": "string", "minLength": 64, "maxLength": 64},
+        "roles": {"type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": true, "items": {"enum": ["core", "sheet", "supplement"]}}
+      }
+    },
+    "choice": {
+      "type": "object", "additionalProperties": false, "required": ["id", "label"],
+      "properties": {"id": {"$ref": "#/$defs/id"}, "label": {"$ref": "#/$defs/label"}}
+    },
+    "field": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "label", "control", "nullable", "mapping"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"}, "label": {"$ref": "#/$defs/label"},
+        "control": {"enum": ["text", "multiline", "integer", "boolean", "enum"]},
+        "nullable": {"type": "boolean"},
+        "help": {"type": ["string", "null"], "maxLength": 2000},
+        "options": {"type": ["array", "null"], "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/choice"}},
+        "mapping": {"$ref": "#/$defs/mapping"}
+      }
+    },
+    "region": {
+      "type": "object", "additionalProperties": false, "required": ["source_id", "page_id", "unit_id"],
+      "properties": {"source_id": {"$ref": "#/$defs/db_id"}, "page_id": {"$ref": "#/$defs/db_id"}, "unit_id": {"$ref": "#/$defs/db_id"}}
+    },
+    "mapping": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["state", "regions"],
+          "properties": {"state": {"const": "mapped"}, "regions": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/region"}}}},
+        {"type": "object", "additionalProperties": false, "required": ["state", "reason"],
+          "properties": {"state": {"const": "unresolved"}, "reason": {"type": "string", "minLength": 1, "maxLength": 5000}}}
+      ]
+    },
+    "group": {
+      "type": "object", "additionalProperties": false, "required": ["id", "label", "fields", "column_hint"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"}, "label": {"$ref": "#/$defs/label"},
+        "fields": {"type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "column_hint": {"enum": ["auto", "main", "sidebar"]}
+      }
+    }
+  }
+}

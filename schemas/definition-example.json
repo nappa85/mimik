@@ -1,0 +1,10 @@
+{
+  "contract_version": 1,
+  "game_id": "synthetic-game",
+  "edition_id": "first",
+  "definition_id": "sheet",
+  "title": "Synthetic sheet",
+  "sources": [],
+  "fields": [{"id": "name", "label": "Name", "control": "text", "nullable": true, "mapping": {"state": "unresolved", "reason": "Draft mapping"}}],
+  "groups": [{"id": "main", "label": "Main", "fields": ["name"], "column_hint": "main"}]
+}

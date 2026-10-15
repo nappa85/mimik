@@ -1,0 +1,3 @@
+# Optional dotenv support for the Python review prototype (BSD-3-Clause).
+python-dotenv==1.2.1
+jsonschema==4.25.1

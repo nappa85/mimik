@@ -1,0 +1,6 @@
+# CPU-only prototype. Transitive resolved versions are recorded by the container.
+marker-pdf==2.0.0
+torch==2.8.0
+torchvision==0.23.0
+surya-ocr==0.22.1
+jsonschema==4.25.1

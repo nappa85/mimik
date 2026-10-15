@@ -1,0 +1,8 @@
+-r requirements-review.txt
+attrs==26.1.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+rpds-py==2026.9.1
+ruff==0.14.14
+pathspec==0.12.1
+typing-extensions==4.16.0
