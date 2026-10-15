@@ -142,7 +142,7 @@ fn populated_fixture_rejection_preserves_every_table_row_trigger_and_version() {
 
 #[test]
 fn unknown_version_rejection_preserves_all_state() {
-    for version in [6, 9, 16] {
+    for version in [6, 9, mimik::SCHEMA_VERSION + 1] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("unknown.sqlite3");
         drop(mimik::Store::open(&path).unwrap());
@@ -207,10 +207,13 @@ fn missing_account_table_rejects_before_drops_and_empty_fixtures_remigrate() {
         drop(mimik::Store::open(&path).unwrap());
         let db = Connection::open(&path).unwrap();
         schema_fixture::pre_finalization(&db, remigrate);
-        assert_eq!(snapshot(&db).version, if remigrate { 15 } else { 6 });
+        assert_eq!(
+            snapshot(&db).version,
+            if remigrate { mimik::SCHEMA_VERSION } else { 6 }
+        );
         drop(db);
         drop(mimik::Store::open(&path).unwrap());
         let db = Connection::open(path).unwrap();
-        assert_eq!(snapshot(&db).version, 15);
+        assert_eq!(snapshot(&db).version, mimik::SCHEMA_VERSION);
     }
 }

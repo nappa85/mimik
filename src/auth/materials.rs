@@ -52,7 +52,7 @@ pub(super) fn routes() -> Router<AuthState> {
                 .layer(DefaultBodyLimit::max(320 * 1024)),
         )
 }
-fn error(e: &AppError) -> StatusCode {
+pub(super) fn error(e: &AppError) -> StatusCode {
     match e {
         AppError::NotFound => StatusCode::FORBIDDEN,
         AppError::Conflict => StatusCode::CONFLICT,
@@ -61,7 +61,7 @@ fn error(e: &AppError) -> StatusCode {
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
-fn html(t: &impl Template) -> AuthResult {
+pub(super) fn html(t: &impl Template) -> AuthResult {
     Ok(Html(t.render().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?).into_response())
 }
 #[derive(Clone, Copy, Default, Deserialize)]

@@ -87,6 +87,16 @@ Chromium gates include actual issuance/reissue/enroll/reset/disable/restart, vis
 clipboard copy, privacy, desktop/mobile reflow and another-loopback-origin framing
 rejection with an authenticated positive control. See `docs/accounts.md`.
 
+Schema16 (planned as migration017 at merge) adds Owner-only browser ruleset
+registration at `/admin/rulesets`, in addition to the unchanged registry CLI: a
+50-row composite-cursor listing, exact game/edition registration and exact legacy
+aliases through the same shared transitions. New editions/aliases append immutable
+`registry_events`; exact repeats write none, and earlier registrations gain no
+invented history. Browser writes add an insert-only `registry_web_events` Owner
+attribution sidecar; strict Origin, durable CSRF and Owner rechecks guard the
+transaction and audit failure rolls it back. Rejected input returns escaped422 forms.
+Definition publication/withdrawal from the browser is not part of this scope.
+
 Schema15 adds Owner-only imported-material inspection and evidence review at
 `/admin/materials`, with independent50-row source/page/unit/history lists, original
 full-page/crop comparisons, server-derived account reviewer and atomic immutable
@@ -96,8 +106,8 @@ forms retain drafts/submitted revisions; scalar validation and320KiB route body 
 support full Unicode corrections. Durable Owner and CSRF rechecks protect transactions;
 crop responses recheck authority after rendering in a fresh transaction. Existing
 source/account/private histories upgrade additively. Extraction/imports, registry
-changes, finalization and publication remain CLI; material uploads/wiring are later
-slices. See `docs/source-review-setup.md`. Synthetic process/desktop-mobile Chromium
+changes, finalization and publication remained CLI in schema15; material
+uploads/wiring are later slices. See `docs/source-review-setup.md`. Synthetic process/desktop-mobile Chromium
 and separate-client LAN/proxy gates include native review/conflict/completion and
 original previews; controlled authority/race/overflow checks are unit/Router evidence.
 

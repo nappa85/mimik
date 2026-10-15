@@ -45,6 +45,12 @@ Owner reset issuance/disablement remains local CLI; a valid CLI-issued Owner res
 token may be completed in the browser with the15-scalar minimum. Disabled-account
 recovery/re-enable and Owner succession are not supported.
 
+Owner administration also links **Rulesets** (`/admin/rulesets`) for registering
+game editions and exact legacy aliases from the browser, in addition to the local CLI
+(user decision 2026-10-15). It grants no campaign or sheet access; registration is
+attributed to the signed-in Owner through an immutable `registry_web_events` sidecar.
+See `docs/runtime-registry.md`.
+
 Account changes and authenticated Owner attribution commit atomically. Schema14
 preserves legacy account events and adds immutable `account_web_events` rows with
 actor ID/epoch and one-way session digest. Presence of this sidecar identifies web

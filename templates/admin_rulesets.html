@@ -1,0 +1,26 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Rulesets · Mimik</title><link rel="stylesheet" href="/assets/app.css"></head><body><main>
+<nav><a href="/admin">Owner administration</a> · <a href="/admin/materials">Materials</a> · <a href="/admin/rulesets">Rulesets</a></nav>
+<h1>Ruleset registry</h1>
+<p>Registering a stable game/edition identity lets prepared sources and records name it exactly. It does not approve evidence, publish a sheet definition, enable rules or authorize campaigns. IDs and labels are immutable once registered; there is no rename or delete. The same registrations are available to the local operator CLI.</p>
+{% if !notice.is_empty() %}<p class="panel" role="status">{{ notice }}</p>{% endif %}
+{% if !message.is_empty() %}<div class="panel" role="alert"><p>{{ message }}</p><p>Your input was not saved. It is retained below; check the registered identities and correct it before submitting again.</p></div>{% endif %}
+<section class="panel"><h2>Register a game edition</h2>
+<form method="post" action="/admin/rulesets"><input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Game ID (lowercase slug) <input name="game_id" required maxlength="64" autocomplete="off" spellcheck="false" value="{% if let Some(form) = ruleset %}{{ form.game_id }}{% endif %}"></label>
+<label>Game label (1–100 characters; must match an existing game's label exactly) <input name="game_label" required autocomplete="off" value="{% if let Some(form) = ruleset %}{{ form.game_label }}{% endif %}"></label>
+<label>Edition ID (lowercase slug) <input name="edition_id" required maxlength="64" autocomplete="off" spellcheck="false" value="{% if let Some(form) = ruleset %}{{ form.edition_id }}{% endif %}"></label>
+<label>Edition label (1–100 characters, unique within the game) <input name="edition_label" required autocomplete="off" value="{% if let Some(form) = ruleset %}{{ form.edition_label }}{% endif %}"></label>
+<p>IDs start with a letter and contain only a–z, 0–9 and hyphens (at most 64). Repeating an exact registration changes nothing. Your signed-in Owner account is recorded.</p>
+<button>Register edition</button></form></section>
+<section class="panel"><h2>Add an exact legacy alias</h2>
+<p>Map an old exact edition label (from a version-1 source or legacy record) to a registered edition of the same game. Matching unresolved records are attached in the same transaction; existing associations are never changed. The native MÖRK BORG edition accepts only its seeded alias.</p>
+<form method="post" action="/admin/rulesets/aliases"><input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Game ID <input name="game_id" required maxlength="64" autocomplete="off" spellcheck="false" value="{% if let Some(form) = alias %}{{ form.game_id }}{% endif %}"></label>
+<label>Edition ID <input name="edition_id" required maxlength="64" autocomplete="off" spellcheck="false" value="{% if let Some(form) = alias %}{{ form.edition_id }}{% endif %}"></label>
+<label>Legacy exact edition label <input name="legacy_edition" required autocomplete="off" value="{% if let Some(form) = alias %}{{ form.legacy_edition }}{% endif %}"></label>
+<button>Register alias</button></form></section>
+<section class="panel"><h2>Registered editions</h2>
+{% for row in rows %}<article><h3>{{ row.game_label }} — {{ row.edition_label }}</h3><p><code>{{ row.game_id }}</code> / <code>{{ row.edition_id }}</code> · {% if let Some(adapter) = row.native_adapter %}native adapter {{ adapter }}{% else %}no native adapter{% endif %} · {% if row.generic_sheet_available %}generic sheet available{% else %}no generic sheet{% endif %}</p></article>{% endfor %}
+{% if rows.is_empty() %}<p>No registered editions on this page.</p>{% endif %}
+{% if let Some(next) = next %}<a href="/admin/rulesets?after_game={{ next.game_id }}&amp;after_edition={{ next.edition_id }}">Next editions</a> · {% endif %}<a href="/admin/rulesets">First editions</a></section>
+</main></body></html>

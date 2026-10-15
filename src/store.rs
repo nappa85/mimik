@@ -6,6 +6,29 @@ use std::{
     time::Duration,
 };
 
+/// Current database schema version; migration `N` sets `PRAGMA user_version=N`.
+pub const SCHEMA_VERSION: i64 = 16;
+
+/// Contiguous migrations in application order: index `N-1` holds migration `N`.
+const MIGRATIONS: [&str; 16] = [
+    include_str!("../migrations/001_characters.sql"),
+    include_str!("../migrations/002_mork_borg.sql"),
+    include_str!("../migrations/003_sources.sql"),
+    include_str!("../migrations/004_source_coverage.sql"),
+    include_str!("../migrations/005_registry.sql"),
+    include_str!("../migrations/006_definition_drafts.sql"),
+    include_str!("../migrations/007_source_finalization.sql"),
+    include_str!("../migrations/008_definition_publication.sql"),
+    include_str!("../migrations/009_review_integrity.sql"),
+    include_str!("../migrations/010_accounts.sql"),
+    include_str!("../migrations/011_auth_sessions.sql"),
+    include_str!("../migrations/012_campaigns.sql"),
+    include_str!("../migrations/013_owner_administration.sql"),
+    include_str!("../migrations/014_account_administration.sql"),
+    include_str!("../migrations/015_material_administration.sql"),
+    include_str!("../migrations/016_registry_administration.sql"),
+];
+
 #[derive(Clone)]
 pub struct Store(Arc<Mutex<Connection>>);
 
@@ -63,57 +86,15 @@ impl Store {
         )?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 15 {
+        if version > SCHEMA_VERSION {
             return Err(AppError::Invalid(
                 "Database schema is newer than this application.",
             ));
         }
-        if version < 1 {
-            tx.execute_batch(include_str!("../migrations/001_characters.sql"))?;
-        }
-        if version < 2 {
-            tx.execute_batch(include_str!("../migrations/002_mork_borg.sql"))?;
-        }
-        if version < 3 {
-            tx.execute_batch(include_str!("../migrations/003_sources.sql"))?;
-        }
-        if version < 4 {
-            tx.execute_batch(include_str!("../migrations/004_source_coverage.sql"))?;
-        }
-        if version < 5 {
-            tx.execute_batch(include_str!("../migrations/005_registry.sql"))?;
-        }
-        if version < 6 {
-            tx.execute_batch(include_str!("../migrations/006_definition_drafts.sql"))?;
-        }
-        if version < 7 {
-            tx.execute_batch(include_str!("../migrations/007_source_finalization.sql"))?;
-        }
-        if version < 8 {
-            tx.execute_batch(include_str!("../migrations/008_definition_publication.sql"))?;
-        }
-        if version < 9 {
-            tx.execute_batch(include_str!("../migrations/009_review_integrity.sql"))?;
-        }
-        if version < 10 {
-            tx.execute_batch(include_str!("../migrations/010_accounts.sql"))?;
-        }
-        if version < 11 {
-            tx.execute_batch(include_str!("../migrations/011_auth_sessions.sql"))?;
-        }
-        if version < 12 {
-            tx.execute_batch(include_str!("../migrations/012_campaigns.sql"))?;
-        }
-        if version < 13 {
-            tx.execute_batch(include_str!("../migrations/013_owner_administration.sql"))?;
-        }
-        if version < 14 {
-            tx.execute_batch(include_str!("../migrations/014_account_administration.sql"))?;
-        }
-        if version < 15 {
-            tx.execute_batch(include_str!(
-                "../migrations/015_material_administration.sql"
-            ))?;
+        for (number, migration) in (1_i64..).zip(MIGRATIONS) {
+            if version < number {
+                tx.execute_batch(migration)?;
+            }
         }
         tx.commit()?;
         Ok(Self(Arc::new(Mutex::new(connection))))
@@ -309,18 +290,7 @@ mod migration_tests {
         });
         // SQLite itself signals lock contention; no scheduler timing or sleeps.
         blocked_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-        for migration in [
-            include_str!("../migrations/001_characters.sql"),
-            include_str!("../migrations/002_mork_borg.sql"),
-            include_str!("../migrations/003_sources.sql"),
-            include_str!("../migrations/004_source_coverage.sql"),
-            include_str!("../migrations/005_registry.sql"),
-            include_str!("../migrations/006_definition_drafts.sql"),
-            include_str!("../migrations/007_source_finalization.sql"),
-            include_str!("../migrations/008_definition_publication.sql"),
-            include_str!("../migrations/009_review_integrity.sql"),
-            include_str!("../migrations/010_accounts.sql"),
-        ] {
+        for migration in &MIGRATIONS[..10] {
             tx.execute_batch(migration).unwrap();
         }
         tx.commit().unwrap();
@@ -336,7 +306,41 @@ mod migration_tests {
             writer
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            15
+            SCHEMA_VERSION
         );
+    }
+
+    #[test]
+    fn migration_files_are_contiguous_and_match_the_applied_chain() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut files = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        files.sort();
+        assert_eq!(i64::try_from(MIGRATIONS.len()).unwrap(), SCHEMA_VERSION);
+        assert_eq!(files.len(), MIGRATIONS.len(), "{files:?}");
+        for ((number, file), applied) in (1_i64..).zip(&files).zip(MIGRATIONS) {
+            let (prefix, rest) = file.split_once('_').unwrap();
+            assert_eq!(
+                prefix,
+                format!("{number:03}"),
+                "migration numbers must be contiguous: {files:?}"
+            );
+            let name = Path::new(rest);
+            assert!(
+                name.extension().is_some_and(|extension| extension == "sql")
+                    && name.file_stem().is_some_and(|stem| !stem.is_empty()),
+                "{file}"
+            );
+            let contents = std::fs::read_to_string(directory.join(file)).unwrap();
+            assert_eq!(contents, applied, "{file} is out of chain order");
+            let last = contents.trim_end().rsplit(';').nth(1).unwrap().trim();
+            assert_eq!(
+                last.replace(' ', ""),
+                format!("PRAGMAuser_version={number}"),
+                "{file} must end by setting its own schema version"
+            );
+        }
     }
 }

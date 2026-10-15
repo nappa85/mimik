@@ -1,5 +1,9 @@
 //! Registered identities are not approved sheet definitions or rule coverage.
-use crate::{AppError, Store};
+use crate::{
+    AppError, Store,
+    pagination::Listing,
+    sources::materials::{read_text, text},
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -110,37 +114,201 @@ fn backfill(
     Ok(())
 }
 
+fn validate_ruleset(input: &RegisterRuleset) -> Result<(), AppError> {
+    if valid_id(&input.game_id)
+        && valid_id(&input.edition_id)
+        && valid_label(&input.game_label)
+        && valid_label(&input.edition_label)
+    {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
+}
+
+fn validate_alias(input: &RegisterAlias) -> Result<(), AppError> {
+    if valid_id(&input.game_id) && valid_id(&input.edition_id) && valid_label(&input.legacy_edition)
+    {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
+}
+
+/// Shared registration transition for the CLI and Owner browser, inside the caller's
+/// transaction. Returns the appended history event, or `None` for an exact repeat.
+pub(crate) fn register_in(
+    db: &Connection,
+    input: &RegisterRuleset,
+) -> Result<Option<i64>, AppError> {
+    validate_ruleset(input)?;
+    if alias(db, &input.game_id, &input.edition_label)?
+        .is_some_and(|target| target.edition_id != input.edition_id)
+    {
+        return Err(invalid());
+    }
+    let game: Option<String> = db
+        .query_row(
+            "SELECT label FROM registry_games WHERE game_id=?1",
+            [&input.game_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match game {
+        Some(label) if label != input.game_label => return Err(invalid()),
+        Some(_) => {}
+        None => {
+            db.execute(
+                "INSERT INTO registry_games VALUES (?1,?2)",
+                params![input.game_id, input.game_label],
+            )?;
+        }
+    }
+    let edition: Option<(String, String)> = db
+        .query_row(
+            "SELECT edition_id,label FROM registry_editions WHERE game_id=?1 AND (edition_id=?2 OR label=?3)",
+            params![input.game_id, input.edition_id, input.edition_label],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    match edition {
+        Some((id, label)) if id != input.edition_id || label != input.edition_label => {
+            Err(invalid())
+        }
+        Some(_) => Ok(None),
+        None => {
+            db.execute(
+                "INSERT INTO registry_editions (game_id,edition_id,label) VALUES (?1,?2,?3)",
+                params![input.game_id, input.edition_id, input.edition_label],
+            )?;
+            db.execute(
+                "INSERT INTO registry_events(kind,game_id,edition_id,game_label,label) VALUES('ruleset',?1,?2,?3,?4)",
+                params![
+                    input.game_id,
+                    input.edition_id,
+                    input.game_label,
+                    input.edition_label
+                ],
+            )?;
+            Ok(Some(db.last_insert_rowid()))
+        }
+    }
+}
+
+/// Shared exact-alias transition inside the caller's transaction. Returns the appended
+/// history event, or `None` when the identical alias already existed.
+pub(crate) fn alias_in(db: &Connection, input: &RegisterAlias) -> Result<Option<i64>, AppError> {
+    validate_alias(input)?;
+    let native: bool = db
+        .query_row(
+            "SELECT native FROM registry_editions WHERE game_id=?1 AND edition_id=?2",
+            params![input.game_id, input.edition_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(invalid)?;
+    let label_target: Option<String> = db
+        .query_row(
+            "SELECT edition_id FROM registry_editions WHERE game_id=?1 AND label=?2",
+            params![input.game_id, input.legacy_edition],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if label_target.is_some_and(|edition| edition != input.edition_id) {
+        return Err(invalid());
+    }
+    let desired = RulesetKey {
+        game_id: input.game_id.clone(),
+        edition_id: input.edition_id.clone(),
+    };
+    let event = match alias(db, &input.game_id, &input.legacy_edition)? {
+        Some(existing) if existing != desired => return Err(invalid()),
+        Some(_) => None,
+        None if native => {
+            return Err(AppError::Invalid(
+                "The native ruleset accepts only its seeded exact legacy alias.",
+            ));
+        }
+        None => {
+            db.execute(
+                "INSERT INTO legacy_ruleset_aliases VALUES (?1,?2,?1,?3)",
+                params![input.game_id, input.legacy_edition, input.edition_id],
+            )?;
+            db.execute(
+                "INSERT INTO registry_events(kind,game_id,edition_id,label) VALUES('alias',?1,?2,?3)",
+                params![input.game_id, input.edition_id, input.legacy_edition],
+            )?;
+            Some(db.last_insert_rowid())
+        }
+    };
+    backfill(db, &input.game_id, &input.legacy_edition, &input.edition_id)?;
+    Ok(event)
+}
+
+fn read_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<RulesetEntry> {
+    let key = RulesetKey {
+        game_id: read_text(row, 0)?,
+        edition_id: read_text(row, 2)?,
+    };
+    let adapter = crate::games::adapter_for_ruleset(&key);
+    Ok(RulesetEntry {
+        game_id: key.game_id,
+        game_label: read_text(row, 1)?,
+        edition_id: key.edition_id,
+        edition_label: read_text(row, 3)?,
+        native: row.get(4)?,
+        native_adapter: adapter.map(|adapter| adapter.id),
+        generic_sheet_available: false,
+    })
+}
+
+/// One bounded page ordered by the composite primary key, after an exclusive cursor.
+pub(crate) fn rulesets_page(
+    db: &Connection,
+    after: Option<&RulesetKey>,
+) -> Result<Listing<RulesetEntry, RulesetKey>, AppError> {
+    if after.is_some_and(|key| !valid_id(&key.game_id) || !valid_id(&key.edition_id)) {
+        return Err(AppError::Invalid(
+            "Ruleset cursors need both parts as registered lowercase IDs.",
+        ));
+    }
+    let sql = format!(
+        "SELECT {},{},{},{},e.native FROM registry_editions e JOIN registry_games g ON g.game_id=e.game_id WHERE ?1 IS NULL OR (e.game_id,e.edition_id)>(?1,?2) ORDER BY e.game_id,e.edition_id LIMIT 51",
+        text("e.game_id", 64),
+        text("g.label", 400),
+        text("e.edition_id", 64),
+        text("e.label", 400)
+    );
+    let mut query = db.prepare(&sql)?;
+    let rows = query
+        .query_map(
+            params![
+                after.map(|key| key.game_id.as_str()),
+                after.map(|key| key.edition_id.as_str())
+            ],
+            read_entry,
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Listing::new(rows, |row| RulesetKey {
+        game_id: row.game_id.clone(),
+        edition_id: row.edition_id.clone(),
+    }))
+}
+
 impl Store {
     /// Register immutable game/edition identities; exact repeated registration is idempotent.
     ///
     /// # Errors
     /// Rejects invalid IDs/labels, identity/alias collisions or storage failures.
     pub async fn register_ruleset(&self, input: RegisterRuleset) -> Result<(), AppError> {
-        if !valid_id(&input.game_id)
-            || !valid_id(&input.edition_id)
-            || !valid_label(&input.game_label)
-            || !valid_label(&input.edition_label)
-        {
-            return Err(invalid());
-        }
+        validate_ruleset(&input)?;
         self.run(move |db| {
             let tx = db.transaction()?;
-            if alias(&tx, &input.game_id, &input.edition_label)?.is_some_and(|target| target.edition_id != input.edition_id) { return Err(invalid()); }
-            let game: Option<String> = tx.query_row("SELECT label FROM registry_games WHERE game_id=?1", [&input.game_id], |row| row.get(0)).optional()?;
-            match game {
-                Some(label) if label != input.game_label => return Err(invalid()),
-                Some(_) => {},
-                None => { tx.execute("INSERT INTO registry_games VALUES (?1,?2)", params![input.game_id,input.game_label])?; }
-            }
-            let edition: Option<(String,String)> = tx.query_row("SELECT edition_id,label FROM registry_editions WHERE game_id=?1 AND (edition_id=?2 OR label=?3)", params![input.game_id,input.edition_id,input.edition_label], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
-            match edition {
-                Some((id,label)) if id != input.edition_id || label != input.edition_label => return Err(invalid()),
-                Some(_) => {},
-                None => { tx.execute("INSERT INTO registry_editions (game_id,edition_id,label) VALUES (?1,?2,?3)", params![input.game_id,input.edition_id,input.edition_label])?; }
-            }
+            register_in(&tx, &input)?;
             tx.commit()?;
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Add an exact same-game legacy alias and attach matching unresolved records atomically.
@@ -148,57 +316,10 @@ impl Store {
     /// # Errors
     /// Rejects native shadowing, collisions, unknown targets or invalid labels/IDs.
     pub async fn register_ruleset_alias(&self, input: RegisterAlias) -> Result<(), AppError> {
-        if !valid_id(&input.game_id)
-            || !valid_id(&input.edition_id)
-            || !valid_label(&input.legacy_edition)
-        {
-            return Err(invalid());
-        }
+        validate_alias(&input)?;
         self.run(move |db| {
             let tx = db.transaction()?;
-            let native: bool = tx
-                .query_row(
-                    "SELECT native FROM registry_editions WHERE game_id=?1 AND edition_id=?2",
-                    params![input.game_id, input.edition_id],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .ok_or_else(invalid)?;
-            let label_target: Option<String> = tx
-                .query_row(
-                    "SELECT edition_id FROM registry_editions WHERE game_id=?1 AND label=?2",
-                    params![input.game_id, input.legacy_edition],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if label_target.is_some_and(|edition| edition != input.edition_id) {
-                return Err(invalid());
-            }
-            let desired = RulesetKey {
-                game_id: input.game_id.clone(),
-                edition_id: input.edition_id.clone(),
-            };
-            match alias(&tx, &input.game_id, &input.legacy_edition)? {
-                Some(existing) if existing != desired => return Err(invalid()),
-                Some(_) => {}
-                None if native => {
-                    return Err(AppError::Invalid(
-                        "The native ruleset accepts only its seeded exact legacy alias.",
-                    ));
-                }
-                None => {
-                    tx.execute(
-                        "INSERT INTO legacy_ruleset_aliases VALUES (?1,?2,?1,?3)",
-                        params![input.game_id, input.legacy_edition, input.edition_id],
-                    )?;
-                }
-            }
-            backfill(
-                &tx,
-                &input.game_id,
-                &input.legacy_edition,
-                &input.edition_id,
-            )?;
+            alias_in(&tx, &input)?;
             tx.commit()?;
             Ok(())
         })
@@ -212,11 +333,7 @@ impl Store {
     pub async fn rulesets(&self) -> Result<Vec<RulesetEntry>, AppError> {
         self.run(|db| {
             let mut query = db.prepare("SELECT e.game_id,g.label,e.edition_id,e.label,e.native FROM registry_editions e JOIN registry_games g ON g.game_id=e.game_id ORDER BY e.game_id,e.edition_id")?;
-            let entries = query.query_map([], |row| {
-                let key = RulesetKey { game_id: row.get(0)?, edition_id: row.get(2)? };
-                let adapter = crate::games::adapter_for_ruleset(&key);
-                Ok(RulesetEntry { game_id: key.game_id, game_label: row.get(1)?, edition_id: key.edition_id, edition_label: row.get(3)?, native: row.get(4)?, native_adapter: adapter.map(|adapter| adapter.id), generic_sheet_available: false })
-            })?;
+            let entries = query.query_map([], read_entry)?;
             Ok(entries.collect::<Result<Vec<_>, _>>()?)
         }).await
     }

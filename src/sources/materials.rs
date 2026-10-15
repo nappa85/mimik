@@ -31,17 +31,17 @@ pub(crate) struct MaterialPage {
 
 // The CASE guards execute in SQLite, before a string crosses the allocation boundary.
 // NULL signals corrupt/oversized evidence; it is never substituted or truncated.
-fn text(column: &str, limit: usize) -> String {
+pub(crate) fn text(column: &str, limit: usize) -> String {
     format!(
         "CASE WHEN typeof({column})='text' AND length(CAST({column} AS BLOB))<={limit} THEN {column} END"
     )
 }
-fn read_text(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<String> {
+pub(crate) fn read_text(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<String> {
     row.get::<_, Option<String>>(index)?.ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
             index,
             rusqlite::types::Type::Null,
-            "Material text exceeds the supported byte limit or has an invalid type.".into(),
+            "Stored text exceeds the supported byte limit or has an invalid type.".into(),
         )
     })
 }

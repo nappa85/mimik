@@ -89,7 +89,7 @@ async fn account_lifecycle_preserves_epoch_and_one_use_contract() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        15
+        mimik::SCHEMA_VERSION
     );
     identity_guards(&db);
     let owner = role_password_policy(&accounts, dir.path(), &owner, &password).await;
@@ -490,7 +490,7 @@ fn schema10_upgrades_real_historical_schemas_and_rolls_back_collision() {
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            15
+            mimik::SCHEMA_VERSION
         );
         assert_eq!(
             db.query_row("SELECT count(*) FROM accounts", [], |r| r.get::<_, i64>(0))

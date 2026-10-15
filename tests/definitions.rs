@@ -619,7 +619,7 @@ async fn schema_six_migration_is_atomic_and_concurrent_updates_have_one_committe
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        15
+        mimik::SCHEMA_VERSION
     );
     assert_eq!(
         db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {

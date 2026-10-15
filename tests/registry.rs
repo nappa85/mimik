@@ -784,7 +784,7 @@ async fn populated_v4_migration_preserves_native_sheet_and_source_review_artifac
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        15
+        mimik::SCHEMA_VERSION
     );
     assert_eq!(
         db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {

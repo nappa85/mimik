@@ -38,7 +38,7 @@ fn schema10_to11_is_additive_reopens_and_collision_rolls_back() {
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            if collision { 10 } else { 15 }
+            if collision { 10 } else { mimik::SCHEMA_VERSION }
         );
         assert_eq!(
             db.query_row("SELECT display_name FROM accounts", [], |r| r

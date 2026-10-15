@@ -10,11 +10,12 @@ mod mork_form;
 pub mod network;
 mod presentation;
 pub mod registry;
+mod registry_admin;
 pub mod sources;
 mod store;
 mod web;
 
-pub use store::Store;
+pub use store::{SCHEMA_VERSION, Store};
 pub use web::app;
 
 use serde::Deserialize;

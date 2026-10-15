@@ -22,6 +22,8 @@ use tower_sessions::{
 mod administration_tests;
 #[path = "material_tests.rs"]
 mod material_tests;
+#[path = "registry_tests.rs"]
+mod registry_tests;
 
 async fn fixture() -> (tempfile::TempDir, Store, Vec<RequestAuth>, Arc<AtomicI64>) {
     fixture_with_owner(1).await
@@ -2441,7 +2443,7 @@ async fn populated_schema12_upgrade_preserves_owner_development_records_and_sess
                 0
             );
             assert_eq!(db.query_row("SELECT count(*) FROM source_web_events",[],|r|r.get::<_,i64>(0))?,0);
-            db.execute_batch("DROP TABLE source_web_events; DROP INDEX source_review_page_history; DROP TABLE account_web_events; DROP VIEW account_web_request;")?;
+            db.execute_batch("DROP TABLE registry_web_events; DROP TABLE registry_events; DROP TABLE source_web_events; DROP INDEX source_review_page_history; DROP TABLE account_web_events; DROP VIEW account_web_request;")?;
             for trigger in [
                 "private_owner_supervision_insert",
                 "private_owner_supervision_update",
@@ -2497,7 +2499,7 @@ async fn populated_schema12_upgrade_preserves_owner_development_records_and_sess
         .run(|db| {
             assert_eq!(
                 db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?,
-                15
+                crate::store::SCHEMA_VERSION
             );
             assert_eq!(
                 db.query_row("SELECT count(*) FROM auth_sessions", [], |row| row

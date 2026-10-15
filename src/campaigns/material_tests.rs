@@ -358,14 +358,14 @@ async fn material_schema14_upgrade_preserves_source_account_and_private_history(
         )
         .await
         .unwrap();
-    store.run(|db|{assert_eq!(db.query_row("SELECT count(*) FROM source_web_events",[],|r|r.get::<_,i64>(0))?,0);db.execute_batch("DROP TABLE source_web_events; DROP INDEX source_review_page_history; PRAGMA user_version=14;")?;Ok(())}).await.unwrap();
+    store.run(|db|{assert_eq!(db.query_row("SELECT count(*) FROM source_web_events",[],|r|r.get::<_,i64>(0))?,0);db.execute_batch("DROP TABLE registry_web_events; DROP TABLE registry_events; DROP TABLE source_web_events; DROP INDEX source_review_page_history; PRAGMA user_version=14;")?;Ok(())}).await.unwrap();
     let reopened = Store::open(&dir.path().join("private.sqlite3")).unwrap();
     reopened
         .run(|db| {
             crate::store::register_auth_clock(db, Arc::new(|| Ok(100)))?;
             assert_eq!(
                 db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-                15
+                crate::store::SCHEMA_VERSION
             );
             assert_eq!(
                 db.query_row("SELECT count(*) FROM account_web_events", [], |r| r

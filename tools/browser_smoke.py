@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from admin_ruleset_browser import run_admin_ruleset_browser
 from material_browser import run_material_browser
 from smoke_release import (
     AUTH_DENIED_PATHS,
@@ -888,6 +889,7 @@ def run_auth_scenario(browser, viewport, binary, directory, fixture):
         anonymous = cookies()
         owner = login("smoke-owner", passwords[0])
         run_material_browser(page, "http://127.0.0.1:3000")
+        run_admin_ruleset_browser(page, "http://127.0.0.1:3000")
         run_account_admin_browser(browser, page, viewport, directory)
         stop(process, log)
         process, log = start(binary, directory, auth=True)
@@ -910,6 +912,11 @@ def run_auth_scenario(browser, viewport, binary, directory, fixture):
                 and page.locator("form").count() == 0,
                 "Browser exposes campaign/source/gameplay DOM",
             )
+        require(
+            page.goto("http://127.0.0.1:3000/admin/rulesets").status == 403
+            and page.locator("form").count() == 0,
+            "Player reached ruleset administration",
+        )
         page.goto("http://127.0.0.1:3000/auth/session")
         require(cookies() == current, "Browser status read extended cookie")
         stop(process, log)

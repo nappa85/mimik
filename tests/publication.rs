@@ -964,7 +964,7 @@ async fn schema9_retrofit_publication(provenance_present: bool) {
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            15
+            mimik::SCHEMA_VERSION
         );
     }
 }

@@ -3,6 +3,7 @@ mod administration;
 mod errors;
 mod materials;
 mod persistence;
+mod rulesets;
 pub use persistence::Principal;
 pub use persistence::SqliteSessions;
 
@@ -185,6 +186,7 @@ fn router_with_sessions(
         .route("/auth/session", get(status))
         .merge(administration::routes())
         .merge(materials::routes())
+        .merge(rulesets::routes())
         .merge(crate::campaigns::web::routes())
         .route("/assets/app.css", get(crate::web::css_asset))
         .route("/assets/logo.png", get(crate::web::logo_asset))
@@ -525,6 +527,14 @@ impl RequestAuth {
             deadline: self.deadline,
             token: "a".repeat(64),
             principal: Some(self.account),
+        }
+    }
+    /// A durable CSRF admission for this session whose token no longer matches.
+    #[cfg(test)]
+    pub(crate) fn stale_csrf_fixture(&self) -> CsrfAdmission {
+        CsrfAdmission {
+            token: "b".repeat(64),
+            ..self.csrf_fixture()
         }
     }
     #[cfg(test)]

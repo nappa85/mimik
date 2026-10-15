@@ -35,8 +35,49 @@ registered labels. Alias insertion and matching unresolved-record backfill are
 one transaction; existing associations are never overwritten. Seeded native
 `mork-borg / it-2025` accepts only its exact seeded Italian label alias.
 
-These are local operator commands, not authenticated Owner/Master permissions.
-The technical Owner and campaign Master are separate planned roles.
+The CLI commands trust local OS/database access and record no account attribution.
+Campaign Masters and players have no registry permission.
+
+## Owner browser registry
+
+User decision (2026-10-15): in authenticated mode the Owner may register rulesets
+from the browser **in addition to** the CLI; neither path replaces the other. Sign
+in as Owner and open **Owner administration → Rulesets** (`/admin/rulesets`). The
+page lists 50 editions per page ordered by `(game_id, edition_id)` with an exclusive
+composite cursor (`after_game` and `after_edition`, both or neither, each a valid
+ID). It offers the same two transitions as the CLI, implemented by the same shared
+code, so validation, idempotency, immutability and alias rules are identical:
+
+- **Register edition** (`POST /admin/rulesets`): game ID/label and edition ID/label.
+  An exact repeat succeeds and changes nothing.
+- **Add exact legacy alias** (`POST /admin/rulesets/aliases`): same-game exact label
+  to a registered edition, with matching unresolved-record backfill in the same
+  transaction. The native edition still accepts only its seeded alias.
+
+Only the Owner is admitted; players, Masters and anonymous requests are denied.
+Forms use strict Origin, durable CSRF rechecked inside the immediate transaction and
+before commit, the default 8 KiB body limit and `deny_unknown_fields` (a submitted
+`actor` is rejected). Rejected input returns 422 with the submitted values retained
+and escaped. Browser work uses the bounded auth workers, so concurrent browser load
+can return 503; retry after inspecting the listing. The CLI does not use those workers;
+CLI and browser writes contend only through SQLite locking (the 5-second busy timeout),
+and a write that loses returns a storage error rather than partial state.
+
+Schema16 adds append-only `registry_events` (kind `ruleset` or `alias`, game/edition
+IDs, game label, edition or alias label, timestamp), written by the shared CLI and
+browser transitions only when a new edition or alias is created. Exact repeats write
+no event. Registrations from earlier schemas keep no invented history. The insert trigger checks
+that an event matches an existing edition or alias but cannot know when that row was
+created, so someone with direct SQL access could add an event for a pre-history
+edition; the application never does, and such a row could not gain a browser sidecar
+unless it was the latest event during an authenticated Owner request. This was left as
+documented, not tightened, because database administrators can bypass any trigger. Browser writes
+also append an immutable `registry_web_events` row (Owner account ID/epoch and one-way
+session digest), checked by an insert trigger against the authenticated Owner request
+and the latest registry event; audit failure rolls back the registration. CLI events
+have no sidecar and carry no account attribution. (The registry history migration is
+planned as number 017 at merge; this branch applies it as 016 until the parallel
+retrieval migration lands.)
 
 ## Prepared bundle identity
 

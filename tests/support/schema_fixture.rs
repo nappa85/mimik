@@ -25,11 +25,17 @@ fn remove_empty_accounts(db: &rusqlite::Connection) {
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
+    // The migration-chain test pins the file count to the application schema version.
+    let current = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations"))
+        .unwrap()
+        .count();
     assert_eq!(
-        version, 15,
-        "Account fixture requires schema 15, found {version}"
+        usize::try_from(version).ok(),
+        Some(current),
+        "Account fixture requires the current schema, found {version}"
     );
     let tables = [
+        "registry_web_events",
         "source_web_events",
         "account_web_events",
         "private_sheet_history",
@@ -61,6 +67,11 @@ fn remove_empty_accounts(db: &rusqlite::Connection) {
     for table in tables {
         db.execute_batch(&format!("DROP TABLE {table};")).unwrap();
     }
+    // Registry history is newer than every rewind target. Discarding its (unattributed CLI)
+    // rows is intentional: older schemas never had history, and remigration starts empty
+    // exactly like an upgraded pre-history database. Its attributed sidecar must be empty
+    // (checked above). Drop after the checks so rejected fixtures stay unchanged.
+    db.execute_batch("DROP TABLE registry_events;").unwrap();
     db.execute_batch("DROP INDEX source_review_page_history;")
         .unwrap();
 }
@@ -128,6 +139,10 @@ fn rewind_finalization(db: &rusqlite::Connection, remigrate: bool) {
         .unwrap();
         db.execute_batch(include_str!(
             "../../migrations/015_material_administration.sql"
+        ))
+        .unwrap();
+        db.execute_batch(include_str!(
+            "../../migrations/016_registry_administration.sql"
         ))
         .unwrap();
     }
