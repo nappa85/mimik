@@ -1,6 +1,8 @@
 //! Strict declarative proposals. Draft storage never approves evidence or enables a sheet.
 mod admission;
 pub(crate) mod decode;
+// Public only so `examples/formula_eval.rs` (development CLI) can link; revisit at M2.
+pub mod formula;
 pub(crate) mod private_pin;
 mod publication;
 mod store;

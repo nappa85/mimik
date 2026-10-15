@@ -5,7 +5,7 @@ edition = "2024"
 description = "A sheet-first tabletop RPG companion"
 license = "AGPL-3.0-only"
 publish = false
-include = ["/Cargo.toml", "/Cargo.lock", "/rust-toolchain.toml", "/LICENSE", "/logo.png", "/README.md", "/AGENTS.md", "/TODO.md", "/about.toml", "/about.hbs", "/pyproject.toml", "/.env.example", "/.gitignore", "/.dockerignore", "/.github/workflows/*.yml", "/containers/**", "/src/**", "/templates/**", "/assets/*.css", "/assets/*.js", "/assets/*.md", "/assets/htmx-LICENSE", "/assets/response-targets-LICENSE", "/migrations/*.sql", "/tests/*.rs", "/tests/support/*.rs", "/examples/*.rs", "/examples/sheet-harness-demo/*.md", "/examples/sheet-harness-demo/*.json", "/examples/sheet-harness-demo/*.html", "/schemas/*.json", "/tools/*.py", "/tools/requirements*.txt", "/docs/**/*.md"]
+include = ["/Cargo.toml", "/Cargo.lock", "/rust-toolchain.toml", "/LICENSE", "/logo.png", "/README.md", "/AGENTS.md", "/TODO.md", "/about.toml", "/about.hbs", "/pyproject.toml", "/.env.example", "/.gitignore", "/.dockerignore", "/.github/workflows/*.yml", "/containers/**", "/src/**", "/templates/**", "/assets/*.css", "/assets/*.js", "/assets/*.md", "/assets/htmx-LICENSE", "/assets/response-targets-LICENSE", "/migrations/*.sql", "/tests/*.rs", "/tests/support/*.rs", "/examples/publication_profile.rs", "/examples/qr_decode.rs", "/examples/source_fixture.rs", "/examples/source_reimport_profile.rs", "/examples/sheet-harness-demo/*.md", "/examples/sheet-harness-demo/*.json", "/examples/sheet-harness-demo/*.html", "/schemas/*.json", "/tools/*.py", "/tools/requirements*.txt", "/docs/**/*.md"]
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
@@ -46,6 +46,7 @@ serde_urlencoded = "0.7"
 sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+cel = { version = "=0.15.0", default-features = false }
 
 [dev-dependencies]
 rqrr = { version = "=0.11.0", default-features = false }
