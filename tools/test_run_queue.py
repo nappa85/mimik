@@ -87,6 +87,47 @@ class FakeHandle:
         return self.rc
 
 
+class FakeCheckHandle:
+    """The CHECK_ONLY pre-pass: instant, then check_only=1 (or a failure)."""
+
+    def __init__(self, clock, env, fail):
+        self.clock, self.env, self.fail = clock, env, fail
+        self.start, self.rc = clock.now, None
+
+    def poll(self):
+        if self.rc is None:
+            out = Path(self.env["OUT_DIR"])
+            if self.fail:
+                text = "failure=model_hash\nfailure_detail=model sha256 mismatch\n"
+                self.rc = 5
+            else:
+                text = "check_only=1 (stopped before launch)\ncleanup_verified=true\n"
+                self.rc = 0
+            (out / "provenance.txt").write_text(text)
+        return self.rc
+
+    def signal(self, sig):
+        self.rc = 143
+
+    def wait(self, timeout):
+        return self.rc
+
+
+class FakeWatchdog:
+    def __init__(self, alive=True, restartable=True):
+        self.is_alive, self.restartable = alive, restartable
+        self.ensures = 0
+
+    def alive(self):
+        return self.is_alive
+
+    def ensure(self):
+        self.ensures += 1
+        if not self.is_alive and self.restartable:
+            self.is_alive = True
+        return self.is_alive
+
+
 class FakeLauncher:
     """Plays a behaviour per launch: {"seconds", "kind", ...}; default a complete run."""
 
@@ -94,10 +135,18 @@ class FakeLauncher:
         self.clock = clock
         self.plan = plan or {}
         self.launches = []
+        self.checks = []
         self.signals = []
+        self.order = []
 
     def start(self, argv, env, stdout_path, stderr_path):
         arm = Path(env["OUT_DIR"]).parent.name
+        stdout_path.write_text("")
+        if env.get("CHECK_ONLY") == "1":
+            self.checks.append(arm)
+            self.order.append(("check", arm))
+            return FakeCheckHandle(self.clock, env, self.plan.get(f"{arm}:check_fail"))
+        self.order.append(("run", arm))
         n = sum(1 for a, _ in self.launches if a == arm)
         self.launches.append((arm, dict(env)))
         stdout_path.write_text("runner stdout\n")
@@ -280,6 +329,7 @@ class Harness(unittest.TestCase):
             return {"ok": self.cleanup_ok, "remaining": [] if self.cleanup_ok else ["x"]}
 
         kw.setdefault("vram_reader", lambda: None)
+        self.watchdog = kw.setdefault("watchdog", FakeWatchdog())
         return rq.Queue(
             rq.load_queue(path, REGISTRY),
             REGISTRY,
@@ -511,7 +561,8 @@ class FailureTests(Harness):
         q = self.make(queue_doc([arm("a")]), at(2026, 10, WED, 20, 0), plan=plan)
         manifest = q.run()
         self.assertEqual(manifest["arms"][0]["attempts"][0]["status"], "incomplete_by_window")
-        self.assertEqual(self.started_at(q, "a", 2), dt.datetime(2026, 10, THU, 18, 0))
+        second = self.started_at(q, "a", 2)  # the first window start that holds the estimate
+        self.assertEqual(second.date(), dt.date(2026, 10, WED))
         self.assertEqual(manifest["arms"][0]["state"], "complete")
 
     def test_lock_held_stops_before_launch(self):
@@ -611,12 +662,13 @@ class ReviewFixGateTests(Harness):
             self.START,
             plan={"a": [{"kind": "infra_vram"}, {}]},
             vram_reader=lambda: next(readings, 100),
+            cooldown_seconds=47,
         )
         manifest = q.run()
         self.assertEqual(manifest["arms"][0]["attempts"][0]["infra"], "infra_vram")
         self.assertEqual(manifest["arms"][0]["state"], "complete")
         self.assertEqual(self.clock.sleeps.count(5), 2)  # waited for the release
-        self.assertIn(30.0, self.clock.sleeps)  # then cooled down
+        self.assertIn(47, self.clock.sleeps)  # then cooled down
 
 
 class ReviewFixCrashTests(Harness):
@@ -649,11 +701,13 @@ class ReviewFixCrashTests(Harness):
 
         rq.check_ledger = bad
         try:
-            with self.assertRaises(ValueError):
-                q.run()
+            manifest = q.run()
         finally:
             rq.check_ledger = original
-        self.assertEqual(self.manifest(q)["state"], "crashed")
+        # Second review round (Sonnet N6): a ledger-parse error fails the arm, not the queue.
+        self.assertEqual(manifest["state"], "done")
+        self.assertEqual(manifest["arms"][0]["state"], "failed")
+        self.assertIn("ledger check error", manifest["arms"][0]["reason"])
 
     def test_exception_while_the_runner_is_running_terminates_it(self):
         q = self.make(queue_doc([arm("a")]), self.START, plan={"a": [{"seconds": 3600}]})
@@ -866,18 +920,6 @@ class G0Tests(Harness):
         self.assertEqual(manifest["g0"][0]["swap_source"], "server cgroup memory.swap.peak")
         self.assertEqual(manifest["arms"][-1]["selected_n_cpu_moe"], 40)
 
-    def test_host_swap_fallback_with_zero_tolerance(self):
-        plan = {
-            "g0-40": [{"eval_ms": 9000, "swap_peak": "n/a"}],
-            "g0-36": [{"eval_ms": 7000, "swap_peak": "n/a", "swap_after": 101}],
-        }
-        doc = queue_doc(self.g0_arms(40, 36) + [self.screen()])
-        q = self.make(doc, at(2026, 10, SAT, 6, 0), plan=plan)
-        manifest = q.run()
-        self.assertEqual([r["qualified"] for r in manifest["g0"]], [True, False])
-        self.assertTrue(manifest["g0"][0]["swap_source"].startswith("host-wide"))
-        self.assertIn("g0_swap_fallback", (q.dir / "queue.log").read_text())
-
     def test_window_stopped_candidate_is_indeterminate(self):
         plan = {
             "g0-40": [{"eval_ms": 9000}],
@@ -913,6 +955,173 @@ class G0Tests(Harness):
         self.assertIn("g0_deadline", attempt["reason"])
 
 
+class ReviewTwoQueueTests(Harness):
+    """Second review round: watchdog readiness, CHECK_ONLY pre-pass, G0 recheck, swap,
+    fit margin, weekend edge, console sanitising."""
+
+    START = at(2026, 10, SAT, 10, 0)
+
+    def test_no_heavy_work_without_a_ready_watchdog(self):
+        dog = FakeWatchdog(alive=False, restartable=False)
+        q = self.make(queue_doc([arm("a")]), self.START, watchdog=dog)
+        manifest = q.run()
+        self.assertEqual(manifest["state"], "stopped")
+        self.assertIn("watchdog unavailable", manifest["stop_reason"])
+        self.assertEqual(self.launcher.launches, [])
+        self.assertEqual(self.launcher.checks, [])
+
+    def test_watchdog_lost_mid_attempt_stops_the_arm(self):
+        dog = FakeWatchdog()
+        q = self.make(
+            queue_doc([arm("a"), arm("b")]),
+            self.START,
+            watchdog=dog,
+            plan={"a": [{"seconds": 3600}]},
+        )
+
+        def die(clock):
+            if q.handle is not None and self.launcher.launches:
+                dog.is_alive, dog.restartable = False, False
+
+        self.clock.on_sleep = die
+        manifest = q.run()
+        self.assertIn(signal.SIGTERM, self.launcher.signals)
+        self.assertEqual(manifest["arms"][0]["state"], "failed")
+        self.assertEqual(manifest["state"], "stopped")
+        self.assertEqual(manifest["arms"][1]["state"], "pending")
+
+    def test_watchdog_restarted_mid_attempt(self):
+        dog = FakeWatchdog()
+        doc = queue_doc([arm("a", max_arm_seconds=7200)])
+        q = self.make(doc, self.START, watchdog=dog, plan={"a": [{"seconds": 1200}]})
+        killed = []
+
+        def die(clock):
+            if q.handle is not None and self.launcher.launches and not killed:
+                dog.is_alive = False  # restartable
+                killed.append(1)
+
+        self.clock.on_sleep = die
+        manifest = q.run()
+        self.assertEqual(manifest["arms"][0]["state"], "complete")
+        self.assertGreaterEqual(dog.ensures, 2)
+
+    def test_check_only_pre_pass_before_each_arm(self):
+        q = self.make(queue_doc([arm("a"), arm("b")]), self.START, plan={"b:check_fail": True})
+        manifest = q.run()
+        self.assertEqual(self.launcher.order[:3], [("check", "a"), ("run", "a"), ("check", "b")])
+        self.assertEqual(manifest["arms"][1]["state"], "refused")
+        self.assertIn("CHECK_ONLY pre-pass", manifest["arms"][1]["reason"])
+        self.assertEqual([a for a, _ in self.launcher.launches], ["a"])
+        check_dir = q.dir / "arms" / "a" / "check-1"
+        self.assertIn("check_only=1", (check_dir / "provenance.txt").read_text())
+
+    def test_g0_deadline_rechecked_after_the_window_wait(self):
+        g0 = [
+            arm(f"g0-{n}", model="qwen36-35b-a3b", g0=True, env={"N_CPU_MOE": n}) for n in (40, 36)
+        ]
+        # About 13 h: it does not fit the rest of Sunday night (to Monday 09:00), so it waits
+        # until Monday 18:00, far past the 4 h G0 deadline counted from g0-40's launch.
+        g0[1]["seconds_per_episode"] = (13 * 3600 - 180 - 2 * 20419565568 / 12.6e6) / 5
+        doc = queue_doc(g0, g0={"deadline_seconds": 4 * 3600})
+        q = self.make(doc, at(2026, 10, SUN, 21, 0), plan={"g0-40": [{"eval_ms": 9000}]})
+        manifest = q.run()
+        states = {a["id"]: (a["state"], a.get("reason")) for a in manifest["arms"]}
+        self.assertEqual(states["g0-40"][0], "complete")
+        self.assertEqual(states["g0-36"], ("skipped", "G0 deadline passed"))
+        self.assertEqual([a for a, _ in self.launcher.launches], ["g0-40"])
+
+    def g0_with_screen(self, plan):
+        g0 = [
+            arm(f"g0-{n}", model="qwen36-35b-a3b", g0=True, env={"N_CPU_MOE": n})
+            for n in (40, 36, 32)
+        ]
+        screen = arm(
+            "screen",
+            model="qwen36-35b-a3b",
+            split="dev",
+            cases_file=str(SUBSET),
+            n_cpu_moe_from_g0=True,
+            seconds_per_episode=60,
+        )
+        q = self.make(queue_doc(g0 + [screen]), at(2026, 10, SAT, 6, 0), plan=plan)
+        return q, q.run()
+
+    def test_unreadable_cgroup_swap_is_indeterminate_and_never_closes(self):
+        plan = {
+            "g0-40": [{"eval_ms": 9000}],
+            "g0-36": [{"eval_ms": 7000, "swap_peak": "n/a", "swap_after": 999}],
+        }
+        q, manifest = self.g0_with_screen(plan)
+        results = {r["arm"]: r for r in manifest["g0"]}
+        self.assertTrue(results["g0-36"]["indeterminate"])
+        self.assertFalse(results["g0-36"]["qualified"])
+        self.assertTrue(results["g0-36"]["swap_source"].startswith("host-wide"))
+        self.assertIn("g0-32", results)  # G0 stayed open
+        self.assertIn("g0_swap_fallback", (q.dir / "queue.log").read_text())
+
+    def test_fit_uses_at_least_900_s(self):
+        # 3000 s estimate at Wednesday 08:00: fits a 300 s margin (08:50 <= 08:55) but not
+        # the runner's 900 s gate (08:50 > 08:45), so it waits for 18:00.
+        doc = queue_doc([arm("a", seconds_per_episode=(3000 - 180 - 2 * 2497280736 / 12.6e6) / 5)])
+        q = self.make(doc, at(2026, 10, WED, 8, 0))
+        q.run()
+        self.assertEqual(self.started_at(q, "a"), dt.datetime(2026, 10, WED, 18, 0))
+
+    def test_saturday_stop_reruns_the_same_weekend(self):
+        """Space Bunny N6: a stop on Saturday must not push the rerun past the weekend."""
+        plan = {"a": [{"kind": "window_refused"}, {}]}
+        q = self.make(queue_doc([arm("a")]), at(2026, 10, SAT, 12, 0), plan=plan)
+        manifest = q.run()
+        self.assertEqual(manifest["arms"][0]["attempts"][0]["status"], "incomplete_by_window")
+        self.assertEqual(self.started_at(q, "a", 2).date(), dt.date(2026, 10, SAT))
+        self.assertEqual(manifest["arms"][0]["state"], "complete")
+
+    def test_console_never_prints_a_case_id(self):
+        q = self.make(queue_doc([arm("a")]), self.START, plan={"a": [{"kind": "harness_fail"}]})
+        q.dir.mkdir(parents=True)
+        q.transition(q.arms[0], "failed", reason="1-case preflight (dev-001) and ho-129 failed")
+        q.stop("stopped near dev-005")
+        for line in self.console:
+            self.assertNotRegex(line, r"(dev|ho)-\d{3}")
+        self.assertIn("<case>", self.console[-2])
+
+    def test_endpoint_override_refuses_the_queue(self):
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(TOOLS / "run_queue.py"),
+                "check",
+                str(TOOLS / "queues" / "screen-small-s40.json"),
+            ],
+            env={"PATH": os.environ.get("PATH", ""), "DOCKER_CONTEXT": "remote"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("DOCKER_CONTEXT", proc.stderr)
+
+
+class SupervisorTests(unittest.TestCase):
+    def test_heartbeat_freshness_and_pid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            beat = Path(tmp) / "hb"
+            sup = rq.WatchdogSupervisor(beat, Path(tmp) / "w.log", fresh_seconds=90)
+            self.assertFalse(sup.alive())
+            beat.write_text(json.dumps({"pid": os.getpid(), "time": time.time()}))
+            self.assertTrue(sup.alive())
+            beat.write_text(json.dumps({"pid": os.getpid(), "time": time.time() - 200}))
+            self.assertFalse(sup.alive())
+            dead = subprocess.Popen(["true"])
+            dead.wait()
+            beat.write_text(json.dumps({"pid": dead.pid, "time": time.time()}))
+            self.assertFalse(sup.alive())
+
+    def test_default_is_no_watchdog(self):
+        self.assertFalse(rq.NoWatchdog().ensure())
+
+
 class ProcessLauncherTests(unittest.TestCase):
     """The real launcher: own process group, stdin /dev/null, output in files."""
 
@@ -925,6 +1134,9 @@ class ProcessLauncherTests(unittest.TestCase):
                 textwrap.dedent(
                     """\
                     #!/bin/sh
+                    if [ "$CHECK_ONLY" = 1 ]; then
+                      echo "check_only=1" > "$OUT_DIR/provenance.txt"; exit 0
+                    fi
                     if read -r line; then echo "stdin had input" > "$OUT_DIR/stdin.txt";
                     else echo eof > "$OUT_DIR/stdin.txt"; fi
                     echo "case dev-001 outcome=answer" >&2
@@ -953,6 +1165,7 @@ class ProcessLauncherTests(unittest.TestCase):
                 cleanup=lambda: {"ok": True},
                 runner=runner,
                 poll_seconds=0.05,
+                watchdog=FakeWatchdog(),
                 console=console.append,
                 env={"MIMIK_MODEL_ROOT": str(models), "PATH": os.environ.get("PATH", "")},
             )

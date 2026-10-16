@@ -46,6 +46,7 @@ import time
 from pathlib import Path
 
 import model_registry
+import run_watchdog
 import tool_loop_benchmark as tl
 import toolloop_ops as ops
 from toolloop_ops import (  # noqa: F401 (re-exported for callers and tests)
@@ -67,6 +68,7 @@ SCHEMA = 1
 TEST_MODE_ENV, TEST_CLOCK_ENV = "MIMIK_TEST_MODE", "MIMIK_TEST_CLOCK_FILE"
 SMOKE_CASES = ("dev-001", "dev-005", "dev-008")
 MIN_STOP_MARGIN = 300
+FIT_MARGIN = 900  # the runner refuses a step with fewer than 900 s left before the cutoff
 INFRA_CLASSES = ("server_start", "server_health", "oom", "infra_vram")  # retried once
 ENV_ALLOW = ("PATH", "HOME", "MIMIK_MODEL_ROOT")  # the only inherited variables
 # Runner pass-through variables a queue file may set (with the C0 / registry defaults).
@@ -413,17 +415,62 @@ class ProcessHandle:
             return None
 
 
-def start_watchdog(log_path: Path):
-    """Start the independent watchdog (it exits at once if one is already running)."""
-    with open(log_path.with_suffix(".console"), "ab") as out:
-        subprocess.Popen(
-            [sys.executable, str(WATCHDOG), "--log", str(log_path)],
-            stdin=subprocess.DEVNULL,
-            stdout=out,
-            stderr=out,
-            start_new_session=True,
-            env={k: os.environ[k] for k in ENV_ALLOW if k in os.environ},
-        )
+class WatchdogSupervisor:
+    """Starts tools/run_watchdog.py and checks its heartbeat (the readiness handshake).
+
+    A watchdog started elsewhere (standalone) counts if its heartbeat is fresh. No heavy work
+    may start or continue while this reports the watchdog unavailable.
+    """
+
+    def __init__(self, heartbeat: Path, log_path: Path, fresh_seconds=90, ready_timeout=60):
+        self.heartbeat, self.log_path = Path(heartbeat), Path(log_path)
+        self.fresh_seconds, self.ready_timeout = fresh_seconds, ready_timeout
+        self.proc = None
+
+    def alive(self) -> bool:
+        try:
+            beat = json.loads(self.heartbeat.read_text(encoding="utf-8"))
+            os.kill(int(beat["pid"]), 0)
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+        return time.time() - float(beat["time"]) <= self.fresh_seconds
+
+    def ensure(self) -> bool:
+        if self.alive():
+            return True
+        with open(self.log_path.with_suffix(".console"), "ab") as out:
+            self.proc = subprocess.Popen(
+                [sys.executable, str(WATCHDOG), "--log", str(self.log_path)],
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=out,
+                start_new_session=True,
+                env={k: os.environ[k] for k in ENV_ALLOW if k in os.environ},
+            )
+        deadline = time.time() + self.ready_timeout
+        while time.time() < deadline:
+            if self.alive():
+                return True
+            time.sleep(0.5)
+        return False
+
+
+class NoWatchdog:
+    """The safe default: without a watchdog, no heavy work starts."""
+
+    def alive(self):
+        return False
+
+    def ensure(self):
+        return False
+
+
+CASE_ID_RE = re.compile(r"\b[a-z]{2,8}-\d{3}\b")
+
+
+def console_safe(text) -> str:
+    """No case id ever reaches the console (plan §11 item 3)."""
+    return CASE_ID_RE.sub("<case>", str(text))
 
 
 def pack_case_ids(split: str) -> list:
@@ -456,6 +503,7 @@ class Queue:
         cooldown_seconds=30.0,
         vram_wait_seconds=180.0,
         extra_env=None,
+        watchdog=None,
     ):
         self.q = queue
         self.registry = registry
@@ -473,7 +521,8 @@ class Queue:
         self.grace_seconds = grace_seconds
         self.console = console or (lambda line: print(line, flush=True))
         self.base_env = dict(os.environ if env is None else env)
-        self.extra_env = dict(extra_env or {})  # Python-only seam (real-docker smoke test)
+        self.extra_env = dict(extra_env or {})
+        self.watchdog = watchdog or NoWatchdog()  # Python-only seam (real-docker smoke test)
         self.vram_reader = vram_reader or read_vram
         self.cooldown_seconds = cooldown_seconds
         self.vram_wait_seconds = vram_wait_seconds
@@ -504,7 +553,7 @@ class Queue:
         self.log("arm_state", arm=arm["id"], state=state, **fields)
         reason = fields.get("reason")
         stamp = local(self.clock.time()).isoformat(timespec="seconds")
-        suffix = "" if reason is None else f" ({reason})"
+        suffix = "" if reason is None else f" ({console_safe(reason)})"
         self.console(f"{stamp} {arm['id']}: {state}{suffix}")
         self.write_manifest()
 
@@ -550,7 +599,7 @@ class Queue:
     def stop(self, reason):
         self.state, self.stop_reason = "stopped", reason
         self.log("queue_stopped", reason=reason)
-        self.console(f"queue stopped: {reason}")
+        self.console(f"queue stopped: {console_safe(reason)}")
         self.write_manifest()
 
     # -- plan and estimates
@@ -667,7 +716,7 @@ class Queue:
         """Sleep until the arm fits in a heavy window (starting at or after not_before).
         False if it never can."""
         estimate = self.estimate(arm)
-        margin = self.q["stop_margin_seconds"]
+        margin = max(self.q["stop_margin_seconds"], FIT_MARGIN)
         if estimate + margin > longest_window_seconds(self.clock.time()):
             self.transition(arm, "skipped", reason=f"estimate {estimate:.0f}s never fits a window")
             return False
@@ -767,6 +816,8 @@ class Queue:
                     break
                 now = self.clock.time()
                 hit = [name for name, at in limits.items() if now >= at]
+                if not hit and not self.watchdog.alive() and not self.watchdog.ensure():
+                    hit = ["watchdog"]
                 if hit:
                     stopped_by = hit[0]
                     rc = self.terminate()
@@ -799,7 +850,11 @@ class Queue:
         oom_keys = ("server_oom_killed", "preflight_oom_killed", "main_oom_killed")
         oom = [k for k in oom_keys if prov.get(k) == "true"]
         ledger = attempt_dir / prov["ledger_file"] if prov.get("ledger_file") else None
-        check = check_ledger(ledger, self.plan(arm, env)) if ledger else None
+        try:
+            check = check_ledger(ledger, self.plan(arm, env)) if ledger else None
+        except Exception as error:  # noqa: BLE001 (fails this arm, not the queue)
+            out["ledger_error"] = f"{type(error).__name__}: {error}"
+            return dict(out, status="failed", infra=None, reason=f"ledger check error: {error}")
         if check is not None:
             out["ledger"] = str(ledger)
             out["ledger_check"] = check
@@ -825,6 +880,7 @@ class Queue:
                 "arm_deadline": "arm_timeout",
                 "session_deadline": "session_deadline",
                 "g0_deadline": "arm_timeout",
+                "watchdog": "failed",
             }[stopped_by]
             return dict(out, status=status, infra=None, reason=f"stopped: {stopped_by}")
         if not prov:
@@ -884,8 +940,9 @@ class Queue:
         if swap_peak is not None:
             swap, swap_source = swap_peak / 2**20, "server cgroup memory.swap.peak"
         elif None not in (before, after):
+            # Host-wide swap moves with other load: recorded, but indeterminate (never closes G0).
             swap, swap_source = after - before, "host-wide (cgroup swap not readable)"
-            self.log("g0_swap_fallback", arm=arm["id"])
+            self.log("g0_swap_fallback", arm=arm["id"], host_swap_growth_mib=swap)
         else:
             swap, swap_source = None, None
         spt = server_seconds_per_token(Path(record["dir"]) / "server.log")
@@ -907,7 +964,10 @@ class Queue:
             "incomplete_by_window",
             "arm_timeout",
             "session_deadline",
-        ) or (record["status"] == "complete" and (spt is None or swap is None or not vram))
+        ) or (
+            record["status"] == "complete"
+            and (spt is None or swap is None or not vram or swap_peak is None)
+        )
         result["indeterminate"] = indeterminate
         result["qualified"] = (
             not indeterminate
@@ -1024,6 +1084,52 @@ class Queue:
             self.console("queue done")
         self.write_manifest()
 
+    def g0_expired(self, arm) -> bool:
+        deadline = self.q["g0"]["deadline_seconds"]
+        return bool(
+            arm["config"]["g0"]
+            and deadline is not None
+            and self.g0_started is not None
+            and self.clock.time() - self.g0_started > deadline
+        )
+
+    def check_pass(self, arm):
+        """CHECK_ONLY pre-pass at window start (plan §8): config, hashes (cached afterwards)
+        and provenance, before the arm's first heavy step. Returns (ok, reason)."""
+        cfg = arm["config"]
+        n = sum(1 for _ in (self.dir / "arms" / arm["id"]).glob("check-*")) + 1
+        check_dir = self.dir / "arms" / arm["id"] / f"check-{n}"
+        check_dir.mkdir(parents=True, exist_ok=False)
+        env = self.env_for(arm, check_dir, window_end(self.clock.time()))
+        env["CHECK_ONLY"] = "1"
+        start = self.clock.time()
+        limit = min(window_end(start) - self.q["stop_margin_seconds"], start + 3 * 3600)
+        rc = None
+        try:
+            self.handle = self.launcher.start(
+                [str(self.runner), cfg["model"], cfg["split"]],
+                env,
+                check_dir / "runner.stdout",
+                check_dir / "runner.stderr",
+            )
+            while True:
+                rc = self.handle.poll()
+                if rc is not None:
+                    break
+                if self.clock.time() >= limit:
+                    rc = self.terminate()
+                    return False, "did not finish before the window edge"
+                self.clock.sleep(min(self.poll_seconds, max(0.5, limit - self.clock.time())))
+        finally:
+            if self.handle is not None and self.handle.poll() is None:
+                self.terminate()
+            self.handle = None
+        prov = parse_provenance(check_dir / "provenance.txt")
+        self.log("check_pass", arm=arm["id"], rc=rc, failure=prov.get("failure"))
+        if rc == 0 and prov.get("check_only") == "1" and prov.get("failure") is None:
+            return True, None
+        return False, prov.get("failure_detail") or f"runner exit {rc}"
+
     def run_arm(self, arm) -> str:
         cfg = arm["config"]
         retried = window_reruns = 0
@@ -1040,11 +1146,26 @@ class Queue:
                 self.transition(arm, "not_started", reason=why)
                 self.stop(why)
                 return "not_started"
+            if not self.watchdog.ensure():
+                self.transition(arm, "not_started", reason="watchdog unavailable")
+                self.stop("watchdog unavailable: no heavy work without it")
+                return "not_started"
+            ok, why = self.check_pass(arm)
+            if not ok:
+                self.transition(arm, "refused", reason=f"CHECK_ONLY pre-pass: {why}")
+                return "refused"
+            if self.g0_expired(arm):  # rechecked after every wait and precheck
+                self.transition(arm, "skipped", reason="G0 deadline passed")
+                return "skipped"
             if cfg["g0"] and self.g0_started is None:
                 self.g0_started = self.clock.time()
             record = self.run_attempt(arm, len(arm["attempts"]) + 1)
             self.record_measurements(arm, record)
             status = record["status"]
+            if record.get("reason") == "stopped: watchdog":
+                self.transition(arm, "failed", reason="watchdog unavailable")
+                self.stop("watchdog unavailable: no heavy work without it")
+                return "failed"
             if record.get("cleanup_unresolved"):
                 self.transition(arm, "failed", reason=record.get("reason"))
                 self.stop("cleanup unresolved: heavy work may still be running")
@@ -1061,9 +1182,8 @@ class Queue:
                 self.wait_vram_release(_int_or_none(prov.get("vram_used_before")))
                 continue
             if status == "incomplete_by_window" and not window_reruns and not cfg["g0"]:
-                window_reruns = 1  # whole-arm rerun in a later window, never resumed
-                now = self.clock.time()
-                not_before = window_end(now) if heavy_allowed(now) else next_window_start(now)
+                window_reruns = 1  # whole-arm rerun, never resumed: the fit rule picks the
+                not_before = None  # first window start that can hold the estimate
                 self.transition(arm, "incomplete_by_window", reason="rerun in a later window")
                 continue
             if status == "session_deadline":
@@ -1129,6 +1249,10 @@ def main(argv=None) -> int:
     run.add_argument("--session-dir", type=Path)
     args = parser.parse_args(argv)
     ops.pin_local_time()
+    if args.command != "window-check":
+        problem = ops.docker_endpoint_problem()
+        if problem:
+            raise SystemExit(problem)
     if args.command == "window-check":
         return window_check(window_clock_now(), args.cutoff, args.margin)
     registry = model_registry.load()
@@ -1149,9 +1273,9 @@ def main(argv=None) -> int:
     lock = hold_lock(ops.lock_paths(main_dir)["queue"], "queue")
     devnull = os.open(os.devnull, os.O_RDONLY)
     os.dup2(devnull, 0)  # never wait for input
-    q = Queue(queue, registry, session)
     session.mkdir(parents=True, exist_ok=True)
-    start_watchdog(session / "watchdog.log")
+    supervisor = WatchdogSupervisor(run_watchdog.heartbeat_path(main_dir), session / "watchdog.log")
+    q = Queue(queue, registry, session, watchdog=supervisor)
 
     def handler(signum, _frame):
         q.interrupt(signum)
