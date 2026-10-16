@@ -191,6 +191,108 @@ impl Evaluation {
     }
 }
 
+/// Which namespace a formula ID belongs to: derived fields and constraints are separate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormulaKind {
+    Derived,
+    Constraint,
+}
+
+/// A derived value that differs between two evaluations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DerivedChange {
+    pub id: String,
+    pub before: Result<Scalar, Code>,
+    pub after: Result<Scalar, Code>,
+}
+
+/// A constraint whose outcome differs between two evaluations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConstraintChange {
+    pub id: String,
+    pub before: Outcome,
+    pub after: Outcome,
+}
+
+/// How a constraint change reads. An error on either side is `Unknown`: never a new or a
+/// resolved violation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transition {
+    NewViolation,
+    Resolved,
+    Unknown,
+}
+
+impl ConstraintChange {
+    #[must_use]
+    pub fn transition(&self) -> Transition {
+        match (self.before, self.after) {
+            (Outcome::Pass, Outcome::Violated) => Transition::NewViolation,
+            (Outcome::Violated, Outcome::Pass) => Transition::Resolved,
+            _ => Transition::Unknown,
+        }
+    }
+}
+
+/// What changing a sheet from `before` to `after` would change. Pure: it writes nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Preview {
+    /// Changed derived values, in evaluation order.
+    pub derived: Vec<DerivedChange>,
+    /// Constraints whose outcome changed, in definition order.
+    pub constraints: Vec<ConstraintChange>,
+}
+
+impl Preview {
+    fn with(&self, transition: Transition) -> Vec<&str> {
+        self.constraints
+            .iter()
+            .filter(|change| change.transition() == transition)
+            .map(|change| change.id.as_str())
+            .collect()
+    }
+    #[must_use]
+    pub fn new_violations(&self) -> Vec<&str> {
+        self.with(Transition::NewViolation)
+    }
+    #[must_use]
+    pub fn resolved_violations(&self) -> Vec<&str> {
+        self.with(Transition::Resolved)
+    }
+    /// Changed constraints with an error on either side.
+    #[must_use]
+    pub fn unknown(&self) -> Vec<&str> {
+        self.with(Transition::Unknown)
+    }
+}
+
+/// Evaluates `before` and `after` and reports what differs. Library-only (no route or CLI
+/// yet). Each side is subject to [`DEADLINE`], so under load a change can read as `Unknown`.
+///
+/// # Errors
+///
+/// Returns the [`InputError`] of whichever side does not match the declarations.
+pub fn preview(compiled: &Compiled, before: &Json, after: &Json) -> Result<Preview, InputError> {
+    let old = compiled.evaluate(before)?;
+    let new = compiled.evaluate(after)?;
+    Ok(Preview {
+        derived: old
+            .derived
+            .into_iter()
+            .zip(new.derived)
+            .filter(|((_, before), (_, after))| before != after)
+            .map(|((id, before), (_, after))| DerivedChange { id, before, after })
+            .collect(),
+        constraints: old
+            .constraints
+            .into_iter()
+            .zip(new.constraints)
+            .filter(|((_, before), (_, after))| before != after)
+            .map(|((id, before), (_, after))| ConstraintChange { id, before, after })
+            .collect(),
+    })
+}
+
 /// Test-only fault injection at the panic boundaries; compiles to nothing otherwise.
 macro_rules! fault_point {
     ($kind:literal, $id:expr) => {
@@ -295,6 +397,52 @@ impl Compiled {
             stack.extend(profile::children_for_tests(expr));
         }
         nodes
+    }
+
+    /// For a formula reported `dependency_failed` in `evaluation`, the first derived field it
+    /// reads, in evaluation order, whose own result is an error. `None` for any other result.
+    #[must_use]
+    pub fn failed_dependency(
+        &self,
+        evaluation: &Evaluation,
+        kind: FormulaKind,
+        id: &str,
+    ) -> Option<&str> {
+        let (formulas, code) = match kind {
+            FormulaKind::Derived => (
+                &self.derived,
+                evaluation
+                    .derived
+                    .iter()
+                    .find(|(item, _)| item == id)
+                    .and_then(|(_, result)| result.as_ref().err().copied()),
+            ),
+            FormulaKind::Constraint => (
+                &self.constraints,
+                evaluation
+                    .constraints
+                    .iter()
+                    .find(|(item, _)| item == id)
+                    .and_then(|(_, outcome)| match outcome {
+                        Outcome::Error(code) => Some(*code),
+                        Outcome::Pass | Outcome::Violated => None,
+                    }),
+            ),
+        };
+        if code? != Code::DependencyFailed {
+            return None;
+        }
+        let formula = formulas.iter().find(|formula| formula.id == id)?;
+        self.derived
+            .iter()
+            .filter(|dependency| formula.deps.contains(&dependency.id))
+            .find(|dependency| {
+                evaluation
+                    .derived
+                    .iter()
+                    .any(|(item, result)| item == &dependency.id && result.is_err())
+            })
+            .map(|dependency| dependency.id.as_str())
     }
 
     /// Static work units of this definition, at most [`MAX_COST`].

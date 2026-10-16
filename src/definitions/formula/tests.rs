@@ -939,3 +939,179 @@ fn maximum_depth_compiled_formulas_drop_on_a_small_stack() {
         largest.node_count()
     );
 }
+
+/// `m` reads nullable `luck`; `b` reads `m`; `c` reads `b`; `both` reads `b` and `m`. The
+/// declaration order differs from the evaluation order (`m`, `b`, `both`, `c`, `plain`).
+fn chain() -> Compiled {
+    let mut spec = basic();
+    for (id, expr) in [
+        ("both", "b + m + vitality"),
+        ("c", "b + 1"),
+        ("b", "m * 2"),
+        ("m", "luck + 1"),
+        ("plain", "vitality + 1"),
+    ] {
+        spec.derived.push(DerivedSpec {
+            id: id.into(),
+            ty: ValueType::Int,
+            expr: expr.into(),
+        });
+    }
+    for (id, expr) in [("b-positive", "b > 0"), ("vitality-cap", "vitality <= 5")] {
+        spec.constraints.push(ConstraintSpec {
+            id: id.into(),
+            expr: expr.into(),
+        });
+    }
+    Compiled::new(&spec).unwrap()
+}
+
+fn with(changes: &[(&str, Json)]) -> Json {
+    let mut values = basic_values();
+    for (id, value) in changes {
+        values[*id] = value.clone();
+    }
+    values
+}
+
+#[test]
+fn failed_dependency_names_the_failed_dependency_in_evaluation_order() {
+    let compiled = chain();
+    let evaluation = compiled.evaluate(&basic_values()).unwrap();
+    let derived = |id: &str| {
+        evaluation
+            .derived
+            .iter()
+            .find(|(item, _)| item == id)
+            .unwrap()
+            .1
+            .clone()
+    };
+    assert_eq!(
+        compiled.derived_order(),
+        vec!["m", "b", "both", "c", "plain"]
+    );
+    assert_eq!(derived("m"), Err(Code::NullValue));
+    assert_eq!(derived("b"), Err(Code::DependencyFailed));
+    assert_eq!(derived("c"), Err(Code::DependencyFailed));
+    assert_eq!(derived("both"), Err(Code::DependencyFailed));
+    let failed = |kind, id| compiled.failed_dependency(&evaluation, kind, id);
+    assert_eq!(failed(FormulaKind::Derived, "b"), Some("m"));
+    assert_eq!(failed(FormulaKind::Derived, "c"), Some("b"));
+    // `both` reads `b` and `m`: `m` comes first in evaluation order, although `b` sorts
+    // first in the dependency set.
+    assert_eq!(failed(FormulaKind::Derived, "both"), Some("m"));
+    assert_eq!(failed(FormulaKind::Constraint, "b-positive"), Some("b"));
+    // A failure of its own, a value and a constraint outcome name no dependency.
+    assert_eq!(failed(FormulaKind::Derived, "m"), None);
+    assert_eq!(failed(FormulaKind::Derived, "plain"), None);
+    assert_eq!(failed(FormulaKind::Constraint, "vitality-cap"), None);
+    // Namespaces are separate: no derived field is called `b-positive`.
+    assert_eq!(failed(FormulaKind::Derived, "b-positive"), None);
+    assert_eq!(failed(FormulaKind::Constraint, "b"), None);
+}
+
+#[test]
+fn deadline_cascade_reports_deadline_not_dependency_failed() {
+    let compiled = chain();
+    let evaluation = compiled
+        .evaluate_with_deadline(&with(&[("luck", json!(1))]), Duration::ZERO)
+        .unwrap();
+    assert!(
+        evaluation
+            .derived
+            .iter()
+            .all(|(_, result)| *result == Err(Code::DeadlineExceeded))
+    );
+    for (id, _) in &evaluation.derived {
+        assert_eq!(
+            compiled.failed_dependency(&evaluation, FormulaKind::Derived, id),
+            None
+        );
+    }
+    assert_eq!(
+        compiled.failed_dependency(&evaluation, FormulaKind::Constraint, "b-positive"),
+        None
+    );
+}
+
+#[test]
+fn preview_reports_only_changed_derived_values() {
+    let compiled = chain();
+    let before = with(&[("luck", json!(1))]);
+    let after = with(&[("luck", json!(1)), ("vitality", json!(4))]);
+    let preview = preview(&compiled, &before, &after).unwrap();
+    let changed: Vec<&str> = preview
+        .derived
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
+    // Only `both` and `plain` read `vitality`; changes are in evaluation order.
+    assert_eq!(changed, vec!["both", "plain"]);
+    assert_eq!(preview.derived[1].before, Ok(Scalar::Int(4)));
+    assert_eq!(preview.derived[1].after, Ok(Scalar::Int(5)));
+    let same = super::preview(&compiled, &before, &before).unwrap();
+    assert!(same.derived.is_empty() && same.constraints.is_empty());
+    // Unknown -> known luck turns every `luck` reader from an error into a value.
+    let known = super::preview(&compiled, &basic_values(), &before).unwrap();
+    let changed: Vec<&str> = known.derived.iter().map(|item| item.id.as_str()).collect();
+    assert_eq!(changed, vec!["m", "b", "both", "c"]);
+    assert_eq!(known.derived[0].before, Err(Code::NullValue));
+}
+
+#[test]
+fn preview_reports_new_and_resolved_violations() {
+    let compiled = chain();
+    let passing = with(&[("luck", json!(1))]);
+    let violating = with(&[("luck", json!(1)), ("vitality", json!(6))]);
+    let new = preview(&compiled, &passing, &violating).unwrap();
+    assert_eq!(new.new_violations(), vec!["vitality-cap"]);
+    assert!(new.resolved_violations().is_empty() && new.unknown().is_empty());
+    let resolved = preview(&compiled, &violating, &passing).unwrap();
+    assert_eq!(resolved.resolved_violations(), vec!["vitality-cap"]);
+    assert!(resolved.new_violations().is_empty() && resolved.unknown().is_empty());
+    // An error on either side is unknown: never a new or a resolved violation.
+    let negative = with(&[("luck", json!(-2))]);
+    let violated = preview(&compiled, &passing, &negative).unwrap();
+    assert_eq!(violated.new_violations(), vec!["b-positive"]);
+    let to_error = preview(&compiled, &negative, &basic_values()).unwrap();
+    assert_eq!(to_error.unknown(), vec!["b-positive"], "violated -> error");
+    assert!(to_error.new_violations().is_empty() && to_error.resolved_violations().is_empty());
+    let from_error = preview(&compiled, &basic_values(), &negative).unwrap();
+    assert_eq!(
+        from_error.unknown(),
+        vec!["b-positive"],
+        "error -> violated"
+    );
+    assert!(from_error.new_violations().is_empty());
+    assert!(from_error.resolved_violations().is_empty());
+    let pass_from_error = preview(&compiled, &basic_values(), &passing).unwrap();
+    assert_eq!(
+        pass_from_error.unknown(),
+        vec!["b-positive"],
+        "error -> pass"
+    );
+    assert!(pass_from_error.resolved_violations().is_empty());
+    // Error -> error, even with a different code, is never a violation.
+    let unchanged = preview(&compiled, &basic_values(), &basic_values()).unwrap();
+    assert!(unchanged.constraints.is_empty());
+}
+
+#[test]
+fn preview_rejects_bad_input_on_either_side() {
+    let compiled = chain();
+    let good = basic_values();
+    let bad = with(&[("vitality", json!("three"))]);
+    let expected = Err(InputError {
+        code: Code::InvalidInput,
+        path: "/vitality".into(),
+    });
+    assert_eq!(
+        preview(&compiled, &bad, &good).map(|preview| preview.derived.len()),
+        expected
+    );
+    assert_eq!(
+        preview(&compiled, &good, &bad).map(|preview| preview.derived.len()),
+        expected
+    );
+}

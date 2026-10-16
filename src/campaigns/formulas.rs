@@ -4,7 +4,7 @@
 //! advisory; they never block a save and are not a legality ruling.
 use crate::definitions::{
     Control, Definition,
-    formula::{Code, Evaluation, InputError, Outcome, Scalar},
+    formula::{Code, Evaluation, FormulaKind, InputError, Outcome, Scalar},
     private_pin::ImmutablePin,
 };
 
@@ -184,8 +184,16 @@ fn display(definition: &Definition, id: &str, value: &Scalar) -> String {
     }
 }
 
-fn explanation(code: Code) -> String {
-    message(code).to_owned()
+/// The human message; `dependency_failed` names the dependency that failed, which shows
+/// its own error on the page.
+fn explanation(code: Code, definition: &Definition, dependency: Option<&str>) -> String {
+    match (code, dependency) {
+        (Code::DependencyFailed, Some(id)) => format!(
+            "it uses {}, which could not be computed",
+            label(definition, id)
+        ),
+        _ => message(code).to_owned(),
+    }
 }
 
 /// Presents one evaluation of stored data, or the refusal of its input.
@@ -219,6 +227,10 @@ pub(super) fn present(pin: &ImmutablePin, result: Result<&Evaluation, &InputErro
             };
         }
     };
+    let failed = |kind, id: &str| {
+        pin.formulas()
+            .and_then(|compiled| compiled.failed_dependency(evaluation, kind, id))
+    };
     let derived = definition
         .fields
         .iter()
@@ -229,7 +241,11 @@ pub(super) fn present(pin: &ImmutablePin, result: Result<&Evaluation, &InputErro
                 Ok(value) => DerivedView::Value(display(definition, &field.id, value)),
                 Err(code) => DerivedView::Error {
                     code: *code,
-                    message: explanation(*code),
+                    message: explanation(
+                        *code,
+                        definition,
+                        failed(FormulaKind::Derived, &field.id),
+                    ),
                 },
             };
             Some(DerivedItem {
@@ -253,7 +269,11 @@ pub(super) fn present(pin: &ImmutablePin, result: Result<&Evaluation, &InputErro
                 Outcome::Error(code) => (
                     CheckStatus::NotEvaluated,
                     code.as_str(),
-                    self::explanation(*code),
+                    self::explanation(
+                        *code,
+                        definition,
+                        failed(FormulaKind::Constraint, &constraint.id),
+                    ),
                 ),
             };
             Some(CheckView {
@@ -350,6 +370,7 @@ mod tests {
             derived("pace", "Pace", "integer", "6 - vitality"),
             derived("lucky", "Lucky", "integer", "luck + 1"),
             derived("lucky_twice", "Lucky twice", "integer", "lucky * 2"),
+            derived("lucky_more", "Lucky more", "integer", "lucky_twice + 1"),
             tier,
             derived("marked", "Marked", "boolean", "label == \"<script>\""),
             derived("echo", "Echo", "text", "label"),
@@ -440,10 +461,32 @@ mod tests {
         assert!(!twice.is_value());
         assert_eq!(
             unknown.derived.len(),
-            6,
+            7,
             "every derived field, in definition order"
         );
         assert_eq!(unknown.derived[0].id, "pace");
+    }
+
+    #[test]
+    fn dependency_failed_names_the_dependency_by_label() {
+        let unknown = view(&json!({"label": "x", "vitality": 1, "luck": null}));
+        let twice = unknown.value("lucky_twice").unwrap();
+        assert_eq!(twice.code(), "dependency_failed");
+        assert_eq!(twice.text(), "it uses Lucky, which could not be computed");
+        assert_eq!(
+            unknown.value("lucky_more").unwrap().text(),
+            "it uses Lucky twice, which could not be computed"
+        );
+        let check = unknown
+            .checks
+            .iter()
+            .find(|check| check.id == "lucky-positive")
+            .unwrap();
+        assert_eq!(check.code, "dependency_failed");
+        assert_eq!(
+            check.explanation,
+            "it uses Lucky, which could not be computed"
+        );
     }
 
     #[test]
@@ -513,6 +556,6 @@ mod tests {
         assert!(view.checks.is_empty());
         assert_eq!((view.passed, view.violated, view.not_evaluated), (0, 0, 0));
         assert!(view.derived.iter().all(|item| !item.view.is_value()));
-        assert_eq!(view.derived.len(), 6);
+        assert_eq!(view.derived.len(), 7);
     }
 }

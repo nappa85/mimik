@@ -376,6 +376,10 @@ async fn violating_save_succeeds_and_view_lists_violation() {
     assert!(derived_text(&html, "lucky").contains("<code>null_value</code>"));
     assert!(derived_text(&html, "lucky").starts_with("Not computed: "));
     assert!(derived_text(&html, "lucky_twice").contains("<code>dependency_failed</code>"));
+    assert!(
+        derived_text(&html, "lucky_twice")
+            .starts_with("Not computed: it uses Lucky, which could not be computed.")
+    );
     assert_eq!(derived_text(&html, "pace"), "-5");
 }
 
