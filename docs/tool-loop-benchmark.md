@@ -770,9 +770,18 @@ prints the command without starting it.
 
 ```sh
 cd /home/marco/Progetti/mimik-wt/harness-v3
-tools/launch_frozen_queue.sh <commit> tools/queues/screen-small-s40.json \
-  tools/queues/g0-qwen36-35b-a3b.json
+tools/launch_frozen_queue.sh --session-end "2026-10-18 22:00" <commit> \
+  tools/queues/screen-small-s40.json tools/queues/g0-qwen36-35b-a3b.json
 ```
+
+`--session-end` (round 3) is an absolute local end passed to every queue as its session
+deadline (the earlier of it and the queue file's): no arm starts unless its estimate ends
+before it, a running attempt is stopped at it, and the runner's cutoff (`WINDOW_END`) is the
+earlier of the window end and the session end, so the runner's gates, harness budget and
+`--deadline-epoch` respect it too. The launcher (round 3) also refuses `MIMIK_MODEL_ROOT`,
+the Docker endpoint variables, a non-default `docker context show`, and any running
+`run_queue.py` or `run_watchdog.py`; it runs `git worktree prune` before adding the frozen
+worktree.
 
 Each queue starts its watchdog and waits for its heartbeat; to run one by itself:
 `setsid nohup python3 tools/run_watchdog.py > target/watchdog.console 2>&1 < /dev/null &`.
@@ -901,6 +910,71 @@ never swapped, not that the host did not. Host-wide swap is still recorded besid
 - **Not run:** any `CHECK_ONLY` or live run on the real model files, the real llama.cpp
   image's TERM and pause handling, `memory.swap.peak` on a real server container, and a DST
   night.
+
+### Round 3 (2026-10-16): last fix batch
+
+Sonnet CLEARED-with-notes, Space Bunny effectively cleared (operator steps and two medium
+fixes), Sol NOT CLEARED (T1–T5). The coordinator ordered one last batch and no further full
+review round; the remaining risks are recorded below.
+
+- **Ledger errors keep the gates:** an exception while checking a ledger records
+  `ledger_error` and falls through, so an unresolved cleanup still stops the queue and the
+  runner exit still gates; the arm then fails with the ledger error.
+- **Pause failure:** if `docker pause` fails, the runner reads the cgroup files and VRAM
+  anyway before stopping the server (the harness has already stopped, so the GPU is idle) and
+  records `server_paused_for_diagnostics=false`. Unreadable diagnostics, or no pause, appear
+  in the manifest's top-level `warnings` and in the attempt; a G0 candidate without a
+  readable cgroup swap peak or `vram_used_end` is indeterminate.
+- **Heartbeat:** the watchdog writes it before any enforcement work in a tick (and after);
+  the queue's freshness limit is interval + `WORST_TICK_SECONDS` (12 × the 60 s docker
+  timeout) + 30 s, so a slow cleanup never looks like a dead watchdog.
+- **CHECK_ONLY pre-pass:** the watchdog is checked on every poll of the pre-pass (restarted,
+  or the queue stops); `cleanup_checked()` runs in its `finally` (unresolved: the queue
+  stops); after the pre-pass the fit and the watchdog are rechecked immediately before the
+  launch (`refit_after_check_pass`).
+- **Docker context:** the queue (`run`), the watchdog and the launcher check the environment
+  variables and `docker context show` = `default` before any other Docker call, including
+  the queue's startup reconcile.
+- **Hash/check containers:** the runner registers each pid-suffixed check container name in
+  `<main checkout>/target/tool-loop-check-containers.txt` while it runs (removed afterwards).
+  The file is machine-wide, beside the locks and the heartbeat, rather than in a session
+  directory, because a standalone watchdog can outlive or precede a session. The watchdog's
+  failed-`ps` fallback includes these names, each removed only after its label is confirmed.
+- **Fixed names:** the runner stops or pauses its fixed-name server and harness only when they
+  carry this run's `mimik.toolloop.run` label, and removes a leftover harness only when it
+  carries the ownership label.
+- Tests: queue 74, watchdog 25, runner 29 (1 skipped), launcher 6. Failing first against
+  `850345d`: 17 of the 20 new tests red. Already green there by design:
+  `test_running_arm_stopped_at_the_session_end` (the queue-file session deadline already
+  stopped attempts; the new part is the launcher option and the runner cutoff),
+  `test_fixed_names_of_another_run_are_not_stopped` (a CHECK_ONLY run never stopped anything;
+  it guards the new label check against regressions), and the `DOCKER_CONFIG` subtest of the
+  launcher refusals (that refusal already existed).
+
+### Accepted residual risks (round 3)
+
+Recorded by the coordinator's decision instead of further fixes; each with its mitigation.
+
+- **T1, a stalled Docker daemon near the edge:** if dockerd stalls, removals by the runner,
+  the queue and the watchdog can all be delayed past the 09:00 edge (every call is bounded,
+  but a stalled daemon only means repeated timeouts). Mitigation: the session hard end. The
+  launch for 2026-10-16 uses `--session-end "2026-10-18 22:00"` (Sunday), so no arm can start
+  or keep running past Sunday 22:00, 11 h before the Monday 09:00 edge.
+- **T2, fixed names:** the runner addresses its server and harness by fixed names. A foreign
+  container with exactly our name is not expected on this single-user host. The label check
+  is applied before stop and pause (this run's `mimik.toolloop.run` label) and before removing
+  a leftover (the ownership label), and all list-based cleanup filters by label and prefix.
+  Not covered: the `docker logs`, `inspect` and `exec` diagnostics calls by fixed name (read
+  only), and `docker run --name`, which simply fails on a name clash (`server_start` or
+  `infra_docker`).
+- **T3, an independent clone's watchdog:** a second clone of the repository has its own
+  `target/` locks and heartbeat, so its watchdog would not see this clone's locks. Only one
+  clone exists; the launcher refuses to start while any `run_queue.py` or `run_watchdog.py`
+  process is running, and the ownership label makes a foreign clone's containers equally
+  removable at the window edge.
+- **N9, the docker CLI:** every stop and kill goes through the docker CLI (bounded calls,
+  `--init` in the containers); there is no direct cgroup or process kill of container
+  processes.
 
 ## Limitations
 
