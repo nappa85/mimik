@@ -1217,6 +1217,30 @@ class ValidatePackAuditTests(CliMixin, Base):
         self.assertEqual(claims, [("final", "pace", 5)])
         self.assertEqual(unresolved, ["lantern_oil", "speed"])
 
+    def test_notes_check_reports_unknown_override_identifiers(self):
+        """Sol confirmation review (N4 incomplete): "Override lantern_oil 2" was dropped
+        silently; it is now unresolved, which fails --validate-pack."""
+        unresolved = []
+        claims = tl.note_claims(
+            "Override lantern_oil 2, vitality 5 (not down).", {"vitality"}, unresolved
+        )
+        self.assertEqual(claims, [("initial", "vitality", 5)])
+        self.assertEqual(unresolved, ["lantern_oil"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = copy_fixture(tmp)
+
+            def bad_override(cases):
+                case = next(c for c in cases if c["id"] == "swap-armor")
+                case["expected"]["notes"] = "Override lantern_oil 2. Swap."
+
+            edit_cases(root, "dev", bad_override)
+            code, report = self.validate(root)
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            report["notes_check"]["unresolved"],
+            [{"case": "swap-armor", "split": "dev", "token": "lantern_oil"}],
+        )
+
     def test_notes_check_parses_transitions_and_overrides(self):
         """Claims the check reads: "Override x N", "<field> a -> b" and "Host derives ..."."""
         claims = tl.note_claims(
@@ -1595,7 +1619,9 @@ def demo_case_values(case):
     return values
 
 
-CLAIM_COUNTS = (55, 144)  # (proposal cases with claims, claims) in the demo notes
+# Dev split only (Sol confirmation review): held-out cases are never pinned.
+DEV_CLAIM_COUNTS = {"cases_with_claims": 55, "claims": 144}
+DEV_OIL_CHECKED = ["dev-017", "ho-020", "dev-034"]
 
 
 class PackRevision3Tests(unittest.TestCase):
@@ -1764,7 +1790,7 @@ class PackRevision3Tests(unittest.TestCase):
         finally:
             pack.close()
         self.assertEqual(report["mismatches"], [])
-        self.assertEqual(report["checked"], ["dev-017", "ho-020", "dev-034"])
+        self.assertEqual(report["by_split"].get("dev"), DEV_OIL_CHECKED)
 
     def test_oil_check_rejects_a_long_rest_that_forgets_the_oil(self):
         """Mutation: dev-034 without its lamp_oil change replays as correct (lamp_lit false is
@@ -1850,8 +1876,62 @@ class PackRevision3Tests(unittest.TestCase):
         finally:
             pack.close()
         self.assertEqual((report["mismatches"], report["unresolved"]), ([], []))
-        # Sonnet N4: exact counts, so a note edit that stops being read shows up here.
-        self.assertEqual((report["cases_with_claims"], report["claims"]), CLAIM_COUNTS)
+        self.assertEqual(report["violated_cases"], [])
+        # Sonnet N4: exact dev counts, so a dev note edit that stops being read shows up here.
+        # Held-out keeps only the general properties above.
+        self.assertEqual(report["by_split"]["dev"], DEV_CLAIM_COUNTS)
+
+    def heldout_report(self, cases):
+        """Run both checks on a copy of the demo pack with `cases` as its held-out split."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "pack"
+            shutil.copytree(DEMO, root)
+            (root / "cases-heldout.json").write_text(
+                json.dumps({"encoding": 1, "split": "heldout", "cases": cases}),
+                encoding="utf-8",
+            )
+            pack = tl.Pack(root, engine_factory=lambda d: tl.CelCliEngine(d, CLI))
+            try:
+                return tl.oil_check(pack), tl.notes_check(pack)
+            finally:
+                pack.close()
+
+    def test_extra_heldout_cases_pass_when_correct_and_fail_when_wrong(self):
+        """Sol confirmation review: a new held-out case must not break the dev pins. A correct
+        held-out long rest with a lit lamp and a correct note claim pass; wrong ones fail."""
+        require_demo_cli(self).close()
+        dev = {c["id"]: c for c in demo_cases("dev")}
+        rest = copy.deepcopy(dev["dev-034"])
+        rest["id"] = "h3-901"
+        spend = copy.deepcopy(dev["dev-001"])
+        spend.update(id="h3-902", request="I spend two focus on a careful search.")
+        spend["expected"]["notes"] = "focus 3 -> 1 (LR2-10)."
+        oil, notes = self.heldout_report([rest, spend])
+        self.assertEqual(oil["mismatches"], [])
+        self.assertEqual(oil["by_split"]["heldout"], ["h3-901"])
+        self.assertEqual(oil["by_split"]["dev"], DEV_OIL_CHECKED)
+        self.assertEqual((notes["mismatches"], notes["unresolved"]), ([], []))
+        self.assertEqual(notes["by_split"]["dev"], DEV_CLAIM_COUNTS)
+        self.assertGreater(notes["by_split"]["heldout"]["claims"], 0)
+
+        wrong_rest = copy.deepcopy(rest)
+        for change in wrong_rest["expected"]["changes"]:
+            if change["field"] == "lamp_oil":
+                change["to"] = 1
+        wrong_rest["expected"]["changes"] = [
+            c for c in wrong_rest["expected"]["changes"] if c["field"] != "lamp_lit"
+        ]
+        wrong_rest["expected"]["notes"] = "Long rest; lamp_oil 2 -> 1."
+        wrong_spend = copy.deepcopy(spend)
+        wrong_spend["expected"]["notes"] = "focus 3 -> 2 (LR2-10)."
+        oil, notes = self.heldout_report([wrong_rest, wrong_spend])
+        self.assertEqual(
+            [(m["case"], m["split"]) for m in oil["mismatches"]], [("h3-901", "heldout")]
+        )
+        self.assertEqual(
+            [(m["case"], m["split"], m["path"]) for m in notes["mismatches"]],
+            [("h3-902", "heldout", "focus")],
+        )
 
 
 class ReviewPackFactsTests(unittest.TestCase):

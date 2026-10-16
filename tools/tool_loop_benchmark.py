@@ -2391,8 +2391,12 @@ def note_claims(text: str, names, unresolved: list | None = None) -> list[tuple]
     for m in NOTE_OVERRIDE.finditer(text):
         for item in re.sub(r"\([^)]*\)", "", m.group(1)).split(","):
             parts = item.split()
-            if len(parts) >= 2 and parts[0] in names and NOTE_VALUE.fullmatch(parts[1]):
+            if len(parts) < 2 or not NOTE_VALUE.fullmatch(parts[1]):
+                continue
+            if parts[0] in names:
                 claims.append(("initial", parts[0], _note_value(parts[1])))
+            elif re.fullmatch(r"[a-z_]+", parts[0]):
+                unresolved.append(parts[0])
     for m in NOTE_TRANSITION.finditer(text):
         path = _note_path(m.group(1), names)
         if path:
@@ -2428,7 +2432,7 @@ def _state_value(values: dict, path: str):
 
 def notes_check(pack: Pack) -> dict:
     """Recompute every proposal's final state and compare the notes' stated values with it."""
-    mismatches, claims, cases, violated, unresolved = [], 0, 0, [], []
+    mismatches, claims, cases, violated, unresolved, by_split = [], 0, 0, [], [], {}
     names = set(pack.fields)
     for split, split_cases in pack.cases.items():
         for case in split_cases:
@@ -2443,9 +2447,12 @@ def notes_check(pack: Pack) -> dict:
                 violated.append(case["id"])
             tokens = []
             found = note_claims(expected.get("notes", ""), names, tokens)
-            unresolved += [{"case": case["id"], "token": token} for token in tokens]
+            unresolved += [{"case": case["id"], "split": split, "token": t} for t in tokens]
             cases += bool(found)
             claims += len(found)
+            per_split = by_split.setdefault(split, {"cases_with_claims": 0, "claims": 0})
+            per_split["cases_with_claims"] += bool(found)
+            per_split["claims"] += len(found)
             for when, path, stated in found:
                 actual = _state_value(initial if when == "initial" else final, path)
                 if actual is None or typed(actual) != typed(stated):
@@ -2463,6 +2470,7 @@ def notes_check(pack: Pack) -> dict:
         "scope": "stated values, derived fields and constraints only; not rule semantics",
         "cases_with_claims": cases,
         "claims": claims,
+        "by_split": by_split,
         "mismatches": mismatches,
         "unresolved": unresolved,
         "violated_cases": violated,
@@ -2508,7 +2516,7 @@ def watches_burned(request: str) -> int | None:
 
 
 def oil_check(pack: Pack) -> dict:
-    checked, mismatches = [], []
+    checked, mismatches, by_split = [], [], {}
     for split, split_cases in pack.cases.items():
         for case in split_cases:
             expected = case["expected"]
@@ -2519,6 +2527,7 @@ def oil_check(pack: Pack) -> dict:
             if not initial.get("lamp_lit") or "lamp_oil" not in initial or watches is None:
                 continue
             checked.append(case["id"])
+            by_split.setdefault(split, []).append(case["id"])
             final = apply_changes(initial, [pack_change_path(c) for c in expected["changes"]])
             oil = max(0, initial["lamp_oil"] - watches)
             want = {"lamp_oil": oil, "lamp_lit": oil > 0}
@@ -2533,7 +2542,7 @@ def oil_check(pack: Pack) -> dict:
                         "got": got,
                     }
                 )
-    return {"checked": checked, "mismatches": mismatches}
+    return {"checked": checked, "by_split": by_split, "mismatches": mismatches}
 
 
 # Offline estimate only: no tokenizer is bundled. JSON-heavy prompts tokenize at roughly 3-4

@@ -271,7 +271,10 @@ default flags all changed.
   proposal's final state with the formula CLI. It compares the values the notes state
   (`Override <field> <v>`, `<field> a -> b`, `Host derives …`) with the engine's initial and
   final values, and lists proposals whose final state violates a constraint. Claim-shaped
-  tokens that name no known field are listed as `unresolved`. Any mismatch, unresolved token
+  tokens that name no known field (in an override, a transition or a "Host derives" item)
+  are listed as `unresolved`. Both checks also report per split (`by_split`). The tests pin
+  exact counts and case lists for dev only; held-out cases are held only to the general
+  properties (no mismatch, no unresolved token, no violation). Any mismatch, unresolved token
   or violation makes `--validate-pack` exit 1. It covers stated values, derived fields and
   constraints only, not whether the right rule was applied. The expected-outcome replay is
   structural verification only, because it copies the gold.
