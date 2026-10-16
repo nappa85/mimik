@@ -714,10 +714,10 @@ class DryRunTests(Base):
             self.assertIn("pending denominator choice", sink.getvalue())
         header = rows[0]
         self.assertEqual(header["event"], "run_started")
-        self.assertEqual(header["benchmark_version"], 2)
+        self.assertEqual(header["benchmark_version"], 3)  # harness v3 (2026-10-16)
         self.assertEqual(header["planned_episodes"], 12)
         self.assertTrue(header["sampling"]["cache_prompt"])
-        self.assertEqual(header["sampling"]["max_tokens"], 2048)
+        self.assertEqual(header["sampling"]["max_tokens"], 4096)  # v3 H11 (v2: 2048)
         self.assertIn("engine", header["formula_engine"])
         self.assertEqual(rows[-1]["event"], "run_summary")
         episodes = [r for r in rows if r["event"] == "episode"]
@@ -992,7 +992,7 @@ class HarnessV2RegressionTests(Base):
         args = tl.build_parser().parse_args(["--pack", "p"])
         self.assertTrue(args.cache_prompt)
         self.assertFalse(tl.build_parser().parse_args(["--no-cache-prompt"]).cache_prompt)
-        self.assertEqual(args.max_tokens, 2048)
+        self.assertEqual(args.max_tokens, 4096)  # v3 H11 (v2: 2048)
 
     def test_recall_mean_excludes_not_run(self):
         case = self.cases["spend-focus"]
