@@ -257,8 +257,39 @@ default flags all changed.
   by the loader (`CASE_TAGS`, `validate_tags`), dropped by `public_case`, copied into ledger
   episode rows for reporting only. The dev tags were set mechanically (pack README).
 - The other v2 ambiguity classes (conflict with a legal alternative, editable item stats, a
-  missing duration) are **not decided**; they wait for a blind adjudicator (§11 item 12; TODO in
-  the pack README).
+  missing duration) were reviewed by a blind adjudicator and decided by the user on
+  2026-10-16 (`docs/tool-loop-pack-adjudication-2026-10-16.md`). Pack revision 3 applies them
+  and the review fixes:
+  - pack README precedence 6–8, model-visible in the new LR2-45 "Assistant conduct";
+  - equipment `kind`/`weight`/`armor`/`category` not editable, and items treated as
+    bookkeeping;
+  - a long rest's night of two watches (LR2-26, LR2-31);
+  - `rules_revision` 3 and `edition_id` `demo-3`;
+  - ho-048 relabelled to ask_rule and dev-034 added (175 dev cases).
+- **Notes check** (`--validate-pack` key `notes_check`, `notes_check()`): the expected
+  replay copies the gold, so it cannot catch a wrong gold. The notes check recomputes every
+  proposal's final state with the formula CLI. It compares the values the notes state
+  (`Override <field> <v>`, `<field> a -> b`, `Host derives …`) with the engine's initial and
+  final values, and lists proposals whose final state violates a constraint. Claim-shaped
+  tokens that name no known field (in an override, a transition or a "Host derives" item)
+  are listed as `unresolved`. Both checks also report per split (`by_split`). The tests pin
+  exact counts and case lists for dev only; held-out cases are held only to the general
+  properties (no mismatch, no unresolved token, no violation). Any mismatch, unresolved token
+  or violation makes `--validate-pack` exit 1. It covers stated values, derived fields and
+  constraints only, not whether the right rule was applied. The expected-outcome replay is
+  structural verification only, because it copies the gold.
+- **Oil check** (`--validate-pack` key `oil_check`, `oil_check()`): an independent
+  computation from the request and the base state. For a proposal with the lamp lit whose
+  request is a long rest (the two-watch night, LR2-26 and LR2-31) or states a number of
+  watches (English or Italian words or digits), the gold must set `lamp_oil` to
+  max(0, oil − watches) and `lamp_lit` false exactly at 0 (LR2-33). Requests that put the
+  lamp out are exempt. A mismatch makes `--validate-pack` exit 1. Demo: dev-017, ho-020 and
+  dev-034 are checked.
+- **Formula CLI dependency in the unit gate:** the demo-pack checks (`PackRevision3Tests`
+  replay and notes check) need `MIMIK_FORMULA_EVAL` or a built `formula_eval`. Like
+  `test_formula_cli`, they fail when the CLI is missing and skip only in the source package
+  (no `examples/formula_eval.rs`). Other CLI-optional tests fall back to the fixture
+  engine.
 
 ### Flags (recorded in the header as `flags`)
 
@@ -607,10 +638,13 @@ requested value (or `template_default`) for `toggle`; `--thinking on` with `neve
 
 `--write-case-subset N --split dev --subset-name NAME --output FILE` writes the first N cases
 of `interleave_by_outcome` (deterministic, seed-independent, outcome proportions kept at any
-cut). The committed file is the first 40 of the 174 dev cases: proposal 15, answer 9, conflict
+cut). The committed file is the first 40 of the 175 dev cases: proposal 15, answer 9, conflict
 7, ask_fact 3, ask_rule 3, stale 2, refuse 1 (each within one case of 40 × its dev share).
-Subset hash (sha256 of the canonical JSON id list) **`a8888d1de313e5bf1c15caca396433abf4ba34ce4b5ddbd556ee0e794d486c78`**;
-source `cases-dev.json` sha256 `e5265a0d…a912`. `--cases-file` refuses a file whose hash, split,
+Subset hash (sha256 of the canonical JSON id list) **`f46e01964d46f7c06e815372ed274f3a1b025bd97f459e6281f82b4951bf6eb8`**;
+source `cases-dev.json` sha256 `c10113c2…43ec` (pack revision 3, 175 cases). The revision 2
+subset (`a8888d1d…6c78`, source `e5265a0d…a912`, 174 cases) differs: ho-048 became ask_rule
+and dev-034 was added, so ho-082 leaves the 40 and ho-048 joins them. The outcome counts are
+unchanged, but screen results on the two subsets are not directly comparable. `--cases-file` refuses a file whose hash, split,
 rule or source file hash does not match, or whose ids are not the prefix recomputed from the
 pack; the header gets `case_subset` {name, rule, size, sha256} and `case_filter` = the ids.
 
@@ -1212,3 +1246,10 @@ See the results doc's "Harness v2" section for the run details. In summary, on 2
 
 Self-check under the prototype tier. Independent review is required before results drive a
 product decision.
+
+**v2 differential tests and pack revisions (2026-10-16).** Pack revision 3 relabelled cases
+(for example ho-048), so the v2 ledgers are rescored against the **v2-era** cases loaded with
+`git show 2eee9ec:examples/tool-loop-demo/cases-heldout.json`. That file's sha256 must equal
+the `cases-heldout.json` hash recorded in each ledger header. With `MIMIK_V2_LEDGERS` mounted,
+missing git history is a test **failure**, not a skip. In a root container on the bind-mounted
+repo, run `git config --global --add safe.directory /w` before the suite.

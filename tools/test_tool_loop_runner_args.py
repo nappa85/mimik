@@ -169,10 +169,10 @@ class RunnerIdentityTests(unittest.TestCase):
 
 class CaseSubsetTests(RunnerCliMixin, Base):
     def test_screen_subset_is_interleaved_prefix_with_proportions(self):
-        """Screen arm: the first 40 of interleave_by_outcome over the 174 dev cases. There
+        """Screen arm: the first 40 of interleave_by_outcome over the 175 dev cases. There
         was no case_subset helper."""
         cases = demo_cases("dev")
-        self.assertEqual(len(cases), 174)
+        self.assertEqual(len(cases), 175)
         doc = tl.case_subset(cases, 40, name="dev-screen-40", split="dev", source_sha256="x")
         ordered = [c["id"] for c in tl.interleave_by_outcome(cases)]
         self.assertEqual(doc["case_ids"], ordered[:40])
@@ -182,7 +182,7 @@ class CaseSubsetTests(RunnerCliMixin, Base):
         by_id = {c["id"]: c["expected"]["outcome"] for c in cases}
         got = collections.Counter(by_id[i] for i in doc["case_ids"])
         for outcome, n in total.items():
-            self.assertLessEqual(abs(got[outcome] - 40 * n / 174), 1, outcome)
+            self.assertLessEqual(abs(got[outcome] - 40 * n / len(cases)), 1, outcome)
         self.assertEqual(doc["outcome_counts"], dict(sorted(got.items())))
 
     def test_committed_screen_subset_matches_the_pack(self):

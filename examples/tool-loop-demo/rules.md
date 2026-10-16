@@ -1,9 +1,21 @@
-# Lantern Reach — rules revision 2
+# Lantern Reach — rules revision 3
 
 Original fictional test material for the Mimik tool-loop benchmark. These are all
 the rules of this demonstration game; do not fill gaps from other games. Each
 `LR2-<n>` identifier is a stable citation anchor. Sheet value names are written
 in `code`.
+
+Changelog (rule IDs are stable; this preamble is not part of any rule):
+
+- 2026-10-16, rules revision 3 (pack revision 3): LR2-45 (new) states how the assistant
+  settles conflicts, item bookkeeping, stats without a field, unstated time and
+  question-only requests; LR2-31 and LR2-26 say the night of a long rest is two watches
+  (only that night) and that a lamp lit when the rest starts burns 2 measures; LR2-15 says
+  plain "armor" is the sheet value; LR2-14 gains the shield swap sentence that mirrors LR2-13;
+  LR2-20 says an item's stats are fixed by the item; LR2-33 says that a change that empties
+  a lit lamp also records `lamp_lit` as false.
+- 2026-10-16: LR2-3 says a stale proposal is reported, not replaced.
+- 2026-10-15: rules revision 2.
 
 ## LR2-1 — Scope and missing rules
 
@@ -97,13 +109,16 @@ outer armor unequips the previous one; neither entry is removed from equipment.
 ## LR2-14 — Shields
 
 An equipment entry of kind `shield` has an `armor` value of exactly 1. At most one
-shield may be equipped at a time. A shield adds to `armor` but never affects
+shield may be equipped at a time. Equipping a different shield unequips the previous one;
+neither entry is removed from equipment. A shield adds to `armor` but never affects
 `pace`.
 
 ## LR2-15 — Armor
 
 `armor` equals the `armor` value of the equipped outer armor plus that of the
-equipped shield, counting zero for whichever is not equipped. `armor` is what
+equipped shield, counting zero for whichever is not equipped. In a request, "armor" without
+naming an item means this sheet value; an item's own `armor` value is a fixed stat
+(LR2-20). `armor` is what
 LR2-6 subtracts from damage. It is a separate value from `armor_pace_penalty`.
 
 ## LR2-16 — Pace
@@ -141,7 +156,10 @@ Each equipment entry has a stable ID, a name, a kind, a `quantity` (a whole
 number of at least 1), a `weight` per unit from 0 to 5 and an `equipped` flag.
 Only outer armor, shields and weapons can be equipped. An item's mechanics come
 from its kind and recorded fields, never from its name alone: an entry named
-"climbing hooks" of kind `tool` is not a rope.
+"climbing hooks" of kind `tool` is not a rope. An item's stats (its kind, its `weight`
+and, for armor and shields, its `armor` value and `category`) are fixed by the item
+itself. They are never changed on the sheet; they change only when the item is replaced
+by a different one.
 
 ## LR2-21 — Conditions
 
@@ -176,8 +194,10 @@ technique. Shaken ends at the end of the scene, or at a short or long rest.
 ## LR2-26 — Scenes, watches and days
 
 A scene is a span of action; the Master or player declares when it ends. A watch
-is a span of travel or waiting, and six watches make a day. Ending a scene does
-not pass a watch, and passing watches does not end a scene.
+is a span of travel or waiting, and six watches make a day. The night of a long rest is
+two watches (LR2-31); that figure applies only to a long rest's night, and a journey by
+night takes as many watches as LR2-36 and LR2-37 give. Ending a scene does not pass a
+watch, and passing watches does not end a scene.
 
 ## LR2-27 — Bandages
 
@@ -207,8 +227,11 @@ Master's ruling; do not assume full restoration, a die roll or a fixed amount.
 
 ## LR2-31 — Long rest
 
-A long rest takes a night. A character with any bleeding stacks cannot take a
-long rest until the bleeding is treated. At the start of the rest the character
+A long rest takes a night, and the night of a long rest is two watches (LR2-26). A lamp
+that is lit when a long rest starts burns 2 measures of oil, one per watch (LR2-33),
+unless the request puts it out first; if it holds less, it goes out when the oil reaches
+zero. A character with any bleeding stacks cannot take a long rest until the bleeding is
+treated. At the start of the rest the character
 eats one ration. If they do, at the end `focus` becomes `focus_max`, `vitality`
 rises by 2 (not above `vitality_max`), one weary stack is removed, and chilled
 and shaken end. If they have no ration to eat, only shaken ends.
@@ -223,7 +246,8 @@ zero. A character without a lamp has `lamp_oil` 0 and `lamp_lit` false.
 ## LR2-33 — Burning oil
 
 A lit lamp burns one measure of oil per watch. When `lamp_oil` reaches zero the
-lamp goes out and `lamp_lit` becomes false. Lighting or putting out a lamp costs
+lamp goes out and `lamp_lit` becomes false: a change that brings `lamp_oil` to zero while
+the lamp is lit also sets `lamp_lit` to false. Lighting or putting out a lamp costs
 nothing. Scenes do not burn oil; only watches do.
 
 ## LR2-34 — Refilling a lamp
@@ -306,3 +330,32 @@ A gap cannot be crossed in darkness unless the crossing character's lamp is lit.
 A character may forage for food in the wild. These rules do not specify how long
 foraging takes, how many rations it yields or whether terrain or weather affect
 it. Ask for the Master's ruling.
+
+## LR2-45 — Assistant conduct
+
+How the assistant settles a request where the rules above could leave it in doubt:
+
+1. A request that breaks a rule or a sheet limit as stated is reported as a conflict, even
+   when a legal alternative exists; no change is proposed for it, and naming the
+   alternative is optional. A request to set a value beyond its limit (for example "set my
+   vitality to 12" above `vitality_max`) is always a conflict. A limit resolves an action
+   instead only where a rule says so: excess healing is lost (LR2-5), oil beyond 4 measures
+   is lost when refilling (LR2-34), a lamp goes out when its oil reaches zero (LR2-33), and
+   equipping another outer armor or shield unequips the previous one (LR2-13, LR2-14). Then
+   propose the change that rule gives.
+2. An item's stats are fixed by the item (LR2-20). Gaining or losing items is plain
+   bookkeeping and needs no rule: picking up, finding, buying, receiving, dropping or giving
+   away an item changes the `quantity` of its equipment entry. Finding rations or bandages
+   is bookkeeping too, unless a rule governs where they come from, as LR2-29 does for
+   shared party supplies. No rule sets prices or what coin buys: for those, ask for a
+   ruling (LR2-1).
+3. A stat or mechanic that has no sheet field: if a rule determines it, answer with what
+   determines it, and propose a change only when the player asks for a concrete change that
+   the rule backs. If no rule covers it, ask for a ruling (LR2-1).
+4. Time (watches, scenes or days). When a rule fixes the duration or the event that ends it,
+   apply that rule without asking, for example the two-watch night of a long rest (LR2-31)
+   or the end of a scene (LR2-22). When an effect depends on elapsed time that no rule fixes
+   and the request does not state it, ask for it; never assume a default. When these rules
+   leave a duration undefined (LR2-30, LR2-44), ask for a ruling.
+5. A hypothetical or question-only request ("would one more flask make me encumbered?") is
+   answered without proposing a change.
