@@ -33,7 +33,15 @@ Last updated: 2026-10-15.
   - **M3 plan:** extra binding amendments §10c (free-model findings) and §10d (Sol: K40, hyphenated field IDs would make every evaluation "unavailable"; values must be projected onto declared inputs). The `cel` record in `docs/dependency-decisions.md` is still missing (M3 step 5).
   - **Harness v3 plan:** `docs/tool-loop-harness-v3-plan.md`, reviewed by 6 reviewers, GO-with-amendments (§11, 33 binding items; record `docs/reviews/2026-10-16-tool-loop-v3-plan.md`).
     - User answers: stale = report only; untrusted marking as its own arm; all other defaults accepted.
-    - **Next:** apply §11, have the amended §6–§8 re-reviewed, then the pack and prompt fixes, harness changes with failing-first tests, and the blind held-out (165 written, 150 kept).
+    - **Implementation in progress (branch `harness-v3`, worktree `mimik-wt/harness-v3`, 2026-10-16; local commits only):**
+      - [x] Pack and prompt fixes (§3, §11 item 21): LR2-3 report-only stale, narrowed refuse line, stale notes fixed, ho-001…141 moved into dev (174), empty held-out placeholder, allowlisted `tags`, README fixes.
+      - [x] Harness behind flags, `BENCHMARK_VERSION = 3`: per-turn `finish_reason` in `ScriptedModel`; H1 nudge; H2a/H2b (off in the base); H3 sanitised echo; H4 `--max-turns` ≤ 16 (CLI-tested); H5 current values; H6 untrusted marking (off); H8 identity, arm grouping, partial/duplicate ledgers refused; H11 `max_tokens` 4096 with a pinned length rule; offline prompt audit and expected-outcome replay in `--validate-pack`.
+      - [x] H7 reporting: at-risk correct, `wrong_proposal` over all, strata, Wilson case-level intervals, leniency exposure, per-episode CSV.
+      - [x] Differential test: rescoring the v2 held-out ledgers reproduces every score and v2 summary key (needs `MIMIK_V2_LEDGERS`; skips otherwise).
+      - Verification: helper/unit only, no inference. Gate 242 tests OK with the v2 ledgers mounted (241 + 2 skipped without); dev expected replay 174/174 (348/348 over two seeds). Details in `docs/tool-loop-benchmark.md` "Harness v3".
+      - [ ] **Blocked on re-review of amended §6–§8:** scoring variants S1–S4 / lenient, selection script, unattended queue (in `tools/`), runner pass-through, manifest/hash gate.
+      - [ ] Blind adjudication of the other ambiguity classes (§11 item 12), then the blind held-out (165 written, 150 kept) and its gold review.
+      - [ ] Independent review of this change set before results drive a decision; the H3 live 3-case smoke with forced truncation needs inference.
     - The runs wait for an idle PC: about 22–29 GPU h over 3 sessions, unattended.
   - **Reviewer benchmark:** `docs/reviewer-benchmark.md`, experiments 1–3, 14 models.
     - **Concluded.** Standing setup (user decision, in `AGENTS.md`): Sol + Sonnet as main reviewers. The third reviewer is the first that works of Space Bunny → DeepSeek → Muse (`tools/external_review.py --chain third`); otherwise proceed with two.

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Canonical live runner for tools/tool_loop_benchmark.py (harness v2). Prototype tier.
+# Canonical live runner for tools/tool_loop_benchmark.py. Prototype tier. Written for harness
+# v2; with harness v3 it runs the C0 default flags (no v3 pass-through yet, plan §11 item 26),
+# and the held-out split is an empty placeholder that the harness refuses to run.
 #
 # Usage: tools/run_tool_loop_benchmark.sh <model-key> <split> [seeds] [ctx]
 #   model-key: qwen35-9b | qwen3-4b-2507 | qwen36-35b-a3b (needs N_CPU_MOE)
