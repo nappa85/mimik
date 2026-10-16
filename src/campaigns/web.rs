@@ -527,6 +527,7 @@ fn groups(
                         crate::definitions::Control::Integer => "integer",
                         crate::definitions::Control::Boolean => "boolean",
                         crate::definitions::Control::Enumeration => "enum",
+                        crate::definitions::Control::List => "list",
                     }
                     .into(),
                     nullable: field.nullable,
@@ -706,7 +707,13 @@ async fn save_private(
         "notes".to_string(),
     ];
     if let Some(pin) = &view.immutable {
-        for field in &pin.definition().fields {
+        // Derived fields are computed, never submitted (evaluation on save is M3).
+        for field in pin
+            .definition()
+            .fields
+            .iter()
+            .filter(|field| field.formula.is_none())
+        {
             keys.push(format!("value-{}", field.id));
             if field.nullable {
                 keys.push(format!("null-{}", field.id));

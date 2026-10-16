@@ -1,0 +1,27 @@
+{
+  "contract_version": 1,
+  "game_id": "synthetic-game",
+  "edition_id": "first",
+  "definition_id": "formula-sheet",
+  "title": "Synthetic formula sheet",
+  "sources": [],
+  "fields": [
+    {"id": "name", "label": "Name", "control": "text", "nullable": false, "mapping": {"state": "unresolved", "reason": "Draft mapping"}},
+    {"id": "vitality", "label": "Vitality", "control": "integer", "nullable": false, "mapping": {"state": "unresolved", "reason": "Draft mapping"}},
+    {"id": "equipment", "label": "Equipment", "control": "list", "nullable": false, "mapping": {"state": "unresolved", "reason": "Draft mapping"},
+     "items": {"properties": [
+       {"id": "kind", "label": "Kind", "control": "enum", "optional": false, "options": [{"id": "outer-armor", "label": "Outer armor"}, {"id": "tool", "label": "Tool"}]},
+       {"id": "equipped", "label": "Equipped", "control": "boolean", "optional": false},
+       {"id": "armor", "label": "Armor", "control": "integer", "optional": true}
+     ]}},
+    {"id": "armor", "label": "Armor", "control": "integer", "nullable": false, "mapping": {"state": "unresolved", "reason": "Draft mapping"},
+     "formula": {"expr": "max_of(equipment.filter(item, item.kind == \"outer-armor\" && item.equipped).map(item, item.armor), 0)", "rule_ids": ["lr-3"], "evidence": {"state": "unresolved", "reason": "Rule unit not yet reviewed"}}},
+    {"id": "pace", "label": "Pace", "control": "integer", "nullable": false, "mapping": {"state": "unresolved", "reason": "Draft mapping"},
+     "formula": {"expr": "6 - armor", "rule_ids": ["lr-4", "lr-3"], "evidence": {"state": "unresolved", "reason": "Rule unit not yet reviewed"}}}
+  ],
+  "groups": [{"id": "main", "label": "Main", "fields": ["name", "vitality", "equipment", "armor", "pace"], "column_hint": "main"}],
+  "formula_profile": 1,
+  "constraints": [
+    {"id": "one-outer-armor", "expr": "size(equipment.filter(item, item.kind == \"outer-armor\" && item.equipped)) <= 1", "rule_ids": ["lr-3"], "message": "At most one outer armor may be equipped.", "evidence": {"state": "unresolved", "reason": "Rule unit not yet reviewed"}}
+  ]
+}

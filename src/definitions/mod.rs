@@ -1,8 +1,11 @@
 //! Strict declarative proposals. Draft storage never approves evidence or enables a sheet.
 mod admission;
 pub(crate) mod decode;
+mod formula_admission;
 // Public only so `examples/formula_eval.rs` (development CLI) can link; revisit at M2.
 pub mod formula;
+#[cfg(test)]
+mod formula_admission_tests;
 pub(crate) mod private_pin;
 mod publication;
 mod store;
@@ -99,6 +102,13 @@ pub struct Definition {
     pub sources: Vec<SourceRef>,
     pub fields: Vec<Field>,
     pub groups: Vec<Group>,
+    /// CEL profile marker (`1` = "cel-mimik-1"); present exactly when formulas, lists or
+    /// constraints are. New members follow the existing ones and are omitted when absent, so
+    /// formula-free canonical bytes and hashes are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formula_profile: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<Constraint>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -126,6 +136,8 @@ pub enum Control {
     Boolean,
     #[serde(rename = "enum")]
     Enumeration,
+    /// Records with declared properties and a host-managed `id` (formula profile only).
+    List,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -140,6 +152,48 @@ pub struct Field {
     #[serde(default)]
     pub options: Option<Vec<Choice>>,
     pub mapping: Mapping,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<Items>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formula: Option<Formula>,
+}
+
+/// Declared properties of every record in a list field.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Items {
+    pub properties: Vec<ItemProperty>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemProperty {
+    pub id: String,
+    pub label: String,
+    pub control: Control,
+    pub optional: bool,
+    #[serde(default)]
+    pub options: Option<Vec<Choice>>,
+}
+
+/// A derived value: CEL source plus rule citations and source evidence.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Formula {
+    pub expr: String,
+    pub rule_ids: Vec<String>,
+    pub evidence: Mapping,
+}
+
+/// An advisory constraint; violations are reported, never enforced.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Constraint {
+    pub id: String,
+    pub expr: String,
+    pub rule_ids: Vec<String>,
+    pub message: String,
+    pub evidence: Mapping,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

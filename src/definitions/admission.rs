@@ -65,6 +65,7 @@ pub(super) fn validate(bytes: &[u8]) -> Result<Admitted, DefinitionError> {
             regions.sort();
         }
     }
+    super::formula_admission::canonicalize(&mut definition);
     let content = serde_json::to_string(&definition).map_err(|_| DefinitionError::Configuration)?;
     if content.len() > MAX_BYTES {
         return Err(ValidationReport::one("/", "canonical-byte-limit"));
@@ -77,7 +78,18 @@ pub(super) fn validate(bytes: &[u8]) -> Result<Admitted, DefinitionError> {
     })
 }
 
-fn label(value: &str) -> bool {
+/// Field and list item-property IDs: the registry slug plus `_`, so formulas (CEL
+/// identifiers cannot contain `-`) can reference multi-word fields. Every other ID keeps the
+/// registry slug grammar.
+pub(super) fn valid_field_id(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value.as_bytes()[0].is_ascii_lowercase()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+}
+
+pub(super) fn label(value: &str) -> bool {
     !value.trim().is_empty()
 }
 
@@ -86,10 +98,7 @@ fn fields(definition: &Definition) -> Result<BTreeSet<&str>, DefinitionError> {
     let mut choices = 0;
     for (index, field) in definition.fields.iter().enumerate() {
         let path = format!("/fields/{index}");
-        if !crate::registry::valid_id(&field.id)
-            || !ids.insert(field.id.as_str())
-            || !label(&field.label)
-        {
+        if !valid_field_id(&field.id) || !ids.insert(field.id.as_str()) || !label(&field.label) {
             return Err(ValidationReport::one(
                 &path,
                 "invalid-or-duplicate-field-id-or-label",
@@ -214,7 +223,8 @@ fn domain(definition: &Definition) -> Result<(), DefinitionError> {
             "every-field-must-appear-exactly-once",
         ));
     }
-    mappings(definition)
+    mappings(definition)?;
+    super::formula_admission::check(definition)
 }
 
 #[cfg(test)]

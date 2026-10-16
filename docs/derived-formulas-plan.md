@@ -842,6 +842,104 @@ hard bound), so `MAX_COST` stays at 2·10⁶ with about 10× headroom under the 
 Not run: release build size, package/vendor/unpacked/browser gates (M3/M4 scope). These
 results are unit and CLI verification only, not app integration.
 
+## 15. M2 implementation (2026-10-15, uncommitted, awaiting independent review)
+
+Scope as approved: the definition envelope, admission, canonical hash, list value schema,
+pin validation, publication evidence and migration 018. Evaluation on view/save is still M3
+and list editing is M4.
+
+**What changed**
+
+- **Envelope** (`definitions/mod.rs`, `schemas/definition-v1.json`, `decode.rs`):
+  - `Definition.formula_profile` and `constraints` follow the existing members.
+  - `Field.items` and `Field.formula` follow `mapping`.
+  - Every new member is `skip_serializing_if` when absent.
+  - `Control::List`, plus `Items`, `ItemProperty`, `Formula` and `Constraint`.
+  - Schema `$defs` and decoder limits: `expr` 1,024, `message` 500, `rule_ids` 16,
+    `constraints` 128, `properties` 32.
+- **Admission** (`formula_admission.rs`, called from `admission::domain`/`validate`):
+  - The marker is required both ways: `formula-profile-required` and
+    `formula-profile-without-formulas`.
+  - List and derived shape rules.
+  - `rule_ids` use the slug grammar and are canonicalized as sorted sets.
+  - Evidence must cite selected `core`/`supplement` sources, and is counted in the
+    1,024-region dependency limit.
+  - The envelope is projected to `formula::SheetSpec` and compiled with the M1 engine. A
+    `Rejection` is mapped to `/fields/<i>/formula`, `/fields/<i>`, `/constraints/<i>` or
+    `/fields/<i>/items` with code `formula-<code>`.
+- **D2:** `admission::valid_field_id` adds `_` for field IDs only. No other `valid_id`
+  caller changed.
+  - Item-property and list-field IDs must be CEL identifiers (`[a-z][a-z0-9_]*`); this is
+    a new control with no legacy data.
+  - Hyphenated scalar field IDs remain valid but are not declared to formulas, so a
+    reference gives `formula-unknown-field` (this replaces the planned
+    `formula-unreferenceable-field`).
+  - Reserved names (`size`, `sum`, `max`, …) are rejected only in formula definitions.
+- **Values** (`campaigns/values.rs`, `private_pin.rs`):
+  - Derived fields are excluded from the value schema, the form and the web save keys.
+  - A list is an array of at most 256 objects with `id` plus declared properties, no
+    `additionalProperties` and no null.
+  - `validate_values` adds item-ID slug/uniqueness checks, exact i64 item integers and a
+    1 MiB aggregate size cap. The cap is the sheet-boundary gate from the M1 review.
+  - `values::form` rejects list fields (`List editing is unsupported until milestone M4`).
+- **Store:** formula/constraint evidence references are verified transactionally
+  (`evidence-unit-page-source-mismatch`).
+- **Publication:**
+  - Evidence pages and units are captured in the wiring snapshot, which gives page-scoped
+    invalidation.
+  - `PublishedDefinition` gains `unresolved_formulas` and `unresolved_constraints`,
+    separate from the field-only `unresolved`, omitted when empty so formula-free output
+    is unchanged. `deterministic_rules` reports `formulas-advisory` for profile
+    definitions.
+  - Approval is refused with `list-editing-unsupported` (until M4) and
+    `formula-evaluation-unsupported` (until M3), so no sheet can pin a definition whose
+    derived values would not be shown.
+- **Migration:** `018_formula_profile.sql` only bumps the schema version. It is appended
+  to `MIGRATIONS` and `SCHEMA_VERSION = 18`. The existing schema fixture test now refuses
+  version 19.
+
+**Deviations from §6 (need reviewer confirmation)**
+
+1. **No snapshot encoding 2.** `definition_approvals.encoding CHECK(encoding=1)` (008) and
+   the provenance trigger's fixed eight-key set (009) would require rebuilding an
+   immutable, foreign-keyed table. That is the risk D1 avoided. The separate unresolved
+   lists are derived from the immutable definition content instead, and the snapshot stays
+   encoding 1.
+   - Encoding sites: the 008 CHECK, the 009 trigger, the approval INSERT (`encoding` 1),
+     and `verify_approval` (`encoding != 1 || snapshot.encoding != 1`).
+   - A test tampers an approval to encoding 2 with a consistent snapshot hash and asserts
+     it is rejected (mutation-confirmed).
+2. **Formula publication is gated until M3.** This is stricter than the plan, which gated
+   only lists.
+3. **The migration contiguity test skips `--` comment lines** before checking that the
+   last statement sets the version. A version-only migration has no earlier `;`. The
+   test's check is unchanged otherwise.
+4. **Still to do:** the pack-integration test (`tests/formula_pack.rs`) and the
+   HTML-escaping test are M3, since nothing renders formulas yet. The M1 fixture already
+   evaluates all four Lantern Reach characters.
+
+**Review fixes (APPROVE-with-fixes, see the review record):**
+- the evidence-capture test;
+- empty evidence region lists rejected;
+- the 1 MiB cap applied to formula definitions only (no retroactive cap on formula-free
+  pins);
+- one shared dependency walk with exact evidence error paths;
+- the list-cap test made to isolate the cap.
+
+**Failing-first and verification.**
+
+- 13 envelope/pin tests in `definitions/formula_admission_tests.rs`. With a stub
+  projection, 12 were red; the 13th is the pre-M2 byte/hash regression vector, captured
+  from the pre-change code before any edit, which must stay green.
+- The 3 publication tests were written after the code. They were confirmed by mutation:
+  publish gate removed, evidence check skipped, encoding gate opened, and the item-i64
+  check disabled. All 4 mutants were killed.
+- Gates passed: `cargo fmt --check`; strict clippy; `cargo test --all-targets
+  --all-features` (329 passed, 182 lib); release formula tests (43, calibration
+  17.0 ms); the `formula_eval` build; ruff check/format; unittest (93, including 5
+  CLI); actionlint; `cargo audit`; `cargo about`.
+- No browser, package, unpacked or live-model checks were run.
+
 ## Appendix A: superseded custom-spec design (revision 1)
 
 Revision 1 proposed a Mimik-specific expression language:

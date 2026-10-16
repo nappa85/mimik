@@ -49,17 +49,57 @@ pub(crate) fn validate(raw: RawPin) -> Result<ImmutablePin, AppError> {
     })
 }
 
+/// Host-managed item IDs (registry slug, unique per list) and exact i64 item integers; JSON
+/// Schema `integer` alone also accepts u64 values above `i64::MAX`.
+fn list_values(field: &super::Field, value: &serde_json::Value) -> Result<(), AppError> {
+    let integers: Vec<&str> = field
+        .items
+        .iter()
+        .flat_map(|items| &items.properties)
+        .filter(|property| property.control == super::Control::Integer)
+        .map(|property| property.id.as_str())
+        .collect();
+    let mut ids = std::collections::BTreeSet::new();
+    for item in value.as_array().into_iter().flatten() {
+        let id = item["id"].as_str().unwrap_or_default();
+        if !crate::registry::valid_id(id) || !ids.insert(id) {
+            return Err(AppError::Invalid("List item IDs must be unique slugs."));
+        }
+        for property in &integers {
+            if item
+                .get(*property)
+                .is_some_and(|number| number.as_i64().is_none())
+            {
+                return Err(AppError::Invalid("Integer outside signed i64 range."));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl ImmutablePin {
     pub(crate) fn validate_values(&self, value: &serde_json::Value) -> Result<(), AppError> {
+        // Aggregate bound at the formula input boundary: per-value caps alone allow megabytes.
+        // Formula-free pins keep their original value contract (no retroactive cap).
+        if self.data.definition.formula_profile.is_some()
+            && serde_json::to_vec(value)?.len() > super::formula::MAX_INPUT_BYTES
+        {
+            return Err(AppError::Invalid("Sheet values exceed the size limit."));
+        }
         if !self.validator.is_valid(value) {
             return Err(AppError::Invalid("Pinned value validation failed."));
         }
+        let out_of_range = || AppError::Invalid("Integer outside signed i64 range.");
         for field in &self.data.definition.fields {
-            if field.control == super::Control::Integer
-                && !value[&field.id].is_null()
-                && value[&field.id].as_i64().is_none()
-            {
-                return Err(AppError::Invalid("Integer outside signed i64 range."));
+            let field_value = &value[&field.id];
+            match field.control {
+                super::Control::Integer
+                    if !field_value.is_null() && field_value.as_i64().is_none() =>
+                {
+                    return Err(out_of_range());
+                }
+                super::Control::List => list_values(field, field_value)?,
+                _ => {}
             }
         }
         Ok(())

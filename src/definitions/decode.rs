@@ -16,13 +16,18 @@ struct Seed<'a> {
 
 fn limits(key: &str) -> (usize, usize) {
     match key {
-        "sources" | "groups" => (32, 64),
+        "sources" | "groups" | "properties" => (32, 64),
         "options" => (128, 64),
         "roles" => (3, 20),
         "regions" => (4, 64),
         "fields" | "id" | "game_id" | "edition_id" | "definition_id" | "pdf_sha256" => (256, 64),
         "title" | "label" => (256, 100),
         "help" => (256, 2000),
+        // Formula profile members (byte limits for `expr` are enforced by the formula layer).
+        "constraints" => (128, 5000),
+        "rule_ids" => (16, 64),
+        "expr" => (256, 1024),
+        "message" => (256, 500),
         _ => (256, 5000),
     }
 }

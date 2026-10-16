@@ -1,5 +1,5 @@
 use super::{
-    DefinitionDraft, DefinitionError, DraftSummary, MAX_BYTES, Mapping, ValidationReport,
+    DefinitionDraft, DefinitionError, DraftSummary, MAX_BYTES, ValidationReport,
     admission::{self, Admitted},
     admit,
 };
@@ -65,17 +65,17 @@ pub(super) fn references(db: &Connection, data: &Admitted) -> Result<(), Definit
             ));
         }
     }
-    for field in &definition.fields {
-        if let Mapping::Mapped { regions } = &field.mapping {
-            for region in regions {
-                let matched: i64 = db.query_row("SELECT count(*) FROM source_units u JOIN source_pages p ON p.id=u.page_id WHERE u.id=?1 AND p.id=?2 AND p.source_id=?3", params![region.unit_id,region.page_id,region.source_id], |row| row.get(0)).map_err(AppError::from)?;
-                if matched != 1 {
-                    return Err(ValidationReport::one(
-                        "/fields",
-                        "mapped-unit-page-source-mismatch",
-                    ));
-                }
-            }
+    // One shared walk over field wiring and formula/constraint evidence.
+    for dependency in super::formula_admission::dependencies(definition) {
+        let region = dependency.region;
+        let matched: i64 = db.query_row("SELECT count(*) FROM source_units u JOIN source_pages p ON p.id=u.page_id WHERE u.id=?1 AND p.id=?2 AND p.source_id=?3", params![region.unit_id,region.page_id,region.source_id], |row| row.get(0)).map_err(AppError::from)?;
+        if matched != 1 {
+            let code = if dependency.evidence {
+                "evidence-unit-page-source-mismatch"
+            } else {
+                "mapped-unit-page-source-mismatch"
+            };
+            return Err(ValidationReport::one(&dependency.path, code));
         }
     }
     Ok(())

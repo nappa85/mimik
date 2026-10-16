@@ -7,10 +7,10 @@ use std::{
 };
 
 /// Current database schema version; migration `N` sets `PRAGMA user_version=N`.
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 18;
 
 /// Contiguous migrations in application order: index `N-1` holds migration `N`.
-const MIGRATIONS: [&str; 17] = [
+const MIGRATIONS: [&str; 18] = [
     include_str!("../migrations/001_characters.sql"),
     include_str!("../migrations/002_mork_borg.sql"),
     include_str!("../migrations/003_sources.sql"),
@@ -28,6 +28,7 @@ const MIGRATIONS: [&str; 17] = [
     include_str!("../migrations/015_material_administration.sql"),
     include_str!("../migrations/016_registry_administration.sql"),
     include_str!("../migrations/017_source_search.sql"),
+    include_str!("../migrations/018_formula_profile.sql"),
 ];
 
 #[derive(Clone)]
@@ -337,7 +338,13 @@ mod migration_tests {
             );
             let contents = std::fs::read_to_string(directory.join(file)).unwrap();
             assert_eq!(contents, applied, "{file} is out of chain order");
-            let last = contents.trim_end().rsplit(';').nth(1).unwrap().trim();
+            // `--` comment lines are not statements; a version-only migration may start with one.
+            let statements: String = contents
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let last = statements.trim_end().rsplit(';').nth(1).unwrap().trim();
             assert_eq!(
                 last.replace(' ', ""),
                 format!("PRAGMAuser_version={number}"),

@@ -101,9 +101,40 @@ pub struct PublishedDefinition {
     pub approval_id: i64,
     pub wiring_status: WiringStatus,
     pub unresolved_fields: usize,
+    /// Derived fields / constraints whose rule evidence is unresolved; omitted when zero so
+    /// formula-free output is unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_formulas: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_constraints: Vec<String>,
     pub definition: Definition,
     pub advisory_tasks: &'static str,
     pub deterministic_rules: &'static str,
+}
+
+/// Deterministic-rule capability: formulas are advisory results, never enforced writes.
+fn deterministic_rules(definition: &Definition) -> &'static str {
+    if definition.formula_profile.is_some() {
+        "formulas-advisory"
+    } else {
+        "unsupported"
+    }
+}
+
+/// M2 admits formula and list definitions as drafts only. Publishing waits for evaluation on
+/// view/save (M3) and list editing (M4), so no sheet can pin a definition it cannot show.
+fn publishable(definition: &Definition) -> Result<(), DefinitionError> {
+    if definition
+        .fields
+        .iter()
+        .any(|field| field.control == super::Control::List)
+    {
+        return Err(invalid("list-editing-unsupported"));
+    }
+    if definition.formula_profile.is_some() {
+        return Err(invalid("formula-evaluation-unsupported"));
+    }
+    Ok(())
 }
 
 fn hash(prefix: &[u8], bytes: &[u8]) -> String {
@@ -161,6 +192,13 @@ fn snapshot(db: &Connection, data: &admission::Admitted) -> Result<Snapshot, Def
     }
     if units.is_empty() {
         return Err(invalid("at-least-one-mapped-field-required"));
+    }
+    // Formula/constraint evidence is captured with the wiring (page-scoped invalidation); its
+    // unresolved IDs are derived from the immutable content, so the encoding-1 envelope and its
+    // field-only `unresolved` list are unchanged.
+    for region in super::formula_admission::evidence_regions(definition) {
+        pages.insert(region.page_id);
+        units.insert(region.unit_id);
     }
     snapshot.unresolved.sort();
     let mut used = encode(&snapshot)?.len();
@@ -399,6 +437,8 @@ fn published(
     } else {
         None
     };
+    let (unresolved_formulas, unresolved_constraints) =
+        super::formula_admission::unresolved_evidence(&data.definition);
     let wiring_status = if approval_id == 0 {
         WiringStatus::NeverApproved
     } else if withdrawn {
@@ -426,9 +466,11 @@ fn published(
             .iter()
             .filter(|field| matches!(field.mapping, Mapping::Unresolved { .. }))
             .count(),
+        unresolved_formulas,
+        unresolved_constraints,
+        deterministic_rules: deterministic_rules(&data.definition),
         definition: data.definition,
         advisory_tasks: "unsupported",
-        deterministic_rules: "unsupported",
     })
 }
 
@@ -497,45 +539,42 @@ fn private_evidence_available(
     }
     let mut pages = BTreeSet::new();
     let mut units = BTreeSet::new();
-    for field in &data.definition.fields {
-        if let Mapping::Mapped { regions } = &field.mapping {
-            for region in regions {
-                if pages.insert((region.page_id, region.source_id)) {
-                    let present: bool = db
-                        .query_row(
-                            "SELECT EXISTS(SELECT 1 FROM source_pages WHERE id=?1)",
-                            [region.page_id],
-                            |r| r.get(0),
-                        )
-                        .map_err(AppError::from)?;
-                    if present {
-                        let valid:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM source_pages WHERE id=?1 AND source_id=?2 AND typeof(revision)='integer' AND revision>0 AND length(CAST(printed_label AS BLOB))<=200 AND complete IN (0,1) AND pdf_page>0)",params![region.page_id,region.source_id],|r|r.get(0)).map_err(AppError::from)?;
-                        if !valid {
-                            return Err(invalid("present-page-metadata-corrupt"));
-                        }
-                    }
-                    let corrupt:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM source_page_hashes WHERE page_id=?1 AND (source_id!=?2 OR length(CAST(image_hash AS BLOB))!=64 OR image_hash GLOB '*[^0-9a-f]*'))",params![region.page_id,region.source_id],|r|r.get(0)).map_err(AppError::from)?;
-                    if corrupt {
-                        return Err(invalid("present-page-hash-metadata-corrupt"));
-                    }
-                }
-                if units.insert((region.unit_id, region.page_id)) {
-                    let present: bool = db
-                        .query_row(
-                            "SELECT EXISTS(SELECT 1 FROM source_units WHERE id=?1)",
-                            [region.unit_id],
-                            |r| r.get(0),
-                        )
-                        .map_err(AppError::from)?;
-                    if present && unit_snapshot(db, region.unit_id)?.page_id != region.page_id {
-                        return Err(invalid("present-unit-parent-corrupt"));
-                    }
-                }
-                let exists:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM source_pages p JOIN source_units u ON u.page_id=p.id JOIN source_page_hashes h ON h.page_id=p.id AND h.source_id=p.source_id WHERE p.id=?1 AND u.id=?2)",params![region.page_id,region.unit_id],|r|r.get(0)).map_err(AppError::from)?;
-                if !exists {
-                    available = false;
+    // Field wiring and formula/constraint evidence are all dependencies.
+    for region in super::formula_admission::regions(&data.definition) {
+        if pages.insert((region.page_id, region.source_id)) {
+            let present: bool = db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM source_pages WHERE id=?1)",
+                    [region.page_id],
+                    |r| r.get(0),
+                )
+                .map_err(AppError::from)?;
+            if present {
+                let valid:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM source_pages WHERE id=?1 AND source_id=?2 AND typeof(revision)='integer' AND revision>0 AND length(CAST(printed_label AS BLOB))<=200 AND complete IN (0,1) AND pdf_page>0)",params![region.page_id,region.source_id],|r|r.get(0)).map_err(AppError::from)?;
+                if !valid {
+                    return Err(invalid("present-page-metadata-corrupt"));
                 }
             }
+            let corrupt:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM source_page_hashes WHERE page_id=?1 AND (source_id!=?2 OR length(CAST(image_hash AS BLOB))!=64 OR image_hash GLOB '*[^0-9a-f]*'))",params![region.page_id,region.source_id],|r|r.get(0)).map_err(AppError::from)?;
+            if corrupt {
+                return Err(invalid("present-page-hash-metadata-corrupt"));
+            }
+        }
+        if units.insert((region.unit_id, region.page_id)) {
+            let present: bool = db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM source_units WHERE id=?1)",
+                    [region.unit_id],
+                    |r| r.get(0),
+                )
+                .map_err(AppError::from)?;
+            if present && unit_snapshot(db, region.unit_id)?.page_id != region.page_id {
+                return Err(invalid("present-unit-parent-corrupt"));
+            }
+        }
+        let exists:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM source_pages p JOIN source_units u ON u.page_id=p.id JOIN source_page_hashes h ON h.page_id=p.id AND h.source_id=p.source_id WHERE p.id=?1 AND u.id=?2)",params![region.page_id,region.unit_id],|r|r.get(0)).map_err(AppError::from)?;
+        if !exists {
+            available = false;
         }
     }
     Ok(available)
@@ -598,6 +637,7 @@ impl Store {
             "draft"
         };
         let (candidate, permit) = candidate(self, target, id).await?;
+        publishable(&candidate.data.definition)?;
         self.run(move|db| { let _permit=permit; Ok((|| {
             let tx=db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(AppError::from)?;
             target_unchanged(&tx,target,&candidate)?;
@@ -608,7 +648,8 @@ impl Store {
             tx.execute("INSERT INTO definition_approvals(version_id,encoding,snapshot,snapshot_hash,actor,rationale,originals_compared,target_kind,target_id,target_revision,comparison_encoding,comparison_hash) VALUES (?1,1,?2,?3,?4,?5,1,?6,?7,?8,1,?9)",params![version_id,encode(&check.snapshot)?,check.snapshot_hash,request.actor,request.rationale,target,id,candidate.revision,check.comparison_hash]).map_err(AppError::from)?;
             let approval_id=tx.last_insert_rowid();
             let version:i64=tx.query_row("SELECT version FROM definition_versions WHERE id=?1",[version_id],|row|row.get(0)).map_err(AppError::from)?;
-            let result=PublishedDefinition{id:version_id,version,content_hash:candidate.data.hash,approval_id,wiring_status:WiringStatus::Current,unresolved_fields:check.snapshot.unresolved.len(),definition:candidate.data.definition,advisory_tasks:"unsupported",deterministic_rules:"unsupported"};
+            let (unresolved_formulas,unresolved_constraints)=super::formula_admission::unresolved_evidence(&candidate.data.definition);
+            let result=PublishedDefinition{id:version_id,version,content_hash:candidate.data.hash,approval_id,wiring_status:WiringStatus::Current,unresolved_fields:check.snapshot.unresolved.len(),unresolved_formulas,unresolved_constraints,deterministic_rules:deterministic_rules(&candidate.data.definition),definition:candidate.data.definition,advisory_tasks:"unsupported"};
             #[cfg(test)] tests::assert_one(before);
             tx.commit().map_err(AppError::from)?; Ok(result)
         })()) }).await?

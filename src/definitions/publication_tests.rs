@@ -128,3 +128,256 @@ async fn cancelled_publication_candidate_keeps_admission_until_db_worker_finishe
     .await
     .unwrap();
 }
+
+/// One registered pair, one imported source with sheet+core roles, and its first unit.
+async fn formula_store(dir: &std::path::Path) -> (Store, serde_json::Value) {
+    fixture::fixture_pair(dir).unwrap();
+    let store = Store::open(&dir.join("formula.sqlite3")).unwrap();
+    store
+        .register_ruleset(crate::registry::RegisterRuleset {
+            game_id: "synthetic-game".into(),
+            game_label: "Synthetic game".into(),
+            edition_id: "first".into(),
+            edition_label: "First edition".into(),
+        })
+        .await
+        .unwrap();
+    store
+        .import_source(&dir.join("unknown-bundle"), &dir.join("original.pdf"))
+        .await
+        .unwrap();
+    let source = store.sources().await.unwrap().remove(0);
+    let page = store.source_page(source.pages[0].id).await.unwrap();
+    let region =
+        serde_json::json!({"source_id":source.id,"page_id":page.id,"unit_id":page.units[0].id});
+    let mut body: serde_json::Value = serde_json::from_str(include_str!(
+        "../../schemas/definition-formula-example.json"
+    ))
+    .unwrap();
+    body["sources"] = serde_json::json!([{"source_id":source.id,"pdf_sha256":source.pdf_hash,"roles":["sheet","core"]}]);
+    body["fields"][0]["mapping"] = serde_json::json!({"state":"mapped","regions":[region]});
+    body["fields"][4]["formula"]["evidence"] =
+        serde_json::json!({"state":"mapped","regions":[region]});
+    (store, body)
+}
+
+fn publication_code(error: &DefinitionError) -> &str {
+    match error {
+        DefinitionError::Invalid(report) => &report.diagnostics[0].code,
+        _ => "other",
+    }
+}
+
+async fn approve(store: &Store, id: i64) -> Result<PublishedDefinition, DefinitionError> {
+    let comparison = store.compare_definition(id, false).await?;
+    store
+        .approve_definition(
+            id,
+            false,
+            ApprovalRequest {
+                comparison_hash: comparison.comparison_hash,
+                actor: "fixture".into(),
+                rationale: "Synthetic".into(),
+                originals_compared: true,
+            },
+        )
+        .await
+}
+
+#[tokio::test]
+async fn formula_and_list_definitions_are_drafts_only_until_evaluation_and_editing_ship() {
+    let _guard = super::super::TEST_RESOURCE_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (store, body) = formula_store(dir.path()).await;
+    let draft = store
+        .save_definition_draft(serde_json::to_vec(&body).unwrap(), 0)
+        .await
+        .unwrap();
+    let error = approve(&store, draft.id).await.unwrap_err();
+    assert_eq!(publication_code(&error), "list-editing-unsupported");
+    // Without the list field (and the formulas that read it) the gate is evaluation (M3).
+    let mut scalar = body.clone();
+    scalar["fields"].as_array_mut().unwrap().remove(2);
+    scalar["fields"][2]["formula"]["expr"] = "vitality + 1".into();
+    scalar["groups"][0]["fields"] = serde_json::json!(["name", "vitality", "armor", "pace"]);
+    scalar["constraints"][0]["expr"] = "pace > 0".into();
+    let draft = store
+        .save_definition_draft(serde_json::to_vec(&scalar).unwrap(), 1)
+        .await
+        .unwrap();
+    let error = approve(&store, draft.id).await.unwrap_err();
+    assert_eq!(publication_code(&error), "formula-evaluation-unsupported");
+}
+
+#[tokio::test]
+async fn formula_evidence_references_are_verified_like_field_mappings() {
+    let _guard = super::super::TEST_RESOURCE_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (store, mut body) = formula_store(dir.path()).await;
+    let unit = body["fields"][4]["formula"]["evidence"]["regions"][0]["unit_id"]
+        .as_i64()
+        .unwrap();
+    body["fields"][4]["formula"]["evidence"]["regions"][0]["unit_id"] = (unit + 1000).into();
+    let error = store
+        .save_definition_draft(serde_json::to_vec(&body).unwrap(), 0)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        publication_code(&error),
+        "evidence-unit-page-source-mismatch"
+    );
+    let DefinitionError::Invalid(report) = &error else {
+        unreachable!()
+    };
+    assert_eq!(report.diagnostics[0].path, "/fields/4/formula/evidence");
+}
+
+/// Encoding sites: `definition_approvals.encoding CHECK(encoding=1)` (008), the provenance
+/// trigger's fixed key set (009), the INSERT in `approve_definition` and the
+/// `encoding != 1` gate in `verify_approval`. A tampered encoding-2 snapshot of a
+/// formula-free definition must be rejected, not reinterpreted.
+#[tokio::test]
+async fn encoding_two_snapshots_are_rejected_for_formula_free_definitions() {
+    let _guard = super::super::TEST_RESOURCE_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = formula_store(dir.path()).await;
+    let source = store.sources().await.unwrap().remove(0);
+    let page = store.source_page(source.pages[0].id).await.unwrap();
+    let mut body: serde_json::Value =
+        serde_json::from_str(include_str!("../../schemas/definition-example.json")).unwrap();
+    body["sources"] =
+        serde_json::json!([{"source_id":source.id,"pdf_sha256":source.pdf_hash,"roles":["sheet"]}]);
+    body["fields"][0]["mapping"] = serde_json::json!({"state":"mapped","regions":[{"source_id":source.id,"page_id":page.id,"unit_id":page.units[0].id}]});
+    let draft = store
+        .save_definition_draft(serde_json::to_vec(&body).unwrap(), 0)
+        .await
+        .unwrap();
+    let published = approve(&store, draft.id).await.unwrap();
+    assert_eq!(published.deterministic_rules, "unsupported");
+    assert!(store.definition_version(published.id).await.is_ok());
+    // Tamper consistently (matching snapshot hash) so only the encoding gate can reject it.
+    store
+        .run(|db| {
+            db.execute_batch(
+                "PRAGMA ignore_check_constraints=ON;
+                 DROP TRIGGER definition_approvals_update;
+                 UPDATE definition_approvals SET encoding=2,
+                   snapshot=json_set(snapshot,'$.encoding',2);",
+            )?;
+            let snapshot: String =
+                db.query_row("SELECT snapshot FROM definition_approvals", [], |row| {
+                    row.get(0)
+                })?;
+            let rehashed = hash(b"mimik-wiring-snapshot-v1\0", snapshot.as_bytes());
+            db.execute(
+                "UPDATE definition_approvals SET snapshot_hash=?1",
+                [rehashed],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let error = store.definition_version(published.id).await.unwrap_err();
+    assert_eq!(
+        publication_code(&error),
+        "stored-approval-snapshot-integrity"
+    );
+}
+
+/// Adds a second text unit to the importable synthetic bundle, so evidence can cite a unit
+/// that no field mapping uses.
+fn add_second_unit(dir: &std::path::Path) {
+    let bundle = dir.join("unknown-bundle");
+    let mut raw: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("source.json")).unwrap()).unwrap();
+    let polygon = serde_json::json!([[10, 60], [100, 60], [100, 90], [10, 90]]);
+    let html = "<p>Pace equals six minus armor.</p>";
+    raw["children"][0]["children"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"id":"/page/0/Text/2","block_type":"Text","polygon":polygon,"html":html,"children":null}));
+    let raw = serde_json::to_vec(&raw).unwrap();
+    std::fs::write(bundle.join("source.json"), &raw).unwrap();
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("bundle.json")).unwrap()).unwrap();
+    manifest["extraction_sha256"] = fixture::hash(&raw).into();
+    manifest["pages"][0]["units"].as_array_mut().unwrap().push(
+        serde_json::json!({"id":"/page/0/Text/2","kind":"Text","polygon":polygon,"html":html}),
+    );
+    std::fs::write(
+        bundle.join("bundle.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn formula_evidence_units_are_captured_in_the_wiring_snapshot() {
+    let _guard = super::super::TEST_RESOURCE_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    fixture::fixture_pair(dir.path()).unwrap();
+    add_second_unit(dir.path());
+    let store = Store::open(&dir.path().join("evidence.sqlite3")).unwrap();
+    store
+        .register_ruleset(crate::registry::RegisterRuleset {
+            game_id: "synthetic-game".into(),
+            game_label: "Synthetic game".into(),
+            edition_id: "first".into(),
+            edition_label: "First edition".into(),
+        })
+        .await
+        .unwrap();
+    store
+        .import_source(
+            &dir.path().join("unknown-bundle"),
+            &dir.path().join("original.pdf"),
+        )
+        .await
+        .unwrap();
+    let source = store.sources().await.unwrap().remove(0);
+    let page = store.source_page(source.pages[0].id).await.unwrap();
+    assert_eq!(page.units.len(), 2);
+    let (wired, cited) = (page.units[0].id, page.units[1].id);
+    let mut body: serde_json::Value = serde_json::from_str(include_str!(
+        "../../schemas/definition-formula-example.json"
+    ))
+    .unwrap();
+    body["sources"] = serde_json::json!([{"source_id":source.id,"pdf_sha256":source.pdf_hash,"roles":["sheet","core"]}]);
+    body["fields"][0]["mapping"] = serde_json::json!({"state":"mapped","regions":[{"source_id":source.id,"page_id":page.id,"unit_id":wired}]});
+    body["constraints"][0]["evidence"] = serde_json::json!({"state":"mapped","regions":[{"source_id":source.id,"page_id":page.id,"unit_id":cited}]});
+    let draft = store
+        .save_definition_draft(serde_json::to_vec(&body).unwrap(), 0)
+        .await
+        .unwrap();
+    let before = store.compare_definition(draft.id, false).await.unwrap();
+    let captured = |comparison: &Comparison| {
+        comparison
+            .snapshot
+            .units
+            .iter()
+            .find(|unit| unit.id == cited)
+            .map(|unit| unit.revision)
+    };
+    assert_eq!(
+        captured(&before),
+        Some(1),
+        "evidence-only unit must be captured"
+    );
+    store
+        .review_source_unit(
+            page.id,
+            cited,
+            crate::sources::UnitReview {
+                revision: 1,
+                state: "corrected".into(),
+                correction: "Pace equals six minus armor (corrected).".into(),
+                actor: "fixture".into(),
+                rationale: "Synthetic correction".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let after = store.compare_definition(draft.id, false).await.unwrap();
+    assert_eq!(captured(&after), Some(2));
+    assert_ne!(before.comparison_hash, after.comparison_hash);
+}

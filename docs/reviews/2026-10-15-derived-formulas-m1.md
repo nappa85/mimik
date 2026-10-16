@@ -106,3 +106,49 @@ and no live model or benchmark result.
   - narrowing `pub mod formula`.
 - **Not changed:** `tools/tool_loop_benchmark.py` and `examples/tool-loop-demo/`. A
   benchmark is running from the main checkout, and the switch to the CLI comes after it.
+
+## M2 (definition envelope, admission, values, publication, migration 018)
+
+Status: **implemented and independently reviewed, with review fixes applied
+(uncommitted).** The scope, deviations and verification are in plan §15.
+
+Self-check findings, supplemental only and not independent:
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| a | Medium | The planned snapshot encoding 2 conflicts with the immutable `CHECK(encoding=1)` and the trigger's key set | Kept encoding 1; separate unresolved lists derived from content; tamper test. Reviewer to confirm |
+| b | Medium | Formula definitions could have been published before view/save shows derived values | Approval gated (`formula-evaluation-unsupported`) until M3 |
+| c | Low | The contiguity test's last-statement parse could not handle a comment-only preamble | The test now skips `--` lines |
+| d | Low | First version of the encoding tamper test survived its mutant: the hash mismatch rejected the tamper before the encoding gate did | Test now rehashes consistently; mutant killed |
+
+Mutation results, implementer-run, all killed:
+- publish gate removed;
+- evidence reference check skipped;
+- `verify_approval` encoding gate opened;
+- list-item i64 check disabled.
+
+Gates: see plan §15 (all passed in `mimik-ci`; `cargo clean --release` afterwards).
+
+### M2 independent review
+
+Reviewer: Sonnet 5.5 subagent (fresh context; Muse unavailable). Verdict:
+**APPROVE-with-fixes**, nothing blocking. All three deviations were judged sound: encoding 1
+kept, formula publication gated until M3, and the contiguity test skipping comment lines.
+
+| # | Severity | Finding | Disposition | Test evidence |
+|---|---|---|---|---|
+| 1 | Medium | Evidence capture in `publication::snapshot` was untested: deleting the loop left the tests green | Test `formula_evidence_units_are_captured_in_the_wiring_snapshot`. The fixture gets a second unit cited only by constraint evidence. Via `compare_definition` (ungated), the test asserts the unit is in `snapshot.units` and that correcting it bumps its captured revision and changes `comparison_hash` | Mutant (loop `take(0)`) killed |
+| 2 | Medium | `Mapped { regions: [] }` was accepted as evidence | The schema already requires one region. `formula_admission::evidence` now also rejects empty lists (`evidence-regions-required`) as a domain check | Red before the fix; mutant killed |
+| 3 | Medium | The 1 MiB total cap applied retroactively to formula-free pins | The cap now applies only when `formula_profile` is set. A test shows a formula-free pin over 1 MiB still validates | Red before the fix; both mutants (cap always applied, cap removed) killed |
+| 4 | Low | Is evidence region validation equivalent to field mappings? | Confirmed equivalent: same `mapping` schema `$def` (1–4 unique positive-ID regions), same unit/page/source SQL match through the shared walk, and the same 1,024 dependency limit. The **only difference is intended**: evidence requires a `core`/`supplement` source role, wiring requires `sheet`. **Accepted** | Existing tests |
+| 5 | Low | Leftover nested blocks in `private_evidence_available`, and duplicated region SQL in `store::references` | Flattened. `formula_admission::dependencies()` is the single walk, used by `regions()`, `evidence_regions()` and `references()` | Covered by the tests above |
+| 6 | Low | `references()` reported `/evidence` for evidence mismatches | Now reports the exact `/fields/N/formula/evidence` or `/constraints/N/evidence` path. Field wiring keeps its legacy `/fields` path | Red before the fix; mutant killed |
+| 7 | — | The reviewer's mutants for the list cap and item-ID uniqueness did not compile | Re-run by the implementer. Uniqueness mutant: killed. List-cap mutant (`maxItems` 1000): **initially survived**, because the 257-item case reused one ID and uniqueness rejected it first. The case now uses unique IDs, and the mutant is killed | Both killed |
+
+Gates after the fixes (`mimik-ci`; disk 40G free):
+- fmt and strict clippy: pass.
+- `cargo test --all-targets --all-features`: 332 passed, 0 failed.
+- Release formula tests: 46 pass; calibration 17.9 ms.
+- `formula_eval` build, ruff, unittest (93), actionlint, `cargo audit` and `cargo about`:
+  all pass.
+- `cargo clean --release` afterwards.
