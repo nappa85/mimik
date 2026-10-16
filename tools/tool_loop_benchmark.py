@@ -2539,6 +2539,7 @@ def run(args, model, out, clock=time.monotonic, pack=None, wall=time.time) -> li
                 getattr(args, "thinking_capability", "toggle"), args.thinking
             ),
             "server": getattr(args, "server_config_doc", None),
+            "device": getattr(args, "device", "gpu"),
             "length_rule": LENGTH_RULE,
             "visible_text_hashes": visible_text_hashes(),
             "pack_hashes": pack.hashes(),
@@ -2757,6 +2758,7 @@ GROUP_IDENTITY = (
     "thinking_capability",
     "thinking_effective",
     "server",
+    "device",
     "model_sha256",
     "case_filter",
     "case_subset",
@@ -2954,6 +2956,12 @@ def build_parser():
         "--quiet-progress",
         action="store_true",
         help="progress lines without case id, outcome or correctness (held-out blindness)",
+    )
+    p.add_argument(
+        "--device",
+        choices=("gpu", "cpu"),
+        default="gpu",
+        help="where the served model runs (recorded; CPU and GPU ledgers never merge)",
     )
     p.add_argument(
         "--server-config",

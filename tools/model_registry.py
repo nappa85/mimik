@@ -154,6 +154,13 @@ SERVER_KEYS = {
 CAPABILITY_KEYS = {"tools", "thinking", "thinking_evidence", "decision_readout"}
 SOURCE_KEYS = {"repo", "revision", "file"}
 CTX_RANGE = (512, 262144)
+DEVICES = ("gpu", "cpu")
+# CPU-only mode (GPU cooling fault, 2026-10-16): a first ~5k-token prefill on CPU can take
+# minutes; the episode estimate is conservative until a preflight measures it.
+CPU_REQUEST_TIMEOUT = 900
+CPU_HEALTH_WAIT = 1800
+CPU_SECONDS_PER_EPISODE = 360
+CPU_THREADS = 6  # Ryzen 5 1600: 6 cores / 12 threads
 
 
 class RegistryError(ValueError):
@@ -339,18 +346,29 @@ def model_file(doc: dict, key: str, env=None) -> Path:
     return model_root(doc, env) / model(doc, key)["path"]
 
 
-def server_args(entry: dict, ctx: int, n_cpu_moe=None) -> list[str]:
-    """The llama.cpp server vector. Fixed hardening flags first, in the runner's v2 order."""
+def server_args(entry: dict, ctx: int, n_cpu_moe=None, device="gpu", threads=None) -> list[str]:
+    """The llama.cpp server vector. Fixed hardening flags first, in the runner's v2 order.
+
+    device "cpu": --n-gpu-layers 0 (the runner also passes no GPU device to the container).
+    """
     _int(ctx, "ctx", *CTX_RANGE)
+    if device not in DEVICES:
+        raise RegistryError(f"device must be one of {list(DEVICES)}")
     server = entry["server"]
+    if threads is not None:
+        _int(threads, "threads", 1, 64)
     moe = server["n_cpu_moe"] if n_cpu_moe is None else n_cpu_moe
-    if moe is None and server["n_cpu_moe_required"]:
+    if device == "cpu":
+        moe = None  # every layer is on the CPU already
+    if moe is None and server["n_cpu_moe_required"] and device == "gpu":
         raise RegistryError(f"{entry['label']} needs n_cpu_moe (N_CPU_MOE, llama.cpp --n-cpu-moe)")
     _int(moe, "n_cpu_moe", 0, 999, allow_none=True)
     args = ["--model", "/models/model.gguf", "--alias", entry["label"], "--host", "0.0.0.0"]
     args += ["--port", "8080", "--offline", "--no-webui", "--no-slots", "--no-mmproj", "--jinja"]
-    args += ["--n-gpu-layers", str(server["n_gpu_layers"]), "--fit", "off"]
-    args += ["--threads", str(server["threads"]), "--ctx-size", str(ctx), "--parallel", "1"]
+    layers = 0 if device == "cpu" else server["n_gpu_layers"]
+    args += ["--n-gpu-layers", str(layers), "--fit", "off"]
+    thread_count = threads if threads is not None else server["threads"]
+    args += ["--threads", str(thread_count), "--ctx-size", str(ctx), "--parallel", "1"]
     args += ["--no-warmup", "--cache-ram", str(server["cache_ram"])]
     if moe is not None:
         args += ["--n-cpu-moe", str(moe)]
@@ -363,15 +381,26 @@ def server_args(entry: dict, ctx: int, n_cpu_moe=None) -> list[str]:
     return args + list(server["extra_args"])
 
 
-def shell_exports(doc: dict, key: str, ctx=None, n_cpu_moe=None, env=None) -> str:
+def shell_exports(
+    doc: dict, key: str, ctx=None, n_cpu_moe=None, env=None, device="gpu", threads=None
+) -> str:
     entry = model(doc, key)
     if not entry["downloaded"]:
         raise RegistryError(f"{key} is registered but not downloaded (downloaded: false)")
     if entry["capabilities"]["tools"] == "none":
         raise RegistryError(f"{key} has no tool-call support (capabilities.tools: none)")
     ctx = entry["server"]["ctx"] if ctx is None else ctx
-    args = server_args(entry, ctx, n_cpu_moe)
+    if device == "cpu" and threads is None:
+        threads = CPU_THREADS
+    args = server_args(entry, ctx, n_cpu_moe, device=device, threads=threads)
     moe = entry["server"]["n_cpu_moe"] if n_cpu_moe is None else n_cpu_moe
+    if device == "cpu":
+        moe = None
+    request_timeout = entry["request_timeout_seconds"]
+    health_wait = entry["health_wait_seconds"]
+    if device == "cpu":
+        request_timeout = max(request_timeout, CPU_REQUEST_TIMEOUT)
+        health_wait = max(health_wait, CPU_HEALTH_WAIT)
     values = {
         "reg_label": entry["label"],
         "reg_path": str(model_file(doc, key, env)),
@@ -382,8 +411,9 @@ def shell_exports(doc: dict, key: str, ctx=None, n_cpu_moe=None, env=None) -> st
         "reg_n_cpu_moe": "" if moe is None else moe,
         "reg_memory": entry["memory_limit"],
         "reg_prewarm": int(entry["prewarm"]),
-        "reg_health_wait": entry["health_wait_seconds"],
-        "reg_request_timeout": entry["request_timeout_seconds"],
+        "reg_health_wait": health_wait,
+        "reg_request_timeout": request_timeout,
+        "reg_device": device,
         "reg_thinking": entry["capabilities"]["thinking"],
         "reg_tools": entry["capabilities"]["tools"],
         "reg_vram_budget": entry["vram_budget_bytes"],
@@ -408,6 +438,8 @@ def main(argv=None) -> int:
     shell.add_argument("key")
     shell.add_argument("--ctx", type=int)
     shell.add_argument("--n-cpu-moe", type=int)
+    shell.add_argument("--device", choices=DEVICES, default="gpu")
+    shell.add_argument("--threads", type=int)
     args = parser.parse_args(argv)
     try:
         doc = load(args.registry)
@@ -420,7 +452,16 @@ def main(argv=None) -> int:
         elif args.command == "get":
             print(json.dumps(model(doc, args.key), indent=2))
         else:
-            sys.stdout.write(shell_exports(doc, args.key, args.ctx, args.n_cpu_moe))
+            sys.stdout.write(
+                shell_exports(
+                    doc,
+                    args.key,
+                    args.ctx,
+                    args.n_cpu_moe,
+                    device=args.device,
+                    threads=args.threads,
+                )
+            )
     except (RegistryError, OSError, json.JSONDecodeError) as error:
         print(f"model registry: {error}", file=sys.stderr)
         return 2

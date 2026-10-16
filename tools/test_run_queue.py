@@ -203,8 +203,15 @@ def fake_header(env, key, split, b):
         "thinking_capability": entry["capabilities"]["thinking"],
         "server": {
             "image": entry["server_image"],
-            "args": model_registry.server_args(entry, ctx, None if moe is None else int(moe)),
+            "args": model_registry.server_args(
+                entry,
+                ctx,
+                None if moe is None else int(moe),
+                device=env.get("DEVICE", "gpu"),
+                threads=int(env["THREADS"]) if env.get("THREADS") else None,
+            ),
         },
+        "device": env.get("DEVICE", "gpu"),
         "planned_episodes": len(cases) * len(seeds),
         "case_order": cases,
         "case_subset": subset,
@@ -1423,6 +1430,91 @@ class ThermalQueueTests(Harness):
         path.write_text(json.dumps(queue_doc([arm("a")], thermal={"fan": 1})))
         with self.assertRaises(rq.QueueError):
             rq.load_queue(path, REGISTRY)
+
+
+class CpuQueueTests(Harness):
+    """CPU-only arms (GPU cooling fault): no fan precondition, no GPU stops, still sampled."""
+
+    START = at(2026, 10, SAT, 10, 0)
+
+    def test_cpu_arm_env_identity_and_estimate(self):
+        doc = queue_doc(
+            [
+                arm(
+                    "a",
+                    model="lfm25-8b-a1b",
+                    split="dev",
+                    cases_file=str(SUBSET),
+                    device="cpu",
+                    threads=6,
+                )
+            ]
+        )
+        q = self.make(
+            doc,
+            self.START,
+            fan_reader=lambda: manual_fan(enable=2, pwm=56),
+            plan={"a": [{"seconds": 600}]},
+        )
+        spe, source = q.seconds_per_episode(q.arms[0])
+        self.assertEqual((spe, source), (360.0, "CPU default"))
+        manifest = q.run()
+        self.assertEqual(manifest["arms"][0]["state"], "complete", manifest["arms"][0])
+        _, env = self.launcher.launches[0]
+        self.assertEqual((env["DEVICE"], env["THREADS"]), ("cpu", "6"))
+        self.assertEqual(manifest["arms"][0]["device"], "cpu")
+
+    def test_hot_gpu_does_not_stop_a_cpu_arm_but_is_recorded(self):
+        hot = cool_gpu(85, 97)
+        doc = queue_doc([arm("a", device="cpu", max_arm_seconds=7200)])
+        q = self.make(doc, self.START, thermal_reader=lambda: hot, plan={"a": [{"seconds": 600}]})
+        manifest = q.run()
+        attempt = manifest["arms"][0]["attempts"][0]
+        self.assertEqual(attempt["status"], "complete")
+        self.assertEqual(attempt["temperatures"]["amdgpu:junction"]["max"], 97)
+        self.assertEqual(manifest["thermal"]["cpu_temperature"], "unavailable on this host")
+
+    def test_gpu_arm_still_refused_without_the_fan(self):
+        q = self.make(
+            queue_doc([arm("a")]), self.START, fan_reader=lambda: manual_fan(enable=2, pwm=56)
+        )
+        manifest = q.run()
+        self.assertTrue(manifest["arms"][0]["reason"].startswith("fan_not_manual"))
+
+    def test_preflight_measurement_sets_the_cpu_estimate(self):
+        doc = queue_doc([arm("a", model="lfm25-8b-a1b", device="cpu")])
+        q = self.make(doc, self.START, plan={"a": [{"kind": "harness_fail"}]})
+        q.run()  # main failed, but its preflight measured one episode
+        spe, source = q.seconds_per_episode(q.arms[0])
+        self.assertEqual((spe, source), (30.0, "measured this session"))  # preflight 30 s
+
+    def test_queue_file_device_validation(self):
+        path = self.root / "d.json"
+        path.write_text(json.dumps(queue_doc([arm("a", device="tpu")])))
+        with self.assertRaises(rq.QueueError):
+            rq.load_queue(path, REGISTRY)
+        path.write_text(json.dumps(queue_doc([arm("a", device="cpu", threads=0)])))
+        with self.assertRaises(rq.QueueError):
+            rq.load_queue(path, REGISTRY)
+
+    def test_committed_cpu_queue(self):
+        q = rq.load_queue(TOOLS / "queues" / "screen-candidates-cpu-s40.json", REGISTRY)
+        self.assertEqual(
+            [a["model"] for a in q["arms"]],
+            ["lfm25-8b-a1b", "minicpm5-2b", "lfm25-2.6b", "granite42-3b", "gemma4-e4b"],
+        )
+        self.assertEqual({a["device"] for a in q["arms"]}, {"cpu"})
+        gpu = rq.load_queue(TOOLS / "queues" / "screen-candidates-s40.json", REGISTRY)
+        ref = {a["model"]: a for a in gpu["arms"]}
+        for a in q["arms"]:
+            gpu_env = {k: v for k, v in ref[a["model"]]["env"].items()}
+            cpu_env = {
+                k: v for k, v in a["env"].items() if k not in ("REQUEST_TIMEOUT", "HEALTH_WAIT")
+            }
+            self.assertEqual(cpu_env, gpu_env)  # same C0 flags, ctx and sampling
+            self.assertEqual(a["cases_file"], ref[a["model"]]["cases_file"])
+            self.assertEqual((a["seeds"], a["split"]), (ref[a["model"]]["seeds"], "dev"))
+            self.assertEqual(a["arm"], ref[a["model"]]["arm"] + "-cpu")
 
 
 class SupervisorTests(unittest.TestCase):

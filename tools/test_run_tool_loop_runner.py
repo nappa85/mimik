@@ -282,6 +282,10 @@ class RunnerTests(unittest.TestCase):
         self.formula_sha = hashlib.sha256(Path(FORMULA).read_bytes()).hexdigest()
         self.clock = self.tmp / "clock"
         # A fake hwmon tree: GPU cool, fan manual at 255 (the runner's fan precondition).
+        self.dri = self.tmp / "dri"  # stand-ins for /dev/dri/renderD128 and card0
+        self.dri.mkdir()
+        for node in ("renderD128", "card0"):
+            (self.dri / node).write_text("")
         self.hwmon = self.tmp / "hwmon"
         chip = self.hwmon / "hwmon3"
         chip.mkdir(parents=True)
@@ -325,6 +329,7 @@ class RunnerTests(unittest.TestCase):
             "RUNNER_POLL_SECONDS": "0",
             "MIMIK_TEST_MODE": "1",
             "MIMIK_TEST_HWMON": str(self.hwmon),
+            "MIMIK_TEST_DRI": str(self.dri),
             "OUT_DIR": str(self.tmp / f"out-{len(list(self.tmp.iterdir()))}"),
         }
         base.update({k: v for k, v in env.items() if v is not None})
@@ -819,6 +824,41 @@ class RunnerTests(unittest.TestCase):
                 self.assertIn("failure=fan_not_manual", text)
                 self.assertIn("sudo tee", text)
                 self.assertFalse((self.log / "server.json").exists())
+
+    # ---- CPU-only mode (GPU cooling fault, 2026-10-16)
+    def test_cpu_arm_has_no_gpu_devices_and_ngl_0(self):
+        (self.hwmon / "hwmon3" / "pwm1_enable").write_text("2\n")  # auto fan: irrelevant on CPU
+        proc, out = self.run_runner("qwen3-4b-2507", "smoke", "17", DEVICE="cpu", THREADS="6")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        server = self.server()
+        self.assertNotIn("--device", server["opts"])
+        self.assertNotIn("--group-add", server["opts"])
+        args = server["args"]
+        self.assertEqual(args[args.index("--n-gpu-layers") + 1], "0")
+        self.assertEqual(args[args.index("--threads") + 1], "6")
+        prov = self.prov(out)
+        self.assertEqual(prov["device"], "cpu")
+        self.assertEqual(prov["cpu_temperature"], "unavailable")
+        self.assertIn("temp_amdgpu_edge_before", prov)
+        self.assertNotIn("fan_pwm1_enable", prov)  # the fan precondition is skipped
+        header = self.ledger(out)[0]
+        self.assertEqual(header["device"], "cpu")
+        calls = [json.loads(x) for x in (self.log / "harness-calls.jsonl").read_text().splitlines()]
+        self.assertEqual(calls[-1][calls[-1].index("--request-timeout") + 1], "900")
+
+    def test_gpu_arm_still_needs_the_fan_and_gpu_devices(self):
+        proc, _ = self.run_runner("qwen3-4b-2507", "smoke", "17")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("--device", self.server()["opts"])
+        (self.hwmon / "hwmon3" / "pwm1_enable").write_text("2\n")
+        proc, _ = self.run_runner("qwen3-4b-2507", "smoke", "17", DEVICE="gpu")
+        self.assertEqual(proc.returncode, 14, proc.stderr)
+
+    def test_bad_device_or_threads_refused(self):
+        for env in ({"DEVICE": "tpu"}, {"DEVICE": "cpu", "THREADS": "0"}):
+            with self.subTest(env=env):
+                proc, _ = self.run_runner("qwen3-4b-2507", "smoke", "17", **env)
+                self.assertEqual(proc.returncode, 2, proc.stderr)
 
     def test_shellcheck_clean_if_available(self):
         if not shutil.which("shellcheck"):

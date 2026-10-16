@@ -22,6 +22,9 @@
 #   WINDOW_END      absolute cutoff (epoch s; the queue passes the window end)
 #   QUEUE_PID       the queue's pid: the runner stops if that process is gone
 #   N_CPU_MOE       llama.cpp --n-cpu-moe (required where the registry says so)
+#   DEVICE          gpu (default) | cpu: no /dev/dri in the server container, -ngl 0, request
+#                   timeout >= 900 s, health wait >= 1800 s, no fan precondition
+#   THREADS         llama.cpp --threads (default: registry; 6 for cpu)
 #   MIMIK_MODEL_ROOT  model root (default: registry model_root)
 #   MODEL_PATH / MODEL_SHA256      override the model file and its expected sha256
 #   HASH_CACHE      file of model hashes verified this session (the queue sets it)
@@ -98,6 +101,7 @@ ours() {  # ours <name>: the container exists and carries this run's label
   [ "$(dk inspect -f '{{index .Config.Labels "mimik.toolloop.run"}}' "$1" 2>/dev/null)" = "$RUN_ID" ]
 }
 check_registry=${CHECK_REGISTRY:-$MAIN/target/tool-loop-check-containers.txt}
+mkdir -p "$(dirname "$check_registry")"
 owned_names() {  # owned containers: label AND name prefix; fails if docker cannot list
   local names
   names=$(dk ps -a --filter "label=$LABEL" --format '{{.Names}}') || return 1
@@ -120,6 +124,15 @@ ctx_arg=${4:-${CTX:-}}
 reg_cmd=(python3 "$ROOT/tools/model_registry.py" shell "$key")
 [ -z "$ctx_arg" ] || reg_cmd+=(--ctx "$ctx_arg")
 [ -z "${N_CPU_MOE:-}" ] || reg_cmd+=(--n-cpu-moe "$N_CPU_MOE")
+# DEVICE=cpu (GPU cooling fault, 2026-10-16): no /dev/dri in the server container, -ngl 0.
+device=${DEVICE:-gpu}
+case $device in gpu|cpu) ;; *) die 2 "DEVICE must be gpu or cpu" ;; esac
+reg_cmd+=(--device "$device")
+if [ -n "${THREADS:-}" ]; then
+  { is_uint "$THREADS" && [ "$THREADS" -ge 1 ] && [ "$THREADS" -le 64 ]; } \
+    || die 2 "THREADS must be 1..64"
+  reg_cmd+=(--threads "$THREADS")
+fi
 # Declared here so the names are visible; the registry tool assigns them.
 reg_label=''
 reg_path=''
@@ -135,6 +148,7 @@ reg_request_timeout=''
 reg_thinking=''
 reg_tools=''
 reg_vram_budget=''
+reg_device=''
 reg_server_config=''
 reg_server_args=()
 reg=$("${reg_cmd[@]}") || exit 2
@@ -185,7 +199,8 @@ fail() {  # fail <exit> <class> <message>
   echo "date_start=$(date -Is)"
   echo "runner=tools/run_tool_loop_benchmark.sh harness=v3 key=$key split=$split arm=${ARM:-}"
   echo "window_end=${WINDOW_END:-} queue_pid=${QUEUE_PID:-} vram_budget_bytes=$reg_vram_budget"
-  echo "run_id=$RUN_ID docker_context=$docker_context"
+  echo "run_id=$RUN_ID docker_context=$docker_context device=$reg_device"
+  echo "cpu_temperature=unavailable (no CPU sensor on this host: no k10temp in /sys/class/hwmon)"
 } > "$prov"
 cases_file_sha=
 if [ -n "${CASES_FILE:-}" ]; then
@@ -410,11 +425,24 @@ temps() {  # temperatures from /sys/class/hwmon by sensor name; the peak file ke
 temps --prefix before >> "$prov"
 # The GPU fan must be manual at >= 230 (auto held ~22 % PWM while the junction reached SW CTF
 # on 2026-10-16); the manual setting resets on reboot.
-if ! fan_line=$(timeout --foreground -k 5 30 python3 "$ROOT/tools/toolloop_ops.py" fancheck \
-  2> "$out/fancheck.err"); then
-  fail 14 fan_not_manual "$(tr '\n' ' ' < "$out/fancheck.err")"
+gpu_devices=()
+if [ "$reg_device" = gpu ]; then
+  if ! fan_line=$(timeout --foreground -k 5 30 python3 "$ROOT/tools/toolloop_ops.py" fancheck \
+    2> "$out/fancheck.err"); then
+    fail 14 fan_not_manual "$(tr '\n' ' ' < "$out/fancheck.err")"
+  fi
+  echo "$fan_line" >> "$prov"
+  dri=/dev/dri  # the test tree replaces it only in test mode
+  if [ "${MIMIK_TEST_MODE:-}" = 1 ] && [ -n "${MIMIK_TEST_DRI:-}" ]; then dri=$MIMIK_TEST_DRI; fi
+  if ! render_gid=$(stat -c %g "$dri/renderD128" 2>/dev/null) \
+    || ! card_gid=$(stat -c %g "$dri/card0" 2>/dev/null); then
+    fail 12 infra_docker "GPU device nodes $dri/renderD128 or $dri/card0 missing"
+  fi
+  gpu_devices=(--device "$dri/renderD128" --device "$dri/card0"
+    --group-add "$render_gid" --group-add "$card_gid")
+else
+  echo "fan_precondition=skipped (device cpu: no GPU device in the container)" >> "$prov"
 fi
-echo "$fan_line" >> "$prov"
 if net_state=$(dk network inspect -f '{{.Internal}} {{index .Labels "mimik.toolloop"}}' "$NET" 2>/dev/null); then
   [ "$net_state" = "true v3" ] || fail 12 infra_docker "network $NET exists and is not internal and owned ($net_state)"
 else
@@ -425,8 +453,7 @@ t0=$(date +%s)
 dk run -d --init --pull never --name "$SRV" "${LABELS[@]}" --network "$NET" --network-alias server \
   --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
   --memory "$srv_memory" --memory-swap "$srv_memory" --cpus 6 --pids-limit 512 \
-  --device /dev/dri/renderD128 --device /dev/dri/card0 \
-  --group-add "$(stat -c %g /dev/dri/renderD128)" --group-add "$(stat -c %g /dev/dri/card0)" \
+  "${gpu_devices[@]}" \
   --mount type=bind,src="$model_real",dst=/models/model.gguf,readonly \
   "$reg_image" "${reg_server_args[@]}" >/dev/null || fail 4 server_start "server container did not start"
 server_failed() {  # server_failed <class> <message>: a VRAM allocation failure is infra_vram
@@ -454,7 +481,7 @@ quiet=()
 common=(python3 /tools/tool_loop_benchmark.py --pack /pack --endpoint http://server:8080
   --model-label "$reg_label" --temperature "$temperature" --top-p "$top_p"
   --max-tokens "$max_tokens" --max-turns "$max_turns" --thinking "$thinking"
-  --thinking-capability "$reg_thinking" --cache-prompt --tool-choice auto
+  --thinking-capability "$reg_thinking" --cache-prompt --tool-choice auto --device "$reg_device"
   --request-timeout "$request_timeout" --ctx "$ctx" "${flags[@]}" "${quiet[@]}"
   --server-config "$reg_server_config"
   --formula-cli "/formula/$CLI_IN_VOLUME" --model-sha256 "$actual_model_sha"

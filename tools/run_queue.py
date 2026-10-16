@@ -146,6 +146,8 @@ ARM_KEYS = {
     "g0",
     "n_cpu_moe_from_g0",
     "preflight_case",
+    "device",
+    "threads",
 }
 QUEUE_KEYS = {
     "schema",
@@ -242,7 +244,14 @@ def load_queue(path: Path, registry: dict) -> dict:
         where = f"arms[{n}]"
         if not isinstance(raw, dict) or set(raw) - ARM_KEYS:
             raise QueueError(f"{where}: unknown keys {sorted(set(raw) - ARM_KEYS)}")
-        arm = {"preflight_case": preflight, "required": True, "retry": True, "g0": False}
+        arm = {
+            "preflight_case": preflight,
+            "required": True,
+            "retry": True,
+            "g0": False,
+            "device": "gpu",
+            "threads": None,
+        }
         arm.update(defaults)
         arm.update(raw)
         arm["env"] = _env_values(dict(defaults.get("env", {}), **raw.get("env", {})), where)
@@ -269,6 +278,15 @@ def load_queue(path: Path, registry: dict) -> dict:
         for flag in ("required", "retry", "g0"):
             if not isinstance(arm[flag], bool):
                 raise QueueError(f"{where}: {flag} must be true or false")
+        if arm["device"] not in model_registry.DEVICES:
+            raise QueueError(f"{where}: device must be one of {list(model_registry.DEVICES)}")
+        threads = arm["threads"]
+        if threads is not None and (
+            isinstance(threads, bool) or not isinstance(threads, int) or not 1 <= threads <= 64
+        ):
+            raise QueueError(f"{where}: threads must be an integer 1..64")
+        if arm["device"] == "cpu" and arm["g0"]:
+            raise QueueError(f"{where}: a g0 arm measures the GPU; it cannot be device cpu")
         if arm["g0"]:
             arm["required"], arm["retry"] = False, False  # a failed load is a G0 result
             if "N_CPU_MOE" not in arm["env"]:
@@ -615,6 +633,7 @@ class Queue:
                 "sensors_found": self.sensors_found,
                 "thermal_stops": self.thermal_stops,
                 "limits": self.q["thermal"],
+                "cpu_temperature": "unavailable on this host",
             },
             # Loud, never silent: diagnostics the runner could not read (review round 3).
             "warnings": [
@@ -629,6 +648,7 @@ class Queue:
                     "model": a["config"]["model"],
                     "arm": a["config"]["arm"],
                     "split": a["config"]["split"],
+                    "device": a["config"]["device"],
                     "required": a["config"]["required"],
                     "vram_budget_bytes": self.registry["models"][a["config"]["model"]][
                         "vram_budget_bytes"
@@ -672,8 +692,11 @@ class Queue:
         cfg = arm["config"]
         if cfg.get("seconds_per_episode"):
             return float(cfg["seconds_per_episode"]), "queue file"
-        if cfg["model"] in self.measured_spe:
-            return self.measured_spe[cfg["model"]], "measured this session"
+        key = (cfg["model"], cfg["device"])
+        if key in self.measured_spe:
+            return self.measured_spe[key], "measured this session"
+        if cfg["device"] == "cpu":
+            return float(model_registry.CPU_SECONDS_PER_EPISODE), "CPU default"
         entry = self.registry["models"][cfg["model"]]
         return float(entry["seconds_per_episode"]), "registry"
 
@@ -691,6 +714,12 @@ class Queue:
         sha = self.registry["models"][key]["sha256"]
         return self.hash_cache.exists() and sha in self.hash_cache.read_text(encoding="utf-8")
 
+    @staticmethod
+    def threads(cfg):
+        if cfg["threads"] is not None:
+            return cfg["threads"]
+        return model_registry.CPU_THREADS if cfg["device"] == "cpu" else None
+
     def plan(self, arm, env) -> dict:
         """What the ledger must show for this arm (strict completeness, review fix 6)."""
         cfg = arm["config"]
@@ -699,7 +728,13 @@ class Queue:
         moe = env.get("N_CPU_MOE")
         server = {
             "image": entry["server_image"],
-            "args": model_registry.server_args(entry, ctx, None if moe is None else int(moe)),
+            "args": model_registry.server_args(
+                entry,
+                ctx,
+                None if moe is None else int(moe),
+                device=cfg["device"],
+                threads=self.threads(cfg),
+            ),
         }
         flags = {
             name: env.get(var, "1" if on else "0") == "1" for var, (name, on) in FLAG_ENV.items()
@@ -729,6 +764,7 @@ class Queue:
             },
             "thinking_capability": entry["capabilities"]["thinking"],
             "server": server,
+            "device": cfg["device"],
         }
         if cfg.get("cases_file"):
             doc = json.loads(Path(cfg["cases_file"]).read_text(encoding="utf-8"))
@@ -761,7 +797,9 @@ class Queue:
                 return "stop", f"disk low: {where} has {free / 1e9:.1f} GB free"
         if not self.lock_probe():
             return "stop", "lock held: another tool-loop run is active"
-        problem = ops.fan_precondition(self.read_fan(), self.q["thermal"])
+        problem = None
+        if cfg["device"] == "gpu":
+            problem = ops.fan_precondition(self.read_fan(), self.q["thermal"])
         if problem:
             self.log("fan_not_manual", detail=problem)
             return "refuse", f"fan_not_manual: {problem}"
@@ -819,6 +857,9 @@ class Queue:
             env["CASES"] = cfg["cases"]
         if cfg.get("cases_file"):
             env["CASES_FILE"] = cfg["cases_file"]
+        env["DEVICE"] = cfg["device"]
+        if self.threads(cfg) is not None:
+            env["THREADS"] = str(self.threads(cfg))
         if arm.get("selected_n_cpu_moe") is not None:
             env["N_CPU_MOE"] = str(arm["selected_n_cpu_moe"])
         env.update(self.extra_env)
@@ -921,7 +962,13 @@ class Queue:
                 hit = [name for name, at in limits.items() if now >= at]
                 if not hit and now >= next_sample:
                     next_sample = now + self.q["thermal"]["sample_seconds"]
-                    verdict, reason = guard.check(self.read_thermal(), now, self.read_fan())
+                    if cfg["device"] == "cpu":
+                        # No GPU work: GPU stops and the fan rules do not apply; the samples are
+                        # still recorded and the watchdog keeps its hard limits.
+                        guard.record(self.read_thermal(), self.read_fan())
+                        verdict = reason = None
+                    else:
+                        verdict, reason = guard.check(self.read_thermal(), now, self.read_fan())
                     if verdict:
                         hit = [verdict]
                         record["thermal_reason"] = reason
@@ -1055,8 +1102,14 @@ class Queue:
         prov = parse_provenance(Path(record["dir"]) / "provenance.txt")
         wall = _int_or_none(prov.get("main_wall_seconds"))
         check = record.get("ledger_check") or {}
+        key = (cfg["model"], cfg["device"])
         if record["status"] == "complete" and wall and check.get("run"):
-            self.measured_spe[cfg["model"]] = wall / check["run"]
+            self.measured_spe[key] = wall / check["run"]
+        elif key not in self.measured_spe:
+            preflight = _int_or_none(prov.get("preflight_wall_seconds"))
+            if preflight and prov.get("preflight_exit") == "0":
+                self.measured_spe[key] = float(preflight)  # one measured episode
+                self.log("spe_from_preflight", arm=arm["id"], seconds=preflight)
         if not cfg["g0"]:
             return
         vram = [_int_or_none(prov.get(k)) for k in ("vram_used_loaded", "vram_used_end")]
@@ -1320,7 +1373,7 @@ class Queue:
                 self.transition(arm, "not_started", reason="watchdog unavailable")
                 self.stop("watchdog unavailable: no heavy work without it")
                 return "not_started"
-            if not self.thermal_ready():
+            if cfg["device"] == "gpu" and not self.thermal_ready():
                 self.transition(arm, "not_started", reason="GPU did not cool down")
                 self.stop("thermal: GPU did not cool down within the cap")
                 return "not_started"
