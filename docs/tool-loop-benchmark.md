@@ -1080,6 +1080,56 @@ the manifest's `thermal.limits`):
   20:08 from `run-4e16649e9c10` use the previous guard plus the main session's interim
   interlock script; this stricter guard applies to launches from a later commit.
 
+### CPU device mode (2026-10-16, GPU cooling fault)
+
+A 20 s diagnostic showed a cooling hardware fault: the forced 700 MHz sclk cap did not hold
+under compute (2,470–2,495 MHz, 142 W) and the junction went from 29 to 86 °C in 2 s with the
+edge at 42 °C (poor die contact). User decision: **CPU-only runs until the GPU is re-pasted;
+no GPU inference at all.**
+
+- **Per arm** `device: "cpu"` (queue file, also in `defaults`) and `threads` (1–64, default 6
+  on this Ryzen 5 1600, 6 cores / 12 threads); the runner takes `DEVICE=cpu` and `THREADS`.
+- **Server container:** no `/dev/dri` device nodes and no video/render `--group-add`, so
+  llama.cpp cannot reach the GPU, even for prompt processing; `--n-gpu-layers 0`,
+  `--threads N`; `--n-cpu-moe` is dropped (every layer is on the CPU). GPU arms are
+  unchanged, and a GPU arm without the device nodes now fails clearly (`infra_docker`).
+- **Identity:** `device` is in provenance (`device=cpu`), in the ledger header (harness
+  `--device`) and in `GROUP_IDENTITY`, and the server vector differs (`-ngl 0`, threads), so
+  CPU and GPU ledgers never merge.
+- **Thermal:** the fan precondition (`fan_precondition=skipped`) and the GPU temperature and fan
+  stops do not apply to CPU arms. The queue still samples every 5 s and records the GPU, NVMe
+  and ACPI temperatures and the fan; the runner still records `temp_*_before`/`_peak`; the
+  watchdog keeps its hard limits (crit − 5 °C, junction ≥ 95 °C) for every arm. CPU
+  temperature is not readable on this host (no `k10temp`): recorded as
+  `cpu_temperature=unavailable` in provenance and in the manifest.
+- **Timeouts and estimates:** request timeout ≥ 900 s per request and health wait ≥ 1800 s
+  (`model_registry.CPU_REQUEST_TIMEOUT`, `CPU_HEALTH_WAIT`); the queue file also sets them.
+  Seconds per episode: the queue file, else a measurement this session for the same model and
+  device (a completed arm, or the preflight's single episode when the main run did not
+  complete), else the conservative CPU default of 360 s (`CPU_SECONDS_PER_EPISODE`).
+- **Queue file** `tools/queues/screen-candidates-cpu-s40.json`: the same 40-case dev screen,
+  seed 17 and C0 settings as `screen-candidates-s40` (arm label `S40-c0-cpu`), in the order
+  lfm25-8b-a1b (MoE, 1B active), minicpm5-2b, lfm25-2.6b, granite42-3b, gemma4-e4b; the 8B
+  dense models are left out (too slow on CPU).
+- Tests: registry CPU args and timeouts; harness `--device` in the header and the identity;
+  runner (no `/dev/dri`, no `--group-add`, `-ngl 0`, threads, request timeout 900, fan
+  precondition skipped on CPU and enforced on GPU, bad device or threads refused); queue (env,
+  CPU estimate, hot GPU does not stop a CPU arm but is recorded, GPU arm still refused without
+  the fan, preflight measurement, device validation, the committed CPU queue). Red against
+  `0841275`: 10 of 12 new tests; the GPU-still-needs-the-fan tests held there by design, and
+  the device-validation test passed there for the wrong reason (unknown key).
+- **Measured CPU preflight (2026-10-16 20:38–20:42, host, one dev case):** lfm25-8b-a1b,
+  `DEVICE=cpu THREADS=6 CASES=dev-001 SEEDS=17 CTX=24576`, runner exit 0,
+  `cleanup_verified=true`. The model hash took about 5 min from the HDD and the pre-warm 46 s;
+  the server was healthy in 3 s. The episode took **122 s** (harness wall 124 s): 3 turns,
+  outcome `proposal`, scored correct; request latencies 48.9, 60.4 and 12.9 s; 9,185 prompt
+  and 1,677 completion tokens. The server log shows prompt processing at about 59–67 tokens/s
+  (the first prefill: 2,699 tokens in 40.3 s) and generation at about 23–24 tokens/s. VRAM use
+  stayed at its idle 579,670,016 B before, while loaded and at the end, so the GPU was not
+  used; GPU edge and junction peaked at 31 °C, NVMe Composite at 32.85 °C; server memory peak
+  4.42 GB, no swap. One case only: other cases and the dense models will differ; the queue
+  still starts from the 360 s default and switches to the session's own preflight measurement.
+
 ## Limitations
 
 - A model that writes a finishing call as plain text gets `no_outcome`. This is deliberate,
