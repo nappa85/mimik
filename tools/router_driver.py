@@ -33,11 +33,15 @@ def quantile_keys(counts: dict, quantiles=("p50", "p90", "max")) -> dict:
     """Nearest-rank quantiles of the prompt token counts; ties to the lower key."""
     ordered = sorted(counts.items(), key=lambda kv: (kv[1], kv[0]))
     n = len(ordered)
-    picks = {}
-    for q in quantiles:
-        rank = n if q == "max" else max(1, math.ceil(int(q[1:]) / 100 * n))
+    ranks = {q: n if q == "max" else max(1, math.ceil(int(q[1:]) / 100 * n)) for q in quantiles}
+    picks, taken = {}, set()
+    for q in sorted(quantiles, key=lambda q: (-ranks[q], q != "max")):  # max first, then lower
+        rank = ranks[q]
+        while rank > 1 and ordered[rank - 1][0] in taken:  # distinct states, nearest below
+            rank -= 1
         picks[q] = ordered[rank - 1][0]
-    return picks
+        taken.add(picks[q])
+    return {q: picks[q] for q in quantiles}
 
 
 def token_stats(values) -> dict:

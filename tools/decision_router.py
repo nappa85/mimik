@@ -58,6 +58,27 @@ ROUTER_ORDER = ("R1", "R4", "R3")  # fixed final tie-break of the router choice
 BASELINES = {"B-ask": "ask_rule", "B-maj": tl.PROPOSAL, "B-risk": "conflict"}
 ECE_BINS = 10
 DECISION_FILE_ENCODING = 1
+# Plan §4: provenance every decision file header must carry (checked by the harness too).
+REQUIRED_HEADER = (
+    "router",
+    "runtime",
+    "image",
+    "library_revision",
+    "artefacts",
+    "device",
+    "device_provenance",
+    "threads",
+    "n_ctx",
+    "policy",
+    "policy_hash",
+    "question_hash",
+    "retrieval",
+    "state_builder_sha256",
+    "fold_seed",
+    "fold_sha256",
+    "gate",
+    "pack_hashes",
+)
 MAX_RESTARTS = 3  # per screen or ablation unit (rev. 3.1, A1)
 PROBE_MAX_RESTARTS = 1  # the probe's own cap: any failed probe decision makes it ineligible
 KILL_WAIT_SECONDS = 15
@@ -550,7 +571,7 @@ def select_report(cases, mapping, screen_dir, ablation_dir=None, router_id=None,
     cv = cross_validate(records, expected, folds)
     oof = route_metrics(cv["routes"], expected)
     n_supported = sum(1 for e in expected.values() if e in SUPPORTED)
-    report["cv"] = {"folds": cv["folds"], "out_of_fold": oof}
+    report["cv"] = {"folds": cv["folds"], "out_of_fold": oof, "routes": cv["routes"]}
     n_at_risk = sum(1 for e in expected.values() if e in AT_RISK)
     report["gate"] = gate(True, oof, n_supported, len(expected), n_at_risk)
     report["refit"] = refit(records, expected) if report["gate"]["passed"] else None
@@ -1019,6 +1040,24 @@ def policy_document(tau_star) -> dict:
     }
 
 
+def runtime_header(entry: dict, screen_summary: dict) -> dict:
+    """Runtime provenance for the decision file: registry entry plus the worker's own record."""
+    ready = next(
+        (s.get("ready") or {} for s in screen_summary.get("starts", []) if s.get("ok")), {}
+    )
+    return {
+        "runtime": entry["runtime"],
+        "image": entry["image"],
+        "library_revision": entry["library_revision"],
+        "artefacts": [{k: f[k] for k in ("role", "size", "sha256")} for f in entry["files"]],
+        "device": "cpu",
+        "device_provenance": ready.get("device_provenance")
+        or {"device": ready.get("device", "cpu")},
+        "threads": entry["threads"],
+        "n_ctx": entry["n_ctx"],
+    }
+
+
 def build_decision_file(report, mapping, screen_dir, states_file, header_extra) -> dict:
     if not report.get("gate", {}).get("passed") or not report.get("refit"):
         raise RouterError("no decision file: the router did not pass the gate")
@@ -1044,6 +1083,7 @@ def build_decision_file(report, mapping, screen_dir, states_file, header_extra) 
             }
         )
     header = {
+        **header_extra,  # runtime provenance first: the computed fields below always win
         "encoding": DECISION_FILE_ENCODING,
         "kind": "sys-r-decisions",
         "split": "dev",
@@ -1056,7 +1096,6 @@ def build_decision_file(report, mapping, screen_dir, states_file, header_extra) 
         "fold_seed": FOLD_SEED,
         "fold_sha256": report["fold_sha256"],
         "gate": report["gate"],
-        **header_extra,
     }
     return {"header": header, "entries": entries}
 
@@ -1067,6 +1106,11 @@ def verify_decision_file(doc, case_ids, state_hash_of) -> dict:
     header = doc.get("header") or {}
     if header.get("encoding") != DECISION_FILE_ENCODING or header.get("kind") != "sys-r-decisions":
         raise RouterError("decision file: unknown encoding or kind")
+    missing_header = [k for k in REQUIRED_HEADER if k not in header]
+    if missing_header:
+        raise RouterError(f"decision file: header lacks {missing_header}")
+    if not (header.get("gate") or {}).get("passed"):
+        raise RouterError("decision file: the router did not pass the gate")
     policy = header.get("policy") or {}
     if header.get("policy_hash") != tl.digest(policy) or policy.get("grid") != list(GRID):
         raise RouterError("decision file: policy hash mismatch")
@@ -1144,7 +1188,8 @@ def main(argv=None) -> int:
     df.add_argument("--mapping", type=Path, required=True)
     df.add_argument("--screen", type=Path, required=True)
     df.add_argument("--states", type=Path, required=True)
-    df.add_argument("--header", type=Path, required=True, help="JSON: runtime provenance")
+    df.add_argument("--router-key", required=True, help="key of tools/decision_models.json")
+    df.add_argument("--header", type=Path, help="optional JSON merged into the header")
     df.add_argument("--out", type=Path, required=True)
     tm = sub.add_parser("timeouts", help="ready/decision timeouts and the projection (JSON)")
     tm.add_argument("--unit", required=True)
@@ -1210,23 +1255,35 @@ def main(argv=None) -> int:
     if args.cmd == "overlay":
         cases = _cases_by_id(args.pack)
         report = json.loads(args.report.read_text(encoding="utf-8"))
-        if not report.get("refit"):
-            print(json.dumps({"overlay": "per-router diagnostic only: no refit (gate failed)"}))
+        source = report.get("refit") or report.get("cv")
+        if not source or "routes" not in source:
+            print(json.dumps({"overlay": "no routes: the screen unit was not gate-evaluable"}))
             return 0
+        label = "refit (tau*)" if report.get("refit") else "out-of-fold (no router passed)"
         routes = {
             cid: {"route": r["route"], "failure": r["reason"] == "fallback_failure"}
-            for cid, r in report["refit"]["routes"].items()
+            for cid, r in source["routes"].items()
         }
         out = {
             str(seed): replay(rows, cases, routes)["totals"]
             for seed, rows in sorted(by_seed(ledger_episodes(args.ledger)).items())
         }
-        print(json.dumps(out, indent=2))
+        print(
+            json.dumps({"routes": label, "label": "non-gating diagnostic", "seeds": out}, indent=2)
+        )
         return 0
     if args.cmd == "decision-file":
         report = json.loads(args.report.read_text(encoding="utf-8"))
         mapping = json.loads(args.mapping.read_text(encoding="utf-8"))
-        extra = json.loads(args.header.read_text(encoding="utf-8"))
+        import decision_models
+
+        entry = decision_models.load()["routers"][args.router_key]
+        if entry["router_id"] != report.get("router"):
+            raise SystemExit("decision-file: --router-key does not match the report's router")
+        screen_summary = json.loads((args.screen / "summary.json").read_text(encoding="utf-8"))
+        extra = runtime_header(entry, screen_summary)
+        if args.header:
+            extra.update(json.loads(args.header.read_text(encoding="utf-8")))
         pack_hashes = {
             n: sha_file(args.pack / n) for n in ("rules.md", "definition.json", "cases-dev.json")
         }

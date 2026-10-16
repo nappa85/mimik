@@ -110,6 +110,23 @@ def decision_file(pack, tau=0.5, records=RECORDS):
             }
         )
     header = {
+        **{
+            "router": "R-test",
+            "runtime": "anyjev-llamacpp",
+            "image": "sha256:" + "0" * 64,
+            "library_revision": "x",
+            "artefacts": [],
+            "device": "cpu",
+            "device_provenance": {"device": "cpu"},
+            "threads": 6,
+            "n_ctx": 8192,
+            "retrieval": {"top_k": 5, "query": "request"},
+            "state_builder_sha256": "0" * 64,
+            "fold_seed": 20261016,
+            "fold_sha256": "0" * 64,
+            "gate": {"passed": True},
+            "pack_hashes": {},
+        },
         "encoding": 1,
         "kind": "sys-r-decisions",
         "split": "dev",

@@ -615,6 +615,25 @@ class StateTests(unittest.TestCase):
 # ---------------------------------------------------------------- decision file
 
 
+PROVENANCE = {
+    "router": "R-test",
+    "runtime": "anyjev-llamacpp",
+    "image": "sha256:" + "0" * 64,
+    "library_revision": "x",
+    "artefacts": [],
+    "device": "cpu",
+    "device_provenance": {"device": "cpu"},
+    "threads": 6,
+    "n_ctx": 8192,
+    "retrieval": {"top_k": 5, "query": "request"},
+    "state_builder_sha256": "0" * 64,
+    "fold_seed": 20261016,
+    "fold_sha256": "0" * 64,
+    "gate": {"passed": True},
+    "pack_hashes": {},
+}
+
+
 def decision_doc(expected, tau=0.5, records=None):
     records = records or perfect_records(expected)
     entries = []
@@ -630,6 +649,7 @@ def decision_doc(expected, tau=0.5, records=None):
             }
         )
     header = {
+        **PROVENANCE,
         "encoding": 1,
         "kind": "sys-r-decisions",
         "policy": dr.policy_document(tau),
@@ -678,6 +698,8 @@ class DecisionFileTests(unittest.TestCase):
         forge(lambda d: d["entries"][0].update(state_hash="other"))
         forge(lambda d: d["header"]["policy"].update(tau_star=0.6))  # policy hash mismatch
         forge(lambda d: d["header"].update(question_hash="0" * 64))
+        forge(lambda d: d["header"].pop("device_provenance"))  # missing provenance
+        forge(lambda d: d["header"].update(gate={"passed": False}))
 
     def test_failure_entry_routes_ask_rule(self):
         records = perfect_records(self.expected)
@@ -727,3 +749,23 @@ class HostSideTests(unittest.TestCase):
             with self.assertRaises(dr.RouterError):
                 dr.unit_timeouts("screen", 1, bad)
         self.assertEqual(dr.unit_timeouts("probe", 5_000_000)["decision_timeout"], 1800)
+
+
+class RuntimeHeaderTests(unittest.TestCase):
+    def test_runtime_header_from_registry_and_worker_record(self):
+        import decision_models
+
+        entry = decision_models.load()["routers"]["r1-qwen3-4b"]
+        summary = {
+            "starts": [
+                {"ok": False},
+                {
+                    "ok": True,
+                    "ready": {"device_provenance": {"device": "cpu", "offloaded_layers": 0}},
+                },
+            ]
+        }
+        header = dr.runtime_header(entry, summary)
+        self.assertEqual(header["device_provenance"]["offloaded_layers"], 0)
+        self.assertEqual(header["artefacts"][0]["sha256"], entry["files"][0]["sha256"])
+        self.assertTrue(set(header) <= set(dr.REQUIRED_HEADER))
