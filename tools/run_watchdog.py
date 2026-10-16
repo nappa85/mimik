@@ -53,6 +53,8 @@ class Watchdog:
         idle_exit=3600,
         heartbeat=None,
         reserve=RESERVE_SECONDS,
+        thermal_reader=None,
+        crit_margin=ops.THERMAL_DEFAULTS["crit_margin_c"],
     ):
         if not 0 < interval <= MAX_INTERVAL:
             raise ValueError(f"interval must be in (0, {MAX_INTERVAL}] seconds")
@@ -61,6 +63,8 @@ class Watchdog:
         self.interval, self.grace, self.idle_exit = interval, grace, idle_exit
         self.heartbeat = None if heartbeat is None else Path(heartbeat)
         self.reserve = reserve
+        self.thermal_reader = thermal_reader or (lambda: ops.read_sensors(ops.HWMON))
+        self.crit_margin = crit_margin
         self.free_since = None
         self.idle_since = None
 
@@ -103,6 +107,15 @@ class Watchdog:
         now = self.clock.time()
         owned = self.docker.owned()  # None: docker could not list; assume there may be some
         held = self.held()
+        try:
+            breaches = ops.crit_breaches(self.thermal_reader(), self.crit_margin)
+        except Exception as error:  # noqa: BLE001 (logged; the queue owns thermal_unknown)
+            self.log("thermal_read_error", error=f"{type(error).__name__}: {error}")
+            breaches = []
+        if breaches and (owned or owned is None):
+            result = self.docker.cleanup()
+            self.log("removed_thermal", containers=owned, breaches=breaches, **result)
+            return "removed_thermal"
         if self.closing(now):
             network = self.docker.network_exists()
             if owned or owned is None or network or network is None:

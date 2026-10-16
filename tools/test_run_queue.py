@@ -293,6 +293,14 @@ def write_attempt(out: Path, b: dict, env: dict, argv) -> int:
     return b.get("runner_exit", main_exit)
 
 
+def cool_gpu(edge=45.0, junction=50.0):
+    return {
+        "amdgpu:edge": {"value": edge, "crit": 100.0},
+        "amdgpu:junction": {"value": junction, "crit": 110.0},
+        "nvme:Composite": {"value": 40.0, "crit": 84.85},
+    }
+
+
 def queue_doc(arms, **extra):
     doc = {
         "schema": 1,
@@ -336,6 +344,7 @@ class Harness(unittest.TestCase):
 
         kw.setdefault("vram_reader", lambda: None)
         self.watchdog = kw.setdefault("watchdog", FakeWatchdog())
+        kw.setdefault("thermal_reader", lambda: cool_gpu())
         return rq.Queue(
             rq.load_queue(path, REGISTRY),
             REGISTRY,
@@ -1236,6 +1245,116 @@ class ReviewThreeTests(Harness):
         self.assertGreater(sup.fresh_seconds, 30 + rq.run_watchdog.WORST_TICK_SECONDS)
 
 
+class ThermalQueueTests(Harness):
+    """Thermal guard (2026-10-16, after the 18:52 shutdown)."""
+
+    START = at(2026, 10, SAT, 10, 0)
+
+    def reader(self, schedule):
+        """schedule: [(seconds after start, sensors)]; the last entry at or before now wins."""
+
+        def read():
+            elapsed = self.clock.now - self.START
+            current = schedule[0][1]
+            for t, sensors in schedule:
+                if elapsed >= t:
+                    current = sensors
+            return current() if callable(current) else current
+
+        return read
+
+    def test_sustained_heat_stops_cools_and_reruns_the_whole_arm(self):
+        hot = cool_gpu(70, 97)
+        # Hot from 60 s to 300 s after start (the first attempt), then cool.
+        schedule = [(0, cool_gpu()), (60, hot), (300, cool_gpu(50, 55))]
+        doc = queue_doc([arm("a", max_arm_seconds=7200)])
+        q = self.make(
+            doc,
+            self.START,
+            plan={"a": [{"seconds": 1200}, {}]},
+            thermal_reader=self.reader(schedule),
+        )
+        manifest = q.run()
+        attempts = manifest["arms"][0]["attempts"]
+        self.assertEqual(attempts[0]["status"], "incomplete_thermal")
+        self.assertEqual(attempts[0]["failure"], "thermal")
+        self.assertIn("junction 97.0", attempts[0]["reason"])
+        self.assertIn(signal.SIGTERM, self.launcher.signals)
+        self.assertEqual(attempts[0]["temperatures"]["amdgpu:junction"]["max"], 97.0)
+        log = (q.dir / "queue.log").read_text()
+        self.assertIn("thermal_cooldown_end", log)
+        second = dt.datetime.fromisoformat(attempts[1]["started"])
+        self.assertGreaterEqual(second, dt.datetime(2026, 10, SAT, 10, 10))  # >= 5 min cool
+        self.assertEqual(manifest["arms"][0]["state"], "complete")
+        self.assertEqual(manifest["thermal"]["thermal_stops"], 1)
+        self.assertIn("amdgpu:edge", manifest["thermal"]["sensors_found"])
+
+    def test_short_spike_does_not_stop(self):
+        schedule = [(0, cool_gpu()), (60, cool_gpu(70, 97)), (90, cool_gpu())]
+        q = self.make(queue_doc([arm("a")]), self.START, thermal_reader=self.reader(schedule))
+        manifest = q.run()
+        self.assertEqual(manifest["arms"][0]["state"], "complete")
+        self.assertEqual(len(manifest["arms"][0]["attempts"]), 1)
+
+    def test_crit_proximity_stops_immediately(self):
+        schedule = [(0, cool_gpu()), (30, cool_gpu(70, 106)), (60, cool_gpu())]
+        q = self.make(queue_doc([arm("a")]), self.START, thermal_reader=self.reader(schedule))
+        manifest = q.run()
+        first = manifest["arms"][0]["attempts"][0]
+        self.assertEqual(first["status"], "incomplete_thermal")
+        self.assertIn("crit proximity", first["reason"])
+        self.assertLessEqual(
+            dt.datetime.fromisoformat(first["ended"]), dt.datetime(2026, 10, SAT, 10, 1)
+        )
+
+    def test_gpu_sensor_disappearing_is_thermal_unknown(self):
+        schedule = [(0, cool_gpu()), (30, {"nvme:Composite": {"value": 40.0, "crit": 84.85}})]
+        schedule.append((90, cool_gpu()))
+        q = self.make(queue_doc([arm("a")]), self.START, thermal_reader=self.reader(schedule))
+        manifest = q.run()
+        first = manifest["arms"][0]["attempts"][0]
+        self.assertEqual(
+            (first["status"], first["failure"]), ("incomplete_thermal", "thermal_unknown")
+        )
+
+    def test_two_thermal_stops_end_the_session(self):
+        hot = cool_gpu(90, 97)
+        # Hot during every attempt, cool between them (cooldown passes).
+        state = {"hot": True}
+
+        def read():
+            return hot if q.handle is not None and state["hot"] else cool_gpu()
+
+        q = self.make(
+            queue_doc([arm("a", max_arm_seconds=7200), arm("b")]),
+            self.START,
+            plan={"a": [{"seconds": 1200}]},
+            thermal_reader=read,
+        )
+        manifest = q.run()
+        self.assertEqual(manifest["state"], "stopped")
+        self.assertIn("2 thermal stops", manifest["stop_reason"])
+        self.assertEqual(len(manifest["arms"][0]["attempts"]), 2)
+        self.assertEqual(manifest["arms"][1]["state"], "pending")
+
+    def test_unreadable_gpu_before_launch_never_counts_as_cool(self):
+        q = self.make(queue_doc([arm("a")]), self.START, thermal_reader=lambda: {})
+        manifest = q.run()
+        self.assertEqual(self.launcher.launches, [])
+        self.assertEqual(manifest["state"], "stopped")
+        self.assertIn("did not cool down", manifest["stop_reason"])
+        self.assertIn("thermal_cooldown_cap", (q.dir / "queue.log").read_text())
+
+    def test_thermal_limits_in_the_queue_file(self):
+        path = self.root / "t.json"
+        path.write_text(json.dumps(queue_doc([arm("a")], thermal={"edge_c": 80})))
+        q = rq.load_queue(path, REGISTRY)
+        self.assertEqual((q["thermal"]["edge_c"], q["thermal"]["junction_c"]), (80, 95.0))
+        path.write_text(json.dumps(queue_doc([arm("a")], thermal={"fan": 1})))
+        with self.assertRaises(rq.QueueError):
+            rq.load_queue(path, REGISTRY)
+
+
 class SupervisorTests(unittest.TestCase):
     def test_heartbeat_freshness_and_pid(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1299,6 +1418,7 @@ class ProcessLauncherTests(unittest.TestCase):
                 runner=runner,
                 poll_seconds=0.05,
                 watchdog=FakeWatchdog(),
+                thermal_reader=lambda: cool_gpu(),
                 console=console.append,
                 env={"MIMIK_MODEL_ROOT": str(models), "PATH": os.environ.get("PATH", "")},
             )

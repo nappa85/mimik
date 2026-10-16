@@ -163,6 +163,7 @@ QUEUE_KEYS = {
     "startup_seconds",
     "estimate_factor",
     "g0",
+    "thermal",
 }
 G0_KEYS = {"vram_max_bytes", "swap_growth_max_mib", "deadline_seconds"}
 
@@ -204,6 +205,13 @@ def load_queue(path: Path, registry: dict) -> dict:
             q["session_deadline"] = epoch(dt.datetime.fromisoformat(doc["session_deadline"]))
         except (TypeError, ValueError):
             raise QueueError("queue: session_deadline must be a local ISO time") from None
+    thermal = doc.get("thermal", {})
+    if not isinstance(thermal, dict) or set(thermal) - set(ops.THERMAL_DEFAULTS):
+        raise QueueError(f"queue: thermal may hold {sorted(ops.THERMAL_DEFAULTS)}")
+    for key, value in thermal.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise QueueError(f"queue: thermal.{key} must be a positive number")
+    q["thermal"] = dict(ops.THERMAL_DEFAULTS, **thermal)
     g0 = doc.get("g0", {})
     if not isinstance(g0, dict) or set(g0) - G0_KEYS:
         raise QueueError(f"queue: g0 may hold {sorted(G0_KEYS)}")
@@ -529,6 +537,7 @@ class Queue:
         vram_wait_seconds=180.0,
         extra_env=None,
         watchdog=None,
+        thermal_reader=None,
     ):
         self.q = queue
         self.registry = registry
@@ -546,9 +555,12 @@ class Queue:
         self.grace_seconds = grace_seconds
         self.console = console or (lambda line: print(line, flush=True))
         self.base_env = dict(os.environ if env is None else env)
-        self.extra_env = dict(extra_env or {})
+        self.extra_env = dict(extra_env or {})  # Python-only seam (real-docker smoke test)
         self.watchdog = watchdog or NoWatchdog()
-        self.watchdog_lost = self.cleanup_lost = False  # Python-only seam (real-docker smoke test)
+        self.watchdog_lost = self.cleanup_lost = False
+        self.thermal_reader = thermal_reader or (lambda: ops.read_sensors(ops.HWMON))
+        self.thermal_stops = 0
+        self.sensors_found = None
         self.vram_reader = vram_reader or read_vram
         self.cooldown_seconds = cooldown_seconds
         self.vram_wait_seconds = vram_wait_seconds
@@ -597,6 +609,11 @@ class Queue:
             "missing_required": missing,
             "study_complete": self.state == "done" and not missing,
             "g0": self.g0_results,
+            "thermal": {
+                "sensors_found": self.sensors_found,
+                "thermal_stops": self.thermal_stops,
+                "limits": self.q["thermal"],
+            },
             # Loud, never silent: diagnostics the runner could not read (review round 3).
             "warnings": [
                 f"{a['id']} attempt {r['attempt']}: {w}"
@@ -801,6 +818,39 @@ class Queue:
         env.update(self.extra_env)
         return env
 
+    def read_thermal(self) -> dict:
+        try:
+            sensors = self.thermal_reader()
+        except Exception as error:  # noqa: BLE001 (unreadable is never cool)
+            self.log("thermal_read_error", error=f"{type(error).__name__}: {error}")
+            return {}
+        if self.sensors_found is None:
+            self.sensors_found = sorted(sensors)
+            self.log("thermal_sensors", sensors=self.sensors_found)
+        return sensors
+
+    def thermal_ready(self) -> bool:
+        """Before heavy work: the GPU must be readable and under its limits, else cool down."""
+        guard = ops.ThermalGuard(self.q["thermal"])
+        sensors = self.read_thermal()
+        verdict, why = guard.check(sensors, self.clock.time())
+        edge = sensors.get(ops.GPU_EDGE, {}).get("value")
+        if verdict is None and edge is not None and edge < self.q["thermal"]["edge_c"]:
+            return True
+        self.log("thermal_not_ready", verdict=verdict, reason=why, edge=edge)
+        return self.cool_down()
+
+    def cool_down(self) -> bool:
+        self.log("thermal_cooldown_start")
+        ok = ops.cooled(
+            self.read_thermal,
+            self.clock,
+            self.q["thermal"],
+            log=lambda edge: self.log("thermal_cooldown_cap", edge=edge),
+        )
+        self.log("thermal_cooldown_end", cooled=ok)
+        return ok
+
     def cutoff(self, window_close: float) -> float:
         """The absolute cutoff for the runner: the window end or the session end, if earlier."""
         deadline = self.q["session_deadline"]
@@ -844,6 +894,8 @@ class Queue:
         arm["attempts"].append(record)
         self.transition(arm, "running", attempt=number, estimate=round(estimate))
         rc = stopped_by = None
+        guard = ops.ThermalGuard(self.q["thermal"])
+        next_sample = start
         try:
             self.handle = self.launcher.start(
                 argv, env, attempt_dir / "runner.stdout", attempt_dir / "runner.stderr"
@@ -854,22 +906,36 @@ class Queue:
                     break
                 now = self.clock.time()
                 hit = [name for name, at in limits.items() if now >= at]
+                if not hit and now >= next_sample:
+                    next_sample = now + self.q["thermal"]["sample_seconds"]
+                    verdict, reason = guard.check(self.read_thermal(), now)
+                    if verdict:
+                        hit = [verdict]
+                        record["thermal_reason"] = reason
                 if not hit and not self.watchdog.alive() and not self.watchdog.ensure():
                     hit = ["watchdog"]
                 if hit:
                     stopped_by = hit[0]
                     rc = self.terminate()
                     break
-                nearest = min(limits.values())
+                nearest = min([*limits.values(), next_sample])
                 self.clock.sleep(min(self.poll_seconds, max(0.5, nearest - now)))
         finally:
             if self.handle is not None and self.handle.poll() is None:
                 rc = self.terminate()  # an exception mid-attempt: never leave the runner
             self.handle = None
             record["queue_cleanup"] = self.cleanup_checked()  # after every attempt
+            record["temperatures"] = guard.stats
         record["runner_exit"] = rc
         record["ended"] = local(self.clock.time()).isoformat(timespec="seconds")
-        record.update(self.classify(arm, attempt_dir, env, rc, stopped_by, record["queue_cleanup"]))
+        result = self.classify(arm, attempt_dir, env, rc, stopped_by, record["queue_cleanup"])
+        if stopped_by in ("thermal", "thermal_unknown") and result["status"] != "failed":
+            result.update(
+                status="incomplete_thermal",
+                failure=stopped_by,
+                reason=f"{stopped_by}: {record.get('thermal_reason')}",
+            )
+        record.update(result)
         return record
 
     def terminate(self):
@@ -920,6 +986,8 @@ class Queue:
                 "session_deadline": "session_deadline",
                 "g0_deadline": "arm_timeout",
                 "watchdog": "failed",
+                "thermal": "incomplete_thermal",
+                "thermal_unknown": "incomplete_thermal",
             }[stopped_by]
             return dict(out, status=status, infra=None, reason=f"stopped: {stopped_by}")
         if not prov:
@@ -1235,6 +1303,10 @@ class Queue:
                 self.transition(arm, "not_started", reason="watchdog unavailable")
                 self.stop("watchdog unavailable: no heavy work without it")
                 return "not_started"
+            if not self.thermal_ready():
+                self.transition(arm, "not_started", reason="GPU did not cool down")
+                self.stop("thermal: GPU did not cool down within the cap")
+                return "not_started"
             if self.g0_expired(arm):  # rechecked after every wait and precheck
                 self.transition(arm, "skipped", reason="G0 deadline passed")
                 return "skipped"
@@ -1251,6 +1323,16 @@ class Queue:
                 self.transition(arm, "failed", reason=record.get("reason"))
                 self.stop("cleanup unresolved: heavy work may still be running")
                 return "failed"
+            if status == "incomplete_thermal":
+                self.thermal_stops += 1
+                self.transition(arm, "incomplete_thermal", reason=record.get("reason"))
+                if self.thermal_stops >= self.q["thermal"]["max_thermal_stops"]:
+                    self.stop(f"{self.thermal_stops} thermal stops in this session")
+                    return "incomplete_thermal"
+                if not self.cool_down():
+                    self.stop("thermal: GPU did not cool down within the cap")
+                    return "incomplete_thermal"
+                continue  # whole-arm rerun after the cooldown
             if status == "complete":
                 record["excluded"] = False
                 arm["ledger"] = record.get("ledger")

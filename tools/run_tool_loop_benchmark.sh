@@ -223,6 +223,7 @@ cleanup() {
     if ours "$SRV"; then dk stop -t 10 "$SRV" >/dev/null 2>&1 || true; fi
     echo "server_oom_killed=$(dk inspect -f '{{.State.OOMKilled}}' "$SRV" 2>/dev/null || echo unknown)" >> "$prov"
     timeout --foreground -k 10 120 docker logs "$SRV" > "$out/server.log" 2>&1 || true
+    temps --print-peaks >> "$prov"
   fi
   if listing=$(owned_names); then
     for name in $listing; do dk rm -f "$name" >/dev/null 2>&1 || true; done
@@ -402,6 +403,11 @@ fi
 # ---- server
 gate server
 echo "vram_used_before=$(vram) swap_used_mib_before=$(swap_used)" >> "$prov"
+temps() {  # temperatures from /sys/class/hwmon by sensor name; the peak file keeps maxima
+  timeout --foreground -k 5 30 python3 "$ROOT/tools/toolloop_ops.py" temps \
+    --peak-file "$out/temps-peak.json" "$@" 2>/dev/null || echo "temp_sensors=unreadable"
+}
+temps --prefix before >> "$prov"
 if net_state=$(dk network inspect -f '{{.Internal}} {{index .Labels "mimik.toolloop"}}' "$NET" 2>/dev/null); then
   [ "$net_state" = "true v3" ] || fail 12 infra_docker "network $NET exists and is not internal and owned ($net_state)"
 else
@@ -428,6 +434,7 @@ while [ $(( $(date +%s) - t0 )) -lt "$health_wait" ]; do
   state=$(dk inspect -f '{{.State.Running}}' "$SRV" 2>/dev/null || echo gone)
   [ "$state" = true ] || server_failed server_start "server exited during load"
   still_allowed "server load"
+  temps >/dev/null
   sleep 2
 done
 [ $healthy = 1 ] || server_failed server_health "server not healthy after ${health_wait}s"
@@ -478,6 +485,7 @@ run_harness() {  # run_harness <phase> <args...>: sets phase_rc; records <phase>
       || fail 12 infra_docker "docker inspect of the harness failed ($phase)"
     case $status in exited*|dead*) break ;; esac
     still_allowed "$phase"
+    temps >/dev/null
     if [ "$limit" -gt 0 ] && [ $(( $(date +%s) - started )) -gt "$limit" ]; then
       fail 12 infra_docker "harness exceeded its time limit ${limit}s ($phase)"
     fi

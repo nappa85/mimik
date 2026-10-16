@@ -784,6 +784,20 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertFalse(any(c[0] in ("stop", "pause") for c in self.calls()))
 
+    # ---- thermal guard
+    def test_temperatures_before_and_peak_in_provenance(self):
+        hw = self.tmp / "hwmon" / "hwmon7"
+        hw.mkdir(parents=True)
+        (hw / "name").write_text("amdgpu\n")
+        (hw / "temp1_input").write_text("44000\n")
+        (hw / "temp1_label").write_text("edge\n")
+        env = {"MIMIK_TEST_MODE": "1", "MIMIK_TEST_HWMON": str(self.tmp / "hwmon")}
+        proc, out = self.run_runner("qwen3-4b-2507", "smoke", "17", **env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        prov = self.prov(out)
+        self.assertEqual(prov["temp_amdgpu_edge_before"], "44.0")
+        self.assertEqual(prov["temp_amdgpu_edge_peak"], "44.0")
+
     def test_shellcheck_clean_if_available(self):
         if not shutil.which("shellcheck"):
             self.skipTest("shellcheck not in this image (run koalaman/shellcheck separately)")

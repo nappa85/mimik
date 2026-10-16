@@ -976,6 +976,48 @@ Recorded by the coordinator's decision instead of further fixes; each with its m
   `--init` in the containers); there is no direct cgroup or process kill of container
   processes.
 
+### Thermal guard (2026-10-16)
+
+Added after the PC shut down at 18:52 on 2026-10-16 during the candidate screen (MiniCPM5-2B
+arm). The shutdown was orderly (docker got SIGTERM at 18:51:53; the queue logged
+`queue_stopped signal 15`); the cause is unknown and overheating is suspected. No unattended
+GPU run starts without this guard.
+
+- **Sensors** (`toolloop_ops.read_sensors`): `/sys/class/hwmon/*`, found by each chip's
+  `name` file, never by hwmon index (it can change across boots); keys are
+  `<chip>:<label or tempN>` with the value and the chip's own `tempN_crit` in °C. An
+  unreadable input is kept with value `None` and is never treated as cool. On this host the
+  chips are `amdgpu` (`edge`, `junction`, `mem`, each with `crit`), `nvme` (`Composite` with
+  `crit`, `Sensor 1`, `Sensor 2`) and `acpitz` (`temp1`, `temp2`). **There is no CPU
+  temperature sensor on this host** (no `k10temp`), so CPU temperature is neither logged nor
+  guarded.
+- **Logging:** the queue samples every `sample_seconds` (30 s) during an attempt and writes
+  min, max and last per sensor into the attempt (`temperatures`); the manifest's `thermal`
+  block lists the sensors found, the limits and the session's thermal stops. The runner writes
+  `temp_<sensor>_before` before the server starts and `temp_<sensor>_peak` (maximum over its
+  health and harness polls) at cleanup.
+- **Stop rules** (queue file `thermal`, defaults shown): GPU junction (or edge if there is no
+  junction sensor) ≥ `junction_c` 95 °C, or edge ≥ `edge_c` 88 °C, continuously for
+  `sustain_seconds` 60 s; or any sensor at or above its own `crit` minus `crit_margin_c` 5 °C
+  (immediate). A missing or unreadable GPU sensor is `thermal_unknown`. Either stops the
+  attempt through the normal stop and cleanup path; the attempt is `incomplete_thermal`
+  (`failure` `thermal` or `thermal_unknown`) and the arm is rerun later as a whole arm.
+- **Cooldown:** after a thermal stop, and before any launch if the GPU is unreadable or over a
+  limit, no heavy work until the GPU edge is ≤ `cooldown_edge_c` 60 °C for
+  `cooldown_hold_seconds` 300 s in a row (an unreadable sample resets the hold), capped at
+  `cooldown_cap_seconds` 2700 s; reaching the cap stops the queue. `max_thermal_stops` 2
+  thermal stops in one session stop the queue.
+- **Watchdog:** independently of the queue, every tick the watchdog applies the hard limit
+  (any sensor at or above its crit minus 5 °C) and removes the owned containers
+  (`removed_thermal`). A sensor read error is logged; the queue owns the `thermal_unknown`
+  rule.
+- Tests: `test_thermal.py` (sysfs discovery by name, unreadable inputs, the runner CLI, the
+  sustained rule, a short spike, crit proximity, a missing sensor, cooldown hold and cap),
+  `ThermalQueueTests` (sustained stop, cooldown and whole-arm rerun, short spike, crit,
+  disappearing GPU sensor, two strikes, unreadable before launch, queue-file limits),
+  `ThermalWatchdogTests` (hard limit, below it, read error) and a runner provenance test.
+  Failing first: all red before the sampler and the guard existed.
+
 ## Limitations
 
 - A model that writes a finishing call as plain text gets `no_outcome`. This is deliberate,

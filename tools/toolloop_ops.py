@@ -12,6 +12,7 @@
 
 import datetime as dt
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -271,3 +272,202 @@ class Docker:
             "network_present": network,
             "errors": errors,
         }
+
+
+# ---------------------------------------------------------------- temperatures (thermal guard)
+
+HWMON = Path("/sys/class/hwmon")
+GPU_EDGE, GPU_JUNCTION = "amdgpu:edge", "amdgpu:junction"
+TEST_HWMON_ENV = "MIMIK_TEST_HWMON"  # honoured only with MIMIK_TEST_MODE=1 (tests)
+
+
+def hwmon_root(env=None) -> Path:
+    env = os.environ if env is None else env
+    if env.get("MIMIK_TEST_MODE") == "1" and env.get(TEST_HWMON_ENV):
+        return Path(env[TEST_HWMON_ENV])
+    return HWMON
+
+
+def _millidegrees(path: Path):
+    try:
+        return int(path.read_text().strip()) / 1000.0
+    except (OSError, ValueError):
+        return None
+
+
+def read_sensors(root: Path = HWMON) -> dict:
+    """{"<chip name>:<label or tempN>": {"value": °C or None, "crit": °C or None}}.
+
+    Chips are found by their `name` file, never by hwmon index (it changes across boots).
+    An unreadable input is present with value None: callers must not treat it as cool.
+    """
+    sensors = {}
+    try:
+        chips = sorted(Path(root).iterdir())
+    except OSError:
+        return sensors
+    for chip in chips:
+        try:
+            name = (chip / "name").read_text().strip()
+        except OSError:
+            continue
+        for item in sorted(chip.glob("temp*_input")):
+            index = item.name[: -len("_input")]
+            try:
+                label = (chip / f"{index}_label").read_text().strip()
+            except OSError:
+                label = index
+            key = f"{name}:{label}"
+            if key in sensors:  # two chips with one name: keep both
+                key = f"{name}.{chip.name}:{label}"
+            sensors[key] = {
+                "value": _millidegrees(item),
+                "crit": _millidegrees(chip / f"{index}_crit"),
+            }
+    return sensors
+
+
+def sensor_slug(key: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+
+
+THERMAL_DEFAULTS = {
+    "junction_c": 95.0,  # GPU junction (or edge if no junction sensor)
+    "edge_c": 88.0,  # GPU edge
+    "sustain_seconds": 60.0,  # continuously over a limit
+    "crit_margin_c": 5.0,  # any sensor at or above its own crit minus this: immediate
+    "cooldown_edge_c": 60.0,
+    "cooldown_hold_seconds": 300.0,
+    "cooldown_cap_seconds": 2700.0,
+    "max_thermal_stops": 2,
+    "sample_seconds": 30.0,
+}
+
+
+def crit_breaches(sensors: dict, margin: float) -> list:
+    """Sensors at or above their own crit minus margin (the watchdog's hard limit)."""
+    return [
+        f"{key} {s['value']:.1f} °C >= crit {s['crit']:.1f} - {margin:.0f}"
+        for key, s in sorted(sensors.items())
+        if s["value"] is not None and s["crit"] is not None and s["value"] >= s["crit"] - margin
+    ]
+
+
+class ThermalGuard:
+    """Decides, per sample, whether a running attempt must stop for temperature.
+
+    check() returns (None, None), ("thermal", reason) or ("thermal_unknown", reason). The
+    GPU edge sensor is required: if it is missing or unreadable, the result is
+    thermal_unknown, never "cool". Per-sensor min/max/last are kept in stats.
+    """
+
+    def __init__(self, limits=None):
+        self.limits = dict(THERMAL_DEFAULTS, **(limits or {}))
+        self.hot_since = None
+        self.stats = {}
+        self.has_junction = None
+
+    def record(self, sensors: dict):
+        for key, s in sensors.items():
+            value = s["value"]
+            entry = self.stats.setdefault(key, {"min": None, "max": None, "last": None})
+            entry["last"] = value
+            if value is not None:
+                entry["min"] = value if entry["min"] is None else min(entry["min"], value)
+                entry["max"] = value if entry["max"] is None else max(entry["max"], value)
+
+    def check(self, sensors: dict, now: float):
+        self.record(sensors)
+        lim = self.limits
+        breaches = crit_breaches(sensors, lim["crit_margin_c"])
+        if breaches:
+            return "thermal", "crit proximity: " + "; ".join(breaches)
+        edge = sensors.get(GPU_EDGE, {}).get("value")
+        if self.has_junction is None:
+            self.has_junction = GPU_JUNCTION in sensors
+        junction = sensors.get(GPU_JUNCTION, {}).get("value") if self.has_junction else edge
+        if edge is None or junction is None:
+            return "thermal_unknown", "GPU temperature sensor missing or unreadable"
+        hot = junction >= lim["junction_c"] or edge >= lim["edge_c"]
+        if not hot:
+            self.hot_since = None
+            return None, None
+        self.hot_since = now if self.hot_since is None else self.hot_since
+        if now - self.hot_since >= lim["sustain_seconds"]:
+            return "thermal", (
+                f"GPU edge {edge:.1f} °C / junction {junction:.1f} °C over the limit "
+                f"(edge {lim['edge_c']:.0f}, junction {lim['junction_c']:.0f}) for "
+                f"{now - self.hot_since:.0f} s"
+            )
+        return None, None
+
+
+def cooled(read, clock, limits=None, log=None) -> bool:
+    """Wait until the GPU edge is <= cooldown_edge_c for cooldown_hold_seconds in a row.
+
+    An unreadable sensor resets the hold. False if the cap passes first.
+    """
+    lim = dict(THERMAL_DEFAULTS, **(limits or {}))
+    start = clock.time()
+    cool_since = None
+    while True:
+        now = clock.time()
+        edge = read().get(GPU_EDGE, {}).get("value")
+        if edge is not None and edge <= lim["cooldown_edge_c"]:
+            cool_since = now if cool_since is None else cool_since
+            if now - cool_since >= lim["cooldown_hold_seconds"]:
+                return True
+        else:
+            cool_since = None
+        if now - start >= lim["cooldown_cap_seconds"]:
+            if log:
+                log(edge)
+            return False
+        clock.sleep(15)
+
+
+def _temps_main(argv=None) -> int:
+    """`toolloop_ops.py temps [--prefix P] [--peak-file F]`: key=value lines for provenance."""
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+    temps = sub.add_parser("temps")
+    temps.add_argument("--prefix", default="")
+    temps.add_argument("--peak-file", type=Path)
+    temps.add_argument("--print-peaks", action="store_true")
+    args = parser.parse_args(argv)
+    sensors = read_sensors(hwmon_root())
+    peaks = {}
+    if args.peak_file and args.peak_file.exists():
+        try:
+            peaks = json.loads(args.peak_file.read_text())
+        except (OSError, ValueError):
+            peaks = {}
+    for key, s in sensors.items():
+        if s["value"] is not None:
+            peaks[key] = max(s["value"], peaks.get(key, s["value"]))
+    if args.peak_file:
+        args.peak_file.write_text(json.dumps(peaks))
+    if args.print_peaks:
+        values = {k: peaks.get(k) for k in sorted(set(peaks) | set(sensors))}
+        print(
+            " ".join(
+                f"temp_{sensor_slug(k)}_peak={'n/a' if v is None else v}" for k, v in values.items()
+            )
+        )
+    else:
+        suffix = f"_{args.prefix}" if args.prefix else ""
+        print(
+            " ".join(
+                f"temp_{sensor_slug(k)}{suffix}={'n/a' if s['value'] is None else s['value']}"
+                for k, s in sorted(sensors.items())
+            )
+            or "temp_sensors=none"
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_temps_main())
