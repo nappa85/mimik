@@ -1,7 +1,7 @@
 # Derived formulas (CEL): plan revisions and milestone M1
 
 Scope: `docs/derived-formulas-plan.md` revisions 1–2 and milestone M1 in the
-`derived-formulas` worktree (uncommitted). M1 covers:
+`derived-formulas` worktree (committed as `97ad442`). M1 covers:
 
 - `src/definitions/formula/`;
 - `schemas/formula-conformance-v1.json`;
@@ -110,7 +110,7 @@ and no live model or benchmark result.
 ## M2 (definition envelope, admission, values, publication, migration 018)
 
 Status: **implemented and independently reviewed, with review fixes applied
-(uncommitted).** The scope, deviations and verification are in plan §15.
+(committed as `1166a1d`).** The scope, deviations and verification are in plan §15.
 
 Self-check findings, supplemental only and not independent:
 

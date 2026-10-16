@@ -8,6 +8,7 @@ has edit/write/bash/web tools denied, so it can only read the snapshot.
 
 import argparse
 import json
+import os
 import re
 import selectors
 import shutil
@@ -42,8 +43,27 @@ AGENT_CONFIG = {
         "reviewer": {
             "mode": "primary",
             "description": "Read-only adversarial reviewer",
-            "tools": {"write": False, "edit": False, "bash": False, "webfetch": False},
-            "permission": {"edit": "deny", "bash": "deny", "webfetch": "deny"},
+            # Only read/glob/grep/todowrite remain. websearch could carry repo text off-box;
+            # task/skill could start agents with other permissions (seen 2026-10-16).
+            "tools": {
+                "write": False,
+                "edit": False,
+                "bash": False,
+                "webfetch": False,
+                "websearch": False,
+                "task": False,
+                "skill": False,
+            },
+            "permission": {
+                "edit": "deny",
+                "bash": "deny",
+                "webfetch": "deny",
+                "websearch": "deny",
+                "task": "deny",
+                "skill": "deny",
+                # Reads outside the snapshot (seen: ~/.claude/CLAUDE.md) must never be asked.
+                "external_directory": "deny",
+            },
         }
     },
 }
@@ -58,10 +78,23 @@ def snapshot(source, dest):
     (dest / "opencode.json").write_text(json.dumps(AGENT_CONFIG, indent=2))
 
 
+def opencode_command(model, snap, prompt):
+    """opencode takes its project directory from `$PWD`, not the process cwd, so a run
+    launched from the real repo would ignore the snapshot. Pin it with `--dir` too."""
+    return ["opencode", "run", "--dir", str(snap), "-m", model, "--agent", "reviewer", prompt]
+
+
 def run_with_idle_timeout(command, cwd, total, idle):
     """Kill the run if it exceeds `total` seconds or emits nothing for `idle` seconds."""
+    env = {**os.environ, "PWD": str(cwd)}
     proc = subprocess.Popen(
-        command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        command,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
     )
     chunks, start, last = [], time.monotonic(), time.monotonic()
     sel = selectors.DefaultSelector()
@@ -86,15 +119,22 @@ def run_with_idle_timeout(command, cwd, total, idle):
     return proc.wait(), "".join(chunks)
 
 
-def preflight(model, cwd, timeout=45, attempts=3):
-    """The free tier fails intermittently with a generic server error; retry briefly."""
-    command = ["opencode", "run", "-m", model, "--agent", "reviewer", "Reply with exactly: PONG"]
+def preflight(model, cwd, timeout=45, attempts=3, base_delay=10):
+    """Retry transient failures briefly and log each one. An exhausted quota hangs instead.
+    `UnknownError` at startup usually means opencode did not load the snapshot's
+    `reviewer` agent (see `opencode_command`)."""
+    command = opencode_command(model, cwd, "Reply with exactly: PONG")
     for attempt in range(attempts):
         code, output = run_with_idle_timeout(command, cwd, timeout, timeout)
         if code == 0 and "PONG" in output:
             return True
+        tail = " ".join(output.split())[-300:]
+        print(
+            f"preflight attempt {attempt + 1}/{attempts} failed (exit {code}): {tail}",
+            file=sys.stderr,
+        )
         if attempt + 1 < attempts:
-            time.sleep(10 * (attempt + 1))
+            time.sleep(base_delay * 2**attempt)
     return False
 
 
@@ -141,7 +181,7 @@ def main():
             args.output.write_text("preflight failed: external reviewer unavailable")
             print("External reviewer preflight failed; fall back.", file=sys.stderr)
             return 3
-        command = ["opencode", "run", "-m", args.model, "--agent", "reviewer", prompt]
+        command = opencode_command(args.model, snap, prompt)
         code, output = run_with_idle_timeout(command, snap, args.timeout, args.idle_timeout)
     args.output.write_text(output)
     if classify(code, output) == "unavailable":

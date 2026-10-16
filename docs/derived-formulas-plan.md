@@ -842,7 +842,7 @@ hard bound), so `MAX_COST` stays at 2·10⁶ with about 10× headroom under the 
 Not run: release build size, package/vendor/unpacked/browser gates (M3/M4 scope). These
 results are unit and CLI verification only, not app integration.
 
-## 15. M2 implementation (2026-10-15, uncommitted, awaiting independent review)
+## 15. M2 implementation (2026-10-15, independently reviewed, committed as `1166a1d`)
 
 Scope as approved: the definition envelope, admission, canonical hash, list value schema,
 pin validation, publication evidence and migration 018. Evaluation on view/save is still M3
