@@ -283,5 +283,56 @@ class CaseSubsetTests(RunnerCliMixin, Base):
                 )
 
 
+class DeadlineTests(RunnerCliMixin, Base):
+    """Review fix 1 (absolute cutoff): no episode starts at or after --deadline-epoch."""
+
+    def args(self, *extra):
+        argv = ["--pack", str(FIXTURE), "--model-label", "fake", "--dry-run", *extra]
+        return tl.build_parser().parse_args(argv)
+
+    def test_deadline_in_the_past_runs_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, rows, _, _ = self.run_split(tmp, "--deadline-epoch", "1")
+        self.assertEqual(code, 0)
+        episodes = [r for r in rows if r["event"] == "episode"]
+        self.assertEqual({r["outcome"] for r in episodes}, {"not_run"})
+        self.assertEqual({r["error"] for r in episodes}, {"schedule deadline reached"})
+        self.assertEqual(rows[0]["deadline_epoch"], 1.0)
+
+    def test_episode_spanning_the_deadline_finishes_and_no_later_one_starts(self):
+        wall = {"now": 1000.0}
+
+        class SlowModel(tl.ScriptedModel):
+            def __call__(self, *a, **k):
+                wall["now"] += 30  # each model turn takes 30 s of wall time
+                return super().__call__(*a, **k)
+
+        args = self.args("--deadline-epoch", "1050")
+        args.case_subset_doc = None
+        out = io.StringIO()
+        with contextlib.redirect_stderr(io.StringIO()):
+            tl.run(args, SlowModel(), out, pack=self.pack, wall=lambda: wall["now"])
+        rows = [json.loads(x) for x in out.getvalue().splitlines()]
+        episodes = [r for r in rows if r["event"] == "episode"]
+        # Episode 1 starts at 1000 (< 1050) and runs two 30 s turns, past the deadline;
+        # it finishes; every later episode is not_run.
+        self.assertNotEqual(episodes[0]["outcome"], "not_run")
+        self.assertEqual([r["outcome"] for r in episodes[1:]], ["not_run"] * (len(episodes) - 1))
+        self.assertEqual(rows[-1]["event"], "run_summary")
+
+
+class SubsetIdentityTests(unittest.TestCase):
+    def test_case_subset_refuses_a_merge(self):
+        """Review L5: case_subset was recorded but not in GROUP_IDENTITY."""
+        with tempfile.TemporaryDirectory() as tmp:
+            a = write_ledger(tmp, "a.jsonl", case_subset={"sha256": "x"})
+            b = write_ledger(
+                tmp, "b.jsonl", case_subset={"sha256": "y"}, episodes=[episode_row("c1", seed=29)]
+            )
+            with self.assertRaises(SystemExit) as raised:
+                tl.load_ledgers([a, b])
+            self.assertIn("case_subset", str(raised.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

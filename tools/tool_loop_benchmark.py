@@ -2484,7 +2484,7 @@ def open_pack(args) -> Pack:
     return Pack(args.pack, engine_factory=lambda d: CelCliEngine(d, args.formula_cli))
 
 
-def run(args, model, out, clock=time.monotonic, pack=None) -> list[dict]:
+def run(args, model, out, clock=time.monotonic, pack=None, wall=time.time) -> list[dict]:
     if pack is None:
         pack = open_pack(args)
     index = RuleIndex(pack.rules, args.top_k)
@@ -2551,6 +2551,7 @@ def run(args, model, out, clock=time.monotonic, pack=None) -> list[dict]:
             "runner_provenance": dict(args.provenance or []),
             "case_order": [c["id"] for c in ordered],
             "case_filter": case_filter or None,
+            "deadline_epoch": getattr(args, "deadline_epoch", None),
             "case_subset": None
             if subset is None
             else {
@@ -2591,8 +2592,12 @@ def run(args, model, out, clock=time.monotonic, pack=None) -> list[dict]:
             "tags": copy.deepcopy(case.get("tags")),
             "seed": seed,
         }
+        stop_at = getattr(args, "deadline_epoch", None)
         if deadline is not None and clock() >= deadline:
             row = dict(base, outcome="not_run", error="run budget exhausted")
+        elif stop_at is not None and wall() >= stop_at:
+            # Absolute schedule cutoff (plan §11 item 26): no episode starts past it.
+            row = dict(base, outcome="not_run", error="schedule deadline reached")
         else:
             try:
                 episode = run_episode(
@@ -2754,6 +2759,7 @@ GROUP_IDENTITY = (
     "server",
     "model_sha256",
     "case_filter",
+    "case_subset",
     "case_ids",
 )
 ROW_HEADER_FIELDS = ("model_label", "arm", "split")
@@ -2917,6 +2923,11 @@ def build_parser():
         )
     p.add_argument("--request-timeout", type=float, default=300.0)
     p.add_argument("--budget-seconds", type=float, default=0, help="0 = no run budget")
+    p.add_argument(
+        "--deadline-epoch",
+        type=float,
+        help="absolute wall-clock time (epoch s): no episode starts at or after it",
+    )
     p.add_argument("--output", type=Path, help="new JSONL ledger (never overwritten)")
     p.add_argument("--dry-run", action="store_true", help="scripted fake model, no inference")
     p.add_argument("--dry-run-script", type=Path, help="JSON {encoding, scripts:{case_id:[turns]}}")
