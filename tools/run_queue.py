@@ -35,6 +35,7 @@ The console gets one line per arm transition and never a per-case outcome (plan 
 import argparse
 import datetime as dt
 import fcntl
+import importlib
 import json
 import os
 import re
@@ -45,8 +46,6 @@ import sys
 import time
 from pathlib import Path
 
-import decision_models
-import decision_router as dr
 import model_registry
 import run_watchdog
 import tool_loop_benchmark as tl
@@ -59,6 +58,22 @@ from toolloop_ops import (  # noqa: F401 (re-exported for callers and tests)
     next_window_start,
     window_end,
 )
+
+
+class _Lazy:
+    """Router arms only: the tool-loop path (and window-check) never imports these modules."""
+
+    def __init__(self, name):
+        self._name, self._module = name, None
+
+    def __getattr__(self, attr):
+        if self._module is None:
+            self._module = importlib.import_module(self._name)
+        return getattr(self._module, attr)
+
+
+decision_models = _Lazy("decision_models")
+dr = _Lazy("decision_router")
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "tools" / "run_tool_loop_benchmark.sh"

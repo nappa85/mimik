@@ -1072,10 +1072,11 @@ def apply_changes(values: dict, changes: list) -> dict:
 class Episode:
     """Host state for one case: validates tool calls; nothing is ever applied."""
 
-    def __init__(self, pack: Pack, index: RuleIndex, case: dict, flags=None):
+    def __init__(self, pack: Pack, index: RuleIndex, case: dict, flags=None, removed=()):
         self.pack = pack
         self.index = index
         self.flags = resolve_flags(flags)
+        self.removed = tuple(removed)  # SYS-R: finishers the router removed (default none)
         self.case = public_case(case)
         state = pack.initial_state(case)
         self.values = state["values"]
@@ -1190,6 +1191,9 @@ class Episode:
     # -- dispatch
     def call(self, name, raw_arguments) -> dict:
         """Execute one tool call; returns the JSON result sent back to the model."""
+        if name in self.removed:  # SYS-R: refused by dispatch, never executed
+            self.rejected_calls += 1
+            return {"ok": False, "error": f"tool {name!r} is not available for this request"}
         try:
             if name not in TOOL_NAMES:
                 raise ToolCallError(f"unknown tool {name!r}; available: {list(TOOL_NAMES)}")
@@ -1424,12 +1428,12 @@ class HttpModel:
         finally:
             conn.close()
 
-    def payload(self, messages, seed):
+    def payload(self, messages, seed, tools=None):
         s = self.sampling
         payload = {
             "model": self.label,
             "messages": messages,
-            "tools": TOOLS,
+            "tools": TOOLS if tools is None else tools,
             "tool_choice": s["tool_choice"],
             "temperature": s["temperature"],
             "top_p": s["top_p"],
@@ -1441,9 +1445,9 @@ class HttpModel:
             payload["chat_template_kwargs"] = {"enable_thinking": s["thinking"] == "on"}
         return payload
 
-    def __call__(self, messages, seed, case_id=None, turn=None):
+    def __call__(self, messages, seed, case_id=None, turn=None, tools=None):
         del case_id, turn
-        payload = self.payload(messages, seed)
+        payload = self.payload(messages, seed, tools)
         conn = http.client.HTTPConnection(
             self.url.hostname, self.url.port or 80, timeout=self.timeout
         )
@@ -1500,8 +1504,8 @@ class ScriptedModel:
             ],
         ]
 
-    def __call__(self, messages, seed, case_id=None, turn=None):
-        del messages, seed
+    def __call__(self, messages, seed, case_id=None, turn=None, tools=None):
+        del messages, seed, tools
         turns = self.turns_for(case_id)
         spec = turns[turn - 1] if turn - 1 < len(turns) else []
         finish = content = None
@@ -1560,11 +1564,23 @@ def sanitize_echo(calls: list) -> int:
 
 
 def run_episode(
-    pack, index, case, model, seed, max_turns=MAX_TURNS, clock=time.monotonic, flags=None
+    pack,
+    index,
+    case,
+    model,
+    seed,
+    max_turns=MAX_TURNS,
+    clock=time.monotonic,
+    flags=None,
+    removed=(),
 ):
-    """One case. `flags` default to FLAGS_OFF (v2 behaviour); the CLI passes BASE_FLAGS."""
+    """One case. `flags` default to FLAGS_OFF (v2 behaviour); the CLI passes BASE_FLAGS.
+    `removed` (SYS-R only): finishers dropped from the tool list and refused by dispatch."""
     flags = resolve_flags(flags)
-    host = Episode(pack, index, case, flags)
+    host = Episode(pack, index, case, flags, removed)
+    model_kwargs = {}
+    if removed:
+        model_kwargs["tools"] = [t for t in TOOLS if t["function"]["name"] not in removed]
     messages = host.messages()
     row = {
         "case_id": case["id"],
@@ -1590,7 +1606,7 @@ def run_episode(
         for turn in range(1, max_turns + 1):
             row["turns"] = turn
             t0 = clock()
-            response = model(messages, seed, case_id=case["id"], turn=turn)
+            response = model(messages, seed, case_id=case["id"], turn=turn, **model_kwargs)
             row["latency_seconds"].append(clock() - t0)
             row["responses"].append(response)
             usage = response.get("usage") or {}
@@ -2041,10 +2057,15 @@ def summarize(rows: list[dict]) -> list[dict]:
     groups = {}
     for row in rows:
         if row.get("event") == "episode":
-            key = (row["model_label"], row.get("arm") or "", row["split"])
+            key = (
+                row["model_label"],
+                row.get("arm") or "",
+                row["split"],
+                row.get("arm_type") or "",
+            )
             groups.setdefault(key, []).append(row)
     summaries = []
-    for (label, arm, split), group in sorted(groups.items()):
+    for (label, arm, split, arm_type), group in sorted(groups.items()):
         n = len(group)
         scores = [r["score"] for r in group]
         outcomes = {}
@@ -2166,6 +2187,11 @@ def summarize(rows: list[dict]) -> list[dict]:
             sanitised_calls=sum(r.get("sanitised_calls") or 0 for r in group),
             length_finishes=sum(r.get("length_finishes") or 0 for r in group),
         )
+        if arm_type:  # SYS-R system arm (absent for model arms: C0 summaries unchanged)
+            summary["arm_type"] = arm_type
+            summary["router_failures"] = sum(
+                bool((r.get("router") or {}).get("failure")) for r in group
+            )
         summary["bar"] = bar_verdict(summary)
         summaries.append(summary)
     return summaries
@@ -2180,6 +2206,14 @@ def bar_verdict(summary: dict) -> dict:
         f"correct >= {BAR['min_correct']:.0%} and false_supported <= "
         f"{BAR['max_false_supported']:.0%} on {BAR['split']}, >= {BAR['min_cases']} cases"
     )
+    if summary.get("arm_type") == "system":
+        return {
+            "label": BAR_LABEL,
+            "criteria": criteria,
+            "variants": {},
+            "reasons": ["the bar judges model arms only (A0); SYS-R is a system arm"],
+            "verdict": "N/A (system arm)",
+        }
     if summary["split"] != BAR["split"]:
         return {
             "label": BAR_LABEL,
@@ -2484,6 +2518,105 @@ def open_pack(args) -> Pack:
     return Pack(args.pack, engine_factory=lambda d: CelCliEngine(d, args.formula_cli))
 
 
+# ---------------------------------------------------------------- SYS-R (dev-only system arm)
+SYSTEM_LABEL_PREFIX = "SYS-"
+
+
+def prepare_router(args, pack) -> None:
+    """--router-decisions (decision-router plan §4): verify the decision file or refuse.
+    Off (the default) this only refuses a SYS- label, which belongs to system arms."""
+    path = getattr(args, "router_decisions", None)
+    args.router_doc = None
+    label = args.model_label or ""
+    if path is None:
+        if label.startswith(SYSTEM_LABEL_PREFIX):
+            raise SystemExit("SYS- labels are for system arms (--router-decisions)")
+        return
+    if not label.startswith(SYSTEM_LABEL_PREFIX):
+        raise SystemExit("--router-decisions: a system arm's --model-label must start with SYS-")
+    if args.split != "dev":
+        raise SystemExit("--router-decisions: SYS-R is dev-only")
+    sha = file_digest(Path(path))
+    if sha != getattr(args, "router_decisions_sha256", None):
+        raise SystemExit(f"--router-decisions: file sha256 {sha} != --router-decisions-sha256")
+    import decision_router  # only for system arms: the C0 path never imports it
+    import router_state_builder
+
+    doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    index = RuleIndex(pack.rules, DEFAULT_TOP_K)
+    cases = {c["id"]: c for c in pack.cases.get("dev", [])}
+
+    def state_hash_of(case_id):
+        case = cases[case_id]
+        entry = {
+            "key": "",
+            "character": case["character"],
+            "request": case["request"],
+            "setup": case.get("setup", {}),
+        }
+        return router_state_builder.text_hash(router_state_builder.render_state(pack, index, entry))
+
+    try:
+        entries = decision_router.verify_decision_file(doc, list(cases), state_hash_of)
+    except decision_router.RouterError as error:
+        raise SystemExit(f"--router-decisions: {error}") from None
+    header = doc["header"]
+    args.router_doc = {
+        "sha256": sha,
+        "entries": entries,
+        "at_risk": decision_router.AT_RISK,
+        "summary": {
+            k: header.get(k)
+            for k in (
+                "router",
+                "policy_hash",
+                "question_hash",
+                "fold_sha256",
+                "state_builder_sha256",
+            )
+        }
+        | {"tau_star": header["policy"]["tau_star"]},
+    }
+
+
+def router_terminal_episode(pack, index, case, seed, outcome, flags, clock) -> dict:
+    """A routed at-risk case: host-written terminal, no model call (plan §4)."""
+    host = Episode(pack, index, case, flags)
+    messages = host.messages()
+    started = clock()
+    host.finish("router", outcome, "", [])
+    return {
+        "case_id": case["id"],
+        "seed": seed,
+        "context_hash": digest(messages),
+        "turns": 0,
+        "tool_calls": 0,
+        "calls_after_terminal": 0,
+        "latency_seconds": [],
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "finish_reasons": [],
+        "length_finishes": 0,
+        "nudged": False,
+        "nudge_turn": None,
+        "sanitised_calls": 0,
+        "responses": [],
+        "error": None,
+        "outcome": outcome,
+        "finish_last": None,
+        "seconds": clock() - started,
+        "terminal": host.terminal,
+        "accepted_proposal": None,
+        "proposal_attempts": [],
+        "pending_proposal_at_end": False,
+        "retrieved_ids": [],
+        "searches": [],
+        "malformed_calls": 0,
+        "rejected_calls": 0,
+        "transcript": messages,
+    }
+
+
 def run(args, model, out, clock=time.monotonic, pack=None, wall=time.time) -> list[dict]:
     if pack is None:
         pack = open_pack(args)
@@ -2515,54 +2648,60 @@ def run(args, model, out, clock=time.monotonic, pack=None, wall=time.time) -> li
         out.write(json.dumps(row, ensure_ascii=False) + "\n")
         out.flush()
 
-    emit(
-        {
-            "event": "run_started",
-            "benchmark_version": BENCHMARK_VERSION,
-            "model_label": args.model_label,
-            "arm": args.arm,
-            "split": args.split,
-            "dry_run": bool(args.dry_run),
-            "dry_run_expected": bool(getattr(args, "dry_run_expected", False)),
-            "allow_heldout_gold_replay": bool(getattr(args, "allow_heldout_gold_replay", False)),
-            "endpoint": None if args.dry_run else args.endpoint,
-            "seeds": seeds,
-            "planned_episodes": len(jobs),
-            "max_turns": args.max_turns,
-            "max_turns_ceiling": MAX_TURNS_CEILING,
-            "ctx": args.ctx,
-            "top_k": args.top_k,
-            "sampling": sampling,
-            "flags": flags,
-            "thinking_capability": getattr(args, "thinking_capability", "toggle"),
-            "thinking_effective": thinking_effective(
-                getattr(args, "thinking_capability", "toggle"), args.thinking
-            ),
-            "server": getattr(args, "server_config_doc", None),
-            "device": getattr(args, "device", "gpu"),
-            "length_rule": LENGTH_RULE,
-            "visible_text_hashes": visible_text_hashes(),
-            "pack_hashes": pack.hashes(),
-            "corpus_hash": index.corpus_hash,
-            "system_prompt_hash": digest(SYSTEM_PROMPT),
-            "tools_hash": digest(TOOLS),
-            "formula_engine": pack.formulas.provenance,
-            "harness_sha256": file_digest(Path(__file__)),
-            "model_sha256": args.model_sha256,
-            "runner_provenance": dict(args.provenance or []),
-            "case_order": [c["id"] for c in ordered],
-            "case_filter": case_filter or None,
-            "deadline_epoch": getattr(args, "deadline_epoch", None),
-            "case_subset": None
-            if subset is None
-            else {
-                "name": subset["name"],
-                "rule": subset["rule"],
-                "size": len(subset["case_ids"]),
-                "sha256": subset["sha256"],
-            },
-        }
-    )
+    router = getattr(args, "router_doc", None)
+    header = {
+        "event": "run_started",
+        "benchmark_version": BENCHMARK_VERSION,
+        "model_label": args.model_label,
+        "arm": args.arm,
+        "split": args.split,
+        "dry_run": bool(args.dry_run),
+        "dry_run_expected": bool(getattr(args, "dry_run_expected", False)),
+        "allow_heldout_gold_replay": bool(getattr(args, "allow_heldout_gold_replay", False)),
+        "endpoint": None if args.dry_run else args.endpoint,
+        "seeds": seeds,
+        "planned_episodes": len(jobs),
+        "max_turns": args.max_turns,
+        "max_turns_ceiling": MAX_TURNS_CEILING,
+        "ctx": args.ctx,
+        "top_k": args.top_k,
+        "sampling": sampling,
+        "flags": flags,
+        "thinking_capability": getattr(args, "thinking_capability", "toggle"),
+        "thinking_effective": thinking_effective(
+            getattr(args, "thinking_capability", "toggle"), args.thinking
+        ),
+        "server": getattr(args, "server_config_doc", None),
+        "device": getattr(args, "device", "gpu"),
+        "length_rule": LENGTH_RULE,
+        "visible_text_hashes": visible_text_hashes(),
+        "pack_hashes": pack.hashes(),
+        "corpus_hash": index.corpus_hash,
+        "system_prompt_hash": digest(SYSTEM_PROMPT),
+        "tools_hash": digest(TOOLS),
+        "formula_engine": pack.formulas.provenance,
+        "harness_sha256": file_digest(Path(__file__)),
+        "model_sha256": args.model_sha256,
+        "runner_provenance": dict(args.provenance or []),
+        "case_order": [c["id"] for c in ordered],
+        "case_filter": case_filter or None,
+        "deadline_epoch": getattr(args, "deadline_epoch", None),
+        "case_subset": None
+        if subset is None
+        else {
+            "name": subset["name"],
+            "rule": subset["rule"],
+            "size": len(subset["case_ids"]),
+            "sha256": subset["sha256"],
+        },
+    }
+    if router is not None:  # SYS-R only: absent from every C0 header
+        header.update(
+            arm_type="system",
+            router_decisions_sha256=router["sha256"],
+            router=router["summary"],
+        )
+    emit(header)
     deadline = None if not args.budget_seconds else clock() + args.budget_seconds
     rows = []
     consecutive_errors = 0
@@ -2593,6 +2732,10 @@ def run(args, model, out, clock=time.monotonic, pack=None, wall=time.time) -> li
             "tags": copy.deepcopy(case.get("tags")),
             "seed": seed,
         }
+        decision = None
+        if router is not None:
+            base["arm_type"] = "system"
+            decision = router["entries"][case["id"]]
         stop_at = getattr(args, "deadline_epoch", None)
         if deadline is not None and clock() >= deadline:
             row = dict(base, outcome="not_run", error="run budget exhausted")
@@ -2601,14 +2744,34 @@ def run(args, model, out, clock=time.monotonic, pack=None, wall=time.time) -> li
             row = dict(base, outcome="not_run", error="schedule deadline reached")
         else:
             try:
-                episode = run_episode(
-                    pack, index, case, model, seed, args.max_turns, clock, flags=flags
-                )
+                if decision is not None and decision["route"] in router["at_risk"]:
+                    episode = router_terminal_episode(
+                        pack, index, case, seed, decision["route"], flags, clock
+                    )
+                elif decision is not None:
+                    removed = ("answer",) if decision["route"] == PROPOSAL else ("submit_proposal",)
+                    episode = run_episode(
+                        pack, index, case, model, seed, args.max_turns, clock, flags, removed
+                    )
+                else:
+                    episode = run_episode(
+                        pack, index, case, model, seed, args.max_turns, clock, flags=flags
+                    )
             except FormulaInfraError as error:
                 abort("formula engine infrastructure fault", error, case["id"])
                 raise
             row = dict(base, **episode)
+        if decision is not None:
+            row["router"] = {
+                "route": decision["route"],
+                "reason": decision["reason"],
+                "failure": decision["reason"] == "fallback_failure",
+                "state_hash": decision["state_hash"],
+            }
         row["score"] = score(case, row)
+        if decision is not None and row["router"]["failure"]:
+            # A router failure is never correct, even on an ask_rule case (rev. 3.1, A6).
+            row["score"].update(correct=False, router_failure=True)
         row["exposure"] = leniency_exposure(case, row, row["score"])
         rows.append(row)
         emit(row)
@@ -2763,8 +2926,10 @@ GROUP_IDENTITY = (
     "case_filter",
     "case_subset",
     "case_ids",
+    "arm_type",
+    "router_decisions_sha256",
 )
-ROW_HEADER_FIELDS = ("model_label", "arm", "split")
+ROW_HEADER_FIELDS = ("model_label", "arm", "split", "arm_type")
 
 
 def _ledger_identity(header: dict) -> dict:
@@ -2812,6 +2977,18 @@ def load_ledgers(paths) -> list[dict]:
                         f"{path}: episode {row.get('case_id')} has {field} {row.get(field)!r}, "
                         f"header {header.get(field)!r}; refusing it"
                     )
+        system = header.get("arm_type") == "system"
+        if header.get("arm_type") not in (None, "system"):
+            raise SystemExit(f"{path}: unknown arm_type {header.get('arm_type')!r}; refusing it")
+        if system != str(header.get("model_label") or "").startswith(SYSTEM_LABEL_PREFIX):
+            raise SystemExit(f"{path}: SYS- labels and system arms go together; refusing it")
+        if not system and any(
+            r.get("router") is not None or (r.get("terminal") or {}).get("tool") == "router"
+            for r in episodes
+        ):
+            raise SystemExit(
+                f"{path}: router rows in a model-arm ledger (relabelled?); refusing it"
+            )
         case_order, seeds = header.get("case_order"), header.get("seeds")
         if not isinstance(case_order, list) or not isinstance(seeds, list):
             raise SystemExit(f"{path}: no declared job set (case_order and seeds); refusing it")
@@ -2969,6 +3146,12 @@ def build_parser():
     )
     p.add_argument("--model-sha256", help="sha256 of the served model file (runner-verified)")
     p.add_argument(
+        "--router-decisions",
+        type=Path,
+        help="SYS-R (dev-only system arm): verified router decision file; off by default",
+    )
+    p.add_argument("--router-decisions-sha256", help="pre-registered sha256 of that file")
+    p.add_argument(
         "--provenance",
         action="append",
         type=lambda kv: tuple(kv.split("=", 1)) if "=" in kv else (kv, ""),
@@ -3088,6 +3271,7 @@ def _main(argv=None):
         model = HttpModel(args.endpoint, args.model_label, sampling_of(args), args.request_timeout)
         pack = open_pack(args)
     try:
+        prepare_router(args, pack)  # off: a no-op unless a SYS- label is misused
         if args.case_subset_doc is not None:  # before the ledger file is created
             check_case_subset(args.case_subset_doc, pack, args.split)
         with args.output.open("x", encoding="utf-8") as out:
