@@ -6,10 +6,12 @@ import hashlib
 import json
 import math
 import os
+import re
 import resource
 import selectors
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -29,6 +31,75 @@ QUESTION = (
     "Which option describes the review?"
 )
 MARKER = "MIMIK_DECISION_RESULT "
+DEFAULT_TIMEOUT = 180  # legacy readiness and decision cap (s); read at call time (injectable)
+LEGACY_SUM_TOLERANCE = 1e-5  # this benchmark's own default; the router sends its tolerance
+DEVICES = ("gpu", "cpu")
+GPU_NODE_PATTERNS = ("dri", "kfd", "nvidia*")
+OFFLOAD_RE = re.compile(r"offloaded (\d+)/(\d+) layers to GPU")
+KEV_ARTEFACT_SHA256 = {
+    "adapter_model.safetensors": "9b908623acb162118575f4e7a94524f9c139c335be4bfb74d6cfceca01e1885a",
+    "head.pt": "f400bd12802b2b105ae45d6b03774a158a3db4fccff42413734ddca2e5c920b6",
+}
+KEV_BASE = "Qwen/Qwen3.5-0.8B-Base"
+KEV_BASE_REVISION = "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68"
+KEV_BASE_WEIGHTS_SHA256 = "c2b1e5a17d9c1e27685d92ed9b382911ebb99955ecd89052d1721241adfbab6c"
+
+
+class OverContext(ValueError):
+    """The rendered prompt is longer than n_ctx: refused, never truncated."""
+
+
+def question_hash(question, choices):
+    """sha256 of the question and its option texts by ID (independent of display order)."""
+    return digest({"question": question, "choices": dict(sorted(choices.items()))})
+
+
+def requested(request):
+    """The request's question and choices (default: the 4-label benchmark's)."""
+    question = request.get("question", QUESTION)
+    choices = request.get("choices", CHOICES)
+    if not isinstance(question, str) or not isinstance(choices, dict):
+        raise ValueError("question must be text and choices an object")
+    if not all(isinstance(k, str) and isinstance(v, str) for k, v in choices.items()):
+        raise ValueError("choices must map IDs to option text")
+    order = request["order"]
+    if len(order) != len(set(order)) or set(order) != set(choices):
+        raise ValueError("order must list every requested choice exactly once")
+    return question, choices
+
+
+def option_lines(choices, order):
+    return [f"{k}: {choices[k]}" for k in order]
+
+
+def gpu_device_nodes(dev_root="/dev"):
+    root = Path(dev_root)
+    return sorted(str(p) for pattern in GPU_NODE_PATTERNS for p in root.glob(pattern))
+
+
+def capture_fd2(fn):
+    """Run fn with the process's fd 2 captured (llama.cpp logs there), then re-emit it."""
+    sys.stderr.flush()
+    saved = os.dup(2)
+    with tempfile.TemporaryFile() as tmp:
+        os.dup2(tmp.fileno(), 2)
+        try:
+            result = fn()
+        finally:
+            sys.stderr.flush()
+            os.dup2(saved, 2)
+            os.close(saved)
+            tmp.seek(0)
+            text = tmp.read().decode("utf-8", errors="replace")
+            sys.stderr.write(text)
+            sys.stderr.flush()
+    return result, text
+
+
+def parse_offload(text):
+    """Layers llama.cpp reports offloaded to the GPU; None when no such line was logged."""
+    found = OFFLOAD_RE.findall(text)
+    return None if not found else max(int(n) for n, _ in found)
 
 
 def project_state(character, case_input):
@@ -92,7 +163,7 @@ def prepare_cases(demo):
     return prepared
 
 
-def validate_distribution(distribution, order):
+def validate_distribution(distribution, order, tolerance=LEGACY_SUM_TOLERANCE):
     if set(distribution) != set(order) or len(order) != len(set(order)):
         raise ValueError("Incomplete or duplicate choice IDs")
     values = list(distribution.values())
@@ -104,7 +175,7 @@ def validate_distribution(distribution, order):
         for v in values
     ):
         raise ValueError("Invalid probability")
-    if not math.isclose(sum(values), 1, abs_tol=1e-5):
+    if not math.isclose(sum(values), 1, abs_tol=tolerance):
         raise ValueError("Probabilities are not normalized")
     # Exact ties use semantic IDs, never the displayed option order.
     return max(sorted(distribution), key=distribution.__getitem__)
@@ -171,15 +242,49 @@ def anyjev_worker(args):
     from anyjev.backends.llamacpp import LlamaCppBackend
     from anyjev.readout import build_prompt, render_chat
 
-    if not llama_cpp.llama_supports_gpu_offload():
-        raise ValueError("Vulkan GPU support is required; no silent CPU fallback")
+    device = getattr(args, "device", None) or "gpu"
+    threads = getattr(args, "threads", None) or 6
+    n_ctx = getattr(args, "n_ctx", None) or 4096
+    build_offload = bool(llama_cpp.llama_supports_gpu_offload())
+    if device == "gpu":
+        if not build_offload:
+            raise ValueError("Vulkan GPU support is required; no silent CPU fallback")
+        n_gpu_layers, nodes = -1, None
+    elif device == "cpu":
+        # Explicit CPU mode (router plan §2): refuse unless no GPU node is visible.
+        nodes = gpu_device_nodes(getattr(args, "dev_root", None) or "/dev")
+        if nodes:
+            raise ValueError(f"CPU mode refused: GPU device node(s) visible {nodes}")
+        n_gpu_layers = 0
+    else:
+        raise ValueError(f"unknown device {device!r}; no silent fallback")
     with Path(args.model).open("rb") as stream:
         actual_hash = hashlib.file_digest(stream, "sha256").hexdigest()
     if actual_hash != args.model_sha256:
         raise ValueError("GGUF artifact hash mismatch")
-    backend = LlamaCppBackend(
-        args.model, n_ctx=4096, n_batch=512, n_gpu_layers=-1, n_threads=6, verbose=True
+    backend, load_log = capture_fd2(
+        lambda: LlamaCppBackend(
+            args.model,
+            n_ctx=n_ctx,
+            n_batch=512,
+            n_gpu_layers=n_gpu_layers,
+            n_threads=threads,
+            verbose=True,
+        )
     )
+    offloaded = parse_offload(load_log)
+    if device == "cpu" and offloaded is not None and offloaded > 0:
+        backend.close()
+        raise ValueError(f"CPU mode refused: llama.cpp offloaded {offloaded} layers to a GPU")
+    device_provenance = {
+        "device": device,
+        "n_gpu_layers": n_gpu_layers,
+        "threads": threads,
+        "n_ctx": n_ctx,
+        "gpu_device_nodes": nodes,
+        "offloaded_layers": "absent" if offloaded is None else offloaded,
+        "llama_supports_gpu_offload": f"{build_offload} (build property only, not a device check)",
+    }
     deciders = {
         "raw": Decider(backend, level="raw", prior="none", canonical_order=False),
         "L0": Decider(
@@ -203,10 +308,27 @@ def anyjev_worker(args):
         deciders["L0"].decide_batch([""], q)
         setup.append({"order": order, "seconds": time.perf_counter() - started})
 
+    def raw_prompt(request):
+        question, choices = requested(request)
+        order = request["order"]
+        q = Question.choice(question, option_lines(choices, order), name="review")
+        decider = deciders[request.get("method", "raw")]
+        prompt = render_chat(
+            backend.tokenizer,
+            build_prompt(request["state"], q, list(range(len(order))), decider.system),
+        )
+        tokens = len(backend.llm.tokenize(prompt.encode("utf-8"), add_bos=False, special=True))
+        return q, decider, question, choices, tokens
+
+    def count(request):
+        *_, tokens = raw_prompt(request)
+        return {"prompt_tokens": tokens, "n_ctx": n_ctx}
+
     def predict(request):
         order = request["order"]
-        q = Question.choice(QUESTION, [f"{k}: {CHOICES[k]}" for k in order], name="review")
-        decider = deciders[request["method"]]
+        q, decider, question, choices, tokens = raw_prompt(request)
+        if tokens > n_ctx:
+            raise OverContext(f"prompt is {tokens} tokens, n_ctx {n_ctx}; never truncated")
         before = dict(decider.stats)
         started = time.perf_counter()
         result = decider.decide_batch([request["state"]], q)[0]
@@ -228,8 +350,11 @@ def anyjev_worker(args):
             "prompt_hash": digest(prompts),
             "kv_prefix_cache": "cleared per prompt by reference backend",
             "physical_evaluations": len(result.diagnostics["perms"]),
+            "question_sha256": question_hash(question, choices),
+            "prompt_tokens": tokens,
         }
 
+    predict.count = count
     return (
         predict,
         backend.close,
@@ -241,6 +366,7 @@ def anyjev_worker(args):
             "model_metadata": backend.llm.metadata,
             "prior_setup": setup,
             "shared_prefix_backend": False,
+            "device_provenance": device_provenance,
         },
     )
 
@@ -254,18 +380,12 @@ def kev_worker(args):
 
     torch.set_num_threads(6)
     torch.set_num_interop_threads(1)
-    for name, expected in {
-        "adapter_model.safetensors": "9b908623acb162118575f4e7a94524f9c139c335be4bfb74d6cfceca01e1885a",
-        "head.pt": "f400bd12802b2b105ae45d6b03774a158a3db4fccff42413734ddca2e5c920b6",
-    }.items():
+    for name, expected in KEV_ARTEFACT_SHA256.items():
         with (Path(args.kev_checkpoint) / name).open("rb") as stream:
             if hashlib.file_digest(stream, "sha256").hexdigest() != expected:
                 raise ValueError("Trained artifact hash mismatch")
     checkpoint = Checkpoint(args.kev_checkpoint)
-    if (
-        checkpoint.meta.base != "Qwen/Qwen3.5-0.8B-Base"
-        or checkpoint.meta.base_revision != "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68"
-    ):
+    if checkpoint.meta.base != KEV_BASE or checkpoint.meta.base_revision != KEV_BASE_REVISION:
         raise ValueError("Unexpected trained checkpoint base/revision")
     from huggingface_hub import hf_hub_download
 
@@ -279,10 +399,7 @@ def kev_worker(args):
         )
     )
     with base_weights.open("rb") as stream:
-        if (
-            hashlib.file_digest(stream, "sha256").hexdigest()
-            != "c2b1e5a17d9c1e27685d92ed9b382911ebb99955ecd89052d1721241adfbab6c"
-        ):
+        if hashlib.file_digest(stream, "sha256").hexdigest() != KEV_BASE_WEIGHTS_SHA256:
             raise ValueError("Base weight hash mismatch")
     tok, model = checkpoint.load(
         "cpu",
@@ -291,30 +408,45 @@ def kev_worker(args):
     if any("visual" in name or "vision" in name for name, _ in model.named_modules()):
         raise ValueError("The loaded decision backbone must be text-only")
     server = Server(checkpoint, tok, model, "cpu")
+    n_ctx = getattr(args, "n_ctx", None)
 
-    def predict(request):
-        criteria = {k: CHOICES[k] for k in request["order"]}
+    def encoded_record(request):
+        question, choices = requested(request)
+        order = request["order"]
         req = SystemOneRequest(
             state=request["state"],
             questions={
                 "review": {
                     "type": "choice",
-                    "instructions": QUESTION,
-                    "criteria": criteria,
+                    "instructions": question,
+                    "criteria": {k: choices[k] for k in order},
                 }
             },
         )
         record, _ = to_record(req)
-        assert record["state"] == request["state"]
-        assert record["questions"][0]["instr"] == QUESTION
-        assert record["questions"][0]["options"] == [f"{k}: {CHOICES[k]}" for k in request["order"]]
+        # Byte-for-byte against the request (never python -O-strippable asserts).
+        if record["state"] != request["state"]:
+            raise ValueError("Kev record state differs from the request")
+        if record["questions"][0]["instr"] != question:
+            raise ValueError("Kev record question differs from the request")
+        if record["questions"][0]["options"] != option_lines(choices, order):
+            raise ValueError("Kev record options differ from the request")
+        return record, admit(model, tok, record), question, choices
+
+    def count(request):
+        _, encoded, _, _ = encoded_record(request)
+        return {"prompt_tokens": len(encoded["ids"]), "n_ctx": n_ctx}
+
+    def predict(request):
+        record, encoded, question, choices = encoded_record(request)
+        if n_ctx and len(encoded["ids"]) > n_ctx:
+            raise OverContext(f"record is {len(encoded['ids'])} tokens, n_ctx {n_ctx}")
         if request.get("clear_cache"):
             server.prefix_cache.clear()
         hits, misses = server.prefix_cache.hits, server.prefix_cache.misses
         started = time.perf_counter()
         probs, native = server.probs(record)
         seconds = time.perf_counter() - started
-        encoded = admit(model, tok, record)
         return {
             "probabilities": dict(zip(request["order"], probs[0], strict=True)),
             "seconds": seconds,
@@ -324,8 +456,11 @@ def kev_worker(args):
             "encoded_token_ids": encoded["ids"],
             "prompt_hash": digest(encoded["ids"]),
             "physical_evaluations": 1,
+            "question_sha256": question_hash(question, choices),
+            "prompt_tokens": len(encoded["ids"]),
         }
 
+    predict.count = count
     return (
         predict,
         server.close,
@@ -353,16 +488,32 @@ def worker(args, factory=None):
     try:
         for line in sys.stdin:
             request = json.loads(line)
+            tolerance = request.get("tolerance", LEGACY_SUM_TOLERANCE)
             try:
-                result = {"status": "completed", **predict(request)}
-                validate_distribution(result["probabilities"], request["order"])
+                if request.get("count_only"):
+                    result = {"status": "counted", **predict.count(request)}
+                else:
+                    result = {"status": "completed", **predict(request)}
             except Exception as error:
                 result = {
                     "status": "failed",
+                    "error_class": "over_context"
+                    if isinstance(error, OverContext)
+                    else "predict_error",
                     "error": f"{type(error).__name__}: {error}",
                 }
                 if hasattr(error, "physical_evaluations"):
                     result["physical_evaluations"] = error.physical_evaluations
+            else:
+                if result["status"] == "completed":
+                    try:
+                        validate_distribution(result["probabilities"], request["order"], tolerance)
+                    except (ValueError, TypeError, AttributeError) as error:
+                        result = {
+                            "status": "failed",
+                            "error_class": "invalid_distribution",
+                            "error": f"{type(error).__name__}: {error}",
+                        }
             result["worker_peak_rss_kib"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             print(MARKER + json.dumps(serial(result)), flush=True)
     finally:
@@ -373,7 +524,9 @@ class Worker:
     """A deadline kills the native model process, not merely a waiting Python thread."""
 
     def __init__(self, args):
-        self.log = args.output.with_suffix(".worker.log").open("w")
+        # Appended, never truncated: a restart keeps the earlier log (router plan A4).
+        log = getattr(args, "worker_log", None) or args.output.with_suffix(".worker.log")
+        self.log = Path(log).open("a")
         command = [
             sys.executable,
             "-u",
@@ -388,6 +541,11 @@ class Worker:
                 command += ["--model-sha256", args.model_sha256]
         if args.kev_checkpoint:
             command += ["--kev-checkpoint", args.kev_checkpoint]
+        for flag, attr in (("--device", "device"), ("--threads", "threads"), ("--n-ctx", "n_ctx")):
+            if getattr(args, attr, None) is not None:
+                command += [flag, str(getattr(args, attr))]
+        if getattr(args, "raw_only", False):
+            command.append("--raw-only")
         command += getattr(args, "worker_options", [])
         self.process = subprocess.Popen(
             command,
@@ -470,6 +628,13 @@ def main():
     parser.add_argument("--output", type=Path)
     parser.add_argument("--worker", action="store_true")
     parser.add_argument("--budget-seconds", type=float, default=1200)
+    parser.add_argument("--ready-timeout", type=float, help=f"default {DEFAULT_TIMEOUT} s")
+    parser.add_argument("--decision-timeout", type=float, help=f"default {DEFAULT_TIMEOUT} s")
+    parser.add_argument("--device", choices=DEVICES, help="AnyJev: gpu (default) or cpu")
+    parser.add_argument("--threads", type=int)
+    parser.add_argument("--n-ctx", type=int, dest="n_ctx")
+    parser.add_argument("--raw-only", action="store_true", dest="raw_only")
+    parser.add_argument("--dev-root", dest="dev_root", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.worker:
         worker(args)
@@ -488,7 +653,11 @@ def main():
     runtime = Worker(args)
     try:
         started = time.monotonic()
-        ready = runtime.receive(180)
+        ready_timeout = DEFAULT_TIMEOUT if args.ready_timeout is None else args.ready_timeout
+        decision_timeout = (
+            DEFAULT_TIMEOUT if args.decision_timeout is None else args.decision_timeout
+        )
+        ready = runtime.receive(ready_timeout)
         if "ready" not in ready:
             raise ValueError("No runtime readiness/provenance")
         args.output.with_suffix(".provenance.json").write_text(
@@ -535,7 +704,7 @@ def main():
                                             "order": order,
                                             "clear_cache": args.backend == "kev" and repeat == 0,
                                         },
-                                        min(180, remaining),
+                                        min(decision_timeout, remaining),
                                     )
                             except (
                                 OSError,
@@ -631,7 +800,7 @@ def main():
                         else:
                             try:
                                 result = runtime.predict(
-                                    payload, min(180, deadline - time.monotonic())
+                                    payload, min(decision_timeout, deadline - time.monotonic())
                                 )
                             except (
                                 OSError,
