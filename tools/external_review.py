@@ -1,7 +1,7 @@
 """Run a read-only review through opencode on a sanitized snapshot, with fallback signalling.
 
-Exit codes: 0 review written; 3 external reviewer unavailable (quota, auth, timeout,
-empty output) so the caller must fall back to another reviewer; 2 usage errors.
+Exit codes: 0 review written (the first output line names the model used); 3 every model
+in the fallback order was unavailable (quota, auth, timeout, empty output); 2 usage errors.
 The snapshot excludes secrets, user data, build output and caches. The opencode agent
 has edit/write/bash/web tools denied, so it can only read the snapshot.
 """
@@ -19,6 +19,15 @@ import time
 from pathlib import Path
 
 DEFAULT_MODEL = "opencode/muse-spark-1.3-contributor-free"
+# User decision 2026-10-16: Sol and a Sonnet subagent are the main reviewers. The third
+# reviewer is the first of these that works; if none works, the review proceeds with two.
+SOL_MODEL = "openai/gpt-6.1-sol"
+THIRD_REVIEWER_CHAIN = (
+    "opencode/space-bunny-free",
+    "opencode/deepseek-v4.1-flash-free",
+    "opencode/muse-spark-1.3-contributor-free",
+)
+CHAINS = {"main": (SOL_MODEL,), "third": THIRD_REVIEWER_CHAIN}
 EXCLUDES = (
     ".env",
     ".env.*",
@@ -145,16 +154,38 @@ def classify(returncode, output):
     return "ok"
 
 
+def review_with_fallback(models, snap, prompt, total, idle):
+    """Try each model in order; return (model, output) from the first usable review, or
+    (None, log) when every model is unavailable."""
+    attempts = []
+    for model in models:
+        if not preflight(model, snap):
+            attempts.append(f"{model}: preflight failed")
+            print(f"{model}: preflight failed; trying the next model.", file=sys.stderr)
+            continue
+        code, output = run_with_idle_timeout(
+            opencode_command(model, snap, prompt), snap, total, idle
+        )
+        if classify(code, output) == "ok":
+            return model, output
+        attempts.append(f"{model}: unavailable (exit {code})")
+        print(f"{model}: unavailable (exit {code}); trying the next model.", file=sys.stderr)
+    return None, "\n".join(attempts)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True, help="Repo or worktree to snapshot")
     parser.add_argument("--prompt-file", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--diff", action="store_true", help="Include `git diff` vs HEAD")
-    parser.add_argument("--model", default=DEFAULT_MODEL)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--model", action="append", help="Model to try; repeat for a fallback order")
+    group.add_argument("--chain", choices=sorted(CHAINS), help="Preset fallback order")
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--idle-timeout", type=int, default=120)
     args = parser.parse_args()
+    models = args.model or CHAINS.get(args.chain) or (DEFAULT_MODEL,)
     if not args.prompt_file.is_file() or not (args.source / "AGENTS.md").is_file():
         print("Prompt file or Mimik source missing", file=sys.stderr)
         return 2
@@ -177,16 +208,12 @@ def main():
             (snap / "REVIEW_DIFF.patch").write_text(diff)
             (snap / "REVIEW_STATUS.txt").write_text(status)
         prompt = args.prompt_file.read_text()
-        if not preflight(args.model, snap):
-            args.output.write_text("preflight failed: external reviewer unavailable")
-            print("External reviewer preflight failed; fall back.", file=sys.stderr)
-            return 3
-        command = opencode_command(args.model, snap, prompt)
-        code, output = run_with_idle_timeout(command, snap, args.timeout, args.idle_timeout)
-    args.output.write_text(output)
-    if classify(code, output) == "unavailable":
-        print(f"External reviewer unavailable (exit {code}); fall back.", file=sys.stderr)
+        model, output = review_with_fallback(models, snap, prompt, args.timeout, args.idle_timeout)
+    if model is None:
+        args.output.write_text(f"no reviewer available:\n{output}\n")
+        print("No external reviewer available; continue without this review.", file=sys.stderr)
         return 3
+    args.output.write_text(f"reviewer-model: {model}\n{output}")
     return 0
 
 

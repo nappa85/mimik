@@ -1,5 +1,12 @@
 # Reviewer benchmark
 
+**Concluded 2026-10-16 (user decision).** The standing setup is in `AGENTS.md`:
+- main reviewers: Sol and Sonnet in parallel;
+- third reviewer: the first that works of Space Bunny, DeepSeek and Muse Spark
+  (`tools/external_review.py --chain third`); if none works, proceed with two.
+
+No further comparison runs are planned. The record below stays as evidence.
+
 A cumulative record of how candidate review models perform on real Mimik review tasks. The
 user asked for it on 2026-10-16 and keeps it separate from the per-change review records in
 `docs/reviews/`. Review policy for 2026-10-16: Muse Spark, Space Bunny and Sonnet review in

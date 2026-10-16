@@ -1,6 +1,7 @@
 # Mimik project rules
 
 - Start each session with `TODO.md`. Update its checkboxes, blockers, verification results, and handoff as work progresses.
+- Commit locally without asking (user decision 2026-10-16): local history can be rewritten. Pushing, or anything else that leaves the machine, still needs explicit approval.
 - Prefer existing maintained crates/libraries over reinventing infrastructure. Before custom implementation, check fit, license compatibility, maintenance, API/capability coverage, portability, and dependency/runtime cost. Record meaningful selection decisions; custom code should cover Mimik-specific behavior or demonstrated gaps.
 - Rust is the application/shipping language. Python is acceptable for extraction/evaluation prototypes. Keep optional prototype dependencies separate from the application.
 - Final provider support should use an established Rust abstraction, not hand-written vendor protocols. Vendor expansion is a roadmap item; keep provider capabilities and model roles explicit.
@@ -16,6 +17,10 @@
 - Every plan must receive an independent adversarial review before execution, and every material implementation step/change set must receive one before being marked complete, except under the prototype tier below. Use a separate reviewer/subagent with a fresh context; self-review is supplemental, not independent review.
 - Review correctness, missing assumptions, failure modes, security, source/rule fidelity, deployability, suitable existing libraries, duplicate logic, maintainability, and production practices. Prefer a read-only reviewer; the implementer owns fixes.
 - Record the reviewed scope, findings, severity, disposition, regression checks, and verification in `docs/reviews/` and summarize blockers/handoff in `TODO.md`. Review findings are not proof of correctness.
+- **Reviewer setup (user decision 2026-10-16):**
+  - Main reviewers: OpenAI Sol (`openai/gpt-6.1-sol` via `tools/external_review.py --chain main`) and a fresh Sonnet subagent, run in parallel.
+  - Third reviewer: the first that works of Space Bunny, DeepSeek v4.1 Flash, then Muse Spark (`--chain third`). If none works, proceed with the two main reviews and record that.
+  - Adjudicate Blocking findings against the code before acting on them; see `docs/reviewer-benchmark.md`.
 - Resolve blocking findings before completion. If independence is unavailable or a blocker cannot be fixed, explicitly record it and keep the work blocked; do not call it production-ready or silently waive it. Review of review records themselves does not recurse.
 
 ### Prototype tier (user decision 2026-10-15)

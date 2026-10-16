@@ -63,5 +63,60 @@ class ReviewerAgentTests(unittest.TestCase):
             self.assertEqual(agent["permission"][tool], "deny", tool)
 
 
+class FallbackTests(unittest.TestCase):
+    def run_chain(self, working):
+        """`working` is the set of models whose preflight and review succeed."""
+        calls = []
+
+        def fake_preflight(model, snap):
+            calls.append(("preflight", model))
+            return model in working
+
+        def fake_run(command, cwd, total, idle):
+            model = command[command.index("-m") + 1]
+            calls.append(("review", model))
+            return 0, f"review by {model}"
+
+        with (
+            mock.patch.object(external_review, "preflight", fake_preflight),
+            mock.patch.object(external_review, "run_with_idle_timeout", fake_run),
+        ):
+            result = external_review.review_with_fallback(
+                external_review.THIRD_REVIEWER_CHAIN, Path("/snap"), "p", 10, 10
+            )
+        return result, calls
+
+    def test_third_reviewer_order_is_bunny_deepseek_muse(self):
+        self.assertEqual(
+            external_review.THIRD_REVIEWER_CHAIN,
+            (
+                "opencode/space-bunny-free",
+                "opencode/deepseek-v4.1-flash-free",
+                "opencode/muse-spark-1.3-contributor-free",
+            ),
+        )
+        self.assertEqual(external_review.CHAINS["main"], ("openai/gpt-6.1-sol",))
+
+    def test_first_working_model_is_used_and_later_ones_not_tried(self):
+        bunny, deepseek, muse = external_review.THIRD_REVIEWER_CHAIN
+        (model, output), calls = self.run_chain({bunny, deepseek})
+        self.assertEqual(model, bunny)
+        self.assertNotIn(("preflight", deepseek), calls)
+
+    def test_falls_through_to_muse(self):
+        bunny, deepseek, muse = external_review.THIRD_REVIEWER_CHAIN
+        (model, output), calls = self.run_chain({muse})
+        self.assertEqual(model, muse)
+        self.assertEqual(
+            [c for c in calls if c[0] == "preflight"],
+            [("preflight", bunny), ("preflight", deepseek), ("preflight", muse)],
+        )
+
+    def test_no_model_available_returns_none(self):
+        (model, log), _ = self.run_chain(set())
+        self.assertIsNone(model)
+        self.assertEqual(log.count("preflight failed"), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
