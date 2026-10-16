@@ -3,7 +3,86 @@ use crate::{
     definitions::{Control, Definition},
 };
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+/// A form index in the canonical grammar `0|[1-9][0-9]{0,2}` (plan D1).
+fn index(raw: &str) -> Option<usize> {
+    let canonical = matches!(raw.len(), 1..=3)
+        && raw.bytes().all(|b| b.is_ascii_digit())
+        && (raw == "0" || !raw.starts_with('0'));
+    canonical.then(|| raw.parse().ok()).flatten()
+}
+
+/// The exact key set a runtime sheet POST may carry (plan D1 and D2), or `None` for a
+/// malformed row-key set (answered 400).
+///
+/// One scan of the submitted `id-f-r` keys bounds every list's row count first: each index
+/// must be canonical, `f` must name a list field, `r` must stay below `MAX_LIST_ITEMS`, and
+/// the rows of a list must be contiguous from 0. Only then are the expected keys generated:
+/// the scalars, every row's ID, property values and (optional properties) presence states,
+/// and `op` when one was submitted.
+pub(crate) fn sheet_keys<'a>(
+    definition: &Definition,
+    submitted: impl Iterator<Item = &'a str>,
+) -> Option<HashSet<String>> {
+    let mut rows: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    let mut op = false;
+    for key in submitted {
+        if key == "op" {
+            op = true;
+        }
+        let Some(rest) = key.strip_prefix("id-") else {
+            continue;
+        };
+        let (f, r) = rest.split_once('-')?;
+        let (f, r) = (index(f)?, index(r)?);
+        if r >= crate::definitions::formula::MAX_LIST_ITEMS
+            || definition.fields.get(f)?.control != Control::List
+        {
+            return None;
+        }
+        rows.entry(f).or_default().insert(r);
+    }
+    if rows
+        .values()
+        .any(|rows| rows.last().is_some_and(|last| last + 1 != rows.len()))
+    {
+        return None;
+    }
+    let mut keys: HashSet<String> = ["csrf", "revision", "name", "notes"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    if op {
+        keys.insert("op".into());
+    }
+    for (f, field) in definition.fields.iter().enumerate() {
+        if field.formula.is_some() {
+            continue;
+        }
+        if field.control == Control::List {
+            let properties = field
+                .items
+                .as_ref()
+                .map_or(&[][..], |items| &items.properties);
+            for r in 0..rows.get(&f).map_or(0, BTreeSet::len) {
+                keys.insert(format!("id-{f}-{r}"));
+                for (p, property) in properties.iter().enumerate() {
+                    keys.insert(format!("row-{f}-{r}-{p}"));
+                    if property.optional {
+                        keys.insert(format!("set-{f}-{r}-{p}"));
+                    }
+                }
+            }
+        } else {
+            keys.insert(format!("value-{}", field.id));
+            if field.nullable {
+                keys.insert(format!("null-{}", field.id));
+            }
+        }
+    }
+    Some(keys)
+}
 
 fn scalar_schema(
     control: Control,

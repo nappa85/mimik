@@ -198,7 +198,7 @@ async fn detail(
 }
 
 fn pairs(bytes: &[u8], keys: &[&str]) -> Result<BTreeMap<String, String>, StatusCode> {
-    super::transport::Pairs::parse(bytes)?.admit(keys)
+    super::transport::Pairs::parse(bytes)?.admit(&keys.iter().copied().collect())
 }
 
 async fn create(
@@ -780,45 +780,52 @@ async fn save_private(
 ) -> ResultResponse {
     let permit = admission.take()?;
     let (pairs, permit) = tokio::task::spawn_blocking(move || {
-        Ok::<_, StatusCode>((super::transport::Pairs::parse(&body)?, permit))
+        Ok::<_, StatusCode>((
+            super::transport::Pairs::parse_limited(&body, super::transport::SHEET_FORM_PAIRS)?,
+            permit,
+        ))
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+    // Precedence (plan D4): parse, then CSRF and authorization, then key admission, so a
+    // bad key set never answers anything but 403 to a caller without a token or rights.
     auth::check_csrf(&session, pairs.csrf()?).await?;
     let auth = auth::request_auth(&state, &session).await?;
-    let (mut view, permit) = load_editor(&state, auth.clone(), id, version, permit).await?;
+    let (view, permit) = load_editor(&state, auth.clone(), id, version, permit).await?;
     if !view.editable {
         return Err(StatusCode::FORBIDDEN);
     }
-    let mut keys = vec![
-        "csrf".to_string(),
-        "revision".to_string(),
-        "name".to_string(),
-        "notes".to_string(),
-    ];
-    if let Some(pin) = &view.immutable {
-        // Derived fields are computed, never submitted (evaluation on save is M3).
-        for field in pin
-            .definition()
-            .fields
-            .iter()
-            .filter(|field| field.formula.is_none())
-        {
-            keys.push(format!("value-{}", field.id));
-            if field.nullable {
-                keys.push(format!("null-{}", field.id));
+    // Admission is O(pairs) but may generate up to 65,536 keys: its own blocking step, whose
+    // only failure is 400 (never a re-render).
+    let (form, mut view, permit) = tokio::task::spawn_blocking(move || {
+        let keys = if let Some(pin) = &view.immutable {
+            values::sheet_keys(pin.definition(), pairs.keys()).ok_or(StatusCode::BAD_REQUEST)?
+        } else {
+            let mut keys: std::collections::HashSet<String> =
+                NATIVE_KEYS.iter().map(|s| (*s).into()).collect();
+            if pairs.keys().any(|key| key == "op") {
+                keys.insert("op".into());
             }
-        }
-    } else {
-        keys = NATIVE_KEYS.iter().map(|s| (*s).into()).collect();
+            keys
+        };
+        Ok::<_, StatusCode>((pairs.admit(&keys)?, view, permit))
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+    if form.get("op").is_some_and(|op| op != "save") {
+        return Err(StatusCode::BAD_REQUEST);
     }
-    let form = pairs.admit(&keys.iter().map(String::as_str).collect::<Vec<_>>())?;
     let csrf = auth::token(&session)
         .await?
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let (result, view, form, permit) = tokio::task::spawn_blocking(move || {
         let result = (|| {
+            // The revision check precedes value validation (plan D4): a stale draft answers
+            // 409 even when its values are invalid.
             let revision = values::integer(&form["revision"])?;
+            if revision != view.snapshot.revision {
+                return Err(AppError::Conflict);
+            }
             let name = super::name_notes(&form["name"], &form["notes"])?;
             let data = if let Some(pin) = &view.immutable {
                 let data = values::form(pin.definition(), &form)?;
@@ -827,9 +834,6 @@ async fn save_private(
             } else {
                 serde_json::to_value(native_draft(&form).validate()?)?
             };
-            if revision != view.snapshot.revision {
-                return Err(AppError::Conflict);
-            }
             view.snapshot.name = name;
             view.snapshot.notes.clone_from(&form["notes"]);
             view.snapshot.data = data;

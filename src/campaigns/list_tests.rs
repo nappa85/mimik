@@ -467,3 +467,246 @@ async fn decoder_bound_snapshot_writes_reopens_and_freezes() {
     assert_eq!((frozen.state.as_str(), frozen.revision), ("frozen", 2));
     assert_eq!(frozen.data, created.data);
 }
+
+fn pair(key: impl Into<String>, value: impl Into<String>) -> (String, String) {
+    (key.into(), value.into())
+}
+
+/// One `equipment` row (field 1): name, quantity, armor (optional), kind (optional),
+/// equipped.
+fn equipment_row(
+    r: usize,
+    id: &str,
+    name: &str,
+    quantity: &str,
+    armor: Option<&str>,
+    kind: Option<&str>,
+    equipped: &str,
+) -> Vec<(String, String)> {
+    let state = |value: Option<&str>| if value.is_some() { "present" } else { "absent" };
+    vec![
+        pair(format!("id-1-{r}"), id),
+        pair(format!("row-1-{r}-0"), name),
+        pair(format!("row-1-{r}-1"), quantity),
+        pair(format!("row-1-{r}-2"), armor.unwrap_or_default()),
+        pair(format!("set-1-{r}-2"), state(armor)),
+        pair(format!("row-1-{r}-3"), kind.unwrap_or_default()),
+        pair(format!("set-1-{r}-3"), state(kind)),
+        pair(format!("row-1-{r}-4"), equipped),
+    ]
+}
+
+/// One `tags` row (field 2).
+fn tag_row(r: usize, id: &str, text: &str) -> Vec<(String, String)> {
+    vec![
+        pair(format!("id-2-{r}"), id),
+        pair(format!("row-2-{r}-0"), text),
+    ]
+}
+
+/// A full list-sheet form: the scalars plus the given rows.
+fn list_form(revision: i64, rows: Vec<Vec<(String, String)>>) -> Vec<(String, String)> {
+    let mut form = vec![
+        pair("csrf", "a".repeat(64)),
+        pair("revision", revision.to_string()),
+        pair("name", "List sheet"),
+        pair("notes", ""),
+        pair("value-label", "x"),
+    ];
+    form.extend(rows.into_iter().flatten());
+    form
+}
+
+fn create_path(setup: &Setup) -> String {
+    format!(
+        "/campaigns/{}/sheets/new?version={}",
+        setup.campaign, setup.version
+    )
+}
+
+/// A two-row equipment list and one tag, as a create form.
+fn rows_form() -> Vec<(String, String)> {
+    list_form(
+        0,
+        vec![
+            equipment_row(0, "", "Rope", "1", None, None, "false"),
+            equipment_row(1, "", "Mail", "1", Some("2"), Some("heavy"), "true"),
+            tag_row(0, "", "brave"),
+        ],
+    )
+}
+
+#[tokio::test]
+async fn list_row_keys_admit_and_bad_key_sets_are_400() {
+    use axum::http::StatusCode;
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    let path = create_path(&setup);
+    // Positive: the D1 key set is admitted (whatever the save then decides).
+    let (status, _) = setup.post(&path, rows_form()).await;
+    assert_ne!(status, StatusCode::BAD_REQUEST, "list row keys admitted");
+    let replace = |from: &str, to: &str| {
+        let mut form = rows_form();
+        for (key, _) in &mut form {
+            if key == from {
+                *key = to.into();
+            }
+        }
+        form
+    };
+    let mut cases = vec![
+        ("non-canonical f", replace("id-1-0", "id-01-0")),
+        ("signed f", replace("id-1-0", "id-+1-0")),
+        ("non-list f", replace("id-2-0", "id-0-0")),
+        ("same-count substitution", replace("row-1-1-0", "row-1-1-9")),
+        ("unknown 70-byte key", replace("notes", &"n".repeat(70))),
+        ("71-byte key", replace("notes", &"n".repeat(71))),
+    ];
+    let mut gap = rows_form();
+    for (key, _) in &mut gap {
+        if let Some(rest) = key.strip_prefix("row-1-1-").map(String::from) {
+            *key = format!("row-1-2-{rest}");
+        } else if let Some(rest) = key.strip_prefix("set-1-1-").map(String::from) {
+            *key = format!("set-1-2-{rest}");
+        } else if key == "id-1-1" {
+            *key = "id-1-2".into();
+        }
+    }
+    cases.push(("row gap", gap));
+    let mut overflow = list_form(
+        0,
+        (0..=256)
+            .map(|r| equipment_row(r, "", "N", "1", None, None, "false"))
+            .collect(),
+    );
+    cases.push(("r = 256", overflow.clone()));
+    overflow.truncate(5);
+    overflow.extend(equipment_row(256, "", "N", "1", None, None, "false"));
+    cases.push(("lone r = 256", overflow));
+    for (context, form) in cases {
+        assert_eq!(
+            setup.post(&path, form).await.0,
+            StatusCode::BAD_REQUEST,
+            "{context}"
+        );
+    }
+    // A `%2D` alias decodes to a duplicate key: refused by the parser.
+    let mut encoded = serde_urlencoded::to_string(rows_form()).unwrap();
+    encoded.push_str("&id%2D1-0=");
+    let response = raw_post(&setup, &path, encoded).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "%2D duplicate");
+    assert_eq!(sheet_count(&setup).await, 0);
+}
+
+async fn raw_post(setup: &Setup, path: &str, body: String) -> axum::response::Response {
+    use tower::ServiceExt;
+    let request = axum::http::Request::builder()
+        .uri(path)
+        .method("POST")
+        .header("host", "127.0.0.1:3000")
+        .header("cookie", setup.auth[1].fixture_cookie())
+        .header("origin", "http://127.0.0.1:3000")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(axum::body::Body::from(body))
+        .unwrap();
+    setup.app.clone().oneshot(request).await.unwrap()
+}
+
+/// A stale draft answers 409 even when its values are invalid (plan D4): the revision check
+/// now precedes value validation on scalar runtime and private native sheets.
+#[tokio::test]
+async fn stale_invalid_draft_conflicts() {
+    use axum::http::StatusCode;
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&super::formula_tests::formula_definition()).await;
+    setup.create().await;
+    let current = super::formula_tests::form(1, "4", Some("2"));
+    assert_eq!(
+        setup.post("/private-sheets/1", current).await.0,
+        StatusCode::SEE_OTHER
+    );
+    // Paired baseline: an invalid draft at the current revision is 422.
+    let invalid_current = super::formula_tests::form(2, "x", Some("2"));
+    assert_eq!(
+        setup.post("/private-sheets/1", invalid_current).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let stale = super::formula_tests::form(1, "x", Some("2"));
+    let (status, html) = setup.post("/private-sheets/1", stale).await;
+    assert_eq!(status, StatusCode::CONFLICT, "scalar runtime");
+    assert!(
+        html.contains("name=\"revision\" value=\"1\""),
+        "submitted revision kept"
+    );
+    // Private native sheet.
+    let store = &setup.store;
+    let campaign = store
+        .create_campaign(
+            setup.auth[1].clone(),
+            "Native".into(),
+            "mork-borg".into(),
+            "it-2025".into(),
+        )
+        .await
+        .unwrap();
+    let mut native = super::native(campaign, 2);
+    native.sheet_id = 2;
+    super::insert_native(store, setup.auth[1].clone(), native).await;
+    let mut form = super::native_form();
+    for (key, value) in &mut form {
+        if key == "revision" {
+            *value = "1".into();
+        }
+    }
+    assert_eq!(
+        setup.post("/private-sheets/2", form.clone()).await.0,
+        StatusCode::SEE_OTHER
+    );
+    for (key, value) in &mut form {
+        if key == "agility" {
+            *value = "x".into();
+        }
+    }
+    assert_eq!(
+        setup.post("/private-sheets/2", form).await.0,
+        StatusCode::CONFLICT,
+        "private native"
+    );
+}
+
+#[tokio::test]
+async fn bad_keys_after_csrf_and_authorization() {
+    use axum::http::StatusCode;
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&super::formula_tests::formula_definition()).await;
+    setup.create().await;
+    let mut bad = super::formula_tests::form(1, "4", Some("2"));
+    bad.push(pair("id-0-0", ""));
+    let mut bad_csrf = bad.clone();
+    bad_csrf[0].1 = "b".repeat(64);
+    assert_eq!(
+        setup.post("/private-sheets/1", bad_csrf).await.0,
+        StatusCode::FORBIDDEN,
+        "bad CSRF with bad keys"
+    );
+    let outsider = super::router_request(
+        &setup.app,
+        &setup.auth[3],
+        "/private-sheets/1",
+        Some(bad.clone()),
+    )
+    .await;
+    assert_eq!(
+        outsider.status(),
+        StatusCode::FORBIDDEN,
+        "no edit rights with bad keys"
+    );
+    assert_eq!(
+        setup.post("/private-sheets/1", bad).await.0,
+        StatusCode::BAD_REQUEST,
+        "authorized with bad keys"
+    );
+}
