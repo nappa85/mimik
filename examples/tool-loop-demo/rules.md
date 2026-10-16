@@ -1,4 +1,4 @@
-# Lantern Reach — rules revision 2
+# Lantern Reach — rules revision 3
 
 Original fictional test material for the Mimik tool-loop benchmark. These are all
 the rules of this demonstration game; do not fill gaps from other games. Each
@@ -7,7 +7,8 @@ in `code`.
 
 Changelog (rule IDs are stable; this preamble is not part of any rule):
 
-- 2026-10-16, pack revision 3: LR2-14 gains the shield swap sentence that mirrors LR2-13;
+- 2026-10-16, rules revision 3 (pack revision 3): LR2-31 and LR2-26 say the night of a long rest is two watches;
+  LR2-14 gains the shield swap sentence that mirrors LR2-13;
   LR2-20 says an item's stats are fixed by the item; LR2-33 says that a change that empties
   a lit lamp also records `lamp_lit` as false.
 - 2026-10-16: LR2-3 says a stale proposal is reported, not replaced.
@@ -188,7 +189,8 @@ technique. Shaken ends at the end of the scene, or at a short or long rest.
 ## LR2-26 — Scenes, watches and days
 
 A scene is a span of action; the Master or player declares when it ends. A watch
-is a span of travel or waiting, and six watches make a day. Ending a scene does
+is a span of travel or waiting, and six watches make a day. The night of a long rest is
+two watches (LR2-31). Ending a scene does
 not pass a watch, and passing watches does not end a scene.
 
 ## LR2-27 — Bandages
@@ -219,7 +221,8 @@ Master's ruling; do not assume full restoration, a die roll or a fixed amount.
 
 ## LR2-31 — Long rest
 
-A long rest takes a night. A character with any bleeding stacks cannot take a
+A long rest takes a night, and the night of a long rest is two watches (LR2-26): a lamp
+left lit through a long rest burns 2 measures of oil (LR2-33). A character with any bleeding stacks cannot take a
 long rest until the bleeding is treated. At the start of the rest the character
 eats one ration. If they do, at the end `focus` becomes `focus_max`, `vitality`
 rises by 2 (not above `vitality_max`), one weary stack is removed, and chilled

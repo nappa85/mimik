@@ -1551,6 +1551,43 @@ class PackRevision3Tests(unittest.TestCase):
         self.assertIn("also sets `lamp_lit` to false", text["LR2-33"])
         self.assertFalse(any("Changelog" in t for t in text.values()))
 
+    def test_a_long_rest_night_is_two_watches(self):
+        """v2/rev3 draft: LR2-31 said a long rest "takes a night" with no length, so oil
+        burned by a lamp left lit through it was undefined (user decision: 2 watches)."""
+        rules = tl.parse_rules((DEMO / "rules.md").read_text(encoding="utf-8"))
+        text = {r["rule_id"]: " ".join(r["text"].split()) for r in rules}
+        self.assertIn("the night of a long rest is two watches", text["LR2-31"])
+        self.assertIn("burns 2 measures of oil", text["LR2-31"])
+        self.assertIn("six watches make a day. The night of a long rest is", text["LR2-26"])
+
+    def test_visible_rules_revision_is_3(self):
+        """Pack revision 3 bumps the model-visible rules_revision and edition_id."""
+        definition = json.loads((DEMO / "definition.json").read_text(encoding="utf-8"))
+        self.assertEqual((definition["rules_revision"], definition["edition_id"]), (3, "demo-3"))
+        rules = (DEMO / "rules.md").read_text(encoding="utf-8")
+        self.assertTrue(rules.startswith("# Lantern Reach — rules revision 3\n"))
+
+    def test_no_gold_proposal_acquires_items(self):
+        """User decision 2026-10-16: acquiring an item (even one more of a kind already
+        carried) needs a rule and this pack has none, so it is ask_rule. Consumption may
+        lower a quantity; no gold or pending change may raise one."""
+        characters = {
+            p.stem: json.loads(p.read_text(encoding="utf-8"))
+            for p in (DEMO / "characters").glob("*.json")
+        }
+        for case in demo_cases("dev") + demo_cases("heldout"):
+            values = characters[case["character"]]["values"]
+            pending = (case.get("setup") or {}).get("pending_proposal") or {}
+            changes = (case["expected"].get("changes") or []) + (pending.get("changes") or [])
+            for change in changes:
+                if change.get("collection") != "equipment" or change["field"] != "quantity":
+                    continue
+                entry = next(e for e in values["equipment"] if e["id"] == change["entry_id"])
+                self.assertLess(change["to"], entry["quantity"], f"{case['id']}: {change}")
+        dev019 = next(c for c in demo_cases("dev") if c["id"] == "dev-019")
+        self.assertEqual(dev019["expected"]["outcome"], "ask_rule")
+        self.assertNotIn("changes", dev019["expected"])
+
     def test_gold_changes_touch_only_editable_fields(self):
         """Mechanical check over the demo pack's JSON (no CLI needed): no expected or pending
         change names a derived field or a field whose spec is not editable."""

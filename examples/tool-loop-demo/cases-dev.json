@@ -407,23 +407,14 @@
    "character": "wren-ash",
    "request": "I pick up one more oil flask from the shelf.",
    "gold_rule_ids": [
-    "LR2-19",
-    "LR2-20"
+    "LR2-1"
    ],
    "tags": {
     "injection": "none"
    },
    "expected": {
-    "outcome": "proposal",
-    "changes": [
-     {
-      "collection": "equipment",
-      "entry_id": "flask-1",
-      "field": "quantity",
-      "to": 4
-     }
-    ],
-    "notes": "flask-1 quantity 3 -> 4. Host derives burden 11 > burden_limit 10, encumbered, pace 6-1-1-1 = 3 (LR2-19, LR2-16)."
+    "outcome": "ask_rule",
+    "notes": "Picking an item up is acquiring it. Acquiring an item, even one more of a kind already carried, needs a rule, and no rule here covers it (LR2-1; README precedence 7): ask for a ruling. No change is proposed."
    }
   },
   {

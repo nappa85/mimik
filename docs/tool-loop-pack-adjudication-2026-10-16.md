@@ -1,7 +1,7 @@
 # Tool-loop pack: blind ambiguity adjudication (2026-10-16)
 
 Status: **user decisions recorded 2026-10-16 (see "User decisions" below); applied in pack
-revision 3** (see "Pack revision 3 relabels" at the end). No dev outcome changed.
+revision 3** (see "Pack revision 3 relabels" at the end). One dev outcome changed (dev-019).
 
 - **Adjudicator:** a fresh subagent given only a copy of the pack: README, rules.md,
   definition.json and characters/. It had no access to the repo, v2 transcripts, results or
@@ -127,47 +127,71 @@ Applying these is a pack revision: definition editable flags, the README precede
 LR2-20 wording change and dev relabels. It is done with the other v3 pack fixes before the
 blind writer brief is extracted.
 
+## Follow-up user decisions (2026-10-16)
+
+Answers to the points the first pack revision 3 pass returned:
+
+1. **Acquiring is acquiring.** Any increase in an item's quantity that comes from acquiring it
+   (finding, buying or receiving), even of a kind already carried, needs a rule. The pack has
+   none, so such requests are `ask_rule`. Decreases through consumption follow the consuming
+   rule (for example LR2-34) and stay valid proposals.
+2. **A night is two watches.** Added to LR2-31 and LR2-26 as "the night of a long rest is two
+   watches", so a lamp left lit through a long rest burns 2 measures (LR2-33). It is scoped
+   to the long rest because a night journey's length comes from LR2-36 and LR2-37 (a night
+   journey can take more than two watches).
+3. **"armor" alone means the sheet total** (README convention, confirmed).
+4. **Visible revision bumped:** `rules_revision` 3. `edition_id` became `demo-3`: the harness
+   only copies it into the model context, the Rust pack test only passes it through, and no
+   registry, queue, ledger identity or case subset keys on it.
+
 ## Pack revision 3 relabels (2026-10-16)
 
 Scope: all 174 dev cases (the held-out split is an empty placeholder). Every case was checked
-against precedence points 6–8 and against the new non-editable equipment fields (`kind`,
-`weight`, `armor`, `category`). Inputs were the pack itself, this record and the harness code;
-no results, ledgers or failure analyses were read.
+against precedence points 6–8, the new non-editable equipment fields (`kind`, `weight`,
+`armor`, `category`), the acquisition decision and the two-watch night. Inputs were the pack
+itself, this record and the harness code; no results, ledgers or failure analyses were read.
 
-**Outcome changes: none (0 of 174).** Counts by old → new outcome: 0 for every pair. The
-expected outcome counts stay proposal 67, answer 38, ask_rule 14, ask_fact 14, conflict 29,
-stale 8 and refuse 4.
-
-Notes-only changes (outcome, gold rule ids and changes unchanged):
+**Outcome changes: 1 of 174.** By old → new outcome: proposal → ask_rule 1; every other pair
+0. The expected outcome counts become proposal 66, answer 38, ask_rule 15, ask_fact 14,
+conflict 29, stale 8 and refuse 4 (at-risk 70, supported 104).
 
 | Case | Old outcome | New outcome | Reason |
 |---|---|---|---|
-| ho-115 | conflict | conflict | Point 7: an item's `weight` is a fixed stat, so the request is a conflict for any value; the old note gave only the 0–5 range. |
-| ho-086 | ask_rule | ask_rule | Point 7 sub-case: weapon damage has no field and no rule, so `ask_rule`; the note now cites point 7. |
+| dev-019 | proposal | ask_rule | Follow-up decision 1: the request acquires an item (one more of a kind already carried) and no rule covers acquisition. `expected.changes` removed; gold rule ids LR2-19, LR2-20 → LR2-1. |
+| ho-115 | conflict | conflict | Notes only. Point 7: an item's `weight` is a fixed stat, so the request is a conflict for any value; the old note gave only the 0–5 range. |
+| ho-086 | ask_rule | ask_rule | Notes only. Point 7 sub-case: weapon damage has no field and no rule, so `ask_rule`; the note now cites point 7. |
 
 Why nothing else changed:
 
 - **Item stats (7).** No expected or pending change names `kind`, `weight`, `armor` or
   `category` of an equipment entry; every equipment change is `equipped` or `quantity`. The
   only dev request to set an item stat (ho-115) was already a conflict. Requests to set
-  "armor" (ho-114, ho-125) mean the derived sheet value and were already conflicts.
+  "armor" (ho-114, ho-125) mean the derived sheet total and were already conflicts.
+- **Acquisition (7, follow-up 1).** Six dev golds change an equipment `quantity`. Only
+  dev-019 raises one. The other five lower an oil flask's quantity by pouring it into a lamp
+  (LR2-34: dev-018, ho-021, ho-022, ho-023, ho-037) and stay proposals. Taking shared
+  rations or bandages (dev-024, ho-033, ho-034) changes personal-supply fields, not an item,
+  and LR2-29 covers it.
 - **Conflict with a legal alternative (6).** The conflicts that have a legal alternative
   (for example dev-021, ho-107, ho-111, ho-113, ho-120, ho-122, ho-123) were already
   `conflict` with no changes. The proposals that go past a limit are those where a rule
   resolves the excess (ho-011, ho-020, ho-021, ho-030, ho-037), so they stay proposals.
 - **Time (8).** Every proposal that depends on time states it (watches, leagues, a scene
-  end, a night's rest); ho-101 (unstated watches) was already `ask_fact`; dev-006, dev-022,
+  end, a night's rest). ho-101 (watches not stated) was already `ask_fact`. dev-006, dev-022,
   ho-082, ho-083 and ho-091 (durations the rules leave open) were already `ask_rule`.
+- **Two-watch night (follow-up 2).** The long-rest cases are dev-026 (a conflict because of
+  bleeding), ho-017 and ho-018. In each, the character's lamp is unlit or the character has
+  no lamp, so no oil burns and no label changes. Night travel cases (ho-031, ho-041, ho-067)
+  take their length from LR2-36 and LR2-37 and are unaffected.
 
 Mechanical checks (helper level, `mimik-ci`, formula CLI mounted): the pack loads (the
-loader rejects a gold change to a non-editable field), the expected-outcome replay gives
-174/174 correct (a gold proposal with a constraint violation would fail it), and
-`tools/test_tool_loop_v3.py` `PackRevision3Tests` checks the editable flags, that no gold
-or pending change touches a non-editable field, the rules wording, and the full replay.
+loader rejects a gold change to a non-editable field), and the expected-outcome replay gives
+174/174 correct (a gold proposal with a constraint violation would fail it).
+`tools/test_tool_loop_v3.py` `PackRevision3Tests` checks:
 
-Not decided here (returned to the user):
+- the editable flags, `rules_revision` 3 and `edition_id` `demo-3`;
+- that no gold or pending change touches a non-editable field or raises a quantity;
+- the rules wording, including the two-watch night;
+- the full replay.
 
-- dev-019 stays a `proposal` that raises an existing entry's
-  `quantity`. Point 7 says acquiring a new or better item needs a rule; it does not say
-  whether one more unit of an item already carried is "acquiring". If it is, dev-019
-  becomes `ask_rule`.
+The editable-flag, revision, acquisition and night tests failed before their fixes.

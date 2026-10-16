@@ -260,7 +260,9 @@ default flags all changed.
   missing duration) were reviewed by a blind adjudicator and decided by the user on
   2026-10-16 (`docs/tool-loop-pack-adjudication-2026-10-16.md`). Pack revision 3 applies them:
   pack README precedence 6–8, equipment `kind`/`weight`/`armor`/`category` not editable,
-  wording fixes in LR2-14, LR2-20 and LR2-33; no dev outcome changed.
+  wording fixes in LR2-14, LR2-20 and LR2-33, a long rest's night of two watches (LR2-26,
+  LR2-31), `rules_revision` 3 and `edition_id` `demo-3`; dev-019 (an acquisition) is
+  relabelled from proposal to ask_rule.
 
 ### Flags (recorded in the header as `flags`)
 
@@ -611,9 +613,11 @@ requested value (or `template_default`) for `toggle`; `--thinking on` with `neve
 of `interleave_by_outcome` (deterministic, seed-independent, outcome proportions kept at any
 cut). The committed file is the first 40 of the 174 dev cases: proposal 15, answer 9, conflict
 7, ask_fact 3, ask_rule 3, stale 2, refuse 1 (each within one case of 40 × its dev share).
-Subset hash (sha256 of the canonical JSON id list) **`a8888d1de313e5bf1c15caca396433abf4ba34ce4b5ddbd556ee0e794d486c78`**;
-source `cases-dev.json` sha256 `f71b266c…81f5` (pack revision 3; the ids, and so the subset hash, are
-the same as with the revision 2 file `e5265a0d…a912`, because no expected outcome changed). `--cases-file` refuses a file whose hash, split,
+Subset hash (sha256 of the canonical JSON id list) **`5284c4769b4443b4ce345ac799c831a08eb9641788fc8c116b53fe0e394fe8f3`**;
+source `cases-dev.json` sha256 `b80c5b09…4ce4` (pack revision 3). The revision 2 subset
+(`a8888d1d…6c78`, source `e5265a0d…a912`) differs: relabelling dev-019 from proposal to
+ask_rule reorders the interleave, so ho-082 leaves the 40 and dev-031 joins them; the outcome
+counts are unchanged. Screen results on the two subsets are not directly comparable. `--cases-file` refuses a file whose hash, split,
 rule or source file hash does not match, or whose ids are not the prefix recomputed from the
 pack; the header gets `case_subset` {name, rule, size, sha256} and `case_filter` = the ids.
 

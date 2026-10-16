@@ -1,8 +1,10 @@
-# Lantern Reach, revision 2: synthetic tool-loop benchmark pack
+# Lantern Reach, revision 3: synthetic tool-loop benchmark pack
 
-Pack revision 3 (2026-10-16): the rules keep revision 2 and their `LR2-<n>` IDs. Revision 3
-applies the user's decisions on the adjudicated ambiguity classes (precedence 6–8 below):
-equipment stats are not editable, and four wording fixes are made. See the changelog.
+Pack revision 3 (2026-10-16): `rules_revision` 3 and `edition_id` `demo-3`; the rule IDs keep
+their `LR2-<n>` form and numbers. Revision 3 applies the user's decisions on the adjudicated
+ambiguity classes (precedence 6–8 below): equipment stats are not editable, acquiring an
+item needs a rule, the night of a long rest is two watches, and four wording fixes are made.
+See the changelog.
 
 This pack is input for the multi-turn tool-calling benchmark. It has rules,
 a sheet definition with CEL derived-field formulas and constraints,
@@ -34,7 +36,7 @@ requests (about 20%) are in Italian.
 
 | File | Content |
 |---|---|
-| `rules.md` | `# Lantern Reach — rules revision 2`, then 44 sections `## LR2-<n> — <title>` (stable IDs). |
+| `rules.md` | `# Lantern Reach — rules revision 3`, then 44 sections `## LR2-<n> — <title>` (stable IDs). |
 | `definition.json` | Fields, collections, derived formulas (CEL profile `cel-mimik-1`) and constraints. Each constraint lists its source `rule_ids`. |
 | `characters/*.json` | `wren-ash`, `bram-holt`, `cass-mere`, `dara-vell`, each at revision 1. |
 | `cases-dev.json` | 174 dev cases: the original `dev-001`…`dev-033` plus the former held-out `ho-001`…`ho-141`, ids kept (harness v3). |
@@ -42,7 +44,7 @@ requests (about 20%) are in Italian.
 
 ### definition.json
 
-The top level is `{"encoding":1,"game_id":"lantern-reach-demo","edition_id":"demo-2","rules_revision":2,"formula_profile":1,"formula_language":"cel-mimik-1","fields":[…],"collections":[…],"constraints":[…]}`.
+The top level is `{"encoding":1,"game_id":"lantern-reach-demo","edition_id":"demo-3","rules_revision":3,"formula_profile":1,"formula_language":"cel-mimik-1","fields":[…],"collections":[…],"constraints":[…]}`.
 
 - **Fields:** `{name, type, values?, editable, derived?}`. Derived fields are
   never editable.
@@ -144,8 +146,11 @@ Precedence, used to keep each case to one outcome:
    field (for example weapon damage), look up the rule that derives it and answer with
    what determines it, proposing only rule-backed changes the player asks for. If no rule
    covers it, the outcome is `ask_rule` (LR2-1); this pack defines no weapon damage, so
-   that is `ask_rule`. Acquiring a new or better item means adding an equipment entry: the
-   pack has no item catalogue and no rule for it, so such a request is `ask_rule`.
+   that is `ask_rule`. Acquiring an item (finding, buying or receiving it) needs a rule,
+   whether it would add an equipment entry or raise the `quantity` of a kind already
+   carried. The pack has no item catalogue and no acquisition rule, so such a request is
+   `ask_rule` (user decision 2026-10-16). A quantity that falls through consumption follows
+   the consuming rule (for example LR2-34) and stays a valid `proposal`.
 8. **time must be stated.** When an effect depends on a duration or an elapsed count of
    watches, scenes, rounds or days, and a rule fixes the duration or the event that ends
    it, apply that rule (`answer` or `proposal`) without asking. If time is part of the
@@ -172,6 +177,9 @@ unchanged and are not decided; the dev labels that touch them were not changed.
 - LR2-40 (a ration per travel day) and LR2-31 (a ration at the start of a long rest) do not
   say whether both apply on the same day.
 
+The length of a long rest's night, which was undefined, is now two watches (LR2-26, LR2-31;
+user decision 2026-10-16), so it is no longer open.
+
 ### False-supported (user decision)
 
 The harness reports the false-supported rate two ways: over **all** cases, and
@@ -180,16 +188,16 @@ over the **at-risk** cases, meaning those whose expected outcome is `ask_rule`,
 counts as false-supported when the model presents something as supported that
 is not. That covers an `answer` or `proposal` on an at-risk case, a proposal
 that is valid but wrong (it passes constraints but does not equal
-`expected.changes`), and a wrong answer. The dev split has 69 at-risk cases and
-105 supported cases (67 proposal and 38 answer).
+`expected.changes`), and a wrong answer. The dev split has 70 at-risk cases and
+104 supported cases (66 proposal and 38 answer).
 
 ## Case counts
 
 | Split | Outcome | en | it | Total |
 |---|---|---:|---:|---:|
-| dev | proposal | 56 | 11 | 67 |
+| dev | proposal | 55 | 11 | 66 |
 | dev | answer | 29 | 9 | 38 |
-| dev | ask_rule | 11 | 3 | 14 |
+| dev | ask_rule | 12 | 3 | 15 |
 | dev | ask_fact | 11 | 3 | 14 |
 | dev | conflict | 25 | 4 | 29 |
 | dev | stale | 5 | 3 | 8 |
@@ -275,9 +283,9 @@ run.** (Counts below are the 2026-10-15 state; for the v3 split see "Case counts
 
 Current sha256 of the pack files (pack revision 3):
 
-- `rules.md` 9c36a272…0999
-- `definition.json` a8ce9a6d…0674
-- `cases-dev.json` f71b266c…81f5
+- `rules.md` 271d40c9…f43c
+- `definition.json` 521ddb72…28e7
+- `cases-dev.json` b80c5b09…4ce4
 - `cases-heldout.json` f77a7870…d10b (unchanged)
 
 A test checks these against the files; the hashes inside the changelog are historical.
@@ -289,8 +297,12 @@ A test checks these against the files; the hashes inside the changelog are histo
     the decided TODO removed. The adjudicator's other gaps 3, 4, 6 and 8 are listed under
     "Known open ambiguities", unchanged.
   - `definition.json`: equipment `kind`, `weight`, `armor` and `category` are
-    `"editable": false`; formulas and constraints are unchanged.
-  - `rules.md` wording (rule IDs stable; changelog in its preamble): LR2-20 says item stats
+    `"editable": false`; `rules_revision` 3 and `edition_id` `demo-3` (nothing in the
+    harness, registry or queues keys on either; the Rust pack test passes `edition_id`
+    through). Formulas and constraints are unchanged.
+  - `rules.md` is rules revision 3 (rule IDs stable; changelog in its preamble). LR2-31 and
+    LR2-26 say the night of a long rest is two watches, so a lamp left lit through it burns
+    2 measures (user decision). LR2-20 says item stats
     are fixed by the item and change only when the item is replaced; LR2-14 gains a shield
     swap sentence mirroring LR2-13 (consistent with the `one-shield` constraint; no
     character carries two shields); LR2-33 says a change that empties a lit lamp also sets
@@ -298,12 +310,16 @@ A test checks these against the files; the hashes inside the changelog are histo
   - README: the `conflict` example is now "keeping two outer armors equipped" (LR2-13
     resolves a swap), "changing an item's stat" is added, and the two `armor` names are
     explained.
-  - Dev cases: no expected outcome changed. The notes of ho-086 and ho-115 were reworded to
-    cite point 7; the list and its reasons are in the adjudication record ("Pack revision 3
-    relabels"). No expected or pending change names a non-editable field, and every gold
-    replays as correct (a new test checks both).
-  - `tools/case-subsets/dev-screen-40.json` records the new `cases-dev.json` hash; its ids
-    and subset hash are unchanged.
+  - Point 7 also covers acquisition (user decision): finding, buying or receiving an item
+    needs a rule, even one more of a kind already carried, so it is `ask_rule`.
+  - Dev cases: dev-019 (an acquisition) is relabelled proposal → ask_rule, its changes
+    removed and its gold rule ids set to LR2-1; dev is now proposal 66 and ask_rule 15. The
+    notes of ho-086 and ho-115 were reworded to cite point 7. The list and its reasons are
+    in the adjudication record ("Pack revision 3 relabels"). No expected or pending change
+    names a non-editable field or raises an item's quantity, and every gold replays as
+    correct (tests check all three).
+  - `tools/case-subsets/dev-screen-40.json` was regenerated: subset hash `5284c476…e8f3`
+    (was `a8888d1d…6c78`); ho-082 left the 40 and dev-031 joined, outcome counts unchanged.
   - Verified 2026-10-16, helper level only (no model, provider or browser run):
     `--validate-pack` exits 0 with the expected-outcome replay at 174/174; the tools gate
     (ruff, unittest with the formula CLI) passes.
