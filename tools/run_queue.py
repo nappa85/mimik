@@ -422,8 +422,11 @@ class WatchdogSupervisor:
     may start or continue while this reports the watchdog unavailable.
     """
 
-    def __init__(self, heartbeat: Path, log_path: Path, fresh_seconds=90, ready_timeout=60):
+    def __init__(
+        self, heartbeat: Path, log_path: Path, fresh_seconds=90, ready_timeout=60, interval=30
+    ):
         self.heartbeat, self.log_path = Path(heartbeat), Path(log_path)
+        self.interval = interval
         self.fresh_seconds, self.ready_timeout = fresh_seconds, ready_timeout
         self.proc = None
 
@@ -440,7 +443,8 @@ class WatchdogSupervisor:
             return True
         with open(self.log_path.with_suffix(".console"), "ab") as out:
             self.proc = subprocess.Popen(
-                [sys.executable, str(WATCHDOG), "--log", str(self.log_path)],
+                [sys.executable, str(WATCHDOG), "--log", str(self.log_path)]
+                + ["--interval", str(self.interval)],
                 stdin=subprocess.DEVNULL,
                 stdout=out,
                 stderr=out,

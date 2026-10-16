@@ -52,7 +52,8 @@ def opt(name):
 if args[:2] == ["run", "-d"]:
     name = opt("--name")
     if name in ("mimik-toolloop-v3-srv", "mimik-toolloop-v3-harness"):
-        new = [real, "run", "-d", "--init", "--pull", "never", "--name", name,
+        labels = [x for n, a in enumerate(args) if a == "--label" for x in ("--label", args[n + 1])]
+        new = [real, "run", "-d", "--init", "--pull", "never", "--name", name, *labels,
                "--network", opt("--network"), "--user", "1000:1000", "--cap-drop", "ALL",
                "--read-only", os.environ["SLEEP_IMAGE"], "sleep", "600"]
         os.execv(real, new)
@@ -173,7 +174,7 @@ class RealDockerCleanupSmoke(unittest.TestCase):
 
     def test_watchdog_outside_the_window_removes_even_with_a_lock(self):
         subprocess.run(
-            ["docker", "network", "create", "--internal", ops.NETWORK],
+            ["docker", "network", "create", "--internal", "--label", ops.LABEL, ops.NETWORK],
             check=True,
             capture_output=True,
             timeout=60,
@@ -188,6 +189,8 @@ class RealDockerCleanupSmoke(unittest.TestCase):
                 "never",
                 "--name",
                 ops.SERVER,
+                "--label",
+                ops.LABEL,
                 "--network",
                 ops.NETWORK,
                 SLEEP_IMAGE,
@@ -208,17 +211,31 @@ class RealDockerCleanupSmoke(unittest.TestCase):
                 pass
 
         dog = run_watchdog.Watchdog(ops.Docker(), lambda: True, Clock(), self.tmp / "w.log")
-        self.assertEqual(dog.tick(), "removed_outside_window")
+        self.assertEqual(dog.tick(), "removed_at_window_edge")
         self.assert_gone()
 
-    def driver(self, session):
-        """A queue process: the real Queue, launcher, cleanup and signal handling."""
+    def driver(self, session, real_watchdog=False):
+        """A queue process: the real Queue, launcher, cleanup and signal handling. The
+        watchdog is the real supervisor and run_watchdog.py when real_watchdog, else an
+        always-ready stand-in (a real one would, correctly, remove these containers on a
+        weekday afternoon)."""
         script = self.tmp / "driver.py"
         script.write_text(
             textwrap.dedent(f"""\
             import json, signal, sys, time
             sys.path.insert(0, {str(self.repo / "tools")!r})
-            import model_registry, run_queue as rq
+            import model_registry, run_queue as rq, run_watchdog, toolloop_ops as ops
+            class Ready:
+                def alive(self):
+                    return True
+                def ensure(self):
+                    return True
+            if {real_watchdog!r}:
+                main_dir = ops.main_checkout(rq.ROOT)
+                dog = rq.WatchdogSupervisor(run_watchdog.heartbeat_path(main_dir),
+                                            {str(session)!r} + "-watchdog.log", interval=5)
+            else:
+                dog = Ready()
             class Clock:
                 def __init__(self):
                     self.now = {dt.datetime(2026, 10, 17, 12, 0).timestamp()}
@@ -234,7 +251,7 @@ class RealDockerCleanupSmoke(unittest.TestCase):
             open({str(self.tmp / "q.json")!r}, "w").write(json.dumps(doc))
             q = rq.Queue(rq.load_queue({str(self.tmp / "q.json")!r}, reg), reg,
                          {str(session)!r}, clock=Clock(), lock_probe=lambda: True,
-                         poll_seconds=0.5, grace_seconds=30,
+                         poll_seconds=0.5, grace_seconds=30, watchdog=dog,
                          env={{"PATH": {self.env["PATH"]!r}, "HOME": {self.env["HOME"]!r},
                                "MIMIK_MODEL_ROOT": "/nonexistent-unused"}},
                          extra_env={{k: v for k, v in {self.env!r}.items()
@@ -255,6 +272,101 @@ class RealDockerCleanupSmoke(unittest.TestCase):
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+
+    def test_label_filter_leaves_a_foreign_container_alone(self):
+        foreign = ops.OWNED_PREFIX + "foreign"
+        self.addCleanup(subprocess.run, ["docker", "rm", "-f", foreign], capture_output=True)
+        subprocess.run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--init",
+                "--pull",
+                "never",
+                "--name",
+                foreign,
+                SLEEP_IMAGE,
+                "sleep",
+                "600",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+        subprocess.run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--init",
+                "--pull",
+                "never",
+                "--name",
+                ops.SERVER,
+                "--label",
+                ops.LABEL,
+                SLEEP_IMAGE,
+                "sleep",
+                "600",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+        wednesday = dt.datetime(2026, 10, 14, 10, 0).timestamp()
+
+        class Clock:
+            def time(self):
+                return wednesday
+
+            def sleep(self, s):
+                pass
+
+        dog = run_watchdog.Watchdog(ops.Docker(), lambda: True, Clock(), self.tmp / "w.log")
+        self.assertEqual(dog.tick(), "removed_at_window_edge")
+        self.assert_gone()  # the labelled one is gone
+        names = subprocess.run(
+            ["docker", "ps", "-a", "--format", "{{.Names}}"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        ).stdout.split()
+        self.assertIn(foreign, names)  # same prefix, no label: left alone
+
+    def test_queue_waits_for_watchdog_readiness(self):
+        session = self.tmp / "session-ready"
+        proc = self.driver(session, real_watchdog=True)
+        main_dir = ops.main_checkout(self.repo)
+        beat = run_watchdog.heartbeat_path(main_dir)
+        deadline = time.time() + 120
+        while time.time() < deadline and not (session / "queue.log").exists():
+            time.sleep(0.5)
+        events = []
+        while time.time() < deadline:
+            events = [json.loads(x) for x in (session / "queue.log").read_text().splitlines()]
+            if any(e.get("state") == "running" for e in events):
+                break
+            time.sleep(0.5)
+        kinds = [e["event"] if e["event"] != "arm_state" else e["state"] for e in events]
+        self.assertIn("watchdog_ready", kinds)
+        self.assertLess(kinds.index("watchdog_ready"), kinds.index("running"))
+        heartbeat = json.loads(beat.read_text())
+        os.kill(heartbeat["pid"], 0)  # the watchdog process is alive
+        if not ops.heavy_allowed(time.time()):
+            # A weekday afternoon: the real watchdog removes the run's containers.
+            log = Path(str(session) + "-watchdog.log")
+            deadline = time.time() + 60
+            while time.time() < deadline and "removed_at_window_edge" not in (
+                log.read_text() if log.exists() else ""
+            ):
+                time.sleep(1)
+            self.assertIn("removed_at_window_edge", log.read_text())
+        os.kill(proc.pid, signal.SIGTERM)
+        proc.wait(180)
+        os.kill(heartbeat["pid"], signal.SIGTERM)
+        self.assert_gone()
 
     def test_queue_sigterm_leaves_nothing(self):
         proc = self.driver(self.tmp / "session-term")
