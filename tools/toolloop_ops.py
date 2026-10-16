@@ -22,6 +22,7 @@ OWNED_PREFIX = "mimik-toolloop-v3-"
 NETWORK = "mimik-toolloop-v3"
 SERVER = OWNED_PREFIX + "srv"
 HARNESS = OWNED_PREFIX + "harness"
+ROUTER = OWNED_PREFIX + "router"  # tools/run_decision_router.sh (decision-router plan §5)
 DOCKER_TIMEOUT = 60
 GIT_TIMEOUT = 30
 
@@ -180,7 +181,7 @@ def docker_endpoint_problem(env=None):
 
 LABEL_KEY, LABEL_VALUE = "mimik.toolloop", "v3"
 LABEL = f"{LABEL_KEY}={LABEL_VALUE}"
-KNOWN_NAMES = (HARNESS, SERVER)  # the fixed names; check containers carry a pid suffix
+KNOWN_NAMES = (HARNESS, SERVER, ROUTER)  # the fixed names; check containers carry a pid suffix
 
 
 class Docker:

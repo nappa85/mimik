@@ -45,6 +45,8 @@ import sys
 import time
 from pathlib import Path
 
+import decision_models
+import decision_router as dr
 import model_registry
 import run_watchdog
 import tool_loop_benchmark as tl
@@ -60,6 +62,8 @@ from toolloop_ops import (  # noqa: F401 (re-exported for callers and tests)
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "tools" / "run_tool_loop_benchmark.sh"
+ROUTER_RUNNER = ROOT / "tools" / "run_decision_router.sh"
+ROUTER_UNITS = {"probe": 3, "screen": 214, "ablation": 80}  # decisions per unit (plan §7)
 WATCHDOG = ROOT / "tools" / "run_watchdog.py"
 PACK = ROOT / "examples" / "tool-loop-demo"
 SCHEMA = 1
@@ -148,6 +152,21 @@ ARM_KEYS = {
     "preflight_case",
     "device",
     "threads",
+    "kind",
+}
+# Router arms (decision-router plan §5): their own keys, no tool-loop field and no defaults.
+ROUTER_ARM_KEYS = {
+    "id",
+    "kind",
+    "router",
+    "unit",
+    "arm",
+    "required",
+    "retry",
+    "device",
+    "max_arm_seconds",
+    "max_projection_seconds",
+    "end_margin_seconds",
 }
 QUEUE_KEYS = {
     "schema",
@@ -170,7 +189,61 @@ QUEUE_KEYS = {
 G0_KEYS = {"vram_max_bytes", "swap_growth_max_mib", "deadline_seconds"}
 
 
-def load_queue(path: Path, registry: dict) -> dict:
+def load_router_arm(raw: dict, where: str, seen: set, decision: dict) -> dict:
+    unknown = set(raw) - ROUTER_ARM_KEYS
+    if unknown:
+        raise QueueError(f"{where}: router arms do not take {sorted(unknown)}")
+    if not isinstance(raw.get("id"), str) or not ID_RE.match(raw["id"]) or raw["id"] in seen:
+        raise QueueError(f"{where}: id must be unique and match {ID_RE.pattern}")
+    seen.add(raw["id"])
+    entry = decision["routers"].get(raw.get("router"))
+    if entry is None:
+        raise QueueError(f"{where}: router {raw.get('router')!r} is not in decision_models.json")
+    if raw.get("unit") not in ROUTER_UNITS:
+        raise QueueError(f"{where}: unit must be one of {list(ROUTER_UNITS)}")
+    device = raw.get("device", "cpu")
+    if device != "cpu" or device not in entry["devices"]:
+        raise QueueError(f"{where}: router arms are CPU-only while the GPU is out of service")
+    label = raw.get("arm")
+    if not isinstance(label, str) or not label.startswith("SYS-") or not ID_RE.match(label.lower()):
+        raise QueueError(f"{where}: a router arm label is a system label starting with SYS-")
+    arm = {
+        "id": raw["id"],
+        "kind": "router",
+        "router": raw["router"],
+        "unit": raw["unit"],
+        "arm": label,
+        "required": raw.get("required", True),
+        "retry": raw.get("retry", False),
+        "device": "cpu",
+        "threads": entry["threads"],
+        "split": "dev",
+        "model": None,
+        "seeds": "17",
+        "env": {},
+        "g0": False,
+        "preflight_case": None,
+        "cases": None,
+        "cases_file": None,
+        "max_arm_seconds": raw.get("max_arm_seconds"),
+        "max_projection_seconds": raw.get("max_projection_seconds"),
+        "end_margin_seconds": raw.get("end_margin_seconds"),
+    }
+    for flag in ("required", "retry"):
+        if not isinstance(arm[flag], bool):
+            raise QueueError(f"{where}: {flag} must be true or false")
+    for name in ("max_arm_seconds", "max_projection_seconds", "end_margin_seconds"):
+        value = arm[name]
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0
+        ):
+            raise QueueError(f"{where}: {name} must be positive")
+    if arm["unit"] == "probe" and (arm["max_projection_seconds"] or arm["end_margin_seconds"]):
+        raise QueueError(f"{where}: projection caps apply to screen and ablation units")
+    return arm
+
+
+def load_queue(path: Path, registry: dict, decision=None) -> dict:
     doc = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(doc, dict) or doc.get("schema") != SCHEMA:
         raise QueueError(f"queue: schema must be {SCHEMA}")
@@ -242,9 +315,17 @@ def load_queue(path: Path, registry: dict) -> dict:
     seen = set()
     for n, raw in enumerate(arms):
         where = f"arms[{n}]"
+        if isinstance(raw, dict) and raw.get("kind", "toolloop") not in ("toolloop", "router"):
+            raise QueueError(f"{where}: kind must be toolloop or router")
+        if isinstance(raw, dict) and raw.get("kind") == "router":
+            if decision is None:
+                decision = decision_models.load()
+            q["arms"].append(load_router_arm(raw, where, seen, decision))
+            continue
         if not isinstance(raw, dict) or set(raw) - ARM_KEYS:
             raise QueueError(f"{where}: unknown keys {sorted(set(raw) - ARM_KEYS)}")
         arm = {
+            "kind": "toolloop",
             "preflight_case": preflight,
             "required": True,
             "retry": True,
@@ -254,6 +335,8 @@ def load_queue(path: Path, registry: dict) -> dict:
         }
         arm.update(defaults)
         arm.update(raw)
+        if arm["kind"] != "toolloop":
+            raise QueueError(f"{where}: defaults cannot set kind")
         arm["env"] = _env_values(dict(defaults.get("env", {}), **raw.get("env", {})), where)
         if not isinstance(arm.get("id"), str) or not ID_RE.match(arm["id"]) or arm["id"] in seen:
             raise QueueError(f"{where}: id must be unique and match {ID_RE.pattern}")
@@ -557,6 +640,8 @@ class Queue:
         watchdog=None,
         thermal_reader=None,
         fan_reader=None,
+        decision_registry=None,
+        router_runner=ROUTER_RUNNER,
     ):
         self.q = queue
         self.registry = registry
@@ -597,6 +682,13 @@ class Queue:
             {"id": a["id"], "state": "pending", "attempts": [], "config": a} for a in queue["arms"]
         ]
         self.hash_cache = self.dir / "hash-cache.txt"
+        self.decision = decision_registry
+        if self.decision is None and any(a["kind"] == "router" for a in queue["arms"]):
+            self.decision = decision_models.load()
+        self.router_runner = Path(router_runner)
+        self.router_probes = {}  # router key -> its complete, eligible probe summary.json
+        self.router_ineligible = {}  # router key -> why (failed or incomplete probe)
+        self.router_screens = set()  # router keys whose screen unit completed
 
     # -- logging and manifest
     def log(self, event, **fields):
@@ -645,14 +737,16 @@ class Queue:
             "arms": [
                 {
                     "id": a["id"],
-                    "model": a["config"]["model"],
+                    "kind": a["config"]["kind"],
+                    "model": a["config"]["model"] or a["config"].get("router"),
+                    "unit": a["config"].get("unit"),
                     "arm": a["config"]["arm"],
                     "split": a["config"]["split"],
                     "device": a["config"]["device"],
                     "required": a["config"]["required"],
-                    "vram_budget_bytes": self.registry["models"][a["config"]["model"]][
-                        "vram_budget_bytes"
-                    ],
+                    "vram_budget_bytes": None
+                    if a["config"]["kind"] == "router"
+                    else self.registry["models"][a["config"]["model"]]["vram_budget_bytes"],
                     "state": a["state"],
                     "reason": a.get("reason"),
                     "selected_n_cpu_moe": a.get("selected_n_cpu_moe"),
@@ -700,8 +794,52 @@ class Queue:
         entry = self.registry["models"][cfg["model"]]
         return float(entry["seconds_per_episode"]), "registry"
 
+    # -- router arms (decision-router plan §5, §7)
+    def router_bytes(self, key) -> int:
+        return sum(f["size"] for f in self.decision["routers"][key]["files"])
+
+    def router_projection(self, key, unit) -> float:
+        """§7 wall_u; RouterError when the router has no complete, eligible probe."""
+        summary = None
+        if unit != "probe":
+            if key in self.router_ineligible:
+                raise dr.RouterError(f"ineligible: {self.router_ineligible[key]}")
+            if key not in self.router_probes:
+                raise dr.RouterError("ineligible: no complete probe of this router in the session")
+            summary = json.loads(Path(self.router_probes[key]).read_text(encoding="utf-8"))
+        return dr.unit_timeouts(unit, self.router_bytes(key), summary, key if summary else None)[
+            "projection_seconds"
+        ]
+
+    def router_admission(self, arm):
+        """None, or (state, reason): probe gate, projection cap and end margin."""
+        cfg = arm["config"]
+        key, unit = cfg["router"], cfg["unit"]
+        try:
+            self.router_projection(key, unit)
+        except dr.RouterError as error:
+            return "refused", str(error)
+        if unit == "ablation" and key not in self.router_screens:
+            return "skipped", "the router's screen unit did not complete in this session"
+        remaining = (
+            [unit] if unit == "ablation" else ([unit, "ablation"] if unit == "screen" else [unit])
+        )
+        total = sum(self.router_projection(key, u) for u in remaining)
+        cap = cfg.get("max_projection_seconds")
+        if cap and unit == "screen" and total > cap:
+            return "skipped", f"projection {total / 3600:.1f} h over the cap {cap / 3600:.1f} h"
+        margin = cfg.get("end_margin_seconds")
+        if margin and unit == "screen":
+            now = self.clock.time()
+            end = self.cutoff(window_end(now))
+            if now + total > end - margin:
+                return "skipped", f"projected end within {margin / 3600:.1f} h of the deadline"
+        return None
+
     def estimate(self, arm) -> float:
         cfg = arm["config"]
+        if cfg["kind"] == "router":
+            return self.router_projection(cfg["router"], cfg["unit"])
         entry = self.registry["models"][cfg["model"]]
         spe, _ = self.seconds_per_episode(arm)
         episodes = self.episodes(arm) + (1 if cfg.get("preflight_case") else 0)
@@ -776,9 +914,28 @@ class Queue:
     def model_path(self, key) -> Path:
         return model_registry.model_file(self.registry, key, env=self.base_env)
 
+    def router_prechecks(self, arm):
+        problems = decision_models.check_files(
+            self.decision, arm["config"]["router"], env=self.base_env
+        )
+        if problems:
+            return "refuse", f"router artefacts: {problems[0]}"
+        for check in self.q["disk_checks"]:
+            where = check["path"]
+            if not os.path.exists(where):
+                return "refuse", f"disk check path {where} does not exist"
+            free = self.disk_free(where)
+            if free < check["min_free_gb"] * 1e9:
+                return "stop", f"disk low: {where} has {free / 1e9:.1f} GB free"
+        if not self.lock_probe():
+            return "stop", "lock held: another tool-loop run is active"
+        return "ok", None
+
     def prechecks(self, arm):
         """Returns ('ok', None) | ('refuse', why) | ('stop', why)."""
         cfg = arm["config"]
+        if cfg["kind"] == "router":
+            return self.router_prechecks(arm)
         entry = self.registry["models"][cfg["model"]]
         if not entry["downloaded"]:
             return "refuse", f"{cfg['model']} is registered but not downloaded"
@@ -841,6 +998,18 @@ class Queue:
         cfg = arm["config"]
         env = {k: self.base_env[k] for k in ENV_ALLOW if k in self.base_env}
         env["TZ"] = ":/etc/localtime"
+        if cfg["kind"] == "router":
+            env.update(
+                OUT_DIR=str(attempt_dir),
+                HASH_CACHE=str(self.hash_cache),
+                QUIET="1" if self.q["quiet"] else "0",
+                WINDOW_END=str(int(self.cutoff(window_close))),
+                QUEUE_PID=str(os.getpid()),
+            )
+            if cfg["unit"] != "probe" and cfg["router"] in self.router_probes:
+                env["PROBE_SUMMARY"] = str(self.router_probes[cfg["router"]])
+            env.update(self.extra_env)
+            return env
         env.update(cfg["env"])
         env.update(
             ARM=cfg["arm"],
@@ -927,7 +1096,7 @@ class Queue:
         start = self.clock.time()
         close = window_end(start)
         env = self.env_for(arm, attempt_dir, close)
-        argv = [str(self.runner), cfg["model"], cfg["split"]]
+        argv = self.argv(cfg)
         estimate = self.estimate(arm)
         limits = {"window": close - self.q["stop_margin_seconds"]}
         limits["arm_deadline"] = start + (cfg.get("max_arm_seconds") or 2 * estimate + 600)
@@ -1001,6 +1170,11 @@ class Queue:
         record.update(result)
         return record
 
+    def argv(self, cfg) -> list:
+        if cfg["kind"] == "router":
+            return [str(self.router_runner), cfg["router"], cfg["unit"]]
+        return [str(self.runner), cfg["model"], cfg["split"]]
+
     def terminate(self):
         """SIGTERM to the runner's process group, then SIGKILL; None if it will not die."""
         self.handle.signal(signal.SIGTERM)
@@ -1011,7 +1185,120 @@ class Queue:
             rc = self.handle.wait(self.grace_seconds)
         return rc
 
+    @staticmethod
+    def router_unit_check(unit_dir: Path, unit: str) -> dict:
+        """Exact coverage of the unit's plan, no not_run, the unit's own size (plan §5)."""
+        try:
+            loaded = dr.load_unit(unit_dir)
+        except (OSError, ValueError, KeyError) as error:
+            return {"complete": False, "reasons": [f"unreadable unit: {type(error).__name__}"]}
+        summary = loaded["summary"]
+        reasons = []
+        planned = len(loaded["finals"]) + loaded["missing"]
+        if summary.get("unit") != unit:
+            reasons.append(f"summary unit {summary.get('unit')!r} != {unit!r}")
+        if planned != ROUTER_UNITS[unit]:
+            reasons.append(f"{planned} decisions != {ROUTER_UNITS[unit]} for a {unit} unit")
+        if loaded["missing"]:
+            reasons.append(f"{loaded['missing']} planned decisions missing")
+        if loaded["not_run"]:
+            reasons.append(f"not_run {loaded['not_run']}")
+        if not summary.get("complete") or not loaded["complete"]:
+            reasons.append("unit incomplete")
+        return {
+            "complete": not reasons,
+            "reasons": reasons,
+            "not_run": loaded["not_run"],
+            "planned": planned,
+            "stopped": summary.get("stopped"),
+            "restarts": summary.get("restarts"),
+        }
+
+    def classify_router(self, arm, attempt_dir: Path, rc, stopped_by, cleanup) -> dict:
+        prov = parse_provenance(attempt_dir / "provenance.txt")
+        out = {"provenance": bool(prov), "failure": prov.get("failure"), "warnings": []}
+        unit_dir = attempt_dir / "unit"
+        check = None
+        if (unit_dir / "summary.json").exists():
+            check = self.router_unit_check(unit_dir, arm["config"]["unit"])
+            out["unit_check"] = check
+            out["ledger"] = str(unit_dir / "decisions.jsonl")
+        if not cleanup.get("ok"):
+            return dict(
+                out,
+                status="failed",
+                infra=None,
+                reason="queue cleanup unresolved",
+                cleanup_unresolved=True,
+            )
+        if rc is None:
+            return dict(
+                out,
+                status="failed",
+                infra=None,
+                reason="runner did not exit",
+                cleanup_unresolved=True,
+            )
+        if stopped_by is not None:
+            status = {
+                "window": "incomplete_by_window",
+                "arm_deadline": "arm_timeout",
+                "session_deadline": "session_deadline",
+                "watchdog": "failed",
+            }.get(stopped_by, "failed")
+            return dict(out, status=status, infra=None, reason=f"stopped: {stopped_by}")
+        if not prov:
+            return dict(out, status="failed", infra=None, reason=f"no provenance.txt (exit {rc})")
+        if prov.get("cleanup_verified") != "true":
+            return dict(
+                out,
+                status="failed",
+                infra=None,
+                reason="runner cleanup not verified",
+                cleanup_unresolved=prov.get("cleanup_verified") == "false",
+            )
+        if "true" in (prov.get("router_oom_killed"), prov.get("main_oom_killed")):
+            return dict(out, status="failed", infra=None, reason="router container OOM-killed")
+        failure = prov.get("failure")
+        if failure == "window":
+            return dict(
+                out, status="incomplete_by_window", infra=None, reason=prov.get("failure_detail")
+            )
+        if failure is not None:
+            return dict(
+                out, status="failed", infra=None, reason=f"{failure}: {prov.get('failure_detail')}"
+            )
+        if prov.get("main_exit") is None or check is None:
+            return dict(out, status="failed", infra=None, reason=f"no unit result (exit {rc})")
+        if check["complete"] and prov.get("main_exit") == "0" and rc == 0:
+            return dict(out, status="complete", infra=None)
+        if str(check.get("stopped") or "").startswith("deadline"):
+            return dict(out, status="incomplete_by_window", infra=None, reason=check["stopped"])
+        return dict(
+            out, status="incomplete", infra=None, reason="; ".join(check["reasons"]) or f"exit {rc}"
+        )
+
+    def router_completed(self, arm, record):
+        """After a complete unit: register an eligible probe, or mark the router ineligible."""
+        cfg = arm["config"]
+        key = cfg["router"]
+        if cfg["unit"] == "screen":
+            self.router_screens.add(key)
+        if cfg["unit"] != "probe":
+            return
+        path = Path(record["dir"]) / "unit" / "summary.json"
+        try:
+            dr.probe_result(json.loads(path.read_text(encoding="utf-8")), key)
+        except (OSError, ValueError) as error:
+            self.router_ineligible[key] = str(error)
+            self.log("router_ineligible", router=key, reason=str(error))
+            return
+        self.router_probes[key] = str(path)
+        self.log("router_probe", router=key, summary=str(path))
+
     def classify(self, arm, attempt_dir: Path, env, rc, stopped_by, cleanup) -> dict:
+        if arm["config"]["kind"] == "router":
+            return self.classify_router(arm, attempt_dir, rc, stopped_by, cleanup)
         prov = parse_provenance(attempt_dir / "provenance.txt")
         out = {"provenance": bool(prov), "failure": prov.get("failure")}
         out["warnings"] = diagnostics_warnings(prov)
@@ -1099,6 +1386,8 @@ class Queue:
     # -- measurements
     def record_measurements(self, arm, record):
         cfg = arm["config"]
+        if cfg["kind"] == "router":
+            return
         prov = parse_provenance(Path(record["dir"]) / "provenance.txt")
         wall = _int_or_none(prov.get("main_wall_seconds"))
         check = record.get("ledger_check") or {}
@@ -1305,7 +1594,7 @@ class Queue:
         rc = None
         try:
             self.handle = self.launcher.start(
-                [str(self.runner), cfg["model"], cfg["split"]],
+                self.argv(cfg),
                 env,
                 check_dir / "runner.stdout",
                 check_dir / "runner.stderr",
@@ -1339,6 +1628,13 @@ class Queue:
         cfg = arm["config"]
         retried = window_reruns = 0
         not_before = None
+        if cfg["kind"] == "router":
+            admission = self.router_admission(arm)
+            if admission is not None:
+                self.transition(arm, admission[0], reason=admission[1])
+                if cfg["unit"] == "probe":
+                    self.router_ineligible[cfg["router"]] = admission[1]
+                return admission[0]
         while True:
             if not self.wait_for_window(arm, not_before):
                 return arm["state"]
@@ -1411,8 +1707,16 @@ class Queue:
             if status == "complete":
                 record["excluded"] = False
                 arm["ledger"] = record.get("ledger")
+                if cfg["kind"] == "router":
+                    self.router_completed(arm, record)
                 self.transition(arm, "complete")
                 return "complete"
+            if (
+                cfg["kind"] == "router"
+                and cfg["unit"] == "probe"
+                and status != "incomplete_by_window"
+            ):
+                self.router_ineligible[cfg["router"]] = f"probe {status}"
             if record.get("infra") in INFRA_CLASSES and cfg["retry"] and not retried:
                 retried = 1
                 self.transition(arm, "retry", reason=f"infrastructure: {record['infra']}")
@@ -1517,6 +1821,14 @@ def main(argv=None) -> int:
     if args.command == "check":
         q = Queue(queue, registry, ROOT / "target" / "queue-check-unused")  # nothing written
         for arm in q.arms:
+            if arm["config"]["kind"] == "router":
+                cfg = arm["config"]
+                try:
+                    estimate = f"{q.estimate(arm) / 3600:.2f}h"
+                except dr.RouterError:
+                    estimate = "after its probe"
+                print(f"{arm['id']}: router {cfg['router']} {cfg['unit']} estimate={estimate}")
+                continue
             spe, source = q.seconds_per_episode(arm)
             print(
                 f"{arm['id']}: {arm['config']['model']} {arm['config']['split']} "

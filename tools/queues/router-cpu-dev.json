@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "name": "router-cpu-dev",
+  "description": "Dev-only decision-router screen SYS-R (docs/decision-router-plan.md rev. 3.1 \u00a77): probes, then R4 (Kev-0.8B, out of distribution), then R1 (Qwen3-4B AnyJev raw, CPU), then R3 (Qwen3.5-9B) only under its 12 h cap. CPU only, no inference until the CPU candidate screens finish (queue lock). Units run whole; an incomplete unit is never gate-evaluable.",
+  "max_consecutive_failures": 3,
+  "arms": [
+    {
+      "id": "probe-r4",
+      "kind": "router",
+      "router": "r4-kev-0.8b",
+      "unit": "probe",
+      "arm": "SYS-R4-probe"
+    },
+    {
+      "id": "probe-r1",
+      "kind": "router",
+      "router": "r1-qwen3-4b",
+      "unit": "probe",
+      "arm": "SYS-R1-probe"
+    },
+    {
+      "id": "probe-r3",
+      "kind": "router",
+      "router": "r3-qwen35-9b",
+      "unit": "probe",
+      "arm": "SYS-R3-probe",
+      "required": false
+    },
+    {
+      "id": "screen-r4",
+      "kind": "router",
+      "router": "r4-kev-0.8b",
+      "unit": "screen",
+      "arm": "SYS-R4-screen"
+    },
+    {
+      "id": "ablation-r4",
+      "kind": "router",
+      "router": "r4-kev-0.8b",
+      "unit": "ablation",
+      "arm": "SYS-R4-ablation"
+    },
+    {
+      "id": "screen-r1",
+      "kind": "router",
+      "router": "r1-qwen3-4b",
+      "unit": "screen",
+      "arm": "SYS-R1-screen"
+    },
+    {
+      "id": "ablation-r1",
+      "kind": "router",
+      "router": "r1-qwen3-4b",
+      "unit": "ablation",
+      "arm": "SYS-R1-ablation"
+    },
+    {
+      "id": "screen-r3",
+      "kind": "router",
+      "router": "r3-qwen35-9b",
+      "unit": "screen",
+      "arm": "SYS-R3-screen",
+      "required": false,
+      "max_projection_seconds": 43200,
+      "end_margin_seconds": 3600
+    },
+    {
+      "id": "ablation-r3",
+      "kind": "router",
+      "router": "r3-qwen35-9b",
+      "unit": "ablation",
+      "arm": "SYS-R3-ablation",
+      "required": false,
+      "max_projection_seconds": 43200,
+      "end_margin_seconds": 3600
+    }
+  ]
+}
