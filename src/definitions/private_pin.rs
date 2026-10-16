@@ -139,13 +139,31 @@ impl ImmutablePin {
     }
     /// Advisory evaluation of stored (already validated) sheet values; `None` for formula-free
     /// pins. Pure: it never writes, and model output never reaches it.
+    ///
+    /// Values of input fields the formula layer does not declare are projected away first;
+    /// every other key, including any that is not a definition field, reaches the engine,
+    /// which refuses it.
     pub(crate) fn evaluate(
         &self,
         values: &serde_json::Value,
     ) -> Option<Result<formula::Evaluation, formula::InputError>> {
-        self.formulas
-            .as_ref()
-            .map(|compiled| compiled.evaluate_with_deadline(values, EVALUATION_DEADLINE))
+        let compiled = self.formulas.as_ref()?;
+        let mut hidden = super::formula_admission::undeclared_inputs(&self.data.definition)
+            .filter(|id| values.get(*id).is_some())
+            .peekable();
+        Some(if hidden.peek().is_none() {
+            compiled.evaluate_with_deadline(values, EVALUATION_DEADLINE)
+        } else {
+            let hidden: std::collections::BTreeSet<&str> = hidden.collect();
+            let projected: serde_json::Map<String, serde_json::Value> = values
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(key, _)| !hidden.contains(key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            compiled.evaluate_with_deadline(&projected.into(), EVALUATION_DEADLINE)
+        })
     }
     pub(crate) fn unchanged(&self, db: &Connection) -> Result<(), AppError> {
         let matches:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM definition_versions WHERE id=?1 AND version=?2 AND game_id=?3 AND edition_id=?4 AND content_hash=?5 AND content=?6)",params![self.raw.id,self.raw.version,self.raw.game,self.raw.edition,self.raw.hash,self.raw.content],|r|r.get(0))?;

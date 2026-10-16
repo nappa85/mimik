@@ -532,3 +532,32 @@ fn pin_with_maximum_depth_formulas_drops_on_a_small_stack() {
         .join()
         .expect("no stack overflow while dropping");
 }
+
+/// Hyphenated field IDs are valid but not declared to the formula layer, which rejects every
+/// undeclared key: stored values must be projected onto the declared inputs first.
+#[test]
+fn hyphenated_unreferenced_fields_do_not_block_evaluation() {
+    let mut value = example();
+    value["fields"].as_array_mut().unwrap().push(
+        json!({"id": "hit-points", "label": "HP", "control": "integer",
+                     "nullable": true, "mapping": {"state": "unresolved", "reason": "r"}}),
+    );
+    value["groups"][0]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push("hit-points".into());
+    let pin = pin_for(&value);
+    let mut values = sheet_values();
+    values["hit-points"] = 7.into();
+    pin.validate_values(&values).unwrap();
+    let evaluation = pin.evaluate(&values).unwrap().unwrap();
+    assert_eq!(evaluation.to_json()["derived"]["pace"], json!({"value": 5}));
+    // Keys that are not definition fields still reach the engine and are refused.
+    let mut unknown = values.clone();
+    unknown["bogus"] = 1.into();
+    assert_eq!(pin.evaluate(&unknown).unwrap().unwrap_err().path, "/bogus");
+    // A derived value submitted as input is not projected away either.
+    let mut derived = values;
+    derived["pace"] = 5.into();
+    assert_eq!(pin.evaluate(&derived).unwrap().unwrap_err().path, "/pace");
+}

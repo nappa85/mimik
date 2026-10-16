@@ -227,6 +227,17 @@ fn value_type(
     })
 }
 
+/// Input fields the formula layer does not declare (non-identifier IDs such as
+/// `hit-points`). Their stored values are dropped before evaluation, because the engine
+/// refuses every undeclared key.
+pub(super) fn undeclared_inputs(definition: &Definition) -> impl Iterator<Item = &str> {
+    definition
+        .fields
+        .iter()
+        .filter(|field| field.formula.is_none() && !cel_identifier(&field.id))
+        .map(|field| field.id.as_str())
+}
+
 /// Projects an admitted envelope onto the formula layer's declarations.
 pub(super) fn formula_spec(definition: &Definition) -> formula::SheetSpec {
     let mut spec = formula::SheetSpec::default();
