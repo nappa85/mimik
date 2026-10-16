@@ -93,9 +93,9 @@ amendment in place; table at the end of the plan.
 | Sol N4 | Med | Valid | One restart per unit but two units, and §7 budgeted one restart in total, without the timeout wait | §5 restart accounting per unit; §7 wall_u formula charging T + K + L per allowed restart in every unit; R3 cap includes both |
 | Son A1 | Med | Valid | One timeout plus one restart per unit makes one slow case end the unit | §5 sequence: restart + retry, second timeout = `timeout` + restart, N = 3 per unit; §6 test |
 | Son A2 | Med | Valid | Retry result vs original not specified | §5 final = retry, attempt log keeps all; §7 charges |
-| Son A3 | Med | Valid | Worker validates at 1e-5 (`:96-109`) while §3 says 1e-6; legacy ties are alphabetical (`:109`); the worker's failure carries no class (`:349-367`) | §3 `SUM_TOLERANCE` shared and sent in the request; canonical ties; `error_class` |
+| Son A3 | Med | Valid | Worker validates at 1e-5 (`:96-110`) while §3 says 1e-6; legacy ties are alphabetical (`:110`); the worker's failure carries no class (`:349-367`) | §3 `SUM_TOLERANCE` shared and sent in the request; canonical ties; `error_class` |
 | Son A4 | Low | Valid | `Worker` opens its log with mode `w` (`:376`), so a restart truncates it | §5 per-start logs; §6 test |
-| Son A5 | Med | Valid | `--budget-seconds` defaults to 1,200 s (`:477`), below every CPU unit | §5 router driver without the legacy budget; test |
+| Son A5 | Med | Valid | `--budget-seconds` defaults to 1,200 s (`:472`), below every CPU unit | §5 router driver without the legacy budget; test |
 | Son A6 | Low | Valid | A failure routed to `ask_rule` could score correct on an `ask_rule` case | §4 never correct (replay and live) |
 | Son A7 | Med | Valid-partial | Recomputed from non-text metadata: 19 multi-case groups, 42 cases (9 en/it pairs) | §3 grouped folds; text-level near-duplicates not detectable without reading case text, recorded as residual |
 
