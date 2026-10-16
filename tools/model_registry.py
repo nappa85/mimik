@@ -31,6 +31,7 @@ REVISION_RE = re.compile(r"^[0-9a-f]{12,40}$")
 IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9./_-]*@sha256:[0-9a-f]{64}$")
 MEMORY_RE = re.compile(r"^[1-9][0-9]{0,4}[mg]$")
 ARG_RE = re.compile(r"^[A-Za-z0-9_.,:=+/-]{1,128}$")
+SHORT_FLAG_RE = re.compile(r"^-[^-0-9.]")
 CACHE_TYPES = (None, "f16", "bf16", "f32", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0", "iq4_nl")
 FLASH_ATTN = (None, "on", "off", "auto")
 TOOLS = ("handler", "unverified", "none")
@@ -78,6 +79,42 @@ MANAGED_FLAGS = {
     "-mu",
     "-hf",
     "--hf-repo",
+    # Prompt cache, sampling and generation are set by the harness per request (review M3).
+    "--cache-prompt",
+    "--no-cache-prompt",
+    "--cache-reuse",
+    "--temp",
+    "--temperature",
+    "--top-p",
+    "--top-k",
+    "--min-p",
+    "--typical",
+    "--seed",
+    "--samplers",
+    "--sampling-seq",
+    "--repeat-penalty",
+    "--repeat-last-n",
+    "--presence-penalty",
+    "--frequency-penalty",
+    "--dry-multiplier",
+    "--mirostat",
+    "--grammar",
+    "--grammar-file",
+    "--json-schema",
+    "--n-predict",
+    "--predict",
+    "--ignore-eos",
+    "--override-kv",
+    "--override-tensor",
+    "--reasoning-budget",
+    "--reasoning-format",
+    "--chat-template",
+    "--chat-template-kwargs",
+    "--jinja-template",
+    "--lora",
+    "--lora-scaled",
+    "--control-vector",
+    "--system-prompt-file",
 }
 TOP_KEYS = {"schema", "model_root", "path_convention", "models"}
 MODEL_KEYS = {
@@ -97,6 +134,8 @@ MODEL_KEYS = {
     "request_timeout_seconds",
     "seconds_per_episode",
     "seconds_per_episode_source",
+    "vram_budget_bytes",
+    "vram_budget_source",
     "licence",
     "notes",
 }
@@ -186,6 +225,9 @@ def _validate_server(server, where):
     managed = [a for a in extra if _flag_name(a) in MANAGED_FLAGS]
     if managed:
         raise RegistryError(f"{where}.extra_args: runner-managed flags {managed}")
+    short = [a for a in extra if SHORT_FLAG_RE.match(a)]
+    if short:  # short aliases cannot be checked against MANAGED_FLAGS reliably
+        raise RegistryError(f"{where}.extra_args: single-dash flags are not allowed {short}")
 
 
 def _validate_model(key, model):
@@ -245,6 +287,8 @@ def _validate_model(key, model):
     _int(model["request_timeout_seconds"], f"{where}.request_timeout_seconds", 1, 3600)
     _number(model["seconds_per_episode"], f"{where}.seconds_per_episode")
     _text(model["seconds_per_episode_source"], f"{where}.seconds_per_episode_source")
+    _int(model["vram_budget_bytes"], f"{where}.vram_budget_bytes", 1)
+    _text(model["vram_budget_source"], f"{where}.vram_budget_source")
     _text(model["licence"], f"{where}.licence")
     if "notes" in model:
         _text(model["notes"], f"{where}.notes")
@@ -342,6 +386,7 @@ def shell_exports(doc: dict, key: str, ctx=None, n_cpu_moe=None, env=None) -> st
         "reg_request_timeout": entry["request_timeout_seconds"],
         "reg_thinking": entry["capabilities"]["thinking"],
         "reg_tools": entry["capabilities"]["tools"],
+        "reg_vram_budget": entry["vram_budget_bytes"],
         "reg_server_config": json.dumps(
             {"image": entry["server_image"], "args": args}, separators=(",", ":")
         ),

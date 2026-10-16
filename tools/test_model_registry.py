@@ -92,6 +92,18 @@ class RegistryFileTests(unittest.TestCase):
             self.assertEqual((server["cache_type_k"], server["cache_type_v"]), ("q8_0", "q8_0"))
             self.assertEqual(server["ctx"], 24576)
 
+    def test_vram_budget_recorded_for_every_model(self):
+        """Review M6: a per-model VRAM budget (estimate) with its source."""
+        for key, m in registry()["models"].items():
+            with self.subTest(key=key):
+                self.assertGreater(m["vram_budget_bytes"], 0)
+                self.assertTrue(m["vram_budget_source"])
+
+    def test_plain_extra_args_still_allowed(self):
+        doc = copy.deepcopy(registry())
+        doc["models"]["qwen35-9b"]["server"]["extra_args"] = ["--mlock", "--batch-size", "512"]
+        mr.validate(doc)
+
     def test_legacy_server_args_unchanged(self):
         m = mr.validate(registry())["models"]["qwen35-9b"]
         self.assertEqual(mr.server_args(m, ctx=16384), LEGACY_9B_ARGS)
@@ -130,6 +142,24 @@ class ValidationTests(unittest.TestCase):
                 "extra_args",
             ),
             "host override": (lambda m: m["server"].update(extra_args=["--host=0"]), "extra_args"),
+            # Review M3: sampling, prompt-cache and generation overrides are runner/harness owned.
+            "temp": (lambda m: m["server"].update(extra_args=["--temp", "1"]), "extra_args"),
+            "cache prompt": (
+                lambda m: m["server"].update(extra_args=["--no-cache-prompt"]),
+                "extra_args",
+            ),
+            "override kv": (
+                lambda m: m["server"].update(extra_args=["--override-kv", "a=int:1"]),
+                "extra_args",
+            ),
+            "samplers": (
+                lambda m: m["server"].update(extra_args=["--samplers", "top_k"]),
+                "extra_args",
+            ),
+            "seed": (lambda m: m["server"].update(extra_args=["-s", "1"]), "extra_args"),
+            "single dash": (lambda m: m["server"].update(extra_args=["-x"]), "extra_args"),
+            "no vram budget": (lambda m: m.pop("vram_budget_bytes"), "vram_budget_bytes"),
+            "vram budget zero": (lambda m: m.update(vram_budget_bytes=0), "vram_budget_bytes"),
             "memory": (lambda m: m.update(memory_limit="lots"), "memory_limit"),
             "short revision downloaded": (
                 lambda m: m["source"].update(revision="3885219b6810"),
