@@ -201,14 +201,30 @@ impl Store {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn private_save(
+        &self,
+        auth: RequestAuth,
+        view: SheetView,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<i64, AppError> {
+        self.private_save_keeping(auth, view, permit)
+            .await
+            .map(|(id, _)| id)
+            .map_err(|(error, _)| error)
+    }
+
+    /// Saves a private sheet and hands the runtime permit back, also when the
+    /// database step rejects the save, so the rejection can re-render the draft under the
+    /// same permit. A worker or authorization failure returns no permit.
+    pub(crate) async fn private_save_keeping(
         &self,
         auth: RequestAuth,
         mut view: SheetView,
         permit: OwnedSemaphorePermit,
-    ) -> Result<i64, AppError> {
-        self.run_campaign(auth.clone(),move |db|{
-            let _permit=permit;
+    ) -> Result<(i64, OwnedSemaphorePermit), (AppError, Option<OwnedSemaphorePermit>)> {
+        let outcome = self.run_campaign(auth.clone(),move |db|{
+            let result=(||{
             let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;auth.recheck(&tx)?;
             let create=view.snapshot.sheet_id==0;
             if create {snapshots::authorize_edit(&tx,&auth,&view.snapshot)?;}else{
@@ -232,7 +248,14 @@ impl Store {
             }
             let result=snapshots::write(&tx,&auth,view.snapshot,if create{"create"}else{"edit"},view.immutable.as_ref())?;
             tx.commit()?;Ok(result.sheet_id)
-        }).await
+            })();
+            Ok((result,permit))
+        }).await;
+        match outcome {
+            Ok((Ok(id), permit)) => Ok((id, permit)),
+            Ok((Err(error), permit)) => Err((error, Some(permit))),
+            Err(error) => Err((error, None)),
+        }
     }
 
     async fn private_badge(

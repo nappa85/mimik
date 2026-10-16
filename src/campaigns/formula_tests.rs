@@ -604,3 +604,88 @@ async fn stored_valid_sheet_with_refused_input_shows_unavailable() {
     assert!(!html.contains("id=\"advisory-checks\""));
     assert!(derived_text(&html, "pace").contains("<code>input_too_large</code>"));
 }
+
+#[tokio::test]
+async fn create_page_never_evaluates_and_create_saves() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&formula_definition()).await;
+    let first_save = "Derived values are computed after the first save.";
+    let (status, html) = setup.get(&setup.create_path()).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, rejected) = setup.post(&setup.create_path(), form(0, "x", None)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(rejected.contains("value=\"x\""), "draft kept");
+    for (context, page) in [("create", &html), ("failed create", &rejected)] {
+        assert!(
+            section(page, "formula-results").contains(first_save),
+            "{context}"
+        );
+        assert!(
+            !page.contains("unavailable"),
+            "{context}: `{{}}` was evaluated"
+        );
+        assert!(!page.contains("id=\"advisory-checks\""), "{context}");
+        assert!(!page.contains("Computed from saved revision"), "{context}");
+        for id in DERIVED {
+            assert!(
+                !names(page).contains(&format!("value-{id}")),
+                "{context} {id}"
+            );
+            assert_eq!(derived_text(page, id), "Computed after the first save.");
+        }
+    }
+    let (status, _) = setup
+        .post(&setup.create_path(), form(0, "4", Some("2")))
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(setup.stored().await.0, 1);
+}
+
+static HELD: std::sync::Mutex<Option<tokio::sync::OwnedSemaphorePermit>> =
+    std::sync::Mutex::new(None);
+
+/// A save rejected by the database step (here: the 32-sheet retained capacity) re-renders
+/// the draft. It must keep its own runtime permit for that, so a concurrent request cannot
+/// take the permit in between and turn the re-render into a bare 503 that loses the draft.
+#[tokio::test]
+async fn failed_database_save_keeps_its_permit_for_the_rerender() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&formula_definition()).await;
+    for _ in 0..32 {
+        let (mut view, permit) = setup
+            .store
+            .private_create_context(
+                setup.auth[1].clone(),
+                setup.campaign,
+                setup.version,
+                crate::definitions::admit().unwrap(),
+            )
+            .await
+            .unwrap();
+        view.snapshot.name = "Capacity".into();
+        view.snapshot.data = json!({"label": "x", "vitality": 4, "luck": null, "kind": "odd"});
+        setup
+            .store
+            .private_save(setup.auth[1].clone(), view, permit)
+            .await
+            .unwrap();
+    }
+    *super::super::web::AFTER_FAILED_SAVE.lock().unwrap() = Some(Box::new(|| {
+        *HELD.lock().unwrap() = crate::definitions::admit().ok();
+    }));
+    let mut draft = form(0, "4", Some("2"));
+    draft[3].1 = "Keep this draft".into();
+    let (status, html) = setup.post(&setup.create_path(), draft).await;
+    let concurrent = HELD.lock().unwrap().take();
+    let taken = concurrent.is_some();
+    drop(concurrent);
+    assert!(
+        !taken,
+        "a concurrent request took the permit between save and re-render"
+    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(html.contains("No changes saved"));
+    assert!(html.contains("Keep this draft"), "draft re-rendered");
+}

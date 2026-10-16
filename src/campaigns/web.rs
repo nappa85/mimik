@@ -57,6 +57,10 @@ async fn runtime(mut request: Request, next: Next) -> Response {
 #[derive(Clone)]
 pub(crate) struct PrivateTrustedEditor;
 
+/// Runs once between a failed save and the re-render's permit request (tests only).
+#[cfg(test)]
+pub(super) static AFTER_FAILED_SAVE: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+
 pub(crate) fn routes() -> Router<AuthState> {
     let sheets = Router::new()
         .route(
@@ -838,21 +842,21 @@ async fn save_private(
             ),
             _ => "No changes saved. Check the full draft and its submitted revision.".into(),
         };
-        let (view, permit) = load_editor(&state, auth, id, version, permit).await?;
-        if !view.editable {
-            return Err(StatusCode::FORBIDDEN);
-        }
+        let (view, permit) = rejected_editor(&state, auth, id, version, Some(permit)).await?;
         return rendered(view, permit, csrf, Some(form), error(failure), message).await;
     }
-    match state.store().private_save(auth.clone(), view, permit).await {
-        Ok(id) => Ok(Redirect::to(&format!("/private-sheets/{id}")).into_response()),
-        Err(failure @ (AppError::Conflict | AppError::Invalid(_))) => {
-            let permit =
-                crate::definitions::admit().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-            let (view, permit) = load_editor(&state, auth, id, version, permit).await?;
-            if !view.editable {
-                return Err(StatusCode::FORBIDDEN);
+    match state
+        .store()
+        .private_save_keeping(auth.clone(), view, permit)
+        .await
+    {
+        Ok((id, _permit)) => Ok(Redirect::to(&format!("/private-sheets/{id}")).into_response()),
+        Err((failure @ (AppError::Conflict | AppError::Invalid(_)), permit)) => {
+            #[cfg(test)]
+            if let Some(hook) = AFTER_FAILED_SAVE.lock().unwrap().take() {
+                hook();
             }
+            let (view, permit) = rejected_editor(&state, auth, id, version, permit).await?;
             rendered(
                 view,
                 permit,
@@ -864,8 +868,29 @@ async fn save_private(
             )
             .await
         }
-        Err(failure) => Err(error(failure)),
+        Err((failure, _)) => Err(error(failure)),
     }
+}
+
+/// Reloads the editor to re-render a rejected draft. The rejected save keeps its permit when
+/// it has one, so a concurrent request cannot turn the re-render into a 503 that loses the
+/// draft.
+async fn rejected_editor(
+    state: &AuthState,
+    auth: auth::RequestAuth,
+    id: i64,
+    version: Option<i64>,
+    permit: Option<OwnedSemaphorePermit>,
+) -> Result<(SheetView, OwnedSemaphorePermit), StatusCode> {
+    let permit = match permit {
+        Some(permit) => permit,
+        None => crate::definitions::admit().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+    };
+    let (view, permit) = load_editor(state, auth, id, version, permit).await?;
+    if !view.editable {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok((view, permit))
 }
 
 async fn load_editor(
