@@ -303,13 +303,13 @@
     },
     "granite42-8b": {
       "label": "granite-4.2-8b-q4_k_m",
-      "downloaded": false,
+      "downloaded": true,
       "path": "granite42-8b/granite-4.2-8b-Q4_K_M.gguf",
       "sha256": "16a9369d0805f80b7377d25d87f937a90c05dc04ad79173a52001e42c9aab311",
       "size": 5347917952,
       "source": {
         "repo": "ibm-granite/granite-4.2-8b-GGUF",
-        "revision": "93f3f6a8938e",
+        "revision": "93f3f6a8938ee922b784cf4e5b4203cd3428df8f",
         "file": "granite-4.2-8b-Q4_K_M.gguf"
       },
       "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
@@ -345,17 +345,17 @@
       "vram_budget_bytes": 7945689497,
       "vram_budget_source": "candidate sheet: about 7.0 GiB with q8_0 KV at 24k plus buffers, borderline (estimate)",
       "licence": "Apache-2.0",
-      "notes": "docs/small-model-candidates-2026-10-16.md #4b. Fits 8 GB at 24k only with q8_0 KV (estimate, about 7.0 GiB plus buffers, borderline); quantised V needs flash attention on Vulkan. Revision is a prefix: pin before download."
+      "notes": "docs/small-model-candidates-2026-10-16.md #4b. Fits 8 GB at 24k only with q8_0 KV (estimate, about 7.0 GiB plus buffers, borderline); quantised V needs flash attention on Vulkan. Downloaded and sha256-verified 1792166396 (unix)."
     },
     "llama31-8b": {
       "label": "llama-3.1-8b-instruct-q4_k_m",
-      "downloaded": false,
+      "downloaded": true,
       "path": "llama31-8b/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
       "sha256": "7b064f5842bf9532c91456deda288a1b672397a54fa729aa665952863033557c",
       "size": 4920739232,
       "source": {
         "repo": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
-        "revision": "bf5b95e96dac",
+        "revision": "bf5b95e96dac0462e2a09145ec66cae9a3f12067",
         "file": "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
       },
       "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
@@ -387,17 +387,17 @@
       "vram_budget_bytes": 7194070220,
       "vram_budget_source": "candidate sheet: about 6.7 GiB with q8_0 KV at 24k including buffers (estimate)",
       "licence": "Llama 3.1 Community License (attribution, naming and acceptable-use terms; not open source). Gated upstream; third-party GGUF",
-      "notes": "docs/small-model-candidates-2026-10-16.md #5. Tool calls go through the generic autoparser at b11610 (no pinned parse test). Needs q8_0 KV at 24k (estimate). Revision is a prefix: pin before download."
+      "notes": "docs/small-model-candidates-2026-10-16.md #5. Tool calls go through the generic autoparser at b11610 (no pinned parse test). Needs q8_0 KV at 24k (estimate). Downloaded and sha256-verified 1792167988 (unix)."
     },
     "ministral3-8b": {
       "label": "ministral-3-8b-instruct-2512-q4_k_m",
-      "downloaded": false,
+      "downloaded": true,
       "path": "ministral3-8b/Ministral-3-8B-Instruct-2512-Q4_K_M.gguf",
       "sha256": "33e7a72cf5e6e2cfc2f2847075acc013d68bba023e35310cef86b5cf8fdca761",
       "size": 5198911904,
       "source": {
         "repo": "mistralai/Ministral-3-8B-Instruct-2512-GGUF",
-        "revision": "0102285ad796",
+        "revision": "0102285ad796bd99af90f58de616092e5630e970",
         "file": "Ministral-3-8B-Instruct-2512-Q4_K_M.gguf"
       },
       "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
@@ -429,7 +429,7 @@
       "vram_budget_bytes": 7516192768,
       "vram_budget_source": "candidate sheet: about 7.0 GiB with q8_0 KV at 24k including buffers, tight (estimate)",
       "licence": "Apache-2.0",
-      "notes": "docs/small-model-candidates-2026-10-16.md S1. Vision-language model; the runner passes --no-mmproj. Needs q8_0 KV at 24k (estimate, tight). Revision is a prefix: pin before download."
+      "notes": "docs/small-model-candidates-2026-10-16.md S1. Vision-language model; the runner passes --no-mmproj. Needs q8_0 KV at 24k (estimate, tight). Downloaded and sha256-verified 1792164655 (unix)."
     },
     "gemma4-e4b": {
       "label": "gemma-4-e4b-it-q4_0",

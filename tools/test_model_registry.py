@@ -5,6 +5,7 @@ Failing-first: run before tools/model_registry.py existed (ModuleNotFoundError).
 
 import copy
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -257,7 +258,13 @@ class ShellExportTests(unittest.TestCase):
         self.assertEqual(config["args"][config["args"].index("--ctx-size") + 1], "24576")
 
     def test_shell_refuses_not_downloaded_and_unknown(self):
-        proc = self.run_cli("shell", "llama31-8b")
+        # Every real model may be downloaded; flip one in a temporary copy.
+        doc = registry()
+        doc["models"]["llama31-8b"]["downloaded"] = False
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            json.dump(doc, handle)
+        self.addCleanup(os.unlink, handle.name)
+        proc = self.run_cli("--registry", handle.name, "shell", "llama31-8b")
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("not downloaded", proc.stderr)
         self.assertEqual(proc.stdout, "")

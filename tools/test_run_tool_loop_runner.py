@@ -251,6 +251,11 @@ class RunnerTests(unittest.TestCase):
         (self.repo / "tools").mkdir(parents=True)
         for name in COPIED:
             shutil.copy2(TOOLS / name, self.repo / "tools" / name)
+        # The refusal test needs a not-downloaded entry; flip one in the copy only.
+        copied = self.repo / "tools" / "models.json"
+        doc = json.loads(copied.read_text())
+        doc["models"]["llama31-8b"]["downloaded"] = False
+        copied.write_text(json.dumps(doc, indent=2) + "\n")
         (self.repo / "examples").mkdir()
         (self.repo / "examples" / "tool-loop-demo").symlink_to(DEMO)
         git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]

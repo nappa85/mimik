@@ -594,6 +594,9 @@ class FailureTests(Harness):
 
     def test_missing_model_root_and_undownloaded_model_refused(self):
         self.env["MIMIK_MODEL_ROOT"] = str(self.root / "absent")
+        entry = REGISTRY["models"]["llama31-8b"]
+        self.addCleanup(entry.__setitem__, "downloaded", entry["downloaded"])
+        entry["downloaded"] = False
         doc = queue_doc([arm("a"), arm("b", model="llama31-8b")])
         manifest = self.make(doc, self.START).run()
         self.assertIn("model root", manifest["arms"][0]["reason"])
