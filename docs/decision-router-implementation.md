@@ -166,3 +166,20 @@ the GPU-repaired gate.
 - **Re-review of `e8846fb`** (both NOT CLEARED; third unavailable twice): fixed with failing-first
   tests, including the states-container subset mount; a real no-inference preparation smoke ran
   twice with byte-identical states (`498f2fa0…`). Same record, round 2.
+
+## Operational notes (review round 3)
+
+- **Code drift refuses analysis (Sonnet 1).** `check_attempt` compares the run manifest's
+  builder, router and render hashes with the analysing checkout. Selection, the queue's unit
+  check and the decision file therefore refuse an attempt whose analysing code differs from the
+  code that ran it, including an in-flight arm if the queue's own checkout changed. The frozen
+  worktree (`tools/launch_frozen_queue.sh`, `run-<sha12>`) prevents this for the queue; run
+  `select` and `decision-file` from that same frozen copy (or the same commit).
+- **Decision files from before `b5a4f50` are refused (Sonnet 2).** The live harness compares
+  `render_sha256` (and, from round 3, `router_sha256`) with the live code. Files built before
+  those fields existed lack them, and files built by other code carry other values; both are
+  refused by design. Rebuild the decision file from the attempt with the code that will run it.
+- **CI runs the router runner tests for real (Sonnet 3).** The `mimik-ci` image has git and
+  flock (checked in the local image: `/usr/bin/git`, `/usr/bin/flock`; the Dockerfile installs
+  git, flock comes with util-linux), and CI now sets `MIMIK_FORMULA_EVAL`. With `CI` set, a
+  missing CLI, git or flock fails `test_run_decision_router` instead of skipping it.

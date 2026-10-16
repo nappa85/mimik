@@ -83,3 +83,25 @@ Verification (round 2): gate in `mimik-toolloop-py:20261015` (`--cpus 2`): ruff 
 **655 tests, 11 skipped, 1 error** (the environmental `test_package`); ShellCheck clean on the
 runner; actionlint clean on `ci.yml`. The real preparation smoke above is the only container
 run beyond the gate; no inference.
+
+## Round 3 (re-review of `b5a4f50`)
+
+- **Sol:** **CLEARED** for the dev run (F1 minor, F2 nit, one test-coverage note).
+- **Sonnet:** **CLEARED** for the dev run (three operational notes).
+- **Third reviewer unavailable** for the third time (`--chain third` preflight timeouts);
+  proceeded with the two main reviews per AGENTS.md.
+- **The main session launched the router queue from the frozen copy of `b5a4f50`.** The
+  follow-ups below are later commits on `harness-v3` and are not part of that run.
+
+| ID | Sev. | Finding | Fix | Regression test (red → green) |
+|---|---|---|---|---|
+| Sol F1 | Minor | `live_identity()` omitted `router_sha256`; live admission never compared the router code | Added to `live_identity()`, compared in `verify_decision_file` | `test_live_router_identity_is_compared` (red: KeyError, then no refusal) |
+| Sol F2 | Nit | `unittest.main()` sat mid-file in `test_router_review_fixes.py`, so direct execution skipped the later classes | Moved to the end | `test_main_guard_is_the_last_statement` (the file at `b5a4f50` fails the AST check) |
+| Sol (coverage) | — | The `state_text` error branch of `check_attempt` had no test | — | `test_state_text_error_is_recorded` (coverage; green on first run, the branch already worked) |
+| Sonnet 1 | Operational | Code-hash drift in the analysing checkout refuses an in-flight arm | Documented (frozen worktree mitigates; analyse from the same commit) | — |
+| Sonnet 2 | Operational | `render_sha256` refuses decision files built before `b5a4f50` | Documented (by design; rebuild with the live code) | — |
+| Sonnet 3 | Operational | CI now runs `test_run_decision_router` for real and needs git and flock | Verified both in `mimik-ci`; the test now fails instead of skipping under `CI` when the CLI, git or flock is missing | `test_runner_tests_fail_rather_than_skip_in_ci` (red at `b5a4f50`: silent skip) |
+
+Verification (round 3 follow-ups): gate in `mimik-toolloop-py:20261015` (`--cpus 2`): ruff
+clean, **659 tests, 11 skipped, 1 error** (the environmental `test_package`). No container run
+beyond the gate; the queue launched from `b5a4f50` was not touched.

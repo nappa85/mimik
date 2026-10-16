@@ -155,9 +155,26 @@ sys.exit(f"fake docker: unhandled {args}")
 """
 
 
-@unittest.skipUnless(FORMULA and Path(FORMULA).exists(), "needs MIMIK_FORMULA_EVAL (formula CLI)")
-@unittest.skipUnless(shutil.which("git") and shutil.which("flock"), "needs git and flock")
 class RouterRunnerTests(unittest.TestCase):
+    """Needs the formula CLI, git and flock (all in the mimik-ci image; CI sets
+    MIMIK_FORMULA_EVAL). Locally a missing one skips; with CI set it fails."""
+
+    @classmethod
+    def setUpClass(cls):
+        missing = [
+            name
+            for name, ok in (
+                ("MIMIK_FORMULA_EVAL", bool(FORMULA) and Path(FORMULA).exists()),
+                ("git", bool(shutil.which("git"))),
+                ("flock", bool(shutil.which("flock"))),
+            )
+            if not ok
+        ]
+        if missing:
+            if os.environ.get("CI"):
+                raise AssertionError(f"CI must provide {missing} for the router runner tests")
+            raise unittest.SkipTest(f"needs {missing}")
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, True)

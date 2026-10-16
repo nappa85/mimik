@@ -607,6 +607,7 @@ def live_identity(pack: Path = PACK) -> dict:
         "fold_sha256": fold_document(pack_cases(pack))["sha256"],
         "state_builder_sha256": sha_file(TOOLS / "router_state_builder.py"),
         "render_sha256": sha_file(TOOLS / "tool_loop_benchmark.py"),
+        "router_sha256": sha_file(Path(__file__)),
     }
 
 
@@ -1423,6 +1424,8 @@ def verify_decision_file(doc, case_ids, state_hash_of, live=None) -> dict:
             raise RouterError("decision file: state builder hash differs from the live builder")
         if "render_sha256" in live and header.get("render_sha256") != live["render_sha256"]:
             raise RouterError("decision file: render path (harness) hash differs from the live one")
+        if "router_sha256" in live and header.get("router_sha256") != live["router_sha256"]:
+            raise RouterError("decision file: router code hash differs from the live router")
     policy = header.get("policy") or {}
     if header.get("policy_hash") != tl.digest(policy) or policy.get("grid") != list(GRID):
         raise RouterError("decision file: policy hash mismatch")

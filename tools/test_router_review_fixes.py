@@ -499,9 +499,6 @@ class MinorTests(unittest.TestCase):
 
 MASTER_PAYLOAD_DIGEST = "aa7a95207c3532b5e907fb8f8945fccb2204dd38cb8f5828ef122b286e3794ef"
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 # ---------------------------------------------------------------- round 2 (re-review of e8846fb)
 
@@ -609,3 +606,62 @@ class LazyReloadDeadlineTests(unittest.TestCase):
             summary = unit.run()
         self.assertNotIn(("b", 3), predicted)
         self.assertIn("deadline", summary["stopped"])
+
+
+class RoundThreeTests(Fixture):
+    def test_live_router_identity_is_compared(self):
+        """b5a4f50: live_identity omitted router_sha256 and verify never compared it (Sol F1)."""
+        screen, ablation = self.attempts()
+        doc = dr.build_decision_file(self.report(screen, ablation), screen, ablation, ENTRY)
+        _, mapping = dr.derive(CASES)
+        inverse = {v: k for k, v in mapping.items()}
+        live = dr.live_identity(dr.PACK)
+        self.assertEqual(live["router_sha256"], doc["header"]["router_sha256"])
+        with self.assertRaisesRegex(dr.RouterError, "router"):
+            dr.verify_decision_file(
+                doc,
+                list(EXPECTED),
+                lambda c: dr.text_hash(f"state-{inverse[c]}"),
+                dict(live, router_sha256="0" * 64),
+            )
+
+    def test_state_text_error_is_recorded(self):
+        """Sol round 3: the state_text error branch of check_attempt had no test."""
+        screen, _ = self.attempts()
+        path = screen / "prep" / "run" / "prepared" / "states.jsonl"
+        rows = [json.loads(x) for x in path.read_text().splitlines()]
+        del rows[0]["state"]
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        check = dr.check_attempt(screen, "screen")
+        self.assertTrue(
+            any("state text cannot be rebuilt" in e for e in check["errors"]), check["errors"]
+        )
+
+    def test_runner_tests_fail_rather_than_skip_in_ci(self):
+        """Sonnet round 3: CI now runs the runner tests for real; missing tools must fail there."""
+        import subprocess
+        import sys
+
+        env = {"PATH": "/nonexistent", "CI": "1", "MIMIK_FORMULA_EVAL": ""}
+        proc = subprocess.run(
+            [sys.executable, "-m", "unittest", "test_run_decision_router"],
+            cwd=Path(__file__).parent,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("CI must provide", proc.stderr)
+
+    def test_main_guard_is_the_last_statement(self):
+        """b5a4f50: unittest.main() sat mid-file, so direct execution skipped later classes (Sol F2)."""
+        import ast
+
+        body = ast.parse(Path(__file__).read_text()).body
+        last = body[-1]
+        self.assertIsInstance(last, ast.If)
+        self.assertIn("__main__", ast.unparse(last.test))
+
+
+if __name__ == "__main__":
+    unittest.main()
