@@ -1,0 +1,394 @@
+{
+  "encoding": 1,
+  "game_id": "lantern-reach-demo",
+  "edition_id": "demo-2",
+  "rules_revision": 2,
+  "formula_profile": 1,
+  "formula_language": "cel-mimik-1",
+  "fields": [
+    {
+      "name": "name",
+      "type": "text",
+      "editable": true
+    },
+    {
+      "name": "notes",
+      "type": "text",
+      "editable": true
+    },
+    {
+      "name": "vitality",
+      "type": "integer",
+      "editable": true
+    },
+    {
+      "name": "vitality_max",
+      "type": "integer",
+      "editable": true
+    },
+    {
+      "name": "focus",
+      "type": "integer",
+      "editable": true
+    },
+    {
+      "name": "focus_max",
+      "type": "integer",
+      "editable": true
+    },
+    {
+      "name": "might",
+      "type": "integer",
+      "editable": true
+    },
+    {
+      "name": "talent_mail_trained",
+      "type": "boolean",
+      "editable": true
+    },
+    {
+      "name": "talent_sure_footed",
+      "type": "boolean",
+      "editable": true
+    },
+    {
+      "name": "lamp_oil",
+      "type": "integer",
+      "editable": true
+    },
+    {
+      "name": "lamp_lit",
+      "type": "boolean",
+      "editable": true
+    },
+    {
+      "name": "rations",
+      "type": "integer",
+      "editable": true
+    },
+    {
+      "name": "bandages",
+      "type": "integer",
+      "editable": true
+    },
+    {
+      "name": "down",
+      "type": "boolean",
+      "editable": false,
+      "derived": "vitality == 0"
+    },
+    {
+      "name": "armor",
+      "type": "integer",
+      "editable": false,
+      "derived": "max_of(equipment.filter(item, item.kind == \"outer-armor\" && item.equipped).map(item, item.armor), 0) + max_of(equipment.filter(item, item.kind == \"shield\" && item.equipped).map(item, item.armor), 0)"
+    },
+    {
+      "name": "armor_pace_penalty",
+      "type": "integer",
+      "editable": false,
+      "derived": "max_of(equipment.filter(item, item.kind == \"outer-armor\" && item.equipped && !(talent_mail_trained && item.category == \"mail\")).map(item, item.armor), 0)"
+    },
+    {
+      "name": "burden",
+      "type": "integer",
+      "editable": false,
+      "derived": "sum(equipment.map(item, item.weight * item.quantity))"
+    },
+    {
+      "name": "burden_limit",
+      "type": "integer",
+      "editable": false,
+      "derived": "6 + 2 * might"
+    },
+    {
+      "name": "encumbered",
+      "type": "boolean",
+      "editable": false,
+      "derived": "burden > burden_limit"
+    },
+    {
+      "name": "bleeding_stacks",
+      "type": "integer",
+      "editable": false,
+      "derived": "sum(conditions.filter(item, item.kind == \"bleeding\").map(item, item.stacks))"
+    },
+    {
+      "name": "weary_stacks",
+      "type": "integer",
+      "editable": false,
+      "derived": "sum(conditions.filter(item, item.kind == \"weary\").map(item, item.stacks))"
+    },
+    {
+      "name": "chilled",
+      "type": "boolean",
+      "editable": false,
+      "derived": "sum(conditions.filter(item, item.kind == \"chilled\").map(item, item.stacks)) > 0"
+    },
+    {
+      "name": "shaken",
+      "type": "boolean",
+      "editable": false,
+      "derived": "sum(conditions.filter(item, item.kind == \"shaken\").map(item, item.stacks)) > 0"
+    },
+    {
+      "name": "pace",
+      "type": "integer",
+      "editable": false,
+      "derived": "down ? 0 : max(1, 6 - armor_pace_penalty - weary_stacks - (encumbered ? 1 : 0) - (chilled ? 1 : 0))"
+    }
+  ],
+  "collections": [
+    {
+      "name": "equipment",
+      "fields": [
+        {
+          "name": "name",
+          "type": "text",
+          "editable": true
+        },
+        {
+          "name": "kind",
+          "type": "enum",
+          "values": [
+            "outer-armor",
+            "shield",
+            "weapon",
+            "lamp",
+            "oil-flask",
+            "rope",
+            "tool",
+            "trinket"
+          ],
+          "editable": true
+        },
+        {
+          "name": "quantity",
+          "type": "integer",
+          "editable": true
+        },
+        {
+          "name": "weight",
+          "type": "integer",
+          "editable": true
+        },
+        {
+          "name": "equipped",
+          "type": "boolean",
+          "editable": true
+        },
+        {
+          "name": "armor",
+          "type": "integer",
+          "editable": true,
+          "optional": true
+        },
+        {
+          "name": "category",
+          "type": "enum",
+          "values": [
+            "cloth",
+            "leather",
+            "mail",
+            "plate"
+          ],
+          "editable": true,
+          "optional": true
+        }
+      ]
+    },
+    {
+      "name": "conditions",
+      "fields": [
+        {
+          "name": "kind",
+          "type": "enum",
+          "values": [
+            "bleeding",
+            "weary",
+            "chilled",
+            "shaken"
+          ],
+          "editable": false
+        },
+        {
+          "name": "stacks",
+          "type": "integer",
+          "editable": true
+        }
+      ]
+    }
+  ],
+  "constraints": [
+    {
+      "id": "vitality-range",
+      "expr": "vitality >= 0 && vitality <= vitality_max",
+      "rule_ids": [
+        "LR2-5"
+      ],
+      "message": "vitality must be from 0 to vitality_max"
+    },
+    {
+      "id": "vitality-max-range",
+      "expr": "vitality_max >= 4 && vitality_max <= 16",
+      "rule_ids": [
+        "LR2-9"
+      ],
+      "message": "vitality_max must be from 4 to 16"
+    },
+    {
+      "id": "focus-range",
+      "expr": "focus >= 0 && focus <= focus_max",
+      "rule_ids": [
+        "LR2-10"
+      ],
+      "message": "focus must be from 0 to focus_max"
+    },
+    {
+      "id": "focus-max-range",
+      "expr": "focus_max >= 1 && focus_max <= 8",
+      "rule_ids": [
+        "LR2-9"
+      ],
+      "message": "focus_max must be from 1 to 8"
+    },
+    {
+      "id": "might-range",
+      "expr": "might >= 1 && might <= 5",
+      "rule_ids": [
+        "LR2-19"
+      ],
+      "message": "might must be from 1 to 5"
+    },
+    {
+      "id": "rations-range",
+      "expr": "rations >= 0 && rations <= 10",
+      "rule_ids": [
+        "LR2-28"
+      ],
+      "message": "rations must be from 0 to 10"
+    },
+    {
+      "id": "bandages-range",
+      "expr": "bandages >= 0 && bandages <= 5",
+      "rule_ids": [
+        "LR2-28"
+      ],
+      "message": "bandages must be from 0 to 5"
+    },
+    {
+      "id": "lamp-oil-range",
+      "expr": "lamp_oil >= 0 && lamp_oil <= 4",
+      "rule_ids": [
+        "LR2-32",
+        "LR2-34"
+      ],
+      "message": "lamp_oil must be from 0 to 4"
+    },
+    {
+      "id": "no-lamp-no-oil",
+      "expr": "size(equipment.filter(item, item.kind == \"lamp\")) > 0 || (lamp_oil == 0 && !lamp_lit)",
+      "rule_ids": [
+        "LR2-32"
+      ],
+      "message": "a character without a lamp has lamp_oil 0 and lamp_lit false"
+    },
+    {
+      "id": "lit-needs-oil",
+      "expr": "!lamp_lit || lamp_oil > 0",
+      "rule_ids": [
+        "LR2-32",
+        "LR2-33"
+      ],
+      "message": "a lamp can only burn with oil above zero"
+    },
+    {
+      "id": "one-outer-armor",
+      "expr": "size(equipment.filter(item, item.kind == \"outer-armor\" && item.equipped)) <= 1",
+      "rule_ids": [
+        "LR2-13"
+      ],
+      "message": "at most one outer armor may be equipped"
+    },
+    {
+      "id": "one-shield",
+      "expr": "size(equipment.filter(item, item.kind == \"shield\" && item.equipped)) <= 1",
+      "rule_ids": [
+        "LR2-14"
+      ],
+      "message": "at most one shield may be equipped"
+    },
+    {
+      "id": "equippable-kinds",
+      "expr": "size(equipment.filter(item, item.equipped && !(item.kind == \"outer-armor\" || item.kind == \"shield\" || item.kind == \"weapon\"))) == 0",
+      "rule_ids": [
+        "LR2-20"
+      ],
+      "message": "only outer armor, shields and weapons can be equipped"
+    },
+    {
+      "id": "quantity-positive",
+      "expr": "size(equipment.filter(item, item.quantity < 1)) == 0",
+      "rule_ids": [
+        "LR2-20"
+      ],
+      "message": "quantity must be at least 1"
+    },
+    {
+      "id": "weight-range",
+      "expr": "size(equipment.filter(item, item.weight < 0 || item.weight > 5)) == 0",
+      "rule_ids": [
+        "LR2-20"
+      ],
+      "message": "weight must be from 0 to 5"
+    },
+    {
+      "id": "outer-armor-fields",
+      "expr": "size(equipment.filter(item, item.kind == \"outer-armor\" && !(has(item.armor) && has(item.category)))) == 0",
+      "rule_ids": [
+        "LR2-13"
+      ],
+      "message": "outer armor needs an armor value and a category"
+    },
+    {
+      "id": "outer-armor-range",
+      "expr": "size(equipment.filter(item, item.kind == \"outer-armor\" && has(item.armor) && (item.armor < 0 || item.armor > 3))) == 0",
+      "rule_ids": [
+        "LR2-13"
+      ],
+      "message": "outer armor value must be from 0 to 3"
+    },
+    {
+      "id": "shield-value",
+      "expr": "size(equipment.filter(item, item.kind == \"shield\" && !(has(item.armor) && item.armor == 1))) == 0",
+      "rule_ids": [
+        "LR2-14"
+      ],
+      "message": "a shield has armor value exactly 1"
+    },
+    {
+      "id": "condition-entries",
+      "expr": "size(conditions.filter(item, item.kind == \"bleeding\")) == 1 && size(conditions.filter(item, item.kind == \"weary\")) == 1 && size(conditions.filter(item, item.kind == \"chilled\")) == 1 && size(conditions.filter(item, item.kind == \"shaken\")) == 1",
+      "rule_ids": [
+        "LR2-21"
+      ],
+      "message": "exactly one entry per condition kind"
+    },
+    {
+      "id": "condition-stacks-range",
+      "expr": "size(conditions.filter(item, item.stacks < 0 || item.stacks > 3)) == 0",
+      "rule_ids": [
+        "LR2-21"
+      ],
+      "message": "condition stacks must be from 0 to 3"
+    },
+    {
+      "id": "single-stack-conditions",
+      "expr": "size(conditions.filter(item, (item.kind == \"chilled\" || item.kind == \"shaken\") && item.stacks > 1)) == 0",
+      "rule_ids": [
+        "LR2-21"
+      ],
+      "message": "chilled and shaken hold at most 1 stack"
+    }
+  ]
+}

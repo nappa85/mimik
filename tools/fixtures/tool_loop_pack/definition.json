@@ -1,0 +1,88 @@
+{
+  "encoding": 1,
+  "game_id": "fixture-game",
+  "edition_id": "fixture-1",
+  "rules_revision": 1,
+  "formula_profile": 1,
+  "formula_language": "cel-mimik-1",
+  "fields": [
+    {
+      "name": "name",
+      "type": "text",
+      "editable": true
+    },
+    {
+      "name": "focus",
+      "type": "integer",
+      "editable": true
+    },
+    {
+      "name": "focus_max",
+      "type": "integer",
+      "editable": false
+    },
+    {
+      "name": "armor",
+      "type": "integer",
+      "editable": false,
+      "derived": "max_of(equipment.filter(item, item.kind == \"outer-armor\" && item.equipped).map(item, item.armor), 0)"
+    },
+    {
+      "name": "pace",
+      "type": "integer",
+      "editable": false,
+      "derived": "6 - armor"
+    },
+    {
+      "name": "notes",
+      "type": "text",
+      "editable": true
+    }
+  ],
+  "collections": [
+    {
+      "name": "equipment",
+      "fields": [
+        {
+          "name": "name",
+          "type": "text"
+        },
+        {
+          "name": "kind",
+          "type": "enum",
+          "values": [
+            "outer-armor",
+            "gear"
+          ]
+        },
+        {
+          "name": "armor",
+          "type": "integer",
+          "optional": true
+        },
+        {
+          "name": "equipped",
+          "type": "boolean"
+        }
+      ]
+    }
+  ],
+  "constraints": [
+    {
+      "id": "focus-range",
+      "expr": "focus >= 0 && focus <= focus_max",
+      "rule_ids": [
+        "FX-1"
+      ],
+      "message": "Focus must stay between 0 and focus_max."
+    },
+    {
+      "id": "one-outer-armor",
+      "expr": "size(equipment.filter(item, item.kind == \"outer-armor\" && item.equipped)) <= 1",
+      "rule_ids": [
+        "FX-2"
+      ],
+      "message": "At most one outer armor may be equipped."
+    }
+  ]
+}

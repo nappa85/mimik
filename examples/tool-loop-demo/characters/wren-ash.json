@@ -1,0 +1,99 @@
+{
+  "encoding": 1,
+  "sheet_id": "wren-ash",
+  "revision": 1,
+  "values": {
+    "name": "Wren Ash",
+    "notes": "Owes the ferrywoman two coins. Wants to map the drowned stair.",
+    "vitality": 7,
+    "vitality_max": 10,
+    "focus": 3,
+    "focus_max": 5,
+    "might": 2,
+    "talent_mail_trained": false,
+    "talent_sure_footed": false,
+    "lamp_oil": 2,
+    "lamp_lit": false,
+    "rations": 3,
+    "bandages": 1,
+    "down": false,
+    "armor": 1,
+    "armor_pace_penalty": 1,
+    "burden": 10,
+    "burden_limit": 10,
+    "encumbered": false,
+    "bleeding_stacks": 0,
+    "weary_stacks": 1,
+    "chilled": false,
+    "shaken": false,
+    "pace": 4,
+    "equipment": [
+      {
+        "id": "coat-1",
+        "name": "Padded coat",
+        "kind": "outer-armor",
+        "quantity": 1,
+        "weight": 1,
+        "equipped": true,
+        "armor": 1,
+        "category": "cloth"
+      },
+      {
+        "id": "hauberk-1",
+        "name": "Iron hauberk",
+        "kind": "outer-armor",
+        "quantity": 1,
+        "weight": 3,
+        "equipped": false,
+        "armor": 3,
+        "category": "mail"
+      },
+      {
+        "id": "lamp-1",
+        "name": "Hand lamp",
+        "kind": "lamp",
+        "quantity": 1,
+        "weight": 1,
+        "equipped": false
+      },
+      {
+        "id": "flask-1",
+        "name": "Oil flask",
+        "kind": "oil-flask",
+        "quantity": 3,
+        "weight": 1,
+        "equipped": false
+      },
+      {
+        "id": "rope-1",
+        "name": "Hemp rope",
+        "kind": "rope",
+        "quantity": 1,
+        "weight": 2,
+        "equipped": false
+      }
+    ],
+    "conditions": [
+      {
+        "id": "cond-bleeding",
+        "kind": "bleeding",
+        "stacks": 0
+      },
+      {
+        "id": "cond-weary",
+        "kind": "weary",
+        "stacks": 1
+      },
+      {
+        "id": "cond-chilled",
+        "kind": "chilled",
+        "stacks": 0
+      },
+      {
+        "id": "cond-shaken",
+        "kind": "shaken",
+        "stacks": 0
+      }
+    ]
+  }
+}

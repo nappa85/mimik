@@ -1,0 +1,12 @@
+{
+  "encoding": 1,
+  "split": "heldout",
+  "cases": [
+    {"id": "low-focus", "language": "en", "character": "hero",
+     "request": "Spend 1 focus.",
+     "setup": {"value_overrides": {"focus": 1}},
+     "gold_rule_ids": ["FX-1"],
+     "expected": {"outcome": "proposal", "changes": [{"field": "focus", "to": 0}],
+                  "notes": "GOLD-NOTE-LOW"}}
+  ]
+}

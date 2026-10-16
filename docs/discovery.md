@@ -156,6 +156,24 @@ User decisions on the proposals in [harness-assessment-2026-10-15.md](harness-as
 - **Models for the first tool-loop run:** Qwen3.6-35B-A3B and Qwen3.5-9B side by side,
   plus the existing Qwen3-4B-Instruct-2507 baseline.
 - **Admin work:** continues in parallel. It is not paused.
+- **Owner browser authority (2026-10-15):** the Owner may register rulesets and
+  publish/withdraw definitions from the browser, in addition to the local CLI, with
+  account-attributed audit. The Owner still gains no campaign access.
+- **Formula language (2026-10-15, supersedes "own spec"):** adopt Google's Common
+  Expression Language via the maintained `cel` crate (0.15, MIT) instead of a custom
+  language, adding `sum`/`max_of`/`min_of`-style aggregates as custom functions and
+  accepting CEL semantics (truncating division, commutative `&&`/`||`). The user
+  asked for whole existing formula crates first. evalexpr cannot express predicate
+  aggregates; fasteval is unmaintained; rhai is a full scripting language. A custom
+  parser, if ever needed, should use nom 8 (already linked, zero-copy) rather than
+  winnow. Dependency audit/notices for `antlr4rust`, `nom` 7 and `lazy_static` are
+  still required.
+- **False-supported metric (2026-10-15):** report the rate over all held-out cases
+  **and** over the at-risk cases (expected ask/conflict/stale/refuse); the user will
+  pick the bar's denominator once data exist. Wrong-but-valid proposals and wrong
+  factual answers also count as false-supported.
+- **Lifecycle policies (2026-10-15):** recorded in
+  [collaboration-and-history.md](collaboration-and-history.md#confirmed-lifecycle-decisions-user-2026-10-15).
 - **Accuracy bar:** on at least 100 held-out cases, at least 90% correct outcomes and
   at most 2% false-supported (unsupported claims presented as supported). This gates
   model-dependent product work, not admin work.

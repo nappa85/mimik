@@ -100,6 +100,36 @@ present unauthenticated service to the network.
   actor and history metadata, but do not label the current local prototype's
   untrusted actor labels as authenticated attribution.
 
+## Confirmed lifecycle decisions (user, 2026-10-15)
+
+Answers to the deferred lifecycle questions (recommended defaults were offered;
+where the user chose otherwise it is noted). Implementation still needs a reviewed design.
+
+1. **Owner lockout/succession:** recovery is a local CLI command, run by someone with
+   server shell access, that issues a fresh Owner reset token.
+2. **Disabled player:** the Owner may re-enable a disabled account and it **keeps its
+   previous campaign memberships** (user chose this over "fresh invite only"). Design
+   must still rotate the session epoch so old sessions stay revoked.
+3. **Character transfer:** the current player initiates, the recipient must accept,
+   within the same campaign only; history keeps the prior custodian.
+4. **Frozen sheet after rejoin:** the sheet is not unfrozen automatically or by the
+   player alone. The campaign may have advanced (other players levelled up), so the
+   returning player updates the sheet and **submits it to a campaign Master for
+   approval**; approval makes it editable again.
+5. **Soft delete/restore:** the player may soft-delete their own sheet (hidden from
+   lists, history kept). **Restore is done by the Owner** (user's choice), not by the
+   player or Master. This is an explicit administrative exception to "Owner has no
+   implicit sheet access": restore does not grant Owner read/edit of sheet content.
+6. **Physical purge:** Owner-only, removes **everything for that sheet, including its
+   audit trail** (user's choice). Backup retention must be documented separately.
+7. **Purge vs "always recoverable":** purge is the single explicit exception, behind
+   a typed confirmation of exactly what will be removed.
+8. **Registry/definition retirement:** a ruleset or definition may be **deleted when
+   nothing references it** (no campaign, sheet, pin or publication dependency).
+
+These answer items 4–5 below and the soft-delete/restore part of item 1. Rollback
+semantics (item 6) remain open.
+
 ## Decisions to ask the user before implementation
 
 1. Visibility answered: player and campaign Master only. Soft-delete, restore and

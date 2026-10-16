@@ -19,6 +19,14 @@ class PackageTests(unittest.TestCase):
             "tools/screen_limits.py",
             "tools/summarize_model_screen.py",
             "tools/test_summarize_model_screen.py",
+            "tools/tool_loop_benchmark.py",
+            "tools/test_tool_loop_benchmark.py",
+            "tools/test_cel_engine.py",
+            "tools/run_tool_loop_benchmark.sh",
+            "tools/fixtures/tool_loop_pack/definition.json",
+            "tools/fixtures/tool_loop_pack/characters/hero.json",
+            "examples/tool-loop-demo/definition.json",
+            "examples/tool-loop-demo/cases-heldout.json",
         ):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 verify_members([m for m in members if m != "mimik/" + name])

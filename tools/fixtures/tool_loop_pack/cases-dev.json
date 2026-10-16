@@ -1,0 +1,36 @@
+{
+  "encoding": 1,
+  "split": "dev",
+  "cases": [
+    {"id": "spend-focus", "language": "en", "character": "hero",
+     "request": "Spend 2 focus.",
+     "gold_rule_ids": ["FX-1"],
+     "expected": {"outcome": "proposal", "changes": [{"field": "focus", "to": 1}],
+                  "notes": "GOLD-NOTE-SPEND"}},
+    {"id": "swap-armor", "language": "en", "character": "hero",
+     "request": "Equip the iron vest instead of the coat.",
+     "gold_rule_ids": ["FX-2", "FX-3"],
+     "expected": {"outcome": "proposal", "changes": [
+        {"collection": "equipment", "entry_id": "coat", "field": "equipped", "to": false},
+        {"collection": "equipment", "entry_id": "vest", "field": "equipped", "to": true}],
+        "notes": "GOLD-NOTE-SWAP"}},
+    {"id": "overspend", "language": "en", "character": "hero",
+     "request": "Spend 5 focus.",
+     "gold_rule_ids": ["FX-1"],
+     "expected": {"outcome": "conflict", "notes": "GOLD-NOTE-OVER"}},
+    {"id": "rest-amount", "language": "it", "character": "hero",
+     "request": "Quanta concentrazione recupero con un riposo breve?",
+     "gold_rule_ids": ["FX-4"],
+     "expected": {"outcome": "ask_rule", "notes": "GOLD-NOTE-REST"}},
+    {"id": "pace-readback", "language": "en", "character": "hero",
+     "request": "What is my pace?",
+     "gold_rule_ids": ["FX-3"],
+     "expected": {"outcome": "answer", "answer_values": {"pace": 5}, "notes": "GOLD-NOTE-PACE"}},
+    {"id": "stale-pending", "language": "en", "character": "hero",
+     "request": "Apply the pending focus change.",
+     "setup": {"current_revision": 5,
+               "pending_proposal": {"base_revision": 3, "changes": [{"field": "focus", "to": 1}]}},
+     "gold_rule_ids": [],
+     "expected": {"outcome": "stale", "notes": "GOLD-NOTE-STALE"}}
+  ]
+}

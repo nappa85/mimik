@@ -1,0 +1,94 @@
+{
+  "encoding": 1,
+  "scripts": {
+    "spend-focus": [
+      [
+        {
+          "name": "search_rules",
+          "arguments": {
+            "query": "spend focus"
+          }
+        }
+      ],
+      [
+        {
+          "name": "propose_change",
+          "arguments": {
+            "changes": [
+              {
+                "path": "focus",
+                "to": 1
+              }
+            ],
+            "rule_ids": [
+              "FX-1"
+            ],
+            "reason": "spend 2"
+          }
+        }
+      ],
+      [
+        {
+          "name": "submit_proposal",
+          "arguments": {
+            "rule_ids": [
+              "FX-1"
+            ],
+            "reason": "spend 2"
+          }
+        }
+      ]
+    ],
+    "pace-readback": [
+      [
+        {
+          "name": "search_rules",
+          "arguments": {
+            "query": "pace"
+          }
+        },
+        {
+          "name": "read_fields",
+          "arguments": {
+            "paths": [
+              "pace"
+            ]
+          }
+        }
+      ],
+      [
+        {
+          "name": "answer",
+          "arguments": {
+            "message": "Your pace is 5.",
+            "values": {
+              "pace": 5
+            },
+            "rule_ids": [
+              "FX-3"
+            ]
+          }
+        }
+      ]
+    ],
+    "rest-amount": [
+      [
+        {
+          "name": "search_rules",
+          "arguments": {
+            "query": "riposo breve concentrazione"
+          }
+        }
+      ],
+      [
+        {
+          "name": "ask_user",
+          "arguments": {
+            "kind": "rule",
+            "question": "Quanto?"
+          }
+        }
+      ]
+    ]
+  }
+}

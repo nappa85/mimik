@@ -1,0 +1,100 @@
+{
+  "encoding": 1,
+  "sheet_id": "bram-holt",
+  "revision": 1,
+  "values": {
+    "name": "Bram Holt",
+    "notes": "Carries the ferry toll for the party. Afraid of deep water.",
+    "vitality": 12,
+    "vitality_max": 14,
+    "focus": 1,
+    "focus_max": 4,
+    "might": 4,
+    "talent_mail_trained": true,
+    "talent_sure_footed": false,
+    "lamp_oil": 0,
+    "lamp_lit": false,
+    "rations": 1,
+    "bandages": 2,
+    "down": false,
+    "armor": 3,
+    "armor_pace_penalty": 0,
+    "burden": 13,
+    "burden_limit": 14,
+    "encumbered": false,
+    "bleeding_stacks": 1,
+    "weary_stacks": 0,
+    "chilled": true,
+    "shaken": false,
+    "pace": 5,
+    "equipment": [
+      {
+        "id": "ringshirt-1",
+        "name": "Ring shirt",
+        "kind": "outer-armor",
+        "quantity": 1,
+        "weight": 3,
+        "equipped": true,
+        "armor": 2,
+        "category": "mail"
+      },
+      {
+        "id": "cuirass-1",
+        "name": "Plate cuirass",
+        "kind": "outer-armor",
+        "quantity": 1,
+        "weight": 4,
+        "equipped": false,
+        "armor": 3,
+        "category": "plate"
+      },
+      {
+        "id": "shield-1",
+        "name": "Round shield",
+        "kind": "shield",
+        "quantity": 1,
+        "weight": 2,
+        "equipped": true,
+        "armor": 1
+      },
+      {
+        "id": "rope-1",
+        "name": "Tarred rope",
+        "kind": "rope",
+        "quantity": 1,
+        "weight": 2,
+        "equipped": false
+      },
+      {
+        "id": "spear-1",
+        "name": "Ash spear",
+        "kind": "weapon",
+        "quantity": 1,
+        "weight": 2,
+        "equipped": true
+      }
+    ],
+    "conditions": [
+      {
+        "id": "cond-bleeding",
+        "kind": "bleeding",
+        "stacks": 1
+      },
+      {
+        "id": "cond-weary",
+        "kind": "weary",
+        "stacks": 0
+      },
+      {
+        "id": "cond-chilled",
+        "kind": "chilled",
+        "stacks": 1
+      },
+      {
+        "id": "cond-shaken",
+        "kind": "shaken",
+        "stacks": 0
+      }
+    ]
+  }
+}

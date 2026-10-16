@@ -1,0 +1,89 @@
+{
+  "encoding": 1,
+  "sheet_id": "cass-mere",
+  "revision": 1,
+  "values": {
+    "name": "Cass Mere",
+    "notes": "Keeps a tally of every beacon she has relit.",
+    "vitality": 3,
+    "vitality_max": 8,
+    "focus": 2,
+    "focus_max": 6,
+    "might": 1,
+    "talent_mail_trained": false,
+    "talent_sure_footed": true,
+    "lamp_oil": 3,
+    "lamp_lit": true,
+    "rations": 0,
+    "bandages": 0,
+    "down": false,
+    "armor": 2,
+    "armor_pace_penalty": 2,
+    "burden": 6,
+    "burden_limit": 8,
+    "encumbered": false,
+    "bleeding_stacks": 2,
+    "weary_stacks": 0,
+    "chilled": false,
+    "shaken": true,
+    "pace": 4,
+    "equipment": [
+      {
+        "id": "jerkin-1",
+        "name": "Leather jerkin",
+        "kind": "outer-armor",
+        "quantity": 1,
+        "weight": 2,
+        "equipped": true,
+        "armor": 2,
+        "category": "leather"
+      },
+      {
+        "id": "lamp-1",
+        "name": "Hooded lamp",
+        "kind": "lamp",
+        "quantity": 1,
+        "weight": 1,
+        "equipped": false
+      },
+      {
+        "id": "flask-1",
+        "name": "Oil flask",
+        "kind": "oil-flask",
+        "quantity": 2,
+        "weight": 1,
+        "equipped": false
+      },
+      {
+        "id": "hooks-1",
+        "name": "Climbing hooks",
+        "kind": "tool",
+        "quantity": 1,
+        "weight": 1,
+        "equipped": false
+      }
+    ],
+    "conditions": [
+      {
+        "id": "cond-bleeding",
+        "kind": "bleeding",
+        "stacks": 2
+      },
+      {
+        "id": "cond-weary",
+        "kind": "weary",
+        "stacks": 0
+      },
+      {
+        "id": "cond-chilled",
+        "kind": "chilled",
+        "stacks": 0
+      },
+      {
+        "id": "cond-shaken",
+        "kind": "shaken",
+        "stacks": 1
+      }
+    ]
+  }
+}
