@@ -6,20 +6,27 @@ retry for pre-declared infrastructure failures only). The queue is an explicit s
 
   arm:   pending -> waiting_window -> prechecks -> running -> complete
                                          |            |-> retry (infra) -> prechecks
-                                         |            |-> failed | incomplete | incomplete_by_window
+                                         |            |-> failed | incomplete |
+                                         |            |   incomplete_with_errors |
+                                         |            |   incomplete_by_window | arm_timeout
                                          |-> refused (config, missing path) | skipped
-  queue: running -> done | stopped(<reason>)
+  queue: running -> done | stopped(<reason>) | crashed(<error>)
 
-Status comes from the runner's provenance.txt (failure=, harness_exit=, OOM flags) and the
-ledger's completeness (run_summary, planned == run, not_run == 0, header identity), never from
-the exit code alone. Heavy work runs only inside the machine schedule (AGENTS.md): Saturday
-and Sunday at any time, Monday-Friday outside 09:00-18:00 local time. An arm starts only if
-its estimated duration fits before the window closes; a running arm is stopped at the window
-edge (incomplete_by_window, rerun whole in a later window, never resumed mid-arm).
+An arm is complete only if the runner exited 0, its cleanup was verified (by the runner and
+by the queue), its provenance is consistent and the ledger passes the harness's own strict
+validation (tool_loop_benchmark.load_ledgers) plus the queue's requested plan: the exact
+(case_id, seed) job set, a live run, and the arm's server config, flags, sampling, max_turns,
+top_k, benchmark version and harness sha256. Heavy work runs only inside the machine schedule
+(AGENTS.md): Saturday and Sunday at any time, Monday-Friday outside 09:00-18:00 local time
+(/etc/localtime). An arm starts only if its estimate fits before the window closes; the
+runner gets the absolute window end, and a running arm is stopped at the edge
+(incomplete_by_window, rerun whole in a later window, never resumed mid-arm). The queue also
+starts tools/run_watchdog.py, an independent process that removes owned containers outside
+the window or when no queue or runner holds the lock.
 
 Usage:
-  run_queue.py run QUEUE.json [--session-dir DIR] [--dry-plan]
-  run_queue.py window-check             (exit 0 open, 1 closed; the runner calls it)
+  run_queue.py run QUEUE.json [--session-dir DIR]
+  run_queue.py window-check [--cutoff EPOCH] [--margin S]  (exit 0 open, 1 closed)
   run_queue.py check QUEUE.json         (validate the queue file and print the plan)
 Start it detached:  setsid nohup python3 tools/run_queue.py run Q.json > q.console 2>&1 < /dev/null &
 The console gets one line per arm transition and never a per-case outcome (plan §11 item 3).
@@ -39,17 +46,30 @@ import time
 from pathlib import Path
 
 import model_registry
+import tool_loop_benchmark as tl
+import toolloop_ops as ops
+from toolloop_ops import (  # noqa: F401 (re-exported for callers and tests)
+    epoch,
+    heavy_allowed,
+    local,
+    longest_window_seconds,
+    next_window_start,
+    window_end,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "tools" / "run_tool_loop_benchmark.sh"
+WATCHDOG = ROOT / "tools" / "run_watchdog.py"
 PACK = ROOT / "examples" / "tool-loop-demo"
 SCHEMA = 1
-BLOCK_START, BLOCK_END = 9, 18  # Monday-Friday [09:00, 18:00) local: no heavy work
-NOW_ENV = "MIMIK_QUEUE_NOW"  # test hook for window-check: epoch seconds
-SMOKE_EPISODES = 3
-SERVER_CONTAINERS = ("mimik-toolloop-v3-harness", "mimik-toolloop-v3-srv")
-INFRA_CLASSES = ("server_start", "server_health", "oom")  # pre-declared, retried once
-# Environment the queue controls; inherited values are dropped so a stale export never leaks.
+# Test-only clock for window-check: honoured only with both variables set; the queue never
+# passes them to a child and the watchdog never reads them.
+TEST_MODE_ENV, TEST_CLOCK_ENV = "MIMIK_TEST_MODE", "MIMIK_TEST_CLOCK_FILE"
+SMOKE_CASES = ("dev-001", "dev-005", "dev-008")
+MIN_STOP_MARGIN = 300
+INFRA_CLASSES = ("server_start", "server_health", "oom", "infra_vram")  # retried once
+ENV_ALLOW = ("PATH", "HOME", "MIMIK_MODEL_ROOT")  # the only inherited variables
+# Runner pass-through variables a queue file may set (with the C0 / registry defaults).
 PASS_THROUGH = (
     "CTX",
     "MAX_TURNS",
@@ -69,82 +89,27 @@ PASS_THROUGH = (
     "N_CPU_MOE",
     "BUDGET_SECONDS",
 )
-CONTROLLED = PASS_THROUGH + (
-    "ARM",
-    "SEEDS",
-    "CASES",
-    "CASES_FILE",
-    "QUIET",
-    "PREFLIGHT_CASE",
-    "OUT_DIR",
-    "HASH_CACHE",
-    "CHECK_ONLY",
-    "SCHEDULE_OVERRIDE",
-    "MODEL_PATH",
-    "MODEL_SHA256",
-)
+FLAG_ENV = {
+    "NUDGE": ("nudge", True),
+    "TURNS_REMAINING": ("turns_remaining", False),
+    "SEARCH_NOTES": ("search_notes", False),
+    "SANITIZE_ECHO": ("sanitize_echo", True),
+    "PENDING_CURRENT": ("pending_current", True),
+    "UNTRUSTED": ("untrusted", False),
+}
 VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{0,64}$")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 SEEDS_RE = re.compile(r"^[0-9]+(,[0-9]+)*$")
 CASES_RE = re.compile(r"^[A-Za-z0-9_-]+(,[A-Za-z0-9_-]+)*$")
 EVAL_RE = re.compile(r"(?<!prompt )eval time =\s*([0-9.]+) ms /\s*([0-9]+) (?:tokens|runs)")
+VRAM_FILE = Path("/sys/class/drm/card0/device/mem_info_vram_used")
 
 
 class QueueError(ValueError):
     pass
 
 
-# ---------------------------------------------------------------- schedule window
-
-
-def local(t: float) -> dt.datetime:
-    return dt.datetime.fromtimestamp(t)  # naive local wall time (system time zone)
-
-
-def epoch(d: dt.datetime) -> float:
-    return d.timestamp()  # naive datetimes are local
-
-
-def heavy_allowed(t: float) -> bool:
-    d = local(t)
-    return d.weekday() >= 5 or not BLOCK_START <= d.hour < BLOCK_END
-
-
-def window_end(t: float) -> float:
-    """First weekday 09:00 local after t (when heavy work must have stopped)."""
-    d = local(t)
-    for days in range(8):
-        day = (d + dt.timedelta(days=days)).replace(hour=BLOCK_START, minute=0, second=0)
-        day = day.replace(microsecond=0)
-        if day.weekday() < 5 and epoch(day) > t:
-            return epoch(day)
-    raise AssertionError("unreachable: a weekday 09:00 exists within 8 days")
-
-
-def next_window_start(t: float) -> float:
-    """t itself if heavy work is allowed now, else today's 18:00."""
-    if heavy_allowed(t):
-        return t
-    return epoch(local(t).replace(hour=BLOCK_END, minute=0, second=0, microsecond=0))
-
-
-def longest_window_seconds(t: float) -> float:
-    """Longest heavy window in the coming week (Friday 18:00 to Monday 09:00 = 63 h)."""
-    best, cursor = 0.0, t
-    for _ in range(8):
-        start = next_window_start(cursor)
-        end = window_end(start)
-        best = max(best, end - max(start, t))
-        cursor = epoch(local(end).replace(hour=BLOCK_END, minute=0, second=0, microsecond=0))
-    return best
-
-
-class SystemClock:
-    def time(self) -> float:
-        return time.time()
-
-    def sleep(self, seconds: float) -> None:
-        time.sleep(max(0.0, seconds))
+SystemClock = ops.SystemClock
 
 
 # ---------------------------------------------------------------- queue file
@@ -224,15 +189,12 @@ def load_queue(path: Path, registry: dict) -> dict:
             ],
         ),
         "quiet": doc.get("quiet", True),
-        "stop_margin_seconds": doc.get("stop_margin_seconds", 120),
+        "stop_margin_seconds": doc.get("stop_margin_seconds", MIN_STOP_MARGIN),
         "io_bytes_per_second": doc.get("io_bytes_per_second", 12_600_000),
         "startup_seconds": doc.get("startup_seconds", 180),
         "estimate_factor": doc.get("estimate_factor", 1.25),
-        "g0": {
-            "vram_max_bytes": 7_500_000_000,
-            "swap_growth_max_mib": 64,
-            "deadline_seconds": None,
-        },
+        # §11 item 27: "no swap growth" (0 tolerance).
+        "g0": {"vram_max_bytes": 7_500_000_000, "swap_growth_max_mib": 0, "deadline_seconds": None},
         "arms": [],
     }
     if doc.get("session_deadline") is not None:
@@ -247,6 +209,8 @@ def load_queue(path: Path, registry: dict) -> dict:
     for name in ("max_consecutive_failures", "stop_margin_seconds", "startup_seconds"):
         if not isinstance(q[name], int) or isinstance(q[name], bool) or q[name] < 0:
             raise QueueError(f"queue: {name} must be a non-negative integer")
+    if q["stop_margin_seconds"] < MIN_STOP_MARGIN:
+        raise QueueError(f"queue: stop_margin_seconds must be >= {MIN_STOP_MARGIN}")
     if q["max_consecutive_failures"] < 1:
         raise QueueError("queue: max_consecutive_failures must be >= 1")
     if not isinstance(q["quiet"], bool):
@@ -316,22 +280,29 @@ def load_queue(path: Path, registry: dict) -> dict:
 
 
 def parse_provenance(path: Path) -> dict:
-    """key=value tokens of provenance.txt; failure_detail keeps its whole line."""
+    """key=value tokens of provenance.txt (first value wins); failure_detail keeps its line."""
     values = {}
     if not path.exists():
         return values
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         if line.startswith("failure_detail="):
-            values["failure_detail"] = line.split("=", 1)[1]
+            values.setdefault("failure_detail", line.split("=", 1)[1])
             continue
         for key, value in re.findall(r"(?:^|\s)([a-z][a-z0-9_]*)=('[^']*'|\S*)", line):
             values.setdefault(key, value.strip("'"))
     return values
 
 
-def check_ledger(path: Path, expect: dict) -> dict:
-    """Completeness of a ledger: header identity, run_summary, planned == run, not_run == 0."""
+def check_ledger(path: Path, plan: dict) -> dict:
+    """Strict completeness against the requested plan.
+
+    The harness's own merge gate (load_ledgers: header, run_summary, declared job set,
+    planned == rows, duplicates, aborted runs) runs first; then the header must equal the
+    plan field by field, the (case_id, seed) set must be exactly the requested one, and the
+    run must be live. Error and not_run episodes are counted and make the arm incomplete.
+    """
     result = {"complete": False, "reasons": [], "planned": None, "run": 0, "not_run": 0}
+    result["errors"] = 0
     try:
         rows = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
     except (OSError, json.JSONDecodeError) as error:
@@ -344,24 +315,36 @@ def check_ledger(path: Path, expect: dict) -> dict:
     episodes = [r for r in rows if r.get("event") == "episode"]
     result["planned"] = header.get("planned_episodes")
     result["not_run"] = sum(1 for r in episodes if r.get("outcome") == "not_run")
+    result["errors"] = sum(1 for r in episodes if r.get("outcome") == "error")
     result["run"] = len(episodes) - result["not_run"]
-    result["aborted"] = any(r.get("event") == "run_aborted" for r in rows)
-    if result["aborted"]:
-        aborted = next(r for r in rows if r.get("event") == "run_aborted")
+    aborted = next((r for r in rows if r.get("event") == "run_aborted"), None)
+    result["aborted"] = aborted is not None
+    if aborted is not None:
         result["abort_reason"] = aborted.get("reason")
-        result["reasons"].append(f"run_aborted: {aborted.get('reason')}")
-    if rows[-1].get("event") != "run_summary":
-        result["reasons"].append("no final run_summary")
-    if result["planned"] != len(episodes):
-        result["reasons"].append(f"{len(episodes)} episode rows, {result['planned']} planned")
-    if result["not_run"]:
-        result["reasons"].append(f"not_run {result['not_run']}")
-    for key, value in expect.items():
+    try:
+        tl.load_ledgers([path])
+    except SystemExit as refusal:
+        result["reasons"].append(f"harness gate: {refusal}")
+    for key, value in plan["header"].items():
         got = header.get(key)
         if key == "case_subset_sha256":
             got = (header.get("case_subset") or {}).get("sha256")
-        if got != value:
+        if json.dumps(got, sort_keys=True) != json.dumps(value, sort_keys=True):
             result["reasons"].append(f"header {key} {got!r} != expected {value!r}")
+    jobs = [(r.get("case_id"), r.get("seed")) for r in episodes]
+    if len(jobs) != len(set(jobs)):
+        result["reasons"].append("duplicate (case_id, seed) rows")
+    if set(jobs) != plan["jobs"]:
+        missing, extra = len(plan["jobs"] - set(jobs)), len(set(jobs) - plan["jobs"])
+        result["reasons"].append(
+            f"job set differs from the plan ({missing} missing, {extra} extra)"
+        )
+    if result["planned"] != len(plan["jobs"]):
+        result["reasons"].append(f"planned_episodes {result['planned']} != {len(plan['jobs'])}")
+    if result["not_run"]:
+        result["reasons"].append(f"not_run {result['not_run']}")
+    if result["errors"]:
+        result["reasons"].append(f"error episodes {result['errors']}")
     result["complete"] = not result["reasons"]
     return result
 
@@ -381,6 +364,13 @@ def _int_or_none(value):
     try:
         return int(value)
     except (TypeError, ValueError):
+        return None
+
+
+def read_vram():
+    try:
+        return int(VRAM_FILE.read_text().strip())
+    except (OSError, ValueError):
         return None
 
 
@@ -423,47 +413,22 @@ class ProcessHandle:
             return None
 
 
-def docker_cleanup():
-    for name in SERVER_CONTAINERS:
-        subprocess.run(
-            ["docker", "rm", "-f", name],
+def start_watchdog(log_path: Path):
+    """Start the independent watchdog (it exits at once if one is already running)."""
+    with open(log_path.with_suffix(".console"), "ab") as out:
+        subprocess.Popen(
+            [sys.executable, str(WATCHDOG), "--log", str(log_path)],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
+            stdout=out,
+            stderr=out,
+            start_new_session=True,
+            env={k: os.environ[k] for k in ENV_ALLOW if k in os.environ},
         )
 
 
-def lock_free(path: Path) -> bool:
-    """True if the runner lock is not held (probe only; released at once)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return False
-        fcntl.flock(handle, fcntl.LOCK_UN)
-    return True
-
-
-def default_lock_path() -> Path:
-    try:
-        common = subprocess.run(
-            ["git", "-C", str(ROOT), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            check=True,
-            stdin=subprocess.DEVNULL,
-        ).stdout.strip()
-        main = Path(common).parent
-    except (OSError, subprocess.CalledProcessError):
-        main = ROOT
-    return main / "target" / ".tool-loop-benchmark.lock"
-
-
-def pack_case_count(split: str) -> int:
+def pack_case_ids(split: str) -> list:
     doc = json.loads((PACK / f"cases-{split}.json").read_text(encoding="utf-8"))
-    return len(doc["cases"])
+    return [c["id"] for c in doc["cases"]]
 
 
 # ---------------------------------------------------------------- the queue
@@ -480,13 +445,17 @@ class Queue:
         disk_free=None,
         lock_probe=None,
         cleanup=None,
-        case_count=pack_case_count,
+        case_ids=pack_case_ids,
         runner=RUNNER,
         poll_seconds=30.0,
         sleep_chunk=600.0,
         grace_seconds=60.0,
         console=None,
         env=None,
+        vram_reader=None,
+        cooldown_seconds=30.0,
+        vram_wait_seconds=180.0,
+        extra_env=None,
     ):
         self.q = queue
         self.registry = registry
@@ -494,15 +463,21 @@ class Queue:
         self.clock = clock or SystemClock()
         self.launcher = launcher or ProcessLauncher()
         self.disk_free = disk_free or (lambda p: shutil.disk_usage(p).free)
-        self.lock_probe = lock_probe or (lambda: lock_free(default_lock_path()))
-        self.cleanup = cleanup or docker_cleanup
-        self.case_count = case_count
+        locks = ops.lock_paths(ops.main_checkout(ROOT))
+        self.lock_probe = lock_probe or (lambda: not ops.lock_held(locks["runner"]))
+        self.cleanup = cleanup or ops.Docker().cleanup
+        self.case_ids = case_ids
         self.runner = Path(runner)
         self.poll_seconds = poll_seconds
         self.sleep_chunk = sleep_chunk
         self.grace_seconds = grace_seconds
         self.console = console or (lambda line: print(line, flush=True))
         self.base_env = dict(os.environ if env is None else env)
+        self.extra_env = dict(extra_env or {})  # Python-only seam (real-docker smoke test)
+        self.vram_reader = vram_reader or read_vram
+        self.cooldown_seconds = cooldown_seconds
+        self.vram_wait_seconds = vram_wait_seconds
+        self.harness_sha256 = tl.file_digest(self.runner.parent / "tool_loop_benchmark.py")
         self.started = self.clock.time()
         self.state = "running"
         self.stop_reason = None
@@ -521,23 +496,22 @@ class Queue:
         row = {"time": dt.datetime.fromtimestamp(self.clock.time()).isoformat(), "event": event}
         row.update(fields)
         with open(self.dir / "queue.log", "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row, sort_keys=True) + "\n")
+            handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
 
     def transition(self, arm, state, **fields):
         arm["state"] = state
         arm.update({k: v for k, v in fields.items() if k in ("reason", "selected_n_cpu_moe")})
         self.log("arm_state", arm=arm["id"], state=state, **fields)
         reason = fields.get("reason")
-        self.console(
-            f"{local(self.clock.time()).isoformat(timespec='seconds')} {arm['id']}: "
-            f"{state}{'' if reason is None else ' (' + str(reason) + ')'}"
-        )
+        stamp = local(self.clock.time()).isoformat(timespec="seconds")
+        suffix = "" if reason is None else f" ({reason})"
+        self.console(f"{stamp} {arm['id']}: {state}{suffix}")
         self.write_manifest()
 
-    def write_manifest(self):
+    def manifest(self) -> dict:
         planned = list(self.arms)
         missing = [a["id"] for a in planned if a["config"]["required"] and a["state"] != "complete"]
-        manifest = {
+        return {
             "queue": self.q["name"],
             "state": self.state,
             "stop_reason": self.stop_reason,
@@ -555,6 +529,9 @@ class Queue:
                     "arm": a["config"]["arm"],
                     "split": a["config"]["split"],
                     "required": a["config"]["required"],
+                    "vram_budget_bytes": self.registry["models"][a["config"]["model"]][
+                        "vram_budget_bytes"
+                    ],
                     "state": a["state"],
                     "reason": a.get("reason"),
                     "selected_n_cpu_moe": a.get("selected_n_cpu_moe"),
@@ -564,8 +541,10 @@ class Queue:
                 for a in planned
             ],
         }
+
+    def write_manifest(self):
         tmp = self.dir / "manifest.json.tmp"
-        tmp.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(self.manifest(), indent=2, default=str) + "\n", encoding="utf-8")
         tmp.replace(self.dir / "manifest.json")
 
     def stop(self, reason):
@@ -574,19 +553,19 @@ class Queue:
         self.console(f"queue stopped: {reason}")
         self.write_manifest()
 
-    # -- estimates
-    def episodes(self, arm) -> int:
+    # -- plan and estimates
+    def requested_cases(self, arm) -> list:
         cfg = arm["config"]
-        seeds = len(cfg["seeds"].split(","))
         if cfg["split"] == "smoke":
-            cases = SMOKE_EPISODES
-        elif cfg.get("cases"):
-            cases = len(cfg["cases"].split(","))
-        elif cfg.get("cases_file"):
-            cases = len(json.loads(Path(cfg["cases_file"]).read_text(encoding="utf-8"))["case_ids"])
-        else:
-            cases = self.case_count(cfg["split"])
-        return cases * seeds
+            return list(SMOKE_CASES)
+        if cfg.get("cases"):
+            return cfg["cases"].split(",")
+        if cfg.get("cases_file"):
+            return json.loads(Path(cfg["cases_file"]).read_text(encoding="utf-8"))["case_ids"]
+        return list(self.case_ids(cfg["split"]))
+
+    def episodes(self, arm) -> int:
+        return len(self.requested_cases(arm)) * len(arm["config"]["seeds"].split(","))
 
     def seconds_per_episode(self, arm):
         cfg = arm["config"]
@@ -610,6 +589,51 @@ class Queue:
     def hashed(self, key) -> bool:
         sha = self.registry["models"][key]["sha256"]
         return self.hash_cache.exists() and sha in self.hash_cache.read_text(encoding="utf-8")
+
+    def plan(self, arm, env) -> dict:
+        """What the ledger must show for this arm (strict completeness, review fix 6)."""
+        cfg = arm["config"]
+        entry = self.registry["models"][cfg["model"]]
+        ctx = int(env.get("CTX", entry["server"]["ctx"]))
+        moe = env.get("N_CPU_MOE")
+        server = {
+            "image": entry["server_image"],
+            "args": model_registry.server_args(entry, ctx, None if moe is None else int(moe)),
+        }
+        flags = {
+            name: env.get(var, "1" if on else "0") == "1" for var, (name, on) in FLAG_ENV.items()
+        }
+        seeds = [int(s) for s in cfg["seeds"].split(",")]
+        header = {
+            "event": "run_started",
+            "benchmark_version": tl.BENCHMARK_VERSION,
+            "harness_sha256": self.harness_sha256,
+            "dry_run": False,
+            "arm": cfg["arm"],
+            "model_label": entry["label"],
+            "model_sha256": entry["sha256"],
+            "split": "dev" if cfg["split"] == "smoke" else cfg["split"],
+            "seeds": seeds,
+            "ctx": ctx,
+            "max_turns": int(env.get("MAX_TURNS", 8)),
+            "top_k": tl.DEFAULT_TOP_K,
+            "flags": tl.resolve_flags(flags),
+            "sampling": {
+                "temperature": float(env.get("TEMPERATURE", 0.1)),
+                "top_p": float(env.get("TOP_P", 0.95)),
+                "max_tokens": int(env.get("MAX_TOKENS", 4096)),
+                "tool_choice": "auto",
+                "thinking": env.get("THINKING", "off"),
+                "cache_prompt": True,
+            },
+            "thinking_capability": entry["capabilities"]["thinking"],
+            "server": server,
+        }
+        if cfg.get("cases_file"):
+            doc = json.loads(Path(cfg["cases_file"]).read_text(encoding="utf-8"))
+            header["case_subset_sha256"] = doc.get("sha256")
+        cases = self.requested_cases(arm)
+        return {"header": header, "jobs": {(c, s) for s in seeds for c in cases}}
 
     # -- prechecks
     def model_path(self, key) -> Path:
@@ -669,9 +693,11 @@ class Queue:
             self.clock.sleep(min(self.sleep_chunk, max(1.0, target - now)))
 
     # -- one attempt
-    def env_for(self, arm, attempt_dir: Path):
+    def env_for(self, arm, attempt_dir: Path, window_close: float):
+        """Child environment from an allowlist; inherited pass-through values never leak."""
         cfg = arm["config"]
-        env = {k: v for k, v in self.base_env.items() if k not in CONTROLLED}
+        env = {k: self.base_env[k] for k in ENV_ALLOW if k in self.base_env}
+        env["TZ"] = ":/etc/localtime"
         env.update(cfg["env"])
         env.update(
             ARM=cfg["arm"],
@@ -679,6 +705,8 @@ class Queue:
             OUT_DIR=str(attempt_dir),
             HASH_CACHE=str(self.hash_cache),
             QUIET="1" if self.q["quiet"] else "0",
+            WINDOW_END=str(int(window_close)),
+            QUEUE_PID=str(os.getpid()),
         )
         if cfg.get("preflight_case"):
             env["PREFLIGHT_CASE"] = str(cfg["preflight_case"])
@@ -688,113 +716,153 @@ class Queue:
             env["CASES_FILE"] = cfg["cases_file"]
         if arm.get("selected_n_cpu_moe") is not None:
             env["N_CPU_MOE"] = str(arm["selected_n_cpu_moe"])
+        env.update(self.extra_env)
         return env
 
-    def expected_header(self, arm, env) -> dict:
-        cfg = arm["config"]
-        entry = self.registry["models"][cfg["model"]]
-        expect = {
-            "arm": cfg["arm"],
-            "model_label": entry["label"],
-            "model_sha256": entry["sha256"],
-            "ctx": int(env.get("CTX", entry["server"]["ctx"])),
-            "split": "dev" if cfg["split"] == "smoke" else cfg["split"],
-            "seeds": [int(s) for s in cfg["seeds"].split(",")],
-        }
-        if cfg.get("cases_file"):
-            doc = json.loads(Path(cfg["cases_file"]).read_text(encoding="utf-8"))
-            expect["case_subset_sha256"] = doc.get("sha256")
-        return expect
+    def cleanup_checked(self) -> dict:
+        try:
+            result = self.cleanup()
+        except Exception as error:  # a cleanup crash is an unresolved cleanup
+            result = {"ok": False, "errors": [f"{type(error).__name__}: {error}"]}
+        if not isinstance(result, dict) or "ok" not in result:
+            result = {"ok": False, "errors": ["cleanup returned no verification"]}
+        self.log("cleanup", **result)
+        return result
 
     def run_attempt(self, arm, number: int) -> dict:
         cfg = arm["config"]
         attempt_dir = self.dir / "arms" / arm["id"] / f"attempt-{number}"
         attempt_dir.mkdir(parents=True, exist_ok=False)
-        env = self.env_for(arm, attempt_dir)
-        argv = [str(self.runner), cfg["model"], cfg["split"]]
         start = self.clock.time()
+        close = window_end(start)
+        env = self.env_for(arm, attempt_dir, close)
+        argv = [str(self.runner), cfg["model"], cfg["split"]]
         estimate = self.estimate(arm)
-        limits = {"window": window_end(start) - self.q["stop_margin_seconds"]}
+        limits = {"window": close - self.q["stop_margin_seconds"]}
         limits["arm_deadline"] = start + (cfg.get("max_arm_seconds") or 2 * estimate + 600)
         if self.q["session_deadline"] is not None:
             limits["session_deadline"] = self.q["session_deadline"]
+        g0_deadline = self.q["g0"]["deadline_seconds"]
+        if cfg["g0"] and g0_deadline is not None and self.g0_started is not None:
+            limits["g0_deadline"] = self.g0_started + g0_deadline
         record = {
             "attempt": number,
             "dir": str(attempt_dir),
             "started": local(start).isoformat(timespec="seconds"),
             "estimate_seconds": round(estimate),
+            "window_end": local(close).isoformat(timespec="seconds"),
+            "env": {k: env[k] for k in sorted(env) if k in PASS_THROUGH},
             "excluded": True,
         }
         arm["attempts"].append(record)
         self.transition(arm, "running", attempt=number, estimate=round(estimate))
-        self.handle = self.launcher.start(
-            argv, env, attempt_dir / "runner.stdout", attempt_dir / "runner.stderr"
-        )
-        stopped_by = None
-        while True:
-            rc = self.handle.poll()
-            if rc is not None:
-                break
-            now = self.clock.time()
-            hit = [name for name, at in limits.items() if now >= at]
-            if hit:
-                stopped_by = hit[0]
-                rc = self.terminate()
-                break
-            nearest = min(limits.values())
-            self.clock.sleep(min(self.poll_seconds, max(0.5, nearest - now)))
-        self.handle = None
+        rc = stopped_by = None
+        try:
+            self.handle = self.launcher.start(
+                argv, env, attempt_dir / "runner.stdout", attempt_dir / "runner.stderr"
+            )
+            while True:
+                rc = self.handle.poll()
+                if rc is not None:
+                    break
+                now = self.clock.time()
+                hit = [name for name, at in limits.items() if now >= at]
+                if hit:
+                    stopped_by = hit[0]
+                    rc = self.terminate()
+                    break
+                nearest = min(limits.values())
+                self.clock.sleep(min(self.poll_seconds, max(0.5, nearest - now)))
+        finally:
+            if self.handle is not None and self.handle.poll() is None:
+                rc = self.terminate()  # an exception mid-attempt: never leave the runner
+            self.handle = None
+            record["queue_cleanup"] = self.cleanup_checked()  # after every attempt
         record["runner_exit"] = rc
         record["ended"] = local(self.clock.time()).isoformat(timespec="seconds")
-        record.update(self.classify(arm, attempt_dir, env, stopped_by))
+        record.update(self.classify(arm, attempt_dir, env, rc, stopped_by, record["queue_cleanup"]))
         return record
 
     def terminate(self):
+        """SIGTERM to the runner's process group, then SIGKILL; None if it will not die."""
         self.handle.signal(signal.SIGTERM)
         rc = self.handle.wait(self.grace_seconds)
         if rc is None:
+            self.log("runner_ignored_sigterm")
             self.handle.signal(signal.SIGKILL)
             rc = self.handle.wait(self.grace_seconds)
-        self.cleanup()
         return rc
 
-    def classify(self, arm, attempt_dir: Path, env, stopped_by) -> dict:
+    def classify(self, arm, attempt_dir: Path, env, rc, stopped_by, cleanup) -> dict:
         prov = parse_provenance(attempt_dir / "provenance.txt")
         out = {"provenance": bool(prov), "failure": prov.get("failure")}
-        oom = "true" in (prov.get("server_oom_killed"), prov.get("harness_oom_killed"))
+        oom_keys = ("server_oom_killed", "preflight_oom_killed", "main_oom_killed")
+        oom = [k for k in oom_keys if prov.get(k) == "true"]
         ledger = attempt_dir / prov["ledger_file"] if prov.get("ledger_file") else None
-        check = check_ledger(ledger, self.expected_header(arm, env)) if ledger else None
+        check = check_ledger(ledger, self.plan(arm, env)) if ledger else None
         if check is not None:
             out["ledger"] = str(ledger)
             out["ledger_check"] = check
+        if not cleanup.get("ok"):
+            return dict(
+                out,
+                status="failed",
+                infra=None,
+                reason="queue cleanup unresolved",
+                cleanup_unresolved=True,
+            )
+        if rc is None:
+            return dict(
+                out,
+                status="failed",
+                infra=None,
+                reason="runner did not exit",
+                cleanup_unresolved=True,
+            )
         if stopped_by is not None:
             status = {
                 "window": "incomplete_by_window",
                 "arm_deadline": "arm_timeout",
                 "session_deadline": "session_deadline",
+                "g0_deadline": "arm_timeout",
             }[stopped_by]
-            return dict(out, status=status, infra=None)
+            return dict(out, status=status, infra=None, reason=f"stopped: {stopped_by}")
         if not prov:
-            return dict(out, status="failed", infra=None, reason="no provenance.txt")
+            return dict(out, status="failed", infra=None, reason=f"no provenance.txt (exit {rc})")
+        if prov.get("cleanup_verified") != "true":
+            return dict(
+                out,
+                status="failed",
+                infra=None,
+                reason="runner cleanup not verified",
+                cleanup_unresolved=prov.get("cleanup_verified") == "false",
+            )
         if oom:
-            return dict(out, status="failed", infra="oom", reason="container OOM-killed")
+            return dict(out, status="failed", infra="oom", reason=f"OOM-killed: {', '.join(oom)}")
         failure = prov.get("failure")
-        if failure in ("server_start", "server_health"):
+        if failure in ("server_start", "server_health", "infra_vram"):
             return dict(out, status="failed", infra=failure, reason=prov.get("failure_detail"))
         if failure == "window":
-            return dict(out, status="incomplete_by_window", infra=None, reason="runner refused")
+            return dict(
+                out, status="incomplete_by_window", infra=None, reason=prov.get("failure_detail")
+            )
         if failure is not None:
             return dict(out, status="failed", infra=None, reason=prov.get("failure_detail"))
-        if prov.get("harness_exit") is None:
-            return dict(out, status="failed", infra=None, reason="no harness_exit in provenance")
+        if prov.get("main_exit") is None:
+            return dict(out, status="failed", infra=None, reason=f"no main_exit (exit {rc})")
         if check and check.get("aborted") and "health" in str(check.get("abort_reason")):
             return dict(out, status="failed", infra="server_health", reason=check["abort_reason"])
-        if prov.get("harness_exit") != "0" or check is None:
-            reason = f"harness_exit {prov.get('harness_exit')}"
+        if prov.get("main_exit") != "0" or rc != 0 or check is None:
+            reason = f"main_exit {prov.get('main_exit')}, runner exit {rc}"
             return dict(out, status="failed", infra=None, reason=reason)
         if check["complete"]:
             return dict(out, status="complete", infra=None)
-        if check["not_run"] and prov.get("budget_from_window"):
+        if check["errors"]:
+            return dict(
+                out, status="incomplete_with_errors", infra=None, reason="; ".join(check["reasons"])
+            )
+        deadline_rows = check["not_run"] and prov.get("main_cutoff")
+        if deadline_rows:
             return dict(out, status="incomplete_by_window", infra=None, reason="window budget")
         return dict(out, status="incomplete", infra=None, reason="; ".join(check["reasons"]))
 
@@ -802,56 +870,125 @@ class Queue:
     def record_measurements(self, arm, record):
         cfg = arm["config"]
         prov = parse_provenance(Path(record["dir"]) / "provenance.txt")
-        wall = _int_or_none(prov.get("harness_wall_seconds"))
+        wall = _int_or_none(prov.get("main_wall_seconds"))
         check = record.get("ledger_check") or {}
         if record["status"] == "complete" and wall and check.get("run"):
             self.measured_spe[cfg["model"]] = wall / check["run"]
-        if cfg["g0"]:
-            vram = [_int_or_none(prov.get(k)) for k in ("vram_used_loaded", "vram_used_end")]
-            vram = [v for v in vram if v is not None]
-            before = _int_or_none(prov.get("swap_used_mib_before"))
-            after = _int_or_none(prov.get("swap_used_mib_after"))
-            spt = server_seconds_per_token(Path(record["dir"]) / "server.log")
-            result = {
-                "arm": arm["id"],
-                "n_cpu_moe": int(cfg["env"]["N_CPU_MOE"]),
-                "status": record["status"],
-                "vram_max": max(vram) if vram else None,
-                "swap_growth_mib": None if None in (before, after) else after - before,
-                "seconds_per_token": spt,
-                "seconds_per_token_source": "server.log eval time" if spt else None,
-                "seconds_per_episode": wall / check["run"] if wall and check.get("run") else None,
-            }
-            limits = self.q["g0"]
-            result["qualified"] = (
-                result["status"] == "complete"
-                and result["vram_max"] is not None
-                and result["vram_max"] <= limits["vram_max_bytes"]
-                and result["swap_growth_mib"] is not None
-                and result["swap_growth_mib"] <= limits["swap_growth_max_mib"]
-            )
-            if result["seconds_per_token"] is None:
-                result["seconds_per_token"] = result["seconds_per_episode"]
-                result["seconds_per_token_source"] = "fallback: seconds per episode"
-            self.g0_results.append(result)
-            if not result["qualified"]:
-                self.g0_closed = True  # lower n_cpu_moe values need more VRAM
-            self.log("g0_result", **result)
+        if not cfg["g0"]:
+            return
+        vram = [_int_or_none(prov.get(k)) for k in ("vram_used_loaded", "vram_used_end")]
+        vram = [v for v in vram if v is not None]
+        swap_peak = _int_or_none(prov.get("server_swap_peak"))
+        before = _int_or_none(prov.get("swap_used_mib_before"))
+        after = _int_or_none(prov.get("swap_used_mib_after"))
+        if swap_peak is not None:
+            swap, swap_source = swap_peak / 2**20, "server cgroup memory.swap.peak"
+        elif None not in (before, after):
+            swap, swap_source = after - before, "host-wide (cgroup swap not readable)"
+            self.log("g0_swap_fallback", arm=arm["id"])
+        else:
+            swap, swap_source = None, None
+        spt = server_seconds_per_token(Path(record["dir"]) / "server.log")
+        spt_source = "server.log eval time" if spt else None
+        if spt is None and wall and check.get("run"):  # fallback first, then qualification
+            spt, spt_source = wall / check["run"], "fallback: seconds per episode"
+        result = {
+            "arm": arm["id"],
+            "n_cpu_moe": int(cfg["env"]["N_CPU_MOE"]),
+            "status": record["status"],
+            "vram_max": max(vram) if vram else None,
+            "swap_growth_mib": swap,
+            "swap_source": swap_source,
+            "seconds_per_token": spt,
+            "seconds_per_token_source": spt_source,
+        }
+        limits = self.q["g0"]
+        indeterminate = record["status"] in (
+            "incomplete_by_window",
+            "arm_timeout",
+            "session_deadline",
+        ) or (record["status"] == "complete" and (spt is None or swap is None or not vram))
+        result["indeterminate"] = indeterminate
+        result["qualified"] = (
+            not indeterminate
+            and record["status"] == "complete"
+            and result["vram_max"] <= limits["vram_max_bytes"]
+            and swap <= limits["swap_growth_max_mib"]
+        )
+        self.g0_results.append(result)
+        if not indeterminate and not result["qualified"]:
+            self.g0_closed = True  # lower n_cpu_moe values need more VRAM
+        self.log("g0_result", **result)
 
     def g0_choice(self):
         """Frozen tie-break (plan §11 item 27): lowest s/token among qualified candidates;
         ties go to the larger n_cpu_moe (less VRAM)."""
-        qualified = [r for r in self.g0_results if r["qualified"] and r["seconds_per_token"]]
+        qualified = [r for r in self.g0_results if r["qualified"]]
         if not qualified:
             return None
         best = min(qualified, key=lambda r: (r["seconds_per_token"], -r["n_cpu_moe"]))
         return best["n_cpu_moe"]
 
+    def wait_vram_release(self, baseline):
+        """Before a retry: wait until VRAM is back near its pre-run level, then cool down."""
+        start = self.clock.time()
+        while baseline is not None:
+            used = self.vram_reader()
+            if used is None or used <= baseline + 256 * 2**20:
+                break
+            if self.clock.time() - start >= self.vram_wait_seconds:
+                self.log("vram_not_released", used=used, baseline=baseline)
+                break
+            self.clock.sleep(5)
+        self.clock.sleep(self.cooldown_seconds)
+
     # -- main loop
+    def reconcile(self) -> bool:
+        """At startup: remove stale owned containers and the network (never a live run's)."""
+        if not self.lock_probe():
+            self.stop("lock held: another tool-loop run is active")
+            return False
+        result = self.cleanup_checked()
+        if not result["ok"]:
+            self.stop("startup cleanup unresolved")
+            return False
+        return True
+
     def run(self) -> dict:
         self.dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self._run()
+        except BaseException as error:
+            self.crash(error)
+            raise
+        return self.manifest()
+
+    def crash(self, error):
+        try:
+            if self.handle is not None:
+                self.terminate()
+        except Exception:  # noqa: BLE001 (best effort on the way out)
+            pass
+        self.handle = None
+        self.cleanup_checked()
+        if not (isinstance(error, SystemExit) and self.state == "stopped"):
+            self.state, self.stop_reason = "crashed", f"{type(error).__name__}: {error}"
+        try:
+            self.log("queue_crashed", error=self.stop_reason)
+            self.write_manifest()
+        except Exception:  # noqa: BLE001 (the manifest itself may be what failed)
+            fallback = {
+                "queue": self.q["name"],
+                "state": self.state,
+                "stop_reason": self.stop_reason,
+            }
+            (self.dir / "manifest.json").write_text(json.dumps(fallback) + "\n", encoding="utf-8")
+
+    def _run(self):
         self.log("queue_started", name=self.q["name"], arms=[a["id"] for a in self.arms])
         self.write_manifest()
+        if not self.reconcile():
+            return
         failures = 0
         for arm in self.arms:
             if self.state != "running":
@@ -874,7 +1011,8 @@ class Queue:
             final = self.run_arm(arm)
             if self.state != "running":
                 break
-            if final in ("failed", "arm_timeout", "incomplete") and not cfg["g0"]:
+            failed = ("failed", "arm_timeout", "incomplete", "incomplete_with_errors")
+            if final in failed and not cfg["g0"]:
                 failures += 1
                 if failures >= self.q["max_consecutive_failures"]:
                     self.stop(f"{failures} consecutive failed arms")
@@ -885,7 +1023,6 @@ class Queue:
             self.log("queue_done")
             self.console("queue done")
         self.write_manifest()
-        return json.loads((self.dir / "manifest.json").read_text(encoding="utf-8"))
 
     def run_arm(self, arm) -> str:
         cfg = arm["config"]
@@ -908,6 +1045,10 @@ class Queue:
             record = self.run_attempt(arm, len(arm["attempts"]) + 1)
             self.record_measurements(arm, record)
             status = record["status"]
+            if record.get("cleanup_unresolved"):
+                self.transition(arm, "failed", reason=record.get("reason"))
+                self.stop("cleanup unresolved: heavy work may still be running")
+                return "failed"
             if status == "complete":
                 record["excluded"] = False
                 arm["ledger"] = record.get("ledger")
@@ -916,10 +1057,13 @@ class Queue:
             if record.get("infra") in INFRA_CLASSES and cfg["retry"] and not retried:
                 retried = 1
                 self.transition(arm, "retry", reason=f"infrastructure: {record['infra']}")
+                prov = parse_provenance(Path(record["dir"]) / "provenance.txt")
+                self.wait_vram_release(_int_or_none(prov.get("vram_used_before")))
                 continue
             if status == "incomplete_by_window" and not window_reruns and not cfg["g0"]:
                 window_reruns = 1  # whole-arm rerun in a later window, never resumed
-                not_before = window_end(self.clock.time())
+                now = self.clock.time()
+                not_before = window_end(now) if heavy_allowed(now) else next_window_start(now)
                 self.transition(arm, "incomplete_by_window", reason="rerun in a later window")
                 continue
             if status == "session_deadline":
@@ -932,46 +1076,61 @@ class Queue:
     def interrupt(self, signum):
         if self.handle is not None:
             self.terminate()
+            self.handle = None
+        self.cleanup_checked()
         self.stop(f"signal {signum}")
 
 
 # ---------------------------------------------------------------- CLI
 
 
-def window_check(now: float) -> int:
-    if heavy_allowed(now):
-        end = window_end(now)
-        left = int(end - now)
-        print(f"schedule_window=open seconds_left={left} closes={local(end).isoformat()}")
-        return 0
-    start = next_window_start(now)
-    print(f"schedule_window=closed opens={local(start).isoformat()}")
-    return 1
+def window_clock_now():
+    """The window-check clock: real time, unless both test variables are set."""
+    if os.environ.get(TEST_MODE_ENV) == "1" and os.environ.get(TEST_CLOCK_ENV):
+        return float(Path(os.environ[TEST_CLOCK_ENV]).read_text().strip())
+    return time.time()
 
 
-def hold_queue_lock(session_root: Path):
-    session_root.mkdir(parents=True, exist_ok=True)
-    handle = open(session_root / ".queue.lock", "a", encoding="utf-8")  # noqa: SIM115
+def window_check(now: float, cutoff=None, margin: float = 0) -> int:
+    if not heavy_allowed(now):
+        print(
+            f"schedule_window=closed now={int(now)} opens={local(next_window_start(now)).isoformat()}"
+        )
+        return 1
+    end = window_end(now)
+    if cutoff is not None:
+        end = min(end, cutoff)
+    left = int(end - now)
+    state = "open" if left > margin else "closing"
+    print(f"schedule_window={state} now={int(now)} seconds_left={left} cutoff={int(end)}")
+    return 0 if state == "open" else 1
+
+
+def hold_lock(path: Path, what: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a", encoding="utf-8")  # noqa: SIM115 (held for the session)
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        raise SystemExit("another queue is running") from None
+        raise SystemExit(f"another {what} is running") from None
     return handle
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("window-check")
+    wc = sub.add_parser("window-check")
+    wc.add_argument("--cutoff", type=float)
+    wc.add_argument("--margin", type=float, default=0)
     check = sub.add_parser("check")
     check.add_argument("queue", type=Path)
     run = sub.add_parser("run")
     run.add_argument("queue", type=Path)
     run.add_argument("--session-dir", type=Path)
     args = parser.parse_args(argv)
+    ops.pin_local_time()
     if args.command == "window-check":
-        now = float(os.environ[NOW_ENV]) if os.environ.get(NOW_ENV) else time.time()
-        return window_check(now)
+        return window_check(window_clock_now(), args.cutoff, args.margin)
     registry = model_registry.load()
     queue = load_queue(args.queue, registry)
     if args.command == "check":
@@ -984,14 +1143,22 @@ def main(argv=None) -> int:
                 f"estimate={q.estimate(arm) / 3600:.2f}h"
             )
         return 0
+    main_dir = ops.main_checkout(ROOT)
     stamp = dt.datetime.now().strftime("%Y%m%dT%H%M%S")
     session = args.session_dir or ROOT / "target" / f"tool-loop-queue-{queue['name']}-{stamp}"
-    lock = hold_queue_lock(ROOT / "target")
+    lock = hold_lock(ops.lock_paths(main_dir)["queue"], "queue")
     devnull = os.open(os.devnull, os.O_RDONLY)
     os.dup2(devnull, 0)  # never wait for input
     q = Queue(queue, registry, session)
+    session.mkdir(parents=True, exist_ok=True)
+    start_watchdog(session / "watchdog.log")
+
+    def handler(signum, _frame):
+        q.interrupt(signum)
+        sys.exit(128 + signum)
+
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(sig, lambda signum, _frame: (q.interrupt(signum), sys.exit(128 + signum)))
+        signal.signal(sig, handler)
     print(f"session {session}", flush=True)
     manifest = q.run()
     lock.close()
