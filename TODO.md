@@ -5,9 +5,9 @@ Last updated: 2026-10-16.
 ## Resume here
 
 - **Plans and decisions (2026-10-16, evening):**
-  - **M4 plan revision 2:** `1b8baa8` (Sol NO-GO and Sonnet GO-with-amendments, now resolved in place; third reviewer unavailable). Needs a short re-review.
+  - **M4 plan revision 3:** `794aad4` (adds Move up/down and the history change summary, both user-requested; rev 2 was `1b8baa8`) (Sol NO-GO and Sonnet GO-with-amendments, now resolved in place; third reviewer unavailable). Needs a short re-review.
     - User: M4 ships plain list editing. The `editable` flag and the item catalogue are deferred to a later milestone.
-  - **Router plan revision 2:** `c960f45`. The user authorised dev-only `SYS-R` (v3 plan §12, amendment §11.24a). CPU-first. Needs a short re-review.
+  - **Router plan revision 3:** `0b5fcc2`, selection procedure frozen (rev 2 was `c960f45`). The user authorised dev-only `SYS-R` (v3 plan §12, amendment §11.24a). CPU-first. Needs a short re-review.
   - **Pack revision 3:** branch `pack-rev3`, applying the user decisions on rules 6–8, acquiring = ask_rule, night = 2 watches, and plain "armor" = the sheet total. Needs an independent review before it seeds the blind held-out writer.
   - **CPU-only candidate screens:** running since 20:49, from frozen copy `run-b085aa4c2be4`. They measured about 122 s per episode, so roughly 1.4 h per model.
 
