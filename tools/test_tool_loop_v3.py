@@ -5,6 +5,7 @@ docstring; the red/green record is in docs/tool-loop-benchmark.md ("Harness v3")
 """
 
 import contextlib
+import copy
 import io
 import json
 import math
@@ -83,10 +84,12 @@ class PackFixTests(unittest.TestCase):
         """v2: dev had 33 cases and held-out the 141 read ho-* cases (results correction 7)."""
         dev = demo_cases("dev")
         ids = [c["id"] for c in dev]
-        self.assertEqual(len(dev), 174)
-        self.assertEqual(len(set(ids)), 174)
+        self.assertEqual(len(dev), 175)
+        self.assertEqual(len(set(ids)), 175)
         self.assertEqual(ids[:33], [f"dev-{n:03d}" for n in range(1, 34)])
-        self.assertEqual(ids[33:], [f"ho-{n:03d}" for n in range(1, 142)])
+        # Pack revision 3 appends dev-034 (review Sonnet R1) after the former held-out.
+        self.assertEqual(ids[33:174], [f"ho-{n:03d}" for n in range(1, 142)])
+        self.assertEqual(ids[174:], ["dev-034"])
         doc = json.loads((DEMO / "cases-heldout.json").read_text(encoding="utf-8"))
         self.assertEqual((doc["encoding"], doc["split"], doc["cases"]), (1, "heldout", []))
 
@@ -1186,6 +1189,48 @@ class ValidatePackAuditTests(CliMixin, Base):
         self.assertEqual(code, 1)
         self.assertEqual(report["expected_replay"]["dev"]["failed"], ["spend-focus"])
 
+    def test_notes_check_fails_validate_on_a_wrong_stated_value(self):
+        """Review Sol R2: a gold whose notes state a derived value the engine does not give
+        replayed as correct; --validate-pack now reports it and exits 1."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = copy_fixture(tmp)
+
+            def wrong_pace(cases):
+                case = next(c for c in cases if c["id"] == "swap-armor")
+                case["expected"]["notes"] = "Swap. Host derives pace 9."
+
+            edit_cases(root, "dev", wrong_pace)
+            code, report = self.validate(root)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["expected_replay"]["dev"]["failed"], [])
+        [mismatch] = report["notes_check"]["mismatches"]
+        self.assertEqual(
+            (mismatch["case"], mismatch["path"], mismatch["stated"]), ("swap-armor", "pace", 9)
+        )
+
+    def test_notes_check_parses_transitions_and_overrides(self):
+        """Claims the check reads: "Override x N", "<field> a -> b" and "Host derives ..."."""
+        claims = tl.note_claims(
+            "Override vitality 5. Ration 3 -> 2; flask-1 quantity 3 -> 2; weary 1 -> 0. "
+            "Host derives armor 3+1 = 4, pace max(1, 6-3-2) = 1 (LR2-16), down false; x.",
+            {"vitality", "rations", "armor", "pace", "down"},
+        )
+        self.assertEqual(
+            claims,
+            [
+                ("initial", "vitality", 5),
+                ("initial", "rations", 3),
+                ("final", "rations", 2),
+                ("initial", "equipment/flask-1/quantity", 3),
+                ("final", "equipment/flask-1/quantity", 2),
+                ("initial", "conditions/cond-weary/stacks", 1),
+                ("final", "conditions/cond-weary/stacks", 0),
+                ("final", "armor", 4),
+                ("final", "pace", 1),
+                ("final", "down", False),
+            ],
+        )
+
     def test_dry_run_expected_replays_every_outcome(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, rows = self.dry_run(tmp, "--dry-run-expected", "--seeds", "1")
@@ -1518,8 +1563,31 @@ class ReviewCliTests(CliMixin, Base):
         self.assertNotIn("truncated_calls", json.dumps(rows[-1]))
 
 
+def require_demo_cli(test):
+    """Fail closed like test_formula_cli: skip only in the source package (no formula_eval
+    source), otherwise a missing CLI fails instead of silently skipping the demo checks."""
+    if not (DEMO.parents[1] / "examples" / "formula_eval.rs").exists():
+        raise unittest.SkipTest("formula_eval is excluded from the source package")
+    if not CLI:
+        test.fail("build the formula_eval example or set MIMIK_FORMULA_EVAL (demo pack checks)")
+    return tl.Pack(DEMO, engine_factory=lambda d: tl.CelCliEngine(d, CLI))
+
+
+def demo_rules():
+    rules = tl.parse_rules((DEMO / "rules.md").read_text(encoding="utf-8"))
+    return {r["rule_id"]: " ".join(r["text"].split()) for r in rules}
+
+
+def demo_case_values(case):
+    """A case's base values: the character's stored values with value_overrides applied."""
+    path = DEMO / "characters" / f"{case['character']}.json"
+    values = copy.deepcopy(json.loads(path.read_text(encoding="utf-8"))["values"])
+    values.update(copy.deepcopy((case.get("setup") or {}).get("value_overrides") or {}))
+    return values
+
+
 class PackRevision3Tests(unittest.TestCase):
-    """Pack revision 3 (user decisions 2026-10-16, adjudication record rule 7)."""
+    """Pack revision 3 (user decisions 2026-10-16, adjudication record)."""
 
     def test_equipment_stats_are_not_editable(self):
         """v2: every equipment field was editable, so "set my coat's armor to 3" was a valid
@@ -1541,10 +1609,10 @@ class PackRevision3Tests(unittest.TestCase):
         )
 
     def test_rules_wording_and_stable_ids(self):
-        """Wording fixes for LR2-14, LR2-20 and LR2-33; the changelog preamble is in no rule."""
-        rules = tl.parse_rules((DEMO / "rules.md").read_text(encoding="utf-8"))
-        self.assertEqual([r["rule_id"] for r in rules], [f"LR2-{n}" for n in range(1, 45)])
-        text = {r["rule_id"]: " ".join(r["text"].split()) for r in rules}
+        """Wording fixes for LR2-14, LR2-20 and LR2-33; LR2-45 is added after the original 44;
+        the changelog preamble is in no rule."""
+        text = demo_rules()
+        self.assertEqual(list(text), [f"LR2-{n}" for n in range(1, 46)])
         self.assertIn("Equipping a different shield unequips the previous one", text["LR2-14"])
         self.assertIn("are fixed by the item itself", text["LR2-20"])
         self.assertIn("they change only when the item is replaced", text["LR2-20"])
@@ -1553,12 +1621,13 @@ class PackRevision3Tests(unittest.TestCase):
 
     def test_a_long_rest_night_is_two_watches(self):
         """v2/rev3 draft: LR2-31 said a long rest "takes a night" with no length, so oil
-        burned by a lamp left lit through it was undefined (user decision: 2 watches)."""
-        rules = tl.parse_rules((DEMO / "rules.md").read_text(encoding="utf-8"))
-        text = {r["rule_id"]: " ".join(r["text"].split()) for r in rules}
+        burned by a lamp left lit through it was undefined (user decision: 2 watches, only for
+        a long rest's night; review D1 and Sonnet R1)."""
+        text = demo_rules()
         self.assertIn("the night of a long rest is two watches", text["LR2-31"])
-        self.assertIn("burns 2 measures of oil", text["LR2-31"])
-        self.assertIn("six watches make a day. The night of a long rest is", text["LR2-26"])
+        self.assertIn("A lamp that is lit when a long rest starts burns 2 measures", text["LR2-31"])
+        self.assertIn("unless the request puts it out first", text["LR2-31"])
+        self.assertIn("applies only to a long rest's night", text["LR2-26"])
 
     def test_visible_rules_revision_is_3(self):
         """Pack revision 3 bumps the model-visible rules_revision and edition_id."""
@@ -1567,26 +1636,74 @@ class PackRevision3Tests(unittest.TestCase):
         rules = (DEMO / "rules.md").read_text(encoding="utf-8")
         self.assertTrue(rules.startswith("# Lantern Reach — rules revision 3\n"))
 
-    def test_no_gold_proposal_acquires_items(self):
-        """User decision 2026-10-16: acquiring an item (even one more of a kind already
-        carried) needs a rule and this pack has none, so it is ask_rule. Consumption may
-        lower a quantity; no gold or pending change may raise one."""
-        characters = {
-            p.stem: json.loads(p.read_text(encoding="utf-8"))
-            for p in (DEMO / "characters").glob("*.json")
-        }
+    # Review Sol R3: the model sees rules.md and definition.json, never the README. Each README
+    # precedence point 6-8 must cite LR2-45 and LR2-45 must carry its behaviour.
+    MODEL_VISIBLE = {
+        6: ["even when a legal alternative exists", "naming the alternative is optional"],
+        7: [
+            "fixed by the item (LR2-20)",
+            "plain bookkeeping and needs no rule",
+            "dropping or giving away",
+            "unless a rule governs where they come from",
+            "has no sheet field",
+            "answer with what determines it",
+            "If no rule covers it, ask for a ruling",
+        ],
+        8: ["does not state it, ask for it", "never assume a default", "ask for a ruling"],
+    }
+
+    def test_readme_precedence_6_to_8_are_model_visible(self):
+        readme = (DEMO / "README.md").read_text(encoding="utf-8")
+        conduct = demo_rules()["LR2-45"]
+        for point, phrases in self.MODEL_VISIBLE.items():
+            item = re.search(rf"^{point}\. (.+?)(?=^\d\. |^$)", readme, re.M | re.S)
+            self.assertIsNotNone(item, point)
+            self.assertIn("LR2-45", item.group(1), point)
+            for phrase in phrases:
+                self.assertIn(phrase, conduct, (point, phrase))
+        self.assertIn("question-only request", conduct)
+
+    def test_items_are_bookkeeping_and_never_drop_to_zero(self):
+        """User decision 2026-10-16 (reverses the acquisition rule): gaining or losing items is
+        bookkeeping, so dev-019 is a proposal raising a quantity. The change format cannot
+        remove an entry, so no gold or pending quantity change reaches 0 (review T1: overrides
+        are applied first)."""
+        raised = []
         for case in demo_cases("dev") + demo_cases("heldout"):
-            values = characters[case["character"]]["values"]
+            values = demo_case_values(case)
             pending = (case.get("setup") or {}).get("pending_proposal") or {}
             changes = (case["expected"].get("changes") or []) + (pending.get("changes") or [])
             for change in changes:
                 if change.get("collection") != "equipment" or change["field"] != "quantity":
                     continue
                 entry = next(e for e in values["equipment"] if e["id"] == change["entry_id"])
-                self.assertLess(change["to"], entry["quantity"], f"{case['id']}: {change}")
+                self.assertGreaterEqual(change["to"], 1, f"{case['id']}: {change}")
+                if change["to"] > entry["quantity"]:
+                    raised.append(case["id"])
+        self.assertEqual(raised, ["dev-019"])
         dev019 = next(c for c in demo_cases("dev") if c["id"] == "dev-019")
-        self.assertEqual(dev019["expected"]["outcome"], "ask_rule")
-        self.assertNotIn("changes", dev019["expected"])
+        self.assertEqual(dev019["expected"]["outcome"], "proposal")
+        self.assertEqual(dev019["gold_rule_ids"], ["LR2-19", "LR2-20"])
+        self.assertEqual(
+            dev019["expected"]["changes"],
+            [{"collection": "equipment", "entry_id": "flask-1", "field": "quantity", "to": 4}],
+        )
+
+    def test_review_relabels(self):
+        """Sol R1: ho-048 is a short rest (duration undefined, LR2-30) while Cass's lamp is
+        lit, so the oil burned is unknown: ask_rule. Sol R4: ho-003 says it swaps items already
+        carried. Sonnet R1: dev-034 is a long rest with the lamp left lit."""
+        cases = {c["id"]: c for c in demo_cases("dev")}
+        ho048 = cases["ho-048"]
+        self.assertEqual(ho048["expected"]["outcome"], "ask_rule")
+        self.assertNotIn("changes", ho048["expected"])
+        self.assertTrue(demo_case_values(ho048)["lamp_lit"])
+        self.assertIn("already carry", cases["ho-003"]["request"])
+        self.assertEqual(cases["ho-003"]["expected"]["outcome"], "proposal")
+        dev034 = cases["dev-034"]
+        self.assertTrue(demo_case_values(dev034)["lamp_lit"])
+        self.assertIn({"field": "lamp_oil", "to": 0}, dev034["expected"]["changes"])
+        self.assertIn({"field": "lamp_lit", "to": False}, dev034["expected"]["changes"])
 
     def test_gold_changes_touch_only_editable_fields(self):
         """Mechanical check over the demo pack's JSON (no CLI needed): no expected or pending
@@ -1629,16 +1746,30 @@ class PackRevision3Tests(unittest.TestCase):
             with self.assertRaisesRegex(tl.PackError, "not editable"):
                 open_pack(root).close()
 
-    @unittest.skipUnless(CLI, "the demo pack needs the CEL formula CLI (MIMIK_FORMULA_EVAL)")
     def test_demo_expected_replay_is_complete(self):
         """Every demo gold replays as correct: proposals apply with no constraint violation
-        (an unreported violation makes the replay incorrect) and answers match."""
-        pack = tl.Pack(DEMO, engine_factory=lambda d: tl.CelCliEngine(d, CLI))
+        (an unreported violation makes the replay incorrect) and answers match. Review T2: fails
+        instead of skipping when the CLI is missing."""
+        pack = require_demo_cli(self)
         try:
             _, replay = tl.offline_audit(pack, tl.RuleIndex(pack.rules))
         finally:
             pack.close()
-        self.assertEqual(replay["dev"], {"cases": 174, "correct": 174, "failed": []})
+        n = len(demo_cases("dev"))
+        self.assertEqual(replay["dev"], {"cases": n, "correct": n, "failed": []})
+
+    def test_demo_notes_claims_match_the_engine(self):
+        """Review Sol R2: the replay copies the gold, so it is circular. The notes check
+        recomputes every proposal with the CEL engine and compares the values the notes state
+        (overrides, "<field> a -> b", "Host derives ...") with the engine's results."""
+        pack = require_demo_cli(self)
+        try:
+            report = tl.notes_check(pack)
+        finally:
+            pack.close()
+        self.assertEqual(report["mismatches"], [])
+        self.assertGreaterEqual(report["cases_with_claims"], 50)
+        self.assertGreaterEqual(report["claims"], 100)
 
 
 class ReviewPackFactsTests(unittest.TestCase):

@@ -2345,6 +2345,118 @@ def expected_replay_script(case: dict) -> list:
     return [*turns, [finish]]
 
 
+# Notes check (review Sol R2). The replay copies the gold, so it cannot catch a wrong gold. This
+# check recomputes each proposal with the formula engine and compares the numbers its notes
+# state with the engine's results. It covers the stated arithmetic, derived values and
+# constraints only, not whether the right rule was applied (semantics stay with human review).
+CONDITION_WORDS = ("bleeding", "weary", "chilled", "shaken")
+NOTE_ALIASES = {"oil": "lamp_oil"}
+NOTE_TRANSITION = re.compile(
+    r"(?<![\w-])([A-Za-z_]+(?:-\d+)?)(?: stacks| quantity)? (-?\d+) -> (-?\d+)\b"
+)
+NOTE_DERIVES = re.compile(r"\b[Hh]ost derives (.*?)(?:[;:]|\.(?:\s|$)|$)")
+NOTE_OVERRIDE = re.compile(r"\bOverride (.*?)(?:\.(?:\s|$)|$)")
+NOTE_VALUE = re.compile(r"(?<![\w-])(-?\d+|true|false)\b")
+
+
+def _note_value(token: str):
+    if token in ("true", "false"):
+        return token == "true"
+    return int(token)
+
+
+def _note_path(word: str, names) -> str | None:
+    if re.fullmatch(r"[a-z]+-\d+", word):
+        return f"equipment/{word}/quantity"
+    word = word.lower()
+    if word in CONDITION_WORDS:
+        return f"conditions/cond-{word}/stacks"
+    word = NOTE_ALIASES.get(word, word)
+    if word in names:
+        return word
+    if word + "s" in names:
+        return word + "s"
+    return None
+
+
+def note_claims(text: str, names) -> list[tuple]:
+    """("initial"|"final", path, value) claims stated in a gold note, in a fixed order:
+    "Override <field> <value>[, ...]", "<field> a -> b" transitions, "Host derives ...".
+    A field name in a "Host derives" item takes the value after its last "=", else its first
+    number or boolean, else true (a bare "down")."""
+    claims = []
+    for m in NOTE_OVERRIDE.finditer(text):
+        for item in re.sub(r"\([^)]*\)", "", m.group(1)).split(","):
+            parts = item.split()
+            if len(parts) >= 2 and parts[0] in names and NOTE_VALUE.fullmatch(parts[1]):
+                claims.append(("initial", parts[0], _note_value(parts[1])))
+    for m in NOTE_TRANSITION.finditer(text):
+        path = _note_path(m.group(1), names)
+        if path:
+            claims.append(("initial", path, int(m.group(2))))
+            claims.append(("final", path, int(m.group(3))))
+    for m in NOTE_DERIVES.finditer(text):
+        for item in re.sub(r"\([^)]*\)", "", m.group(1)).split(","):
+            parts = item.split()
+            if not parts or parts[0] not in names:
+                continue
+            rest = " ".join(parts[1:])
+            if "=" in rest:
+                found = NOTE_VALUE.findall(rest.rsplit("=", 1)[1])
+            else:
+                found = NOTE_VALUE.findall(rest)
+            claims.append(("final", parts[0], _note_value(found[0]) if found else True))
+    return claims
+
+
+def _state_value(values: dict, path: str):
+    collection, entry_id, name = split_path(path)
+    if not collection:
+        return values.get(name)
+    entry = next((e for e in values.get(collection, []) if e["id"] == entry_id), None)
+    return None if entry is None else entry.get(name)
+
+
+def notes_check(pack: Pack) -> dict:
+    """Recompute every proposal's final state and compare the notes' stated values with it."""
+    mismatches, claims, cases, violated = [], 0, 0, []
+    names = set(pack.fields)
+    for split, split_cases in pack.cases.items():
+        for case in split_cases:
+            expected = case["expected"]
+            if expected["outcome"] != PROPOSAL:
+                continue
+            state = pack.initial_state(case)
+            initial = state["values"]
+            changes = [pack_change_path(c) for c in expected["changes"]]
+            final = pack.formulas.derive(apply_changes(initial, changes))
+            if pack.formulas.violations(final):
+                violated.append(case["id"])
+            found = note_claims(expected.get("notes", ""), names)
+            cases += bool(found)
+            claims += len(found)
+            for when, path, stated in found:
+                actual = _state_value(initial if when == "initial" else final, path)
+                if actual is None or typed(actual) != typed(stated):
+                    mismatches.append(
+                        {
+                            "case": case["id"],
+                            "split": split,
+                            "when": when,
+                            "path": path,
+                            "stated": stated,
+                            "actual": actual,
+                        }
+                    )
+    return {
+        "scope": "stated values, derived fields and constraints only; not rule semantics",
+        "cases_with_claims": cases,
+        "claims": claims,
+        "mismatches": mismatches,
+        "violated_cases": violated,
+    }
+
+
 # Offline estimate only: no tokenizer is bundled. JSON-heavy prompts tokenize at roughly 3-4
 # bytes per token for Qwen-style BPE vocabularies; 2.5 is deliberately conservative. Exact
 # counts need the served model's tokenizer (llama.cpp /tokenize) at G0.
@@ -3029,6 +3141,7 @@ def _main(argv=None):
         try:
             counts = {split: len(cases) for split, cases in pack.cases.items()}
             audit, replay = offline_audit(pack, RuleIndex(pack.rules, args.top_k))
+            notes = notes_check(pack)
             report = {
                 "rules": len(pack.rules),
                 "characters": len(pack.characters),
@@ -3036,11 +3149,13 @@ def _main(argv=None):
                 "formula_engine": pack.formulas.provenance,
                 "prompt_audit": audit,
                 "expected_replay": replay,
+                "notes_check": notes,
             }
             print(json.dumps(report))
         finally:
             pack.close()
-        return 1 if any(r["failed"] for r in replay.values()) else 0
+        failed = any(r["failed"] for r in replay.values())
+        return 1 if failed or notes["mismatches"] or notes["violated_cases"] else 0
     if not args.output or not args.model_label:
         raise SystemExit("--output and --model-label are required")
     if args.dry_run_expected and not args.dry_run:

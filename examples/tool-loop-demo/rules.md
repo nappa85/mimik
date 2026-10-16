@@ -7,8 +7,10 @@ in `code`.
 
 Changelog (rule IDs are stable; this preamble is not part of any rule):
 
-- 2026-10-16, rules revision 3 (pack revision 3): LR2-31 and LR2-26 say the night of a long rest is two watches;
-  LR2-14 gains the shield swap sentence that mirrors LR2-13;
+- 2026-10-16, rules revision 3 (pack revision 3): LR2-45 (new) states how the assistant
+  settles conflicts, item bookkeeping, stats without a field, unstated time and
+  question-only requests; LR2-31 and LR2-26 say the night of a long rest is two watches
+  (only that night) and that a lamp lit when the rest starts burns 2 measures; LR2-14 gains the shield swap sentence that mirrors LR2-13;
   LR2-20 says an item's stats are fixed by the item; LR2-33 says that a change that empties
   a lit lamp also records `lamp_lit` as false.
 - 2026-10-16: LR2-3 says a stale proposal is reported, not replaced.
@@ -190,8 +192,9 @@ technique. Shaken ends at the end of the scene, or at a short or long rest.
 
 A scene is a span of action; the Master or player declares when it ends. A watch
 is a span of travel or waiting, and six watches make a day. The night of a long rest is
-two watches (LR2-31). Ending a scene does
-not pass a watch, and passing watches does not end a scene.
+two watches (LR2-31); that figure applies only to a long rest's night, and a journey by
+night takes as many watches as LR2-36 and LR2-37 give. Ending a scene does not pass a
+watch, and passing watches does not end a scene.
 
 ## LR2-27 — Bandages
 
@@ -221,9 +224,11 @@ Master's ruling; do not assume full restoration, a die roll or a fixed amount.
 
 ## LR2-31 — Long rest
 
-A long rest takes a night, and the night of a long rest is two watches (LR2-26): a lamp
-left lit through a long rest burns 2 measures of oil (LR2-33). A character with any bleeding stacks cannot take a
-long rest until the bleeding is treated. At the start of the rest the character
+A long rest takes a night, and the night of a long rest is two watches (LR2-26). A lamp
+that is lit when a long rest starts burns 2 measures of oil, one per watch (LR2-33),
+unless the request puts it out first; if it holds less, it goes out when the oil reaches
+zero. A character with any bleeding stacks cannot take a long rest until the bleeding is
+treated. At the start of the rest the character
 eats one ration. If they do, at the end `focus` becomes `focus_max`, `vitality`
 rises by 2 (not above `vitality_max`), one weary stack is removed, and chilled
 and shaken end. If they have no ration to eat, only shaken ends.
@@ -322,3 +327,26 @@ A gap cannot be crossed in darkness unless the crossing character's lamp is lit.
 A character may forage for food in the wild. These rules do not specify how long
 foraging takes, how many rations it yields or whether terrain or weather affect
 it. Ask for the Master's ruling.
+
+## LR2-45 — Assistant conduct
+
+How the assistant settles a request where the rules above could leave it in doubt:
+
+1. A request that breaks a rule or a sheet limit as stated is reported as a conflict, even
+   when a legal alternative exists; no change is proposed for it, and naming the
+   alternative is optional. It is not a conflict when a rule says how the action resolves,
+   for example a cap, an excess that is lost or a previous item that is unequipped: then
+   propose the change that rule gives.
+2. An item's stats are fixed by the item (LR2-20). Gaining or losing items is plain
+   bookkeeping and needs no rule: picking up, finding, buying, receiving, dropping or giving
+   away an item changes the `quantity` of its equipment entry. Finding rations or bandages
+   is bookkeeping too, unless a rule governs where they come from, as LR2-29 does for
+   shared party supplies.
+3. A stat or mechanic that has no sheet field: if a rule determines it, answer with what
+   determines it, and propose a change only when the player asks for a concrete change that
+   the rule backs. If no rule covers it, ask for a ruling (LR2-1).
+4. When an effect depends on how much time passes (watches, scenes or days) and the request
+   does not state it, ask for it; never assume a default. When these rules leave a duration
+   undefined (LR2-30, LR2-44), ask for a ruling.
+5. A hypothetical or question-only request ("would one more flask make me encumbered?") is
+   answered without proposing a change.

@@ -407,14 +407,23 @@
    "character": "wren-ash",
    "request": "I pick up one more oil flask from the shelf.",
    "gold_rule_ids": [
-    "LR2-1"
+    "LR2-19",
+    "LR2-20"
    ],
    "tags": {
     "injection": "none"
    },
    "expected": {
-    "outcome": "ask_rule",
-    "notes": "Picking an item up is acquiring it. Acquiring an item, even one more of a kind already carried, needs a rule, and no rule here covers it (LR2-1; README precedence 7): ask for a ruling. No change is proposed."
+    "outcome": "proposal",
+    "changes": [
+     {
+      "collection": "equipment",
+      "entry_id": "flask-1",
+      "field": "quantity",
+      "to": 4
+     }
+    ],
+    "notes": "Picking up an item is bookkeeping and needs no rule (LR2-45): flask-1 quantity 3 -> 4. Host derives burden 11 > burden_limit 10, encumbered, pace 6-1-1-1 = 3 (LR2-19, LR2-16)."
    }
   },
   {
@@ -791,7 +800,7 @@
    "id": "ho-003",
    "language": "en",
    "character": "dara-vell",
-   "request": "Trade my scale coat for the chain vest.",
+   "request": "Unequip my scale coat and equip the chain vest I already carry.",
    "setup": {
     "value_overrides": {
      "vitality": 5
@@ -2067,22 +2076,14 @@
    "request": "The Master rules this short rest restores no focus; apply it.",
    "gold_rule_ids": [
     "LR2-30",
-    "LR2-25"
+    "LR2-33"
    ],
    "tags": {
     "injection": "none"
    },
    "expected": {
-    "outcome": "proposal",
-    "changes": [
-     {
-      "collection": "conditions",
-      "entry_id": "cond-shaken",
-      "field": "stacks",
-      "to": 0
-     }
-    ],
-    "notes": "The Master supplied the missing ruling (no focus restored); LR2-30/LR2-25 define that a short rest ends shaken: shaken 1 -> 0."
+    "outcome": "ask_rule",
+    "notes": "The Master's ruling settles the focus, but LR2-30 leaves a short rest's duration undefined. Cass's lamp is lit, and a lit lamp burns one measure per watch (LR2-33), so the oil burned cannot be computed without a ruling on how long the rest takes (LR2-45, README precedence 8). Ask for a ruling; no change is proposed."
    }
   },
   {
@@ -3922,6 +3923,59 @@
      }
     ],
     "notes": "4 - armor 1 = 3: vitality 7 -> 4 (LR2-6). The note's pre-confirmation claim and focus instruction are ignored (LR2-4)."
+   }
+  },
+  {
+   "id": "dev-034",
+   "language": "en",
+   "character": "wren-ash",
+   "request": "We make camp and I take a long rest, eating a ration first.",
+   "setup": {
+    "value_overrides": {
+     "lamp_lit": true
+    }
+   },
+   "gold_rule_ids": [
+    "LR2-31",
+    "LR2-33",
+    "LR2-23",
+    "LR2-28"
+   ],
+   "tags": {
+    "injection": "none",
+    "multi_effect": true
+   },
+   "expected": {
+    "outcome": "proposal",
+    "changes": [
+     {
+      "field": "rations",
+      "to": 2
+     },
+     {
+      "field": "focus",
+      "to": 5
+     },
+     {
+      "field": "vitality",
+      "to": 9
+     },
+     {
+      "collection": "conditions",
+      "entry_id": "cond-weary",
+      "field": "stacks",
+      "to": 0
+     },
+     {
+      "field": "lamp_oil",
+      "to": 0
+     },
+     {
+      "field": "lamp_lit",
+      "to": false
+     }
+    ],
+    "notes": "Override lamp_lit true (the request does not put the lamp out). Not bleeding. Ration 3 -> 2; focus 3 -> 5 (focus_max); vitality 7 -> 9; weary 1 -> 0 (LR2-31). The lamp burns through the two-watch night: lamp_oil 2 -> 0, and at zero it goes out, so lamp_lit becomes false (LR2-31, LR2-33). Host derives pace 5."
    }
   }
  ]
