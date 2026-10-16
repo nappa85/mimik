@@ -73,3 +73,44 @@ artifact gates remain separate from license-policy approval.
 ## Lexical retrieval (2026-10-15)
 
 Rules lookup uses SQLite FTS5, already compiled into the bundled rusqlite/libsqlite3-sys build (`ENABLE_FTS5`, SQLite 3.50.2, verified in the CI container), with the built-in `unicode61 remove_diacritics 2` tokenizer (Italian manuals; English `porter` rejected) and bm25 ranking. Search text is produced by the existing html2text dependency in `plain_no_decorate` raw mode (unwrapped, one table cell per line); no new crate or SQLite feature was added. Custom code is limited to eligibility filtering, quoting-only query construction and index maintenance. A vector index (`sqlite-vec` or brute-force Rust cosine) is deferred until an embedding runtime is selected; see `docs/hybrid-retrieval-plan.md`.
+
+## Derived-field formula engine: `cel` and `antlr4rust` (selected 2026-10-15, recorded in M3)
+
+Derived values and advisory constraints use the maintained `cel` crate (cel-rust), restricted
+by Mimik to the admitted subset "cel-mimik-1". Selection evidence, the capability spike and
+the combined-tree measurements are in `docs/derived-formulas-plan.md` §2.
+
+- **Versions and pinning:** `cel = "=0.15.0"` with `default-features = false` (no regex,
+  chrono or base64 encoders; Mimik owns JSON→CEL conversion, so `json` is unused).
+  Its required parser runtime `antlr4rust` 0.6.0 is transitive. Both are locked: the
+  `pinned_engine_versions_in_lockfile` test fails on any version change of either crate,
+  so `cargo update` cannot move them silently, and the golden conformance fixture
+  (`schemas/formula-conformance-v1.json`) is SHA-256-locked in the Rust and Python tests.
+- **Licenses:** `cel` is MIT; `antlr4rust` is BSD-3-Clause. Both are in the existing
+  `about.toml` accept list; `cargo about generate --locked --fail` passes unchanged. New
+  transitive packages are listed in the plan §2; the transitive duplicates (`nom` 7/8,
+  `bit-set`/`bit-vec`) are accepted like the html5ever precedent above and reassessed when
+  upstreams converge.
+- **Maintenance risk:** `antlr4rust` is a single community-maintained upstream for the
+  generated parser runtime. Mitigations: the lockfile gate, `cargo audit --deny warnings`
+  in CI, and a reviewed re-run of the conformance fixture on every bump.
+- **Alternatives rejected:**
+  - `evalexpr`: its own expression language, no static typing of declared fields and no
+    standard semantics to cite; Mimik would have to specify and maintain the language.
+  - `fasteval`: floating-point numeric evaluation only (no exact i64, strings, lists or
+    enums).
+  - `rhai`: a general-purpose scripting language with loops and functions; admitting it
+    would mean disabling most of the language and still bounding a Turing-complete
+    runtime.
+  - A custom `winnow` parser (revision 1 of the plan, Appendix A): a Mimik-specific
+    language with a Python reference implementation, i.e. two implementations to
+    maintain. It was dropped once the user accepted CEL's truncating division and error
+    absorption.
+- **Custom code** is limited to the gaps cel-rust does not cover: admission (allowlisted
+  constructs, static types, AST depth, nested-aggregate and static cost bounds), Mimik's
+  aggregate function catalogue, typed JSON↔CEL conversion and the stable error-code
+  mapping (`src/definitions/formula/`).
+- **Exit path:** the engine is isolated behind `formula::{Compiled, Evaluation, Code}`.
+  Replacing `cel` means a new profile ID, an engine passing the golden fixture (or a
+  reviewed outcome diff under `formula_profile: 2`) and dual evaluation of existing pins
+  until migration; pinned definitions keep their profile.
