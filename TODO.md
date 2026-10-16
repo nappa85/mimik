@@ -4,6 +4,10 @@ Last updated: 2026-10-16.
 
 ## Resume here
 
+- **M3 merged 2026-10-16** (derived formulas: evaluation on view/save/history, preview, gate lifted for scalar formula definitions; lists stay gated until M4). Review `docs/reviews/2026-10-16-derived-formulas-m3.md` cleared it: Sonnet APPROVE, Sol APPROVE-with-fixes, third reviewer unavailable.
+  - Follow-ups: the duplicated declared-input predicate (F4); the residual 503 path (F5); global test hooks depending on test serialization.
+  - **Next: M4** (list editing plus browser).
+
 - **Checkpoint 2026-10-16:**
   - **Master is `1166a1d`** (all local, no push): `a765427` fetch controller and review wrapper → `2eee9ec` harness v2 and pack → `1166a1d` CEL M2 (migration 018; formula publication gated until M3).
   - **Harness v2 held-out run:** 141 cases × seeds 17/29. Both models FAIL the bar on both denominators, and under every labelling. Failure analysis done; independent results review done (3 reviewers, SOUND-with-corrections; `docs/reviews/2026-10-16-tool-loop-v2-results.md`).

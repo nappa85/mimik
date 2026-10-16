@@ -40,3 +40,24 @@ correctness.
 ## Status
 
 All fixes have been applied. Re-review of the fixes is pending; the branch is not merged.
+
+## Re-review of the fixes (commits 3708836, 84cd5bf)
+
+- **Sonnet 5.5: APPROVE.** It ran the full suite at `--cpus 2` (369 passed) and re-ran the
+  two mutations that had survived. Swapping `depart` back to `private_pin::validate`, and
+  dropping the kept permit before `rejected_editor`, now both fail. Low notes, open as
+  follow-ups:
+  - the global test hooks `DEPARTURE_PINS` and `REJECTED_EDITOR_KEPT_PERMIT` depend on
+    test serialization (comment, or clear them per test);
+  - the `permit: None` 503 path is untested.
+- **OpenAI Sol (`--chain main`): APPROVE-with-fixes**, with nothing blocking. R1–R3 and F1–F3,
+  F6–F8 fixed. Two items are only partly fixed and remain follow-ups:
+  - F4: the declared-input predicate is still duplicated, though a consistency test now
+    catches drift;
+  - F5: the residual 503 on the `(Conflict|Invalid, None)` path is documented, not removed.
+- **Third reviewer: unavailable** again. Space Bunny, DeepSeek and Muse all failed preflight
+  at 18:25–18:33. Per AGENTS.md, the review proceeds with the two main reviewers.
+
+**Disposition:** cleared for merge to master. The follow-ups above are tracked in TODO.md.
+Not re-verified by the re-reviewers: the fresh-source rebuild and the LAN/proxy gate. These
+were recorded as passed by the implementer on `3708836`; see the derived-formulas plan §16.
