@@ -4,11 +4,14 @@ Last updated: 2026-10-16.
 
 ## Resume here
 
-- **GPU thermal (2026-10-16):** at 18:50 the kernel logged `SW CTF` ×3 and the system shut down. Cause: the automatic fan curve tracks the edge temperature and held about 22% PWM while the junction passed 86 °C.
-  - **Fix** (resets on reboot; the user runs it with root): manual fan `pwm1_enable=1`, `pwm1=255`, plus a room fan into the open case. The junction then plateaus at 76–79 °C at 110 W over 5 min.
-  - **Next:** a stricter guard (fan-manual precondition, an immediate stop at 90 °C junction, 5 s sampling), then relaunch the 5 small and 3 8B screens. The 35B G0 is held until the thermal data from those runs is reviewed.
-  - Screens done: 9B (25/40 correct, 8/40 false-supported) and 4B (14/40, 17/40; discarded).
-
+- **GPU thermal (2026-10-16): hardware fault, GPU benchmarks blocked until the GPU is re-pasted.**
+  - **18:50:** kernel `SW CTF` ×3, followed by a shutdown.
+  - **Fans:** the automatic curve stays near 22% PWM; with manual pwm 255 the junction plateaus at 79 °C on a decode-only load.
+  - **Benchmark load** (5k-token prefills): the junction reaches 95–98 °C in 1–2 minutes even at full fan.
+  - **Diagnostic:** at 142 W and 2,470 MHz the junction jumps from 29 to 86 °C in 2 s while the edge reads 42 °C. That points to poor die contact (paste or mounting).
+  - **No software fix:** a forced 700 MHz sclk is not honoured under compute, and `power1_cap_min` is 134 W.
+  - **Interim:** CPU-only screens of the small models (user-approved), with no `/dev/dri` passed to the container.
+  - **After re-pasting:** rerun the 20 s diagnostic; aim for a junction about 15–25 °C above the edge.
 - **M3 merged 2026-10-16** (derived formulas: evaluation on view/save/history, preview, gate lifted for scalar formula definitions; lists stay gated until M4). Review `docs/reviews/2026-10-16-derived-formulas-m3.md` cleared it: Sonnet APPROVE, Sol APPROVE-with-fixes, third reviewer unavailable.
   - Follow-ups: the duplicated declared-input predicate (F4); the residual 503 path (F5); global test hooks depending on test serialization.
   - **Next: M4** (list editing plus browser).
