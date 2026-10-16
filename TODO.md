@@ -4,6 +4,21 @@ Last updated: 2026-10-16.
 
 ## Resume here
 
+- **Plans and decisions (2026-10-16, evening):**
+  - **M4 plan revision 3:** `794aad4` (adds Move up/down and the history change summary, both user-requested; rev 2 was `1b8baa8`) (Sol NO-GO and Sonnet GO-with-amendments, now resolved in place; third reviewer unavailable). Needs a short re-review.
+    - User: M4 ships plain list editing. The `editable` flag and the item catalogue are deferred to a later milestone.
+  - **Router plan revision 3:** `0b5fcc2`, selection procedure frozen (rev 2 was `c960f45`). The user authorised dev-only `SYS-R` (v3 plan §12, amendment §11.24a). CPU-first. Needs a short re-review.
+  - **Pack revision 3:** branch `pack-rev3`, applying the user decisions on rules 6–8, acquiring = ask_rule, night = 2 watches, and plain "armor" = the sheet total. Needs an independent review before it seeds the blind held-out writer.
+  - **CPU-only candidate screens:** running since 20:49, from frozen copy `run-b085aa4c2be4`. They measured about 122 s per episode, so roughly 1.4 h per model.
+
+- **GPU thermal (2026-10-16): hardware fault, GPU benchmarks blocked until the GPU is re-pasted.**
+  - **18:50:** kernel `SW CTF` ×3, followed by a shutdown.
+  - **Fans:** the automatic curve stays near 22% PWM; with manual pwm 255 the junction plateaus at 79 °C on a decode-only load.
+  - **Benchmark load** (5k-token prefills): the junction reaches 95–98 °C in 1–2 minutes even at full fan.
+  - **Diagnostic:** at 142 W and 2,470 MHz the junction jumps from 29 to 86 °C in 2 s while the edge reads 42 °C. That points to poor die contact (paste or mounting).
+  - **No software fix:** a forced 700 MHz sclk is not honoured under compute, and `power1_cap_min` is 134 W.
+  - **Interim:** CPU-only screens of the small models (user-approved), with no `/dev/dri` passed to the container.
+  - **After re-pasting:** rerun the 20 s diagnostic; aim for a junction about 15–25 °C above the edge.
 - **M3 merged 2026-10-16** (derived formulas: evaluation on view/save/history, preview, gate lifted for scalar formula definitions; lists stay gated until M4). Review `docs/reviews/2026-10-16-derived-formulas-m3.md` cleared it: Sonnet APPROVE, Sol APPROVE-with-fixes, third reviewer unavailable.
   - Follow-ups: the duplicated declared-input predicate (F4); the residual 503 path (F5); global test hooks depending on test serialization.
   - **Next: M4** (list editing plus browser).
