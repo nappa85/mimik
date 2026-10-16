@@ -1,6 +1,6 @@
 use crate::{
     AppError,
-    definitions::{Control, Definition},
+    definitions::{Control, Definition, Field},
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -173,20 +173,195 @@ pub(crate) fn integer(raw: &str) -> Result<i64, AppError> {
         .map_err(|_| AppError::Invalid("Integer outside signed i64 range."))
 }
 
+/// The declared properties of a list field (empty for any other field).
+pub(crate) fn properties(field: &Field) -> &[crate::definitions::ItemProperty] {
+    field
+        .items
+        .as_ref()
+        .map_or(&[][..], |items| &items.properties)
+}
+
+/// One list row as submitted or saved: raw strings, never validated here (plan D5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DraftRow {
+    /// The saved item ID, or empty for a new row.
+    pub id: String,
+    /// One raw value per declared property.
+    pub values: Vec<String>,
+    /// Per property: the presence state of an optional property (`present`, `absent`, or
+    /// whatever was submitted); empty for a required property.
+    pub states: Vec<String>,
+}
+
+/// The rows of one list field, in row order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ListDraft {
+    pub rows: Vec<DraftRow>,
+}
+
+fn raw_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+impl ListDraft {
+    /// The rows of list field `f` in an admitted form (rows `0..n`, contiguous by admission).
+    pub(crate) fn submitted(f: usize, field: &Field, form: &BTreeMap<String, String>) -> Self {
+        let properties = properties(field);
+        let get = |key: String| form.get(&key).cloned().unwrap_or_default();
+        let rows = (0..=crate::definitions::formula::MAX_LIST_ITEMS)
+            .map_while(|r| {
+                let id = form.get(&format!("id-{f}-{r}"))?.clone();
+                Some(DraftRow {
+                    id,
+                    values: (0..properties.len())
+                        .map(|p| get(format!("row-{f}-{r}-{p}")))
+                        .collect(),
+                    states: properties
+                        .iter()
+                        .enumerate()
+                        .map(|(p, property)| {
+                            if property.optional {
+                                get(format!("set-{f}-{r}-{p}"))
+                            } else {
+                                String::new()
+                            }
+                        })
+                        .collect(),
+                })
+            })
+            .collect();
+        Self { rows }
+    }
+
+    /// The rows of a saved (validated) list value.
+    pub(crate) fn saved(field: &Field, value: &Value) -> Self {
+        let properties = properties(field);
+        let rows = value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|item| DraftRow {
+                id: item["id"].as_str().unwrap_or_default().to_owned(),
+                values: properties
+                    .iter()
+                    .map(|property| item.get(&property.id).map(raw_text).unwrap_or_default())
+                    .collect(),
+                states: properties
+                    .iter()
+                    .map(|property| {
+                        if !property.optional {
+                            String::new()
+                        } else if item.get(&property.id).is_some() {
+                            "present".into()
+                        } else {
+                            "absent".into()
+                        }
+                    })
+                    .collect(),
+            })
+            .collect();
+        Self { rows }
+    }
+}
+
+fn scalar_value(control: Control, raw: &str) -> Result<Value, AppError> {
+    Ok(match control {
+        Control::Text | Control::Multiline | Control::Enumeration => Value::String(raw.into()),
+        Control::Integer => integer(raw)?.into(),
+        Control::Boolean => match raw {
+            "true" => true.into(),
+            "false" => false.into(),
+            _ => return Err(AppError::Invalid("Select true or false.")),
+        },
+        Control::List => return Err(AppError::Invalid("Nested lists are unsupported.")),
+    })
+}
+
+/// Turns a list draft into stored items (plan D3): an empty ID gets the next host ID
+/// `r<next>-<k>`, k = 1, 2, … over this list's new rows in row order; a non-empty ID must
+/// name a row of the saved list (anything else is tampering); IDs stay unique. Optional
+/// properties need an explicit Set (`present`) or Not set (`absent`) state.
+pub(crate) fn reconcile(
+    field: &Field,
+    draft: &ListDraft,
+    saved: &Value,
+    next: i64,
+) -> Result<Value, AppError> {
+    if draft.rows.len() > crate::definitions::formula::MAX_LIST_ITEMS {
+        return Err(AppError::Invalid("A list holds at most 256 rows."));
+    }
+    let known: HashSet<&str> = saved
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["id"].as_str())
+        .collect();
+    let mut seen = HashSet::new();
+    let mut allocated = 0_usize;
+    let mut items = Vec::with_capacity(draft.rows.len());
+    for row in &draft.rows {
+        let id = if row.id.is_empty() {
+            allocated += 1;
+            format!("r{next}-{allocated}")
+        } else if known.contains(row.id.as_str()) {
+            row.id.clone()
+        } else {
+            return Err(AppError::Invalid(
+                "A list row ID is not part of the saved sheet.",
+            ));
+        };
+        if !seen.insert(id.clone()) {
+            return Err(AppError::Invalid("List row IDs must be unique."));
+        }
+        let mut item = serde_json::Map::new();
+        item.insert("id".into(), Value::String(id));
+        for (p, property) in properties(field).iter().enumerate() {
+            if property.optional {
+                match row.states.get(p).map(String::as_str) {
+                    Some("present") => {}
+                    Some("absent") => continue,
+                    _ => {
+                        return Err(AppError::Invalid(
+                            "Select Set or Not set for every optional row property.",
+                        ));
+                    }
+                }
+            }
+            let raw = row.values.get(p).map_or("", String::as_str);
+            item.insert(property.id.clone(), scalar_value(property.control, raw)?);
+        }
+        items.push(Value::Object(item));
+    }
+    Ok(Value::Array(items))
+}
+
+/// The values of an admitted runtime form. `saved` and `revision` are the current saved
+/// data and revision: list rows reconcile against them (new IDs use `revision + 1`).
 pub(crate) fn form(
     definition: &Definition,
     form: &BTreeMap<String, String>,
+    saved: &Value,
+    revision: i64,
 ) -> Result<Value, AppError> {
+    let next = revision
+        .checked_add(1)
+        .ok_or(AppError::Invalid("Sheet revision exhausted."))?;
     let mut values = serde_json::Map::new();
-    for field in definition
-        .fields
-        .iter()
-        .filter(|field| field.formula.is_none())
-    {
+    for (f, field) in definition.fields.iter().enumerate() {
+        if field.formula.is_some() {
+            continue;
+        }
         if field.control == Control::List {
-            return Err(AppError::Invalid(
-                "List editing is unsupported until milestone M4.",
-            ));
+            let draft = ListDraft::submitted(f, field, form);
+            values.insert(
+                field.id.clone(),
+                reconcile(field, &draft, &saved[&field.id], next)?,
+            );
+            continue;
         }
         let raw = form
             .get(&format!("value-{}", field.id))
@@ -203,18 +378,7 @@ pub(crate) fn form(
         let value = if null {
             Value::Null
         } else {
-            match field.control {
-                Control::Text | Control::Multiline | Control::Enumeration => {
-                    Value::String(raw.clone())
-                }
-                Control::Integer => integer(raw)?.into(),
-                Control::Boolean => match raw.as_str() {
-                    "true" => true.into(),
-                    "false" => false.into(),
-                    _ => return Err(AppError::Invalid("Select true or false.")),
-                },
-                Control::List => return Err(AppError::Invalid("List editing is unsupported.")),
-            }
+            scalar_value(field.control, raw)?
         };
         values.insert(field.id.clone(), value);
     }

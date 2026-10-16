@@ -596,7 +596,9 @@ async fn list_row_keys_admit_and_bad_key_sets_are_400() {
     encoded.push_str("&id%2D1-0=");
     let response = raw_post(&setup, &path, encoded).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST, "%2D duplicate");
-    assert_eq!(sheet_count(&setup).await, 0);
+    // At most the positive case was saved; no refused form wrote anything.
+    let saved = i64::from(status == StatusCode::SEE_OTHER);
+    assert_eq!(sheet_count(&setup).await, saved);
 }
 
 async fn raw_post(setup: &Setup, path: &str, body: String) -> axum::response::Response {
@@ -708,5 +710,243 @@ async fn bad_keys_after_csrf_and_authorization() {
         setup.post("/private-sheets/1", bad).await.0,
         StatusCode::BAD_REQUEST,
         "authorized with bad keys"
+    );
+}
+
+fn selector(css: &str) -> scraper::Selector {
+    scraper::Selector::parse(css).unwrap()
+}
+
+/// The sheet created by `create` with `rows` equipment rows `r1-1…` and one tag.
+async fn create_rows(setup: &Setup, rows: usize) -> PrivateSnapshot {
+    let equipment = (1..=rows)
+        .map(|k| {
+            let mut item = item(&format!("r1-{k}"), &format!("Item {k}"));
+            if k % 2 == 0 {
+                item["armor"] = 1.into();
+                item["kind"] = "heavy".into();
+            }
+            item
+        })
+        .collect();
+    create(setup, data(equipment, vec![tag("r1-1")]))
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn list_sheet_rendered_form_round_trips() {
+    use axum::http::StatusCode;
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    let created = create_rows(&setup, 70).await;
+    let (status, html) = setup.get("/private-sheets/1").await;
+    assert_eq!(status, StatusCode::OK);
+    let form = super::formula_tests::submitted(&html);
+    assert!(form.len() > 516, "{} pairs", form.len());
+    let (status, _) = setup.post("/private-sheets/1", form).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let saved = reopen(&setup, 1).await;
+    assert_eq!(saved.revision, 2);
+    assert_eq!(saved.data, created.data, "unchanged round trip");
+}
+
+#[tokio::test]
+async fn list_rows_render_as_labelled_fieldsets_unique_ids() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    create_rows(&setup, 3).await;
+    let (_, html) = setup.get("/private-sheets/1").await;
+    let page = scraper::Html::parse_document(&html);
+    let lists: Vec<_> = page.select(&selector("fieldset.list-field")).collect();
+    assert_eq!(lists.len(), 2, "equipment and tags");
+    assert_eq!(lists[0].value().attr("id"), Some("list-1"));
+    let legend: String = lists[0]
+        .select(&selector("legend"))
+        .next()
+        .unwrap()
+        .text()
+        .collect();
+    assert_eq!(legend, "Equipment");
+    let rows: Vec<_> = lists[0].select(&selector("fieldset.list-row")).collect();
+    assert_eq!(rows.len(), 3);
+    let row_legend: String = rows[1]
+        .select(&selector("legend"))
+        .next()
+        .unwrap()
+        .text()
+        .collect();
+    assert_eq!(row_legend, "Row 2 of 3 · ID r1-2");
+    assert_eq!(rows[1].value().attr("id"), Some("row-1-1"));
+    let mut ids = std::collections::BTreeSet::new();
+    for element in page.select(&selector("[id]")) {
+        let id = element.value().attr("id").unwrap();
+        assert!(ids.insert(id.to_owned()), "duplicate id {id}");
+    }
+    for control in lists[0].select(&selector("input:not([type=hidden]), select, textarea")) {
+        let id = control.value().attr("id").expect("control id");
+        assert_eq!(
+            page.select(&selector(&format!("label[for=\"{id}\"]")))
+                .count(),
+            1,
+            "label for {id}"
+        );
+    }
+    // Optional properties carry an explicit Set/Not set state; required ones do not.
+    assert!(html.contains("name=\"set-1-1-2\""));
+    assert!(!html.contains("name=\"set-1-1-0\""));
+    let empty = list_setup(&list_definition()).await;
+    let (_, create_page) = empty
+        .get(&format!(
+            "/campaigns/{}/sheets/new?version={}",
+            empty.campaign, empty.version
+        ))
+        .await;
+    assert!(create_page.contains("No rows yet."));
+}
+
+#[tokio::test]
+async fn failed_save_rerender_keeps_draft_and_submitted_revision() {
+    use axum::http::StatusCode;
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    create_rows(&setup, 1).await;
+    let form = list_form(
+        1,
+        vec![
+            equipment_row(0, "r1-1", "Kept <draft>", "x", None, None, "true"),
+            equipment_row(
+                1,
+                "",
+                "New draft row",
+                "2",
+                Some("4"),
+                Some("light"),
+                "false",
+            ),
+        ],
+    );
+    let (status, html) = setup.post("/private-sheets/1", form).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let page = scraper::Html::parse_document(&html);
+    let value = |id: &str| {
+        page.select(&selector(&format!("[name=\"{id}\"]")))
+            .next()
+            .unwrap_or_else(|| panic!("{id} missing"))
+            .value()
+            .attr("value")
+            .map(str::to_owned)
+    };
+    assert_eq!(value("row-1-0-0").as_deref(), Some("Kept <draft>"));
+    assert_eq!(value("row-1-0-1").as_deref(), Some("x"));
+    assert_eq!(value("id-1-1").as_deref(), Some(""));
+    assert_eq!(value("row-1-1-2").as_deref(), Some("4"));
+    assert_eq!(value("revision").as_deref(), Some("1"));
+    assert_eq!(reopen(&setup, 1).await.revision, 1, "nothing saved");
+}
+
+#[test]
+fn submitted_helper_sends_only_the_clicked_submitter() {
+    use super::formula_tests::{default_submitter, submitted_by};
+    let page = r#"<form><input type="hidden" name="csrf" value="t"><button name="op" value="save">Save</button>
+<input name="a" value="1"><input name="off" value="x" disabled>
+<fieldset disabled><legend><input name="legend" value="kept"></legend><input name="inner" value="y"></fieldset>
+<select name="s"><option value="u">U</option><option value="v" selected>V</option></select>
+<textarea name="t">&lt;text&gt;</textarea><button name="op" value="add-1">Add</button><button name="op" value="up-1-1" disabled>Up</button></form>"#;
+    let base = vec![
+        ("csrf".to_owned(), "t".to_owned()),
+        ("a".into(), "1".into()),
+        ("legend".into(), "kept".into()),
+        ("s".into(), "v".into()),
+        ("t".into(), "<text>".into()),
+    ];
+    assert_eq!(submitted_by(page, None), base);
+    let mut add = base.clone();
+    add.push(("op".into(), "add-1".into()));
+    assert_eq!(submitted_by(page, Some(("op", "add-1"))), add);
+    let mut save = base;
+    save.insert(1, ("op".into(), "save".into()));
+    assert_eq!(submitted_by(page, Some(("op", "save"))), save);
+    assert_eq!(
+        default_submitter(page),
+        Some(("op".to_owned(), "save".to_owned()))
+    );
+    let disabled = std::panic::catch_unwind(|| submitted_by(page, Some(("op", "up-1-1"))));
+    assert!(disabled.is_err(), "a disabled button cannot be clicked");
+}
+
+#[tokio::test]
+async fn first_submitter_in_tree_order_is_op_save_before_groups() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    create_rows(&setup, 2).await;
+    let (_, html) = setup.get("/private-sheets/1").await;
+    let page = scraper::Html::parse_document(&html);
+    let order: Vec<String> = page
+        .select(&selector(
+            "form button, form input[type=submit], form section.panel, form fieldset.list-field",
+        ))
+        .map(|element| {
+            let value = element.value();
+            format!(
+                "{}:{}={}",
+                value.name(),
+                value.attr("name").unwrap_or_default(),
+                value.attr("value").unwrap_or_default()
+            )
+        })
+        .collect();
+    assert_eq!(
+        order.first().map(String::as_str),
+        Some("button:op=save"),
+        "{order:?}"
+    );
+    assert_eq!(
+        super::formula_tests::default_submitter(&html),
+        Some(("op".into(), "save".into()))
+    );
+    let saves = order
+        .iter()
+        .filter(|item| *item == "button:op=save")
+        .count();
+    assert_eq!(saves, 2, "top and bottom Save: {order:?}");
+    assert_eq!(order.last().map(String::as_str), Some("button:op=save"));
+    // Scalar sheets keep their single (bottom) Save, now named op=save.
+    let scalar = setup_scalar().await;
+    let (_, html) = scalar.get("/private-sheets/1").await;
+    let page = scraper::Html::parse_document(&html);
+    let buttons: Vec<_> = page.select(&selector("form button")).collect();
+    assert_eq!(buttons.len(), 1);
+    assert_eq!(buttons[0].value().attr("value"), Some("save"));
+}
+
+async fn setup_scalar() -> Setup {
+    let setup = setup(&super::formula_tests::formula_definition()).await;
+    setup.create().await;
+    setup
+}
+
+#[tokio::test]
+async fn stale_invalid_list_draft_conflicts() {
+    use axum::http::StatusCode;
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    let created = create_rows(&setup, 1).await;
+    edit(&setup, &created, created.data.clone()).await.unwrap();
+    let stale = list_form(
+        1,
+        vec![
+            equipment_row(0, "r1-1", "A", "not a number", None, None, "true"),
+            equipment_row(1, "forged", "B", "1", None, None, "maybe"),
+        ],
+    );
+    assert_eq!(
+        setup.post("/private-sheets/1", stale).await.0,
+        StatusCode::CONFLICT
     );
 }

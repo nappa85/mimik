@@ -60,3 +60,5 @@ article.panel { margin-bottom: 1rem; }
 .invitation-qr { max-width: 280px; background: white; padding: 8px; }
 .invitation-qr svg { display: block; width: 100%; height: auto; }
 .form-error { padding: .9rem 1rem; border-left: 4px solid #a6382e; background: #fff1ee; color: #6c241d; border-radius: 4px; }
+.list-field, .list-row { min-width: 0; border: 1px solid #d8d8cc; border-radius: 8px; margin: 1rem 0; padding: .5rem 1rem 1rem; }
+.list-row legend { font-weight: 600; }

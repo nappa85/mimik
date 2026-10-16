@@ -384,6 +384,136 @@ struct FieldView {
     derived: Option<DerivedView>,
     expr: String,
     rule_ids: String,
+    /// The rows of a list field (plan D10); `None` for every other control.
+    list: Option<ListView>,
+}
+
+/// At most this many characters of a value shown in a second, visible context (plan D7
+/// RE3-1): the full value is echoed once, in its control.
+const EXCERPT_CHARS: usize = 64;
+
+fn excerpt(value: &str) -> String {
+    match value.char_indices().nth(EXCERPT_CHARS) {
+        Some((end, _)) => format!("{}…", &value[..end]),
+        None => value.to_owned(),
+    }
+}
+
+/// One declared property of a list field.
+struct PropertyView {
+    label: String,
+    control: &'static str,
+    optional: bool,
+    options: Vec<(String, String)>,
+}
+
+struct CellView {
+    p: usize,
+    value: String,
+    state: String,
+}
+
+impl CellView {
+    fn valid_boolean(&self) -> bool {
+        matches!(self.value.as_str(), "" | "true" | "false")
+    }
+    fn valid_state(&self) -> bool {
+        matches!(self.state.as_str(), "present" | "absent")
+    }
+    fn value_excerpt(&self) -> String {
+        excerpt(&self.value)
+    }
+    fn state_excerpt(&self) -> String {
+        excerpt(&self.state)
+    }
+}
+
+struct RowView {
+    r: usize,
+    id: String,
+    cells: Vec<CellView>,
+}
+
+impl RowView {
+    fn number(&self) -> usize {
+        self.r + 1
+    }
+    fn id_excerpt(&self) -> String {
+        excerpt(&self.id)
+    }
+}
+
+/// A list field: its index `f` in the definition (the form key prefix), properties and rows.
+struct ListView {
+    f: usize,
+    properties: Vec<PropertyView>,
+    rows: Vec<RowView>,
+}
+
+impl ListView {
+    fn new(f: usize, field: &crate::definitions::Field, draft: values::ListDraft) -> Self {
+        let properties = values::properties(field)
+            .iter()
+            .map(|property| PropertyView {
+                label: property.label.clone(),
+                control: control_name(property.control),
+                optional: property.optional,
+                options: choices(property.options.as_ref()),
+            })
+            .collect();
+        let rows = draft
+            .rows
+            .into_iter()
+            .enumerate()
+            .map(|(r, row)| RowView {
+                r,
+                id: row.id,
+                cells: row
+                    .values
+                    .into_iter()
+                    .zip(row.states)
+                    .enumerate()
+                    .map(|(p, (value, state))| CellView { p, value, state })
+                    .collect(),
+            })
+            .collect();
+        Self {
+            f,
+            properties,
+            rows,
+        }
+    }
+    fn property(&self, cell: &CellView) -> &PropertyView {
+        &self.properties[cell.p]
+    }
+    fn valid_option(&self, cell: &CellView) -> bool {
+        self.properties[cell.p]
+            .options
+            .iter()
+            .any(|option| option.0 == cell.value)
+    }
+}
+
+fn control_name(control: crate::definitions::Control) -> &'static str {
+    match control {
+        crate::definitions::Control::Text => "text",
+        crate::definitions::Control::Multiline => "multiline",
+        crate::definitions::Control::Integer => "integer",
+        crate::definitions::Control::Boolean => "boolean",
+        crate::definitions::Control::Enumeration => "enum",
+        crate::definitions::Control::List => "list",
+    }
+}
+
+fn choices(options: Option<&Vec<crate::definitions::Choice>>) -> Vec<(String, String)> {
+    options
+        .map(|choices| {
+            choices
+                .iter()
+                .map(|c| (c.id.clone(), c.label.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl FieldView {
@@ -415,6 +545,8 @@ struct PrivateTemplate<'a> {
     native: bool,
     create: bool,
     pin: String,
+    /// The definition declares a list field: the page gets a top Save button (plan D6).
+    lists: bool,
     mode: FormulaMode,
     /// Evaluation of the saved snapshot; never of an unsaved draft.
     formulas: Option<FormulaView>,
@@ -542,6 +674,12 @@ fn render_private(
         native,
         create,
         pin: serde_json::to_string(&view.snapshot.pin)?,
+        lists: view.immutable.as_ref().is_some_and(|pin| {
+            pin.definition()
+                .fields
+                .iter()
+                .any(|field| field.control == crate::definitions::Control::List)
+        }),
         mode: match (
             view.immutable
                 .as_ref()
@@ -570,13 +708,21 @@ fn groups(
         for group in &pin.definition().groups {
             let mut fields = Vec::new();
             for id in &group.fields {
-                let field = pin
+                let (f, field) = pin
                     .definition()
                     .fields
                     .iter()
-                    .find(|f| &f.id == id)
+                    .enumerate()
+                    .find(|(_, field)| &field.id == id)
                     .ok_or(AppError::Invalid("Invalid pinned group."))?;
                 let saved = &view.snapshot.data[id];
+                let list = (field.control == crate::definitions::Control::List).then(|| {
+                    let draft = raw.map_or_else(
+                        || values::ListDraft::saved(field, saved),
+                        |raw| values::ListDraft::submitted(f, field, raw),
+                    );
+                    ListView::new(f, field, draft)
+                });
                 let value = raw
                     .and_then(|r| r.get(&format!("value-{id}")))
                     .cloned()
@@ -593,28 +739,11 @@ fn groups(
                     id: id.clone(),
                     label: field.label.clone(),
                     help: field.help.clone().unwrap_or_default(),
-                    control: match field.control {
-                        crate::definitions::Control::Text => "text",
-                        crate::definitions::Control::Multiline => "multiline",
-                        crate::definitions::Control::Integer => "integer",
-                        crate::definitions::Control::Boolean => "boolean",
-                        crate::definitions::Control::Enumeration => "enum",
-                        crate::definitions::Control::List => "list",
-                    }
-                    .into(),
+                    control: control_name(field.control).into(),
                     nullable: field.nullable,
                     value_state,
                     value,
-                    options: field
-                        .options
-                        .as_ref()
-                        .map(|choices| {
-                            choices
-                                .iter()
-                                .map(|c| (c.id.clone(), c.label.clone()))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
+                    options: choices(field.options.as_ref()),
                     computed: field.formula.is_some(),
                     derived: field
                         .formula
@@ -633,6 +762,7 @@ fn groups(
                         .as_ref()
                         .map(|formula| super::formulas::rule_list(&formula.rule_ids))
                         .unwrap_or_default(),
+                    list,
                 });
             }
             groups.push(GroupView {
@@ -770,6 +900,58 @@ async fn edit_sheet(
     save_private(state, session, id, None, admission, body).await
 }
 
+/// Closed-key admission of a sheet POST (plan D2). It is O(pairs) but may generate up to
+/// 65,536 keys, so it is its own blocking step, whose only failure is 400 (never a
+/// re-render).
+async fn admit_form(
+    view: SheetView,
+    pairs: super::transport::Pairs,
+    permit: OwnedSemaphorePermit,
+) -> Result<(BTreeMap<String, String>, SheetView, OwnedSemaphorePermit), StatusCode> {
+    tokio::task::spawn_blocking(move || {
+        let keys = if let Some(pin) = &view.immutable {
+            values::sheet_keys(pin.definition(), pairs.keys()).ok_or(StatusCode::BAD_REQUEST)?
+        } else {
+            let mut keys: std::collections::HashSet<String> =
+                NATIVE_KEYS.iter().map(|s| (*s).into()).collect();
+            if pairs.keys().any(|key| key == "op") {
+                keys.insert("op".into());
+            }
+            keys
+        };
+        Ok::<_, StatusCode>((pairs.admit(&keys)?, view, permit))
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+}
+
+/// Validates an admitted save form into `view.snapshot` (plan D4 steps 5 and 6).
+fn apply_save(view: &mut SheetView, form: &BTreeMap<String, String>) -> Result<(), AppError> {
+    // The revision check precedes value validation: a stale draft answers 409 even when its
+    // values are invalid.
+    let revision = values::integer(&form["revision"])?;
+    if revision != view.snapshot.revision {
+        return Err(AppError::Conflict);
+    }
+    let name = super::name_notes(&form["name"], &form["notes"])?;
+    let data = if let Some(pin) = &view.immutable {
+        let data = values::form(
+            pin.definition(),
+            form,
+            &view.snapshot.data,
+            view.snapshot.revision,
+        )?;
+        pin.validate_values(&data)?;
+        data
+    } else {
+        serde_json::to_value(native_draft(form).validate()?)?
+    };
+    view.snapshot.name = name;
+    view.snapshot.notes.clone_from(&form["notes"]);
+    view.snapshot.data = data;
+    Ok(())
+}
+
 async fn save_private(
     state: AuthState,
     session: Session,
@@ -795,23 +977,7 @@ async fn save_private(
     if !view.editable {
         return Err(StatusCode::FORBIDDEN);
     }
-    // Admission is O(pairs) but may generate up to 65,536 keys: its own blocking step, whose
-    // only failure is 400 (never a re-render).
-    let (form, mut view, permit) = tokio::task::spawn_blocking(move || {
-        let keys = if let Some(pin) = &view.immutable {
-            values::sheet_keys(pin.definition(), pairs.keys()).ok_or(StatusCode::BAD_REQUEST)?
-        } else {
-            let mut keys: std::collections::HashSet<String> =
-                NATIVE_KEYS.iter().map(|s| (*s).into()).collect();
-            if pairs.keys().any(|key| key == "op") {
-                keys.insert("op".into());
-            }
-            keys
-        };
-        Ok::<_, StatusCode>((pairs.admit(&keys)?, view, permit))
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+    let (form, mut view, permit) = admit_form(view, pairs, permit).await?;
     if form.get("op").is_some_and(|op| op != "save") {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -819,26 +985,7 @@ async fn save_private(
         .await?
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let (result, view, form, permit) = tokio::task::spawn_blocking(move || {
-        let result = (|| {
-            // The revision check precedes value validation (plan D4): a stale draft answers
-            // 409 even when its values are invalid.
-            let revision = values::integer(&form["revision"])?;
-            if revision != view.snapshot.revision {
-                return Err(AppError::Conflict);
-            }
-            let name = super::name_notes(&form["name"], &form["notes"])?;
-            let data = if let Some(pin) = &view.immutable {
-                let data = values::form(pin.definition(), &form)?;
-                pin.validate_values(&data)?;
-                data
-            } else {
-                serde_json::to_value(native_draft(&form).validate()?)?
-            };
-            view.snapshot.name = name;
-            view.snapshot.notes.clone_from(&form["notes"]);
-            view.snapshot.data = data;
-            Ok(())
-        })();
+        let result = apply_save(&mut view, &form);
         (result, view, form, permit)
     })
     .await
