@@ -123,21 +123,21 @@
       "health_wait_seconds": 900,
       "request_timeout_seconds": 180,
       "seconds_per_episode": 240,
-      "seconds_per_episode_source": "estimate: plan §10 Q8 prefix threshold; not measured (G0 measures it)",
+      "seconds_per_episode_source": "estimate: plan \u00a710 Q8 prefix threshold; not measured (G0 measures it)",
       "vram_budget_bytes": 7516192768,
       "vram_budget_source": "cap: G0 picks n_cpu_moe so that VRAM stays <= 7.5e9 B (plan \u00a711 item 27)",
       "licence": "Apache-2.0 (model card front matter; no LICENSE file at the pinned revision)",
-      "notes": "GGUF block_count 40, 256 experts, 8 used (header metadata). n_cpu_moe comes from G0. health wait and request timeout are the runner's current values; the G0 queue overrides them (plan §11 item 27)."
+      "notes": "GGUF block_count 40, 256 experts, 8 used (header metadata). n_cpu_moe comes from G0. health wait and request timeout are the runner's current values; the G0 queue overrides them (plan \u00a711 item 27)."
     },
     "minicpm5-2b": {
       "label": "minicpm5-2b-q4_k_m",
-      "downloaded": false,
+      "downloaded": true,
       "path": "minicpm5-2b/MiniCPM5-2B-Q4_K_M.gguf",
       "sha256": "ec2d5801640099e97d8d7e8003ad4d81f336e757811f03a26173dddf386602fd",
       "size": 1561318368,
       "source": {
         "repo": "openbmb/MiniCPM5-2B-GGUF",
-        "revision": "2079a22f3bea",
+        "revision": "2079a22f3beaa4e306449978533478fe0522f4b3",
         "file": "MiniCPM5-2B-Q4_K_M.gguf"
       },
       "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
@@ -169,17 +169,17 @@
       "vram_budget_bytes": 3221225472,
       "vram_budget_source": "candidate sheet: 2.4 GiB at 24k f16 KV + 0.6 GiB buffers (estimate)",
       "licence": "Apache-2.0",
-      "notes": "docs/small-model-candidates-2026-10-16.md #1. Revision is a prefix from the sheet: pin the full commit with tools/fetch_models.py before download. Italian not stated."
+      "notes": "docs/small-model-candidates-2026-10-16.md #1. Revision is a prefix from the sheet: pin the full commit with tools/fetch_models.py before download. Italian not stated. Downloaded and sha256-verified 1792160926 (unix)."
     },
     "lfm25-2.6b": {
       "label": "lfm2.5-2.6b-q4_k_m",
-      "downloaded": false,
+      "downloaded": true,
       "path": "lfm25-2.6b/LFM2.5-2.6B-Q4_K_M.gguf",
       "sha256": "02a8b7e17487d326e46d68ce0ba24211e1b80a14c4cd0597fa73c1cd697f52ed",
       "size": 1674455040,
       "source": {
         "repo": "LiquidAI/LFM2.5-2.6B-GGUF",
-        "revision": "e7caca5d835a",
+        "revision": "e7caca5d835a3901a8e0d63e94009429bafafdfc",
         "file": "LFM2.5-2.6B-Q4_K_M.gguf"
       },
       "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
@@ -211,17 +211,17 @@
       "vram_budget_bytes": 2791728742,
       "vram_budget_source": "candidate sheet: 2.0 GiB at 24k + 0.6 GiB buffers (estimate)",
       "licence": "LFM Open License v1.0 (commercial use only below US$10M annual revenue; not OSI)",
-      "notes": "docs/small-model-candidates-2026-10-16.md #2. Revision is a prefix: pin before download."
+      "notes": "docs/small-model-candidates-2026-10-16.md #2. Downloaded and sha256-verified 1792161452 (unix)."
     },
     "lfm25-8b-a1b": {
       "label": "lfm2.5-8b-a1b-q4_k_m",
-      "downloaded": false,
+      "downloaded": true,
       "path": "lfm25-8b-a1b/LFM2.5-8B-A1B-Q4_K_M.gguf",
       "sha256": "4923ec14f06b968b74d663e5949867d2d9c3bf13a20b8be1a9f9af39989b2bb0",
       "size": 5155564768,
       "source": {
         "repo": "LiquidAI/LFM2.5-8B-A1B-GGUF",
-        "revision": "49c148317070",
+        "revision": "49c14831707011e64d70b2ebd8462ba08d608434",
         "file": "LFM2.5-8B-A1B-Q4_K_M.gguf"
       },
       "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
@@ -253,17 +253,17 @@
       "vram_budget_bytes": 6120328396,
       "vram_budget_source": "candidate sheet: 5.1 GiB at 24k + 0.6 GiB buffers (estimate)",
       "licence": "LFM Open License v1.0 (commercial use only below US$10M annual revenue; not OSI)",
-      "notes": "docs/small-model-candidates-2026-10-16.md #3. MoE, fits fully on the GPU (estimate). Revision is a prefix: pin before download."
+      "notes": "docs/small-model-candidates-2026-10-16.md #3. MoE, fits fully on the GPU (estimate). Downloaded and sha256-verified 1792160436 (unix)."
     },
     "granite42-3b": {
       "label": "granite-4.2-3b-q4_k_m",
-      "downloaded": false,
+      "downloaded": true,
       "path": "granite42-3b/granite-4.2-3b-Q4_K_M.gguf",
       "sha256": "e0406663965846ae22a403456eb826ccce5f450840491f71952f18a7cb78e7d5",
       "size": 2244011552,
       "source": {
         "repo": "ibm-granite/granite-4.2-3b-GGUF",
-        "revision": "c40945d71cd9",
+        "revision": "c40945d71cd90f249a56985e8155551a9188dc30",
         "file": "granite-4.2-3b-Q4_K_M.gguf"
       },
       "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
@@ -299,7 +299,7 @@
       "vram_budget_bytes": 4939212390,
       "vram_budget_source": "candidate sheet: 4.0 GiB at 24k + 0.6 GiB buffers (estimate)",
       "licence": "Apache-2.0",
-      "notes": "docs/small-model-candidates-2026-10-16.md #4a. Qwen3-Coder XML handler; the 4.2 template is not in the pinned llama.cpp tests. Revision is a prefix: pin before download."
+      "notes": "docs/small-model-candidates-2026-10-16.md #4a. Qwen3-Coder XML handler; the 4.2 template is not in the pinned llama.cpp tests. Downloaded and sha256-verified 1792158730 (unix)."
     },
     "granite42-8b": {
       "label": "granite-4.2-8b-q4_k_m",
@@ -433,13 +433,13 @@
     },
     "gemma4-e4b": {
       "label": "gemma-4-e4b-it-q4_0",
-      "downloaded": false,
+      "downloaded": true,
       "path": "gemma4-e4b/gemma-4-E4B-it-Q4_0.gguf",
       "sha256": "a555b900214b477d8880e7832e0b8925e139b0159640036b09fe472b6f2097f2",
       "size": 4590807392,
       "source": {
         "repo": "ggml-org/gemma-4-E4B-it-GGUF",
-        "revision": "b8093469224f",
+        "revision": "b8093469224f83f5c38f691eb906c380e9e63114",
         "file": "gemma-4-E4B-it-Q4_0.gguf"
       },
       "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
@@ -471,7 +471,7 @@
       "vram_budget_bytes": 5690831667,
       "vram_budget_source": "candidate sheet: 4.7 GiB (Q4_0, sliding-window KV) + 0.6 GiB buffers (estimate)",
       "licence": "Apache-2.0 (Gemma 4 licence page; separate prohibited-use policy page)",
-      "notes": "docs/small-model-candidates-2026-10-16.md S2. Official ggml-org Q4_0 chosen (the sheet's VRAM estimate is for Q4_0); the third-party unsloth Q4_K_M (4,977,171,584 B, 85a896a0...ab87) is the alternative. Revision is a prefix: pin before download."
+      "notes": "docs/small-model-candidates-2026-10-16.md S2. Official ggml-org Q4_0 chosen (the sheet's VRAM estimate is for Q4_0); the third-party unsloth Q4_K_M (4,977,171,584 B, 85a896a0...ab87) is the alternative. Downloaded and sha256-verified 1792162902 (unix)."
     }
   }
 }

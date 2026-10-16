@@ -78,13 +78,18 @@ class RegistryFileTests(unittest.TestCase):
                 self.assertTrue(m["downloaded"])
         self.assertTrue(models["qwen36-35b-a3b"]["server"]["n_cpu_moe_required"])
 
-    def test_candidates_are_registered_but_not_downloaded(self):
+    def test_candidates_are_registered_and_download_state_is_pinned(self):
         models = registry()["models"]
         for key, sha in CANDIDATES.items():
             with self.subTest(key=key):
                 self.assertEqual(models[key]["sha256"], sha)
-                self.assertFalse(models[key]["downloaded"])
                 self.assertTrue(models[key]["path"].startswith(f"{key}/"))
+                revision = models[key]["source"]["revision"]
+                if models[key]["downloaded"]:
+                    # A downloaded model is pinned to a full commit, never a prefix.
+                    self.assertRegex(revision, r"^[0-9a-f]{40}$")
+                else:
+                    self.assertRegex(revision, r"^[0-9a-f]{12,40}$")
         for key in ("lfm25-2.6b", "lfm25-8b-a1b"):
             self.assertEqual(models[key]["capabilities"]["thinking"], "always")
         for key in ("granite42-8b", "llama31-8b", "ministral3-8b"):
@@ -252,7 +257,7 @@ class ShellExportTests(unittest.TestCase):
         self.assertEqual(config["args"][config["args"].index("--ctx-size") + 1], "24576")
 
     def test_shell_refuses_not_downloaded_and_unknown(self):
-        proc = self.run_cli("shell", "granite42-3b")
+        proc = self.run_cli("shell", "llama31-8b")
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("not downloaded", proc.stderr)
         self.assertEqual(proc.stdout, "")

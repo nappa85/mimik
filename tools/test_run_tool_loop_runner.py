@@ -479,7 +479,7 @@ class RunnerTests(unittest.TestCase):
     def test_refusals(self):
         cases = {
             "unknown model": (("nope", "dev"), {}, 2),
-            "not downloaded": (("granite42-3b", "dev"), {}, 2),
+            "not downloaded": (("llama31-8b", "dev"), {}, 2),
             "moe required": (("qwen36-35b-a3b", "smoke"), {}, 2),
             "bad flag": (("qwen35-9b", "dev"), {"UNTRUSTED": "yes"}, 2),
             "bad ctx": (("qwen35-9b", "dev"), {"CTX": "12k"}, 2),
