@@ -25,8 +25,11 @@ pub(crate) struct ImmutablePin {
     pub raw: RawPin,
     data: admission::Admitted,
     validator: jsonschema::Validator,
-    /// Compiled once per pin load by admission itself; `None` for formula-free definitions.
+    /// Compiled once per pin load by admission itself; `None` for formula-free definitions
+    /// and for write-only pins.
     formulas: Option<formula::Compiled>,
+    /// Loaded for writes only ([`validate_for_write`]): evaluation fails closed.
+    write_only: bool,
 }
 
 pub(crate) fn load(db: &Connection, id: i64) -> Result<RawPin, AppError> {
@@ -42,8 +45,20 @@ pub(crate) fn load(db: &Connection, id: i64) -> Result<RawPin, AppError> {
 }
 
 pub(crate) fn validate(raw: RawPin) -> Result<ImmutablePin, AppError> {
+    validated(raw, false)
+}
+
+/// A pin for writes that never evaluate (freezing up to 32 sheets at once): admission
+/// still compiles the formulas, but drops them at once, so peak memory stays one compiled
+/// definition instead of 32. Evaluating such a pin fails closed as `internal_error`.
+pub(crate) fn validate_for_write(raw: RawPin) -> Result<ImmutablePin, AppError> {
+    validated(raw, true)
+}
+
+fn validated(raw: RawPin, write_only: bool) -> Result<ImmutablePin, AppError> {
     let (data, formulas) = admission::validate_compiled(raw.content.as_bytes())
         .map_err(|_| AppError::Invalid("Corrupt immutable definition."))?;
+    let formulas = formulas.filter(|_| !write_only);
     if raw.version <= 0
         || data.content != raw.content
         || data.hash != raw.hash
@@ -58,6 +73,7 @@ pub(crate) fn validate(raw: RawPin) -> Result<ImmutablePin, AppError> {
         data,
         validator,
         formulas,
+        write_only,
     })
 }
 
@@ -147,6 +163,12 @@ impl ImmutablePin {
         &self,
         values: &serde_json::Value,
     ) -> Option<Result<formula::Evaluation, formula::InputError>> {
+        if self.write_only {
+            return Some(Err(formula::InputError {
+                code: formula::Code::InternalError,
+                path: String::new(),
+            }));
+        }
         let compiled = self.formulas.as_ref()?;
         let mut hidden = super::formula_admission::undeclared_inputs(&self.data.definition)
             .filter(|id| values.get(*id).is_some())

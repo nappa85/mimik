@@ -561,3 +561,23 @@ fn hyphenated_unreferenced_fields_do_not_block_evaluation() {
     derived["pace"] = 5.into();
     assert_eq!(pin.evaluate(&derived).unwrap().unwrap_err().path, "/pace");
 }
+
+/// Freezing validates up to 32 pins at once and never evaluates: write-only pins drop the
+/// compiled formulas, and evaluating one fails closed instead of reading as formula-free.
+#[test]
+fn write_only_pins_carry_no_compiled_formulas_and_fail_closed() {
+    let admitted = admit(&example()).unwrap();
+    let pin = private_pin::validate_for_write(private_pin::RawPin {
+        id: 1,
+        version: 1,
+        game: "synthetic-game".into(),
+        edition: "first".into(),
+        content: admitted.content,
+        hash: admitted.hash,
+    })
+    .unwrap_or_else(|_| panic!("write-only pin rejected"));
+    assert!(pin.formulas().is_none());
+    pin.validate_values(&sheet_values()).unwrap();
+    let refused = pin.evaluate(&sheet_values()).unwrap().unwrap_err();
+    assert_eq!(refused.code, super::formula::Code::InternalError);
+}

@@ -224,7 +224,8 @@ impl Store {
             let pins = raw
                 .into_iter()
                 .map(|raw| {
-                    crate::definitions::private_pin::validate(raw).map(|pin| (pin.raw.id, pin))
+                    crate::definitions::private_pin::validate_for_write(raw)
+                        .map(|pin| (pin.raw.id, pin))
                 })
                 .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
             Ok::<_, AppError>((pins, permit))

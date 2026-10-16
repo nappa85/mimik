@@ -1115,3 +1115,37 @@ fn preview_rejects_bad_input_on_either_side() {
         expected
     );
 }
+
+/// Report-only sizing of the largest admitted definition by expression nodes: the 256 KiB
+/// envelope admits about 240 formulas of 1,024 bytes; a balanced sum of 256 literals is the
+/// densest admitted shape (511 nodes in 1,021 bytes, depth 9).
+#[test]
+fn largest_admitted_definition_ast_size_report() {
+    fn balanced(leaves: usize) -> String {
+        if leaves == 1 {
+            "1".into()
+        } else {
+            let left = leaves / 2;
+            format!("({}+{})", balanced(left), balanced(leaves - left))
+        }
+    }
+    let expr = balanced(256);
+    assert!(expr.len() <= MAX_SOURCE_BYTES, "{}", expr.len());
+    let mut spec = basic();
+    for index in 0..240 {
+        spec.derived.push(DerivedSpec {
+            id: format!("d{index}"),
+            ty: ValueType::Int,
+            expr: expr.clone(),
+        });
+    }
+    let compiled = Compiled::new(&spec).unwrap();
+    println!(
+        "densest admitted definition (report-only): {} formulas, {} expression nodes, \
+         size_of::<IdedExpr>() = {} bytes, cost {}",
+        compiled.derived_order().len(),
+        compiled.node_count(),
+        std::mem::size_of::<cel::IdedExpr>(),
+        compiled.cost()
+    );
+}
