@@ -981,7 +981,13 @@ Recorded by the coordinator's decision instead of further fixes; each with its m
 Added after the PC shut down at 18:52 on 2026-10-16 during the candidate screen (MiniCPM5-2B
 arm). The shutdown was orderly (docker got SIGTERM at 18:51:53; the queue logged
 `queue_stopped signal 15`); the cause is unknown and overheating is suspected. No unattended
-GPU run starts without this guard.
+GPU run starts without this guard. The interrupted runner's cleanup could not list
+containers while docker was shutting down (`cleanup_verified=false`, `failure=cleanup` in the
+MiniCPM5-2B attempt); its exited server and harness containers and the network survived the
+reboot. Their logs were saved beside that attempt as `postmortem-srv.log` and
+`postmortem-harness.log`, then the owned objects were removed through the reconcile path
+(`toolloop_ops.Docker().cleanup()`, ok). The server log ends with an orderly
+`cleaning up before exit`.
 
 - **Sensors** (`toolloop_ops.read_sensors`): `/sys/class/hwmon/*`, found by each chip's
   `name` file, never by hwmon index (it can change across boots); keys are
@@ -1016,7 +1022,11 @@ GPU run starts without this guard.
   `ThermalQueueTests` (sustained stop, cooldown and whole-arm rerun, short spike, crit,
   disappearing GPU sensor, two strikes, unreadable before launch, queue-file limits),
   `ThermalWatchdogTests` (hard limit, below it, read error) and a runner provenance test.
-  Failing first: all red before the sampler and the guard existed.
+  Failing first: all red before the sampler and the guard existed. Mutation checks (each
+  killed): no sustain window; no crit check; a missing GPU sensor read as cool; the cooldown
+  accepting unreadable samples; no cooldown cap; no thermal sampling in the attempt; no
+  two-strike stop (the test then never ends: killed by its timeout); no cooldown after a stop;
+  no pre-launch check; no watchdog hard limit.
 
 ## Limitations
 
