@@ -1317,9 +1317,11 @@ class OrderAndMergeTests(Base):
             "pack_hashes": {"a": "1"},
             "formula_engine": {"cli_sha256": "c"},
             "model_sha256": "m1",
+            "planned_episodes": 0,
         }
         base.update(header)
-        path.write_text(json.dumps(base) + "\n")
+        # v3 (H8): a ledger must be complete, so it ends with its run_summary.
+        path.write_text(json.dumps(base) + "\n" + json.dumps({"event": "run_summary"}) + "\n")
         return path
 
     def test_summarize_refuses_mixed_provenance(self):
@@ -1337,8 +1339,8 @@ class OrderAndMergeTests(Base):
                 with self.assertRaises(SystemExit, msg=change):
                     tl.load_ledgers([a, b])
             other_model = self.ledger(tmp, "c.jsonl", model_label="n", model_sha256="m9")
-            self.assertEqual(len(tl.load_ledgers([a, other_model])), 2)
-            self.assertEqual(len(tl.load_ledgers([a, self.ledger(tmp, "d.jsonl")])), 2)
+            self.assertEqual(len(tl.load_ledgers([a, other_model])), 4)
+            self.assertEqual(len(tl.load_ledgers([a, self.ledger(tmp, "d.jsonl")])), 4)
 
 
 class NeutralToolTextTests(unittest.TestCase):

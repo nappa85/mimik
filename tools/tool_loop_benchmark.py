@@ -1813,14 +1813,15 @@ def _rate(count, total):
 
 
 def summarize(rows: list[dict]) -> list[dict]:
-    """Per model_label x split. Denominators are planned episodes, including not_run,
+    """Per model_label x arm x split. Denominators are planned episodes, including not_run,
     except retrieval recall, which is over episodes that ran (not_run reported beside it)."""
     groups = {}
     for row in rows:
         if row.get("event") == "episode":
-            groups.setdefault((row["model_label"], row["split"]), []).append(row)
+            key = (row["model_label"], row.get("arm") or "", row["split"])
+            groups.setdefault(key, []).append(row)
     summaries = []
-    for (label, split), group in sorted(groups.items()):
+    for (label, arm, split), group in sorted(groups.items()):
         n = len(group)
         scores = [r["score"] for r in group]
         outcomes = {}
@@ -1844,6 +1845,7 @@ def summarize(rows: list[dict]) -> list[dict]:
         not_run = sum(r["outcome"] == "not_run" for r in group)
         summary = {
             "model_label": label,
+            "arm": arm or None,
             "split": split,
             "episodes": n,
             "unique_cases": len(cases),
@@ -1969,7 +1971,9 @@ def format_summary(summary: dict) -> str:
     recall = summary["retrieval_recall_mean"]
     bar = summary["bar"]
     lines = [
-        f"[{summary['model_label']} / {summary['split']}] episodes={summary['episodes']} "
+        f"[{summary['model_label']}"
+        + (f" / arm {summary['arm']}" if summary.get("arm") else "")
+        + f" / {summary['split']}] episodes={summary['episodes']} "
         f"cases={summary['unique_cases']} not_run={summary['not_run']}",
         f"  correct {r(summary['correct'])}; outcome {r(summary['outcome_correct'])}; "
         f"changes_exact {r(summary['changes_exact'])}; "
@@ -2174,38 +2178,89 @@ def interleave_by_outcome(cases: list[dict]) -> list[dict]:
     return [k[3] for k in sorted(keyed, key=lambda k: k[:3])]
 
 
-def _ledger_identity(header: dict) -> tuple:
+# Must agree across every merged ledger.
+GLOBAL_IDENTITY = (
+    "benchmark_version",
+    "pack_hashes",
+    "cli_sha256",
+    "system_prompt_hash",
+    "tools_hash",
+)
+# Must agree within one model_label x arm x split group (H8, plan §11 item 19).
+GROUP_IDENTITY = ("sampling", "max_turns", "ctx", "top_k", "flags", "model_sha256")
+
+
+def _ledger_identity(header: dict) -> dict:
     engine = header.get("formula_engine") or {}
-    return (
-        header.get("benchmark_version"),
-        json.dumps(header.get("pack_hashes"), sort_keys=True),
-        engine.get("cli_sha256"),
-    )
+    identity = {k: header.get(k) for k in GLOBAL_IDENTITY if k != "cli_sha256"}
+    identity["cli_sha256"] = engine.get("cli_sha256")
+    return identity
+
+
+def _differing(a: dict, b: dict) -> list:
+    return [
+        k for k in a if json.dumps(a[k], sort_keys=True) != json.dumps(b.get(k), sort_keys=True)
+    ]
 
 
 def load_ledgers(paths) -> list[dict]:
-    """Rows of several ledgers; refuses to merge incompatible or aborted runs."""
-    rows, identity, model_hashes = [], None, {}
+    """Rows of several ledgers; refuses incompatible, aborted, partial or duplicate runs.
+
+    Global identity (GLOBAL_IDENTITY) must match across all ledgers. Within one
+    model_label x arm x split group, GROUP_IDENTITY must match too, so two configurations
+    with the same label never merge silently; give them different --arm labels. A model
+    label always maps to one model_sha256.
+    """
+    rows, identity, groups, model_hashes, seen_files, seen_episodes = [], None, {}, {}, set(), {}
     for path in paths:
+        resolved = Path(path).resolve()
+        if resolved in seen_files:
+            raise SystemExit(f"{path}: duplicate ledger; refusing to merge it twice")
+        seen_files.add(resolved)
         with open(path, encoding="utf-8") as handle:
             file_rows = [json.loads(line) for line in handle if line.strip()]
         if not file_rows or file_rows[0].get("event") != "run_started":
             raise SystemExit(f"{path}: not a ledger (no run_started header)")
         if any(r.get("event") == "run_aborted" for r in file_rows):
             raise SystemExit(f"{path}: run was aborted; refusing to summarize it")
+        if file_rows[-1].get("event") != "run_summary":
+            raise SystemExit(f"{path}: incomplete ledger (no final run_summary); refusing it")
         header = file_rows[0]
+        episodes = [r for r in file_rows if r.get("event") == "episode"]
+        if header.get("planned_episodes") != len(episodes):
+            raise SystemExit(
+                f"{path}: partial ledger ({len(episodes)} episodes, "
+                f"{header.get('planned_episodes')} planned); refusing it"
+            )
         this = _ledger_identity(header)
         if identity is None:
             identity = this
         elif this != identity:
             raise SystemExit(
-                f"{path}: harness version, pack hash or formula CLI hash differs from the "
-                "first ledger; refusing to merge"
+                f"{path}: {', '.join(_differing(identity, this))} differs from the first ledger; "
+                "refusing to merge"
             )
         label = header.get("model_label")
         if label in model_hashes and model_hashes[label] != header.get("model_sha256"):
             raise SystemExit(f"{path}: model_sha256 differs for {label!r}; refusing to merge")
         model_hashes[label] = header.get("model_sha256")
+        group = (label, header.get("arm"), header.get("split"))
+        config = {k: header.get(k) for k in GROUP_IDENTITY}
+        if group in groups and groups[group] != config:
+            raise SystemExit(
+                f"{path}: {', '.join(_differing(groups[group], config))} differs within "
+                f"model_label {label!r}, arm {header.get('arm')!r}; give the runs different "
+                "--arm labels; refusing to merge"
+            )
+        groups[group] = config
+        for row in episodes:
+            key = (*group, row.get("case_id"), row.get("seed"))
+            if key in seen_episodes:
+                raise SystemExit(
+                    f"{path}: duplicate episode {row.get('case_id')} seed {row.get('seed')} "
+                    f"(also in {seen_episodes[key]}); refusing to merge"
+                )
+            seen_episodes[key] = path
         rows.extend(file_rows)
     return rows
 

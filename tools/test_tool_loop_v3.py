@@ -650,3 +650,202 @@ class CliV3Tests(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------- ledgers (H8, §11 item 19)
+
+HEADER = {
+    "event": "run_started",
+    "benchmark_version": 3,
+    "model_label": "m",
+    "split": "dev",
+    "pack_hashes": {"a": "1"},
+    "formula_engine": {"cli_sha256": "c"},
+    "model_sha256": "m1",
+    "system_prompt_hash": "s1",
+    "tools_hash": "t1",
+    "max_turns": 8,
+    "ctx": 16384,
+    "top_k": 5,
+    "sampling": {"temperature": 0.1, "max_tokens": 4096, "thinking": "off"},
+    "flags": {"nudge": True},
+}
+
+
+def episode_row(case_id, seed=17, arm=None, label="m", split="dev", correct=True):
+    return {
+        "event": "episode",
+        "model_label": label,
+        "arm": arm,
+        "split": split,
+        "case_id": case_id,
+        "seed": seed,
+        "outcome": "answer",
+        "score": {
+            "expected_outcome": "answer",
+            "has_gold": False,
+            "retrieval_recall": None,
+            "outcome_correct": True,
+            "changes_exact": None,
+            "wrong_proposal": False,
+            "answer_check": None,
+            "answer_values_substring_diagnostic": None,
+            "false_supported_reasons": [],
+            "citation_valid": None,
+            "citation_covers_gold": None,
+            "unreported_violation": False,
+            "correct": correct,
+            "false_supported": False,
+        },
+    }
+
+
+def write_ledger(tmp, name, episodes=None, summary=True, **header):
+    head = dict(HEADER, **header)
+    if episodes is None:
+        episodes = [
+            episode_row("c1", arm=head.get("arm"), label=head["model_label"], split=head["split"])
+        ]
+    head.setdefault("planned_episodes", len(episodes))
+    rows = [head, *episodes] + ([{"event": "run_summary", "summaries": []}] if summary else [])
+    path = Path(tmp) / name
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return path
+
+
+class LedgerIdentityTests(unittest.TestCase):
+    def refused(self, *paths):
+        with self.assertRaises(SystemExit) as raised:
+            tl.load_ledgers(paths)
+        return str(raised.exception)
+
+    def test_merge_refused_same_label_different_sampling(self):
+        """v2: identity is version, pack and CLI only, so two arms with one label merged
+        silently (plan §1)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            a = write_ledger(tmp, "a.jsonl")
+            b = write_ledger(
+                tmp,
+                "b.jsonl",
+                sampling=dict(HEADER["sampling"], thinking="on"),
+                episodes=[episode_row("c2")],
+            )
+            self.assertIn("sampling", self.refused(a, b))
+
+    def test_each_identity_field_refuses_a_merge(self):
+        """§11 item 19: system_prompt_hash, tools_hash, max_turns, ctx, flags (and top_k,
+        model_sha256) must agree within a model_label x arm x split group."""
+        changes = {
+            "system_prompt_hash": "s2",
+            "tools_hash": "t2",
+            "max_turns": 12,
+            "ctx": 24576,
+            "flags": {"nudge": False},
+            "top_k": 3,
+            "model_sha256": "m2",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            a = write_ledger(tmp, "a.jsonl")
+            for n, (key, value) in enumerate(changes.items()):
+                b = write_ledger(tmp, f"b{n}.jsonl", episodes=[episode_row("c2")], **{key: value})
+                with self.subTest(key=key):
+                    self.assertIn(key, self.refused(a, b))
+
+    def test_prompt_and_tools_hashes_are_global(self):
+        """Different labels may differ in model and sampling, never in prompt or tools."""
+        with tempfile.TemporaryDirectory() as tmp:
+            a = write_ledger(tmp, "a.jsonl")
+            other = write_ledger(
+                tmp, "o.jsonl", model_label="n", model_sha256="m9", sampling={"thinking": "on"}
+            )
+            self.assertEqual(len(tl.load_ledgers([a, other])), 6)
+            for key in ("system_prompt_hash", "tools_hash"):
+                b = write_ledger(tmp, f"{key}.jsonl", model_label="n", **{key: "x"})
+                self.assertIn(key, self.refused(a, b))
+
+    def test_summary_groups_by_arm(self):
+        """v2: summaries group by (model_label, split) only, so arms D0 and D2 of one model
+        would be pooled."""
+        with tempfile.TemporaryDirectory() as tmp:
+            d0 = write_ledger(tmp, "d0.jsonl", arm="D0")
+            d2 = write_ledger(tmp, "d2.jsonl", arm="D2", max_turns=12)
+            rows = [r for r in tl.load_ledgers([d0, d2]) if r["event"] == "episode"]
+        summaries = tl.summarize(rows)
+        self.assertEqual(
+            [(s["model_label"], s["arm"]) for s in summaries], [("m", "D0"), ("m", "D2")]
+        )
+        self.assertTrue(all(s["episodes"] == 1 for s in summaries))
+        self.assertIn("D2", tl.format_summary(summaries[1]))
+
+    def test_partial_ledgers_rejected(self):
+        """Sol (§11 item 19): v2 summarized a ledger cut short by a crash."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cut = write_ledger(tmp, "cut.jsonl", summary=False)
+            self.assertIn("run_summary", self.refused(cut))
+            short = write_ledger(tmp, "short.jsonl", planned_episodes=2)
+            self.assertIn("planned", self.refused(short))
+
+    def test_duplicate_ledgers_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a = write_ledger(tmp, "a.jsonl")
+            self.assertIn("duplicate", self.refused(a, a))
+            copy = write_ledger(tmp, "copy.jsonl")  # same case and seed in the same group
+            self.assertIn("duplicate", self.refused(a, copy))
+            other_seed = write_ledger(tmp, "seed.jsonl", episodes=[episode_row("c1", seed=29)])
+            self.assertEqual(len(tl.load_ledgers([a, other_seed])), 6)
+
+
+class V2DifferentialTests(unittest.TestCase):
+    """§11 item 15: strict scoring is v2. Rescoring the v2 held-out ledgers must reproduce
+    every stored episode score and every v2 summary field exactly (153/70/46 for the 9B).
+
+    The ledgers live in the local, unpublished target/ tree; point MIMIK_V2_LEDGERS at
+    target/tool-loop-benchmark-20261016 (read-only). Without them this test is skipped.
+    """
+
+    def ledgers(self):
+        import os
+
+        root = os.environ.get("MIMIK_V2_LEDGERS")
+        paths = sorted(Path(root).glob("*/heldout-*/ledger-*.jsonl")) if root else []
+        if not paths:
+            self.skipTest(
+                "v2 ledgers absent: set MIMIK_V2_LEDGERS to target/tool-loop-benchmark-20261016"
+            )
+        return paths
+
+    def test_rescoring_v2_ledgers_is_byte_identical(self):
+        cases = {c["id"]: c for c in demo_cases("dev")}
+        headline = {}
+        for path in self.ledgers():
+            rows = tl.load_ledgers([path])
+            stored = rows[-1]["summaries"]
+            episodes = [r for r in rows if r["event"] == "episode"]
+            rescored = []
+            for row in episodes:
+                new = tl.score(cases[row["case_id"]], row)
+                self.assertEqual(new, row["score"], (path.name, row["case_id"], row["seed"]))
+                rescored.append(dict(row, score=new))
+            summaries = tl.summarize(rescored)
+            self.assertEqual(len(summaries), len(stored))
+            for new, old in zip(summaries, stored, strict=True):
+                for key in old:
+                    self.assertEqual(
+                        json.dumps(new[key], sort_keys=True),
+                        json.dumps(old[key], sort_keys=True),
+                        (path.name, key),
+                    )
+                headline[old["model_label"]] = (
+                    old["correct"]["count"],
+                    old["false_supported"]["count"],
+                    old["false_supported_at_risk"]["count"],
+                    old["false_supported_at_risk"]["of"],
+                )
+        self.assertEqual(headline.get("qwen3.5-9b-q4_k_m"), (153, 70, 46, 112))
+        self.assertEqual(headline.get("qwen3-4b-instruct-2507-q4_k_m"), (79, 58, 33, 112))
+
+    def test_v2_ledgers_still_merge_across_models(self):
+        paths = self.ledgers()
+        rows = [r for r in tl.load_ledgers(paths) if r["event"] == "episode"]
+        self.assertEqual(len(rows), 282 * len(paths))
+        self.assertEqual(len(tl.summarize(rows)), len(paths))
