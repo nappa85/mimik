@@ -28,7 +28,7 @@
    "id": "dev-002",
    "language": "en",
    "character": "wren-ash",
-   "request": "Swap my padded coat for the iron hauberk.",
+   "request": "Unequip my padded coat and equip the iron hauberk I already carry.",
    "gold_rule_ids": [
     "LR2-13",
     "LR2-15",
@@ -766,7 +766,7 @@
    "id": "ho-002",
    "language": "en",
    "character": "bram-holt",
-   "request": "Swap the ring shirt for the plate cuirass.",
+   "request": "Unequip my ring shirt and equip the plate cuirass I already carry.",
    "gold_rule_ids": [
     "LR2-13",
     "LR2-15",
@@ -2076,7 +2076,8 @@
    "request": "The Master rules this short rest restores no focus; apply it.",
    "gold_rule_ids": [
     "LR2-30",
-    "LR2-33"
+    "LR2-33",
+    "LR2-45"
    ],
    "tags": {
     "injection": "none"
@@ -2961,7 +2962,7 @@
    },
    "expected": {
     "outcome": "ask_rule",
-    "notes": "No rule covers buying or coin (LR2-1)."
+    "notes": "Prices, and how many rations an amount of coin buys, are not defined by any rule (LR2-1, LR2-45): ask for a ruling."
    }
   },
   {

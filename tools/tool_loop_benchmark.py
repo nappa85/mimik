@@ -2379,12 +2379,15 @@ def _note_path(word: str, names) -> str | None:
     return None
 
 
-def note_claims(text: str, names) -> list[tuple]:
+def note_claims(text: str, names, unresolved: list | None = None) -> list[tuple]:
     """("initial"|"final", path, value) claims stated in a gold note, in a fixed order:
     "Override <field> <value>[, ...]", "<field> a -> b" transitions, "Host derives ...".
     A field name in a "Host derives" item takes the value after its last "=", else its first
-    number or boolean, else true (a bare "down")."""
+    number or boolean, else true (a bare "down"). Claim-shaped tokens that name no known
+    field (a transition's word, or an identifier opening a "Host derives" item) are appended
+    to `unresolved` instead of being dropped silently."""
     claims = []
+    unresolved = [] if unresolved is None else unresolved
     for m in NOTE_OVERRIDE.finditer(text):
         for item in re.sub(r"\([^)]*\)", "", m.group(1)).split(","):
             parts = item.split()
@@ -2395,10 +2398,16 @@ def note_claims(text: str, names) -> list[tuple]:
         if path:
             claims.append(("initial", path, int(m.group(2))))
             claims.append(("final", path, int(m.group(3))))
+        else:
+            unresolved.append(m.group(1))
     for m in NOTE_DERIVES.finditer(text):
         for item in re.sub(r"\([^)]*\)", "", m.group(1)).split(","):
             parts = item.split()
-            if not parts or parts[0] not in names:
+            if not parts:
+                continue
+            if parts[0] not in names:
+                if re.fullmatch(r"[a-z_]+", parts[0]):
+                    unresolved.append(parts[0])
                 continue
             rest = " ".join(parts[1:])
             if "=" in rest:
@@ -2419,7 +2428,7 @@ def _state_value(values: dict, path: str):
 
 def notes_check(pack: Pack) -> dict:
     """Recompute every proposal's final state and compare the notes' stated values with it."""
-    mismatches, claims, cases, violated = [], 0, 0, []
+    mismatches, claims, cases, violated, unresolved = [], 0, 0, [], []
     names = set(pack.fields)
     for split, split_cases in pack.cases.items():
         for case in split_cases:
@@ -2432,7 +2441,9 @@ def notes_check(pack: Pack) -> dict:
             final = pack.formulas.derive(apply_changes(initial, changes))
             if pack.formulas.violations(final):
                 violated.append(case["id"])
-            found = note_claims(expected.get("notes", ""), names)
+            tokens = []
+            found = note_claims(expected.get("notes", ""), names, tokens)
+            unresolved += [{"case": case["id"], "token": token} for token in tokens]
             cases += bool(found)
             claims += len(found)
             for when, path, stated in found:
@@ -2453,8 +2464,76 @@ def notes_check(pack: Pack) -> dict:
         "cases_with_claims": cases,
         "claims": claims,
         "mismatches": mismatches,
+        "unresolved": unresolved,
         "violated_cases": violated,
     }
+
+
+# Oil check (round-2 review Sonnet N1): an independent computation, not read from the gold.
+# A proposal whose base state has the lamp lit, and whose request is a long rest (a two-watch
+# night, LR2-26/LR2-31) or states a number of watches, must burn max(0, oil - watches)
+# (LR2-33) and put the lamp out exactly when the oil reaches 0. A request that puts the lamp
+# out is exempt (no oil burns after that).
+NUMBER_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "un": 1,
+    "una": 1,
+    "uno": 1,
+    "due": 2,
+    "tre": 3,
+    "quattro": 4,
+    "cinque": 5,
+    "sei": 6,
+}
+STATED_WATCHES = re.compile(
+    r"\b(\d+|" + "|".join(NUMBER_WORDS) + r") (?:watch(?:es)?|veglie|veglia)\b", re.I
+)
+LONG_REST = re.compile(r"\blong rest\b|\briposo lungo\b", re.I)
+PUTS_LAMP_OUT = re.compile(r"\bput\b.*\bout\b|\bdouse|\bextinguish|\bsnuff|\bspegn", re.I)
+
+
+def watches_burned(request: str) -> int | None:
+    stated = STATED_WATCHES.search(request)
+    if stated:
+        word = stated.group(1).lower()
+        return int(word) if word.isdigit() else NUMBER_WORDS[word]
+    if LONG_REST.search(request):
+        return 2
+    return None
+
+
+def oil_check(pack: Pack) -> dict:
+    checked, mismatches = [], []
+    for split, split_cases in pack.cases.items():
+        for case in split_cases:
+            expected = case["expected"]
+            if expected["outcome"] != PROPOSAL or PUTS_LAMP_OUT.search(case["request"]):
+                continue
+            initial = pack.initial_state(case)["values"]
+            watches = watches_burned(case["request"])
+            if not initial.get("lamp_lit") or "lamp_oil" not in initial or watches is None:
+                continue
+            checked.append(case["id"])
+            final = apply_changes(initial, [pack_change_path(c) for c in expected["changes"]])
+            oil = max(0, initial["lamp_oil"] - watches)
+            want = {"lamp_oil": oil, "lamp_lit": oil > 0}
+            got = {k: final[k] for k in want}
+            if got != want:
+                mismatches.append(
+                    {
+                        "case": case["id"],
+                        "split": split,
+                        "watches": watches,
+                        "want": want,
+                        "got": got,
+                    }
+                )
+    return {"checked": checked, "mismatches": mismatches}
 
 
 # Offline estimate only: no tokenizer is bundled. JSON-heavy prompts tokenize at roughly 3-4
@@ -3142,6 +3221,7 @@ def _main(argv=None):
             counts = {split: len(cases) for split, cases in pack.cases.items()}
             audit, replay = offline_audit(pack, RuleIndex(pack.rules, args.top_k))
             notes = notes_check(pack)
+            oil = oil_check(pack)
             report = {
                 "rules": len(pack.rules),
                 "characters": len(pack.characters),
@@ -3150,12 +3230,14 @@ def _main(argv=None):
                 "prompt_audit": audit,
                 "expected_replay": replay,
                 "notes_check": notes,
+                "oil_check": oil,
             }
             print(json.dumps(report))
         finally:
             pack.close()
         failed = any(r["failed"] for r in replay.values())
-        return 1 if failed or notes["mismatches"] or notes["violated_cases"] else 0
+        notes_failed = notes["mismatches"] or notes["unresolved"] or notes["violated_cases"]
+        return 1 if failed or notes_failed or oil["mismatches"] else 0
     if not args.output or not args.model_label:
         raise SystemExit("--output and --model-label are required")
     if args.dry_run_expected and not args.dry_run:

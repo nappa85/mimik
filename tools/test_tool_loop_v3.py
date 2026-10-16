@@ -1208,6 +1208,15 @@ class ValidatePackAuditTests(CliMixin, Base):
             (mismatch["case"], mismatch["path"], mismatch["stated"]), ("swap-armor", "pace", 9)
         )
 
+    def test_notes_check_reports_unresolved_claim_tokens(self):
+        """Sonnet N4: a claim-shaped token naming no known field is reported, not dropped."""
+        unresolved = []
+        claims = tl.note_claims(
+            "lantern_oil 2 -> 1. Host derives speed 4, pace 5.", {"pace"}, unresolved
+        )
+        self.assertEqual(claims, [("final", "pace", 5)])
+        self.assertEqual(unresolved, ["lantern_oil", "speed"])
+
     def test_notes_check_parses_transitions_and_overrides(self):
         """Claims the check reads: "Override x N", "<field> a -> b" and "Host derives ..."."""
         claims = tl.note_claims(
@@ -1586,6 +1595,9 @@ def demo_case_values(case):
     return values
 
 
+CLAIM_COUNTS = (55, 144)  # (proposal cases with claims, claims) in the demo notes
+
+
 class PackRevision3Tests(unittest.TestCase):
     """Pack revision 3 (user decisions 2026-10-16, adjudication record)."""
 
@@ -1663,24 +1675,38 @@ class PackRevision3Tests(unittest.TestCase):
                 self.assertIn(phrase, conduct, (point, phrase))
         self.assertIn("question-only request", conduct)
 
-    def test_items_are_bookkeeping_and_never_drop_to_zero(self):
-        """User decision 2026-10-16 (reverses the acquisition rule): gaining or losing items is
-        bookkeeping, so dev-019 is a proposal raising a quantity. The change format cannot
-        remove an entry, so no gold or pending quantity change reaches 0 (review T1: overrides
-        are applied first)."""
-        raised = []
+    def test_item_changes_are_bookkeeping_on_existing_entries(self):
+        """Property over every dev and held-out case (round-2 review Sol RR1: no pinned ids).
+        Gaining or losing items is bookkeeping (user decision 2026-10-16), so a quantity may
+        rise or fall, but only in a proposal (or a pending proposal), only on an entry that
+        exists in the case's values (overrides applied, review T1), never to 0, and no change
+        creates or removes an entry: the change format has no such operation."""
+        definition = json.loads((DEMO / "definition.json").read_text(encoding="utf-8"))
+        collections = {c["name"] for c in definition["collections"]}
         for case in demo_cases("dev") + demo_cases("heldout"):
             values = demo_case_values(case)
             pending = (case.get("setup") or {}).get("pending_proposal") or {}
-            changes = (case["expected"].get("changes") or []) + (pending.get("changes") or [])
-            for change in changes:
-                if change.get("collection") != "equipment" or change["field"] != "quantity":
-                    continue
-                entry = next(e for e in values["equipment"] if e["id"] == change["entry_id"])
-                self.assertGreaterEqual(change["to"], 1, f"{case['id']}: {change}")
-                if change["to"] > entry["quantity"]:
-                    raised.append(case["id"])
-        self.assertEqual(raised, ["dev-019"])
+            sources = [
+                (case["expected"]["outcome"], case["expected"].get("changes") or []),
+                ("pending", pending.get("changes") or []),
+            ]
+            for source, changes in sources:
+                for change in changes:
+                    where = f"{case['id']} {source}: {change}"
+                    self.assertLessEqual(set(change), {"collection", "entry_id", "field", "to"})
+                    self.assertNotIn(change["field"], collections, where)
+                    if not change.get("collection"):
+                        continue
+                    ids = [e["id"] for e in values[change["collection"]]]
+                    self.assertIn(change["entry_id"], ids, where)
+                    if change["field"] != "quantity":
+                        continue
+                    self.assertIn(source, ("proposal", "pending"), where)
+                    self.assertIsInstance(change["to"], int, where)
+                    self.assertGreaterEqual(change["to"], 1, where)
+
+    def test_dev_019_pick_up_is_a_proposal(self):
+        """Regression for the reversed acquisition rule (dev only; held-out is not pinned)."""
         dev019 = next(c for c in demo_cases("dev") if c["id"] == "dev-019")
         self.assertEqual(dev019["expected"]["outcome"], "proposal")
         self.assertEqual(dev019["gold_rule_ids"], ["LR2-19", "LR2-20"])
@@ -1689,21 +1715,77 @@ class PackRevision3Tests(unittest.TestCase):
             [{"collection": "equipment", "entry_id": "flask-1", "field": "quantity", "to": 4}],
         )
 
+    def test_round_2_conduct_wording(self):
+        """Round-2 review: Sol RR2 (a rule-fixed duration applies without asking), Sonnet N2
+        (an explicit set beyond a limit is a conflict; only named rules resolve a limit), N3
+        (prices and coin need a ruling) and the plain "armor" convention in LR2-15."""
+        text = demo_rules()
+        conduct = text["LR2-45"]
+        self.assertIn(
+            "When a rule fixes the duration or the event that ends it, apply that rule "
+            "without asking",
+            conduct,
+        )
+        self.assertIn("that no rule fixes", conduct)
+        self.assertIn("A request to set a value beyond its limit", conduct)
+        for rule_id in ("LR2-5", "LR2-13", "LR2-14", "LR2-33", "LR2-34"):
+            self.assertIn(rule_id, conduct.split("A request to set a value", 1)[1].split("2.")[0])
+        self.assertIn("No rule sets prices or what coin buys", conduct)
+        self.assertIn('"armor" without naming an item means this sheet value', text["LR2-15"])
+
     def test_review_relabels(self):
         """Sol R1: ho-048 is a short rest (duration undefined, LR2-30) while Cass's lamp is
-        lit, so the oil burned is unknown: ask_rule. Sol R4: ho-003 says it swaps items already
-        carried. Sonnet R1: dev-034 is a long rest with the lamp left lit."""
+        lit, so the oil burned is unknown: ask_rule. Sol R4 and Sonnet N5: the equipment swaps
+        name items already carried. Sonnet R1: dev-034 is a long rest with the lamp left lit.
+        Sol RR3: ho-093 says prices and coin are undefined."""
         cases = {c["id"]: c for c in demo_cases("dev")}
         ho048 = cases["ho-048"]
         self.assertEqual(ho048["expected"]["outcome"], "ask_rule")
         self.assertNotIn("changes", ho048["expected"])
+        self.assertIn("LR2-45", ho048["gold_rule_ids"])
         self.assertTrue(demo_case_values(ho048)["lamp_lit"])
-        self.assertIn("already carry", cases["ho-003"]["request"])
-        self.assertEqual(cases["ho-003"]["expected"]["outcome"], "proposal")
+        for case_id in ("dev-002", "ho-002", "ho-003"):
+            self.assertIn("already carry", cases[case_id]["request"], case_id)
+            self.assertEqual(cases[case_id]["expected"]["outcome"], "proposal")
         dev034 = cases["dev-034"]
         self.assertTrue(demo_case_values(dev034)["lamp_lit"])
         self.assertIn({"field": "lamp_oil", "to": 0}, dev034["expected"]["changes"])
         self.assertIn({"field": "lamp_lit", "to": False}, dev034["expected"]["changes"])
+        notes = cases["ho-093"]["expected"]["notes"]
+        self.assertIn("Prices", notes)
+        self.assertIn("coin", notes)
+
+    def test_demo_oil_check(self):
+        """Sonnet N1: with the lamp lit and a long rest (2 watches) or stated watches, the gold
+        must burn max(0, oil - watches) and put the lamp out at 0, computed independently."""
+        pack = require_demo_cli(self)
+        try:
+            report = tl.oil_check(pack)
+        finally:
+            pack.close()
+        self.assertEqual(report["mismatches"], [])
+        self.assertEqual(report["checked"], ["dev-017", "ho-020", "dev-034"])
+
+    def test_oil_check_rejects_a_long_rest_that_forgets_the_oil(self):
+        """Mutation: dev-034 without its lamp_oil change replays as correct (lamp_lit false is
+        still valid) but the oil check rejects it."""
+        require_demo_cli(self).close()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "pack"
+            shutil.copytree(DEMO, root)
+
+            def drop_oil(cases):
+                case = next(c for c in cases if c["id"] == "dev-034")
+                changes = case["expected"]["changes"]
+                case["expected"]["changes"] = [c for c in changes if c["field"] != "lamp_oil"]
+
+            edit_cases(root, "dev", drop_oil)
+            pack = tl.Pack(root, engine_factory=lambda d: tl.CelCliEngine(d, CLI))
+            try:
+                report = tl.oil_check(pack)
+            finally:
+                pack.close()
+        self.assertEqual([m["case"] for m in report["mismatches"]], ["dev-034"])
 
     def test_gold_changes_touch_only_editable_fields(self):
         """Mechanical check over the demo pack's JSON (no CLI needed): no expected or pending
@@ -1767,9 +1849,9 @@ class PackRevision3Tests(unittest.TestCase):
             report = tl.notes_check(pack)
         finally:
             pack.close()
-        self.assertEqual(report["mismatches"], [])
-        self.assertGreaterEqual(report["cases_with_claims"], 50)
-        self.assertGreaterEqual(report["claims"], 100)
+        self.assertEqual((report["mismatches"], report["unresolved"]), ([], []))
+        # Sonnet N4: exact counts, so a note edit that stops being read shows up here.
+        self.assertEqual((report["cases_with_claims"], report["claims"]), CLAIM_COUNTS)
 
 
 class ReviewPackFactsTests(unittest.TestCase):

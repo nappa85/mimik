@@ -59,8 +59,8 @@ The top level is `{"encoding":1,"game_id":"lantern-reach-demo","edition_id":"dem
 - **Two values are named `armor`.** The sheet-level `armor` is derived: the total of the
   equipped outer armor and shield (LR2-15). An equipment entry's `armor` is that item's own
   value, a fixed stat (LR2-20). Neither can be set, so a request to set "my armor" to a
-  number is a `conflict` whichever is meant. In case requests and notes, "armor" alone
-  means the sheet-level value; an item's value is named with its item.
+  number is a `conflict` whichever is meant. "armor" alone means the sheet-level value; an
+  item's value is named with its item. The model sees this in LR2-15.
 - **Conditions:** a fixed four-entry collection, one entry per kind
   (`cond-bleeding`, `cond-weary`, `cond-chilled`, `cond-shaken`). Zero `stacks`
   means the condition is absent. This design keeps every condition change
@@ -140,8 +140,9 @@ Precedence, used to keep each case to one outcome:
    the requested action resolves, for example by capping a value, discarding an excess or
    unequipping a previous item (LR2-5, LR2-13, LR2-14, LR2-27, LR2-31, LR2-33, LR2-34).
    Then the request is legal and the outcome is a `proposal` that includes the change the
-   rule requires. Naming the legal alternative in the message is friendly but optional, and
-   it is never scored.
+   rule requires. An explicit "set X to N" beyond a limit is always a `conflict`; only the
+   rules named in LR2-45 item 1 resolve a limit. Naming the legal alternative in the
+   message is friendly but optional, and it is never scored.
 7. **item stats are fixed; items and supplies are bookkeeping** (model-visible in LR2-20 and
    LR2-45 items 2–3).
    - An equipment entry's `kind`, `weight`, `armor` and `category` are fixed by the item;
@@ -151,8 +152,8 @@ Precedence, used to keep each case to one outcome:
      2026-10-16, reversing the earlier "acquiring needs a rule"): picking up, finding,
      buying, receiving, dropping or giving away an item is a `proposal` that changes its
      entry's `quantity`. Finding rations or bandages is bookkeeping too, unless a rule
-     governs the source (LR2-29 for shared party stock). Pricing is still not covered, so a
-     question about what coin buys stays `ask_rule` (ho-084, ho-093).
+     governs the source (LR2-29 for shared party stock). No rule sets prices or what coin
+     buys, so those are `ask_rule` (ho-084, ho-093; LR2-45 item 2).
    - A stat or mechanic with no field: if a rule determines it, the outcome is `answer`,
      explaining what determines it, unless the player asks for a concrete rule-backed
      change, which is a `proposal`. Only when no rule covers it is the outcome `ask_rule`
@@ -308,9 +309,9 @@ run.** (Counts below are the 2026-10-15 state; for the v3 split see "Case counts
 
 Current sha256 of the pack files (pack revision 3):
 
-- `rules.md` 337429d0…acb2
+- `rules.md` 8a325e71…9fa4
 - `definition.json` 521ddb72…28e7
-- `cases-dev.json` ec6604ad…a629
+- `cases-dev.json` c10113c2…43ec
 - `cases-heldout.json` f77a7870…d10b (unchanged)
 
 A test checks these against the files; the hashes inside the changelog are historical.
@@ -347,10 +348,19 @@ A test checks these against the files; the hashes inside the changelog are histo
     - ho-003: request reworded to say both items are already carried, outcome unchanged;
     - dev-034 added (long rest with the lamp lit), so there are 175 dev cases;
     - ho-086 and ho-115: notes reworded to cite point 7.
-  - Checks: no expected or pending change names a non-editable field or drops a quantity
-    to 0. A new notes check (`--validate-pack` `notes_check`) recomputes every proposal
-    and compares the values its notes state with the engine; it covers stated values,
-    derived fields and constraints, not rule semantics.
+  - Checks: no expected or pending change names a non-editable field, creates or removes an
+    entry, or drops a quantity to 0 (a property over every case, held-out included). The
+    expected-outcome replay is **structural verification only**: it copies the gold. Two
+    independent checks run in `--validate-pack`:
+    - `notes_check` recomputes every proposal and compares the values its notes state with
+      the engine. Claim-shaped tokens naming no field fail it. It covers stated values,
+      derived fields and constraints, not rule semantics.
+    - `oil_check` recomputes the lamp's oil (max(0, oil − watches), out at 0) for a lit lamp
+      over a long rest or stated watches, from the request alone.
+  - Round-2 review: LR2-45 item 4 applies a rule-fixed duration without asking; item 1
+    names the rules that resolve a limit; item 2 says prices and coin need a ruling; LR2-15
+    states the plain "armor" convention; dev-002 and ho-002 now name items already carried;
+    ho-048 cites LR2-45; ho-093's note says prices and coin are undefined.
   - `tools/case-subsets/dev-screen-40.json` was regenerated from the 175 cases: subset hash
     `f46e0196…6eb8` (master `a8888d1d…6c78`); against master, ho-082 left the 40 and ho-048
     joined, and the outcome counts are unchanged.

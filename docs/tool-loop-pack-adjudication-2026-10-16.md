@@ -197,10 +197,12 @@ ask_rule 15, ask_fact 14, conflict 29, stale 8 and refuse 4 (at-risk 70, support
 
 | Case | Old outcome | New outcome | Reason |
 |---|---|---|---|
-| ho-048 | proposal | ask_rule | Sol R1, rule 8: LR2-30 leaves a short rest's duration undefined, and Cass's lamp is lit (LR2-33), so the oil burned cannot be computed; the Master's focus ruling is not sufficient. Changes removed; gold LR2-30, LR2-25 → LR2-30, LR2-33. |
+| ho-048 | proposal | ask_rule | Sol R1, rule 8: LR2-30 leaves a short rest's duration undefined, and Cass's lamp is lit (LR2-33), so the oil burned cannot be computed; the Master's focus ruling is not sufficient. Changes removed; gold LR2-30, LR2-25 → LR2-30, LR2-33, LR2-45 (LR2-45 added in round 2, Sonnet N6). |
 | dev-019 | proposal | proposal | Reverted to the master gold (changes and gold LR2-19, LR2-20) after the bookkeeping decision; the note cites LR2-45. |
 | dev-034 | — (new) | proposal | Sonnet R1: a long rest with the lamp lit (override) burns the two-watch night's 2 measures; the lamp empties, so `lamp_lit` becomes false (LR2-31, LR2-33). |
 | ho-003 | proposal | proposal | Sol R4: the request now says both items are already carried; changes unchanged. |
+| dev-002, ho-002 | proposal | proposal | Round-2 Sonnet N5: same rewording as ho-003; changes unchanged. |
+| ho-093 | ask_rule | ask_rule | Round-2 Sol RR3: the note says prices and coin-to-rations conversion are undefined (buying itself is bookkeeping). |
 | ho-115 | conflict | conflict | Notes only. Point 7: an item's `weight` is a fixed stat, so the request is a conflict for any value; the old note gave only the 0–5 range. |
 | ho-086 | ask_rule | ask_rule | Notes only. Point 7 sub-case: weapon damage has no field and no rule, so `ask_rule`; the note now cites point 7. |
 
@@ -243,3 +245,27 @@ Mechanical checks (helper level, `mimik-ci`, formula CLI mounted):
   bookkeeping (no quantity reaches 0; dev-019 raises one), the review relabels, the full
   replay and the notes check. The CLI-dependent tests fail instead of skipping when the CLI
   is missing, and skip only in the source package.
+
+### Round-2 review fixes (2026-10-16, review of `2b22ee5`)
+
+Sol REJECT and Sonnet APPROVE-with-fixes; the third reviewer was unavailable. All the items
+were narrow, and all were applied. No outcome changed.
+
+- **RR1:** the quantity test is now a property over dev and held-out, with no pinned ids. A
+  quantity may rise or fall only in a proposal or a pending proposal, only on an existing
+  entry, and never to 0. No change creates or removes an entry.
+- **RR2:** LR2-45 item 4 applies a rule-fixed duration or ending event without asking. It
+  asks for the elapsed time only when no rule fixes it, and asks for a ruling when the
+  rules leave a duration undefined.
+- **N2:** LR2-45 item 1 makes an explicit set beyond a limit a conflict and names the rules
+  that resolve a limit (LR2-5, LR2-13, LR2-14, LR2-33, LR2-34).
+- **N3:** LR2-45 item 2 says no rule sets prices or what coin buys, so those need a ruling.
+- **"armor" convention:** LR2-15 now says plain "armor" in a request is the sheet value.
+- **N1:** a new `oil_check` in `--validate-pack` independently computes max(0, oil −
+  watches) for a lit lamp over a long rest or stated watches. It checks dev-017, ho-020 and
+  dev-034, and a mutation of dev-034 without its oil change is rejected. The replay is
+  documented as structural only.
+- **N4:** `notes_check` fails on unresolved claim tokens. The demo counts are pinned at 55
+  proposal cases with 144 claims.
+- **N5, N6, RR3:** applied as listed in the relabel table.
+
