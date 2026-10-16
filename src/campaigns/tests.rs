@@ -23,7 +23,7 @@ mod administration_tests;
 #[path = "formula_tests.rs"]
 mod formula_tests;
 #[path = "list_tests.rs"]
-mod list_tests;
+pub(super) mod list_tests;
 #[path = "list_values_tests.rs"]
 mod list_values_tests;
 #[path = "material_tests.rs"]

@@ -30,6 +30,41 @@ pub(crate) struct SheetView {
     pub immutable: Option<ImmutablePin>,
     pub warning: String,
     pub editable: bool,
+    /// History pages only: the change summary against the previous revision (plan D8).
+    pub changes: Option<super::history_diff::Changes>,
+}
+
+/// The change summary of history revision `snapshot` against its validated predecessor.
+/// Revision N − 1 goes through the same decode, identity, pin and value checks as N; any
+/// failure degrades to "unavailable" and never fails the page (plan D8, N-C).
+fn changes(
+    snapshot: &PrivateSnapshot,
+    immutable: Option<&ImmutablePin>,
+    previous: Option<Result<snapshots::RawSnapshot, AppError>>,
+) -> super::history_diff::Changes {
+    use super::history_diff::{Changes, diff};
+    let Some(pin) = immutable else {
+        return Changes::Unavailable("Change summary unavailable for this sheet.");
+    };
+    let previous = match previous {
+        None => None,
+        Some(raw) => {
+            let checked = raw
+                .and_then(snapshots::RawSnapshot::decode)
+                .and_then(|previous| {
+                    match_pin(&previous, pin)?;
+                    pin.validate_values(&previous.data)?;
+                    Ok(previous)
+                });
+            match checked {
+                Ok(previous) => Some(previous),
+                Err(_) => {
+                    return Changes::Unavailable("Change summary unavailable for this revision.");
+                }
+            }
+        }
+    };
+    Changes::Summary(diff(previous.as_ref(), snapshot, pin.definition()))
 }
 
 #[cfg(test)]
@@ -95,13 +130,15 @@ impl Store {
         permit: OwnedSemaphorePermit,
     ) -> Result<(SheetView, OwnedSemaphorePermit), AppError> {
         let admitted_auth = auth.clone();
-        let (snapshot,raw,warning,editable,permit)=self.run_bounded_auth(move |db|{
+        let (snapshot,raw,warning,editable,previous,permit)=self.run_bounded_auth(move |db|{
             let tx=db.transaction()?;auth.recheck(&tx)?;snapshots::authorize_read(&tx,&auth,id)?;
             let snapshot=snapshots::raw_load(&tx,id,history)?;
+            // History pages also read revision N − 1 in the same transaction (plan D8).
+            let previous=history.filter(|revision|*revision>1).map(|revision|snapshots::raw_load(&tx,id,Some(revision-1)));
             let editable=if history.is_some(){false}else{match snapshots::authorize_edit(&tx,&auth,&snapshot.identity){Ok(())=>true,Err(AppError::NotFound)=>false,Err(error)=>return Err(error)}};
             let raw=if let Pin::Runtime{version_id,schema:1,..}=snapshot.identity.pin{Some(private_pin::load(&tx,version_id)?)}else{None};
             let warning=if !snapshots::supported(&snapshot.identity){"Unsupported immutable interpretation pin. Retained canonical data is read-only; it has not been reinterpreted.".into()}else if history.is_some(){"Historical revision: a retained read-only snapshot.".into()}else if snapshot.identity.state=="frozen"{"Frozen on departure/removal. Rejoining does not reactivate this sheet.".into()}else if !editable{"Read-only: active custody/current campaign grants and an enabled supervising Master are required to edit.".into()}else{String::new()};
-            auth.recheck(&tx)?;tx.commit()?;Ok((snapshot,raw,warning,editable,permit))
+            auth.recheck(&tx)?;tx.commit()?;Ok((snapshot,raw,warning,editable,previous,permit))
         }).await?;
         // Immutable definition decoding/compilation is outside the database mutex.
         let (view, permit) = tokio::task::spawn_blocking(move || {
@@ -115,12 +152,14 @@ impl Store {
             if let Some(hook) = AFTER_PRIVATE_VALIDATION.lock().unwrap().take() {
                 hook();
             }
+            let changes = history.map(|_| changes(&snapshot, immutable.as_ref(), previous));
             Ok::<_, AppError>((
                 SheetView {
                     snapshot,
                     immutable,
                     warning,
                     editable,
+                    changes,
                 },
                 permit,
             ))
@@ -191,6 +230,7 @@ impl Store {
                     immutable,
                     warning: String::new(),
                     editable: true,
+                    changes: None,
                 },
                 permit,
             ))

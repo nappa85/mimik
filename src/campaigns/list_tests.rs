@@ -21,7 +21,7 @@ fn list(id: &str, label: &str, properties: Vec<Value>) -> Value {
 
 /// A formula-free definition with a scalar and two lists: `equipment` (text, integer,
 /// optional integer, optional enum, boolean) and `tags` (one text property).
-pub(super) fn list_definition() -> Value {
+pub(crate) fn list_definition() -> Value {
     let mut kind = property("kind", "Kind", "enum", true);
     kind["options"] = json!([{"id": "light", "label": "Light"}, {"id": "heavy", "label": "Heavy"}]);
     let fields = vec![
@@ -1670,4 +1670,622 @@ async fn create_page_adds_rows_then_creates() {
         .map(|item| item["id"].as_str().unwrap())
         .collect();
     assert_eq!(ids, ["r1-1", "r1-2"]);
+}
+
+// ---- Step 5: history rows, change summary, derived values, escaping (plan D8, D9, D11) ----
+
+async fn history_page(setup: &Setup, revision: i64) -> String {
+    let (status, html) = setup
+        .get(&format!("/private-sheets/1/history/{revision}"))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "history {revision}: {}",
+        &html[..html.len().min(3000)]
+    );
+    html
+}
+
+fn summary_section(html: &str) -> Option<String> {
+    let page = scraper::Html::parse_document(html);
+    page.select(&selector("section#change-summary"))
+        .next()
+        .map(|section| section.html())
+}
+
+fn summary_lines(html: &str) -> Vec<String> {
+    let page = scraper::Html::parse_document(html);
+    page.select(&selector("section#change-summary ul > li"))
+        .map(|li| li.text().collect())
+        .collect()
+}
+
+#[tokio::test]
+async fn list_history_rows_have_stable_ids_and_no_ops() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    let created = abc(&setup).await;
+    edit(
+        &setup,
+        &created,
+        data(vec![item("r1-3", "C"), item("r1-1", "A")], vec![]),
+    )
+    .await
+    .unwrap();
+    for (revision, ids) in [(1, vec!["r1-1", "r1-2", "r1-3"]), (2, vec!["r1-3", "r1-1"])] {
+        let html = history_page(&setup, revision).await;
+        let page = scraper::Html::parse_document(&html);
+        let legends: Vec<String> = page
+            .select(&selector("fieldset.list-row > legend"))
+            .map(|legend| legend.text().collect())
+            .collect();
+        let want: Vec<String> = ids
+            .iter()
+            .enumerate()
+            .map(|(r, id)| format!("Row {} of {} · ID {id}", r + 1, ids.len()))
+            .collect();
+        assert_eq!(legends, want, "revision {revision}");
+        assert_eq!(
+            page.select(&selector("button")).count(),
+            0,
+            "no ops, no Save"
+        );
+        for control in page.select(&selector(
+            "fieldset.list-row select, fieldset.list-row input:not([type=hidden])",
+        )) {
+            assert!(
+                control.value().attr("disabled").is_some(),
+                "read-only history"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn decoder_bound_history_renders_read_only() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&integer_lists_definition(3)).await;
+    let mut snapshot = blank(&setup, 1).await;
+    snapshot.sheet_id = 1;
+    snapshot.data = integer_items(3);
+    write(&setup, 1, snapshot, "create").await.unwrap();
+    let html = history_page(&setup, 1).await;
+    let page = scraper::Html::parse_document(&html);
+    assert_eq!(page.select(&selector("fieldset.list-row")).count(), 3 * 256);
+    assert_eq!(
+        summary_lines(&html),
+        ["Sheet created with 768 rows in 3 lists."]
+    );
+}
+
+#[tokio::test]
+async fn history_page_shows_change_summary_for_revision_n_against_n_minus_1() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    let first = abc(&setup).await;
+    // Revision 2 removes C; revision 3 edits A's quantity and moves B to the top.
+    let mut second_data = first.data.clone();
+    second_data["equipment"].as_array_mut().unwrap().pop();
+    let second = edit(&setup, &first, second_data).await.unwrap();
+    let mut third_data = second.data.clone();
+    third_data["equipment"].as_array_mut().unwrap().swap(0, 1);
+    third_data["equipment"][1]["quantity"] = 7.into();
+    edit(&setup, &second, third_data).await.unwrap();
+    let html = history_page(&setup, 3).await;
+    assert_eq!(
+        summary_lines(&html),
+        [
+            "Row equipment/r1-1 of Equipment edited: Quantity equipment/r1-1/quantity.",
+            "Row equipment/r1-2 of Equipment moved.",
+        ],
+        "N against N − 1 only (C's removal belongs to revision 2)"
+    );
+    assert_eq!(
+        summary_lines(&history_page(&setup, 2).await),
+        ["Row equipment/r1-3 of Equipment removed."]
+    );
+    // DOM structure (plan N-G).
+    let page = scraper::Html::parse_document(&html);
+    let section = page
+        .select(&selector("section#change-summary"))
+        .next()
+        .expect("summary section");
+    assert_eq!(
+        section.value().attr("aria-labelledby"),
+        Some("change-summary-heading")
+    );
+    let heading = section
+        .select(&selector("h2#change-summary-heading"))
+        .next()
+        .unwrap();
+    assert_eq!(heading.text().collect::<String>(), "Changes in revision 3");
+    assert_eq!(section.select(&selector("ul")).count(), 1);
+    let codes: Vec<String> = section
+        .select(&selector("ul > li code"))
+        .map(|code| code.text().collect())
+        .collect();
+    assert_eq!(
+        codes,
+        [
+            "equipment/r1-1",
+            "equipment/r1-1/quantity",
+            "equipment/r1-2"
+        ]
+    );
+    let link = section.select(&selector("a")).next().unwrap();
+    assert_eq!(
+        link.value().attr("href"),
+        Some("/private-sheets/1/history/2")
+    );
+    // Revision 1 is a creation line; the current view has no summary.
+    assert_eq!(
+        summary_lines(&history_page(&setup, 1).await),
+        ["Sheet created with 3 rows in 2 lists."]
+    );
+    assert!(summary_section(&sheet_page(&setup).await).is_none());
+}
+
+/// Replaces revision `revision`'s stored snapshot, keeping its serialization order (tests
+/// only: the history is append-only, so the trigger is dropped and restored around the
+/// update). `corrupt` stores a hash that does not match the content.
+async fn tamper_history(
+    setup: &Setup,
+    revision: i64,
+    corrupt: bool,
+    edit: impl FnOnce(&mut PrivateSnapshot) + Send + 'static,
+) {
+    setup
+        .store
+        .run(move |db| {
+            let tx = db.transaction()?;
+            let content: String = tx.query_row(
+                "SELECT snapshot FROM private_sheet_history WHERE sheet_id=1 AND revision=?1",
+                [revision],
+                |r| r.get(0),
+            )?;
+            let mut snapshot: PrivateSnapshot = serde_json::from_str(&content)?;
+            edit(&mut snapshot);
+            let content = serde_json::to_string(&snapshot)?;
+            let hash = if corrupt {
+                "0".repeat(64)
+            } else {
+                snapshots::hash(content.as_bytes())
+            };
+            let trigger: String = tx.query_row(
+                "SELECT sql FROM sqlite_schema WHERE name='private_sheet_history_update'",
+                [],
+                |r| r.get(0),
+            )?;
+            tx.execute_batch("DROP TRIGGER private_sheet_history_update;")?;
+            tx.execute(
+                "UPDATE private_sheet_history SET snapshot=?1,hash=?2 WHERE sheet_id=1 AND revision=?3",
+                params![content, hash, revision],
+            )?;
+            tx.execute_batch(&trigger)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn change_summary_unavailable_for_native_unsupported_and_invalid_previous() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let unavailable_revision = ["Change summary unavailable for this revision."];
+    // A previous revision whose values fail the pin's validation.
+    let setup = list_setup(&list_definition()).await;
+    let first = abc(&setup).await;
+    let second = edit(&setup, &first, first.data.clone()).await.unwrap();
+    edit(&setup, &second, first.data.clone()).await.unwrap();
+    tamper_history(&setup, 1, false, |snapshot| {
+        snapshot.data["equipment"][0]["quantity"] = "not an integer".into();
+    })
+    .await;
+    let html = history_page(&setup, 2).await;
+    assert!(summary_lines(&html).is_empty());
+    assert!(
+        summary_section(&html)
+            .unwrap()
+            .contains(unavailable_revision[0]),
+        "invalid values in N − 1"
+    );
+    assert!(
+        html.contains("fieldset class=\"list-row\""),
+        "revision N still renders"
+    );
+    // A previous revision whose stored hash does not match its content. (A previous revision
+    // with another pin cannot sit under a valid revision N: the history view already refuses
+    // N then, so the pin check of N − 1 is defence in depth.)
+    tamper_history(&setup, 2, true, |_| {}).await;
+    let html = history_page(&setup, 3).await;
+    assert!(
+        summary_section(&html)
+            .unwrap()
+            .contains(unavailable_revision[0]),
+        "corrupt hash"
+    );
+    // Paired positive on the same sheet: revision 2 against an intact revision 1 is unavailable
+    // only because revision 1 was tampered above; a fresh sheet shows a summary.
+    let fresh = list_setup(&list_definition()).await;
+    let first = abc(&fresh).await;
+    edit(&fresh, &first, first.data.clone()).await.unwrap();
+    assert!(
+        summary_section(&history_page(&fresh, 2).await)
+            .unwrap()
+            .contains("No stored values changed."),
+        "no changes, but available"
+    );
+    // A native sheet.
+    let campaign = fresh
+        .store
+        .create_campaign(
+            fresh.auth[1].clone(),
+            "Native".into(),
+            "mork-borg".into(),
+            "it-2025".into(),
+        )
+        .await
+        .unwrap();
+    let mut native = super::native(campaign, 2);
+    native.sheet_id = 2;
+    super::insert_native(&fresh.store, fresh.auth[1].clone(), native).await;
+    let (status, html) = fresh.get("/private-sheets/2/history/1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        summary_section(&html)
+            .unwrap()
+            .contains("Change summary unavailable for this sheet."),
+        "native"
+    );
+}
+
+#[tokio::test]
+async fn change_summary_unavailable_for_an_unsupported_runtime_pin() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    abc(&setup).await;
+    setup
+        .store
+        .run(|db| {
+            let tx = db.transaction()?;
+            let (content, pin): (String, String) = tx.query_row(
+                "SELECT snapshot,pin FROM private_sheets WHERE id=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            let mut snapshot: PrivateSnapshot = serde_json::from_str(&content)?;
+            if let snapshots::Pin::Runtime { schema, .. } = &mut snapshot.pin {
+                *schema = 2;
+            }
+            let mut pin: snapshots::Pin = serde_json::from_str(&pin)?;
+            if let snapshots::Pin::Runtime { schema, .. } = &mut pin {
+                *schema = 2;
+            }
+            let content = serde_json::to_string(&snapshot)?;
+            let hash = snapshots::hash(content.as_bytes());
+            let triggers = ["private_sheets_update", "private_sheet_history_update"].map(|name| {
+                tx.query_row("SELECT sql FROM sqlite_schema WHERE name=?1", [name], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap()
+            });
+            tx.execute_batch(
+                "DROP TRIGGER private_sheets_update; DROP TRIGGER private_sheet_history_update;",
+            )?;
+            tx.execute(
+                "UPDATE private_sheets SET pin=?1,snapshot=?2,hash=?3",
+                params![serde_json::to_string(&pin)?, content, hash],
+            )?;
+            tx.execute(
+                "UPDATE private_sheet_history SET snapshot=?1,hash=?2",
+                params![content, hash],
+            )?;
+            for sql in triggers {
+                tx.execute_batch(&sql)?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let html = history_page(&setup, 1).await;
+    assert!(html.contains("Unsupported immutable interpretation pin"));
+    assert!(
+        summary_section(&html)
+            .unwrap()
+            .contains("Change summary unavailable for this sheet.")
+    );
+}
+
+/// `lists` lists of 32 integer properties whose labels are 100 `"` (the widest escape).
+fn quoted_lists_definition(lists: usize) -> Value {
+    let label = "\"".repeat(100);
+    let fields: Vec<Value> = (0..lists)
+        .map(|l| {
+            list(
+                &format!("l{l}_{}", "a".repeat(61)),
+                &label,
+                (0..32)
+                    .map(|p| {
+                        property(
+                            &format!("p{p:02}_{}", "b".repeat(12)),
+                            &label,
+                            "integer",
+                            false,
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
+    let ids: Vec<Value> = fields.iter().map(|field| field["id"].clone()).collect();
+    json!({
+        "contract_version": 1, "game_id": "synthetic-game", "edition_id": "first",
+        "definition_id": "quoted-lists", "title": "Quoted lists",
+        "sources": [{"source_id": 1, "pdf_sha256": "0".repeat(64), "roles": ["sheet"]}],
+        "fields": fields, "formula_profile": 1,
+        "groups": [{"id": "main", "label": "Main", "fields": ids, "column_hint": "main"}],
+    })
+}
+
+/// Plan D8 (N-E): 200 lines of at most 8 labels, one overflow line, and the section bound.
+pub(super) const SUMMARY_LINE_BYTES: usize = 8_192;
+pub(super) const SUMMARY_OVERFLOW_BYTES: usize = 32_768;
+pub(super) const SUMMARY_FIXED_BYTES: usize = 4_096;
+pub(super) const SUMMARY_BYTES: usize =
+    200 * SUMMARY_LINE_BYTES + SUMMARY_OVERFLOW_BYTES + SUMMARY_FIXED_BYTES;
+
+/// The raw bytes of the change-summary section as served.
+fn raw_summary(html: &str) -> &str {
+    let start = html
+        .find("<section class=\"panel\" id=\"change-summary\"")
+        .expect("summary section");
+    let end = start + html[start..].find("</section>").unwrap() + "</section>".len();
+    &html[start..end]
+}
+
+#[tokio::test]
+async fn change_summary_large_diff_is_bounded() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    assert_eq!(SUMMARY_BYTES, 1_675_264);
+    let definition = quoted_lists_definition(3);
+    let setup = list_setup(&definition).await;
+    let ids: Vec<String> = (0..3)
+        .map(|l| definition["fields"][l]["id"].as_str().unwrap().to_owned())
+        .collect();
+    let properties: Vec<String> = (0..32)
+        .map(|p| {
+            definition["fields"][0]["items"]["properties"][p]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    let rows = |revision: i64, value: i64| -> Vec<Value> {
+        (1..=256)
+            .map(|k| {
+                let mut item = json!({"id": format!("r{revision}-{k}")});
+                for (p, property) in properties.iter().enumerate() {
+                    // Property 0 never changes, so 31 of 32 change: an edit, not a reuse.
+                    item[property] = if p == 0 { 0.into() } else { value.into() };
+                }
+                item
+            })
+            .collect()
+    };
+    let mut first = blank(&setup, 1).await;
+    first.sheet_id = 1;
+    first.data =
+        json!({ids[0].clone(): rows(1, 0), ids[1].clone(): rows(1, 0), ids[2].clone(): rows(1, 0)});
+    let first = write(&setup, 1, first, "create").await.unwrap();
+    // Lists 0 and 1: every row edited; list 2: every row replaced.
+    let second =
+        json!({ids[0].clone(): rows(1, 1), ids[1].clone(): rows(1, 1), ids[2].clone(): rows(2, 0)});
+    edit(&setup, &first, second).await.unwrap();
+    let response = super::router_request(
+        &setup.app,
+        &setup.auth[1],
+        "/private-sheets/1/history/2",
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let lines = summary_lines(&html);
+    assert_eq!(lines.len(), 201, "200 lines and the overflow line");
+    let page = scraper::Html::parse_document(&html);
+    for li in page
+        .select(&selector("section#change-summary ul > li"))
+        .take(200)
+    {
+        assert_eq!(li.select(&selector("code")).count(), 9, "entry + 8 labels");
+        assert!(li.text().collect::<String>().ends_with(" and 23 more."));
+    }
+    let label = "\"".repeat(100);
+    let overflow = lines.last().unwrap();
+    assert_eq!(
+        overflow,
+        &format!(
+            "and 824 more changes. Totals: {label}: 0 added, 0 removed, 256 edited, 0 moved; \
+             {label}: 0 added, 0 removed, 256 edited, 0 moved; \
+             {label}: 256 added, 256 removed, 0 edited, 0 moved."
+        )
+    );
+    let raw = raw_summary(&html);
+    assert!(raw.len() <= SUMMARY_BYTES, "{} bytes", raw.len());
+    for line in raw.split("<li>").skip(1).take(200) {
+        assert!(line.len() <= SUMMARY_LINE_BYTES, "{} bytes", line.len());
+    }
+    let overflow_raw = raw.rsplit("<li>").next().unwrap();
+    assert!(overflow_raw.len() <= SUMMARY_OVERFLOW_BYTES);
+    assert!(
+        raw.contains(&"&#34;".repeat(100)),
+        "labels escaped at 5 bytes"
+    );
+}
+
+#[tokio::test]
+async fn derived_values_over_lists_update_after_save() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&formula_list_definition()).await;
+    abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    let derived = |html: &str| -> String {
+        scraper::Html::parse_document(html)
+            .select(&selector("dl.derived dd"))
+            .next()
+            .unwrap()
+            .text()
+            .collect()
+    };
+    assert_eq!(derived(&html), "3");
+    let mut form = submitted(&html);
+    set(&mut form, "row-1-0-1", "20");
+    assert_eq!(
+        setup.post("/private-sheets/1", form).await.0,
+        StatusCode::SEE_OTHER
+    );
+    let html = sheet_page(&setup).await;
+    assert_eq!(derived(&html), "22");
+    assert!(html.contains("Advisory checks: 1 violated"));
+    // History recomputes each revision's own result.
+    assert_eq!(derived(&history_page(&setup, 1).await), "3");
+}
+
+/// Labels carrying markup, and a multiline property for `</textarea>` payloads.
+fn hostile_definition() -> Value {
+    let mut kind = property("kind", "<script>Kind", "enum", true);
+    kind["options"] = json!([{"id": "a", "label": "<script>Option"}, {"id": "b", "label": "B"}]);
+    let fields = vec![
+        json!({"id": "label", "label": "Label", "control": "text", "nullable": false,
+               "mapping": mapped()}),
+        list(
+            "gear",
+            "<script>List",
+            vec![
+                property("name", "<script>Name", "text", false),
+                property("story", "<script>Story", "multiline", false),
+                kind,
+            ],
+        ),
+    ];
+    json!({
+        "contract_version": 1, "game_id": "synthetic-game", "edition_id": "first",
+        "definition_id": "hostile", "title": "Hostile",
+        "sources": [{"source_id": 1, "pdf_sha256": "0".repeat(64), "roles": ["sheet"]}],
+        "fields": fields, "formula_profile": 1,
+        "groups": [{"id": "main", "label": "Main", "fields": ["label", "gear"],
+                    "column_hint": "main"}],
+    })
+}
+
+/// No injected element, and every payload reads back verbatim from its own context.
+fn assert_inert(html: &str, context: &str, values: &[(&str, &str)]) {
+    let page = scraper::Html::parse_document(html);
+    for tag in ["script", "b", "i", "u"] {
+        assert_eq!(
+            page.select(&selector(tag)).count(),
+            0,
+            "{context}: <{tag}> injected"
+        );
+    }
+    let form = submitted_by(html, None);
+    for (key, want) in values {
+        assert_eq!(get(&form, key), *want, "{context}: {key}");
+    }
+}
+
+#[tokio::test]
+async fn list_payloads_escaped_in_context() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&hostile_definition()).await;
+    let text = "\"'><b>text</b>";
+    let story = "</textarea><script>alert(1)</script>";
+    let created = create(
+        &setup,
+        json!({"label": "x", "gear": [{"id": "r1-1", "name": text, "story": story}]}),
+    )
+    .await
+    .unwrap();
+    let saved = [("row-1-0-0", text), ("row-1-0-1", story)];
+    let view = sheet_page(&setup).await;
+    assert_inert(&view, "view", &saved);
+    assert!(view.contains("&#60;script&#62;List"), "list label escaped");
+    // Op page: a forged hidden ID, an invalid enum value and an invalid Set/Not set state are
+    // echoed in attribute values; the status message carries the list label.
+    let forged_id = "\"'><i>id</i>";
+    let forged_enum = "\"'><u>enum</u>";
+    let forged_state = "'\"><u>state</u>";
+    let mut form = clicked(&view, "add-1");
+    set(&mut form, "id-1-0", forged_id);
+    set(&mut form, "row-1-0-2", forged_enum);
+    set(&mut form, "set-1-0-2", forged_state);
+    let (status, op) = setup.post("/private-sheets/1", form.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let echoed = [
+        ("id-1-0", forged_id),
+        ("row-1-0-0", text),
+        ("row-1-0-1", story),
+        ("row-1-0-2", forged_enum),
+        ("set-1-0-2", forged_state),
+    ];
+    assert_inert(&op, "op", &echoed);
+    assert_eq!(
+        status_text(&op),
+        "Row added to <script>List. Not saved yet."
+    );
+    // 422: the same forged draft saved at the current revision.
+    let mut save = form.clone();
+    save.retain(|(key, _)| key != "op");
+    let (status, rejected) = setup.post("/private-sheets/1", save.clone()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_inert(&rejected, "422", &echoed);
+    // 409: the same draft after a competing write.
+    let second = edit(&setup, &created, created.data.clone()).await.unwrap();
+    let (status, conflict) = setup.post("/private-sheets/1", save).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_inert(&conflict, "409", &echoed);
+    // History and its change summary (labels carry markup).
+    let mut changed = second.data.clone();
+    changed["gear"][0]["name"] = "renamed".into();
+    edit(&setup, &second, changed).await.unwrap();
+    let history = history_page(&setup, 3).await;
+    let page = scraper::Html::parse_document(&history);
+    for tag in ["script", "b", "i", "u"] {
+        assert_eq!(page.select(&selector(tag)).count(), 0, "history: <{tag}>");
+    }
+    assert_eq!(
+        summary_lines(&history),
+        ["Row gear/r1-1 of <script>List edited: <script>Name gear/r1-1/name."]
+    );
+    let textarea: String = page
+        .select(&selector("textarea[name=\"row-1-0-1\"]"))
+        .next()
+        .unwrap()
+        .text()
+        .collect();
+    assert_eq!(textarea, story, "history textarea");
+    // Every formaction is the generated same-origin path plus #list-f.
+    for button in scraper::Html::parse_document(&view).select(&selector("button[formaction]")) {
+        assert_eq!(
+            button.value().attr("formaction"),
+            Some("/private-sheets/1#list-1")
+        );
+    }
 }
