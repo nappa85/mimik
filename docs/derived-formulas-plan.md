@@ -940,7 +940,7 @@ and list editing is M4.
   CLI); actionlint; `cargo audit`; `cargo about`.
 - No browser, package, unpacked or live-model checks were run.
 
-## 16. M3 implementation (2026-10-16, branch `derived-formulas`; independent review pending)
+## 16. M3 implementation (2026-10-16, branch `derived-formulas`; reviewed, fixes applied, re-review pending)
 
 Plan: [derived-formulas-m3-plan.md](derived-formulas-m3-plan.md), with its binding §10–§10d
 amendments. Commits are local only.
@@ -1007,24 +1007,77 @@ amendments. Commits are local only.
 - Release binary: 20,802,360 bytes vs 20,447,416 for master `60e88a6` built in the same
   container (+354,944 bytes, +1.7%). The 18,210,072 figure predates `cel`.
 
-**Verification (2026-10-16, `mimik-ci`/`mimik-browser` containers, `--cpus 2`)**
+**Verification after the review fixes (2026-10-16, revision `3708836`, rebased on master
+`2566040`, every container at `--cpus 2`)**
 
 - `cargo fmt --check`; strict Clippy (all + pedantic, `-D warnings`); `cargo test --locked
-  --all-targets --all-features`: 365 passed, 0 failed, 1 ignored (pre-existing
-  performance measurement), of which 218 library tests.
-- `cargo test --release --locked --lib formula`: 77 passed (timings above).
-- `formula_eval` example build; `source_fixture` generation; Ruff check and format;
-  tools unittest 259 OK (3 skipped); actionlint; `cargo audit --deny warnings` (322
-  crates); `cargo about generate --locked --fail`.
-- Release build, `cargo package` (run `--offline`: the gate container has no network)
-  with `verify_source_package.py`, `cargo vendor` and `package_release.py`; checksums,
-  unpack and binary equality; `smoke_release.py --auth` on the unpacked binary.
-- Offline Chromium gate (`containers/browser.Dockerfile`, CI flags) with the new formula
-  stage at 1280×720 and 390×844: passed. A negative control with a wrong expected derived
-  value failed as intended ("Derived value missing after save").
-- Offline rebuild of the delivered source with vendored dependencies and an empty
-  `CARGO_HOME`: passed (into the shared formula target directory, not a fresh one).
-- Not run: the LAN/proxy separate-client gate (`lan_smoke.py`).
+  --all-targets --all-features`: 369 passed, 0 failed, 1 ignored (the existing performance
+  measurement), of which 222 are library tests.
+- `cargo test --release --locked --lib formula`: 82 passed (timings above).
+- The `formula_eval` example build; `source_fixture` generation; Ruff check and format;
+  the tools unittest suite, 259 run (3 skipped); actionlint; `cargo audit --deny warnings`
+  (322 crates); `cargo about generate --locked --fail`.
+- Release build of 20,802,520 bytes (+355,104 against master `60e88a6`, +1.7%).
+- `cargo package --offline` (the gate containers have no network), then
+  `verify_source_package.py`, `cargo vendor` and `package_release.py`.
+- Artifact `BUILD.txt` revision `3708836a7484e5b0620a4f97730147a5168b0651`. SHA-256:
+  - `mimik-0.1.0-linux-x86_64.tar.gz`
+    `f2edc84928c346be665ccfaa253c89f3aa1329cb5e789db4a2d924cf87618609`
+  - `mimik-0.1.0-source.crate`
+    `cc36718e9e64f54e44bc135f8e42757282dc077056b2a7543d65aead3fe86a44`
+  - `mimik-0.1.0-dependency-sources.tar.gz`
+    `89942d18cfb867e1ab1300abc238aef575e6ea3927bf7d03e0dfbb59953b145c`
+- The checksums verified, the archive unpacked, and the unpacked binary equals the release
+  build. `smoke_release.py --auth` on the unpacked binary passed.
+- The offline Chromium gate (CI flags, 1280×720 and 390×844) with the formula stage
+  passed. Its image tools match the reviewed sources by hash.
+- The delivered source and vendored dependencies rebuilt offline with an empty `CARGO_HOME`
+  and a fresh target directory (`/target/formula-fresh`, removed afterwards): passed in
+  6 min 19 s. The rebuilt binary is not byte-identical to the shipped one; CI does not
+  require identity, and the release build is not reproducible across paths.
+- `tools/lan_smoke.py` passed on the same unpacked runtime and the matching unpacked
+  source/vendor: separate-client LAN HTTP, HTTPS proxy, a denied peer, and QR decoding at
+  both viewports. A local `docker` shim added `--cpus=2` to the one container the script
+  starts without a CPU limit (the QR decoder), for the machine schedule.
+- Not certified: physical phone/router setups, as the gate itself states.
+
+**Red→green record (review-ready)**
+
+Commands ran in `mimik-ci` with `--cpus 2`: `cargo test --locked --lib -- <filter>`.
+"Executed red" means the test ran and failed for the stated reason before the fix.
+"Compile red" means the API did not exist yet, so the only red state was a compile failure.
+"Guard" means the test passed when it was introduced and protects existing behaviour.
+Mutations were applied to the fixed code, run, and then reverted.
+
+| Test | Kind | Base or mutation | Actual failure | Fixed in |
+|---|---|---|---|---|
+| `formula_sheet_view_shows_derived_values_and_advisory_checks` | executed red | C1 tree with `web.rs` and the template stashed | "derived pace not rendered" | C1 (`b1c896b`) |
+| `derived_fields_render_without_form_names` | executed red | same | rendered names included `value-pace`…`value-echo` | C1 |
+| `failed_save_rerender_labels_the_saved_revision` | executed red | same | "section formula-results missing" | C1 |
+| `formula_text_is_escaped` | executed red | same | "view: escaped <script>alert(1)</script> absent" | C1 |
+| `history_recomputes_identically` | executed red | same | "section advisory-checks missing" | C1 |
+| `stored_valid_sheet_with_refused_input_shows_unavailable` | executed red | same | "section formula-results missing" | C1 |
+| `violating_save_succeeds_and_view_lists_violation` | executed red | same | summary line "Advisory checks: 1 violated…" absent | C1 |
+| `withdrawn_approval_still_evaluates_with_warning` | executed red | same | "derived pace not rendered" | C1 |
+| `submitted_derived_key_is_rejected_and_not_saved`, `viewing_never_writes`, 503-after-save | guard | same base | passed | C1 |
+| view-model tests (`campaigns::formulas`) | compile red, then mutation | `present` maps errors to values | 3 tests failed (tri-state, deadline, derived states) | C1 |
+| `pin_evaluates_formula_definitions_and_not_formula_free_ones`, pack tests | compile red, then mutation | `pin.evaluate` always `None` | all failed on `unwrap` of `None` | C1 |
+| `preview_*` (3), `failed_dependency_names_…` | executed red | stubs (`preview` empty, `failed_dependency` `None`) | assertion failures | C2 (`bd792f8`) |
+| `failed_dependency_names_…` | mutation | dependency-set order instead of `derived_order()` | `Some("b")` vs `Some("m")` | C2 |
+| `dependency_failed_names_the_dependency_by_label` | executed red | C1 view model | "a derived value it uses could not be computed" | C2 |
+| `hyphenated_unreferenced_fields_do_not_block_evaluation` (K40) | executed red | C2 | `pin.evaluate` returned `InputError` at `/hit-points` | C3 (`8f71120`) |
+| `create_page_never_evaluates_and_create_saves` | guard, then mutation | evaluate on the create page | "create: `{}` was evaluated" | create skip landed in C1 |
+| `failed_database_save_keeps_its_permit_for_the_rerender` (K39) | executed red | C3 | a concurrent request took the permit, so 503 and the draft was lost | C4 (`ad44dd0`) |
+| same, review fix F2 | mutation | kept permit dropped, `None` passed to `rejected_editor` | `[false]` vs `[true]`: "must reuse the rejected save's own permit" | `3708836` |
+| `rendered_form_round_trips` | mutation red | template renders derived fields as controls (the M2 bug) | POST of the parsed form gave 400, want 303 | fixed template since C1; test in `a19ac6f` |
+| `write_only_pins_carry_no_compiled_formulas_and_fail_closed` | compile red, then mutation | compiled formulas kept | assertion failed | `6b53743` |
+| `departure_and_removal_freeze_formula_sheets_with_write_only_pins` (F1) | mutation | `depart` uses `private_pin::validate` | `[true, true]` vs `[false, false]`: "departure pins carry compiled formulas" | `6b53743`; test in `3708836` |
+| `formula_free_pins_never_evaluate_even_when_write_only` (F3) | executed red | `6b53743` (write-only check first) | `evaluate` returned `Some` | `3708836` |
+| `undeclared_inputs_are_the_fields_missing_…` (F4) | guard, then mutation | predicate also excludes booleans | `["hit-points"]` vs `["hit-points", "x-y"]` | `3708836` |
+| `quote_payloads_stay_one_attribute_value` (R2) | guard, then mutation | input `value` rendered with `|safe` | "view: attribute injected" | `3708836` |
+| `formula_text_is_escaped`, saved-revision block (R2) | mutation | re-render block value with `|safe` | "re-render: raw script tag" | `3708836` |
+| `list_definitions_stay_drafts_until_editing_ships` (test 20) | executed red | gate on | `formula-evaluation-unsupported` | `81c4d01` |
+| browser formula stage | negative control | expected pace changed to `9` | "Derived value missing after save" | `81c4d01` |
 
 ## Appendix A: superseded custom-spec design (revision 1)
 
