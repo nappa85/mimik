@@ -10,18 +10,19 @@ def admit_execution(cutoff, remaining, free_bytes):
     return True
 
 
-def setup_remaining(global_cutoff, candidate_started, now=None):
+def setup_remaining(global_cutoff, candidate_started, now=None, cap_seconds=900):
     """A transport change must keep the original candidate start, not restart it."""
     now = time.time() if now is None else now
     if (
         any(
             isinstance(value, bool) or not math.isfinite(value)
-            for value in (global_cutoff, candidate_started, now)
+            for value in (global_cutoff, candidate_started, now, cap_seconds)
         )
         or candidate_started > now
+        or cap_seconds <= 0
     ):
         raise ValueError("Invalid setup clock")
-    remaining = min(global_cutoff, candidate_started + 900) - now
+    remaining = min(global_cutoff, candidate_started + cap_seconds) - now
     if remaining <= 0:
         raise ValueError("Shared candidate/global elapsed setup deadline exhausted")
     return remaining
