@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "name": "g0-qwen36-35b-a3b",
+  "description": "G0 load test of the 35B (plan §8, §11 item 27): one 3-case dev smoke per --n-cpu-moe candidate, descending from all 40 MoE layers; stops at the first candidate that fails or exceeds VRAM 7.5e9 B / swap growth 64 MiB. Then the 40-case dev screen at the G0 choice (lowest server s/token among qualified candidates; ties to the larger n-cpu-moe). PROPOSED candidate list: freeze it before the run (§11 item 27).",
+  "defaults": {
+    "seeds": "17",
+    "env": {
+      "CTX": 24576,
+      "MAX_TURNS": 8,
+      "MAX_TOKENS": 4096,
+      "THINKING": "off",
+      "TEMPERATURE": "0.1",
+      "TOP_P": "0.95",
+      "REQUEST_TIMEOUT": 600,
+      "HEALTH_WAIT": 1800
+    }
+  },
+  "g0": {"vram_max_bytes": 7500000000, "swap_growth_max_mib": 64, "deadline_seconds": 14400},
+  "preflight_case": "dev-001",
+  "quiet": true,
+  "max_consecutive_failures": 2,
+  "disk_checks": [
+    {"path": "/var/lib/docker", "min_free_gb": 10},
+    {"path": "/media/data", "min_free_gb": 10}
+  ],
+  "arms": [
+    {"id": "g0-moe40", "model": "qwen36-35b-a3b", "split": "smoke", "arm": "G0-moe40", "g0": true, "env": {"N_CPU_MOE": 40}},
+    {"id": "g0-moe36", "model": "qwen36-35b-a3b", "split": "smoke", "arm": "G0-moe36", "g0": true, "env": {"N_CPU_MOE": 36}},
+    {"id": "g0-moe32", "model": "qwen36-35b-a3b", "split": "smoke", "arm": "G0-moe32", "g0": true, "env": {"N_CPU_MOE": 32}},
+    {"id": "g0-moe28", "model": "qwen36-35b-a3b", "split": "smoke", "arm": "G0-moe28", "g0": true, "env": {"N_CPU_MOE": 28}},
+    {"id": "g0-moe24", "model": "qwen36-35b-a3b", "split": "smoke", "arm": "G0-moe24", "g0": true, "env": {"N_CPU_MOE": 24}},
+    {"id": "s40-qwen36-35b-a3b", "model": "qwen36-35b-a3b", "split": "dev", "arm": "S40-c0",
+     "cases_file": "tools/case-subsets/dev-screen-40.json", "n_cpu_moe_from_g0": true}
+  ]
+}
