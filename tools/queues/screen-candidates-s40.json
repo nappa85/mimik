@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "name": "screen-candidates-s40",
+  "description": "Same 40-case dev screen and C0 settings as screen-small-s40, for the downloaded small-model candidates (docs/small-model-candidates-2026-10-16.md), smallest first. Exploratory: never a verdict arm. LFM2.5 always thinks (thinking_effective recorded).",
+  "defaults": {
+    "split": "dev",
+    "seeds": "17",
+    "arm": "S40-c0",
+    "cases_file": "tools/case-subsets/dev-screen-40.json",
+    "env": {
+      "CTX": 24576,
+      "MAX_TURNS": 8,
+      "MAX_TOKENS": 4096,
+      "THINKING": "off",
+      "TEMPERATURE": "0.1",
+      "TOP_P": "0.95",
+      "NUDGE": 1,
+      "TURNS_REMAINING": 0,
+      "SEARCH_NOTES": 0,
+      "SANITIZE_ECHO": 1,
+      "PENDING_CURRENT": 1,
+      "UNTRUSTED": 0
+    }
+  },
+  "preflight_case": "dev-001",
+  "quiet": true,
+  "max_consecutive_failures": 2,
+  "disk_checks": [
+    {
+      "path": "/var/lib/docker",
+      "min_free_gb": 10
+    },
+    {
+      "path": "/media/data",
+      "min_free_gb": 10
+    }
+  ],
+  "arms": [
+    {
+      "id": "s40-minicpm5-2b",
+      "model": "minicpm5-2b"
+    },
+    {
+      "id": "s40-lfm25-2.6b",
+      "model": "lfm25-2.6b"
+    },
+    {
+      "id": "s40-granite42-3b",
+      "model": "granite42-3b"
+    },
+    {
+      "id": "s40-gemma4-e4b",
+      "model": "gemma4-e4b"
+    },
+    {
+      "id": "s40-lfm25-8b-a1b",
+      "model": "lfm25-8b-a1b"
+    }
+  ]
+}

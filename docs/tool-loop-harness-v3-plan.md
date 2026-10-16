@@ -477,7 +477,7 @@ against the code or artefacts. Where §1–§10 differ, this section wins.
 26. **Queue (all six).**
     - It lives in `tools/` and is reviewed, not under `target/` (Bun, DS).
     - It runs as an explicit state machine, with status taken from
-      `harness_exit`/provenance, not `$?`.
+      `main_exit`/provenance, not `$?` (the runner's key was `harness_exit` until 2026-10-16).
     - Non-interactive stdin, per-arm and per-session deadlines, and cleanup traps for both
       the server and the harness.
     - One retry only for pre-declared infrastructure failures. A completeness check

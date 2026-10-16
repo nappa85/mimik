@@ -2484,14 +2484,18 @@ def open_pack(args) -> Pack:
     return Pack(args.pack, engine_factory=lambda d: CelCliEngine(d, args.formula_cli))
 
 
-def run(args, model, out, clock=time.monotonic, pack=None) -> list[dict]:
+def run(args, model, out, clock=time.monotonic, pack=None, wall=time.time) -> list[dict]:
     if pack is None:
         pack = open_pack(args)
     index = RuleIndex(pack.rules, args.top_k)
     cases = pack.cases.get(args.split)
     if not cases:
         raise PackError(f"pack has no {args.split} cases")
+    subset = getattr(args, "case_subset_doc", None)
     case_filter = [c for c in (args.cases or "").split(",") if c]
+    if subset is not None:
+        check_case_subset(subset, pack, args.split)
+        case_filter = list(subset["case_ids"])
     if case_filter:
         known = {c["id"] for c in cases}
         unknown = [c for c in case_filter if c not in known]
@@ -2500,6 +2504,9 @@ def run(args, model, out, clock=time.monotonic, pack=None) -> list[dict]:
         cases = [c for c in cases if c["id"] in set(case_filter)]
     seeds = [int(s) for s in str(args.seeds).split(",")]
     ordered = interleave_by_outcome(cases)
+    if subset is not None:  # the subset keeps its own (interleaved) order
+        position = {case_id: n for n, case_id in enumerate(case_filter)}
+        ordered = sorted(cases, key=lambda c: position[c["id"]])
     jobs = [(seed, case) for seed in seeds for case in ordered]
     sampling = sampling_of(args)
     flags = flags_of(args)
@@ -2527,6 +2534,11 @@ def run(args, model, out, clock=time.monotonic, pack=None) -> list[dict]:
             "top_k": args.top_k,
             "sampling": sampling,
             "flags": flags,
+            "thinking_capability": getattr(args, "thinking_capability", "toggle"),
+            "thinking_effective": thinking_effective(
+                getattr(args, "thinking_capability", "toggle"), args.thinking
+            ),
+            "server": getattr(args, "server_config_doc", None),
             "length_rule": LENGTH_RULE,
             "visible_text_hashes": visible_text_hashes(),
             "pack_hashes": pack.hashes(),
@@ -2539,6 +2551,15 @@ def run(args, model, out, clock=time.monotonic, pack=None) -> list[dict]:
             "runner_provenance": dict(args.provenance or []),
             "case_order": [c["id"] for c in ordered],
             "case_filter": case_filter or None,
+            "deadline_epoch": getattr(args, "deadline_epoch", None),
+            "case_subset": None
+            if subset is None
+            else {
+                "name": subset["name"],
+                "rule": subset["rule"],
+                "size": len(subset["case_ids"]),
+                "sha256": subset["sha256"],
+            },
         }
     )
     deadline = None if not args.budget_seconds else clock() + args.budget_seconds
@@ -2559,7 +2580,7 @@ def run(args, model, out, clock=time.monotonic, pack=None) -> list[dict]:
         )
         print(f"RUN ABORTED: {reason}", file=sys.stderr, flush=True)
 
-    for seed, case in jobs:
+    for number, (seed, case) in enumerate(jobs, 1):
         base = {
             "event": "episode",
             "model_label": args.model_label,
@@ -2571,8 +2592,12 @@ def run(args, model, out, clock=time.monotonic, pack=None) -> list[dict]:
             "tags": copy.deepcopy(case.get("tags")),
             "seed": seed,
         }
+        stop_at = getattr(args, "deadline_epoch", None)
         if deadline is not None and clock() >= deadline:
             row = dict(base, outcome="not_run", error="run budget exhausted")
+        elif stop_at is not None and wall() >= stop_at:
+            # Absolute schedule cutoff (plan §11 item 26): no episode starts past it.
+            row = dict(base, outcome="not_run", error="schedule deadline reached")
         else:
             try:
                 episode = run_episode(
@@ -2586,12 +2611,15 @@ def run(args, model, out, clock=time.monotonic, pack=None) -> list[dict]:
         row["exposure"] = leniency_exposure(case, row, row["score"])
         rows.append(row)
         emit(row)
-        print(
-            f"{args.model_label} {case['id']} seed={seed}: outcome={row['outcome']} "
-            f"correct={row['score']['correct']} error={row.get('error')}",
-            file=sys.stderr,
-            flush=True,
-        )
+        if getattr(args, "quiet_progress", False):
+            # Held-out blindness (plan §11 item 3): no case id, outcome or correctness.
+            progress = f"{args.model_label} {args.arm or '-'} episode {number}/{len(jobs)}"
+        else:
+            progress = (
+                f"{args.model_label} {case['id']} seed={seed}: outcome={row['outcome']} "
+                f"correct={row['score']['correct']} error={row.get('error')}"
+            )
+        print(progress, file=sys.stderr, flush=True)
         if row["outcome"] == "error":
             consecutive_errors += 1
             health = getattr(model, "health", None)
@@ -2617,6 +2645,61 @@ def sampling_of(args) -> dict:
         "thinking": args.thinking,
         "cache_prompt": args.cache_prompt,
     }
+
+
+THINKING_CAPABILITIES = ("toggle", "always", "never")
+
+
+def thinking_effective(capability: str, requested: str) -> str:
+    """What the model actually does: "always" templates ignore enable_thinking (LFM2.5)."""
+    if capability == "always":
+        return "on"
+    if capability == "never":
+        return "off"
+    return "template_default" if requested == "default" else requested
+
+
+SUBSET_RULE = "interleave_by_outcome_prefix"
+
+
+def case_subset(cases: list[dict], size: int, name: str, split: str, source_sha256: str) -> dict:
+    """The first `size` cases of interleave_by_outcome: deterministic, outcome proportions kept."""
+    if not 1 <= size <= len(cases):
+        raise SystemExit(f"subset size must be 1..{len(cases)}")
+    ids = [c["id"] for c in interleave_by_outcome(cases)[:size]]
+    outcome = {c["id"]: c["expected"]["outcome"] for c in cases}
+    counts: dict[str, int] = {}
+    for case_id in ids:
+        counts[outcome[case_id]] = counts.get(outcome[case_id], 0) + 1
+    return {
+        "name": name,
+        "split": split,
+        "rule": SUBSET_RULE,
+        "source_cases_sha256": source_sha256,
+        "source_cases": len(cases),
+        "case_ids": ids,
+        "outcome_counts": dict(sorted(counts.items())),
+        "sha256": digest(ids),
+    }
+
+
+def check_case_subset(doc: dict, pack, split: str) -> None:
+    """Refuse a cases file whose hash, split, source pack file or derivation does not hold."""
+    ids = doc.get("case_ids")
+    if not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids):
+        raise PackError("--cases-file: case_ids must be a non-empty list of ids")
+    if doc.get("sha256") != digest(ids):
+        raise PackError("--cases-file: sha256 does not match its case_ids")
+    if doc.get("split") != split:
+        raise PackError(f"--cases-file: subset is for split {doc.get('split')!r}, not {split!r}")
+    if doc.get("rule") != SUBSET_RULE:
+        raise PackError(f"--cases-file: unknown rule {doc.get('rule')!r}")
+    source = pack.root / f"cases-{split}.json"
+    if doc.get("source_cases_sha256") != file_digest(source):
+        raise PackError(f"--cases-file: {source.name} changed since the subset was made")
+    expected = case_subset(pack.cases[split], len(ids), doc.get("name"), split, "")
+    if expected["case_ids"] != ids:
+        raise PackError("--cases-file: case_ids are not the interleave_by_outcome prefix")
 
 
 def flags_of(args) -> dict:
@@ -2671,8 +2754,12 @@ GROUP_IDENTITY = (
     "ctx",
     "top_k",
     "flags",
+    "thinking_capability",
+    "thinking_effective",
+    "server",
     "model_sha256",
     "case_filter",
+    "case_subset",
     "case_ids",
 )
 ROW_HEADER_FIELDS = ("model_label", "arm", "split")
@@ -2801,6 +2888,12 @@ def build_parser():
     p.add_argument("--tool-choice", choices=("auto", "required"), default="auto")
     p.add_argument("--thinking", choices=("off", "on", "default"), default="off")
     p.add_argument(
+        "--thinking-capability",
+        choices=THINKING_CAPABILITIES,
+        default="toggle",
+        help="model template: toggle (honours enable_thinking), always, never (registry)",
+    )
+    p.add_argument(
         "--cache-prompt",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -2830,6 +2923,11 @@ def build_parser():
         )
     p.add_argument("--request-timeout", type=float, default=300.0)
     p.add_argument("--budget-seconds", type=float, default=0, help="0 = no run budget")
+    p.add_argument(
+        "--deadline-epoch",
+        type=float,
+        help="absolute wall-clock time (epoch s): no episode starts at or after it",
+    )
     p.add_argument("--output", type=Path, help="new JSONL ledger (never overwritten)")
     p.add_argument("--dry-run", action="store_true", help="scripted fake model, no inference")
     p.add_argument("--dry-run-script", type=Path, help="JSON {encoding, scripts:{case_id:[turns]}}")
@@ -2844,6 +2942,23 @@ def build_parser():
         help="allow --dry-run-expected on the held-out split (writes gold into the ledger)",
     )
     p.add_argument("--cases", help="comma-separated case ids to run (default: whole split)")
+    p.add_argument("--cases-file", type=Path, help="hashed case subset (see --write-case-subset)")
+    p.add_argument(
+        "--write-case-subset",
+        type=int,
+        metavar="N",
+        help="write the first N cases of interleave_by_outcome for --split to --output and exit",
+    )
+    p.add_argument("--subset-name", help="name recorded in a --write-case-subset file")
+    p.add_argument(
+        "--quiet-progress",
+        action="store_true",
+        help="progress lines without case id, outcome or correctness (held-out blindness)",
+    )
+    p.add_argument(
+        "--server-config",
+        help='JSON {"image": ..., "args": [...]} of the served model, recorded in the header',
+    )
     p.add_argument("--model-sha256", help="sha256 of the served model file (runner-verified)")
     p.add_argument(
         "--provenance",
@@ -2858,6 +2973,23 @@ def build_parser():
         "--episodes-csv", type=Path, help="with --summarize: write a per-episode CSV (new file)"
     )
     return p
+
+
+def parse_server_config(text):
+    if text is None:
+        return None
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"--server-config is not JSON: {error}") from None
+    if (
+        not isinstance(doc, dict)
+        or not isinstance(doc.get("image"), str)
+        or not isinstance(doc.get("args"), list)
+        or not all(isinstance(a, str) for a in doc["args"])
+    ):
+        raise SystemExit('--server-config must be {"image": str, "args": [str, ...]}')
+    return doc
 
 
 def main(argv=None):
@@ -2881,6 +3013,17 @@ def _main(argv=None):
         return 0
     if not args.pack:
         raise SystemExit("--pack is required")
+    if args.write_case_subset is not None:
+        if not args.output:
+            raise SystemExit("--write-case-subset needs --output")
+        source = args.pack / f"cases-{args.split}.json"
+        cases = json.loads(source.read_text(encoding="utf-8"))["cases"]
+        name = args.subset_name or f"{args.split}-{args.write_case_subset}"
+        doc = case_subset(cases, args.write_case_subset, name, args.split, file_digest(source))
+        with args.output.open("x", encoding="utf-8") as out:
+            out.write(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+        print(json.dumps({"name": name, "size": len(doc["case_ids"]), "sha256": doc["sha256"]}))
+        return 0
     if args.validate_pack:
         pack = open_pack(args)
         try:
@@ -2911,6 +3054,14 @@ def _main(argv=None):
         raise SystemExit(f"--max-turns must be 1..{MAX_TURNS_CEILING}")
     if args.ctx is not None and args.ctx < 1:
         raise SystemExit("--ctx must be positive")
+    if args.thinking_capability == "never" and args.thinking == "on":
+        raise SystemExit("--thinking on for a model whose thinking capability is never")
+    args.server_config_doc = parse_server_config(args.server_config)
+    args.case_subset_doc = None
+    if args.cases_file:
+        if args.cases:
+            raise SystemExit("--cases and --cases-file are exclusive")
+        args.case_subset_doc = json.loads(args.cases_file.read_text(encoding="utf-8"))
     if args.dry_run:
         scripts = {}
         if args.dry_run_script:
@@ -2929,6 +3080,8 @@ def _main(argv=None):
         model = HttpModel(args.endpoint, args.model_label, sampling_of(args), args.request_timeout)
         pack = open_pack(args)
     try:
+        if args.case_subset_doc is not None:  # before the ledger file is created
+            check_case_subset(args.case_subset_doc, pack, args.split)
         with args.output.open("x", encoding="utf-8") as out:
             summaries = run(args, model, out, pack=pack)
     except FormulaInfraError as error:
