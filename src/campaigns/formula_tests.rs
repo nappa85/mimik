@@ -689,3 +689,96 @@ async fn failed_database_save_keeps_its_permit_for_the_rerender() {
     assert!(html.contains("No changes saved"));
     assert!(html.contains("Keep this draft"), "draft re-rendered");
 }
+
+fn unescape(text: &str) -> String {
+    [
+        ("&#60;", "<"),
+        ("&lt;", "<"),
+        ("&#62;", ">"),
+        ("&gt;", ">"),
+        ("&#34;", "\""),
+        ("&quot;", "\""),
+        ("&#39;", "'"),
+        ("&#38;", "&"),
+        ("&amp;", "&"),
+    ]
+    .iter()
+    .fold(text.to_owned(), |text, (entity, raw)| {
+        text.replace(entity, raw)
+    })
+}
+
+fn attribute(tag: &str, name: &str) -> Option<String> {
+    let start = tag.find(&format!(" {name}=\""))? + name.len() + 3;
+    Some(unescape(&tag[start..start + tag[start..].find('"')?]))
+}
+
+/// What a browser submits for the sheet form: every named control with its current value
+/// (a select's selected option, or its first one).
+fn submitted(html: &str) -> Vec<(String, String)> {
+    let form = &html[html.find("<form").unwrap()..html.find("</form>").unwrap()];
+    let mut pairs = Vec::new();
+    let mut rest = form;
+    while let Some(start) = rest.find('<') {
+        rest = &rest[start..];
+        let tag = &rest[..=rest.find('>').unwrap()];
+        let name = attribute(tag, "name");
+        if let Some(name) = name {
+            if tag.starts_with("<input") {
+                pairs.push((name, attribute(tag, "value").unwrap_or_default()));
+            } else if tag.starts_with("<textarea") {
+                let body = &rest[tag.len()..];
+                pairs.push((name, unescape(&body[..body.find("</textarea>").unwrap()])));
+            } else if tag.starts_with("<select") {
+                let body = &rest[tag.len()..rest.find("</select>").unwrap()];
+                let options: Vec<&str> = body
+                    .split("<option")
+                    .skip(1)
+                    .map(|option| &option[..option.find('>').unwrap()])
+                    .collect();
+                let chosen = options
+                    .iter()
+                    .find(|option| option.contains(" selected"))
+                    .or(options.first())
+                    .unwrap();
+                pairs.push((name, attribute(chosen, "value").unwrap_or_default()));
+            }
+        }
+        rest = &rest[1..];
+    }
+    pairs
+}
+
+/// The rendered form, posted back unchanged, is a valid full save: no derived field leaks
+/// into it as a control (the M2 latent bug rendered every derived field as `value-<id>`).
+#[tokio::test]
+async fn rendered_form_round_trips() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&formula_definition()).await;
+    setup.create().await;
+    let (_, data_before, _) = setup.stored().await;
+    let (_, html) = setup.get("/private-sheets/1").await;
+    let form = submitted(&html);
+    let (status, _) = setup.post("/private-sheets/1", form.clone()).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{form:?}");
+    assert_eq!(form.len(), 9, "{form:?}");
+    assert!(form.contains(&("value-label".into(), "<script>".into())));
+    let (revision, data, history) = setup.stored().await;
+    assert_eq!((revision, history), (2, 2));
+    assert_eq!(data, data_before);
+    // The create page round-trips into a first save too, once values are entered.
+    let (_, create) = setup.get(&setup.create_path()).await;
+    let mut form = submitted(&create);
+    for (key, value) in &mut form {
+        match key.as_str() {
+            "name" => *value = "Second".into(),
+            "value-vitality" => *value = "3".into(),
+            "value-kind" => *value = "odd".into(),
+            "null-luck" => *value = "unknown".into(),
+            _ => {}
+        }
+    }
+    let (status, _) = setup.post(&setup.create_path(), form).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+}
