@@ -828,6 +828,36 @@ class V2DifferentialTests(unittest.TestCase):
     target/tool-loop-benchmark-20261016 (read-only). Without them this test is skipped.
     """
 
+    V2_PACK_COMMIT = "2eee9ec"  # harness v2 pack; the v2 ledgers were scored against it
+
+    def v2_cases(self, path):
+        """The held-out cases the v2 ledgers were scored with, from git, checked against the
+        `cases-heldout.json` hash recorded in the ledger header. Pack revisions after v2
+        relabel cases (for example ho-048), so the current pack cannot rescore v2."""
+        import hashlib
+        import subprocess
+
+        header = json.loads(Path(path).read_text().splitlines()[0])
+        want = header["pack_hashes"]["cases-heldout.json"]
+        proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(DEMO.parents[1]),
+                "show",
+                f"{self.V2_PACK_COMMIT}:examples/tool-loop-demo/cases-heldout.json",
+            ],
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0:  # ledgers are present here, so missing history is an error
+            self.fail(
+                f"v2 ledgers present but `git show {self.V2_PACK_COMMIT}` failed: "
+                f"{proc.stderr.decode(errors='replace').strip()}"
+            )
+        self.assertEqual(hashlib.sha256(proc.stdout).hexdigest(), want, "v2 pack hash mismatch")
+        return {c["id"]: c for c in json.loads(proc.stdout)["cases"]}
+
     def ledgers(self):
         import os
 
@@ -840,9 +870,9 @@ class V2DifferentialTests(unittest.TestCase):
         return paths
 
     def test_rescoring_v2_ledgers_is_byte_identical(self):
-        cases = {c["id"]: c for c in demo_cases("dev")}
         headline = {}
         for path in self.ledgers():
+            cases = self.v2_cases(path)
             rows = tl.load_ledgers([path])
             stored = rows[-1]["summaries"]
             episodes = [r for r in rows if r["event"] == "episode"]
@@ -872,11 +902,11 @@ class V2DifferentialTests(unittest.TestCase):
     def test_leniency_exposure_on_v2_ledgers_matches_the_review(self):
         """Results correction 9: 17 of the 47 verified 9B answers are single-boolean, and
         ho-072 s17 passes with a stray int."""
-        cases = {c["id"]: c for c in demo_cases("dev")}
         for path in self.ledgers():
             rows = [r for r in tl.load_ledgers([path]) if r["event"] == "episode"]
             if rows[0]["model_label"] != "qwen3.5-9b-q4_k_m":
                 continue
+            cases = self.v2_cases(path)
             for row in rows:
                 row["exposure"] = tl.leniency_exposure(cases[row["case_id"]], row, row["score"])
             (summary,) = tl.summarize(rows)

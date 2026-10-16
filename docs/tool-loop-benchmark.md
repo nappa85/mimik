@@ -1092,3 +1092,10 @@ See the results doc's "Harness v2" section for the run details. In summary, on 2
 
 Self-check under the prototype tier. Independent review is required before results drive a
 product decision.
+
+**v2 differential tests and pack revisions (2026-10-16).** Pack revision 3 relabelled cases
+(for example ho-048), so the v2 ledgers are rescored against the **v2-era** cases loaded with
+`git show 2eee9ec:examples/tool-loop-demo/cases-heldout.json`. That file's sha256 must equal
+the `cases-heldout.json` hash recorded in each ledger header. With `MIMIK_V2_LEDGERS` mounted,
+missing git history is a test **failure**, not a skip. In a root container on the bind-mounted
+repo, run `git config --global --add safe.directory /w` before the suite.
