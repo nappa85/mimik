@@ -1,7 +1,7 @@
 # Tool-loop pack: blind ambiguity adjudication (2026-10-16)
 
-Status: **proposed, user veto pending; not applied** to the pack, and no dev case has been
-relabelled.
+Status: **user decisions recorded 2026-10-16 (see "User decisions" below); not yet applied** to
+the pack, and no dev case has been relabelled.
 
 - **Adjudicator:** a fresh subagent given only a copy of the pack: README, rules.md,
   definition.json and characters/. It had no access to the repo, v2 transcripts, results or
@@ -102,3 +102,27 @@ These lines continue the README "Precedence" list as items 6–8.
    on outcomes.
 4. Relabel the affected dev cases. Only then can the writer brief for the blind held-out set
    be extracted (§11 item 9).
+
+## User decisions (2026-10-16)
+
+The user's answers supersede the adjudicator's lines where they differ.
+
+- **Rule 6: accepted.** A request that breaks a rule is `conflict`. Naming a legal alternative
+  is friendly but optional, and never scored.
+- **Rule 7: reversed.** Item stats are normally **not** editable: players find better items
+  instead. The pack definition is to mark equipment stat fields (`armor`, `category`, `kind`,
+  `weight`) as non-editable, while `quantity`, `equipped` and `name` stay editable.
+  - A request to change an item's stat is `conflict`.
+  - For a stat with no field (for example weapon damage), the assistant looks up the rule
+    that derives it and answers with what determines it. It proposes only rule-backed changes
+    the player asks for, and asks for a ruling only when no rule covers it. In this pack no
+    rule defines weapon damage, so the outcome is `ask_rule`.
+  - Acquiring a better item means adding an entry. The pack has no item catalogue, so this
+    needs a rule; otherwise it is `ask_rule`.
+- **Rule 8: confirmed.** If time is part of the calculation, the player must state it, and no
+  default is assumed (`ask_fact`). If the rules leave the duration undefined, the outcome is
+  `ask_rule`.
+
+Applying these is a pack revision: definition editable flags, the README precedence, an
+LR2-20 wording change and dev relabels. It is done with the other v3 pack fixes before the
+blind writer brief is extracted.
