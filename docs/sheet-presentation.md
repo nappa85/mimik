@@ -13,6 +13,13 @@ The user selected recreating the original PDF sheet layout in **HTML/CSS**, avoi
 - Keep rule explanations adjacent to relevant fields or in accessible expandable details so reference content does not crowd the sheet.
 - htmx handles server-rendered edits on the native editor; no frontend framework is needed for the layout.
 - Runtime definition sheets (private campaign sheets) save with a full-page POST/redirect/GET. Their derived values and advisory checks are computed from the saved snapshot and update on save and reload; there is no live recompute while typing. Derived values are read-only text with a "Computed" label, never form controls, and their expressions and rule IDs sit in collapsed "How this is computed" disclosures. The native htmx editor is unchanged.
+- List fields on runtime sheets (M4) are server-rendered with no script: each list is a
+  fieldset of row fieldsets ("Row 2 of 5 · ID r1-2"), every control with its own label, an
+  explicit Set/Not set select for optional properties, and per-row Move up, Move down and
+  Remove buttons plus an Add button whose names include the row number. These buttons
+  re-render the unsaved draft (Save persists it); the button row wraps, targets are at least
+  24 × 24 CSS px, and rows stack without tables at 390 px. Reordering takes one round trip
+  per move. History revisions show the rows read-only with a change summary.
 - Build print styling separately: paginate long sections, repeat relevant headings, and avoid hiding overflow. Browser print/PDF output can be considered later; filling/exporting the publisher's original PDF is not required for the interactive editor.
 
 ## Source assets and verification

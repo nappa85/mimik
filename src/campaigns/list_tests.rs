@@ -2289,3 +2289,43 @@ async fn list_payloads_escaped_in_context() {
         );
     }
 }
+
+/// The unpacked-gate list fixture (`list-definition.json`) publishes, round-trips through
+/// draft operations and evaluates its list formulas, including one reading `item.id`.
+#[tokio::test]
+async fn source_fixture_list_definition_saves_and_evaluates() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let mut definition = crate::definitions::source_fixture::list_definition();
+    definition["sources"] =
+        json!([{"source_id": 1, "pdf_sha256": "0".repeat(64), "roles": ["sheet"]}]);
+    definition["fields"][0]["mapping"] = mapped();
+    let setup = list_setup(&definition).await;
+    let path = create_path(&setup);
+    let (_, page) = setup.get(&path).await;
+    let (_, page) = setup.post(&path, clicked(&page, "add-1")).await;
+    let (_, page) = setup.post(&path, clicked(&page, "add-1")).await;
+    let mut form = submitted(&page);
+    for (key, value) in [
+        ("name", "Fixture"),
+        ("value-name", "Fixture"),
+        ("row-1-0-0", "Rope"),
+        ("row-1-0-2", "2"),
+        ("row-1-0-3", "3"),
+        ("row-1-0-4", "false"),
+        ("row-1-1-0", "Torch"),
+        ("row-1-1-2", "1"),
+        ("row-1-1-3", "5"),
+        ("row-1-1-4", "true"),
+    ] {
+        set(&mut form, key, value);
+    }
+    assert_eq!(setup.post(&path, form).await.0, StatusCode::SEE_OTHER);
+    let html = sheet_page(&setup).await;
+    let derived: Vec<String> = scraper::Html::parse_document(&html)
+        .select(&selector("dl.derived dd"))
+        .map(|dd| dd.text().collect())
+        .collect();
+    assert_eq!(derived, ["11", "1"], "load 2*3 + 1*5 and r1-1 kept");
+    assert!(html.contains("Advisory checks: 1 violated"), "load 11 > 10");
+}

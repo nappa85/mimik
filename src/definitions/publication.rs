@@ -735,4 +735,4 @@ fn publish_version(
 
 #[cfg(test)]
 #[path = "publication_tests.rs"]
-mod tests;
+pub(super) mod tests;

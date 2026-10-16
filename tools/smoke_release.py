@@ -940,6 +940,24 @@ def publish_definition(binary, directory, definition, name):
     )
 
 
+def version_link(html, campaign, version_id):
+    """The create link of exactly `version_id`, never chosen by its position on the page."""
+    link = f"{campaign}/sheets/new?version={version_id}"
+    require(f'href="{link}"' in html, f"Published runtime version {version_id} missing")
+    return link
+
+
+def latest_version(directory, definition_id):
+    """The ID of the newest published version of `definition_id`."""
+    with sqlite3.connect(directory / "smoke.sqlite3") as db:
+        row = db.execute(
+            "SELECT id FROM definition_versions WHERE definition_id=? ORDER BY version DESC LIMIT 1",
+            (definition_id,),
+        ).fetchone()
+    require(row is not None, f"No published version of {definition_id}")
+    return row[0]
+
+
 def prepare_workspace_materials(binary, directory, fixture):
     """Original synthetic fixtures only; no real manual/model approval.
 
@@ -1127,9 +1145,9 @@ def smoke_workspace(binary, directory, cookie, player, passwords):
         edition_id="first",
     )
     html = auth_request(generic, cookie=cookie)[2]
-    versions = re.findall(r'href="(' + re.escape(generic) + r'/sheets/new\?version=\d+)"', html)
-    require(versions, "Current published runtime capability missing")
-    action, generic_form, _ = workspace_form(versions[-1], cookie)
+    generic_version = latest_version(directory, "sheet")
+    print(f"Generic runtime sheet uses published version ID {generic_version} (definition 'sheet')")
+    action, generic_form, _ = workspace_form(version_link(html, generic, generic_version), cookie)
     generic_sheet = workspace_submit(
         cookie,
         action,

@@ -11,6 +11,8 @@ mod formula_admission_tests;
 mod formula_pack_tests;
 pub(crate) mod private_pin;
 mod publication;
+#[cfg(test)]
+pub(crate) use publication::tests::fixture as source_fixture;
 mod store;
 #[cfg(test)]
 pub(crate) use publication::publish_unshipped_for_tests;

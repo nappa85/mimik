@@ -7,7 +7,13 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from smoke_release import FormFields, registry_cli, require_secret_free, smoke_owner_development
+from smoke_release import (
+    FormFields,
+    registry_cli,
+    require_secret_free,
+    smoke_owner_development,
+    version_link,
+)
 
 
 class PublicationFailureTests(unittest.TestCase):
@@ -177,6 +183,29 @@ class WorkspaceFormTests(unittest.TestCase):
             parser.forms["/private-sheets/1"],
             {"null-flag": "unknown", "value-flag": "false", "value-choice": "b"},
         )
+
+
+class VersionSelectionTests(unittest.TestCase):
+    PAGE = (
+        '<a href="/campaigns/4/sheets/new?version=1">Generic v1</a>'
+        '<a href="/campaigns/4/sheets/new?version=2">Generic v2</a>'
+        '<a href="/campaigns/4/sheets/new?version=3">List definition</a>'
+    )
+
+    def test_create_link_is_chosen_by_version_id_not_position(self):
+        self.assertEqual(
+            version_link(self.PAGE, "/campaigns/4", 2), "/campaigns/4/sheets/new?version=2"
+        )
+        self.assertEqual(
+            version_link(self.PAGE, "/campaigns/4", 3), "/campaigns/4/sheets/new?version=3"
+        )
+
+    def test_missing_or_prefix_version_is_refused(self):
+        for version in (4, 0):
+            with self.assertRaisesRegex(AssertionError, "Published runtime version"):
+                version_link(self.PAGE, "/campaigns/4", version)
+        with self.assertRaisesRegex(AssertionError, "Published runtime version"):
+            version_link('<a href="/campaigns/4/sheets/new?version=21">', "/campaigns/4", 2)
 
 
 if __name__ == "__main__":
