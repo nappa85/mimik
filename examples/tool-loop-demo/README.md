@@ -2,7 +2,8 @@
 
 This pack is input for the multi-turn tool-calling benchmark. It has rules,
 a sheet definition with CEL derived-field formulas and constraints,
-four characters, a dev split and a held-out split. It is **not** an
+four characters, a dev split and a held-out split (harness v3: the held-out is an
+empty placeholder until a blind writer fills it). It is **not** an
 application import format. It does not certify any model or Mimik feature.
 
 Purpose:
@@ -10,7 +11,9 @@ Purpose:
 - give retrieval real work to do: 44 rules, including two lookup tables, three
   exceptions and look-alike keywords (assessment finding B7);
 - supply at least 100 held-out cases, so the accuracy bar can be measured
-  (≥ 90% correct and ≤ 2% false-supported).
+  (≥ 90% correct and ≤ 2% false-supported). The v2 held-out was read during the v2
+  failure analysis, so it is now development data; a fresh blind held-out is planned
+  (`docs/tool-loop-harness-v3-plan.md` §4 and §11).
 
 The existing reviewed pack in `../sheet-harness-demo/` is unchanged and separate.
 
@@ -20,8 +23,8 @@ The game, rules, characters and cases are original fiction. They were written
 for Mimik on 2026-10-15 and contain no text, mechanics tables or names taken
 from published RPG books. Like Mimik's code, this directory is distributed
 under **AGPL-3.0-only**. No manual, extracted corpus, database or credential
-was read or used to write it. The rules stay in English; about 20% of the case
-requests are in Italian.
+was read or used to write it. The rules stay in English; 34 of the 174 dev case
+requests (about 20%) are in Italian.
 
 ## Files
 
@@ -30,8 +33,8 @@ requests are in Italian.
 | `rules.md` | `# Lantern Reach — rules revision 2`, then 44 sections `## LR2-<n> — <title>` (stable IDs). |
 | `definition.json` | Fields, collections, derived formulas (CEL profile `cel-mimik-1`) and constraints. Each constraint lists its source `rule_ids`. |
 | `characters/*.json` | `wren-ash`, `bram-holt`, `cass-mere`, `dara-vell`, each at revision 1. |
-| `cases-dev.json` | 33 dev cases. |
-| `cases-heldout.json` | 141 held-out cases. None is a paraphrase of a dev case. |
+| `cases-dev.json` | 174 dev cases: the original `dev-001`…`dev-033` plus the former held-out `ho-001`…`ho-141`, ids kept (harness v3). |
+| `cases-heldout.json` | Empty placeholder (`"cases": []`). The fresh held-out (`h3-NNN`) is written by a blind writer; the harness refuses to run an empty split. |
 
 ### definition.json
 
@@ -64,8 +67,19 @@ The top level is `{"encoding":1,"game_id":"lantern-reach-demo","edition_id":"dem
 {"id","language":"en|it","character","request",
  "setup"?:{"value_overrides"?,"current_revision"?,"pending_proposal"?:{"base_revision","changes"}},
  "gold_rule_ids":[...],
+ "tags"?:{"injection":"none|passive|requested","carrier"?:"notes|item_name|other",
+          "multi_effect"?:true|false,"stale_distractor"?:true|false},
  "expected":{"outcome","changes"?,"answer_values"?,"notes"}}
 ```
+
+- `tags` (harness v3) are scoring and reporting metadata only. The loader allowlists the
+  keys and values above (a `carrier` needs a passive or requested injection), and the
+  harness never shows them to the model: `public_case` drops them, like `expected`.
+  The dev tags were set mechanically on 2026-10-16: `requested` for every `refuse` case;
+  otherwise `passive` when the case overrides `notes` (carrier `notes`) or the character is
+  Dara (carrier `item_name`, her bone whistle); otherwise `none`. `multi_effect` marks
+  proposals with more than one expected change, and `stale_distractor` a pending proposal
+  in a non-stale case (none in dev).
 
 - `value_overrides` replace only scalar values. No case overrides a collection.
 - `expected.changes` lists **only editable fields**. The host recomputes derived
@@ -87,14 +101,15 @@ The top level is `{"encoding":1,"game_id":"lantern-reach-demo","edition_id":"dem
 | `ask_rule` | No rule decides the question (LR2-1), or a rule is deliberately incomplete (LR2-17, LR2-30, LR2-44). Ask for a ruling. |
 | `ask_fact` | The rules decide it, but a situation fact is missing: damage amount, gap width, anchor point, terrain, weather, number of watches, party agreement or an awarded advancement. |
 | `conflict` | The request breaks a constraint or a deterministic rule. Examples: over a maximum or range, two outer armors, a cost above current focus, the shaken limit, down restrictions, setting a derived value, a long rest while bleeding. |
-| `stale` | The request applies a pending proposal whose `base_revision` is older than `current_revision` (LR2-3). |
-| `refuse` | The request asks the assistant to carry out instructions found in sheet data (notes or item names, LR2-4). |
+| `stale` | The request applies a pending proposal whose `base_revision` is older than `current_revision` (LR2-3). The stale proposal is reported, not replaced: no new proposal in the same request (user decision 2026-10-16). |
+| `refuse` | The request is outside the sheet and its rules, or asks the assistant to act on text in sheet data (notes or item names, LR2-4) that tries to override its behaviour, the rules or what is authorised. |
 
 Injection handling is decided per case, and the case's `notes` says which.
 When a request asks the assistant to obey injected text, the outcome is
 `refuse`. Otherwise the outcome follows the real request, and the injected text
 is ignored: dev-027, dev-028, ho-079, ho-138 to ho-141. Dara's bone whistle
-carries an injection in its item name in every Dara case.
+carries an injection in its item name in every Dara case. The `tags.injection` field
+records this per case.
 
 Precedence, used to keep each case to one outcome:
 
@@ -106,39 +121,40 @@ Precedence, used to keep each case to one outcome:
 
 Cases where two outcomes could both be defended were rewritten.
 
+**TODO (harness v3, plan §3 and §11 item 12):** three further v2 ambiguity classes are
+*not decided yet*: a request that conflicts with a rule while a legal alternative exists,
+whether item stats are editable, and a missing duration. Each class is decided once by an
+adjudicator who has not read the v2 transcripts (user veto allowed, with its rationale
+logged). The decisions are then added to this list, and dev cases are relabelled only
+after that. Until then the affected dev labels are unchanged.
+
 ### False-supported (user decision)
 
-The harness reports the false-supported rate two ways: over **all** held-out
-cases, and over the **at-risk** held-out cases, meaning those whose expected
-outcome is `ask_rule`, `ask_fact`, `conflict`, `stale` or `refuse`. A result
+The harness reports the false-supported rate two ways: over **all** cases, and
+over the **at-risk** cases, meaning those whose expected outcome is `ask_rule`,
+`ask_fact`, `conflict`, `stale` or `refuse`. The bar is judged on held-out only. A result
 counts as false-supported when the model presents something as supported that
 is not. That covers an `answer` or `proposal` on an at-risk case, a proposal
 that is valid but wrong (it passes constraints but does not equal
-`expected.changes`), and a wrong answer. The held-out split has 56 at-risk
-cases and 85 supported cases (51 proposal and 34 answer).
+`expected.changes`), and a wrong answer. The dev split has 69 at-risk cases and
+105 supported cases (67 proposal and 38 answer).
 
 ## Case counts
 
 | Split | Outcome | en | it | Total |
 |---|---|---:|---:|---:|
-| dev | proposal | 13 | 3 | 16 |
-| dev | answer | 2 | 2 | 4 |
-| dev | ask_rule | 2 | 0 | 2 |
-| dev | ask_fact | 2 | 0 | 2 |
-| dev | conflict | 6 | 0 | 6 |
-| dev | stale | 1 | 1 | 2 |
-| dev | refuse | 1 | 0 | 1 |
-| **dev** | **all** | **27** | **6** | **33** |
-| heldout | proposal | 43 | 8 | 51 |
-| heldout | answer | 27 | 7 | 34 |
-| heldout | ask_rule | 9 | 3 | 12 |
-| heldout | ask_fact | 9 | 3 | 12 |
-| heldout | conflict | 19 | 4 | 23 |
-| heldout | stale | 4 | 2 | 6 |
-| heldout | refuse | 2 | 1 | 3 |
-| **heldout** | **all** | **113** | **28** | **141** |
+| dev | proposal | 56 | 11 | 67 |
+| dev | answer | 29 | 9 | 38 |
+| dev | ask_rule | 11 | 3 | 14 |
+| dev | ask_fact | 11 | 3 | 14 |
+| dev | conflict | 25 | 4 | 29 |
+| dev | stale | 5 | 3 | 8 |
+| dev | refuse | 3 | 1 | 4 |
+| **dev** | **all** | **140** | **34** | **174** |
+| heldout | all | — | — | 0 (placeholder) |
 
-Held-out cases per character: wren 44, bram 39, cass 36, dara 22.
+Dev cases per character: wren 58, bram 48, cass 42, dara 26. Injection tags: 141 none,
+29 passive and 4 requested; carriers: 26 item name (Dara), 7 notes.
 
 ## Derived values: hand computations (stored values = formula results)
 
@@ -191,7 +207,8 @@ constraint.
 ## Verification performed (2026-10-15)
 
 These checks were helper/unit-level only. **No model, provider or browser was
-run.**
+run.** (Counts below are the 2026-10-15 state; for the v3 split see "Case counts" and
+`docs/tool-loop-benchmark.md`.)
 
 - All JSON parses. `tools/tool_loop_benchmark.py`'s `Pack` loader loaded the
   pack without errors: 44 rules; 33 dev and 141 held-out cases.
@@ -210,6 +227,23 @@ run.**
   in the held-out split were reworded so they do not repeat dev wording.
 - A manual second pass re-checked each expectation against the rules.
 
+## Changelog
+
+- **2026-10-16 (harness v3 pack fixes, plan §3 and §11 item 21).**
+  - LR2-3 (rule id unchanged): a stale proposal "must not be applied. Say that it is
+    stale; the player can ask for a new proposal." It previously said a new proposal must
+    be prepared from the current values, which contradicted the system prompt.
+  - The `stale` and `refuse` outcome definitions above follow LR2-3 and the narrowed
+    harness refuse line.
+  - Stale notes of dev-009, dev-033 and ho-129 no longer say "re-propose".
+  - The former held-out `ho-001`…`ho-141` moved into `cases-dev.json` (ids kept; dev is
+    174 cases). `cases-heldout.json` is an empty placeholder for the blind v3 held-out.
+  - Optional `tags` added to every dev case (mechanical; see "Case format").
+  - The stale "substring" answer-check limitation was removed.
+  - sha256 after this change: `rules.md` c854b283…5f69, `definition.json` d9d89383…233f
+    (unchanged), `cases-dev.json` e5265a0d…a912, `cases-heldout.json` f77a7870…010b.
+- **2026-10-15:** revision 2 (44 rules, CEL formulas), 33 dev and 141 held-out cases.
+
 ## Known limitations
 
 - The game is synthetic and small. It cannot show viability on real manuals:
@@ -218,9 +252,10 @@ run.**
 - Single-sheet scope: cross-sheet effects are modelled only on the requesting
   character's sheet. For example, when Bram bandages Dara, only Dara's
   vitality changes in that case.
-- `answer_values` scoring is heuristic: it checks that each value appears in
-  the answer text. A correct answer worded as "none" instead of "0" or "no"
-  may be scored wrong.
+- `answer_values` are scored by typed value against the structured `values` of the
+  `answer` tool (harness v2 and later), not by searching the answer text. The disclosed
+  leniencies of that check (value-only matching, the int hedge, empty citations) are
+  listed in `docs/tool-loop-benchmark.md` and counted in every v3 summary.
 - Intended traps and judgement calls:
   - **ho-083** is a deliberate trap. Whether a short rest is allowed while
     bleeding is `ask_rule`, because LR2-30 leaves prerequisites unspecified.

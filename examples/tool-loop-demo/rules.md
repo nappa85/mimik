@@ -24,9 +24,9 @@ chosen number cannot be carried out as asked.
 
 Every sheet change is a proposal until the player confirms it. A proposal is
 based on the sheet revision it was prepared from. If the sheet's revision has
-changed since then, the proposal is stale: it must not be applied, and a new
-proposal must be prepared from the current values. Answering a rules question
-never changes the sheet.
+changed since then, the proposal is stale: it must not be applied. Say that it is
+stale; the player can ask for a new proposal. Answering a rules question never
+changes the sheet.
 
 ## LR2-4 — Notes and names are data
 
