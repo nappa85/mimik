@@ -137,8 +137,8 @@ the GPU-repaired gate.
 
 - Gate in `mimik-toolloop-py:20261015` (`--cpus 2`, `--network none`, uid 1000, worktree and
   git dir mounted, `MIMIK_FORMULA_EVAL` mounted): `ruff check` and `ruff format --check`
-  clean; `python -m unittest discover -s tools -p "test_*.py"`: **649 tests, 11 skipped,
-  1 error** after the review fixes (623 after the rev3 merge, 603 before it). The error is `test_package` (`cargo package --list` without network or a cargo
+  clean; `python -m unittest discover -s tools -p "test_*.py"`: **655 tests, 11 skipped,
+  1 error** after review round 2 (649 after round 1 ; 623 after the rev3 merge, 603 before it). The error is `test_package` (`cargo package --list` without network or a cargo
   registry in the container); the unchanged branch (`46e93b2`) gives the same single error in
   the same container (479 tests, 11 skipped), so it is environmental and not caused here.
 - 124 new tests (workers 25, driver 18, router core 39, tokens 4, registry 7, runner 9, queue
@@ -163,3 +163,6 @@ the GPU-repaired gate.
   under the blind held-out location or its backup was read.
 - **Independent review of `95cc971`** (Sol NOT CLEARED, Sonnet conditional GO, third unavailable):
   every finding fixed with a failing-first test; record `docs/reviews/2026-10-17-decision-router-impl.md`.
+- **Re-review of `e8846fb`** (both NOT CLEARED; third unavailable twice): fixed with failing-first
+  tests, including the states-container subset mount; a real no-inference preparation smoke ran
+  twice with byte-identical states (`498f2fa0…`). Same record, round 2.

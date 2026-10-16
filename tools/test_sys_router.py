@@ -235,6 +235,7 @@ class SysRouterTests(unittest.TestCase):
         rows = self.run_rows(self.args(router=path, sha=sha), model)
         header, eps = rows[0], {r["case_id"]: r for r in rows if r["event"] == "episode"}
         self.assertEqual(header["arm_type"], "system")
+        self.assertIs(header["router"]["positive_claim"], False)  # recorded on every SYS-R ledger
         self.assertEqual(header["router_decisions_sha256"], sha)
         # spend-focus: routed proposal, the model used the allowed finisher: same episode.
         same = {

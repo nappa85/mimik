@@ -60,3 +60,26 @@ recorded; the payload pin adds the live request body for the router-off path.
 
 - Third reviewer pending (main session).
 - The fixed commit needs the re-review's confirmation before router results drive decisions.
+
+## Round 2 (re-review of `e8846fb`)
+
+- **Sol** (`--chain main`): **NOT CLEARED** (R1 blocking, R2 major, R3–R4 minor).
+- **Sonnet** (fresh subagent): **NOT CLEARED** (the same blocker; N2–N4).
+- **Third reviewer unavailable again:** all three models of `--chain third` timed out in
+  preflight (≈00:40 on 2026-10-17). Proceeded with the two main reviews per AGENTS.md (twice
+  unavailable for this record).
+
+| ID | Sev. | Finding | Verdict | Fix | Regression test (red → green) |
+|---|---|---|---|---|---|
+| Sol R1, Sonnet (blocker) | Block | The states container mounted three modules but not `tools/case-subsets/dev-screen-40.json`, and `prepare` ran without `--subset`: every CHECK_ONLY pre-pass would fail as `infra_docker` and the queue would refuse every arm. The runner test ran `prepare` on the host path, so it missed this | Valid (confirmed, lines 278–287) | The subset is mounted read-only and passed as `--subset`. The fake docker now runs `prepare` inside a private root holding only the mounted files (the container filesystem boundary) | `test_probe_unit_hardened_container_and_provenance` and every runner test: red against the `e8846fb` runner with `FileNotFoundError: .../tools/case-subsets/dev-screen-40.json` (exit 12), green after |
+| Sol R1 smoke | — | No real-container evidence of the preparation step | — | **Real no-inference smoke, run twice:** the production preparation container (harness image `sha256:8477ff91…`, `--network none`, uid 1000, `--cap-drop ALL`, read-only root, `--cpus 2`, the exact production mounts, the real pinned formula CLI from the `mimik-formula-target` volume), names `mimik-router-smoke-prep-{1,2}` (no ownership label, no `mimik-toolloop-v3-` prefix). Both exit 0; 175 states; `states.jsonl` byte-identical across the two runs (sha256 `498f2fa0…62a9`), and so are the manifest, mapping and plans; the manifest's code identity and pack hashes (with the four character files) equal the current code and pack | Manual, recorded here (the runner itself cannot run while the CPU queue holds the shared lock) |
+| Sol R2, Sonnet N3 | Major | The manifest's builder/router hashes were never checked against the analysing code; the decision file wrote the current builder hash; pack identity omitted the character files and the harness rendering path | Valid | `code_identity()` (builder, `decision_router.py`, `tool_loop_benchmark.py` as the C0 rendering path) is recorded in the manifest and checked by `check_attempt`; `pack_hashes` includes every character file; the decision file carries the run's validated identity (`state_builder_sha256`, `render_sha256`, `router_sha256`); the harness also compares `render_sha256` | `test_builder_drift_after_collection_is_refused`, `test_decision_file_carries_the_run_builder_identity`, `test_character_file_drift_after_collection_is_refused` |
+| Sol R3 | Minor | The deadline was checked before a lazy reload, not after it | Valid | After every restart the driver rechecks `decision_timeout <= left()` before predicting | `test_a_reload_that_consumes_the_allowance_stops_before_prediction` (fake clock: 250 s left, 100 s reload, 180 s timeout) |
+| Sol R4 | Minor | CI ran unittest without `CI` or `MIMIK_FORMULA_EVAL` in the container, so the identity test still skipped there | Valid (verified in `.github/workflows/ci.yml`) | The CI container gets `-e CI=1 -e MIMIK_FORMULA_EVAL=/workspace/target/debug/examples/formula_eval` (built earlier in the same step); actionlint clean | `test_ci_runs_the_identity_test_with_the_formula_cli` |
+| Sonnet N2 | Minor | `expected_jobs` / `state_text` errors escaped `check_attempt` | Valid | Caught (KeyError, RouterError, TypeError) and recorded as errors | `test_check_attempt_records_job_and_state_errors` |
+| Sonnet N4 | Nit | Should live SYS-R require `claim.positive_claim`? | Documented, not enforced | The plan does not make a positive claim a precondition of the dev-only live run: §3 builds the decision file for a router that passes the gate (now also falsifier-not-null), and §2 says only that a result without a complete ablation "supports no positive claim". So the claim is not a gate; instead every SYS-R ledger header records `router.positive_claim`, and the decision file carries the full `claim` block | `test_router_on_changes_only_routed_cases` asserts the header field |
+
+Verification (round 2): gate in `mimik-toolloop-py:20261015` (`--cpus 2`): ruff clean,
+**655 tests, 11 skipped, 1 error** (the environmental `test_package`); ShellCheck clean on the
+runner; actionlint clean on `ci.yml`. The real preparation smoke above is the only container
+run beyond the gate; no inference.

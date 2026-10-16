@@ -83,7 +83,9 @@ class Worker:
         self.dead = True
 
 
-def build_attempt(root, unit, predictor, mutate_plan=None, runtime_extra=None, fail=None):
+def build_attempt(
+    root, unit, predictor, mutate_plan=None, runtime_extra=None, fail=None, pack=dr.PACK
+):
     """An attempt dir as run_decision_router.sh leaves it, with a fake worker."""
     _, mapping = dr.derive(CASES)
     prep = Path(root) / "prep"
@@ -97,7 +99,7 @@ def build_attempt(root, unit, predictor, mutate_plan=None, runtime_extra=None, f
         }
         for k in mapping
     ]
-    dr.write_prepared(prep / "run", mapping, SUBSET, dr.PACK, "d" * 64, rows=rows)
+    dr.write_prepared(prep / "run", mapping, SUBSET, pack, "d" * 64, rows=rows)
     plan_path = prep / "run" / "prepared" / f"plan-{unit}.json"
     if mutate_plan:
         plan = json.loads(plan_path.read_text())
@@ -499,3 +501,111 @@ MASTER_PAYLOAD_DIGEST = "aa7a95207c3532b5e907fb8f8945fccb2204dd38cb8f5828ef122b2
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------- round 2 (re-review of e8846fb)
+
+
+class RoundTwoTests(Fixture):
+    def test_builder_drift_after_collection_is_refused(self):
+        """e8846fb: the manifest's builder/router/render hashes were never checked against the
+        analysing code, and the decision file wrote the current builder hash (Sol R2)."""
+        screen, ablation = self.attempts()
+        manifest = screen / "prep" / "run" / "prepared" / "manifest.json"
+        doc = json.loads(manifest.read_text())
+        self.assertEqual(doc["builder_sha256"], dr.code_identity()["builder_sha256"])
+        for key in ("builder_sha256", "router_sha256", "render_sha256"):
+            drifted = dict(doc, **{key: "0" * 64})
+            manifest.write_text(json.dumps(drifted, indent=2) + "\n")
+            report = self.report(screen)
+            self.assertFalse(report["gate"]["passed"], key)
+            self.assertTrue(any("code" in r for r in report["gate"]["reasons"]), report["gate"])
+        manifest.write_text(json.dumps(doc, indent=2) + "\n")
+
+    def test_decision_file_carries_the_run_builder_identity(self):
+        screen, ablation = self.attempts()
+        filed = dr.build_decision_file(self.report(screen, ablation), screen, ablation, ENTRY)
+        manifest = json.loads((screen / "prep" / "run" / "prepared" / "manifest.json").read_text())
+        self.assertEqual(filed["header"]["state_builder_sha256"], manifest["builder_sha256"])
+        self.assertEqual(filed["header"]["render_sha256"], manifest["render_sha256"])
+
+    def test_character_file_drift_after_collection_is_refused(self):
+        """e8846fb: pack identity omitted the character files (Sol R2, Sonnet N3)."""
+        import shutil
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        pack = Path(tmp.name) / "pack"
+        shutil.copytree(dr.PACK, pack)
+        self.assertTrue(any(k.startswith("characters/") for k in dr.pack_hashes(pack)))
+        screen = build_attempt(Path(tmp.name) / "screen", "screen", good_predictor, pack=pack)
+        self.assertTrue(
+            dr.select_attempts(CASES, screen, None, "R4", SUBSET, pack)["gate"]["passed"]
+        )
+        character = sorted((pack / "characters").glob("*.json"))[0]
+        character.write_text(character.read_text().replace("}", " }", 1))
+        report = dr.select_attempts(CASES, screen, None, "R4", SUBSET, pack)
+        self.assertFalse(report["gate"]["passed"])
+        self.assertTrue(any("pack" in r for r in report["gate"]["reasons"]))
+
+    def test_check_attempt_records_job_and_state_errors(self):
+        """e8846fb: expected_jobs/state_text errors raised out of check_attempt (Sonnet N2)."""
+        screen, _ = self.attempts()
+        subset = screen / "prep" / "run" / "host" / "subset.json"
+        subset.write_text(json.dumps(["not-a-case"]))
+        manifest = screen / "prep" / "run" / "prepared" / "manifest.json"
+        doc = json.loads(manifest.read_text())
+        doc["subset_sha256"] = dr.sha_file(subset)
+        manifest.write_text(json.dumps(doc))
+        check = dr.check_attempt(screen, "screen")
+        self.assertFalse(check["complete"])
+        self.assertTrue(any("job set" in e for e in check["errors"]), check["errors"])
+
+    def test_ci_runs_the_identity_test_with_the_formula_cli(self):
+        """e8846fb: CI ran unittest without CI or MIMIK_FORMULA_EVAL in the container (Sol R4)."""
+        ci = (Path(dr.ROOT) / ".github" / "workflows" / "ci.yml").read_text()
+        self.assertIn("-e CI=1", ci)
+        self.assertIn("-e MIMIK_FORMULA_EVAL=/workspace/target/debug/examples/formula_eval", ci)
+        self.assertLess(
+            ci.index("cargo build --locked --example formula_eval"),
+            ci.index("python -m unittest discover"),
+        )
+
+
+class LazyReloadDeadlineTests(unittest.TestCase):
+    def test_a_reload_that_consumes_the_allowance_stops_before_prediction(self):
+        """e8846fb: the deadline was checked before a lazy reload, not after (Sol R3)."""
+        from test_router_driver import Clock as DClock
+        from test_router_driver import FakeWorker, plan_for, states_for
+
+        clock = DClock()
+        predicted = []
+
+        class SlowReload(FakeWorker):
+            def receive(self, timeout):
+                self.clock.advance(5 if self.n == 1 else 100)
+                return {"ready": {"start": self.n}}
+
+            def predict(self, payload, timeout):
+                predicted.append((payload["state"], self.n))
+                return super().predict(payload, timeout)
+
+        # 5 s first load; "a" times out twice (lazy restart pending); before "b": left() 250 s,
+        # decision timeout 180 s; the reload takes 100 s, leaving 150 s.
+        behaviour = {"a": ["timeout", "timeout"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            unit = rd.Unit(
+                plan_for(["a", "b"]),
+                states_for(["a", "b"]),
+                Path(tmp),
+                lambda n: SlowReload(n, behaviour, clock),
+                50,
+                180,
+                0,
+                now=clock.now,
+                monotonic=clock.now,
+            )
+            unit.deadline = clock.now() + 5 + 180 + 100 + 180 + dr.DEADLINE_MARGIN + 250
+            summary = unit.run()
+        self.assertNotIn(("b", 3), predicted)
+        self.assertIn("deadline", summary["stopped"])

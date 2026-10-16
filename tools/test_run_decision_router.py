@@ -90,9 +90,31 @@ if args[0] == "run":
         print(f"{digest}  {cmd[1]}")
         sys.exit(0)
     if "prepare" in cmd:
-        mapped = [env["MIMIK_FORMULA_EVAL"] if a.startswith("/formula/") else host(a) for a in cmd[1:]]
-        proc = subprocess.run([sys.executable] + mapped, capture_output=True, text=True)
+        # Enforce the container's filesystem boundary (round 2, R1): only the mounted files
+        # exist under a private root; nothing resolves to the host tree.
+        import shutil, tempfile
+        root = Path(tempfile.mkdtemp(prefix="fake-container-"))
+        for dst, src in mounts.items():
+            target = root / dst.lstrip("/")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if dst == "/formula":
+                continue  # the volume: only the pinned CLI, placed below
+            if dst == "/prep":
+                target.symlink_to(src)  # the one writable mount
+            elif Path(src).is_dir():
+                shutil.copytree(src, target)
+            else:
+                shutil.copy2(src, target)
+        args_ = []
+        for a in cmd[1:]:
+            if a.startswith("/formula/"):
+                dest = root / a.lstrip("/")
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(env["MIMIK_FORMULA_EVAL"], dest)
+            args_.append(str(root / a.lstrip("/")) if a.startswith("/") else a)
+        proc = subprocess.run([sys.executable, "-E", "-s"] + args_, capture_output=True, text=True, cwd=root / "tools")
         sys.stdout.write(proc.stdout); sys.stderr.write(proc.stderr)
+        shutil.rmtree(root, ignore_errors=True)
         sys.exit(proc.returncode)
     if name.endswith("-router"):
         (log / "router.json").write_text(json.dumps({"image": image, "cmd": cmd, "opts": opts, "mounts": mounts}))

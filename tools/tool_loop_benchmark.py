@@ -2776,7 +2776,12 @@ def prepare_router(args, pack) -> None:
                 "state_builder_sha256",
             )
         }
-        | {"tau_star": header["policy"]["tau_star"]},
+        | {
+            "tau_star": header["policy"]["tau_star"],
+            # Not a gate for the dev-only live run (plan §2-§4): every SYS-R ledger states
+            # whether the router's result supports a positive claim (round 2, Sonnet N4).
+            "positive_claim": bool((header.get("claim") or {}).get("positive_claim")),
+        },
     }
 
 

@@ -245,6 +245,9 @@ class Unit:
             if self.worker is None or self.worker.process.poll() is not None:
                 if not self.restart():
                     return self.not_run(entry, self.stopped)
+                if self.decision_timeout > self.left():  # the reload used time (round 2, R3)
+                    self.stop("deadline: the decision timeout would cross the deadline")
+                    return self.not_run(entry, self.stopped)
             record, dead = self.one_attempt(entry, attempt)
             if not dead:
                 return record
@@ -257,7 +260,7 @@ class Unit:
                 return record
             if not self.restart():
                 return self.not_run(entry, f"no retry: {self.stopped}")
-        return record
+        return record  # the loop's top rechecks the deadline before the retry
 
     def finish(self, rows) -> dict:
         if self.worker is not None:

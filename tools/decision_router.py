@@ -606,14 +606,25 @@ def live_identity(pack: Path = PACK) -> dict:
         "pack_hashes": pack_hashes(pack),
         "fold_sha256": fold_document(pack_cases(pack))["sha256"],
         "state_builder_sha256": sha_file(TOOLS / "router_state_builder.py"),
+        "render_sha256": sha_file(TOOLS / "tool_loop_benchmark.py"),
     }
 
 
 def pack_hashes(pack: Path) -> dict:
+    """Every pack input that determines the states: rules, definition, dev cases and each
+    character file (review round 2: Sol R2, Sonnet N3)."""
+    names = ["rules.md", "definition.json", "cases-dev.json"]
+    names += [f"characters/{p.name}" for p in sorted((Path(pack) / "characters").glob("*.json"))]
+    return {name: sha_file(Path(pack) / name) for name in names if (Path(pack) / name).exists()}
+
+
+def code_identity() -> dict:
+    """The state-generation and analysis code: the builder, this module and the harness's C0
+    rendering path. A run is only analysed by the code that produced it (round 2, Sol R2)."""
     return {
-        name: sha_file(Path(pack) / name)
-        for name in ("rules.md", "definition.json", "cases-dev.json")
-        if (Path(pack) / name).exists()
+        "builder_sha256": sha_file(TOOLS / "router_state_builder.py"),
+        "router_sha256": sha_file(Path(__file__)),
+        "render_sha256": sha_file(TOOLS / "tool_loop_benchmark.py"),
     }
 
 
@@ -639,7 +650,10 @@ def check_attempt(attempt: Path, unit: str, pack: Path = PACK) -> dict:
         errors.append(f"attempt inputs unreadable: {type(error).__name__}: {error}")
         out.update(complete=False, hashes=hashes)
         return out
-    out.update(hashes=hashes, mapping=mapping, subset=subset, states=states)
+    out.update(hashes=hashes, mapping=mapping, subset=subset, states=states, manifest=manifest)
+    for key, value in code_identity().items():
+        if manifest.get(key) != value:
+            errors.append(f"the analysing code differs from the run's ({key})")
     loaded = out["unit"]
     summary = loaded["summary"] if loaded else {}
     if (
@@ -663,8 +677,14 @@ def check_attempt(attempt: Path, unit: str, pack: Path = PACK) -> dict:
                 (d["key"], d["variant"], d["order"]) for d in input_plan["decisions"]
             ]:
                 errors.append("the unit's plan.json differs from the prepared plan")
-            want = expected_jobs(unit, mapping, subset)
-            if set(loaded["planned"]) != want or set(loaded["finals"]) != want:
+            try:
+                want = expected_jobs(unit, mapping, subset)
+            except (KeyError, RouterError, TypeError) as error:  # round 2, Sonnet N2
+                errors.append(f"job set cannot be rebuilt: {type(error).__name__}: {error}")
+                want = None
+            if want is not None and (
+                set(loaded["planned"]) != want or set(loaded["finals"]) != want
+            ):
                 errors.append(f"job set differs from the frozen {unit} job set")
         for (key, variant, _), row in loaded["finals"].items():
             if row["status"] == "not_run":
@@ -673,7 +693,12 @@ def check_attempt(attempt: Path, unit: str, pack: Path = PACK) -> dict:
                 errors.append(f"a decision row carries another option hash ({key})")
                 break
             state = states.get(key)
-            if state is None or row.get("state_hash") != text_hash(state_text(state, variant)):
+            try:
+                hashed = text_hash(state_text(state, variant)) if state is not None else None
+            except (KeyError, RouterError, TypeError) as error:
+                errors.append(f"state text cannot be rebuilt ({key}): {type(error).__name__}")
+                break
+            if hashed is None or row.get("state_hash") != hashed:
                 errors.append(f"a decision row's state hash differs from the states file ({key})")
                 break
     out["runtime"] = {
@@ -1085,8 +1110,7 @@ def write_prepared(
         "mapping_sha256": mapping_sha,
         "subset_sha256": subset_sha,
         "states_sha256": sha_file(prepared / "states.jsonl"),
-        "builder_sha256": sha_file(TOOLS / "router_state_builder.py"),
-        "router_sha256": sha_file(Path(__file__)),
+        **code_identity(),
         "plan_sha256": hashes,
         "order_seed": ORDER_SEED,
         "retrieval": {
@@ -1360,7 +1384,10 @@ def build_decision_file(report, screen_attempt, ablation_attempt, entry, pack=PA
         "policy_hash": tl.digest(policy_document(tau)),
         "question_hash": OPTION_HASH,
         "retrieval": {"top_k": tl.DEFAULT_TOP_K, "query": "request"},
-        "state_builder_sha256": sha_file(TOOLS / "router_state_builder.py"),
+        # The run's validated code identity (check_attempt refused any drift), not today's.
+        "state_builder_sha256": screen["manifest"]["builder_sha256"],
+        "render_sha256": screen["manifest"]["render_sha256"],
+        "router_sha256": screen["manifest"]["router_sha256"],
         "fold_seed": FOLD_SEED,
         "fold_sha256": fresh["fold_sha256"],
         "gate": fresh["gate"],
@@ -1394,6 +1421,8 @@ def verify_decision_file(doc, case_ids, state_hash_of, live=None) -> dict:
             raise RouterError("decision file: fold hash differs from the live pack's folds")
         if header.get("state_builder_sha256") != live.get("state_builder_sha256"):
             raise RouterError("decision file: state builder hash differs from the live builder")
+        if "render_sha256" in live and header.get("render_sha256") != live["render_sha256"]:
+            raise RouterError("decision file: render path (harness) hash differs from the live one")
     policy = header.get("policy") or {}
     if header.get("policy_hash") != tl.digest(policy) or policy.get("grid") != list(GRID):
         raise RouterError("decision file: policy hash mismatch")

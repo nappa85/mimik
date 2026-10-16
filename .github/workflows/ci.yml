@@ -23,7 +23,8 @@ jobs:
           REVISION: ${{ github.sha }}
         run: |
           docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" \
-            -e REVISION mimik-ci bash -euxo pipefail -c '
+            -e REVISION -e CI=1 -e MIMIK_FORMULA_EVAL=/workspace/target/debug/examples/formula_eval \
+            mimik-ci bash -euxo pipefail -c '
               cargo fmt --check
               cargo clippy --locked --all-targets --all-features -- -D warnings
               ruff check tools

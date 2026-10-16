@@ -279,12 +279,15 @@ prep_mounts=()
 for f in decision_router.py router_state_builder.py tool_loop_benchmark.py; do
   prep_mounts+=(--mount "type=bind,src=$ROOT/tools/$f,dst=/tools/$f,readonly")
 done
+# The frozen S40 subset is a state-generation input too (round 2, R1): mounted and named.
+SUBSET_REL=tools/case-subsets/dev-screen-40.json
+prep_mounts+=(--mount "type=bind,src=$ROOT/$SUBSET_REL,dst=/$SUBSET_REL,readonly")
 check_run "$step_limit" --memory 2g -e PYTHONDONTWRITEBYTECODE=1 "${prep_mounts[@]}" \
   --mount type=bind,src="$ROOT/examples/tool-loop-demo",dst=/pack,readonly \
   --mount type=volume,src=mimik-formula-target,dst=/formula,readonly \
   --mount type=bind,src="$out/prep",dst=/prep \
   -w /tools "$HARNESS_IMAGE" python3 /tools/decision_router.py prepare --pack /pack \
-  --out /prep/run --formula-cli "/formula/$CLI_IN_VOLUME" > "$out/prepare.json"
+  --out /prep/run --subset "/$SUBSET_REL" --formula-cli "/formula/$CLI_IN_VOLUME" > "$out/prepare.json"
 states_sha=$(sha256sum "$out/prep/run/prepared/states.jsonl" | cut -d' ' -f1)
 {
   echo "image=$dm_image library_revision='$dm_library_revision' label=$dm_label"
