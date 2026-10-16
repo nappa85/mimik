@@ -257,8 +257,10 @@ default flags all changed.
   by the loader (`CASE_TAGS`, `validate_tags`), dropped by `public_case`, copied into ledger
   episode rows for reporting only. The dev tags were set mechanically (pack README).
 - The other v2 ambiguity classes (conflict with a legal alternative, editable item stats, a
-  missing duration) are **not decided**; they wait for a blind adjudicator (§11 item 12; TODO in
-  the pack README).
+  missing duration) were reviewed by a blind adjudicator and decided by the user on
+  2026-10-16 (`docs/tool-loop-pack-adjudication-2026-10-16.md`). Pack revision 3 applies them:
+  pack README precedence 6–8, equipment `kind`/`weight`/`armor`/`category` not editable,
+  wording fixes in LR2-14, LR2-20 and LR2-33; no dev outcome changed.
 
 ### Flags (recorded in the header as `flags`)
 
@@ -610,7 +612,8 @@ of `interleave_by_outcome` (deterministic, seed-independent, outcome proportions
 cut). The committed file is the first 40 of the 174 dev cases: proposal 15, answer 9, conflict
 7, ask_fact 3, ask_rule 3, stale 2, refuse 1 (each within one case of 40 × its dev share).
 Subset hash (sha256 of the canonical JSON id list) **`a8888d1de313e5bf1c15caca396433abf4ba34ce4b5ddbd556ee0e794d486c78`**;
-source `cases-dev.json` sha256 `e5265a0d…a912`. `--cases-file` refuses a file whose hash, split,
+source `cases-dev.json` sha256 `f71b266c…81f5` (pack revision 3; the ids, and so the subset hash, are
+the same as with the revision 2 file `e5265a0d…a912`, because no expected outcome changed). `--cases-file` refuses a file whose hash, split,
 rule or source file hash does not match, or whose ids are not the prefix recomputed from the
 pack; the header gets `case_subset` {name, rule, size, sha256} and `case_filter` = the ids.
 

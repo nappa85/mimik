@@ -1,7 +1,7 @@
 # Tool-loop pack: blind ambiguity adjudication (2026-10-16)
 
-Status: **user decisions recorded 2026-10-16 (see "User decisions" below); not yet applied** to
-the pack, and no dev case has been relabelled.
+Status: **user decisions recorded 2026-10-16 (see "User decisions" below); applied in pack
+revision 3** (see "Pack revision 3 relabels" at the end). No dev outcome changed.
 
 - **Adjudicator:** a fresh subagent given only a copy of the pack: README, rules.md,
   definition.json and characters/. It had no access to the repo, v2 transcripts, results or
@@ -126,3 +126,48 @@ The user's answers supersede the adjudicator's lines where they differ.
 Applying these is a pack revision: definition editable flags, the README precedence, an
 LR2-20 wording change and dev relabels. It is done with the other v3 pack fixes before the
 blind writer brief is extracted.
+
+## Pack revision 3 relabels (2026-10-16)
+
+Scope: all 174 dev cases (the held-out split is an empty placeholder). Every case was checked
+against precedence points 6–8 and against the new non-editable equipment fields (`kind`,
+`weight`, `armor`, `category`). Inputs were the pack itself, this record and the harness code;
+no results, ledgers or failure analyses were read.
+
+**Outcome changes: none (0 of 174).** Counts by old → new outcome: 0 for every pair. The
+expected outcome counts stay proposal 67, answer 38, ask_rule 14, ask_fact 14, conflict 29,
+stale 8 and refuse 4.
+
+Notes-only changes (outcome, gold rule ids and changes unchanged):
+
+| Case | Old outcome | New outcome | Reason |
+|---|---|---|---|
+| ho-115 | conflict | conflict | Point 7: an item's `weight` is a fixed stat, so the request is a conflict for any value; the old note gave only the 0–5 range. |
+| ho-086 | ask_rule | ask_rule | Point 7 sub-case: weapon damage has no field and no rule, so `ask_rule`; the note now cites point 7. |
+
+Why nothing else changed:
+
+- **Item stats (7).** No expected or pending change names `kind`, `weight`, `armor` or
+  `category` of an equipment entry; every equipment change is `equipped` or `quantity`. The
+  only dev request to set an item stat (ho-115) was already a conflict. Requests to set
+  "armor" (ho-114, ho-125) mean the derived sheet value and were already conflicts.
+- **Conflict with a legal alternative (6).** The conflicts that have a legal alternative
+  (for example dev-021, ho-107, ho-111, ho-113, ho-120, ho-122, ho-123) were already
+  `conflict` with no changes. The proposals that go past a limit are those where a rule
+  resolves the excess (ho-011, ho-020, ho-021, ho-030, ho-037), so they stay proposals.
+- **Time (8).** Every proposal that depends on time states it (watches, leagues, a scene
+  end, a night's rest); ho-101 (unstated watches) was already `ask_fact`; dev-006, dev-022,
+  ho-082, ho-083 and ho-091 (durations the rules leave open) were already `ask_rule`.
+
+Mechanical checks (helper level, `mimik-ci`, formula CLI mounted): the pack loads (the
+loader rejects a gold change to a non-editable field), the expected-outcome replay gives
+174/174 correct (a gold proposal with a constraint violation would fail it), and
+`tools/test_tool_loop_v3.py` `PackRevision3Tests` checks the editable flags, that no gold
+or pending change touches a non-editable field, the rules wording, and the full replay.
+
+Not decided here (returned to the user):
+
+- dev-019 stays a `proposal` that raises an existing entry's
+  `quantity`. Point 7 says acquiring a new or better item needs a rule; it does not say
+  whether one more unit of an item already carried is "acquiring". If it is, dev-019
+  becomes `ask_rule`.

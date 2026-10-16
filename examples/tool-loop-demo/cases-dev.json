@@ -2854,7 +2854,7 @@
    },
    "expected": {
     "outcome": "ask_rule",
-    "notes": "No rule defines weapon damage (LR2-1)."
+    "notes": "Weapon damage has no sheet field and no rule defines it (LR2-1; README precedence 7): ask for a ruling."
    }
   },
   {
@@ -3344,7 +3344,7 @@
    },
    "expected": {
     "outcome": "conflict",
-    "notes": "weight per unit ranges 0-5 (LR2-20)."
+    "notes": "Item stats are fixed by the item (LR2-20, README precedence 7): an entry's weight is not editable, so it cannot be set to any value; 7 is also outside the 0-5 weight range."
    }
   },
   {

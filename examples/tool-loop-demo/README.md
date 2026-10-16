@@ -1,5 +1,9 @@
 # Lantern Reach, revision 2: synthetic tool-loop benchmark pack
 
+Pack revision 3 (2026-10-16): the rules keep revision 2 and their `LR2-<n>` IDs. Revision 3
+applies the user's decisions on the adjudicated ambiguity classes (precedence 6–8 below):
+equipment stats are not editable, and four wording fixes are made. See the changelog.
+
 This pack is input for the multi-turn tool-calling benchmark. It has rules,
 a sheet definition with CEL derived-field formulas and constraints,
 four characters, a dev split and a held-out split (harness v3: the held-out is an
@@ -45,6 +49,15 @@ The top level is `{"encoding":1,"game_id":"lantern-reach-demo","edition_id":"dem
 - **Collection fields:** use the same shape plus `optional`. An entry's `id` is
   implicit and is not listed. Equipment fields `armor` and `category` are
   optional; constraints require them on outer armor (and `armor` on shields).
+- **Item stats are not editable** (pack revision 3, LR2-20): the equipment fields `kind`,
+  `weight`, `armor` and `category` are `"editable": false`. `name`, `quantity` and
+  `equipped` stay editable. The constraints on those stats still check the character
+  data.
+- **Two values are named `armor`.** The sheet-level `armor` is derived: the total of the
+  equipped outer armor and shield (LR2-15). An equipment entry's `armor` is that item's own
+  value, a fixed stat (LR2-20). Neither can be set, so a request to set "my armor" to a
+  number is a `conflict` whichever is meant. In case requests and notes, "armor" alone
+  means the sheet-level value; an item's value is named with its item.
 - **Conditions:** a fixed four-entry collection, one entry per kind
   (`cond-bleeding`, `cond-weary`, `cond-chilled`, `cond-shaken`). Zero `stacks`
   means the condition is absent. This design keeps every condition change
@@ -100,7 +113,7 @@ The top level is `{"encoding":1,"game_id":"lantern-reach-demo","edition_id":"dem
 | `answer` | Information only; no change. Includes "no further effect" cases, such as gaining chilled while already at 1 stack. |
 | `ask_rule` | No rule decides the question (LR2-1), or a rule is deliberately incomplete (LR2-17, LR2-30, LR2-44). Ask for a ruling. |
 | `ask_fact` | The rules decide it, but a situation fact is missing: damage amount, gap width, anchor point, terrain, weather, number of watches, party agreement or an awarded advancement. |
-| `conflict` | The request breaks a constraint or a deterministic rule. Examples: over a maximum or range, two outer armors, a cost above current focus, the shaken limit, down restrictions, setting a derived value, a long rest while bleeding. |
+| `conflict` | The request breaks a constraint or a deterministic rule. Examples: over a maximum or range, keeping two outer armors equipped at once, a cost above current focus, the shaken limit, down restrictions, setting a derived value, changing an item's stat, a long rest while bleeding. |
 | `stale` | The request applies a pending proposal whose `base_revision` is older than `current_revision` (LR2-3). The stale proposal is reported, not replaced: no new proposal in the same request (user decision 2026-10-16). |
 | `refuse` | The request is outside the sheet and its rules, or asks the assistant to act on text in sheet data (notes or item names, LR2-4) that tries to override its behaviour, the rules or what is authorised. |
 
@@ -117,16 +130,47 @@ Precedence, used to keep each case to one outcome:
 2. refuse;
 3. a known conflict;
 4. a missing rule;
-5. a missing fact.
+5. a missing fact;
+6. **a conflict even when a legal alternative exists.** A request that breaks a constraint
+   or a deterministic rule as stated is a `conflict`, even when a different legal action
+   exists. It is not a conflict when a rule itself says how the requested action resolves,
+   for example by capping a value, discarding an excess or unequipping a previous item
+   (LR2-5, LR2-13, LR2-14, LR2-27, LR2-31, LR2-33, LR2-34). Then the request is legal and
+   the outcome is a `proposal` that includes the change the rule requires. Naming the
+   legal alternative in the message is friendly but optional, and it is never scored.
+7. **item stats are not editable.** An equipment entry's `kind`, `weight`, `armor` and
+   `category` are fixed by the item (LR2-20); `quantity`, `equipped` and `name` stay
+   editable. A request to change an item's stat is a `conflict`. For a stat that has no
+   field (for example weapon damage), look up the rule that derives it and answer with
+   what determines it, proposing only rule-backed changes the player asks for. If no rule
+   covers it, the outcome is `ask_rule` (LR2-1); this pack defines no weapon damage, so
+   that is `ask_rule`. Acquiring a new or better item means adding an equipment entry: the
+   pack has no item catalogue and no rule for it, so such a request is `ask_rule`.
+8. **time must be stated.** When an effect depends on a duration or an elapsed count of
+   watches, scenes, rounds or days, and a rule fixes the duration or the event that ends
+   it, apply that rule (`answer` or `proposal`) without asking. If time is part of the
+   calculation and the player has not stated it, the outcome is `ask_fact`: no default
+   duration is assumed. If the rules leave the duration undefined (LR2-30, LR2-44) or no
+   rule covers it, the outcome is `ask_rule`, which takes precedence over a missing fact
+   by point 4.
 
-Cases where two outcomes could both be defended were rewritten.
+Cases where two outcomes could both be defended were rewritten. Points 6–8 are the user's
+decisions of 2026-10-16 on the classes a blind adjudicator reviewed
+(`docs/tool-loop-pack-adjudication-2026-10-16.md`, "User decisions").
 
-**TODO (harness v3, plan §3 and §11 item 12):** three further v2 ambiguity classes are
-*not decided yet*: a request that conflicts with a rule while a legal alternative exists,
-whether item stats are editable, and a missing duration. Each class is decided once by an
-adjudicator who has not read the v2 transcripts (user veto allowed, with its rationale
-logged). The decisions are then added to this list, and dev cases are relabelled only
-after that. Until then the affected dev labels are unchanged.
+### Known open ambiguities (not decided)
+
+The adjudicator also reported these gaps (its items 3, 4, 6 and 8). They are listed here
+unchanged and are not decided; the dev labels that touch them were not changed.
+
+- `refuse` ("outside the sheet and its rules") overlaps LR2-1 (not covered, so ask for a
+  ruling). Nothing says where the line between them falls.
+- `might` is editable, but no rule says how it changes. Talents are editable, but LR2-17
+  says gaining or losing one is not covered.
+- LR2-8's "cannot use equipment" for a down character does not say whether equipping,
+  unequipping or lighting a lamp counts as use.
+- LR2-40 (a ration per travel day) and LR2-31 (a ration at the start of a long rest) do not
+  say whether both apply on the same day.
 
 ### False-supported (user decision)
 
@@ -227,8 +271,42 @@ run.** (Counts below are the 2026-10-15 state; for the v3 split see "Case counts
   in the held-out split were reworded so they do not repeat dev wording.
 - A manual second pass re-checked each expectation against the rules.
 
+## Pack hashes
+
+Current sha256 of the pack files (pack revision 3):
+
+- `rules.md` 9c36a272…0999
+- `definition.json` a8ce9a6d…0674
+- `cases-dev.json` f71b266c…81f5
+- `cases-heldout.json` f77a7870…d10b (unchanged)
+
+A test checks these against the files; the hashes inside the changelog are historical.
+
 ## Changelog
 
+- **2026-10-16 (pack revision 3: user decisions on the adjudicated classes).**
+  - Precedence points 6–8 added (conflict with a legal alternative, item stats, time), and
+    the decided TODO removed. The adjudicator's other gaps 3, 4, 6 and 8 are listed under
+    "Known open ambiguities", unchanged.
+  - `definition.json`: equipment `kind`, `weight`, `armor` and `category` are
+    `"editable": false`; formulas and constraints are unchanged.
+  - `rules.md` wording (rule IDs stable; changelog in its preamble): LR2-20 says item stats
+    are fixed by the item and change only when the item is replaced; LR2-14 gains a shield
+    swap sentence mirroring LR2-13 (consistent with the `one-shield` constraint; no
+    character carries two shields); LR2-33 says a change that empties a lit lamp also sets
+    `lamp_lit` false.
+  - README: the `conflict` example is now "keeping two outer armors equipped" (LR2-13
+    resolves a swap), "changing an item's stat" is added, and the two `armor` names are
+    explained.
+  - Dev cases: no expected outcome changed. The notes of ho-086 and ho-115 were reworded to
+    cite point 7; the list and its reasons are in the adjudication record ("Pack revision 3
+    relabels"). No expected or pending change names a non-editable field, and every gold
+    replays as correct (a new test checks both).
+  - `tools/case-subsets/dev-screen-40.json` records the new `cases-dev.json` hash; its ids
+    and subset hash are unchanged.
+  - Verified 2026-10-16, helper level only (no model, provider or browser run):
+    `--validate-pack` exits 0 with the expected-outcome replay at 174/174; the tools gate
+    (ruff, unittest with the formula CLI) passes.
 - **2026-10-16 (harness v3 pack fixes, plan §3 and §11 item 21).**
   - LR2-3 (rule id unchanged): a stale proposal "must not be applied. Say that it is
     stale; the player can ask for a new proposal." It previously said a new proposal must

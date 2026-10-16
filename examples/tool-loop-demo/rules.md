@@ -5,6 +5,14 @@ the rules of this demonstration game; do not fill gaps from other games. Each
 `LR2-<n>` identifier is a stable citation anchor. Sheet value names are written
 in `code`.
 
+Changelog (rule IDs are stable; this preamble is not part of any rule):
+
+- 2026-10-16, pack revision 3: LR2-14 gains the shield swap sentence that mirrors LR2-13;
+  LR2-20 says an item's stats are fixed by the item; LR2-33 says that a change that empties
+  a lit lamp also records `lamp_lit` as false.
+- 2026-10-16: LR2-3 says a stale proposal is reported, not replaced.
+- 2026-10-15: rules revision 2.
+
 ## LR2-1 — Scope and missing rules
 
 These rules are complete for this demonstration. When a question is not covered
@@ -97,7 +105,8 @@ outer armor unequips the previous one; neither entry is removed from equipment.
 ## LR2-14 — Shields
 
 An equipment entry of kind `shield` has an `armor` value of exactly 1. At most one
-shield may be equipped at a time. A shield adds to `armor` but never affects
+shield may be equipped at a time. Equipping a different shield unequips the previous one;
+neither entry is removed from equipment. A shield adds to `armor` but never affects
 `pace`.
 
 ## LR2-15 — Armor
@@ -141,7 +150,10 @@ Each equipment entry has a stable ID, a name, a kind, a `quantity` (a whole
 number of at least 1), a `weight` per unit from 0 to 5 and an `equipped` flag.
 Only outer armor, shields and weapons can be equipped. An item's mechanics come
 from its kind and recorded fields, never from its name alone: an entry named
-"climbing hooks" of kind `tool` is not a rope.
+"climbing hooks" of kind `tool` is not a rope. An item's stats (its kind, its `weight`
+and, for armor and shields, its `armor` value and `category`) are fixed by the item
+itself. They are never changed on the sheet; they change only when the item is replaced
+by a different one.
 
 ## LR2-21 — Conditions
 
@@ -223,7 +235,8 @@ zero. A character without a lamp has `lamp_oil` 0 and `lamp_lit` false.
 ## LR2-33 — Burning oil
 
 A lit lamp burns one measure of oil per watch. When `lamp_oil` reaches zero the
-lamp goes out and `lamp_lit` becomes false. Lighting or putting out a lamp costs
+lamp goes out and `lamp_lit` becomes false: a change that brings `lamp_oil` to zero while
+the lamp is lit also sets `lamp_lit` to false. Lighting or putting out a lamp costs
 nothing. Scenes do not burn oil; only watches do.
 
 ## LR2-34 — Refilling a lamp

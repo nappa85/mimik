@@ -160,7 +160,7 @@
             "tool",
             "trinket"
           ],
-          "editable": true
+          "editable": false
         },
         {
           "name": "quantity",
@@ -170,7 +170,7 @@
         {
           "name": "weight",
           "type": "integer",
-          "editable": true
+          "editable": false
         },
         {
           "name": "equipped",
@@ -180,7 +180,7 @@
         {
           "name": "armor",
           "type": "integer",
-          "editable": true,
+          "editable": false,
           "optional": true
         },
         {
@@ -192,7 +192,7 @@
             "mail",
             "plate"
           ],
-          "editable": true,
+          "editable": false,
           "optional": true
         }
       ]

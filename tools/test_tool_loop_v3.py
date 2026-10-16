@@ -1518,6 +1518,92 @@ class ReviewCliTests(CliMixin, Base):
         self.assertNotIn("truncated_calls", json.dumps(rows[-1]))
 
 
+class PackRevision3Tests(unittest.TestCase):
+    """Pack revision 3 (user decisions 2026-10-16, adjudication record rule 7)."""
+
+    def test_equipment_stats_are_not_editable(self):
+        """v2: every equipment field was editable, so "set my coat's armor to 3" was a valid
+        proposal. Item stats are fixed by the item; quantity, equipped and name stay editable."""
+        definition = json.loads((DEMO / "definition.json").read_text(encoding="utf-8"))
+        equipment = next(c for c in definition["collections"] if c["name"] == "equipment")
+        editable = {f["name"]: f.get("editable", True) for f in equipment["fields"]}
+        self.assertEqual(
+            editable,
+            {
+                "name": True,
+                "kind": False,
+                "quantity": True,
+                "weight": False,
+                "equipped": True,
+                "armor": False,
+                "category": False,
+            },
+        )
+
+    def test_rules_wording_and_stable_ids(self):
+        """Wording fixes for LR2-14, LR2-20 and LR2-33; the changelog preamble is in no rule."""
+        rules = tl.parse_rules((DEMO / "rules.md").read_text(encoding="utf-8"))
+        self.assertEqual([r["rule_id"] for r in rules], [f"LR2-{n}" for n in range(1, 45)])
+        text = {r["rule_id"]: " ".join(r["text"].split()) for r in rules}
+        self.assertIn("Equipping a different shield unequips the previous one", text["LR2-14"])
+        self.assertIn("are fixed by the item itself", text["LR2-20"])
+        self.assertIn("they change only when the item is replaced", text["LR2-20"])
+        self.assertIn("also sets `lamp_lit` to false", text["LR2-33"])
+        self.assertFalse(any("Changelog" in t for t in text.values()))
+
+    def test_gold_changes_touch_only_editable_fields(self):
+        """Mechanical check over the demo pack's JSON (no CLI needed): no expected or pending
+        change names a derived field or a field whose spec is not editable."""
+        definition = json.loads((DEMO / "definition.json").read_text(encoding="utf-8"))
+        fields = {f["name"]: f for f in definition["fields"]}
+        props = {c["name"]: {f["name"]: f for f in c["fields"]} for c in definition["collections"]}
+        checked = 0
+        for case in demo_cases("dev") + demo_cases("heldout"):
+            pending = (case.get("setup") or {}).get("pending_proposal") or {}
+            changes = (case["expected"].get("changes") or []) + (pending.get("changes") or [])
+            for change in changes:
+                if change.get("collection"):
+                    spec = props[change["collection"]][change["field"]]
+                    ok = spec.get("editable", True) is not False
+                else:
+                    spec = fields[change["field"]]
+                    ok = bool(spec.get("editable")) and "derived" not in spec
+                self.assertTrue(ok, f"{case['id']}: {change}")
+                checked += 1
+        self.assertGreater(checked, 0)
+
+    def test_gold_change_to_a_non_editable_entry_field_is_rejected_on_load(self):
+        """The loader guard behind the check above, on the fixture pack."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = copy_fixture(tmp)
+            path = root / "definition.json"
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            equipment = next(c for c in doc["collections"] if c["name"] == "equipment")
+            next(f for f in equipment["fields"] if f["name"] == "armor")["editable"] = False
+            path.write_text(json.dumps(doc), encoding="utf-8")
+
+            def stat_change(cases):
+                case = next(c for c in cases if c["id"] == "swap-armor")
+                case["expected"]["changes"] = [
+                    {"collection": "equipment", "entry_id": "vest", "field": "armor", "to": 1}
+                ]
+
+            edit_cases(root, "dev", stat_change)
+            with self.assertRaisesRegex(tl.PackError, "not editable"):
+                open_pack(root).close()
+
+    @unittest.skipUnless(CLI, "the demo pack needs the CEL formula CLI (MIMIK_FORMULA_EVAL)")
+    def test_demo_expected_replay_is_complete(self):
+        """Every demo gold replays as correct: proposals apply with no constraint violation
+        (an unreported violation makes the replay incorrect) and answers match."""
+        pack = tl.Pack(DEMO, engine_factory=lambda d: tl.CelCliEngine(d, CLI))
+        try:
+            _, replay = tl.offline_audit(pack, tl.RuleIndex(pack.rules))
+        finally:
+            pack.close()
+        self.assertEqual(replay["dev"], {"cases": 174, "correct": 174, "failed": []})
+
+
 class ReviewPackFactsTests(unittest.TestCase):
     """Fix 10 (guard): the README counts table and recorded hashes match the pack."""
 
@@ -1541,9 +1627,14 @@ class ReviewPackFactsTests(unittest.TestCase):
         self.assertEqual(tuple(int(x) for x in total.groups()), (en, len(dev) - en, len(dev)))
 
     def test_readme_hashes_match_pack_hashes(self):
+        """Pack revision 3: the current hashes live in "## Pack hashes"; the changelog keeps
+        historical ones, which a whole-file scan would let override the current line."""
         readme = (DEMO / "README.md").read_text(encoding="utf-8")
+        section = readme.split("\n## Pack hashes\n", 1)[1].split("\n## ", 1)[0]
         pattern = r"`([\w.-]+\.(?:md|json))` ([0-9a-f]{8})…([0-9a-f]{4})"
-        recorded = {name: (head, tail) for name, head, tail in re.findall(pattern, readme)}
+        found = re.findall(pattern, section)
+        recorded = {name: (head, tail) for name, head, tail in found}
+        self.assertEqual(len(found), len(recorded))
         self.assertEqual(
             sorted(recorded),
             ["cases-dev.json", "cases-heldout.json", "definition.json", "rules.md"],
