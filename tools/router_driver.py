@@ -73,6 +73,8 @@ class Unit:
         monotonic=time.monotonic,
         max_restarts=dr.MAX_RESTARTS,
         extra_summary=None,
+        states_path=None,
+        plan_path=None,
     ):
         self.plan = plan
         self.states = states
@@ -90,6 +92,9 @@ class Unit:
         self.worker = None
         self.stopped = None
         self.extra = dict(extra_summary or {})
+        # Bindings (review Sol B1, Sonnet M2): the exact states and plan files this unit ran.
+        self.extra["states_sha256"] = dr.sha_file(states_path) if states_path else None
+        self.extra["input_plan_sha256"] = dr.sha_file(plan_path) if plan_path else None
         self.decisions = self.out / "decisions.jsonl"
         self.attempts = self.out / "attempts.jsonl"
 
@@ -163,6 +168,12 @@ class Unit:
     def not_run(self, entry, why) -> dict:
         return {**entry, "status": "not_run", "error": why, "probabilities": None}
 
+    def write_plan(self, decisions):
+        (self.out / "plan.json").write_text(
+            json.dumps({"unit": self.plan["unit"], "decisions": decisions}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
     def one_attempt(self, entry, attempt):
         """-> (record, dead). dead: the worker was killed or exited (retry path)."""
         payload = self.payload(entry)
@@ -171,7 +182,13 @@ class Unit:
         try:
             raw = self.worker.predict(payload, self.decision_timeout)
             record = dr.normalise_worker_result(raw, payload["order"])
-            for key in ("seconds", "prompt_hash", "prompt_tokens", "question_sha256"):
+            for key in (
+                "seconds",
+                "prompt_hash",
+                "prompt_tokens",
+                "question_sha256",
+                "worker_peak_rss_kib",
+            ):
                 if key in raw:
                     record[key] = raw[key]
             if record["status"] == "completed" and raw.get("question_sha256") != dr.OPTION_HASH:
@@ -198,9 +215,18 @@ class Unit:
                 "probabilities": None,
             }
             dead = True
+        except Exception as error:  # noqa: BLE001 (any other fault fails this decision only)
+            record = {
+                "status": "failed",
+                "error_class": "driver_error",
+                "error": f"{type(error).__name__}: {error}",
+                "probabilities": None,
+            }
+            dead = True  # the worker's state is unknown: never reuse it
         record = {
             **entry,
             **record,
+            "state_hash": dr.text_hash(payload["state"]),
             "attempt": attempt,
             "worker_start": len(self.starts),
             "request_seconds": self.monotonic() - began,
@@ -222,10 +248,14 @@ class Unit:
             record, dead = self.one_attempt(entry, attempt)
             if not dead:
                 return record
-            alive = self.restart()
+            if self.worker is not None:
+                self.worker.close()
+                self.worker = None
             if attempt == 2:
-                return record  # the retry's own failure is final (timeout or failed)
-            if not alive:
+                # The retry's own failure is final. No eager restart: the next decision, if
+                # any, restarts the worker (review m6: nothing left must not burn the cap).
+                return record
+            if not self.restart():
                 return self.not_run(entry, f"no retry: {self.stopped}")
         return record
 
@@ -256,6 +286,16 @@ class Unit:
             },
             "ready_seconds": [s.get("ready_seconds") for s in self.starts if s.get("ok")],
             "option_hash": dr.OPTION_HASH,
+            "runtime": next((s.get("ready") for s in self.starts if s.get("ok")), None),
+            "worker_peak_rss_kib_max": max(
+                (
+                    r["worker_peak_rss_kib"]
+                    for r in rows
+                    if isinstance(r.get("worker_peak_rss_kib"), int)
+                ),
+                default=None,
+            ),
+            "worker_peak_rss_scope": "worker process (ru_maxrss), not the whole container",
             **self.extra,
         }
         (self.out / "summary.json").write_text(
@@ -273,17 +313,16 @@ class Unit:
             self.start_worker()
         except StartFailure as error:
             self.stop(f"first start failed: {error}")
+        if self.plan.get("select") != "token_quantiles":
+            self.write_plan([dict(d) for d in self.plan["decisions"]])  # before any decision
         decisions = self.plan_decisions()
+        self.write_plan(decisions)
         rows = []
         for entry in decisions:
             record = self.decide(entry)
             row = {"event": "decision", **record}
             rows.append(row)
             self.emit(self.decisions, row)
-        (self.out / "plan.json").write_text(
-            json.dumps({"unit": self.plan["unit"], "decisions": decisions}, indent=2) + "\n",
-            encoding="utf-8",
-        )
         return self.finish(rows)
 
     def plan_decisions(self) -> list:
@@ -375,6 +414,8 @@ def main(argv=None) -> int:
         method="raw" if args.backend == "anyjev" else "kev",
         max_restarts=args.max_restarts,
         extra_summary=extra,
+        states_path=args.states,
+        plan_path=args.plan,
     )
     summary = unit.run()
     print(

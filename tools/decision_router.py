@@ -78,6 +78,9 @@ REQUIRED_HEADER = (
     "fold_sha256",
     "gate",
     "pack_hashes",
+    "falsifier",
+    "claim",
+    "bindings",
 )
 MAX_RESTARTS = 3  # per screen or ablation unit (rev. 3.1, A1)
 PROBE_MAX_RESTARTS = 1  # the probe's own cap: any failed probe decision makes it ineligible
@@ -107,8 +110,7 @@ class IncompleteUnit(RouterError):
     pass
 
 
-def text_hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+text_hash = builder.text_hash  # one definition (router_state_builder)
 
 
 def sha_file(path) -> str:
@@ -385,6 +387,24 @@ def route_metrics(routes, expected, records=None) -> dict:
         }
         for e in CANONICAL
     }
+
+    def stratum(e):
+        """Correct by route_correct, never the confusion diagonal: a failure fallback lands on
+        ask_rule but is never correct (rev. 3.1 A6; review Sol 5)."""
+        members = [c for c in ids if expected[c] == e]
+        hits = count(members, is_correct)
+        out = {
+            "n": len(members),
+            "row": confusion[e],
+            "correct": hits,
+            "failures": count(members, lambda c: routes[c]["reason"] == "fallback_failure"),
+        }
+        if len(members) >= 10:
+            out["wilson95_correct"] = tl.wilson(hits, len(members))
+        else:
+            out["counts_only"] = True
+        return out
+
     return {
         "n": len(ids),
         "correct": tl._wilson_rate(correct, len(ids)),
@@ -394,15 +414,7 @@ def route_metrics(routes, expected, records=None) -> dict:
         "safe_wrong": tl._wilson_rate(safe_wrong, len(ids)),
         "failures": len(failures),
         "confusion": confusion,
-        "per_stratum": {
-            e: {"n": sum(confusion[e].values()), "row": confusion[e]}
-            | (
-                {"wilson95_correct": tl.wilson(confusion[e][e], sum(confusion[e].values()))}
-                if sum(confusion[e].values()) >= 10
-                else {"counts_only": True}
-            )
-            for e in CANONICAL
-        },
+        "per_stratum": {e: stratum(e) for e in CANONICAL},
     }
 
 
@@ -506,7 +518,7 @@ def falsifier(records, expected) -> dict:
     }
 
 
-# ---------------------------------------------------------------- unit ledgers
+# ---------------------------------------------------------------- unit ledgers and bindings
 
 
 def load_unit(unit_dir: Path) -> dict:
@@ -526,15 +538,159 @@ def load_unit(unit_dir: Path) -> dict:
         finals[key] = row
     planned = json.loads((unit_dir / "plan.json").read_text(encoding="utf-8"))["decisions"]
     wanted = [(d["key"], d["variant"], d["order"]) for d in planned]
+    if len(set(wanted)) != len(wanted):
+        raise RouterError("duplicate planned decisions")
     missing = [k for k in wanted if k not in finals]
     not_run = [k for k, r in finals.items() if r["status"] == "not_run"]
     return {
         "summary": summary,
         "finals": finals,
+        "planned": wanted,
         "complete": not missing and not not_run and set(finals) == set(wanted),
         "missing": len(missing),
         "not_run": len(not_run),
     }
+
+
+def expected_jobs(unit: str, mapping: dict, subset: list) -> set:
+    """The exact (key, variant, order) set a unit must cover (review Sol 4)."""
+    inverse = {v: k for k, v in mapping.items()}
+    s40 = {inverse[c] for c in subset}
+    if unit == "screen":
+        return {(k, "full", "canonical") for k in mapping} | {(k, "full", "reversed") for k in s40}
+    if unit == "ablation":
+        return {(k, v, "canonical") for k in s40 for v in ("empty", "request_only")}
+    raise RouterError(f"no fixed job set for unit {unit!r}")
+
+
+def check_attempt_unit(unit_dir: Path, unit: str) -> dict:
+    """The unit directory alone: readable, its own unit, complete. Never a traceback."""
+    out = {"complete": False, "errors": [], "unit": None}
+    try:
+        loaded = load_unit(unit_dir)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        out["errors"].append(f"unit unreadable or incomplete: {type(error).__name__}: {error}")
+        return out
+    out["unit"] = loaded
+    summary = loaded["summary"]
+    if summary.get("unit") != unit:
+        out["errors"].append(f"summary unit {summary.get('unit')!r} != {unit!r}")
+    if (
+        loaded["missing"]
+        or loaded["not_run"]
+        or not loaded["complete"]
+        or not summary.get("complete")
+    ):
+        out["errors"].append(
+            f"unit incomplete (missing {loaded['missing']}, not_run {loaded['not_run']})"
+        )
+    out["complete"] = not out["errors"]
+    return out
+
+
+def attempt_paths(attempt: Path) -> dict:
+    attempt = Path(attempt)
+    run = attempt / "prep" / "run"
+    return {
+        "unit": attempt / "unit",
+        "states": run / "prepared" / "states.jsonl",
+        "manifest": run / "prepared" / "manifest.json",
+        "mapping": run / "host" / "mapping.json",
+        "subset": run / "host" / "subset.json",
+    }
+
+
+def live_identity(pack: Path = PACK) -> dict:
+    """What the live pack and code are now: the decision file must match it (review m3)."""
+    return {
+        "pack_hashes": pack_hashes(pack),
+        "fold_sha256": fold_document(pack_cases(pack))["sha256"],
+        "state_builder_sha256": sha_file(TOOLS / "router_state_builder.py"),
+    }
+
+
+def pack_hashes(pack: Path) -> dict:
+    return {
+        name: sha_file(Path(pack) / name)
+        for name in ("rules.md", "definition.json", "cases-dev.json")
+        if (Path(pack) / name).exists()
+    }
+
+
+def check_attempt(attempt: Path, unit: str, pack: Path = PACK) -> dict:
+    """Every binding of one attempt (review Sol B1, Sonnet M2, Sol 4): returns errors, the
+    input hashes, the loaded unit, mapping, subset, states and the run's runtime identity."""
+    paths = attempt_paths(attempt)
+    out = check_attempt_unit(paths["unit"], unit)
+    errors = out["errors"]
+    hashes = {}
+    try:
+        for name in ("states", "manifest", "mapping", "subset"):
+            hashes[name] = sha_file(paths[name])
+        for name in ("decisions.jsonl", "plan.json", "summary.json"):
+            hashes[name.split(".")[0]] = sha_file(paths["unit"] / name)
+        hashes["input_plan"] = sha_file(paths["manifest"].parent / f"plan-{unit}.json")
+        manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+        mapping = json.loads(paths["mapping"].read_text(encoding="utf-8"))
+        subset = json.loads(paths["subset"].read_text(encoding="utf-8"))
+        states = read_states(paths["states"])
+        input_plan = json.loads((paths["manifest"].parent / f"plan-{unit}.json").read_text())
+    except (OSError, ValueError, KeyError) as error:
+        errors.append(f"attempt inputs unreadable: {type(error).__name__}: {error}")
+        out.update(complete=False, hashes=hashes)
+        return out
+    out.update(hashes=hashes, mapping=mapping, subset=subset, states=states)
+    loaded = out["unit"]
+    summary = loaded["summary"] if loaded else {}
+    if (
+        manifest.get("states_sha256") != hashes["states"]
+        or summary.get("states_sha256") != hashes["states"]
+    ):
+        errors.append("states file differs from the run's (manifest or summary states_sha256)")
+    if manifest.get("mapping_sha256") != hashes["mapping"]:
+        errors.append("mapping file differs from the manifest")
+    if manifest.get("subset_sha256") != hashes["subset"]:
+        errors.append("subset file differs from the manifest")
+    if summary.get("input_plan_sha256") != hashes["input_plan"]:
+        errors.append("the unit ran another plan than the prepared one")
+    if manifest.get("option_hash") != OPTION_HASH or summary.get("option_hash") != OPTION_HASH:
+        errors.append("option hash differs (manifest or summary)")
+    if manifest.get("pack_hashes") != pack_hashes(pack):
+        errors.append("the run's pack hashes differ from the live pack")
+    if loaded:
+        if unit != "probe":
+            if loaded["planned"] != [
+                (d["key"], d["variant"], d["order"]) for d in input_plan["decisions"]
+            ]:
+                errors.append("the unit's plan.json differs from the prepared plan")
+            want = expected_jobs(unit, mapping, subset)
+            if set(loaded["planned"]) != want or set(loaded["finals"]) != want:
+                errors.append(f"job set differs from the frozen {unit} job set")
+        for (key, variant, _), row in loaded["finals"].items():
+            if row["status"] == "not_run":
+                continue
+            if row["status"] == "completed" and row.get("question_sha256") != OPTION_HASH:
+                errors.append(f"a decision row carries another option hash ({key})")
+                break
+            state = states.get(key)
+            if state is None or row.get("state_hash") != text_hash(state_text(state, variant)):
+                errors.append(f"a decision row's state hash differs from the states file ({key})")
+                break
+    out["runtime"] = {
+        k: summary.get(k)
+        for k in (
+            "router_key",
+            "router_id",
+            "image",
+            "artefacts",
+            "library_revision",
+            "runtime_kind",
+            "threads",
+            "n_ctx",
+        )
+    } | {"worker": summary.get("runtime")}
+    out["complete"] = not errors
+    return out
 
 
 def records_by_case(unit, mapping, variant="full", order="canonical") -> dict:
@@ -546,33 +702,48 @@ def records_by_case(unit, mapping, variant="full", order="canonical") -> dict:
     return out
 
 
-def select_report(cases, mapping, screen_dir, ablation_dir=None, router_id=None, subset=None):
+def select_attempts(
+    cases, screen_attempt, ablation_attempt=None, router_id=None, subset=None, pack=PACK
+):
+    """Per-router selection from bound run artefacts (plan §3; review fixes)."""
     expected = {c["id"]: c["expected"]["outcome"] for c in cases}
     folds = allocate_folds(cases)
-    screen = load_unit(screen_dir)
-    records = records_by_case(screen, mapping)
-    complete = screen["complete"] and set(records) == set(expected)
+    screen = check_attempt(screen_attempt, "screen", pack)
+    errors = list(screen["errors"])
+    if subset is not None and screen.get("subset") is not None and screen["subset"] != list(subset):
+        errors.append("the run's S40 subset differs from the frozen subset")
+    mapping = screen.get("mapping") or {}
+    if mapping and set(mapping.values()) != set(expected):
+        errors.append("the run's mapping does not cover the pack's dev cases")
     report = {
         "router": router_id,
         "option_hash": OPTION_HASH,
         "grid": list(GRID),
         "fold_sha256": fold_document(cases)["sha256"],
-        "screen_complete": complete,
-        "screen_missing": screen["missing"],
-        "screen_not_run": screen["not_run"],
         "label": "exploratory, dev only",
+        "bindings": {
+            "screen": screen.get("hashes"),
+            "ablation": None,
+            "runtime": screen.get("runtime"),
+            "option_hash": OPTION_HASH,
+            "fold_sha256": fold_document(cases)["sha256"],
+            "pack_hashes": pack_hashes(pack),
+        },
     }
-    if not complete:
-        report["gate"] = {
-            "passed": False,
-            "reasons": ["screen unit incomplete; not gate-evaluable"],
-        }
+    if errors:
+        report["screen_complete"] = False
+        report["gate"] = {"passed": False, "reasons": ["screen unit not gate-evaluable", *errors]}
+        report["falsifier"] = {"null": True, "reason": "not evaluable"}
+        report["claim"] = {"positive_claim": False, "reasons": ["screen unit not gate-evaluable"]}
         return report
+    report["screen_complete"] = True
+    unit = screen["unit"]
+    records = records_by_case(unit, mapping)
     cv = cross_validate(records, expected, folds)
     oof = route_metrics(cv["routes"], expected)
     n_supported = sum(1 for e in expected.values() if e in SUPPORTED)
-    report["cv"] = {"folds": cv["folds"], "out_of_fold": oof, "routes": cv["routes"]}
     n_at_risk = sum(1 for e in expected.values() if e in AT_RISK)
+    report["cv"] = {"folds": cv["folds"], "out_of_fold": oof, "routes": cv["routes"]}
     report["gate"] = gate(True, oof, n_supported, len(expected), n_at_risk)
     report["refit"] = refit(records, expected) if report["gate"]["passed"] else None
     report["baselines"] = {
@@ -595,69 +766,122 @@ def select_report(cases, mapping, screen_dir, ablation_dir=None, router_id=None,
     )
     seconds = [
         r["seconds"]
-        for r in screen["finals"].values()
+        for r in unit["finals"].values()
         if r["status"] == "completed" and r.get("seconds")
     ]
     report["median_seconds_per_decision"] = statistics.median(seconds) if seconds else None
+    report["worker_peak_rss_kib_max"] = unit["summary"].get("worker_peak_rss_kib_max")
     report["per_fold_strata"] = {
         str(i): {
             e: sum(1 for c, f in folds.items() if f == i and expected[c] == e) for e in CANONICAL
         }
         for i in range(N_FOLDS)
     }
-    if subset:
-        report["order_flips"] = order_flips(screen, mapping, subset)
-    report["ablation"] = ablation_report(ablation_dir, mapping, records, expected, subset)
+    s40 = screen["subset"]
+    report["order_flips"] = order_flips(unit, mapping, s40)
+    report["ablation"], report["bindings"]["ablation"] = ablation_report(
+        ablation_attempt, screen, records, expected, s40, pack
+    )
+    report["claim"] = claim(report)
     return report
 
 
-def order_flips(screen, mapping, subset) -> dict:
+def claim(report) -> dict:
+    """Consolidated eligibility for any positive claim (plan §2; review Sol 2, Sonnet M1)."""
+    reasons = []
+    if not report["gate"]["passed"]:
+        reasons.append("the gate failed")
+    if not report.get("refit") or report["refit"]["null"]:
+        reasons.append("no refit or tau* NONE")
+    if report["falsifier"]["null"]:
+        reasons.append("falsifier null: at-risk top-1 does not beat B-risk")
+    ablation = report.get("ablation") or {}
+    if not ablation.get("complete"):
+        reasons.append(f"priors not excluded: {ablation.get('verdict', 'no ablation unit')}")
+    else:
+        full = ablation["full_state"]["count"]
+        for variant in ("empty", "request_only"):
+            if full <= ablation[variant]["count"]:
+                reasons.append(f"priors not excluded: full state does not beat {variant}")
+    return {"positive_claim": not reasons, "reasons": reasons}
+
+
+def order_flips(unit, mapping, subset) -> dict:
     inverse = {v: k for k, v in mapping.items()}
     flips = evaluated = 0
     for cid in subset:
-        a = screen["finals"].get((inverse[cid], "full", "canonical"))
-        b = screen["finals"].get((inverse[cid], "full", "reversed"))
+        a = unit["finals"].get((inverse[cid], "full", "canonical"))
+        b = unit["finals"].get((inverse[cid], "full", "reversed"))
         if a and b and a["status"] == b["status"] == "completed":
             evaluated += 1
             flips += argmax(a["probabilities"], CANONICAL) != argmax(b["probabilities"], CANONICAL)
     return {"evaluated": evaluated, "flips": flips, "of": len(subset)}
 
 
-def ablation_report(ablation_dir, mapping, full_records, expected, subset) -> dict:
-    if ablation_dir is None or not subset:
-        return {"complete": False, "verdict": "priors not excluded (no ablation unit)"}
-    unit = load_unit(ablation_dir)
-    if not unit["complete"]:
-        return {"complete": False, "verdict": "priors not excluded (ablation unit incomplete)"}
-    out = {"complete": True}
+def ablation_report(ablation_attempt, screen, full_records, expected, subset, pack=PACK):
+    if ablation_attempt is None:
+        return {"complete": False, "verdict": "no ablation unit"}, None
+    check = check_attempt(ablation_attempt, "ablation", pack)
+    errors = list(check["errors"])
+    if check.get("hashes", {}).get("states") != screen["hashes"].get("states"):
+        errors.append("the ablation ran on other states than the screen")
+    if check.get("runtime") != screen.get("runtime"):
+        errors.append("the ablation ran on another runtime than the screen")
+    if errors:
+        return {
+            "complete": False,
+            "verdict": "ablation unit not valid",
+            "errors": errors,
+        }, check.get("hashes")
+    mapping = screen["mapping"]
 
     def accuracy(records):
-        ids = [c for c in subset if c in records]
         hits = sum(
             1
-            for c in ids
-            if records[c]["status"] == "completed"
+            for c in subset
+            if c in records
+            and records[c]["status"] == "completed"
             and argmax(records[c]["probabilities"], CANONICAL) == expected[c]
         )
         return tl._wilson_rate(hits, len(subset))
 
-    out["full_state"] = accuracy(full_records)
+    out = {"complete": True, "full_state": accuracy(full_records)}
     for variant in ("empty", "request_only"):
-        out[variant] = accuracy(records_by_case(unit, mapping, variant=variant))
+        out[variant] = accuracy(records_by_case(check["unit"], mapping, variant=variant))
     out["note"] = "no accuracy drop against the full state means priors"
-    return out
+    return out, check["hashes"]
 
 
 def choose(reports) -> dict:
-    """Among passing routers only: highest out-of-fold supported recall, then lower median
-    seconds per decision, then the fixed order R1, R4, R3. Exploratory."""
+    """Among routers that pass the gate and whose falsifier is not null: highest out-of-fold
+    supported recall, then lower median seconds per decision, then R1, R4, R3. Exploratory.
+    Every report must come from the same option hash, folds and pack."""
+    shared = {
+        json.dumps(
+            {
+                k: (r.get("bindings") or {}).get(k)
+                for k in ("option_hash", "fold_sha256", "pack_hashes")
+            },
+            sort_keys=True,
+        )
+        for r in reports
+    }
+    if len(shared) > 1:
+        raise RouterError("reports were not computed on the same option hash, folds and pack")
     passing = [
         r
         for r in reports
-        if r.get("gate", {}).get("passed") and r.get("refit") and not r["refit"]["null"]
+        if r.get("gate", {}).get("passed")
+        and r.get("refit")
+        and not r["refit"]["null"]
+        and not (r.get("falsifier") or {}).get("null", True)
     ]
     if not passing:
-        return {"choice": None, "result": "null", "reason": "no router passes the gate"}
+        return {
+            "choice": None,
+            "result": "null",
+            "reason": "no router passes the gate and the falsifier",
+        }
 
     def key(r):
         recall = r["cv"]["out_of_fold"]["supported_recall"]["count"]
@@ -670,6 +894,7 @@ def choose(reports) -> dict:
         "choice": best["router"],
         "result": "exploratory",
         "candidates": [r["router"] for r in passing],
+        "positive_claim": best.get("claim", {}).get("positive_claim", False),
     }
 
 
@@ -832,23 +1057,21 @@ def write_json(path: Path, doc) -> str:
     return text_hash(text)
 
 
-def prepare(
-    pack: Path, out: Path, formula_cli=None, subset_file: Path = SUBSET, cases=None
+def write_prepared(
+    run: Path, mapping: dict, subset_ids: list, pack: Path, derived_sha: str, rows=None
 ) -> dict:
-    """prepared/ (mounted into the router container) and host/ (never mounted)."""
-    out = Path(out)
-    prepared, host = out / "prepared", out / "host"
-    prepared.mkdir(parents=True)
-    host.mkdir(parents=True)
-    cases = pack_cases(pack) if cases is None else cases
-    derived, mapping = derive(cases)
-    derived_sha = write_json(prepared / "derived.json", derived)
+    """prepared/ (states, plans, manifest; mounted into the router container) and host/
+    (mapping and subset; never mounted). rows: write the states too (tests, sentinel runs)."""
+    run = Path(run)
+    prepared, host = run / "prepared", run / "host"
+    prepared.mkdir(parents=True, exist_ok=True)
+    host.mkdir(parents=True, exist_ok=True)
+    if rows is not None:
+        with (prepared / "states.jsonl").open("x", encoding="utf-8") as out:
+            for row in rows:
+                out.write(json.dumps(row, ensure_ascii=False) + "\n")
     mapping_sha = write_json(host / "mapping.json", mapping)
-    build_states_isolated(pack, prepared / "derived.json", prepared / "states.jsonl", formula_cli)
-    subset_ids = (
-        json.loads(Path(subset_file).read_text(encoding="utf-8"))["case_ids"] if subset_file else []
-    )
-    write_json(host / "subset.json", subset_ids)
+    subset_sha = write_json(host / "subset.json", list(subset_ids))
     plans = unit_plans(mapping, subset_ids)
     hashes = {
         name: write_json(prepared / f"plan-{name}.json", plan) for name, plan in plans.items()
@@ -860,6 +1083,7 @@ def prepare(
         "sum_tolerance": SUM_TOLERANCE,
         "derived_sha256": derived_sha,
         "mapping_sha256": mapping_sha,
+        "subset_sha256": subset_sha,
         "states_sha256": sha_file(prepared / "states.jsonl"),
         "builder_sha256": sha_file(TOOLS / "router_state_builder.py"),
         "router_sha256": sha_file(Path(__file__)),
@@ -870,14 +1094,27 @@ def prepare(
             "top_k": tl.DEFAULT_TOP_K,
             "query": "request",
         },
-        "pack_hashes": {
-            name: sha_file(Path(pack) / name)
-            for name in ("rules.md", "definition.json", "cases-dev.json")
-            if (Path(pack) / name).exists()
-        },
+        "pack_hashes": pack_hashes(pack),
     }
     write_json(prepared / "manifest.json", manifest)
     return manifest
+
+
+def prepare(
+    pack: Path, out: Path, formula_cli=None, subset_file: Path = SUBSET, cases=None
+) -> dict:
+    out = Path(out)
+    prepared = out / "prepared"
+    prepared.mkdir(parents=True)
+    (out / "host").mkdir(parents=True)
+    cases = pack_cases(pack) if cases is None else cases
+    derived, mapping = derive(cases)
+    derived_sha = write_json(prepared / "derived.json", derived)
+    build_states_isolated(pack, prepared / "derived.json", prepared / "states.jsonl", formula_cli)
+    subset_ids = (
+        json.loads(Path(subset_file).read_text(encoding="utf-8"))["case_ids"] if subset_file else []
+    )
+    return write_prepared(out, mapping, subset_ids, pack, derived_sha)
 
 
 def read_states(path: Path) -> dict:
@@ -974,19 +1211,25 @@ def probe_projection(load_seconds: float, n_decisions: int = 3) -> float:
     return load_seconds + restarts + n_decisions * PROBE_DECISION_TIMEOUT
 
 
-def _dev_cases_count() -> int:
-    try:
-        return len(json.loads((PACK / "cases-dev.json").read_text(encoding="utf-8"))["cases"])
-    except (OSError, ValueError, KeyError):
-        return 0
-
-
 SUBSET_SIZE = 40  # S40: reversed order and the two ablations (plan §2, §7)
-DEV_CASES = _dev_cases_count()  # 175 on the rev3 pack (174 before)
-UNIT_DECISIONS = {"screen": DEV_CASES + SUBSET_SIZE, "ablation": 2 * SUBSET_SIZE}
 
 
-def probe_result(summary, router_key=None) -> dict:
+def unit_decisions(pack: Path = PACK) -> dict:
+    """Decisions per unit, from the pack (175 + 40 on rev3); refuses a missing pack (m4)."""
+    try:
+        n = len(pack_cases(pack))
+    except (OSError, ValueError, KeyError) as error:
+        raise RouterError(f"no dev cases in {pack}: {type(error).__name__}") from None
+    if not n:
+        raise RouterError(f"no dev cases in {pack}")
+    return {"screen": n + SUBSET_SIZE, "ablation": 2 * SUBSET_SIZE}
+
+
+def registry_artefacts(entry: dict) -> list:
+    return [{k: f[k] for k in ("role", "size", "sha256")} for f in entry["files"]]
+
+
+def probe_result(summary, router_key=None, entry=None) -> dict:
     """A complete probe summary, or RouterError (the router is then ineligible; rev. 3.1 N3)."""
     if (
         not isinstance(summary, dict)
@@ -996,6 +1239,11 @@ def probe_result(summary, router_key=None) -> dict:
         raise RouterError("no complete probe: the router is ineligible")
     if router_key is not None and summary.get("router_key") != router_key:
         raise RouterError("the probe summary belongs to another router")
+    if entry is not None:  # review m9: the probe ran this image and these artefacts
+        if summary.get("image") != entry["image"]:
+            raise RouterError("the probe ran another image than the registry entry")
+        if summary.get("artefacts") != registry_artefacts(entry):
+            raise RouterError("the probe ran other artefacts than the registry entry")
     slowest = (summary.get("decision_seconds") or {}).get("max")
     if not isinstance(slowest, (int, float)) or slowest <= 0:
         raise RouterError("probe has no measured decision time: the router is ineligible")
@@ -1004,7 +1252,9 @@ def probe_result(summary, router_key=None) -> dict:
     return {"slowest": float(slowest), "disk_rate": summary.get("disk_rate")}
 
 
-def unit_timeouts(unit: str, total_bytes: int, probe_summary=None, router_key=None) -> dict:
+def unit_timeouts(
+    unit: str, total_bytes: int, probe_summary=None, router_key=None, entry=None, pack=PACK
+) -> dict:
     if unit == "probe":
         ready = ready_timeout(total_bytes, probe=True)
         timeout = decision_timeout(probe=True)
@@ -1016,18 +1266,17 @@ def unit_timeouts(unit: str, total_bytes: int, probe_summary=None, router_key=No
             "max_restarts": PROBE_MAX_RESTARTS,
             "source": "probe caps (independent of probe results)",
         }
-    if unit not in UNIT_DECISIONS:
+    sizes = unit_decisions(pack)
+    if unit not in sizes:
         raise RouterError(f"unknown unit {unit!r}")
-    probe = probe_result(probe_summary, router_key)
+    probe = probe_result(probe_summary, router_key, entry)
     ready = ready_timeout(total_bytes, probe["disk_rate"])
     timeout = decision_timeout(probe["slowest"])
     return {
         "unit": unit,
         "ready_timeout": ready,
         "decision_timeout": timeout,
-        "projection_seconds": unit_projection(
-            UNIT_DECISIONS[unit], ready, timeout, probe["slowest"]
-        ),
+        "projection_seconds": unit_projection(sizes[unit], ready, timeout, probe["slowest"]),
         "seconds_per_decision": probe["slowest"],
         "max_restarts": MAX_RESTARTS,
         "disk_rate": probe["disk_rate"],
@@ -1049,34 +1298,34 @@ def policy_document(tau_star) -> dict:
     }
 
 
-def runtime_header(entry: dict, screen_summary: dict) -> dict:
-    """Runtime provenance for the decision file: registry entry plus the worker's own record."""
-    ready = next(
-        (s.get("ready") or {} for s in screen_summary.get("starts", []) if s.get("ok")), {}
+def build_decision_file(report, screen_attempt, ablation_attempt, entry, pack=PACK) -> dict:
+    """Recompute the selection from the bound run artefacts and refuse a stale report, a
+    falsifier-null or gate-failing router, or a run whose runtime is not the registry entry's
+    (review Sol B1, Sol 2, Sonnet M1, M2). Runtime provenance comes from the run."""
+    fresh = select_attempts(
+        pack_cases(pack), screen_attempt, ablation_attempt, report.get("router"), None, pack
     )
-    return {
-        "runtime": entry["runtime"],
-        "image": entry["image"],
-        "library_revision": entry["library_revision"],
-        "artefacts": [{k: f[k] for k in ("role", "size", "sha256")} for f in entry["files"]],
-        "device": "cpu",
-        "device_provenance": ready.get("device_provenance")
-        or {"device": ready.get("device", "cpu")},
-        "threads": entry["threads"],
-        "n_ctx": entry["n_ctx"],
-    }
-
-
-def build_decision_file(report, mapping, screen_dir, states_file, header_extra) -> dict:
-    if not report.get("gate", {}).get("passed") or not report.get("refit"):
+    for key in ("bindings", "gate", "falsifier", "claim"):
+        if json.dumps(fresh.get(key), sort_keys=True) != json.dumps(
+            report.get(key), sort_keys=True
+        ):
+            raise RouterError(f"stale report: its {key} is not what the bound inputs give")
+    if (fresh.get("refit") or {}).get("tau_star") != (report.get("refit") or {}).get("tau_star"):
+        raise RouterError("stale report: tau* is not what the bound inputs give")
+    if not fresh["gate"]["passed"] or not fresh.get("refit"):
         raise RouterError("no decision file: the router did not pass the gate")
-    tau = report["refit"]["tau_star"]
+    if fresh["falsifier"]["null"]:
+        raise RouterError("no decision file: the falsifier is null for this router")
+    tau = fresh["refit"]["tau_star"]
     if tau == NONE:
         raise RouterError("no decision file: tau* is NONE (null router)")
-    unit = load_unit(screen_dir)
-    if not unit["complete"]:
-        raise RouterError("no decision file: the screen unit is incomplete")
-    states = read_states(states_file)
+    runtime = fresh["bindings"]["runtime"]
+    if runtime.get("image") != entry["image"] or runtime.get("artefacts") != registry_artefacts(
+        entry
+    ):
+        raise RouterError("the run's runtime (image or artefacts) differs from the registry entry")
+    screen = check_attempt(screen_attempt, "screen", pack)
+    unit, states, mapping = screen["unit"], screen["states"], screen["mapping"]
     entries = []
     for key, cid in sorted(mapping.items(), key=lambda kv: kv[1]):
         row = unit["finals"][(key, "full", "canonical")]
@@ -1091,27 +1340,42 @@ def build_decision_file(report, mapping, screen_dir, states_file, header_extra) 
                 "reason": reason,
             }
         )
+    worker = runtime.get("worker") or {}
     header = {
-        **header_extra,  # runtime provenance first: the computed fields below always win
         "encoding": DECISION_FILE_ENCODING,
         "kind": "sys-r-decisions",
         "split": "dev",
-        "router": report["router"],
+        "router": fresh["router"],
+        "runtime": runtime.get("runtime_kind"),
+        "image": runtime["image"],
+        "library_revision": runtime.get("library_revision"),
+        "artefacts": runtime["artefacts"],
+        "device": "cpu",
+        "device_provenance": worker.get("device_provenance")
+        or {"device": worker.get("device", "cpu")},
+        "worker": worker,
+        "threads": runtime.get("threads"),
+        "n_ctx": runtime.get("n_ctx"),
         "policy": policy_document(tau),
         "policy_hash": tl.digest(policy_document(tau)),
         "question_hash": OPTION_HASH,
         "retrieval": {"top_k": tl.DEFAULT_TOP_K, "query": "request"},
         "state_builder_sha256": sha_file(TOOLS / "router_state_builder.py"),
         "fold_seed": FOLD_SEED,
-        "fold_sha256": report["fold_sha256"],
-        "gate": report["gate"],
+        "fold_sha256": fresh["fold_sha256"],
+        "gate": fresh["gate"],
+        "falsifier": fresh["falsifier"],
+        "claim": fresh["claim"],
+        "bindings": fresh["bindings"],
+        "pack_hashes": fresh["bindings"]["pack_hashes"],
     }
     return {"header": header, "entries": entries}
 
 
-def verify_decision_file(doc, case_ids, state_hash_of) -> dict:
+def verify_decision_file(doc, case_ids, state_hash_of, live=None) -> dict:
     """Integrity checks (plan §4); raises RouterError on any refusal. state_hash_of(case_id)
-    recomputes the state hash through the isolated builder."""
+    recomputes the state hash through the isolated builder; live (live_identity) is what the
+    pack, folds and builder are now (review m3)."""
     header = doc.get("header") or {}
     if header.get("encoding") != DECISION_FILE_ENCODING or header.get("kind") != "sys-r-decisions":
         raise RouterError("decision file: unknown encoding or kind")
@@ -1120,6 +1384,16 @@ def verify_decision_file(doc, case_ids, state_hash_of) -> dict:
         raise RouterError(f"decision file: header lacks {missing_header}")
     if not (header.get("gate") or {}).get("passed"):
         raise RouterError("decision file: the router did not pass the gate")
+    if (header.get("falsifier") or {}).get("null", True):
+        raise RouterError("decision file: the falsifier is null for this router")
+    if live is not None:
+        for name, value in (live.get("pack_hashes") or {}).items():
+            if (header.get("pack_hashes") or {}).get(name) != value:
+                raise RouterError(f"decision file: pack hash of {name} differs from the live pack")
+        if header.get("fold_sha256") != live.get("fold_sha256"):
+            raise RouterError("decision file: fold hash differs from the live pack's folds")
+        if header.get("state_builder_sha256") != live.get("state_builder_sha256"):
+            raise RouterError("decision file: state builder hash differs from the live builder")
     policy = header.get("policy") or {}
     if header.get("policy_hash") != tl.digest(policy) or policy.get("grid") != list(GRID):
         raise RouterError("decision file: policy hash mismatch")
@@ -1179,9 +1453,8 @@ def main(argv=None) -> int:
     f.add_argument("--out", type=Path)
     s = sub.add_parser("select")
     s.add_argument("--pack", type=Path, default=PACK)
-    s.add_argument("--mapping", type=Path, required=True)
-    s.add_argument("--screen", type=Path, required=True)
-    s.add_argument("--ablation", type=Path)
+    s.add_argument("--screen-attempt", type=Path, required=True, help="the screen attempt dir")
+    s.add_argument("--ablation-attempt", type=Path, help="the ablation attempt dir")
     s.add_argument("--router", required=True)
     s.add_argument("--subset", type=Path, default=SUBSET)
     s.add_argument("--out", type=Path, required=True)
@@ -1194,24 +1467,31 @@ def main(argv=None) -> int:
     df = sub.add_parser("decision-file")
     df.add_argument("--pack", type=Path, default=PACK)
     df.add_argument("--report", type=Path, required=True)
-    df.add_argument("--mapping", type=Path, required=True)
-    df.add_argument("--screen", type=Path, required=True)
-    df.add_argument("--states", type=Path, required=True)
+    df.add_argument("--screen-attempt", type=Path, required=True)
+    df.add_argument("--ablation-attempt", type=Path)
     df.add_argument("--router-key", required=True, help="key of tools/decision_models.json")
-    df.add_argument("--header", type=Path, help="optional JSON merged into the header")
     df.add_argument("--out", type=Path, required=True)
     tm = sub.add_parser("timeouts", help="ready/decision timeouts and the projection (JSON)")
     tm.add_argument("--unit", required=True)
     tm.add_argument("--total-bytes", type=int, required=True)
     tm.add_argument("--probe-summary", type=Path)
     tm.add_argument("--router-key")
+    tm.add_argument("--pack", type=Path, default=PACK)
     args = p.parse_args(argv)
     if args.cmd == "timeouts":
         summary = None
         if args.probe_summary:
             summary = json.loads(args.probe_summary.read_text(encoding="utf-8"))
         try:
-            print(json.dumps(unit_timeouts(args.unit, args.total_bytes, summary, args.router_key)))
+            entry = None
+            if args.router_key:
+                import decision_models
+
+                entry = decision_models.load()["routers"][args.router_key]
+            out = unit_timeouts(
+                args.unit, args.total_bytes, summary, args.router_key, entry, args.pack
+            )
+            print(json.dumps(out))
         except RouterError as error:
             print(f"ineligible: {error}", file=sys.stderr)
             return 3
@@ -1248,18 +1528,29 @@ def main(argv=None) -> int:
         )
         return 0
     if args.cmd == "select":
-        mapping = json.loads(args.mapping.read_text(encoding="utf-8"))
         subset = json.loads(args.subset.read_text(encoding="utf-8"))["case_ids"]
-        report = select_report(
-            pack_cases(args.pack), mapping, args.screen, args.ablation, args.router, subset
+        report = select_attempts(
+            pack_cases(args.pack),
+            args.screen_attempt,
+            args.ablation_attempt,
+            args.router,
+            subset,
+            args.pack,
         )
         with args.out.open("x", encoding="utf-8") as handle:
             handle.write(json.dumps(report, indent=2) + "\n")
-        print(json.dumps({"router": args.router, "gate": report["gate"]}, indent=2))
+        print(
+            json.dumps(
+                {k: report.get(k) for k in ("router", "gate", "falsifier", "claim")}, indent=2
+            )
+        )
         return 0
     if args.cmd == "choose":
         reports = [json.loads(r.read_text(encoding="utf-8")) for r in args.reports]
-        print(json.dumps(choose(reports), indent=2))
+        try:
+            print(json.dumps(choose(reports), indent=2))
+        except RouterError as error:
+            raise SystemExit(f"choose: {error}") from None
         return 0
     if args.cmd == "overlay":
         cases = _cases_by_id(args.pack)
@@ -1283,22 +1574,17 @@ def main(argv=None) -> int:
         return 0
     if args.cmd == "decision-file":
         report = json.loads(args.report.read_text(encoding="utf-8"))
-        mapping = json.loads(args.mapping.read_text(encoding="utf-8"))
         import decision_models
 
         entry = decision_models.load()["routers"][args.router_key]
         if entry["router_id"] != report.get("router"):
             raise SystemExit("decision-file: --router-key does not match the report's router")
-        screen_summary = json.loads((args.screen / "summary.json").read_text(encoding="utf-8"))
-        extra = runtime_header(entry, screen_summary)
-        if args.header:
-            extra.update(json.loads(args.header.read_text(encoding="utf-8")))
-        pack_hashes = {
-            n: sha_file(args.pack / n) for n in ("rules.md", "definition.json", "cases-dev.json")
-        }
-        doc = build_decision_file(
-            report, mapping, args.screen, args.states, {**extra, "pack_hashes": pack_hashes}
-        )
+        try:
+            doc = build_decision_file(
+                report, args.screen_attempt, args.ablation_attempt, entry, args.pack
+            )
+        except RouterError as error:
+            raise SystemExit(f"decision-file: {error}") from None
         with args.out.open("x", encoding="utf-8") as handle:
             handle.write(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
         print(json.dumps({"sha256": sha_file(args.out), "entries": len(doc["entries"])}))

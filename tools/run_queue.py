@@ -78,7 +78,7 @@ dr = _Lazy("decision_router")
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "tools" / "run_tool_loop_benchmark.sh"
 ROUTER_RUNNER = ROOT / "tools" / "run_decision_router.sh"
-ROUTER_UNITS = ("probe", "screen", "ablation")  # decisions per unit: router_unit_size()
+ROUTER_UNITS = ("probe", "screen", "ablation")  # decisions per unit: dr.unit_decisions()
 WATCHDOG = ROOT / "tools" / "run_watchdog.py"
 PACK = ROOT / "examples" / "tool-loop-demo"
 SCHEMA = 1
@@ -822,9 +822,10 @@ class Queue:
             if key not in self.router_probes:
                 raise dr.RouterError("ineligible: no complete probe of this router in the session")
             summary = json.loads(Path(self.router_probes[key]).read_text(encoding="utf-8"))
-        return dr.unit_timeouts(unit, self.router_bytes(key), summary, key if summary else None)[
-            "projection_seconds"
-        ]
+        entry = self.decision["routers"][key]
+        return dr.unit_timeouts(
+            unit, self.router_bytes(key), summary, key if summary else None, entry
+        )["projection_seconds"]
 
     def router_admission(self, arm):
         """None, or (state, reason): probe gate, projection cap and end margin."""
@@ -1201,31 +1202,19 @@ class Queue:
         return rc
 
     @staticmethod
-    def router_unit_check(unit_dir: Path, unit: str) -> dict:
-        """Exact coverage of the unit's plan, no not_run, the unit's own size (plan §5)."""
-        try:
-            loaded = dr.load_unit(unit_dir)
-        except (OSError, ValueError, KeyError) as error:
-            return {"complete": False, "reasons": [f"unreadable unit: {type(error).__name__}"]}
-        summary = loaded["summary"]
-        reasons = []
-        planned = len(loaded["finals"]) + loaded["missing"]
-        if summary.get("unit") != unit:
-            reasons.append(f"summary unit {summary.get('unit')!r} != {unit!r}")
-        size = 3 if unit == "probe" else dr.UNIT_DECISIONS[unit]
-        if planned != size:
-            reasons.append(f"{planned} decisions != {size} for a {unit} unit")
-        if loaded["missing"]:
-            reasons.append(f"{loaded['missing']} planned decisions missing")
-        if loaded["not_run"]:
-            reasons.append(f"not_run {loaded['not_run']}")
-        if not summary.get("complete") or not loaded["complete"]:
-            reasons.append("unit incomplete")
+    def router_unit_check(attempt_dir: Path, unit: str) -> dict:
+        """Every binding and the exact frozen job set (plan §5; review Sol 4, B1)."""
+        check = dr.check_attempt(attempt_dir, unit)
+        loaded = check.get("unit") or {}
+        summary = loaded.get("summary") or {}
+        reasons = list(check["errors"])
+        if unit == "probe" and loaded and len(loaded["planned"]) != 3:
+            reasons.append(f"{len(loaded['planned'])} probe decisions != 3")
         return {
             "complete": not reasons,
             "reasons": reasons,
-            "not_run": loaded["not_run"],
-            "planned": planned,
+            "not_run": loaded.get("not_run"),
+            "planned": len(loaded.get("planned") or []),
             "stopped": summary.get("stopped"),
             "restarts": summary.get("restarts"),
         }
@@ -1236,7 +1225,7 @@ class Queue:
         unit_dir = attempt_dir / "unit"
         check = None
         if (unit_dir / "summary.json").exists():
-            check = self.router_unit_check(unit_dir, arm["config"]["unit"])
+            check = self.router_unit_check(attempt_dir, arm["config"]["unit"])
             out["unit_check"] = check
             out["ledger"] = str(unit_dir / "decisions.jsonl")
         if not cleanup.get("ok"):
@@ -1304,7 +1293,9 @@ class Queue:
             return
         path = Path(record["dir"]) / "unit" / "summary.json"
         try:
-            dr.probe_result(json.loads(path.read_text(encoding="utf-8")), key)
+            dr.probe_result(
+                json.loads(path.read_text(encoding="utf-8")), key, self.decision["routers"][key]
+            )
         except (OSError, ValueError) as error:
             self.router_ineligible[key] = str(error)
             self.log("router_ineligible", router=key, reason=str(error))

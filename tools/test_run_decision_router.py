@@ -81,6 +81,9 @@ if args[0] == "run":
         return path
     if cmd[:1] == ["sha256sum"]:
         path = env["MIMIK_FORMULA_EVAL"] if cmd[1].startswith("/formula/") else host(cmd[1])
+        clock = env.get("MIMIK_TEST_CLOCK_FILE")
+        if clock and env.get("FAKE_HASH_SECONDS") and not cmd[1].startswith("/formula/"):
+            Path(clock).write_text(str(float(Path(clock).read_text()) + float(env["FAKE_HASH_SECONDS"])))
         digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
         if env.get("FAKE_BAD_HASH") and not cmd[1].startswith("/formula/"):
             digest = "0" * 64
@@ -271,9 +274,15 @@ class RouterRunnerTests(unittest.TestCase):
             "planned": 3,
             "statuses": {"completed": 3},
             "decision_seconds": {"max": 100.0},
-            "disk_rate": 20000000,
-            "router_key": "r1-qwen3-4b",
         }
+        registry = json.loads((self.repo / "tools" / "decision_models.json").read_text())
+        e = registry["routers"]["r1-qwen3-4b"]
+        doc.update(
+            router_key="r1-qwen3-4b",
+            disk_rate=20000000,
+            image=e["image"],
+            artefacts=[{k: f[k] for k in ("role", "size", "sha256")} for f in e["files"]],
+        )
         doc.update(change)
         path = self.tmp / f"probe-{len(list(self.tmp.iterdir()))}.json"
         path.write_text(json.dumps(doc))
@@ -286,6 +295,7 @@ class RouterRunnerTests(unittest.TestCase):
             self.probe_summary(complete=False),
             self.probe_summary(router_key="r4-kev-0.8b"),
             self.probe_summary(statuses={"completed": 2}),
+            self.probe_summary(image="sha256:" + "9" * 64),
         ):
             proc, _, prov = self.run_router("r1-qwen3-4b", "screen", PROBE_SUMMARY=bad)
             self.assertEqual((proc.returncode, prov.get("failure")), (3, "ineligible"))
@@ -350,6 +360,95 @@ class RouterRunnerTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertEqual(prov["main_exit"], "1")
         self.assertEqual(prov["cleanup_verified"], "true")
+
+    def clock(self, offset=0):
+        import time
+
+        path = self.tmp / "clock"
+        now = int(time.time())
+        path.write_text(str(now))
+        return str(path), now
+
+    def test_a_cutoff_crossed_mid_hashing_stops_before_the_next_artefact(self):
+        """95cc971: setup was bounded by fixed timeouts only, one gate before all hashes (Sol 3)."""
+        clock, now = self.clock()
+        proc, _, prov = self.run_router(
+            "r4-kev-0.8b",
+            "probe",
+            MIMIK_TEST_CLOCK_FILE=clock,
+            MIMIK_TEST_HARD_DEADLINE=str(now + 3000),
+            FAKE_HASH_SECONDS="5000",
+        )
+        self.assertEqual((proc.returncode, prov.get("failure")), (10, "window"), proc.stderr)
+        self.assertIsNone(self.router())
+        self.assertEqual(prov["cleanup_verified"], "true")
+        hashed = [
+            line
+            for line in (self.tmp / "log" / "calls.jsonl").read_text().splitlines()
+            if "/artefact" in line
+        ]
+        self.assertEqual(len(hashed), 1)  # the second artefact never started
+
+    def test_setup_steps_are_bounded_by_the_time_left(self):
+        clock, now = self.clock()
+        proc, out, prov = self.run_router(
+            "r1-qwen3-4b",
+            "probe",
+            MIMIK_TEST_CLOCK_FILE=clock,
+            MIMIK_TEST_HARD_DEADLINE=str(now + 800),
+        )
+        text = (out / "provenance.txt").read_text()
+        self.assertIn("hash_gguf_limit_seconds=440 (bounded by the cutoff)", text)
+
+    def test_check_only_keeps_the_absolute_deadline(self):
+        clock, now = self.clock()
+        proc, _, prov = self.run_router(
+            "r1-qwen3-4b",
+            "probe",
+            CHECK_ONLY="1",
+            MIMIK_TEST_CLOCK_FILE=clock,
+            MIMIK_TEST_HARD_DEADLINE=str(now - 10),
+        )
+        self.assertEqual((proc.returncode, prov.get("failure")), (10, "window"))
+
+    def test_a_queued_run_refuses_a_dirty_tree(self):
+        """Review m8: a registered run must not run uncommitted code."""
+        (self.repo / "tools" / "decision_router.py").write_text(
+            (self.repo / "tools" / "decision_router.py").read_text() + "\n# edit\n"
+        )
+        proc, _, prov = self.run_router(
+            "r1-qwen3-4b", "probe", QUEUE_PID=str(__import__("os").getpid())
+        )
+        self.assertEqual((proc.returncode, prov.get("failure")), (2, "dirty_tree"))
+
+    def test_router_container_mounts_an_allowlist_of_tools(self):
+        """Review m8: the whole tools/ directory was mounted."""
+        proc, _, _ = self.run_router("r1-qwen3-4b", "probe")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        dsts = [
+            dict(kv.split("=", 1) for kv in m.split(",") if "=" in kv)["dst"]
+            for m in self.router()["opts"]["--mount"]
+        ]
+        self.assertNotIn("/tools", dsts)
+        self.assertIn("/tools/router_driver.py", dsts)
+        self.assertNotIn("/tools/decision_models.json", dsts)
+
+    def test_summary_extra_carries_the_run_identity(self):
+        proc, out, _ = self.run_router("r1-qwen3-4b", "probe")
+        extra = json.loads((out / "prep" / "summary-extra.json").read_text())
+        registry = json.loads((self.repo / "tools" / "decision_models.json").read_text())[
+            "routers"
+        ]["r1-qwen3-4b"]
+        self.assertEqual(extra["image"], registry["image"])
+        self.assertEqual(extra["artefacts"][0]["sha256"], registry["files"][0]["sha256"])
+
+    def test_an_artefact_resolving_outside_the_model_root_is_refused(self):
+        """95cc971: only lexical checks; a symlinked directory escaped the root (Sol 6)."""
+        outside = self.tmp / "outside"
+        (self.models / "g").rename(outside)
+        (self.models / "g").symlink_to(outside)
+        proc, _, prov = self.run_router("r1-qwen3-4b", "probe")
+        self.assertEqual((proc.returncode, prov.get("failure")), (5, "model_path"))
 
     def test_unresolved_cleanup_exits_11(self):
         proc, _, prov = self.run_router("r1-qwen3-4b", "probe", FAKE_RM_FAIL="1")

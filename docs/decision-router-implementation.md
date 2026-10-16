@@ -118,16 +118,16 @@ directory (`$S/arms/<arm>/attempt-<n>`):
 
 ```sh
 python3 tools/decision_router.py select --router R4 \
-  --mapping $A_screen/prep/run/host/mapping.json \
-  --screen $A_screen/unit --ablation $A_ablation/unit --out $S/report-R4.json
-python3 tools/decision_router.py choose $S/report-R*.json        # passing routers only
+  --screen-attempt $S/arms/screen-r4/attempt-1 --ablation-attempt $S/arms/ablation-r4/attempt-1 \
+  --out $S/report-R4.json
+python3 tools/decision_router.py choose $S/report-R*.json        # same inputs, passing, falsifier not null
 python3 tools/decision_router.py overlay --report $S/report-R4.json --ledger <C0 S40 ledger>
-python3 tools/decision_router.py decision-file --router-key r4-kev-0.8b \
-  --report $S/report-R4.json --mapping $A_screen/prep/run/host/mapping.json \
-  --screen $A_screen/unit --states $A_screen/prep/run/prepared/states.jsonl --out $S/sys-r-R4.json
+python3 tools/decision_router.py decision-file --router-key r4-kev-0.8b --report $S/report-R4.json \
+  --screen-attempt $S/arms/screen-r4/attempt-1 --ablation-attempt $S/arms/ablation-r4/attempt-1 \
+  --out $S/sys-r-R4.json
 ```
 
-`select` refuses to judge an incomplete screen unit; `decision-file` refuses a router that did
+`select` reads only bound run artefacts: it checks the states, mapping, subset, plan and option-hash bindings, the exact frozen job set and the live pack hashes, and records an incomplete unit as not gate-evaluable (never a traceback). The report carries the input hashes, the run's runtime identity and a consolidated `claim` (gate, falsifier, ablation). `decision-file` recomputes the selection from the same attempts, refuses a stale report, a falsifier-null router or a run whose image or artefacts differ from the registry, refuses a router that did
 not pass the gate or whose τ\* is `NONE`. The overlay uses the refit routes, or the out-of-fold
 routes when no router passed, and is labelled non-gating. Live SYS-R
 (`--router-decisions FILE --router-decisions-sha256 HEX`, a `SYS-` label, dev only) waits behind
@@ -137,8 +137,8 @@ the GPU-repaired gate.
 
 - Gate in `mimik-toolloop-py:20261015` (`--cpus 2`, `--network none`, uid 1000, worktree and
   git dir mounted, `MIMIK_FORMULA_EVAL` mounted): `ruff check` and `ruff format --check`
-  clean; `python -m unittest discover -s tools -p "test_*.py"`: **623 tests, 11 skipped,
-  1 error** after the rev3 merge (603 before it; master added 20). The error is `test_package` (`cargo package --list` without network or a cargo
+  clean; `python -m unittest discover -s tools -p "test_*.py"`: **649 tests, 11 skipped,
+  1 error** after the review fixes (623 after the rev3 merge, 603 before it). The error is `test_package` (`cargo package --list` without network or a cargo
   registry in the container); the unchanged branch (`46e93b2`) gives the same single error in
   the same container (479 tests, 11 skipped), so it is environmental and not caused here.
 - 124 new tests (workers 25, driver 18, router core 39, tokens 4, registry 7, runner 9, queue
@@ -161,3 +161,5 @@ the GPU-repaired gate.
   only `TODO.md` conflicted). The running CPU screens still use the pre-rev3 pack, so their S40
   ledgers are pre-rev3 evidence and do not pair case-for-case with rev3 router states. Nothing
   under the blind held-out location or its backup was read.
+- **Independent review of `95cc971`** (Sol NOT CLEARED, Sonnet conditional GO, third unavailable):
+  every finding fixed with a failing-first test; record `docs/reviews/2026-10-17-decision-router-impl.md`.

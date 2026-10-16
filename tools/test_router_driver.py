@@ -308,83 +308,8 @@ class DriverTests(unittest.TestCase):
         self.assertFalse(made[0].raw_only)
 
 
-class EndToEndTests(unittest.TestCase):
-    """Driver output -> nested CV selection -> decision file, on the demo pack's dev cases."""
-
-    def test_units_select_and_decision_file(self):
-        cases = dr.pack_cases(dr.PACK)
-        expected = {c["id"]: c["expected"]["outcome"] for c in cases}
-        _, mapping = dr.derive(cases)
-        subset = json.loads(dr.SUBSET.read_text())["case_ids"]
-        plans = dr.unit_plans(mapping, subset)
-        states = {
-            k: {"key": k, "state": f"state-{k}", "state_hash": f"h-{k}", "request_only": "{}"}
-            for k in mapping
-        }
-        clock = Clock()
-
-        class Oracle(FakeWorker):
-            def predict(self, payload, timeout):
-                self.clock.advance(10)
-                key = payload["state"].removeprefix("state-")
-                kind = expected[mapping[key]] if key in mapping else "ask_rule"
-                p = good_probs(kind)
-                if kind != "conflict":
-                    p[kind], p["conflict"] = 0.9, 0.1
-                return {
-                    "status": "completed",
-                    "probabilities": p,
-                    "seconds": 10,
-                    "question_sha256": dr.OPTION_HASH,
-                }
-
-        with tempfile.TemporaryDirectory() as tmp:
-            dirs = {}
-            for unit in ("screen", "ablation"):
-                dirs[unit] = Path(tmp) / unit
-                rd.Unit(
-                    plans[unit],
-                    states,
-                    dirs[unit],
-                    lambda n: Oracle(n, {}, clock),
-                    50,
-                    100,
-                    clock.now() + 10**7,
-                    now=clock.now,
-                    monotonic=clock.now,
-                ).run()
-            report = dr.select_report(
-                cases, mapping, dirs["screen"], dirs["ablation"], "R4", subset
-            )
-            self.assertTrue(report["gate"]["passed"], report["gate"])
-            self.assertEqual(report["refit"]["tau_star"], 0.5)
-            self.assertEqual(
-                report["cv"]["out_of_fold"]["supported_recall"]["count"],
-                sum(e in dr.SUPPORTED for e in expected.values()),
-            )
-            self.assertEqual(report["order_flips"], {"evaluated": 40, "flips": 0, "of": 40})
-            self.assertTrue(report["ablation"]["complete"])
-            states_file = Path(tmp) / "states.jsonl"
-            states_file.write_text("".join(json.dumps(r) + "\n" for r in states.values()))
-            header = {
-                k: "x"
-                for k in (
-                    "runtime",
-                    "image",
-                    "library_revision",
-                    "artefacts",
-                    "device",
-                    "device_provenance",
-                    "threads",
-                    "n_ctx",
-                    "pack_hashes",
-                )
-            }
-            header["gate"] = {"passed": False}  # never wins over the report's gate
-            doc = dr.build_decision_file(report, mapping, dirs["screen"], states_file, header)
-            inverse = {v: k for k, v in mapping.items()}
-            seen = dr.verify_decision_file(doc, list(expected), lambda cid: f"h-{inverse[cid]}")
-            self.assertEqual(len(seen), len(expected))
+# The end-to-end driver -> selection -> decision file path is in test_router_review_fixes.py
+# (real attempt directories with every binding).
 
 
 class QuantileTests(unittest.TestCase):

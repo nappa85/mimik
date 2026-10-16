@@ -153,17 +153,47 @@ def model_root(doc, env=None) -> Path:
     return Path(env.get(ROOT_ENV) or doc["model_root"])
 
 
+def under_root(path: Path, root: Path) -> bool:
+    """The resolved path stays beneath the resolved model root (symlinks followed; review
+    Sol 6). Hugging Face snapshot -> blob links inside the root are fine."""
+    return Path(path).resolve().is_relative_to(Path(root).resolve())
+
+
 def check_files(doc, key, env=None) -> list:
-    """Sizes on disk (hashes are the runner's job). Returns problems, empty when fine."""
+    """Sizes and containment on disk (hashes are the runner's job). Problems, empty if fine."""
     root = model_root(doc, env)
+    entry = doc["routers"][key]
     problems = []
-    for item in doc["routers"][key]["files"]:
+    for item in entry["files"]:
         path = root / item["path"]
         if not path.exists():
             problems.append(f"{item['role']}: missing {path}")
+        elif not under_root(path, root):
+            problems.append(f"{item['role']}: resolves outside the model root ({path})")
         elif path.resolve().stat().st_size != item["size"]:
             problems.append(f"{item['role']}: size differs ({path})")
+    if entry.get("hf_cache") and (root / entry["hf_cache"]).exists():
+        if not under_root(root / entry["hf_cache"], root):
+            problems.append("hf_cache: resolves outside the model root")
     return problems
+
+
+def summary_extra(doc, key, disk_rate=None) -> dict:
+    """Run identity the runner hands the driver (summary.json): what the run actually used,
+    carried into the selection report and the decision file (review Sol B1, m9)."""
+    e = doc["routers"][key]
+    return {
+        "router_key": key,
+        "router_id": e["router_id"],
+        "runtime_kind": e["runtime"],
+        "image": e["image"],
+        "library_revision": e["library_revision"],
+        "artefacts": [{k: f[k] for k in ("role", "size", "sha256")} for f in e["files"]],
+        "threads": e["threads"],
+        "n_ctx": e["n_ctx"],
+        "total_bytes": sum(f["size"] for f in e["files"]),
+        "disk_rate": disk_rate,
+    }
 
 
 def shell(doc, key, env=None) -> str:
@@ -204,6 +234,9 @@ def main(argv=None) -> int:
     sub.add_parser("list")
     s = sub.add_parser("shell")
     s.add_argument("key")
+    x = sub.add_parser("summary-extra")
+    x.add_argument("key")
+    x.add_argument("--disk-rate", type=int)
     args = p.parse_args(argv)
     try:
         doc = load(args.registry)
@@ -222,6 +255,9 @@ def main(argv=None) -> int:
         if args.cmd == "list":
             for key, e in doc["routers"].items():
                 print(f"{key} {e['router_id']} {e['runtime']} {e['label']}")
+            return 0
+        if args.cmd == "summary-extra":
+            print(json.dumps(summary_extra(doc, args.key, args.disk_rate)))
             return 0
         sys.stdout.write(shell(doc, args.key))
         return 0

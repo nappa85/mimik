@@ -2757,7 +2757,8 @@ def prepare_router(args, pack) -> None:
         return router_state_builder.text_hash(router_state_builder.render_state(pack, index, entry))
 
     try:
-        entries = decision_router.verify_decision_file(doc, list(cases), state_hash_of)
+        live = decision_router.live_identity(pack.root)
+        entries = decision_router.verify_decision_file(doc, list(cases), state_hash_of, live)
     except decision_router.RouterError as error:
         raise SystemExit(f"--router-decisions: {error}") from None
     header = doc["header"]

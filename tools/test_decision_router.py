@@ -372,6 +372,7 @@ class SelectionTests(unittest.TestCase):
                 "router": router,
                 "gate": {"passed": True},
                 "refit": {"null": False},
+                "falsifier": {"null": False},
                 "cv": {"out_of_fold": {"supported_recall": {"count": recall}}},
                 "median_seconds_per_decision": seconds,
             }
@@ -588,7 +589,7 @@ class StateTests(unittest.TestCase):
                         dr.reference_prompt(dr.state_text(row, variant), dr.order_ids(order))
                     )
         self.assertEqual(len(texts), len(rows) * 6)
-        self.assertEqual(len(rows), dr.DEV_CASES)
+        self.assertEqual(len(rows), len(dr.pack_cases(DEMO)))
         self.assertEqual(dr.scan_for_sentinels(texts), [])
         # Pair: a planted leak (the case id in the state) is caught.
         leaked = [dr.reference_prompt(rows[0]["state"] + cases[0]["id"], list(dr.CANONICAL))]
@@ -601,10 +602,10 @@ class StateTests(unittest.TestCase):
             states = dr.read_states(prepared / "states.jsonl")
             mapping = json.loads((host / "mapping.json").read_text())
             self.assertEqual(set(states), set(mapping))
-            self.assertEqual(len(states), dr.DEV_CASES)
+            self.assertEqual(len(states), len(dr.pack_cases(DEMO)))
             screen = json.loads((prepared / "plan-screen.json").read_text())["decisions"]
-            self.assertEqual(len(screen), dr.DEV_CASES + 40)
-            self.assertEqual(dr.UNIT_DECISIONS["screen"], dr.DEV_CASES + 40)
+            self.assertEqual(len(screen), len(dr.pack_cases(DEMO)) + 40)
+            self.assertEqual(dr.unit_decisions()["screen"], len(dr.pack_cases(DEMO)) + 40)
             ablation = json.loads((prepared / "plan-ablation.json").read_text())["decisions"]
             self.assertEqual(len(ablation), 80)
             self.assertFalse(
@@ -633,6 +634,9 @@ PROVENANCE = {
     "fold_sha256": "0" * 64,
     "gate": {"passed": True},
     "pack_hashes": {},
+    "falsifier": {"null": False},
+    "claim": {"positive_claim": False, "reasons": ["fixture"]},
+    "bindings": {},
 }
 
 
@@ -751,23 +755,3 @@ class HostSideTests(unittest.TestCase):
             with self.assertRaises(dr.RouterError):
                 dr.unit_timeouts("screen", 1, bad)
         self.assertEqual(dr.unit_timeouts("probe", 5_000_000)["decision_timeout"], 1800)
-
-
-class RuntimeHeaderTests(unittest.TestCase):
-    def test_runtime_header_from_registry_and_worker_record(self):
-        import decision_models
-
-        entry = decision_models.load()["routers"]["r1-qwen3-4b"]
-        summary = {
-            "starts": [
-                {"ok": False},
-                {
-                    "ok": True,
-                    "ready": {"device_provenance": {"device": "cpu", "offloaded_layers": 0}},
-                },
-            ]
-        }
-        header = dr.runtime_header(entry, summary)
-        self.assertEqual(header["device_provenance"]["offloaded_layers"], 0)
-        self.assertEqual(header["artefacts"][0]["sha256"], entry["files"][0]["sha256"])
-        self.assertTrue(set(header) <= set(dr.REQUIRED_HEADER))

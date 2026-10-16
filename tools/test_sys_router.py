@@ -60,9 +60,14 @@ def c0_ledger_text(tl_module, pack_root, formula_cli, extra=()):
     return json.dumps(rows, sort_keys=True)
 
 
-@unittest.skipUnless(HAS_CLI, "needs MIMIK_FORMULA_EVAL (formula CLI)")
 class ByteIdentityTests(unittest.TestCase):
     def test_router_off_ledger_is_byte_identical_to_v3_c0(self):
+        """Needs the formula CLI. Locally it skips without MIMIK_FORMULA_EVAL; in CI (CI set)
+        a missing CLI fails, so the identity check can never be skipped silently there."""
+        if not HAS_CLI:
+            if os.environ.get("CI"):
+                self.fail("CI must set MIMIK_FORMULA_EVAL: the C0 byte-identity check needs it")
+            self.skipTest("needs MIMIK_FORMULA_EVAL (formula CLI)")
         text = c0_ledger_text(tl, DEMO, FORMULA)
         self.assertEqual(hashlib.sha256(text.encode()).hexdigest(), GOLDEN_C0)
         self.assertNotIn('"arm_type"', text)
@@ -130,6 +135,9 @@ def decision_file(pack, tau=0.5, records=RECORDS):
             "fold_sha256": "0" * 64,
             "gate": {"passed": True},
             "pack_hashes": {},
+            "falsifier": {"null": False},
+            "claim": {"positive_claim": False, "reasons": ["fixture"]},
+            "bindings": {},
         },
         "encoding": 1,
         "kind": "sys-r-decisions",
@@ -139,6 +147,7 @@ def decision_file(pack, tau=0.5, records=RECORDS):
         "policy_hash": tl.digest(dr.policy_document(tau)),
         "question_hash": dr.OPTION_HASH,
     }
+    header.update(dr.live_identity(FIXTURE))  # the harness compares these with the live pack
     return {"header": header, "entries": entries}
 
 
@@ -304,6 +313,16 @@ class SysRouterTests(unittest.TestCase):
         p3, s3 = self.write(wrong)
         with self.assertRaisesRegex(SystemExit, "state hash"):
             self.run_rows(self.args(router=p3, sha=s3), CountingModel(SCRIPTS))
+        other_pack = copy.deepcopy(doc)
+        other_pack["header"]["pack_hashes"]["cases-dev.json"] = "0" * 64
+        p5, s5 = self.write(other_pack)
+        with self.assertRaisesRegex(SystemExit, "pack hash"):
+            self.run_rows(self.args(router=p5, sha=s5), CountingModel(SCRIPTS))
+        null = copy.deepcopy(doc)
+        null["header"]["falsifier"] = {"null": True}
+        p6, s6 = self.write(null)
+        with self.assertRaisesRegex(SystemExit, "falsifier"):
+            self.run_rows(self.args(router=p6, sha=s6), CountingModel(SCRIPTS))
         forged = copy.deepcopy(doc)
         forged["entries"][2]["route"] = "proposal"
         p4, s4 = self.write(forged)

@@ -147,12 +147,37 @@ gate() {  # gate <step>
   window "$WINDOW_MARGIN" || fail 10 window "before $1: ${gate_line:-window-check failed}"
   echo "window_gate_$1=open $gate_line" >> "$prov"
 }
+now() {  # epoch seconds; the test clock only in test mode
+  if [ "${MIMIK_TEST_MODE:-}" = 1 ] && [ -n "${MIMIK_TEST_CLOCK_FILE:-}" ]; then
+    cut -d. -f1 < "$MIMIK_TEST_CLOCK_FILE"
+  else
+    date +%s
+  fi
+}
 still_allowed() {
   if [ -n "${QUEUE_PID:-}" ] && ! kill -0 "$QUEUE_PID" 2>/dev/null; then
     fail 13 orphan "queue process $QUEUE_PID is gone during $1"
   fi
   [ "$override" = 1 ] || window "$STOP_MARGIN" || fail 10 window "stopped at the window edge during $1"
-  [ "$(date +%s)" -lt "$deadline" ] || fail 10 window "deadline reached during $1"
+  [ "$(now)" -lt "$deadline" ] || fail 10 window "deadline reached during $1"
+}
+setup_step() {  # setup_step <step>: before every setup step, also with CHECK_ONLY (review Sol 3)
+  if [ -n "${QUEUE_PID:-}" ] && ! kill -0 "$QUEUE_PID" 2>/dev/null; then
+    fail 13 orphan "queue process $QUEUE_PID is gone before $1"
+  fi
+  [ $(( deadline - $(now) - STOP_MARGIN )) -gt 0 ] || fail 10 window "before $1: the absolute cutoff has passed"
+  gate "$1"
+}
+step_limit=0 step_bounded=0
+bounded() {  # bounded <default seconds> <step>: step_limit = min(default, cutoff - now - margin)
+  local left
+  left=$(( deadline - $(now) - STOP_MARGIN ))
+  [ "$left" -gt 0 ] || fail 10 window "before $2: the absolute cutoff has passed"
+  step_limit=$1 step_bounded=0
+  if [ "$left" -lt "$step_limit" ]; then
+    step_limit=$left step_bounded=1
+    echo "${2// /_}_limit_seconds=$left (bounded by the cutoff)" >> "$prov"
+  fi
 }
 temps() {
   timeout --foreground -k 5 30 python3 "$ROOT/tools/toolloop_ops.py" temps \
@@ -173,14 +198,26 @@ check_run() {  # check_run <seconds> <docker run args...>: a named, bounded chec
   mv -f "$check_registry.tmp" "$check_registry" 2>/dev/null || true
   if [ "$rc" != 0 ]; then
     dk rm -f "$name" >/dev/null 2>&1 || true
+    if [ "$rc" = 124 ] && [ "$step_bounded" = 1 ]; then
+      fail 10 window "check container $name did not finish before the cutoff"
+    fi
     fail 12 infra_docker "check container $name failed (exit $rc)"
   fi
   printf '%s\n' "$output"
 }
 
+# ---- registered runs refuse a dirty tree (review m8): the frozen copy must be what ran
+git_dirty=$(timeout --foreground -k 5 30 git -C "$ROOT" status --porcelain | wc -l)
+if [ -n "${QUEUE_PID:-}" ] && [ "$git_dirty" != 0 ]; then
+  fail 2 dirty_tree "a queued run needs a clean tree ($git_dirty dirty paths)"
+fi
+root_real=$(realpath -e -- "$dm_root" 2>/dev/null) || fail 5 model_missing "model root $dm_root not found"
+inside_root() { [[ $1 == "$root_real"/* ]]; }
+
 # ---- formula CLI (the state builder renders through the harness's C0 path)
-gate hash
-cli_line=$(check_run 120 --memory 256m --mount type=volume,src=mimik-formula-target,dst=/formula,readonly \
+setup_step hash
+bounded 120 "cli hash"
+cli_line=$(check_run "$step_limit" --memory 256m --mount type=volume,src=mimik-formula-target,dst=/formula,readonly \
   "$CHECK_IMAGE" sha256sum "/formula/$CLI_IN_VOLUME")
 [ "${cli_line%% *}" = "$CLI_SHA" ] || fail 3 cli_hash "formula_eval sha256 ${cli_line%% *} != pinned $CLI_SHA"
 
@@ -189,7 +226,9 @@ hashed_bytes=0 hash_seconds=0
 declare -a mounts=()
 for spec in "${dm_files[@]}"; do
   IFS=$'\t' read -r role rel size sha <<< "$spec"
+  setup_step "hash_$role"
   path=$(realpath -e -- "$dm_root/$rel" 2>/dev/null) || fail 5 model_missing "artefact $role ($dm_root/$rel) not found"
+  inside_root "$path" || fail 5 model_path "artefact $role resolves outside the model root ($path)"
   [ -f "$path" ] || fail 5 model_missing "artefact $role is not a regular file"
   [ "$(stat -c %s "$path")" = "$size" ] || fail 5 model_size "artefact $role size differs from the registry"
   IFS=' ' read -r st_size st_mtime st_inode st_dev <<< "$(stat -c '%s %.9Y %i %d' "$path")"
@@ -201,11 +240,12 @@ for spec in "${dm_files[@]}"; do
   source=session_cache
   if [ -z "$actual" ]; then
     source=hashed
-    h0=$(date +%s)
-    line=$(check_run $(( size / 5000000 + 600 )) --memory 256m \
+    h0=$(now)
+    bounded $(( size / 5000000 + 600 )) "hash $role"
+    line=$(check_run "$step_limit" --memory 256m \
       --mount type=bind,src="$path",dst=/artefact,readonly "$CHECK_IMAGE" sha256sum /artefact)
     actual=${line%% *}
-    hashed_bytes=$(( hashed_bytes + size )) hash_seconds=$(( hash_seconds + $(date +%s) - h0 ))
+    hashed_bytes=$(( hashed_bytes + size )) hash_seconds=$(( hash_seconds + $(now) - h0 ))
     if [ -n "${HASH_CACHE:-}" ]; then
       printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$path" "$st_size" "$st_mtime" "$st_inode" "$st_dev" "$actual" >> "$HASH_CACHE"
     fi
@@ -219,11 +259,13 @@ if [ "$hashed_bytes" -gt 100000000 ]; then
 fi
 if [ "$dm_runtime" = kev-torch ]; then
   cache=$(realpath -e -- "$dm_root/$dm_hf_cache") || fail 5 model_missing "Kev hf cache missing"
+  inside_root "$cache" || fail 5 model_path "Kev hf cache resolves outside the model root ($cache)"
   mounts=(--mount "type=bind,src=$cache,dst=/hf,readonly")
   model_args=(--backend kev --kev-checkpoint "/hf/${dm_kev_checkpoint#"$dm_hf_cache"/}")
   env_args=(-e HF_HUB_CACHE=/hf -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HF_HUB_DISABLE_TELEMETRY=1)
 else
   gguf=$(realpath -e -- "$dm_root/$dm_gguf")
+  inside_root "$gguf" || fail 5 model_path "GGUF resolves outside the model root ($gguf)"
   mounts=(--mount "type=bind,src=$gguf,dst=/models/model.gguf,readonly")
   model_args=(--backend anyjev --model /models/model.gguf --model-sha256 "$dm_gguf_sha256" --device cpu)
   env_args=()
@@ -231,9 +273,13 @@ fi
 echo "hashed_bytes=$hashed_bytes hash_seconds=$hash_seconds disk_rate=$disk_rate" >> "$prov"
 
 # ---- states (isolated builder process, harness image, pinned formula CLI)
-gate states
-check_run 900 --memory 2g -e PYTHONDONTWRITEBYTECODE=1 \
-  --mount type=bind,src="$ROOT/tools",dst=/tools,readonly \
+setup_step states
+bounded 900 "states"
+prep_mounts=()
+for f in decision_router.py router_state_builder.py tool_loop_benchmark.py; do
+  prep_mounts+=(--mount "type=bind,src=$ROOT/tools/$f,dst=/tools/$f,readonly")
+done
+check_run "$step_limit" --memory 2g -e PYTHONDONTWRITEBYTECODE=1 "${prep_mounts[@]}" \
   --mount type=bind,src="$ROOT/examples/tool-loop-demo",dst=/pack,readonly \
   --mount type=volume,src=mimik-formula-target,dst=/formula,readonly \
   --mount type=bind,src="$out/prep",dst=/prep \
@@ -260,13 +306,23 @@ tjson=$(python3 "$ROOT/tools/decision_router.py" timeouts --unit "$unit" --route
   || fail 3 ineligible "$(tr '\n' ' ' < "$out/timeouts.err")"
 read -r ready_timeout decision_timeout max_restarts projection < <(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(int(d["ready_timeout"]) + 1, int(d["decision_timeout"]), d["max_restarts"], int(d["projection_seconds"]))' "$tjson")
 echo "ready_timeout=$ready_timeout decision_timeout=$decision_timeout max_restarts=$max_restarts projection_seconds=$projection" >> "$prov"
-printf '{"disk_rate": %s, "router_key": "%s", "router_id": "%s", "total_bytes": %s}\n' "$disk_rate" "$key" "$dm_router_id" "$dm_total_bytes" > "$out/prep/summary-extra.json"
+rate_args=()
+[ "$disk_rate" = null ] || rate_args=(--disk-rate "$disk_rate")
+python3 "$ROOT/tools/decision_models.py" summary-extra "$key" "${rate_args[@]}" > "$out/prep/summary-extra.json" \
+  || fail 2 config "summary-extra for $key failed"
 if [ "${CHECK_ONLY:-0}" = 1 ]; then
+  [ $(( deadline - $(now) )) -gt 0 ] || fail 10 window "CHECK_ONLY finished after the absolute cutoff"
   echo "check_only=1 (stopped before launch)" >> "$prov"; exit 0
 fi
 
 # ---- router container (detached; polled for the window edge, the deadline and the queue)
-gate router
+setup_step router
+# An allowlist of the modules the driver and worker import, never the whole tools/ (review m8).
+tool_mounts=()
+for f in router_driver.py decision_router.py router_state_builder.py tool_loop_benchmark.py \
+  local_decision_benchmark.py local_rag_benchmark.py; do
+  tool_mounts+=(--mount "type=bind,src=$ROOT/tools/$f,dst=/tools/$f,readonly")
+done
 temps --prefix before >> "$prov"
 started_heavy=1
 t0=$(date +%s)
@@ -274,7 +330,7 @@ dk run -d --init --pull never --name "$ROUTER" "${LABELS[@]}" --network none \
   --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
   --memory "$dm_memory" --memory-swap "$dm_memory" --cpus "$dm_threads" --pids-limit 256 \
   -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS="$dm_threads" "${env_args[@]}" \
-  --mount type=bind,src="$ROOT/tools",dst=/tools,readonly \
+  "${tool_mounts[@]}" \
   --mount type=bind,src="$out/prep/run/prepared",dst=/prep/prepared,readonly \
   --mount type=bind,src="$out/prep/summary-extra.json",dst=/prep/summary-extra.json,readonly \
   --mount type=bind,src="$out/unit",dst=/out \

@@ -43,44 +43,88 @@ def probs():
 
 
 def write_unit(out: Path, unit: str, behaviour: dict, key: str):
+    """What run_decision_router.sh leaves: prepared states, plans, manifest, host mapping and
+    a driver-run unit (fake worker), so the queue checks the real bindings and job set."""
+    import router_driver as rd
+    from test_router_review_fixes import CASES, SUBSET, Worker
+
+    _, mapping = dr.derive(CASES)
+    run = out / "prep" / "run"
+    rows = [
+        {
+            "key": k,
+            "state": f"state-{k}",
+            "state_hash": dr.text_hash(f"state-{k}"),
+            "request_only": f"state-{k}|ro",
+        }
+        for k in mapping
+    ]
+    dr.write_prepared(run, mapping, SUBSET, dr.PACK, "d" * 64, rows=rows)
+    plan_path = run / "prepared" / f"plan-{unit}.json"
+    if behaviour.get("wrong_variant") and unit == "screen":
+        plan = json.loads(plan_path.read_text())
+        for d in plan["decisions"]:
+            if d["order"] == "reversed":
+                d.update(variant="request_only", order="canonical")
+        plan_path.write_text(json.dumps(plan))
+    extra = decision_models.summary_extra(DECISION, key, disk_rate=20_000_000)
+    seconds = behaviour.get("seconds_per_decision", 50.0)
+    failed = behaviour.get("failed", 0)
+    count = {"n": 0}
+
+    def predictor(cid, payload):
+        return probs()
+
+    def fail(payload):
+        count["n"] += 1
+        if count["n"] <= 2 * failed:
+            raise TimeoutError("fake timeout")
+
+    class Clock:
+        t = 1_000_000.0
+
+        def now(self):
+            return self.t
+
+    clock = Clock()
+
+    def factory(n):
+        w = Worker(n, predictor, mapping, clock, fail=fail if failed else None)
+        inner = w.predict
+
+        def predict(payload, timeout):
+            out_ = inner(payload, timeout)
+            out_["seconds"] = seconds
+            return out_
+
+        w.predict = predict
+        return w
+
+    rd.Unit(
+        json.loads(plan_path.read_text()),
+        dr.read_states(run / "prepared" / "states.jsonl"),
+        out / "unit",
+        factory,
+        50,
+        100,
+        clock.now() + 10**7,
+        now=clock.now,
+        monotonic=clock.now,
+        extra_summary=extra,
+        states_path=run / "prepared" / "states.jsonl",
+        plan_path=plan_path,
+    ).run()
     u = out / "unit"
-    u.mkdir(parents=True, exist_ok=True)
-    n = {"probe": 3, **dr.UNIT_DECISIONS}[unit]
-    decisions = [{"key": f"k{i:03d}", "variant": "full", "order": "canonical"} for i in range(n)]
-    rows = []
-    for i, d in enumerate(decisions):
-        status = "completed"
-        if i < behaviour.get("not_run", 0):
-            status = "not_run"
-        elif i < behaviour.get("failed", 0):
-            status = "timeout"
-        rows.append(
-            {
-                "event": "decision",
-                **d,
-                "status": status,
-                "probabilities": probs() if status == "completed" else None,
-                "error_class": None if status == "completed" else status,
-                "seconds": behaviour.get("seconds_per_decision", 50.0),
-            }
+    summary = json.loads((u / "summary.json").read_text())
+    if behaviour.get("not_run"):
+        lines = [json.loads(x) for x in (u / "decisions.jsonl").read_text().splitlines()]
+        for row in lines[: behaviour["not_run"]]:
+            row.update(status="not_run", probabilities=None)
+        (u / "decisions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in lines))
+        summary.update(
+            complete=False, not_run=behaviour["not_run"], stopped=behaviour.get("stopped")
         )
-    (u / "plan.json").write_text(json.dumps({"unit": unit, "decisions": decisions}))
-    (u / "decisions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
-    statuses = {}
-    for r in rows:
-        statuses[r["status"]] = statuses.get(r["status"], 0) + 1
-    summary = {
-        "unit": unit,
-        "planned": n,
-        "complete": not behaviour.get("not_run"),
-        "not_run": behaviour.get("not_run", 0),
-        "statuses": statuses,
-        "decision_seconds": {"max": behaviour.get("seconds_per_decision", 50.0)},
-        "disk_rate": 20_000_000,
-        "router_key": key,
-        "stopped": behaviour.get("stopped"),
-    }
-    (u / "summary.json").write_text(json.dumps(summary))
+        (u / "summary.json").write_text(json.dumps(summary))
     main_exit = 0 if summary["complete"] else 1
     prov = [
         "date_start=x",
@@ -285,6 +329,16 @@ class RouterQueueTests(Harness):
         q2 = self.make_router(arms, plan={"p": [{"seconds_per_decision": 20.0}]})
         manifest = q2.run()
         self.assertEqual(manifest["arms"][1]["state"], "complete", manifest["arms"][1])
+
+    def test_same_count_wrong_variant_screen_is_never_complete(self):
+        """Review Sol 4: a screen of the right size but the wrong jobs was complete for the queue."""
+        q = self.make_router(
+            [router_arm("p"), router_arm("s", unit="screen")], plan={"s": [{"wrong_variant": True}]}
+        )
+        q.run()
+        attempt = q.arms[1]["attempts"][0]
+        self.assertNotEqual(attempt["status"], "complete")
+        self.assertTrue(any("job set" in r for r in attempt["unit_check"]["reasons"]))
 
     def test_cpu_temperatures_recorded_for_router_attempts(self):
         q = self.make_router([router_arm("p")])
