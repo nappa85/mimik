@@ -268,6 +268,186 @@ impl ListDraft {
     }
 }
 
+impl ListDraft {
+    /// Replaces the row keys of list field `f` in `form` with this draft's rows (`0..n`).
+    pub(crate) fn write(&self, f: usize, field: &Field, form: &mut BTreeMap<String, String>) {
+        let prefixes = [format!("id-{f}-"), format!("row-{f}-"), format!("set-{f}-")];
+        form.retain(|key, _| {
+            !prefixes
+                .iter()
+                .any(|prefix| key.starts_with(prefix.as_str()))
+        });
+        let properties = properties(field);
+        for (r, row) in self.rows.iter().enumerate() {
+            form.insert(format!("id-{f}-{r}"), row.id.clone());
+            for (p, property) in properties.iter().enumerate() {
+                form.insert(
+                    format!("row-{f}-{r}-{p}"),
+                    row.values.get(p).cloned().unwrap_or_default(),
+                );
+                if property.optional {
+                    form.insert(
+                        format!("set-{f}-{r}-{p}"),
+                        row.states.get(p).cloned().unwrap_or_default(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A draft operation from the clicked submitter (plan D1 and D5). Every variant except
+/// `Save` re-renders an unsaved draft and never writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Op {
+    Save,
+    Add(usize),
+    Remove(usize, usize),
+    Up(usize, usize),
+    Down(usize, usize),
+}
+
+/// What an applied draft operation reports back to the page.
+pub(crate) struct Applied {
+    /// The `role="status"` message.
+    pub message: String,
+    /// The one control that gets `autofocus`.
+    pub focus: Focus,
+}
+
+/// The single `autofocus` target after an operation (plan D5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Focus {
+    /// The first control of row `r` of list `f`.
+    RowStart(usize, usize),
+    /// The Add button of list `f`.
+    Add(usize),
+    /// Row `r`'s Move up button.
+    Up(usize, usize),
+    /// Row `r`'s Move down button.
+    Down(usize, usize),
+}
+
+impl Op {
+    /// Parses the submitted `op` against the definition and the admitted rows: a malformed
+    /// op, a non-list field, a row out of range or an edge move is `None` (answered 400).
+    pub(crate) fn parse(
+        raw: Option<&str>,
+        definition: Option<&Definition>,
+        form: &BTreeMap<String, String>,
+    ) -> Option<Self> {
+        let Some(raw) = raw else {
+            return Some(Self::Save);
+        };
+        if raw == "save" {
+            return Some(Self::Save);
+        }
+        let (verb, rest) = raw.split_once('-')?;
+        let (f, r) = match rest.split_once('-') {
+            Some((f, r)) => (index(f)?, Some(index(r)?)),
+            None => (index(rest)?, None),
+        };
+        let field = definition?.fields.get(f)?;
+        if field.control != Control::List {
+            return None;
+        }
+        let rows = (0..=crate::definitions::formula::MAX_LIST_ITEMS)
+            .take_while(|r| form.contains_key(&format!("id-{f}-{r}")))
+            .count();
+        let op = match (verb, r) {
+            ("add", None) => Self::Add(f),
+            ("remove", Some(r)) if r < rows => Self::Remove(f, r),
+            ("up", Some(r)) if r > 0 && r < rows => Self::Up(f, r),
+            ("down", Some(r)) if r + 1 < rows => Self::Down(f, r),
+            _ => return None,
+        };
+        Some(op)
+    }
+
+    /// Applies a draft operation to `form` in place. Values, presence states and hidden IDs
+    /// move together; nothing is validated. Add at `MAX_LIST_ITEMS` rows is refused.
+    pub(crate) fn apply(
+        self,
+        definition: &Definition,
+        form: &mut BTreeMap<String, String>,
+    ) -> Result<Applied, AppError> {
+        let f = match self {
+            Self::Save => return Err(AppError::Invalid("Save is not a draft operation.")),
+            Self::Add(f) | Self::Remove(f, _) | Self::Up(f, _) | Self::Down(f, _) => f,
+        };
+        let field = &definition.fields[f];
+        let mut draft = ListDraft::submitted(f, field, form);
+        let label = &field.label;
+        let applied = match self {
+            Self::Add(_) => {
+                if draft.rows.len() >= crate::definitions::formula::MAX_LIST_ITEMS {
+                    return Err(AppError::Invalid(
+                        "This list already has 256 rows, the most a list can hold.",
+                    ));
+                }
+                let properties = properties(field);
+                draft.rows.push(DraftRow {
+                    id: String::new(),
+                    values: vec![String::new(); properties.len()],
+                    states: properties
+                        .iter()
+                        .map(|property| {
+                            if property.optional {
+                                "absent".into()
+                            } else {
+                                String::new()
+                            }
+                        })
+                        .collect(),
+                });
+                Applied {
+                    message: format!("Row added to {label}. Not saved yet."),
+                    focus: Focus::RowStart(f, draft.rows.len() - 1),
+                }
+            }
+            Self::Remove(_, r) => {
+                draft.rows.remove(r);
+                Applied {
+                    message: format!("Row {} of {label} removed. Not saved yet.", r + 1),
+                    focus: Focus::Add(f),
+                }
+            }
+            Self::Up(_, r) => {
+                draft.rows.swap(r - 1, r);
+                Applied {
+                    message: format!(
+                        "Row {} of {label} moved up to position {r}. Not saved yet.",
+                        r + 1
+                    ),
+                    focus: if r == 1 {
+                        Focus::Down(f, 0)
+                    } else {
+                        Focus::Up(f, r - 1)
+                    },
+                }
+            }
+            Self::Down(_, r) => {
+                draft.rows.swap(r, r + 1);
+                Applied {
+                    message: format!(
+                        "Row {} of {label} moved down to position {}. Not saved yet.",
+                        r + 1,
+                        r + 2
+                    ),
+                    focus: if r + 2 == draft.rows.len() {
+                        Focus::Up(f, r + 1)
+                    } else {
+                        Focus::Down(f, r + 1)
+                    },
+                }
+            }
+            Self::Save => return Err(AppError::Invalid("Save is not a draft operation.")),
+        };
+        draft.write(f, field, form);
+        Ok(applied)
+    }
+}
+
 fn scalar_value(control: Control, raw: &str) -> Result<Value, AppError> {
     Ok(match control {
         Control::Text | Control::Multiline | Control::Enumeration => Value::String(raw.into()),

@@ -950,3 +950,724 @@ async fn stale_invalid_list_draft_conflicts() {
         StatusCode::CONFLICT
     );
 }
+
+// ---- Step 4: draft operations (plan D5) ----
+
+use super::formula_tests::{submitted, submitted_by};
+use axum::http::StatusCode;
+
+/// The sheet page form with `op` clicked.
+fn clicked(html: &str, op: &str) -> Vec<(String, String)> {
+    submitted_by(html, Some(("op", op)))
+}
+
+/// The page form with `op` added even when its button is disabled or absent (a forged op).
+fn forged(html: &str, op: &str) -> Vec<(String, String)> {
+    let mut form = submitted_by(html, None);
+    form.push(pair("op", op));
+    form
+}
+
+fn set(form: &mut [(String, String)], key: &str, value: &str) {
+    let pair = form
+        .iter_mut()
+        .find(|(k, _)| k == key)
+        .unwrap_or_else(|| panic!("{key} missing"));
+    pair.1 = value.into();
+}
+
+fn get(form: &[(String, String)], key: &str) -> String {
+    form.iter()
+        .find(|(k, _)| k == key)
+        .map_or_else(|| panic!("{key} missing"), |(_, v)| v.clone())
+}
+
+/// The hidden IDs and names of the equipment rows of a page, in row order.
+fn rows_of(html: &str) -> Vec<(String, String)> {
+    let form = submitted_by(html, None);
+    (0..)
+        .map_while(|r| {
+            let id = form.iter().find(|(k, _)| *k == format!("id-1-{r}"))?;
+            let name = form.iter().find(|(k, _)| *k == format!("row-1-{r}-0"))?;
+            Some((id.1.clone(), name.1.clone()))
+        })
+        .collect()
+}
+
+fn autofocus(html: &str) -> Vec<String> {
+    scraper::Html::parse_document(html)
+        .select(&selector("[autofocus]"))
+        .map(|element| element.value().attr("id").unwrap_or_default().to_owned())
+        .collect()
+}
+
+fn status_text(html: &str) -> String {
+    scraper::Html::parse_document(html)
+        .select(&selector("p[role=status]"))
+        .next()
+        .map(|element| element.text().collect())
+        .unwrap_or_default()
+}
+
+async fn history_len(setup: &Setup) -> usize {
+    setup
+        .store
+        .private_history(setup.auth[1].clone(), 1, 0)
+        .await
+        .unwrap()
+        .len()
+}
+
+async fn sheet_page(setup: &Setup) -> String {
+    let (status, html) = setup.get("/private-sheets/1").await;
+    assert_eq!(status, StatusCode::OK);
+    html
+}
+
+/// Three rows A, B, C (`r1-1…r1-3`); B has its optional properties set.
+async fn abc(setup: &Setup) -> PrivateSnapshot {
+    let mut b = item("r1-2", "B");
+    b["armor"] = 2.into();
+    b["kind"] = "heavy".into();
+    create(
+        setup,
+        data(vec![item("r1-1", "A"), b, item("r1-3", "C")], vec![]),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn competing_writer_loser_unchanged() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    let mut first = submitted(&html);
+    set(&mut first, "row-1-0-0", "First writer");
+    let mut second = submitted(&html);
+    set(&mut second, "row-1-0-0", "Second writer");
+    assert_eq!(
+        setup.post("/private-sheets/1", first).await.0,
+        StatusCode::SEE_OTHER
+    );
+    let (status, page) = setup.post("/private-sheets/1", second).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(page.contains("Second writer"), "the loser's draft is kept");
+    let saved = reopen(&setup, 1).await;
+    assert_eq!(saved.revision, 2);
+    assert_eq!(saved.data["equipment"][0]["name"], "First writer");
+    assert_eq!(history_len(&setup).await, 2);
+}
+
+#[tokio::test]
+async fn op_409_op_save_never_rebases() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    let created = abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    edit(&setup, &created, created.data.clone()).await.unwrap();
+    let (status, op_page) = setup
+        .post("/private-sheets/1", clicked(&html, "add-1"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(get(&submitted_by(&op_page, None), "revision"), "1");
+    let (status, conflict) = setup.post("/private-sheets/1", submitted(&op_page)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(get(&submitted_by(&conflict, None), "revision"), "1");
+    assert_eq!(rows_of(&conflict).len(), 4, "the added draft row is kept");
+    let (status, again) = setup
+        .post("/private-sheets/1", clicked(&conflict, "remove-1-3"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(get(&submitted_by(&again, None), "revision"), "1");
+    assert_eq!(reopen(&setup, 1).await.revision, 2);
+}
+
+#[tokio::test]
+async fn add_rerenders_200_no_store_without_writing() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    let response = super::router_request(
+        &setup.app,
+        &setup.auth[1],
+        "/private-sheets/1",
+        Some(clicked(&html, "add-1")),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let page = super::formula_tests::body(response).await;
+    let rows = rows_of(&page);
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[3], (String::new(), String::new()), "an empty new row");
+    assert!(page.contains("Row 4 of 4 · New row · ID assigned on save"));
+    let form = submitted_by(&page, None);
+    assert_eq!(
+        get(&form, "set-1-3-2"),
+        "absent",
+        "new optional properties start Not set"
+    );
+    assert_eq!(reopen(&setup, 1).await.revision, 1, "nothing written");
+    assert_eq!(history_len(&setup).await, 1);
+}
+
+#[tokio::test]
+async fn remove_rerenders_without_writing() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    let (status, page) = setup
+        .post("/private-sheets/1", clicked(&html, "remove-1-1"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let rows: Vec<String> = rows_of(&page).into_iter().map(|row| row.0).collect();
+    assert_eq!(rows, ["r1-1", "r1-3"]);
+    assert_eq!(reopen(&setup, 1).await.revision, 1, "nothing written");
+    assert_eq!(history_len(&setup).await, 1);
+    // Saving the draft persists the removal.
+    assert_eq!(
+        setup.post("/private-sheets/1", submitted(&page)).await.0,
+        StatusCode::SEE_OTHER
+    );
+    let saved = reopen(&setup, 1).await;
+    assert_eq!(saved.data["equipment"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn move_up_down_rerender_new_order_without_writing() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    let (status, up) = setup
+        .post("/private-sheets/1", clicked(&html, "up-1-2"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<String> = rows_of(&up).into_iter().map(|row| row.1).collect();
+    assert_eq!(names, ["A", "C", "B"]);
+    let (status, down) = setup
+        .post("/private-sheets/1", clicked(&up, "down-1-0"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<String> = rows_of(&down).into_iter().map(|row| row.1).collect();
+    assert_eq!(names, ["C", "A", "B"]);
+    assert_eq!(reopen(&setup, 1).await.revision, 1, "nothing written");
+    assert_eq!(history_len(&setup).await, 1);
+}
+
+#[tokio::test]
+async fn move_carries_id_values_and_set_state() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    let mut form = clicked(&html, "up-1-1");
+    set(&mut form, "row-1-1-1", "not a number");
+    let (status, page) = setup.post("/private-sheets/1", form).await;
+    assert_eq!(status, StatusCode::OK);
+    let moved = submitted_by(&page, None);
+    for (key, want) in [
+        ("id-1-0", "r1-2"),
+        ("row-1-0-0", "B"),
+        ("row-1-0-1", "not a number"),
+        ("row-1-0-2", "2"),
+        ("set-1-0-2", "present"),
+        ("row-1-0-3", "heavy"),
+        ("set-1-0-3", "present"),
+        ("id-1-1", "r1-1"),
+        ("row-1-1-0", "A"),
+        ("set-1-1-2", "absent"),
+        ("set-1-1-3", "absent"),
+    ] {
+        assert_eq!(get(&moved, key), want, "{key}");
+    }
+}
+
+#[tokio::test]
+async fn save_after_moves_persists_order() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    create(
+        &setup,
+        data(vec![item("r1-1", "A"), item("r1-2", "B")], vec![]),
+    )
+    .await
+    .unwrap();
+    let html = sheet_page(&setup).await;
+    // Add N1 and N2 at the end, then move N2 to the top and N1 above A:
+    // [A, B, N1, N2] → [N2, A, B, N1] → [N2, A, N1, B] → [N2, N1, A, B].
+    let (_, page) = setup
+        .post("/private-sheets/1", clicked(&html, "add-1"))
+        .await;
+    let (_, page) = setup
+        .post("/private-sheets/1", clicked(&page, "add-1"))
+        .await;
+    let mut form = clicked(&page, "up-1-3");
+    for (key, value) in [
+        ("row-1-2-0", "N1"),
+        ("row-1-2-1", "1"),
+        ("row-1-2-4", "false"),
+        ("row-1-3-0", "N2"),
+        ("row-1-3-1", "2"),
+        ("row-1-3-4", "true"),
+    ] {
+        set(&mut form, key, value);
+    }
+    let (_, page) = setup.post("/private-sheets/1", form).await;
+    let (_, page) = setup
+        .post("/private-sheets/1", clicked(&page, "up-1-2"))
+        .await;
+    let (_, page) = setup
+        .post("/private-sheets/1", clicked(&page, "up-1-1"))
+        .await;
+    let (_, page) = setup
+        .post("/private-sheets/1", clicked(&page, "up-1-3"))
+        .await;
+    let (_, page) = setup
+        .post("/private-sheets/1", clicked(&page, "up-1-2"))
+        .await;
+    let names: Vec<String> = rows_of(&page).into_iter().map(|row| row.1).collect();
+    assert_eq!(names, ["N2", "N1", "A", "B"]);
+    assert_eq!(reopen(&setup, 1).await.revision, 1);
+    assert_eq!(
+        setup.post("/private-sheets/1", submitted(&page)).await.0,
+        StatusCode::SEE_OTHER
+    );
+    let saved = reopen(&setup, 1).await;
+    let stored: Vec<(&str, &str)> = saved.data["equipment"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| (item["id"].as_str().unwrap(), item["name"].as_str().unwrap()))
+        .collect();
+    // New IDs follow the final row order (plan N-D).
+    assert_eq!(
+        stored,
+        [("r2-1", "N2"), ("r2-2", "N1"), ("r1-1", "A"), ("r1-2", "B")]
+    );
+}
+
+#[tokio::test]
+async fn edge_move_buttons_disabled() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    let page = scraper::Html::parse_document(&html);
+    let disabled = |id: &str| {
+        page.select(&selector(&format!("button#{id}")))
+            .next()
+            .unwrap_or_else(|| panic!("{id} missing"))
+            .value()
+            .attr("disabled")
+            .is_some()
+    };
+    assert!(disabled("up-1-0") && disabled("down-1-2"));
+    for id in [
+        "down-1-0",
+        "up-1-1",
+        "down-1-1",
+        "up-1-2",
+        "remove-1-0",
+        "add-1",
+    ] {
+        assert!(!disabled(id), "{id}");
+    }
+}
+
+#[tokio::test]
+async fn edge_or_out_of_range_move_is_400() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    // Paired positive on the same page.
+    assert_eq!(
+        setup
+            .post("/private-sheets/1", clicked(&html, "up-1-1"))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    for op in ["up-1-0", "down-1-2", "up-1-3", "down-1-3", "remove-1-3"] {
+        assert_eq!(
+            setup.post("/private-sheets/1", forged(&html, op)).await.0,
+            StatusCode::BAD_REQUEST,
+            "{op}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn add_at_256_is_422_with_message() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    create_rows(&setup, 256).await;
+    let html = sheet_page(&setup).await;
+    let page = scraper::Html::parse_document(&html);
+    let add = page.select(&selector("button#add-1")).next().unwrap();
+    assert!(add.value().attr("disabled").is_some());
+    assert_eq!(
+        add.text().collect::<String>(),
+        "Add Equipment row (limit reached: 256 rows)"
+    );
+    let response = super::router_request(
+        &setup.app,
+        &setup.auth[1],
+        "/private-sheets/1",
+        Some(forged(&html, "add-1")),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let page = super::formula_tests::body(response).await;
+    assert!(
+        status_text(&page)
+            .contains("This list already has 256 rows, the most a list can hold. Not saved yet."),
+        "{}",
+        status_text(&page)
+    );
+    assert_eq!(rows_of(&page).len(), 256, "the draft is re-rendered");
+}
+
+#[tokio::test]
+async fn bad_op_or_index_is_400_and_two_ops_is_400() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    for op in [
+        "add-0",
+        "add-3",
+        "add-01",
+        "add-+1",
+        "add-1-0",
+        "remove-1",
+        "up-1",
+        "down-1-01",
+        "frobnicate",
+        "save-1",
+        "",
+        "Add-1",
+    ] {
+        assert_eq!(
+            setup.post("/private-sheets/1", forged(&html, op)).await.0,
+            StatusCode::BAD_REQUEST,
+            "{op:?}"
+        );
+    }
+    let mut two = clicked(&html, "add-1");
+    two.push(pair("op", "save"));
+    assert_eq!(
+        setup.post("/private-sheets/1", two).await.0,
+        StatusCode::BAD_REQUEST,
+        "two ops"
+    );
+    // A non-integer revision makes any op forged.
+    let mut form = clicked(&html, "add-1");
+    set(&mut form, "revision", "one");
+    assert_eq!(
+        setup.post("/private-sheets/1", form).await.0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn ops_need_csrf_and_edit_rights() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    let mut bad = clicked(&html, "add-1");
+    set(&mut bad, "csrf", &"b".repeat(64));
+    assert_eq!(
+        setup.post("/private-sheets/1", bad).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let outsider = super::router_request(
+        &setup.app,
+        &setup.auth[3],
+        "/private-sheets/1",
+        Some(clicked(&html, "add-1")),
+    )
+    .await;
+    assert_eq!(outsider.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn stale_op_warns() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    let created = abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    let warning = "The saved sheet changed (revision 1 → 2); saving this draft will be refused.";
+    let (_, current) = setup
+        .post("/private-sheets/1", clicked(&html, "add-1"))
+        .await;
+    assert!(
+        !current.contains("The saved sheet changed"),
+        "no warning while current"
+    );
+    edit(&setup, &created, created.data.clone()).await.unwrap();
+    let (status, stale) = setup
+        .post("/private-sheets/1", clicked(&html, "add-1"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(stale.contains(warning));
+}
+
+/// The list fixture plus a derived `load` over the equipment quantities.
+fn formula_list_definition() -> Value {
+    let mut definition = list_definition();
+    definition["fields"].as_array_mut().unwrap().push(json!({
+        "id": "load", "label": "Load", "control": "integer", "nullable": false,
+        "mapping": mapped(),
+        "formula": {"expr": "sum(equipment.map(item, item.quantity))", "rule_ids": ["r-1"],
+                    "evidence": {"state": "unresolved", "reason": "Synthetic"}}}));
+    definition["groups"][0]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push("load".into());
+    definition["constraints"] = json!([{"id": "light-load", "expr": "load <= 10",
+        "rule_ids": [], "message": "Load at most 10.",
+        "evidence": {"state": "unresolved", "reason": "Synthetic"}}]);
+    definition
+}
+
+#[tokio::test]
+async fn ops_never_evaluate_draft() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&formula_list_definition()).await;
+    abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    assert!(
+        html.contains("Advisory checks: 0 violated"),
+        "saved load 3 passes"
+    );
+    let mut form = clicked(&html, "add-1");
+    set(&mut form, "row-1-0-1", "100");
+    let (status, page) = setup.post("/private-sheets/1", form).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("Computed from saved revision 1 — not from your unsaved changes"));
+    assert!(page.contains("Advisory checks of saved revision 1: 0 violated"));
+    assert!(!page.contains(">100<"), "the draft's load was not computed");
+    assert!(!page.contains("1 violated"));
+}
+
+#[tokio::test]
+async fn op_never_reveals_saved_ids() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    let (_, removed) = setup
+        .post("/private-sheets/1", clicked(&html, "remove-1-1"))
+        .await;
+    let (status, page) = setup
+        .post("/private-sheets/1", clicked(&removed, "add-1"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !page.contains("r1-2"),
+        "a saved ID the draft lacked is not revealed"
+    );
+}
+
+#[tokio::test]
+async fn unknown_id_draft_op_rerenders_then_save_422_or_409() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    let created = abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    let mut form = clicked(&html, "add-1");
+    set(&mut form, "id-1-0", "r9-9");
+    let (status, page) = setup.post("/private-sheets/1", form.clone()).await;
+    assert_eq!(status, StatusCode::OK, "ops never validate IDs");
+    let (status, _) = setup.post("/private-sheets/1", submitted(&page)).await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "current: tampering"
+    );
+    edit(&setup, &created, created.data.clone()).await.unwrap();
+    let (status, stale) = setup.post("/private-sheets/1", form).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = setup.post("/private-sheets/1", submitted(&stale)).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "stale: the revision check comes first"
+    );
+}
+
+#[tokio::test]
+async fn op_buttons_have_formnovalidate_and_formaction() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    let (_, create_page) = setup.get(&create_path(&setup)).await;
+    abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    for (page, action) in [
+        (&html, "/private-sheets/1".to_owned()),
+        (&create_page, create_path(&setup)),
+    ] {
+        let parsed = scraper::Html::parse_document(page);
+        let ops: Vec<_> = parsed
+            .select(&selector("button[name=op]:not([value=save])"))
+            .collect();
+        assert!(!ops.is_empty());
+        for button in ops {
+            let value = button.value();
+            let op = value.attr("value").unwrap();
+            assert!(value.attr("formnovalidate").is_some(), "{op}");
+            let f = op.split('-').nth(1).unwrap();
+            assert_eq!(
+                value.attr("formaction"),
+                Some(format!("{action}#list-{f}").as_str()),
+                "{op}"
+            );
+        }
+        for save in parsed.select(&selector("button[value=save]")) {
+            assert!(
+                save.value().attr("formnovalidate").is_none(),
+                "Save validates"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn single_autofocus_after_add_remove_and_each_move() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    assert!(autofocus(&html).is_empty(), "a plain view focuses nothing");
+    for (op, focus) in [
+        ("add-1", "row-1-3-0"),
+        ("remove-1-1", "add-1"),
+        ("up-1-2", "up-1-1"),
+        ("up-1-1", "down-1-0"),
+        ("down-1-0", "down-1-1"),
+        ("down-1-1", "up-1-2"),
+    ] {
+        let (status, page) = setup.post("/private-sheets/1", clicked(&html, op)).await;
+        assert_eq!(status, StatusCode::OK, "{op}");
+        assert_eq!(autofocus(&page), [focus], "{op}");
+    }
+    // The tag list's first property is required text; an optional first property gets the
+    // Set/Not set select instead (covered by the equipment row's own structure).
+    let (_, tags) = setup
+        .post("/private-sheets/1", clicked(&html, "add-2"))
+        .await;
+    assert_eq!(autofocus(&tags), ["row-2-0-0"]);
+}
+
+#[tokio::test]
+async fn op_button_names_and_status_messages() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    abc(&setup).await;
+    let html = sheet_page(&setup).await;
+    let parsed = scraper::Html::parse_document(&html);
+    let text = |id: &str| -> String {
+        parsed
+            .select(&selector(&format!("button#{id}")))
+            .next()
+            .unwrap()
+            .text()
+            .collect()
+    };
+    assert_eq!(text("add-1"), "Add Equipment row");
+    assert_eq!(text("remove-1-1"), "Remove row 2 of Equipment");
+    assert_eq!(text("up-1-1"), "Move row 2 of Equipment up");
+    assert_eq!(text("down-1-1"), "Move row 2 of Equipment down");
+    for (op, message) in [
+        ("add-1", "Row added to Equipment. Not saved yet."),
+        ("remove-1-2", "Row 3 of Equipment removed. Not saved yet."),
+        (
+            "up-1-2",
+            "Row 3 of Equipment moved up to position 2. Not saved yet.",
+        ),
+        (
+            "down-1-0",
+            "Row 1 of Equipment moved down to position 2. Not saved yet.",
+        ),
+    ] {
+        let (_, page) = setup.post("/private-sheets/1", clicked(&html, op)).await;
+        assert_eq!(status_text(&page), message, "{op}");
+    }
+    // The focus target's accessible name carries the row's new position (plan N-G).
+    let (_, moved) = setup
+        .post("/private-sheets/1", clicked(&html, "up-1-2"))
+        .await;
+    let parsed = scraper::Html::parse_document(&moved);
+    let focused = parsed.select(&selector("[autofocus]")).next().unwrap();
+    assert_eq!(
+        focused.text().collect::<String>(),
+        "Move row 2 of Equipment up"
+    );
+}
+
+#[tokio::test]
+async fn create_page_adds_rows_then_creates() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    let path = create_path(&setup);
+    let (_, page) = setup.get(&path).await;
+    assert_eq!(
+        get(&submitted_by(&page, None), "name"),
+        "",
+        "Name still empty"
+    );
+    let (status, page) = setup.post(&path, clicked(&page, "add-1")).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, page) = setup.post(&path, clicked(&page, "add-1")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("New row · ID assigned on save"));
+    let mut form = submitted(&page);
+    for (key, value) in [
+        ("name", "Created with rows"),
+        ("value-label", "x"),
+        ("row-1-0-0", "Rope"),
+        ("row-1-0-1", "1"),
+        ("row-1-0-4", "false"),
+        ("row-1-1-0", "Torch"),
+        ("row-1-1-1", "2"),
+        ("row-1-1-4", "true"),
+    ] {
+        set(&mut form, key, value);
+    }
+    assert_eq!(setup.post(&path, form).await.0, StatusCode::SEE_OTHER);
+    let saved = reopen(&setup, 1).await;
+    let ids: Vec<&str> = saved.data["equipment"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["r1-1", "r1-2"]);
+}

@@ -432,11 +432,30 @@ struct RowView {
     r: usize,
     id: String,
     cells: Vec<CellView>,
+    /// Which of this row's controls gets `autofocus` after a draft operation, if any.
+    focus: RowFocus,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowFocus {
+    None,
+    Start,
+    Up,
+    Down,
 }
 
 impl RowView {
     fn number(&self) -> usize {
         self.r + 1
+    }
+    fn focus_start(&self, cell: &CellView) -> bool {
+        self.focus == RowFocus::Start && cell.p == 0
+    }
+    fn focus_up(&self) -> bool {
+        self.focus == RowFocus::Up
+    }
+    fn focus_down(&self) -> bool {
+        self.focus == RowFocus::Down
     }
     fn id_excerpt(&self) -> String {
         excerpt(&self.id)
@@ -448,10 +467,23 @@ struct ListView {
     f: usize,
     properties: Vec<PropertyView>,
     rows: Vec<RowView>,
+    /// The Add button gets `autofocus` (after Remove).
+    focus_add: bool,
 }
 
 impl ListView {
-    fn new(f: usize, field: &crate::definitions::Field, draft: values::ListDraft) -> Self {
+    fn new(
+        f: usize,
+        field: &crate::definitions::Field,
+        draft: values::ListDraft,
+        focus: Option<values::Focus>,
+    ) -> Self {
+        let row_focus = |r: usize| match focus {
+            Some(values::Focus::RowStart(list, row)) if (list, row) == (f, r) => RowFocus::Start,
+            Some(values::Focus::Up(list, row)) if (list, row) == (f, r) => RowFocus::Up,
+            Some(values::Focus::Down(list, row)) if (list, row) == (f, r) => RowFocus::Down,
+            _ => RowFocus::None,
+        };
         let properties = values::properties(field)
             .iter()
             .map(|property| PropertyView {
@@ -475,13 +507,23 @@ impl ListView {
                     .enumerate()
                     .map(|(p, (value, state))| CellView { p, value, state })
                     .collect(),
+                focus: row_focus(r),
             })
             .collect();
         Self {
             f,
             properties,
             rows,
+            focus_add: focus == Some(values::Focus::Add(f)),
         }
+    }
+    /// The last row: its Move down button is disabled.
+    fn last(&self, row: &RowView) -> bool {
+        row.r + 1 == self.rows.len()
+    }
+    /// At the row limit the Add button is disabled.
+    fn full(&self) -> bool {
+        self.rows.len() >= crate::definitions::formula::MAX_LIST_ITEMS
     }
     fn property(&self, cell: &CellView) -> &PropertyView {
         &self.properties[cell.p]
@@ -605,6 +647,7 @@ fn render_private(
     csrf: &str,
     raw: Option<&BTreeMap<String, String>>,
     message: &str,
+    focus: Option<values::Focus>,
 ) -> Result<String, AppError> {
     let native = matches!(view.snapshot.pin, Pin::Native { .. })
         && super::snapshots::supported(&view.snapshot);
@@ -637,7 +680,7 @@ fn render_private(
             })
         })
     };
-    let groups = groups(view, raw, formulas.as_ref())?;
+    let groups = groups(view, raw, formulas.as_ref(), focus)?;
     let name = raw
         .and_then(|r| r.get("name"))
         .map_or(view.snapshot.name.as_str(), String::as_str);
@@ -702,6 +745,7 @@ fn groups(
     view: &SheetView,
     raw: Option<&BTreeMap<String, String>>,
     formulas: Option<&FormulaView>,
+    focus: Option<values::Focus>,
 ) -> Result<Vec<GroupView>, AppError> {
     let mut groups = Vec::new();
     if let Some(pin) = &view.immutable {
@@ -721,7 +765,7 @@ fn groups(
                         || values::ListDraft::saved(field, saved),
                         |raw| values::ListDraft::submitted(f, field, raw),
                     );
-                    ListView::new(f, field, draft)
+                    ListView::new(f, field, draft, focus)
                 });
                 let value = raw
                     .and_then(|r| r.get(&format!("value-{id}")))
@@ -781,10 +825,11 @@ async fn rendered(
     raw: Option<BTreeMap<String, String>>,
     status: StatusCode,
     message: String,
+    focus: Option<values::Focus>,
 ) -> ResultResponse {
     let html = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        render_private(&view, &csrf, raw.as_ref(), &message)
+        render_private(&view, &csrf, raw.as_ref(), &message, focus)
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -816,7 +861,16 @@ async fn new_sheet(
     let csrf = auth::token(&session)
         .await?
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    rendered(view, permit, csrf, None, StatusCode::OK, String::new()).await
+    rendered(
+        view,
+        permit,
+        csrf,
+        None,
+        StatusCode::OK,
+        String::new(),
+        None,
+    )
+    .await
 }
 
 async fn read_sheet(
@@ -852,7 +906,16 @@ async fn read_private(
     let csrf = auth::token(&session)
         .await?
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    rendered(view, permit, csrf, None, StatusCode::OK, String::new()).await
+    rendered(
+        view,
+        permit,
+        csrf,
+        None,
+        StatusCode::OK,
+        String::new(),
+        None,
+    )
+    .await
 }
 
 const NATIVE_KEYS: &[&str] = &[
@@ -925,6 +988,68 @@ async fn admit_form(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
 }
 
+/// A draft operation (plan D5): applies itself to the submitted draft and re-renders it with
+/// 200, never validating or saving it. A non-integer revision is forged (400); Add at the row
+/// limit answers 422 with the draft. A draft from an older revision gets a warning, and keeps
+/// its submitted revision: nothing rebases it.
+async fn draft_op(
+    mut view: SheetView,
+    permit: OwnedSemaphorePermit,
+    csrf: String,
+    mut form: BTreeMap<String, String>,
+    op: values::Op,
+) -> ResultResponse {
+    let submitted = values::integer(&form["revision"]).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let (applied, view, form, permit) = tokio::task::spawn_blocking(move || {
+        let applied = view
+            .immutable
+            .as_ref()
+            .ok_or(AppError::Invalid("Draft operations need list fields."))
+            .and_then(|pin| op.apply(pin.definition(), &mut form));
+        if submitted != view.snapshot.revision {
+            let stale = format!(
+                "The saved sheet changed (revision {submitted} → {}); saving this draft will be refused.",
+                view.snapshot.revision
+            );
+            view.warning = if view.warning.is_empty() {
+                stale
+            } else {
+                format!("{stale} {}", view.warning)
+            };
+        }
+        (applied, view, form, permit)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match applied {
+        Ok(applied) => {
+            rendered(
+                view,
+                permit,
+                csrf,
+                Some(form),
+                StatusCode::OK,
+                applied.message,
+                Some(applied.focus),
+            )
+            .await
+        }
+        Err(AppError::Invalid(reason)) => {
+            rendered(
+                view,
+                permit,
+                csrf,
+                Some(form),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("{reason} Not saved yet."),
+                None,
+            )
+            .await
+        }
+        Err(failure) => Err(error(failure)),
+    }
+}
+
 /// Validates an admitted save form into `view.snapshot` (plan D4 steps 5 and 6).
 fn apply_save(view: &mut SheetView, form: &BTreeMap<String, String>) -> Result<(), AppError> {
     // The revision check precedes value validation: a stale draft answers 409 even when its
@@ -978,12 +1103,20 @@ async fn save_private(
         return Err(StatusCode::FORBIDDEN);
     }
     let (form, mut view, permit) = admit_form(view, pairs, permit).await?;
-    if form.get("op").is_some_and(|op| op != "save") {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    let op = values::Op::parse(
+        form.get("op").map(String::as_str),
+        view.immutable
+            .as_ref()
+            .map(crate::definitions::private_pin::ImmutablePin::definition),
+        &form,
+    )
+    .ok_or(StatusCode::BAD_REQUEST)?;
     let csrf = auth::token(&session)
         .await?
         .ok_or(StatusCode::UNAUTHORIZED)?;
+    if op != values::Op::Save {
+        return draft_op(view, permit, csrf, form, op).await;
+    }
     let (result, view, form, permit) = tokio::task::spawn_blocking(move || {
         let result = apply_save(&mut view, &form);
         (result, view, form, permit)
@@ -998,7 +1131,16 @@ async fn save_private(
             _ => "No changes saved. Check the full draft and its submitted revision.".into(),
         };
         let (view, permit) = rejected_editor(&state, auth, id, version, Some(permit)).await?;
-        return rendered(view, permit, csrf, Some(form), error(failure), message).await;
+        return rendered(
+            view,
+            permit,
+            csrf,
+            Some(form),
+            error(failure),
+            message,
+            None,
+        )
+        .await;
     }
     match state
         .store()
@@ -1020,6 +1162,7 @@ async fn save_private(
                 error(failure),
                 "No changes saved. Copy your draft, reload and reassess the submitted revision."
                     .into(),
+                None,
             )
             .await
         }
