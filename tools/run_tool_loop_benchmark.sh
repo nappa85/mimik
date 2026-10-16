@@ -18,7 +18,9 @@
 #   CASES           comma-separated case ids;  CASES_FILE  hashed subset (tools/case-subsets/)
 #   QUIET=1         harness --quiet-progress (no per-case outcome on stderr; plan §11 item 3)
 #   PREFLIGHT_CASE  dev case id: 1-case, seed-17 dev run on the same server before the arm
-#   BUDGET_SECONDS  harness run budget (default: seconds left in the schedule window - 600)
+#   BUDGET_SECONDS  harness run budget (default: seconds left before the cutoff - 900)
+#   WINDOW_END      absolute cutoff (epoch s; the queue passes the window end)
+#   QUEUE_PID       the queue's pid: the runner stops if that process is gone
 #   N_CPU_MOE       llama.cpp --n-cpu-moe (required where the registry says so)
 #   MIMIK_MODEL_ROOT  model root (default: registry model_root)
 #   MODEL_PATH / MODEL_SHA256      override the model file and its expected sha256
@@ -30,39 +32,52 @@
 #   SCHEDULE_OVERRIDE=user-approved   heavy work inside the weekday 09:00-18:00 block
 #
 # Runs are strictly sequential (one GPU): a lock file refuses a second concurrent run. Heavy
-# work is refused Monday-Friday 09:00-18:00 local time (AGENTS.md machine schedule), and the
-# harness budget ends before the window closes; tools/run_queue.py also stops a running arm at
-# the window edge. The model path is resolved (realpath); the resolved file is size-checked,
+# work is refused Monday-Friday 09:00-18:00 local time (AGENTS.md, /etc/localtime): the
+# schedule is re-checked immediately before the hash, the pre-warm, the server load, the
+# preflight and the harness launch, and every 15 s while the server loads and the harness
+# runs; the harness gets the budget left at launch and the absolute --deadline-epoch, so no
+# episode starts past the cutoff. tools/run_queue.py and tools/run_watchdog.py are further
+# independent stops. The model path is resolved (realpath); the resolved file is size-checked,
 # hashed in a locked-down container (or matched in HASH_CACHE), pre-warmed into the page cache
 # when the registry says so (plan §11 item 27), and bind-mounted read-only. Server and harness
-# run on an internal Docker network with no published ports and never pull images, as uid
-# 1000, all capabilities dropped, read-only root filesystems. The harness fails fast (5
-# consecutive error episodes, failed health check, formula CLI fault). provenance.txt holds
-# key=value lines, with failure=<class> on any runner failure (tools/run_queue.py reads it).
-# Exit codes: 2 usage/config, 3 CLI hash, 4 server start/health, 5 model file/hash, 6 preflight,
-# 9 another run active, 10 outside the schedule window, 130/143 signal; otherwise the harness
-# exit code (3 formula infrastructure fault, 4 fail-fast abort).
+# run detached on an internal Docker network with no published ports, never pull images, use
+# --init, run as uid 1000 with all capabilities dropped and read-only root filesystems. Every
+# docker call has a timeout. Cleanup stops the harness and the server first, then collects
+# logs, removes every owned container (prefix mimik-toolloop-v3-) and the network, and
+# verifies that they are gone (cleanup_verified). provenance.txt holds key=value lines, with
+# failure=<class> on any runner failure (tools/run_queue.py reads it).
+# Exit codes: 2 usage/config, 3 CLI hash, 4 server start/health/VRAM, 5 model file/hash,
+# 6 preflight, 9 another run active, 10 schedule window, 11 cleanup unresolved, 12 docker
+# failure, 13 queue gone, 130/143 signal; otherwise the harness exit code (3 formula
+# infrastructure fault, 4 fail-fast abort).
 set -euo pipefail
+export TZ=:/etc/localtime
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-MAIN=$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)")
+MAIN=$(dirname "$(timeout 30 git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)")
 RUN_BASE=$ROOT/target/tool-loop-benchmark-$(date +%Y%m%d)
 # Local image ids, pinned because the tags may move: mimik-ci (hash checks) and
 # mimik-toolloop-py:20261015 (FROM mimik-ci plus chmod 0711 /root so uid 1000 reaches python).
 CHECK_IMAGE=sha256:9578747a34f5e02cb7561c8e2a8903b75100b96ce1b0587d5fa4b687be0d3a9f
 HARNESS_IMAGE=sha256:8477ff915533b4a21a9727d2804acd06bae15b93e95d60627f8e127cd7025a7d
+OWNED=mimik-toolloop-v3-
 NET=mimik-toolloop-v3
-SRV=mimik-toolloop-v3-srv
-HARNESS=mimik-toolloop-v3-harness
+SRV=${OWNED}srv
+HARNESS=${OWNED}harness
 CLI_IN_VOLUME=harness-formula-eval/release/examples/formula_eval
 CLI_SHA=${FORMULA_CLI_SHA256:-f0e13322ef921fa89685c48831e9a7658cf789e842514a8a93ff891fa334fc10}
 CLI_BUILD_INFO=${CLI_BUILD_INFO:-$MAIN/target/tool-loop-benchmark-20261015/harness-v2/formula-cli-build.txt}
 SMOKE_CASES=dev-001,dev-005,dev-008
-WINDOW_MARGIN=600
+WINDOW_MARGIN=900   # no episode starts later than this before the cutoff
+STOP_MARGIN=360     # a running load or harness is stopped this long before the cutoff
+DOCKER_TIMEOUT=${DOCKER_TIMEOUT:-60}  # per short docker call (tests lower it)
+POLL_SECONDS=${RUNNER_POLL_SECONDS:-15}  # harness poll interval (tests lower it)
+VRAM_PATTERN='out of memory|OutOfDeviceMemory|failed to allocate|unable to allocate|cannot allocate'
 [ $# -ge 2 ] || { sed -n '7,10p' "$0" >&2; exit 2; }
 key=$1 split=$2 seeds=${3:-${SEEDS:-17,29}}
 exec </dev/null
 die() { echo "$2" >&2; exit "$1"; }
 is_uint() { [[ $1 =~ ^[0-9]+$ ]]; }
+dk() { timeout -k 10 "$DOCKER_TIMEOUT" docker "$@"; }  # every short docker call is bounded
 lock=${LOCK_FILE:-$MAIN/target/.tool-loop-benchmark.lock}
 mkdir -p "$(dirname "$lock")"
 exec 9>"$lock"
@@ -70,6 +85,10 @@ flock -n 9 || die 9 "another tool-loop run is active; runs are strictly sequenti
 
 # ---- configuration (registry + pass-through), validated before anything runs
 [ -z "${N_CPU_MOE:-}" ] || is_uint "$N_CPU_MOE" || die 2 "N_CPU_MOE must be a non-negative integer"
+[ -z "${WINDOW_END:-}" ] || is_uint "$WINDOW_END" || die 2 "WINDOW_END must be an epoch in seconds"
+[ -z "${QUEUE_PID:-}" ] || is_uint "$QUEUE_PID" || die 2 "QUEUE_PID must be a pid"
+{ is_uint "$DOCKER_TIMEOUT" && [ "$DOCKER_TIMEOUT" -gt 0 ]; } || die 2 "DOCKER_TIMEOUT must be a positive integer"
+is_uint "$POLL_SECONDS" || die 2 "RUNNER_POLL_SECONDS must be an integer"
 ctx_arg=${4:-${CTX:-}}
 [ -z "$ctx_arg" ] || is_uint "$ctx_arg" || die 2 "ctx must be a positive integer"
 reg_cmd=(python3 "$ROOT/tools/model_registry.py" shell "$key")
@@ -89,6 +108,7 @@ reg_health_wait=''
 reg_request_timeout=''
 reg_thinking=''
 reg_tools=''
+reg_vram_budget=''
 reg_server_config=''
 reg_server_args=()
 reg=$("${reg_cmd[@]}") || exit 2
@@ -138,6 +158,7 @@ fail() {  # fail <exit> <class> <message>
 {
   echo "date_start=$(date -Is)"
   echo "runner=tools/run_tool_loop_benchmark.sh harness=v3 key=$key split=$split arm=${ARM:-}"
+  echo "window_end=${WINDOW_END:-} queue_pid=${QUEUE_PID:-} vram_budget_bytes=$reg_vram_budget"
 } > "$prov"
 cases_file_sha=
 if [ -n "${CASES_FILE:-}" ]; then
@@ -147,71 +168,133 @@ if [ -n "${CASES_FILE:-}" ]; then
   case_args=(--cases-file /out/cases-file.json)
 fi
 
-# ---- schedule window (AGENTS.md): heavy work only outside weekday 09:00-18:00
-budget=${BUDGET_SECONDS:-0}
-if [ "${CHECK_ONLY:-0}" != 1 ]; then
-  if [ "${SCHEDULE_OVERRIDE:-}" = user-approved ]; then
-    echo "schedule_override=user-approved" >> "$prov"
+# ---- cleanup: stop heavy work first, then diagnostics, then remove and verify
+started_heavy=0
+cleanup() {
+  local rc=$? left net
+  [ "$started_heavy" = 1 ] || [ -n "$(dk ps -a -q --filter "name=^/$OWNED" 2>/dev/null)" ] || {
+    echo "cleanup_verified=true date_end=$(date -Is)" >> "$prov"; return; }
+  dk stop -t 10 "$HARNESS" >/dev/null 2>&1 || true
+  dk stop -t 10 "$SRV" >/dev/null 2>&1 || true
+  echo "server_oom_killed=$(dk inspect -f '{{.State.OOMKilled}}' "$SRV" 2>/dev/null || echo unknown)" >> "$prov"
+  timeout -k 10 120 docker logs "$SRV" > "$out/server.log" 2>&1 || true
+  for name in $(dk ps -a --format '{{.Names}}' 2>/dev/null | grep "^$OWNED" || true); do
+    dk rm -f "$name" >/dev/null 2>&1 || true
+  done
+  dk network rm "$NET" >/dev/null 2>&1 || true
+  left=$(dk ps -a --format '{{.Names}}' 2>&1 | grep "^$OWNED" || true)
+  net=$(dk network ls --format '{{.Name}}' 2>&1 | grep -x "$NET" || true)
+  if ! dk ps -a -q >/dev/null 2>&1; then left="docker ps failed"; fi
+  if [ -z "$left$net" ]; then
+    echo "cleanup_verified=true date_end=$(date -Is)" >> "$prov"
   else
-    window=$(python3 "$ROOT/tools/run_queue.py" window-check) \
-      || fail 10 window "outside the heavy-work window: $window"
-    echo "$window" >> "$prov"
-    left=$(sed -n 's/.*seconds_left=\([0-9]*\).*/\1/p' <<< "$window")
-    [ -n "$left" ] && [ "$left" -gt "$WINDOW_MARGIN" ] \
-      || fail 10 window "heavy-work window closes in ${left:-?}s"
-    left=$(( left - WINDOW_MARGIN ))
-    if [ "$budget" = 0 ] || [ "$budget" -gt "$left" ]; then
-      budget=$left; echo "budget_from_window=$left" >> "$prov"
-    fi
+    { echo "cleanup_verified=false cleanup_remaining=${left//$'\n'/,}${net:+,network}"
+      echo "failure=cleanup"; echo "date_end=$(date -Is)"; } >> "$prov"
+    exit 11
   fi
-fi
+  return "$rc"
+}
+trap cleanup EXIT
+trap 'echo "stopped_by_signal=TERM" >> "$prov"; exit 143' TERM
+trap 'echo "stopped_by_signal=INT" >> "$prov"; exit 130' INT
+
+# ---- schedule gate (AGENTS.md): re-run immediately before every heavy step
+override=0
+[ "${SCHEDULE_OVERRIDE:-}" = user-approved ] && override=1
+[ "$override" = 0 ] || echo "schedule_override=user-approved" >> "$prov"
+gate_now='' gate_left='' gate_cutoff=''
+window() {  # window <margin>: sets gate_*; returns 1 if the window is closed within margin
+  local line cutoff_args=()
+  [ -z "${WINDOW_END:-}" ] || cutoff_args=(--cutoff "$WINDOW_END")
+  line=$(python3 "$ROOT/tools/run_queue.py" window-check --margin "$1" "${cutoff_args[@]}") \
+    || { gate_line=$line; return 1; }
+  gate_line=$line
+  gate_now=$(sed -n 's/.* now=\([0-9]*\).*/\1/p' <<< "$line")
+  gate_left=$(sed -n 's/.* seconds_left=\([0-9]*\).*/\1/p' <<< "$line")
+  gate_cutoff=$(sed -n 's/.* cutoff=\([0-9]*\).*/\1/p' <<< "$line")
+}
+gate() {  # gate <step>: refuse the step (exit 10) unless the window stays open past the margin
+  [ "${CHECK_ONLY:-0}" != 1 ] || return 0
+  if [ "$override" = 1 ]; then gate_now=$(date +%s); gate_left='' gate_cutoff=''; return 0; fi
+  window "$WINDOW_MARGIN" || fail 10 window "before $1: ${gate_line:-window-check failed}"
+  echo "window_gate_$1=open now=$gate_now seconds_left=$gate_left cutoff=$gate_cutoff" >> "$prov"
+}
+still_allowed() {  # during a load or a run: stop at the edge, or when the queue is gone
+  if [ -n "${QUEUE_PID:-}" ] && ! kill -0 "$QUEUE_PID" 2>/dev/null; then
+    fail 13 orphan "queue process $QUEUE_PID is gone during $1"
+  fi
+  [ "$override" = 1 ] || window "$STOP_MARGIN" || fail 10 window "stopped at the window edge during $1"
+}
 
 # ---- model file: resolve symlinks, size, hash (or session cache)
 model_real=$(realpath -e -- "$model" 2>/dev/null) || fail 5 model_missing "model file $model not found"
 [ -f "$model_real" ] || fail 5 model_missing "model $model_real is not a regular file"
+case $model_real in *$'\t'*|*$'\n'*) fail 5 model_missing "model path contains a tab or newline" ;; esac
 size=$(stat -c %s "$model_real")
 if [ -z "${MODEL_PATH:-}" ] && [ "$size" != "$reg_size" ]; then
   fail 5 model_size "model size $size != registry $reg_size ($model_real)"
 fi
-check=(docker run --rm --pull never --network none --user 1000:1000 --cap-drop ALL
-  --security-opt no-new-privileges --read-only --memory 256m --pids-limit 32)
-actual_cli_sha=$("${check[@]}" --mount type=volume,src=mimik-formula-target,dst=/formula,readonly \
-  "$CHECK_IMAGE" sha256sum "/formula/$CLI_IN_VOLUME" | cut -d' ' -f1)
+check_n=0
+check_run() {  # check_run <seconds> <mounts and command...>: a named, bounded check container
+  local limit=$1 name rc output; shift
+  check_n=$((check_n + 1)); name=${OWNED}check-$$-$check_n
+  set +e
+  output=$(timeout -k 10 "$limit" docker run --rm --init --pull never --name "$name" --network none \
+    --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only --memory 256m \
+    --pids-limit 32 "$@")
+  rc=$?
+  set -e
+  if [ "$rc" != 0 ]; then
+    dk rm -f "$name" >/dev/null 2>&1 || true
+    fail 12 infra_docker "check container $name failed (exit $rc)"
+  fi
+  printf '%s\n' "$output"
+}
+gate hash
+cli_line=$(check_run 120 --mount type=volume,src=mimik-formula-target,dst=/formula,readonly \
+  "$CHECK_IMAGE" sha256sum "/formula/$CLI_IN_VOLUME")
+actual_cli_sha=${cli_line%% *}
 if [ "$actual_cli_sha" != "$CLI_SHA" ]; then
   fail 3 cli_hash "formula_eval sha256 $actual_cli_sha != pinned $CLI_SHA"
 fi
-stamp="$model_real $(stat -c '%s %Y %i %d' "$model_real")"
+IFS=' ' read -r st_size st_mtime st_inode st_dev <<< "$(stat -c '%s %.9Y %i %d' "$model_real")"
 hash_source=hashed actual_model_sha=''
-if [ -n "${HASH_CACHE:-}" ] && [ -f "$HASH_CACHE" ]; then
-  actual_model_sha=$(awk -v s="$stamp" '{h=$NF; $NF=""; sub(/ $/, ""); if ($0 == s) print h}' \
-    "$HASH_CACHE" | tail -1)
+if [ -n "${HASH_CACHE:-}" ] && [ -f "$HASH_CACHE" ]; then  # path size mtime_ns inode dev sha (tabs)
+  actual_model_sha=$(awk -F'\t' -v p="$model_real" -v s="$st_size" -v m="$st_mtime" \
+    -v i="$st_inode" -v d="$st_dev" \
+    'NF == 6 && $1 "" == p "" && $2 "" == s "" && $3 "" == m "" && $4 "" == i "" && $5 "" == d "" && length($6) == 64 && $6 ~ /^[0-9a-f]+$/ {h = $6} END {print h}' \
+    "$HASH_CACHE")
   [ -z "$actual_model_sha" ] || hash_source=session_cache
 fi
 h0=$(date +%s)
 if [ -z "$actual_model_sha" ]; then
-  actual_model_sha=$("${check[@]}" --mount type=bind,src="$model_real",dst=/models/model.gguf,readonly \
-    "$CHECK_IMAGE" sha256sum /models/model.gguf | cut -d' ' -f1)
+  hash_limit=$(( size / 5000000 + 600 ))  # >= 5 MB/s; the HDD reads about 12.6 MB/s cold
+  model_line=$(check_run "$hash_limit" \
+    --mount type=bind,src="$model_real",dst=/models/model.gguf,readonly \
+    "$CHECK_IMAGE" sha256sum /models/model.gguf)
+  actual_model_sha=${model_line%% *}
 fi
 echo "model_hash_seconds=$(( $(date +%s) - h0 )) model_sha256_source=$hash_source" >> "$prov"
 if [ "$actual_model_sha" != "$sha" ]; then
   fail 5 model_hash "model sha256 $actual_model_sha != expected $sha"
 fi
 if [ -n "${HASH_CACHE:-}" ] && [ "$hash_source" = hashed ]; then
-  echo "$stamp $actual_model_sha" >> "$HASH_CACHE"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$model_real" "$st_size" "$st_mtime" "$st_inode" "$st_dev" \
+    "$actual_model_sha" >> "$HASH_CACHE"
 fi
 harness_sha=$(sha256sum "$ROOT/tools/tool_loop_benchmark.py" | cut -d' ' -f1)
 runner_sha=$(sha256sum "$0" | cut -d' ' -f1)
 registry_sha=$(sha256sum "$ROOT/tools/models.json" | cut -d' ' -f1)
-git_head=$(git -C "$ROOT" rev-parse HEAD)
-git_dirty=$(git -C "$ROOT" status --porcelain | wc -l)
-harness_git_state=$(git -C "$ROOT" status --porcelain -- tools/tool_loop_benchmark.py | cut -c1-2)
+git_head=$(timeout 30 git -C "$ROOT" rev-parse HEAD)
+git_dirty=$(timeout 30 git -C "$ROOT" status --porcelain | wc -l)
+harness_git_state=$(timeout 30 git -C "$ROOT" status --porcelain -- tools/tool_loop_benchmark.py | cut -c1-2)
 cli_source_commit=unknown
 if [ -f "$CLI_BUILD_INFO" ]; then
   cli_source_commit=$(sed -n 's/^source_commit=\([0-9a-f]*\).*/\1/p' "$CLI_BUILD_INFO")
 fi
 {
   echo "image=$reg_image"
-  docker image inspect "$reg_image" --format 'image_id={{.Id}} version={{index .Config.Labels "org.opencontainers.image.version"}} revision={{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null \
+  dk image inspect "$reg_image" --format 'image_id={{.Id}} version={{index .Config.Labels "org.opencontainers.image.version"}} revision={{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null \
     || echo "image_id=not-present-locally"
   echo "model=$model resolved=$model_real sha256=$actual_model_sha (expected $sha) size=$size"
   echo "formula_cli=mimik-formula-target:/$CLI_IN_VOLUME sha256=$actual_cli_sha (pinned $CLI_SHA) source_commit=$cli_source_commit ($CLI_BUILD_INFO)"
@@ -219,7 +302,7 @@ fi
   echo "git_head=$git_head git_dirty_paths=$git_dirty harness_file_git_status='${harness_git_state:-clean}'"
   echo "check_image=$CHECK_IMAGE harness_image=$HARNESS_IMAGE server_memory=$srv_memory"
   echo "ctx=$ctx thinking=$thinking thinking_capability=$reg_thinking tools=$reg_tools"
-  echo "cases_file_sha256=$cases_file_sha budget_seconds=$budget"
+  echo "cases_file_sha256=$cases_file_sha"
   echo "server_args=${reg_server_args[*]}"
   echo "prompt_cache=on (server: no --no-cache-prompt; harness: --cache-prompt; --cache-ram 0 = no extra host-RAM cache)"
 } >> "$prov"
@@ -227,58 +310,57 @@ if [ "${CHECK_ONLY:-0}" = 1 ]; then
   echo "check_only=1 (stopped before launch)" >> "$prov"; exit 0
 fi
 if [ "$reg_prewarm" = 1 ]; then  # a cold read of a big GGUF on the HDD outlasts the health wait
+  gate prewarm
   p0=$(date +%s)
-  cat -- "$model_real" > /dev/null
+  timeout -k 10 "$(( size / 5000000 + 600 ))" cat -- "$model_real" > /dev/null \
+    || fail 5 model_missing "pre-warm read of $model_real failed or timed out"
   echo "prewarm_seconds=$(( $(date +%s) - p0 ))" >> "$prov"
 fi
 
 # ---- server
 vram() { cat /sys/class/drm/card0/device/mem_info_vram_used 2>/dev/null || echo n/a; }
 swap_used() { free -m | awk '/^Swap:/{print $3}'; }
-echo "vram_used_before=$(vram) swap_used_mib_before=$(swap_used)" >> "$prov"
-docker network inspect "$NET" >/dev/null 2>&1 || docker network create --internal "$NET" >/dev/null
-docker rm -f "$SRV" "$HARNESS" >/dev/null 2>&1 || true
-cleanup() {
-  local cid peak
-  cid=$(docker inspect -f '{{.Id}}' "$SRV" 2>/dev/null || true)
-  if [ -n "$cid" ]; then
-    peak=$(cat "/sys/fs/cgroup/system.slice/docker-$cid.scope/memory.peak" 2>/dev/null \
-      || cat "/sys/fs/cgroup/docker/$cid/memory.peak" 2>/dev/null || echo n/a)
-    {
-      echo "server_oom_killed=$(docker inspect -f '{{.State.OOMKilled}}' "$SRV" 2>/dev/null || echo unknown)"
-      echo "server_memory_peak=$peak vram_used_end=$(vram) swap_used_mib_after=$(swap_used)"
-    } >> "$prov"
-    docker logs "$SRV" > "$out/server.log" 2>&1 || true
-  fi
-  docker stop -t 5 "$HARNESS" >/dev/null 2>&1 || true
-  docker rm -f "$HARNESS" >/dev/null 2>&1 || true
-  docker stop -t 5 "$SRV" >/dev/null 2>&1 || true
-  docker rm -f "$SRV" >/dev/null 2>&1 || true
-  docker network rm "$NET" >/dev/null 2>&1 || true
-  echo "date_end=$(date -Is)" >> "$prov"
+cgroup_file() {  # cgroup_file <name>: a file of the server's cgroup (systemd or cgroupfs layout)
+  local cid
+  cid=$(dk inspect -f '{{.Id}}' "$SRV" 2>/dev/null) || return 1
+  cat "/sys/fs/cgroup/system.slice/docker-$cid.scope/$1" 2>/dev/null \
+    || cat "/sys/fs/cgroup/docker/$cid/$1" 2>/dev/null
 }
-trap cleanup EXIT
-trap 'echo "stopped_by_signal=TERM" >> "$prov"; exit 143' TERM
-trap 'echo "stopped_by_signal=INT" >> "$prov"; exit 130' INT
+gate server
+echo "vram_used_before=$(vram) swap_used_mib_before=$(swap_used)" >> "$prov"
+if internal=$(dk network inspect -f '{{.Internal}}' "$NET" 2>/dev/null); then
+  [ "$internal" = true ] || fail 12 infra_docker "network $NET exists and is not internal"
+else
+  dk network create --internal "$NET" >/dev/null || fail 12 infra_docker "network create failed"
+fi
+started_heavy=1
 t0=$(date +%s)
-docker run -d --pull never --name "$SRV" --network "$NET" --network-alias server \
+dk run -d --init --pull never --name "$SRV" --network "$NET" --network-alias server \
   --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
   --memory "$srv_memory" --memory-swap "$srv_memory" --cpus 6 --pids-limit 512 \
   --device /dev/dri/renderD128 --device /dev/dri/card0 \
   --group-add "$(stat -c %g /dev/dri/renderD128)" --group-add "$(stat -c %g /dev/dri/card0)" \
   --mount type=bind,src="$model_real",dst=/models/model.gguf,readonly \
   "$reg_image" "${reg_server_args[@]}" >/dev/null || fail 4 server_start "server container did not start"
+server_failed() {  # server_failed <class> <message>: a VRAM allocation failure is infra_vram
+  if timeout -k 10 60 docker logs "$SRV" 2>&1 | grep -Eqi "$VRAM_PATTERN"; then
+    fail 4 infra_vram "$2 (VRAM allocation failure in the server log)"
+  fi
+  fail 4 "$1" "$2"
+}
 healthy=0
 while [ $(( $(date +%s) - t0 )) -lt "$health_wait" ]; do
-  if docker exec "$SRV" curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1; then healthy=1; break; fi
-  docker ps -q -f "name=^/$SRV$" | grep -q . || fail 4 server_start "server exited during load"
+  if timeout 10 docker exec "$SRV" curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1; then healthy=1; break; fi
+  state=$(dk inspect -f '{{.State.Running}}' "$SRV" 2>/dev/null || echo gone)
+  [ "$state" = true ] || server_failed server_start "server exited during load"
+  still_allowed "server load"
   sleep 2
 done
-[ $healthy = 1 ] || fail 4 server_health "server not healthy after ${health_wait}s"
+[ $healthy = 1 ] || server_failed server_health "server not healthy after ${health_wait}s"
 echo "server_ready_seconds=$(( $(date +%s) - t0 )) vram_used_loaded=$(vram)" >> "$prov"
-docker exec "$SRV" curl -sf http://127.0.0.1:8080/props > "$out/props.json" || true
+timeout 30 docker exec "$SRV" curl -sf http://127.0.0.1:8080/props > "$out/props.json" || true
 
-# ---- harness
+# ---- harness (detached; polled for the window edge and the queue)
 quiet=()
 [ "${QUIET:-0}" = 1 ] && quiet=(--quiet-progress)
 common=(python3 /tools/tool_loop_benchmark.py --pack /pack --endpoint http://server:8080
@@ -294,45 +376,69 @@ common=(python3 /tools/tool_loop_benchmark.py --pack /pack --endpoint http://ser
   --provenance "n_cpu_moe=$reg_n_cpu_moe" --provenance "runner_sha256=$runner_sha"
   --provenance "registry_key=$key" --provenance "registry_sha256=$registry_sha"
   --provenance "model_sha256_source=$hash_source" --provenance "cases_file_sha256=$cases_file_sha")
-run_harness() {  # run_harness <stdout> <stderr> <args...>: prints the exit code, records OOM
-  local so=$1 se=$2 rc; shift 2
-  set +e
-  docker run --pull never --name "$HARNESS" --network "$NET" \
+timing() {  # timing <phase>: gate, then budget and absolute deadline from this moment
+  gate "$1"
+  phase_budget=${BUDGET_SECONDS:-0} phase_deadline=()
+  if [ -n "$gate_cutoff" ]; then
+    local left=$(( gate_cutoff - WINDOW_MARGIN - gate_now ))
+    if [ "$phase_budget" = 0 ] || [ "$phase_budget" -gt "$left" ]; then phase_budget=$left; fi
+    phase_deadline=(--deadline-epoch "$(( gate_cutoff - WINDOW_MARGIN ))")
+  fi
+  echo "${1}_start_epoch=$gate_now ${1}_budget_seconds=$phase_budget ${1}_cutoff=$gate_cutoff" >> "$prov"
+}
+run_harness() {  # run_harness <phase> <args...>: sets phase_rc; records <phase>_exit/_oom_killed
+  local phase=$1 status limit started; shift
+  dk rm -f "$HARNESS" >/dev/null 2>&1 || true
+  dk run -d --init --pull never --name "$HARNESS" --network "$NET" \
     --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
     --memory 2g --cpus 2 --pids-limit 128 -e PYTHONDONTWRITEBYTECODE=1 \
     --mount type=bind,src="$ROOT/tools",dst=/tools,readonly \
     --mount type=bind,src="$pack",dst=/pack,readonly \
     --mount type=volume,src=mimik-formula-target,dst=/formula,readonly \
     --mount type=bind,src="$out",dst=/out \
-    "$HARNESS_IMAGE" "$@" > "$so" 2> "$se" < /dev/null
-  rc=$?
-  set -e
-  echo "harness_oom_killed=$(docker inspect -f '{{.State.OOMKilled}}' "$HARNESS" 2>/dev/null || echo unknown)" >> "$prov"
-  docker rm -f "$HARNESS" >/dev/null 2>&1 || true
-  echo "$rc"
+    "$HARNESS_IMAGE" "$@" >/dev/null || fail 12 infra_docker "harness container did not start ($phase)"
+  started=$(date +%s)
+  limit=$(( phase_budget > 0 ? phase_budget + max_turns * ${request_timeout%.*} + 600 : 0 ))
+  while :; do
+    status=$(dk inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}' "$HARNESS") \
+      || fail 12 infra_docker "docker inspect of the harness failed ($phase)"
+    case $status in exited*|dead*) break ;; esac
+    still_allowed "$phase"
+    if [ "$limit" -gt 0 ] && [ $(( $(date +%s) - started )) -gt "$limit" ]; then
+      fail 12 infra_docker "harness exceeded its time limit ${limit}s ($phase)"
+    fi
+    sleep "$POLL_SECONDS"
+  done
+  read -r _ phase_rc oom <<< "$status"
+  timeout -k 10 300 docker logs "$HARNESS" > "$out/$phase.stdout" 2> "$out/$phase.stderr" || true
+  dk rm -f "$HARNESS" >/dev/null 2>&1 || true
+  echo "${phase}_exit=$phase_rc ${phase}_oom_killed=$oom ${phase}_wall_seconds=$(( $(date +%s) - started ))" >> "$prov"
 }
 echo "pack=$pack" >> "$prov"
 if [ -n "${PREFLIGHT_CASE:-}" ]; then
+  timing preflight
   pre=(--split dev --cases "$PREFLIGHT_CASE" --seeds 17 --arm "${ARM:-none}-preflight"
-    --output /out/preflight-ledger.jsonl)
+    --budget-seconds "$phase_budget" "${phase_deadline[@]}" --output /out/preflight-ledger.jsonl)
   echo "preflight_cli=${common[*]} ${pre[*]}" >> "$prov"
-  p0=$(date +%s)
-  prc=$(run_harness "$out/preflight.stdout" "$out/preflight.stderr" "${common[@]}" "${pre[@]}")
-  echo "preflight_exit=$prc preflight_wall_seconds=$(( $(date +%s) - p0 ))" >> "$prov"
-  [ "$prc" = 0 ] || fail 6 preflight "1-case preflight ($PREFLIGHT_CASE) failed with exit $prc"
-  # A pipeline check, not a score: one finished episode that is not an error.
+  run_harness preflight "${common[@]}" "${pre[@]}"
+  [ "$phase_rc" = 0 ] || fail 6 preflight "1-case preflight ($PREFLIGHT_CASE) failed with exit $phase_rc"
+  # A pipeline check, not a score: one finished episode that is neither an error nor not_run.
   if ! grep -q '"event": "run_summary"' "$out/preflight-ledger.jsonl" \
-    || grep -q '"outcome": "error"' "$out/preflight-ledger.jsonl"; then
-    fail 6 preflight "1-case preflight ($PREFLIGHT_CASE): ledger incomplete or error episode"
+    || grep -Eq '"outcome": "(error|not_run)"' "$out/preflight-ledger.jsonl"; then
+    fail 6 preflight "1-case preflight ($PREFLIGHT_CASE): ledger incomplete, error or not_run"
   fi
 fi
 ledger_name=ledger-$(date +%Y%m%dT%H%M%S).jsonl
 arm_args=()
 [ -z "${ARM:-}" ] || arm_args=(--arm "$ARM")
+timing main
 cli=("${common[@]}" --split "$hsplit" "${case_args[@]}" --seeds "$seeds" "${arm_args[@]}"
-  --budget-seconds "$budget" --output "/out/$ledger_name")
+  --budget-seconds "$phase_budget" "${phase_deadline[@]}" --output "/out/$ledger_name")
 { echo "harness_cli=${cli[*]}"; echo "ledger_file=$ledger_name"; } >> "$prov"
-h0=$(date +%s)
-rc=$(run_harness "$out/harness.stdout" "$out/harness.stderr" "${cli[@]}")
-echo "harness_exit=$rc harness_wall_seconds=$(( $(date +%s) - h0 ))" >> "$prov"
-[ "$rc" = 0 ] || exit "$rc"
+run_harness main "${cli[@]}"
+# Diagnostics of the loaded server, read before cleanup stops it (the cgroup goes with it).
+{
+  echo "vram_used_end=$(vram) swap_used_mib_after=$(swap_used)"
+  echo "server_memory_peak=$(cgroup_file memory.peak || echo n/a) server_swap_peak=$(cgroup_file memory.swap.peak || echo n/a)"
+} >> "$prov"
+[ "$phase_rc" = 0 ] || exit "$phase_rc"
