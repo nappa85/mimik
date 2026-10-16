@@ -48,13 +48,14 @@ class Watchdog:
         lock_held,
         clock,
         log_path,
-        interval=30,
+        interval=10,
         grace=120,
         idle_exit=3600,
         heartbeat=None,
         reserve=RESERVE_SECONDS,
         thermal_reader=None,
         crit_margin=ops.THERMAL_DEFAULTS["crit_margin_c"],
+        emergency_junction=ops.EMERGENCY_JUNCTION_C,
     ):
         if not 0 < interval <= MAX_INTERVAL:
             raise ValueError(f"interval must be in (0, {MAX_INTERVAL}] seconds")
@@ -65,6 +66,7 @@ class Watchdog:
         self.reserve = reserve
         self.thermal_reader = thermal_reader or (lambda: ops.read_sensors(ops.HWMON))
         self.crit_margin = crit_margin
+        self.emergency_junction = emergency_junction
         self.free_since = None
         self.idle_since = None
 
@@ -108,7 +110,11 @@ class Watchdog:
         owned = self.docker.owned()  # None: docker could not list; assume there may be some
         held = self.held()
         try:
-            breaches = ops.crit_breaches(self.thermal_reader(), self.crit_margin)
+            sensors = self.thermal_reader()
+            breaches = ops.crit_breaches(sensors, self.crit_margin)
+            junction = ops.gpu_junction(sensors)
+            if junction is not None and junction >= self.emergency_junction:
+                breaches.append(f"GPU junction {junction:.1f} °C >= {self.emergency_junction:.0f}")
         except Exception as error:  # noqa: BLE001 (logged; the queue owns thermal_unknown)
             self.log("thermal_read_error", error=f"{type(error).__name__}: {error}")
             breaches = []
@@ -163,7 +169,8 @@ def heartbeat_path(main_dir: Path) -> Path:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--interval", type=float, default=30)
+    parser.add_argument("--interval", type=float, default=10)  # thermal limits every <= 10 s
+    parser.add_argument("--emergency-junction", type=float, default=ops.EMERGENCY_JUNCTION_C)
     parser.add_argument("--grace", type=float, default=120)
     parser.add_argument("--idle-exit", type=float, default=3600)
     parser.add_argument("--log", type=Path)
@@ -195,6 +202,7 @@ def main(argv=None) -> int:
         args.grace,
         args.idle_exit,
         heartbeat=heartbeat_path(main_dir),
+        emergency_junction=args.emergency_junction,
     )
     return dog.run(once=args.once)
 

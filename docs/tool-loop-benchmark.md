@@ -1028,6 +1028,58 @@ reboot. Their logs were saved beside that attempt as `postmortem-srv.log` and
   two-strike stop (the test then never ends: killed by its timeout); no cooldown after a stop;
   no pre-launch check; no watchdog hard limit.
 
+#### Stricter guard (2026-10-16, after the cause was confirmed)
+
+The kernel logged `amdgpu: GPU over temperature range (SW CTF)` three times at 18:50–18:51,
+then the system shut down. A supervised fan test (main session) measured: on **auto fan** the
+firmware held PWM at about 22 % (1,200 RPM) while the junction climbed to 86 °C within 60 s
+at about 105 W with the edge only at 61 °C; with **manual pwm 255 plus a room fan** the
+junction plateaued at 76–79 °C for 5 min at 110 W (3,100–3,400 RPM). The power cap cannot be
+lowered meaningfully (`power1_cap_min` 134 W). The guard was tightened accordingly; these
+rules **replace** the stop rules above (all are queue-file `thermal` parameters, recorded in
+the manifest's `thermal.limits`):
+
+| Parameter | Default | Rule |
+|---|---|---|
+| `junction_stop_c` | 90 °C | GPU junction (edge if no junction sensor) at or above: immediate stop |
+| `edge_c`, `edge_sustain_seconds` | 80 °C, 20 s | GPU edge at or above, continuously |
+| `crit_margin_c` | 5 °C | any sensor at or above its own crit minus this: immediate |
+| `fan_pwm_min` | 230 | precondition and during the attempt: `pwm1_enable` = 1 (manual) and `pwm1` ≥ this |
+| `fan_rpm_min`, `fan_rpm_check_above_c` | 2000 RPM, 60 °C | `fan1_input` below this while the junction is above that |
+| `fan_fault_seconds` | 10 s | a fan problem lasting this long stops with `fan_fault` |
+| `sample_seconds` | 5 s | sampling during attempts (was 30 s) |
+| `cooldown_edge_c`, `cooldown_hold_seconds`, `cooldown_cap_seconds`, `max_thermal_stops` | 60 °C, 300 s, 2700 s, 2 | unchanged |
+
+- **Fan precondition:** the queue's prechecks and the runner (before the server load) read
+  `pwm1_enable`, `pwm1` and `fan1_input` of the chip named `amdgpu` and refuse unless the fan
+  is manual at ≥ 230: the arm is refused as `fan_not_manual` (runner exit 14,
+  `failure=fan_not_manual`), with the command to set it, for example
+  `echo 1 | sudo tee /sys/class/hwmon/hwmon<N>/pwm1_enable && echo 255 | sudo tee
+  /sys/class/hwmon/hwmon<N>/pwm1` (the path of the `amdgpu` chip is filled in). The manual
+  setting resets on reboot, so this catches a forgotten setup after a restart. The runner's
+  check uses the default `fan_pwm_min`; the queue's uses the queue file's value.
+- **During an attempt:** `pwm1_enable` leaving manual, `pwm1` < 230, an unreadable fan, or
+  `fan1_input` < 2000 RPM while the junction is above 60 °C, lasting 10 s, stops the attempt
+  as `fan_fault` (attempt `incomplete_thermal`). Because the fan will not fix itself, a fan
+  fault stops the queue for the session; it counts as a thermal stop.
+- **Watchdog:** checks every `--interval` (now 10 s by default, at most 60) the crit − 5 °C
+  hard limit and an emergency GPU junction ≥ 95 °C (`--emergency-junction`), and removes the
+  owned containers when either is exceeded. The queue starts it with the 10 s interval.
+- The fan readings (`amdgpu:fan1_rpm`, `amdgpu:pwm1`) appear with the temperatures in each
+  attempt's `temperatures`.
+- Tests: `test_thermal.py` now 20 (junction 90 immediate, edge 80 for 20 s, a short edge spike,
+  crit, missing sensor, edge for an absent junction, pwm reverting to auto mid-run, a short fan
+  glitch, low RPM only when warm, unreadable fan, stats, defaults, fan read by name, the
+  precondition and the `fancheck` CLI); queue thermal tests now 10 (fan precondition refusal,
+  pwm reverting to auto mid-run, 5 s sampling and the manifest limits added); watchdog
+  emergency junction and 10 s interval; runner `fan_not_manual` refusal before the server
+  load. Mutation checks (each killed): no immediate junction stop; no edge sustain; no fan
+  fault; fan glitch fatal; manual mode not required; no fan precheck; fan not sampled; no
+  emergency junction.
+- **Not run:** any of this under a real GPU load. The screens launched by the main session at
+  20:08 from `run-4e16649e9c10` use the previous guard plus the main session's interim
+  interlock script; this stricter guard applies to launches from a later commit.
+
 ## Limitations
 
 - A model that writes a finishing call as plain text gets `no_outcome`. This is deliberate,

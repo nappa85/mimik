@@ -301,6 +301,15 @@ def cool_gpu(edge=45.0, junction=50.0):
     }
 
 
+def manual_fan(enable=1, pwm=255, rpm=3200):
+    return {
+        "pwm1_enable": enable,
+        "pwm1": pwm,
+        "fan1_input": rpm,
+        "path": "/sys/class/hwmon/hwmonX",
+    }
+
+
 def queue_doc(arms, **extra):
     doc = {
         "schema": 1,
@@ -345,6 +354,7 @@ class Harness(unittest.TestCase):
         kw.setdefault("vram_reader", lambda: None)
         self.watchdog = kw.setdefault("watchdog", FakeWatchdog())
         kw.setdefault("thermal_reader", lambda: cool_gpu())
+        kw.setdefault("fan_reader", lambda: manual_fan())
         return rq.Queue(
             rq.load_queue(path, REGISTRY),
             REGISTRY,
@@ -685,7 +695,7 @@ class ReviewFixGateTests(Harness):
         manifest = q.run()
         self.assertEqual(manifest["arms"][0]["attempts"][0]["infra"], "infra_vram")
         self.assertEqual(manifest["arms"][0]["state"], "complete")
-        self.assertEqual(self.clock.sleeps.count(5), 2)  # waited for the release
+        self.assertEqual(self.clock.sleeps.count(3), 2)  # waited for the release
         self.assertIn(47, self.clock.sleeps)  # then cooled down
 
 
@@ -1290,7 +1300,8 @@ class ThermalQueueTests(Harness):
         self.assertIn("amdgpu:edge", manifest["thermal"]["sensors_found"])
 
     def test_short_spike_does_not_stop(self):
-        schedule = [(0, cool_gpu()), (60, cool_gpu(70, 97)), (90, cool_gpu())]
+        # Edge 85 °C for 10 s (< the 20 s sustain), junction under 90.
+        schedule = [(0, cool_gpu()), (60, cool_gpu(85, 88)), (70, cool_gpu())]
         q = self.make(queue_doc([arm("a")]), self.START, thermal_reader=self.reader(schedule))
         manifest = q.run()
         self.assertEqual(manifest["arms"][0]["state"], "complete")
@@ -1345,11 +1356,70 @@ class ThermalQueueTests(Harness):
         self.assertIn("did not cool down", manifest["stop_reason"])
         self.assertIn("thermal_cooldown_cap", (q.dir / "queue.log").read_text())
 
+    def test_fan_not_manual_refuses_the_arm(self):
+        q = self.make(
+            queue_doc([arm("a"), arm("b")]),
+            self.START,
+            fan_reader=lambda: manual_fan(enable=2, pwm=56),
+        )
+        manifest = q.run()
+        self.assertEqual(self.launcher.launches, [])
+        self.assertEqual(self.launcher.checks, [])
+        reason = manifest["arms"][0]["reason"]
+        self.assertTrue(reason.startswith("fan_not_manual"), reason)
+        self.assertIn("sudo tee /sys/class/hwmon/hwmonX/pwm1_enable", reason)
+
+    def test_pwm_reverting_to_auto_mid_run_stops_with_fan_fault(self):
+        state = {"auto": False}
+
+        def fan():
+            return manual_fan(enable=2, pwm=56) if state["auto"] else manual_fan()
+
+        def flip(clock):
+            if q.handle is not None and self.launcher.launches and clock.now >= self.START + 60:
+                state["auto"] = True
+
+        doc = queue_doc([arm("a", max_arm_seconds=7200), arm("b")])
+        q = self.make(doc, self.START, plan={"a": [{"seconds": 1200}]}, fan_reader=fan)
+        self.clock.on_sleep = flip
+        manifest = q.run()
+        first = manifest["arms"][0]["attempts"][0]
+        self.assertEqual((first["status"], first["failure"]), ("incomplete_thermal", "fan_fault"))
+        self.assertIn("not manual", first["reason"])
+        ended = dt.datetime.fromisoformat(first["ended"])
+        self.assertLessEqual(ended, dt.datetime(2026, 10, SAT, 10, 1, 30))  # within ~10 s
+        self.assertEqual(manifest["state"], "stopped")
+        self.assertIn("fan fault", manifest["stop_reason"])
+        self.assertEqual(manifest["arms"][1]["state"], "pending")
+
+    def test_sampling_every_5_s_and_limits_in_the_manifest(self):
+        reads = []
+
+        def read():
+            reads.append(self.clock.now)
+            return cool_gpu()
+
+        q = self.make(
+            queue_doc([arm("a")]), self.START, thermal_reader=read, plan={"a": [{"seconds": 60}]}
+        )
+        manifest = q.run()
+        during = [t for t in reads if t > self.START]
+        gaps = {round(b - a) for a, b in zip(during, during[1:], strict=False)}
+        self.assertEqual(gaps, {5})
+        limits = manifest["thermal"]["limits"]
+        self.assertEqual(
+            (limits["junction_stop_c"], limits["edge_c"], limits["sample_seconds"]),
+            (90.0, 80.0, 5.0),
+        )
+        self.assertIn("amdgpu:fan1_rpm", manifest["arms"][0]["attempts"][0]["temperatures"])
+
     def test_thermal_limits_in_the_queue_file(self):
         path = self.root / "t.json"
-        path.write_text(json.dumps(queue_doc([arm("a")], thermal={"edge_c": 80})))
+        path.write_text(
+            json.dumps(queue_doc([arm("a")], thermal={"edge_c": 80, "junction_stop_c": 90}))
+        )
         q = rq.load_queue(path, REGISTRY)
-        self.assertEqual((q["thermal"]["edge_c"], q["thermal"]["junction_c"]), (80, 95.0))
+        self.assertEqual((q["thermal"]["edge_c"], q["thermal"]["junction_stop_c"]), (80, 90.0))
         path.write_text(json.dumps(queue_doc([arm("a")], thermal={"fan": 1})))
         with self.assertRaises(rq.QueueError):
             rq.load_queue(path, REGISTRY)
@@ -1419,6 +1489,7 @@ class ProcessLauncherTests(unittest.TestCase):
                 poll_seconds=0.05,
                 watchdog=FakeWatchdog(),
                 thermal_reader=lambda: cool_gpu(),
+                fan_reader=lambda: manual_fan(),
                 console=console.append,
                 env={"MIMIK_MODEL_ROOT": str(models), "PATH": os.environ.get("PATH", "")},
             )

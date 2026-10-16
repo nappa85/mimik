@@ -112,27 +112,42 @@ class SensorTests(unittest.TestCase):
             self.assertEqual(ops.hwmon_root({"MIMIK_TEST_HWMON": str(root)}), ops.HWMON)
 
 
+def fan(enable=1, pwm=255, rpm=3200):
+    return {
+        "pwm1_enable": enable,
+        "pwm1": pwm,
+        "fan1_input": rpm,
+        "path": "/sys/class/hwmon/hwmonX",
+    }
+
+
 class GuardTests(unittest.TestCase):
+    """Rules tightened after the 2026-10-16 SW CTF shutdown."""
+
     def run_samples(self, samples, guard=None):
         guard = guard or ops.ThermalGuard()
-        for t, sensors in samples:
-            verdict, reason = guard.check(sensors, t)
+        for sample in samples:
+            t, sensors = sample[0], sample[1]
+            verdict, reason = guard.check(sensors, t, sample[2] if len(sample) > 2 else None)
             if verdict:
                 return verdict, reason, t
         return None, None, None
 
-    def test_sustained_over_the_limit_stops_at_60_s(self):
-        verdict, reason, t = self.run_samples(
-            [(0, gpu(70, 96)), (30, gpu(70, 96)), (60, gpu(70, 97)), (90, gpu(70, 97))]
-        )
-        self.assertEqual((verdict, t), ("thermal", 60))
-        self.assertIn("junction 97.0", reason)
-        verdict, _, t = self.run_samples([(0, gpu(89, 90)), (30, gpu(89, 90)), (60, gpu(89, 90))])
-        self.assertEqual((verdict, t), ("thermal", 60))
+    def test_junction_90_stops_immediately(self):
+        self.assertEqual(self.run_samples([(0, gpu(60, 89.9))])[0], None)
+        verdict, reason, t = self.run_samples([(0, gpu(60, 70)), (5, gpu(60, 90))])
+        self.assertEqual((verdict, t), ("thermal", 5))
+        self.assertIn("junction 90.0", reason)
 
-    def test_short_spike_does_not_stop(self):
-        samples = [(0, gpu(89, 90)), (30, gpu(89, 96)), (60, gpu(70, 80)), (90, gpu(89, 90))]
-        samples += [(120, gpu(70, 80))]
+    def test_edge_80_sustained_for_20_s(self):
+        samples = [(t, gpu(81, 85)) for t in (0, 5, 10, 15, 20, 25)]
+        verdict, reason, t = self.run_samples(samples)
+        self.assertEqual((verdict, t), ("thermal", 20))
+        self.assertIn("edge 81.0", reason)
+
+    def test_short_edge_spike_does_not_stop(self):
+        samples = [(t, gpu(81, 85)) for t in (0, 5, 10, 15)]
+        samples += [(20, gpu(70, 75))] + [(t, gpu(81, 85)) for t in (25, 30, 35)]
         self.assertEqual(self.run_samples(samples)[0], None)
 
     def test_crit_proximity_stops_at_once(self):
@@ -147,18 +162,99 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(self.run_samples([(0, gpu(None, 50))])[0], "thermal_unknown")
         guard = ops.ThermalGuard()
         self.assertEqual(guard.check(gpu(50, 50), 0)[0], None)
-        self.assertEqual(guard.check(gpu(50), 30)[0], "thermal_unknown")  # junction vanished
+        self.assertEqual(guard.check(gpu(50), 5)[0], "thermal_unknown")  # junction vanished
 
     def test_edge_stands_in_for_an_absent_junction(self):
-        guard = ops.ThermalGuard({"edge_c": 200})  # only the junction rule can fire
-        samples = [(t, gpu(96)) for t in (0, 30, 60)]
-        self.assertEqual(self.run_samples(samples, guard)[0], "thermal")
+        self.assertEqual(self.run_samples([(0, gpu(91))])[0], "thermal")
+
+    def test_pwm_reverting_to_auto_mid_run_is_a_fan_fault(self):
+        samples = [(0, gpu(50, 60), fan()), (5, gpu(50, 60), fan(enable=2, pwm=56))]
+        samples += [(10, gpu(50, 60), fan(enable=2, pwm=56)), (15, gpu(50, 60), fan(enable=2))]
+        verdict, reason, t = self.run_samples(samples)
+        self.assertEqual((verdict, t), ("fan_fault", 15))
+        self.assertIn("not manual", reason)
+        self.assertIn("pwm1_enable", reason)
+
+    def test_short_fan_glitch_does_not_stop(self):
+        samples = [(0, gpu(50, 60), fan(pwm=200)), (5, gpu(50, 60), fan(pwm=200))]
+        samples += [(10, gpu(50, 60), fan()), (15, gpu(50, 60), fan(pwm=200))]
+        self.assertEqual(self.run_samples(samples)[0], None)
+
+    def test_low_rpm_only_counts_while_the_junction_is_warm(self):
+        cold = [(t, gpu(45, 55), fan(rpm=1200)) for t in (0, 5, 10, 15)]
+        self.assertEqual(self.run_samples(cold)[0], None)
+        warm = [(t, gpu(55, 70), fan(rpm=1200)) for t in (0, 5, 10, 15)]
+        self.assertEqual(self.run_samples(warm)[:1], ("fan_fault",))
+
+    def test_unreadable_fan_is_a_fault(self):
+        unread = {"pwm1_enable": None, "pwm1": None, "fan1_input": None, "path": None}
+        samples = [(t, gpu(50, 60), unread) for t in (0, 5, 10)]
+        self.assertEqual(self.run_samples(samples)[0], "fan_fault")
 
     def test_stats_min_max_last(self):
         guard = ops.ThermalGuard()
-        for t, edge in ((0, 50), (30, 70), (60, 60)):
-            guard.check(gpu(edge, edge), t)
+        for t, edge in ((0, 50), (5, 70), (10, 60)):
+            guard.check(gpu(edge, edge), t, fan(rpm=3000 + t))
         self.assertEqual(guard.stats[ops.GPU_EDGE], {"min": 50, "max": 70, "last": 60})
+        self.assertEqual(guard.stats["amdgpu:fan1_rpm"]["max"], 3010)
+
+    def test_defaults(self):
+        d = ops.THERMAL_DEFAULTS
+        self.assertEqual(
+            (d["junction_stop_c"], d["edge_c"], d["edge_sustain_seconds"]), (90, 80, 20)
+        )
+        self.assertEqual(
+            (d["fan_pwm_min"], d["fan_rpm_min"], d["fan_fault_seconds"]), (230, 2000, 10)
+        )
+        self.assertEqual(d["sample_seconds"], 5)
+
+
+class FanTests(unittest.TestCase):
+    def tree(self, tmp, enable=1, pwm=255, rpm=3200):
+        root = make_hwmon(Path(tmp), [(4, "amdgpu", {1: ("edge", 44, 100)}), (1, "nvme", {})])
+        chip = root / "hwmon4"
+        for key, value in (("pwm1_enable", enable), ("pwm1", pwm), ("fan1_input", rpm)):
+            if value is not None:
+                (chip / key).write_text(f"{value}\n")
+        return root
+
+    def test_read_fan_by_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.tree(tmp)
+            self.assertEqual(
+                ops.read_fan(root),
+                {"pwm1_enable": 1, "pwm1": 255, "fan1_input": 3200, "path": str(root / "hwmon4")},
+            )
+
+    def test_precondition(self):
+        self.assertIsNone(ops.fan_precondition(fan()))
+        for bad in (fan(enable=2), fan(pwm=229), fan(enable=None, pwm=None)):
+            with self.subTest(bad=bad):
+                message = ops.fan_precondition(bad)
+                self.assertIn("sudo tee", message)
+                self.assertIn("pwm1_enable", message)
+        self.assertIsNone(ops.fan_precondition(fan(pwm=200), {"fan_pwm_min": 150}))
+
+    def test_fancheck_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for enable, code in ((1, 0), (2, 1)):
+                root = self.tree(Path(tmp) / str(enable), enable=enable)
+                env = {
+                    "PATH": os.environ.get("PATH", ""),
+                    "MIMIK_TEST_MODE": "1",
+                    "MIMIK_TEST_HWMON": str(root),
+                }
+                proc = subprocess.run(
+                    [sys.executable, str(TOOLS / "toolloop_ops.py"), "fancheck"],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(proc.returncode, code, proc.stderr)
+                self.assertIn(f"fan_pwm1_enable={enable}", proc.stdout)
+                if code:
+                    self.assertIn(str(root / "hwmon4") + "/pwm1_enable", proc.stderr)
 
 
 class CooldownTests(unittest.TestCase):

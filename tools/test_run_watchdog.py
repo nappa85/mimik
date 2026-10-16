@@ -372,10 +372,27 @@ class ThermalWatchdogTests(WatchdogBase):
         docker = FakeDocker([ops.SERVER])
         self.clock = FakeClock(at(2026, 10, 17, 12, 0))
         dog = wd.Watchdog(
-            docker, lambda: True, self.clock, self.log, thermal_reader=lambda: self.hot(104.9)
+            docker, lambda: True, self.clock, self.log, thermal_reader=lambda: self.hot(94.9)
         )
         self.assertEqual(dog.tick(), "ok")
         self.assertEqual(docker.cleanups, 0)
+
+    def test_emergency_junction_95(self):
+        docker = FakeDocker([ops.SERVER])
+        self.clock = FakeClock(at(2026, 10, 17, 12, 0))
+        dog = wd.Watchdog(
+            docker, lambda: True, self.clock, self.log, thermal_reader=lambda: self.hot(95.0)
+        )
+        self.assertEqual(dog.tick(), "removed_thermal")
+        row = json.loads(self.log.read_text().splitlines()[-1])
+        self.assertIn("junction 95.0", row["breaches"][-1])
+
+    def test_watchdog_checks_every_10_s_by_default(self):
+        import inspect
+
+        self.assertEqual(inspect.signature(wd.Watchdog).parameters["interval"].default, 10)
+        source = Path(wd.__file__).read_text()
+        self.assertIn('parser.add_argument("--interval", type=float, default=10)', source)
 
     def test_sensor_read_error_is_logged_not_fatal(self):
         def broken():

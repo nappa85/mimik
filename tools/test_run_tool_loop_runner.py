@@ -281,6 +281,19 @@ class RunnerTests(unittest.TestCase):
         self.real, self.sha = real, hashlib.sha256(b"fake gguf").hexdigest()
         self.formula_sha = hashlib.sha256(Path(FORMULA).read_bytes()).hexdigest()
         self.clock = self.tmp / "clock"
+        # A fake hwmon tree: GPU cool, fan manual at 255 (the runner's fan precondition).
+        self.hwmon = self.tmp / "hwmon"
+        chip = self.hwmon / "hwmon3"
+        chip.mkdir(parents=True)
+        for name, value in (
+            ("name", "amdgpu"),
+            ("temp1_input", "44000"),
+            ("temp1_label", "edge"),
+            ("pwm1_enable", "1"),
+            ("pwm1", "255"),
+            ("fan1_input", "3200"),
+        ):
+            (chip / name).write_text(value + "\n")
 
     def runner_env(self, **env):
         return self._env(env)
@@ -310,6 +323,8 @@ class RunnerTests(unittest.TestCase):
             "MODEL_SHA256": self.sha,
             "SCHEDULE_OVERRIDE": "user-approved",
             "RUNNER_POLL_SECONDS": "0",
+            "MIMIK_TEST_MODE": "1",
+            "MIMIK_TEST_HWMON": str(self.hwmon),
             "OUT_DIR": str(self.tmp / f"out-{len(list(self.tmp.iterdir()))}"),
         }
         base.update({k: v for k, v in env.items() if v is not None})
@@ -786,17 +801,24 @@ class RunnerTests(unittest.TestCase):
 
     # ---- thermal guard
     def test_temperatures_before_and_peak_in_provenance(self):
-        hw = self.tmp / "hwmon" / "hwmon7"
-        hw.mkdir(parents=True)
-        (hw / "name").write_text("amdgpu\n")
-        (hw / "temp1_input").write_text("44000\n")
-        (hw / "temp1_label").write_text("edge\n")
-        env = {"MIMIK_TEST_MODE": "1", "MIMIK_TEST_HWMON": str(self.tmp / "hwmon")}
-        proc, out = self.run_runner("qwen3-4b-2507", "smoke", "17", **env)
+        proc, out = self.run_runner("qwen3-4b-2507", "smoke", "17")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         prov = self.prov(out)
         self.assertEqual(prov["temp_amdgpu_edge_before"], "44.0")
         self.assertEqual(prov["temp_amdgpu_edge_peak"], "44.0")
+
+    def test_fan_not_manual_refuses_before_the_server_load(self):
+        for key, value in (("pwm1_enable", "2"), ("pwm1", "200")):
+            with self.subTest(key=key):
+                (self.hwmon / "hwmon3" / "pwm1_enable").write_text("1\n")
+                (self.hwmon / "hwmon3" / "pwm1").write_text("255\n")
+                (self.hwmon / "hwmon3" / key).write_text(value + "\n")
+                proc, out = self.run_runner("qwen3-4b-2507", "smoke", "17")
+                self.assertEqual(proc.returncode, 14, proc.stderr)
+                text = (out / "provenance.txt").read_text()
+                self.assertIn("failure=fan_not_manual", text)
+                self.assertIn("sudo tee", text)
+                self.assertFalse((self.log / "server.json").exists())
 
     def test_shellcheck_clean_if_available(self):
         if not shutil.which("shellcheck"):

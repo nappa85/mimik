@@ -449,7 +449,7 @@ class WatchdogSupervisor:
         log_path: Path,
         fresh_seconds=None,
         ready_timeout=60,
-        interval=30,
+        interval=10,
     ):
         # Fresh means newer than one interval plus the watchdog's worst-case tick.
         if fresh_seconds is None:
@@ -538,6 +538,7 @@ class Queue:
         extra_env=None,
         watchdog=None,
         thermal_reader=None,
+        fan_reader=None,
     ):
         self.q = queue
         self.registry = registry
@@ -559,6 +560,7 @@ class Queue:
         self.watchdog = watchdog or NoWatchdog()
         self.watchdog_lost = self.cleanup_lost = False
         self.thermal_reader = thermal_reader or (lambda: ops.read_sensors(ops.HWMON))
+        self.fan_reader = fan_reader or (lambda: ops.read_fan(ops.HWMON))
         self.thermal_stops = 0
         self.sensors_found = None
         self.vram_reader = vram_reader or read_vram
@@ -759,6 +761,10 @@ class Queue:
                 return "stop", f"disk low: {where} has {free / 1e9:.1f} GB free"
         if not self.lock_probe():
             return "stop", "lock held: another tool-loop run is active"
+        problem = ops.fan_precondition(self.read_fan(), self.q["thermal"])
+        if problem:
+            self.log("fan_not_manual", detail=problem)
+            return "refuse", f"fan_not_manual: {problem}"
         return "ok", None
 
     # -- schedule
@@ -828,6 +834,13 @@ class Queue:
             self.sensors_found = sorted(sensors)
             self.log("thermal_sensors", sensors=self.sensors_found)
         return sensors
+
+    def read_fan(self) -> dict:
+        try:
+            return self.fan_reader()
+        except Exception as error:  # noqa: BLE001 (an unreadable fan counts as a fault)
+            self.log("fan_read_error", error=f"{type(error).__name__}: {error}")
+            return {"pwm1_enable": None, "pwm1": None, "fan1_input": None, "path": None}
 
     def thermal_ready(self) -> bool:
         """Before heavy work: the GPU must be readable and under its limits, else cool down."""
@@ -908,7 +921,7 @@ class Queue:
                 hit = [name for name, at in limits.items() if now >= at]
                 if not hit and now >= next_sample:
                     next_sample = now + self.q["thermal"]["sample_seconds"]
-                    verdict, reason = guard.check(self.read_thermal(), now)
+                    verdict, reason = guard.check(self.read_thermal(), now, self.read_fan())
                     if verdict:
                         hit = [verdict]
                         record["thermal_reason"] = reason
@@ -929,7 +942,10 @@ class Queue:
         record["runner_exit"] = rc
         record["ended"] = local(self.clock.time()).isoformat(timespec="seconds")
         result = self.classify(arm, attempt_dir, env, rc, stopped_by, record["queue_cleanup"])
-        if stopped_by in ("thermal", "thermal_unknown") and result["status"] != "failed":
+        if (
+            stopped_by in ("thermal", "thermal_unknown", "fan_fault")
+            and result["status"] != "failed"
+        ):
             result.update(
                 status="incomplete_thermal",
                 failure=stopped_by,
@@ -988,6 +1004,7 @@ class Queue:
                 "watchdog": "failed",
                 "thermal": "incomplete_thermal",
                 "thermal_unknown": "incomplete_thermal",
+                "fan_fault": "incomplete_thermal",
             }[stopped_by]
             return dict(out, status=status, infra=None, reason=f"stopped: {stopped_by}")
         if not prov:
@@ -1116,7 +1133,7 @@ class Queue:
             if self.clock.time() - start >= self.vram_wait_seconds:
                 self.log("vram_not_released", used=used, baseline=baseline)
                 break
-            self.clock.sleep(5)
+            self.clock.sleep(3)
         self.clock.sleep(self.cooldown_seconds)
 
     # -- main loop
@@ -1323,6 +1340,11 @@ class Queue:
                 self.transition(arm, "failed", reason=record.get("reason"))
                 self.stop("cleanup unresolved: heavy work may still be running")
                 return "failed"
+            if status == "incomplete_thermal" and record.get("failure") == "fan_fault":
+                self.thermal_stops += 1
+                self.transition(arm, "incomplete_thermal", reason=record.get("reason"))
+                self.stop(f"fan fault: {record.get('reason')}")  # a person must fix the fan
+                return "incomplete_thermal"
             if status == "incomplete_thermal":
                 self.thermal_stops += 1
                 self.transition(arm, "incomplete_thermal", reason=record.get("reason"))

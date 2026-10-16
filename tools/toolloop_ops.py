@@ -332,16 +332,62 @@ def sensor_slug(key: str) -> str:
 
 
 THERMAL_DEFAULTS = {
-    "junction_c": 95.0,  # GPU junction (or edge if no junction sensor)
-    "edge_c": 88.0,  # GPU edge
-    "sustain_seconds": 60.0,  # continuously over a limit
+    # Tightened after the 2026-10-16 SW CTF shutdown (junction 86 °C in 60 s on auto fan).
+    "junction_stop_c": 90.0,  # GPU junction (edge if no junction sensor): immediate stop
+    "edge_c": 80.0,  # GPU edge, sustained for edge_sustain_seconds
+    "edge_sustain_seconds": 20.0,
     "crit_margin_c": 5.0,  # any sensor at or above its own crit minus this: immediate
+    "fan_pwm_min": 230.0,  # pwm1 (0-255) with pwm1_enable == 1 (manual)
+    "fan_rpm_min": 2000.0,  # fan1_input while the junction is above fan_rpm_check_above_c
+    "fan_rpm_check_above_c": 60.0,
+    "fan_fault_seconds": 10.0,
     "cooldown_edge_c": 60.0,
     "cooldown_hold_seconds": 300.0,
     "cooldown_cap_seconds": 2700.0,
     "max_thermal_stops": 2,
-    "sample_seconds": 30.0,
+    "sample_seconds": 5.0,
 }
+EMERGENCY_JUNCTION_C = 95.0  # the watchdog's own limit, beside crit - 5
+
+
+def read_fan(root: Path = HWMON) -> dict:
+    """pwm1_enable, pwm1 and fan1_input of the amdgpu chip, found by name (None if unreadable)."""
+    fan = {"pwm1_enable": None, "pwm1": None, "fan1_input": None, "path": None}
+    try:
+        chips = sorted(Path(root).iterdir())
+    except OSError:
+        return fan
+    for chip in chips:
+        try:
+            if (chip / "name").read_text().strip() != "amdgpu":
+                continue
+        except OSError:
+            continue
+        fan["path"] = str(chip)
+        for key in ("pwm1_enable", "pwm1", "fan1_input"):
+            try:
+                fan[key] = int((chip / key).read_text().strip())
+            except (OSError, ValueError):
+                fan[key] = None
+        break
+    return fan
+
+
+def fan_command(fan: dict) -> str:
+    path = fan.get("path") or "/sys/class/hwmon/hwmon<N>  (the chip whose name is amdgpu)"
+    return f"echo 1 | sudo tee {path}/pwm1_enable && echo 255 | sudo tee {path}/pwm1"
+
+
+def fan_precondition(fan: dict, limits=None):
+    """None if the GPU fan is in manual mode at >= fan_pwm_min, else the refusal message."""
+    lim = dict(THERMAL_DEFAULTS, **(limits or {}))
+    if fan.get("pwm1_enable") == 1 and (fan.get("pwm1") or 0) >= lim["fan_pwm_min"]:
+        return None
+    return (
+        f"GPU fan not in manual mode at pwm >= {lim['fan_pwm_min']:.0f} "
+        f"(pwm1_enable={fan.get('pwm1_enable')}, pwm1={fan.get('pwm1')}); the manual setting "
+        f"resets on reboot. Set it with: {fan_command(fan)}"
+    )
 
 
 def crit_breaches(sensors: dict, margin: float) -> list:
@@ -353,31 +399,45 @@ def crit_breaches(sensors: dict, margin: float) -> list:
     ]
 
 
-class ThermalGuard:
-    """Decides, per sample, whether a running attempt must stop for temperature.
+def gpu_junction(sensors: dict):
+    """The junction reading, or the edge where there is no junction sensor."""
+    if GPU_JUNCTION in sensors:
+        return sensors[GPU_JUNCTION]["value"]
+    return sensors.get(GPU_EDGE, {}).get("value")
 
-    check() returns (None, None), ("thermal", reason) or ("thermal_unknown", reason). The
-    GPU edge sensor is required: if it is missing or unreadable, the result is
-    thermal_unknown, never "cool". Per-sensor min/max/last are kept in stats.
+
+class ThermalGuard:
+    """Decides, per sample, whether a running attempt must stop for temperature or fan.
+
+    check() returns (None, None), ("thermal", reason), ("thermal_unknown", reason) or
+    ("fan_fault", reason). The GPU edge sensor is required: missing or unreadable is
+    thermal_unknown, never "cool"; an unreadable fan counts as a fault. Per-sensor
+    min/max/last are kept in stats (the fan under "amdgpu:fan1_rpm" and "amdgpu:pwm1").
     """
 
     def __init__(self, limits=None):
         self.limits = dict(THERMAL_DEFAULTS, **(limits or {}))
-        self.hot_since = None
+        self.edge_hot_since = None
+        self.fan_bad_since = None
         self.stats = {}
         self.has_junction = None
 
-    def record(self, sensors: dict):
-        for key, s in sensors.items():
-            value = s["value"]
-            entry = self.stats.setdefault(key, {"min": None, "max": None, "last": None})
-            entry["last"] = value
-            if value is not None:
-                entry["min"] = value if entry["min"] is None else min(entry["min"], value)
-                entry["max"] = value if entry["max"] is None else max(entry["max"], value)
+    def _note(self, key, value):
+        entry = self.stats.setdefault(key, {"min": None, "max": None, "last": None})
+        entry["last"] = value
+        if value is not None:
+            entry["min"] = value if entry["min"] is None else min(entry["min"], value)
+            entry["max"] = value if entry["max"] is None else max(entry["max"], value)
 
-    def check(self, sensors: dict, now: float):
-        self.record(sensors)
+    def record(self, sensors: dict, fan=None):
+        for key, s in sensors.items():
+            self._note(key, s["value"])
+        if fan is not None:
+            self._note("amdgpu:fan1_rpm", fan.get("fan1_input"))
+            self._note("amdgpu:pwm1", fan.get("pwm1"))
+
+    def check(self, sensors: dict, now: float, fan=None):
+        self.record(sensors, fan)
         lim = self.limits
         breaches = crit_breaches(sensors, lim["crit_margin_c"])
         if breaches:
@@ -388,18 +448,40 @@ class ThermalGuard:
         junction = sensors.get(GPU_JUNCTION, {}).get("value") if self.has_junction else edge
         if edge is None or junction is None:
             return "thermal_unknown", "GPU temperature sensor missing or unreadable"
-        hot = junction >= lim["junction_c"] or edge >= lim["edge_c"]
-        if not hot:
-            self.hot_since = None
-            return None, None
-        self.hot_since = now if self.hot_since is None else self.hot_since
-        if now - self.hot_since >= lim["sustain_seconds"]:
-            return "thermal", (
-                f"GPU edge {edge:.1f} °C / junction {junction:.1f} °C over the limit "
-                f"(edge {lim['edge_c']:.0f}, junction {lim['junction_c']:.0f}) for "
-                f"{now - self.hot_since:.0f} s"
-            )
+        if junction >= lim["junction_stop_c"]:
+            return "thermal", f"GPU junction {junction:.1f} °C >= {lim['junction_stop_c']:.0f}"
+        if edge >= lim["edge_c"]:
+            self.edge_hot_since = now if self.edge_hot_since is None else self.edge_hot_since
+            if now - self.edge_hot_since >= lim["edge_sustain_seconds"]:
+                return "thermal", (
+                    f"GPU edge {edge:.1f} °C >= {lim['edge_c']:.0f} for "
+                    f"{now - self.edge_hot_since:.0f} s"
+                )
+        else:
+            self.edge_hot_since = None
+        if fan is not None:
+            problem = self.fan_problem(fan, junction)
+            if problem is None:
+                self.fan_bad_since = None
+            else:
+                self.fan_bad_since = now if self.fan_bad_since is None else self.fan_bad_since
+                if now - self.fan_bad_since >= lim["fan_fault_seconds"]:
+                    seconds = now - self.fan_bad_since
+                    return "fan_fault", f"{problem} for {seconds:.0f} s; {fan_command(fan)}"
         return None, None
+
+    def fan_problem(self, fan: dict, junction: float):
+        lim = self.limits
+        if fan.get("pwm1_enable") != 1:
+            return f"pwm1_enable {fan.get('pwm1_enable')} (not manual)"
+        if fan.get("pwm1") is None or fan["pwm1"] < lim["fan_pwm_min"]:
+            return f"pwm1 {fan.get('pwm1')} < {lim['fan_pwm_min']:.0f}"
+        rpm = fan.get("fan1_input")
+        if junction > lim["fan_rpm_check_above_c"] and (rpm is None or rpm < lim["fan_rpm_min"]):
+            return (
+                f"fan {rpm} RPM < {lim['fan_rpm_min']:.0f} with the junction at {junction:.1f} °C"
+            )
+        return None
 
 
 def cooled(read, clock, limits=None, log=None) -> bool:
@@ -437,7 +519,19 @@ def _temps_main(argv=None) -> int:
     temps.add_argument("--prefix", default="")
     temps.add_argument("--peak-file", type=Path)
     temps.add_argument("--print-peaks", action="store_true")
+    sub.add_parser("fancheck")
     args = parser.parse_args(argv)
+    if args.command == "fancheck":
+        fan = read_fan(hwmon_root())
+        problem = fan_precondition(fan)
+        print(
+            f"fan_pwm1_enable={fan['pwm1_enable']} fan_pwm1={fan['pwm1']} "
+            f"fan_rpm={fan['fan1_input']}"
+        )
+        if problem:
+            print(problem, file=__import__("sys").stderr)
+            return 1
+        return 0
     sensors = read_sensors(hwmon_root())
     peaks = {}
     if args.peak_file and args.peak_file.exists():

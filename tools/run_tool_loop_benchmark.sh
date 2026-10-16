@@ -48,8 +48,8 @@
 # failure=<class> on any runner failure (tools/run_queue.py reads it).
 # Exit codes: 2 usage/config, 3 CLI hash, 4 server start/health/VRAM, 5 model file/hash,
 # 6 preflight, 9 another run active, 10 schedule window, 11 cleanup unresolved, 12 docker
-# failure, 13 queue gone, 130/143 signal; otherwise the harness exit code (3 formula
-# infrastructure fault, 4 fail-fast abort).
+# failure, 13 queue gone, 14 GPU fan not manual, 130/143 signal; otherwise the harness exit
+# code (3 formula infrastructure fault, 4 fail-fast abort).
 set -euo pipefail
 export TZ=:/etc/localtime
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -408,6 +408,13 @@ temps() {  # temperatures from /sys/class/hwmon by sensor name; the peak file ke
     --peak-file "$out/temps-peak.json" "$@" 2>/dev/null || echo "temp_sensors=unreadable"
 }
 temps --prefix before >> "$prov"
+# The GPU fan must be manual at >= 230 (auto held ~22 % PWM while the junction reached SW CTF
+# on 2026-10-16); the manual setting resets on reboot.
+if ! fan_line=$(timeout --foreground -k 5 30 python3 "$ROOT/tools/toolloop_ops.py" fancheck \
+  2> "$out/fancheck.err"); then
+  fail 14 fan_not_manual "$(tr '\n' ' ' < "$out/fancheck.err")"
+fi
+echo "$fan_line" >> "$prov"
 if net_state=$(dk network inspect -f '{{.Internal}} {{index .Labels "mimik.toolloop"}}' "$NET" 2>/dev/null); then
   [ "$net_state" = "true v3" ] || fail 12 infra_docker "network $NET exists and is not internal and owned ($net_state)"
 else
