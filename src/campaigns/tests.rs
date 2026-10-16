@@ -22,6 +22,8 @@ use tower_sessions::{
 mod administration_tests;
 #[path = "formula_tests.rs"]
 mod formula_tests;
+#[path = "list_tests.rs"]
+mod list_tests;
 #[path = "material_tests.rs"]
 mod material_tests;
 #[path = "registry_tests.rs"]

@@ -638,9 +638,9 @@ async fn stored_valid_sheet_with_refused_input_shows_unavailable() {
         )
         .await
         .unwrap();
-    let items: Vec<Value> = (0..256)
+    let items: Vec<Value> = (1..=256)
         .map(|n| {
-            let mut item = json!({"id": format!("i-{n}"), "t": "x".repeat(3600)});
+            let mut item = json!({"id": format!("r1-{n}"), "t": "x".repeat(3600)});
             for p in 0..31 {
                 item[format!("p{p}")] = 0.into();
             }
