@@ -4,10 +4,10 @@ Last updated: 2026-10-16.
 
 ## Resume here
 
-- **GPU BLOCKED (2026-10-16 18:50):** kernel `amdgpu ... GPU over temperature range (SW CTF)` ×3, then the system shut down, during a light MiniCPM5-2B screen. All GPU runs are stopped.
-  - Next: the user checks the fans and dust; then a supervised 2-minute fan test (abort when the junction ≥ 85 °C, or > 65 °C with fan 0 RPM); then a stricter guard (immediate stop at ≥ 90 °C junction, the fan-failure rule, 5 s sampling, optionally a lower power cap).
+- **GPU thermal (2026-10-16):** at 18:50 the kernel logged `SW CTF` ×3 and the system shut down. Cause: the automatic fan curve tracks the edge temperature and held about 22% PWM while the junction passed 86 °C.
+  - **Fix** (resets on reboot; the user runs it with root): manual fan `pwm1_enable=1`, `pwm1=255`, plus a room fan into the open case. The junction then plateaus at 76–79 °C at 110 W over 5 min.
+  - **Next:** a stricter guard (fan-manual precondition, an immediate stop at 90 °C junction, 5 s sampling), then relaunch the 5 small and 3 8B screens. The 35B G0 is held until the thermal data from those runs is reviewed.
   - Screens done: 9B (25/40 correct, 8/40 false-supported) and 4B (14/40, 17/40; discarded).
-  - Pending: the 5 small candidates, the 3 8B models, the 35B G0.
 
 - **M3 merged 2026-10-16** (derived formulas: evaluation on view/save/history, preview, gate lifted for scalar formula definitions; lists stay gated until M4). Review `docs/reviews/2026-10-16-derived-formulas-m3.md` cleared it: Sonnet APPROVE, Sol APPROVE-with-fixes, third reviewer unavailable.
   - Follow-ups: the duplicated declared-input predicate (F4); the residual 503 path (F5); global test hooks depending on test serialization.
