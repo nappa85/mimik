@@ -73,8 +73,9 @@ N_CPU_MOE=<layers> tools/run_tool_loop_benchmark.sh qwen36-35b-a3b smoke 17
 ```
 
 - **Output** goes to `target/tool-loop-benchmark-<date>/<model-key>/<split>-<time>/` (or
-  `OUT_DIR`): `provenance.txt`, `server.log`, `props.json`, `harness.stdout`,
-  `harness.stderr`, the ledger and, with a preflight, `preflight-ledger.jsonl`. `ROOT` is
+  `OUT_DIR`): `provenance.txt`, `server.log`, `props.json`, `main.stdout`,
+  `main.stderr`, the ledger and, with a preflight, `preflight-ledger.jsonl` and
+  `preflight.stdout`/`.stderr`. `ROOT` is
   derived from the script location.
 - **Models, the server image and the llama.cpp args come from the registry**
   (`tools/models.json`); see [Run infrastructure](#run-infrastructure-2026-10-16) for the
@@ -548,33 +549,58 @@ requested value (or `template_default`) for `toggle`; `--thinking on` with `neve
 
 **Other runner behaviour:**
 
-- `exec </dev/null`: the runner never reads input.
-- **Schedule:** without `CHECK_ONLY`, it asks `run_queue.py window-check` and refuses heavy
-  work Monday–Friday 09:00–18:00 local time (exit 10, `failure=window`), and sets the harness
-  budget to the seconds left in the window minus 600 (`budget_from_window`) unless
-  `BUDGET_SECONDS` is smaller. `SCHEDULE_OVERRIDE=user-approved` skips this and is recorded;
-  use it only with the user's explicit approval.
+- `exec </dev/null`: the runner never reads input. `TZ=:/etc/localtime` is exported, so the
+  schedule uses the machine's time zone whatever the operator shell set.
+- **Schedule gates (review fix 1):** without `CHECK_ONLY`, `run_queue.py window-check
+  --margin 900 [--cutoff WINDOW_END]` runs immediately before each heavy step: the hash, the
+  pre-warm, the server load, the preflight and the main harness launch
+  (`window_gate_<step>=open now= seconds_left= cutoff=` in provenance). The cutoff is the
+  earlier of the next weekday 09:00 and `WINDOW_END` (the absolute window end the queue
+  passes). A closed window, or fewer than 900 s left, refuses the step with exit 10
+  (`failure=window`, "before <step>"). At each harness launch the budget is recomputed from
+  that moment (`<phase>_start_epoch`, `<phase>_budget_seconds` = cutoff − 900 − now, or
+  `BUDGET_SECONDS` if smaller) and the harness gets `--deadline-epoch cutoff − 900`, so no
+  episode starts past it. While the server loads and the harness runs (detached; polled every
+  15 s), the runner stops at cutoff − 360 s (exit 10, "stopped at the window edge") and
+  stops when the queue process `QUEUE_PID` is gone (exit 13, `failure=orphan`).
+  `SCHEDULE_OVERRIDE=user-approved` skips the gates and is recorded; use it only with the
+  user's explicit approval. The window-check clock is real time; a test clock is read only
+  when both `MIMIK_TEST_MODE=1` and `MIMIK_TEST_CLOCK_FILE` are set (the queue never passes
+  either; the old `MIMIK_QUEUE_NOW` hook is gone).
 - **Model file:** symlinks are resolved, the size is checked against the registry, and the hash
-  is computed in the locked-down check container, or taken from `HASH_CACHE` when the same
-  resolved path, size, mtime, inode and device were verified earlier in the session (§11 item
-  27: hash once per session). `prewarm: true` then reads the file once into the page cache
-  (`prewarm_seconds`), because a cold 20.4 GB read at about 12.6 MB/s exceeds the 900 s
-  health wait.
+  is computed in a named, bounded check container (`mimik-toolloop-v3-check-<pid>-<n>`, time
+  limit size / 5 MB/s + 600 s), or taken from `HASH_CACHE` when the same resolved path, size,
+  nanosecond mtime, inode and device were verified earlier in the session (tab-separated
+  lines, compared field by field as strings; §11 item 27: hash once per session).
+  `prewarm: true` then reads the file once into the page cache (`prewarm_seconds`), because a
+  cold 20.4 GB read at about 12.6 MB/s exceeds the 900 s health wait.
 - **Preflight** (§11 item 26; `CHECK_ONLY` stops before launch, so it cannot replace this):
   with `PREFLIGHT_CASE`, after the server is healthy the harness runs that dev case once
-  (seed 17, arm `<ARM>-preflight`, its own ledger). A non-zero exit, a missing `run_summary` or
-  an `error` episode stops the run with exit 6 (`failure=preflight`) before the arm starts.
-- **Docker:** every `docker run` has `--pull never` (a missing image fails instead of
-  downloading). The harness container is named (`mimik-toolloop-v3-harness`) so its OOM flag
-  can be read; network and server are `mimik-toolloop-v3` and `mimik-toolloop-v3-srv`.
-  TERM and INT exit through the cleanup trap, which stops the harness and the server.
+  (seed 17, arm `<ARM>-preflight`, its own ledger). A non-zero exit, a missing `run_summary`, or
+  an `error` or `not_run` episode stops the run with exit 6 (`failure=preflight`).
+- **Docker:** every `docker run` has `--pull never` and `--init` (TERM reaches the process);
+  every short docker call has a timeout (`DOCKER_TIMEOUT`, 60 s). Every container is named
+  with the prefix `mimik-toolloop-v3-` (server `-srv`, harness `-harness`, check
+  `-check-<pid>-<n>`) on the internal network `mimik-toolloop-v3`; an existing network that is
+  not `Internal` is refused. A failing or timed-out docker or check-container call is
+  `failure=infra_docker`, exit 12. A server that dies or is unhealthy with a VRAM allocation
+  error in its log is `failure=infra_vram` (exit 4).
+- **Cleanup** (EXIT trap; TERM and INT exit through it): stop the harness and the server
+  first, then read the OOM flag and the server log, then remove every owned container and the
+  network, then verify with `docker ps -a` and `docker network ls` that nothing owned is left:
+  `cleanup_verified=true`, or `cleanup_verified=false`, `cleanup_remaining=…`,
+  `failure=cleanup` and exit 11. The loaded server's diagnostics (`vram_used_end`,
+  `server_memory_peak`, `server_swap_peak` from its cgroup v2 `memory.peak` and
+  `memory.swap.peak`, host swap) are read right after the main harness, before cleanup.
 - **Provenance** (`provenance.txt`, `key=value`): `failure=<class>` with `failure_detail` on
-  every runner failure (`config`, `window`, `model_missing`, `model_size`, `model_hash`,
-  `cli_hash`, `server_start`, `server_health`, `preflight`), `server_oom_killed`,
-  `harness_oom_killed`, `vram_used_before`/`_loaded`/`_end` (card0 sysfs; includes the
-  desktop's use), `swap_used_mib_before`/`_after`, `server_memory_peak` (cgroup v2),
-  `server_ready_seconds`, `preflight_exit`, `harness_exit`, `harness_wall_seconds` and
-  `ledger_file`.
+  every runner failure (`config`, `window`, `orphan`, `model_missing`, `model_size`,
+  `model_hash`, `cli_hash`, `infra_docker`, `server_start`, `server_health`, `infra_vram`,
+  `preflight`, `cleanup`), `window_end`, `queue_pid`, `vram_budget_bytes`,
+  `server_oom_killed`, `preflight_exit`/`preflight_oom_killed`/`preflight_wall_seconds`,
+  `main_exit`/`main_oom_killed`/`main_wall_seconds`, `vram_used_before`/`_loaded`/`_end`
+  (card0 sysfs; includes the desktop's use), `swap_used_mib_before`/`_after`,
+  `server_ready_seconds`, `ledger_file` and `cleanup_verified`. Outputs `main.stdout`,
+  `main.stderr`, `preflight.stdout`, `preflight.stderr` come from `docker logs`.
 
 ### Screen subset (`tools/case-subsets/dev-screen-40.json`)
 
@@ -587,11 +613,11 @@ source `cases-dev.json` sha256 `e5265a0d…a912`. `--cases-file` refuses a file 
 rule or source file hash does not match, or whose ids are not the prefix recomputed from the
 pack; the header gets `case_subset` {name, rule, size, sha256} and `case_filter` = the ids.
 
-### Unattended queue (`tools/run_queue.py`)
+### Unattended queue (`tools/run_queue.py`) and watchdog (`tools/run_watchdog.py`)
 
 Stdlib only. `run QUEUE.json` runs the arms of a queue file in order; `check QUEUE.json`
-validates it and prints each arm's episodes and estimate; `window-check` is the runner's
-schedule test (exit 0 open, 1 closed; `MIMIK_QUEUE_NOW` fixes the clock, for tests only).
+validates it and prints each arm's episodes and estimate; `window-check [--cutoff E]
+[--margin S]` is the runner's schedule gate (exit 0 open, 1 closed or closing).
 
 - **Queue file:** `name`, `defaults` (any arm field except id and model), `arms` (each: `id`,
   `model` (registry key), `split`, `seeds`, `arm` label, `cases` or `cases_file`, `env` (only
@@ -600,108 +626,175 @@ schedule test (exit 0 open, 1 closed; `MIMIK_QUEUE_NOW` fixes the clock, for tes
   `preflight_case`, `g0`, `n_cpu_moe_from_g0`), plus `preflight_case` (default `dev-001`),
   `quiet` (default true), `max_consecutive_failures` (2), `disk_checks` (default
   `/var/lib/docker` and `/media/data`, 10 GB each), `session_deadline` (local ISO time),
-  `stop_margin_seconds` (120), `io_bytes_per_second` (12.6 MB/s), `startup_seconds` (180),
-  `estimate_factor` (1.25) and `g0` limits.
+  `stop_margin_seconds` (default and minimum 300), `io_bytes_per_second` (12.6 MB/s),
+  `startup_seconds` (180), `estimate_factor` (1.25) and `g0` limits.
 - **State machine:** arm states `pending → waiting_window → prechecks → running → complete`,
-  or `retry`, `failed`, `incomplete`, `incomplete_by_window`, `arm_timeout`, `refused`,
-  `skipped`, `not_started`; the queue is `running`, `done` or `stopped` with a reason. Every
-  transition goes to `queue.log` (JSON lines) and rewrites `manifest.json` atomically.
-- **Status is evidence-based**, from `provenance.txt` and the ledger, never the exit code
-  alone: `complete` needs `harness_exit=0`, a `run_started` header, a final `run_summary`,
-  episodes = `planned_episodes`, `not_run` = 0, no `run_aborted`, and the header's arm,
-  model label, model sha256, ctx, split, seeds and subset hash equal to the queue's.
+  or `retry`, `failed`, `incomplete`, `incomplete_with_errors`, `incomplete_by_window`,
+  `arm_timeout`, `refused`, `skipped`, `not_started`; the queue is `running`, `done`,
+  `stopped` (with a reason) or `crashed` (with the error). Every transition goes to
+  `queue.log` (JSON lines) and rewrites `manifest.json` atomically.
+- **Child environment (review fix 7):** built from an allowlist (`PATH`, `HOME`,
+  `MIMIK_MODEL_ROOT`) plus `TZ=:/etc/localtime`, the queue file's `env` and the queue's own
+  values (`ARM`, `SEEDS`, `CASES`/`CASES_FILE`, `QUIET`, `PREFLIGHT_CASE`, `OUT_DIR`,
+  `HASH_CACHE`, `WINDOW_END`, `QUEUE_PID`). Nothing else from the operator shell reaches the
+  runner: no `CTX` or other pass-through value, no `SCHEDULE_OVERRIDE`, `CHECK_ONLY`,
+  `LOCK_FILE`, `TZ`, test clock or `DOCKER_HOST`. Each attempt's effective pass-through
+  values are in the manifest (`env`).
+- **Status is evidence-based** (review fixes 5, 6). `complete` needs all of: runner exit 0;
+  `cleanup_verified=true` from the runner and a verified queue cleanup; no `failure=`; no OOM
+  flag; `main_exit=0`; and a ledger that passes the harness's own merge gate
+  (`tool_loop_benchmark.load_ledgers`: header, final `run_summary`, declared job set,
+  planned = rows, row/header agreement, no abort) **and** the queue's requested plan: the
+  exact (case_id, seed) set (smoke list, `cases`, `cases_file` ids or the pack split) with no
+  duplicates, `planned_episodes` equal to it, `dry_run: false`, and header fields equal to the
+  arm's: benchmark version, harness sha256 (of the queue's `tools/tool_loop_benchmark.py`),
+  arm, label, model sha256, split, seeds, ctx, max_turns, top_k, flags, sampling (temperature,
+  top_p, max_tokens, tool choice, thinking, cache prompt), thinking capability, server config
+  (image and the full llama.cpp vector from the registry) and subset hash. An `error` episode
+  makes the arm `incomplete_with_errors`; `not_run` rows make it `incomplete` (or
+  `incomplete_by_window` when the runner's window budget produced them).
 - **One retry, whole arm, only for pre-declared infrastructure failures:** `server_start`,
-  `server_health` (including a harness abort "server health check failed"), and a container
-  OOM kill. The aborted attempt stays in `arms/<id>/attempt-<n>/` and is marked
-  `excluded: true` in the manifest. Everything else (harness exit 4 from consecutive errors,
-  preflight failure, hash mismatch, a missing ledger) fails the arm without a retry, and the
-  queue continues with the next arm. Two consecutive failed arms stop the queue.
+  `server_health` (including a harness abort "server health check failed"), `infra_vram`
+  and an OOM kill of the server or of either harness phase (`server_oom_killed`,
+  `preflight_oom_killed`, `main_oom_killed`). Before the retry the queue waits up to 180 s
+  for VRAM to return within 256 MiB of its pre-run level, then 30 s more. The aborted
+  attempt stays in `arms/<id>/attempt-<n>/`, marked `excluded: true`. Everything else fails
+  the arm without a retry and the queue continues; two consecutive failed arms stop it.
+- **Crash safety (review fix 3):** `run()` and every attempt are wrapped: on any exception
+  or signal the runner's process group gets SIGTERM, then SIGKILL after 60 s; owned
+  containers and the network are removed; the manifest says `crashed` (a fallback manifest is
+  written if the manifest writer itself failed). Cleanup runs after every attempt whatever
+  its status, and at startup (stale owned containers and network) before any window wait. An
+  unresolved cleanup, or a runner that will not die, fails the arm and stops the queue.
 - **Prechecks before each arm:** the model is downloaded; the model root and file exist
-  (otherwise the arm is `refused` with a clear reason, not a crash); each disk-check path
-  exists (missing: arm refused) and has the free space (low: queue stopped); the runner lock is
-  free (held: queue stopped). The queue also holds its own lock (`target/.queue.lock`), so a
-  second queue refuses to start.
+  (otherwise `refused` with a clear reason, not a crash); each disk-check path exists
+  (missing: refused) and has the free space (low: queue stopped); the runner lock is free
+  (held: queue stopped). Locks live in the main checkout's `target/` and are probed through
+  `/proc/locks`, never taken by a probe: `.tool-loop-benchmark.lock` (runner),
+  `.tool-loop-queue.lock` (one queue at a time) and `.tool-loop-watchdog.lock`.
 - **Schedule window** (AGENTS.md): heavy work Saturday and Sunday at any time, Monday–Friday
-  outside 09:00–18:00, in the system's local time zone (naive local times through
-  `datetime.fromtimestamp`/`timestamp`, so DST is the system's). An arm starts only if
+  outside 09:00–18:00, in the machine's time zone (`/etc/localtime`). An arm starts only if
   `estimate + stop margin` fits before the next weekday 09:00; otherwise the queue sleeps (in
   its own process) until a window where it fits. An estimate longer than the longest window
   (Friday 18:00 to Monday 09:00, 63 h) is `skipped`. The estimate is startup (180 s plus one
   or two cold reads of the GGUF: hash unless already hashed this session, and pre-warm) plus
   (episodes + preflight) × seconds per episode × 1.25; seconds per episode come from the queue
-  file, else from a completed arm of the same model in this session (harness wall time / run
-  episodes), else from the registry.
-- **Stops:** at the window edge (09:00 minus the stop margin), the per-arm deadline
-  (`max_arm_seconds`, default 2 × estimate + 600 s) or the session deadline, the queue sends
-  SIGTERM to the runner's process group, waits 60 s, then SIGKILL, and removes the harness and
-  server containers. A window stop is `incomplete_by_window`; the arm is rerun once, whole, in
-  a later window (never resumed). A run whose harness budget ran out at the window
-  (`budget_from_window` with `not_run` > 0) is treated the same way.
-- **Quiet:** `quiet: true` (default) passes `QUIET=1`; runner stdout and stderr go to
-  `runner.stdout`/`runner.stderr` in the attempt directory; the console only gets one line
-  per arm transition and never a case id or outcome (§11 item 3).
+  file, else from a completed arm of the same model in this session, else from the registry.
+- **Stops:** at the window edge (09:00 minus the stop margin, ≥ 300 s), the per-arm deadline
+  (`max_arm_seconds`, default 2 × estimate + 600 s), the G0 deadline or the session deadline,
+  the queue terminates the runner (SIGTERM, 60 s, SIGKILL) and cleans up. A window stop is
+  `incomplete_by_window`; the arm is rerun once, whole, in a later window (never resumed):
+  the next window if the stop happened inside a window, tonight's 18:00 if it was seen in a
+  blocked period (review F8).
+- **Quiet:** `quiet: true` (default) passes `QUIET=1`; runner stdout and stderr go to files in
+  the attempt directory; the console gets one line per arm transition and never a case id or
+  outcome (§11 item 3).
 - **Manifest:** planned arms, complete arms, `missing_required`, `study_complete` (queue done
-  and no required arm missing), G0 results and every attempt with its status, infrastructure
-  class, ledger check and exclusion.
-- **G0** (§8, §11 item 27): arms with `g0: true` (never required, never retried, never
-  counted as consecutive failures) run a smoke per `N_CPU_MOE` candidate in the given
-  (descending) order. Each records max VRAM, swap growth and seconds per token (summed
-  llama.cpp `eval time` lines of `server.log`, prompt eval excluded; else seconds per episode,
-  labelled as a fallback). A candidate qualifies if it completed with VRAM ≤ `vram_max_bytes`
-  (7.5e9 B) and swap growth ≤ `swap_growth_max_mib` (64 MiB; host-wide, so other load moves
-  it). The first failed or unqualified candidate, or the G0 `deadline_seconds`, closes G0
-  (lower values need more VRAM). An arm with `n_cpu_moe_from_g0` gets the qualified candidate
-  with the lowest seconds per token (ties: larger n-cpu-moe), or is refused if none qualified.
+  and no required arm missing), per-arm `vram_budget_bytes`, G0 results and every attempt
+  with its window end, effective env, status, infrastructure class, ledger check, queue
+  cleanup result and exclusion.
+- **G0** (§8, §11 item 27): arms with `g0: true` (never required, never retried, never counted
+  as consecutive failures) run a smoke per `N_CPU_MOE` candidate in the given (descending)
+  order, inside the G0 `deadline_seconds`, which is also an active limit of the running
+  attempt. Each records max VRAM, swap and seconds per token (summed llama.cpp `eval time`
+  lines of `server.log`, prompt eval excluded; else seconds per episode, labelled as a
+  fallback and computed before qualification). Swap is the server cgroup's
+  `memory.swap.peak`; if that is not readable, host-wide swap growth (logged as a fallback).
+  A candidate qualifies if it completed with VRAM ≤ `vram_max_bytes` (7.5e9 B) and swap
+  growth ≤ `swap_growth_max_mib`, **0 by default ("no swap growth")**. A candidate stopped by
+  the window or a deadline, or without timings, swap or VRAM figures, is `indeterminate` and
+  does not close G0; a failed load or a determinate unqualified result closes it (lower
+  values need more VRAM). An arm with `n_cpu_moe_from_g0` gets the qualified candidate with
+  the lowest seconds per token (ties: larger n-cpu-moe), or is refused if none qualified.
+- **Watchdog (review fix 2):** the queue starts `tools/run_watchdog.py` as a separate process
+  (its own session; a second one exits at once), and it also runs standalone. Every
+  `--interval` (default 30 s, at most 60 s) it checks the schedule with the real clock only:
+  outside the window it force-removes every owned container and the network, whatever lock
+  is held; inside the window it removes owned containers as orphans once neither the runner
+  nor the queue lock has been held for `--grace` (120 s). Every docker call has a timeout;
+  every action is a JSON line in its log; it exits after `--idle-exit` (3600 s) with no lock
+  holder and no owned container.
 
 Queue files: `tools/queues/screen-small-s40.json` (9B then 4B, 40-case subset, seed 17, arm
 `S40-c0`, C0 flags, thinking off, T 0.1, ctx 24576) and `tools/queues/g0-qwen36-35b-a3b.json`
-(G0 at n-cpu-moe 40, 36, 32, 28, 24, then the same screen at the G0 choice; request timeout
-600 s, health wait 1800 s; the candidate list is a proposal to freeze before the run). ctx
-24576 is chosen because the conservative 8-turn bound (≈22.3k tokens) exceeds 16384; the exact
-figure still waits for the tokenizer count.
+(G0 at n-cpu-moe 40, 36, 32, 28, 24 within 4 h, swap tolerance 0, then the same screen at the
+G0 choice; request timeout 600 s, health wait 1800 s; the candidate list is a proposal to
+freeze before the run). ctx 24576 is chosen because the conservative 8-turn bound (≈22.3k
+tokens) exceeds 16384; the exact figure still waits for the tokenizer count.
 
-Start a queue detached (it sleeps until the window opens):
+Start the queues detached (each sleeps until the window opens; the second waits for the first,
+because only one queue may run):
 
 ```sh
 cd /home/marco/Progetti/mimik-wt/harness-v3 && mkdir -p target
-MIMIK_MODEL_ROOT=/home/marco/Progetti/mimik setsid nohup \
-  python3 tools/run_queue.py run tools/queues/screen-small-s40.json \
-  > target/queue-screen-small-s40.console 2>&1 < /dev/null &
+MIMIK_MODEL_ROOT=/home/marco/Progetti/mimik setsid nohup sh -c \
+  'python3 tools/run_queue.py run tools/queues/screen-small-s40.json;
+   python3 tools/run_queue.py run tools/queues/g0-qwen36-35b-a3b.json' \
+  > target/queue-tonight.console 2>&1 < /dev/null &
 ```
 
+Each queue starts its watchdog; to run one by itself:
+`setsid nohup python3 tools/run_watchdog.py > target/watchdog.console 2>&1 < /dev/null &`.
 Session output: `target/tool-loop-queue-<name>-<time>/` (`manifest.json`, `queue.log`,
-`hash-cache.txt`, `arms/<id>/attempt-<n>/`). Summaries afterwards:
+`watchdog.log`, `hash-cache.txt`, `arms/<id>/attempt-<n>/`). Summaries afterwards:
 `tool_loop_benchmark.py --summarize <ledger>…` inside `mimik-ci`.
 
-### Verification (2026-10-16, helper/unit only)
+### Verification (2026-10-16, helper/unit only; review fixes the same day)
 
 - Gate (the given `mimik-ci` command, `--cpus 2`, formula CLI and v2 ledgers mounted):
-  `ruff check tools`, `ruff format --check tools`, unittest **323 tests OK, 1 skipped** (the
-  ShellCheck test: `shellcheck` is not in `mimik-ci`).
+  `ruff check tools`, `ruff format --check tools`, unittest **381 tests OK, 6 skipped**: the
+  ShellCheck test (`shellcheck` is not in `mimik-ci`) and the five real-docker smoke tests
+  (opt-in, host only).
 - ShellCheck 0.11.0 (local image `koalaman/shellcheck:stable`, `--network none`) on
-  `tools/run_tool_loop_benchmark.sh`: clean, with no disable directives. The old runner had
-  four SC2086 and one SC2329 (a false positive: the trap handler counted as unused because
-  the script ended with `exit "$rc"`; the new ending is `[ "$rc" = 0 ] || exit "$rc"`).
-- New tests: `test_tool_loop_runner_args.py` (14), `test_model_registry.py` (11),
-  `test_run_queue.py` (29) and `test_run_tool_loop_runner.py` (10, one skipped). The runner
-  tests put a fake `docker` on PATH that hashes mounted files for real, records the server
-  vector and runs the **real harness as a dry run** with the runner's harness arguments, so
-  they check that ctx reaches `--ctx-size`, that symlinks are resolved before the mount, and
-  that every pass-through value lands in the ledger header.
-- Failing first: `test_tool_loop_runner_args.py` against `2566040`: 13 of 14 red (no
-  `--quiet-progress`, `--server-config`, `--thinking-capability`, `--cases-file`,
-  `case_subset`, committed subset, or identity fields); `test_default_progress_still_shows_outcomes`
-  is the paired on-test and passed by design. `test_run_tool_loop_runner.py` against the old
-  runner: 9 of 10 red (one skipped); in `test_refusals` the unknown-model, not-downloaded and
-  missing-`N_CPU_MOE` subtests already exited 2 there. `test_model_registry.py` and
-  `test_run_queue.py` were red as missing modules.
-- Mutation self-check of the queue (each mutant in a copy, each made at least one test red):
-  no infrastructure retry; no window stop; heavy work always allowed; no "later window" for
-  a rerun; lock ignored; `not_run` ignored; no consecutive-failure stop; disk check ignored;
-  no fit check; header identity ignored.
-- **Not run:** any `CHECK_ONLY` or live run against the real model files (hashing reads 28 GB
-  while the files are being moved to `/media/data`), any GPU, server or model load, the
-  docker cleanup and signal path against real containers, and a DST transition night.
+  `tools/run_tool_loop_benchmark.sh`: clean, with no disable directives.
+- **Real-docker cleanup smoke** (`tools/test_real_docker_cleanup.py`, host, real docker,
+  `MIMIK_REAL_DOCKER_SMOKE=1`; not heavy: the server and harness are `sleep` containers of
+  the local mimik-ci image, every other call is the real one): **5/5 passed, twice**, and
+  nothing owned was left afterwards. SIGTERM of the runner: exit 143, its trap removed every
+  container and the network (`cleanup_verified=true`). SIGKILL of the runner: the server and
+  harness stay (no trap), and the watchdog (real docker, grace 0) removed them. Watchdog
+  outside the window with a lock held: removed the container and the network. SIGTERM of
+  the queue process only: the queue terminated the runner and cleaned up (manifest
+  `stopped`). SIGKILL of the queue: the runner noticed the queue pid was gone, stopped
+  (`failure=orphan`) and cleaned up.
+- Tests: `test_tool_loop_runner_args.py` (17), `test_model_registry.py` (13),
+  `test_run_queue.py` (54), `test_run_tool_loop_runner.py` (20, one skipped),
+  `test_run_watchdog.py` (13), `test_real_docker_cleanup.py` (5, skipped in the gate). The
+  runner tests put a fake `docker` on PATH (container and network state in a file) that
+  hashes mounted files for real, records the server vector and runs the **real harness as a
+  dry run**; schedule tests drive a test clock file that the fake advances during the hash
+  or while the harness runs.
+- Failing first. First round: `test_tool_loop_runner_args.py` against `2566040`: 13 of 14
+  red; `test_run_tool_loop_runner.py` against the old runner: 9 of 10 red;
+  `test_model_registry.py` and `test_run_queue.py` red as missing modules. Review round,
+  against `7bb41d6`: the harness deadline and `case_subset` identity tests red (3/3); the
+  registry M3/M6 tests red (6 refusal subtests and the VRAM budget test); the watchdog and ops
+  tests red as missing modules; the queue tests red against the old queue, but mostly at the
+  constructor (new seams), which is the wrong reason, so the review fixes are pinned by the
+  mutation checks below.
+- Mutation checks (each mutant in a copy; each turned at least one test red):
+  - queue, first round: no infrastructure retry; no window stop; heavy work always allowed;
+    no later window for a rerun; lock ignored; `not_run` ignored; no consecutive-failure
+    stop; disk check ignored; no fit check; header identity ignored;
+  - queue, review round: job-set check removed (it survived the first review as the
+    planned-vs-rows check); harness gate (`load_ledgers`) removed (survived at first, killed
+    by the no-summary and row/header cases); runner exit ignored; runner cleanup evidence
+    ignored; errors not distinct; inherited env; no crash handling; no cleanup after the
+    attempt; no startup reconcile; no SIGKILL after an ignored SIGTERM; main OOM key ignored;
+    F8 next-day rerun; F9 no VRAM wait; indeterminate G0 closes G0; G0 deadline not active;
+    swap tolerance 64; stop margin unchecked; one test variable enough for the clock (survived
+    at first, killed by an opposite-answer clock file); no window end to the runner;
+  - runner: no harness deadline; budget without the margin; no pre-warm gate; no `--init` on
+    the server; cleanup trusts `rm`; network `Internal` unchecked; no VRAM class;
+    second-resolution hash-cache mtime; check failure unclassified; no stop before logs;
+  - watchdog and ops: window ignored; no grace; lock ignored; network not removed; cleanup
+    trusts `rm`; foreign container names removed.
+- Intermediate commits of the review round are not each gate-green (the queue commit carries
+  the new runner tests' expectations only from the next commit); the final tree is.
+- **Not run:** any `CHECK_ONLY` or live run against the real model files, any GPU, server or
+  model load, the real llama.cpp image's TERM handling (the smoke uses `sleep` under
+  `--init`), the cgroup `memory.swap.peak` read on this host's real server container, and a
+  DST transition night.
 
 ## Limitations
 
