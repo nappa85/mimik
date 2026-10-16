@@ -1,261 +1,230 @@
 # Decision router plan (prototype tier)
 
-2026-10-16. Status: **plan draft, awaiting independent plan review.** Produced by a read-only
-planning subagent; nothing built or run. Base: master `46fd889` (harness v3, registry, queue,
-M3). This plan reopens H10, which v3 plan §11.24 cut. Held-out use requires a user decision
-(Q1) and the review in Q9.
+2026-10-16. Status: **revision 2 after review (Sol NO-GO, Sonnet GO-with-amendments, third
+unavailable); requires the user's explicit authorisation to reopen H10 as a dev-only track,
+plus a short re-review.** Nothing built or run. Review record:
+[reviews/2026-10-16-decision-router-plan.md](reviews/2026-10-16-decision-router-plan.md).
+Code base: branch `harness-v3` at `b085aa4` (v3 harness, registry, queue, CPU device mode).
+**The GPU is out of service** (cooling fault, junction 29→86 °C in 2 s under compute), so
+every step below is CPU-only; GPU items wait behind the *GPU repaired* gate (§7).
 
-## Current state (verified)
+## Current state
 
-**Scoring** (`tools/tool_loop_benchmark.py`)
+**Source-verified** (`tools/tool_loop_benchmark.py` at `harness-v3`)
+- 7 expected outcome kinds plus 4 harness outcomes (`:61-67`); at-risk set (`:68`); bar
+  (`:69`): held-out, ≥100 cases, ≥90% correct, ≤2% false support.
+- False support needs outcome `proposal` or `answer`: `outcome_error`, a proposal where none
+  was expected, or a value reason (`wrong_answer`, `over_cap`, `wrong_proposal`,
+  `unreported_violation`) (`:1736-1816`). Answer on an expected proposal is only incorrect.
+- `public_case` returns `id`, character, request and setup (`:830-838`); the rendered context
+  omits `id` but carries the character as `sheet_id` (`:1127-1143`).
+  `interleave_by_outcome` orders by **expected** outcome (`:2719-2732`). `summarize` groups
+  by label × arm × split, `bar_verdict` judges any held-out group (`:2038-2049`,
+  `:2177-2217`), and `GROUP_IDENTITY` is checked only within a group.
+- `tools/local_decision_benchmark.py:174-175`: the AnyJev worker **refuses without Vulkan**
+  and requests `n_gpu_layers=-1`, `n_ctx=4096`; the Kev worker is CPU-only (`:248-293`).
+- `tools/model_registry.py`: single-GGUF entries with `sha256` and pinned image (`:241-271`).
+  `tools/run_queue.py` drives only the tool-loop runner; estimate and completeness assume
+  GGUF and episodes (`:690-725`). Watchdog fallback: fixed names plus registered checks only
+  (`toolloop_ops.py:240-250`). CPU device mode: `DEVICE=cpu`, no `/dev/dri`, `-ngl 0`; CPU
+  temperature unreadable (no `k10temp`), recorded as such.
 
-- Outcome kinds: 7 (`:61-65`). At-risk set: `UNSUPPORTED_EXPECTED` (`:68`). Bar: held-out,
-  ≥90% correct and ≤2% false support (`:69`).
-- False support arises only when the outcome is `proposal` or `answer`:
-  - `outcome_error` (`:1801-1802`);
-  - any proposal when none was expected (`:1744-1748`);
-  - value errors: `wrong_answer`, `over_cap`, `wrong_proposal`, `unreported_violation`
-    (`:1803-1814`).
-- So a route to ask, conflict, stale or refuse can never count as false support. `answer` on
-  an expected proposal is incorrect but not false support (`:1745-1747`).
+**Recomputed locally** (no case text read)
+- Dev pack: 174 cases — proposal 67, answer 38, conflict 29, ask_rule 14, ask_fact 14, stale 8,
+  refuse 4 (105 supported, 69 at-risk); 34 Italian.
+- S40, 9B, seed 17 (`run-79fddee1d17d`, 9B ledger, `score` fields only): correct 25/40,
+  false support 8/40. Cross-kind 3 (conflict→answer, ask_rule→answer, stale→proposal); value
+  5 (wrong_answer 2, wrong_proposal 2, over_cap 1); 4 supported cases ended in the other
+  supported kind.
 
-**Inputs and identity** (`tools/tool_loop_benchmark.py`)
+**Reported, not re-verified:** 4B S40 (14/40, 17/40), latencies, the 2026-10-15 decision
+numbers, local images and weights. **Measured on CPU** (Ryzen 5 1600, 6 threads,
+LFM2.5-8B-A1B, one episode): prefill ≈59–67 tok/s, generation ≈23–24 tok/s, 122 s/episode.
 
-- `public_case` exposes only id, character, request and setup (`:830-838`). The context JSON
-  has no case id (`:1127-1143`).
-- Retrieval is FTS5 BM25, top 5 (`:843-879`).
-- The H8 merge gate is `GLOBAL_IDENTITY` / `GROUP_IDENTITY` (`:2736-2763`).
+## 0. Oracle replay (post-hoc, descriptive)
 
-**Dev pack.** 174 cases:
+Revision 1's go rule (≥1/3 of the 9B's false support router-removable; S40: 3/8) was written
+**after** seeing S40: post-hoc exploratory justification, not a pre-registered gate.
+- **Oracle definition (one router only):** gold-kind routing, fixed-output replay. At-risk
+  cases are replaced by the right kind; a supported case keeps its C0 score when C0 chose
+  the right kind; a supported case where C0 chose the other supported kind is `unresolved`.
+- **S40 bounds for that definition:** false support ≥5/40, correct ≤31/40 (35/40 only if all 4
+  unresolved cases were rewritten correctly by a live rerun, which is not assumed).
+- These are **conditional S40 replay bounds**, not a live or held-out result: live SYS-R
+  removes finishers and so changes trajectories and values. A thresholded router is another
+  definition: each abstention on a supported case lowers correct and may remove a value-side
+  false support (the abstention trade-off). Recompute on D0 (174) when it exists (§7).
+- Narrow hypothesis: a router reduces cross-kind false support; value errors need other fixes.
 
-| proposal | answer | conflict | ask_rule | ask_fact | stale | refuse |
-|---|---|---|---|---|---|---|
-| 67 | 38 | 29 | 14 | 14 | 8 | 4 |
+## 1. Amendment proposal for v3 §11 (needs the user's authorisation)
 
-That is 105 supported and 69 at-risk; 34 are Italian.
+Append, dated and with the authoriser, never editing frozen copies:
+> **§11.24a.** H10 is reopened as `SYS-R`, a **dev-only system track**. A0 stays the only
+> verdict arm (§11.2). SYS-R never enters the held-out verdict. A held-out SYS-R arm is
+> admissible only if its router, policy, options, state builder and decision-file hashes are
+> pre-registered and committed before A0's first held-out episode, and is then reported as a
+> separately labelled system result. If held-out has started, SYS-R stays dev-only.
+> Cross-reference §11.23 (H9: product-only applicability predicate).
 
-**v3 dev screen (S40, seed 17)**
+Until authorised: no harness, registry or queue edit. Afterwards: a short re-review.
 
-| Model | Correct | False-supported | Notes |
-|---|---|---|---|
-| 9B | 25/40 | 8/40 | injection-passive 2/7; Dara 2/6; 40.5 s per episode |
-| 4B | 14/40 | 17/40 | discarded as a tool-loop model |
+## 2. Router-only screen (dev, CPU, no tool loop)
 
-**Oracle split of the 9B's 8 false-supported cases**
+**State builder** (`tools/decision_router.py`, isolated):
+- It runs in its own process over a derived case file holding only character, request and
+  setup (no `id`, expected, gold, tags, language or injection metadata), so `expected` never
+  reaches it. It renders through the harness's C0 context path plus `retrieved_rules`
+  (request-only top-5 BM25).
+- **Sentinel scan:** a copy of the pack with unique sentinels in every id, expected, gold,
+  tag and language field; every backend-rendered prompt (all orders) must contain none.
+- **Order:** shuffled with a fixed seed (never `interleave_by_outcome`); stateless decisions
+  (AnyJev clears the KV cache per prompt; Kev's cache keyed on state only). `n_ctx` 8192;
+  an over-length rendered state fails as `over_context`, never truncated.
 
-Source: the frozen run `run-79fddee1d17d`, `arms/s40-qwen35-9b/attempt-1/`, `score` fields
-only.
+**Question.** One generic question; 7 options = the `SYSTEM_PROMPT` outcome lines, verbatim,
+hashed, fixed IDs. Routes to `stale` are reported, never claimed (8 cases).
 
-- **3 have the wrong outcome kind.** A router can remove these: conflict→answer,
-  ask_rule→answer, stale→proposal.
-- **5 have the right kind but wrong values.** A router cannot remove these: `wrong_answer` 2,
-  `wrong_proposal` 2, `over_cap` 1.
-- **Bounds with a perfect router:** false support ≥ 5/40 (12.5%), and correct ≤ 35/40
-  (87.5%).
-- **Even a perfect router cannot meet the bar with the 9B on current evidence. It can only
-  reduce false support.**
+**Candidates (CPU-first):**
 
-**v3 plan** (`docs/tool-loop-harness-v3-plan.md`)
-
-- H9 and H10 were each their own system arm; H10 was cut.
-- The router may use only product inputs, and must never read `expected`.
-- §11.2: A0 is the sole verdict arm.
-- §11.3: dev runs before held-out.
-
-**Decision results** (`docs/local-decision-benchmark-2026-10-15.md`; 18 synthetic cases,
-72 observations)
-
-| Configuration | Correct | Median time | Wrong at p ≥ 0.9 |
-|---|---|---|---|
-| 4B raw | 58 | 0.47 s | 12/64 |
-| 4B L0 | 52 | 1.89 s | 8/58 |
-| 8B raw | 38 | 0.82 s | 28/62 |
-| 8B L0 | 56 | 3.34 s | 8/58 |
-| Kev-0.8B CPU | 44 | 6.52 s cold, 2.12 s warm | — |
-
-The AnyJev GGUF backend clears the KV cache for every prompt.
-
-**Tooling**
-
-- `tools/local_decision_benchmark.py` has a fixed set of 4 `CHOICES` and a fixed `QUESTION`.
-  Its AnyJev worker uses Vulkan with `n_ctx=4096`, and its Kev worker runs on CPU.
-- Local images: `mimik-decision-anyjev:20261015` and `mimik-decision-kev:20261015`.
-- Weights live under `/media/data/mimik/models/target/`.
-- Kev-4B is not downloaded; a 14.3 GB footprint does not fit in 8 GB.
-- Registry: `decision_readout` is already a capability, but entries are single-GGUF
-  llama-server entries. Kev's torch snapshot does not fit that schema.
-- Queue: it is hard-wired to `run_tool_loop_benchmark.sh`. The watchdog relies on the
-  `OWNED_PREFIX` and the ownership labels.
-
-## 0. Go/no-go before any router work (no GPU)
-
-- `decision_router.py oracle LEDGER…` reads only `score` fields and prints counts, never case
-  text.
-- **Pre-registered rule:** proceed only if the router could remove at least 1/3 of the 9B's
-  false support. On S40 it could remove 3/8, so the rule passes.
-- Always state the result as "reduction only; the bar also needs value-side fixes".
-
-## 1. Router-only screen (174 dev cases, no tool loop)
-
-**State.** It consists of the C0 context plus `retrieved_rules` (the request's top-5 search).
-It never includes expected, gold, the loop's searches, tags, case ID or language.
-
-**Question.** One generic question. The 7 options are the `SYSTEM_PROMPT` outcome lines
-copied verbatim and hashed, with fixed IDs.
-
-**Candidates, in this order:**
-
-| ID | Router | Notes |
+| ID | Router | Condition |
 |---|---|---|
-| R3 | AnyJev raw over Qwen3.5-9B | Load probe first (Q6) |
-| R1 | AnyJev raw over Qwen3-4B-Instruct | Router role only (Q11) |
-| R2 | AnyJev raw over Qwen3-8B | |
-| R4 | Kev-0.8B, CPU | |
-| R5 | AnyJev L0 | 7 rotations, on the 2 best raw routers |
-| R6 | Kev-4B | Deferred (Q5) |
+| R1 | AnyJev raw over Qwen3-4B-Instruct, CPU | Router role only (the 4B stays discarded as a tool-loop model) |
+| R4 | Kev-0.8B, CPU-native | — |
+| R3 | AnyJev raw over Qwen3.5-9B, CPU | Only if its single-decision CPU probe fits the budget (§7) |
+| B-ask, B-maj, B-risk | Constant baselines | always `ask_rule`; majority class (`proposal`); majority at-risk (`conflict`) |
 
-- `n_ctx` is 8192. An over-length state fails as `over_context`; it is never truncated.
+Cut: L0 (R5), Qwen3-8B (R2), Kev-4B (R6); reconsidered only after a router beats baselines.
 
-**Metrics.** Case denominators with Wilson intervals:
-- top-1 accuracy and the 7×7 confusion matrix;
-- **unsafe-route rate**: (route = proposal ∧ expected ≠ proposal) or (route = answer ∧
-  expected at-risk), over all cases and over at-risk cases;
-- safe-wrong rate;
-- ECE, Brier score, risk–coverage;
-- order flips;
-- strata by injection tag, Dara and language;
-- latency and RSS.
+**AnyJev CPU mode** (explicit, tested): worker flag `--device cpu|gpu`. CPU: container
+without `/dev/dri`, `n_gpu_layers=0`, threads 6, and the worker records
+`llama_supports_gpu_offload()`, `device=cpu`, layers and threads in provenance. GPU mode
+keeps the Vulkan requirement. No silent fallback either way: an unknown device, or CPU mode
+with a GPU device visible, is refused. Default behaviour of the existing benchmark unchanged.
 
-## 2. Threshold (pre-registered; dev only)
+**Metrics** (case denominators, Wilson intervals): top-1 accuracy and 7×7 confusion; the
+**cross-kind unsafe-route rate** (route = proposal ∧ expected ≠ proposal, or route = answer
+∧ expected at-risk) over all 174 and over the 69 at-risk; supported-route recall over 105;
+safe-wrong rate; ECE, Brier, risk–coverage; order flips (reversed order on the S40 ids only);
+strata only where n ≥ 10; latency and RSS; failures counted as coverage loss. Route risk is
+kept distinct from completed-system false support.
 
-- **Policy:** route to k ∈ {answer, proposal} only if k is the argmax and p(k) ≥ τ. Otherwise
-  route to the renormalised argmax among the at-risk kinds. A failure or timeout routes to
-  `ask_rule` and is flagged.
-- **Grid:** τ ∈ {.50, .60, .70, .80, .85, .90, .95, .98, .99}.
-- **τ\*:** the smallest τ with zero dev unsafe routes (Q7). If none qualifies, the router
-  fails.
-- **Choice:** the router with the most supported cases routed correctly. Ties go to fewer
-  unsafe routes, then to lower cost.
-- **Folds:** 5 deterministic folds stratified by outcome; informational only.
-- **Freeze:** commit the script, grid, policy and hashes before inference.
+**Falsifiers:** each router is reported beside every baseline; one that does not beat B-risk
+on at-risk top-1 (Wilson lower bound above the baseline point) is null. Ablations on the S40
+ids (short prompts, minutes): empty state and request only; no accuracy drop = priors.
 
-## 3. Combined system arm (behind a flag)
+## 3. Threshold and selection (pre-registered, frozen before inference)
 
-**Offline overlay first.** Applied to a C0 ledger:
-- routed at-risk → the routed outcome;
-- routed supported, with the C0 kind equal to the route or at-risk → the C0 score;
-- routed supported, with C0 choosing the other supported kind → `unresolved`, reported both
-  as incorrect and as false support.
+- **Policy:** route to k ∈ {answer, proposal} only if k is the argmax and p(k) ≥ τ; otherwise
+  the renormalised argmax among the at-risk kinds. Failure, timeout, invalid or zero-mass
+  distribution → `ask_rule`, flagged.
+- **Grid:** τ ∈ {.50, .60, .70, .80, .85, .90, .95, .98, .99}. **Nested CV:** 5 outer folds
+  stratified by outcome (fixed seed); in each, choose (router, τ) on the other 4 folds (the
+  smallest τ with zero cross-kind unsafe routes over **all** inner cases, then most supported
+  cases routed correctly, ties to fewer unsafe routes, then lower cost) and apply it to the
+  held fold. The gate uses the pooled out-of-fold routes only.
+- **Gate (named set: all 174 dev cases, out-of-fold):** zero cross-kind unsafe routes **and**
+  supported-route recall ≥80% (≥84/105). Report the Wilson 95% upper bounds (0/174 → 2.16%,
+  0/69 → 5.27%). τ\* is a point estimate; this is no statistical certification of ≤2%.
+- **Freeze:** script, grid, policy, folds, seeds and hashes committed before inference.
 
-**Go rule for the live arm.**
-- Worst-case false support is at most half of C0's, over all cases and over at-risk cases.
-- Correct drops by no more than 10 pp.
+## 4. Combined system (`SYS-R`, after authorisation)
 
-**Live `SYS-R`** (`--router-decisions FILE`; off by default, so v3 stays byte-identical)
-- Routed at-risk: the host writes the terminal (`terminal.tool="router"`, no model call).
-- Routed supported: the run uses `allowed_finishers`, removing the other supported finisher.
-  `respond` and `ask_user` stay.
-- The header records the router identity, τ\* and option hash, with `system_arm: true` in
-  `GROUP_IDENTITY`.
-- Safeguards:
-  - the state hash is checked against the decisions file;
-  - `SYS-` labels are required;
-  - the bar is labelled as a system bar.
-- Held-out only if pre-registered before A0.
+**Fixed-output replay diagnostic** on a C0 ledger (S40 now, D0 later), never a live bound:
+routed at-risk → the routed outcome; routed supported with the C0 kind equal to the route
+→ the C0 score; every other routed-supported case `unresolved`, counted as incorrect *and*
+as false support. Router terminals carry no message or citations and are reported as such.
+It is exploratory and non-gating for any live claim.
 
-## 4. How it runs
+**Live SYS-R** (`--router-decisions FILE`; off by default, v3 byte-identical when off).
+Routed at-risk: host-written terminal (`terminal.tool="router"`, no model call). Routed
+supported: `allowed_finishers` drops the other supported finisher; `respond` and `ask_user`
+stay; no hint. First a 3-case live smoke with forced restriction, then dev 174; dev-only.
 
-**Registry (schema 2).** A `decision_models` map with these fields:
-- `runtime` (anyjev-llamacpp | kev-torch), `image`, `library_revision`;
-- `backbone` or `files`;
-- `device`, `n_ctx`, `levels`, `threads`, `memory_limit`, `seconds_per_decision`, `licence`.
+**Decision-file integrity.** Header: router runtime, image digest, model artefact hashes,
+library revision, device, threads, `n_ctx`; policy hash (τ\*, grid, fallback); question and
+option hash; retrieval config; state-builder sha; pack hashes. One entry per case: case id,
+state hash, 7 probabilities, route. The harness records the file's sha256 in the ledger
+header and refuses on: file hash mismatch, missing or duplicate cases, invalid
+distributions (non-finite, wrong keys, sum ≠ 1 ± 1e-6), a route that the recomputed policy
+does not reproduce, or a state hash mismatch.
 
-Also add a `qwen3-8b` entry.
+**Summary and bar isolation.** Row-header `arm_type: model|system` joins the summary key and
+merge identity; `bar_verdict` gives `N/A (system arm)`; selection and verdict accept only
+`arm_type=model`, arm A0; `SYS-` labels required on system rows, forbidden on model rows.
 
-**Runner** (`tools/run_decision_router.sh`)
-- Uses the same runner lock and window gates as the tool loop.
-- `--deadline-epoch`.
-- Container `mimik-toolloop-v3-router`, with ownership labels so the watchdog covers it.
-- `--network none`, `--pull never --init`, read-only mounts.
-- Uses the same **thermal and fan guard** as the tool loop (added 2026-10-16 after the GPU
-  overheating shutdown).
-- The workers take `choices`/`question`/`n_ctx` parameters; their defaults are unchanged.
+## 5. How it runs
 
-**Queue.**
-- Arm field `kind: toolloop|router`.
-- The same estimate, fit, edge stop, retry, heartbeat, manifest and thermal rules.
-- Kev on CPU counts as heavy work, so it runs only in the window and never concurrently with
-  a GPU arm.
+**Decision models: `tools/decision_models.json`** (separate file; `tools/models.json` and its
+consumers unchanged). Per entry: `runtime` (anyjev-llamacpp | kev-torch), pinned
+`image@sha256`, `library_revision`, `files` each with path, size and sha256 (GGUF; or base,
+head, tokenizer, config for Kev), `devices`, `threads`, `n_ctx`, `memory_limit`,
+`seconds_per_decision` (measured or null), `licence`. Paths stay under the model root; every
+artefact is hashed before load.
 
-## 5. Failing-first tests
+**Runner `tools/run_decision_router.sh`:** the tool loop's runner lock and window gate,
+`--deadline-epoch`; container `mimik-toolloop-v3-router` with ownership labels, `--network
+none --pull never --init`, read-only mounts, memory and `--cpus 6` caps, no `/dev/dri` while
+the GPU is out. Workers take `choices`/`question`/`n_ctx`/`device`, defaults unchanged.
 
-**Router module:**
-- `test_state_never_contains_gold`
-- `test_retrieval_query_is_request_only`
-- `test_option_ids_stable_across_orders`
-- `test_route_unsafe_matches_score`: all 49 pairs against the real `score()`
-- `test_threshold_policy`
-- `test_failure_routes_ask_rule`
-- `test_selection_rule`
-- `test_cv_folds_deterministic`
-- `test_ece_brier_known_values`
-- `test_overlay_bounds_unresolved`
-- `test_oracle_split_counts`
-- `test_over_context_refused`
+**Queue:** arm `kind: toolloop|router`; router estimate = load + hash I/O + decisions ×
+orders × `seconds_per_decision` × factor; completeness = exact case coverage. CPU inference
+and loads are heavy: window only, serialised by the lock after the running CPU queue.
 
-**Harness:**
-- `test_router_off_byte_identical`
-- `test_router_terminal_makes_no_model_call`
-- `test_routed_supported_restricts_finishers`
-- `test_removed_finisher_is_malformed`
-- `test_state_hash_mismatch_refused`
-- `test_router_never_merges_with_model_arm`
-- `test_sys_label_required`
-- `test_bar_labelled_system`
+**Watchdog and thermal:** the router container joins the watchdog's fallback names; queue 5 s
+sampling and watchdog hard limits apply; CPU temperature recorded as unavailable.
 
-**Registry and queue:**
-- `test_decision_entry_schema`
-- `test_shell_refuses_decision_entry`
-- `test_queue_router_arm_window_lock_watchdog`
-- `test_router_runner_args`
-- `test_worker_defaults_unchanged`
+## 6. Failing-first tests (each red before its fix; on/off pairs)
 
-## 6. Budget and order
+- **State:** `test_sentinels_absent_from_every_prompt` (pair: planted leak caught),
+  `test_builder_has_no_expected_import`, `test_retrieval_query_is_request_only`,
+  `test_order_shuffled_seeded` (pair: interleave refused), `test_over_context_refused`.
+- **Routing:** option IDs stable across orders; cross-kind unsafe on all 49 pairs with
+  value-correct fixtures through the real `score()`, paired with value errors (wrong answer,
+  over cap, wrong proposal, violation) that are *not* router-unsafe; non-trivial threshold
+  boundaries; invalid or zero-mass distribution → `ask_rule`; failures as coverage loss.
+- **Selection:** nested CV never sees the held fold (pair: planted leakage detected); gate
+  needs zero unsafe *and* recall; baselines and falsifier; ECE/Brier known values; oracle
+  replay on a synthetic ledger.
+- **CPU mode:** CPU → zero layers, no `/dev/dri` / GPU → Vulkan still required; unknown
+  device and CPU-with-GPU-visible refused; CPU provenance recorded; worker defaults unchanged.
+- **Harness (after authorisation):** router off byte-identical / on changes only routed
+  cases; router terminal makes no model call; a removed finisher is rejected through real
+  dispatch; decision-file hash, missing, duplicate and invalid entries, and recomputed-route
+  mismatch refused; system arm never gets the bar / model arm still does; forged relabel refused.
+- **Ops:** decision-model schema and hashes; `tools/models.json` consumers untouched; queue
+  router arm (window, lock, estimate, completeness); watchdog fallback removes the router
+  container with docker listing failing; real-docker smoke (no model): labels, `--network
+  none`, watchdog removal, cleanup verified.
 
-1. **Now** (CPU-light): §0 (passes, 3/8); code and tests; freeze §2.
-2. **Weekend:** the candidate screens (5 small, 3 8B), then the router queue:
+## 7. CPU budget and order
 
-   | Step | Time |
-   |---|---|
-   | Probes | ≈0.5 h |
-   | R3 | ≈0.35 h |
-   | R1 | ≈0.2 h |
-   | R2 | ≈0.35 h |
-   | R4 (Kev, CPU) | ≈1.5–2.5 h |
-   | R5 (L0) | ≈0.7–1.2 h each |
-   | **Total** | **≈5–7 h** |
+Assumed state ≈3k tokens per decision; raw readout ≈ one prefill. **All rows unmeasured
+estimates** except the LFM reference; dense models prefill more slowly than the MoE.
 
-   Skip order when short of time: L0, then Kev, then R2.
-3. **CPU, minutes:** selection, folds, overlay on S40.
-4. **Next window:** D0 (9B on all 174 dev cases, ≈2.4 h); then the full overlay; then, if the
-   go rule passes, live `SYS-R`.
-5. **Before A0:** independent results review; pre-register or record the null result.
+| Item | Assumed rate | Per decision | 174 + 40 reversed |
+|---|---|---|---|
+| LFM2.5-8B-A1B (reference, measured) | 59–67 tok/s | ≈45–50 s | — |
+| R4 Kev-0.8B torch FP32 | 40–80 tok/s | ≈40–75 s | ≈2.4–4.5 h |
+| R1 Qwen3-4B dense | 15–25 tok/s | ≈120–200 s | ≈7–12 h |
+| R3 Qwen3.5-9B dense | 7–12 tok/s | ≈250–430 s | ≈15–26 h |
+
+Probes (3 states × 3 backbones, incl. load and HDD hash): ≈1–1.5 h.
+
+1. **Now (no inference):** authorisation, re-review, then code and tests; freeze §3.
+2. **After the CPU screen queue (≈04:00 Saturday):** probes, R4, R1; R3 only if its probe
+   projects ≤12 h and it fits before Monday 09:00. Then (minutes) CV, baselines, S40 replay.
+3. **GPU repaired gate:** D0 (9B on 174, ≈2.4 h on GPU), oracle recompute, full replay,
+   live SYS-R smoke and dev run; reconsider L0, Qwen3-8B and Kev-4B.
+4. **Before any held-out use:** independent results review; pre-register (§1) or record null.
 
 ## Questions for the user (recommended defaults)
 
-1. **Reopen H10 as the separate track `SYS-R`,** knowing that even a perfect router leaves the
-   9B at ≥12.5% false support on S40? *Default: yes, as a false-support reduction, dev only
-   until reviewed, paired with value-side work.*
-2. **Low-confidence fallback.** *Default: the argmax among the at-risk kinds.*
-3. **Routed-supported mode.** *Default: remove the other supported finisher, keep `respond`
-   and `ask_user`, no hint text.*
-4. **Does Kev CPU inference count as heavy work?** *Default: yes, window only.*
-5. **Kev-4B.** *Default: defer.*
-6. **If AnyJev cannot load Qwen3.5-9B**, allow a reviewed llama-server top-logprob readout?
-   *Default: yes, labelled separately.*
-7. **Threshold target.** *Default: zero unsafe routes on the dev at-risk cases.*
-8. **D0 in the next window.** *Default: yes.*
-9. **Independent plan review before amending the v3 pre-registration.** *Default: yes.*
-10. **Weekend order.** *Default: candidate screens, then G0/35B (held for thermal reasons
-    since 2026-10-16), then the router.*
-11. **Keep the discarded 4B as a router backbone?** *Default: yes, router role only.*
+1. **Authorise §11.24a** (H10 reopened as dev-only SYS-R)? *Default: yes, dev only.*
+2. **Fallback** at-risk argmax; **routed-supported** removes the other finisher, no hint.
+   *Default: yes to both.*
+3. **CPU inference counts as heavy work** (window only). *Default: yes.*
+4. **Recall floor** ≥80% of supported cases at zero unsafe. *Default: 80%.*
+5. **9B router on CPU** only if the probe projects ≤12 h. *Default: yes.*
+6. **If AnyJev cannot load Qwen3.5-9B:** a reviewed, separately labelled llama-server
+   top-logprob readout? *Default: yes, behind the GPU gate.*
+7. **Keep the discarded 4B as a router backbone?** *Default: yes, router role only.*
