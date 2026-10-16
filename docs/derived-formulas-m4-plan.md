@@ -1,380 +1,347 @@
 # Derived-field formulas: milestone M4 plan (server-rendered list editing, browser and package gates)
 
-2026-10-16. Status: **draft, awaiting independent plan review** (AGENTS.md). Produced by a
-read-only planning subagent; not implemented. Base: master `46fd889` (M3 merged). The
-worktree `../mimik-wt/formula` starts with `git merge --ff-only master`. Parent plan:
+2026-10-16. Status: **revision 2, amended after review (Sol NO-GO, Sonnet GO-with-amendments,
+third unavailable); needs a short re-review before execution.** Review record:
+[reviews/2026-10-16-derived-formulas-m4-plan.md](reviews/2026-10-16-derived-formulas-m4-plan.md).
+Not implemented. §1 re-verified read-only against master `1ddbf17`; the worktree
+`../mimik-wt/formula` starts with `git merge --ff-only master`. Parent plan:
 [derived-formulas-plan.md](derived-formulas-plan.md) §6, §7, §9, §14.1 item 18, §16. Pattern:
 [M3 plan](derived-formulas-m3-plan.md) §10–§10d.
 
+**Scope (user decision 2026-10-16):** M4 ships **plain list editing**. Every list property the
+current schema declares is editable. Non-editable properties and the item catalogue are a later
+milestone (§8). Section 3 lists the remaining user questions; the design uses their recommended
+defaults until answered.
+
 ## 1. Current state (verified)
 
-**Value schema and pin checks**
+- **Values.** `values::list_schema` (`src/campaigns/values.rs:26-49`): array of ≤ 256 items
+  (`MAX_LIST_ITEMS`, `formula/mod.rs:32`), each with a required 1–64 character `id`, the
+  non-optional properties required, `additionalProperties:false`, no null.
+  `private_pin::list_values` (`private_pin.rs:97-121`) requires unique registry-slug IDs and
+  exact i64 integers. The 1 MiB cap in `validate_values` (`:127-131`) applies only to pins with
+  a `formula_profile`. `ItemProperty` (`definitions/mod.rs:173-182`, `deny_unknown_fields`) and
+  the schema (`definition-v1.json:72-79`) have no `editable` member.
+- **Writer and decoder.** `snapshots::write` (`snapshots.rs:260-345`) accepts any valid slug
+  as an item ID. It checks the schema and the encoded size (`encode`, `:50-56`, 1 MiB, also for
+  the frozen reserve at `:326-334`), **not** the decoder limits. Reopening uses
+  `decode::parse_sheet` (`snapshots.rs:111-114`): a **32,768-node** cap (`decode.rs:38`), and
+  256 keys per data object and 256 elements per array (`:80-112`).
+- **Transport.** `values::form` refuses lists (`values.rs:107-111`, `:137`); `values::integer`
+  (`:85-95`) takes exact decimal i64. `transport::Pairs` (`transport.rs:13-60`): ≤ 516 pairs,
+  keys ≤ 70 bytes, no decoded duplicates. `admit` (`:50-59`) uses `keys.contains` per pair, so
+  it is O(n·m), and it runs on the async worker (`web.rs:815`); only `parse` is in
+  `spawn_blocking` (`:784-788`). Body limits: 1 MiB for all sheet routes (`web.rs:76`), 8 KiB
+  elsewhere (`:86`).
+- **Save.** `save_private` (`web.rs:773-880`) validates the values and **then** checks the
+  revision (`:830`), so a stale invalid draft answers 422. `rejected_editor` (`:882-911`)
+  re-renders with the save's own permit, except on the `None` path, which reacquires a permit
+  and can answer 503 without the draft (`:896-901`). `rendered` marks only 409/422 responses
+  `PrivateTrustedEditor` (`:663-668`).
+- **Render.** `groups()` maps lists to `"list"` (`:602`). `private_sheet.html` has no list
+  branch, so a list renders as an unsaveable `value-<list>` input (latent bug). The page has no
+  JS, Name is `required` (line 6), there is one bottom "Save full private sheet" button
+  (line 9), and the "Computed from saved revision N" heading is in the template (line 10). The
+  test helper `submitted` (`formula_tests.rs:794-827`) ignores submit buttons and disabled
+  controls.
+- **Publication.** `publishable` (`publication.rs:139-152`) refuses lists. The test bypass has
+  three parts: the thread-local `UNSHIPPED_FOR_TESTS` (`:12-17`), `publish_unshipped_for_tests`
+  (`:19-23`, re-exported at `definitions/mod.rs:16`; one caller, `formula_tests.rs:629`, which
+  seeds IDs `i-{n}`) and the early return (`:140-143`). `publication_tests.rs:188-217` asserts
+  the refusal. **No shipped database holds a list sheet.** The admitted maxima are 256 fields,
+  32 lists, 32 properties and 128 options (`formula/mod.rs:37-40`).
+- **History and pack.** `/history/{rev}` reuses the sheet template read-only and has no diff.
+  The `{list, entry_id, field}` address (parent §6) is used only by
+  `tools/tool_loop_benchmark.py:587-591`. The pack has `equipment` (name, kind enum of 8,
+  quantity, weight, equipped, optional armor, optional category enum of 4) and `conditions`
+  (kind enum of 4, marked `editable: false`, and stacks). The translator
+  (`src/definitions/formula_pack_tests.rs:37-108`) drops `editable`. No expression reads
+  `item.id`.
+- **Smoke.** `smoke_release.py:943-984` publishes two versions, and the generic step picks
+  `versions[-1]` (`:1132`). `browser_smoke.py` locates "Save full private sheet" by exact name
+  (`:461`–`:661`). The CI browser runs with `--network=none --cpus=2` (`ci.yml:114-120`).
 
-- `values::list_schema` (`src/campaigns/values.rs:26-49`) builds an array with
-  `maxItems = formula::MAX_LIST_ITEMS` (256, `formula/mod.rs:32`):
-  - required `id` (a 1–64 character string) plus the declared properties;
-  - `required` holds `id` plus the non-optional properties;
-  - `additionalProperties:false`; no null inside items.
-- `private_pin::list_values` (`src/definitions/private_pin.rs:95-121`) checks that item IDs
-  are registry slugs (`registry.rs:41-47`: `[a-z][a-z0-9-]{0,63}`), that they are unique per
-  list, and that item integers are exact i64.
-  - `validate_values` calls it (`:124-149`), after the 1 MiB profile-pin cap (`:127-131`).
-- Item IDs are not host-managed: the writer `snapshots::write`
-  (`src/campaigns/snapshots.rs:260-311`) accepts any valid slug, so a client can rename or
-  reuse IDs.
+## 2. Design
 
-**Forms and transport**
+**D1. Form encoding.** For list field index `f` (its index in `definition.fields`, stable
+because pins are immutable), row `r` (0-based, contiguous) and property index `p`:
+- `id-f-r` is hidden: the saved item ID, or empty for a new draft row;
+- `row-f-r-p` is the value of property `p`;
+- `set-f-r-p` is `present` / `absent` (optional properties only);
+- `op` comes only from the clicked submitter: `save`, `add-f` or `remove-f-r`.
 
-- `values::form` refuses every list field ("List editing is unsupported until milestone M4.",
-  `values.rs:107-111`, `:137`).
-- Integers go through `values::integer` (`:85-95`): exact decimal i64, with no leading zero
-  and no `+`.
-- Form transport (`src/campaigns/transport.rs:21-58`):
-  - at most **516** pairs, keys of at most **70** bytes, no duplicate keys;
-  - `admit` requires the key set to match exactly;
-  - `tests.rs:1036-1052` pins the 516 limit.
-- Body limits: 1 MiB on sheet routes (`web.rs:76`) and 8 KiB on the rest (`:86`).
-- Worst case: 256 rows × (1 + 32 + 32) keys = 16,640 pairs per list. Lists therefore cannot
-  fit under 516.
+Indices use the canonical grammar `0|[1-9][0-9]{0,2}`. `f` must name a list field, `r < 256`,
+and `p` must be below that list's property count. The longest key, `set-255-255-31`, is 14 bytes.
+Rows are stored in ascending `r`, as submitted.
 
-**Save and render**
+**D2. Admission: O(n), set-based, off the async worker.**
+- `Pairs::parse_limited(bytes, limit)` replaces the hard-coded 516: `parse` keeps 516, and sheet
+  POSTs use `SHEET_FORM_PAIRS = 65_536`. The decoded-duplicate and 70-byte checks stay.
+- Admission moves into the existing `spawn_blocking` closure (`web.rs:818`). Only the CSRF
+  lookup, one O(n) scan, stays async.
+  1. One scan of the `id-` keys parses their indices. A bad grammar, a non-list `f`, `r ≥ 256`
+     or a gap → 400. This bounds `n_f ≤ 256` **before** any key is generated.
+  2. The expected keys go into a `HashSet<String>`: the scalars, the rows `0..n_f`, and an
+     optional `op`.
+  3. The form is admitted only if the counts match and every pair is in the set; otherwise → 400.
+- `Pairs::admit` takes that set, so every route (`web.rs:201`, `save_private`) shares one path.
 
-- `save_private` (`web.rs:773-880`):
-  - builds the fixed `value-<id>`/`null-<id>` key list (`:793-814`) and admits it (`:815`);
-  - in `spawn_blocking`, runs `values::form`, then `validate_values`, then the revision check
-    (`:824-833`);
-  - on success, returns 303; Invalid/Conflict re-render as 422/409 through
-    `rejected_editor`, which keeps the permit (`:882-911`).
-- `groups()` (`web.rs:563-640`) maps `Control::List` to `"list"` (`:602`). The template has
-  no list branch, so a list renders through the generic `<input name="value-<list>">` else
-  branch (`templates/private_sheet.html:8`).
-  - **Latent bug**, analogous to M3's: a list sheet published through the test path renders
-    a control that cannot save.
-- `render_private` (`web.rs:471-553`) evaluates only the saved snapshot. `FormulaMode::Draft`
-  labels results "Computed from saved revision N" (`:423-443`).
-- The page has no JS and one bottom submit button, "Save full private sheet"
-  (`private_sheet.html:9`).
+**D3. Host-managed IDs, enforced by the writer (decided: deterministic format).**
+- A new row's ID is `r<N>-<k>`: N is the revision being written (`checked_add`), and k = 1..m
+  numbers the **newly allocated** rows of that list in row order. The scope is one list of one
+  sheet. Writer invariant (`snapshots::write`, kind `runtime`, `create` and `edit` only; `freeze`
+  already requires identical data): every ID absent from the previous revision's list (empty on
+  create) must be `r<new revision>-<k>`, with k contiguous from 1. So there are no client-chosen
+  IDs, and a removed ID never returns.
+- IDs label **row slots, not item identity**. Overwriting every property of a row, or a forged
+  swap of hidden IDs between rows, is accepted and documented in the contract. Item identity
+  belongs to §8. Future import and tool-loop writers must re-ID through the host.
+- `values::form` reconciliation: an empty ID gets the next `r<N>-<k>`; a non-empty ID must exist
+  in the saved list at the (by then current) revision; duplicates → 422.
 
-**Formula admission and publication**
+**D4. Status precedence (all runtime and native sheet saves).** In order:
+1. 413 body limit; 400 parse (pair cap, key length, duplicates).
+2. 403 CSRF; authorization (`load_editor`); 403 if not `editable`.
+3. 400 admission (D2), op grammar and op range.
+4. An op (a non-integer `revision` → 400) → 200 draft re-render (D5); Add at 256 rows → 422.
+   No value, ID or revision-match validation.
+5. Save: a malformed `revision` → 422; **revision ≠ current → 409**. This now runs before values,
+   so a stale draft with invalid values or unknown IDs answers 409. That is a deliberate change
+   from `web.rs:830`, applied to scalar and native sheets too, and documented in the contract.
+6. 422: `values::form`, reconciliation (an unknown ID at the current revision is tampering),
+   `validate_values`.
+7. Writer: 409 for a concurrent writer; 422 for an undecodable snapshot (D7) or the ID invariant.
+- Every re-render (op, 409, 422) keeps the **submitted** hidden revision; nothing rebases a draft.
 
-- `formula_admission::items` (`src/definitions/formula_admission.rs:42-81`):
-  - lists are never nullable and never a formula;
-  - list and property IDs are CEL identifiers, and the property `id` is reserved;
-  - no nested lists; valid enum choices.
-- The decoder caps lists at 32 properties and definitions at 256 fields (`decode.rs:19,23`).
-- Derived fields cannot be lists, so derived values over lists are scalars computed by the M3
-  path. `ImmutablePin::evaluate` passes list values through, because list IDs are always
-  declared (`private_pin.rs:162-191`).
-- `publication::publishable` (`src/definitions/publication.rs:136-152`) refuses lists with
-  `list-editing-unsupported`.
-  - The test-thread bypass `publish_unshipped_for_tests` (`:10-23`, re-exported at
-    `definitions/mod.rs:16`) has one caller, `campaigns/formula_tests.rs:629`, which seeds
-    item IDs `i-{n}` (`:643`).
-  - `publication_tests.rs:188-217` asserts the refusal.
+**D5. Draft operations (Q1 default: Add and Remove re-render, Save persists; Q2 default:
+no reorder).**
+- The buttons are `<button name="op" value="add-f" formnovalidate>`, "Add <List label> row",
+  and `remove-f-r`, "Remove row R of <List label>". `formnovalidate` stops the `required` Name
+  and half-typed rows from blocking an op; Save keeps browser validation.
+- An op parses the draft into `ListDraft` (raw strings, never validated), applies itself and
+  re-renders with **200** in `FormulaMode::Draft` (never evaluated). `auth::normalize` already
+  sets `no-store` on every response (`auth/mod.rs:426-429`; test 18 guards it). The Add-at-256
+  422 goes through `rendered`, so it carries `PrivateTrustedEditor` and is not replaced by the
+  error document. The page shows a `role="status"` message ("Row added to Equipment. Not saved
+  yet."). It never writes, never reveals saved IDs the draft lacked, and still needs CSRF,
+  authorization, `editable` and the JOBS permit.
+- At 256 rows the Add button is disabled with "limit reached" text. If the revision differs from
+  the current one, an advisory warning reads "The saved sheet changed (revision N → M); saving
+  this draft will be refused."
+- `formaction="<action>#list-f"` (trusted numeric indices only) scrolls to the list. `autofocus`
+  goes to the new row's first control after Add, and to the list's Add button after Remove.
 
-**History**
+**D6. Implicit submission.** List sheets also render a "Save full private sheet" (`op=save`)
+button **before** the groups, so Enter saves (the default button is the first submitter in tree
+order). Scalar sheets keep a single button and their browser locators; list-stage locators are
+scoped.
 
-- `private_history.html` is a list of revision links. `/history/{rev}` reuses
-  `private_sheet.html` read-only, with controls disabled. There is no diff view.
-- The "history addressing" deferred by §14.1 item 18 is the `{list, entry_id, field}` address
-  of parent §6 (`derived-formulas-plan.md:296-300`). Only the Python benchmark tools use it
-  (`tools/tool_loop_benchmark.py:587-591`).
+**D7. Limits and the publication budget (Q3 default).** Owners: rows, `MAX_LIST_ITEMS`
+(schema, `values::form`, D2); i64, slugs and uniqueness, `values::integer` and `list_values`;
+text length, the schema (8,000 / 20,000) plus `maxlength`; stored bytes, `snapshots::encode`
+(1 MiB); decodability, `snapshots::encode`; worst-case pairs, nodes and render units,
+`values::form_budget` called by `publishable`.
+- **Writer decodability (Sol B3).** `encode` re-parses its output with `decode::parse_sheet`.
+  On failure it returns `Invalid("Private snapshot exceeds the sheet decoder limits.")` → 422,
+  atomically. The frozen reserve is checked the same way, so an active sheet can always freeze.
+  The decoder cap is not raised.
+- **Publication budget.** `form_budget` assumes full lists with every optional property present.
+  `publishable` refuses any count over its limit with `list-form-exceeds-limit`:
+  - pairs = 5 + Σ non-derived scalars (1, or 2 if nullable) + Σ lists 256 × (1 + props +
+    optional props) ≤ `SHEET_FORM_PAIRS`;
+  - stored-JSON nodes = `ENVELOPE_NODES` + 1 + Σ non-derived scalars + Σ lists (1 + 256 × (2 +
+    props)) ≤ `decode::MAX_NODES` (the 32,768 literal becomes a shared const). `ENVELOPE_NODES`
+    bounds the snapshot's non-data nodes and is pinned by a boundary test: a definition exactly
+    at the budget publishes, and its maximal snapshot saves, reopens and freezes. The writer
+    check stays authoritative;
+  - render units (Sol B5) = Σ scalars (1 + choices, + 2 if nullable) + Σ lists (4 + 256 × (4 +
+    Σ props (1 + choices, + 2 if optional))) ≤ `RENDER_UNITS = 32_768`. Choices are the enum
+    options + 1, or 3 for a boolean. A unit is one control, option or row element with its
+    label, so its markup is bounded (labels ≤ 100 characters, escaped).
+  - The pack is about 10,000 units, 3,400 nodes and 3,400 pairs. Four lists × 256 rows × 32
+    integers is 34,820 nodes, about 250 KB of JSON, and is refused.
+- **Body limit 5 MiB, on the create and edit POST routes only**; GETs keep 1 MiB. Stored values
+  are ≤ 1 MiB, URL encoding expands them ≤ 3×, and keys add ≤ 65,536 × 16 bytes: ≤ 4 MiB, plus
+  margin. A save over 1 MiB stored (or over the profile cap) → 422 with the draft kept. A page
+  is ≤ units × per-unit markup + 6 × the echoed input; JOBS = 1 renders one at a time.
 
-**Pack**
+**D8. History (Q4 default).** `/history/N` shows each row as a read-only fieldset, legend
+"Row 2 · ID r1-2", disabled controls (M3 L1), no op buttons and no top Save. The
+contract defines the address textually as `<list id>/<item id>/<property id>`, scoped to one
+sheet and its immutable pin. It uses IDs, never form indices. No diff view.
 
-- `examples/tool-loop-demo/definition.json` has two lists:
-  - `equipment`: name, kind enum, quantity, weight, equipped, and optional armor and
-    category;
-  - `conditions`: kind and stacks.
-- `bram-holt` has 5 equipment and 4 condition rows, with pack IDs (`ringshirt-1`, …). No pack
-  expression reads `item.id`.
-- `formula_pack_tests.rs:37-108` translates the pack into an envelope with `"sources": []`,
-  as far as a pin and without a database.
-- **New input (user decision, 2026-10-16):** item stats are not editable. The pack revision
-  will mark the equipment fields `armor`, `category`, `kind` and `weight` as non-editable; see
-  [adjudication](tool-loop-pack-adjudication-2026-10-16.md). M4 must therefore handle
-  non-editable list properties (§2 D11).
+**D9. Derived values.** No engine change. Derived fields cannot be lists. Op and rejected
+re-renders show the saved revision's results in the M3 block. `item.id` reaches formulas as
+the host ID.
 
-**Browser and smoke**
+**D10. Markup and accessibility.** A list is `<fieldset class="list-field" id="list-f">` with
+its label as the legend. Each row is a nested `fieldset id="row-f-r"`, legend "Row R of N · ID x"
+or "New row · ID assigned on save". Every control has a `<label for>`; IDs are unique per page.
+Optional properties get a labelled Set/Not set select (decided: explicit state), and required
+boolean and enum selects start on "Select a value". Button names are visible text with the row
+number (WCAG 2.5.3). An empty list shows "No rows yet.". No tables: rows stack, with
+`fieldset{min-width:0}` and a flex-wrapping button row.
 
-- `tests/support/source_fixture.rs:93-132` holds the scalar formula fixture, written as
-  `formula-definition.json` (`:86-89`).
-- `smoke_release.py:943-984` publishes it as the second version, and the generic-form step
-  picks `versions[-1]` (`:1130`). Adding a third version of the same game would silently
-  switch it.
-- `browser_smoke.py:441-517` holds the scalar formula stage, run at 1280×720 and 390×844
-  (`:1129`).
-- The CI browser job runs with `--network=none --cpus=2` (`ci.yml:114-120`).
+**D11. Escaping.** Askama defaults; no `|safe` (the source check stays). Witnesses go in their
+real contexts: `</textarea>` in item text; `"` and `'` in attribute values (the hidden-ID echo,
+text `value=`, invalid enum and Set/Not set echoes); `<script>` in list, property and option
+labels and in the status message. These run on the view, op, 422, 409 and history pages. Tests
+parse the DOM with the maintained `scraper` crate (a dev-dependency only, adopted after a
+recorded licence, audit and `cargo about` check). They assert no injected elements or
+attributes, and exact text and attribute values. `formaction` must equal the generated
+same-origin path plus `#list-f`.
 
-## 2. Design decisions
+## 3. Questions for the user (recommended default first; the design uses it)
 
-**D1. Form encoding: positional keys plus a hidden ID per row.**
+1. **Q1 Op semantics:** (a) Add and Remove re-render an unsaved draft, and Save persists; or
+   (b) each op saves a new revision.
+2. **Q2 Reorder:** (a) defer to a later milestone; rows keep their order (Sonnet R14); or (b) Move
+   up and down buttons in M4, which adds `up-f-r`/`down-f-r` ops, edge-button rules and
+   browser keyboard steps.
+3. **Q3 Large forms:** (a) a 5 MiB POST limit plus the three-count budget (D7); or (b) keep 1 MiB,
+   use a smaller budget and document 413.
+4. **Q4 History:** (a) ID-labelled rows and the address grammar, no diff; or (b) a per-revision
+   change summary in M4.
 
-For list field index `f` (its index in `definition.fields`, stable because the pin is
-immutable), row `r` (0-based, contiguous) and property index `p`:
+Decided by the review, with no product trade-off: explicit Set/Not set for optional properties,
+deterministic `r<N>-<k>` IDs, and the D4 precedence.
 
-| Key | Meaning |
-|---|---|
-| `id-f-r` | Hidden. The saved item ID, or empty for a new draft row. |
-| `row-f-r-p` | The value of property `p`. |
-| `set-f-r-p` | Optional properties only: a select, `present` or `absent` (Q2). |
+## 4. Failing-first tests (in order)
 
-- The longest key is `set-255-255-31` (14 bytes). Raw IDs would break the 70-byte cap and
-  put user text into names.
-- Row order is ascending `r`, and it is stored as submitted.
-- **Admission:**
-  - `n_f` is the number of `id-f-*` keys;
-  - the expected set is the scalar keys, plus all row keys for `0..n_f`, plus an optional
-    `op`;
-  - a gap, a missing key, an extra key, or an `id-` key on a non-list index → 400;
-  - `Pairs::admit` gains an optional-key slice;
-  - cap `SHEET_FORM_PAIRS = 65_536` through a new `Pairs::parse_limited`. Other routes keep
-    516.
+"Guard" = passes when written; every other test runs red first with the stated failing
+assertion, after a paired positive baseline on the same fixture passes (so it is red for the
+intended reason). The `submitted` helper (rebuilt on `scraper` in step 5) includes exactly the
+clicked submitter's `name=value` and excludes disabled controls and other buttons. Route tests
+publish through the bypass until step 7.
 
-**D2. Host-managed IDs, enforced in the writer and generated deterministically.**
-
-- New rows get `r<N>-<k>`, where N is the revision being written and k = 1, 2, … in row order
-  within that list.
-- New `snapshots::write` invariant (runtime create and edit): every item ID absent from the
-  previous revision's list must be exactly `r<new revision>-<k>`. Consequences:
-  - existing IDs cannot be renamed into fresh ones;
-  - a removed ID never returns, because its revision is in the past;
-  - two drafts on the same revision collide only on the revision check.
-  - Freeze is unchanged.
-- `values::form` reconciliation:
-  - an empty ID gets a generated ID;
-  - a non-empty ID must exist in the saved list, else 422 (409 when the revision is stale);
-  - duplicates → 422.
-- Reconciliation runs after `form` and before `validate_values`, so the scalar order is
-  unchanged.
-
-**D3. Add, remove and reorder are draft operations (Q1, Q3).**
-
-- Per row: "Move up", "Move down" and "Remove row R". Per list: "Add <List label> row".
-- All are submit buttons with `name="op"` and values `add-f`, `remove-f-r`, `up-f-r` and
-  `down-f-r`.
-- An op POST:
-  - parses the draft into `ListDraft` (raw strings, never validated, so half-typed rows
-    survive);
-  - applies the op;
-  - re-renders with **200** in `FormulaMode::Draft` (never evaluated), with "Row added to
-    Equipment. Not saved yet.";
-  - never writes, but still runs CSRF, the `load_editor` authorization, `editable` (403
-    otherwise) and the JOBS permit.
-- `op=save`, or no op, saves.
-- Errors:
-  - an out-of-range or unknown op → 400;
-  - Add at 256 rows → 422 with a message; the Add button is disabled, with "limit reached"
-    text.
-- An op on a stale revision warns: "The saved sheet changed (revision N → M); saving this
-  draft will be refused."
-
-**D4. Implicit submission (Enter) must save.**
-
-- Browsers submit with the first submit button, so list sheets render a "Save full private
-  sheet" (`op=save`) button **before** the groups, as well as at the bottom.
-- Test: the first `<button` inside the form is `op=save`.
-- JS-free progressive enhancement: op buttons get `formaction="<action>#list-f"`, so the page
-  scrolls to the affected list.
-
-**D5. Limits, each with one owner.**
-
-| Limit | Owner |
-|---|---|
-| 256 rows | `MAX_LIST_ITEMS` in `values::form` and the schema |
-| i64 | `values::integer` on input, `list_values` in storage |
-| slug and uniqueness | `list_values` |
-| text length | schema (8,000 / 20,000) plus `maxlength` |
-
-- Sheet-route body limit: 1 MiB → **5 MiB** (Q4). Stored JSON is ≤ 1 MiB; URL encoding expands
-  it ≤ 3×; keys add ≤ ~1.3 MiB.
-- Publication refuses `list-form-exceeds-limit` when the worst-case pair count exceeds
-  65,536.
-  - The count is 4 + 1 + Σ scalar (1–2) + Σ lists 256 × (1 + props + optional props).
-  - It is a pure function in `campaigns::values`, called by `publishable` in the gate-lift
-    commit.
-- One body at a time: the `runtime` layer takes the permit first.
-
-**D6. Stale and concurrent edits.**
-
-- A stale save → 409, and the re-render keeps the draft rows.
-- An unknown ID at the current revision is tampering → 422; at a stale revision → 409.
-- Last writer loses, never merges.
-
-**D7. History (Q5).**
-
-- `/history/N` shows each row as a read-only fieldset with the ID in the legend ("Row 2 · ID
-  r1-2"). It has no op buttons and no top Save.
-- With D2's never-reused IDs, `<list>/<entry_id>/<property>` is a stable address. It is
-  documented in `runtime-definition-contract.md`.
-- No diff view in M4.
-
-**D8. Derived values over lists.**
-
-- No engine change. The view shows the M3 states. Draft and op re-renders show the saved
-  revision's results in the separate M3 block.
-- `item.id` reaches formulas as the generated ID.
-
-**D9. Markup, accessibility and reflow.**
-
-- A list is `<fieldset class="list-field" id="list-f"><legend>Label</legend>`. Each row is a
-  nested `<fieldset class="list-row" id="row-f-r">`, with the legend "Row R of N · ID x" or
-  "New row · ID assigned on save".
-- Every control has a `<label for>`. Optional properties have a labelled Set/Not set select.
-  Required boolean and enum selects start on "Select a value".
-- Button names are visible text including the row number (WCAG 2.5.3).
-- "No rows yet." marks an empty list. Status messages use the existing `role="status"`.
-- No tables; rows stack. CSS adds `fieldset{min-width:0}` and a flex-wrap button row.
-- Read-only history disables each control (M3 L1).
-
-**D10. Escaping.**
-
-- Askama defaults; no `|safe`.
-- Test payloads (`<script>`, `"`, `'`) go into list labels, property labels, enum option
-  labels, item text, the status message and `formaction`.
-- Assert the escaped form is present **and** the raw form absent, in text and attribute
-  contexts, on four pages: view, op re-render, 422 re-render and history.
-
-**D11. Non-editable list properties** (new, from the user's item-stats decision).
-
-- A property marked `editable: false` renders as read-only text in existing rows and is not
-  submitted.
-- New rows take its value from where the item comes from. The pack has no item catalogue, so
-  for M4 a non-editable property is either set when the row is created and immutable
-  afterwards, or the whole list is append-only from an approved source. **Q7.**
-- The writer rejects any change to a non-editable property of an existing item (409/422).
-
-## 3. Questions for the user (recommended default first)
-
-1. **Op semantics:** (a) add, remove and move re-render an unsaved draft, and Save persists;
-   or (b) each op saves immediately as a new revision.
-2. **Optional properties:** (a) an explicit Set/Not set select; or (b) empty means absent,
-   with a select only for text.
-3. **Reorder in M4:** (a) Move up and down buttons; or (b) defer.
-4. **Large forms:** (a) a 5 MiB body, a 65,536-pair cap and `list-form-exceeds-limit`; or
-   (b) keep 1 MiB and document 413.
-5. **History:** (a) ID-labelled rows plus the address grammar, with no diff; or (b) a
-   per-revision change summary in M4.
-6. **ID format:** (a) deterministic `r<revision>-<k>`; or (b) random slugs.
-7. **Non-editable properties on new rows:** (a) set once at row creation, then immutable; or
-   (b) new rows only from an approved item list (a catalogue, which is future work).
-
-## 4. Failing-first test list (in order)
-
-"Guard" means the test passes when written. Every other test is run red first. Route tests
-publish through the test bypass until step 6.
-
-| # | File | Test | Red because |
+| # | File | Test | Red because (failing assertion) |
 |---|---|---|---|
-| 1 | `src/campaigns/list_tests.rs` (new) | `writer_refuses_client_chosen_new_item_ids` | writer accepts |
-| 2 | same | `writer_refuses_reintroducing_a_removed_item_id` | writer accepts |
-| 3 | same | `writer_accepts_host_ids_and_per_list_reuse` | guard |
-| 4 | same | `freeze_preserves_list_ids` | guard |
-| 5 | `src/campaigns/values.rs` tests | `list_rows_parse_in_order_and_new_rows_get_host_ids` | `form` refuses lists |
-| 6 | same | `optional_property_state_is_explicit` | same |
-| 7 | same | `item_integers_use_exact_i64_text` | same |
-| 8 | same | `unknown_id_is_invalid_when_current_conflict_when_stale`; `duplicate_row_ids_refused`; `257_rows_refused` | same |
-| 9 | `src/campaigns/tests.rs` | `sheet_routes_admit_list_keys_exactly`; `sheet_pair_cap_is_65536` | no list keys / cap 516 |
-| 10 | `list_tests.rs` | `list_sheet_rendered_form_round_trips` | renders `value-<list>`, 422 |
-| 11 | same | `list_rows_render_as_labelled_fieldsets` | same |
-| 12 | same | `failed_save_rerender_keeps_draft_rows` | same |
-| 13 | same | `stale_list_save_conflicts_and_keeps_draft` | same |
-| 14 | same | `largest_list_sheet_round_trips` | 413/400 |
-| 15 | same | `add_row_rerenders_without_saving` | no ops |
-| 16 | same | `remove_and_move_rerender_without_saving` | no ops |
-| 17 | same | `add_at_256_rows_refused_with_message`; `unknown_or_out_of_range_op_is_400` | no ops |
-| 18 | same | `first_submit_button_saves` | single bottom button |
-| 19 | same | `ops_need_csrf_and_edit_rights`; `op_on_stale_revision_warns`; `ops_never_evaluate_the_draft` | no ops |
-| 20 | same | `create_page_adds_rows_then_creates` | no ops |
-| 21 | same | `list_history_shows_rows_with_stable_ids` | no rows rendered |
-| 22 | same | `derived_values_over_lists_update_after_save` | not saveable |
-| 23 | same | `list_text_is_escaped` | not rendered |
-| 24 | existing native tests | MÖRK BORG view and save unchanged | guard |
-| 25 | `publication_tests.rs:188` renamed | list definition publishes; oversized → `list-form-exceeds-limit` | `list-editing-unsupported` |
-| 26 | `list_tests.rs` | `lantern_reach_list_sheet_end_to_end` (real publication of the translated pack) | refused by the gate |
-| 27 | `tools/browser_smoke.py` | list stage negative control | — |
-| 28 | `tools/test_smoke_release.py` | workspace form chosen by version ID, not `versions[-1]` | picks last |
-| 29 | `list_tests.rs` | `non_editable_item_properties_render_read_only_and_reject_changes` (D11) | properties editable |
+| 1 | `campaigns/list_tests.rs` (new) | `writer_refuses_client_chosen_new_ids` (create and edit) | `write` returns Ok |
+| 2 | same | `writer_refuses_removed_id_reintroduced`; `…_wrong_or_noncontiguous_k` (`r2-2` alone; `r2-2,r2-1`) | Ok |
+| 3 | same | `writer_accepts_mixed_retained_new_rows_per_list_reuse_and_swaps` | guard |
+| 4 | same | `departure_and_removal_freeze_keep_arbitrary_valid_ids`; `stale_direct_write_conflicts` | guard |
+| 5 | same | `writer_refuses_undecodable_snapshot_atomically` (4 lists × 256 × 32 integers) | Ok; reopen then fails |
+| 6 | same | `decoder_bound_snapshot_writes_reopens_and_freezes` (3 lists) | guard |
+| 7 | `campaigns/tests.rs` | `list_row_keys_admit` baseline, then `…_rejects_gaps_aliases_overflow_substitution` (`id-01-0`, `id-+1-0`, non-list `f`, `r=256`, same-count swap, `%2D` duplicate, 70/71 bytes) | baseline 400 (no list keys) |
+| 8 | same | `sheet_post_pair_cap_is_65536_other_routes_516` | cap 516 |
+| 9 | same | `admission_of_65536_pairs_is_linear` (debug, < 5 s) | quadratic `contains` |
+| 10 | same | `stale_invalid_draft_conflicts` (scalar, native, list) | 422 ≠ 409 |
+| 11 | `values.rs` tests | `list_rows_parse_in_order_new_rows_get_host_ids`; `optional_state_is_explicit`; `item_integers_exact_i64`; `unknown_or_duplicate_ids_refused`; `257_rows_refused` | `form` returns the M2 refusal |
+| 12 | `list_tests.rs` | `list_sheet_rendered_form_round_trips` (303, revision + 1) | renders `value-<list>`, 422 |
+| 13 | same | `list_rows_render_as_labelled_fieldsets_unique_ids` | no `fieldset.list-row` |
+| 14 | same | `failed_save_rerender_keeps_draft_and_submitted_revision` | same |
+| 15 | same | `largest_budget_list_sheet_round_trips`; `body_5mib_plus_1_is_413`; `get_body_limit_unchanged` | 413 at 1 MiB |
+| 16 | same | `stored_over_1mib_is_422_with_draft` | same |
+| 17 | same | `competing_writer_loser_unchanged`; `op_409_op_save_never_rebases` | no ops |
+| 18 | same | `add_rerenders_200_no_store_without_writing`; `remove_rerenders_without_writing` | no ops |
+| 19 | same | `add_at_256_is_422_with_message`; `bad_op_or_index_is_400`; `two_ops_is_400` | no ops |
+| 20 | same | `first_submitter_in_tree_order_is_save` (parsed, includes `input type=submit`) | single bottom button |
+| 21 | same | `ops_need_csrf_and_edit_rights`; `stale_op_warns`; `ops_never_evaluate_draft`; `op_never_reveals_saved_ids` | no ops |
+| 22 | same | `unknown_id_draft_op_rerenders_then_save_422` (current) and `409` (stale) | no ops |
+| 23 | same | `op_buttons_have_formnovalidate_and_formaction`; `autofocus_after_add_and_remove` | absent |
+| 24 | same | `create_page_adds_rows_then_creates` | no ops |
+| 25 | same | `list_history_rows_have_stable_ids_and_no_ops` (incl. the test 6 snapshot); `history_address_grammar` | no rows |
+| 26 | same | `derived_values_over_lists_update_after_save` | not saveable |
+| 27 | same | `list_payloads_escaped_in_context` (D11, five pages) | not rendered |
+| 28 | existing native and scalar tests | view, save and browser locators unchanged | guard |
+| 29 | `tools/test_smoke_release.py` | form chosen by version ID and logged, not `versions[-1]` | picks last |
+| 30 | `publication_tests.rs:188` renamed | list definition publishes; each budget count over → `list-form-exceeds-limit`; the same fixture at the limit publishes (guard) | `list-editing-unsupported` |
+| 31 | `list_tests.rs` | `lantern_reach_list_sheet_end_to_end` (real publication; pack IDs re-ID'd to `r1-k`; derived results unchanged) | refused by the gate |
+| 32 | `tools/browser_smoke.py` | list stage with a negative control | — |
 
-## 5. Commit-sized steps (each warning-clean; no `pub(crate)` item without a caller; no `#[allow]`)
+Mutations for reviewers (each must be killed): writer invariant skipped; wrong `k` accepted;
+writer decode check removed; reconcile accepts an unknown or duplicate ID; admission accepts a
+row gap; admission reverted to `contains`; the pair cap reverted to 516; 5 MiB applied to
+GETs; the revision check moved back after values; the op path writes; the draft is evaluated;
+op skips CSRF; `formnovalidate` dropped; the first button is not Save; the top Save has the wrong
+`op`; `set-` ignored; `|safe` on item text; a dropped kept permit; a re-render that rebases the
+hidden revision; an op that silently does nothing; a budget term removed; the gate restored.
 
-1. **Writer invariant** (tests 1–4). Rewrite the `i-{n}` seeds to `r1-{n+1}`.
-2. **List save and render** (tests 5–14, 29):
-   - `ListDraft`;
-   - `Pairs::parse_limited` and optional-key `admit`;
-   - dynamic keys and the 5 MiB limit;
-   - the template list branch and CSS;
-   - remove the M2 refusal strings.
-3. **Draft ops** (tests 15–20): op dispatch, top Save, `formaction`, messages, the 256 limit,
-   the stale warning.
-4. **History, derived values and escaping** (tests 21–24).
-5. **Docs that do not claim publication:** contract (address grammar, ID format, optional
-   state, non-editable properties), sheet presentation and campaign workspace.
-6. **Gate lift last** (tests 25–28):
-   - remove `list-editing-unsupported` and add `list-form-exceeds-limit`;
-   - **delete** `publish_unshipped_for_tests` and move its callers to real publication;
-   - add the list fixture `list-definition.json`, with a derived `load` sum, a formula reading
-     `item.id` and the constraint `load <= 10`;
-   - `smoke_release.py` publishes a third version and selects it by ID;
-   - add a `browser_smoke.py` list stage at both viewports: add, fill, Enter saves, IDs,
-     keyboard Move down, remove, a violation, read-only history, no script, `no_overflow`
-     with a 3,000-character note;
-   - flip the scope docs.
-7. **Review record** with a red→green table.
+## 5. Commit-sized steps
 
-Mutations for reviewers:
-- writer invariant skipped;
-- reconcile accepts unknown IDs;
-- first button is not Save;
-- the op path writes;
-- the draft is evaluated;
-- `|safe` on item text;
-- the pair cap reverted to 516;
-- the gate restored;
-- `set-` ignored;
-- a non-editable property accepted.
+Every commit passes fmt and strict clippy (`all` + `pedantic`, `-D warnings`) with no `#[allow]`.
+Every new item lands with its production caller (named below), and shipped behaviour stays
+unchanged until step 7, because lists cannot be published.
+
+1. **Writer** (tests 1–6). `snapshots::host_item_ids` (private; caller `write`); the
+   `parse_sheet` round check in `encode` (caller `write`). Seeds `i-{n}` → `r1-{n+1}`.
+2. **Transport and precedence** (tests 7–10). `Pairs::parse_limited` (callers: `parse`, and
+   `save_private` for sheet POSTs); set-based `Pairs::admit` (callers: the form helper at
+   `web.rs:201` and `save_private`); `values::sheet_keys`
+   (caller `save_private`, inside `spawn_blocking`). The revision check moves first. List rows
+   are admitted and then refused by `form` until step 3.
+3. **List save and render** (tests 11–16, 20). `ListDraft` and `values::reconcile` (callers
+   `values::form`, and `groups`/`render_private`); template list branch and CSS; top Save on list
+   sheets; 5 MiB layer on the create and edit POST routes; the M2 refusal strings removed.
+4. **Draft ops** (tests 17–19, 21–24). `values::Op` parse and apply (caller `save_private`);
+   `formnovalidate`, `formaction`, `autofocus`, messages, the 256 limit, the stale warning.
+5. **History, derived values, escaping** (tests 25–28). History legends (caller
+   `render_private`); the `scraper` dev-dependency and the rebuilt `submitted` helper.
+6. **Docs and smoke preparation** (test 29). The contract gains the ID format and slot
+   semantics, the address grammar, the optional state, D4 precedence, op behaviour and limits.
+   The sheet-presentation and campaign-workspace docs are updated, but none of them claims list
+   publication. `smoke_release.py` selects by version ID and logs it. `source_fixture.rs` writes
+   `list-definition.json`: a derived `load` sum, a formula reading `item.id`, `load <= 10`, and a
+   second list of 32 properties for 390 px. Its caller is a bypass route test.
+7. **Gate lift, its own final commit** (tests 30–32):
+   - `values::form_budget`, `ENVELOPE_NODES` and `RENDER_UNITS` (caller `publishable`);
+     `decode::MAX_NODES` (callers: the decoder and `form_budget`);
+   - `list-editing-unsupported` removed;
+   - **deleted:** `publish_unshipped_for_tests`, its re-export, `UNSHIPPED_FOR_TESTS` and the
+     early return; its callers move to real publication;
+   - the smoke publishes a third version;
+   - a `browser_smoke.py` list stage at both viewports: Add on an empty create page before Name
+     (B6); fill, Enter saves; IDs; Remove; an op keeps an invalid row value; a violation; read-only
+     history; no script; focus after ops; `no_overflow` with a 3,000-character note and the
+     32-property row;
+   - the scope docs flipped.
+
+   Steps 1–6 are committed with their gates green. Step 7 (Sol M3, as M3 §10b.17) is assembled
+   in the worktree. The **full §6 set, the smoke run and both browser viewports run on the
+   uncommitted candidate**, and it is committed only when all pass, with the tree hash recorded.
+   Any later fix re-runs the set.
+8. **Implementation review** (Sol + Sonnet + the third chain) and a record with a red→green
+   table (executed red, compile red, guards, mutations). Not complete while a blocker is open.
 
 ## 6. Container gates
 
-The same `mimik-ci` gate set as M3 §8:
-- fmt;
-- strict clippy;
-- the full test suite;
-- release formula tests;
-- the `formula_eval` build;
-- `source_fixture`;
-- ruff and unittest;
-- actionlint;
-- `cargo about`;
-- a release build against a re-measured current baseline;
-- `cargo audit`, which is the only networked run.
-
-After step 6:
-- `cargo package --offline` and verify;
-- `cargo vendor` and the release package;
-- checksums, unpack and binary equality;
-- `smoke_release.py --auth`;
-- the `mimik-browser` run with CI flags;
-- the fresh offline rebuild with an empty `CARGO_HOME`;
-- `lan_smoke.py`.
-
-Also:
-- record a 256-row render time (report-only);
-- `--cpus 2` on weekdays 09:00–18:00 and while GPU benchmarks run;
-- report every gate not run as not run.
+The `mimik-ci` set of M3 §8: fmt, strict clippy, full tests, release formula tests, the
+`formula_eval` build, `source_fixture`, ruff and unittest, actionlint, `cargo about` (including
+`scraper`), a release build against a re-measured baseline, and `cargo audit` (the only
+networked run). On the step 7 candidate, also: `cargo package --offline` plus verify;
+`cargo vendor` and the release package; checksums, unpack and binary equality;
+`smoke_release.py --auth`; `mimik-browser` with the CI flags; the fresh offline rebuild with an
+empty `CARGO_HOME`; and `lan_smoke.py`. Record the bytes of the worst-budget GET, op and 422 pages (asserted ≤ the D7
+bound), plus their time and permit hold (report-only). Use `--cpus 2` on weekdays 09:00–18:00.
+Report every gate not run as not run.
 
 ## 7. Risks
 
-1. Implicit submission fires a row op. Covered by D4, test 18 and the browser Enter check.
-2. Form and page size. Bounded by the permit and measured.
-3. Positional keys depend on the field index. Safe only because pins are immutable; document
-   it.
-4. A 200 response to an op makes a browser reload ask to resubmit. Harmless; document it.
-5. The writer invariant constrains future import and tool-loop writers, which must re-ID
-   through the host. Intended.
-6. More POSTs contend for JOBS = 1, so more 503s.
-7. The smoke `versions[-1]` selection. Test 28.
-8. The test bypass must be removed at the lift.
-9. Fieldset quirks on mobile. Checked by `no_overflow` at 390 px.
-10. Scope creep into history diffs.
-11. The third reviewer was unavailable in M3. Record it again if that is still true.
+1. Enter fires an op (D6, test 20, browser Enter check). Size is bounded by the D7 budget and
+   measured.
+2. Positional keys rely on immutable pins. Reloading after an op asks to resubmit, which is
+   harmless (`no-store`, no writes).
+3. JOBS = 1 contention means more 503s. The M3 rejected-save `None` path can still lose a draft
+   on 503 (`web.rs:896-901`, documented).
+4. D4 changes a scalar and native corner case (tested and documented). The writer invariant
+   binds future writers (§8). The bypass must be fully deleted (mutation check).
+5. Scope creep into reorder, diffs or the catalogue (§3, §8). Third reviewer: retry at
+   implementation review.
+
+## 8. Deferred to the item-catalogue milestone
+
+- A per-property `editable: false` flag (Sol B1):
+  - the schema and an `ItemProperty` field whose default keeps existing canonical bytes and
+    hashes;
+  - translator support and read-only rendering;
+  - exact key sets for existing versus new rows;
+  - reconstruction by saved ID, including optional absence;
+  - writer-enforced immutability.
+- An **item catalogue** in the definition. A new row picks an item and gets its fixed stats,
+  under an authority the host checks. This settles new-row provenance (Sol B2) and the pack's
+  acquisition rule (`ask_rule`, `tool-loop-pack-adjudication-2026-10-16.md:112-121`). Item
+  identity beyond slot IDs (D3) belongs here too.
+- Until then, every list property is editable, including pack `conditions.kind` and the
+  equipment stats. The M4 pack test claims neither item-stat immutability nor a working
+  acquisition workflow.
+- Also deferred: reorder (if Q2 stays (a)), history diffs, and the import and tool-loop writers.
