@@ -9,9 +9,8 @@ Last updated: 2026-10-16.
     - User: M4 ships plain list editing. The `editable` flag and the item catalogue are deferred to a later milestone.
   - **Router plan revision 3:** `0b5fcc2`, selection procedure frozen (rev 2 was `c960f45`). The user authorised dev-only `SYS-R` (v3 plan §12, amendment §11.24a). CPU-first. Needs a short re-review.
   - **Pack revision 3: merged** `34bbd46`, review `docs/reviews/2026-10-16-tool-loop-pack-rev3.md`. The v2 differential tests now rescore against the v2 pack from git (`cef5565`).
-  - **Blind held-out:**
-    - Writer brief and snapshot in `/media/data/mimik/blind-heldout/` (brief sha256 `df481d7c…`, no dev leakage found).
-    - The blind writer is writing 165 cases; next come the gold review, mechanical checks and the overlap check.
+  - **Blind held-out FROZEN:** 165 cases, 78 at-risk, sha256 `6f11af05…`, stored outside the repo (`docs/tool-loop-heldout-v3-freeze.md`).
+    - Before A0: implement the held-out hash gate in the runner and queue (§11 item 8).
     - Known limitation: no "apply a current, non-stale pending proposal" cases in either split, because the pack never defined that behaviour.
   - (superseded) Pack revision 3: branch `pack-rev3`, applying the user decisions on rules 6–8, acquiring = ask_rule, night = 2 watches, and plain "armor" = the sheet total. Needs an independent review before it seeds the blind held-out writer.
   - **CPU-only candidate screens:** running since 20:49, from frozen copy `run-b085aa4c2be4`. They measured about 122 s per episode, so roughly 1.4 h per model.
