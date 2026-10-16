@@ -45,7 +45,7 @@ def probs():
 def write_unit(out: Path, unit: str, behaviour: dict, key: str):
     u = out / "unit"
     u.mkdir(parents=True, exist_ok=True)
-    n = {"probe": 3, "screen": 214, "ablation": 80}[unit]
+    n = {"probe": 3, **dr.UNIT_DECISIONS}[unit]
     decisions = [{"key": f"k{i:03d}", "variant": "full", "order": "canonical"} for i in range(n)]
     rows = []
     for i, d in enumerate(decisions):

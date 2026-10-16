@@ -45,7 +45,11 @@ every step below is CPU-only; GPU items wait behind the *GPU repaired* gate (§7
 
 **Recomputed locally** (no case text read)
 - Dev pack: 174 cases — proposal 67, answer 38, conflict 29, ask_rule 14, ask_fact 14, stale 8,
-  refuse 4 (105 supported, 69 at-risk); 34 Italian.
+  refuse 4 (105 supported, 69 at-risk); 34 Italian. **Pack revision 3 (merged 2026-10-17):
+  175 cases, ask_rule 15 (105 supported, 70 at-risk).** The code derives every count from the
+  pack: on rev3 the screen unit is 215 decisions, the gate needs ≥ 84/105 recall and ≤ 8 of 175
+  failures, and zero unsafe has Wilson upper bounds 0/175 → 2.15%, 0/70 → 5.20%. The 174-case
+  figures below are the revision-3 text and are kept for the record.
 - S40, 9B, seed 17 (`run-79fddee1d17d`, 9B ledger, `score` fields only): correct 25/40,
   false support 8/40. Cross-kind 3 (conflict→answer, ask_rule→answer, stale→proposal); value
   5 (wrong_answer 2, wrong_proposal 2, over_cap 1); 4 supported cases ended in the other
@@ -106,8 +110,8 @@ applicability predicate).
   retrieved rules, question and options under the backend's own template. It reports min,
   median, p90 and max, per router, and the count over `n_ctx`. It loads no weights, runs capped
   at 2 cores and is allowed outside the window. §7 projects from these counts, not from the
-  assumed 3k. **Measured 2026-10-16:** max 2,064 (Kev), 2,118 (Qwen3-4B), 2,130 (Qwen3.5-9B)
-  tokens, none over 8192 ([implementation notes](decision-router-implementation.md)).
+  assumed 3k. **Measured on rev3 (2026-10-17):** max 2,546 (Kev), 2,601 (Qwen3-4B), 2,612
+  (Qwen3.5-9B) tokens, none over 8192 ([implementation notes](decision-router-implementation.md)).
 
 **Question.** One generic question; 7 options = the `SYSTEM_PROMPT` outcome lines, verbatim,
 hashed, fixed IDs in the canonical order. Routes to `stale` are reported, never claimed
@@ -207,8 +211,8 @@ feasible τ is the unique best choice.
   `sha256(f"{fold_seed}:{first case id of the group}")` and dealt round-robin, whole, into folds
   0–4; the fold pointer carries over between kinds and is never reset.
 - Fold sizes are therefore those the deal produces (recorded in the fold file and the report;
-  the ungrouped 35/35/35/35/34 no longer holds). Computed on the dev pack: 39/33/33/35/34; fold
-  4 holds no stale case and fold 3 no refuse case (fold file sha256 `8ad758e7…8de6`). Refuse and stale land as the deal gives them
+  the ungrouped 35/35/35/35/34 no longer holds). Computed on the rev3 dev pack: 35/38/33/34/35;
+  fold 4 holds no stale case and fold 3 no refuse case (fold document sha256 `97abdc5a…99f9`). Refuse and stale land as the deal gives them
   (each listed in the 5 × 7 table), so some fold may hold none of them.
 - The fold file (case id → fold, plus the group key of each case) is hashed and frozen. The
   report shows a 5 × 7 table of held and inner counts per kind. Limitation: rare classes are

@@ -236,7 +236,7 @@ class FoldTests(unittest.TestCase):
         for _, ids in dr.groups_of(cases):
             self.assertEqual(len({a[i] for i in ids}), 1, ids)
         doc = dr.fold_document(cases)
-        self.assertEqual(sum(doc["sizes"]), 174)
+        self.assertEqual(sum(doc["sizes"]), len(cases))
         self.assertEqual(doc["sizes"], [sum(1 for f in a.values() if f == i) for i in range(5)])
         for kind in dr.CANONICAL:
             n = sum(1 for c in cases if c["expected"]["outcome"] == kind)
@@ -587,7 +587,8 @@ class StateTests(unittest.TestCase):
                     texts.append(
                         dr.reference_prompt(dr.state_text(row, variant), dr.order_ids(order))
                     )
-        self.assertEqual(len(texts), 174 * 6)
+        self.assertEqual(len(texts), len(rows) * 6)
+        self.assertEqual(len(rows), dr.DEV_CASES)
         self.assertEqual(dr.scan_for_sentinels(texts), [])
         # Pair: a planted leak (the case id in the state) is caught.
         leaked = [dr.reference_prompt(rows[0]["state"] + cases[0]["id"], list(dr.CANONICAL))]
@@ -600,9 +601,10 @@ class StateTests(unittest.TestCase):
             states = dr.read_states(prepared / "states.jsonl")
             mapping = json.loads((host / "mapping.json").read_text())
             self.assertEqual(set(states), set(mapping))
-            self.assertEqual(len(states), 174)
+            self.assertEqual(len(states), dr.DEV_CASES)
             screen = json.loads((prepared / "plan-screen.json").read_text())["decisions"]
-            self.assertEqual(len(screen), 214)
+            self.assertEqual(len(screen), dr.DEV_CASES + 40)
+            self.assertEqual(dr.UNIT_DECISIONS["screen"], dr.DEV_CASES + 40)
             ablation = json.loads((prepared / "plan-ablation.json").read_text())["decisions"]
             self.assertEqual(len(ablation), 80)
             self.assertFalse(

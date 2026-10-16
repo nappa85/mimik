@@ -78,7 +78,7 @@ dr = _Lazy("decision_router")
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "tools" / "run_tool_loop_benchmark.sh"
 ROUTER_RUNNER = ROOT / "tools" / "run_decision_router.sh"
-ROUTER_UNITS = {"probe": 3, "screen": 214, "ablation": 80}  # decisions per unit (plan §7)
+ROUTER_UNITS = ("probe", "screen", "ablation")  # decisions per unit: router_unit_size()
 WATCHDOG = ROOT / "tools" / "run_watchdog.py"
 PACK = ROOT / "examples" / "tool-loop-demo"
 SCHEMA = 1
@@ -1212,8 +1212,9 @@ class Queue:
         planned = len(loaded["finals"]) + loaded["missing"]
         if summary.get("unit") != unit:
             reasons.append(f"summary unit {summary.get('unit')!r} != {unit!r}")
-        if planned != ROUTER_UNITS[unit]:
-            reasons.append(f"{planned} decisions != {ROUTER_UNITS[unit]} for a {unit} unit")
+        size = 3 if unit == "probe" else dr.UNIT_DECISIONS[unit]
+        if planned != size:
+            reasons.append(f"{planned} decisions != {size} for a {unit} unit")
         if loaded["missing"]:
             reasons.append(f"{loaded['missing']} planned decisions missing")
         if loaded["not_run"]:

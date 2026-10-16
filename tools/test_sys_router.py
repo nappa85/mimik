@@ -3,7 +3,7 @@
 Before this change the harness had no --router-decisions flag, no arm_type in the summary key
 or the bar, and no router terminal. The byte-identity test pins the v3 C0 dry-run ledger of
 the demo dev split (two seeds, expected replay) to the digest produced by the unchanged
-harness at 46e93b2 (computed with this file's own normalisation), so the router code must
+pre-router harness merged with master f9d34e0, on the rev3 pack (computed with this file's own normalisation), so the router code must
 leave C0 byte-identical when it is off. A pack change legitimately changes the digest: then
 recompute it by running c0_ledger_text with the previous commit's tool_loop_benchmark on the new
 pack (docs/decision-router-implementation.md), never by copying the current output.
@@ -26,9 +26,11 @@ from test_tool_loop_benchmark import FIXTURE, SEARCH_FOCUS, call, open_pack, pro
 DEMO = Path(__file__).resolve().parents[1] / "examples" / "tool-loop-demo"
 FORMULA = os.environ.get("MIMIK_FORMULA_EVAL", "")
 HAS_CLI = bool(FORMULA) and Path(FORMULA).exists()
-# Normalised C0 dry-run ledger of the demo dev split, seeds 17 and 29, expected replay, from the
-# unchanged harness (46e93b2; tool_loop_benchmark.py as at b085aa4).
-GOLDEN_C0 = "9ea39fda7719a86567ae9f55d5909bd02f28c5fe3f02c863e449946a2aa7d676"
+# Normalised C0 dry-run ledger of the rev3 demo dev split, seeds 17 and 29, expected replay, from
+# the harness without the router: harness-v3 before the router (46e93b2) merged with master
+# f9d34e0 (tool_loop_benchmark.py 2bc70c30...). Master's own harness (c9725045...) gives the same
+# ledger except header "device" (null: master lacks the CPU device mode of 6324fad).
+GOLDEN_C0 = "06a7c6cc9ba1d61210aa4f43172389120370e0a334e4fb4c3c1b2a0c85a8ab34"
 
 
 def c0_ledger_text(tl_module, pack_root, formula_cli, extra=()):

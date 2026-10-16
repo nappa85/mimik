@@ -974,7 +974,16 @@ def probe_projection(load_seconds: float, n_decisions: int = 3) -> float:
     return load_seconds + restarts + n_decisions * PROBE_DECISION_TIMEOUT
 
 
-UNIT_DECISIONS = {"screen": 214, "ablation": 80}
+def _dev_cases_count() -> int:
+    try:
+        return len(json.loads((PACK / "cases-dev.json").read_text(encoding="utf-8"))["cases"])
+    except (OSError, ValueError, KeyError):
+        return 0
+
+
+SUBSET_SIZE = 40  # S40: reversed order and the two ablations (plan §2, §7)
+DEV_CASES = _dev_cases_count()  # 175 on the rev3 pack (174 before)
+UNIT_DECISIONS = {"screen": DEV_CASES + SUBSET_SIZE, "ablation": 2 * SUBSET_SIZE}
 
 
 def probe_result(summary, router_key=None) -> dict:

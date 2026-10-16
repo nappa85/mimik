@@ -309,7 +309,7 @@ class DriverTests(unittest.TestCase):
 
 
 class EndToEndTests(unittest.TestCase):
-    """Driver output -> nested CV selection -> decision file, on the demo pack's 174 cases."""
+    """Driver output -> nested CV selection -> decision file, on the demo pack's dev cases."""
 
     def test_units_select_and_decision_file(self):
         cases = dr.pack_cases(dr.PACK)
@@ -358,7 +358,10 @@ class EndToEndTests(unittest.TestCase):
             )
             self.assertTrue(report["gate"]["passed"], report["gate"])
             self.assertEqual(report["refit"]["tau_star"], 0.5)
-            self.assertEqual(report["cv"]["out_of_fold"]["supported_recall"]["count"], 105)
+            self.assertEqual(
+                report["cv"]["out_of_fold"]["supported_recall"]["count"],
+                sum(e in dr.SUPPORTED for e in expected.values()),
+            )
             self.assertEqual(report["order_flips"], {"evaluated": 40, "flips": 0, "of": 40})
             self.assertTrue(report["ablation"]["complete"])
             states_file = Path(tmp) / "states.jsonl"
@@ -381,7 +384,7 @@ class EndToEndTests(unittest.TestCase):
             doc = dr.build_decision_file(report, mapping, dirs["screen"], states_file, header)
             inverse = {v: k for k, v in mapping.items()}
             seen = dr.verify_decision_file(doc, list(expected), lambda cid: f"h-{inverse[cid]}")
-            self.assertEqual(len(seen), 174)
+            self.assertEqual(len(seen), len(expected))
 
 
 class QuantileTests(unittest.TestCase):
