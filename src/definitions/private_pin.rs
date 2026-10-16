@@ -1,7 +1,16 @@
 //! Immutable interpretation admission is independent of current source evidence.
-use super::{Definition, DefinitionError, WiringStatus, admission, publication};
+use super::{Definition, DefinitionError, WiringStatus, admission, formula, publication};
 use crate::AppError;
 use rusqlite::{Connection, OptionalExtension, params};
+use std::time::Duration;
+
+/// Wall-clock safety net for sheet evaluation. Route tests run under parallel CPU load, so
+/// test builds use a generous seam; the engine's own deadline tests cover the production
+/// value.
+#[cfg(not(test))]
+const EVALUATION_DEADLINE: Duration = formula::DEADLINE;
+#[cfg(test)]
+const EVALUATION_DEADLINE: Duration = Duration::from_mins(1);
 
 pub(crate) struct RawPin {
     pub id: i64,
@@ -16,6 +25,8 @@ pub(crate) struct ImmutablePin {
     pub raw: RawPin,
     data: admission::Admitted,
     validator: jsonschema::Validator,
+    /// Compiled once per pin load by admission itself; `None` for formula-free definitions.
+    formulas: Option<formula::Compiled>,
 }
 
 pub(crate) fn load(db: &Connection, id: i64) -> Result<RawPin, AppError> {
@@ -31,7 +42,7 @@ pub(crate) fn load(db: &Connection, id: i64) -> Result<RawPin, AppError> {
 }
 
 pub(crate) fn validate(raw: RawPin) -> Result<ImmutablePin, AppError> {
-    let data = admission::validate(raw.content.as_bytes())
+    let (data, formulas) = admission::validate_compiled(raw.content.as_bytes())
         .map_err(|_| AppError::Invalid("Corrupt immutable definition."))?;
     if raw.version <= 0
         || data.content != raw.content
@@ -46,7 +57,23 @@ pub(crate) fn validate(raw: RawPin) -> Result<ImmutablePin, AppError> {
         raw,
         data,
         validator,
+        formulas,
     })
+}
+
+/// A pin built from a definition envelope without a database (tests only).
+#[cfg(test)]
+pub(crate) fn for_tests(definition: &serde_json::Value) -> ImmutablePin {
+    let admitted = admission::validate(&serde_json::to_vec(definition).unwrap()).unwrap();
+    validate(RawPin {
+        id: 1,
+        version: 1,
+        game: admitted.definition.game_id.clone(),
+        edition: admitted.definition.edition_id.clone(),
+        content: admitted.content,
+        hash: admitted.hash,
+    })
+    .unwrap_or_else(|_| panic!("test pin rejected"))
 }
 
 /// Host-managed item IDs (registry slug, unique per list) and exact i64 item integers; JSON
@@ -106,6 +133,19 @@ impl ImmutablePin {
     }
     pub(crate) fn definition(&self) -> &Definition {
         &self.data.definition
+    }
+    pub(crate) fn formulas(&self) -> Option<&formula::Compiled> {
+        self.formulas.as_ref()
+    }
+    /// Advisory evaluation of stored (already validated) sheet values; `None` for formula-free
+    /// pins. Pure: it never writes, and model output never reaches it.
+    pub(crate) fn evaluate(
+        &self,
+        values: &serde_json::Value,
+    ) -> Option<Result<formula::Evaluation, formula::InputError>> {
+        self.formulas
+            .as_ref()
+            .map(|compiled| compiled.evaluate_with_deadline(values, EVALUATION_DEADLINE))
     }
     pub(crate) fn unchanged(&self, db: &Connection) -> Result<(), AppError> {
         let matches:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM definition_versions WHERE id=?1 AND version=?2 AND game_id=?3 AND edition_id=?4 AND content_hash=?5 AND content=?6)",params![self.raw.id,self.raw.version,self.raw.game,self.raw.edition,self.raw.hash,self.raw.content],|r|r.get(0))?;

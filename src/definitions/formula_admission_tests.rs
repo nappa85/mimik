@@ -435,7 +435,9 @@ fn empty_evidence_region_lists_are_not_evidence() {
     definition.fields[4].formula.as_mut().unwrap().evidence = super::Mapping::Mapped {
         regions: Vec::new(),
     };
-    let error = super::formula_admission::check(&definition).unwrap_err();
+    let Err(error) = super::formula_admission::check(&definition) else {
+        panic!("empty evidence regions were admitted");
+    };
     assert_eq!(
         code(Err(error)),
         "/fields/4/formula/evidence evidence-regions-required"
@@ -444,7 +446,9 @@ fn empty_evidence_region_lists_are_not_evidence() {
     definition.constraints[0].evidence = super::Mapping::Mapped {
         regions: Vec::new(),
     };
-    let error = super::formula_admission::check(&definition).unwrap_err();
+    let Err(error) = super::formula_admission::check(&definition) else {
+        panic!("empty evidence regions were admitted");
+    };
     assert_eq!(
         code(Err(error)),
         "/constraints/0/evidence evidence-regions-required"
@@ -476,4 +480,55 @@ fn the_aggregate_cap_does_not_apply_retroactively_to_formula_free_pins() {
     }
     assert!(serde_json::to_vec(&values).unwrap().len() > 1024 * 1024);
     assert!(pin.validate_values(&values).is_ok());
+}
+
+#[test]
+fn pin_evaluates_formula_definitions_and_not_formula_free_ones() {
+    let pin = pin_for(&example());
+    let direct =
+        super::formula::Compiled::new(&super::formula_admission::formula_spec(pin.definition()))
+            .unwrap();
+    let values = sheet_values();
+    let pinned = pin
+        .evaluate(&values)
+        .expect("formula pin evaluates")
+        .unwrap();
+    assert_eq!(pinned, direct.evaluate(&values).unwrap());
+    assert_eq!(pinned.to_json()["derived"]["pace"], json!({"value": 5}));
+    let mut two = sheet_values();
+    two["equipment"][1] =
+        json!({"id": "coat-2", "kind": "outer-armor", "equipped": true, "armor": 2});
+    assert_eq!(
+        pin.evaluate(&two).unwrap().unwrap(),
+        direct.evaluate(&two).unwrap()
+    );
+    assert_eq!(
+        pin.evaluate(&json!({"name": "Mira"})).unwrap(),
+        direct.evaluate(&json!({"name": "Mira"})),
+        "input errors are returned, not hidden"
+    );
+    let plain = pin_for(&formula_free());
+    assert!(plain.formulas().is_none());
+    assert!(
+        plain
+            .evaluate(&json!({"name": null, "size": "small", "hit-points": 1}))
+            .is_none()
+    );
+}
+
+/// Pins now carry compiled ASTs, so they can be dropped on async or database worker threads
+/// (2 MiB stacks): a maximum-depth definition must drop there without recursion overflow.
+#[test]
+fn pin_with_maximum_depth_formulas_drops_on_a_small_stack() {
+    let mut value = example();
+    let depth = super::formula::MAX_AST_DEPTH;
+    value["fields"][4]["formula"]["expr"] = format!("vitality{}", " + 1".repeat(depth - 1)).into();
+    let pin = pin_for(&value);
+    assert!(pin.formulas().is_some());
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || drop(pin))
+        .unwrap()
+        .join()
+        .expect("no stack overflow while dropping");
 }

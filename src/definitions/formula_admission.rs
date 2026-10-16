@@ -320,10 +320,12 @@ fn constraint(index: usize, item: &Constraint) -> Result<(), DefinitionError> {
     rule_ids(&path, &item.rule_ids)
 }
 
-/// Formula-profile domain checks, run after the existing envelope checks.
-pub(super) fn check(definition: &Definition) -> Result<(), DefinitionError> {
+/// Formula-profile domain checks, run after the existing envelope checks. Returns the
+/// compiled formulas of a formula definition (`None` for a formula-free one); only immutable
+/// pins keep them, every other caller drops them at once.
+pub(super) fn check(definition: &Definition) -> Result<Option<formula::Compiled>, DefinitionError> {
     match (definition.formula_profile, uses_profile(definition)) {
-        (None, false) => return Ok(()),
+        (None, false) => return Ok(None),
         (None, true) => return Err(report("/formula_profile", "formula-profile-required")),
         (Some(_), false) => {
             return Err(report(
@@ -363,13 +365,14 @@ pub(super) fn check(definition: &Definition) -> Result<(), DefinitionError> {
         return Err(report("/fields", "mapping-dependency-limit"));
     }
     let spec = formula_spec(definition);
-    formula::Compiled::new(&spec).map_err(|rejection| {
-        report(
-            &rejection_path(definition, &rejection),
-            &format!("formula-{}", rejection.code.as_str().replace('_', "-")),
-        )
-    })?;
-    Ok(())
+    formula::Compiled::new(&spec)
+        .map(Some)
+        .map_err(|rejection| {
+            report(
+                &rejection_path(definition, &rejection),
+                &format!("formula-{}", rejection.code.as_str().replace('_', "-")),
+            )
+        })
 }
 
 /// Canonical form: rule citations are sets (sorted, deduplicated), evidence regions are

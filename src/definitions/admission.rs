@@ -31,7 +31,16 @@ pub(super) fn hash(bytes: &[u8]) -> String {
     hex::encode(hash.finalize())
 }
 
+/// Admits a definition envelope; any compiled formulas are dropped at once.
 pub(super) fn validate(bytes: &[u8]) -> Result<Admitted, DefinitionError> {
+    validate_compiled(bytes).map(|(admitted, _)| admitted)
+}
+
+/// Admits a definition envelope and also returns its compiled formulas (`None` for a
+/// formula-free definition). Only immutable pins keep them.
+pub(super) fn validate_compiled(
+    bytes: &[u8],
+) -> Result<(Admitted, Option<super::formula::Compiled>), DefinitionError> {
     let value = decode::parse(bytes)?;
     let validator = VALIDATOR
         .as_ref()
@@ -55,7 +64,7 @@ pub(super) fn validate(bytes: &[u8]) -> Result<Admitted, DefinitionError> {
     }
     let mut definition: Definition =
         serde_json::from_value(value).map_err(|_| DefinitionError::Configuration)?;
-    domain(&definition)?;
+    let formulas = domain(&definition)?;
     definition.sources.sort_by_key(|source| source.source_id);
     for source in &mut definition.sources {
         source.roles.sort();
@@ -71,11 +80,14 @@ pub(super) fn validate(bytes: &[u8]) -> Result<Admitted, DefinitionError> {
         return Err(ValidationReport::one("/", "canonical-byte-limit"));
     }
     let hash = hash(content.as_bytes());
-    Ok(Admitted {
-        definition,
-        content,
-        hash,
-    })
+    Ok((
+        Admitted {
+            definition,
+            content,
+            hash,
+        },
+        formulas,
+    ))
 }
 
 /// Field and list item-property IDs: the registry slug plus `_`, so formulas (CEL
@@ -172,7 +184,7 @@ fn mappings(definition: &Definition) -> Result<(), DefinitionError> {
     Ok(())
 }
 
-fn domain(definition: &Definition) -> Result<(), DefinitionError> {
+fn domain(definition: &Definition) -> Result<Option<super::formula::Compiled>, DefinitionError> {
     for (path, id) in [
         ("/game_id", &definition.game_id),
         ("/edition_id", &definition.edition_id),

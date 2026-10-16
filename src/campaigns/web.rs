@@ -1,5 +1,6 @@
 use super::domain::{Detail, DetailPage, Workspace};
 use super::{
+    formulas::{DerivedView, FormulaView},
     sheets::{HistorySummary, SheetSummary, SheetView},
     snapshots::Pin,
     values,
@@ -369,6 +370,12 @@ struct FieldView {
     value_state: String,
     value: String,
     options: Vec<(String, String)>,
+    /// A derived (formula) field: shown read-only, never rendered as a form control.
+    computed: bool,
+    /// The computed value or error for a saved snapshot; `None` on create and re-render.
+    derived: Option<DerivedView>,
+    expr: String,
+    rule_ids: String,
 }
 
 impl FieldView {
@@ -400,6 +407,31 @@ struct PrivateTemplate<'a> {
     native: bool,
     create: bool,
     pin: String,
+    mode: FormulaMode,
+    /// Evaluation of the saved snapshot; never of an unsaved draft.
+    formulas: Option<FormulaView>,
+}
+
+/// How a runtime sheet shows its derived values.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FormulaMode {
+    /// Native, unsupported or formula-free pin: no formula section.
+    Absent,
+    /// Create page: nothing saved yet, so nothing is evaluated.
+    Create,
+    /// The saved snapshot itself (view and history).
+    Saved,
+    /// A failed save re-renders the rejected draft beside the saved revision's results.
+    Draft,
+}
+
+impl FormulaMode {
+    fn shown(self) -> bool {
+        self != Self::Absent
+    }
+    fn draft(self) -> bool {
+        self == Self::Draft
+    }
 }
 
 fn native_draft(form: &BTreeMap<String, String>) -> crate::mork_form::SheetDraft {
@@ -446,7 +478,26 @@ fn render_private(
     } else {
         crate::mork_form::SheetDraft::from_sheet(&view.snapshot.name, &sheet)
     };
-    let groups = groups(view, raw)?;
+    let create = view.snapshot.sheet_id == 0;
+    // Evaluated once per response, of the saved snapshot only: never on create (`{}` is not
+    // valid input) and never of a rejected draft.
+    let formulas = if create {
+        None
+    } else {
+        view.immutable.as_ref().and_then(|pin| {
+            pin.evaluate(&view.snapshot.data).map(|result| {
+                if let Ok(evaluation) = &result {
+                    super::formulas::log_failures(
+                        view.snapshot.sheet_id,
+                        pin.raw.version,
+                        evaluation,
+                    );
+                }
+                super::formulas::present(pin, result.as_ref())
+            })
+        })
+    };
+    let groups = groups(view, raw, formulas.as_ref())?;
     let name = raw
         .and_then(|r| r.get("name"))
         .map_or(view.snapshot.name.as_str(), String::as_str);
@@ -457,7 +508,6 @@ fn render_private(
         .and_then(|r| r.get("revision"))
         .cloned()
         .unwrap_or_else(|| view.snapshot.revision.to_string());
-    let create = view.snapshot.sheet_id == 0;
     let action = if create {
         let version = match view.snapshot.pin {
             Pin::Runtime { version_id, .. } => version_id,
@@ -484,6 +534,19 @@ fn render_private(
         native,
         create,
         pin: serde_json::to_string(&view.snapshot.pin)?,
+        mode: match (
+            view.immutable
+                .as_ref()
+                .is_some_and(|pin| pin.formulas().is_some()),
+            create,
+            raw.is_some(),
+        ) {
+            (false, _, _) => FormulaMode::Absent,
+            (true, true, _) => FormulaMode::Create,
+            (true, false, false) => FormulaMode::Saved,
+            (true, false, true) => FormulaMode::Draft,
+        },
+        formulas,
     }
     .render()
     .map_err(|_| AppError::Template)
@@ -492,6 +555,7 @@ fn render_private(
 fn groups(
     view: &SheetView,
     raw: Option<&BTreeMap<String, String>>,
+    formulas: Option<&FormulaView>,
 ) -> Result<Vec<GroupView>, AppError> {
     let mut groups = Vec::new();
     if let Some(pin) = &view.immutable {
@@ -542,6 +606,24 @@ fn groups(
                                 .map(|c| (c.id.clone(), c.label.clone()))
                                 .collect()
                         })
+                        .unwrap_or_default(),
+                    computed: field.formula.is_some(),
+                    derived: field
+                        .formula
+                        .as_ref()
+                        .filter(|_| raw.is_none())
+                        .and(formulas)
+                        .and_then(|formulas| formulas.value(id))
+                        .cloned(),
+                    expr: field
+                        .formula
+                        .as_ref()
+                        .map(|formula| formula.expr.clone())
+                        .unwrap_or_default(),
+                    rule_ids: field
+                        .formula
+                        .as_ref()
+                        .map(|formula| super::formulas::rule_list(&formula.rule_ids))
                         .unwrap_or_default(),
                 });
             }

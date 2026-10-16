@@ -9,6 +9,17 @@ use std::collections::BTreeSet;
 const SNAPSHOT_LIMIT: usize = 1024 * 1024;
 #[cfg(test)]
 thread_local! { static SNAPSHOTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+thread_local! {
+    /// Route tests of unshipped sheet capabilities publish on their own test thread only.
+    static UNSHIPPED_FOR_TESTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Lets the current test thread publish definitions the publication gate still refuses.
+#[cfg(test)]
+pub(crate) fn publish_unshipped_for_tests() {
+    UNSHIPPED_FOR_TESTS.with(|allowed| allowed.set(true));
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -124,6 +135,10 @@ fn deterministic_rules(definition: &Definition) -> &'static str {
 /// M2 admits formula and list definitions as drafts only. Publishing waits for evaluation on
 /// view/save (M3) and list editing (M4), so no sheet can pin a definition it cannot show.
 fn publishable(definition: &Definition) -> Result<(), DefinitionError> {
+    #[cfg(test)]
+    if UNSHIPPED_FOR_TESTS.with(std::cell::Cell::get) {
+        return Ok(());
+    }
     if definition
         .fields
         .iter()

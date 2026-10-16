@@ -915,3 +915,27 @@ fn a_panic_while_compiling_or_evaluating_fails_closed() {
         Outcome::Error(Code::InternalError)
     );
 }
+
+#[test]
+fn maximum_depth_compiled_formulas_drop_on_a_small_stack() {
+    let sources = [
+        format!("vitality{}", " + 1".repeat(MAX_AST_DEPTH - 1)),
+        format!("{}vitality{}", "(".repeat(30), ")".repeat(30)),
+        format!("{}1", "flag ? 1 : ".repeat(30)),
+    ];
+    for source in &sources {
+        let compiled = Compiled::new(&derived(source)).unwrap();
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || drop(compiled))
+            .unwrap()
+            .join()
+            .expect("no stack overflow while dropping");
+    }
+    let largest = Compiled::new(&largest_admitted_budget_spec()).unwrap();
+    println!(
+        "largest admitted budget definition (report-only): cost {}, expression nodes {}",
+        largest.cost(),
+        largest.node_count()
+    );
+}

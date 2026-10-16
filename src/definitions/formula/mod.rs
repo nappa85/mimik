@@ -280,6 +280,23 @@ impl Compiled {
         self.derived.iter().map(|item| item.id.as_str()).collect()
     }
 
+    /// Expression nodes across every compiled formula, for memory sizing in tests.
+    #[cfg(test)]
+    pub(crate) fn node_count(&self) -> usize {
+        let mut stack: Vec<&cel::IdedExpr> = self
+            .derived
+            .iter()
+            .chain(&self.constraints)
+            .map(|formula| &formula.expr)
+            .collect();
+        let mut nodes = 0;
+        while let Some(expr) = stack.pop() {
+            nodes += 1;
+            stack.extend(profile::children_for_tests(expr));
+        }
+        nodes
+    }
+
     /// Static work units of this definition, at most [`MAX_COST`].
     #[must_use]
     pub fn cost(&self) -> u64 {

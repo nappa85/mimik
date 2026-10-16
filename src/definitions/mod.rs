@@ -2,13 +2,18 @@
 mod admission;
 pub(crate) mod decode;
 mod formula_admission;
-// Public only so `examples/formula_eval.rs` (development CLI) can link; revisit at M2.
+// Public so `examples/formula_eval.rs` (development CLI) links and the library-only
+// `formula::preview` is reachable without a caller (decided at M3, see the parent plan §16).
 pub mod formula;
 #[cfg(test)]
 mod formula_admission_tests;
+#[cfg(test)]
+mod formula_pack_tests;
 pub(crate) mod private_pin;
 mod publication;
 mod store;
+#[cfg(test)]
+pub(crate) use publication::publish_unshipped_for_tests;
 pub use publication::{ApprovalRequest, Comparison, PublishedDefinition, WiringStatus};
 
 use serde::{Deserialize, Serialize};

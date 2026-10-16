@@ -20,6 +20,8 @@ use tower_sessions::{
 };
 #[path = "administration_tests.rs"]
 mod administration_tests;
+#[path = "formula_tests.rs"]
+mod formula_tests;
 #[path = "material_tests.rs"]
 mod material_tests;
 #[path = "registry_tests.rs"]
@@ -613,6 +615,7 @@ async fn actual_router_campaign_native_full_replace_escaped_drafts_private_legac
         .status(),
         StatusCode::SEE_OTHER
     );
+    assert_native_page_has_no_formula_markers(&app, &auth[2]).await;
     for pair in &mut form {
         if pair.0 == "revision" {
             pair.1 = "1".into();
@@ -647,6 +650,29 @@ async fn actual_router_campaign_native_full_replace_escaped_drafts_private_legac
         StatusCode::BAD_REQUEST
     );
     assert!(store.list().await.unwrap().is_empty());
+}
+
+/// Native sheets have no immutable pin, so nothing is evaluated or shown as advisory.
+async fn assert_native_page_has_no_formula_markers(app: &axum::Router, auth: &RequestAuth) {
+    use axum::http::StatusCode;
+    let native_page = router_request(app, auth, "/private-sheets/1", None).await;
+    assert_eq!(native_page.status(), StatusCode::OK);
+    let native_html = String::from_utf8(
+        axum::body::to_bytes(native_page.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    for marker in [
+        "dvisory",
+        "Computed",
+        "formula-results",
+        "How this is computed",
+    ] {
+        assert!(!native_html.contains(marker), "native page shows {marker}");
+    }
+    assert!(native_html.contains("fieldset style=\"min-width:0\" >"));
 }
 
 async fn published_fixture(store: &Store) -> i64 {
