@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,7 @@ COPIED = (
     "run_queue.py",
     "toolloop_ops.py",
     "tool_loop_benchmark.py",
+    "run_watchdog.py",
 )
 SUBSET = TOOLS / "case-subsets" / "dev-screen-40.json"
 OWNED = "mimik-toolloop-v3-"
@@ -58,7 +60,14 @@ def hang(what):
         time.sleep(3600)
 VALUE = {"--name", "--network", "--network-alias", "--user", "--cap-drop", "--security-opt",
          "--memory", "--memory-swap", "--cpus", "--pids-limit", "--device", "--group-add",
-         "--mount", "--tmpfs", "-e", "--pull"}
+         "--mount", "--tmpfs", "-e", "--pull", "--label"}
+def labels_of(opts):
+    return dict(l.split("=", 1) for l in opts.get("--label", []))
+def label_filter(args):
+    for n, a in enumerate(args):
+        if a == "--filter" and args[n + 1].startswith("label="):
+            return args[n + 1][len("label="):]
+    return None
 if args[0] == "run":
     opts, i, mounts = {}, 1, {}
     while args[i].startswith("-"):
@@ -73,6 +82,9 @@ if args[0] == "run":
             i += 1
     image, cmd = args[i], args[i + 1:]
     name = opts.get("--name", [""])[0]
+    labels = labels_of(opts)
+    if labels.get("mimik.toolloop") != "v3" or "mimik.toolloop.run" not in labels:
+        sys.exit("fake docker: run without the ownership labels")
     for need in ("--pull", "--init"):
         if need not in opts:
             sys.exit(f"fake docker: run without {need}")
@@ -89,12 +101,15 @@ if args[0] == "run":
             path = env["MIMIK_FORMULA_EVAL"]
         else:
             advance(env.get("FAKE_HASH_SECONDS", 0))
+            if env.get("FAKE_HASH_SLEEP"):
+                (log / "hash.pid").write_text(str(os.getpid()))
+                time.sleep(float(env["FAKE_HASH_SLEEP"]))
         print(f"{hashlib.sha256(Path(path).read_bytes()).hexdigest()}  {cmd[1]}")
         sys.exit(0)
     if name.endswith("-srv"):
         (log / "server.json").write_text(json.dumps({"image": image, "args": cmd, "mounts": mounts, "opts": opts}))
         dies = bool(env.get("FAKE_SERVER_DIES_VRAM"))
-        state["c"][name] = {"status": "exited" if dies else "running", "rc": 1 if dies else 0, "oom": False,
+        state["c"][name] = {"status": "exited" if dies else "running", "rc": 1 if dies else 0, "oom": False, "label": "v3",
                             "log": "ggml_vulkan: ErrorOutOfDeviceMemory\n" if dies else
                                    "       eval time =   100.00 ms /    10 tokens\n"}
         save()
@@ -119,14 +134,14 @@ if args[0] == "run":
         h.write(json.dumps(cmd) + "\n")
     phase = "main" if "--arm" not in cmd or not cmd[cmd.index("--arm") + 1].endswith("-preflight") else "preflight"
     if env.get("FAKE_HARNESS_RUNNING") and phase == "main":
-        state["c"][name] = {"status": "running", "rc": 0, "oom": False, "out": "", "err": ""}
+        state["c"][name] = {"status": "running", "rc": 0, "oom": False, "out": "", "err": "", "label": "v3"}
         save()
         print("beef")
         sys.exit(0)
     proc = subprocess.run([sys.executable] + mapped[1:] + ["--dry-run"], capture_output=True, text=True)
     oom = bool(env.get("FAKE_MAIN_OOM")) and phase == "main"
     state["c"][name] = {"status": "exited", "rc": 137 if oom else proc.returncode, "oom": oom,
-                        "out": proc.stdout, "err": proc.stderr}
+                        "out": proc.stdout, "err": proc.stderr, "label": "v3"}
     save()
     print("beef")
     sys.exit(0)
@@ -135,7 +150,9 @@ if args[0] == "inspect":
     c = state["c"].get(name)
     if c is None:
         sys.exit(1)
-    if "{{.Id}}" in fmt:
+    if "Config.Labels" in fmt:
+        print(c.get("label") or "")
+    elif "{{.Id}}" in fmt:
         print("cafe" + name[-3:])
     elif "State.Status" in fmt:
         if c["status"] == "running":
@@ -150,9 +167,18 @@ if args[0] == "exec":
     c = state["c"].get(args[1])
     print("{}")
     sys.exit(0 if c and c["status"] == "running" else 1)
+if args[0] == "context":
+    print(env.get("FAKE_CONTEXT", "default"))
+    sys.exit(0)
+if args[0] in ("pause", "unpause"):
+    with open(log / "pauses.jsonl", "a") as h:
+        h.write(json.dumps(args) + "\n")
+    sys.exit(0 if args[1] in state["c"] else 1)
 if args[0] == "ps":
     hang("ps")
-    names = sorted(state["c"])
+    wanted = label_filter(args)
+    names = sorted(n for n, c in state["c"].items()
+                   if wanted is None or ("mimik.toolloop=" + str(c.get("label"))) == wanted)
     if "-q" in args:
         print("\n".join("id" + n for n in names if n.startswith("mimik-toolloop-v3-")))
     else:
@@ -180,12 +206,15 @@ if args[0] == "network":
     hang("network")
     sub = args[1]
     if sub == "inspect":
-        if "mimik-toolloop-v3" not in state["n"]:
+        net = state["n"].get("mimik-toolloop-v3")
+        if net is None:
             sys.exit(1)
-        print(str(state["n"]["mimik-toolloop-v3"]).lower())
+        print(f"{str(net['internal']).lower()} {net['label'] or '<no value>'}")
         sys.exit(0)
     if sub == "create":
-        state["n"]["mimik-toolloop-v3"] = "--internal" in args
+        labels = dict(a.split("=", 1) for n, a in enumerate(args) if n and args[n - 1] == "--label")
+        state["n"]["mimik-toolloop-v3"] = {"internal": "--internal" in args,
+                                           "label": labels.get("mimik.toolloop")}
         save()
         sys.exit(0)
     if sub == "rm":
@@ -193,7 +222,10 @@ if args[0] == "network":
         save()
         sys.exit(0)
     if sub == "ls":
-        print("\n".join(["bridge"] + sorted(state["n"])))
+        wanted = label_filter(args)
+        names = [n for n, v in state["n"].items()
+                 if wanted is None or "mimik.toolloop=" + str(v["label"]) == wanted]
+        print("\n".join(([] if wanted else ["bridge"]) + sorted(names)))
         sys.exit(0)
 if args[0] == "image":
     print("image_id=sha256:fake version=b11610 revision=x")
@@ -238,7 +270,23 @@ class RunnerTests(unittest.TestCase):
         self.formula_sha = hashlib.sha256(Path(FORMULA).read_bytes()).hexdigest()
         self.clock = self.tmp / "clock"
 
+    def runner_env(self, **env):
+        return self._env(env)
+
     def run_runner(self, *argv, **env):
+        base = self._env(env)
+        proc = subprocess.run(
+            ["bash", str(self.repo / "tools" / "run_tool_loop_benchmark.sh"), *argv],
+            env=base,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=300,
+        )
+        return proc, Path(base["OUT_DIR"])
+
+    def _env(self, env):
         base = {
             "PATH": f"{self.bin}:{os.environ['PATH']}",
             "HOME": str(self.tmp),
@@ -256,16 +304,7 @@ class RunnerTests(unittest.TestCase):
         for k, v in env.items():
             if v is None:
                 base.pop(k, None)
-        proc = subprocess.run(
-            ["bash", str(self.repo / "tools" / "run_tool_loop_benchmark.sh"), *argv],
-            env=base,
-            capture_output=True,
-            text=True,
-            stdin=subprocess.DEVNULL,
-            check=False,
-            timeout=300,
-        )
-        return proc, Path(base["OUT_DIR"])
+        return base
 
     @staticmethod
     def future(weekday, hour):
@@ -305,8 +344,9 @@ class RunnerTests(unittest.TestCase):
 
     def assert_clean(self):
         state = self.state()
-        self.assertEqual([n for n in state["c"] if n.startswith(OWNED)], [])
-        self.assertEqual(state["n"], {})
+        owned = [n for n, c in state["c"].items() if n.startswith(OWNED) and c.get("label") == "v3"]
+        self.assertEqual(owned, [])
+        self.assertEqual({n: v for n, v in state["n"].items() if v.get("label") == "v3"}, {})
 
     def test_pass_through_reaches_server_and_header(self):
         proc, out = self.run_runner(
@@ -563,21 +603,26 @@ class RunnerTests(unittest.TestCase):
 
     def test_docker_failures_are_infra_docker(self):
         cases = {
-            "check container": {"FAKE_CHECK_FAIL": "1"},
-            "hanging network": {"FAKE_HANG": "network", "DOCKER_TIMEOUT": "2"},
+            "check container": ({"FAKE_CHECK_FAIL": "1"}, 12),
+            # A hung docker also cannot verify the cleanup: exit 11, first failure kept.
+            "hanging network": ({"FAKE_HANG": "network", "DOCKER_TIMEOUT": "2"}, 11),
         }
-        for name, env in cases.items():
+        for name, (env, code) in cases.items():
             with self.subTest(name=name):
                 proc, out = self.run_runner("qwen3-4b-2507", "smoke", "17", **env)
-                self.assertEqual(proc.returncode, 12, proc.stderr)
-                self.assertIn("failure=infra_docker", (out / "provenance.txt").read_text())
+                self.assertEqual(proc.returncode, code, proc.stderr)
+                self.assertEqual(self.prov(out)["failure"], "infra_docker")
 
     def test_existing_external_network_refused(self):
-        state = {"c": {}, "n": {"mimik-toolloop-v3": False}}
-        (self.log / "state.json").write_text(json.dumps(state))
-        proc, out = self.run_runner("qwen3-4b-2507", "smoke", "17")
-        self.assertEqual(proc.returncode, 12, proc.stderr)
-        self.assertIn("not internal", (out / "provenance.txt").read_text())
+        for net in ({"internal": False, "label": "v3"}, {"internal": True, "label": None}):
+            with self.subTest(net=net):
+                state = {"c": {}, "n": {"mimik-toolloop-v3": net}}
+                (self.log / "state.json").write_text(json.dumps(state))
+                proc, out = self.run_runner("qwen3-4b-2507", "smoke", "17")
+                self.assertEqual(proc.returncode, 12, proc.stderr)
+                self.assertIn("not internal and owned", (out / "provenance.txt").read_text())
+                if net["label"] is None:  # a foreign network is never removed
+                    self.assertIn("mimik-toolloop-v3", self.state()["n"])
 
     def test_vram_failure_is_infra_vram(self):
         proc, out = self.run_runner("qwen3-4b-2507", "smoke", "17", FAKE_SERVER_DIES_VRAM="1")
@@ -601,6 +646,96 @@ class RunnerTests(unittest.TestCase):
         calls = (self.log / "harness-calls.jsonl").read_text().splitlines()
         self.assertEqual(len(calls), 1)
         self.assert_clean()
+
+    # ---- second review round
+    def test_foreign_same_prefix_container_survives_cleanup(self):
+        foreign = {"status": "running", "rc": 0, "oom": False, "label": None}
+        state = {"c": {OWNED + "foreign": foreign}, "n": {}}
+        (self.log / "state.json").write_text(json.dumps(state))
+        proc, out = self.run_runner("qwen3-4b-2507", "smoke", "17")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(OWNED + "foreign", self.state()["c"])
+        self.assertEqual(self.prov(out)["cleanup_verified"], "true")
+        self.assertIn("run_id", self.prov(out))
+
+    def test_endpoint_override_or_context_refused(self):
+        for env in (
+            {"DOCKER_HOST": "tcp://elsewhere"},
+            {"DOCKER_CONFIG": "/tmp/c"},
+            {"DOCKER_CONTEXT": "x"},
+            {"FAKE_CONTEXT": "remote"},
+        ):
+            with self.subTest(env=env):
+                proc, _ = self.run_runner("qwen3-4b-2507", "smoke", "17", **env)
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertFalse((self.log / "server.json").exists())
+
+    def test_server_frozen_before_diagnostics_on_normal_completion(self):
+        proc, out = self.run_runner("qwen3-4b-2507", "smoke", "17")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        calls = self.calls()
+        index = {tuple(c[:2]): i for i, c in reversed(list(enumerate(calls)))}
+        pause = index[("pause", OWNED + "srv")]
+        self.assertLess(index[("stop", "-t")], pause)  # the harness stopped first
+        stop_srv = next(
+            i for i, c in enumerate(calls) if c[:4] == ["stop", "-t", "10", OWNED + "srv"]
+        )
+        logs_srv = next(i for i, c in enumerate(calls) if c[:2] == ["logs", OWNED + "srv"])
+        self.assertLess(pause, stop_srv)
+        self.assertLess(stop_srv, logs_srv)
+        prov = self.prov(out)
+        self.assertEqual(prov["server_paused_for_diagnostics"], "true")
+        self.assertIn("server_swap_peak", prov)
+        text = (out / "provenance.txt").read_text()
+        self.assertLess(text.index("main_exit="), text.index("server_swap_peak="))
+
+    def test_cleanup_not_verified_when_docker_cannot_list(self):
+        proc, out = self.run_runner(
+            "qwen3-4b-2507", "smoke", "17", CHECK_ONLY="1", FAKE_HANG="ps", DOCKER_TIMEOUT="2"
+        )
+        self.assertEqual(proc.returncode, 11, proc.stderr)
+        self.assertEqual(self.prov(out)["cleanup_verified"], "false")
+
+    def test_stop_kills_a_running_hash(self):
+        """Sonnet N4: timeout --foreground keeps the hash in the runner's process group."""
+        env = dict(os.environ)
+        proc = subprocess.Popen(
+            [
+                "bash",
+                str(self.repo / "tools" / "run_tool_loop_benchmark.sh"),
+                "qwen3-4b-2507",
+                "smoke",
+                "17",
+            ],
+            env=self.runner_env(FAKE_HASH_SLEEP="120"),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        del env
+        pid_file = self.log / "hash.pid"
+        deadline = time.time() + 60
+        while not pid_file.exists() and time.time() < deadline:
+            time.sleep(0.2)
+        hash_pid = int(pid_file.read_text())
+        os.killpg(proc.pid, signal.SIGTERM)
+        self.assertEqual(proc.wait(60), 143)
+        time.sleep(0.5)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(hash_pid, 0)
+
+    def test_hash_bounded_by_the_time_left(self):
+        when = self.future(2, 20)
+        env = self.at_clock(when)
+        cutoff = int(rq.epoch(rq.dt.datetime(*when))) + 905  # 5 s left after the margin
+        proc, out = self.run_runner(
+            "qwen3-4b-2507", "smoke", "17", WINDOW_END=str(cutoff), FAKE_HASH_SLEEP="60", **env
+        )
+        self.assertEqual(proc.returncode, 10, proc.stderr)
+        text = (out / "provenance.txt").read_text()
+        self.assertIn("did not finish before the cutoff", text)
+        self.assertIn("hash_limit_seconds=5", text)
 
     def test_shellcheck_clean_if_available(self):
         if not shutil.which("shellcheck"):

@@ -1150,6 +1150,7 @@ class Queue:
                 self.transition(arm, "not_started", reason="watchdog unavailable")
                 self.stop("watchdog unavailable: no heavy work without it")
                 return "not_started"
+            self.log("watchdog_ready", arm=arm["id"])
             ok, why = self.check_pass(arm)
             if not ok:
                 self.transition(arm, "refused", reason=f"CHECK_ONLY pre-pass: {why}")
