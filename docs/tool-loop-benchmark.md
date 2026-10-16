@@ -478,7 +478,8 @@ the runner, every value `shlex`-quoted) are the other commands. Stdlib only.
 - **Paths:** `model_root` is `/media/data/mimik/models` (slow HDD), overridden by
   `MIMIK_MODEL_ROOT`. Entry paths are relative to the root. Files moved from the repo's
   `target/` keep their layout (`target/<dir>/<file>`), so the same entries work with
-  `MIMIK_MODEL_ROOT=/home/marco/Progetti/mimik` (the old location, where symlinks stay) and
+  `MIMIK_MODEL_ROOT=/home/marco/Progetti/mimik` (the old location, where symlinks stay; not
+  used by the launch recipe) and
   with the default root. New downloads go to `<key>/<file>`. The runner resolves symlinks
   (`realpath -e`), checks the size against the registry, hashes the resolved file and
   bind-mounts the resolved file.
@@ -699,44 +700,85 @@ validates it and prints each arm's episodes and estimate; `window-check [--cutof
   attempt. Each records max VRAM, swap and seconds per token (summed llama.cpp `eval time`
   lines of `server.log`, prompt eval excluded; else seconds per episode, labelled as a
   fallback and computed before qualification). Swap is the server cgroup's
-  `memory.swap.peak`; if that is not readable, host-wide swap growth (logged as a fallback).
-  A candidate qualifies if it completed with VRAM ≤ `vram_max_bytes` (7.5e9 B) and swap
-  growth ≤ `swap_growth_max_mib`, **0 by default ("no swap growth")**. A candidate stopped by
-  the window or a deadline, or without timings, swap or VRAM figures, is `indeterminate` and
-  does not close G0; a failed load or a determinate unqualified result closes it (lower
+  `memory.swap.peak` (on this host `/sys/fs/cgroup/docker/<id>/memory.swap.peak`, cgroupfs
+  driver, cgroup v2). A candidate qualifies if it completed with VRAM ≤ `vram_max_bytes`
+  (7.5e9 B) and cgroup swap ≤ `swap_growth_max_mib`, **0 by default ("no swap growth")**. An
+  unreadable `memory.swap.peak` is never a disqualification: the host-wide swap growth is
+  logged as a fallback (`g0_swap_fallback`) and the candidate is `indeterminate`. A candidate
+  stopped by the window or a deadline, or without timings, cgroup swap or VRAM figures, is
+  `indeterminate` and does not close G0; the G0 deadline is rechecked right before each
+  launch, after the window wait and the prechecks; a failed load or a determinate unqualified result closes it (lower
   values need more VRAM). An arm with `n_cpu_moe_from_g0` gets the qualified candidate with
   the lowest seconds per token (ties: larger n-cpu-moe), or is refused if none qualified.
-- **Watchdog (review fix 2):** the queue starts `tools/run_watchdog.py` as a separate process
-  (its own session; a second one exits at once), and it also runs standalone. Every
+- **Watchdog (review fix 2, hardened in round 2):** `tools/run_watchdog.py` is a separate
+  process (its own session; a second one exits at once) that also runs standalone. Every
   `--interval` (default 30 s, at most 60 s) it checks the schedule with the real clock only:
-  outside the window it force-removes every owned container and the network, whatever lock
-  is held; inside the window it removes owned containers as orphans once neither the runner
-  nor the queue lock has been held for `--grace` (120 s). Every docker call has a timeout;
-  every action is a JSON line in its log; it exits after `--idle-exit` (3600 s) with no lock
-  holder and no owned container.
+  from the window edge minus a 240 s reserve (`removed_at_window_edge`, reserve recorded) and
+  whenever heavy work is not allowed, it force-removes every owned container and the owned
+  network, whatever lock is held; inside the window it removes owned containers as orphans
+  once neither the runner nor the queue lock has been held for `--grace` (120 s). A lock probe
+  that cannot decide (an OSError other than a missing lock file) counts as held. If `docker
+  ps` fails it falls back to the known fixed names, each removed only after its label is
+  confirmed, and retries every tick. Log and heartbeat write errors, and any exception in a
+  tick, never stop the loop. It exits after `--idle-exit` (3600 s) with no lock holder and no
+  owned container. Order at the edge: runner stops at cutoff − 360 s, queue at cutoff − 300
+  s, watchdog at cutoff − 240 s.
+- **Watchdog readiness (round 2):** every tick rewrites
+  `<main checkout>/target/tool-loop-watchdog.heartbeat` (pid and time). Before each arm's
+  first heavy step the queue requires a fresh heartbeat (≤ 90 s, live pid), starting the
+  watchdog and waiting up to 60 s if needed (`watchdog_ready` in `queue.log`); during an
+  attempt it checks on every poll and restarts the watchdog if it is gone. Without a ready
+  watchdog no heavy work starts, and a running attempt is stopped and the queue stops.
+- **CHECK_ONLY pre-pass (round 2, plan §8):** at window start, before each attempt's first
+  heavy step, the queue runs the runner with `CHECK_ONLY=1` (registry, config, CLI and model
+  hash, provenance; `arms/<id>/check-<n>/`). The hash cache makes the hash cheap afterwards.
+  A failed pre-pass refuses the arm with its reason.
+- **Fit, reruns, console (round 2):** the fit rule uses max(`stop_margin_seconds`, 900 s), the
+  runner's gate margin. After a stop the arm is rerun whole at the first window start that can
+  hold its estimate (a Saturday stop reruns the same weekend). Console reasons pass through a
+  filter that replaces anything shaped like a case id (`dev-001`, `ho-129`) with `<case>`. A
+  ledger that cannot be parsed or checked fails that arm, not the queue.
+- **Ownership and endpoint (round 2):** every owned container and the network carry the labels
+  `mimik.toolloop=v3` and `mimik.toolloop.run=<run id>`; the runner, the queue cleanup and
+  the watchdog act only on objects with the label **and** the name prefix, so a foreign
+  container or network with the same prefix is never touched (an unlabelled network named
+  `mimik-toolloop-v3` makes the runner refuse to start, `infra_docker`). The runner, the queue
+  and the watchdog refuse to run when `DOCKER_HOST`, `DOCKER_CONTEXT` or `DOCKER_CONFIG` is set
+  at all, and the runner also requires `docker context show` = `default`: one Docker endpoint
+  only.
 
 Queue files: `tools/queues/screen-small-s40.json` (9B then 4B, 40-case subset, seed 17, arm
 `S40-c0`, C0 flags, thinking off, T 0.1, ctx 24576) and `tools/queues/g0-qwen36-35b-a3b.json`
-(G0 at n-cpu-moe 40, 36, 32, 28, 24 within 4 h, swap tolerance 0, then the same screen at the
-G0 choice; request timeout 600 s, health wait 1800 s; the candidate list is a proposal to
-freeze before the run). ctx 24576 is chosen because the conservative 8-turn bound (≈22.3k
-tokens) exceeds 16384; the exact figure still waits for the tokenizer count.
+(G0 at n-cpu-moe **40, 36, 32, 28, 24, frozen** by the main session's decision, swap tolerance
+0, **G0 deadline 8 h**: the worst-case estimate is 5 × 1.28 h = 6.4 h with each candidate
+re-reading the 20.4 GB GGUF at 12.6 MB/s, about 4.6 h once the session hash cache holds the
+hash; then the same screen at the G0 choice; request timeout 600 s, health wait 1800 s).
+**ctx 24576 for the screens is confirmed** (main session); it was chosen because the
+conservative 8-turn bound (≈22.3k tokens) exceeds 16384.
 
-Start the queues detached (each sleeps until the window opens; the second waits for the first,
-because only one queue may run):
+**Launch from a frozen copy** (round 2, N1): `tools/launch_frozen_queue.sh <commit>
+<queue.json>…` creates (or reuses) a clean detached worktree `<main checkout>/../mimik-wt/
+run-<12-hex>` at that commit, checks that it is at the commit and has no local changes, and
+starts the given queues in order inside it with `setsid nohup bash -c '…; …'`. The queues
+run one after the other, because the second command starts only when the first queue process
+has exited (whatever its outcome). The models come from the registry default root
+`/media/data/mimik/models` (no `MIMIK_MODEL_ROOT` override). Edits to `harness-v3` or any
+other checkout cannot change a running queue, and the harness sha pinned in the ledgers is the
+frozen commit's by construction; the runner, queue and watchdog locks stay shared in the main
+checkout's `target/` through the common git dir. `--print` creates and checks the worktree and
+prints the command without starting it.
 
 ```sh
-cd /home/marco/Progetti/mimik-wt/harness-v3 && mkdir -p target
-MIMIK_MODEL_ROOT=/home/marco/Progetti/mimik setsid nohup sh -c \
-  'python3 tools/run_queue.py run tools/queues/screen-small-s40.json;
-   python3 tools/run_queue.py run tools/queues/g0-qwen36-35b-a3b.json' \
-  > target/queue-tonight.console 2>&1 < /dev/null &
+cd /home/marco/Progetti/mimik-wt/harness-v3
+tools/launch_frozen_queue.sh <commit> tools/queues/screen-small-s40.json \
+  tools/queues/g0-qwen36-35b-a3b.json
 ```
 
-Each queue starts its watchdog; to run one by itself:
+Each queue starts its watchdog and waits for its heartbeat; to run one by itself:
 `setsid nohup python3 tools/run_watchdog.py > target/watchdog.console 2>&1 < /dev/null &`.
-Session output: `target/tool-loop-queue-<name>-<time>/` (`manifest.json`, `queue.log`,
-`watchdog.log`, `hash-cache.txt`, `arms/<id>/attempt-<n>/`). Summaries afterwards:
+Session output, inside the frozen worktree: `target/tool-loop-queue-<name>-<time>/`
+(`manifest.json`, `queue.log`, `watchdog.log`, `hash-cache.txt`,
+`arms/<id>/check-<n>/`, `arms/<id>/attempt-<n>/`). Summaries afterwards:
 `tool_loop_benchmark.py --summarize <ledger>…` inside `mimik-ci`.
 
 ### Verification (2026-10-16, helper/unit only; review fixes the same day)
@@ -795,6 +837,70 @@ Session output: `target/tool-loop-queue-<name>-<time>/` (`manifest.json`, `queue
   model load, the real llama.cpp image's TERM handling (the smoke uses `sleep` under
   `--init`), the cgroup `memory.swap.peak` read on this host's real server container, and a
   DST transition night.
+
+### Second review round (2026-10-16)
+
+Sonnet CLEARED-with-notes, Sol and Space Bunny NOT CLEARED; the coordinator adjudicated twelve
+items, all fixed (watchdog hardening and readiness, labels, one Docker endpoint, server frozen
+before diagnostics on every path, G0 recheck, swap indeterminate, CHECK_ONLY pre-pass, fit 900
+and bounded steps, weekend reruns, small fixes, docs, frozen-copy launch). Runner details
+beyond the sections above:
+
+- On every exit path the harness is stopped, then the server is **frozen** (`docker pause`,
+  the cgroup freezer: no compute, while the cgroup and VRAM can still be read), then the
+  diagnostics are read (`vram_used_end`, `server_memory_peak`, `server_swap_peak`, host swap;
+  `server_paused_for_diagnostics=true`), then the server is unpaused and stopped, and only
+  then the OOM flag and the server log are collected. A `cgroup` file vanishes with a stopped
+  container, so "stopped before diagnostics" is met by the freeze.
+- The hash and the pre-warm are bounded by min(their own limit, cutoff − now − 900 s); a
+  timeout imposed by the window is `failure=window` (exit 10) and recorded
+  (`hash_limit_seconds`). Every `timeout` runs with `--foreground`, so it stays in the
+  runner's process group and a stop (SIGTERM to the group) kills a running hash or `cat`.
+- `cleanup_verified=true` only when both the labelled container list and the network list
+  succeeded and were empty; a docker that cannot list gives `cleanup_verified=false` and
+  exit 11.
+
+**Swap path verified on this host (2026-10-16, throwaway `mimik-ci sleep` container,
+`--memory 256m --memory-swap 256m`):** Docker uses the cgroupfs driver on cgroup v2, so the
+files are under `/sys/fs/cgroup/docker/<container id>/` (the systemd path
+`/sys/fs/cgroup/system.slice/docker-<id>.scope/` does not exist here). They were readable:
+`memory.swap.peak` = 0, `memory.swap.current` = 0, `memory.swap.max` = 0, `memory.peak` =
+5,701,632. With `--memory-swap` equal to `--memory` (as the runner sets it) the container's
+own swap is disabled, so its `memory.swap.peak` is 0 by construction; it shows the container
+never swapped, not that the host did not. Host-wide swap is still recorded beside it.
+
+**Verification (helper/unit only, plus the real-docker smoke):**
+
+- Gate: `ruff check tools`, `ruff format --check tools`, unittest **412 tests OK, 8 skipped**
+  (the ShellCheck test, and the 7 real-docker smoke tests, opt-in on the host). ShellCheck
+  0.11.0 clean on `run_tool_loop_benchmark.sh` and `launch_frozen_queue.sh`.
+- Per file: runner args 17, registry 13, queue 65, runner 26 (1 skipped), watchdog 23,
+  frozen launch 2, real-docker smoke 7.
+- **Real-docker smoke rerun: 7/7 passed**, nothing owned left afterwards, no watchdog process
+  left. New: the queue with the real supervisor and the real `run_watchdog.py` logged
+  `watchdog_ready` before its first `running` transition, the heartbeat pid was alive, and,
+  since the run was on a weekday afternoon, the real watchdog removed the run's containers
+  (`removed_at_window_edge`); a container named with the owned prefix but without the label
+  survived both the queue cleanup and a watchdog tick, while the labelled one was removed. The
+  five earlier cases (SIGTERM and SIGKILL of runner and queue, watchdog outside the window)
+  passed again with labelled objects.
+- Failing first: the new watchdog and ops tests against `9915b92`: 11 red (missing reserve,
+  fallback, probe-error, logging, heartbeat, label and endpoint behaviour); the new runner
+  tests against `9915b92`: the endpoint, foreign-container, freeze, listing, process-group and
+  window-bound tests red (the fake docker now also rejects unlabelled runs, so most older tests
+  were red too); `test_launch_frozen_queue.py` red as a missing script. The new queue tests
+  are pinned by mutation (below).
+- Mutation checks, round 2 (each killed): queue: no readiness gate; no mid-attempt watchdog
+  check; no CHECK_ONLY pre-pass; no G0 recheck; host swap qualifies; fit margin 300; console
+  unsanitised; ledger error crashes the queue; no retry cooldown (survived before; the test
+  now uses a distinctive 47 s cooldown). Runner: no label filter; no endpoint check; no freeze
+  before diagnostics; verified without listing (the first form of this mutant was equivalent,
+  only changing the message; the listing-gate mutant is killed); no `--foreground`; hash not
+  window-bounded. Watchdog and ops: no edge reserve; `ps` failure ignored; probe error treated
+  as free (both in the watchdog and in `lock_held`); log error fatal.
+- **Not run:** any `CHECK_ONLY` or live run on the real model files, the real llama.cpp
+  image's TERM and pause handling, `memory.swap.peak` on a real server container, and a DST
+  night.
 
 ## Limitations
 
