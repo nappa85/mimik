@@ -2329,3 +2329,326 @@ async fn source_fixture_list_definition_saves_and_evaluates() {
     assert_eq!(derived, ["11", "1"], "load 2*3 + 1*5 and r1-1 kept");
     assert!(html.contains("Advisory checks: 1 violated"), "load 11 > 10");
 }
+
+// ---- Step 7: large-form transport (plan D7) ----
+
+/// Page-size bound of a sheet re-render (plan D7, RE3-1): fixed chrome, plus a bounded markup
+/// per render unit (a control, option or row element with its label, escaped, including one
+/// 64-character excerpt), plus each echoed byte once at the widest escape (`&#34;`, 5 bytes).
+/// Derived fields and checks are not in these fixtures; their markup is bounded by the
+/// formula layer's expression limits.
+pub(super) const FIXED_PAGE_BYTES: usize = 64 * 1024;
+pub(super) const UNIT_MARKUP_BYTES: usize = 2_048;
+
+/// Render units of a formula-free list definition with `rows[f]` rows per list (plan D7).
+fn render_units(definition: &Value, rows: &[usize]) -> usize {
+    let choices = |item: &Value| match item["control"].as_str().unwrap() {
+        "enum" => item["options"].as_array().unwrap().len() + 1,
+        "boolean" => 3,
+        _ => 0,
+    };
+    definition["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(f, field)| {
+            if field["control"] == "list" {
+                let per_row: usize = field["items"]["properties"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| 1 + choices(p) + if p["optional"] == true { 2 } else { 0 })
+                    .sum();
+                4 + rows.get(f).copied().unwrap_or_default() * (4 + per_row)
+            } else {
+                1 + choices(field) + if field["nullable"] == true { 2 } else { 0 }
+            }
+        })
+        .sum()
+}
+
+fn page_bound(units: usize) -> usize {
+    FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES + 5 * super::super::web::ECHO_BYTES
+}
+
+async fn big_post(setup: &Setup, path: &str, body: String) -> (StatusCode, String) {
+    let response = raw_post(setup, path, body).await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024 * 1024)
+        .await
+        .unwrap();
+    (status, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
+/// A list-sheet edit form whose notes pad the URL-encoded body to exactly `size` bytes.
+fn padded(revision: i64, size: usize) -> String {
+    let base = serde_urlencoded::to_string(list_form(
+        revision,
+        vec![equipment_row(0, "r1-1", "Rope", "1", None, None, "false")],
+    ))
+    .unwrap();
+    let without = base.replace("&notes=&", "&");
+    let pad = size - without.len() - "&notes=".len();
+    format!("{without}&notes={}", "a".repeat(pad))
+}
+
+#[tokio::test]
+async fn sheet_post_accepts_5mib_and_413s_5mib_plus_1() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    create_rows(&setup, 1).await;
+    let limit = super::super::web::SHEET_POST_BYTES;
+    assert_eq!(limit, 5 * 1024 * 1024);
+    let body = padded(1, limit);
+    assert_eq!(body.len(), limit);
+    let (status, _) = big_post(&setup, "/private-sheets/1", body).await;
+    assert_ne!(status, StatusCode::PAYLOAD_TOO_LARGE, "exactly 5 MiB");
+    let (status, _) = big_post(&setup, "/private-sheets/1", padded(1, limit + 1)).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    // The create POST has the same limit.
+    let path = create_path(&setup);
+    let (status, _) = big_post(&setup, &path, padded(0, limit + 1)).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "create");
+    let (status, _) = big_post(&setup, &path, padded(0, limit)).await;
+    assert_ne!(status, StatusCode::PAYLOAD_TOO_LARGE, "create at the limit");
+}
+
+#[tokio::test]
+async fn non_sheet_posts_keep_8kib() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    let body = |size: usize| {
+        let base = format!(
+            "csrf={}&game_id=synthetic-game&edition_id=first&title=",
+            "a".repeat(64)
+        );
+        format!("{base}{}", "t".repeat(size - base.len()))
+    };
+    let (status, _) = big_post(&setup, "/campaigns", body(8192)).await;
+    assert_ne!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let (status, _) = big_post(&setup, "/campaigns", body(8193)).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let join = format!("/campaigns/{}/join", setup.campaign);
+    let (status, _) = big_post(&setup, &join, format!("csrf={}", "a".repeat(8188))).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "join: 8,193 bytes");
+}
+
+#[tokio::test]
+async fn unauthenticated_large_post_is_403_without_reading_the_body() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tower::ServiceExt;
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    create_rows(&setup, 1).await;
+    for path in ["/private-sheets/1".to_owned(), create_path(&setup)] {
+        let polled = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&polled);
+        let chunks = futures_util::stream::iter((0..320).map(move |_| {
+            counter.fetch_add(16 * 1024, Ordering::SeqCst);
+            Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![b'a'; 16 * 1024]))
+        }));
+        let request = axum::http::Request::builder()
+            .uri(&path)
+            .method("POST")
+            .header("host", "127.0.0.1:3000")
+            .header("origin", "http://127.0.0.1:3000")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(axum::body::Body::from_stream(chunks))
+            .unwrap();
+        let response = setup.app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        let read = polled.load(Ordering::SeqCst);
+        assert!(read <= 64 * 1024, "{path}: {read} bytes polled before 403");
+    }
+}
+
+#[tokio::test]
+async fn stored_over_1mib_is_422_with_draft() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    create_rows(&setup, 1).await;
+    let quotes = "\"".repeat(2_400);
+    let rows = (0..256)
+        .map(|r| {
+            equipment_row(
+                r,
+                if r == 0 { "r1-1" } else { "" },
+                &quotes,
+                "1",
+                None,
+                None,
+                "false",
+            )
+        })
+        .collect();
+    let form = list_form(1, rows);
+    let decoded: usize = form.iter().map(|(_, v)| v.len()).sum();
+    assert!(
+        decoded <= super::super::web::ECHO_BYTES,
+        "within the echo cap"
+    );
+    let (status, html) = big_post(
+        &setup,
+        "/private-sheets/1",
+        serde_urlencoded::to_string(form).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        status_text(&html).starts_with("No changes saved:"),
+        "{}",
+        status_text(&html)
+    );
+    assert_eq!(
+        get(&submitted_by(&html, None), "row-1-255-0"),
+        quotes,
+        "draft kept"
+    );
+    assert_eq!(reopen(&setup, 1).await.revision, 1, "nothing saved");
+}
+
+fn alert_text(html: &str) -> String {
+    scraper::Html::parse_document(html)
+        .select(&selector("p[role=alert]"))
+        .next()
+        .map(|element| element.text().collect())
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn oversized_draft_is_not_echoed() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    create_rows(&setup, 1).await;
+    let base = serde_urlencoded::to_string(list_form(
+        1,
+        vec![equipment_row(0, "r1-1", "Rope", "1", None, None, "false")],
+    ))
+    .unwrap()
+    .replace("&notes=&", "&");
+    let quotes = (super::super::web::SHEET_POST_BYTES - base.len() - "&notes=".len()) / 3;
+    let body = format!("{base}&notes={}", "%22".repeat(quotes));
+    assert!(body.len() <= super::super::web::SHEET_POST_BYTES);
+    let (status, html) = big_post(&setup, "/private-sheets/1", body).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        alert_text(&html),
+        "This draft is larger than the 1 MiB sheet limit and was not kept. Nothing was saved; copy large text before submitting."
+    );
+    assert!(
+        !html.contains(&"&#34;".repeat(64)),
+        "the draft was not echoed"
+    );
+    assert_eq!(
+        get(&submitted_by(&html, None), "row-1-0-0"),
+        "Item 1",
+        "saved values shown"
+    );
+    let units = render_units(&list_definition(), &[0, 1, 1]);
+    assert!(html.len() <= page_bound(units), "{} bytes", html.len());
+    assert_eq!(reopen(&setup, 1).await.revision, 1);
+}
+
+#[tokio::test]
+async fn one_mib_of_quotes_is_echoed_within_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    create_rows(&setup, 2).await;
+    // Every repeated (maximum-amplification) context gets 1,000 quotes: the hidden ID, an
+    // invalid enum value, an invalid boolean and an invalid Set/Not set state, on 256 rows.
+    let quotes = "\"".repeat(1_000);
+    let rows: Vec<Vec<(String, String)>> = (0..256)
+        .map(|r| {
+            let mut row = equipment_row(r, &quotes, "n", "1", None, Some(&quotes), &quotes);
+            set(&mut row, &format!("set-1-{r}-2"), &quotes);
+            row
+        })
+        .collect();
+    let mut form = list_form(1, rows);
+    form.push(pair("op", "up-1-1"));
+    let decoded: usize = form.iter().map(|(_, v)| v.len()).sum();
+    assert!(decoded <= super::super::web::ECHO_BYTES, "{decoded}");
+    assert!(decoded > 1_000_000);
+    let (status, html) = big_post(
+        &setup,
+        "/private-sheets/1",
+        serde_urlencoded::to_string(form).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // Each value in full exactly once, plus one 64-character excerpt in its second context
+    // (the page chrome, such as the pin JSON, has its own quotes).
+    let chrome = sheet_page(&setup).await.matches("&#34;").count();
+    let escaped = html.matches("&#34;").count();
+    assert_eq!(escaped, chrome + 256 * 4 * (1_000 + 64));
+    let excerpt = format!("Invalid submitted value: {}…", "&#34;".repeat(64));
+    assert_eq!(
+        html.matches(&excerpt).count(),
+        256 * 2,
+        "enum and boolean excerpts"
+    );
+    assert_eq!(
+        html.matches(&format!("· ID {}…", "&#34;".repeat(64)))
+            .count(),
+        256,
+        "legend ID excerpts"
+    );
+    let units = render_units(&list_definition(), &[0, 256, 0]);
+    assert!(
+        html.len() <= page_bound(units),
+        "{} > {}",
+        html.len(),
+        page_bound(units)
+    );
+}
+
+/// The worst-label sheet (labels of 100 `"`, 3 lists × 256 rows × 32 properties) stays
+/// within the per-unit markup bound (no echo).
+#[tokio::test]
+async fn worst_label_page_markup_is_within_the_unit_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let definition = quoted_lists_definition(3);
+    let setup = list_setup(&definition).await;
+    let mut values = serde_json::Map::new();
+    for l in 0..3 {
+        let id = definition["fields"][l]["id"].as_str().unwrap().to_owned();
+        let items: Vec<Value> = (1..=256)
+            .map(|k| {
+                let mut item = json!({"id": format!("r1-{k}")});
+                for p in definition["fields"][l]["items"]["properties"]
+                    .as_array()
+                    .unwrap()
+                {
+                    item[p["id"].as_str().unwrap()] = 0.into();
+                }
+                item
+            })
+            .collect();
+        values.insert(id, items.into());
+    }
+    let mut snapshot = blank(&setup, 1).await;
+    snapshot.sheet_id = 1;
+    snapshot.data = values.into();
+    write(&setup, 1, snapshot, "create").await.unwrap();
+    let response =
+        super::router_request(&setup.app, &setup.auth[1], "/private-sheets/1", None).await;
+    let html = axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
+        .await
+        .unwrap();
+    let units = render_units(&definition, &[256, 256, 256]);
+    assert_eq!(units, 27_660);
+    assert!(
+        html.len() <= FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES,
+        "{} bytes for {units} units",
+        html.len()
+    );
+    println!("worst-label view page: {} bytes, {units} units", html.len());
+}

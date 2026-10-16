@@ -65,13 +65,46 @@ pub(super) static REJECTED_EDITOR_KEPT_PERMIT: Mutex<Vec<bool>> = Mutex::new(Vec
 #[cfg(test)]
 pub(super) static AFTER_FAILED_SAVE: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
 
+/// Body limit of the private sheet create and edit POSTs (plan D7): stored values are at
+/// most 1 MiB, URL encoding expands them at most 3×, and keys add at most 65,536 × 16 bytes.
+pub(super) const SHEET_POST_BYTES: usize = 5 * 1024 * 1024;
+
+/// A re-render echoes a draft only when its decoded form values total at most this many
+/// bytes: a larger draft could never be stored (plan D7, N8).
+pub(super) const ECHO_BYTES: usize = 1024 * 1024;
+
+/// Before a 5 MiB body is buffered, the session must carry a principal (cookie only, no
+/// body): an anonymous request answers 403 without its body being read (plan D7, N3).
+async fn signed_in(session: Session, request: Request, next: Next) -> Response {
+    match auth::has_principal(&session).await {
+        Ok(true) => next.run(request).await,
+        Ok(false) => StatusCode::FORBIDDEN.into_response(),
+        Err(status) => status.into_response(),
+    }
+}
+
+/// A sheet POST method: its own 5 MiB body limit (inside the router-wide 1 MiB layer, so it
+/// wins for this method only) and the pre-body principal check.
+fn sheet_post<H, T>(handler: H) -> axum::routing::MethodRouter<AuthState>
+where
+    H: axum::handler::Handler<T, AuthState>,
+    T: 'static,
+{
+    post(handler)
+        .layer(DefaultBodyLimit::max(SHEET_POST_BYTES))
+        .route_layer(middleware::from_fn(signed_in))
+}
+
 pub(crate) fn routes() -> Router<AuthState> {
     let sheets = Router::new()
         .route(
             "/campaigns/{id}/sheets/new",
-            get(new_sheet).post(create_sheet),
+            get(new_sheet).merge(sheet_post(create_sheet)),
         )
-        .route("/private-sheets/{id}", get(read_sheet).post(edit_sheet))
+        .route(
+            "/private-sheets/{id}",
+            get(read_sheet).merge(sheet_post(edit_sheet)),
+        )
         .route("/private-sheets/{id}/history/{revision}", get(read_history))
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn(runtime));
@@ -559,6 +592,12 @@ fn choices(options: Option<&Vec<crate::definitions::Choice>>) -> Vec<(String, St
 }
 
 impl FieldView {
+    fn value_excerpt(&self) -> String {
+        excerpt(&self.value)
+    }
+    fn state_excerpt(&self) -> String {
+        excerpt(&self.value_state)
+    }
     fn valid_boolean(&self) -> bool {
         matches!(self.value.as_str(), "" | "true" | "false")
     }
@@ -581,6 +620,8 @@ struct PrivateTemplate<'a> {
     sheet: &'a crate::mork_borg::Sheet,
     groups: &'a [GroupView],
     message: &'a str,
+    /// A `role="alert"` notice (an oversized draft that was not kept); empty otherwise.
+    alert: &'a str,
     name: &'a str,
     notes: &'a str,
     revision: String,
@@ -646,8 +687,7 @@ fn render_private(
     view: &SheetView,
     csrf: &str,
     raw: Option<&BTreeMap<String, String>>,
-    message: &str,
-    focus: Option<values::Focus>,
+    notice: &Notice,
 ) -> Result<String, AppError> {
     let native = matches!(view.snapshot.pin, Pin::Native { .. })
         && super::snapshots::supported(&view.snapshot);
@@ -680,7 +720,7 @@ fn render_private(
             })
         })
     };
-    let groups = groups(view, raw, formulas.as_ref(), focus)?;
+    let groups = groups(view, raw, formulas.as_ref(), notice.focus)?;
     let name = raw
         .and_then(|r| r.get("name"))
         .map_or(view.snapshot.name.as_str(), String::as_str);
@@ -710,7 +750,8 @@ fn render_private(
         draft: &draft,
         sheet: &sheet,
         groups: &groups,
-        message,
+        message: &notice.message,
+        alert: &notice.alert,
         name,
         notes,
         revision,
@@ -818,18 +859,41 @@ fn groups(
     Ok(groups)
 }
 
+/// What a rendered sheet page announces: the `role="status"` message, an optional
+/// `role="alert"`, and the single `autofocus` target after a draft operation.
+#[derive(Default)]
+struct Notice {
+    message: String,
+    alert: String,
+    focus: Option<values::Focus>,
+}
+
+impl Notice {
+    fn status(message: String) -> Self {
+        Self {
+            message,
+            ..Self::default()
+        }
+    }
+    fn focused(self, focus: values::Focus) -> Self {
+        Self {
+            focus: Some(focus),
+            ..self
+        }
+    }
+}
+
 async fn rendered(
     view: SheetView,
     permit: OwnedSemaphorePermit,
     csrf: String,
     raw: Option<BTreeMap<String, String>>,
     status: StatusCode,
-    message: String,
-    focus: Option<values::Focus>,
+    notice: Notice,
 ) -> ResultResponse {
     let html = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        render_private(&view, &csrf, raw.as_ref(), &message, focus)
+        render_private(&view, &csrf, raw.as_ref(), &notice)
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -861,16 +925,7 @@ async fn new_sheet(
     let csrf = auth::token(&session)
         .await?
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    rendered(
-        view,
-        permit,
-        csrf,
-        None,
-        StatusCode::OK,
-        String::new(),
-        None,
-    )
-    .await
+    rendered(view, permit, csrf, None, StatusCode::OK, Notice::default()).await
 }
 
 async fn read_sheet(
@@ -906,16 +961,7 @@ async fn read_private(
     let csrf = auth::token(&session)
         .await?
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    rendered(
-        view,
-        permit,
-        csrf,
-        None,
-        StatusCode::OK,
-        String::new(),
-        None,
-    )
-    .await
+    rendered(view, permit, csrf, None, StatusCode::OK, Notice::default()).await
 }
 
 const NATIVE_KEYS: &[&str] = &[
@@ -1029,8 +1075,7 @@ async fn draft_op(
                 csrf,
                 Some(form),
                 StatusCode::OK,
-                applied.message,
-                Some(applied.focus),
+                Notice::status(applied.message).focused(applied.focus),
             )
             .await
         }
@@ -1041,8 +1086,7 @@ async fn draft_op(
                 csrf,
                 Some(form),
                 StatusCode::UNPROCESSABLE_ENTITY,
-                format!("{reason} Not saved yet."),
-                None,
+                Notice::status(format!("{reason} Not saved yet.")),
             )
             .await
         }
@@ -1114,6 +1158,23 @@ async fn save_private(
     let csrf = auth::token(&session)
         .await?
         .ok_or(StatusCode::UNAUTHORIZED)?;
+    if form.values().map(String::len).sum::<usize>() > ECHO_BYTES {
+        // Never storable and never echoed: the saved revision is shown instead.
+        return rendered(
+            view,
+            permit,
+            csrf,
+            None,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Notice {
+                alert: "This draft is larger than the 1 MiB sheet limit and was not kept. \
+                        Nothing was saved; copy large text before submitting."
+                    .into(),
+                ..Notice::default()
+            },
+        )
+        .await;
+    }
     if op != values::Op::Save {
         return draft_op(view, permit, csrf, form, op).await;
     }
@@ -1137,8 +1198,7 @@ async fn save_private(
             csrf,
             Some(form),
             error(failure),
-            message,
-            None,
+            Notice::status(message),
         )
         .await;
     }
@@ -1160,9 +1220,10 @@ async fn save_private(
                 csrf,
                 Some(form),
                 error(failure),
-                "No changes saved. Copy your draft, reload and reassess the submitted revision."
-                    .into(),
-                None,
+                Notice::status(
+                    "No changes saved. Copy your draft, reload and reassess the submitted revision."
+                        .into(),
+                ),
             )
             .await
         }
