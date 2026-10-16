@@ -1,0 +1,455 @@
+{
+  "schema": 1,
+  "model_root": "/media/data/mimik/models",
+  "path_convention": "Paths are relative to model_root (override: env MIMIK_MODEL_ROOT). Files moved from the repo's target/ keep their layout (target/<dir>/<file>); new downloads go to <key>/<file>. The runner resolves symlinks (realpath) and hashes and mounts the resolved file.",
+  "models": {
+    "qwen35-9b": {
+      "label": "qwen3.5-9b-q4_k_m",
+      "downloaded": true,
+      "path": "target/model-fetch-20261015/Qwen3.5-9B-Q4_K_M.gguf",
+      "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+      "size": 5680522464,
+      "source": {
+        "repo": "unsloth/Qwen3.5-9B-GGUF",
+        "revision": "3885219b6810b007914f3a7950a8d1b469d598a5",
+        "file": "Qwen3.5-9B-Q4_K_M.gguf"
+      },
+      "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
+      "server": {
+        "ctx": 16384,
+        "n_gpu_layers": 99,
+        "n_cpu_moe": null,
+        "n_cpu_moe_required": false,
+        "threads": 6,
+        "cache_ram": 0,
+        "cache_type_k": null,
+        "cache_type_v": null,
+        "flash_attn": null,
+        "extra_args": []
+      },
+      "capabilities": {
+        "tools": "handler",
+        "thinking": "toggle",
+        "thinking_evidence": "hybrid Qwen3.5 template reads enable_thinking; v2 runs used enable_thinking=false",
+        "decision_readout": "untested"
+      },
+      "recommended_sampling": null,
+      "memory_limit": "14g",
+      "prewarm": true,
+      "health_wait_seconds": 900,
+      "request_timeout_seconds": 180,
+      "seconds_per_episode": 51,
+      "seconds_per_episode_source": "measured: v2 held-out, 282 episodes in 14,291 s (2026-10-16)",
+      "licence": "Apache-2.0 (model card front matter; no LICENSE file at the pinned revision)",
+      "notes": "docs/model-fetch-2026-10-15.md"
+    },
+    "qwen3-4b-2507": {
+      "label": "qwen3-4b-instruct-2507-q4_k_m",
+      "downloaded": true,
+      "path": "target/local-rag-benchmark-20261015/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+      "sha256": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e",
+      "size": 2497280736,
+      "source": {
+        "repo": "bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF",
+        "revision": "ae44f08e1392f39c0e474af10c3ff8355c8b6688",
+        "file": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+      },
+      "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
+      "server": {
+        "ctx": 16384,
+        "n_gpu_layers": 99,
+        "n_cpu_moe": null,
+        "n_cpu_moe_required": false,
+        "threads": 6,
+        "cache_ram": 0,
+        "cache_type_k": null,
+        "cache_type_v": null,
+        "flash_attn": null,
+        "extra_args": []
+      },
+      "capabilities": {
+        "tools": "handler",
+        "thinking": "never",
+        "thinking_evidence": "Instruct-2507 is the non-thinking Qwen3 release (upstream card)",
+        "decision_readout": "verified"
+      },
+      "recommended_sampling": null,
+      "memory_limit": "14g",
+      "prewarm": true,
+      "health_wait_seconds": 900,
+      "request_timeout_seconds": 180,
+      "seconds_per_episode": 12,
+      "seconds_per_episode_source": "measured: v2 held-out, 282 episodes in 3,366 s (2026-10-16)",
+      "licence": "Apache-2.0 upstream (Qwen/Qwen3-4B-Instruct-2507 cdbee75f); third-party quantisation, no redistribution clearance inferred",
+      "notes": "docs/local-rag-benchmark-plan.md; AnyJev readout in docs/local-hierarchy-screen-2026-10-15.md"
+    },
+    "qwen36-35b-a3b": {
+      "label": "qwen3.6-35b-a3b-q4_k_m",
+      "downloaded": true,
+      "path": "target/model-fetch-20261015/Qwen3.6-35B-A3B-Q4_K_M.gguf",
+      "sha256": "671e47e0ec53c665d048b98c3ecbfd5236b5ca9c3e02ed19fc8f81f7b85140c7",
+      "size": 20419565568,
+      "source": {
+        "repo": "ggml-org/Qwen3.6-35B-A3B-GGUF",
+        "revision": "baec3ebee244827cda0f4557eafa8b28f7545fa6",
+        "file": "Qwen3.6-35B-A3B-Q4_K_M.gguf"
+      },
+      "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
+      "server": {
+        "ctx": 16384,
+        "n_gpu_layers": 99,
+        "n_cpu_moe": null,
+        "n_cpu_moe_required": true,
+        "threads": 6,
+        "cache_ram": 0,
+        "cache_type_k": null,
+        "cache_type_v": null,
+        "flash_attn": null,
+        "extra_args": []
+      },
+      "capabilities": {
+        "tools": "handler",
+        "thinking": "toggle",
+        "thinking_evidence": "hybrid Qwen3.6 template reads enable_thinking (not yet run)",
+        "decision_readout": "untested"
+      },
+      "recommended_sampling": null,
+      "memory_limit": "26g",
+      "prewarm": true,
+      "health_wait_seconds": 900,
+      "request_timeout_seconds": 180,
+      "seconds_per_episode": 240,
+      "seconds_per_episode_source": "estimate: plan §10 Q8 prefix threshold; not measured (G0 measures it)",
+      "licence": "Apache-2.0 (model card front matter; no LICENSE file at the pinned revision)",
+      "notes": "GGUF block_count 40, 256 experts, 8 used (header metadata). n_cpu_moe comes from G0. health wait and request timeout are the runner's current values; the G0 queue overrides them (plan §11 item 27)."
+    },
+    "minicpm5-2b": {
+      "label": "minicpm5-2b-q4_k_m",
+      "downloaded": false,
+      "path": "minicpm5-2b/MiniCPM5-2B-Q4_K_M.gguf",
+      "sha256": "ec2d5801640099e97d8d7e8003ad4d81f336e757811f03a26173dddf386602fd",
+      "size": 1561318368,
+      "source": {
+        "repo": "openbmb/MiniCPM5-2B-GGUF",
+        "revision": "2079a22f3bea",
+        "file": "MiniCPM5-2B-Q4_K_M.gguf"
+      },
+      "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
+      "server": {
+        "ctx": 24576,
+        "n_gpu_layers": 99,
+        "n_cpu_moe": null,
+        "n_cpu_moe_required": false,
+        "threads": 6,
+        "cache_ram": 0,
+        "cache_type_k": null,
+        "cache_type_v": null,
+        "flash_attn": null,
+        "extra_args": []
+      },
+      "capabilities": {
+        "tools": "handler",
+        "thinking": "toggle",
+        "thinking_evidence": "template adds an empty think block when enable_thinking=false (candidate sheet)",
+        "decision_readout": "untested"
+      },
+      "recommended_sampling": null,
+      "memory_limit": "14g",
+      "prewarm": true,
+      "health_wait_seconds": 900,
+      "request_timeout_seconds": 180,
+      "seconds_per_episode": 15,
+      "seconds_per_episode_source": "estimate: unmeasured, scaled from the 4B (12 s)",
+      "licence": "Apache-2.0",
+      "notes": "docs/small-model-candidates-2026-10-16.md #1. Revision is a prefix from the sheet: pin the full commit with tools/fetch_models.py before download. Italian not stated."
+    },
+    "lfm25-2.6b": {
+      "label": "lfm2.5-2.6b-q4_k_m",
+      "downloaded": false,
+      "path": "lfm25-2.6b/LFM2.5-2.6B-Q4_K_M.gguf",
+      "sha256": "02a8b7e17487d326e46d68ce0ba24211e1b80a14c4cd0597fa73c1cd697f52ed",
+      "size": 1674455040,
+      "source": {
+        "repo": "LiquidAI/LFM2.5-2.6B-GGUF",
+        "revision": "e7caca5d835a",
+        "file": "LFM2.5-2.6B-Q4_K_M.gguf"
+      },
+      "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
+      "server": {
+        "ctx": 24576,
+        "n_gpu_layers": 99,
+        "n_cpu_moe": null,
+        "n_cpu_moe_required": false,
+        "threads": 6,
+        "cache_ram": 0,
+        "cache_type_k": null,
+        "cache_type_v": null,
+        "flash_attn": null,
+        "extra_args": []
+      },
+      "capabilities": {
+        "tools": "handler",
+        "thinking": "always",
+        "thinking_evidence": "card: a pure reasoning model that always thinks; template ignores enable_thinking (candidate sheet)",
+        "decision_readout": "untested"
+      },
+      "recommended_sampling": null,
+      "memory_limit": "14g",
+      "prewarm": true,
+      "health_wait_seconds": 900,
+      "request_timeout_seconds": 180,
+      "seconds_per_episode": 30,
+      "seconds_per_episode_source": "estimate: unmeasured; always thinks, so longer turns than the 4B",
+      "licence": "LFM Open License v1.0 (commercial use only below US$10M annual revenue; not OSI)",
+      "notes": "docs/small-model-candidates-2026-10-16.md #2. Revision is a prefix: pin before download."
+    },
+    "lfm25-8b-a1b": {
+      "label": "lfm2.5-8b-a1b-q4_k_m",
+      "downloaded": false,
+      "path": "lfm25-8b-a1b/LFM2.5-8B-A1B-Q4_K_M.gguf",
+      "sha256": "4923ec14f06b968b74d663e5949867d2d9c3bf13a20b8be1a9f9af39989b2bb0",
+      "size": 5155564768,
+      "source": {
+        "repo": "LiquidAI/LFM2.5-8B-A1B-GGUF",
+        "revision": "49c148317070",
+        "file": "LFM2.5-8B-A1B-Q4_K_M.gguf"
+      },
+      "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
+      "server": {
+        "ctx": 24576,
+        "n_gpu_layers": 99,
+        "n_cpu_moe": null,
+        "n_cpu_moe_required": false,
+        "threads": 6,
+        "cache_ram": 0,
+        "cache_type_k": null,
+        "cache_type_v": null,
+        "flash_attn": null,
+        "extra_args": []
+      },
+      "capabilities": {
+        "tools": "handler",
+        "thinking": "always",
+        "thinking_evidence": "card describes a reasoning model; template ignores enable_thinking (candidate sheet)",
+        "decision_readout": "untested"
+      },
+      "recommended_sampling": null,
+      "memory_limit": "14g",
+      "prewarm": true,
+      "health_wait_seconds": 900,
+      "request_timeout_seconds": 180,
+      "seconds_per_episode": 30,
+      "seconds_per_episode_source": "estimate: unmeasured; about 1B active parameters, but always thinks",
+      "licence": "LFM Open License v1.0 (commercial use only below US$10M annual revenue; not OSI)",
+      "notes": "docs/small-model-candidates-2026-10-16.md #3. MoE, fits fully on the GPU (estimate). Revision is a prefix: pin before download."
+    },
+    "granite42-3b": {
+      "label": "granite-4.2-3b-q4_k_m",
+      "downloaded": false,
+      "path": "granite42-3b/granite-4.2-3b-Q4_K_M.gguf",
+      "sha256": "e0406663965846ae22a403456eb826ccce5f450840491f71952f18a7cb78e7d5",
+      "size": 2244011552,
+      "source": {
+        "repo": "ibm-granite/granite-4.2-3b-GGUF",
+        "revision": "c40945d71cd9",
+        "file": "granite-4.2-3b-Q4_K_M.gguf"
+      },
+      "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
+      "server": {
+        "ctx": 24576,
+        "n_gpu_layers": 99,
+        "n_cpu_moe": null,
+        "n_cpu_moe_required": false,
+        "threads": 6,
+        "cache_ram": 0,
+        "cache_type_k": null,
+        "cache_type_v": null,
+        "flash_attn": null,
+        "extra_args": []
+      },
+      "capabilities": {
+        "tools": "handler",
+        "thinking": "toggle",
+        "thinking_evidence": "template defaults enable_thinking to true and reads it (candidate sheet)",
+        "decision_readout": "untested"
+      },
+      "recommended_sampling": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "source": "model card: temperature 1.0, top_p 0.95 for all tasks (metadata only; arms set sampling)"
+      },
+      "memory_limit": "14g",
+      "prewarm": true,
+      "health_wait_seconds": 900,
+      "request_timeout_seconds": 180,
+      "seconds_per_episode": 15,
+      "seconds_per_episode_source": "estimate: unmeasured, scaled from the 4B (12 s)",
+      "licence": "Apache-2.0",
+      "notes": "docs/small-model-candidates-2026-10-16.md #4a. Qwen3-Coder XML handler; the 4.2 template is not in the pinned llama.cpp tests. Revision is a prefix: pin before download."
+    },
+    "granite42-8b": {
+      "label": "granite-4.2-8b-q4_k_m",
+      "downloaded": false,
+      "path": "granite42-8b/granite-4.2-8b-Q4_K_M.gguf",
+      "sha256": "16a9369d0805f80b7377d25d87f937a90c05dc04ad79173a52001e42c9aab311",
+      "size": 5347917952,
+      "source": {
+        "repo": "ibm-granite/granite-4.2-8b-GGUF",
+        "revision": "93f3f6a8938e",
+        "file": "granite-4.2-8b-Q4_K_M.gguf"
+      },
+      "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
+      "server": {
+        "ctx": 24576,
+        "n_gpu_layers": 99,
+        "n_cpu_moe": null,
+        "n_cpu_moe_required": false,
+        "threads": 6,
+        "cache_ram": 0,
+        "cache_type_k": "q8_0",
+        "cache_type_v": "q8_0",
+        "flash_attn": "on",
+        "extra_args": []
+      },
+      "capabilities": {
+        "tools": "handler",
+        "thinking": "toggle",
+        "thinking_evidence": "template defaults enable_thinking to true and reads it (candidate sheet)",
+        "decision_readout": "untested"
+      },
+      "recommended_sampling": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "source": "model card: temperature 1.0, top_p 0.95 for all tasks (metadata only; arms set sampling)"
+      },
+      "memory_limit": "14g",
+      "prewarm": true,
+      "health_wait_seconds": 900,
+      "request_timeout_seconds": 180,
+      "seconds_per_episode": 55,
+      "seconds_per_episode_source": "estimate: unmeasured, scaled from the 9B (51 s)",
+      "licence": "Apache-2.0",
+      "notes": "docs/small-model-candidates-2026-10-16.md #4b. Fits 8 GB at 24k only with q8_0 KV (estimate, about 7.0 GiB plus buffers, borderline); quantised V needs flash attention on Vulkan. Revision is a prefix: pin before download."
+    },
+    "llama31-8b": {
+      "label": "llama-3.1-8b-instruct-q4_k_m",
+      "downloaded": false,
+      "path": "llama31-8b/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+      "sha256": "7b064f5842bf9532c91456deda288a1b672397a54fa729aa665952863033557c",
+      "size": 4920739232,
+      "source": {
+        "repo": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+        "revision": "bf5b95e96dac",
+        "file": "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+      },
+      "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
+      "server": {
+        "ctx": 24576,
+        "n_gpu_layers": 99,
+        "n_cpu_moe": null,
+        "n_cpu_moe_required": false,
+        "threads": 6,
+        "cache_ram": 0,
+        "cache_type_k": "q8_0",
+        "cache_type_v": "q8_0",
+        "flash_attn": "on",
+        "extra_args": []
+      },
+      "capabilities": {
+        "tools": "unverified",
+        "thinking": "never",
+        "thinking_evidence": "UNVERIFIED: non-reasoning 2024 instruct model; template not checked for enable_thinking",
+        "decision_readout": "untested"
+      },
+      "recommended_sampling": null,
+      "memory_limit": "14g",
+      "prewarm": true,
+      "health_wait_seconds": 900,
+      "request_timeout_seconds": 180,
+      "seconds_per_episode": 50,
+      "seconds_per_episode_source": "estimate: unmeasured, scaled from the 9B (51 s)",
+      "licence": "Llama 3.1 Community License (attribution, naming and acceptable-use terms; not open source). Gated upstream; third-party GGUF",
+      "notes": "docs/small-model-candidates-2026-10-16.md #5. Tool calls go through the generic autoparser at b11610 (no pinned parse test). Needs q8_0 KV at 24k (estimate). Revision is a prefix: pin before download."
+    },
+    "ministral3-8b": {
+      "label": "ministral-3-8b-instruct-2512-q4_k_m",
+      "downloaded": false,
+      "path": "ministral3-8b/Ministral-3-8B-Instruct-2512-Q4_K_M.gguf",
+      "sha256": "33e7a72cf5e6e2cfc2f2847075acc013d68bba023e35310cef86b5cf8fdca761",
+      "size": 5198911904,
+      "source": {
+        "repo": "mistralai/Ministral-3-8B-Instruct-2512-GGUF",
+        "revision": "0102285ad796",
+        "file": "Ministral-3-8B-Instruct-2512-Q4_K_M.gguf"
+      },
+      "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
+      "server": {
+        "ctx": 24576,
+        "n_gpu_layers": 99,
+        "n_cpu_moe": null,
+        "n_cpu_moe_required": false,
+        "threads": 6,
+        "cache_ram": 0,
+        "cache_type_k": "q8_0",
+        "cache_type_v": "q8_0",
+        "flash_attn": "on",
+        "extra_args": []
+      },
+      "capabilities": {
+        "tools": "handler",
+        "thinking": "never",
+        "thinking_evidence": "UNVERIFIED: Instruct (not Reasoning) variant; template not checked for enable_thinking",
+        "decision_readout": "untested"
+      },
+      "recommended_sampling": null,
+      "memory_limit": "14g",
+      "prewarm": true,
+      "health_wait_seconds": 900,
+      "request_timeout_seconds": 180,
+      "seconds_per_episode": 55,
+      "seconds_per_episode_source": "estimate: unmeasured, scaled from the 9B (51 s)",
+      "licence": "Apache-2.0",
+      "notes": "docs/small-model-candidates-2026-10-16.md S1. Vision-language model; the runner passes --no-mmproj. Needs q8_0 KV at 24k (estimate, tight). Revision is a prefix: pin before download."
+    },
+    "gemma4-e4b": {
+      "label": "gemma-4-e4b-it-q4_0",
+      "downloaded": false,
+      "path": "gemma4-e4b/gemma-4-E4B-it-Q4_0.gguf",
+      "sha256": "a555b900214b477d8880e7832e0b8925e139b0159640036b09fe472b6f2097f2",
+      "size": 4590807392,
+      "source": {
+        "repo": "ggml-org/gemma-4-E4B-it-GGUF",
+        "revision": "b8093469224f",
+        "file": "gemma-4-E4B-it-Q4_0.gguf"
+      },
+      "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
+      "server": {
+        "ctx": 24576,
+        "n_gpu_layers": 99,
+        "n_cpu_moe": null,
+        "n_cpu_moe_required": false,
+        "threads": 6,
+        "cache_ram": 0,
+        "cache_type_k": null,
+        "cache_type_v": null,
+        "flash_attn": null,
+        "extra_args": []
+      },
+      "capabilities": {
+        "tools": "handler",
+        "thinking": "toggle",
+        "thinking_evidence": "UNVERIFIED: not checked in the candidate sheet; confirm against the GGUF template before a thinking arm",
+        "decision_readout": "untested"
+      },
+      "recommended_sampling": null,
+      "memory_limit": "14g",
+      "prewarm": true,
+      "health_wait_seconds": 900,
+      "request_timeout_seconds": 180,
+      "seconds_per_episode": 30,
+      "seconds_per_episode_source": "estimate: unmeasured",
+      "licence": "Apache-2.0 (Gemma 4 licence page; separate prohibited-use policy page)",
+      "notes": "docs/small-model-candidates-2026-10-16.md S2. Official ggml-org Q4_0 chosen (the sheet's VRAM estimate is for Q4_0); the third-party unsloth Q4_K_M (4,977,171,584 B, 85a896a0...ab87) is the alternative. Revision is a prefix: pin before download."
+    }
+  }
+}
