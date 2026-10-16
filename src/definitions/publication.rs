@@ -11,7 +11,8 @@ const SNAPSHOT_LIMIT: usize = 1024 * 1024;
 thread_local! { static SNAPSHOTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 #[cfg(test)]
 thread_local! {
-    /// Route tests of unshipped sheet capabilities publish on their own test thread only.
+    /// Route tests of unshipped sheet capabilities (list fields, until M4) publish on their
+    /// own test thread only.
     static UNSHIPPED_FOR_TESTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -132,8 +133,9 @@ fn deterministic_rules(definition: &Definition) -> &'static str {
     }
 }
 
-/// M2 admits formula and list definitions as drafts only. Publishing waits for evaluation on
-/// view/save (M3) and list editing (M4), so no sheet can pin a definition it cannot show.
+/// List definitions stay drafts until list editing ships (M4), so no sheet can pin a
+/// definition it cannot edit. Scalar formula definitions publish: sheets evaluate them on
+/// view, save and history (M3), with advisory results.
 fn publishable(definition: &Definition) -> Result<(), DefinitionError> {
     #[cfg(test)]
     if UNSHIPPED_FOR_TESTS.with(std::cell::Cell::get) {
@@ -145,9 +147,6 @@ fn publishable(definition: &Definition) -> Result<(), DefinitionError> {
         .any(|field| field.control == super::Control::List)
     {
         return Err(invalid("list-editing-unsupported"));
-    }
-    if definition.formula_profile.is_some() {
-        return Err(invalid("formula-evaluation-unsupported"));
     }
     Ok(())
 }

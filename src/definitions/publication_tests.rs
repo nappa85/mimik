@@ -185,7 +185,7 @@ async fn approve(store: &Store, id: i64) -> Result<PublishedDefinition, Definiti
 }
 
 #[tokio::test]
-async fn formula_and_list_definitions_are_drafts_only_until_evaluation_and_editing_ship() {
+async fn list_definitions_stay_drafts_until_editing_ships() {
     let _guard = super::super::TEST_RESOURCE_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let (store, body) = formula_store(dir.path()).await;
@@ -195,7 +195,8 @@ async fn formula_and_list_definitions_are_drafts_only_until_evaluation_and_editi
         .unwrap();
     let error = approve(&store, draft.id).await.unwrap_err();
     assert_eq!(publication_code(&error), "list-editing-unsupported");
-    // Without the list field (and the formulas that read it) the gate is evaluation (M3).
+    // Without the list field (and the formulas that read it) a formula definition publishes:
+    // M3 evaluates it on view, save and history. Its results are advisory.
     let mut scalar = body.clone();
     scalar["fields"].as_array_mut().unwrap().remove(2);
     scalar["fields"][2]["formula"]["expr"] = "vitality + 1".into();
@@ -205,8 +206,14 @@ async fn formula_and_list_definitions_are_drafts_only_until_evaluation_and_editi
         .save_definition_draft(serde_json::to_vec(&scalar).unwrap(), 1)
         .await
         .unwrap();
-    let error = approve(&store, draft.id).await.unwrap_err();
-    assert_eq!(publication_code(&error), "formula-evaluation-unsupported");
+    let published = approve(&store, draft.id).await.unwrap();
+    assert_eq!(published.deterministic_rules, "formulas-advisory");
+    assert_eq!(published.unresolved_formulas, vec!["armor".to_owned()]);
+    assert_eq!(
+        published.unresolved_constraints,
+        vec!["one-outer-armor".to_owned()]
+    );
+    assert!(published.definition.formula_profile.is_some());
 }
 
 #[tokio::test]

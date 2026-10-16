@@ -65,7 +65,6 @@ pub(super) fn formula_definition() -> Value {
 /// Publishes `definition` after the generic fixture (which loads the synthetic source).
 pub(super) async fn publish(store: &Store, definition: &Value) -> i64 {
     published_fixture(store).await;
-    crate::definitions::publish_unshipped_for_tests();
     let draft = store
         .save_definition_draft(serde_json::to_vec(definition).unwrap(), 0)
         .await
@@ -543,7 +542,7 @@ async fn busy_runtime_after_a_save_returns_503_with_retry_after() {
 
 /// A list sheet whose stored values are valid (JSON within 1 MiB) but whose converted input
 /// exceeds the engine's aggregate charge: evaluation refuses the input and the page still
-/// renders. Lists are unpublishable until M4; the test publishes through the test-only path.
+/// renders. Lists are unpublishable until M4; this test publishes through the test-only path.
 #[tokio::test]
 async fn stored_valid_sheet_with_refused_input_shows_unavailable() {
     let _auth_lock = crate::auth::test_resource_lock().await;
@@ -560,6 +559,7 @@ async fn stored_valid_sheet_with_refused_input_shows_unavailable() {
         .as_array_mut()
         .unwrap()
         .push("items".into());
+    crate::definitions::publish_unshipped_for_tests();
     let setup = setup(&definition).await;
     let (mut view, permit) = setup
         .store

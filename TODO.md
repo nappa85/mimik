@@ -1,6 +1,6 @@
 # Mimik — persistent work tracker
 
-Last updated: 2026-10-15.
+Last updated: 2026-10-16.
 
 ## Resume here
 
@@ -26,7 +26,10 @@ Last updated: 2026-10-15.
   - **M3 plan:** `docs/derived-formulas-m3-plan.md`.
     - Reviewed GO-with-amendments; §10 and §10b are binding. Records: `docs/reviews/2026-10-16-derived-formulas-m3-plan.md` and `docs/reviewer-benchmark.md`.
     - User answers: PRG save; browser scenario in M3; expressions shown collapsed; `dependency_failed` names the failed dependency.
-    - Not started: the builds wait for an idle PC.
+    - **M2 done** (`1166a1d`, review `docs/reviews/2026-10-15-derived-formulas-m1.md`).
+    - **ACTIVE — M3 implemented on branch `derived-formulas`** (worktree `mimik-wt/formula`, local commits, not merged). Evaluation on view/save/history, `preview`, named failed dependencies, K40 projection, create page, kept permit on rejected saves, round-trip regression, write-only pins for freezing, browser scenario, docs, gate lift last. Summary in `docs/derived-formulas-plan.md` §16.
+      - [ ] **Blocked on independent implementation review** (Sol, Sonnet, third reviewer) before merging; record it in `docs/reviews/`.
+      - Verification and the red→green list: see the handoff of the M3 implementation report and §16.
   - **Reviews (user decision 2026-10-16, at least for today):** Muse Spark, Space Bunny (`opencode/space-bunny-free`) and Sonnet run in parallel, recorded in `docs/reviewer-benchmark.md`.
     - The experiment is being extended to every opencode free model.
     - Earlier "Muse unavailable" fallbacks were a wrapper bug, not quota: opencode used the launch `$PWD` (real repo) instead of the snapshot. The wrapper now pins `--dir`/`PWD` and denies `websearch`/`task`/`skill` (`tools/test_external_review.py`). None of those runs reached the model or read a file.

@@ -940,6 +940,92 @@ and list editing is M4.
   CLI); actionlint; `cargo audit`; `cargo about`.
 - No browser, package, unpacked or live-model checks were run.
 
+## 16. M3 implementation (2026-10-16, branch `derived-formulas`; independent review pending)
+
+Plan: [derived-formulas-m3-plan.md](derived-formulas-m3-plan.md), with its binding §10–§10d
+amendments. Commits are local only.
+
+**What changed**
+
+- **Pin carries the compiled formulas** (D1). `formula_admission::check` and
+  `admission::domain` return `Option<formula::Compiled>`; `admission::validate` drops it at
+  once for draft, store and publication callers; `admission::validate_compiled` keeps it
+  for `private_pin::validate` only. `ImmutablePin::evaluate` (`None` for formula-free
+  pins) runs with a test-only 60 s deadline seam; production uses `formula::DEADLINE`.
+- **Evaluation at render time with PRG** (user decision Q1). This deviates from §7 "save
+  evaluates proposed data": the POST never evaluates; the redirected GET evaluates the
+  stored data, which is the same pure function of pin and data. Evaluation runs once per
+  response inside `rendered`'s `spawn_blocking`, after the final authorization recheck,
+  under the existing `JOBS` permit, never on the create page and never of a rejected draft.
+- **View model** `campaigns/formulas.rs`: `present(pin, Result<&Evaluation, &InputError>)`
+  (K37), an exhaustive code→message match (table in `runtime-definition-contract.md`),
+  enum values by option label, tri-state checks with violations first, and "unavailable"
+  for an `InputError` only (§10b 20). `dependency_failed` names the first failed
+  dependency in evaluation order via `Compiled::failed_dependency` (Q5); `Evaluation`,
+  `Code` and the golden fixture digest are unchanged.
+- **Template**: derived fields are `<dl class="derived">` read-only text with a
+  "Computed" label and a collapsed "How this is computed" disclosure (expression and rule
+  IDs); they are never controls (the M2 latent bug). Advisory checks are a section after
+  the form. Runtime sheets disable each control instead of the whole fieldset so the
+  disclosures work in read-only history (L1); the native sheet keeps its disabled
+  fieldset. A failed save shows saved-revision results in a separate "Computed from saved
+  revision N — not from your unsaved changes" block.
+- **K40**: `ImmutablePin::evaluate` drops only the values of input fields that the formula
+  layer does not declare (hyphenated IDs); other unknown keys still reach the engine.
+- **K39**: a save rejected by the database step keeps its permit for the re-render
+  (`private_save_keeping`), so a concurrent request cannot turn it into a 503 that loses
+  the draft.
+- **`preview`** (§7 listed it, but it did not exist): library-only
+  `formula::preview(&Compiled, before, after)`; changes in evaluation order; an error on
+  either side is `Unknown`, never a new or resolved violation (K42). No route or CLI.
+- **`pub mod formula`** (§14.1 item 18, K34): stays `pub`, for `examples/formula_eval.rs`
+  and because `preview` has no in-crate caller (`pub(crate)` would be dead code).
+- **Pack test**: `formula_pack_tests.rs` covers envelope → admission → pin →
+  `validate_values` → `ImmutablePin::evaluate` for one character (`bram-holt`) and the
+  two-outer-armor mutation (§10b 27); the M1 fixture keeps the engine-level coverage of
+  all four characters. The test-only translation drops the pack's `encoding`,
+  `rules_revision` and `formula_language` (K35).
+- **Freezing uses write-only pins** (§10b 19): `depart` validates up to 32 pins at once and
+  drops them in the database worker; carrying 32 compiled sets is avoided with
+  `private_pin::validate_for_write`, whose evaluation fails closed.
+- **Gate**: `publication.rs` no longer refuses formula definitions; list definitions stay
+  `list-editing-unsupported` until M4. Route tests of list sheets publish through a
+  test-thread-only path.
+
+**Measurements (report-only)**
+
+- Pack, `--release`: admission + pin + compile 15.7–19.2 ms; evaluate 1.06–1.09 ms;
+  cost 79,065; 656 expression nodes (debug: 67–78 ms and 3.0–8.3 ms).
+- Densest admitted definition (240 formulas of 1,021 bytes, balanced sums): 122,640
+  expression nodes, `size_of::<IdedExpr>()` 64 bytes, i.e. several MB per pin plus box
+  overhead. The largest cost-budget definition has 312 nodes at cost 1,966,128 (≈18 ms
+  evaluation at the cap, M1 calibration).
+- Worst-case permit hold per sheet request ≈ pin admission and compile (tens of ms) +
+  input conversion + the 500 ms deadline + one formula (bounded by `MAX_COST`, not the
+  deadline). `Retry-After: 1` therefore stays. `spawn_blocking` is not cancellable: an
+  abandoned request keeps the permit until its evaluation ends, within that bound.
+- Release binary: 20,802,360 bytes vs 20,447,416 for master `60e88a6` built in the same
+  container (+354,944 bytes, +1.7%). The 18,210,072 figure predates `cel`.
+
+**Verification (2026-10-16, `mimik-ci`/`mimik-browser` containers, `--cpus 2`)**
+
+- `cargo fmt --check`; strict Clippy (all + pedantic, `-D warnings`); `cargo test --locked
+  --all-targets --all-features`: 365 passed, 0 failed, 1 ignored (pre-existing
+  performance measurement), of which 218 library tests.
+- `cargo test --release --locked --lib formula`: 77 passed (timings above).
+- `formula_eval` example build; `source_fixture` generation; Ruff check and format;
+  tools unittest 259 OK (3 skipped); actionlint; `cargo audit --deny warnings` (322
+  crates); `cargo about generate --locked --fail`.
+- Release build, `cargo package` (run `--offline`: the gate container has no network)
+  with `verify_source_package.py`, `cargo vendor` and `package_release.py`; checksums,
+  unpack and binary equality; `smoke_release.py --auth` on the unpacked binary.
+- Offline Chromium gate (`containers/browser.Dockerfile`, CI flags) with the new formula
+  stage at 1280×720 and 390×844: passed. A negative control with a wrong expected derived
+  value failed as intended ("Derived value missing after save").
+- Offline rebuild of the delivered source with vendored dependencies and an empty
+  `CARGO_HOME`: passed (into the shared formula target directory, not a fresh one).
+- Not run: the LAN/proxy separate-client gate (`lan_smoke.py`).
+
 ## Appendix A: superseded custom-spec design (revision 1)
 
 Revision 1 proposed a Mimik-specific expression language:

@@ -34,14 +34,55 @@ build elaborate migration paths for test data. New draft admission has no such
 exception; its additive table does not require a reset.
 
 First controls: text, multiline, signed integer, nullable boolean, enum, flat
-ordered groups. Lists, nested/repeating groups, decimals, formulas, scripts,
-generated templates and deterministic game-rule enforcement are unsupported.
-Current native MÖRK BORG characters/checklist remain compatibility fixtures.
+ordered groups. Nested/repeating groups, decimals, scripts, generated templates and
+deterministic game-rule enforcement are unsupported. Current native MÖRK BORG
+characters/checklist remain compatibility fixtures.
+
+Derived fields and constraints are supported under `formula_profile: 1` ("CEL profile
+cel-mimik-1", `docs/derived-formulas-plan.md`). Their results are **advisory**: derived
+values are computed from the stored values and the immutable pin on every view, save
+and history page, are never stored or submitted, and checks never block a save or rule
+on legality. List fields (`control: list`) are admitted in drafts but stay unpublishable
+until list editing ships (M4).
+
+How each result is shown (`src/campaigns/formulas.rs`, one exhaustive match): a value is
+shown as text (integers as decimals, booleans as True/False, enums by option label); an
+error as "Not computed: <message>." with its code; a check as Pass, Violated or Not
+evaluated. Evaluation-reachable codes:
+
+| Code | Message |
+|---|---|
+| `invalid_input` | the saved values do not match the formula declarations |
+| `input_too_large` | the saved values exceed the formula input size limit |
+| `collection_too_large` | a list has more items than formulas accept |
+| `missing_property` | an optional item property it reads is absent |
+| `null_value` | a value it uses is unknown (null) |
+| `type_mismatch` | a value has a type the formula cannot use |
+| `overflow` | the integer result is out of range |
+| `division_by_zero` | it divides by zero |
+| `invalid_argument` | a function received an argument outside its accepted range |
+| `invalid_result` | the result is not a valid value for this field |
+| `unknown_field` | it reads a field that is not available |
+| `arity_mismatch` | a function was called with the wrong number of arguments |
+| `dependency_failed` | it uses <Label>, which could not be computed (the first failed dependency in evaluation order) |
+| `deadline_exceeded` | the time limit was reached. Reload to retry |
+| `internal_error` | an internal error occurred. Reload to retry |
+
+Admission-only codes (parse, depth, construct, identifier, declaration, cycle and cost
+codes) share "unexpected formula state; report this sheet", which evaluation never
+reaches. `deadline_exceeded` and `internal_error` are not deterministic (load, a failed
+formula thread) and are logged with sheet ID, pin version and formula ID, never values.
+A stored-valid sheet whose values the engine refuses as a whole (`invalid_input`,
+`input_too_large`, `collection_too_large`) still renders with "Derived values
+unavailable"; such saves are allowed.
 
 ## 2. Registry, identity and legacy migration (R3)
 
 - Stable `game_id`, `edition_id`, `definition_id`, field/group/enum-option IDs use
-  `[a-z][a-z0-9-]{0,63}`. Edition IDs are unique **within a game**; definition IDs
+  `[a-z][a-z0-9-]{0,63}`. Field and list item-property IDs also allow `_` (M2), so
+  formulas can reference multi-word fields; list fields and item properties must be CEL
+  identifiers (`[a-z][a-z0-9_]*`), and hyphenated scalar fields stay valid but cannot be
+  referenced by formulas. Edition IDs are unique **within a game**; definition IDs
   within that game/edition. IDs are immutable data, never paths, templates or
   trusted CSS selectors. Labels are independent escaped Unicode text.
 - Source printing/language/PDF identity remain separate metadata. Registration

@@ -41,6 +41,13 @@ Owner access. The flag conflicts with `--no-auth` and cannot accompany CLI subco
    capabilities are explained; registration alone is insufficient.
 4. Save the complete sheet. **Full history** shows creation and every successful
    edit, including no-op saves; select a revision to inspect its retained values.
+   For a formula definition, derived values and advisory checks are recomputed on
+   every view: a historical revision recomputes from the sheet's immutable pin and the
+   historical data, so it matches what that revision showed, except for the
+   non-deterministic `deadline_exceeded`/`internal_error` states. Checks never block a
+   save; a violating save succeeds and the next view lists the violation. A failed save
+   (422/409) re-renders the draft, with derived values and checks shown separately as
+   "computed from saved revision N", never from the unsaved draft.
 
 ## Joining, grants and privacy
 

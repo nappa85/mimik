@@ -11,7 +11,8 @@ The user selected recreating the original PDF sheet layout in **HTML/CSS**, avoi
 - Long notes, descriptions, equipment, powers, and abilities expand vertically. Repeated entries add rows/cards; no fixed maximum PDF box or clipping.
 - Use native growing-textarea support where available (`field-sizing: content`); retain manual resizing/minimum heights as a fallback. The current prototype now uses that CSS progressive enhancement.
 - Keep rule explanations adjacent to relevant fields or in accessible expandable details so reference content does not crowd the sheet.
-- htmx handles server-rendered edits/derived-value updates; no frontend framework is needed for the layout.
+- htmx handles server-rendered edits on the native editor; no frontend framework is needed for the layout.
+- Runtime definition sheets (private campaign sheets) save with a full-page POST/redirect/GET. Their derived values and advisory checks are computed from the saved snapshot and update on save and reload; there is no live recompute while typing. Derived values are read-only text with a "Computed" label, never form controls, and their expressions and rule IDs sit in collapsed "How this is computed" disclosures. The native htmx editor is unchanged.
 - Build print styling separately: paginate long sections, repeat relevant headings, and avoid hiding overflow. Browser print/PDF output can be considered later; filling/exporting the publisher's original PDF is not required for the interactive editor.
 
 ## Source assets and verification

@@ -1,7 +1,8 @@
 # Derived-field formulas: milestone M3 plan (evaluation on view, save and history)
 
 2026-10-16. Status: **plan reviewed: GO-with-amendments (Sonnet 5.5, 2026-10-16); amendments in §10 are binding and supersede earlier sections.**
-Not implemented. Produced by a read-only planning subagent; the main session spot-checked
+**Implemented** on branch `derived-formulas` (see [parent plan §16](derived-formulas-plan.md));
+independent implementation review pending. Produced by a read-only planning subagent; the main session spot-checked
 §1 claims (no `preview` in `src/`, `groups()` renders every group field as an input, the
 publication gate at `publication.rs:124-137`). Base: master and `../mimik-wt/formula` at
 `1166a1d`. Parent plan: [derived-formulas-plan.md](derived-formulas-plan.md) §7, §9, §10,

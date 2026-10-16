@@ -7,7 +7,7 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from admin_ruleset_browser import run_admin_ruleset_browser
 from material_browser import run_material_browser
@@ -431,10 +431,97 @@ def run_scenario(browser, viewport):
         context.close()
 
 
+FORMULA_DERIVED = ("pace", "echo", "marker")
+
+
+def submitted_keys(request):
+    return {key for key, _ in parse_qsl(request.post_data or "", keep_blank_values=True)}
+
+
+def run_formula_browser(page, campaign, version, submit):
+    """Published scalar formula sheet: computed values, advisory checks, reflow, keyboard."""
+    page.goto(campaign + f"/sheets/new?version={version}")
+    main = page.locator("main")
+    require(
+        "Derived values are computed after the first save." in main.inner_text(),
+        "Formula create page evaluated or hid the first-save note",
+    )
+    for derived in FORMULA_DERIVED:
+        require(
+            page.locator(f'[name="value-{derived}"], [name="null-{derived}"]').count() == 0,
+            "Derived field rendered as a form control",
+        )
+    page.locator('input[name="name"]').fill("Formula browser private")
+    page.locator('input[name="value-name"]').fill("Formula <b>name</b>")
+    page.locator('input[name="value-vitality"]').fill("4")
+    page.locator('select[name="null-hit-points"]').select_option("known")
+    page.locator('input[name="value-hit-points"]').fill("7")
+    page.locator('textarea[name="value-story"]').fill("unbroken" * 400)
+    with page.expect_request(lambda request: request.method == "POST") as request:
+        submit(page, page.get_by_role("button", name="Save full private sheet", exact=True))
+    keys = submitted_keys(request.value)
+    require(
+        not any(key.endswith(tuple(f"-{derived}" for derived in FORMULA_DERIVED)) for key in keys)
+        and "value-hit-points" in keys,
+        "Saved formula form carried a derived name",
+    )
+    formula_sheet = page.url
+    pace = page.locator("dl.derived", has=page.locator("#label-pace"))
+    require(
+        pace.locator("dd").inner_text() == "2" and "Computed" in pace.inner_text(),
+        "Derived value missing after save",
+    )
+    require(
+        page.locator("dl.derived", has=page.locator("#label-echo")).locator("dd").inner_text()
+        == "unbroken" * 400,
+        "Derived long text differs",
+    )
+    require(
+        "0 violated, 0 not evaluated" in page.locator("#advisory-checks").inner_text(),
+        "Advisory checks missing after save",
+    )
+    page.locator('input[name="value-vitality"]').fill("11")
+    submit(page, page.get_by_role("button", name="Save full private sheet", exact=True))
+    checks = page.locator("#advisory-checks")
+    require(
+        "Violated" in checks.inner_text()
+        and "Vitality is at most 10." in checks.inner_text()
+        and page.get_by_role("link", name="Advisory checks: 1 violated, 0 not evaluated").count()
+        == 1,
+        "Violation not visible after a violating save",
+    )
+    require(
+        page.locator("dl.derived", has=page.locator("#label-pace")).locator("dd").inner_text()
+        == "-5",
+        "Derived value not recomputed on save",
+    )
+    no_overflow(page, "formula sheet")
+    for target in (formula_sheet, formula_sheet + "/history/1"):
+        page.goto(target)
+        marker = page.locator("details", has=page.locator("pre", has_text="name=="))
+        summary = marker.locator("summary")
+        summary.focus()
+        page.keyboard.press("Enter")
+        require(
+            marker.evaluate("details => details.open")
+            and len(marker.locator("pre").inner_text()) == 1024,
+            "Expression disclosure is not keyboard-operable",
+        )
+        no_overflow(page, "formula sheet with an open 1,024-byte expression")
+    require(
+        page.locator('input[name="value-vitality"]').input_value() == "4"
+        and page.locator('input[name="value-vitality"]').is_disabled()
+        and page.locator("dl.derived", has=page.locator("#label-pace")).locator("dd").inner_text()
+        == "2",
+        "Formula history did not recompute the historical revision",
+    )
+
+
 def run_workspace_browser(
-    browser, page, viewport, binary, directory, collaborator, passwords, version
+    browser, page, viewport, binary, directory, collaborator, passwords, versions
 ):
     """Real campaign/native/runtime forms with an ordinary independent collaborator."""
+    version, formula_version = versions
 
     def submit(tab, button, status=303):
         with tab.expect_response(lambda response: response.request.method == "POST") as response:
@@ -583,6 +670,8 @@ def run_workspace_browser(
             owner_page.goto(runtime_sheet).status == 403,
             "Cross-campaign collaborator access leaked",
         )
+        stage = "formula sheet"
+        run_formula_browser(page, generic, formula_version, submit)
         page.goto("http://127.0.0.1:3000/auth/session")
     except AssertionError:
         raise
@@ -765,7 +854,7 @@ def run_auth_scenario(browser, viewport, binary, directory, fixture):
     _, passwords = smoke_accounts(binary, directory)
     player = prepare_auth_player(binary, directory, passwords)
     collaborator = prepare_auth_player(binary, directory, passwords, login="table-helper")
-    version = prepare_workspace_materials(binary, directory, fixture)
+    version, formula_version = prepare_workspace_materials(binary, directory, fixture)
     process, log = start(binary, directory, auth=True)
     context = browser.new_context(viewport=viewport)
     context.set_default_timeout(15_000)
@@ -902,7 +991,14 @@ def run_auth_scenario(browser, viewport, binary, directory, fixture):
         reject_replay(anonymous)
         reject_replay(owner)
         run_workspace_browser(
-            browser, page, viewport, binary, directory, collaborator, passwords, version
+            browser,
+            page,
+            viewport,
+            binary,
+            directory,
+            collaborator,
+            passwords,
+            (version, formula_version),
         )
         for path in AUTH_DENIED_PATHS:
             response = page.goto("http://127.0.0.1:3000" + path)

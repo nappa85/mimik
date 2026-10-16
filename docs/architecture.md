@@ -63,7 +63,7 @@ model integration. Proposed hybrid retrieval and tool loop:
 6. Generate an explanation with source identifiers; validate that cited identifiers were actually retrieved. Citation existence does not prove that the claim is entailed, so evaluate that separately.
 7. Keep manual evidence separate from campaign notes and GM-only information.
 
-Decided model interaction (user, 2026-10-15; not implemented): small tools (`search_rules`, `read_fields`, `propose_change`, `ask_user`). The host fills old values and revisions, evaluates declarative derived-field formulas in Rust and shows a diff for explicit confirmation, instead of the model emitting a complete typed patch in one response.
+Decided model interaction (user, 2026-10-15; not implemented): small tools (`search_rules`, `read_fields`, `propose_change`, `ask_user`). The host fills old values and revisions, evaluates declarative derived-field formulas in Rust and shows a diff for explicit confirmation, instead of the model emitting a complete typed patch in one response. Formula evaluation exists (M3): sheets evaluate their pinned formulas on view, save and history, and the library function `formula::preview` reports what a proposed change would change (derived values, new/resolved/unknown constraint outcomes). No tool loop, route or model integration calls it yet.
 
 Acceptance requires a curated set of questions and expected sources, edition-isolation checks, retrieval measurements, unsupported-answer behavior, and rule edge-case tests. Imported documents are data, never executable model instructions.
 

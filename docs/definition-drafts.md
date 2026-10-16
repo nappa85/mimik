@@ -29,8 +29,10 @@ for registered `synthetic-game / first`, not an approved real-game sheet.
 Trusted host schema: `schemas/definition-v1.json`, not uploaded JSON Schema.
 Required root: contract_version1, game_id, edition_id, definition_id, title,
 sources, fields, groups. Controls: text/multiline/integer/boolean/enum. No scripts,
-formulas, decimals, nested/repeating controls, unknown properties or uploaded
-schema hooks. Each field occurs exactly once in ordered groups; hints only
+decimals, nested/repeating controls, unknown properties or uploaded schema hooks.
+Derived fields, constraints and list fields follow the formula profile
+(`formula_profile: 1`, see `runtime-definition-contract.md` and
+`derived-formulas-plan.md` §6). Each field occurs exactly once in ordered groups; hints only
 auto/main/sidebar. Field/group IDs have separate namespaces; choices unique per
 field. IDs follow the registry slug grammar; whitespace-only labels/reasons fail.
 

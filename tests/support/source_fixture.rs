@@ -83,5 +83,50 @@ pub fn fixture_pair(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         root.join("definition.json"),
         include_bytes!("../../schemas/definition-example.json"),
     )?;
+    fs::write(
+        root.join("formula-definition.json"),
+        serde_json::to_vec(&formula_definition())?,
+    )?;
     Ok(())
+}
+
+/// Scalar, list-free formula definition for the unpacked browser gate (lists wait for M4).
+/// It has a hyphenated unreferenced field, a long text echoed by a derived value and an
+/// unbroken 1,024-byte expression, so reflow and projection are checked in a real browser.
+#[must_use]
+pub fn formula_definition() -> serde_json::Value {
+    let unresolved = json!({"state": "unresolved", "reason": "Synthetic fixture"});
+    let field = |id: &str, label: &str, control: &str, nullable: bool| {
+        json!({"id": id, "label": label, "control": control, "nullable": nullable,
+               "mapping": unresolved})
+    };
+    let derived = |id: &str, label: &str, control: &str, expr: &str| {
+        let mut value = field(id, label, control, false);
+        value["formula"] = json!({"expr": expr, "rule_ids": ["synthetic-1"],
+                                  "evidence": unresolved});
+        value
+    };
+    let head = "name==\"";
+    let tail = "\"?1:0";
+    let marker = format!("{head}{}{tail}", "x".repeat(1024 - head.len() - tail.len()));
+    let fields = vec![
+        field("name", "Name", "text", false),
+        field("vitality", "Vitality", "integer", false),
+        field("hit-points", "Hit points", "integer", true),
+        field("story", "Story", "multiline", false),
+        derived("pace", "Pace", "integer", "6 - vitality"),
+        derived("echo", "Story echo", "multiline", "story"),
+        derived("marker", "Marker", "integer", &marker),
+    ];
+    let ids: Vec<serde_json::Value> = fields.iter().map(|field| field["id"].clone()).collect();
+    json!({
+        "contract_version": 1, "game_id": "synthetic-game", "edition_id": "first",
+        "definition_id": "formula-sheet", "title": "Synthetic formula sheet", "sources": [],
+        "fields": fields,
+        "groups": [{"id": "main", "label": "Main", "fields": ids, "column_hint": "main"}],
+        "formula_profile": 1,
+        "constraints": [{"id": "vitality-cap", "expr": "vitality <= 10",
+                         "rule_ids": ["synthetic-2"], "message": "Vitality is at most 10.",
+                         "evidence": unresolved}]
+    })
 }

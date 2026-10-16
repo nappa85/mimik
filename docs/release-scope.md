@@ -111,6 +111,27 @@ uploads/wiring are later slices. See `docs/source-review-setup.md`. Synthetic pr
 and separate-client LAN/proxy gates include native review/conflict/completion and
 original previews; controlled authority/race/overflow checks are unit/Router evidence.
 
+Schema18 (migration018, CEL formula profile M2) and the M3 evaluation slice add
+advisory derived values and checks to runtime definition sheets. Scope by sheet kind:
+
+- **Native MÖRK BORG sheets:** unchanged; no formula evaluation.
+- **Runtime sheets of scalar formula definitions** (`formula_profile: 1`, no list fields):
+  publishable; derived values and advisory checks are computed on view, save and history
+  from the stored values and the immutable pin, shown read-only (never submitted), and
+  never block saving or rule on legality. Process/browser evidence: the unpacked
+  Chromium gate publishes a synthetic scalar formula definition and checks create
+  (nothing evaluated), saves that carry no derived name, a visible violation after a
+  violating save, read-only computed values, keyboard-operable expression disclosures in
+  the editor and in read-only history, and desktop/mobile reflow with an unbroken
+  1,024-byte expression and a long derived text. Escaping, round-trip, create,
+  failed-save, permit and unavailable-input cases are unit/connected-Router evidence.
+- **List fields:** admitted in drafts only; publication is refused until list editing
+  (M4). Not certified.
+
+No model, tool loop or provider evaluates or proposes formula changes; `formula::preview`
+is library-only. See `docs/runtime-definition-contract.md` and
+`docs/derived-formulas-plan.md` §16.
+
 Normal no-flag startup discovers the primary private IPv4 LAN interface and accepts real
 socket peers from that subnet or loopback. Host/Origin checks remain exact; missing
 LAN peer attribution and forged forwarding data cannot establish authority.

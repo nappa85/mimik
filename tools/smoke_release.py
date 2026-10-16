@@ -905,33 +905,8 @@ def prepare_auth_player(binary, directory, passwords, *, login="auth-player"):
     )
 
 
-def prepare_workspace_materials(binary, directory, fixture):
-    """Original synthetic fixtures only; no real manual/model approval."""
-    registry_cli(
-        binary,
-        directory,
-        "import-source",
-        "--bundle",
-        str(fixture / "adapter-bundle"),
-        "--pdf",
-        str(fixture / "original.pdf"),
-    )
-    prepare_unknown_registry_source(binary, directory, fixture)
-    with sqlite3.connect(directory / "smoke.sqlite3") as db:
-        source, page, unit = db.execute(
-            "SELECT s.id,p.id,u.id FROM sources s JOIN source_pages p ON p.source_id=s.id "
-            "JOIN source_units u ON u.page_id=p.id WHERE s.source_id='synthetic-unknown-core'"
-        ).fetchone()
-    manifest = json.loads((fixture / "unknown-bundle/bundle.json").read_text())
-    definition = json.loads((fixture / "definition.json").read_text())
-    definition["sources"] = [
-        {"source_id": source, "pdf_sha256": manifest["source_sha256"], "roles": ["sheet"]}
-    ]
-    definition["fields"][0]["mapping"] = {
-        "state": "mapped",
-        "regions": [{"source_id": source, "page_id": page, "unit_id": unit}],
-    }
-    path = directory / "synthetic-workspace-definition.json"
+def publish_definition(binary, directory, definition, name):
+    path = directory / name
     path.write_text(json.dumps(definition))
     draft = json.loads(
         registry_cli(
@@ -962,7 +937,50 @@ def prepare_workspace_materials(binary, directory, fixture):
             "Known generated white page and mapped region fixture",
             "--originals-compared",
         )
-    )["id"]
+    )
+
+
+def prepare_workspace_materials(binary, directory, fixture):
+    """Original synthetic fixtures only; no real manual/model approval.
+
+    Returns the published version IDs of the generic and the formula definition.
+    """
+    registry_cli(
+        binary,
+        directory,
+        "import-source",
+        "--bundle",
+        str(fixture / "adapter-bundle"),
+        "--pdf",
+        str(fixture / "original.pdf"),
+    )
+    prepare_unknown_registry_source(binary, directory, fixture)
+    with sqlite3.connect(directory / "smoke.sqlite3") as db:
+        source, page, unit = db.execute(
+            "SELECT s.id,p.id,u.id FROM sources s JOIN source_pages p ON p.source_id=s.id "
+            "JOIN source_units u ON u.page_id=p.id WHERE s.source_id='synthetic-unknown-core'"
+        ).fetchone()
+    manifest = json.loads((fixture / "unknown-bundle/bundle.json").read_text())
+    sources = [{"source_id": source, "pdf_sha256": manifest["source_sha256"], "roles": ["sheet"]}]
+    mapping = {
+        "state": "mapped",
+        "regions": [{"source_id": source, "page_id": page, "unit_id": unit}],
+    }
+    definition = json.loads((fixture / "definition.json").read_text())
+    definition["sources"] = sources
+    definition["fields"][0]["mapping"] = mapping
+    generic = publish_definition(
+        binary, directory, definition, "synthetic-workspace-definition.json"
+    )
+    formula = json.loads((fixture / "formula-definition.json").read_text())
+    formula["sources"] = sources
+    formula["fields"][0]["mapping"] = mapping
+    published = publish_definition(binary, directory, formula, "synthetic-formula-definition.json")
+    require(
+        published["deterministic_rules"] == "formulas-advisory",
+        "Formula definition is not published as advisory",
+    )
+    return generic["id"], published["id"]
 
 
 def auth_login(cookie, fields, login, password):

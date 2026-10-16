@@ -50,6 +50,21 @@ partial publication or approval. Identical content to the latest version reuses
 that immutable version and appends an approval. Changed content allocates the
 next version. Draft changes never rewrite old versions.
 
+## Formula definitions (M3)
+
+Scalar formula definitions (`formula_profile: 1` with derived fields and constraints,
+no list fields) publish like any other definition. The approval output reports
+`deterministic_rules: "formulas-advisory"` and lists derived fields and constraints
+whose rule evidence is still unresolved in `unresolved_formulas` and
+`unresolved_constraints` (omitted when empty; formula-free output is unchanged).
+Unresolved rule evidence does not block publication; it stays visible. Definitions with
+a list field are refused with `list-editing-unsupported` until list editing ships (M4).
+
+Sheets pinned to a formula definition evaluate it on every view, save and history page,
+from the stored values and the immutable pin. A stale or withdrawn approval does not stop
+evaluation: the sheet keeps its existing warning and its advisory results. Results never
+write a sheet, approve evidence or rule on legality.
+
 ## Invalidation, reapproval and withdrawal
 
 `show-definition-version` reports `current`, `stale`, `withdrawn` or
