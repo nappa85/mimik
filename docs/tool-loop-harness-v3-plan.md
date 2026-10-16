@@ -530,3 +530,17 @@ against the code or artefacts. Where §1–§10 differ, this section wins.
 33. **Libraries.** Use stdlib only (`statistics`, `csv`, `difflib`) and add no dependency;
     record this decision (Bun, Lu, Son).
 
+
+## 12. Amendment §11.24a: dev-only router track (user-authorised 2026-10-16)
+
+The user explicitly authorised reopening H10 as a **dev-only** system track, `SYS-R`. This
+supersedes §11.24 ("cut H10") only within these limits:
+
+- `SYS-R` runs on dev cases only, as described in
+  [decision-router-plan.md](decision-router-plan.md) revision 2, after its re-review.
+- It is never part of the A0 verdict. It enters the held-out set only if it is pre-registered
+  before A0's first held-out episode.
+- It never edits a frozen harness copy. Router changes land behind flags that are off by
+  default, so v3 C0 stays byte-identical when they are off.
+- Runs are CPU-only while the GPU cooling fault stands, after the current CPU candidate
+  screens (queue lock).
