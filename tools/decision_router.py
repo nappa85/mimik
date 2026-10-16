@@ -1061,6 +1061,7 @@ def main(argv=None) -> int:
     pr.add_argument("--out", type=Path, required=True)
     pr.add_argument("--formula-cli", type=Path)
     pr.add_argument("--subset", type=Path, default=SUBSET)
+    pr.add_argument("--sentinel", action="store_true", help="sentinel copy of the cases (scan)")
     f = sub.add_parser("folds")
     f.add_argument("--pack", type=Path, default=PACK)
     f.add_argument("--out", type=Path)
@@ -1095,7 +1096,12 @@ def main(argv=None) -> int:
         print(json.dumps(out, indent=2))
         return 0
     if args.cmd == "prepare":
-        print(json.dumps(prepare(args.pack, args.out, args.formula_cli, args.subset), indent=2))
+        if args.sentinel:
+            cases = sentinel_cases(pack_cases(args.pack))
+            manifest = prepare(args.pack, args.out, args.formula_cli, None, cases=cases)
+        else:
+            manifest = prepare(args.pack, args.out, args.formula_cli, args.subset)
+        print(json.dumps(manifest, indent=2))
         return 0
     if args.cmd == "folds":
         doc = fold_document(pack_cases(args.pack))
