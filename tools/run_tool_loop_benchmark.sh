@@ -91,6 +91,13 @@ docker_context=$(dk context show 2>/dev/null) || die 12 "docker context show fai
 [ "$docker_context" = default ] || die 2 "refusing docker context '$docker_context' (default only)"
 RUN_ID=$(date +%Y%m%dT%H%M%S)-$$
 LABELS=(--label "$LABEL" --label "mimik.toolloop.run=$RUN_ID")
+labelled() {  # labelled <name>: the container exists and carries the ownership label
+  [ "$(dk inspect -f '{{index .Config.Labels "mimik.toolloop"}}' "$1" 2>/dev/null)" = v3 ]
+}
+ours() {  # ours <name>: the container exists and carries this run's label
+  [ "$(dk inspect -f '{{index .Config.Labels "mimik.toolloop.run"}}' "$1" 2>/dev/null)" = "$RUN_ID" ]
+}
+check_registry=${CHECK_REGISTRY:-$MAIN/target/tool-loop-check-containers.txt}
 owned_names() {  # owned containers: label AND name prefix; fails if docker cannot list
   local names
   names=$(dk ps -a --filter "label=$LABEL" --format '{{.Names}}') || return 1
@@ -203,17 +210,17 @@ cleanup() {
   if [ "$started_heavy" = 1 ]; then
     # Heavy work stops before any diagnostics: harness stopped, server frozen (cgroup
     # freezer: no compute, cgroup and VRAM still readable), diagnostics read, server stopped.
-    dk stop -t 10 "$HARNESS" >/dev/null 2>&1 || true
-    if dk pause "$SRV" >/dev/null 2>&1; then
-      {
-        echo "server_paused_for_diagnostics=true vram_used_end=$(vram) swap_used_mib_after=$(swap_used)"
-        echo "server_memory_peak=$(cgroup_file memory.peak || echo n/a) server_swap_peak=$(cgroup_file memory.swap.peak || echo n/a)"
-      } >> "$prov"
-      dk unpause "$SRV" >/dev/null 2>&1 || true
-    else
-      echo "server_paused_for_diagnostics=false swap_used_mib_after=$(swap_used)" >> "$prov"
-    fi
-    dk stop -t 10 "$SRV" >/dev/null 2>&1 || true
+    # Fixed names are acted on only when they carry this run's label (residual risk T2).
+    if ours "$HARNESS"; then dk stop -t 10 "$HARNESS" >/dev/null 2>&1 || true; fi
+    paused=false
+    if ours "$SRV" && dk pause "$SRV" >/dev/null 2>&1; then paused=true; fi
+    # If the pause failed, the harness has stopped, so the GPU is idle: read them anyway.
+    {
+      echo "server_paused_for_diagnostics=$paused vram_used_end=$(vram) swap_used_mib_after=$(swap_used)"
+      echo "server_memory_peak=$(cgroup_file memory.peak || echo n/a) server_swap_peak=$(cgroup_file memory.swap.peak || echo n/a)"
+    } >> "$prov"
+    if [ "$paused" = true ]; then dk unpause "$SRV" >/dev/null 2>&1 || true; fi
+    if ours "$SRV"; then dk stop -t 10 "$SRV" >/dev/null 2>&1 || true; fi
     echo "server_oom_killed=$(dk inspect -f '{{.State.OOMKilled}}' "$SRV" 2>/dev/null || echo unknown)" >> "$prov"
     timeout --foreground -k 10 120 docker logs "$SRV" > "$out/server.log" 2>&1 || true
   fi
@@ -298,12 +305,15 @@ limit_from_window=0 step_limit=0
 check_run() {  # check_run <seconds> <mounts and command...>: a named, bounded check container
   local limit=$1 name rc output; shift
   check_n=$((check_n + 1)); name=${OWNED}check-$$-$check_n
+  echo "$name" >> "$check_registry"  # for the watchdog's fallback if docker cannot list
   set +e
   output=$(timeout --foreground -k 10 "$limit" docker run --rm --init --pull never --name "$name" "${LABELS[@]}" --network none \
     --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only --memory 256m \
     --pids-limit 32 "$@")
   rc=$?
   set -e
+  grep -vx "$name" "$check_registry" > "$check_registry.tmp" 2>/dev/null || true
+  mv -f "$check_registry.tmp" "$check_registry" 2>/dev/null || true
   if [ "$rc" != 0 ]; then
     dk rm -f "$name" >/dev/null 2>&1 || true
     if [ "$rc" = 124 ] && [ "$limit_from_window" = 1 ]; then
@@ -452,7 +462,7 @@ timing() {  # timing <phase>: gate, then budget and absolute deadline from this 
 }
 run_harness() {  # run_harness <phase> <args...>: sets phase_rc; records <phase>_exit/_oom_killed
   local phase=$1 status limit started; shift
-  dk rm -f "$HARNESS" >/dev/null 2>&1 || true
+  if labelled "$HARNESS"; then dk rm -f "$HARNESS" >/dev/null 2>&1 || true; fi  # a leftover
   dk run -d --init --pull never --name "$HARNESS" "${LABELS[@]}" --network "$NET" \
     --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
     --memory 2g --cpus 2 --pids-limit 128 -e PYTHONDONTWRITEBYTECODE=1 \
@@ -475,7 +485,7 @@ run_harness() {  # run_harness <phase> <args...>: sets phase_rc; records <phase>
   done
   read -r _ phase_rc oom <<< "$status"
   timeout --foreground -k 10 300 docker logs "$HARNESS" > "$out/$phase.stdout" 2> "$out/$phase.stderr" || true
-  dk rm -f "$HARNESS" >/dev/null 2>&1 || true
+  if ours "$HARNESS"; then dk rm -f "$HARNESS" >/dev/null 2>&1 || true; fi
   echo "${phase}_exit=$phase_rc ${phase}_oom_killed=$oom ${phase}_wall_seconds=$(( $(date +%s) - started ))" >> "$prov"
 }
 echo "pack=$pack" >> "$prov"

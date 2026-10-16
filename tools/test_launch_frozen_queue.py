@@ -6,6 +6,7 @@ Failing-first: run before the script existed. Only --print is exercised (nothing
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -30,6 +31,13 @@ class FrozenLaunchTests(unittest.TestCase):
         self.git("commit", "-q", "-m", "t")
         self.head = self.git("rev-parse", "HEAD").strip()
         self.base = self.tmp / "wts"
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        docker = self.bin / "docker"
+        docker.write_text(
+            '#!/bin/sh\n[ "$1 $2" = "context show" ] && echo "${FAKE_CONTEXT:-default}"\n'
+        )
+        docker.chmod(0o755)
 
     def git(self, *args, cwd=None):
         cmd = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
@@ -37,7 +45,11 @@ class FrozenLaunchTests(unittest.TestCase):
         return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
 
     def launch(self, *args, **env):
-        base = {"PATH": os.environ["PATH"], "HOME": str(self.tmp), "FROZEN_BASE": str(self.base)}
+        base = {
+            "PATH": f"{self.bin}:{os.environ['PATH']}",
+            "HOME": str(self.tmp),
+            "FROZEN_BASE": str(self.base),
+        }
         base.update(env)
         return subprocess.run(
             ["bash", str(self.repo / "tools" / SCRIPT), *args],
@@ -61,6 +73,49 @@ class FrozenLaunchTests(unittest.TestCase):
         self.assertEqual(Path(common.strip()).parent, self.repo.resolve())
         again = self.launch("--print", self.head, "tools/queues/a.json")
         self.assertEqual(again.returncode, 0, again.stderr)
+
+    def test_session_end_passed_to_every_queue(self):
+        proc = self.launch(
+            "--print",
+            "--session-end",
+            "2099-10-18 22:00",
+            "HEAD",
+            "tools/queues/a.json",
+            "tools/queues/b.json",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.count("--session-end 2099-10-18\\ 22:00"), 2, proc.stdout)
+        for bad in ("Sunday", "2099-13-40 22:00", "2001-01-01 00:00"):
+            with self.subTest(bad=bad):
+                proc = self.launch("--print", "--session-end", bad, "HEAD", "tools/queues/a.json")
+                self.assertEqual(proc.returncode, 2, proc.stdout)
+
+    def test_round_three_refusals(self):
+        cases = {
+            "model root": {"MIMIK_MODEL_ROOT": "/home/x"},
+            "docker config": {"DOCKER_CONFIG": "/tmp/c"},
+            "context": {"FAKE_CONTEXT": "remote"},
+        }
+        for name, env in cases.items():
+            with self.subTest(name=name):
+                proc = self.launch("--print", "HEAD", "tools/queues/a.json", **env)
+                self.assertEqual(proc.returncode, 2, proc.stdout)
+                self.assertIn("refusing", proc.stderr)
+
+    def test_refuses_while_a_queue_or_watchdog_runs(self):
+        fake = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)", "run_watchdog.py"]
+        )
+        self.addCleanup(fake.kill)
+        proc = self.launch("--print", "HEAD", "tools/queues/a.json")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("already running", proc.stderr)
+
+    def test_prunes_a_stale_worktree_entry(self):
+        self.assertEqual(self.launch("--print", "HEAD", "tools/queues/a.json").returncode, 0)
+        shutil.rmtree(self.base / f"run-{self.head[:12]}")  # deleted, still registered
+        proc = self.launch("--print", "HEAD", "tools/queues/a.json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_refusals(self):
         self.assertEqual(self.launch("--print", "HEAD", "tools/queues/a.json").returncode, 0)

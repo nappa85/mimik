@@ -351,6 +351,19 @@ def check_ledger(path: Path, plan: dict) -> dict:
     return result
 
 
+def diagnostics_warnings(prov: dict) -> list:
+    """Server diagnostics that are missing or were read without the freeze."""
+    if prov.get("server_paused_for_diagnostics") is None:
+        return []  # no server was started
+    warnings = []
+    if prov.get("server_paused_for_diagnostics") != "true":
+        warnings.append("server could not be paused; diagnostics read after the harness stop")
+    for key in ("server_swap_peak", "server_memory_peak", "vram_used_end"):
+        if prov.get(key) in (None, "", "n/a"):
+            warnings.append(f"{key} unreadable")
+    return warnings
+
+
 def server_seconds_per_token(path: Path):
     """Generation seconds per token from llama.cpp's 'eval time' log lines (None if absent)."""
     if not path.exists():
@@ -423,8 +436,16 @@ class WatchdogSupervisor:
     """
 
     def __init__(
-        self, heartbeat: Path, log_path: Path, fresh_seconds=90, ready_timeout=60, interval=30
+        self,
+        heartbeat: Path,
+        log_path: Path,
+        fresh_seconds=None,
+        ready_timeout=60,
+        interval=30,
     ):
+        # Fresh means newer than one interval plus the watchdog's worst-case tick.
+        if fresh_seconds is None:
+            fresh_seconds = interval + run_watchdog.WORST_TICK_SECONDS + 30
         self.heartbeat, self.log_path = Path(heartbeat), Path(log_path)
         self.interval = interval
         self.fresh_seconds, self.ready_timeout = fresh_seconds, ready_timeout
@@ -526,7 +547,8 @@ class Queue:
         self.console = console or (lambda line: print(line, flush=True))
         self.base_env = dict(os.environ if env is None else env)
         self.extra_env = dict(extra_env or {})
-        self.watchdog = watchdog or NoWatchdog()  # Python-only seam (real-docker smoke test)
+        self.watchdog = watchdog or NoWatchdog()
+        self.watchdog_lost = self.cleanup_lost = False  # Python-only seam (real-docker smoke test)
         self.vram_reader = vram_reader or read_vram
         self.cooldown_seconds = cooldown_seconds
         self.vram_wait_seconds = vram_wait_seconds
@@ -575,6 +597,13 @@ class Queue:
             "missing_required": missing,
             "study_complete": self.state == "done" and not missing,
             "g0": self.g0_results,
+            # Loud, never silent: diagnostics the runner could not read (review round 3).
+            "warnings": [
+                f"{a['id']} attempt {r['attempt']}: {w}"
+                for a in planned
+                for r in a["attempts"]
+                for w in r.get("warnings", [])
+            ],
             "arms": [
                 {
                     "id": a["id"],
@@ -758,7 +787,7 @@ class Queue:
             OUT_DIR=str(attempt_dir),
             HASH_CACHE=str(self.hash_cache),
             QUIET="1" if self.q["quiet"] else "0",
-            WINDOW_END=str(int(window_close)),
+            WINDOW_END=str(int(self.cutoff(window_close))),
             QUEUE_PID=str(os.getpid()),
         )
         if cfg.get("preflight_case"):
@@ -771,6 +800,11 @@ class Queue:
             env["N_CPU_MOE"] = str(arm["selected_n_cpu_moe"])
         env.update(self.extra_env)
         return env
+
+    def cutoff(self, window_close: float) -> float:
+        """The absolute cutoff for the runner: the window end or the session end, if earlier."""
+        deadline = self.q["session_deadline"]
+        return window_close if deadline is None else min(window_close, deadline)
 
     def cleanup_checked(self) -> dict:
         try:
@@ -851,6 +885,7 @@ class Queue:
     def classify(self, arm, attempt_dir: Path, env, rc, stopped_by, cleanup) -> dict:
         prov = parse_provenance(attempt_dir / "provenance.txt")
         out = {"provenance": bool(prov), "failure": prov.get("failure")}
+        out["warnings"] = diagnostics_warnings(prov)
         oom_keys = ("server_oom_killed", "preflight_oom_killed", "main_oom_killed")
         oom = [k for k in oom_keys if prov.get(k) == "true"]
         ledger = attempt_dir / prov["ledger_file"] if prov.get("ledger_file") else None
@@ -858,7 +893,7 @@ class Queue:
             check = check_ledger(ledger, self.plan(arm, env)) if ledger else None
         except Exception as error:  # noqa: BLE001 (fails this arm, not the queue)
             out["ledger_error"] = f"{type(error).__name__}: {error}"
-            return dict(out, status="failed", infra=None, reason=f"ledger check error: {error}")
+            check = None  # fall through: the cleanup and runner-exit gates still apply
         if check is not None:
             out["ledger"] = str(ledger)
             out["ledger_check"] = check
@@ -910,6 +945,9 @@ class Queue:
             return dict(out, status="failed", infra=None, reason=prov.get("failure_detail"))
         if prov.get("main_exit") is None:
             return dict(out, status="failed", infra=None, reason=f"no main_exit (exit {rc})")
+        if out.get("ledger_error"):
+            reason = f"ledger check error: {out['ledger_error']}"
+            return dict(out, status="failed", infra=None, reason=reason)
         if check and check.get("aborted") and "health" in str(check.get("abort_reason")):
             return dict(out, status="failed", infra="server_health", reason=check["abort_reason"])
         if prov.get("main_exit") != "0" or rc != 0 or check is None:
@@ -970,9 +1008,16 @@ class Queue:
             "session_deadline",
         ) or (
             record["status"] == "complete"
-            and (spt is None or swap is None or not vram or swap_peak is None)
+            and (
+                spt is None
+                or swap is None
+                or not vram
+                or swap_peak is None
+                or _int_or_none(prov.get("vram_used_end")) is None
+            )
         )
         result["indeterminate"] = indeterminate
+        result["warnings"] = record.get("warnings", [])
         result["qualified"] = (
             not indeterminate
             and record["status"] == "complete"
@@ -1088,6 +1133,15 @@ class Queue:
             self.console("queue done")
         self.write_manifest()
 
+    def fits_now(self, arm) -> bool:
+        now = self.clock.time()
+        estimate = self.estimate(arm)
+        margin = max(self.q["stop_margin_seconds"], FIT_MARGIN)
+        deadline = self.q["session_deadline"]
+        if deadline is not None and now + estimate > deadline:
+            return False
+        return heavy_allowed(now) and now + estimate <= window_end(now) - margin
+
     def g0_expired(self, arm) -> bool:
         deadline = self.q["g0"]["deadline_seconds"]
         return bool(
@@ -1108,6 +1162,8 @@ class Queue:
         env["CHECK_ONLY"] = "1"
         start = self.clock.time()
         limit = min(window_end(start) - self.q["stop_margin_seconds"], start + 3 * 3600)
+        if self.q["session_deadline"] is not None:
+            limit = min(limit, self.q["session_deadline"])
         rc = None
         try:
             self.handle = self.launcher.start(
@@ -1123,11 +1179,18 @@ class Queue:
                 if self.clock.time() >= limit:
                     rc = self.terminate()
                     return False, "did not finish before the window edge"
+                if not self.watchdog.alive() and not self.watchdog.ensure():
+                    rc = self.terminate()
+                    self.watchdog_lost = True
+                    return False, "watchdog unavailable"
                 self.clock.sleep(min(self.poll_seconds, max(0.5, limit - self.clock.time())))
         finally:
             if self.handle is not None and self.handle.poll() is None:
                 self.terminate()
             self.handle = None
+            check_cleanup = self.cleanup_checked()
+            if not check_cleanup["ok"]:
+                self.cleanup_lost = True
         prov = parse_provenance(check_dir / "provenance.txt")
         self.log("check_pass", arm=arm["id"], rc=rc, failure=prov.get("failure"))
         if rc == 0 and prov.get("check_only") == "1" and prov.get("failure") is None:
@@ -1155,10 +1218,23 @@ class Queue:
                 self.stop("watchdog unavailable: no heavy work without it")
                 return "not_started"
             self.log("watchdog_ready", arm=arm["id"])
+            self.watchdog_lost = self.cleanup_lost = False
             ok, why = self.check_pass(arm)
+            if self.cleanup_lost or self.watchdog_lost:
+                why = "cleanup unresolved" if self.cleanup_lost else "watchdog unavailable"
+                self.transition(arm, "not_started", reason=f"CHECK_ONLY pre-pass: {why}")
+                self.stop(f"{why} after the CHECK_ONLY pre-pass")
+                return "not_started"
             if not ok:
                 self.transition(arm, "refused", reason=f"CHECK_ONLY pre-pass: {why}")
                 return "refused"
+            if not self.fits_now(arm):  # the pre-pass took time: recheck the fit
+                self.log("refit_after_check_pass", arm=arm["id"])
+                continue
+            if not self.watchdog.ensure():  # and the watchdog, immediately before launch
+                self.transition(arm, "not_started", reason="watchdog unavailable")
+                self.stop("watchdog unavailable: no heavy work without it")
+                return "not_started"
             if self.g0_expired(arm):  # rechecked after every wait and precheck
                 self.transition(arm, "skipped", reason="G0 deadline passed")
                 return "skipped"
@@ -1231,6 +1307,15 @@ def window_check(now: float, cutoff=None, margin: float = 0) -> int:
     return 0 if state == "open" else 1
 
 
+def session_end(text: str, current=None) -> float:
+    """--session-end as an epoch; the earlier of it and the queue file's session deadline."""
+    try:
+        end = epoch(dt.datetime.strptime(text, "%Y-%m-%d %H:%M"))
+    except ValueError:
+        raise SystemExit(f"--session-end must be 'YYYY-MM-DD HH:MM', got {text!r}") from None
+    return end if current is None else min(end, current)
+
+
 def hold_lock(path: Path, what: str):
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(path, "a", encoding="utf-8")  # noqa: SIM115 (held for the session)
@@ -1252,16 +1337,26 @@ def main(argv=None) -> int:
     run = sub.add_parser("run")
     run.add_argument("queue", type=Path)
     run.add_argument("--session-dir", type=Path)
+    run.add_argument(
+        "--session-end",
+        help="absolute local time (YYYY-MM-DD HH:MM): no arm starts or keeps running past it",
+    )
     args = parser.parse_args(argv)
     ops.pin_local_time()
-    if args.command != "window-check":
+    if args.command == "check":
         problem = ops.docker_endpoint_problem()
+        if problem:
+            raise SystemExit(problem)
+    if args.command == "run":  # environment and context, before any other Docker call
+        problem = ops.docker_problem()
         if problem:
             raise SystemExit(problem)
     if args.command == "window-check":
         return window_check(window_clock_now(), args.cutoff, args.margin)
     registry = model_registry.load()
     queue = load_queue(args.queue, registry)
+    if getattr(args, "session_end", None):
+        queue["session_deadline"] = session_end(args.session_end, queue["session_deadline"])
     if args.command == "check":
         q = Queue(queue, registry, ROOT / "target" / "queue-check-unused")  # nothing written
         for arm in q.arms:

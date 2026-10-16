@@ -90,12 +90,12 @@ class FakeHandle:
 class FakeCheckHandle:
     """The CHECK_ONLY pre-pass: instant, then check_only=1 (or a failure)."""
 
-    def __init__(self, clock, env, fail):
-        self.clock, self.env, self.fail = clock, env, fail
+    def __init__(self, clock, env, fail, seconds=0):
+        self.clock, self.env, self.fail, self.seconds = clock, env, fail, seconds
         self.start, self.rc = clock.now, None
 
     def poll(self):
-        if self.rc is None:
+        if self.rc is None and self.clock.now >= self.start + self.seconds:
             out = Path(self.env["OUT_DIR"])
             if self.fail:
                 text = "failure=model_hash\nfailure_detail=model sha256 mismatch\n"
@@ -145,7 +145,12 @@ class FakeLauncher:
         if env.get("CHECK_ONLY") == "1":
             self.checks.append(arm)
             self.order.append(("check", arm))
-            return FakeCheckHandle(self.clock, env, self.plan.get(f"{arm}:check_fail"))
+            return FakeCheckHandle(
+                self.clock,
+                env,
+                self.plan.get(f"{arm}:check_fail"),
+                self.plan.get(f"{arm}:check_seconds", 0),
+            )
         self.order.append(("run", arm))
         n = sum(1 for a, _ in self.launches if a == arm)
         self.launches.append((arm, dict(env)))
@@ -274,6 +279,7 @@ def write_attempt(out: Path, b: dict, env: dict, argv) -> int:
         f"main_wall_seconds={b.get('wall', 100)}",
         f"vram_used_end={vram} swap_used_mib_after={b.get('swap_after', 100)}",
         f"server_memory_peak=1 server_swap_peak={b.get('swap_peak', 0)}",
+        f"server_paused_for_diagnostics={b.get('paused', 'true')}",
         "server_oom_killed=false",
     ]
     if b.get("window_budget"):
@@ -759,7 +765,7 @@ class ReviewFixCrashTests(Harness):
 
         def cleanup():
             self.cleanups += 1
-            ok = self.cleanups == 1  # startup ok, after the first attempt not
+            ok = self.cleanups <= 2  # startup and check pass ok, after the first attempt not
             return {"ok": ok, "remaining": [] if ok else ["mimik-toolloop-v3-srv"]}
 
         q.cleanup = cleanup
@@ -1101,6 +1107,130 @@ class ReviewTwoQueueTests(Harness):
         )
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("DOCKER_CONTEXT", proc.stderr)
+
+
+class ReviewThreeTests(Harness):
+    """Round 3: ledger error keeps the gates, pause failure is loud, check-pass watchdog
+    and cleanup, refit after the pre-pass, session hard end, heartbeat freshness."""
+
+    START = at(2026, 10, SAT, 10, 0)
+
+    def test_ledger_error_still_reaches_the_cleanup_gate(self):
+        q = self.make(queue_doc([arm("a"), arm("b")]), self.START)
+        original = rq.check_ledger
+
+        def bad(*args):
+            raise ValueError("bad ledger")
+
+        calls = {"n": 0}
+
+        def cleanup():
+            calls["n"] += 1
+            ok = calls["n"] <= 2  # startup and the check pass; not after the attempt
+            return {"ok": ok, "remaining": [] if ok else ["mimik-toolloop-v3-srv"]}
+
+        q.cleanup = cleanup
+        rq.check_ledger = bad
+        try:
+            manifest = q.run()
+        finally:
+            rq.check_ledger = original
+        self.assertEqual(manifest["state"], "stopped")
+        self.assertIn("cleanup unresolved", manifest["stop_reason"])
+        self.assertIn("ledger_error", manifest["arms"][0]["attempts"][0])
+        self.assertEqual(manifest["arms"][1]["state"], "pending")
+
+    def test_pause_failure_is_loud_and_g0_indeterminate(self):
+        g0 = [arm("g0-40", model="qwen36-35b-a3b", g0=True, env={"N_CPU_MOE": 40})]
+        plan = {"g0-40": [{"eval_ms": 9000, "paused": "false", "swap_peak": "n/a"}]}
+        q = self.make(queue_doc(g0), at(2026, 10, SAT, 6, 0), plan=plan)
+        manifest = q.run()
+        self.assertTrue(manifest["g0"][0]["indeterminate"])
+        self.assertFalse(manifest["g0"][0]["qualified"])
+        joined = " ".join(manifest["warnings"])
+        self.assertIn("could not be paused", joined)
+        self.assertIn("server_swap_peak unreadable", joined)
+        self.assertEqual(
+            manifest["g0"][0]["warnings"], manifest["arms"][0]["attempts"][0]["warnings"]
+        )
+
+    def test_watchdog_lost_during_the_check_pass(self):
+        dog = FakeWatchdog()
+        plan = {"a:check_seconds": 600}
+        q = self.make(queue_doc([arm("a")]), self.START, watchdog=dog, plan=plan)
+
+        def die(clock):
+            if q.handle is not None and not self.launcher.launches:
+                dog.is_alive, dog.restartable = False, False
+
+        self.clock.on_sleep = die
+        manifest = q.run()
+        self.assertEqual(self.launcher.launches, [])
+        self.assertEqual(manifest["state"], "stopped")
+        self.assertIn("watchdog unavailable", manifest["stop_reason"])
+
+    def test_check_pass_cleanup_runs_in_finally_and_gates(self):
+        q = self.make(queue_doc([arm("a")]), self.START)
+        calls = {"n": 0}
+
+        def cleanup():
+            calls["n"] += 1
+            ok = calls["n"] == 1  # startup ok; the check-pass cleanup fails
+            return {"ok": ok, "remaining": []}
+
+        q.cleanup = cleanup
+        manifest = q.run()
+        self.assertEqual(self.launcher.launches, [])
+        self.assertIn("cleanup unresolved after the CHECK_ONLY pre-pass", manifest["stop_reason"])
+
+    def test_refit_after_a_long_check_pass(self):
+        # Wednesday 08:00, a ~636 s smoke fits before 08:45, but a 40 min pre-pass ends at
+        # 08:40 and the arm no longer fits: it waits for 18:00.
+        plan = {"a:check_seconds": 2400}
+        q = self.make(queue_doc([arm("a")]), at(2026, 10, WED, 8, 0), plan=plan)
+        manifest = q.run()
+        self.assertIn("refit_after_check_pass", (q.dir / "queue.log").read_text())
+        # 18:00 window, a new 40 min pre-pass, then the launch.
+        self.assertEqual(self.started_at(q, "a"), dt.datetime(2026, 10, WED, 18, 40))
+        self.assertEqual(manifest["arms"][0]["state"], "complete")
+
+    def test_session_end_bounds_the_runner_and_the_queue(self):
+        doc = queue_doc(
+            [arm("a"), arm("b", seconds_per_episode=600)], session_deadline="2026-10-17T10:30:00"
+        )
+        plan = {"a": [{"seconds": 600}], "b": [{"seconds": 3 * 3600}]}
+        q = self.make(doc, at(2026, 10, SAT, 10, 0), plan=plan)
+        manifest = q.run()
+        _, env = self.launcher.launches[0]
+        self.assertEqual(env["WINDOW_END"], str(int(at(2026, 10, SAT, 10, 30))))
+        self.assertEqual(manifest["arms"][0]["state"], "complete")
+        self.assertEqual(manifest["arms"][1]["state"], "skipped")  # no start past the end
+
+    def test_running_arm_stopped_at_the_session_end(self):
+        doc = queue_doc(
+            [arm("a", seconds_per_episode=1, max_arm_seconds=10 * 3600)],
+            session_deadline="2026-10-17T11:00:00",
+        )
+        q = self.make(doc, at(2026, 10, SAT, 10, 0), plan={"a": [{"seconds": 5 * 3600}]})
+        manifest = q.run()
+        attempt = manifest["arms"][0]["attempts"][0]
+        self.assertEqual(attempt["status"], "session_deadline")
+        self.assertLessEqual(
+            dt.datetime.fromisoformat(attempt["ended"]), dt.datetime(2026, 10, SAT, 11, 0)
+        )
+        self.assertEqual(manifest["state"], "stopped")
+
+    def test_session_end_option(self):
+        self.assertEqual(rq.session_end("2026-10-18 22:00"), at(2026, 10, SUN, 22, 0))
+        self.assertEqual(
+            rq.session_end("2026-10-18 22:00", at(2026, 10, SAT, 1, 0)), at(2026, 10, SAT, 1, 0)
+        )
+        with self.assertRaises(SystemExit):
+            rq.session_end("Sunday night")
+
+    def test_freshness_exceeds_the_worst_tick(self):
+        sup = rq.WatchdogSupervisor(Path("/nonexistent"), Path("/nonexistent.log"), interval=30)
+        self.assertGreater(sup.fresh_seconds, 30 + rq.run_watchdog.WORST_TICK_SECONDS)
 
 
 class SupervisorTests(unittest.TestCase):

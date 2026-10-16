@@ -101,6 +101,9 @@ if args[0] == "run":
             path = env["MIMIK_FORMULA_EVAL"]
         else:
             advance(env.get("FAKE_HASH_SECONDS", 0))
+            reg = env.get("CHECK_REGISTRY")
+            if reg and Path(reg).exists():
+                (log / "registry-during-hash.txt").write_text(Path(reg).read_text())
             if env.get("FAKE_HASH_SLEEP"):
                 (log / "hash.pid").write_text(str(os.getpid()))
                 time.sleep(float(env["FAKE_HASH_SLEEP"]))
@@ -109,7 +112,7 @@ if args[0] == "run":
     if name.endswith("-srv"):
         (log / "server.json").write_text(json.dumps({"image": image, "args": cmd, "mounts": mounts, "opts": opts}))
         dies = bool(env.get("FAKE_SERVER_DIES_VRAM"))
-        state["c"][name] = {"status": "exited" if dies else "running", "rc": 1 if dies else 0, "oom": False, "label": "v3",
+        state["c"][name] = {"status": "exited" if dies else "running", "rc": 1 if dies else 0, "oom": False, "label": "v3", "run": labels["mimik.toolloop.run"],
                             "log": "ggml_vulkan: ErrorOutOfDeviceMemory\n" if dies else
                                    "       eval time =   100.00 ms /    10 tokens\n"}
         save()
@@ -134,14 +137,14 @@ if args[0] == "run":
         h.write(json.dumps(cmd) + "\n")
     phase = "main" if "--arm" not in cmd or not cmd[cmd.index("--arm") + 1].endswith("-preflight") else "preflight"
     if env.get("FAKE_HARNESS_RUNNING") and phase == "main":
-        state["c"][name] = {"status": "running", "rc": 0, "oom": False, "out": "", "err": "", "label": "v3"}
+        state["c"][name] = {"status": "running", "rc": 0, "oom": False, "out": "", "err": "", "label": "v3", "run": labels["mimik.toolloop.run"]}
         save()
         print("beef")
         sys.exit(0)
     proc = subprocess.run([sys.executable] + mapped[1:] + ["--dry-run"], capture_output=True, text=True)
     oom = bool(env.get("FAKE_MAIN_OOM")) and phase == "main"
     state["c"][name] = {"status": "exited", "rc": 137 if oom else proc.returncode, "oom": oom,
-                        "out": proc.stdout, "err": proc.stderr, "label": "v3"}
+                        "out": proc.stdout, "err": proc.stderr, "label": "v3", "run": labels["mimik.toolloop.run"]}
     save()
     print("beef")
     sys.exit(0)
@@ -150,7 +153,9 @@ if args[0] == "inspect":
     c = state["c"].get(name)
     if c is None:
         sys.exit(1)
-    if "Config.Labels" in fmt:
+    if "mimik.toolloop.run" in fmt:
+        print(c.get("run") or "")
+    elif "Config.Labels" in fmt:
         print(c.get("label") or "")
     elif "{{.Id}}" in fmt:
         print("cafe" + name[-3:])
@@ -173,6 +178,8 @@ if args[0] == "context":
 if args[0] in ("pause", "unpause"):
     with open(log / "pauses.jsonl", "a") as h:
         h.write(json.dumps(args) + "\n")
+    if env.get("FAKE_PAUSE_FAIL"):
+        sys.exit(1)
     sys.exit(0 if args[1] in state["c"] else 1)
 if args[0] == "ps":
     hang("ps")
@@ -676,7 +683,6 @@ class RunnerTests(unittest.TestCase):
         calls = self.calls()
         index = {tuple(c[:2]): i for i, c in reversed(list(enumerate(calls)))}
         pause = index[("pause", OWNED + "srv")]
-        self.assertLess(index[("stop", "-t")], pause)  # the harness stopped first
         stop_srv = next(
             i for i, c in enumerate(calls) if c[:4] == ["stop", "-t", "10", OWNED + "srv"]
         )
@@ -736,6 +742,42 @@ class RunnerTests(unittest.TestCase):
         text = (out / "provenance.txt").read_text()
         self.assertIn("did not finish before the cutoff", text)
         self.assertIn("hash_limit_seconds=5", text)
+
+    # ---- round 3
+    def test_pause_failure_still_reads_diagnostics_before_the_stop(self):
+        proc, out = self.run_runner("qwen3-4b-2507", "smoke", "17", FAKE_PAUSE_FAIL="1")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        prov = self.prov(out)
+        self.assertEqual(prov["server_paused_for_diagnostics"], "false")
+        self.assertIn("server_swap_peak", prov)
+        self.assertIn("vram_used_end", prov)
+        calls = self.calls()
+        stop_srv = next(
+            i for i, c in enumerate(calls) if c[:4] == ["stop", "-t", "10", OWNED + "srv"]
+        )
+        cgroup_reads = [
+            i for i, c in enumerate(calls) if c[:2] == ["inspect", "-f"] and "{{.Id}}" in c[2]
+        ]
+        self.assertTrue(cgroup_reads)
+        self.assertLess(cgroup_reads[0], stop_srv)
+
+    def test_check_containers_registered_while_they_run(self):
+        registry = self.tmp / "checks.txt"
+        proc, _ = self.run_runner(
+            "qwen3-4b-2507", "smoke", "17", CHECK_ONLY="1", CHECK_REGISTRY=str(registry)
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        during = (self.log / "registry-during-hash.txt").read_text().split()
+        self.assertTrue(any(n.startswith(OWNED + "check-") for n in during), during)
+        self.assertEqual(registry.read_text().split(), [])  # unregistered afterwards
+
+    def test_fixed_names_of_another_run_are_not_stopped(self):
+        other = {"status": "running", "rc": 0, "oom": False, "label": "v3", "run": "other-run"}
+        state = {"c": {OWNED + "harness": other}, "n": {}}
+        (self.log / "state.json").write_text(json.dumps(state))
+        proc, _ = self.run_runner("qwen3-4b-2507", "smoke", "17", CHECK_ONLY="1")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(any(c[0] in ("stop", "pause") for c in self.calls()))
 
     def test_shellcheck_clean_if_available(self):
         if not shutil.which("shellcheck"):

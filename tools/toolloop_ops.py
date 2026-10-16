@@ -109,6 +109,9 @@ def lock_paths(main: Path) -> dict:
         "runner": target / ".tool-loop-benchmark.lock",
         "queue": target / ".tool-loop-queue.lock",
         "watchdog": target / ".tool-loop-watchdog.lock",
+        # Names of the pid-suffixed hash/check containers the runner starts (one per line),
+        # for the watchdog's fallback when docker cannot list containers.
+        "checks": target / "tool-loop-check-containers.txt",
     }
 
 
@@ -146,6 +149,22 @@ def lock_held(path: Path, proc_locks: Path = Path("/proc/locks")) -> bool:
 ENDPOINT_VARIABLES = ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG")
 
 
+def docker_context_problem(docker=None):
+    """The docker context must be `default` (checked before any other Docker call)."""
+    docker = docker or Docker()
+    rc, out = docker.call("context", "show")
+    if rc != 0:
+        return "docker context show failed or timed out"
+    if out.strip() != "default":
+        return f"refusing docker context {out.strip()!r} (default only)"
+    return None
+
+
+def docker_problem(env=None, docker=None):
+    """Environment refusal, then the context check: None if this Docker endpoint is usable."""
+    return docker_endpoint_problem(env) or docker_context_problem(docker)
+
+
 def docker_endpoint_problem(env=None):
     """One Docker endpoint for runner, queue and watchdog: refuse any endpoint override."""
     env = os.environ if env is None else env
@@ -170,8 +189,18 @@ class Docker:
     the same prefix but without the label is never touched.
     """
 
-    def __init__(self, binary="docker", timeout=DOCKER_TIMEOUT, run=subprocess.run):
+    def __init__(
+        self, binary="docker", timeout=DOCKER_TIMEOUT, run=subprocess.run, check_registry=None
+    ):
         self.binary, self.timeout, self._run = binary, timeout, run
+        self.check_registry = None if check_registry is None else Path(check_registry)
+
+    def registered_checks(self):
+        try:
+            lines = self.check_registry.read_text(encoding="utf-8").split()
+        except (OSError, AttributeError):
+            return []
+        return [n for n in lines if n.startswith(OWNED_PREFIX + "check-")]
 
     def call(self, *args, timeout=None):
         try:
@@ -217,7 +246,8 @@ class Docker:
         names = self.owned()
         if names is None:
             errors.append("docker ps failed or timed out")
-            names = [n for n in KNOWN_NAMES if self.is_owned(n)]
+            candidates = list(KNOWN_NAMES) + self.registered_checks()
+            names = [n for n in candidates if self.is_owned(n)]
         for name in names:  # harness before server: stop the load first
             rc, _ = self.call("rm", "-f", name)
             if rc == 0:

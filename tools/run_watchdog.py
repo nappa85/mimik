@@ -36,6 +36,9 @@ import toolloop_ops as ops
 ROOT = Path(__file__).resolve().parents[1]
 MAX_INTERVAL = 60
 RESERVE_SECONDS = 240
+# Worst case of one tick: list, network list, cleanup (rm of the known and registered names,
+# network rm, two verification listings), each docker call bounded by DOCKER_TIMEOUT.
+WORST_TICK_SECONDS = 12 * ops.DOCKER_TIMEOUT
 
 
 class Watchdog:
@@ -90,6 +93,7 @@ class Watchdog:
             return True
 
     def tick(self) -> str:
+        self.beat()  # before any enforcement work, so a slow cleanup never looks like a death
         try:
             return self._tick()
         finally:
@@ -152,7 +156,7 @@ def main(argv=None) -> int:
     parser.add_argument("--log", type=Path)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
-    problem = ops.docker_endpoint_problem()
+    problem = ops.docker_problem()  # before any other Docker call
     if problem:
         print(problem, file=sys.stderr)
         return 2
@@ -170,7 +174,7 @@ def main(argv=None) -> int:
         return 0
     log = args.log or locks["watchdog"].parent / "tool-loop-watchdog.log"
     dog = Watchdog(
-        ops.Docker(),
+        ops.Docker(check_registry=locks["checks"]),
         lambda: ops.lock_held(locks["runner"]) or ops.lock_held(locks["queue"]),
         ops.SystemClock(),  # the real clock only: no test hook here
         log,

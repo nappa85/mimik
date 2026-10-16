@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -298,6 +299,50 @@ class ReviewTwoWatchdogTests(WatchdogBase):
         )
         self.assertEqual(proc.returncode, 2)
         self.assertIn("DOCKER_HOST", proc.stderr)
+
+
+class ReviewThreeWatchdogTests(WatchdogBase):
+    def test_heartbeat_written_before_a_slow_cleanup(self):
+        beat = Path(self.tmp.name) / "hb"
+        seen = {}
+
+        class Slow(FakeDocker):
+            def cleanup(inner):
+                seen["beat_before_cleanup"] = beat.exists()
+                time.sleep(1.2)  # a slow docker
+                return FakeDocker.cleanup(inner)
+
+        self.clock = FakeClock(at(2026, 10, 14, 10, 0))
+        dog = wd.Watchdog(Slow([ops.SERVER]), lambda: True, self.clock, self.log, heartbeat=beat)
+        start = time.time()
+        dog.tick()
+        self.assertTrue(seen["beat_before_cleanup"])
+        self.assertGreaterEqual(json.loads(beat.read_text())["time"], start + 1.2)  # and after
+        self.assertGreaterEqual(wd.WORST_TICK_SECONDS, 10 * ops.DOCKER_TIMEOUT)
+
+    def test_ps_failure_fallback_includes_registered_check_containers(self):
+        registry = Path(self.tmp.name) / "checks.txt"
+        check = ops.OWNED_PREFIX + "check-42-1"
+        registry.write_text(f"{check}\n{ops.OWNED_PREFIX}check-43-1\nnot-ours\n")
+        labels = {check: "v3", ops.SERVER: "v3"}
+        removed = []
+
+        def run(argv, **kw):
+            args = argv[1:]
+            if args[0] in ("ps", "network"):
+                return subprocess.CompletedProcess(argv, 1, "", "")
+            if args[0] == "inspect":
+                name = args[-1]
+                return subprocess.CompletedProcess(
+                    argv, 0 if name in labels else 1, labels.get(name, "") + "\n", ""
+                )
+            if args[:2] == ["rm", "-f"]:
+                removed.append(args[2])
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return subprocess.CompletedProcess(argv, 1, "", "")
+
+        ops.Docker(run=run, check_registry=registry).cleanup()
+        self.assertEqual(sorted(removed), sorted([check, ops.SERVER]))
 
 
 class LabelTests(unittest.TestCase):
