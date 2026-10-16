@@ -255,17 +255,21 @@ default flags all changed.
 
 ### Flags (recorded in the header as `flags`)
 
-The library default (`run_episode`, `Episode`) is `FLAGS_OFF`, which reproduces v2 behaviour;
-the CLI default is `BASE_FLAGS`, the C0 base of §11 item 5.
+The library default (`run_episode`, `Episode`) is `FLAGS_OFF`, which reproduces the v2 *loop*
+behaviour; the CLI default is `BASE_FLAGS`, the C0 base of §11 item 5. **v3 with every flag off
+is still not byte-identical to v2:** the system prompt and the `respond` description changed
+(refuse line), so `system_prompt_hash`, `tools_hash` and `context_hash` differ; only the user
+message of an unchanged case is pinned to its v2 bytes (`test_marking_off_keeps_context_hash`).
+The v2 differential test covers scoring only.
 
 | Flag | CLI | C0 | Behaviour |
 |---|---|---|---|
 | H1 `nudge` | `--[no-]nudge` | on | After a reply with no tool call, one user message with the fixed `NUDGE_TEXT` ("Your reply had no tool call. End the request with exactly one finishing tool call."). At most once; it uses a turn, so none is sent on the last turn. Rows record `nudged` and `nudge_turn`. |
 | H2a `turns_remaining` | `--[no-]turns-remaining` | off | Every tool result carries `turns_remaining` = max_turns − current turn (0 on the last turn). |
 | H2b `search_notes` | `--[no-]search-notes` | off | `search_rules` results get `note`: "No rules matched this query." and/or "Same query as an earlier search in this request; same results." (same normalised FTS terms). The notes never name an outcome or a tool. |
-| H3 `sanitize_echo` | `--[no-]sanitize-echo` | on | Echoed tool-call arguments that are not a JSON object become `"{}"` in the history; the host still receives the raw text (so it reports "arguments are not valid JSON"), and the raw response stays in `responses`. Rows count `truncated_calls`. |
-| H5 `pending_current` | `--[no-]pending-current` | on | Each pending change in the context also shows `current` (the host's current value; not `from`, which is unknown). |
-| H6 `untrusted` | `--[no-]untrusted-marking` | off | Free text (fields and entry properties of type `text`: notes, names) is wrapped as `{"untrusted_text": …}` in the context, `read_fields` results (scalar, entry, collection), previews (`from`/`to`) and pending changes, and the user message gets `UNTRUSTED_PREAMBLE`. Enum values, ids and host state are never wrapped. Its own arm (D3). |
+| H3 `sanitize_echo` | `--[no-]sanitize-echo` | on | Echoed tool-call arguments that are not a JSON object become `"{}"` in the history; the host still receives the raw text (so it reports "arguments are not valid JSON"), and the raw response stays in `responses`. Rows count `sanitised_calls` (truncated or otherwise unparseable arguments, and valid JSON that is not an object; renamed from `truncated_calls` after review). |
+| H5 `pending_current` | `--[no-]pending-current` | on | Each pending change in the context also shows `current` (the host's current value; not `from`, which is unknown). Read the stale results with this in mind: H5 puts the current values in front of the model while LR2-3 forbids preparing a new proposal in a stale request. |
+| H6 `untrusted` | `--[no-]untrusted-marking` | off | Free text (fields and entry properties of type `text`: notes, names) is wrapped as `{"untrusted_text": …}` in the context, `read_fields` results (scalar, entry, collection), previews (`from`/`to`) and pending changes, and the user message gets `UNTRUSTED_PREAMBLE`. Rejection prose never repeats free text unmarked: the no-op error shows the marked JSON value (flags off: the v2 `repr`). Enum values, ids and host state are never wrapped. Its own arm (D3). |
 
 - **H4:** `--max-turns` accepts 1..`MAX_TURNS_CEILING` (16); default 8. The header records
   `max_turns` and `max_turns_ceiling`.
@@ -274,27 +278,36 @@ the CLI default is `BASE_FLAGS`, the C0 base of §11 item 5.
   otherwise handled like any turn. Its tool calls are processed as usual (unparseable arguments
   are malformed for the host and echoed as `{}` with H3); a `length` turn without a tool call is
   a no-call reply, so H1 applies once, otherwise `no_outcome`. Rows also record `finish_last`.
-- H9 (stale router) and H10 (classifier router) are cut.
+- H9 (stale router) is not implemented here (§11 item 23: its applicability predicate is
+  pending). H10 (classifier router) is cut.
 - `ScriptedModel` turns may be `{"calls", "finish_reason", "content"}`, so tests can script a
   `length` truncation.
 
 ### Header and merge identity (H8, §11 item 19)
 
 New header fields: `arm` (`--arm`), `ctx` (`--ctx`, recorded only), `flags`,
-`max_turns_ceiling`, `length_rule`, `dry_run_expected` and `visible_text_hashes` (sha256 of the
+`max_turns_ceiling`, `length_rule`, `dry_run_expected`, `allow_heldout_gold_replay` and `visible_text_hashes` (sha256 of the
 system prompt, tools, context intro, nudge, both search notes and the H6 preamble). Episode rows
-add `arm`, `character`, `tags`, `nudged`, `nudge_turn`, `truncated_calls`, `length_finishes`,
+add `arm`, `character`, `tags`, `nudged`, `nudge_turn`, `sanitised_calls`, `length_finishes`,
 `finish_last` and `exposure`.
 
 `--summarize` (`load_ledgers`) refuses:
 
-- ledgers that differ in **global identity**: harness version, pack hashes, formula CLI sha256,
-  `system_prompt_hash` or `tools_hash`;
+- ledgers that differ in **global identity** (`GLOBAL_IDENTITY`): harness version, pack hashes,
+  formula CLI sha256, `system_prompt_hash`, `tools_hash`, `harness_sha256`,
+  `visible_text_hashes`, `length_rule`, `dry_run` and `dry_run_expected`; so dry-run and live
+  ledgers never merge;
 - within one `model_label × arm × split` group, ledgers that differ in `sampling`, `max_turns`,
-  `ctx`, `top_k`, `flags` or `model_sha256` (give different configurations different `--arm`
-  labels); a label must always map to one `model_sha256`;
-- **partial** ledgers (no final `run_summary`, or fewer episode rows than `planned_episodes`),
-  aborted ledgers, the same file twice, and a repeated case/seed within a group.
+  `ctx` (including set vs unset), `top_k`, `flags`, `model_sha256`, `case_filter` or the sorted
+  case-id set; a label must always map to one `model_sha256`. Give different configurations
+  different `--arm` labels. Seeds may differ, so a seed-29 confirmation ledger merges with its
+  seed-17 ledger, but every seed of a group must cover the same case set (a 174-case and an
+  87-case ledger under one arm are refused);
+- an episode row whose `model_label`, `arm` or `split` differs from its header;
+- a header without a declared job set (`case_order`, `seeds`), with `planned_episodes` ≠
+  |case_order| × |seeds|, or whose episodes are not exactly that job set;
+- **partial** ledgers (no final `run_summary`, or fewer episode rows than planned), aborted
+  ledgers, the same file twice, and a repeated case/seed within a group.
 
 Summaries are grouped by `model_label × arm × split`.
 
@@ -317,19 +330,27 @@ Added to every summary; all v2 keys are unchanged:
   `other`); the v2 `wrong_proposal` stays over expected-proposal episodes;
 - `strata`: tables by injection tag (`untagged` for rows without tags), character and language,
   each with correct, false-supported and at-risk false-supported;
+- `coverage`: planned episodes, episodes that ran, `not_run`, cases, and cases with complete and
+  incomplete seed coverage. On held-out, incomplete seed coverage (like `not_run`) fails the
+  bar;
 - `case_level`: per seed (correct and false-supported), all seeds correct, false-supported on
-  any seed over all and at-risk cases, each with a **Wilson 95%** interval (`wilson`, z from
+  any seed over all and at-risk cases, each with a **Wilson 95%** interval; the all-seeds and
+  any-seed metrics count only cases with every seed of the group, and
+  `incomplete_cases` is reported beside them (`wilson`, z from
   `statistics.NormalDist`; tested against the closed form for 0 events and the 10/100 textbook
   value);
 - `leniency_exposure`: counts of single-boolean verified answers, verified answers with an
   extra int value, empty citations, `answer` on an expected proposal and `no_outcome` with a
-  preview pending (rows without exposure data, such as v2 ledgers, are counted as
-  `unavailable`);
-- `nudged`, `truncated_calls`, `length_finishes`.
+  preview pending. The flags are computed in `run()` for ledger episode rows (they need the
+  case gold), not in `run_episode`. Rows without exposure data (v2 ledgers) and `not_run` rows
+  are counted as `unavailable`. `empty_citation` is counted over all rows with data and its
+  denominator is reported as `empty_citation_of`: finishing calls that carry rule ids
+  (`citing_terminal`; proposal, answer and respond);
+- `nudged`, `sanitised_calls`, `length_finishes`.
 
 `--summarize … --episodes-csv FILE` writes one row per episode (new file only):
 `case_id, seed, model_label, arm, split, expected, outcome, correct_strict, fs_strict,
-fs_reasons, nudged, turns, truncated_calls, length_finishes, finish_last, tags, language,
+fs_reasons, nudged, turns, sanitised_calls, length_finishes, finish_last, tags, language,
 character, pattern`. `pattern` is the mechanical `expected -> outcome` transition, not an
 analyst's failure label. The lenient columns come with the scoring variants.
 
@@ -345,24 +366,41 @@ added.
   `answer_values`, respond or ask), citing no rule. It checks the harness and the gold
   mechanically, including that every proposal gold passes the constraints (pack load checks
   types only). `--dry-run --dry-run-expected` runs the same replay through the full loop into a
-  ledger.
+  ledger. On the held-out split it is refused unless `--allow-heldout-gold-replay` is given
+  (recorded in the header), because the ledger would then contain the gold outcomes.
+  `--validate-pack` still replays the held-out internally and prints only counts and failing
+  ids.
 - **Prompt audit:** UTF-8 JSON bytes of system prompt, user context, history and tool schemas at
   each model call of the replay, with every prompt-growing flag on (`AUDIT_FLAGS`). The token
   figure is an estimate at 2.5 bytes per token (no tokenizer is bundled); exact counts need the
-  served model's tokenizer at G0. The replay makes 2–3 model calls; longer episodes add about
-  one tool result per turn (`largest_tool_result_bytes`).
+  served model's tokenizer at G0. The replay makes 2–3 model calls, so its maximum is not a
+  bound for longer episodes.
+- **ctx upper bound** (`upper_bound`, for max_turns 8, 12 and 16): max initial prompt +
+  max_turns × (largest tool message + largest assistant message) + the nudge message, in
+  bytes, then tokens at 2.5 bytes per token plus 4096 completion tokens, times
+  `CTX_SAFETY_MARGIN` = 1.25 for the chat-template overhead, which is unknown without the
+  tokenizer. The largest tool message is the larger of the replay's and two synthetic results
+  per case (read every field and collection; a search returning the top_k longest rules with
+  both notes). Assumptions: one tool call per turn, and assistant calls no larger than the
+  largest replay call. The exact count is taken at G0 with the served model's tokenizer.
 
 ### Verification so far (2026-10-16, `mimik-ci`, formula CLI mounted)
 
 Helper/unit level only. **No model, server or GPU was run.**
 
 - Gate: `ruff check tools`, `ruff format --check tools` and `python -m unittest discover -s
-  tools -p "test_*.py"`: 242 tests OK with the v2 ledgers mounted (differential tests ran);
-  241 OK with 2 skipped (differential tests, ledgers absent) using the plain gate command.
+  tools -p "test_*.py"` (after the review fixes): **259 tests OK** with the v2 ledgers mounted
+  read-only and `MIMIK_V2_LEDGERS` set; **259 run, 3 skipped** with the plain gate command.
+  The three `V2DifferentialTests` skip when `MIMIK_V2_LEDGERS` is unset or no
+  `*/heldout-*/ledger-*.jsonl` exists under it; the leniency one also skips if the 9B ledger
+  is missing.
 - `--validate-pack` on `examples/tool-loop-demo`: 44 rules, 4 characters, 174 dev and 0
   held-out cases; expected replay 174/174; prompt audit (dev): initial prompt max 10,780 B
   (median 10,490), largest replay prompt 13,793 B (ho-029), ≈5.5k tokens at the conservative
-  estimate, largest tool result 2,148 B.
+  estimate, largest tool result 2,148 B. ctx upper bound with margin (after the review fixes):
+  22,280 tokens at 8 turns, 28,137 at 12 and 33,993 at 16 (prompt 34,319 / 46,031 / 57,743
+  B). **The conservative 8-turn bound exceeds the planned ctx 16384**; the exact figure waits
+  for the tokenizer at G0.
 - `--dry-run --dry-run-expected` on dev, seeds 17 and 29, base flags: 348/348 correct, 0 false
   support, 0 errors; `--summarize --episodes-csv` wrote 348 rows.
 - Visible-text sha256: system prompt `3704d25d…b5a8`, tools `3a1c1038…d701`, nudge
@@ -386,7 +424,27 @@ Helper/unit level only. **No model, server or GPU was run.**
 - Deliberate v2-test updates: `benchmark_version` 3, `max_tokens` 4096, and complete
   (`run_summary`-terminated) ledgers in the merge-test helper.
 
+### Review fixes (2026-10-16)
+
+Three reviews (Sonnet APPROVE-with-fixes, Space Bunny APPROVE-with-fixes, Sol REJECT),
+adjudicated by the coordinator. Failing-first tests are in `ReviewLedgerGateTests`,
+`ReviewCaseCoverageTests`, `ReviewAuditBoundTests`, `ReviewUntrustedTests`, `ReviewCliTests`
+and `ReviewPackFactsTests`, each run against commit `5869e00` first. Red there: the new global
+identity fields, dry-run/live mixing, row/header mismatches, the declared job set and
+different case sets per group all merged; all-seeds metrics counted cases with missing seeds;
+`not_run` rows entered the exposure denominator and incomplete seed coverage passed the bar;
+there was no `upper_bound` and no `citing_terminal`; the no-op rejection repeated an injected
+note and entry name unmarked; `--dry-run-expected` ran on held-out without opt-in; the counter
+was `truncated_calls`; and the README recorded the wrong `cases-heldout.json` hash
+(`…010b`, actual `…d10b`; fixed). Already green there: ctx set vs unset was refused. Guards
+shown red by mutation: removing the derived-preview marking, and changing a README count.
+
 ### Deferred (not built here)
+
+- Sol R3: the expected-outcome replay copies `expected.answer_values` and scores against them,
+  so it cannot validate answer gold. Independent recomputation from the sheet belongs to the
+  held-out gold-check phase (§11 item 13), with a failing-first test that corrupts an answer
+  gold.
 
 - Scoring variants S1–S4 / lenient, `--labels`, `test_nudged_episode_scored_both_ways`
   (S4), the selection script, the unattended queue, runner pass-through (`THINKING`,

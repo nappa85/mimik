@@ -971,8 +971,11 @@ def editable_paths(pack: Pack, values: dict) -> list[str]:
     return paths
 
 
-def validate_changes(pack: Pack, values: dict, changes) -> tuple[list, list]:
-    """Return ([({path, to}, old)], errors). Shared by the host and pack validation."""
+def validate_changes(pack: Pack, values: dict, changes, mark=None) -> tuple[list, list]:
+    """Return ([({path, to}, old)], errors). Shared by the host and pack validation.
+
+    `mark(path, value)` (H6) marks free text that error prose would otherwise repeat.
+    """
     if not isinstance(changes, list) or not changes:
         return [], ['changes must be a non-empty array of {"path": ..., "to": ...} objects']
     normalized, errors, seen = [], [], set()
@@ -1043,7 +1046,12 @@ def validate_changes(pack: Pack, values: dict, changes) -> tuple[list, list]:
             continue
         seen.add(path)
         if old is not None and typed(old) == typed(to):
-            errors.append(f"{where}: {path} is already {to!r}")
+            shown = mark(path, to) if mark else to
+            if isinstance(shown, dict):  # H6: free text only in its marked form
+                shown_text = json.dumps(shown, ensure_ascii=False)
+            else:
+                shown_text = repr(to)
+            errors.append(f"{where}: {path} is already {shown_text}")
             continue
         normalized.append(({"path": path, "to": to}, old))
     return normalized, errors
@@ -1265,7 +1273,12 @@ class Episode:
         _check_args(args, {"changes": _changes_shape, "rule_ids": _str_list, "reason": _str})
         attempt = {"arguments": copy.deepcopy(args), "accepted": False}
         self.proposals.append(attempt)
-        normalized, errors = validate_changes(self.pack, self.values, args["changes"])
+        normalized, errors = validate_changes(
+            self.pack,
+            self.values,
+            args["changes"],
+            mark=self.mark_path if self.flags["untrusted"] else None,
+        )
         path_errors = bool(errors)
         uncited = [r for r in args["rule_ids"] if r not in self.retrieved]
         if uncited:
@@ -1533,7 +1546,7 @@ def is_json_object(text: str) -> bool:
 def sanitize_echo(calls: list) -> int:
     """H3: replace echoed arguments that are not a JSON object with "{}" (in place).
 
-    Returns how many were replaced (`truncated_calls`). The host already received the raw
+    Returns how many were replaced (`sanitised_calls`). The host already received the raw
     arguments, and the raw response is kept in the ledger.
     """
     replaced = 0
@@ -1567,7 +1580,7 @@ def run_episode(
         "length_finishes": 0,
         "nudged": False,
         "nudge_turn": None,
-        "truncated_calls": 0,
+        "sanitised_calls": 0,
         "responses": [],
         "error": None,
     }
@@ -1600,7 +1613,7 @@ def run_episode(
             if calls:
                 echo["tool_calls"] = copy.deepcopy(calls)  # the raw response stays intact
                 if flags["sanitize_echo"]:
-                    row["truncated_calls"] += sanitize_echo(echo["tool_calls"])
+                    row["sanitised_calls"] += sanitize_echo(echo["tool_calls"])
             messages.append(echo)
             if not calls:
                 if flags["nudge"] and not row["nudged"] and turn < max_turns:
@@ -1855,6 +1868,8 @@ def leniency_exposure(case: dict, row: dict, scored: dict) -> dict:
         and isinstance(next(iter(wanted.values())), bool),
         "int_extra_verified": verified and any(kind == "int" for kind, _ in extras),
         "empty_citation": scored.get("cited_rule_ids") == [],
+        # Denominator of empty_citation: finishing calls that carry rule_ids.
+        "citing_terminal": scored.get("cited_rule_ids") is not None,
         "answer_on_expected_proposal": case["expected"]["outcome"] == PROPOSAL
         and row.get("outcome") == ANSWER,
         "no_outcome_with_pending_preview": row.get("outcome") == "no_outcome"
@@ -1891,16 +1906,47 @@ def strata(group) -> dict:
     return tables
 
 
+def _seed_key(seed):
+    return (seed is None, seed if isinstance(seed, int) else str(seed))
+
+
+def coverage(group) -> dict:
+    """Episodes that ran and cases with every seed of the group (§11 items 1-3)."""
+    seeds = sorted({r.get("seed") for r in group}, key=_seed_key)
+    by_case = {}
+    for row in group:
+        by_case.setdefault(row["case_id"], set()).add(row.get("seed"))
+    complete = sum(found == set(seeds) for found in by_case.values())
+    not_run = sum(r["outcome"] == "not_run" for r in group)
+    return {
+        "planned_episodes": len(group),
+        "ran": len(group) - not_run,
+        "not_run": not_run,
+        "cases": len(by_case),
+        "complete_cases": complete,
+        "incomplete_cases": len(by_case) - complete,
+        "seeds": seeds,
+    }
+
+
 def case_level(group) -> dict:
-    """Case-level rates with Wilson 95% intervals (the unit of the v3 verdict, §11 item 1)."""
+    """Case-level rates with Wilson 95% intervals (the unit of the v3 verdict, §11 item 1).
+
+    All-seeds and any-seed metrics count only cases that have every seed of the group;
+    cases with incomplete seed coverage are reported separately.
+    """
+    seeds = sorted({r.get("seed") for r in group}, key=_seed_key)
     by_case = {}
     for row in group:
         by_case.setdefault(row["case_id"], []).append(row)
+    complete = {c: rs for c, rs in by_case.items() if {r.get("seed") for r in rs} == set(seeds)}
     at_risk = {
-        c for c, rs in by_case.items() if rs[0]["score"]["expected_outcome"] in UNSUPPORTED_EXPECTED
+        c
+        for c, rs in complete.items()
+        if rs[0]["score"]["expected_outcome"] in UNSUPPORTED_EXPECTED
     }
     per_seed = {}
-    for seed in sorted({r.get("seed") for r in group}, key=str):
+    for seed in seeds:
         rows = [r for r in group if r.get("seed") == seed]
         per_seed[str(seed)] = {
             "correct": _wilson_rate(sum(r["score"]["correct"] for r in rows), len(rows)),
@@ -1908,14 +1954,16 @@ def case_level(group) -> dict:
                 sum(r["score"]["false_supported"] for r in rows), len(rows)
             ),
         }
-    fs_any = {c for c, rs in by_case.items() if any(r["score"]["false_supported"] for r in rs)}
-    all_correct = sum(all(r["score"]["correct"] for r in rs) for rs in by_case.values())
+    fs_any = {c for c, rs in complete.items() if any(r["score"]["false_supported"] for r in rs)}
+    all_correct = sum(all(r["score"]["correct"] for r in rs) for rs in complete.values())
     return {
         "cases": len(by_case),
+        "complete_cases": len(complete),
+        "incomplete_cases": len(by_case) - len(complete),
         "at_risk_cases": len(at_risk),
         "per_seed": per_seed,
-        "all_seeds_correct": _wilson_rate(all_correct, len(by_case)),
-        "false_supported_any_seed": _wilson_rate(len(fs_any), len(by_case)),
+        "all_seeds_correct": _wilson_rate(all_correct, len(complete)),
+        "false_supported_any_seed": _wilson_rate(len(fs_any), len(complete)),
         "false_supported_any_seed_at_risk": _wilson_rate(len(fs_any & at_risk), len(at_risk)),
     }
 
@@ -1933,7 +1981,7 @@ EPISODE_CSV_COLUMNS = (
     "fs_reasons",
     "nudged",
     "turns",
-    "truncated_calls",
+    "sanitised_calls",
     "length_finishes",
     "finish_last",
     "tags",
@@ -1975,7 +2023,7 @@ def write_episode_csv(rows, path: Path):
                         ";".join(s["false_supported_reasons"]),
                         row.get("nudged"),
                         row.get("turns"),
-                        row.get("truncated_calls"),
+                        row.get("sanitised_calls"),
                         row.get("length_finishes"),
                         row.get("finish_last"),
                         json.dumps(tags, sort_keys=True) if tags is not None else None,
@@ -2089,7 +2137,11 @@ def summarize(rows: list[dict]) -> list[dict]:
             "completion_tokens": sum(r.get("completion_tokens", 0) for r in group),
         }
         # v3 reporting (H7); every v2 key above is unchanged (differential test).
-        exposed = [r["exposure"] for r in group if isinstance(r.get("exposure"), dict)]
+        exposed = [
+            r["exposure"]
+            for r in group
+            if isinstance(r.get("exposure"), dict) and r["outcome"] != "not_run"
+        ]
         expected_proposal = [s for s in scores if s["expected_outcome"] == PROPOSAL]
         other = [s for s in scores if s["expected_outcome"] != PROPOSAL]
         summary.update(
@@ -2103,13 +2155,15 @@ def summarize(rows: list[dict]) -> list[dict]:
             },
             strata=strata(group),
             case_level=case_level(group),
+            coverage=coverage(group),
             leniency_exposure={
                 **{k: sum(bool(e.get(k)) for e in exposed) for k in LENIENCY_KEYS},
+                "empty_citation_of": sum(bool(e.get("citing_terminal")) for e in exposed),
                 "of": len(exposed),
                 "unavailable": n - len(exposed),
             },
             nudged=sum(bool(r.get("nudged")) for r in group),
-            truncated_calls=sum(r.get("truncated_calls") or 0 for r in group),
+            sanitised_calls=sum(r.get("sanitised_calls") or 0 for r in group),
             length_finishes=sum(r.get("length_finishes") or 0 for r in group),
         )
         summary["bar"] = bar_verdict(summary)
@@ -2137,6 +2191,9 @@ def bar_verdict(summary: dict) -> dict:
     common = []
     if summary["not_run"]:
         common.append(f"incomplete: {summary['not_run']} planned episodes not run")
+    incomplete = (summary.get("coverage") or {}).get("incomplete_cases")
+    if incomplete:
+        common.append(f"incomplete seed coverage: {incomplete} cases lack a seed")
     if summary["unique_cases"] < BAR["min_cases"]:
         common.append(f"only {summary['unique_cases']} unique cases (< {BAR['min_cases']})")
     rate = summary["correct"]["rate"]
@@ -2218,6 +2275,8 @@ def format_summary(summary: dict) -> str:
                 ("at-risk", "false_supported_any_seed_at_risk"),
             )
         )
+        + f"; {summary['case_level']['incomplete_cases']} cases with incomplete seed coverage "
+        "excluded"
         + "; per seed correct "
         + ", ".join(f"{k} {w(v['correct'])}" for k, v in summary["case_level"]["per_seed"].items()),
         "  strata: "
@@ -2228,9 +2287,11 @@ def format_summary(summary: dict) -> str:
         ),
         "  leniency exposure ("
         + f"{summary['leniency_exposure']['of']} episodes with data, "
-        + f"{summary['leniency_exposure']['unavailable']} without): "
-        + ", ".join(f"{k} {summary['leniency_exposure'][k]}" for k in LENIENCY_KEYS),
-        f"  nudged={summary['nudged']} truncated_calls={summary['truncated_calls']} "
+        + f"{summary['leniency_exposure']['unavailable']} without or not run): "
+        + ", ".join(f"{k} {summary['leniency_exposure'][k]}" for k in LENIENCY_KEYS)
+        + f" (empty_citation of {summary['leniency_exposure']['empty_citation_of']} citing)",
+        "  coverage: " + ", ".join(f"{k} {v}" for k, v in summary["coverage"].items()),
+        f"  nudged={summary['nudged']} sanitised_calls={summary['sanitised_calls']} "
         f"length_finishes={summary['length_finishes']}",
         f"  {bar['label']} ({bar['criteria']}): {bar['verdict']}"
         + (f" — {'; '.join(bar['reasons'])}" if bar["reasons"] else ""),
@@ -2288,11 +2349,60 @@ def expected_replay_script(case: dict) -> list:
 # bytes per token for Qwen-style BPE vocabularies; 2.5 is deliberately conservative. Exact
 # counts need the served model's tokenizer (llama.cpp /tokenize) at G0.
 BYTES_PER_TOKEN_ESTIMATE = 2.5
+# Chat-template overhead (role markers, tool-schema wrapping) is unknown without the model's
+# tokenizer and template; the ctx figure is multiplied by this documented safety margin.
+CTX_SAFETY_MARGIN = 1.25
+AUDIT_TURNS = (8, 12, 16)
+AUDIT_NOTE = (
+    "Estimate from UTF-8 JSON bytes at BYTES_PER_TOKEN_ESTIMATE; chat-template overhead is "
+    "unknown without the tokenizer, so ctx_tokens_with_margin applies CTX_SAFETY_MARGIN. The "
+    "upper bound assumes one tool call per turn and assistant calls no larger than the largest "
+    "replay call. Exact token counts are taken at G0 with the served model's tokenizer "
+    "(llama.cpp /tokenize)."
+)
 AUDIT_FLAGS = {**BASE_FLAGS, "turns_remaining": True, "search_notes": True, "untrusted": True}
 
 
 def prompt_bytes(messages) -> int:
     return len((json.dumps(messages, ensure_ascii=False) + json.dumps(TOOLS)).encode())
+
+
+def _message_bytes(message) -> int:
+    """Bytes a message adds to prompt_bytes (its JSON plus the list separator)."""
+    return len(json.dumps(message, ensure_ascii=False).encode()) + 2
+
+
+def _synthetic_tool_messages(pack: Pack, index: RuleIndex, case: dict) -> list[int]:
+    """The largest tool results a case can produce: read every field and collection, and a
+    search returning the top_k longest rules with both notes."""
+    episode = Episode(pack, index, case, AUDIT_FLAGS)
+    read = episode.call("read_fields", {"paths": [*pack.fields, *pack.collections]})
+    longest = sorted(pack.rules, key=lambda r: len(json.dumps(r, ensure_ascii=False)))
+    search = {
+        "ok": True,
+        "results": longest[-index.top_k :],
+        "note": f"{SEARCH_NOTE_EMPTY} {SEARCH_NOTE_REPEAT}",
+    }
+    sizes = []
+    for result in (read, search):
+        result = dict(result, turns_remaining=MAX_TURNS_CEILING)
+        content = json.dumps(result, ensure_ascii=False)
+        sizes.append(
+            _message_bytes({"role": "tool", "tool_call_id": "call_16_9", "content": content})
+        )
+    return sizes
+
+
+def _upper_bound(initial: int, turns: int, tool: int, assistant: int) -> dict:
+    nudge = _message_bytes({"role": "user", "content": NUDGE_TEXT})
+    prompt = initial + turns * (tool + assistant) + nudge
+    tokens = math.ceil(prompt / BYTES_PER_TOKEN_ESTIMATE)
+    return {
+        "prompt_bytes": prompt,
+        "est_prompt_tokens": tokens,
+        "completion_tokens": DEFAULT_MAX_TOKENS,
+        "ctx_tokens_with_margin": math.ceil((tokens + DEFAULT_MAX_TOKENS) * CTX_SAFETY_MARGIN),
+    }
 
 
 def offline_audit(pack: Pack, index: RuleIndex, max_turns: int = MAX_TURNS) -> tuple[dict, dict]:
@@ -2305,6 +2415,7 @@ def offline_audit(pack: Pack, index: RuleIndex, max_turns: int = MAX_TURNS) -> t
     audit, replay = {}, {}
     for split, cases in pack.cases.items():
         initial, largest, failed, tool_results = [], [], [], []
+        assistant, tool_messages = [], []
         for case in cases:
             sizes = []
             scripted = ScriptedModel({case["id"]: expected_replay_script(case)})
@@ -2327,6 +2438,12 @@ def offline_audit(pack: Pack, index: RuleIndex, max_turns: int = MAX_TURNS) -> t
             row = run_episode(pack, index, case, model, 0, max_turns, flags=AUDIT_FLAGS)
             if not score(case, row)["correct"]:
                 failed.append(case["id"])
+            for m in row["transcript"]:
+                if m["role"] == "assistant":
+                    assistant.append(_message_bytes(m))
+                elif m["role"] == "tool":
+                    tool_messages.append(_message_bytes(m))
+            tool_messages.extend(_synthetic_tool_messages(pack, index, case))
             initial.append((sizes[0], case["id"]))
             largest.append((max(sizes), case["id"]))
         replay[split] = {"cases": len(cases), "correct": len(cases) - len(failed), "failed": failed}
@@ -2344,11 +2461,19 @@ def offline_audit(pack: Pack, index: RuleIndex, max_turns: int = MAX_TURNS) -> t
             # The replay makes 2-3 model calls; a longer episode adds about one tool result
             # (and one short assistant call) per extra turn.
             "largest_tool_result_bytes": max(tool_results, default=0),
+            "largest_tool_message_bytes": max(tool_messages),
+            "largest_assistant_message_bytes": max(assistant),
+            "upper_bound": {
+                str(turns): _upper_bound(max(initial)[0], turns, max(tool_messages), max(assistant))
+                for turns in AUDIT_TURNS
+            },
         }
     report = {
         "flags": AUDIT_FLAGS,
         "bytes_per_token_estimate": BYTES_PER_TOKEN_ESTIMATE,
-        "note": "estimate from UTF-8 JSON bytes; exact token counts need the model tokenizer",
+        "ctx_safety_margin": CTX_SAFETY_MARGIN,
+        "completion_tokens": DEFAULT_MAX_TOKENS,
+        "note": AUDIT_NOTE,
         "splits": audit,
     }
     return report, replay
@@ -2392,6 +2517,7 @@ def run(args, model, out, clock=time.monotonic, pack=None) -> list[dict]:
             "split": args.split,
             "dry_run": bool(args.dry_run),
             "dry_run_expected": bool(getattr(args, "dry_run_expected", False)),
+            "allow_heldout_gold_replay": bool(getattr(args, "allow_heldout_gold_replay", False)),
             "endpoint": None if args.dry_run else args.endpoint,
             "seeds": seeds,
             "planned_episodes": len(jobs),
@@ -2530,9 +2656,26 @@ GLOBAL_IDENTITY = (
     "cli_sha256",
     "system_prompt_hash",
     "tools_hash",
+    "harness_sha256",
+    "visible_text_hashes",
+    "length_rule",
+    "dry_run",  # dry-run and live ledgers never merge
+    "dry_run_expected",
 )
-# Must agree within one model_label x arm x split group (H8, plan §11 item 19).
-GROUP_IDENTITY = ("sampling", "max_turns", "ctx", "top_k", "flags", "model_sha256")
+# Must agree within one model_label x arm x split group (H8, plan §11 item 19). Seeds may
+# differ (a seed-29 confirmation run merges with its seed-17 run), but every seed of a
+# group must cover the same case set.
+GROUP_IDENTITY = (
+    "sampling",
+    "max_turns",
+    "ctx",
+    "top_k",
+    "flags",
+    "model_sha256",
+    "case_filter",
+    "case_ids",
+)
+ROW_HEADER_FIELDS = ("model_label", "arm", "split")
 
 
 def _ledger_identity(header: dict) -> dict:
@@ -2557,6 +2700,7 @@ def load_ledgers(paths) -> list[dict]:
     label always maps to one model_sha256.
     """
     rows, identity, groups, model_hashes, seen_files, seen_episodes = [], None, {}, {}, set(), {}
+    seed_cases = {}
     for path in paths:
         resolved = Path(path).resolve()
         if resolved in seen_files:
@@ -2572,11 +2716,31 @@ def load_ledgers(paths) -> list[dict]:
             raise SystemExit(f"{path}: incomplete ledger (no final run_summary); refusing it")
         header = file_rows[0]
         episodes = [r for r in file_rows if r.get("event") == "episode"]
+        for row in episodes:
+            for field in ROW_HEADER_FIELDS:
+                if row.get(field) != header.get(field):
+                    raise SystemExit(
+                        f"{path}: episode {row.get('case_id')} has {field} {row.get(field)!r}, "
+                        f"header {header.get(field)!r}; refusing it"
+                    )
+        case_order, seeds = header.get("case_order"), header.get("seeds")
+        if not isinstance(case_order, list) or not isinstance(seeds, list):
+            raise SystemExit(f"{path}: no declared job set (case_order and seeds); refusing it")
+        if len(set(case_order)) != len(case_order) or len(set(seeds)) != len(seeds):
+            raise SystemExit(f"{path}: duplicate ids in the declared job set; refusing it")
+        if header.get("planned_episodes") != len(case_order) * len(seeds):
+            raise SystemExit(
+                f"{path}: planned_episodes {header.get('planned_episodes')} != case_order x seeds "
+                f"({len(case_order)} x {len(seeds)}); refusing it"
+            )
         if header.get("planned_episodes") != len(episodes):
             raise SystemExit(
                 f"{path}: partial ledger ({len(episodes)} episodes, "
                 f"{header.get('planned_episodes')} planned); refusing it"
             )
+        jobs = {(c, s) for s in seeds for c in case_order}
+        if {(r.get("case_id"), r.get("seed")) for r in episodes} != jobs:
+            raise SystemExit(f"{path}: episodes do not match the declared job set; refusing it")
         this = _ledger_identity(header)
         if identity is None:
             identity = this
@@ -2590,7 +2754,8 @@ def load_ledgers(paths) -> list[dict]:
             raise SystemExit(f"{path}: model_sha256 differs for {label!r}; refusing to merge")
         model_hashes[label] = header.get("model_sha256")
         group = (label, header.get("arm"), header.get("split"))
-        config = {k: header.get(k) for k in GROUP_IDENTITY}
+        config = {k: header.get(k) for k in GROUP_IDENTITY if k != "case_ids"}
+        config["case_ids"] = sorted(case_order)
         if group in groups and groups[group] != config:
             raise SystemExit(
                 f"{path}: {', '.join(_differing(groups[group], config))} differs within "
@@ -2598,6 +2763,12 @@ def load_ledgers(paths) -> list[dict]:
                 "--arm labels; refusing to merge"
             )
         groups[group] = config
+        for seed in seeds:  # implied by case_ids, kept as an explicit check
+            known = seed_cases.setdefault(group, {}).setdefault(seed, set())
+            known |= set(case_order)
+        sets = {frozenset(v) for v in seed_cases[group].values()}
+        if len(sets) > 1:
+            raise SystemExit(f"{path}: per-seed case sets differ within {group}; refusing it")
         for row in episodes:
             key = (*group, row.get("case_id"), row.get("seed"))
             if key in seen_episodes:
@@ -2667,6 +2838,11 @@ def build_parser():
         action="store_true",
         help="with --dry-run: replay every case's expected outcome (harness and gold check)",
     )
+    p.add_argument(
+        "--allow-heldout-gold-replay",
+        action="store_true",
+        help="allow --dry-run-expected on the held-out split (writes gold into the ledger)",
+    )
     p.add_argument("--cases", help="comma-separated case ids to run (default: whole split)")
     p.add_argument("--model-sha256", help="sha256 of the served model file (runner-verified)")
     p.add_argument(
@@ -2726,6 +2902,11 @@ def _main(argv=None):
         raise SystemExit("--output and --model-label are required")
     if args.dry_run_expected and not args.dry_run:
         raise SystemExit("--dry-run-expected needs --dry-run")
+    if args.dry_run_expected and args.split == "heldout" and not args.allow_heldout_gold_replay:
+        raise SystemExit(
+            "--dry-run-expected on heldout writes the gold outcomes into the ledger; "
+            "pass --allow-heldout-gold-replay to do it deliberately"
+        )
     if not 1 <= args.max_turns <= MAX_TURNS_CEILING:
         raise SystemExit(f"--max-turns must be 1..{MAX_TURNS_CEILING}")
     if args.ctx is not None and args.ctx < 1:

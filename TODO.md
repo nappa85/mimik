@@ -41,7 +41,10 @@ Last updated: 2026-10-15.
       - Verification: helper/unit only, no inference. Gate 242 tests OK with the v2 ledgers mounted (241 + 2 skipped without); dev expected replay 174/174 (348/348 over two seeds). Details in `docs/tool-loop-benchmark.md` "Harness v3".
       - [ ] **Blocked on re-review of amended §6–§8:** scoring variants S1–S4 / lenient, selection script, unattended queue (in `tools/`), runner pass-through, manifest/hash gate.
       - [ ] Blind adjudication of the other ambiguity classes (§11 item 12), then the blind held-out (165 written, 150 kept) and its gold review.
-      - [ ] Independent review of this change set before results drive a decision; the H3 live 3-case smoke with forced truncation needs inference.
+      - [x] Independent review (Sonnet, Space Bunny, Sol; coordinator-adjudicated) and its 10 must-fix items applied with failing-first tests: ledger gate (global identity incl. dry-run/harness/visible-text hashes, row/header, declared job set, per-seed case sets), complete-seed case-level metrics and coverage gate, ctx upper bound for 8/12/16 turns with a 1.25 margin, `not_run` excluded from exposure, H6 rejection prose marked, derived-preview marking test, held-out gold replay opt-in, `sanitised_calls`, docs, pack-facts test. Gate: 259 OK with the v2 ledgers; 259 run / 3 skipped without.
+      - **Finding:** the conservative ctx bound is ≈22.3k tokens at 8 turns (with margin), above the planned 16384; decide ctx after the exact tokenizer count at G0.
+      - [ ] Deferred: Sol R3 (answer-gold replay is circular; independent recomputation of `answer_values` from the sheet in the held-out gold-check phase, §11 item 13, with a failing-first test that corrupts an answer gold); the lenient CSV columns; the runner `--ctx`/`--arm` pass-through.
+      - [ ] The H3 live 3-case smoke with forced truncation needs inference.
     - The runs wait for an idle PC: about 22–29 GPU h over 3 sessions, unattended.
   - **Reviewer benchmark:** `docs/reviewer-benchmark.md`, experiments 1–3, 14 models.
     - **Concluded.** Standing setup (user decision, in `AGENTS.md`): Sol + Sonnet as main reviewers. The third reviewer is the first that works of Space Bunny → DeepSeek → Muse (`tools/external_review.py --chain third`); otherwise proceed with two.

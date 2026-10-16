@@ -1318,6 +1318,8 @@ class OrderAndMergeTests(Base):
             "formula_engine": {"cli_sha256": "c"},
             "model_sha256": "m1",
             "planned_episodes": 0,
+            "case_order": [],
+            "seeds": [17],
         }
         base.update(header)
         # v3 (H8): a ledger must be complete, so it ends with its run_summary.

@@ -239,9 +239,11 @@ run.** (Counts below are the 2026-10-15 state; for the v3 split see "Case counts
   - The former held-out `ho-001`…`ho-141` moved into `cases-dev.json` (ids kept; dev is
     174 cases). `cases-heldout.json` is an empty placeholder for the blind v3 held-out.
   - Optional `tags` added to every dev case (mechanical; see "Case format").
+  - Review fix: the `cases-heldout.json` hash below was first recorded with a wrong tail;
+    a test now checks these hashes and the counts table against the files.
   - The stale "substring" answer-check limitation was removed.
   - sha256 after this change: `rules.md` c854b283…5f69, `definition.json` d9d89383…233f
-    (unchanged), `cases-dev.json` e5265a0d…a912, `cases-heldout.json` f77a7870…010b.
+    (unchanged), `cases-dev.json` e5265a0d…a912, `cases-heldout.json` f77a7870…d10b.
 - **2026-10-15:** revision 2 (44 rules, CEL formulas), 33 dev and 141 held-out cases.
 
 ## Known limitations
