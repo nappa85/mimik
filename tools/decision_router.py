@@ -33,7 +33,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import local_decision_benchmark as bench
 import router_state_builder as builder
 import tool_loop_benchmark as tl
 
@@ -59,7 +58,8 @@ ROUTER_ORDER = ("R1", "R4", "R3")  # fixed final tie-break of the router choice
 BASELINES = {"B-ask": "ask_rule", "B-maj": tl.PROPOSAL, "B-risk": "conflict"}
 ECE_BINS = 10
 DECISION_FILE_ENCODING = 1
-MAX_RESTARTS = 3  # per unit (rev. 3.1, A1)
+MAX_RESTARTS = 3  # per screen or ablation unit (rev. 3.1, A1)
+PROBE_MAX_RESTARTS = 1  # the probe's own cap: any failed probe decision makes it ineligible
 KILL_WAIT_SECONDS = 15
 RETRY_FACTOR = 1.05
 SAFETY_FACTOR = 1.25
@@ -123,7 +123,15 @@ def outcome_options(prompt: str = tl.SYSTEM_PROMPT) -> dict:
 
 
 CHOICES = outcome_options()
-OPTION_HASH = bench.question_hash(QUESTION, CHOICES)
+
+
+def question_hash(question, choices) -> str:
+    """Equal to local_decision_benchmark.question_hash (tested); kept here so the host side
+    (queue, runner helpers) imports no neural or jsonschema dependency."""
+    return tl.digest({"question": question, "choices": dict(sorted(choices.items()))})
+
+
+OPTION_HASH = question_hash(QUESTION, CHOICES)
 
 
 def order_ids(order: str) -> list:
@@ -916,10 +924,11 @@ def reference_prompt(state: str, order: list) -> str:
 
 
 def ready_timeout(total_bytes: int, measured_rate=None, probe: bool = False) -> float:
-    if probe:
+    """Probe: bytes / 5 MB/s + 600 s. Units: bytes / min(measured, 40 MB/s) + 600 s; without
+    a measured rate (the probe read every artefact from the session hash cache) the probe's
+    conservative 5 MB/s is used."""
+    if probe or not measured_rate or measured_rate <= 0:
         return total_bytes / PROBE_DISK_RATE + READY_SLACK
-    if not measured_rate or measured_rate <= 0:
-        raise RouterError("no probe-measured disk rate: the router is ineligible")
     return total_bytes / min(measured_rate, DISK_RATE_CAP) + READY_SLACK
 
 
@@ -939,11 +948,61 @@ def unit_projection(n_decisions: int, load_seconds: float, timeout: float, secon
 
 
 def probe_projection(load_seconds: float, n_decisions: int = 3) -> float:
-    return (
-        load_seconds
-        + MAX_RESTARTS * (PROBE_DECISION_TIMEOUT + KILL_WAIT_SECONDS + load_seconds)
-        + n_decisions * PROBE_DECISION_TIMEOUT
-    )
+    """Worst case at the probe caps: every decision waits out its timeout."""
+    restarts = PROBE_MAX_RESTARTS * (PROBE_DECISION_TIMEOUT + KILL_WAIT_SECONDS + load_seconds)
+    return load_seconds + restarts + n_decisions * PROBE_DECISION_TIMEOUT
+
+
+UNIT_DECISIONS = {"screen": 214, "ablation": 80}
+
+
+def probe_result(summary, router_key=None) -> dict:
+    """A complete probe summary, or RouterError (the router is then ineligible; rev. 3.1 N3)."""
+    if (
+        not isinstance(summary, dict)
+        or summary.get("unit") != "probe"
+        or not summary.get("complete")
+    ):
+        raise RouterError("no complete probe: the router is ineligible")
+    if router_key is not None and summary.get("router_key") != router_key:
+        raise RouterError("the probe summary belongs to another router")
+    slowest = (summary.get("decision_seconds") or {}).get("max")
+    if not isinstance(slowest, (int, float)) or slowest <= 0:
+        raise RouterError("probe has no measured decision time: the router is ineligible")
+    if summary.get("statuses", {}).get("completed", 0) != summary.get("planned"):
+        raise RouterError("probe had failed decisions: the router is ineligible")
+    return {"slowest": float(slowest), "disk_rate": summary.get("disk_rate")}
+
+
+def unit_timeouts(unit: str, total_bytes: int, probe_summary=None, router_key=None) -> dict:
+    if unit == "probe":
+        ready = ready_timeout(total_bytes, probe=True)
+        timeout = decision_timeout(probe=True)
+        return {
+            "unit": unit,
+            "ready_timeout": ready,
+            "decision_timeout": timeout,
+            "projection_seconds": probe_projection(ready),
+            "max_restarts": PROBE_MAX_RESTARTS,
+            "source": "probe caps (independent of probe results)",
+        }
+    if unit not in UNIT_DECISIONS:
+        raise RouterError(f"unknown unit {unit!r}")
+    probe = probe_result(probe_summary, router_key)
+    ready = ready_timeout(total_bytes, probe["disk_rate"])
+    timeout = decision_timeout(probe["slowest"])
+    return {
+        "unit": unit,
+        "ready_timeout": ready,
+        "decision_timeout": timeout,
+        "projection_seconds": unit_projection(
+            UNIT_DECISIONS[unit], ready, timeout, probe["slowest"]
+        ),
+        "seconds_per_decision": probe["slowest"],
+        "max_restarts": MAX_RESTARTS,
+        "disk_rate": probe["disk_rate"],
+        "source": "complete probe",
+    }
 
 
 # ---------------------------------------------------------------- decision file (§4)
@@ -1087,7 +1146,22 @@ def main(argv=None) -> int:
     df.add_argument("--states", type=Path, required=True)
     df.add_argument("--header", type=Path, required=True, help="JSON: runtime provenance")
     df.add_argument("--out", type=Path, required=True)
+    tm = sub.add_parser("timeouts", help="ready/decision timeouts and the projection (JSON)")
+    tm.add_argument("--unit", required=True)
+    tm.add_argument("--total-bytes", type=int, required=True)
+    tm.add_argument("--probe-summary", type=Path)
+    tm.add_argument("--router-key")
     args = p.parse_args(argv)
+    if args.cmd == "timeouts":
+        summary = None
+        if args.probe_summary:
+            summary = json.loads(args.probe_summary.read_text(encoding="utf-8"))
+        try:
+            print(json.dumps(unit_timeouts(args.unit, args.total_bytes, summary, args.router_key)))
+        except RouterError as error:
+            print(f"ineligible: {error}", file=sys.stderr)
+            return 3
+        return 0
     if args.cmd == "oracle":
         cases = _cases_by_id(args.pack)
         out = {}

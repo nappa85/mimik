@@ -314,6 +314,7 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(dr.decision_timeout(probe=True), 1800)
         with self.assertRaises(dr.RouterError):
             dr.decision_timeout(None)  # a missing probe never yields an estimate
+        self.assertEqual(dr.ready_timeout(5e9, measured_rate=None), 5e9 / 5e6 + 600)
 
     def test_ready_timeout_never_assumes_a_disk_faster_than_40_mb_s(self):
         self.assertEqual(dr.ready_timeout(4e9, measured_rate=4e9), 4e9 / 40e6 + 600)

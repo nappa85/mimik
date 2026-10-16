@@ -57,14 +57,14 @@ class OptionTests(unittest.TestCase):
     def test_option_hash_stable_across_orders(self):
         self.assertEqual(
             dr.OPTION_HASH,
-            dr.bench.question_hash(dr.QUESTION, dict(reversed(list(dr.CHOICES.items())))),
+            dr.question_hash(dr.QUESTION, dict(reversed(list(dr.CHOICES.items())))),
         )
         self.assertEqual(dr.order_ids("reversed"), list(reversed(dr.CANONICAL)))
         changed = tl.SYSTEM_PROMPT.replace(
             "the rules do not settle the question", "no rule settles it"
         )
         self.assertNotEqual(
-            dr.bench.question_hash(dr.QUESTION, dr.outcome_options(changed)), dr.OPTION_HASH
+            dr.question_hash(dr.QUESTION, dr.outcome_options(changed)), dr.OPTION_HASH
         )
 
 
@@ -692,3 +692,38 @@ class DecisionFileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostSideTests(unittest.TestCase):
+    def test_option_hash_equals_the_worker_function(self):
+        import local_decision_benchmark as bench
+
+        self.assertEqual(dr.OPTION_HASH, bench.question_hash(dr.QUESTION, dr.CHOICES))
+
+    def test_host_module_imports_no_neural_or_jsonschema_dependency(self):
+        tree = ast.parse((Path(dr.TOOLS) / "decision_router.py").read_text(encoding="utf-8"))
+        imports = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+        self.assertNotIn("local_decision_benchmark", imports)
+        self.assertNotIn("local_rag_benchmark", imports)
+
+    def test_unit_timeouts_need_a_complete_probe(self):
+        probe = {
+            "unit": "probe",
+            "complete": True,
+            "planned": 3,
+            "statuses": {"completed": 3},
+            "decision_seconds": {"max": 120.0},
+            "disk_rate": 12e6,
+        }
+        out = dr.unit_timeouts("screen", 2_500_000_000, probe)
+        self.assertEqual(out["decision_timeout"], 360)
+        self.assertAlmostEqual(out["ready_timeout"], 2_500_000_000 / 12e6 + 600)
+        for bad in (
+            None,
+            dict(probe, complete=False),
+            dict(probe, statuses={"completed": 2}),
+            dict(probe, unit="screen"),
+        ):
+            with self.assertRaises(dr.RouterError):
+                dr.unit_timeouts("screen", 1, bad)
+        self.assertEqual(dr.unit_timeouts("probe", 5_000_000)["decision_timeout"], 1800)
