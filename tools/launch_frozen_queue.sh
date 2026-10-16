@@ -38,7 +38,9 @@ done
 docker_context=$(timeout --foreground -k 5 60 docker context show 2>/dev/null) \
   || die "docker context show failed"
 [ "$docker_context" = default ] || die "refusing docker context '$docker_context' (default only)"
-if pgrep -f 'run_(queue|watchdog)\.py' >/dev/null 2>&1; then
+# Only real interpreter processes (python ... run_queue.py / run_watchdog.py), not any command
+# line that merely mentions the file names.
+if pgrep -f '^[^ ]*python[0-9.]* [^ ]*run_(queue|watchdog)\.py( |$)' >/dev/null 2>&1; then
   die "a run_queue.py or run_watchdog.py process is already running; stop it first"
 fi
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
