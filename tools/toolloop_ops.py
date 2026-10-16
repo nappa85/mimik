@@ -113,12 +113,21 @@ def lock_paths(main: Path) -> dict:
 
 
 def lock_held(path: Path, proc_locks: Path = Path("/proc/locks")) -> bool:
-    """True if any process holds a lock on path (read from /proc/locks; never locks)."""
+    """True if any process holds a lock on path (read from /proc/locks; never locks).
+
+    A lock file that does not exist is not held. Any other error ("cannot determine") counts
+    as held, so a probe error never lets the watchdog or the queue kill a live run.
+    """
     try:
         st = os.stat(path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
         text = proc_locks.read_text(encoding="ascii", errors="replace")
     except OSError:
-        return False
+        return True
     want = (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino)
     for line in text.splitlines():
         for field in line.split():
@@ -134,11 +143,32 @@ def lock_held(path: Path, proc_locks: Path = Path("/proc/locks")) -> bool:
     return False
 
 
+ENDPOINT_VARIABLES = ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG")
+
+
+def docker_endpoint_problem(env=None):
+    """One Docker endpoint for runner, queue and watchdog: refuse any endpoint override."""
+    env = os.environ if env is None else env
+    set_vars = [name for name in ENDPOINT_VARIABLES if env.get(name)]
+    if set_vars:
+        return f"refusing to run with {', '.join(set_vars)} set (one Docker endpoint only)"
+    return None
+
+
 # ---------------------------------------------------------------- docker
 
 
+LABEL_KEY, LABEL_VALUE = "mimik.toolloop", "v3"
+LABEL = f"{LABEL_KEY}={LABEL_VALUE}"
+KNOWN_NAMES = (HARNESS, SERVER)  # the fixed names; check containers carry a pid suffix
+
+
 class Docker:
-    """docker CLI with a timeout on every call; returns (rc, stdout), rc None on timeout."""
+    """docker CLI with a timeout on every call; returns (rc, stdout), rc None on timeout.
+
+    Ownership is the name prefix AND the label mimik.toolloop=v3: a foreign container with
+    the same prefix but without the label is never touched.
+    """
 
     def __init__(self, binary="docker", timeout=DOCKER_TIMEOUT, run=subprocess.run):
         self.binary, self.timeout, self._run = binary, timeout, run
@@ -160,35 +190,47 @@ class Docker:
         return proc.returncode, proc.stdout
 
     def owned(self):
-        """Names of every container (any state) with the owned prefix; None if docker fails."""
-        rc, out = self.call("ps", "-a", "--format", "{{.Names}}")
+        """Owned containers (any state); None if docker fails."""
+        rc, out = self.call("ps", "-a", "--filter", f"label={LABEL}", "--format", "{{.Names}}")
         if rc != 0:
             return None
         return sorted(n for n in out.split() if n.startswith(OWNED_PREFIX))
 
     def network_exists(self):
-        rc, out = self.call("network", "ls", "--format", "{{.Name}}")
+        """True if the owned (labelled) network exists; None if docker fails."""
+        rc, out = self.call("network", "ls", "--filter", f"label={LABEL}", "--format", "{{.Name}}")
         if rc != 0:
             return None
         return NETWORK in out.split()
 
+    def is_owned(self, name):
+        rc, out = self.call("inspect", "-f", '{{index .Config.Labels "' + LABEL_KEY + '"}}', name)
+        return rc == 0 and out.strip() == LABEL_VALUE
+
     def cleanup(self) -> dict:
-        """Remove every owned container and the network, then verify that they are gone."""
+        """Remove every owned container and the owned network, then verify they are gone.
+
+        If listing fails, fall back to the known fixed names, each removed only after its
+        label is confirmed; the caller retries on its next tick.
+        """
         errors, removed = [], []
         names = self.owned()
         if names is None:
             errors.append("docker ps failed or timed out")
-            names = [HARNESS, SERVER]
+            names = [n for n in KNOWN_NAMES if self.is_owned(n)]
         for name in names:  # harness before server: stop the load first
             rc, _ = self.call("rm", "-f", name)
             if rc == 0:
                 removed.append(name)
             else:
                 errors.append(f"rm -f {name}: {'timeout' if rc is None else rc}")
-        if self.network_exists() is not False:
+        present = self.network_exists()
+        if present:
             rc, _ = self.call("network", "rm", NETWORK)
-            if rc not in (0,):
+            if rc != 0:
                 errors.append(f"network rm: {'timeout' if rc is None else rc}")
+        elif present is None:
+            errors.append("docker network ls failed or timed out")
         remaining = self.owned()
         network = self.network_exists()
         ok = remaining == [] and network is False

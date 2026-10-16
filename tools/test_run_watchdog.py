@@ -6,7 +6,9 @@ Failing-first: run before tools/run_watchdog.py and tools/toolloop_ops.py existe
 import datetime as dt
 import fcntl
 import json
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,12 +33,13 @@ class FakeClock:
 
 
 class FakeDocker:
-    def __init__(self, names=(), network=False, fail_rm=False):
+    def __init__(self, names=(), network=False, fail_rm=False, ps_fails=False):
         self.names, self.network, self.fail_rm = set(names), network, fail_rm
+        self.ps_fails = ps_fails
         self.cleanups = 0
 
     def owned(self):
-        return sorted(self.names)
+        return None if self.ps_fails else sorted(self.names)
 
     def network_exists(self):
         return self.network
@@ -49,7 +52,7 @@ class FakeDocker:
         return {"ok": not self.names and not self.network, "remaining": sorted(self.names)}
 
 
-class WatchdogTests(unittest.TestCase):
+class WatchdogBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -62,10 +65,12 @@ class WatchdogTests(unittest.TestCase):
     def actions(self):
         return [json.loads(x)["action"] for x in self.log.read_text().splitlines()]
 
+
+class WatchdogTests(WatchdogBase):
     def test_removes_owned_containers_outside_the_window_even_with_a_live_lock(self):
         docker = FakeDocker([ops.SERVER, ops.HARNESS], network=True)
         dog = self.dog(docker, {"value": True}, at(2026, 10, 14, 9, 0, 30))  # Wednesday
-        self.assertEqual(dog.tick(), "removed_outside_window")
+        self.assertEqual(dog.tick(), "removed_at_window_edge")
         self.assertEqual(docker.owned(), [])
         self.assertFalse(docker.network)
 
@@ -110,6 +115,7 @@ class WatchdogTests(unittest.TestCase):
 
     def test_idle_exit_and_run_loop(self):
         dog = self.dog(FakeDocker(), {"value": False}, at(2026, 10, 17, 12, 0), idle_exit=90)
+        dog.interval = 30
         self.assertEqual(dog.run(), 0)
         self.assertEqual(self.actions()[-1], "idle_exit")
         self.assertGreaterEqual(self.clock.now - at(2026, 10, 17, 12, 0), 90)
@@ -206,6 +212,157 @@ class LockTests(unittest.TestCase):
         paths = ops.lock_paths(Path("/repo"))
         self.assertEqual(paths["runner"], Path("/repo/target/.tool-loop-benchmark.lock"))
         self.assertEqual(paths["queue"].parent, paths["runner"].parent)
+
+
+class ReviewTwoWatchdogTests(WatchdogBase):
+    """Second review round: reserve, docker ps failure, probe errors, logging, heartbeat."""
+
+    def test_removes_before_the_edge_with_a_reserve(self):
+        docker = FakeDocker([ops.SERVER])
+        dog = self.dog(docker, {"value": True}, at(2026, 10, 15, 8, 55, 0))  # Thursday
+        self.assertEqual(dog.tick(), "ok")  # 300 s before 09:00: not yet
+        self.clock.now = at(2026, 10, 15, 8, 56, 30)  # 210 s before: inside the 240 s reserve
+        self.assertEqual(dog.tick(), "removed_at_window_edge")
+        row = json.loads(self.log.read_text().splitlines()[-1])
+        self.assertEqual(row["reserve"], 240)
+
+    def test_docker_ps_failure_still_enforces_and_retries(self):
+        docker = FakeDocker(ps_fails=True)
+        dog = self.dog(docker, {"value": True}, at(2026, 10, 14, 10, 0))  # outside the window
+        self.assertEqual(dog.tick(), "removed_at_window_edge")
+        self.assertEqual(dog.tick(), "removed_at_window_edge")  # retried every tick
+        self.assertEqual(docker.cleanups, 2)
+        orphan = FakeDocker(ps_fails=True)
+        dog = self.dog(orphan, {"value": False}, at(2026, 10, 17, 12, 0), grace=60)
+        self.assertEqual(dog.tick(), "orphan_grace")
+        self.clock.sleep(60)
+        self.assertEqual(dog.tick(), "removed_orphans")
+        live = FakeDocker(ps_fails=True)
+        dog = self.dog(live, {"value": True}, at(2026, 10, 17, 12, 0))
+        self.assertEqual(dog.tick(), "docker_error")
+        self.assertEqual(live.cleanups, 0)
+
+    def test_lock_probe_error_counts_as_held(self):
+        def broken():
+            raise OSError("cannot read /proc/locks")
+
+        docker = FakeDocker([ops.SERVER])
+        self.clock = FakeClock(at(2026, 10, 17, 12, 0))
+        dog = wd.Watchdog(docker, broken, self.clock, self.log, grace=0)
+        self.assertEqual(dog.tick(), "ok")
+        self.assertEqual(docker.cleanups, 0)
+
+    def test_log_failure_does_not_stop_enforcement(self):
+        docker = FakeDocker([ops.SERVER])
+        self.clock = FakeClock(at(2026, 10, 14, 10, 0))
+        unwritable = Path(self.tmp.name)  # a directory: every log write fails
+        dog = wd.Watchdog(docker, lambda: True, self.clock, unwritable)
+        self.assertEqual(dog.tick(), "removed_at_window_edge")
+        self.assertEqual(docker.owned(), [])
+
+    def test_heartbeat_on_every_tick(self):
+        beat = Path(self.tmp.name) / "hb"
+        self.clock = FakeClock(at(2026, 10, 17, 12, 0))
+        dog = wd.Watchdog(FakeDocker(), lambda: True, self.clock, self.log, heartbeat=beat)
+        dog.tick()
+        first = json.loads(beat.read_text())
+        self.assertEqual(first["pid"], os.getpid())
+
+    def test_tick_exception_keeps_the_loop_alive(self):
+        class Flaky(FakeDocker):
+            calls = 0
+
+            def owned(self):
+                Flaky.calls += 1
+                if Flaky.calls == 1:
+                    raise RuntimeError("boom")
+                return []
+
+        self.clock = FakeClock(at(2026, 10, 17, 12, 0))
+        dog = wd.Watchdog(Flaky(), lambda: False, self.clock, self.log, idle_exit=30)
+        self.assertEqual(dog.run(), 0)
+        actions = [json.loads(x)["action"] for x in self.log.read_text().splitlines()]
+        self.assertIn("tick_error", actions)
+        self.assertEqual(actions[-1], "idle_exit")
+
+    def test_endpoint_override_refused(self):
+        self.assertIsNone(ops.docker_endpoint_problem({}))
+        for name in ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG"):
+            self.assertIn(name, ops.docker_endpoint_problem({name: "x"}))
+        proc = subprocess.run(
+            [sys.executable, str(Path(wd.__file__)), "--once"],
+            env={"PATH": os.environ.get("PATH", ""), "DOCKER_HOST": "tcp://x"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("DOCKER_HOST", proc.stderr)
+
+
+class LabelTests(unittest.TestCase):
+    """Second review round N4: ownership is label AND name prefix."""
+
+    def docker(self, ps_works=True):
+        state = {
+            "c": {
+                ops.SERVER: "v3",
+                ops.OWNED_PREFIX + "check-1-1": "v3",
+                ops.HARNESS: None,  # same prefix, no label: foreign
+                "other": "v3",  # label, other name: not ours either
+            },
+            "net": True,
+        }
+
+        def run(argv, **kw):
+            args = argv[1:]
+            if args[:2] == ["ps", "-a"]:
+                if not ps_works:
+                    return subprocess.CompletedProcess(argv, 1, "", "")
+                names = [n for n, label in state["c"].items() if label == "v3"]
+                assert f"label={ops.LABEL}" in args
+                return subprocess.CompletedProcess(argv, 0, "\n".join(names), "")
+            if args[:2] == ["network", "ls"]:
+                out = ops.NETWORK if state["net"] else ""
+                return subprocess.CompletedProcess(argv, 0, out, "")
+            if args[0] == "inspect":
+                label = state["c"].get(args[-1])
+                rc = 0 if args[-1] in state["c"] else 1
+                return subprocess.CompletedProcess(argv, rc, f"{label or ''}\n", "")
+            if args[:2] == ["rm", "-f"]:
+                state["c"].pop(args[2], None)
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if args[:2] == ["network", "rm"]:
+                state["net"] = False
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return subprocess.CompletedProcess(argv, 1, "", "")
+
+        return ops.Docker(run=run), state
+
+    def test_foreign_same_prefix_container_left_alone(self):
+        docker, state = self.docker()
+        self.assertEqual(docker.owned(), [ops.OWNED_PREFIX + "check-1-1", ops.SERVER])
+        result = docker.cleanup()
+        self.assertTrue(result["ok"], result)
+        self.assertIn(ops.HARNESS, state["c"])
+        self.assertIn("other", state["c"])
+        self.assertNotIn(ops.SERVER, state["c"])
+
+    def test_ps_failure_falls_back_to_labelled_known_names(self):
+        docker, state = self.docker(ps_works=False)
+        result = docker.cleanup()
+        self.assertFalse(result["ok"])  # cannot verify without ps
+        self.assertNotIn(ops.SERVER, state["c"])  # labelled known name removed
+        self.assertIn(ops.HARNESS, state["c"])  # unlabelled known name kept
+
+
+class LockProbeErrorTests(unittest.TestCase):
+    def test_unreadable_proc_locks_counts_as_held(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "lock"
+            path.touch()
+            self.assertTrue(ops.lock_held(path, proc_locks=Path(tmp) / "no-such-file"))
+            self.assertFalse(ops.lock_held(Path(tmp) / "missing-lock"))
 
 
 if __name__ == "__main__":
