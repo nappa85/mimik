@@ -23,6 +23,17 @@ pub(crate) struct DetailPage {
     pub sheets: i64,
 }
 
+/// Inspects the pins a departure validated, before they move into the database worker
+/// (tests only).
+#[cfg(test)]
+pub(super) type DeparturePinsHook = Box<
+    dyn FnOnce(&std::collections::BTreeMap<i64, crate::definitions::private_pin::ImmutablePin>)
+        + Send,
+>;
+#[cfg(test)]
+pub(super) static DEPARTURE_PINS: std::sync::Mutex<Option<DeparturePinsHook>> =
+    std::sync::Mutex::new(None);
+
 impl DetailPage {
     pub(crate) fn valid(self) -> bool {
         [self.members, self.requests, self.versions, self.sheets]
@@ -232,6 +243,10 @@ impl Store {
         })
         .await
         .map_err(|_| AppError::Worker)??;
+        #[cfg(test)]
+        if let Some(hook) = DEPARTURE_PINS.lock().unwrap().take() {
+            hook(&pins);
+        }
         self.run_campaign(auth.clone(),move |db| {
             let _permit=permit;
             let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;

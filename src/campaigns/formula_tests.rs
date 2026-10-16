@@ -503,9 +503,69 @@ async fn formula_text_is_escaped() {
             "{context}: attribute value"
         );
     }
-    assert!(escaped("<script>").contains(&derived_text(&view, "echo").to_owned()));
+    // The derived echo of the `<script>` input, escaped inside each result block itself.
+    let echo = escaped("<script>");
+    assert!(
+        echo.contains(&derived_text(&view, "echo").to_owned()),
+        "view block"
+    );
+    assert!(
+        echo.contains(&derived_text(&history, "echo").to_owned()),
+        "history block"
+    );
+    let saved = section(&rerender, "formula-results");
+    assert!(
+        echo.iter().any(|text| saved.contains(&format!(
+            "<dt>Echo <span class=\"badge\">Computed</span></dt><dd class=\"evidence-text\">{text}</dd>"
+        ))),
+        "saved-revision re-render block"
+    );
     let template = include_str!("../../templates/private_sheet.html");
     assert!(!template.contains("|safe") && !template.contains("| safe"));
+}
+
+/// A quote-bearing payload must stay inside one attribute value: in the saved input value,
+/// in the derived echo, and in the re-rendered invalid enum option of a rejected draft.
+#[tokio::test]
+async fn quote_payloads_stay_one_attribute_value() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&formula_definition()).await;
+    setup.create().await;
+    let payload = "\" autofocus onfocus=\"x";
+    let mut edit = form(1, "4", Some("2"));
+    edit[4].1 = payload.into();
+    let (status, _) = setup.post("/private-sheets/1", edit).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let (_, view) = setup.get("/private-sheets/1").await;
+    let mut bad = form(2, "4", Some("2"));
+    bad[4].1 = payload.into();
+    bad[8].1 = payload.into();
+    let (status, rerender) = setup.post("/private-sheets/1", bad).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    for (context, html) in [("view", &view), ("re-render", &rerender)] {
+        assert!(
+            !html.contains("\" autofocus"),
+            "{context}: attribute injected"
+        );
+        assert!(
+            !html.contains("onfocus=\"x"),
+            "{context}: attribute injected"
+        );
+        assert!(
+            escaped(payload)
+                .iter()
+                .any(|text| html.contains(&format!("name=\"value-label\" value=\"{text}\""))),
+            "{context}: one attribute value"
+        );
+    }
+    assert!(escaped(payload).contains(&derived_text(&view, "echo").to_owned()));
+    assert!(
+        escaped(payload)
+            .iter()
+            .any(|text| rerender.contains(&format!("<option value=\"{text}\" selected>"))),
+        "re-rendered invalid option keeps one attribute value"
+    );
 }
 
 #[tokio::test]
@@ -526,12 +586,19 @@ async fn viewing_never_writes() {
     assert_eq!(setup.stored().await, before);
 }
 
+/// The GET that follows a successful save evaluates under the runtime permit; when the
+/// permit is busy it answers 503 with `Retry-After` (the save itself has committed).
 #[tokio::test]
-async fn busy_runtime_after_a_save_returns_503_with_retry_after() {
+async fn busy_get_after_a_successful_save_returns_503_with_retry_after() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let setup = setup(&formula_definition()).await;
     setup.create().await;
+    let (status, _) = setup
+        .post("/private-sheets/1", form(1, "5", Some("2")))
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(setup.stored().await.0, 2);
     let held = crate::definitions::admit().unwrap();
     let response = router_request(&setup.app, &setup.auth[1], "/private-sheets/1", None).await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -675,6 +742,10 @@ async fn failed_database_save_keeps_its_permit_for_the_rerender() {
     *super::super::web::AFTER_FAILED_SAVE.lock().unwrap() = Some(Box::new(|| {
         *HELD.lock().unwrap() = crate::definitions::admit().ok();
     }));
+    super::super::web::REJECTED_EDITOR_KEPT_PERMIT
+        .lock()
+        .unwrap()
+        .clear();
     let mut draft = form(0, "4", Some("2"));
     draft[3].1 = "Keep this draft".into();
     let (status, html) = setup.post(&setup.create_path(), draft).await;
@@ -688,6 +759,13 @@ async fn failed_database_save_keeps_its_permit_for_the_rerender() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(html.contains("No changes saved"));
     assert!(html.contains("Keep this draft"), "draft re-rendered");
+    assert_eq!(
+        *super::super::web::REJECTED_EDITOR_KEPT_PERMIT
+            .lock()
+            .unwrap(),
+        vec![true],
+        "the re-render must reuse the rejected save's own permit"
+    );
 }
 
 fn unescape(text: &str) -> String {
@@ -781,4 +859,111 @@ async fn rendered_form_round_trips() {
     }
     let (status, _) = setup.post(&setup.create_path(), form).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
+}
+
+/// Leaving and removal freeze formula sheets with their values and a `freeze` history row,
+/// and the departure validates write-only pins: no compiled formulas are carried for the
+/// up to 32 pins it holds at once.
+#[tokio::test]
+async fn departure_and_removal_freeze_formula_sheets_with_write_only_pins() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&formula_definition()).await;
+    for (member, account) in [(2, 3), (3, 4)] {
+        setup
+            .store
+            .request_join(setup.auth[member].clone(), setup.campaign)
+            .await
+            .unwrap();
+        setup
+            .store
+            .decide_join(setup.auth[1].clone(), setup.campaign, account, 1, true)
+            .await
+            .unwrap();
+        let response = router_request(
+            &setup.app,
+            &setup.auth[member],
+            &setup.create_path(),
+            Some(form(0, "11", Some("2"))),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+    let compiled_carried = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    // (leaving member, departing account, actor, sheet)
+    for (actor, account, sheet) in [(2, 3, 1), (1, 4, 2)] {
+        let seen = std::sync::Arc::clone(&compiled_carried);
+        *super::super::domain::DEPARTURE_PINS.lock().unwrap() = Some(Box::new(move |pins| {
+            seen.lock()
+                .unwrap()
+                .extend(pins.values().map(|pin| pin.formulas().is_some()));
+        }));
+        let (before, permit) = setup
+            .store
+            .private_read(
+                setup.auth[if actor == 1 { 3 } else { actor }].clone(),
+                sheet,
+                None,
+                crate::definitions::admit().unwrap(),
+            )
+            .await
+            .unwrap();
+        drop(permit);
+        let campaign = setup.campaign;
+        let revision: i64 = setup
+            .store
+            .run(move |db| {
+                Ok(db.query_row(
+                    "SELECT revision FROM campaign_members WHERE campaign_id=?1 AND account_id=?2",
+                    [campaign, account],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        setup
+            .store
+            .depart(setup.auth[actor].clone(), setup.campaign, account, revision)
+            .await
+            .unwrap();
+        let custodian = setup.auth[if actor == 1 { 3 } else { actor }].clone();
+        let (after, permit) = setup
+            .store
+            .private_read(
+                custodian.clone(),
+                sheet,
+                None,
+                crate::definitions::admit().unwrap(),
+            )
+            .await
+            .unwrap();
+        drop(permit);
+        assert_eq!(after.snapshot.state, "frozen", "sheet {sheet}");
+        assert_eq!(after.snapshot.data, before.snapshot.data, "values intact");
+        assert_eq!(after.snapshot.revision, before.snapshot.revision + 1);
+        let history = setup
+            .store
+            .private_history(custodian.clone(), sheet, 0)
+            .await
+            .unwrap();
+        assert_eq!(history.last().unwrap().operation, "freeze");
+        // The frozen sheet still shows its advisory results, read-only.
+        let response = router_request(
+            &setup.app,
+            &custodian,
+            &format!("/private-sheets/{sheet}"),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body(response).await;
+        assert_eq!(derived_text(&html, "pace"), "-5");
+        assert!(section(&html, "advisory-checks").contains("<strong>Violated</strong>"));
+    }
+    let carried = compiled_carried.lock().unwrap().clone();
+    assert_eq!(
+        carried,
+        vec![false, false],
+        "departure pins carry compiled formulas"
+    );
 }

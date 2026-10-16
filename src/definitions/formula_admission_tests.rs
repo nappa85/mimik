@@ -581,3 +581,59 @@ fn write_only_pins_carry_no_compiled_formulas_and_fail_closed() {
     let refused = pin.evaluate(&sheet_values()).unwrap().unwrap_err();
     assert_eq!(refused.code, super::formula::Code::InternalError);
 }
+
+/// Formula-free definitions have nothing to evaluate, write-only or not.
+#[test]
+fn formula_free_pins_never_evaluate_even_when_write_only() {
+    let admitted = admit(&formula_free()).unwrap();
+    let pin = private_pin::validate_for_write(private_pin::RawPin {
+        id: 1,
+        version: 1,
+        game: "synthetic-game".into(),
+        edition: "first".into(),
+        content: admitted.content,
+        hash: admitted.hash,
+    })
+    .unwrap_or_else(|_| panic!("write-only pin rejected"));
+    let values = json!({"name": null, "size": "small", "hit-points": 1});
+    assert!(pin.evaluate(&values).is_none());
+    assert!(pin_for(&formula_free()).evaluate(&values).is_none());
+}
+
+/// The projection drops exactly the input fields the formula layer does not declare.
+#[test]
+fn undeclared_inputs_are_the_fields_missing_from_the_formula_declarations() {
+    let mut value = example();
+    for (id, control) in [
+        ("hit-points", "integer"),
+        ("long_name", "text"),
+        ("x-y", "boolean"),
+    ] {
+        value["fields"].as_array_mut().unwrap().push(
+            json!({"id": id, "label": id, "control": control, "nullable": false,
+                   "mapping": {"state": "unresolved", "reason": "r"}}),
+        );
+        value["groups"][0]["fields"]
+            .as_array_mut()
+            .unwrap()
+            .push(id.into());
+    }
+    let definition = admit(&value).unwrap().definition;
+    let spec = super::formula_admission::formula_spec(&definition);
+    let declared: std::collections::BTreeSet<&str> = spec
+        .declarations
+        .fields
+        .iter()
+        .map(|field| field.id.as_str())
+        .chain(spec.declarations.lists.iter().map(|list| list.id.as_str()))
+        .collect();
+    let expected: Vec<&str> = definition
+        .fields
+        .iter()
+        .filter(|field| field.formula.is_none() && !declared.contains(field.id.as_str()))
+        .map(|field| field.id.as_str())
+        .collect();
+    let undeclared: Vec<&str> = super::formula_admission::undeclared_inputs(&definition).collect();
+    assert_eq!(undeclared, expected);
+    assert_eq!(undeclared, vec!["hit-points", "x-y"]);
+}

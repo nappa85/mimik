@@ -163,6 +163,8 @@ impl ImmutablePin {
         &self,
         values: &serde_json::Value,
     ) -> Option<Result<formula::Evaluation, formula::InputError>> {
+        // Formula-free definitions have nothing to evaluate, write-only or not.
+        self.data.definition.formula_profile?;
         if self.write_only {
             return Some(Err(formula::InputError {
                 code: formula::Code::InternalError,

@@ -57,6 +57,10 @@ async fn runtime(mut request: Request, next: Next) -> Response {
 #[derive(Clone)]
 pub(crate) struct PrivateTrustedEditor;
 
+/// Whether each `rejected_editor` call received the rejected save's own permit (tests only).
+#[cfg(test)]
+pub(super) static REJECTED_EDITOR_KEPT_PERMIT: Mutex<Vec<bool>> = Mutex::new(Vec::new());
+
 /// Runs once between a failed save and the re-render's permit request (tests only).
 #[cfg(test)]
 pub(super) static AFTER_FAILED_SAVE: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
@@ -882,6 +886,15 @@ async fn rejected_editor(
     version: Option<i64>,
     permit: Option<OwnedSemaphorePermit>,
 ) -> Result<(SheetView, OwnedSemaphorePermit), StatusCode> {
+    #[cfg(test)]
+    REJECTED_EDITOR_KEPT_PERMIT
+        .lock()
+        .unwrap()
+        .push(permit.is_some());
+    // `None` only when the database step itself failed before returning the permit (for
+    // example an authorization recheck reporting Conflict/Invalid). That rare path asks
+    // for a new permit and may answer 503; the auth layer adds `Retry-After: 1` to every
+    // 503 document, and the draft is not re-rendered.
     let permit = match permit {
         Some(permit) => permit,
         None => crate::definitions::admit().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
