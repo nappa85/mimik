@@ -4,7 +4,9 @@ Before this change the harness had no --router-decisions flag, no arm_type in th
 or the bar, and no router terminal. The byte-identity test pins the v3 C0 dry-run ledger of
 the demo dev split (two seeds, expected replay) to the digest produced by the unchanged
 harness at 46e93b2 (computed with this file's own normalisation), so the router code must
-leave C0 byte-identical when it is off.
+leave C0 byte-identical when it is off. A pack change legitimately changes the digest: then
+recompute it by running c0_ledger_text with the previous commit's tool_loop_benchmark on the new
+pack (docs/decision-router-implementation.md), never by copying the current output.
 """
 
 import copy

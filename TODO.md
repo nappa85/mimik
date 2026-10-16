@@ -7,7 +7,13 @@ Last updated: 2026-10-16.
 - **Plans and decisions (2026-10-16, evening):**
   - **M4 plan revision 3:** `794aad4` (adds Move up/down and the history change summary, both user-requested; rev 2 was `1b8baa8`) (Sol NO-GO and Sonnet GO-with-amendments, now resolved in place; third reviewer unavailable). Needs a short re-review.
     - User: M4 ships plain list editing. The `editable` flag and the item catalogue are deferred to a later milestone.
-  - **Router plan revision 3:** `0b5fcc2`, selection procedure frozen (rev 2 was `c960f45`). The user authorised dev-only `SYS-R` (v3 plan §12, amendment §11.24a). CPU-first. Needs a short re-review.
+  - **Router plan revision 3.1** (round-3 re-review: Sol and Sonnet GO-with-amendments; A1–A7, N3–N4 applied). The user authorised dev-only `SYS-R` (v3 plan §12, amendment §11.24a). CPU-first.
+    - [x] **Implemented on `harness-v3` (prototype tier, helper/unit only, no inference):** oracle, isolated state builder and sentinel scan, vocab-only token measurement, `tools/decision_models.json`, worker generalisation and explicit AnyJev CPU mode, router driver and runner, queue arm kind `router` (`tools/queues/router-cpu-dev.json`), nested CV selection, overlay, decision file, live `--router-decisions` (off by default, C0 byte-identical). Notes, measurements and red→green: `docs/decision-router-implementation.md`.
+    - Measured (vocab-only): prompt tokens per decision max 2,064 (Kev), 2,118 (4B), 2,130 (9B); none over n_ctx 8192; sentinel scan 0 hits in 1,044 rendered prompts per backend. §0 oracle on the S40 9B ledger reproduces 31/40 correct, 5/40 false support, 4 unresolved.
+    - [ ] **Launch** the router queue from a frozen copy after the CPU candidate screens finish (main session; command in the implementation notes). R3 is expected to be skipped by its 12 h cap.
+    - [ ] Independent review of the implementation (and later of the router results) before they drive any decision.
+    - Not run: router inference, the router real-docker smoke (would collide with the running queue's owned names).
+    - **Decide before launch:** master gained pack rev3 after this branch merged it (`34bbd46`, clean trial merge). The router work and its measurements use the pre-rev3 pack, like the running CPU screens; merging means recomputing the C0 digest, folds and token counts.
   - **Pack revision 3:** branch `pack-rev3`, applying the user decisions on rules 6–8, acquiring = ask_rule, night = 2 watches, and plain "armor" = the sheet total. Needs an independent review before it seeds the blind held-out writer.
   - **CPU-only candidate screens:** running since 20:49, from frozen copy `run-b085aa4c2be4`. They measured about 122 s per episode, so roughly 1.4 h per model.
 

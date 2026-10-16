@@ -106,7 +106,8 @@ applicability predicate).
   retrieved rules, question and options under the backend's own template. It reports min,
   median, p90 and max, per router, and the count over `n_ctx`. It loads no weights, runs capped
   at 2 cores and is allowed outside the window. §7 projects from these counts, not from the
-  assumed 3k.
+  assumed 3k. **Measured 2026-10-16:** max 2,064 (Kev), 2,118 (Qwen3-4B), 2,130 (Qwen3.5-9B)
+  tokens, none over 8192 ([implementation notes](decision-router-implementation.md)).
 
 **Question.** One generic question; 7 options = the `SYSTEM_PROMPT` outcome lines, verbatim,
 hashed, fixed IDs in the canonical order. Routes to `stale` are reported, never claimed
@@ -206,7 +207,8 @@ feasible τ is the unique best choice.
   `sha256(f"{fold_seed}:{first case id of the group}")` and dealt round-robin, whole, into folds
   0–4; the fold pointer carries over between kinds and is never reset.
 - Fold sizes are therefore those the deal produces (recorded in the fold file and the report;
-  the ungrouped 35/35/35/35/34 no longer holds). Refuse and stale land as the deal gives them
+  the ungrouped 35/35/35/35/34 no longer holds). Computed on the dev pack: 39/33/33/35/34; fold
+  4 holds no stale case and fold 3 no refuse case (fold file sha256 `8ad758e7…8de6`). Refuse and stale land as the deal gives them
   (each listed in the 5 × 7 table), so some fold may hold none of them.
 - The fold file (case id → fold, plus the group key of each case) is hashed and frozen. The
   report shows a 5 × 7 table of held and inner counts per kind. Limitation: rare classes are
@@ -320,8 +322,8 @@ the GPU is out. Workers take `choices`, `question`, `n_ctx` and `device`, defaul
     restarted again; the unit continues with the next case.
   - A worker that exits during a decision is handled the same way, with status `failed` and
     `error_class: worker_exit`.
-  - Restarts are capped at **N = 3 per unit** (screen and ablation each have their own cap; the
-    probe has its own). When a fourth restart would be needed, the rest is `not_run` and the
+  - Restarts are capped at **N = 3 per unit** (screen and ablation each have their own cap). The
+    probe's own cap is 1: any failed probe decision already makes the router ineligible. When a fourth restart would be needed, the rest is `not_run` and the
     unit incomplete. A test shows that one deterministic timeout does not collapse the unit.
   - The final record of a retried case is the retry's result; every attempt, including the
     original, is kept in the unit's attempt log.
@@ -468,3 +470,4 @@ machine schedule names model loads and inference as heavy).
 | N4 | Sol | Restarts counted per unit, both units' restart costs (timeout wait, kill wait, reload) in the projection and R3's cap (§5, §7) |
 | — | Sol | Closed: N1 and N2 (selection algorithm, failure records) |
 | — | main session | Ready timeout rate = min(measured, 40 MB/s) (clarifies "floor 40 MB/s"); R4 runs before R1 (§5, §7) |
+| — | implementer | Probe restart cap 1; without a measured disk rate (artefacts read from the session hash cache) the unit ready timeout uses the probe's 5 MB/s; an ablation unit runs only after its router's screen unit completed; the decision file header must carry the §4 provenance and a passed gate (§4, §5) |

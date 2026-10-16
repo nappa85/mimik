@@ -249,7 +249,10 @@ class RouterRunnerTests(unittest.TestCase):
         self.assertEqual(opts["--cap-drop"], ["ALL"])
         model = next(m for m in opts["--mount"] if "dst=/models/model.gguf" in m)
         self.assertIn("readonly", model)
-        self.assertIn("readonly", next(m for m in opts["--mount"] if "dst=/prep" in m))
+        self.assertIn("readonly", next(m for m in opts["--mount"] if "dst=/prep/prepared" in m))
+        for mount in opts["--mount"]:  # the host-only mapping (prep/run/host) is never mounted
+            self.assertFalse(mount.split(",")[1].endswith(("/prep", "/run", "/host")), mount)
+        self.assertTrue((out / "prep" / "run" / "host" / "mapping.json").exists())
         cmd = r["cmd"]
         self.assertEqual(cmd[cmd.index("--device") + 1], "cpu")
         self.assertEqual(cmd[cmd.index("--max-restarts") + 1], "1")

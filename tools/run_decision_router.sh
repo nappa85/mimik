@@ -21,7 +21,9 @@
 # §5). The driver gets deadline - 900 s and starts no decision whose timeout would cross that
 # minus 120 s; the runner stops the container 360 s before the deadline (window margin). The router container mimik-toolloop-v3-router runs with --network none, --pull never,
 # --init, uid 1000, all capabilities dropped, a read-only root, read-only model and state mounts,
-# memory and CPU caps and no /dev/dri (CPU only while the GPU is out of service).
+# memory and CPU caps and no /dev/dri (CPU only while the GPU is out of service). Only the
+# prepared states and plans are mounted into it; the host-only key -> case id mapping
+# (prep/run/host) never is.
 # Exit codes: 2 usage/config, 3 CLI hash or ineligible router, 5 artefact missing/hash,
 # 9 another run active, 10 schedule window/deadline, 11 cleanup unresolved, 12 docker failure,
 # 13 queue gone, 130/143 signal; otherwise the driver's exit code (1 = unit incomplete).
@@ -273,11 +275,12 @@ dk run -d --init --pull never --name "$ROUTER" "${LABELS[@]}" --network none \
   --memory "$dm_memory" --memory-swap "$dm_memory" --cpus "$dm_threads" --pids-limit 256 \
   -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS="$dm_threads" "${env_args[@]}" \
   --mount type=bind,src="$ROOT/tools",dst=/tools,readonly \
-  --mount type=bind,src="$out/prep",dst=/prep,readonly \
+  --mount type=bind,src="$out/prep/run/prepared",dst=/prep/prepared,readonly \
+  --mount type=bind,src="$out/prep/summary-extra.json",dst=/prep/summary-extra.json,readonly \
   --mount type=bind,src="$out/unit",dst=/out \
   "${mounts[@]}" --entrypoint python3 -w /tools "$dm_image" /tools/router_driver.py \
   "${model_args[@]}" --threads "$dm_threads" --n-ctx "$dm_n_ctx" \
-  --states /prep/run/prepared/states.jsonl --plan "/prep/run/prepared/plan-$unit.json" --out /out \
+  --states /prep/prepared/states.jsonl --plan "/prep/prepared/plan-$unit.json" --out /out \
   --ready-timeout "$ready_timeout" --decision-timeout "$decision_timeout" \
   --deadline-epoch "$((deadline - WINDOW_MARGIN))" --max-restarts "$max_restarts" --summary-extra /prep/summary-extra.json \
   >/dev/null || fail 12 infra_docker "router container did not start"
