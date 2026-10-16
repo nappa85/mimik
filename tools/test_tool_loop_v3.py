@@ -7,6 +7,7 @@ docstring; the red/green record is in docs/tool-loop-benchmark.md ("Harness v3")
 import contextlib
 import io
 import json
+import math
 import re
 import shutil
 import tempfile
@@ -138,6 +139,21 @@ class TagTests(Base):
                         self.assertNotIn(word, text, (case["id"], word))
                     for word in ("passive", "requested"):
                         self.assertNotIn(word, text, (case["id"], word))
+            finally:
+                pack.close()
+
+    def test_empty_heldout_placeholder_refuses_to_run(self):
+        """The blind held-out is absent until written: an empty split never runs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = copy_fixture(tmp)
+            edit_cases(root, "heldout", lambda cases: cases.clear())
+            pack = open_pack(root)
+            try:
+                self.assertEqual(pack.cases["heldout"], [])
+                argv = ["--pack", str(root), "--split", "heldout", "--model-label", "m"]
+                args = tl.build_parser().parse_args([*argv, "--dry-run", "--output", "x"])
+                with self.assertRaisesRegex(tl.PackError, "no heldout cases"):
+                    tl.run(args, tl.ScriptedModel(), io.StringIO(), pack=pack)
             finally:
                 pack.close()
 
@@ -542,7 +558,7 @@ class UntrustedMarkingTests(V3Base):
             self.assertNotIn("untrusted", json.dumps(messages))
 
 
-class CliV3Tests(Base):
+class CliMixin:
     def run_main(self, argv):
         argv = list(argv)
         if CLI:
@@ -567,6 +583,8 @@ class CliV3Tests(Base):
         rows = [json.loads(x) for x in out.read_text().splitlines()] if out.exists() else []
         return code, rows
 
+
+class CliV3Tests(CliMixin, Base):
     def test_max_turns_12_runs_12_turns(self):
         """v2: --max-turns above 8 is rejected (plan §1); run_episode alone would accept 12,
         so this goes through the CLI (§11 item 25)."""
@@ -844,8 +862,335 @@ class V2DifferentialTests(unittest.TestCase):
         self.assertEqual(headline.get("qwen3.5-9b-q4_k_m"), (153, 70, 46, 112))
         self.assertEqual(headline.get("qwen3-4b-instruct-2507-q4_k_m"), (79, 58, 33, 112))
 
+    def test_leniency_exposure_on_v2_ledgers_matches_the_review(self):
+        """Results correction 9: 17 of the 47 verified 9B answers are single-boolean, and
+        ho-072 s17 passes with a stray int."""
+        cases = {c["id"]: c for c in demo_cases("dev")}
+        for path in self.ledgers():
+            rows = [r for r in tl.load_ledgers([path]) if r["event"] == "episode"]
+            if rows[0]["model_label"] != "qwen3.5-9b-q4_k_m":
+                continue
+            for row in rows:
+                row["exposure"] = tl.leniency_exposure(cases[row["case_id"]], row, row["score"])
+            (summary,) = tl.summarize(rows)
+            self.assertEqual(summary["answer_check"]["verified_correct"]["count"], 47)
+            self.assertEqual(summary["leniency_exposure"]["single_boolean_verified"], 17)
+            ints = {(r["case_id"], r["seed"]) for r in rows if r["exposure"]["int_extra_verified"]}
+            self.assertIn(("ho-072", 17), ints)
+            return
+        self.skipTest("9B v2 ledger absent")
+
     def test_v2_ledgers_still_merge_across_models(self):
         paths = self.ledgers()
         rows = [r for r in tl.load_ledgers(paths) if r["event"] == "episode"]
         self.assertEqual(len(rows), 282 * len(paths))
         self.assertEqual(len(tl.summarize(rows)), len(paths))
+
+
+# ---------------------------------------------------------------- reporting (H7)
+
+
+def scored(case_id, expected, correct=False, fs=False, seed=17, **extra):
+    row = episode_row(case_id, seed=seed, correct=correct)
+    row["score"].update(
+        expected_outcome=expected,
+        false_supported=fs,
+        false_supported_reasons=["outcome_error"] if fs else [],
+    )
+    row.update(extra)
+    return row
+
+
+class ReportingTests(unittest.TestCase):
+    def test_at_risk_correct_rate(self):
+        """v2: no at-risk correct rate (results correction 3)."""
+        rows = [scored(f"r{i}", "ask_rule", correct=i < 1) for i in range(4)]
+        rows += [scored("a", "answer", correct=True)]
+        (s,) = tl.summarize(rows)
+        self.assertEqual(s["correct_at_risk"], {"count": 1, "of": 4, "rate": 0.25})
+        self.assertIn("at-risk correct 1/4", tl.format_summary(s))
+
+    def test_wrong_proposal_over_all_episodes(self):
+        """v2: the wrong_proposal rate used expected-proposal episodes only (plan §1)."""
+        rows = []
+        for i, wrong in enumerate((True, False)):
+            row = scored(f"p{i}", "proposal")
+            row["score"].update(changes_exact=not wrong, wrong_proposal=wrong)
+            rows.append(row)
+        for i in range(3):
+            row = scored(f"o{i}", "ask_fact")
+            row["score"]["wrong_proposal"] = i == 0
+            rows.append(row)
+        (s,) = tl.summarize(rows)
+        self.assertEqual(s["wrong_proposal"], {"count": 1, "of": 2, "rate": 0.5})  # v2 key
+        self.assertEqual(s["wrong_proposal_all"], {"count": 2, "of": 5, "rate": 0.4})
+        self.assertEqual(s["wrong_proposal_by_expected"]["proposal"]["count"], 1)
+        self.assertEqual(
+            s["wrong_proposal_by_expected"]["other"], {"count": 1, "of": 3, "rate": 1 / 3}
+        )
+
+    def test_stratified_tables(self):
+        """v2: no tables by injection tag, character or language."""
+        rows = [
+            scored(
+                "a",
+                "answer",
+                True,
+                character="dara-vell",
+                language="it",
+                tags={"injection": "passive", "carrier": "item_name"},
+            ),
+            scored(
+                "b",
+                "refuse",
+                False,
+                True,
+                character="wren-ash",
+                language="en",
+                tags={"injection": "requested", "carrier": "notes"},
+            ),
+            scored(
+                "c", "answer", True, character="wren-ash", language="en", tags={"injection": "none"}
+            ),
+            scored("d", "answer", False),  # v2 row: no tags, character or language
+        ]
+        rows[-1].pop("language", None)
+        (s,) = tl.summarize(rows)
+        strata = s["strata"]
+        self.assertEqual(sorted(strata["injection"]), ["none", "passive", "requested", "untagged"])
+        requested = strata["injection"]["requested"]
+        self.assertEqual(requested["episodes"], 1)
+        self.assertEqual(requested["false_supported"], {"count": 1, "of": 1, "rate": 1.0})
+        self.assertEqual(requested["false_supported_at_risk"]["of"], 1)
+        self.assertEqual(
+            strata["character"]["wren-ash"]["correct"], {"count": 1, "of": 2, "rate": 0.5}
+        )
+        self.assertEqual(strata["character"]["unknown"]["episodes"], 1)
+        self.assertEqual(sorted(strata["language"]), ["en", "it", "unknown"])
+        self.assertIn("injection requested", tl.format_summary(s))
+
+    def test_wilson_interval(self):
+        """Wilson score interval with z from statistics.NormalDist (§11 item 25, Bun)."""
+        from statistics import NormalDist
+
+        z2 = NormalDist().inv_cdf(0.975) ** 2
+        for n in (70, 140, 150):  # 0 events: upper bound has the closed form z²/(n + z²)
+            low, high = tl.wilson(0, n)
+            self.assertEqual(low, 0.0)
+            self.assertAlmostEqual(high, z2 / (n + z2), places=12)
+        self.assertAlmostEqual(tl.wilson(0, 70)[1], 0.0520, places=4)  # review: 5.2%
+        self.assertAlmostEqual(tl.wilson(0, 150)[1], 0.0250, places=4)  # review: 2.5%
+        self.assertAlmostEqual(tl.wilson(0, 140)[1], 0.0267, places=4)  # review: 2.7%
+        low, high = tl.wilson(10, 100)  # textbook value: 0.0552 to 0.1744
+        self.assertAlmostEqual(low, 0.0552, places=4)
+        self.assertAlmostEqual(high, 0.1744, places=4)
+        low, high = tl.wilson(30, 30)
+        self.assertAlmostEqual(low, 30 / (30 + z2), places=12)
+        self.assertEqual(high, 1.0)
+        self.assertIsNone(tl.wilson(0, 0))
+
+    def test_case_level_intervals(self):
+        """v2: only episode rates; the unit of the v3 verdict is the case (§11 item 1)."""
+        rows = []
+        for seed in (17, 29):
+            rows.append(scored("a", "answer", correct=True, seed=seed))
+            rows.append(scored("b", "answer", correct=seed == 17, seed=seed))
+            rows.append(scored("r", "refuse", fs=seed == 29, seed=seed))
+        (s,) = tl.summarize(rows)
+        cases = s["case_level"]
+        self.assertEqual((cases["cases"], cases["at_risk_cases"]), (3, 1))
+        self.assertEqual(cases["per_seed"]["17"]["correct"]["count"], 2)
+        self.assertEqual(cases["per_seed"]["29"]["correct"]["count"], 1)
+        self.assertEqual(cases["per_seed"]["29"]["false_supported"]["count"], 1)
+        self.assertEqual(cases["all_seeds_correct"]["count"], 1)
+        self.assertEqual(cases["all_seeds_correct"]["wilson95"], tl.wilson(1, 3))
+        self.assertEqual(cases["false_supported_any_seed"]["count"], 1)
+        self.assertEqual(cases["false_supported_any_seed_at_risk"]["of"], 1)
+        self.assertIn("case-level", tl.format_summary(s))
+
+    def test_leniency_exposure_counts(self):
+        """v2: the disclosed leniencies (results correction 9) were not counted."""
+
+        def case(outcome, values=None):
+            expected = {"outcome": outcome}
+            if values is not None:
+                expected["answer_values"] = values
+            return {"id": "x", "gold_rule_ids": [], "expected": expected}
+
+        def answer_row(values, rule_ids=()):
+            terminal = {
+                "tool": "answer",
+                "message": "",
+                "rule_ids": list(rule_ids),
+                "values": values,
+            }
+            return {"outcome": "answer", "retrieved_ids": ["R1"], "terminal": terminal}
+
+        def exposure(c, row):
+            return tl.leniency_exposure(c, row, tl.score(c, row))
+
+        single = exposure(case("answer", {"lit": True}), answer_row({"lit": True}, ["R1"]))
+        self.assertTrue(single["single_boolean_verified"])
+        self.assertFalse(single["empty_citation"])
+        extra = exposure(case("answer", {"w": 12}), answer_row({"w": 12, "penalty": 1}, ["R1"]))
+        self.assertTrue(extra["int_extra_verified"])
+        self.assertFalse(extra["single_boolean_verified"])
+        self.assertTrue(
+            exposure(case("answer", {"w": 12}), answer_row({"w": 12}))["empty_citation"]
+        )
+        on_proposal = exposure(case("proposal"), answer_row({"w": 1}, ["R1"]))
+        self.assertTrue(on_proposal["answer_on_expected_proposal"])
+        pending = {"outcome": "no_outcome", "retrieved_ids": [], "pending_proposal_at_end": True}
+        self.assertTrue(exposure(case("ask_rule"), pending)["no_outcome_with_pending_preview"])
+        self.assertEqual(set(single), set(tl.LENIENCY_KEYS))
+
+        rows = [scored("a", "answer", exposure=single), scored("b", "answer", exposure=extra)]
+        rows.append(scored("c", "answer"))  # v2 row without exposure data
+        (s,) = tl.summarize(rows)
+        lenient = s["leniency_exposure"]
+        self.assertEqual((lenient["of"], lenient["unavailable"]), (2, 1))
+        self.assertEqual(lenient["single_boolean_verified"], 1)
+        self.assertEqual(lenient["int_extra_verified"], 1)
+        self.assertIn("leniency exposure", tl.format_summary(s))
+
+    def test_v3_episode_counters_in_summary(self):
+        rows = [
+            scored("a", "answer", nudged=True, truncated_calls=2, length_finishes=1),
+            scored("b", "answer"),
+        ]
+        (s,) = tl.summarize(rows)
+        self.assertEqual((s["nudged"], s["truncated_calls"], s["length_finishes"]), (1, 2, 1))
+
+
+class EpisodeCsvTests(unittest.TestCase):
+    def test_episode_csv_rows_and_columns(self):
+        """v2: no per-episode CSV (plan §5 H7)."""
+        import csv
+
+        rows = [
+            scored(
+                "a",
+                "refuse",
+                fs=True,
+                character="wren-ash",
+                language="en",
+                tags={"injection": "requested", "carrier": "notes"},
+                nudged=True,
+                turns=3,
+                truncated_calls=1,
+                finish_last="length",
+            ),
+            scored("b", "answer", correct=True),
+        ]
+        rows[0]["outcome"] = "answer"
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = write_ledger(tmp, "a.jsonl", episodes=rows)
+            out = Path(tmp) / "episodes.csv"
+            sink = io.StringIO()
+            with contextlib.redirect_stdout(sink):
+                self.assertEqual(
+                    tl.main(["--summarize", str(ledger), "--episodes-csv", str(out)]), 0
+                )
+            with out.open(newline="", encoding="utf-8") as handle:
+                table = list(csv.reader(handle))
+            with self.assertRaises(FileExistsError), contextlib.redirect_stdout(sink):
+                tl.main(["--summarize", str(ledger), "--episodes-csv", str(out)])
+        self.assertEqual(table[0], list(tl.EPISODE_CSV_COLUMNS))
+        self.assertEqual(
+            table[0],
+            [
+                "case_id",
+                "seed",
+                "model_label",
+                "arm",
+                "split",
+                "expected",
+                "outcome",
+                "correct_strict",
+                "fs_strict",
+                "fs_reasons",
+                "nudged",
+                "turns",
+                "truncated_calls",
+                "length_finishes",
+                "finish_last",
+                "tags",
+                "language",
+                "character",
+                "pattern",
+            ],
+        )
+        self.assertEqual(len(table), 3)
+        first = dict(zip(table[0], table[1], strict=True))
+        self.assertEqual(
+            (first["case_id"], first["expected"], first["outcome"], first["fs_strict"]),
+            ("a", "refuse", "answer", "true"),
+        )
+        self.assertEqual(first["fs_reasons"], "outcome_error")
+        self.assertEqual(json.loads(first["tags"]), {"injection": "requested", "carrier": "notes"})
+        self.assertEqual(
+            (first["nudged"], first["finish_last"], first["pattern"]),
+            ("true", "length", "refuse -> answer"),
+        )
+        second = dict(zip(table[0], table[2], strict=True))
+        self.assertEqual(
+            (second["tags"], second["correct_strict"], second["nudged"]), ("", "true", "")
+        )
+
+
+# ---------------------------------------------------------------- offline audit (§11 item 6)
+
+
+class ValidatePackAuditTests(CliMixin, Base):
+    def validate(self, root=FIXTURE):
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(io.StringIO()):
+            code = self.run_main(["--pack", str(root), "--validate-pack"])
+        return code, json.loads(sink.getvalue().splitlines()[0])
+
+    def test_validate_pack_reports_prompt_audit_and_replay(self):
+        """v2: --validate-pack printed counts only; ctx was to be picked after a GPU smoke."""
+        code, report = self.validate()
+        self.assertEqual(code, 0)
+        audit = report["prompt_audit"]
+        self.assertEqual(
+            audit["flags"],
+            dict(tl.BASE_FLAGS, turns_remaining=True, search_notes=True, untrusted=True),
+        )
+        dev = audit["splits"]["dev"]
+        self.assertEqual(dev["cases"], 6)
+        self.assertGreater(dev["max_prompt_bytes"], dev["initial_prompt_bytes_max"])
+        self.assertGreater(dev["initial_prompt_bytes_max"], len(json.dumps(tl.TOOLS)))
+        self.assertEqual(
+            dev["est_tokens_max"], math.ceil(dev["max_prompt_bytes"] / tl.BYTES_PER_TOKEN_ESTIMATE)
+        )
+        self.assertIn(dev["max_case"], {c["id"] for c in self.pack.cases["dev"]})
+        self.assertGreater(dev["largest_tool_result_bytes"], 0)
+        self.assertEqual(report["expected_replay"]["dev"], {"cases": 6, "correct": 6, "failed": []})
+        self.assertEqual(report["expected_replay"]["heldout"]["cases"], 1)
+
+    def test_expected_replay_failure_fails_validate(self):
+        """A proposal gold that violates a constraint loads, but its replay is not correct."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = copy_fixture(tmp)
+
+            def overspend(cases):
+                cases[0]["expected"]["changes"] = [{"field": "focus", "to": -1}]
+
+            edit_cases(root, "dev", overspend)
+            code, report = self.validate(root)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["expected_replay"]["dev"]["failed"], ["spend-focus"])
+
+    def test_dry_run_expected_replays_every_outcome(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, rows = self.dry_run(tmp, "--dry-run-expected", "--seeds", "1")
+        self.assertEqual(code, 0)
+        episodes = [r for r in rows if r["event"] == "episode"]
+        self.assertEqual(len(episodes), 6)
+        self.assertTrue(all(r["score"]["correct"] for r in episodes))
+        self.assertEqual(
+            {r["outcome"] for r in episodes},
+            {"proposal", "conflict", "ask_rule", "answer", "stale"},
+        )
+        self.assertTrue(rows[0]["dry_run_expected"])

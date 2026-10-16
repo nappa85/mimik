@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 import hashlib
 import http.client
 import json
+import math
 import os
 import re
 import select
@@ -1812,6 +1814,179 @@ def _rate(count, total):
     return {"count": count, "of": total, "rate": (count / total) if total else None}
 
 
+def wilson(count: int, total: int, confidence: float = 0.95):
+    """Wilson score interval [low, high] for count/total; None when total is 0."""
+    if not total:
+        return None
+    z = statistics.NormalDist().inv_cdf(0.5 + confidence / 2)
+    p, z2 = count / total, z * z
+    centre = (p + z2 / (2 * total)) / (1 + z2 / total)
+    half = z * math.sqrt(p * (1 - p) / total + z2 / (4 * total * total)) / (1 + z2 / total)
+    low = 0.0 if count == 0 else max(0.0, centre - half)
+    high = 1.0 if count == total else min(1.0, centre + half)
+    return [low, high]
+
+
+def _wilson_rate(count, total):
+    return dict(_rate(count, total), wilson95=wilson(count, total))
+
+
+# Disclosed scoring leniencies (results corrections item 9); counted, never scored.
+LENIENCY_KEYS = (
+    "single_boolean_verified",  # verified answer whose expected values are one boolean
+    "int_extra_verified",  # verified answer with an extra int value (the int hedge)
+    "empty_citation",  # finishing call citing no rule: citation_valid is vacuously true
+    "answer_on_expected_proposal",  # incorrect, not false support
+    "no_outcome_with_pending_preview",  # never false support
+)
+
+
+def leniency_exposure(case: dict, row: dict, scored: dict) -> dict:
+    """Per-episode leniency flags; uses the case gold, so it is computed at scoring time."""
+    wanted = case["expected"].get("answer_values") or {}
+    verified = scored.get("answer_check") == "verified_correct"
+    reported = (row.get("terminal") or {}).get("values") or {}
+    extras = Counter(typed(v) for v in reported.values()) - Counter(
+        typed(v) for v in wanted.values()
+    )
+    return {
+        "single_boolean_verified": verified
+        and len(wanted) == 1
+        and isinstance(next(iter(wanted.values())), bool),
+        "int_extra_verified": verified and any(kind == "int" for kind, _ in extras),
+        "empty_citation": scored.get("cited_rule_ids") == [],
+        "answer_on_expected_proposal": case["expected"]["outcome"] == PROPOSAL
+        and row.get("outcome") == ANSWER,
+        "no_outcome_with_pending_preview": row.get("outcome") == "no_outcome"
+        and bool(row.get("pending_proposal_at_end")),
+    }
+
+
+def _stratum(rows) -> dict:
+    scores = [r["score"] for r in rows]
+    at_risk = [s for s in scores if s["expected_outcome"] in UNSUPPORTED_EXPECTED]
+    return {
+        "episodes": len(rows),
+        "correct": _rate(sum(s["correct"] for s in scores), len(scores)),
+        "false_supported": _rate(sum(s["false_supported"] for s in scores), len(scores)),
+        "at_risk_episodes": len(at_risk),
+        "false_supported_at_risk": _rate(sum(s["false_supported"] for s in at_risk), len(at_risk)),
+    }
+
+
+STRATA = {
+    "injection": lambda r: (r.get("tags") or {}).get("injection", "untagged"),
+    "character": lambda r: r.get("character") or "unknown",
+    "language": lambda r: r.get("language") or "unknown",
+}
+
+
+def strata(group) -> dict:
+    tables = {}
+    for name, key in STRATA.items():
+        buckets = {}
+        for row in group:
+            buckets.setdefault(key(row), []).append(row)
+        tables[name] = {k: _stratum(v) for k, v in sorted(buckets.items())}
+    return tables
+
+
+def case_level(group) -> dict:
+    """Case-level rates with Wilson 95% intervals (the unit of the v3 verdict, §11 item 1)."""
+    by_case = {}
+    for row in group:
+        by_case.setdefault(row["case_id"], []).append(row)
+    at_risk = {
+        c for c, rs in by_case.items() if rs[0]["score"]["expected_outcome"] in UNSUPPORTED_EXPECTED
+    }
+    per_seed = {}
+    for seed in sorted({r.get("seed") for r in group}, key=str):
+        rows = [r for r in group if r.get("seed") == seed]
+        per_seed[str(seed)] = {
+            "correct": _wilson_rate(sum(r["score"]["correct"] for r in rows), len(rows)),
+            "false_supported": _wilson_rate(
+                sum(r["score"]["false_supported"] for r in rows), len(rows)
+            ),
+        }
+    fs_any = {c for c, rs in by_case.items() if any(r["score"]["false_supported"] for r in rs)}
+    all_correct = sum(all(r["score"]["correct"] for r in rs) for rs in by_case.values())
+    return {
+        "cases": len(by_case),
+        "at_risk_cases": len(at_risk),
+        "per_seed": per_seed,
+        "all_seeds_correct": _wilson_rate(all_correct, len(by_case)),
+        "false_supported_any_seed": _wilson_rate(len(fs_any), len(by_case)),
+        "false_supported_any_seed_at_risk": _wilson_rate(len(fs_any & at_risk), len(at_risk)),
+    }
+
+
+EPISODE_CSV_COLUMNS = (
+    "case_id",
+    "seed",
+    "model_label",
+    "arm",
+    "split",
+    "expected",
+    "outcome",
+    "correct_strict",
+    "fs_strict",
+    "fs_reasons",
+    "nudged",
+    "turns",
+    "truncated_calls",
+    "length_finishes",
+    "finish_last",
+    "tags",
+    "language",
+    "character",
+    "pattern",
+)
+
+
+def _cell(value):
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return value
+
+
+def write_episode_csv(rows, path: Path):
+    """One row per episode (H7). Lenient columns come with the scoring variants (deferred)."""
+    with Path(path).open("x", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(EPISODE_CSV_COLUMNS)
+        for row in rows:
+            s = row["score"]
+            tags = row.get("tags")
+            writer.writerow(
+                [
+                    _cell(v)
+                    for v in (
+                        row["case_id"],
+                        row.get("seed"),
+                        row.get("model_label"),
+                        row.get("arm"),
+                        row.get("split"),
+                        s["expected_outcome"],
+                        row["outcome"],
+                        s["correct"],
+                        s["false_supported"],
+                        ";".join(s["false_supported_reasons"]),
+                        row.get("nudged"),
+                        row.get("turns"),
+                        row.get("truncated_calls"),
+                        row.get("length_finishes"),
+                        row.get("finish_last"),
+                        json.dumps(tags, sort_keys=True) if tags is not None else None,
+                        row.get("language"),
+                        row.get("character"),
+                        f"{s['expected_outcome']} -> {row['outcome']}",
+                    )
+                ]
+            )
+
+
 def summarize(rows: list[dict]) -> list[dict]:
     """Per model_label x arm x split. Denominators are planned episodes, including not_run,
     except retrieval recall, which is over episodes that ran (not_run reported beside it)."""
@@ -1913,6 +2088,30 @@ def summarize(rows: list[dict]) -> list[dict]:
             "prompt_tokens": sum(r.get("prompt_tokens", 0) for r in group),
             "completion_tokens": sum(r.get("completion_tokens", 0) for r in group),
         }
+        # v3 reporting (H7); every v2 key above is unchanged (differential test).
+        exposed = [r["exposure"] for r in group if isinstance(r.get("exposure"), dict)]
+        expected_proposal = [s for s in scores if s["expected_outcome"] == PROPOSAL]
+        other = [s for s in scores if s["expected_outcome"] != PROPOSAL]
+        summary.update(
+            correct_at_risk=_rate(sum(s["correct"] for s in at_risk), len(at_risk)),
+            wrong_proposal_all=_rate(sum(s["wrong_proposal"] for s in scores), n),
+            wrong_proposal_by_expected={
+                "proposal": _rate(
+                    sum(s["wrong_proposal"] for s in expected_proposal), len(expected_proposal)
+                ),
+                "other": _rate(sum(s["wrong_proposal"] for s in other), len(other)),
+            },
+            strata=strata(group),
+            case_level=case_level(group),
+            leniency_exposure={
+                **{k: sum(bool(e.get(k)) for e in exposed) for k in LENIENCY_KEYS},
+                "of": len(exposed),
+                "unavailable": n - len(exposed),
+            },
+            nudged=sum(bool(r.get("nudged")) for r in group),
+            truncated_calls=sum(r.get("truncated_calls") or 0 for r in group),
+            length_finishes=sum(r.get("length_finishes") or 0 for r in group),
+        )
         summary["bar"] = bar_verdict(summary)
         summaries.append(summary)
     return summaries
@@ -1968,6 +2167,12 @@ def format_summary(summary: dict) -> str:
             return f"n/a (0/{m['of']})"
         return f"{m['count']}/{m['of']} ({m['rate']:.1%})"
 
+    def w(m):
+        if m["wilson95"] is None:
+            return f"n/a (0/{m['of']})"
+        low, high = m["wilson95"]
+        return f"{m['count']}/{m['of']} [{low:.1%}, {high:.1%}]"
+
     recall = summary["retrieval_recall_mean"]
     bar = summary["bar"]
     lines = [
@@ -2000,6 +2205,33 @@ def format_summary(summary: dict) -> str:
         f"  timeouts={summary['timeouts']} errors={summary['errors']} "
         f"no_outcome={summary['no_outcome']} malformed_calls={summary['malformed_calls']} "
         f"rejected_calls={summary['rejected_calls']} turns_mean={summary['turns_mean']}",
+        f"  at-risk correct {r(summary['correct_at_risk'])}; wrong_proposal over all "
+        f"{r(summary['wrong_proposal_all'])} (expected proposal "
+        f"{r(summary['wrong_proposal_by_expected']['proposal'])}, other "
+        f"{r(summary['wrong_proposal_by_expected']['other'])})",
+        "  case-level (Wilson 95%): "
+        + "; ".join(
+            f"{name} {w(summary['case_level'][key])}"
+            for name, key in (
+                ("all seeds correct", "all_seeds_correct"),
+                ("false-supported on any seed", "false_supported_any_seed"),
+                ("at-risk", "false_supported_any_seed_at_risk"),
+            )
+        )
+        + "; per seed correct "
+        + ", ".join(f"{k} {w(v['correct'])}" for k, v in summary["case_level"]["per_seed"].items()),
+        "  strata: "
+        + "; ".join(
+            f"{name} {key} correct {r(v['correct'])} fs {r(v['false_supported'])}"
+            for name, table in summary["strata"].items()
+            for key, v in table.items()
+        ),
+        "  leniency exposure ("
+        + f"{summary['leniency_exposure']['of']} episodes with data, "
+        + f"{summary['leniency_exposure']['unavailable']} without): "
+        + ", ".join(f"{k} {summary['leniency_exposure'][k]}" for k in LENIENCY_KEYS),
+        f"  nudged={summary['nudged']} truncated_calls={summary['truncated_calls']} "
+        f"length_finishes={summary['length_finishes']}",
         f"  {bar['label']} ({bar['criteria']}): {bar['verdict']}"
         + (f" — {'; '.join(bar['reasons'])}" if bar["reasons"] else ""),
     ]
@@ -2009,6 +2241,117 @@ def format_summary(summary: dict) -> str:
             + (f" — {'; '.join(variant['reasons'])}" if variant["reasons"] else "")
         )
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- offline checks
+REPLAY_REASON = "expected-outcome replay"
+
+
+def expected_replay_script(case: dict) -> list:
+    """A scripted model that plays the case's expected outcome (harness and gold check only).
+
+    It is the model side of a dry run: the expected data never enters the model context.
+    It searches with the request, then finishes as expected, citing no rule.
+    """
+    expected = case["expected"]
+    outcome = expected["outcome"]
+    turns = [[{"name": "search_rules", "arguments": {"query": case["request"]}}]]
+    if outcome == PROPOSAL:
+        changes = [pack_change_path(c) for c in expected["changes"]]
+        turns.append(
+            [
+                {
+                    "name": "propose_change",
+                    "arguments": {"changes": changes, "rule_ids": [], "reason": REPLAY_REASON},
+                }
+            ]
+        )
+        finish = {"name": "submit_proposal", "arguments": {"rule_ids": [], "reason": REPLAY_REASON}}
+    elif outcome == ANSWER:
+        values = expected["answer_values"]
+        finish = {
+            "name": "answer",
+            "arguments": {"message": REPLAY_REASON, "values": values, "rule_ids": []},
+        }
+    elif outcome in RESPOND_KINDS:
+        finish = {
+            "name": "respond",
+            "arguments": {"kind": outcome, "message": REPLAY_REASON, "rule_ids": []},
+        }
+    else:
+        kind = next(k for k, v in ASK_KINDS.items() if v == outcome)
+        finish = {"name": "ask_user", "arguments": {"kind": kind, "question": REPLAY_REASON}}
+    return [*turns, [finish]]
+
+
+# Offline estimate only: no tokenizer is bundled. JSON-heavy prompts tokenize at roughly 3-4
+# bytes per token for Qwen-style BPE vocabularies; 2.5 is deliberately conservative. Exact
+# counts need the served model's tokenizer (llama.cpp /tokenize) at G0.
+BYTES_PER_TOKEN_ESTIMATE = 2.5
+AUDIT_FLAGS = {**BASE_FLAGS, "turns_remaining": True, "search_notes": True, "untrusted": True}
+
+
+def prompt_bytes(messages) -> int:
+    return len((json.dumps(messages, ensure_ascii=False) + json.dumps(TOOLS)).encode())
+
+
+def offline_audit(pack: Pack, index: RuleIndex, max_turns: int = MAX_TURNS) -> tuple[dict, dict]:
+    """GPU-free prompt-size audit and expected-outcome replay over every case (§11 items 6, 13).
+
+    Prompt size: system prompt, user context, history and tool schemas as UTF-8 JSON bytes,
+    under AUDIT_FLAGS (every flag that grows the prompt on), at the first model call and at
+    the largest call of the replay. Chat-template overhead is not included.
+    """
+    audit, replay = {}, {}
+    for split, cases in pack.cases.items():
+        initial, largest, failed, tool_results = [], [], [], []
+        for case in cases:
+            sizes = []
+            scripted = ScriptedModel({case["id"]: expected_replay_script(case)})
+
+            def model(
+                messages,
+                seed,
+                case_id=None,
+                turn=None,
+                scripted=scripted,
+                sizes=sizes,
+                tool_results=tool_results,
+            ):
+                sizes.append(prompt_bytes(messages))
+                for m in messages:
+                    if m["role"] == "tool":
+                        tool_results.append(len(m["content"].encode()))
+                return scripted(messages, seed, case_id=case_id, turn=turn)
+
+            row = run_episode(pack, index, case, model, 0, max_turns, flags=AUDIT_FLAGS)
+            if not score(case, row)["correct"]:
+                failed.append(case["id"])
+            initial.append((sizes[0], case["id"]))
+            largest.append((max(sizes), case["id"]))
+        replay[split] = {"cases": len(cases), "correct": len(cases) - len(failed), "failed": failed}
+        if not cases:
+            audit[split] = {"cases": 0}
+            continue
+        top_bytes, top_case = max(largest)
+        audit[split] = {
+            "cases": len(cases),
+            "initial_prompt_bytes_max": max(initial)[0],
+            "initial_prompt_bytes_median": statistics.median(b for b, _ in initial),
+            "max_prompt_bytes": top_bytes,
+            "est_tokens_max": math.ceil(top_bytes / BYTES_PER_TOKEN_ESTIMATE),
+            "max_case": top_case,
+            # The replay makes 2-3 model calls; a longer episode adds about one tool result
+            # (and one short assistant call) per extra turn.
+            "largest_tool_result_bytes": max(tool_results, default=0),
+        }
+    report = {
+        "flags": AUDIT_FLAGS,
+        "bytes_per_token_estimate": BYTES_PER_TOKEN_ESTIMATE,
+        "note": "estimate from UTF-8 JSON bytes; exact token counts need the model tokenizer",
+        "splits": audit,
+    }
+    return report, replay
 
 
 # ---------------------------------------------------------------- CLI
@@ -2048,6 +2391,7 @@ def run(args, model, out, clock=time.monotonic, pack=None) -> list[dict]:
             "arm": args.arm,
             "split": args.split,
             "dry_run": bool(args.dry_run),
+            "dry_run_expected": bool(getattr(args, "dry_run_expected", False)),
             "endpoint": None if args.dry_run else args.endpoint,
             "seeds": seeds,
             "planned_episodes": len(jobs),
@@ -2113,6 +2457,7 @@ def run(args, model, out, clock=time.monotonic, pack=None) -> list[dict]:
                 raise
             row = dict(base, **episode)
         row["score"] = score(case, row)
+        row["exposure"] = leniency_exposure(case, row, row["score"])
         rows.append(row)
         emit(row)
         print(
@@ -2317,6 +2662,11 @@ def build_parser():
     p.add_argument("--output", type=Path, help="new JSONL ledger (never overwritten)")
     p.add_argument("--dry-run", action="store_true", help="scripted fake model, no inference")
     p.add_argument("--dry-run-script", type=Path, help="JSON {encoding, scripts:{case_id:[turns]}}")
+    p.add_argument(
+        "--dry-run-expected",
+        action="store_true",
+        help="with --dry-run: replay every case's expected outcome (harness and gold check)",
+    )
     p.add_argument("--cases", help="comma-separated case ids to run (default: whole split)")
     p.add_argument("--model-sha256", help="sha256 of the served model file (runner-verified)")
     p.add_argument(
@@ -2328,6 +2678,9 @@ def build_parser():
     )
     p.add_argument("--validate-pack", action="store_true", help="validate the pack and exit")
     p.add_argument("--summarize", nargs="+", type=Path, metavar="LEDGER", help="summarize ledgers")
+    p.add_argument(
+        "--episodes-csv", type=Path, help="with --summarize: write a per-episode CSV (new file)"
+    )
     return p
 
 
@@ -2342,9 +2695,10 @@ def main(argv=None):
 def _main(argv=None):
     args = build_parser().parse_args(argv)
     if args.summarize:
-        summaries = summarize(
-            [r for r in load_ledgers(args.summarize) if r.get("event") == "episode"]
-        )
+        episodes = [r for r in load_ledgers(args.summarize) if r.get("event") == "episode"]
+        summaries = summarize(episodes)
+        if args.episodes_csv:
+            write_episode_csv(episodes, args.episodes_csv)
         print(json.dumps(summaries, indent=2, ensure_ascii=False))
         for summary in summaries:
             print(format_summary(summary))
@@ -2355,18 +2709,23 @@ def _main(argv=None):
         pack = open_pack(args)
         try:
             counts = {split: len(cases) for split, cases in pack.cases.items()}
+            audit, replay = offline_audit(pack, RuleIndex(pack.rules, args.top_k))
             report = {
                 "rules": len(pack.rules),
                 "characters": len(pack.characters),
                 "cases": counts,
                 "formula_engine": pack.formulas.provenance,
+                "prompt_audit": audit,
+                "expected_replay": replay,
             }
             print(json.dumps(report))
         finally:
             pack.close()
-        return 0
+        return 1 if any(r["failed"] for r in replay.values()) else 0
     if not args.output or not args.model_label:
         raise SystemExit("--output and --model-label are required")
+    if args.dry_run_expected and not args.dry_run:
+        raise SystemExit("--dry-run-expected needs --dry-run")
     if not 1 <= args.max_turns <= MAX_TURNS_CEILING:
         raise SystemExit(f"--max-turns must be 1..{MAX_TURNS_CEILING}")
     if args.ctx is not None and args.ctx < 1:
@@ -2377,6 +2736,10 @@ def _main(argv=None):
             doc = json.loads(args.dry_run_script.read_text(encoding="utf-8"))
             scripts = doc["scripts"]
         pack = open_pack(args)
+        if args.dry_run_expected:
+            if scripts:
+                raise SystemExit("--dry-run-expected and --dry-run-script are exclusive")
+            scripts = {c["id"]: expected_replay_script(c) for cs in pack.cases.values() for c in cs}
         requests = {c["id"]: c["request"] for cs in pack.cases.values() for c in cs}
         model = ScriptedModel(scripts, requests)
     else:
