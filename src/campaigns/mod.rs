@@ -1,6 +1,7 @@
 //! Campaign grants and private sheets are distinct from the public prototype.
 mod domain;
 mod formulas;
+mod history_diff;
 mod sheets;
 mod snapshots;
 #[cfg(test)]

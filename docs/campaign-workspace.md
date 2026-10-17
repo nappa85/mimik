@@ -48,6 +48,14 @@ Owner access. The flag conflicts with `--no-auth` and cannot accompany CLI subco
    save; a violating save succeeds and the next view lists the violation. A failed save
    (422/409) re-renders the draft, with derived values and checks shown separately as
    "computed from saved revision N", never from the unsaved draft.
+5. List fields (M4, publishable): Add, Remove, Move up and
+   Move down change only the unsaved draft, and Save persists the whole sheet. New rows get
+   host IDs `r<revision>-<k>` on save. A stale save answers 409 before value checks; the
+   draft keeps its submitted revision and a warning names both revisions. Each history
+   revision shows "Changes in revision N" against revision N − 1 (rows added, removed,
+   edited with their properties, moved; scalar, name and notes changes), names only, with a
+   link to the previous revision. Row IDs label row slots in this sheet's history, not
+   items.
 
 ## Joining, grants and privacy
 

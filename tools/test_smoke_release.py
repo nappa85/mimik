@@ -7,7 +7,14 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from smoke_release import FormFields, registry_cli, require_secret_free, smoke_owner_development
+from smoke_release import (
+    FormFields,
+    corrected_evidence,
+    registry_cli,
+    require_secret_free,
+    smoke_owner_development,
+    version_link,
+)
 
 
 class PublicationFailureTests(unittest.TestCase):
@@ -177,6 +184,82 @@ class WorkspaceFormTests(unittest.TestCase):
             parser.forms["/private-sheets/1"],
             {"null-flag": "unknown", "value-flag": "false", "value-choice": "b"},
         )
+
+
+class TextareaNewlineTests(unittest.TestCase):
+    def test_one_leading_newline_after_the_textarea_tag_is_dropped_like_a_browser(self):
+        parser = FormFields()
+        parser.feed(
+            '<form action="/s"><textarea name="a">\nplain</textarea>'
+            '<textarea name="b">\n\nkept</textarea><textarea name="c">x</textarea></form>'
+        )
+        self.assertEqual(parser.forms["/s"], {"a": "plain", "b": "\nkept", "c": "x"})
+        self.assertEqual(parser.values["b"], "\nkept")
+
+    def test_a_crlf_split_across_two_feeds_is_one_newline(self):
+        parser = FormFields()
+        parser.feed('<form action="/s"><textarea name="a">\r')
+        parser.feed('\nplain</textarea><textarea name="b">x\r')
+        parser.feed("</textarea></form>")
+        parser.close()
+        self.assertEqual(parser.forms["/s"], {"a": "plain", "b": "x\n"})
+
+    def test_literal_crlf_and_cr_are_normalised_before_the_initial_newline_rule(self):
+        parser = FormFields()
+        parser.feed(
+            '<form action="/s"><textarea name="a">\r\nplain</textarea>'
+            '<textarea name="b">\rplain</textarea><textarea name="c">\r\n\r\nkept\r\n</textarea>'
+            '<textarea name="d">&#13;ref</textarea></form>'
+        )
+        self.assertEqual(
+            parser.forms["/s"], {"a": "plain", "b": "plain", "c": "\nkept\n", "d": "\rref"}
+        )
+
+
+class FormFieldsLifecycleTests(unittest.TestCase):
+    def test_reset_discards_a_held_back_cr(self):
+        parser = FormFields()
+        parser.feed('<form action="/s"><textarea name="a">x\r')
+        parser.reset()
+        self.assertEqual(parser.pending_cr, "", "reset() discards the held-back CR")
+        parser.feed('<form action="/s"><textarea name="a">\nplain</textarea></form>')
+        parser.close()
+        self.assertEqual(parser.forms["/s"], {"a": "plain"})
+
+
+class CorrectedEvidenceTests(unittest.TestCase):
+    def test_the_search_check_requires_the_stored_leading_newline(self):
+        self.assertTrue(
+            corrected_evidence('<pre class="evidence-text">\n\nVerified fixture correction</pre>')
+        )
+        for lost in (
+            '<pre class="evidence-text">\nVerified fixture correction</pre>',
+            '<pre class="evidence-text">Verified fixture correction</pre>',
+        ):
+            self.assertFalse(corrected_evidence(lost), lost)
+
+
+class VersionSelectionTests(unittest.TestCase):
+    PAGE = (
+        '<a href="/campaigns/4/sheets/new?version=1">Generic v1</a>'
+        '<a href="/campaigns/4/sheets/new?version=2">Generic v2</a>'
+        '<a href="/campaigns/4/sheets/new?version=3">List definition</a>'
+    )
+
+    def test_create_link_is_chosen_by_version_id_not_position(self):
+        self.assertEqual(
+            version_link(self.PAGE, "/campaigns/4", 2), "/campaigns/4/sheets/new?version=2"
+        )
+        self.assertEqual(
+            version_link(self.PAGE, "/campaigns/4", 3), "/campaigns/4/sheets/new?version=3"
+        )
+
+    def test_missing_or_prefix_version_is_refused(self):
+        for version in (4, 0):
+            with self.assertRaisesRegex(AssertionError, "Published runtime version"):
+                version_link(self.PAGE, "/campaigns/4", version)
+        with self.assertRaisesRegex(AssertionError, "Published runtime version"):
+            version_link('<a href="/campaigns/4/sheets/new?version=21">', "/campaigns/4", 2)
 
 
 if __name__ == "__main__":

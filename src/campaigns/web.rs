@@ -65,13 +65,46 @@ pub(super) static REJECTED_EDITOR_KEPT_PERMIT: Mutex<Vec<bool>> = Mutex::new(Vec
 #[cfg(test)]
 pub(super) static AFTER_FAILED_SAVE: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
 
+/// Body limit of the private sheet create and edit POSTs (plan D7): stored values are at
+/// most 1 MiB, URL encoding expands them at most 3×, and keys add at most 65,536 × 16 bytes.
+pub(super) const SHEET_POST_BYTES: usize = 5 * 1024 * 1024;
+
+/// A re-render echoes a draft only when its decoded form values total at most this many
+/// bytes: a larger draft could never be stored (plan D7, N8).
+pub(super) const ECHO_BYTES: usize = 1024 * 1024;
+
+/// Before a 5 MiB body is buffered, the session must carry a principal (cookie only, no
+/// body): an anonymous request answers 403 without its body being read (plan D7, N3).
+async fn signed_in(session: Session, request: Request, next: Next) -> Response {
+    match auth::has_principal(&session).await {
+        Ok(true) => next.run(request).await,
+        Ok(false) => StatusCode::FORBIDDEN.into_response(),
+        Err(status) => status.into_response(),
+    }
+}
+
+/// A sheet POST method: its own 5 MiB body limit (inside the router-wide 1 MiB layer, so it
+/// wins for this method only) and the pre-body principal check.
+fn sheet_post<H, T>(handler: H) -> axum::routing::MethodRouter<AuthState>
+where
+    H: axum::handler::Handler<T, AuthState>,
+    T: 'static,
+{
+    post(handler)
+        .layer(DefaultBodyLimit::max(SHEET_POST_BYTES))
+        .route_layer(middleware::from_fn(signed_in))
+}
+
 pub(crate) fn routes() -> Router<AuthState> {
     let sheets = Router::new()
         .route(
             "/campaigns/{id}/sheets/new",
-            get(new_sheet).post(create_sheet),
+            get(new_sheet).merge(sheet_post(create_sheet)),
         )
-        .route("/private-sheets/{id}", get(read_sheet).post(edit_sheet))
+        .route(
+            "/private-sheets/{id}",
+            get(read_sheet).merge(sheet_post(edit_sheet)),
+        )
         .route("/private-sheets/{id}/history/{revision}", get(read_history))
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn(runtime));
@@ -198,7 +231,7 @@ async fn detail(
 }
 
 fn pairs(bytes: &[u8], keys: &[&str]) -> Result<BTreeMap<String, String>, StatusCode> {
-    super::transport::Pairs::parse(bytes)?.admit(keys)
+    super::transport::Pairs::parse(bytes)?.admit(&keys.iter().copied().collect())
 }
 
 async fn create(
@@ -384,9 +417,187 @@ struct FieldView {
     derived: Option<DerivedView>,
     expr: String,
     rule_ids: String,
+    /// The rows of a list field (plan D10); `None` for every other control.
+    list: Option<ListView>,
+}
+
+/// At most this many characters of a value shown in a second, visible context (plan D7
+/// RE3-1): the full value is echoed once, in its control.
+const EXCERPT_CHARS: usize = 64;
+
+fn excerpt(value: &str) -> String {
+    match value.char_indices().nth(EXCERPT_CHARS) {
+        Some((end, _)) => format!("{}…", &value[..end]),
+        None => value.to_owned(),
+    }
+}
+
+/// One declared property of a list field.
+struct PropertyView {
+    label: String,
+    control: &'static str,
+    optional: bool,
+    options: Vec<(String, String)>,
+}
+
+struct CellView {
+    p: usize,
+    value: String,
+    state: String,
+}
+
+impl CellView {
+    fn valid_boolean(&self) -> bool {
+        matches!(self.value.as_str(), "" | "true" | "false")
+    }
+    fn valid_state(&self) -> bool {
+        matches!(self.state.as_str(), "present" | "absent")
+    }
+    fn value_excerpt(&self) -> String {
+        excerpt(&self.value)
+    }
+    fn state_excerpt(&self) -> String {
+        excerpt(&self.state)
+    }
+}
+
+struct RowView {
+    r: usize,
+    id: String,
+    cells: Vec<CellView>,
+    /// Which of this row's controls gets `autofocus` after a draft operation, if any.
+    focus: RowFocus,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowFocus {
+    None,
+    Start,
+    Up,
+    Down,
+}
+
+impl RowView {
+    fn number(&self) -> usize {
+        self.r + 1
+    }
+    fn focus_start(&self, cell: &CellView) -> bool {
+        self.focus == RowFocus::Start && cell.p == 0
+    }
+    fn focus_up(&self) -> bool {
+        self.focus == RowFocus::Up
+    }
+    fn focus_down(&self) -> bool {
+        self.focus == RowFocus::Down
+    }
+    fn id_excerpt(&self) -> String {
+        excerpt(&self.id)
+    }
+}
+
+/// A list field: its index `f` in the definition (the form key prefix), properties and rows.
+struct ListView {
+    f: usize,
+    properties: Vec<PropertyView>,
+    rows: Vec<RowView>,
+    /// The Add button gets `autofocus` (after Remove).
+    focus_add: bool,
+}
+
+impl ListView {
+    fn new(
+        f: usize,
+        field: &crate::definitions::Field,
+        draft: values::ListDraft,
+        focus: Option<values::Focus>,
+    ) -> Self {
+        let row_focus = |r: usize| match focus {
+            Some(values::Focus::RowStart(list, row)) if (list, row) == (f, r) => RowFocus::Start,
+            Some(values::Focus::Up(list, row)) if (list, row) == (f, r) => RowFocus::Up,
+            Some(values::Focus::Down(list, row)) if (list, row) == (f, r) => RowFocus::Down,
+            _ => RowFocus::None,
+        };
+        let properties = values::properties(field)
+            .iter()
+            .map(|property| PropertyView {
+                label: property.label.clone(),
+                control: control_name(property.control),
+                optional: property.optional,
+                options: choices(property.options.as_ref()),
+            })
+            .collect();
+        let rows = draft
+            .rows
+            .into_iter()
+            .enumerate()
+            .map(|(r, row)| RowView {
+                r,
+                id: row.id,
+                cells: row
+                    .values
+                    .into_iter()
+                    .zip(row.states)
+                    .enumerate()
+                    .map(|(p, (value, state))| CellView { p, value, state })
+                    .collect(),
+                focus: row_focus(r),
+            })
+            .collect();
+        Self {
+            f,
+            properties,
+            rows,
+            focus_add: focus == Some(values::Focus::Add(f)),
+        }
+    }
+    /// The last row: its Move down button is disabled.
+    fn last(&self, row: &RowView) -> bool {
+        row.r + 1 == self.rows.len()
+    }
+    /// At the row limit the Add button is disabled.
+    fn full(&self) -> bool {
+        self.rows.len() >= crate::definitions::formula::MAX_LIST_ITEMS
+    }
+    fn property(&self, cell: &CellView) -> &PropertyView {
+        &self.properties[cell.p]
+    }
+    fn valid_option(&self, cell: &CellView) -> bool {
+        self.properties[cell.p]
+            .options
+            .iter()
+            .any(|option| option.0 == cell.value)
+    }
+}
+
+fn control_name(control: crate::definitions::Control) -> &'static str {
+    match control {
+        crate::definitions::Control::Text => "text",
+        crate::definitions::Control::Multiline => "multiline",
+        crate::definitions::Control::Integer => "integer",
+        crate::definitions::Control::Boolean => "boolean",
+        crate::definitions::Control::Enumeration => "enum",
+        crate::definitions::Control::List => "list",
+    }
+}
+
+fn choices(options: Option<&Vec<crate::definitions::Choice>>) -> Vec<(String, String)> {
+    options
+        .map(|choices| {
+            choices
+                .iter()
+                .map(|c| (c.id.clone(), c.label.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl FieldView {
+    fn value_excerpt(&self) -> String {
+        excerpt(&self.value)
+    }
+    fn state_excerpt(&self) -> String {
+        excerpt(&self.value_state)
+    }
     fn valid_boolean(&self) -> bool {
         matches!(self.value.as_str(), "" | "true" | "false")
     }
@@ -409,12 +620,19 @@ struct PrivateTemplate<'a> {
     sheet: &'a crate::mork_borg::Sheet,
     groups: &'a [GroupView],
     message: &'a str,
+    /// A `role="alert"` notice (an oversized draft that was not kept); empty otherwise.
+    alert: &'a str,
     name: &'a str,
     notes: &'a str,
     revision: String,
+    /// The submitted revision as shown in visible text: an excerpt, so the hidden control
+    /// is its only full echo (RE3-1).
+    revision_excerpt: String,
     native: bool,
     create: bool,
     pin: String,
+    /// The definition declares a list field: the page gets a top Save button (plan D6).
+    lists: bool,
     mode: FormulaMode,
     /// Evaluation of the saved snapshot; never of an unsaved draft.
     formulas: Option<FormulaView>,
@@ -472,7 +690,7 @@ fn render_private(
     view: &SheetView,
     csrf: &str,
     raw: Option<&BTreeMap<String, String>>,
-    message: &str,
+    notice: &Notice,
 ) -> Result<String, AppError> {
     let native = matches!(view.snapshot.pin, Pin::Native { .. })
         && super::snapshots::supported(&view.snapshot);
@@ -505,7 +723,7 @@ fn render_private(
             })
         })
     };
-    let groups = groups(view, raw, formulas.as_ref())?;
+    let groups = groups(view, raw, formulas.as_ref(), notice.focus)?;
     let name = raw
         .and_then(|r| r.get("name"))
         .map_or(view.snapshot.name.as_str(), String::as_str);
@@ -535,13 +753,21 @@ fn render_private(
         draft: &draft,
         sheet: &sheet,
         groups: &groups,
-        message,
+        message: &notice.message,
+        alert: &notice.alert,
         name,
         notes,
+        revision_excerpt: excerpt(&revision),
         revision,
         native,
         create,
         pin: serde_json::to_string(&view.snapshot.pin)?,
+        lists: view.immutable.as_ref().is_some_and(|pin| {
+            pin.definition()
+                .fields
+                .iter()
+                .any(|field| field.control == crate::definitions::Control::List)
+        }),
         mode: match (
             view.immutable
                 .as_ref()
@@ -564,19 +790,28 @@ fn groups(
     view: &SheetView,
     raw: Option<&BTreeMap<String, String>>,
     formulas: Option<&FormulaView>,
+    focus: Option<values::Focus>,
 ) -> Result<Vec<GroupView>, AppError> {
     let mut groups = Vec::new();
     if let Some(pin) = &view.immutable {
         for group in &pin.definition().groups {
             let mut fields = Vec::new();
             for id in &group.fields {
-                let field = pin
+                let (f, field) = pin
                     .definition()
                     .fields
                     .iter()
-                    .find(|f| &f.id == id)
+                    .enumerate()
+                    .find(|(_, field)| &field.id == id)
                     .ok_or(AppError::Invalid("Invalid pinned group."))?;
                 let saved = &view.snapshot.data[id];
+                let list = (field.control == crate::definitions::Control::List).then(|| {
+                    let draft = raw.map_or_else(
+                        || values::ListDraft::saved(field, saved),
+                        |raw| values::ListDraft::submitted(f, field, raw),
+                    );
+                    ListView::new(f, field, draft, focus)
+                });
                 let value = raw
                     .and_then(|r| r.get(&format!("value-{id}")))
                     .cloned()
@@ -593,28 +828,11 @@ fn groups(
                     id: id.clone(),
                     label: field.label.clone(),
                     help: field.help.clone().unwrap_or_default(),
-                    control: match field.control {
-                        crate::definitions::Control::Text => "text",
-                        crate::definitions::Control::Multiline => "multiline",
-                        crate::definitions::Control::Integer => "integer",
-                        crate::definitions::Control::Boolean => "boolean",
-                        crate::definitions::Control::Enumeration => "enum",
-                        crate::definitions::Control::List => "list",
-                    }
-                    .into(),
+                    control: control_name(field.control).into(),
                     nullable: field.nullable,
                     value_state,
                     value,
-                    options: field
-                        .options
-                        .as_ref()
-                        .map(|choices| {
-                            choices
-                                .iter()
-                                .map(|c| (c.id.clone(), c.label.clone()))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
+                    options: choices(field.options.as_ref()),
                     computed: field.formula.is_some(),
                     derived: field
                         .formula
@@ -633,6 +851,7 @@ fn groups(
                         .as_ref()
                         .map(|formula| super::formulas::rule_list(&formula.rule_ids))
                         .unwrap_or_default(),
+                    list,
                 });
             }
             groups.push(GroupView {
@@ -644,17 +863,41 @@ fn groups(
     Ok(groups)
 }
 
+/// What a rendered sheet page announces: the `role="status"` message, an optional
+/// `role="alert"`, and the single `autofocus` target after a draft operation.
+#[derive(Default)]
+struct Notice {
+    message: String,
+    alert: String,
+    focus: Option<values::Focus>,
+}
+
+impl Notice {
+    fn status(message: String) -> Self {
+        Self {
+            message,
+            ..Self::default()
+        }
+    }
+    fn focused(self, focus: values::Focus) -> Self {
+        Self {
+            focus: Some(focus),
+            ..self
+        }
+    }
+}
+
 async fn rendered(
     view: SheetView,
     permit: OwnedSemaphorePermit,
     csrf: String,
     raw: Option<BTreeMap<String, String>>,
     status: StatusCode,
-    message: String,
+    notice: Notice,
 ) -> ResultResponse {
     let html = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        render_private(&view, &csrf, raw.as_ref(), &message)
+        render_private(&view, &csrf, raw.as_ref(), &notice)
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -686,7 +929,7 @@ async fn new_sheet(
     let csrf = auth::token(&session)
         .await?
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    rendered(view, permit, csrf, None, StatusCode::OK, String::new()).await
+    rendered(view, permit, csrf, None, StatusCode::OK, Notice::default()).await
 }
 
 async fn read_sheet(
@@ -722,7 +965,7 @@ async fn read_private(
     let csrf = auth::token(&session)
         .await?
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    rendered(view, permit, csrf, None, StatusCode::OK, String::new()).await
+    rendered(view, permit, csrf, None, StatusCode::OK, Notice::default()).await
 }
 
 const NATIVE_KEYS: &[&str] = &[
@@ -770,6 +1013,118 @@ async fn edit_sheet(
     save_private(state, session, id, None, admission, body).await
 }
 
+/// Closed-key admission of a sheet POST (plan D2). It is O(pairs) but may generate up to
+/// 65,536 keys, so it is its own blocking step, whose only failure is 400 (never a
+/// re-render).
+async fn admit_form(
+    view: SheetView,
+    pairs: super::transport::Pairs,
+    permit: OwnedSemaphorePermit,
+) -> Result<(BTreeMap<String, String>, SheetView, OwnedSemaphorePermit), StatusCode> {
+    tokio::task::spawn_blocking(move || {
+        let keys = if let Some(pin) = &view.immutable {
+            values::sheet_keys(pin.definition(), pairs.keys()).ok_or(StatusCode::BAD_REQUEST)?
+        } else {
+            let mut keys: std::collections::HashSet<String> =
+                NATIVE_KEYS.iter().map(|s| (*s).into()).collect();
+            if pairs.keys().any(|key| key == "op") {
+                keys.insert("op".into());
+            }
+            keys
+        };
+        Ok::<_, StatusCode>((pairs.admit(&keys)?, view, permit))
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+}
+
+/// A draft operation (plan D5): applies itself to the submitted draft and re-renders it with
+/// 200, never validating or saving it. A non-integer revision is forged (400); Add at the row
+/// limit answers 422 with the draft. A draft from an older revision gets a warning, and keeps
+/// its submitted revision: nothing rebases it.
+async fn draft_op(
+    mut view: SheetView,
+    permit: OwnedSemaphorePermit,
+    csrf: String,
+    mut form: BTreeMap<String, String>,
+    op: values::Op,
+) -> ResultResponse {
+    let submitted = values::integer(&form["revision"]).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let (applied, view, form, permit) = tokio::task::spawn_blocking(move || {
+        let applied = view
+            .immutable
+            .as_ref()
+            .ok_or(AppError::Invalid("Draft operations need list fields."))
+            .and_then(|pin| op.apply(pin.definition(), &mut form));
+        if submitted != view.snapshot.revision {
+            let stale = format!(
+                "The saved sheet changed (revision {submitted} → {}); saving this draft will be refused with a conflict (409). Copy your changes, reload and re-apply them.",
+                view.snapshot.revision
+            );
+            view.warning = if view.warning.is_empty() {
+                stale
+            } else {
+                format!("{stale} {}", view.warning)
+            };
+        }
+        (applied, view, form, permit)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match applied {
+        Ok(applied) => {
+            rendered(
+                view,
+                permit,
+                csrf,
+                Some(form),
+                StatusCode::OK,
+                Notice::status(applied.message).focused(applied.focus),
+            )
+            .await
+        }
+        Err(AppError::Invalid(reason)) => {
+            rendered(
+                view,
+                permit,
+                csrf,
+                Some(form),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Notice::status(format!("{reason} Not saved yet.")),
+            )
+            .await
+        }
+        Err(failure) => Err(error(failure)),
+    }
+}
+
+/// Validates an admitted save form into `view.snapshot` (plan D4 steps 5 and 6).
+fn apply_save(view: &mut SheetView, form: &BTreeMap<String, String>) -> Result<(), AppError> {
+    // The revision check precedes value validation: a stale draft answers 409 even when its
+    // values are invalid.
+    let revision = values::integer(&form["revision"])?;
+    if revision != view.snapshot.revision {
+        return Err(AppError::Conflict);
+    }
+    let name = super::name_notes(&form["name"], &form["notes"])?;
+    let data = if let Some(pin) = &view.immutable {
+        let data = values::form(
+            pin.definition(),
+            form,
+            &view.snapshot.data,
+            view.snapshot.revision,
+        )?;
+        pin.validate_values(&data)?;
+        data
+    } else {
+        serde_json::to_value(native_draft(form).validate()?)?
+    };
+    view.snapshot.name = name;
+    view.snapshot.notes.clone_from(&form["notes"]);
+    view.snapshot.data = data;
+    Ok(())
+}
+
 async fn save_private(
     state: AuthState,
     session: Session,
@@ -780,61 +1135,55 @@ async fn save_private(
 ) -> ResultResponse {
     let permit = admission.take()?;
     let (pairs, permit) = tokio::task::spawn_blocking(move || {
-        Ok::<_, StatusCode>((super::transport::Pairs::parse(&body)?, permit))
+        Ok::<_, StatusCode>((
+            super::transport::Pairs::parse_limited(&body, super::transport::SHEET_FORM_PAIRS)?,
+            permit,
+        ))
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+    // Precedence (plan D4): parse, then CSRF and authorization, then key admission, so a
+    // bad key set never answers anything but 403 to a caller without a token or rights.
     auth::check_csrf(&session, pairs.csrf()?).await?;
     let auth = auth::request_auth(&state, &session).await?;
-    let (mut view, permit) = load_editor(&state, auth.clone(), id, version, permit).await?;
+    let (view, permit) = load_editor(&state, auth.clone(), id, version, permit).await?;
     if !view.editable {
         return Err(StatusCode::FORBIDDEN);
     }
-    let mut keys = vec![
-        "csrf".to_string(),
-        "revision".to_string(),
-        "name".to_string(),
-        "notes".to_string(),
-    ];
-    if let Some(pin) = &view.immutable {
-        // Derived fields are computed, never submitted (evaluation on save is M3).
-        for field in pin
-            .definition()
-            .fields
-            .iter()
-            .filter(|field| field.formula.is_none())
-        {
-            keys.push(format!("value-{}", field.id));
-            if field.nullable {
-                keys.push(format!("null-{}", field.id));
-            }
-        }
-    } else {
-        keys = NATIVE_KEYS.iter().map(|s| (*s).into()).collect();
-    }
-    let form = pairs.admit(&keys.iter().map(String::as_str).collect::<Vec<_>>())?;
+    let (form, mut view, permit) = admit_form(view, pairs, permit).await?;
+    let op = values::Op::parse(
+        form.get("op").map(String::as_str),
+        view.immutable
+            .as_ref()
+            .map(crate::definitions::private_pin::ImmutablePin::definition),
+        &form,
+    )
+    .ok_or(StatusCode::BAD_REQUEST)?;
     let csrf = auth::token(&session)
         .await?
         .ok_or(StatusCode::UNAUTHORIZED)?;
+    if form.values().map(String::len).sum::<usize>() > ECHO_BYTES {
+        // Never storable and never echoed: the saved revision is shown instead.
+        return rendered(
+            view,
+            permit,
+            csrf,
+            None,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Notice {
+                alert: "This draft is larger than the 1 MiB sheet limit and was not kept. \
+                        Nothing was saved; copy large text before submitting."
+                    .into(),
+                ..Notice::default()
+            },
+        )
+        .await;
+    }
+    if op != values::Op::Save {
+        return draft_op(view, permit, csrf, form, op).await;
+    }
     let (result, view, form, permit) = tokio::task::spawn_blocking(move || {
-        let result = (|| {
-            let revision = values::integer(&form["revision"])?;
-            let name = super::name_notes(&form["name"], &form["notes"])?;
-            let data = if let Some(pin) = &view.immutable {
-                let data = values::form(pin.definition(), &form)?;
-                pin.validate_values(&data)?;
-                data
-            } else {
-                serde_json::to_value(native_draft(&form).validate()?)?
-            };
-            if revision != view.snapshot.revision {
-                return Err(AppError::Conflict);
-            }
-            view.snapshot.name = name;
-            view.snapshot.notes.clone_from(&form["notes"]);
-            view.snapshot.data = data;
-            Ok(())
-        })();
+        let result = apply_save(&mut view, &form);
         (result, view, form, permit)
     })
     .await
@@ -847,7 +1196,15 @@ async fn save_private(
             _ => "No changes saved. Check the full draft and its submitted revision.".into(),
         };
         let (view, permit) = rejected_editor(&state, auth, id, version, Some(permit)).await?;
-        return rendered(view, permit, csrf, Some(form), error(failure), message).await;
+        return rendered(
+            view,
+            permit,
+            csrf,
+            Some(form),
+            error(failure),
+            Notice::status(message),
+        )
+        .await;
     }
     match state
         .store()
@@ -867,8 +1224,10 @@ async fn save_private(
                 csrf,
                 Some(form),
                 error(failure),
-                "No changes saved. Copy your draft, reload and reassess the submitted revision."
-                    .into(),
+                Notice::status(
+                    "No changes saved. Copy your draft, reload and reassess the submitted revision."
+                        .into(),
+                ),
             )
             .await
         }
@@ -899,6 +1258,10 @@ async fn rejected_editor(
         Some(permit) => permit,
         None => crate::definitions::admit().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
     };
+    // A second, accepted loss path: if edit rights were lost between the rejected save and
+    // this reload (a departure, removal or custody change racing the save), the sheet is
+    // read-only for this caller and the draft is not re-rendered; the answer is the plain
+    // 403 access-denied document. Nothing was saved either way.
     let (view, permit) = load_editor(state, auth, id, version, permit).await?;
     if !view.editable {
         return Err(StatusCode::FORBIDDEN);

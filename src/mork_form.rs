@@ -18,11 +18,17 @@ pub(crate) struct SheetForm {
     pub standard_items: String,
     pub silver: String,
     pub omens: String,
+    #[serde(deserialize_with = "crate::form_text::lf")]
     pub equipment: String,
+    #[serde(deserialize_with = "crate::form_text::lf_option")]
     pub description: Option<String>,
+    #[serde(deserialize_with = "crate::form_text::lf_option")]
     pub class_notes: Option<String>,
+    #[serde(deserialize_with = "crate::form_text::lf_option")]
     pub powers: Option<String>,
+    #[serde(deserialize_with = "crate::form_text::lf_option")]
     pub weapon_one: Option<String>,
+    #[serde(deserialize_with = "crate::form_text::lf_option")]
     pub weapon_two: Option<String>,
     pub campaign_miseries: Option<String>,
 }

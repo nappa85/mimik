@@ -394,6 +394,26 @@ def prepare_definition_draft(binary, directory, fixture):
 
 
 class FormFields(HTMLParser):
+    def feed(self, data):
+        # HTML input-stream preprocessing: literal CRLF and lone CR become LF before
+        # tokenisation (character references such as &#13; are decoded later, untouched).
+        # A trailing CR is held back, so a CRLF split across two feeds stays one newline.
+        data = self.pending_cr + data
+        self.pending_cr = "\r" if data.endswith("\r") else ""
+        if self.pending_cr:
+            data = data[:-1]
+        super().feed(data.replace("\r\n", "\n").replace("\r", "\n"))
+
+    def reset(self):
+        self.pending_cr = ""
+        super().reset()
+
+    def close(self):
+        if self.pending_cr:
+            self.pending_cr = ""
+            super().feed("\n")
+        super().close()
+
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.values = {}
@@ -435,7 +455,11 @@ class FormFields(HTMLParser):
                 self.forms[self.active_form][self.textarea] += data
 
     def handle_endtag(self, tag):
-        if tag == "textarea":
+        if tag == "textarea" and self.textarea:
+            # HTML parsing drops one newline right after <textarea>; html.parser does not.
+            for values in (self.values, self.forms.get(self.active_form, {})):
+                if values.get(self.textarea, "").startswith("\n"):
+                    values[self.textarea] = values[self.textarea][1:]
             self.textarea = None
         if tag == "form":
             self.active_form = None
@@ -446,6 +470,7 @@ class FormFields(HTMLParser):
 def assert_fields(html, expected):
     fields = FormFields()
     fields.feed(html)
+    fields.close()
     for name, value in expected.items():
         require(fields.values.get(name) == str(value), f"Persisted field differs: {name}")
 
@@ -674,6 +699,12 @@ def smoke_publication(binary, directory, fixture, draft):
     return draft, [reapproved, restored]
 
 
+def corrected_evidence(html):
+    """The search result shows the stored correction, leading newline included: the raw
+    markup is the template's sacrificial LF after <pre>, then the stored "\\nVerified…"."""
+    return '<pre class="evidence-text">\n\nVerified fixture correction' in html
+
+
 def smoke_sources():
     sources = request("/sources")[2]
     lookup = re.search(r"<h2>Synthetic source</h2>.*?</section>", sources, re.DOTALL)
@@ -724,11 +755,17 @@ def smoke_sources():
     correction = dict(
         fields.forms[unit_path],
         state="corrected",
-        correction="Verified fixture correction",
+        correction="\nVerified fixture correction",
         actor="smoke-reviewer",
         rationale="Synthetic correction test",
     )
     require(request(unit_path, correction)[0] == 303, "Correction failed")
+    fields = FormFields()
+    fields.feed(request(path)[2])
+    require(
+        fields.forms[unit_path].get("correction") == "\nVerified fixture correction",
+        "Source correction lost its leading newline",
+    )
     require("No reviewed match" in request(query)[2], "Changed page remained searchable")
     fields = FormFields()
     fields.feed(request(path)[2])
@@ -746,10 +783,7 @@ def smoke_sources():
             "query": "Verified fixture correction",
         }
     )
-    require(
-        '<pre class="evidence-text">Verified fixture correction' in request(correction_query)[2],
-        "Corrected evidence missing",
-    )
+    require(corrected_evidence(request(correction_query)[2]), "Corrected evidence missing")
     return correction_query
 
 
@@ -793,8 +827,15 @@ def smoke_positive_advice():
         "blocking_armor": "no",
         "disoriented": "no",
         "power_uses": "3",
+        "goal": "\n\nreach the gate",
     }
     html = request(path + "/context", context)[2]
+    goal = FormFields()
+    goal.feed(html)
+    require(
+        goal.values.get("goal") == "\n\nreach the gate",
+        "Context goal lost its leading newlines",
+    )
     require(
         "Ordinary melee attack — blocked standard path" in html,
         "Exhausted ordinary action not blocked",
@@ -940,21 +981,26 @@ def publish_definition(binary, directory, definition, name):
     )
 
 
-def prepare_workspace_materials(binary, directory, fixture):
-    """Original synthetic fixtures only; no real manual/model approval.
+def version_link(html, campaign, version_id):
+    """The create link of exactly `version_id`, never chosen by its position on the page."""
+    link = f"{campaign}/sheets/new?version={version_id}"
+    require(f'href="{link}"' in html, f"Published runtime version {version_id} missing")
+    return link
 
-    Returns the published version IDs of the generic and the formula definition.
-    """
-    registry_cli(
-        binary,
-        directory,
-        "import-source",
-        "--bundle",
-        str(fixture / "adapter-bundle"),
-        "--pdf",
-        str(fixture / "original.pdf"),
-    )
-    prepare_unknown_registry_source(binary, directory, fixture)
+
+def latest_version(directory, definition_id):
+    """The ID of the newest published version of `definition_id`."""
+    with sqlite3.connect(directory / "smoke.sqlite3") as db:
+        row = db.execute(
+            "SELECT id FROM definition_versions WHERE definition_id=? ORDER BY version DESC LIMIT 1",
+            (definition_id,),
+        ).fetchone()
+    require(row is not None, f"No published version of {definition_id}")
+    return row[0]
+
+
+def unknown_source_mapping(directory, fixture):
+    """The synthetic unknown source's reference and first unit, as definition evidence."""
     with sqlite3.connect(directory / "smoke.sqlite3") as db:
         source, page, unit = db.execute(
             "SELECT s.id,p.id,u.id FROM sources s JOIN source_pages p ON p.source_id=s.id "
@@ -966,6 +1012,78 @@ def prepare_workspace_materials(binary, directory, fixture):
         "state": "mapped",
         "regions": [{"source_id": source, "page_id": page, "unit_id": unit}],
     }
+    return sources, mapping
+
+
+def publish_list_definition(binary, directory, fixture):
+    """Publishes the synthetic list definition (M4); returns its version ID."""
+    sources, mapping = unknown_source_mapping(directory, fixture)
+    definition = json.loads((fixture / "list-definition.json").read_text())
+    definition["sources"] = sources
+    definition["fields"][0]["mapping"] = mapping
+    published = publish_definition(binary, directory, definition, "synthetic-list-definition.json")
+    require(
+        published["deterministic_rules"] == "formulas-advisory",
+        "List definition is not published as advisory",
+    )
+    print(f"List definition published as version ID {published['id']}")
+    return published["id"]
+
+
+def smoke_list_sheet(directory, cookie, campaign, html):
+    """A list sheet: Add re-renders without writing, Save assigns r1-1, history summarises."""
+    version = latest_version(directory, "list-sheet")
+    print(f"List runtime sheet uses published version ID {version} (definition 'list-sheet')")
+    action, form, _ = workspace_form(version_link(html, campaign, version), cookie)
+    response = auth_request(action, cookie=cookie, form=dict(form, op="add-1"))
+    require(response[0] == 200, "List Add did not re-render the draft")
+    require("Row added to Equipment. Not saved yet." in response[2], "List Add message missing")
+    parser = FormFields()
+    parser.feed(response[2])
+    form = dict(parser.forms[action])
+    require(form.get("id-1-0") == "", "Added list row is not a new row")
+    form.update(
+        {
+            "name": "List private sheet",
+            "value-name": "Lister",
+            "row-1-0-0": "Rope",
+            "set-1-0-1": "absent",
+            "row-1-0-2": "2",
+            "row-1-0-3": "3",
+            "row-1-0-4": "false",
+            "set-1-0-5": "absent",
+        }
+    )
+    sheet = workspace_submit(cookie, action, form)
+    _, saved, page = workspace_form(sheet, cookie)
+    require(saved.get("id-1-0") == "r1-1", "List row did not get the host ID r1-1")
+    require('<dd class="evidence-text">6</dd>' in page, "List-derived load missing")
+    workspace_submit(cookie, sheet, saved, **{"row-1-0-2": "5"})
+    history = auth_request(sheet + "/history/2", cookie=cookie)
+    require(history[0] == 200, "List history unavailable")
+    require(
+        "Changes in revision 2" in history[2] and "equipment/r1-1/quantity" in history[2],
+        "List change summary missing",
+    )
+    return sheet
+
+
+def prepare_workspace_materials(binary, directory, fixture):
+    """Original synthetic fixtures only; no real manual/model approval.
+
+    Returns the published version IDs of the generic, the formula and the list definition.
+    """
+    registry_cli(
+        binary,
+        directory,
+        "import-source",
+        "--bundle",
+        str(fixture / "adapter-bundle"),
+        "--pdf",
+        str(fixture / "original.pdf"),
+    )
+    prepare_unknown_registry_source(binary, directory, fixture)
+    sources, mapping = unknown_source_mapping(directory, fixture)
     definition = json.loads((fixture / "definition.json").read_text())
     definition["sources"] = sources
     definition["fields"][0]["mapping"] = mapping
@@ -980,7 +1098,7 @@ def prepare_workspace_materials(binary, directory, fixture):
         published["deterministic_rules"] == "formulas-advisory",
         "Formula definition is not published as advisory",
     )
-    return generic["id"], published["id"]
+    return generic["id"], published["id"], publish_list_definition(binary, directory, fixture)
 
 
 def auth_login(cookie, fields, login, password):
@@ -1127,9 +1245,9 @@ def smoke_workspace(binary, directory, cookie, player, passwords):
         edition_id="first",
     )
     html = auth_request(generic, cookie=cookie)[2]
-    versions = re.findall(r'href="(' + re.escape(generic) + r'/sheets/new\?version=\d+)"', html)
-    require(versions, "Current published runtime capability missing")
-    action, generic_form, _ = workspace_form(versions[-1], cookie)
+    generic_version = latest_version(directory, "sheet")
+    print(f"Generic runtime sheet uses published version ID {generic_version} (definition 'sheet')")
+    action, generic_form, _ = workspace_form(version_link(html, generic, generic_version), cookie)
     generic_sheet = workspace_submit(
         cookie,
         action,
@@ -1144,13 +1262,14 @@ def smoke_workspace(binary, directory, cookie, player, passwords):
         "Pinned runtime history unavailable",
     )
     auth_error(auth_request(generic_sheet, cookie=owner_cookie), 403, "Access denied.")
+    smoke_list_sheet(directory, cookie, generic, html)
     with sqlite3.connect(directory / "smoke.sqlite3") as db:
         require(
-            db.execute("SELECT count(*) FROM private_sheets").fetchone()[0] == 3,
+            db.execute("SELECT count(*) FROM private_sheets").fetchone()[0] == 4,
             "Unexpected private sheet count",
         )
         require(
-            db.execute("SELECT count(*) FROM private_sheet_history").fetchone()[0] == 6,
+            db.execute("SELECT count(*) FROM private_sheet_history").fetchone()[0] == 8,
             "Private mutation history is incomplete",
         )
         require(
@@ -1755,6 +1874,7 @@ def main():
                 definition_snapshot, publication_snapshots = smoke_publication(
                     binary, directory, fixture, definition_snapshot
                 )
+                publish_list_definition(binary, directory, fixture)
             for path, content_type in [
                 ("/assets/app.css", "text/css"),
                 ("/assets/htmx.min.js", "text/javascript"),
@@ -1950,8 +2070,7 @@ def main():
             )
             if correction_query:
                 require(
-                    '<pre class="evidence-text">Verified fixture correction'
-                    in request(correction_query)[2],
+                    corrected_evidence(request(correction_query)[2]),
                     "Reviewed evidence persistence failed",
                 )
         finally:

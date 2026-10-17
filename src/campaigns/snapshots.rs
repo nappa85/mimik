@@ -47,12 +47,59 @@ pub(crate) fn hash(bytes: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
-fn encode(snapshot: &PrivateSnapshot) -> Result<String, AppError> {
+fn serialize(snapshot: &PrivateSnapshot) -> Result<String, AppError> {
     let bytes = serde_json::to_string(snapshot)?;
     if bytes.len() > MAX_BYTES {
         return Err(AppError::Invalid("Private snapshot exceeds 1 MiB."));
     }
     Ok(bytes)
+}
+
+/// The writer's encoding: within 1 MiB **and** reopenable by the bounded sheet decoder
+/// (node, key and element caps), so a written snapshot can always be loaded and frozen.
+fn encode(snapshot: &PrivateSnapshot) -> Result<String, AppError> {
+    let bytes = serialize(snapshot)?;
+    crate::definitions::decode::parse_sheet(bytes.as_bytes())
+        .map_err(|_| AppError::Invalid("Private snapshot exceeds the sheet decoder limits."))?;
+    Ok(bytes)
+}
+
+/// Host-managed list item IDs (plan D3). Every item ID absent from the previous revision's
+/// list (every ID on create) must be `r<revision>-<k>`, with `revision` the one being
+/// written and `k` numbering that list's newly allocated rows 1, 2, … in row order. Retained
+/// IDs keep their slot; a removed ID can never return because `revision` only grows.
+fn host_item_ids(
+    definition: &crate::definitions::Definition,
+    previous: Option<&serde_json::Value>,
+    data: &serde_json::Value,
+    revision: i64,
+) -> Result<(), AppError> {
+    for field in definition
+        .fields
+        .iter()
+        .filter(|field| field.control == crate::definitions::Control::List)
+    {
+        let retained: std::collections::HashSet<&str> = previous
+            .and_then(|previous| previous[&field.id].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["id"].as_str())
+            .collect();
+        let mut allocated = 0_usize;
+        for item in data[&field.id].as_array().into_iter().flatten() {
+            let id = item["id"].as_str().unwrap_or_default();
+            if retained.contains(id) {
+                continue;
+            }
+            allocated += 1;
+            if id != format!("r{revision}-{allocated}") {
+                return Err(AppError::Invalid(
+                    "New list rows must carry host-assigned IDs.",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn supported(snapshot: &PrivateSnapshot) -> bool {
@@ -124,7 +171,7 @@ pub(crate) fn decode(content: &str, expected: &str) -> Result<PrivateSnapshot, A
         || !matches!(snapshot.state.as_str(), "active" | "frozen")
         || (snapshot.state == "active" && snapshot.revision == i64::MAX)
         || name_notes(&snapshot.name, &snapshot.notes)? != snapshot.name
-        || encode(&snapshot)? != content
+        || serialize(&snapshot)? != content
         || hash(content.as_bytes()) != expected
     {
         return Err(AppError::Invalid("Private snapshot integrity error."));
@@ -285,6 +332,7 @@ pub(crate) fn write(
     if !matches!(operation, "create" | "edit" | "freeze") {
         return Err(AppError::Invalid("Invalid private operation."));
     }
+    let mut previous_data = None;
     if previous > 0 {
         let old = load(db, resulting.sheet_id)?;
         if old.revision != previous {
@@ -307,8 +355,21 @@ pub(crate) fn write(
         {
             return Err(AppError::Invalid("Freeze must preserve values."));
         }
+        previous_data = Some(old.data);
     }
     resulting.revision = previous.checked_add(1).ok_or(AppError::Conflict)?;
+    // After the revision-conflict check, so a stale write answers 409 whatever its IDs.
+    // Freezing already requires identical data.
+    if operation != "freeze"
+        && let Some(admitted) = admitted.filter(|_| resulting.kind == "runtime")
+    {
+        host_item_ids(
+            admitted.definition(),
+            previous_data.as_ref(),
+            &resulting.data,
+            resulting.revision,
+        )?;
+    }
     resulting.state = if operation == "freeze" {
         "frozen"
     } else {

@@ -42,8 +42,9 @@ Derived fields and constraints are supported under `formula_profile: 1` ("CEL pr
 cel-mimik-1", `docs/derived-formulas-plan.md`). Their results are **advisory**: derived
 values are computed from the stored values and the immutable pin on every view, save
 and history page, are never stored or submitted, and checks never block a save or rule
-on legality. List fields (`control: list`) are admitted in drafts but stay unpublishable
-until list editing ships (M4).
+on legality. List fields (`control: list`) are editable on private sheets (M4, §5 "List
+fields") and publishable within the render-unit budget (`list-form-exceeds-limit`,
+`docs/definition-publication.md`).
 
 How each result is shown (`src/campaigns/formulas.rs`, one exhaustive match): a value is
 shown as text (integers as decimals, booleans as True/False, enums by option label); an
@@ -282,6 +283,112 @@ invalidity gives422 with raw draft; stale writes give409 with the submitted toke
 not a refreshed token. Failed writes preserve all persisted state. Definition
 updates never reinterpret saved values; explicit cross-version migration is a
 separately reviewed future operation.
+
+### List fields (M4)
+
+Plan: `docs/derived-formulas-m4-plan.md` (D1–D11). Every declared list property is
+editable; a per-property `editable: false` flag and an item catalogue are a later milestone.
+
+- **Values.** A list is an array of at most 256 items. Each item has a host-managed `id`
+  plus its declared properties; a required property is always present, an optional one is
+  present or absent (never `null`). Item integers are exact i64.
+- **Host IDs (slot labels).** A new row's ID is `r<N>-<k>`: N is the revision being written
+  and k = 1, 2, … numbers that list's newly allocated rows in row order. The sole writer
+  enforces it for runtime `create` and `edit` (freezing keeps the data unchanged): every ID
+  absent from the previous revision's list must have that form, checked after the revision
+  conflict check, so a stale write answers 409 whatever its IDs. Clients never choose IDs, a
+  removed ID never returns, and IDs label **row slots, not items**: overwriting every
+  property of a row, or swapping hidden IDs between rows, is accepted. A move carries a
+  row's ID with it. Future import and tool-loop writers must re-ID through the host.
+- **Address.** A row property is addressed as `<list id>/<entry id>/<property id>` (a row as
+  `<list id>/<entry id>`), scoped to one sheet and its immutable pin; form indices never
+  appear in addresses.
+- **Form encoding.** For list field index f (its position in the pinned definition), row r
+  and property index p: hidden `id-f-r` (the saved ID, or empty for a new row), `row-f-r-p`
+  (the value) and, for optional properties, `set-f-r-p` = `present` / `absent` (an explicit
+  Set/Not set control). `op` comes only from the clicked submitter: `save`, `add-f`,
+  `remove-f-r`, `up-f-r` or `down-f-r`. Indices use the canonical grammar
+  `0|[1-9][0-9]{0,2}`; rows are contiguous from 0 and stored in submitted order. Sheet POSTs
+  allow 65,536 form pairs (other forms 516), keys of at most 70 bytes and no duplicates.
+- **Status precedence** (private runtime and private native saves; the legacy
+  `/characters` editor is unchanged): 413 body limit (after a pre-body principal check, 403
+  without reading the body); 400 parse; 403 CSRF, authorization or a read-only sheet; 400
+  key admission, op grammar or range (including an edge move); a draft operation (400 for a
+  non-integer revision) re-renders with 200, or 422 for Add at 256 rows; for Save a
+  malformed revision is 422 and **a stale revision is 409 before any value validation**, so
+  a stale draft with invalid values or unknown IDs answers 409 (a deliberate change for
+  scalar runtime and private native sheets too); then 422 for values, an unknown or
+  duplicate row ID at the current revision, or the pinned validation; then the writer (409
+  for a concurrent writer; 422 for the ID invariant or an undecodable snapshot). Every
+  re-render keeps the submitted hidden revision; nothing rebases a draft.
+- **Draft operations.** Add, Remove, Move up and Move down re-render the unsaved draft with
+  200 and a `role="status"` message ("Row added to Equipment. Not saved yet."). They never
+  write, validate, evaluate or reveal saved IDs the draft lacked, and still need CSRF,
+  authorization, edit rights and the runtime permit. A move swaps a row with its
+  neighbour: values, Set/Not set states and the hidden ID together. Row 1's Move up and the
+  last row's Move down are disabled; a submitted edge move is forged (400). Op buttons carry
+  `formnovalidate` and post to the form's own action with no URL fragment (a fragment that
+  names an element blocks `autofocus` in browsers); exactly one control gets `autofocus`, which
+  also scrolls it into view
+  (the new row's first control, the list's Add button after Remove, the moved row's move
+  button at its new position). A draft from an older revision shows "The saved sheet
+  changed (revision N → M); saving this draft will be refused with a conflict (409). Copy your changes, reload and
+  re-apply them."
+  The `role="status"` message is part of a freshly loaded page, which screen readers do not
+  reliably announce; the focused control and its name carry the result. List sheets also render a
+  Save button before the groups, so Enter saves.
+- **Change summary** (history page of revision N of a runtime sheet with a supported pin):
+  stored values only, names and addresses but never values. It lists name and notes
+  changes, changed scalar fields, and per list the added, removed and edited rows (with the
+  changed property labels, set ↔ not set included) and the moved rows: the rows outside one
+  longest increasing subsequence of their previous positions, ties broken so that the rows
+  that ended up earlier are reported. This is a deterministic minimal explanation of the net
+  order change, not a record of clicks. A retained row of a list with two or more
+  properties whose every property changed reads as a possibly reused slot. At most 200
+  lines of at most 8 property labels, then one line with exact per-list totals. Revision
+  N − 1 is read in the same transaction and validated like N; if it fails, or the sheet is
+  native or its pin unsupported, the section reads "Change summary unavailable …". There is
+  no revert or restore.
+- **Limits and accepted risks.** Stored snapshots stay ≤ 1 MiB and must reopen under the
+  sheet decoder's limits (32,768 nodes, 256 keys and elements per container); the writer
+  refuses anything else with 422, atomically. The create and edit POSTs accept bodies up to
+  5 MiB; a logged-in principal (editor or not) can make the server buffer up to 5 MiB
+  without a valid CSRF token for at most the 5 s request timeout, holding a request permit
+  and the runtime permit. The whole body must arrive within that 5 s, so a 5 MiB upload
+  needs about 8.4 Mbit/s. A re-render echoes the draft only when its decoded values total ≤
+  1 MiB (a larger draft could never be stored); otherwise it answers 422 with an alert:
+  "Nothing was saved; copy large text before submitting." Each submitted string is echoed
+  in full at most once (the submitted revision included); second visible contexts show a
+  64-character excerpt.
+- **Line breaks.** Two separate guarantees apply:
+  - *Displayed and edited content is preserved.* Every textarea and every stored-text
+    `<pre class="evidence-text">` in the application emits a sacrificial newline after its
+    opening tag, because HTML parsing drops the first newline there. This covers private
+    sheets, list cells, native fields, the legacy editor, character creation, the MÖRK BORG
+    context page, source review, material review, review history and evidence search, so
+    leading newlines show and resubmit intact.
+  - *New writes are stored with LF.* A native form submission serialises textarea line breaks
+    as CR LF. Every form decoder normalises CR LF and lone CR to LF before validation, through
+    the shared `form_text::newlines_to_lf`:
+    - `campaigns::transport`, for every value of private runtime and native sheets and of the
+      other campaign routes;
+    - the textarea fields of the legacy `/characters` editor, character creation, the MÖRK
+      BORG sheet and context forms, source review (unit and page) and material review
+      (correction, rationale and completeness rationale).
+    Length limits therefore count what the user typed, matching each control's `maxlength`.
+    For values already stored with LF, an unchanged browser Save is byte-identical. This
+    applies to new writes only; existing data is not migrated. A private sheet or record
+    saved before this change may hold CR LF, and its next save rewrites it to LF as a new
+    revision, while history keeps the earlier revision unchanged.
+- **Large bodies and permits.** The 5 MiB limit is enforced on the body itself, with or
+  without a `Content-Length`. The single runtime permit is taken before the body is read, so
+  buffering happens under it: at most one sheet POST (≤ 5 MiB) buffers at a time, and any
+  other runtime request answers 503 meanwhile. This is an accepted risk, alongside the 5 s
+  slow-upload hold.
+- **Lost re-render.** If edit rights are lost between a rejected save and its re-render, the
+  answer is a plain 403 and the draft is not re-rendered; nothing is saved.
+- **Page-size bound.** It covers the editor chrome and controls, not the formula sections of
+  a formula definition (see the M4 plan D7).
 
 ## 6. Capability states and future task/history seams
 

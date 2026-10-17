@@ -19,7 +19,8 @@
     <form method="post" action="/characters">
       <label for="name">Character name</label><input id="name" name="name" value="{{ draft.name }}" required maxlength="100" autocomplete="off">
       <label for="adapter">Loaded game and edition</label><select id="adapter" name="adapter_id" required>{% for option in catalog.options %}<option value="{{ option.id }}" {% if draft.adapter_id == option.id %}selected{% endif %}>{{ option.label }}</option>{% endfor %}</select>
-      <label for="notes">Session notes (optional; separate from sheet description)</label><textarea id="notes" name="notes" rows="4" maxlength="20000">{{ draft.notes }}</textarea>
+      <label for="notes">Session notes (optional; separate from sheet description)</label><textarea id="notes" name="notes" rows="4" maxlength="20000">
+{{ draft.notes }}</textarea>
       <button type="submit">Create character</button>
     </form>
   {% endif %}

@@ -8,7 +8,8 @@
 {% if !message.is_empty() %}<p>The supplied draft and expected revision are preserved. Copy it and reload/reassess current data before retrying; no advice was generated.</p>{% endif %}
 <form method="post" action="/characters/{{ character.id }}/context" class="panel">
 <input type="hidden" name="revision" value="{{ context.revision }}">
-<label for="goal">Your intent (not interpreted as confirmed facts)</label><textarea id="goal" name="goal" maxlength="1000">{{ context.goal }}</textarea>
+<label for="goal">Your intent (not interpreted as confirmed facts)</label><textarea id="goal" name="goal" maxlength="1000">
+{{ context.goal }}</textarea>
 <div class="columns">
 {% for field in fields %}<div><label for="{{ field.name }}">{{ field.label }}</label><select id="{{ field.name }}" name="{{ field.name }}"><option value="unknown" {% if field.value == "unknown" %}selected{% endif %}>Unknown / not confirmed</option><option value="yes" {% if field.value == "yes" %}selected{% endif %}>Yes</option><option value="no" {% if field.value == "no" %}selected{% endif %}>No</option></select></div>{% endfor %}
 </div>

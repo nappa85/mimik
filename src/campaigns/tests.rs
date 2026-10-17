@@ -22,6 +22,10 @@ use tower_sessions::{
 mod administration_tests;
 #[path = "formula_tests.rs"]
 mod formula_tests;
+#[path = "list_tests.rs"]
+pub(super) mod list_tests;
+#[path = "list_values_tests.rs"]
+mod list_values_tests;
 #[path = "material_tests.rs"]
 mod material_tests;
 #[path = "registry_tests.rs"]
@@ -1029,13 +1033,13 @@ fn url_transport_rejects_duplicate_unknown_missing_and_excess_pairs_before_map()
     assert!(
         Pairs::parse(b"csrf=a&unknown=x")
             .unwrap()
-            .admit(&["csrf", "name"])
+            .admit(&["csrf", "name"].into_iter().collect())
             .is_err()
     );
     assert!(
         Pairs::parse(b"csrf=a")
             .unwrap()
-            .admit(&["csrf", "name"])
+            .admit(&["csrf", "name"].into_iter().collect())
             .is_err()
     );
     let keys = (0..516).map(|n| format!("field-{n}")).collect::<Vec<_>>();
@@ -1044,7 +1048,7 @@ fn url_transport_rejects_duplicate_unknown_missing_and_excess_pairs_before_map()
     assert_eq!(
         Pairs::parse(encoded.as_bytes())
             .unwrap()
-            .admit(&keys.iter().map(String::as_str).collect::<Vec<_>>())
+            .admit(&keys.iter().map(String::as_str).collect())
             .unwrap()
             .len(),
         516

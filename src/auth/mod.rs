@@ -633,6 +633,13 @@ impl AuthState {
         self.sessions.store.clone()
     }
 }
+/// Whether the session carries a principal binding at all (cookie-backed session data only;
+/// no account lookup and no request body). Callers still authenticate fully afterwards.
+pub(crate) async fn has_principal(session: &Session) -> Result<bool, StatusCode> {
+    let binding: Option<Principal> = session.get("principal").await.map_err(session_error)?;
+    Ok(binding.is_some())
+}
+
 async fn principal(state: &AuthState, session: &Session) -> Result<Option<Summary>, StatusCode> {
     let binding: Option<Principal> = session.get("principal").await.map_err(session_error)?;
     let Some(binding) = binding else {

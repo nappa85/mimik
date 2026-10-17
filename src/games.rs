@@ -57,7 +57,7 @@ pub struct CreateRequest {
     pub adapter_id: String,
     #[serde(default)]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::form_text::lf")]
     pub notes: String,
 }
 

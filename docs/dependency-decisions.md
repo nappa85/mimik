@@ -114,3 +114,28 @@ the combined-tree measurements are in `docs/derived-formulas-plan.md` §2.
   Replacing `cel` means a new profile ID, an engine passing the golden fixture (or a
   reviewed outcome diff under `formula_profile: 2`) and dual evaluation of existing pins
   until migration; pinned definitions keep their profile.
+
+## Test-only DOM parser: `scraper` 0.27.0 (selected 2026-10-16, M4 step 3)
+
+- **Need:** M4 page tests must parse the rendered sheet DOM: which submitter a browser
+  sends, disabled controls (also inside a disabled fieldset), label/`for` pairs, unique IDs,
+  `section[aria-labelledby]` structure, and payloads in their real attribute and text
+  contexts (plan D11). The M3 string scanner could not see buttons or disabled state.
+- **Choice:** `scraper = { version = "=0.27.0", default-features = false }`, a
+  **dev-dependency only**; it never enters the release binary. 0.27.0 is the newest release
+  and uses `html5ever ^0.39`, which reuses the already-locked `html5ever 0.39.0` (no third
+  copy; 0.25.0 would have added `html5ever 0.36`). Licence ISC.
+- **New locked packages** (one networked `cargo fetch` in `mimik-ci`, from an allowlisted
+  copy holding only `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and stub targets; every
+  later build and test is offline): `scraper 0.27.0`, `selectors 0.38.0`, `cssparser 0.37.0`,
+  `cssparser-macros 0.7.1`, `ego-tree 0.11.0`, `servo_arc 0.4.3`, `derive_more 2.1.1`,
+  `derive_more-impl 2.1.1`, `phf_macros 0.13.1`, `rustc_version 0.4.1`, `semver 1.0.28`.
+  Checksums are in `Cargo.lock`.
+- **Licences:** `selectors`, `cssparser 0.37.0` and `cssparser-macros` are MPL-2.0 and get
+  per-crate `about.toml` acceptances with the existing `cssparser` rationale (MPL-2.0 permits
+  AGPLv3 secondary licensing); without them `cargo about generate --locked --fail` refuses 2
+  licences. `servo_arc`, `rustc_version` and `semver` are MIT OR Apache-2.0; `derive_more`,
+  `derive_more-impl` and `phf_macros` are MIT; `ego-tree` is ISC. `cargo about` and
+  `cargo audit` cover dev-dependencies (`about.toml` does not ignore them).
+- **Duplicates:** `cssparser` 0.37/0.38 and `phf` 0.13 coexist in the dev graph only.
+- **Fallback (not needed):** a dev-only walk over the already-locked `html5ever` tokenizer.

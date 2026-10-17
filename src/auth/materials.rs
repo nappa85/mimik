@@ -235,7 +235,9 @@ struct Draft {
     csrf: String,
     revision: i64,
     state: String,
+    #[serde(deserialize_with = "crate::form_text::lf")]
     correction: String,
+    #[serde(deserialize_with = "crate::form_text::lf")]
     rationale: String,
 }
 #[derive(Clone, Deserialize)]
@@ -244,6 +246,7 @@ struct Completion {
     csrf: String,
     revision: i64,
     printed_label: String,
+    #[serde(deserialize_with = "crate::form_text::lf")]
     rationale: String,
 }
 async fn review(

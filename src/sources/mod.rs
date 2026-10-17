@@ -77,8 +77,10 @@ pub struct UnitView {
 pub struct UnitReview {
     pub revision: i64,
     pub state: String,
+    #[serde(deserialize_with = "crate::form_text::lf")]
     pub correction: String,
     pub actor: String,
+    #[serde(deserialize_with = "crate::form_text::lf")]
     pub rationale: String,
 }
 
@@ -87,6 +89,7 @@ pub struct PageReview {
     pub revision: i64,
     pub printed_label: String,
     pub actor: String,
+    #[serde(deserialize_with = "crate::form_text::lf")]
     pub rationale: String,
 }
 

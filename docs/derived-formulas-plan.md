@@ -1079,6 +1079,207 @@ Mutations were applied to the fixed code, run, and then reverted.
 | `list_definitions_stay_drafts_until_editing_ships` (test 20) | executed red | gate on | `formula-evaluation-unsupported` | `81c4d01` |
 | browser formula stage | negative control | expected pace changed to `9` | "Derived value missing after save" | `81c4d01` |
 
+## 17. M4 implementation (2026-10-17, branch `derived-formulas`; independent review pending)
+
+Plan: [derived-formulas-m4-plan.md](derived-formulas-m4-plan.md) revision 3.1 (review record
+[reviews/2026-10-16-derived-formulas-m4-plan.md](reviews/2026-10-16-derived-formulas-m4-plan.md),
+round 3). Commits are local only; the branch was rebased on master `f9d34e0` before the
+step-8 gate pass (master gained tool-loop pack revision 3 and tools; no `src/` change).
+
+**Commits per step**
+
+| Step | Commit | Content |
+|---|---|---|
+| 3.1 | `381f416` | Plan revision 3.1 and the round-3 review record |
+| 1 | `b5b003c` | Writer host-ID invariant; decoder-bound `encode` |
+| 2 | `6e475dd` | `PairsSeed`/`parse_limited`, set-based admission, `values::sheet_keys`, D4 precedence |
+| 3 | `61074d8` | `scraper` adoption, rebuilt `submitted` helper, `ListDraft`/`reconcile`, list template, top Save |
+| 4 | `0456bbb` | Draft operations Add, Remove, Move up, Move down |
+| 5 | `b30c002` | History rows; `history_diff` change summary |
+| 6 | `4dbfe99` | Contract and workspace docs, smoke version selection, `list-definition.json` fixture |
+| 7 | `76f057e` | 5 MiB sheet POSTs, pre-body principal check, echo cap and excerpts |
+| 8 | `92cd03f` | Publication budget and gate lift, bypass deleted, smoke and browser list stages, scope docs |
+
+Steps 1–7 were gated individually (fmt, strict Clippy, full tests) before the rebase; the
+rebased commits were not re-gated one by one. The step-8 candidate (tree `aac0b3a`, which is the tree of `92cd03f`) passed the
+full set below before it was committed.
+
+**What changed (beyond the plan text)**
+
+- **Deviation, demonstrated: no `#list-f` fragment on op buttons.** D5 asked for
+  `formaction="<action>#list-f"` and exactly one `autofocus`. Chromium does not run
+  autofocus when the document URL has a fragment that indicates an element, so the focus
+  rules could not hold together with the fragment. The browser stage failed with the
+  fragment (`document.activeElement` stayed the body after Add, "Add did not focus the new
+  row's first control ('')") and passed without it, on otherwise identical builds. Op
+  buttons now post to the form's own action; the focused control scrolls into view. Tests
+  25 and 36 assert that no op button carries `formaction` and that the form action is the
+  generated same-origin path. The contract says so.
+- **Admission limits the budget arithmetic.** Admission allows 2,048 enum options per
+  definition in all, so a scalar-only definition reaches at most a few thousand render
+  units and no M3-publishable definition is refused by the new budget. The exact-budget
+  fixture reaches 32,768 units through three lists of 32 properties plus 244 texts.
+- **Test 5 reaches the writer directly.** Its 4 lists × 256 × 32 integers definition is now
+  refused at publication (render and node budgets), so the test stores the admitted
+  definition as an unpublished version row and calls the writer with that pin.
+- **Echo excerpts (RE3-1)** cover the scalar invalid-value and invalid-state options too.
+- **Test placement:** tests 7, 10 and 11 live in `campaigns/list_tests.rs`; test 12 in
+  `campaigns/list_values_tests.rs`; tests 44 and 45 (dominance) in
+  `definitions/publication_tests.rs`. The shared source fixture is re-exported test-only as
+  `definitions::source_fixture` for the `list-definition.json` route test.
+- **Heavy tests slimmed for the shared CI box.** An auth test once timed out (408) while the
+  heavy page tests ran in parallel in a debug build; test 34 now uses 10 properties and 296
+  rows, and the worst-label markup test one list of 256 × 32.
+
+**Measurements (report-only, release build, `--cpus 2`, a CPU benchmark running on the box)**
+
+- Exact-budget sheet (32,768 render units, 27,640 form pairs, 1,156,401-byte body, 959,233-byte
+  stored snapshot, 18 envelope nodes against `ENVELOPE_NODES` = 32): save 196 ms (303); view
+  5,025,717 bytes in 136 ms; op re-render of the full draft 5,037,418 bytes in 151 ms; 422
+  re-render 5,037,504 bytes in 134 ms; change summary of every row edited 60,577 bytes (≤
+  `SUMMARY_BYTES` = 1,675,264) in a 4,591,229-byte history page. Each request holds the runtime
+  permit for its own duration, so these times are the permit holds. No legitimate save comes
+  near the 2.5 s stop threshold.
+- Worst-label page (labels of 100 `"`, 256 rows × 32 properties, 9,220 units): 5,733,829 bytes,
+  622 bytes per unit against the 2,048-byte bound.
+- A slow 5 MiB upload (64 chunks every 100 ms) by a signed-in principal holds the runtime permit
+  for 5.006 s and gets 408 from the 5 s request timeout (the accepted N3/N-H risk). A 5 MiB
+  request that completes was not timed separately; the release measurement run, including the
+  5 MiB oversized-draft test, took 8.7 s for 6 tests.
+- Pack (release): admission + pin + compile 10.9–13.9 ms; evaluate 0.64–0.89 ms.
+- Release binary 21,048,408 bytes against 20,802,520 for master `f9d34e0` built in the same
+  container (+245,888 bytes, +1.18%). `scraper` is a dev-dependency and not in the binary.
+
+**Verification on the step-8 candidate (tree `aac0b3a`, every container `--cpus 2`)**
+
+- `cargo fmt --check`; strict Clippy (all + pedantic, `-D warnings`); `cargo test --locked
+  --all-targets --all-features`: 442 passed, 0 failed, 1 ignored (the existing performance
+  measurement), of which 295 are library tests.
+- `cargo test --release --locked --lib formula`: 82 passed; the release measurement run: 6
+  passed.
+- The `formula_eval` example build; `source_fixture` generation (now with
+  `list-definition.json`); Ruff check and format; the tools unittest suite, 452 run (39
+  skipped); actionlint; `cargo about generate --locked --fail`; `cargo audit --deny warnings`
+  (333 crates scanned against an advisory database of 1,334 entries, no findings; the one
+  networked run besides the step-3 fetch).
+- Release build; `cargo package --locked --allow-dirty --offline` (including its verify
+  build), `verify_source_package.py`, `cargo vendor --offline` and `package_release.py`
+  (revision recorded as `tree-aac0b3a…`).
+- SHA-256: `mimik-0.1.0-linux-x86_64.tar.gz`
+  `51fee670e0f7a3d24c33ceb8a3e08052041bcdc7827c543f34827d8a6c137d7c`;
+  `mimik-0.1.0-source.crate`
+  `12156e54a472d1a59e6a9ba45786e537bf8884fe8cba6f7cdf27e086c13ee57a`;
+  `mimik-0.1.0-dependency-sources.tar.gz`
+  `427e0aabf938bb7d797f3e2943648c8e64beb307f7c758ba200de81d50996f52`.
+  The checksums verified, the archive unpacked, and the unpacked binary equals the release
+  build.
+- `smoke_release.py --auth` on the unpacked binary passed, including the new list stage
+  (third published version, chosen by ID and logged).
+- The offline Chromium gate with the CI flags (1280×720 and 390×844) passed, including the
+  list stage. The image `mimik-browser:m4` is `mimik-browser:formula` (same pinned base and
+  pip layer) plus the four current tool files, whose SHA-256 match the worktree; the
+  Dockerfile's pip layer could not be rebuilt offline.
+- The delivered source and vendored dependencies rebuilt offline with an empty `CARGO_HOME`
+  and a fresh target directory (removed afterwards): passed in 5 min 49 s.
+- `tools/lan_smoke.py` on the unpacked runtime and the matching unpacked source/vendor passed
+  (separate-client LAN HTTP, HTTPS proxy, a denied peer, QR decoding at both viewports). A
+  local `docker` shim added `--cpus=2` to the containers the script starts without a CPU
+  limit.
+- Not certified: physical phone/router setups, item catalogues, per-property `editable:
+  false`, value diffs and revert.
+
+**Red→green record**
+
+"Executed red" ran the test against the previous step's code (the step's source files
+stashed) and saw it fail for the stated reason. "Compile red" means the API did not exist.
+"Guard" passed when written and is paired with a killing mutation where one is named.
+Mutations were applied to the fixed code, run, and reverted.
+
+| Test (plan #) | Kind | Base or mutation | Failure seen |
+|---|---|---|---|
+| `writer_refuses_client_chosen_new_ids` (1) | executed red | step-1 base | "create: want Invalid, got Ok(1)" |
+| `writer_refuses_removed_id_reintroduced_and_wrong_or_noncontiguous_k` (2) | executed red | step-1 base | "removed ID reintroduced: want Invalid, got Ok(3)" |
+| `writer_accepts_mixed_retained_new_rows_per_list_reuse_and_swaps` (3), `departure_and_removal_freeze_keep_arbitrary_valid_ids`, `stale_write_with_bad_ids_is_409_not_422` (4), `decoder_bound_snapshot_writes_reopens_and_freezes` (6) | guard | mutation: invariant uses the pre-increment revision | 6 of 7 list tests failed |
+| `writer_refuses_undecodable_snapshot_atomically` (5) | executed red; mutation | step-1 base; decode check removed (step 8) | "want Invalid, got Ok(1)"; failed |
+| `list_row_keys_admit_and_bad_key_sets_are_400` (7) | executed red; guard negatives | step-2 base; mutation "admit any well-formed list key" | positive answered 400; negatives failed under the mutation |
+| `parse_limited_takes_its_limit_from_the_seed` (8) | compile red; mutation | seed ignored, 516 hard-coded | failed |
+| `admission_of_65536_pairs_is_linear` (9) | mutation red | `contains` over a key slice | 78.08 s against the 5 s limit |
+| `stale_invalid_draft_conflicts` (10) | executed red | step-2 base | "scalar runtime left: 422 right: 409" |
+| `stale_invalid_list_draft_conflicts` (10, list case) | guard | — | already 409 after step 2 |
+| `bad_keys_after_csrf_and_authorization` (11) | guard | admission before CSRF | failed |
+| `list_values_tests` (12, five tests) | compile red; mutations | unknown ID accepted, duplicates accepted, `set-` ignored | each failed |
+| `list_sheet_rendered_form_round_trips` (13) | executed red; mutation | step-3 base; sheet cap reverted to 516 | pair-count assertion failed; failed |
+| `list_rows_render_as_labelled_fieldsets_unique_ids` (14) | executed red | step-3 base | "equipment and tags left: 0 right: 2" |
+| `failed_save_rerender_keeps_draft_and_submitted_revision` (15) | executed red | step-3 base | "row-1-0-0 missing" |
+| `submitted_helper_sends_only_the_clicked_submitter` (16) | compile red | — | — |
+| `first_submitter_in_tree_order_is_op_save_before_groups` (17) | executed red; mutation | step-3 base; top Save with the wrong op | "section:=" first; failed |
+| `rendered_form_round_trips` (M3, now expects `op=save`) | executed red | step-3 base | 9 pairs, want 10 |
+| op tests 18–27 (19 tests) | executed red | step-4 base | buttons absent; with forged op pairs every op answered 400 |
+| 19, 20 | mutations | op does nothing; wrong neighbour; `set-` state lost; hidden ID lost | each failed |
+| 21 | mutation | edge move accepted | failed |
+| 23 | guard; mutation | op skips CSRF | failed |
+| 25 | mutations | `formnovalidate` dropped; a second `autofocus` | each failed |
+| `history_diff` unit tests (29–31, seven tests) | compile red; mutations | moved by index; tie-break reversed; optional presence ignored | each failed |
+| `history_page_shows_change_summary_for_revision_n_against_n_minus_1` (32) | executed red; mutation | step-5 base; N against N − 2 | no lines; failed |
+| `change_summary_unavailable_*` (33, two tests) | executed red; mutation | step-5 base; N − 1 used without validation | no section; failed |
+| `change_summary_large_diff_is_bounded` (34) | executed red; mutation | step-5 base; summary cap removed | 0 lines; failed |
+| `decoder_bound_history_renders_read_only` (28) | executed red | step-5 base | no summary lines |
+| `list_history_rows_have_stable_ids_and_no_ops` (28), `derived_values_over_lists_update_after_save` (35) | guard | — | — |
+| `list_payloads_escaped_in_context` (36) | executed red (summary part); mutation | step-5 base; `|safe` on a summary label | summary assertion; failed |
+| `VersionSelectionTests` (38) | executed red | step-6 base | ImportError `version_link` |
+| `sheet_post_accepts_5mib_and_413s_5mib_plus_1`, `non_sheet_posts_keep_8kib` (39) | mutation red | no 5 MiB layer; 5 MiB on every route | 413; failed |
+| `unauthenticated_large_post_is_403_without_reading_the_body` (40) | mutation red | pre-body check removed | body polled |
+| `stored_over_1mib_is_422_with_draft` (41) | mutation red | no 5 MiB layer | 413 |
+| `oversized_draft_is_not_echoed`, `one_mib_of_quotes_is_echoed_within_bound` (42) | mutation red | no 5 MiB layer; echo cap removed; excerpts disabled | each failed |
+| `list_definition_publishes` (43), `lantern_reach_list_sheet_end_to_end` (47), `render_budget_boundary_publishes_and_plus_one_refuses` (45), `exact_budget_sheet_saves_reopens_and_freezes` (46) | mutation red | the gate restored | `list-editing-unsupported` |
+| `budget::*` (44, 45 dominance) | compile red; mutations | `within` ignores units, pairs or nodes; the optional +2 dropped | each failed |
+| browser list stage (48) | negative control | the `#list-f` fragment restored | "Add did not focus the new row's first control ('')" |
+
+Not mutation-run: "the op path writes" and "the draft is evaluated" (covered by the
+nothing-written assertions of 19/20 and the saved-revision assertions of 23).
+
+**Open for the review**
+
+- The independent implementation review (plan step 9) with Sol, Sonnet and the third chain.
+- The `#list-f` deviation above, and the slimmed heavy tests.
+
+**Implementation-review fixes (2026-10-17)**
+
+Review: Sonnet MERGE, Sol MERGE AFTER FIXES, Space Bunny (third chain) MERGE AFTER FIXES; all
+three accepted the D5 deviation. Record:
+[reviews/2026-10-17-derived-formulas-m4-impl.md](reviews/2026-10-17-derived-formulas-m4-impl.md).
+Fixes: the visible submitted revision is excerpted (Sol Major 1); every private-sheet
+textarea emits a sacrificial newline (Sol Major 2); the streamed-body 413 guard (Space Bunny
+F1, adjudicated not a defect); D7 and the contract state what the page bound covers (F2); the
+`form_budget` approximation comment and a second calibration (F3); the optional-first-
+property autofocus test (F4); plan revision 3.2 (F5); the `outside_increasing` invariant
+(F6); the documented lost-draft 403 path (F7); the buffering risk (Sonnet); wording nits.
+
+| Test | Kind | Base or mutation | Failure seen |
+|---|---|---|---|
+| `malformed_near_cap_revision_is_echoed_once` | executed red | `18c6a07` templates and `web.rs` | 2,000,014 `&#34;`, want 1,000,078 |
+| `leading_newlines_survive_ops_rejected_saves_and_reloads` | executed red; mutation | `18c6a07`; list textarea without the newline | "saved reload: notes" `"notes"` vs `"\nnotes"`; failed |
+| `stale_op_warns` (new wording) | executed red | `18c6a07` | old wording |
+| browser list stage, leading newlines | executed red | release build without the newline | "Leading newlines lost after draft operations" |
+| `streamed_body_over_5mib_without_length_is_413` | guard; mutation | `DefaultBodyLimit::disable()` on the sheet POSTs | failed |
+| `add_focuses_the_set_select_of_an_optional_first_property` | guard; mutation | Set/Not set select never autofocused | failed |
+| `all_optional_worst_label_page_is_within_the_unit_bound` | guard (measurement) | — | 246 bytes per unit |
+| `TextareaNewlineTests` CRLF/CR case (re-review, Sol) | executed red | reader before `feed` normalisation | `'\r\nplain'` vs `'plain'` |
+| `native_sheet_textareas_keep_leading_newlines` (re-review) | guard; mutation | native description textarea without the newline | failed |
+| `material_textareas_keep_leading_newlines` (re-review N2) | executed red | `material_page.html` before the newline | `"corrected text"` vs `"\ncorrected text"` |
+| `legacy_editor_notes_keep_leading_newlines` (re-review N2, N6) | executed red | `editor.html` before the newline | `"\nlegacy notes"` vs `"\n\nlegacy notes"` |
+| `material_malformed_revision_is_not_echoed` (re-review N6) | guard | — | revision is `i64`: refused before rendering |
+| `browser_crlf_submission_is_stored_as_lf`, `submitted_values_have_crlf_and_cr_normalised_to_lf` (final review, Sol) | executed red | transport without CR normalisation | CR LF stored |
+| `test_a_crlf_split_across_two_feeds_is_one_newline` (final review F1) | executed red | reader without the held-back CR | `'\nplain'` vs `'plain'` |
+| smoke context goal and source correction newlines (final review F2) | mutation red | `mork_context.html` without the newline | "Context goal lost its leading newlines" |
+| `material_completion_rationale_keeps_leading_newlines` (final review F2) | guard; mutation | completion branch without the newline | failed |
+| final-review gate pass (tree `217cf06`) | gate failure | `smoke_release.py` post-restart search check expected no leading newline | "Reviewed evidence persistence failed"; first relaxed, then made strict in the last review |
+| `material_crlf_at_the_limit_…`, `source_review_crlf_at_the_limit_…`, `legacy_editor_crlf_notes_at_the_limit_…` (last review F1) | executed red | legacy extractors without `form_text::lf` | 422, want 303 |
+| history and search `<pre>` sacrificial LF (last review F4) | mutation | material or source `<pre>` without the newline | failed |
+| `CorrectedEvidenceTests`, `FormFieldsLifecycleTests` (last review) | executed red | smoke helper absent; no `reset()` override | ImportError; AttributeError |
+| `draft_op_rerender_has_crlf_normalised` (last review F8) | guard | — | — |
+| `TextareaNewlineTests` (smoke form reader) | executed red | `smoke_release.py` before the fix | `'\nplain'` vs `'plain'`; found by the first gate rerun (`smoke_auth` failed "Persisted field differs: equipment") |
+
 ## Appendix A: superseded custom-spec design (revision 1)
 
 Revision 1 proposed a Mimik-specific expression language:

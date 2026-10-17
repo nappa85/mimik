@@ -517,11 +517,162 @@ def run_formula_browser(page, campaign, version, submit):
     )
 
 
+def run_list_browser(page, campaign, version, submit):
+    """Published list sheet (M4): draft ops by pointer and keyboard, focus, IDs, summary."""
+
+    def active():
+        # Autofocus runs at the next rendering opportunity, after DOMContentLoaded.
+        try:
+            page.wait_for_function(
+                "document.activeElement && document.activeElement !== document.body",
+                timeout=3_000,
+            )
+        except Exception:  # noqa: BLE001 - report what has focus instead
+            pass
+        return page.evaluate("document.activeElement ? document.activeElement.id : ''")
+
+    def press(key, status=200):
+        with page.expect_response(lambda response: response.request.method == "POST") as response:
+            with page.expect_navigation(wait_until="domcontentloaded"):
+                page.keyboard.press(key)
+        require(response.value.status == status, f"List keyboard op status differs ({key})")
+
+    def button(name):
+        return page.get_by_role("button", name=name, exact=True)
+
+    page.goto(campaign + f"/sheets/new?version={version}")
+    require(page.locator("script").count() == 0, "List sheet page carries a script")
+    require("No rows yet." in page.locator("#list-1").inner_text(), "Empty list note missing")
+    # Add on the empty create page, before Name is filled (formnovalidate).
+    submit(page, button("Add Equipment row"), 200)
+    focused = active()
+    require(focused == "row-1-0-0", f"Add did not focus the new row's first control ({focused!r})")
+    require(
+        "Row added to Equipment. Not saved yet." in page.get_by_role("status").inner_text(),
+        "Add status message missing",
+    )
+    page.locator('input[name="name"]').fill("List browser private")
+    page.locator('input[name="value-name"]').fill("Lister")
+    page.locator('input[name="row-1-0-0"]').fill("Rope")
+    page.locator('input[name="row-1-0-2"]').fill("2")
+    page.locator('input[name="row-1-0-3"]').fill("3")
+    page.locator('select[name="row-1-0-4"]').select_option("false")
+    # Enter in a text field uses the first submitter: the top Save.
+    page.locator('input[name="row-1-0-0"]').focus()
+    with page.expect_request(lambda request: request.method == "POST") as request:
+        press("Enter", 303)
+    require(
+        ("op", "save") in parse_qsl(request.value.post_data or "", keep_blank_values=True),
+        "Enter did not save through the op=save button",
+    )
+    list_sheet = page.url
+    require(
+        page.locator('input[name="id-1-0"]').input_value() == "r1-1"
+        and "ID r1-1" in page.locator("#row-1-0 legend").inner_text(),
+        "Saved row did not get the host ID r1-1",
+    )
+    load = page.locator("dl.derived", has=page.locator("#label-load")).locator("dd")
+    require(load.inner_text() == "6", "List-derived load missing after save")
+    # Add a second row, then move it up and back down by keyboard.
+    submit(page, button("Add Equipment row"), 200)
+    page.locator('input[name="row-1-1-0"]').fill("Torch")
+    page.locator('input[name="row-1-1-2"]').fill("1")
+    page.locator('input[name="row-1-1-3"]').fill("1")
+    page.locator('select[name="row-1-1-4"]').select_option("true")
+    # Leading newlines survive every round trip (a parser drops the first newline after
+    # <textarea>; the template emits a sacrificial one).
+    page.locator('select[name="set-1-0-5"]').select_option("present")
+    page.locator('textarea[name="row-1-0-5"]').fill("\n\nkept note")
+    page.locator('textarea[name="notes"]').fill("\nsheet notes")
+
+    def newlines_kept(context):
+        require(
+            page.locator('textarea[name="row-1-0-5"]').input_value() == "\n\nkept note"
+            and page.locator('textarea[name="notes"]').input_value() == "\nsheet notes",
+            f"Leading newlines lost after {context}",
+        )
+
+    page.locator('textarea[name="row-1-1-5"]').focus()
+    page.keyboard.press("Tab")
+    require(active() == "up-1-1", "Tab did not reach Move row 2 up")
+    press("Enter")
+    require(active() == "down-1-0", "Move up to the top did not focus its Move down")
+    require(
+        page.locator('input[name="row-1-0-0"]').input_value() == "Torch",
+        "Move up did not reorder the draft",
+    )
+    require(
+        page.locator("#up-1-0").is_disabled() and page.locator("#down-1-1").is_disabled(),
+        "Edge move buttons are not disabled",
+    )
+    press("Space")
+    newlines_kept("draft operations")
+    require(active() == "up-1-1", "Move down to the end did not focus its Move up")
+    require(
+        page.locator('input[name="row-1-1-0"]').input_value() == "Torch"
+        and page.locator('input[name="id-1-0"]').input_value() == "r1-1",
+        "Move down did not carry the row and its ID",
+    )
+    # An op keeps an invalid row value; Remove focuses Add.
+    page.locator('input[name="row-1-1-2"]').fill("not a number")
+    submit(page, button("Add Equipment row"), 200)
+    require(
+        page.locator('input[name="row-1-1-2"]').input_value() == "not a number",
+        "A draft op lost an invalid row value",
+    )
+    submit(page, page.get_by_role("button", name="Save full private sheet").first, 422)
+    newlines_kept("a rejected save")
+    require(
+        page.locator('input[name="row-1-1-2"]').input_value() == "not a number",
+        "A rejected save lost the draft",
+    )
+    submit(page, button("Remove row 3 of Equipment"), 200)
+    require(active() == "add-1", "Remove did not focus the Add button")
+    # 390 px: a 3,000-character note and the 32-property row with its buttons.
+    page.locator('input[name="row-1-1-2"]').fill("4")
+    page.locator('select[name="set-1-1-5"]').select_option("present")
+    page.locator('textarea[name="row-1-1-5"]').fill("long note " * 300)
+    submit(page, button("Add Traits row"), 200)
+    no_overflow(page, "list sheet with a 32-property row and a 3,000-character note")
+    for p in range(32):
+        control = page.locator(f'[name="row-2-0-{p}"]')
+        tag = control.evaluate("element => element.tagName")
+        if tag == "SELECT":
+            control.select_option(index=1)
+        else:
+            control.fill("1" if p % 5 == 1 else "trait")
+    # Save: load 2*3 + 4*1 = 10 passes; then a violation.
+    submit(page, page.get_by_role("button", name="Save full private sheet").first)
+    require(load.inner_text() == "10", "Load not recomputed after the moves")
+    page.reload()
+    newlines_kept("a saved reload")
+    page.locator('input[name="row-1-1-2"]').fill("9")
+    submit(page, page.get_by_role("button", name="Save full private sheet").first)
+    require(
+        "Load is at most 10." in page.locator("#advisory-checks").inner_text(),
+        "List advisory violation not shown",
+    )
+    newlines_kept("a second save")
+    page.goto(list_sheet + "/history/3")
+    summary = page.locator("section#change-summary")
+    require(
+        summary.get_by_role("heading", name="Changes in revision 3").count() == 1
+        and "equipment/r2-1/quantity" in summary.inner_text(),
+        "History change summary missing",
+    )
+    require(
+        page.get_by_role("button").count() == 0
+        and page.locator('input[name="row-1-0-0"]').is_disabled(),
+        "List history is not read-only",
+    )
+    no_overflow(page, "list history with its change summary")
+
+
 def run_workspace_browser(
     browser, page, viewport, binary, directory, collaborator, passwords, versions
 ):
     """Real campaign/native/runtime forms with an ordinary independent collaborator."""
-    version, formula_version = versions
+    version, formula_version, list_version = versions
 
     def submit(tab, button, status=303):
         with tab.expect_response(lambda response: response.request.method == "POST") as response:
@@ -672,6 +823,8 @@ def run_workspace_browser(
         )
         stage = "formula sheet"
         run_formula_browser(page, generic, formula_version, submit)
+        stage = "list sheet"
+        run_list_browser(page, generic, list_version, submit)
         page.goto("http://127.0.0.1:3000/auth/session")
     except AssertionError:
         raise
@@ -854,7 +1007,7 @@ def run_auth_scenario(browser, viewport, binary, directory, fixture):
     _, passwords = smoke_accounts(binary, directory)
     player = prepare_auth_player(binary, directory, passwords)
     collaborator = prepare_auth_player(binary, directory, passwords, login="table-helper")
-    version, formula_version = prepare_workspace_materials(binary, directory, fixture)
+    version, formula_version, list_version = prepare_workspace_materials(binary, directory, fixture)
     process, log = start(binary, directory, auth=True)
     context = browser.new_context(viewport=viewport)
     context.set_default_timeout(15_000)
@@ -998,7 +1151,7 @@ def run_auth_scenario(browser, viewport, binary, directory, fixture):
             directory,
             collaborator,
             passwords,
-            (version, formula_version),
+            (version, formula_version, list_version),
         )
         for path in AUTH_DENIED_PATHS:
             response = page.goto("http://127.0.0.1:3000" + path)
