@@ -28,6 +28,9 @@ from pathlib import Path
 import run_watchdog
 import toolloop_ops as ops
 
+# Never see a real user-granted schedule override (toolloop_ops.OVERRIDE_ENV).
+os.environ["MIMIK_SCHEDULE_OVERRIDE_FILE"] = "/nonexistent/mimik-schedule-override.json"
+
 TOOLS = Path(__file__).resolve().parent
 DEMO = TOOLS.parent / "examples" / "tool-loop-demo"
 ENABLED = os.environ.get("MIMIK_REAL_DOCKER_SMOKE") == "1" and shutil.which("docker")

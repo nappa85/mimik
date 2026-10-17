@@ -23,6 +23,9 @@ from pathlib import Path
 
 import run_queue as rq
 
+# Never see a real user-granted schedule override (toolloop_ops.OVERRIDE_ENV).
+os.environ["MIMIK_SCHEDULE_OVERRIDE_FILE"] = "/nonexistent/mimik-schedule-override.json"
+
 TOOLS = Path(__file__).resolve().parent
 DEMO = TOOLS.parent / "examples" / "tool-loop-demo"
 FORMULA = os.environ.get("MIMIK_FORMULA_EVAL", "")

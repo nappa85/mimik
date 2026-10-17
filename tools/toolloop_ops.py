@@ -11,6 +11,7 @@
 """
 
 import datetime as dt
+import json
 import os
 import re
 import subprocess
@@ -44,13 +45,50 @@ def epoch(d: dt.datetime) -> float:
     return d.timestamp()  # naive datetimes are local
 
 
-def heavy_allowed(t: float) -> bool:
+# A user-granted, time-limited schedule override (main checkout target/, shared by every
+# worktree): {"until": "YYYY-MM-DDTHH:MM", "granted_by": ..., "reason": ...}. Heavy work is
+# allowed until `until` (local), which also ends that window. It is ignored (normal schedule)
+# when missing, malformed, already past, or more than OVERRIDE_MAX_SECONDS after the file's
+# mtime, so a stale grant never extends. Deleting the file stops runs at the normal edge.
+OVERRIDE_NAME = "schedule-override.json"
+OVERRIDE_MAX_SECONDS = 4 * 86400
+OVERRIDE_PATH = None  # resolved lazily; tests point it elsewhere
+OVERRIDE_ENV = "MIMIK_SCHEDULE_OVERRIDE_FILE"  # tests (and their subprocesses) isolate with it
+
+
+def override_file() -> Path:
+    global OVERRIDE_PATH  # noqa: PLW0603 (lazy cache of the main checkout path)
+    if os.environ.get(OVERRIDE_ENV):
+        return Path(os.environ[OVERRIDE_ENV])
+    if OVERRIDE_PATH is None:
+        main = main_checkout(Path(__file__).resolve().parent.parent)
+        OVERRIDE_PATH = main / "target" / OVERRIDE_NAME
+    return Path(OVERRIDE_PATH)
+
+
+def override_until(t: float):
+    """The override's end (epoch) if a valid grant covers t, else None."""
+    path = override_file()
+    try:
+        mtime = path.stat().st_mtime
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        until = epoch(dt.datetime.strptime(doc["until"], "%Y-%m-%dT%H:%M"))
+        granted = doc.get("granted_by")
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+    if not (isinstance(granted, str) and granted.strip()):
+        return None
+    if until > mtime + OVERRIDE_MAX_SECONDS or t >= until:
+        return None
+    return until
+
+
+def _normal_heavy_allowed(t: float) -> bool:
     d = local(t)
     return d.weekday() >= 5 or not BLOCK_START <= d.hour < BLOCK_END
 
 
-def window_end(t: float) -> float:
-    """First weekday 09:00 local after t (when heavy work must have stopped)."""
+def _normal_window_end(t: float) -> float:
     d = local(t)
     for days in range(8):
         day = (d + dt.timedelta(days=days)).replace(
@@ -59,6 +97,20 @@ def window_end(t: float) -> float:
         if day.weekday() < 5 and epoch(day) > t:
             return epoch(day)
     raise AssertionError("unreachable: a weekday 09:00 exists within 8 days")
+
+
+def heavy_allowed(t: float) -> bool:
+    return _normal_heavy_allowed(t) or override_until(t) is not None
+
+
+def window_end(t: float) -> float:
+    """First weekday 09:00 local after t (when heavy work must have stopped), or the
+    override's end when a valid override covers t and outlasts that 09:00."""
+    end = _normal_window_end(t)
+    until = override_until(t)
+    if until is not None and (end < until or not _normal_heavy_allowed(t)):
+        return until
+    return end
 
 
 def next_window_start(t: float) -> float:

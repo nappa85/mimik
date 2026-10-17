@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "name": "router-cpu-dev-r3",
+  "description": "Dev-only decision-router screen SYS-R3 (Qwen3.5-9B, CPU) after router-cpu-dev skipped it under the 12 h cap (projection 39.1 h). User decision 2026-10-17: run it anyway through Monday under a time-limited schedule override (target/schedule-override.json, until 2026-10-19 18:00), stopped on request. Probe, screen and ablation; units run whole; an incomplete unit is never gate-evaluable.",
+  "max_consecutive_failures": 3,
+  "arms": [
+    {
+      "id": "probe-r3",
+      "kind": "router",
+      "router": "r3-qwen35-9b",
+      "unit": "probe",
+      "arm": "SYS-R3-probe"
+    },
+    {
+      "id": "screen-r3",
+      "kind": "router",
+      "router": "r3-qwen35-9b",
+      "unit": "screen",
+      "arm": "SYS-R3-screen",
+      "end_margin_seconds": 3600
+    },
+    {
+      "id": "ablation-r3",
+      "kind": "router",
+      "router": "r3-qwen35-9b",
+      "unit": "ablation",
+      "arm": "SYS-R3-ablation"
+    }
+  ]
+}

@@ -22,6 +22,10 @@ from pathlib import Path
 import model_registry
 import run_queue as rq
 import tool_loop_benchmark as tl
+import toolloop_ops as ops
+
+# Never see a real user-granted schedule override (toolloop_ops.OVERRIDE_ENV).
+os.environ["MIMIK_SCHEDULE_OVERRIDE_FILE"] = "/nonexistent/mimik-schedule-override.json"
 
 TOOLS = Path(__file__).resolve().parent
 REGISTRY = model_registry.load()
@@ -404,11 +408,82 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(rq.longest_window_seconds(at(2026, 10, WED, 10, 0)), 63 * 3600)
 
 
+class ScheduleOverrideTests(unittest.TestCase):
+    """User-granted, time-limited schedule override (toolloop_ops.override_until)."""
+
+    TUE = 20
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="override-"))
+        self.path = self.dir / "schedule-override.json"
+        patcher = unittest.mock.patch.dict(os.environ, {ops.OVERRIDE_ENV: str(self.path)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def grant(self, until, written, **extra):
+        doc = {"until": until, "granted_by": "user", "reason": "test", **extra}
+        self.path.write_text(json.dumps(doc), encoding="utf-8")
+        os.utime(self.path, (written, written))
+
+    def test_no_file_is_the_normal_schedule(self):
+        self.assertFalse(rq.heavy_allowed(at(2026, 10, MON, 10, 0)))
+        self.assertEqual(rq.window_end(at(2026, 10, SAT, 22, 0)), at(2026, 10, MON, 9, 0))
+
+    def test_grant_extends_the_weekend_window_to_until(self):
+        self.grant(f"2026-10-{MON}T18:00", at(2026, 10, SAT, 22, 0))
+        self.assertTrue(rq.heavy_allowed(at(2026, 10, MON, 10, 0)))
+        self.assertEqual(rq.window_end(at(2026, 10, SAT, 22, 0)), at(2026, 10, MON, 18, 0))
+        self.assertEqual(rq.window_end(at(2026, 10, MON, 10, 0)), at(2026, 10, MON, 18, 0))
+        self.assertEqual(rq.next_window_start(at(2026, 10, MON, 10, 0)), at(2026, 10, MON, 10, 0))
+        # After until: the normal schedule again.
+        self.assertFalse(rq.heavy_allowed(at(2026, 10, self.TUE, 10, 0)))
+        self.assertEqual(rq.window_end(at(2026, 10, MON, 20, 0)), at(2026, 10, self.TUE, 9, 0))
+
+    def test_until_inside_the_block_ends_the_window_there(self):
+        self.grant(f"2026-10-{MON}T12:00", at(2026, 10, SAT, 22, 0))
+        self.assertEqual(rq.window_end(at(2026, 10, SUN, 3, 0)), at(2026, 10, MON, 12, 0))
+        self.assertTrue(rq.heavy_allowed(at(2026, 10, MON, 11, 59)))
+        self.assertFalse(rq.heavy_allowed(at(2026, 10, MON, 12, 0)))
+
+    def test_stale_or_invalid_grants_are_ignored(self):
+        night = at(2026, 10, SAT, 22, 0)
+        stale = at(2026, 10, MON, 18, 0) - ops.OVERRIDE_MAX_SECONDS - 60
+        cases = [
+            (f"2026-10-{MON}T18:00", stale, {}),
+            ("Monday evening", night, {}),
+            (f"2026-10-{MON}T18:00", night, {"granted_by": " "}),
+            (f"2026-10-{MON}T18:00", night, {"granted_by": None}),
+        ]
+        for until, written, extra in cases:
+            with self.subTest(until=until, extra=extra):
+                self.grant(until, written, **extra)
+                self.assertFalse(rq.heavy_allowed(at(2026, 10, MON, 10, 0)))
+                self.assertEqual(rq.window_end(night), at(2026, 10, MON, 9, 0))
+        self.path.write_text("{not json", encoding="utf-8")
+        self.assertFalse(rq.heavy_allowed(at(2026, 10, MON, 10, 0)))
+
+    def test_deleting_the_file_restores_the_09_00_edge(self):
+        self.grant(f"2026-10-{MON}T18:00", at(2026, 10, SAT, 22, 0))
+        self.assertEqual(rq.window_end(at(2026, 10, SUN, 8, 0)), at(2026, 10, MON, 18, 0))
+        self.path.unlink()
+        self.assertEqual(rq.window_end(at(2026, 10, SUN, 8, 0)), at(2026, 10, MON, 9, 0))
+
+    def test_watchdog_closing_follows_the_grant(self):
+        import run_watchdog  # noqa: PLC0415 (only this test needs it)
+
+        dog = run_watchdog.Watchdog.__new__(run_watchdog.Watchdog)
+        dog.reserve = 240
+        self.assertTrue(dog.closing(at(2026, 10, MON, 10, 0)))
+        self.grant(f"2026-10-{MON}T18:00", at(2026, 10, SAT, 22, 0))
+        self.assertFalse(dog.closing(at(2026, 10, MON, 10, 0)))
+        self.assertTrue(dog.closing(at(2026, 10, MON, 17, 57)))
+
+
 class WindowCheckCliTests(unittest.TestCase):
     """Review fix 7: the clock hook needs two explicit test variables."""
 
     def run_check(self, env, *argv):
-        base = {"PATH": os.environ.get("PATH", "")}
+        base = {"PATH": os.environ.get("PATH", ""), ops.OVERRIDE_ENV: os.environ[ops.OVERRIDE_ENV]}
         base.update(env)
         script = [sys.executable, str(TOOLS / "run_queue.py"), "window-check", *argv]
         return subprocess.run(script, env=base, capture_output=True, text=True, check=False)

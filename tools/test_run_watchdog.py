@@ -17,6 +17,9 @@ from pathlib import Path
 import run_watchdog as wd
 import toolloop_ops as ops
 
+# Never see a real user-granted schedule override (toolloop_ops.OVERRIDE_ENV).
+os.environ["MIMIK_SCHEDULE_OVERRIDE_FILE"] = "/nonexistent/mimik-schedule-override.json"
+
 _EMPTY_HWMON = tempfile.mkdtemp(prefix="no-hwmon-")
 
 
