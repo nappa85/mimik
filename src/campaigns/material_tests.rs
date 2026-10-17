@@ -1206,3 +1206,62 @@ async fn material_completion_rationale_keeps_leading_newlines() {
         .collect();
     assert_eq!(rationale, "\n\nwhole page checked");
 }
+
+/// Last review (Space Bunny F1, F4; Sonnet): material review normalises browser CR LF before
+/// validation (20,000 typed correction characters and 5,000 rationale characters accepted,
+/// stored with LF); the history `<pre>` keeps a leading newline; the empty completion textarea
+/// (the `else` branch) is empty in a browser.
+#[tokio::test]
+async fn material_crlf_at_the_limit_is_stored_as_lf_and_shown_intact() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let page = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let parsed = scraper::Html::parse_document(&page);
+    let completion: String = parsed
+        .select(
+            &scraper::Selector::parse(
+                "form[action=\"/admin/materials/pages/1\"] textarea[name=rationale]",
+            )
+            .unwrap(),
+        )
+        .next()
+        .expect("empty completion rationale")
+        .text()
+        .collect();
+    assert_eq!(completion, "", "the else branch is empty in a browser");
+    let correction = "\nx".repeat(10_000);
+    let rationale = "y\n".repeat(2_500);
+    let mut form = decision(1);
+    form[3].1 = correction.replace('\n', "\r\n");
+    form[4].1 = rationale.replace('\n', "\r\n");
+    let response = document_post(&app, &auth[0], form).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::SEE_OTHER,
+        "typed characters within limits"
+    );
+    let stored: (String, String) = store
+        .run(|db| {
+            Ok(db.query_row(
+                "SELECT u.correction,e.rationale FROM source_units u JOIN source_review_events e ON e.unit_id=u.id WHERE u.id=1 ORDER BY e.id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(stored, (correction.clone(), rationale), "stored with LF");
+    let page = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let history: String = scraper::Html::parse_document(&page)
+        .select(&scraper::Selector::parse("pre.evidence-text").unwrap())
+        .next()
+        .expect("history correction")
+        .text()
+        .collect();
+    assert_eq!(
+        history, correction,
+        "history <pre> keeps the leading newline"
+    );
+}

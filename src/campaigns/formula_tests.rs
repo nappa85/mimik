@@ -279,7 +279,7 @@ async fn formula_sheet_view_shows_derived_values_and_advisory_checks() {
     );
     assert!(section(&html, "formula-results").contains("Computed from saved revision 1"));
     assert!(html.contains(
-        "<summary>How this is computed</summary><pre class=\"evidence-text\">6 - vitality</pre>"
+        "<summary>How this is computed</summary><pre class=\"evidence-text\">\n6 - vitality</pre>"
     ));
 }
 

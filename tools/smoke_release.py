@@ -404,6 +404,10 @@ class FormFields(HTMLParser):
             data = data[:-1]
         super().feed(data.replace("\r\n", "\n").replace("\r", "\n"))
 
+    def reset(self):
+        self.pending_cr = ""
+        super().reset()
+
     def close(self):
         if self.pending_cr:
             self.pending_cr = ""
@@ -411,7 +415,6 @@ class FormFields(HTMLParser):
         super().close()
 
     def __init__(self):
-        self.pending_cr = ""
         super().__init__(convert_charrefs=True)
         self.values = {}
         self.textarea = None
@@ -467,6 +470,7 @@ class FormFields(HTMLParser):
 def assert_fields(html, expected):
     fields = FormFields()
     fields.feed(html)
+    fields.close()
     for name, value in expected.items():
         require(fields.values.get(name) == str(value), f"Persisted field differs: {name}")
 
@@ -695,6 +699,12 @@ def smoke_publication(binary, directory, fixture, draft):
     return draft, [reapproved, restored]
 
 
+def corrected_evidence(html):
+    """The search result shows the stored correction, leading newline included: the raw
+    markup is the template's sacrificial LF after <pre>, then the stored "\\nVerified…"."""
+    return '<pre class="evidence-text">\n\nVerified fixture correction' in html
+
+
 def smoke_sources():
     sources = request("/sources")[2]
     lookup = re.search(r"<h2>Synthetic source</h2>.*?</section>", sources, re.DOTALL)
@@ -773,14 +783,7 @@ def smoke_sources():
             "query": "Verified fixture correction",
         }
     )
-    require(
-        re.search(
-            r'<pre class="evidence-text">\n?Verified fixture correction',
-            request(correction_query)[2],
-        )
-        is not None,
-        "Corrected evidence missing",
-    )
+    require(corrected_evidence(request(correction_query)[2]), "Corrected evidence missing")
     return correction_query
 
 
@@ -2067,11 +2070,7 @@ def main():
             )
             if correction_query:
                 require(
-                    re.search(
-                        r'<pre class="evidence-text">\n?Verified fixture correction',
-                        request(correction_query)[2],
-                    )
-                    is not None,
+                    corrected_evidence(request(correction_query)[2]),
                     "Reviewed evidence persistence failed",
                 )
         finally:

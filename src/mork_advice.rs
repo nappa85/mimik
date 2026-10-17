@@ -54,7 +54,7 @@ pub struct Context {
     pub route_clear: Truth,
     #[serde(default)]
     pub power_uses: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::form_text::lf")]
     pub goal: String,
 }
 

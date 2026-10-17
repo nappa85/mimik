@@ -33,5 +33,6 @@
 <button type="submit">Confirm inspected page completeness</button></form></section>
 </section>
 </div>
-<details class="panel"><summary>Recent append-only review history</summary><ul>{% for event in page.events %}<li><time data-local-time datetime="{{ event.created_at.replace(" ", "T") }}Z">{{ event.created_at }} UTC</time> · {{ event.actor }} · {{ event.state }} · {% match event.unit_id %}{% when Some with (id) %}unit {{ id }}{% when None %}page completeness{% endmatch %} · previous revision {{ event.previous_revision }}<p>{{ event.rationale }}</p><pre class="evidence-text">{{ event.correction }}</pre></li>{% endfor %}</ul></details>
+<details class="panel"><summary>Recent append-only review history</summary><ul>{% for event in page.events %}<li><time data-local-time datetime="{{ event.created_at.replace(" ", "T") }}Z">{{ event.created_at }} UTC</time> · {{ event.actor }} · {{ event.state }} · {% match event.unit_id %}{% when Some with (id) %}unit {{ id }}{% when None %}page completeness{% endmatch %} · previous revision {{ event.previous_revision }}<p>{{ event.rationale }}</p><pre class="evidence-text">
+{{ event.correction }}</pre></li>{% endfor %}</ul></details>
 {% endblock %}

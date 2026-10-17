@@ -40,20 +40,10 @@ impl<'de> Visitor<'de> for PairsSeed {
                     "duplicate key or form expansion limit",
                 ));
             }
-            pairs.push((key, newlines_to_lf(value)));
+            // Every value: CR LF and CR to LF before any validation (`crate::form_text`).
+            pairs.push((key, crate::form_text::newlines_to_lf(value)));
         }
         Ok(Pairs(pairs))
-    }
-}
-
-/// Native form submission serialises textarea line breaks as CR LF; the textarea API value
-/// (and canonical storage) uses LF. Every submitted value therefore has CR LF and lone CR
-/// normalised to LF before any validation, so length limits count the normalised text.
-fn newlines_to_lf(value: String) -> String {
-    if value.contains('\r') {
-        value.replace("\r\n", "\n").replace('\r', "\n")
-    } else {
-        value
     }
 }
 

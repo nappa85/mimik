@@ -280,9 +280,11 @@ length, the schema (8,000 / 20,000) plus `maxlength`; stored bytes, `snapshots::
   Every textarea emits one sacrificial newline after its opening tag, because HTML parsing
   drops the first newline there; values that start with newlines show and resubmit
   intact (revision 3.2, Sol Major 2). Separately, browsers serialise textarea line breaks as
-  CR LF on submission; the sheet transport normalises CR LF and CR to LF before validation, so
-  canonical storage is LF and an unchanged Save is byte-identical (final implementation
-  review).
+  CR LF on submission. Every form decoder (the sheet transport and the legacy textarea
+  extractors, through `form_text::newlines_to_lf`) normalises CR LF and CR to LF before
+  validation. New writes are stored with LF, and an unchanged Save of LF-stored values is
+  byte-identical. Existing CR LF data is rewritten to LF as a new revision on its next save,
+  and history keeps the old revision (final and last implementation reviews).
   So a re-render is ≤ `FIXED_PAGE_BYTES` + units × `UNIT_MARKUP_BYTES` + 5 × `ECHO_BYTES`
   (Askama escapes `"` as the 5-byte `&#34;`, the widest escape), where `UNIT_MARKUP_BYTES`
   includes one 64-character excerpt escaped (≤ 320 bytes). Step 7 derives both constants from

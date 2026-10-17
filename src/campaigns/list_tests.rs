@@ -3412,3 +3412,26 @@ async fn browser_crlf_submission_is_stored_as_lf() {
     );
     assert_eq!(reopen(&setup, 1).await.notes, "\n".repeat(20_000));
 }
+
+/// Last review (F8): a draft operation re-renders the normalised draft; no CR reaches the page.
+#[tokio::test]
+async fn draft_op_rerender_has_crlf_normalised() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&hostile_definition()).await;
+    create(
+        &setup,
+        json!({"label": "x", "gear": [{"id": "r1-1", "name": "n", "story": "s"}]}),
+    )
+    .await
+    .unwrap();
+    let mut form = clicked(&sheet_page(&setup).await, "add-1");
+    set(&mut form, "row-1-0-1", "\r\nfirst\r\nsecond\rthird");
+    set(&mut form, "notes", "a\r\nb");
+    let (status, html) = setup.post("/private-sheets/1", form).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!html.contains('\r'), "no CR in the re-render");
+    let echoed = submitted_by(&html, None);
+    assert_eq!(get(&echoed, "row-1-0-1"), "\nfirst\nsecond\nthird");
+    assert_eq!(get(&echoed, "notes"), "a\nb");
+}

@@ -140,10 +140,10 @@ equality; `smoke_release.py --auth`; Chromium at both viewports; the fresh offli
 
 | Finding | Disposition | Regression |
 |---|---|---|
-| Sol (CR LF storage) | `campaigns::transport` normalises CR LF and lone CR to LF in every submitted value while decoding. This covers private runtime and native sheets and every campaign route. It runs before validation, so the 20,000-character limits count the normalised text. The legacy `/characters`, source-review and material-review forms use their own extractors with no shared decode point; they keep CR LF, recorded as a known limitation in the contract. Plan D7, the contract and this record now separate "textarea content is preserved" from "canonical storage is LF". | `submitted_values_have_crlf_and_cr_normalised_to_lf` (unit test); `browser_crlf_submission_is_stored_as_lf` covers an unchanged browser Save with CR LF (stored bytes identical), a raw `a\r\nb\rc` (stored `a\nb\nc`) and 20,000 CR LF pairs accepted as 20,000 characters. It failed first: `"\r\n\r\nscalar…"` was stored. |
+| Sol (CR LF storage) | *(Scope extended in the last review: every form decoder, not only campaigns.)* `campaigns::transport` normalises CR LF and lone CR to LF in every submitted value while decoding. This covers private runtime and native sheets and every campaign route. It runs before validation, so the 20,000-character limits count the normalised text. The legacy `/characters`, source-review and material-review forms use their own extractors with no shared decode point; they keep CR LF, recorded as a known limitation in the contract. Plan D7, the contract and this record now separate "textarea content is preserved" from "canonical storage is LF". | `submitted_values_have_crlf_and_cr_normalised_to_lf` (unit test); `browser_crlf_submission_is_stored_as_lf` covers an unchanged browser Save with CR LF (stored bytes identical), a raw `a\r\nb\rc` (stored `a\nb\nc`) and 20,000 CR LF pairs accepted as 20,000 characters. It failed first: `"\r\n\r\nscalar…"` was stored. |
 | Space Bunny F1 | `FormFields.feed` holds back a trailing CR until the next feed or `close()`. | `test_a_crlf_split_across_two_feeds_is_one_newline`; failed first: `'\nplain'` vs `'plain'` |
 | Space Bunny F2 | The smoke's source-review round trip stores the correction `"\nVerified fixture correction"` and reads it back. The positive-advice context posts the goal `"\n\nreach the gate"` and reads it back. A scraper test covers the material completion-rationale branch. | Smoke mutation: a release build of `mork_context.html` without the newline failed `smoke_release.py --auth` with "Context goal lost its leading newlines". `material_completion_rationale_keeps_leading_newlines` is a guard; a mutation removing that branch's newline fails it. |
-| F2 follow-up | The first gate pass on the final-review tree failed `smoke_release.py` ("Reviewed evidence persistence failed"): the post-restart search check still expected the correction without its new leading newline. It now accepts the optional newline like the first check, and the whole set was rerun. | the smoke itself |
+| F2 follow-up | The first gate pass on the final-review tree failed `smoke_release.py` ("Reviewed evidence persistence failed"): the post-restart search check still expected the correction without its new leading newline. The check was relaxed to accept an optional newline, and the whole set was rerun. *Correction (last review):* that relaxation did not match the first check. The only exact check was the pre-restart textarea assertion, so the post-restart check no longer verified the leading newline; it is strict again (see "Last review"). | the smoke itself |
 | Space Bunny F3 | The empty completion textarea also emits the sacrificial newline, for consistency. | — |
 | Space Bunny F4 | The contract's line-break paragraph lists every template that carries the newline. | — |
 | Space Bunny F5 | Noted; no change. | — |
@@ -162,6 +162,40 @@ Ruff; tools unittest 455 run (39 skipped); actionlint; `cargo about --fail`; `ca
 `dcae9cc95078b60625bb701ffab465534f14da995a5a7b1dad9fc8c79467847e`), checksums and binary
 equality; `smoke_release.py --auth`; Chromium at both viewports; the fresh offline rebuild
 (5 min 11 s); `lan_smoke.py`. All passed.
+
+## Last review (commit `e0deed0`)
+
+- Sonnet: **MERGE**, with nits: `FormFields.close()` is never called; the material
+  else-branch change is untested.
+- Sol: **MERGE AFTER FIXES**, two Minors:
+  1. The relaxed post-restart search check can hide the loss of the leading newline.
+  2. The LF-storage guarantee was stated more broadly than implemented: existing snapshots
+     are not migrated.
+- Space Bunny: **MERGE AFTER FIXES**:
+  - F1, **Major (accepted)**: the legacy routes count CR LF as two characters, so text with
+    many line breaks near a limit is refused although `maxlength` allowed it; three routes
+    were missing from the limitation.
+  - F2: existing CR LF data is rewritten on the next save.
+  - F3: the relaxed post-restart check, and the record's sentence about it.
+  - F4: `<pre>` elements drop a leading newline.
+  - F5: `close()` is not called.
+  - F6: the 5 MiB sentence had been absorbed into the limitation bullet.
+  - F7: no §17 row for the gate failure.
+  - F8: no draft-op normalisation test.
+  - F9: an extra allocation (not changed).
+
+| Finding | Disposition | Regression |
+|---|---|---|
+| Space Bunny F1 (Major) | Fixed rather than documented. `form_text::newlines_to_lf` is the shared helper, and `campaigns::transport` uses it. Serde `deserialize_with = form_text::lf` (or `lf_option`) applies it to every textarea-bearing value of the legacy extractors before validation: `CharacterInput.notes` (`/characters/{id}`), `CreateRequest.notes` (`/` creation), the six `SheetForm` textareas (`/characters/{id}/mork-borg`), `Context.goal` (`/characters/{id}/context`), `UnitReview` correction and rationale, `PageReview` rationale (source review), and material `Draft` correction and rationale plus `Completion` rationale. These are all eight textarea-bearing templates. The "known limitation" is removed; nothing remains. | `form_text::tests::crlf_and_cr_become_lf`. `material_crlf_at_the_limit_is_stored_as_lf_and_shown_intact`, `tests/source_review.rs::source_review_crlf_at_the_limit_is_accepted_and_stored_as_lf` and `tests/foundation.rs::legacy_editor_crlf_notes_at_the_limit_are_stored_as_lf` send `%0D%0A` bodies of exactly 20,000 typed characters (and 5,000 for rationales). All three failed first with 422 (want 303). They now assert LF storage. Mutation: dropping `lf` from the material correction fails the material test. |
+| Space Bunny F4 | A sacrificial LF after every stored-text `<pre class="evidence-text">`: material and source history, evidence search, retained canonical data, and formula expressions. The first gate pass then failed one M3 test (`formula_sheet_view_shows_derived_values_and_advisory_checks`), which asserted the raw `<pre>` markup; it now expects the sacrificial LF, and the whole set was rerun. | The same material and source tests read the history `<pre>` with scraper. Mutations removing the material and the source `<pre>` newline each fail their test. |
+| Sol 1, Space Bunny F3 | The smoke's search checks are strict: `corrected_evidence` requires the raw markup `<pre class="evidence-text">` + sacrificial LF + the stored `\nVerified fixture correction`, before and after the restart. The record sentence is corrected above. | `CorrectedEvidenceTests` (the newline-less shapes are refused); failed first with ImportError, as the helper is new. The smoke run on the final tree passed. |
+| Sol 2, Space Bunny F2 | The guarantee is scoped to new writes. Existing CR LF data is not migrated; its next save rewrites it to LF as a new revision, and history keeps the old revision. Stated in the contract, plan D7 and a release-scope migration note. | — |
+| F5 (Space Bunny, Sonnet) | `FormFields.reset()` discards a held-back CR, and `assert_fields` calls `close()`. | `FormFieldsLifecycleTests` (red without the override) |
+| F6 | The 5 MiB, lost re-render and page-bound sentences are their own bullets again. | — |
+| F7 | §17 has a row for the gate failure. | — |
+| F8 | — | `draft_op_rerender_has_crlf_normalised`: no CR in the re-render, echo is LF. A guard, since the transport already normalised. |
+| Sonnet nit (material else branch) | — | The empty completion textarea is asserted empty in `material_crlf_at_the_limit_is_stored_as_lf_and_shown_intact`. A guard: an empty textarea is empty with or without the sacrificial LF, so no mutation can distinguish it; the newline is kept for consistency (F3 of the final review). |
+| F9 | Not changed: bounded and correct. | — |
 
 ## Status
 

@@ -1273,6 +1273,11 @@ property autofocus test (F4); plan revision 3.2 (F5); the `outside_increasing` i
 | `test_a_crlf_split_across_two_feeds_is_one_newline` (final review F1) | executed red | reader without the held-back CR | `'\nplain'` vs `'plain'` |
 | smoke context goal and source correction newlines (final review F2) | mutation red | `mork_context.html` without the newline | "Context goal lost its leading newlines" |
 | `material_completion_rationale_keeps_leading_newlines` (final review F2) | guard; mutation | completion branch without the newline | failed |
+| final-review gate pass (tree `217cf06`) | gate failure | `smoke_release.py` post-restart search check expected no leading newline | "Reviewed evidence persistence failed"; first relaxed, then made strict in the last review |
+| `material_crlf_at_the_limit_…`, `source_review_crlf_at_the_limit_…`, `legacy_editor_crlf_notes_at_the_limit_…` (last review F1) | executed red | legacy extractors without `form_text::lf` | 422, want 303 |
+| history and search `<pre>` sacrificial LF (last review F4) | mutation | material or source `<pre>` without the newline | failed |
+| `CorrectedEvidenceTests`, `FormFieldsLifecycleTests` (last review) | executed red | smoke helper absent; no `reset()` override | ImportError; AttributeError |
+| `draft_op_rerender_has_crlf_normalised` (last review F8) | guard | — | — |
 | `TextareaNewlineTests` (smoke form reader) | executed red | `smoke_release.py` before the fix | `'\nplain'` vs `'plain'`; found by the first gate rerun (`smoke_auth` failed "Persisted field differs: equipment") |
 
 ## Appendix A: superseded custom-spec design (revision 1)

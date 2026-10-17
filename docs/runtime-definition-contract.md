@@ -359,26 +359,36 @@ editable; a per-property `editable: false` flag and an item catalogue are a late
   1 MiB (a larger draft could never be stored); otherwise it answers 422 with an alert:
   "Nothing was saved; copy large text before submitting." Each submitted string is echoed
   in full at most once (the submitted revision included); second visible contexts show a
-  64-character excerpt. Two separate guarantees cover line breaks:
-  - *Textarea content is preserved.* Every textarea in the application (private sheets,
-    list cells, native fields, and also the legacy editor, character creation, the MÖRK BORG
-    context page, source review and material review) emits a sacrificial newline after its
-    opening tag, because HTML parsing drops the first newline there; leading newlines show
-    and resubmit intact.
-  - *Canonical storage is LF.* A native form submission serialises textarea line breaks as
-    CR LF. The private-sheet and campaign transport (`campaigns::transport`) normalises CR LF
-    and lone CR to LF in every submitted value before validation (length limits count the
-    normalised text), so an unchanged browser Save stores byte-identical values and stored
-    text never contains CR. **Known limitation:** the legacy `/characters` editor and the
-    source- and material-review forms decode with their own form extractors, with no shared
-    decode point; they store browser-submitted line breaks as CR LF. The 5 MiB limit is enforced on the body
-  itself, with or without a `Content-Length`. The single runtime permit is taken before the body is
-  read, so buffering happens under it: at most one sheet POST (≤ 5 MiB) buffers at a time and
-  any other runtime request answers 503 meanwhile, an accepted risk alongside the 5 s
-  slow-upload hold. If edit rights are lost between a
-  rejected save and its re-render, the answer is a plain 403 and the draft is not re-rendered
-  (nothing is saved). The page-size bound covers the editor chrome and controls, not the
-  formula sections of a formula definition (see the M4 plan D7).
+  64-character excerpt.
+- **Line breaks.** Two separate guarantees apply:
+  - *Displayed and edited content is preserved.* Every textarea and every stored-text
+    `<pre class="evidence-text">` in the application emits a sacrificial newline after its
+    opening tag, because HTML parsing drops the first newline there. This covers private
+    sheets, list cells, native fields, the legacy editor, character creation, the MÖRK BORG
+    context page, source review, material review, review history and evidence search, so
+    leading newlines show and resubmit intact.
+  - *New writes are stored with LF.* A native form submission serialises textarea line breaks
+    as CR LF. Every form decoder normalises CR LF and lone CR to LF before validation, through
+    the shared `form_text::newlines_to_lf`:
+    - `campaigns::transport`, for every value of private runtime and native sheets and of the
+      other campaign routes;
+    - the textarea fields of the legacy `/characters` editor, character creation, the MÖRK
+      BORG sheet and context forms, source review (unit and page) and material review
+      (correction, rationale and completeness rationale).
+    Length limits therefore count what the user typed, matching each control's `maxlength`.
+    For values already stored with LF, an unchanged browser Save is byte-identical. This
+    applies to new writes only; existing data is not migrated. A private sheet or record
+    saved before this change may hold CR LF, and its next save rewrites it to LF as a new
+    revision, while history keeps the earlier revision unchanged.
+- **Large bodies and permits.** The 5 MiB limit is enforced on the body itself, with or
+  without a `Content-Length`. The single runtime permit is taken before the body is read, so
+  buffering happens under it: at most one sheet POST (≤ 5 MiB) buffers at a time, and any
+  other runtime request answers 503 meanwhile. This is an accepted risk, alongside the 5 s
+  slow-upload hold.
+- **Lost re-render.** If edit rights are lost between a rejected save and its re-render, the
+  answer is a plain 403 and the draft is not re-rendered; nothing is saved.
+- **Page-size bound.** It covers the editor chrome and controls, not the formula sections of
+  a formula definition (see the M4 plan D7).
 
 ## 6. Capability states and future task/history seams
 

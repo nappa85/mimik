@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from smoke_release import (
     FormFields,
+    corrected_evidence,
     registry_cli,
     require_secret_free,
     smoke_owner_development,
@@ -213,6 +214,29 @@ class TextareaNewlineTests(unittest.TestCase):
         self.assertEqual(
             parser.forms["/s"], {"a": "plain", "b": "plain", "c": "\nkept\n", "d": "\rref"}
         )
+
+
+class FormFieldsLifecycleTests(unittest.TestCase):
+    def test_reset_discards_a_held_back_cr(self):
+        parser = FormFields()
+        parser.feed('<form action="/s"><textarea name="a">x\r')
+        parser.reset()
+        self.assertEqual(parser.pending_cr, "", "reset() discards the held-back CR")
+        parser.feed('<form action="/s"><textarea name="a">\nplain</textarea></form>')
+        parser.close()
+        self.assertEqual(parser.forms["/s"], {"a": "plain"})
+
+
+class CorrectedEvidenceTests(unittest.TestCase):
+    def test_the_search_check_requires_the_stored_leading_newline(self):
+        self.assertTrue(
+            corrected_evidence('<pre class="evidence-text">\n\nVerified fixture correction</pre>')
+        )
+        for lost in (
+            '<pre class="evidence-text">\nVerified fixture correction</pre>',
+            '<pre class="evidence-text">Verified fixture correction</pre>',
+        ):
+            self.assertFalse(corrected_evidence(lost), lost)
 
 
 class VersionSelectionTests(unittest.TestCase):

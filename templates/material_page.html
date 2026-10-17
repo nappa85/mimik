@@ -66,7 +66,8 @@
 <ul>{% for event in page.events %}<li>
 <time data-local-time datetime="{{ event.created_at.replace(" ", "T") }}Z">{{ event.created_at }} UTC</time> · {{ event.actor }} · {{ event.state }} ·
 {% match event.unit_id %}{% when Some with (id) %}unit {{ id }}{% when None %}page completeness{% endmatch %} · previous revision {{ event.previous_revision }}
-<p>{{ event.rationale }}</p><pre class="evidence-text">{{ event.correction }}</pre></li>{% endfor %}</ul>
+<p>{{ event.rationale }}</p><pre class="evidence-text">
+{{ event.correction }}</pre></li>{% endfor %}</ul>
 {% if let Some(next) = history_next %}<a href="/admin/materials/pages/{{ page.id }}?units={{ units }}&amp;history={{ next }}">Next history</a>{% endif %} ·
 <a href="/admin/materials/pages/{{ page.id }}?units={{ units }}">First history</a>
 </section>

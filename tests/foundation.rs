@@ -296,3 +296,28 @@ async fn legacy_editor_notes_keep_leading_newlines() {
         "revision not echoed"
     );
 }
+
+/// Last review (Space Bunny F1): legacy editor notes submitted with CR LF line breaks are
+/// normalised to LF before validation, so 20,000 typed characters are accepted.
+#[tokio::test]
+async fn legacy_editor_crlf_notes_at_the_limit_are_stored_as_lf() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("test.sqlite3")).unwrap();
+    let router = app(store.clone());
+    store.create(input()).await.unwrap();
+    let notes = "n\n".repeat(10_000);
+    let body = serde_urlencoded::to_string([
+        ("name", "Elara"),
+        ("system_id", "dnd"),
+        ("edition", "Example edition"),
+        ("notes", &notes.replace('\n', "\r\n")),
+        ("revision", "1"),
+    ])
+    .unwrap();
+    let response = router
+        .oneshot(post("/characters/1", &body, false))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(store.get(1).await.unwrap().input.notes, notes);
+}

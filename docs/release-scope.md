@@ -140,6 +140,10 @@ advisory derived values and checks to runtime definition sheets. Scope by sheet 
   Budget, echo, escaping, precedence, writer and history cases are unit/connected-Router
   evidence. Not certified: item catalogues, per-property `editable: false`, value-level
   diffs or revert, and physical phone setups.
+- **Line-break migration note (M4):** every form now stores submitted line breaks as LF, and
+  length limits count typed characters. Text saved by earlier builds may hold CR LF; it is
+  not migrated in place, and its next save writes it as LF in a new revision, while history
+  keeps the earlier revision.
 
 No model, tool loop or provider evaluates or proposes formula changes; `formula::preview`
 is library-only. See `docs/runtime-definition-contract.md` and
