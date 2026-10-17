@@ -5,7 +5,9 @@ Last updated: 2026-10-16.
 ## Resume here
 
 - **Plans and decisions (2026-10-16, evening):**
-  - **M4 plan revision 3:** `794aad4` (adds Move up/down and the history change summary, both user-requested; rev 2 was `1b8baa8`) (Sol NO-GO and Sonnet GO-with-amendments, now resolved in place; third reviewer unavailable). Needs a short re-review.
+  - **ACTIVE — M4 implemented on branch `derived-formulas`** (worktree `mimik-wt/formula`, local commits `381f416`…`92cd03f`, rebased on master `f9d34e0`, not merged). Plan revision 3.1 (round-3 amendments RE3-1, RE3-2, N-A…N-H) in `381f416`; steps 1–8 one commit each; summary, measurements, gate evidence and the red→green table in `docs/derived-formulas-plan.md` §17.
+    - [x] Full gate set on the step-8 candidate (tree `aac0b3a`): fmt, strict Clippy, 442 tests, release formula tests, examples, Ruff/unittest, actionlint, about, audit, release build (+245,888 bytes vs master), package/vendor/release archives, checksums and binary equality, `smoke_release.py --auth`, Chromium at both viewports, fresh offline rebuild, LAN/proxy gate.
+    - [ ] Independent implementation review (Sol + Sonnet + third chain), then merge (main session). Flag for review: op buttons dropped D5's `#list-f` fragment because it blocks autofocus in Chromium (demonstrated).
     - User: M4 ships plain list editing. The `editable` flag and the item catalogue are deferred to a later milestone.
   - **Router plan revision 3:** `0b5fcc2`, selection procedure frozen (rev 2 was `c960f45`). The user authorised dev-only `SYS-R` (v3 plan §12, amendment §11.24a). CPU-first. Needs a short re-review.
   - **Pack revision 3: merged** `34bbd46`, review `docs/reviews/2026-10-16-tool-loop-pack-rev3.md`. The v2 differential tests now rescore against the v2 pack from git (`cef5565`).
