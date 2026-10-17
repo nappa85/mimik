@@ -40,7 +40,14 @@ impl<'de> Visitor<'de> for PairsSeed {
                     "duplicate key or form expansion limit",
                 ));
             }
-            // Every value: CR LF and CR to LF before any validation (`crate::form_text`).
+            // Every value, not only textarea-backed ones: CR LF and CR to LF before any
+            // validation (`crate::form_text`). The campaign forms carry no field whose CR is
+            // meaningful (hidden IDs are slugs, revisions decimal, CSRF tokens hex, options
+            // and states fixed words), so applying it uniformly is simpler than a per-key
+            // list. One consequence: a value with a trailing `%0D` (for example a hidden ID or
+            // state) is read as the same value with a trailing LF, which still fails its own
+            // grammar. A future byte-exact field routed through `Pairs` would need an
+            // exemption here.
             pairs.push((key, crate::form_text::newlines_to_lf(value)));
         }
         Ok(Pairs(pairs))

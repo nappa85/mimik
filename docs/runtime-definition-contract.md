@@ -367,14 +367,20 @@ editable; a per-property `editable: false` flag and an item catalogue are a late
     sheets, list cells, native fields, the legacy editor, character creation, the MÖRK BORG
     context page, source review, material review, review history and evidence search, so
     leading newlines show and resubmit intact.
-  - *New writes are stored with LF.* A native form submission serialises textarea line breaks
-    as CR LF. Every form decoder normalises CR LF and lone CR to LF before validation, through
-    the shared `form_text::newlines_to_lf`:
+  - *New writes of textarea-backed fields and campaign-transport values are stored with
+    LF.* A native form submission serialises textarea line breaks as CR LF. These decoders
+    normalise CR LF and lone CR to LF before validation, through the shared
+    `form_text::newlines_to_lf`:
     - `campaigns::transport`, for every value of private runtime and native sheets and of the
       other campaign routes;
     - the textarea fields of the legacy `/characters` editor, character creation, the MÖRK
       BORG sheet and context forms, source review (unit and page) and material review
       (correction, rationale and completeness rationale).
+    Single-line inputs of the legacy forms (for example `printed_label`, actor names, and
+    credentials on the account forms) are not normalised, and must not be. The campaign
+    transport normalises **every** value it decodes, because no campaign field's CR is
+    meaningful. A future byte-exact field routed through it would need an exemption. The serde
+    wrappers also apply if those structs are ever deserialised from a non-form source.
     Length limits therefore count what the user typed, matching each control's `maxlength`.
     For values already stored with LF, an unchanged browser Save is byte-identical. This
     applies to new writes only; existing data is not migrated. A private sheet or record

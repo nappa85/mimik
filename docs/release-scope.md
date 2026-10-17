@@ -140,8 +140,9 @@ advisory derived values and checks to runtime definition sheets. Scope by sheet 
   Budget, echo, escaping, precedence, writer and history cases are unit/connected-Router
   evidence. Not certified: item catalogues, per-property `editable: false`, value-level
   diffs or revert, and physical phone setups.
-- **Line-break migration note (M4):** every form now stores submitted line breaks as LF, and
-  length limits count typed characters. Text saved by earlier builds may hold CR LF; it is
+- **Line-break migration note (M4):** textarea-backed fields and every campaign-transport value
+  are now stored with LF, and their length limits count typed characters. Single-line inputs
+  such as printed labels and credentials are unchanged. Text saved by earlier builds may hold CR LF; it is
   not migrated in place, and its next save writes it as LF in a new revision, while history
   keeps the earlier revision.
 

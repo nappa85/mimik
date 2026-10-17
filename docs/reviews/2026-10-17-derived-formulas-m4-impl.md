@@ -257,3 +257,13 @@ and is pinned by a guard test. The fix commits go to a re-review of the fixes be
    - Any future byte-exact field routed through `Pairs` would need an exemption.
 4. **Note that the `lf` serde wrappers also affect non-form deserialisation** of those structs (Sonnet). There is no current use.
 5. **Nits:** the extra allocation in the `lf` helpers, and the remaining items in the reviewers' texts.
+
+## Follow-ups after the merge (branch `m4-followups`)
+
+| Item | Disposition | Regression |
+|---|---|---|
+| 1. CR LF tests for three decoders | `tests/form_newlines.rs` covers each decoder with a body at the limit using `%0D%0A` line breaks:<br>• all six `SheetForm` textareas at their limits (20,000 or 2,000 typed characters), stored with LF;<br>• `Context.goal` with 999 typed characters including a leading newline, echoed with LF;<br>• `CreateRequest.notes` with 20,000 typed characters, stored with LF.<br>It also covers a creation-page round trip: a rejected draft keeps its leading newlines and echoes no CR. | Mutation check: I removed each of the eight `deserialize_with` attributes in turn (six `SheetForm` fields, `goal`, creation `notes`). Each removal failed its test; the creation `notes` removal failed both creation tests. |
+| 2. Scope of the LF guarantee | The contract and `release-scope.md` now say "textarea-backed fields and campaign-transport values". Single-line legacy inputs (`printed_label`, actor names, credentials) are named as not normalised. | — |
+| 3. Why the transport normalises every value | Recorded in a code comment and in the contract. No campaign field's CR is meaningful: IDs are slugs, revisions are decimal, CSRF tokens are hex, and options and states are fixed words. A trailing `%0D` becomes a trailing LF, which still fails each field's own grammar. A future byte-exact field would need an exemption. | — |
+| 4. The `lf` wrappers outside forms | Recorded in the `form_text` doc comment and the contract. The wrappers apply wherever those structs are deserialised; there is no non-form use today. | — |
+| 5. Extra allocation (nit) | `newlines_to_lf` now makes one pass with one allocation, and none when the value holds no CR. | `form_text::tests::crlf_and_cr_become_lf`, extended with mixed CR runs and multibyte text. |
