@@ -406,8 +406,9 @@ added.
   types only). `--dry-run --dry-run-expected` runs the same replay through the full loop into a
   ledger. On the held-out split it is refused unless `--allow-heldout-gold-replay` is given
   (recorded in the header), because the ledger would then contain the gold outcomes.
-  `--validate-pack` still replays the held-out internally and prints only counts and failing
-  ids.
+  `--validate-pack` validates dev only by default; `--validate-pack --split heldout` needs the
+  same opt-in and then prints counts and pass/fail only (no ids). Any held-out `--dry-run` needs
+  the opt-in too.
 - **Prompt audit:** UTF-8 JSON bytes of system prompt, user context, history and tool schemas at
   each model call of the replay, with every prompt-growing flag on (`AUDIT_FLAGS`). The token
   figure is an estimate at 2.5 bytes per token (no tokenizer is bundled); exact counts need the
@@ -1268,3 +1269,12 @@ case hash on every held-out row; summaries and merges refuse anything else. Regi
 verdict case sets only (the full set and the frozen-order 100-case prefix, `verdict_case_sets`
 in the pin); a dry-run or gold-replay held-out ledger never yields a verdict; held-out progress
 is always quiet; held-out subsets carry ids only. Details: `docs/tool-loop-heldout-v3-freeze.md`.
+
+**Held-out ledger policy (gate review round 3, main-session decision).** Held-out ledgers
+contain per-case gold and correctness, because scoring needs them. They are written with mode
+0600 and read only through `--summarize`'s aggregate output. Agents and the main session never
+open, read or print held-out ledger rows; `--episodes-csv` (and any other per-case export)
+refuses held-out rows unless `--allow-heldout-gold-replay` is given, which the blind protocol
+never does. Verdicts are reproducible from the ledger alone: `bar_verdict` checks the recorded
+pin digest and case-set digests against code constants (`HELDOUT_PIN_SHA256`,
+`HELDOUT_VERDICT_CASE_SETS`), not the live pin file.

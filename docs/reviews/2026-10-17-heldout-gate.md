@@ -69,3 +69,44 @@ per-set `sha256` fields are left null: filling them needs the frozen ids, which 
 not read; the run-time rule check from the verified bytes holds without them.
 
 Handoff: re-review of round 2 before any A0 verdict run.
+
+## Round 3 (re-review of `7ed4887`)
+
+- **Sonnet:** CLEARED conditionally (F1–F4, plus a FormulaInfraError note).
+- **Sol:** NOT CLEARED (1–2 high, 3 medium).
+- **Space Bunny:** NOT CLEARED (R3-1 high, R3-2 medium, R3-3–R3-7).
+- **Main-session decisions:** fill the per-set digests (one authorised ids-only computation),
+  anchor them in code, and accept gold in held-out ledgers by policy.
+
+**Ids-only computation (authorised).** A scratch script read the frozen file only through
+`read_verified_heldout` (hash-checked bytes), took the case ids, and printed only:
+`full 165 4f5f0b031f6f2595ff3bae8f73fa6ce94b7787d30559bef63b4e04fab6bbfce1` and
+`h1-prefix-100 100 9d5768426c503c4581627af5172a690907fdcbdfaf8c03c7dcaa97cd3b24f4a5`, using
+the harness's own `case_set_sha256`. No id, case content or label was printed or stored.
+
+| ID | Sev. | Finding | Fix | Regression test |
+|---|---|---|---|---|
+| Sol 1, Sonnet F2 | High | Ledger and verdict checks accepted a self-consistent unregistered set (any ids as `full`) | Digests in the pin and as code constants (`HELDOUT_VERDICT_CASE_SETS`, with sizes); `load_ledgers` requires name, digest, size and `case_order` re-hash to match the constant, and every row's set equals the header's; `bar_verdict` requires the same and `unique_cases == size`; run time (harness, queue) requires the computed digest to equal the pinned one | `test_ledger_with_a_self_consistent_unregistered_set_is_refused`, `test_committed_case_set_digests_are_code_anchored` |
+| Space Bunny R3-1 | High | `verdict_case_sets` were shape-checked only | `load_heldout_pin` refuses sets other than the code constant and pin bytes other than `HELDOUT_PIN_SHA256` | `test_editing_only_the_verdict_case_sets_is_refused` |
+| Space Bunny R3-2 | Medium | `bar_verdict` re-read the live pin | Rows and summaries carry `heldout_pin_sha256`; the verdict checks it and the set digests against code constants only, with no pin file needed | `test_bar_uses_the_ledger_recorded_pin_not_the_live_file` |
+| Sol 2 | High | Held-out ledgers carry per-case gold; a plain held-out `--dry-run` wrote such rows | Accepted by policy (scoring needs gold): held-out ledgers are mode 0600 and read only through `--summarize`'s aggregate output (freeze record, benchmark doc, TODO). Held-out `--dry-run` requires `--allow-heldout-gold-replay`. The interleaved `case_order` in the header is the same gold-bearing artefact and falls under the same policy | `test_heldout_dry_run_needs_the_opt_in`, `test_heldout_ledgers_are_private`, `test_summarize_output_is_aggregate_only` (guard) |
+| Sol 3, Sonnet F1, Space Bunny R3-5 | Medium | `--summarize --episodes-csv` exported per-case gold | Refused for held-out rows without `--allow-heldout-gold-replay` | `test_episodes_csv_refuses_heldout_rows_without_the_opt_in` |
+| Space Bunny R3-3 | Low | No test for the counts-only unknown-id branch | Test added (the branch already counted; the test is a guard) | `test_unknown_heldout_case_ids_are_counted_not_echoed` |
+| Space Bunny R3-4 | Low | Doc said validation prints failing ids | Sentence fixed | — |
+| Space Bunny R3-6 | Info | `console_safe` missed `h3-001`-style ids | Pattern widened to letters-with-digits prefixes and 3+ digit numbers | `test_every_case_id_shape_is_masked` |
+| Space Bunny R3-7 | Info | A `PackError` from episode setup could name a case | Held-out runs re-raise it generically | — (unreachable today; covered by load-time validation) |
+| Sonnet F3 | Low | `run_aborted` rows carry `case_id` | Ledger only, covered by the ledger policy. **Correction:** round 2 of this record said "run_aborted/stderr carry reasons only"; the stderr line carries the reason only, the `run_aborted` *ledger row* carries the case id | — |
+| Sonnet F4 | Low | `QUIET` echoed unsanitised into provenance | `QUIET` must be 0 or 1 (else exit 2); the echo is a fixed string | covered by the runner tests |
+| Sonnet (note) | Low | `FormulaInfraError` `stderr_tail` could echo held-out formulas | Held-out runs print a generic message without the error text or tail | `test_formula_faults_on_heldout_print_no_stderr_tail` |
+
+Red runs (round 3): all 11 new tests failed against `7ed4887`. Most of the failures were
+attribute errors on the new constants; the behavioural regressions are
+`test_editing_only_the_verdict_case_sets_is_refused` and `test_every_case_id_shape_is_masked`.
+The aggregate-summary and unknown-id tests are guards for behaviour that was already correct.
+
+Verification (round 3): gate in `mimik-toolloop-py:20261015` (`--cpus 2`): ruff clean,
+**715 tests, 11 skipped, 1 error** (the environmental `test_package`). ShellCheck clean on the
+runner. The committed pin loads under its anchors. The frozen file was touched only by the
+authorised ids-only script and by `sha256sum -c --status` (which matches).
+
+Handoff: re-review of round 3 before any A0 verdict run.

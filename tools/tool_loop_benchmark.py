@@ -2244,6 +2244,9 @@ def summarize(rows: list[dict]) -> list[dict]:
                 {json.dumps(r.get("heldout_case_set"), sort_keys=True) for r in group}
             )
             summary["case_set_sha256"] = case_set_sha256(cases)
+            summary["heldout_pin_sha256"] = sorted(
+                {str(r.get("heldout_pin_sha256")) for r in group}
+            )
             for flag in ("dry_run", "dry_run_expected", "allow_heldout_gold_replay"):
                 summary[flag] = any(r.get(flag, True) for r in group)  # unknown counts as set
         if arm_type:  # SYS-R system arm (absent for model arms: C0 summaries unchanged)
@@ -2268,17 +2271,18 @@ def heldout_refusals(summary) -> list:
     flags = ("dry_run", "dry_run_expected", "allow_heldout_gold_replay")
     if any(summary.get(f, True) for f in flags):
         reasons.append("a dry run or gold replay ledger is never a verdict")
+    if summary.get("heldout_pin_sha256") != [HELDOUT_PIN_SHA256]:
+        reasons.append("the ledger was not made under the anchored pin (heldout_pin_sha256)")
+    # Code constants only: the verdict is reproducible from its own ledger (R3-2).
     sets = summary.get("heldout_case_set") or []
     entry = json.loads(sets[0]) if len(sets) == 1 else None
-    try:
-        registered = {s["name"]: s for s in load_heldout_pin(HELDOUT_PIN)["verdict_case_sets"]}
-    except PackError:
-        registered = {}
+    registered = {s["name"]: s for s in HELDOUT_VERDICT_CASE_SETS}
+    pinned = registered.get(entry.get("name")) if isinstance(entry, dict) else None
     if (
-        not isinstance(entry, dict)
-        or entry.get("name") not in registered
-        or entry.get("sha256") != summary.get("case_set_sha256")
-        or registered[entry["name"]].get("sha256") not in (None, entry.get("sha256"))
+        pinned is None
+        or entry.get("sha256") != pinned["sha256"]
+        or summary.get("case_set_sha256") != pinned["sha256"]
+        or summary.get("unique_cases") != pinned["size"]
     ):
         reasons.append("the case set is not a registered verdict case set (pin)")
     return reasons
@@ -2842,6 +2846,13 @@ HELDOUT_PIN = Path(__file__).resolve().parent / "heldout-v3-pin.json"
 # The code anchor: the pin JSON must name exactly this hash, so editing the JSON alone cannot
 # move the frozen set (review of 0b9742d). Tests patch both constants; nothing else can.
 HELDOUT_FROZEN_SHA256 = "6f11af05f27347ea31a50996b0e6b6eea4ccbfa3254a085cd7699d4d8ec68974"
+# The registered verdict case sets and the pin file itself are anchored too (gate review
+# round 3: R3-1, R3-2). The per-set digests are sha256 of the sorted ids, computed once by the
+# authorised ids-only step from the verified frozen bytes (never ids or labels printed).
+# fmt: off
+HELDOUT_VERDICT_CASE_SETS = [{"name": "full", "rule": "all", "size": 165, "sha256": "4f5f0b031f6f2595ff3bae8f73fa6ce94b7787d30559bef63b4e04fab6bbfce1"}, {"name": "h1-prefix-100", "rule": "frozen_order_prefix", "size": 100, "sha256": "9d5768426c503c4581627af5172a690907fdcbdfaf8c03c7dcaa97cd3b24f4a5"}]  # noqa: E501
+HELDOUT_PIN_SHA256 = "13a17c6877d7ea642efe7711ceb701e518f1a3bde972957856e6475ab802e8f5"
+# fmt: on
 _PIN_KEYS = {
     "encoding",
     "split",
@@ -2883,18 +2894,19 @@ def load_heldout_pin(path) -> dict:
             not isinstance(s, dict)
             or set(s) - {"name", "rule", "size", "sha256"}
             or s.get("rule") not in CASE_SET_RULES
-            or (
-                s["rule"] == "frozen_order_prefix"
-                and not (is_int(s.get("size")) and 1 <= s["size"] <= pin["cases"])
-            )
-            or (s["rule"] == "all" and "size" in s)
-            or (s.get("sha256") is not None and not re.fullmatch(r"[0-9a-f]{64}", str(s["sha256"])))
+            or not (is_int(s.get("size")) and 1 <= s["size"] <= pin["cases"])
+            or (s["rule"] == "all" and s["size"] != pin["cases"])
+            or not re.fullmatch(r"[0-9a-f]{64}", str(s.get("sha256")))
             for s in sets
         )
     ):
         raise PackError("held-out pin: verdict_case_sets must name all / frozen_order_prefix sets")
     if pin["sha256"] != HELDOUT_FROZEN_SHA256:
         raise PackError("held-out pin: sha256 is not the code anchor HELDOUT_FROZEN_SHA256")
+    if sets != HELDOUT_VERDICT_CASE_SETS:
+        raise PackError("held-out pin: verdict_case_sets are not the code anchor")
+    if file_digest(Path(path)) != HELDOUT_PIN_SHA256:
+        raise PackError("held-out pin: the pin file is not the code anchor HELDOUT_PIN_SHA256")
     pin["pin_sha256"] = file_digest(Path(path))
     return pin
 
@@ -2937,7 +2949,7 @@ def registered_case_set(frozen_ids, chosen_ids, pin) -> dict:
         members = frozen_ids if entry["rule"] == "all" else frozen_ids[: entry["size"]]
         if chosen == set(members) and len(chosen) == len(chosen_ids):
             sha = case_set_sha256(members)
-            if entry.get("sha256") not in (None, sha):
+            if entry["sha256"] != sha or len(members) != entry["size"]:
                 raise PackError(f"held-out case set {entry['name']}: hash differs from the pin")
             return {"name": entry["name"], "sha256": sha}
     raise PackError("held-out case set is not a registered verdict case set (pin)")
@@ -3177,6 +3189,7 @@ def run(args, model, out, clock=time.monotonic, pack=None, wall=time.time) -> li
         header["heldout_case_set"] = case_set
         heldout_rows = {
             "heldout_cases_sha256": pack.heldout_source["sha256"],
+            "heldout_pin_sha256": args.heldout_pin_doc["pin_sha256"],
             "heldout_case_set": case_set,
             "dry_run": bool(args.dry_run),
             "dry_run_expected": bool(getattr(args, "dry_run_expected", False)),
@@ -3247,6 +3260,10 @@ def run(args, model, out, clock=time.monotonic, pack=None, wall=time.time) -> li
                     )
             except FormulaInfraError as error:
                 abort("formula engine infrastructure fault", error, case["id"])
+                raise
+            except PackError:
+                if args.split == "heldout":  # no case id or field (gate review R3-7)
+                    raise PackError("held-out episode setup failed") from None
                 raise
             row = dict(base, **episode)
         if decision is not None:
@@ -3487,8 +3504,20 @@ def load_ledgers(paths) -> list[dict]:
                     f"{path}: held-out rows not from the frozen case file; refusing it"
                 )
             case_set = header.get("heldout_case_set") or {}
-            if case_set.get("sha256") != case_set_sha256(header.get("case_order") or []):
-                raise SystemExit(f"{path}: held-out case set does not match its order; refusing it")
+            order = header.get("case_order") or []
+            pinned = {s["name"]: s for s in HELDOUT_VERDICT_CASE_SETS}.get(case_set.get("name"))
+            if (
+                pinned is None
+                or case_set.get("sha256") != pinned["sha256"]
+                or case_set_sha256(order) != pinned["sha256"]
+                or len(set(order)) != pinned["size"]
+                or any(r.get("heldout_case_set") != case_set for r in episodes)
+            ):
+                raise SystemExit(f"{path}: held-out case set is not a registered set; refusing it")
+            if header.get("heldout_pin_sha256") != HELDOUT_PIN_SHA256:
+                raise SystemExit(
+                    f"{path}: held-out ledger not made under the anchored pin; refusing it"
+                )
         system = header.get("arm_type") == "system"
         if header.get("arm_type") not in (None, "system"):
             raise SystemExit(f"{path}: unknown arm_type {header.get('arm_type')!r}; refusing it")
@@ -3701,11 +3730,18 @@ def parse_server_config(text):
     return doc
 
 
+HELDOUT_FAULT = "aborted: formula engine infrastructure fault (details withheld on held-out)"
+
+
 def main(argv=None):
     try:
         return _main(argv)
     except FormulaInfraError as error:
-        print(f"aborted: {error}\n{error.stderr_tail}", file=sys.stderr)
+        argv_list = list(sys.argv[1:] if argv is None else argv)
+        if "heldout" in argv_list:  # no formula text or stderr tail from held-out cases
+            print(HELDOUT_FAULT, file=sys.stderr)
+        else:
+            print(f"aborted: {error}\n{error.stderr_tail}", file=sys.stderr)
         return 3
 
 
@@ -3715,6 +3751,15 @@ def _main(argv=None):
         episodes = [r for r in load_ledgers(args.summarize) if r.get("event") == "episode"]
         summaries = summarize(episodes)
         if args.episodes_csv:
+            # A per-case export of held-out rows is a gold table (gate review round 3).
+            if (
+                any(r.get("split") == "heldout" for r in episodes)
+                and not args.allow_heldout_gold_replay
+            ):
+                raise SystemExit(
+                    "--episodes-csv on held-out ledgers writes per-case gold; pass "
+                    "--allow-heldout-gold-replay to do it deliberately"
+                )
             write_episode_csv(episodes, args.episodes_csv)
         print(json.dumps(summaries, indent=2, ensure_ascii=False))
         for summary in summaries:
@@ -3798,6 +3843,11 @@ def _main(argv=None):
             "--dry-run-expected on heldout writes the gold outcomes into the ledger; "
             "pass --allow-heldout-gold-replay to do it deliberately"
         )
+    if args.dry_run and args.split == "heldout" and not args.allow_heldout_gold_replay:
+        raise SystemExit(  # gate review round 3 (Sol 2): a dry run writes gold-bearing rows
+            "--dry-run on heldout writes gold-bearing rows; pass --allow-heldout-gold-replay "
+            "to do it deliberately"
+        )
     if not 1 <= args.max_turns <= MAX_TURNS_CEILING:
         raise SystemExit(f"--max-turns must be 1..{MAX_TURNS_CEILING}")
     if args.ctx is not None and args.ctx < 1:
@@ -3841,10 +3891,12 @@ def _main(argv=None):
                 )
             except PackError as error:
                 raise SystemExit(f"held-out gate: {error}") from None
-        with args.output.open("x", encoding="utf-8") as out:
+        mode = 0o600 if args.split == "heldout" else 0o666  # held-out ledgers are private
+        fd = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
             summaries = run(args, model, out, pack=pack)
     except FormulaInfraError as error:
-        print(f"aborted: {error}", file=sys.stderr)
+        print(HELDOUT_FAULT if args.split == "heldout" else f"aborted: {error}", file=sys.stderr)
         return 3
     except RunAborted as error:
         print(f"aborted: {error}", file=sys.stderr)

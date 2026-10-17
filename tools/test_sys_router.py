@@ -363,10 +363,16 @@ class SysRouterTests(unittest.TestCase):
                 dict(
                     model,
                     split="heldout",
-                    unique_cases=200,
+                    unique_cases=tl.HELDOUT_VERDICT_CASE_SETS[0]["size"],
                     heldout_cases_sha256=[tl.HELDOUT_FROZEN_SHA256],
-                    heldout_case_set=[json.dumps({"name": "full", "sha256": "x"}, sort_keys=True)],
-                    case_set_sha256="x",
+                    heldout_case_set=[
+                        json.dumps(
+                            {"name": "full", "sha256": tl.HELDOUT_VERDICT_CASE_SETS[0]["sha256"]},
+                            sort_keys=True,
+                        )
+                    ],
+                    case_set_sha256=tl.HELDOUT_VERDICT_CASE_SETS[0]["sha256"],
+                    heldout_pin_sha256=[tl.HELDOUT_PIN_SHA256],
                     dry_run=False,
                     dry_run_expected=False,
                     allow_heldout_gold_replay=False,

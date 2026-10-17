@@ -50,6 +50,19 @@ Hardening after review (2026-10-17, `docs/reviews/2026-10-17-heldout-gate.md`):
     for registered prefix sizes only.
   - **Paths:** whitespace in `HELDOUT_CASES` or its resolved path is refused; `fail()` never
     adds provenance lines.
+- **Round 3 (re-review of `7ed4887`):**
+  - **Per-set digests filled** by the one authorised ids-only computation (it read the file
+    through `read_verified_heldout` and printed only digests and counts): `full` 165 cases
+    `4f5f0b03…bfce1`, `h1-prefix-100` 100 cases `9d576842…24f4a5`. They are in the pin and, with
+    the pin file's own digest (`HELDOUT_PIN_SHA256`), code constants beside
+    `HELDOUT_FROZEN_SHA256`; `load_heldout_pin` refuses any other `verdict_case_sets` or pin
+    bytes.
+  - **Ledgers and verdicts** check the recorded set name, digest, size and `case_order`
+    re-hash against those constants; the verdict needs only the ledger and the code.
+  - **Ledger policy:** held-out ledgers hold per-case gold by necessity (scoring); mode 0600;
+    read only through `--summarize`'s aggregate output; nobody reads or prints their rows.
+    `--episodes-csv` and held-out `--dry-run` need `--allow-heldout-gold-replay`, which the
+    blind protocol never passes.
 - **Limitation (tamper evidence):** the hash chain is self-asserted. Anyone who can write a
   results directory can write the anchor into a fabricated ledger; the gate assumes no write
   access to results by untrusted parties and is not tamper-evident.

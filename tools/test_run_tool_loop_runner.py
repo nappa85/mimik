@@ -11,6 +11,7 @@ case statement) and the review regressions against 7bb41d6.
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -142,7 +143,8 @@ if args[0] == "run":
         save()
         print("beef")
         sys.exit(0)
-    proc = subprocess.run([sys.executable] + mapped[1:] + ["--dry-run"], capture_output=True, text=True)
+    extra = ["--dry-run"] + (["--allow-heldout-gold-replay"] if "heldout" in mapped else [])
+    proc = subprocess.run([sys.executable] + mapped[1:] + extra, capture_output=True, text=True)
     oom = bool(env.get("FAKE_MAIN_OOM")) and phase == "main"
     state["c"][name] = {"status": "exited", "rc": 137 if oom else proc.returncode, "oom": oom,
                         "out": proc.stdout, "err": proc.stderr, "label": "v3", "run": labels["mimik.toolloop.run"]}
@@ -397,7 +399,14 @@ class RunnerTests(unittest.TestCase):
             "outcomes": {case["expected"]["outcome"]: 1},
             "default_path": str(path),
             "freeze_record": "docs/tool-loop-heldout-v3-freeze.md",
-            "verdict_case_sets": [{"name": "full", "rule": "all"}],
+            "verdict_case_sets": [
+                {
+                    "name": "full",
+                    "rule": "all",
+                    "size": 1,
+                    "sha256": hashlib.sha256(json.dumps(["h3-test-001"]).encode()).hexdigest(),
+                }
+            ],
         }
         (self.repo / "tools" / "heldout-v3-pin.json").write_text(json.dumps(pin))
         # Test-only: move the code anchor in the copied repo (production cannot: review of
@@ -406,7 +415,21 @@ class RunnerTests(unittest.TestCase):
         text = harness.read_text()
         anchor = 'HELDOUT_FROZEN_SHA256 = "6f11af05f27347ea31a50996b0e6b6eea4ccbfa3254a085cd7699d4d8ec68974"'
         self.assertIn(anchor, text)
-        harness.write_text(text.replace(anchor, f'HELDOUT_FROZEN_SHA256 = "{pin["sha256"]}"'))
+        text = text.replace(anchor, f'HELDOUT_FROZEN_SHA256 = "{pin["sha256"]}"')
+        pin_sha = hashlib.sha256(
+            (self.repo / "tools" / "heldout-v3-pin.json").read_bytes()
+        ).hexdigest()
+        text = re.sub(
+            r'HELDOUT_PIN_SHA256 = "[0-9a-f]{64}"', f'HELDOUT_PIN_SHA256 = "{pin_sha}"', text
+        )
+        text = re.sub(
+            r"HELDOUT_VERDICT_CASE_SETS = \[.*\]  # noqa: E501",
+            "HELDOUT_VERDICT_CASE_SETS = "
+            + json.dumps(pin["verdict_case_sets"])
+            + "  # noqa: E501",
+            text,
+        )
+        harness.write_text(text)
         git = [
             "git",
             "-c",

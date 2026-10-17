@@ -1633,6 +1633,14 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(values["harness_file_git_status"], "clean")
 
 
+class ConsoleMaskTests(unittest.TestCase):
+    def test_every_case_id_shape_is_masked(self):
+        """Gate review R3-6: held-out ids like h3-001 were not masked on the console."""
+        text = rq.console_safe("h3-001, h3-1001, dev-005, ho-141 and h3-s-002")
+        for raw in ("h3-001", "h3-1001", "dev-005", "ho-141", "h3-s-002"):
+            self.assertNotIn(raw, text)
+
+
 class HeldoutGateQueueTests(Harness):
     """§11 item 8 in the queue: a held-out arm runs only the pinned case file."""
 
@@ -1656,9 +1664,23 @@ class HeldoutGateQueueTests(Harness):
             "outcomes": outcomes,
             "default_path": str(path),
             "freeze_record": "docs/tool-loop-heldout-v3-freeze.md",
-            "verdict_case_sets": [{"name": "full", "rule": "all"}]
+            "verdict_case_sets": [
+                {
+                    "name": "full",
+                    "rule": "all",
+                    "size": n,
+                    "sha256": tl.case_set_sha256([c["id"] for c in cases]),
+                }
+            ]
             + (
-                [{"name": "h1-prefix-100", "rule": "frozen_order_prefix", "size": 100}]
+                [
+                    {
+                        "name": "h1-prefix-100",
+                        "rule": "frozen_order_prefix",
+                        "size": 100,
+                        "sha256": tl.case_set_sha256([c["id"] for c in cases[:100]]),
+                    }
+                ]
                 if n >= 100
                 else []
             ),
@@ -1670,6 +1692,10 @@ class HeldoutGateQueueTests(Harness):
             path.write_text(path.read_text() + " ")
         self.enterContext(unittest.mock.patch.object(tl, "HELDOUT_PIN", pin_path))
         self.enterContext(unittest.mock.patch.object(tl, "HELDOUT_FROZEN_SHA256", pin["sha256"]))
+        self.enterContext(
+            unittest.mock.patch.object(tl, "HELDOUT_VERDICT_CASE_SETS", pin["verdict_case_sets"])
+        )
+        self.enterContext(unittest.mock.patch.object(tl, "HELDOUT_PIN_SHA256", pin["pin_sha256"]))
         return path, pin, cases
 
     def test_heldout_arm_with_a_mismatching_file_is_refused(self):

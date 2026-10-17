@@ -1455,12 +1455,14 @@ class ReviewCaseCoverageTests(unittest.TestCase):
     def test_incomplete_seed_coverage_fails_the_bar(self):
         rows = [scored(f"c{i}", "answer", correct=True, seed=17) for i in range(110)]
         rows += [scored(f"c{i}", "answer", correct=True, seed=29) for i in range(109)]
-        from test_tool_loop_benchmark import live_heldout_fields
+        from test_tool_loop_benchmark import fixture_pin_patches, live_heldout_fields
 
-        fields = live_heldout_fields(sorted({r["case_id"] for r in rows}))
+        fields = live_heldout_fields([f"c{i}" for i in range(110)])
         for row in rows:
             row["split"] = "heldout"
             row.update(fields)
+        for patcher in fixture_pin_patches(110):
+            self.enterContext(patcher)
         (s,) = tl.summarize(rows)
         reasons = s["bar"]["variants"]["all_cases"]["reasons"]
         self.assertEqual(s["bar"]["variants"]["all_cases"]["verdict"], "FAIL")

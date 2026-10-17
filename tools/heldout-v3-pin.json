@@ -17,12 +17,15 @@
   "verdict_case_sets": [
     {
       "name": "full",
-      "rule": "all"
+      "rule": "all",
+      "size": 165,
+      "sha256": "4f5f0b031f6f2595ff3bae8f73fa6ce94b7787d30559bef63b4e04fab6bbfce1"
     },
     {
       "name": "h1-prefix-100",
       "rule": "frozen_order_prefix",
-      "size": 100
+      "size": 100,
+      "sha256": "9d5768426c503c4581627af5172a690907fdcbdfaf8c03c7dcaa97cd3b24f4a5"
     }
   ]
 }

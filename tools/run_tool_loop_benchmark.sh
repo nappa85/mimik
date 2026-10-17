@@ -169,6 +169,7 @@ for v in request_timeout temperature top_p; do
   [[ ${!v} =~ ^[0-9]+([.][0-9]+)?$ ]] || die 2 "$v must be a non-negative number"
 done
 case $thinking in off|on|default) ;; *) die 2 "THINKING must be off, on or default" ;; esac
+case ${QUIET:-0} in 0|1) ;; *) die 2 "QUIET must be 0 or 1" ;; esac  # never echoed raw (round 3)
 flags=()
 for spec in NUDGE:nudge:1 TURNS_REMAINING:turns-remaining:0 SEARCH_NOTES:search-notes:0 \
   SANITIZE_ECHO:sanitize-echo:1 PENDING_CURRENT:pending-current:1 UNTRUSTED:untrusted-marking:0; do
@@ -508,7 +509,7 @@ timeout --foreground -k 5 30 docker exec "$SRV" curl -sf http://127.0.0.1:8080/p
 quiet=()
 [ "${QUIET:-0}" = 1 ] && quiet=(--quiet-progress)
 if [ "$hsplit" = heldout ]; then  # held-out progress is never per case (round 2, Sonnet M1)
-  [ "${QUIET:-1}" = 1 ] || echo "quiet_forced=heldout (QUIET=${QUIET} ignored)" >> "$prov"
+  [ "${QUIET:-1}" = 1 ] || echo "quiet_forced=heldout (QUIET=0 ignored)" >> "$prov"
   quiet=(--quiet-progress)
 fi
 common=(python3 /tools/tool_loop_benchmark.py --pack /pack --endpoint http://server:8080

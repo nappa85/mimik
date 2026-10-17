@@ -619,7 +619,9 @@ class NoWatchdog:
         return False
 
 
-CASE_ID_RE = re.compile(r"\b[a-z]{2,8}-\d{3}\b")
+# Any id shape: letters (optionally with digits, e.g. h3) and a numeric part of 3+ digits
+# (gate review R3-6: h3-001 was not masked by the old letters-only prefix).
+CASE_ID_RE = re.compile(r"\b[a-z][a-z0-9]{0,7}(?:-[a-z0-9]{1,8})?-\d{3,}\b")
 
 
 def console_safe(text) -> str:
