@@ -155,7 +155,8 @@ class TagTests(Base):
                 self.assertEqual(pack.cases["heldout"], [])
                 argv = ["--pack", str(root), "--split", "heldout", "--model-label", "m"]
                 args = tl.build_parser().parse_args([*argv, "--dry-run", "--output", "x"])
-                with self.assertRaisesRegex(tl.PackError, "no heldout cases"):
+                # §11 item 8: an ungated held-out pack never runs (before: "no heldout cases").
+                with self.assertRaisesRegex(tl.PackError, "hash gate"):
                     tl.run(args, tl.ScriptedModel(), io.StringIO(), pack=pack)
             finally:
                 pack.close()
@@ -1610,8 +1611,19 @@ class ReviewCliTests(CliMixin, Base):
             with self.assertRaises(SystemExit) as raised:
                 self.dry_run(tmp, "--split", "heldout", "--dry-run-expected")
             self.assertIn("--allow-heldout-gold-replay", str(raised.exception))
+            from test_heldout_gate import synthetic  # a gated synthetic file (§11 item 8)
+
+            path, pin_path, _ = synthetic(tmp)
             code, rows = self.dry_run(
-                tmp, "--split", "heldout", "--dry-run-expected", "--allow-heldout-gold-replay"
+                tmp,
+                "--split",
+                "heldout",
+                "--dry-run-expected",
+                "--allow-heldout-gold-replay",
+                "--heldout-cases",
+                str(path),
+                "--heldout-pin",
+                str(pin_path),
             )
         self.assertEqual(code, 0)
         self.assertTrue(rows[0]["allow_heldout_gold_replay"])

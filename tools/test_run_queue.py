@@ -1630,5 +1630,68 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(values["harness_file_git_status"], "clean")
 
 
+class HeldoutGateQueueTests(Harness):
+    """§11 item 8 in the queue: a held-out arm runs only the pinned case file."""
+
+    START = at(2026, 10, SAT, 10, 0)
+
+    def pinned(self, tamper=False):
+        import hashlib
+
+        dev = json.loads((TOOLS.parent / "examples/tool-loop-demo/cases-dev.json").read_text())[
+            "cases"
+        ][0]
+        path = self.root / "frozen-cases-heldout.json"
+        path.write_text(
+            json.dumps({"encoding": 1, "split": "heldout", "cases": [dict(dev, id="h3-q-001")]})
+        )
+        pin = {
+            "encoding": 1,
+            "split": "heldout",
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "cases": 1,
+            "outcomes": {dev["expected"]["outcome"]: 1},
+            "default_path": str(path),
+            "freeze_record": "docs/tool-loop-heldout-v3-freeze.md",
+        }
+        pin_path = self.root / "pin.json"
+        pin_path.write_text(json.dumps(pin))
+        if tamper:
+            path.write_text(path.read_text() + " ")
+        return path, pin_path, pin
+
+    def test_heldout_arm_with_a_mismatching_file_is_refused(self):
+        path, pin_path, _ = self.pinned(tamper=True)
+        q = self.make(
+            queue_doc([arm("h", split="heldout", heldout_cases=str(path))]),
+            self.START,
+            heldout_pin=pin_path,
+        )
+        manifest = q.run()
+        self.assertEqual(manifest["arms"][0]["state"], "refused")
+        self.assertIn("held-out", manifest["arms"][0]["reason"])
+        self.assertEqual(self.launcher.launches, [])
+
+    def test_heldout_arm_passes_the_file_and_expects_its_hash(self):
+        path, pin_path, pin = self.pinned()
+        q = self.make(
+            queue_doc([arm("h", split="heldout", heldout_cases=str(path))]),
+            self.START,
+            heldout_pin=pin_path,
+        )
+        a = q.arms[0]
+        env = q.env_for(a, self.root, rq.window_end(self.START))
+        self.assertEqual(env["HELDOUT_CASES"], str(path))
+        plan = q.plan(a, env)
+        self.assertEqual(plan["header"]["heldout_cases_sha256"], pin["sha256"])
+        self.assertEqual(plan["jobs"], {("h3-q-001", 17)})
+
+    def test_heldout_cases_only_on_heldout_arms(self):
+        path = self.root / "q.json"
+        path.write_text(json.dumps(queue_doc([arm("d", split="dev", heldout_cases="/x.json")])))
+        with self.assertRaises(rq.QueueError):
+            rq.load_queue(path, REGISTRY)
+
+
 if __name__ == "__main__":
     unittest.main()

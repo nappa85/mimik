@@ -20,7 +20,7 @@ Last updated: 2026-10-16.
     - Not run: router inference, the router real-docker smoke (would collide with the running queue's owned names).
   - **Pack revision 3: merged** `34bbd46`, review `docs/reviews/2026-10-16-tool-loop-pack-rev3.md`. The v2 differential tests now rescore against the v2 pack from git (`cef5565`).
   - **Blind held-out FROZEN:** 165 cases, 78 at-risk, sha256 `6f11af05…`, stored outside the repo (`docs/tool-loop-heldout-v3-freeze.md`).
-    - Before A0: implement the held-out hash gate in the runner and queue (§11 item 8).
+    - [x] Held-out hash gate (§11 item 8), branch `harness-v3`, 2026-10-17: one committed pin `tools/heldout-v3-pin.json` (sha256 `6f11af05…`, 165 cases, outcome counts); harness `--heldout-cases` (default the frozen path), runner `HELDOUT_CASES` mounted read-only, queue `heldout_cases`; refused on a missing file, a hash mismatch (hashed before parsing) or count mismatch; `run()` never runs an ungated held-out pack; header `heldout_cases_sha256`; dev unchanged (C0 digest test green). Synthetic files and injected pins only; the real file was checked by `stat` and `sha256sum -c --status` only (matches). Gate 680 tests, 1 environmental error. Not reviewed yet.
     - Known limitation: no "apply a current, non-stale pending proposal" cases in either split, because the pack never defined that behaviour.
   - (superseded) Pack revision 3: branch `pack-rev3`, applying the user decisions on rules 6–8, acquiring = ask_rule, night = 2 watches, and plain "armor" = the sheet total. Needs an independent review before it seeds the blind held-out writer.
   - **CPU-only candidate screens:** running since 20:49, from frozen copy `run-b085aa4c2be4`. They measured about 122 s per episode, so roughly 1.4 h per model.

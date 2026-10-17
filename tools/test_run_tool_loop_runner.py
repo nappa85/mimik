@@ -33,6 +33,7 @@ COPIED = (
     "toolloop_ops.py",
     "tool_loop_benchmark.py",
     "run_watchdog.py",
+    "heldout-v3-pin.json",
 )
 SUBSET = TOOLS / "case-subsets" / "dev-screen-40.json"
 OWNED = "mimik-toolloop-v3-"
@@ -129,8 +130,8 @@ if args[0] == "run":
             continue
         if a.startswith("/formula/"):
             a = env["MIMIK_FORMULA_EVAL"]
-        for dst in ("/tools", "/pack", "/out"):
-            if a == dst or a.startswith(dst + "/"):
+        for dst in ("/tools", "/pack", "/out", "/heldout/cases-heldout.json"):
+            if dst in mounts and (a == dst or a.startswith(dst + "/")):
                 a = mounts[dst] + a[len(dst):]
         mapped.append(a)
     with open(log / "harness-calls.jsonl", "a") as h:
@@ -379,6 +380,66 @@ class RunnerTests(unittest.TestCase):
         owned = [n for n, c in state["c"].items() if n.startswith(OWNED) and c.get("label") == "v3"]
         self.assertEqual(owned, [])
         self.assertEqual({n: v for n, v in state["n"].items() if v.get("label") == "v3"}, {})
+
+    def synthetic_heldout(self, tamper=False):
+        """A synthetic held-out file (one demo dev case under a new id) and a matching pin in
+        the copied repo; never the real frozen file (§11 item 8)."""
+        dev = json.loads((DEMO / "cases-dev.json").read_text())["cases"][0]
+        case = dict(dev, id="h3-test-001")
+        path = self.tmp / "frozen" / "cases-heldout.json"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps({"encoding": 1, "split": "heldout", "cases": [case]}))
+        pin = {
+            "encoding": 1,
+            "split": "heldout",
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "cases": 1,
+            "outcomes": {case["expected"]["outcome"]: 1},
+            "default_path": str(path),
+            "freeze_record": "docs/tool-loop-heldout-v3-freeze.md",
+        }
+        (self.repo / "tools" / "heldout-v3-pin.json").write_text(json.dumps(pin))
+        git = [
+            "git",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "-C",
+            str(self.repo),
+        ]
+        subprocess.run(git + ["commit", "-qam", "pin"], check=True)
+        if tamper:
+            path.write_text(path.read_text() + " ")
+        return path, pin
+
+    def test_heldout_runs_only_the_pinned_file_mounted_read_only(self):
+        """§11 item 8: before, the held-out split ran the pack's own file with no hash gate."""
+        path, pin = self.synthetic_heldout()
+        proc, out = self.run_runner(
+            "qwen35-9b", "heldout", SEEDS="17", BUDGET_SECONDS="0", HELDOUT_CASES=str(path)
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr + (out / "main.stderr").read_text())
+        calls = [json.loads(x) for x in (self.log / "harness-calls.jsonl").read_text().splitlines()]
+        main = calls[-1]
+        self.assertEqual(main[main.index("--heldout-cases") + 1], "/heldout/cases-heldout.json")
+        header = self.ledger(out)[0]
+        self.assertEqual(header["heldout_cases_sha256"], pin["sha256"])
+        docker = (self.log / "calls.jsonl").read_text()
+        self.assertIn(f"src={path},dst=/heldout/cases-heldout.json,readonly", docker)
+        self.assertIn(f"heldout_cases_sha256={pin['sha256']}", (out / "provenance.txt").read_text())
+
+    def test_heldout_hash_mismatch_or_missing_file_is_refused(self):
+        path, _ = self.synthetic_heldout(tamper=True)
+        proc, out = self.run_runner("qwen35-9b", "heldout", SEEDS="17", HELDOUT_CASES=str(path))
+        self.assertEqual(proc.returncode, 5)
+        self.assertIn("failure=heldout_hash", (out / "provenance.txt").read_text())
+        proc, out = self.run_runner(
+            "qwen35-9b", "heldout", SEEDS="17", HELDOUT_CASES=str(self.tmp / "absent.json")
+        )
+        self.assertEqual(proc.returncode, 5)
+        self.assertIn("failure=heldout_missing", (out / "provenance.txt").read_text())
+        self.assertFalse((self.log / "server.json").exists())
 
     def test_pass_through_reaches_server_and_header(self):
         proc, out = self.run_runner(

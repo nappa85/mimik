@@ -11,8 +11,12 @@ repository** so that development agents cannot read it by accident:
 **sha256 `6f11af05f27347ea31a50996b0e6b6eea4ccbfa3254a085cd7699d4d8ec68974`**
 
 Only the v3 verdict arms (plan §11: A0, and any arm pre-registered before A0's first episode)
-may read it. A held-out run must refuse any case file whose hash differs (plan §11 item 8).
-That gate is still to be implemented in the runner and queue before A0.
+may read it. **Hash gate (plan §11 item 8), implemented 2026-10-17:** the pin — this sha256,
+165 cases and the outcome counts below — lives in one committed file,
+`tools/heldout-v3-pin.json`. The harness (`--heldout-cases`, default the frozen path above),
+the runner (`HELDOUT_CASES`, mounted read-only) and the queue refuse a held-out run unless the
+case file's sha256 equals the pin; the file is hashed before it is parsed, and the loaded
+counts must equal the pinned ones. A held-out ledger header records `heldout_cases_sha256`.
 
 ## Counts
 

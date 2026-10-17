@@ -399,6 +399,8 @@ against the code or artefacts. Where §1–§10 differ, this section wins.
    - the rubric, and the held-out and dev case-id lists.
 
    The held-out runner refuses a case file whose hash differs from the frozen one (Son).
+   *Implemented 2026-10-17 (`tools/heldout-v3-pin.json`; harness, runner and queue; see
+   `docs/tool-loop-heldout-v3-freeze.md`).*
 
 **Blindness and gold**
 

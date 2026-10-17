@@ -1,0 +1,17 @@
+{
+  "encoding": 1,
+  "split": "heldout",
+  "sha256": "6f11af05f27347ea31a50996b0e6b6eea4ccbfa3254a085cd7699d4d8ec68974",
+  "cases": 165,
+  "outcomes": {
+    "proposal": 49,
+    "answer": 38,
+    "conflict": 27,
+    "ask_rule": 15,
+    "ask_fact": 15,
+    "stale": 9,
+    "refuse": 12
+  },
+  "default_path": "/media/data/mimik/blind-heldout/frozen/cases-heldout.json",
+  "freeze_record": "docs/tool-loop-heldout-v3-freeze.md"
+}

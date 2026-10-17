@@ -347,6 +347,23 @@ actual_cli_sha=${cli_line%% *}
 if [ "$actual_cli_sha" != "$CLI_SHA" ]; then
   fail 3 cli_hash "formula_eval sha256 $actual_cli_sha != pinned $CLI_SHA"
 fi
+# ---- held-out hash gate (plan §11 item 8): only the pinned case file, mounted read-only
+heldout_mount=() heldout_args=()
+if [ "$hsplit" = heldout ]; then
+  pin_file=$ROOT/tools/heldout-v3-pin.json
+  pin_line=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["sha256"], d["default_path"])' "$pin_file") \
+    || fail 2 config "held-out pin $pin_file unreadable"
+  read -r heldout_pin_sha heldout_default <<< "$pin_line"
+  heldout=${HELDOUT_CASES:-$heldout_default}
+  heldout_real=$(realpath -e -- "$heldout" 2>/dev/null) || fail 5 heldout_missing "held-out case file $heldout not found"
+  [ -f "$heldout_real" ] || fail 5 heldout_missing "held-out case file $heldout_real is not a regular file"
+  heldout_line=$(check_run 120 --mount type=bind,src="$heldout_real",dst=/heldout/cases-heldout.json,readonly \
+    "$CHECK_IMAGE" sha256sum /heldout/cases-heldout.json)
+  [ "${heldout_line%% *}" = "$heldout_pin_sha" ] || fail 5 heldout_hash "held-out case file sha256 differs from the pin"
+  echo "heldout_cases_sha256=${heldout_line%% *} heldout_cases=$heldout_real" >> "$prov"
+  heldout_mount=(--mount "type=bind,src=$heldout_real,dst=/heldout/cases-heldout.json,readonly")
+  heldout_args=(--heldout-cases /heldout/cases-heldout.json)
+fi
 IFS=' ' read -r st_size st_mtime st_inode st_dev <<< "$(stat -c '%s %.9Y %i %d' "$model_real")"
 hash_source=hashed actual_model_sha=''
 if [ -n "${HASH_CACHE:-}" ] && [ -f "$HASH_CACHE" ]; then  # path size mtime_ns inode dev sha (tabs)
@@ -510,7 +527,7 @@ run_harness() {  # run_harness <phase> <args...>: sets phase_rc; records <phase>
     --mount type=bind,src="$ROOT/tools",dst=/tools,readonly \
     --mount type=bind,src="$pack",dst=/pack,readonly \
     --mount type=volume,src=mimik-formula-target,dst=/formula,readonly \
-    --mount type=bind,src="$out",dst=/out \
+    --mount type=bind,src="$out",dst=/out "${heldout_mount[@]}" \
     "$HARNESS_IMAGE" "$@" >/dev/null || fail 12 infra_docker "harness container did not start ($phase)"
   started=$(date +%s)
   limit=$(( phase_budget > 0 ? phase_budget + max_turns * ${request_timeout%.*} + 600 : 0 ))
@@ -548,7 +565,7 @@ ledger_name=ledger-$(date +%Y%m%dT%H%M%S).jsonl
 arm_args=()
 [ -z "${ARM:-}" ] || arm_args=(--arm "$ARM")
 timing main
-cli=("${common[@]}" --split "$hsplit" "${case_args[@]}" --seeds "$seeds" "${arm_args[@]}"
+cli=("${common[@]}" --split "$hsplit" "${heldout_args[@]}" "${case_args[@]}" --seeds "$seeds" "${arm_args[@]}"
   --budget-seconds "$phase_budget" "${phase_deadline[@]}" --output "/out/$ledger_name")
 { echo "harness_cli=${cli[*]}"; echo "ledger_file=$ledger_name"; } >> "$prov"
 run_harness main "${cli[@]}"
