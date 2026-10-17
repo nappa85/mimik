@@ -8,12 +8,12 @@ pub mod formula;
 #[cfg(test)]
 mod formula_admission_tests;
 #[cfg(test)]
-mod formula_pack_tests;
+pub(crate) mod formula_pack_tests;
 pub(crate) mod private_pin;
 mod publication;
-mod store;
 #[cfg(test)]
-pub(crate) use publication::publish_unshipped_for_tests;
+pub(crate) use publication::tests::fixture as source_fixture;
+mod store;
 pub use publication::{ApprovalRequest, Comparison, PublishedDefinition, WiringStatus};
 
 use serde::{Deserialize, Serialize};

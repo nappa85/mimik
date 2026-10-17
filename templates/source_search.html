@@ -16,7 +16,8 @@
 {% if result.partial_runs > 0 %}<p class="badge">Partial or unknown original-PDF coverage: {{ result.partial_runs }} extraction run(s) contain selected-page subsets or lack a confirmed original total.</p>{% endif %}
 {% if result.matches.is_empty() %}<p>No reviewed match. This does not mean the rule or action does not exist.</p>{% endif %}
 {% if result.truncated %}<p class="badge">More than {{ result.matches.len() }} reviewed matches; only the best-ranked are shown. Refine the query.</p>{% endif %}
-{% for evidence in result.matches %}<article class="panel"><h2><a href="/sources/pages/{{ evidence.page_id }}">{{ evidence.title }} · printed {{ evidence.printed_label }} · PDF {{ evidence.pdf_page }}</a></h2><p>Unit {{ evidence.unit_id }} rev {{ evidence.unit_revision }} · {{ evidence.kind }}{% if evidence.state == "corrected" %} · <span class="badge">reviewer correction</span>{% endif %} · <a href="/sources/pages/{{ evidence.page_id }}/units/{{ evidence.unit_id }}/image">Compare source region</a></p><pre class="evidence-text">{{ evidence.text }}</pre></article>{% endfor %}
+{% for evidence in result.matches %}<article class="panel"><h2><a href="/sources/pages/{{ evidence.page_id }}">{{ evidence.title }} · printed {{ evidence.printed_label }} · PDF {{ evidence.pdf_page }}</a></h2><p>Unit {{ evidence.unit_id }} rev {{ evidence.unit_revision }} · {{ evidence.kind }}{% if evidence.state == "corrected" %} · <span class="badge">reviewer correction</span>{% endif %} · <a href="/sources/pages/{{ evidence.page_id }}/units/{{ evidence.unit_id }}/image">Compare source region</a></p><pre class="evidence-text">
+{{ evidence.text }}</pre></article>{% endfor %}
 {% endif %}
 {% when None %}{% endmatch %}
 {% endblock %}

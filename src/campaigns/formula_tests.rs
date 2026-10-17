@@ -279,7 +279,7 @@ async fn formula_sheet_view_shows_derived_values_and_advisory_checks() {
     );
     assert!(section(&html, "formula-results").contains("Computed from saved revision 1"));
     assert!(html.contains(
-        "<summary>How this is computed</summary><pre class=\"evidence-text\">6 - vitality</pre>"
+        "<summary>How this is computed</summary><pre class=\"evidence-text\">\n6 - vitality</pre>"
     ));
 }
 
@@ -306,8 +306,13 @@ async fn derived_fields_render_without_form_names() {
     for path in ["/private-sheets/1", "/private-sheets/1/history/1"] {
         let (status, html) = setup.get(path).await;
         assert_eq!(status, StatusCode::OK);
-        // History is read-only; its controls are the same form, disabled.
-        assert_eq!(names(&html), expected, "{path}");
+        // History is read-only; its controls are the same form, disabled, and it has no
+        // Save button (`op=save`, plan D6).
+        let mut want = expected.clone();
+        if !path.contains("history") {
+            want.insert("op".into());
+        }
+        assert_eq!(names(&html), want, "{path}");
         for id in DERIVED {
             assert!(
                 !html.contains(&format!("for=\"value-{id}\"")),
@@ -609,7 +614,7 @@ async fn busy_get_after_a_successful_save_returns_503_with_retry_after() {
 
 /// A list sheet whose stored values are valid (JSON within 1 MiB) but whose converted input
 /// exceeds the engine's aggregate charge: evaluation refuses the input and the page still
-/// renders. Lists are unpublishable until M4; this test publishes through the test-only path.
+/// renders. The list definition publishes through the real publication path (M4).
 #[tokio::test]
 async fn stored_valid_sheet_with_refused_input_shows_unavailable() {
     let _auth_lock = crate::auth::test_resource_lock().await;
@@ -626,7 +631,6 @@ async fn stored_valid_sheet_with_refused_input_shows_unavailable() {
         .as_array_mut()
         .unwrap()
         .push("items".into());
-    crate::definitions::publish_unshipped_for_tests();
     let setup = setup(&definition).await;
     let (mut view, permit) = setup
         .store
@@ -638,9 +642,9 @@ async fn stored_valid_sheet_with_refused_input_shows_unavailable() {
         )
         .await
         .unwrap();
-    let items: Vec<Value> = (0..256)
+    let items: Vec<Value> = (1..=256)
         .map(|n| {
-            let mut item = json!({"id": format!("i-{n}"), "t": "x".repeat(3600)});
+            let mut item = json!({"id": format!("r1-{n}"), "t": "x".repeat(3600)});
             for p in 0..31 {
                 item[format!("p{p}")] = 0.into();
             }
@@ -768,63 +772,113 @@ async fn failed_database_save_keeps_its_permit_for_the_rerender() {
     );
 }
 
-fn unescape(text: &str) -> String {
-    [
-        ("&#60;", "<"),
-        ("&lt;", "<"),
-        ("&#62;", ">"),
-        ("&gt;", ">"),
-        ("&#34;", "\""),
-        ("&quot;", "\""),
-        ("&#39;", "'"),
-        ("&#38;", "&"),
-        ("&amp;", "&"),
-    ]
-    .iter()
-    .fold(text.to_owned(), |text, (entity, raw)| {
-        text.replace(entity, raw)
+/// Whether `element` is disabled for submission: its own `disabled`, or a disabled ancestor
+/// fieldset (outside that fieldset's first legend).
+fn disabled(element: scraper::ElementRef<'_>) -> bool {
+    if element.value().attr("disabled").is_some() {
+        return true;
+    }
+    let mut child = *element;
+    for ancestor in element.ancestors() {
+        let Some(ancestor) = scraper::ElementRef::wrap(ancestor) else {
+            continue;
+        };
+        if ancestor.value().name() == "fieldset" && ancestor.value().attr("disabled").is_some() {
+            let first_legend = ancestor
+                .children()
+                .filter_map(scraper::ElementRef::wrap)
+                .find(|e| e.value().name() == "legend");
+            if first_legend.is_none_or(|legend| legend.id() != child.id()) {
+                return true;
+            }
+        }
+        child = *ancestor;
+    }
+    false
+}
+
+/// What a browser submits for the sheet form when `submitter` (its name and value) is
+/// clicked: every enabled named control in tree order with its current value (a select's
+/// selected option, or its first one), plus exactly the clicked submitter; other buttons
+/// and disabled controls are left out.
+pub(super) fn submitted_by(html: &str, submitter: Option<(&str, &str)>) -> Vec<(String, String)> {
+    let document = scraper::Html::parse_document(html);
+    let form = document
+        .select(&scraper::Selector::parse("form").unwrap())
+        .next()
+        .expect("a form");
+    let controls = scraper::Selector::parse("input, textarea, select, button").unwrap();
+    let option = scraper::Selector::parse("option").unwrap();
+    let mut pairs = Vec::new();
+    let mut clicked = false;
+    for control in form.select(&controls) {
+        let element = control.value();
+        let Some(name) = element.attr("name") else {
+            continue;
+        };
+        if disabled(control) {
+            continue;
+        }
+        let kind = element.attr("type").unwrap_or_default();
+        match element.name() {
+            "button" | "input" if element.name() == "button" || kind == "submit" => {
+                let value = element.attr("value").unwrap_or_default();
+                if !clicked && submitter == Some((name, value)) {
+                    clicked = true;
+                    pairs.push((name.to_owned(), value.to_owned()));
+                }
+            }
+            "input" => pairs.push((
+                name.to_owned(),
+                element.attr("value").unwrap_or_default().to_owned(),
+            )),
+            "textarea" => pairs.push((name.to_owned(), control.text().collect())),
+            "select" => {
+                let options: Vec<_> = control.select(&option).collect();
+                let chosen = options
+                    .iter()
+                    .find(|option| option.value().attr("selected").is_some())
+                    .or(options.first())
+                    .expect("an option");
+                let value = chosen
+                    .value()
+                    .attr("value")
+                    .map_or_else(|| chosen.text().collect(), str::to_owned);
+                pairs.push((name.to_owned(), value));
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        submitter.is_none() || clicked,
+        "submitter {submitter:?} not found or disabled"
+    );
+    pairs
+}
+
+/// The first submit button in tree order: what Enter in a text field activates.
+pub(super) fn default_submitter(html: &str) -> Option<(String, String)> {
+    let document = scraper::Html::parse_document(html);
+    let selector = scraper::Selector::parse("form button, form input[type=submit]").unwrap();
+    document.select(&selector).find_map(|button| {
+        let element = button.value();
+        let submit =
+            element.name() == "input" || element.attr("type").is_none_or(|kind| kind == "submit");
+        submit.then(|| {
+            (
+                element.attr("name").unwrap_or_default().to_owned(),
+                element.attr("value").unwrap_or_default().to_owned(),
+            )
+        })
     })
 }
 
-fn attribute(tag: &str, name: &str) -> Option<String> {
-    let start = tag.find(&format!(" {name}=\""))? + name.len() + 3;
-    Some(unescape(&tag[start..start + tag[start..].find('"')?]))
-}
-
-/// What a browser submits for the sheet form: every named control with its current value
-/// (a select's selected option, or its first one).
-fn submitted(html: &str) -> Vec<(String, String)> {
-    let form = &html[html.find("<form").unwrap()..html.find("</form>").unwrap()];
-    let mut pairs = Vec::new();
-    let mut rest = form;
-    while let Some(start) = rest.find('<') {
-        rest = &rest[start..];
-        let tag = &rest[..=rest.find('>').unwrap()];
-        let name = attribute(tag, "name");
-        if let Some(name) = name {
-            if tag.starts_with("<input") {
-                pairs.push((name, attribute(tag, "value").unwrap_or_default()));
-            } else if tag.starts_with("<textarea") {
-                let body = &rest[tag.len()..];
-                pairs.push((name, unescape(&body[..body.find("</textarea>").unwrap()])));
-            } else if tag.starts_with("<select") {
-                let body = &rest[tag.len()..rest.find("</select>").unwrap()];
-                let options: Vec<&str> = body
-                    .split("<option")
-                    .skip(1)
-                    .map(|option| &option[..option.find('>').unwrap()])
-                    .collect();
-                let chosen = options
-                    .iter()
-                    .find(|option| option.contains(" selected"))
-                    .or(options.first())
-                    .unwrap();
-                pairs.push((name, attribute(chosen, "value").unwrap_or_default()));
-            }
-        }
-        rest = &rest[1..];
-    }
-    pairs
+/// What a browser submits when the default (first) submitter is used.
+pub(super) fn submitted(html: &str) -> Vec<(String, String)> {
+    let default = default_submitter(html).expect("a submit button");
+    // An unnamed submitter adds no pair.
+    let named = (!default.0.is_empty()).then_some((default.0.as_str(), default.1.as_str()));
+    submitted_by(html, named)
 }
 
 /// The rendered form, posted back unchanged, is a valid full save: no derived field leaks
@@ -840,7 +894,11 @@ async fn rendered_form_round_trips() {
     let form = submitted(&html);
     let (status, _) = setup.post("/private-sheets/1", form.clone()).await;
     assert_eq!(status, StatusCode::SEE_OTHER, "{form:?}");
-    assert_eq!(form.len(), 9, "{form:?}");
+    assert_eq!(form.len(), 10, "{form:?}");
+    assert!(
+        form.contains(&("op".into(), "save".into())),
+        "the clicked Save"
+    );
     assert!(form.contains(&("value-label".into(), "<script>".into())));
     let (revision, data, history) = setup.stored().await;
     assert_eq!((revision, history), (2, 2));

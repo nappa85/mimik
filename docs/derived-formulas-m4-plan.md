@@ -1,10 +1,16 @@
 # Derived-field formulas: milestone M4 plan (server-rendered list editing, browser and package gates)
 
-2026-10-16. Status: **revision 3.** Revision 2 was re-reviewed (Sol GO-with-amendments RR1–RR5,
-Sonnet GO-with-amendments N1–N10, third unavailable); revision 3 resolves those findings and
-takes in two changed user decisions (reorder and a change summary are now in M4). Because the
-user decisions add scope, revision 3 needs a short re-review of the new D5 reorder, D8 change
-summary and D7 large-form parts before execution. Review record:
+2026-10-16. Status: **revision 3.1, ready for execution.** Revision 2 was re-reviewed (Sol
+GO-with-amendments RR1–RR5, Sonnet GO-with-amendments N1–N10, third unavailable); revision 3
+resolved those findings and took in two changed user decisions (reorder and a change summary
+are now in M4). Revision 3 was re-reviewed (Sol GO-with-amendments RE3-1 and RE3-2, Sonnet
+GO-with-amendments N-A to N-H, third unavailable); revision 3.1 applies those amendments in
+place (D5, D7, D8, Q5 and tests 20, 30–34, 42). **Revision 3.2 (implementation review,
+2026-10-17)** amends D5, D7, D11 and tests 25 and 42 in place: op buttons carry no `#list-f`
+fragment (it blocks autofocus; parent plan §17 negative control, accepted by all three
+implementation reviewers), the submitted revision is excerpted in visible text, textareas get
+a sacrificial newline, and D7 states what the page bound covers. Review records:
+[reviews/2026-10-17-derived-formulas-m4-impl.md](reviews/2026-10-17-derived-formulas-m4-impl.md) and
 [reviews/2026-10-16-derived-formulas-m4-plan.md](reviews/2026-10-16-derived-formulas-m4-plan.md).
 Not implemented. §1 was re-verified read-only against master `39cb421` (no `src/`, `templates/`,
 `tools/` or `tests/` change since `1ddbf17`). The worktree `../mimik-wt/formula` starts with
@@ -164,7 +170,7 @@ draft; Save persists).**
   an op; Save keeps browser validation.
 - **Edges.** Every row renders both move buttons, so the button row never shifts under the
   pointer. Row 1's Move up and the last row's Move down are `disabled` (excluded from
-  submission, still announced). A submitted edge move (`up-f-0`, `down-f-(n−1)`) or any `r ≥ n`
+  submission; no claim is made about how assistive technology announces them, N-G). A submitted edge move (`up-f-0`, `down-f-(n−1)`) or any `r ≥ n`
   is forged → 400.
 - An op parses the draft into `ListDraft` (raw strings, never validated), applies itself and
   re-renders with **200** in `FormulaMode::Draft` (never evaluated). Add appends an empty row
@@ -179,12 +185,18 @@ draft; Save persists).**
 - At 256 rows the Add button is disabled with "limit reached" text. If the revision differs from
   the current one, an advisory warning reads "The saved sheet changed (revision N → M); saving
   this draft will be refused."
-- **Focus and scroll.** `formaction="<action>#list-f"` (trusted numeric indices only) scrolls to
-  the list. Exactly one `autofocus` per page:
+- **Focus and scroll (revision 3.2).** Op buttons post to the form's own action with **no URL
+  fragment**: Chromium does not run autofocus when the URL fragment names an element (parent
+  plan §17: the browser stage fails with `#list-f` and passes without it), so the earlier
+  `formaction="<action>#list-f"` was dropped at implementation review; the autofocused control
+  scrolls into view instead. Exactly one `autofocus` per page:
   - after Add, on the new row's first control;
   - after Remove, on the list's Add button;
   - after Move up, on the moved row's Move up button at its new position, or on its Move down
     button if it is now first; after Move down, symmetrically.
+  - The focus target's accessible name carries the row's **new** position, because every
+    button name includes the current row number ("Move row 2 of Equipment up" after row 3 moved
+    up), together with the `role="status"` message (N-G).
 - **Layout.** The row's button group (Move up, Move down, Remove) is a flex-wrapping row. Each
   target is at least 24 × 24 CSS px (WCAG 2.5.8). At 390 px the 32-property row and its buttons
   must not overflow (browser `no_overflow`, step 8).
@@ -244,15 +256,49 @@ length, the schema (8,000 / 20,000) plus `maxlength`; stored bytes, `snapshots::
   body) for at most the 5 s `boundary` timeout. The LAN admission and `post_origin` checks still
   apply first. §6 measures that hold time for a slow 5 MiB upload. Moving the JOBS permit after
   body buffering is a recorded follow-up, not M4.
+- **Accepted limit: the 5 s `boundary` timeout (N-H).** The whole request, body included,
+  must arrive within the 5 s `boundary` timeout (`auth/mod.rs:217`). A 5 MiB body therefore
+  needs about 8.4 Mbit/s of sustained upload (5 × 8 × 1.048576 / 5 s). Slower clients get the
+  timeout response and nothing is saved. This is recorded as an accepted limit of M4, not
+  raised; the realistic pack form is about 100 KB.
 - **Echo cap (N8).** A re-render (op, 409 or 422) echoes the draft only if its decoded values
   total ≤ `ECHO_BYTES = 1 MiB`. A larger draft could never be stored: JSON encoding only adds
   bytes, so its snapshot would exceed the 1 MiB writer cap. Such a draft answers 422 with the
   saved revision's values, no echo, and a `role="alert"`: "This draft is larger than the 1 MiB
-  sheet limit and was not kept. Nothing was saved. Use the browser's Back button to recover your
-  text." The worst page is then ≤ units × the per-unit markup bound + 6 × 1 MiB (every echoed
-  byte a `"` → `&quot;`); step 8 derives the per-unit bound from the template and test 42
-  asserts it, so a body of 5 MiB of quotes cannot produce a 30 MiB page. A save over 1 MiB
-  stored, but within the echo cap (or over the profile cap), → 422 with the draft kept.
+  sheet limit and was not kept. Nothing was saved; copy large text before submitting." Every
+  response is `no-store`, so the plan promises no Back-button recovery (N-B).
+- **Echo multiplicity (RE3-1).** Each submitted string is echoed **in full at most once**. The
+  contexts that repeat a value are bounded instead:
+  - an invalid enum, boolean, known/unknown or Set/Not set value is echoed in full once, as the
+    extra option's `value`, and its visible text shows at most the first 64 characters plus
+    "…";
+  - a row's hidden ID is echoed in full once, as the hidden `value`; the row legend shows at
+    most the first 64 characters (a valid ID is ≤ 64);
+  - text inputs, textareas, Name and General notes are echoed once;
+  - the submitted revision is echoed in full once, in the hidden control; the page's
+    "submitted/form revision" text shows a 64-character excerpt (revision 3.2, Sol Major 1).
+  Every textarea emits one sacrificial newline after its opening tag, because HTML parsing
+  drops the first newline there; values that start with newlines show and resubmit
+  intact (revision 3.2, Sol Major 2). Separately, browsers serialise textarea line breaks as
+  CR LF on submission. Every form decoder (the sheet transport and the legacy textarea
+  extractors, through `form_text::newlines_to_lf`) normalises CR LF and CR to LF before
+  validation. New writes are stored with LF, and an unchanged Save of LF-stored values is
+  byte-identical. Existing CR LF data is rewritten to LF as a new revision on its next save,
+  and history keeps the old revision (final and last implementation reviews).
+  So a re-render is ≤ `FIXED_PAGE_BYTES` + units × `UNIT_MARKUP_BYTES` + 5 × `ECHO_BYTES`
+  (Askama escapes `"` as the 5-byte `&#34;`, the widest escape), where `UNIT_MARKUP_BYTES`
+  includes one 64-character excerpt escaped (≤ 320 bytes). Step 7 derives both constants from
+  the template and test 42 asserts the bound on a draft that fills the maximum-amplification
+  contexts (invalid enum and boolean values, invalid states and hidden IDs made of `"`), so a
+  body of 5 MiB of quotes cannot produce a 25 MiB page. A save over 1 MiB stored, but within
+  the echo cap (or over the profile cap), → 422 with the draft kept.
+- **What the page bound covers (revision 3.2, third reviewer F2).** `FIXED_PAGE_BYTES` covers
+  the editor chrome only (headings, pin JSON, notices, the Name and notes controls), and the
+  units cover the input controls, options and row elements. It is **not** a bound on the
+  formula sections of a formula definition: derived-field expressions, check messages and
+  explanations are bounded by the definition's 256 KiB content cap (each rendered at most
+  twice, escaped at ≤ 5 bytes per character), and each derived value by its field's text
+  limit (20,000 characters). The tests that assert the bound use formula-free fixtures.
 
 **D8. History: ID-labelled rows and a read-only change summary (user decision Q4).**
 - **Rows.** `/history/N` shows each row as a read-only fieldset, legend "Row 2 · ID r1-2",
@@ -261,9 +307,14 @@ length, the schema (8,000 / 20,000) plus `maxlength`; stored bytes, `snapshots::
   It uses IDs, never form indices.
 - **Change summary**, a section "Changes in revision N" above the rows, for runtime sheets with
   a supported pin. `private_read` loads revision N − 1 from `private_sheet_history` in the same
-  read transaction. `history::diff(prev, cur, definition)` runs host-side, in the existing
+  read transaction. `history_diff::diff(prev, cur, definition)` runs host-side, in the existing
   blocking read path under the JOBS permit, and compares stored data only (derived results are
-  recomputed, not diffed). Entries, in this order:
+  recomputed, not diffed).
+- **Revision N − 1 is validated like N (N-C).** It goes through the same `RawSnapshot::decode`
+  (bounded parse, integrity, hash and event correspondence), the same identity checks against
+  the sheet row, `match_pin` against the same immutable pin, and `validate_values`. Any failure
+  of N − 1 degrades the section to "Change summary unavailable for this revision." and never
+  fails the page; revision N itself keeps its current checks. Entries, in this order:
   - name and general notes changed (labels only);
   - scalar fields changed: one entry per field whose stored value differs, including known ↔
     unknown (null), shown by label and field ID;
@@ -273,22 +324,47 @@ length, the schema (8,000 / 20,000) plus `maxlength`; stored bytes, `snapshots::
     - **edited**: retained IDs whose properties differ, a set ↔ not set change included, with
       the changed property labels, `equipment/r1-2/quantity`;
     - **moved**: retained rows outside one longest increasing subsequence of their N − 1
-      positions taken in N order. Ties are broken deterministically: among equal-length
-      subsequences, the one whose N positions are lexicographically smallest is kept. Moving one
-      row to the top therefore shows that row as moved, not every row it passed.
+      positions taken in N order. The moved set is a **deterministic minimal explanation of
+      the net order change**, not a claim about which row the user clicked (RE3-2). Ties are
+      broken so that the rows reported as moved are the ones that ended up **earlier**: among
+      the maximum-length subsequences, the one whose N positions are lexicographically
+      **greatest** is kept (built greedily: the largest feasible N position first, then the
+      largest feasible next one). Consequences, pinned in test 30:
+      - moving one row to the top reports exactly that row (`[A,B,C,D]` → `[D,A,B,C]`: D);
+      - an adjacent swap reports the row that moved up (`[A,B]` → `[B,A]`: B;
+        `[A,B,C]` → `[B,A,C]`: B; `[A,B,C]` → `[A,C,B]`: C), which is also the row a single
+        Move up click moves;
+      - moving one row to the bottom by two or more places reports that row (`[A,B,C]` →
+        `[B,C,A]`: A).
   - **Reused slots.** IDs are slot labels (D3), and a removed ID never returns, so an ID always
-    names the same slot. When every property of a retained ID changed, the entry reads "Row
-    r1-2 of Equipment: all properties changed (the row slot was reused)". The section notes that
-    row IDs label positions in this sheet's history, not items.
+    names the same slot. For a list with **two or more properties**, when every property of a
+    retained ID changed, the entry reads "Row r1-2 of Equipment: all properties changed (the row
+    slot may have been reused)". For a one-property list a changed row is an ordinary edit line
+    with neutral text, because changing its only property is not evidence of reuse (N-A). The
+    section notes that row IDs label positions in this sheet's history, not items.
   - Revision 1 (create) reads "Sheet created with K rows in L lists"; a freeze reads "Frozen; no
     value changes". An unsupported pin, or a native sheet, shows "Change summary unavailable for
     this sheet."
-- **Bounds.** At most `SUMMARY_LINES = 200` lines are rendered, in the order above; each line
-  lists at most 8 property labels, then "and M more". Past the cap, one line reads "and K more
-  changes" with exact per-list counts of added, removed, edited and moved rows, which are always
-  complete. A line is ≤ 10 labels × 100 characters escaped plus the address, so the section is
-  ≤ about 1.25 MB in the worst case (every label 100 `"`), asserted in test 34. The diff is
-  O(rows × properties) per list plus O(n log n) for the subsequence, n ≤ 256.
+- **Markup (N-G).** The summary is `<section id="change-summary" aria-labelledby=
+  "change-summary-heading">` with an `<h2 id="change-summary-heading">`, one `<ul>` of `<li>`
+  lines, and every address in a `<code>` element. Test 32 asserts this structure on the parsed
+  DOM.
+- **Bounds (N-E).** At most `SUMMARY_LINES = 200` lines are rendered, in the order above; each
+  line lists at most **8** property labels with their addresses, then "and M more". Past the
+  cap, one overflow line reads "and K more changes" with exact per-list counts of added,
+  removed, edited and moved rows, which are always complete. The bound is derived per part,
+  with every label 100 characters escaped at 5 bytes (`&#34;`, ≤ 500 bytes) and IDs ≤ 64 ASCII
+  bytes:
+  - one line ≤ the list label (500) + 8 × (a property label 500 + its address ≤ 194 + markup
+    ≤ 40) + the entry address (≤ 129) + fixed text and markup (≤ 400) = 6,901 bytes, so
+    `SUMMARY_LINE_BYTES = 8,192`;
+  - the overflow line ≤ 32 lists × (label 500 + four counts and fixed text ≤ 200) + 100 =
+    22,500 bytes, so `SUMMARY_OVERFLOW_BYTES = 32,768`;
+  - the heading, the slot note and the link ≤ `SUMMARY_FIXED_BYTES = 4,096`;
+  - so the section is ≤ `SUMMARY_BYTES` = 200 × 8,192 + 32,768 + 4,096 = **1,675,264
+    bytes**, the exact constant test 34 asserts.
+  The diff is O(rows × properties) per list plus O(n²) for the subsequence, n ≤ 256 (at most
+  65,536 steps).
 - It is read-only: no revert, restore or copy-to-draft action. Everything is escaped by Askama
   defaults (D11). Values are not shown; the full revision is on the same page, and a link goes
   to `/history/N−1`.
@@ -308,8 +384,8 @@ tables: rows stack, with `fieldset{min-width:0}` and the flex-wrapping button ro
 Witnesses go in their real contexts: `</textarea>` in item text; `"` and `'` in attribute
 values (the hidden-ID echo, text `value=`, invalid enum and Set/Not set echoes); `<script>` in
 list, property and option labels, in the status message and in change-summary labels. These run
-on the view, op, 422, 409, history and change-summary pages. `formaction` must equal the
-generated same-origin path plus `#list-f`.
+on the view, op, 422, 409, history and change-summary pages. No op button carries a
+`formaction`; the form action must equal the generated same-origin path (revision 3.2).
 - **Parser selection (N9, RR1).** Tests parse the DOM with the maintained `scraper` crate, a
   dev-dependency only, adopted at the start of step 3 with a recorded selection note. At
   adoption, pick the newest `scraper` release whose `html5ever` matches an already-locked
@@ -340,7 +416,7 @@ render-unit budget as the only binding publication count.
 
 Open (the plan applies the default until answered):
 - **Q5 Oversized drafts.** A draft over 1 MiB decoded (which can never be saved) answers 422
-  without echoing it, plus a Back-button notice (D7). *Default: yes.* The alternative is to echo
+  without echoing it, plus a notice to copy large text before submitting (D7). *Default: yes.* The alternative is to echo
   it and accept pages up to about 30 MiB.
 - **Q6 Summary content.** The change summary names what changed (labels and addresses), not the
   old and new values (D8). *Default: names only.* The alternative is truncated values, which
@@ -376,21 +452,21 @@ through the bypass until step 8.
 | 17 | 3 | same | `first_submitter_in_tree_order_is_op_save_before_groups` (includes `input type=submit`) | the first submitter has no `name="op" value="save"` and follows the groups |
 | 18 | 4 | same | `competing_writer_loser_unchanged`; `op_409_op_save_never_rebases` | `op=add-0` answers 400 |
 | 19 | 4 | same | `add_rerenders_200_no_store_without_writing`; `remove_rerenders_without_writing` | 400 |
-| 20 | 4 | same | `move_up_down_rerender_new_order_without_writing`; `move_carries_id_values_and_set_state`; `save_after_moves_persists_order` | 400 |
+| 20 | 4 | same | `move_up_down_rerender_new_order_without_writing`; `move_carries_id_values_and_set_state` (an invalid text value is kept through the move); `save_after_moves_persists_order`, with new rows moved around retained rows: the new IDs `r<N>-k` follow the **final** row order (N-D) | 400 |
 | 21 | 4 | same | `edge_move_buttons_disabled`; `edge_or_out_of_range_move_is_400` | buttons absent; the 400 cases are guards, run against the mutation "edge move accepted" |
 | 22 | 4 | same | `add_at_256_is_422_with_message`; `bad_op_or_index_is_400`; `two_ops_is_400` | Add at 256 answers 400, not 422; the others are guards |
 | 23 | 4 | same | `ops_need_csrf_and_edit_rights`; `stale_op_warns`; `ops_never_evaluate_draft`; `op_never_reveals_saved_ids` | the warning text is absent; the CSRF and rights cases are guards |
 | 24 | 4 | same | `unknown_id_draft_op_rerenders_then_save_422` (current) and `409` (stale) | the op answers 400 |
-| 25 | 4 | same | `op_buttons_have_formnovalidate_and_formaction`; `single_autofocus_after_add_remove_and_each_move` (incl. a move to the edge) | attributes absent |
+| 25 | 4 | same | `op_buttons_have_formnovalidate_and_no_fragment` (revision 3.2; was `…_and_formaction`); `single_autofocus_after_add_remove_and_each_move` (incl. a move to the edge) | attributes absent |
 | 26 | 4 | same | `op_button_names_and_status_messages` (row number in each name; three message forms) | absent |
 | 27 | 4 | same | `create_page_adds_rows_then_creates` | the op answers 400 |
 | 28 | 5 | same | `list_history_rows_have_stable_ids_and_no_ops` (incl. the test 6 snapshot); `history_address_grammar` | no row fieldsets in history |
 | 29 | 5 | `campaigns/history_diff.rs` tests (new) | `diff_added_removed_edited_scalars_name_notes`; `diff_optional_presence_is_an_edit` | compile red |
-| 30 | 5 | same | `diff_moved_is_lis_with_deterministic_ties` (one row to the top; a swap; equal-length ties) | compile red |
-| 31 | 5 | same | `diff_reused_slot_all_properties_changed`; `diff_create_and_freeze_lines` | compile red |
-| 32 | 5 | `list_tests.rs` | `history_page_shows_change_summary_for_revision_n_against_n_minus_1` (and a link to N − 1) | no summary section |
-| 33 | 5 | same | `change_summary_unavailable_for_native_and_unsupported_pins` | no summary text |
-| 34 | 5 (again 8) | same | `change_summary_large_diff_is_bounded` (all rows replaced in all lists; labels of 100 `"`): ≤ 200 lines + the overflow line, exact counts, section ≤ the D8 bound | no summary; in step 8 rerun on the exact-budget fixture |
+| 30 | 5 | same | `diff_moved_is_lis_with_deterministic_ties` (one row to the top; to the bottom by two; the RE3-2 cases `[A,B]`→`[B,A]`, `[A,B,C]`→`[B,A,C]` and `[A,B,C]`→`[A,C,B]` with their pinned results) | compile red |
+| 31 | 5 | same | `diff_reused_slot_all_properties_changed` (two properties), `diff_one_property_list_change_is_a_plain_edit` (neutral text, N-A); `diff_create_and_freeze_lines` | compile red |
+| 32 | 5 | `list_tests.rs` | `history_page_shows_change_summary_for_revision_n_against_n_minus_1` (and a link to N − 1; DOM: `section[aria-labelledby]` → `h2`, one `ul`, addresses in `code`, N-G) | no summary section |
+| 33 | 5 | same | `change_summary_unavailable_for_native_and_unsupported_pins`, and for a corrupt or pin-mismatched revision N − 1 (the page still renders N, N-C) | no summary text |
+| 34 | 5 (again 8) | same | `change_summary_large_diff_is_bounded` (all rows replaced in all lists; labels of 100 `"`): ≤ 200 lines + the overflow line, exact counts, ≤ 8 labels per line, section ≤ `SUMMARY_BYTES` = 1,675,264 | no summary; in step 8 rerun on the exact-budget fixture |
 | 35 | 5 | same | `derived_values_over_lists_update_after_save` | guard (no engine change, D9) |
 | 36 | 5 | same | `list_payloads_escaped_in_context` (D11, six pages incl. the summary; DOM-parsed) | guard |
 | 37 | 5 | existing native and scalar tests | view, save and browser locators unchanged | guard |
@@ -398,7 +474,7 @@ through the bypass until step 8.
 | 39 | 7 | `list_tests.rs` | `sheet_post_accepts_5mib_and_413s_5mib_plus_1`; `non_sheet_posts_keep_8kib` | 413 at 1 MiB |
 | 40 | 7 | same | `unauthenticated_large_post_is_403_without_reading_the_body` (a counting body stream: ≤ 64 KiB polled) | the whole body is read before 403 |
 | 41 | 7 | same | `stored_over_1mib_is_422_with_draft` | 413 at 1 MiB |
-| 42 | 7 | same | `oversized_draft_is_not_echoed` (5 MiB of `"` → 422, alert, page ≤ bound); `one_mib_of_quotes_is_echoed_within_bound` | the page echoes the whole draft |
+| 42 | 7 | same | `oversized_draft_is_not_echoed` (5 MiB of `"` → 422, the exact alert wording "Nothing was saved; copy large text before submitting", page ≤ bound); `one_mib_of_quotes_is_echoed_within_bound`, with the quotes placed in the maximum-amplification contexts (invalid enum and boolean values, invalid states, hidden IDs) and the 64-character excerpts asserted (RE3-1) | the page echoes the whole draft |
 | 43 | 8 | `publication_tests.rs:188` renamed | `list_definition_publishes` | `list-editing-unsupported` |
 | 44 | 8 | `publication.rs` tests | `within_refuses_each_count_with_test_limits` (pairs, nodes and units each over its own small test limit, the others under); `form_budget_counts_match_arithmetic` | compile red |
 | 45 | 8 | same | `render_budget_boundary_publishes_and_plus_one_refuses` (real publication); `pairs_and_nodes_are_dominated_by_render_units` (extremal definitions: 32 lists × 32 props, all integers, all enums of 128, all optional; no lists) | compile red |
@@ -427,7 +503,9 @@ through the bypass until step 8.
 | the first button is not Save; the top Save has the wrong `op` | 17 |
 | `|safe` on item text or a summary label | 36 |
 | a dropped kept permit; a re-render that rebases the hidden revision | existing `REJECTED_EDITOR_KEPT_PERMIT` test, 15; 18 |
-| the summary compares N with N − 2; `moved` by index instead of the subsequence | 32; 30 |
+| the summary compares N with N − 2; `moved` by index instead of the subsequence; the tie-break reversed | 32; 30; 30 |
+| revision N − 1 used without validation | 33 |
+| a repeated context echoes the full value | 42 |
 | optional presence ignored by the diff; the summary cap removed | 29; 34 |
 | 5 MiB applied to non-sheet POST routes; the pre-body check removed | 39; 40 |
 | the echo cap removed | 42 |
@@ -461,7 +539,7 @@ in its commit (RR5, N10):
    `groups`/`render_private`); the template list branch and CSS; the `op=save` buttons, top and
    bottom, on list sheets; the M2 refusal strings removed.
 4. **Draft ops** (tests 18–27). `values::Op` parse and apply for add, remove, up and down
-   (caller `save_private`); `formnovalidate`, `formaction`, `autofocus`, edge rules, messages,
+   (caller `save_private`); `formnovalidate`, `autofocus` (no `formaction`, revision 3.2), edge rules, messages,
    the 256 limit, the stale warning, the button-row CSS.
 5. **History rows and change summary, derived values, escaping** (tests 28–37). History legends
    (caller `render_private`); `history_diff::diff` (caller `private_read`'s history path, which
@@ -474,12 +552,13 @@ in its commit (RR5, N10):
    `list-definition.json`: a derived `load` sum, a formula reading `item.id`, `load <= 10`, and
    a second list of 32 properties for 390 px. Its caller is a bypass route test.
 7. **Large-form transport** (tests 39–42). The per-method 5 MiB layer through one helper, the
-   pre-body principal `route_layer`, `ECHO_BYTES` and its alert. A shipped change for every
+   pre-body principal `route_layer`, `ECHO_BYTES` and its alert, the 64-character excerpts of
+   repeated echo contexts (RE3-1). A shipped change for every
    private sheet, documented in the contract.
 8. **Gate lift, its own final commit** (tests 43–48, test 34 rerun):
    - `values::form_budget`, `within`, `ENVELOPE_NODES` and `RENDER_UNITS` (caller
-     `publishable`); `decode::MAX_NODES` (callers: the decoder and `form_budget`); the per-unit
-     markup bound used by test 42;
+     `publishable`); `decode::MAX_NODES` (callers: the decoder and `form_budget`); the page-size
+     constants `FIXED_PAGE_BYTES` and `UNIT_MARKUP_BYTES` already land with test 42 in step 7;
    - `list-editing-unsupported` removed;
    - **deleted:** `publish_unshipped_for_tests`, its re-export, `UNSHIPPED_FOR_TESTS` and the
      early return; its callers move to real publication;

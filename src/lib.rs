@@ -2,6 +2,7 @@ pub mod accounts;
 pub mod auth;
 pub mod campaigns;
 pub mod definitions;
+mod form_text;
 pub mod games;
 mod local_file;
 pub mod mork_advice;
@@ -50,6 +51,7 @@ pub struct CharacterInput {
     pub name: String,
     pub system_id: String,
     pub edition: String,
+    #[serde(deserialize_with = "crate::form_text::lf")]
     pub notes: String,
     #[serde(default)]
     pub revision: i64,

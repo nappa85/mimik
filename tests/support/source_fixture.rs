@@ -87,7 +87,82 @@ pub fn fixture_pair(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         root.join("formula-definition.json"),
         serde_json::to_vec(&formula_definition())?,
     )?;
+    fs::write(
+        root.join("list-definition.json"),
+        serde_json::to_vec(&list_definition())?,
+    )?;
     Ok(())
+}
+
+/// List definition for the unpacked browser gate (M4): an equipment list with a derived
+/// `load` sum, a formula reading `item.id`, the advisory check `load <= 10`, and a second
+/// list of 32 properties of every control so the 390 px layout is exercised.
+#[must_use]
+pub fn list_definition() -> serde_json::Value {
+    let unresolved = json!({"state": "unresolved", "reason": "Synthetic fixture"});
+    let property = |id: &str, label: &str, control: &str, optional: bool| json!({"id": id, "label": label, "control": control, "optional": optional});
+    let mut kind = property("kind", "Kind", "enum", true);
+    kind["options"] = json!([{"id": "light", "label": "Light"}, {"id": "heavy", "label": "Heavy"}]);
+    let equipment = vec![
+        property("name", "Item name", "text", false),
+        kind,
+        property("quantity", "Quantity", "integer", false),
+        property("weight", "Weight", "integer", false),
+        property("equipped", "Equipped", "boolean", false),
+        property("note", "Item note", "multiline", true),
+    ];
+    let controls = ["text", "integer", "boolean", "enum", "multiline"];
+    let traits: Vec<serde_json::Value> = (0..32)
+        .map(|n| {
+            let control = controls[n % controls.len()];
+            let mut value = property(
+                &format!("t{n:02}"),
+                &format!("Trait property {n}"),
+                control,
+                n % 3 == 0,
+            );
+            if control == "enum" {
+                value["options"] = json!([{"id": "a", "label": "Option A"},
+                                          {"id": "b", "label": "Option B"}]);
+            }
+            value
+        })
+        .collect();
+    let list = |id: &str, label: &str, properties: Vec<serde_json::Value>| {
+        json!({"id": id, "label": label, "control": "list", "nullable": false,
+               "mapping": unresolved, "items": {"properties": properties}})
+    };
+    let derived = |id: &str, label: &str, expr: &str| {
+        json!({"id": id, "label": label, "control": "integer", "nullable": false,
+               "mapping": unresolved,
+               "formula": {"expr": expr, "rule_ids": ["synthetic-1"], "evidence": unresolved}})
+    };
+    let fields = vec![
+        json!({"id": "name", "label": "Name", "control": "text", "nullable": false,
+               "mapping": unresolved}),
+        list("equipment", "Equipment", equipment),
+        list("traits", "Traits", traits),
+        derived(
+            "load",
+            "Load",
+            "sum(equipment.map(item, item.quantity * item.weight))",
+        ),
+        derived(
+            "first_kept",
+            "First row kept",
+            "size(equipment.filter(item, item.id == \"r1-1\"))",
+        ),
+    ];
+    let ids: Vec<serde_json::Value> = fields.iter().map(|field| field["id"].clone()).collect();
+    json!({
+        "contract_version": 1, "game_id": "synthetic-game", "edition_id": "first",
+        "definition_id": "list-sheet", "title": "Synthetic list sheet", "sources": [],
+        "fields": fields,
+        "groups": [{"id": "main", "label": "Main", "fields": ids, "column_hint": "main"}],
+        "formula_profile": 1,
+        "constraints": [{"id": "load-cap", "expr": "load <= 10", "rule_ids": ["synthetic-2"],
+                         "message": "Load is at most 10.", "evidence": unresolved}]
+    })
 }
 
 /// Scalar, list-free formula definition for the unpacked browser gate (lists wait for M4).

@@ -6,8 +6,9 @@
     <input type="hidden" name="system_id" value="{{ character.input.system_id }}">
     <input type="hidden" name="edition" value="{{ character.input.edition }}">
     <label for="name">Character name</label><input id="name" name="name" value="{{ character.input.name }}" required maxlength="100">
-    <label for="notes">Notes</label><textarea id="notes" name="notes" rows="12" maxlength="20000">{{ character.input.notes }}</textarea>
+    <label for="notes">Notes</label><textarea id="notes" name="notes" rows="12" maxlength="20000">
+{{ character.input.notes }}</textarea>
     <button type="submit">Save changes</button><span class="htmx-indicator">Saving…</span>
-    <small>Revision {{ character.input.revision }} · Game and edition are fixed for this record.</small>
+    <small>Revision {{ character.input.revision|truncate(64) }} · Game and edition are fixed for this record.</small>
   </form>
 </section>

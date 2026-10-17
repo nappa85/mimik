@@ -2,8 +2,8 @@
 
 2026-10-16. Scope: [derived-formulas-m4-plan.md](../derived-formulas-m4-plan.md). Round 1
 reviewed revision 1 (draft `9c79436`) against master `1ddbf17`; the plan was rewritten as
-revision 2 (`1b8baa8`). Round 2 re-reviewed revision 2; the plan is now revision 3, which also
-takes in two changed user decisions. Documentation only: no code, builds, tests or containers
+revision 2 (`1b8baa8`). Round 2 re-reviewed revision 2; revision 3 also took in two changed user decisions.
+Round 3 re-reviewed revision 3's new scope; the plan is now revision 3.1. Documentation only: no code, builds, tests or containers
 were run for this record. Test numbers below are revision 3's.
 
 ## Independence
@@ -103,14 +103,51 @@ wrong (N9, `servo_arc`).
   data; added, removed, edited (with properties, presence included) and moved (a deterministic
   longest increasing subsequence) per list, plus scalar, name and notes changes; the `<list>/
   <entry id>/<property>` address; a reused slot shown as "all properties changed"; create and
-  freeze lines; 200 lines, 8 labels per line, an overflow line with exact counts, a ≈ 1.25 MB
+  freeze lines; 200 lines, 8 labels per line, an overflow line with exact counts, a ≈ 1.25 MB (corrected to 1,675,264 bytes in round 3, N-E)
   worst-case section; read-only with no revert. Tests 29–34, 36; risk 7.
 - Open: Q5 (oversized drafts not echoed) and Q6 (names only, no values, in the summary), each
   with a default applied.
 
+## Round 3 findings (revision 3)
+
+Round 3 re-reviewed revision 3's new scope (D5 moves, D8 change summary, the D7 pre-body check
+and echo cap) in parallel with fresh contexts:
+- Sol (`--chain main`): **GO-with-amendments**, RE3-1 and RE3-2 (both medium). It confirmed
+  RR1–RR5 and N1–N10 incorporated.
+- Sonnet subagent: **GO-with-amendments**, N-A to N-H. The main session relayed these as
+  amendments without severities, so the table shows none.
+- Third reviewer (`--chain third`): **unavailable** again; proceed with the two main reviews
+  and retry at implementation review.
+
+Revision 3.1 applies every amendment in plan text. Each was checked against the code read-only
+at master `8174be6`.
+
+| ID | Reviewer | Sev. | Verdict and evidence | Disposition (revision 3.1) |
+|---|---|---|---|---|
+| RE3-1 | Sol | Medium | **Valid.** The scalar template already echoes an invalid enum, boolean or state value twice, as the option `value` and in its visible text (`private_sheet.html:7-8`); the planned row legend would repeat the hidden ID. `6 × ECHO_BYTES` counted each byte once (Askama's widest escape is the 5-byte `&#34;`, `askama 0.14` `filters/escape.rs`). | D7 "Echo multiplicity": each string in full at most once; repeated contexts show a 64-character excerpt; page ≤ `FIXED_PAGE_BYTES` + units × `UNIT_MARKUP_BYTES` + 5 × `ECHO_BYTES`. Test 42 fills the maximum-amplification contexts; a mutation "a repeated context echoes the full value". |
+| RE3-2 | Sol | Medium | **Valid.** `[A,B,C]` → `[B,A,C]` gives N − 1 positions `[1,0,2]`; the lexicographically smallest N positions keep B and C and report A, contradicting "moving one row to the top shows that row". | D8: a deterministic minimal explanation; the tie-break keeps the lexicographically **greatest** N positions, so the rows that ended up earlier are reported. Pinned cases in test 30, a mutation "the tie-break reversed". The adjacent-swap-at-the-bottom case reports the row that moved up, as stated. |
+| N-A | Sonnet | — | **Valid.** In a one-property list every edit changes "all properties". | D8: the reused-slot wording only for lists with ≥ 2 properties; neutral edit text otherwise; test 31 one-property case. |
+| N-B | Sonnet | — | **Valid.** `auth::normalize` sets `no-store` on every response (`auth/mod.rs:426-429`), so Back-button recovery cannot be promised. | D7 and Q5: "Nothing was saved; copy large text before submitting"; test 42 asserts the wording. |
+| N-C | Sonnet | — | **Valid.** Revision N − 1 had no stated validation. | D8: N − 1 goes through the same decode, identity, `match_pin` and `validate_values`; any failure shows "Change summary unavailable for this revision."; test 33 extended; a mutation. |
+| N-D | Sonnet | — | **Valid.** Test 20 did not cover new rows moved around retained rows, or invalid text through a move. | Test 20 extended: new IDs follow the final row order; invalid text kept. |
+| N-E | Sonnet | — | **Valid.** The ≈ 1.25 MB figure assumed 10 labels at 100 bytes, not 8 labels escaped at 5 bytes per character, and left out the overflow line. | D8 derives `SUMMARY_LINE_BYTES`, `SUMMARY_OVERFLOW_BYTES` and `SUMMARY_FIXED_BYTES`; `SUMMARY_BYTES` = 1,675,264, asserted by test 34. |
+| N-F | Sonnet | — | **Valid.** D8 named `history::diff`. | `history_diff::diff` everywhere. |
+| N-G | Sonnet | — | **Valid.** "Still announced" is not something the plan can guarantee for disabled buttons. | D5: the claim dropped; the focus target's accessible name carries the new position; D8 summary markup (`section[aria-labelledby]`, `h2`, `ul`, `code`) with a DOM assertion in test 32. |
+| N-H | Sonnet | — | **Valid.** The 5 s `boundary` timeout (`auth/mod.rs:217`) covers the body too. | D7: recorded as an accepted limit (about 8.4 Mbit/s for 5 MiB). |
+
+No round-3 finding was rejected. The user's open questions Q5 and Q6 keep their defaults (Q5
+amended by N-B).
+
+## Implementation-review amendment (revision 3.2)
+
+The implementation dropped D5's `#list-f` fragment after the browser stage demonstrated that
+it blocks autofocus (parent plan §17 negative control). All three implementation reviewers
+(Sonnet, Sol, Space Bunny) accepted the deviation; the plan text was amended in place as
+revision 3.2, with the other implementation-review fixes. Record:
+[2026-10-17-derived-formulas-m4-impl.md](2026-10-17-derived-formulas-m4-impl.md).
+
 ## Status
 
-Revision 3 resolves every round-1 and round-2 finding in plan text. It adds scope the reviewers
-have not seen (D5 moves, D8 change summary, the D7 pre-body check and echo cap), so it needs a
-**short re-review of those parts** before execution, and the user's answer to Q5 and Q6 or
-acceptance of the defaults. Review findings are not proof of correctness.
+Revision 3.1 resolves every round-1, round-2 and round-3 finding in plan text and is ready for
+execution. Review of the review record does not recurse. Review findings are not proof of
+correctness; the implementation review (plan step 9) is still required.

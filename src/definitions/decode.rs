@@ -4,6 +4,10 @@ use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
 use std::fmt;
 
+/// The node cap of every bounded parse (definitions and sheet snapshots); also the stored
+/// node budget of list definitions at publication (`campaigns::values::form_budget`).
+pub(crate) const MAX_NODES: usize = 32_768;
+
 struct Seed<'a> {
     depth: usize,
     nodes: &'a mut usize,
@@ -35,7 +39,7 @@ fn limits(key: &str) -> (usize, usize) {
 impl<'de> DeserializeSeed<'de> for Seed<'_> {
     type Value = Value;
     fn deserialize<D: serde::Deserializer<'de>>(self, decoder: D) -> Result<Value, D::Error> {
-        if self.reject || *self.nodes >= 32_768 {
+        if self.reject || *self.nodes >= MAX_NODES {
             return Err(serde::de::Error::custom("Definition expansion limit"));
         }
         *self.nodes += 1;
@@ -145,6 +149,25 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Value, DefinitionError> {
 
 pub(crate) fn parse_sheet(bytes: &[u8]) -> Result<Value, DefinitionError> {
     parse_profile(bytes, true)
+}
+
+/// The decoder's own node count of a sheet snapshot (tests measure `ENVELOPE_NODES` with it).
+#[cfg(test)]
+pub(crate) fn sheet_nodes(bytes: &[u8]) -> usize {
+    let mut decoder = serde_json::Deserializer::from_slice(bytes);
+    let mut nodes = 0;
+    Seed {
+        depth: 0,
+        nodes: &mut nodes,
+        array_limit: 256,
+        string_limit: 5000,
+        reject: false,
+        sheet: true,
+        data: false,
+    }
+    .deserialize(&mut decoder)
+    .expect("a decodable sheet snapshot");
+    nodes
 }
 
 fn parse_profile(bytes: &[u8], sheet: bool) -> Result<Value, DefinitionError> {

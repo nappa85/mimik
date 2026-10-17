@@ -564,3 +564,79 @@ async fn source_pages_and_images_are_local_and_html_is_safe() {
     assert_eq!(response.headers()["content-type"], "image/png");
     assert_eq!(response.headers()["cache-control"], "no-store");
 }
+
+/// Last review (Space Bunny F1): a browser submits textarea line breaks as CR LF. The
+/// source-review forms normalise them to LF before validation, so a correction of exactly
+/// 20,000 typed characters is accepted and stored with LF; the history `<pre>` keeps a leading
+/// newline (sacrificial LF, F4).
+#[tokio::test]
+async fn source_review_crlf_at_the_limit_is_accepted_and_stored_as_lf() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bundle, pdf) = fixture(dir.path());
+    let store = Store::open(&dir.path().join("test.sqlite3")).unwrap();
+    store.import_source(&bundle, &pdf).await.unwrap();
+    let page = store.sources().await.unwrap()[0].pages[0].id;
+    let (unit_id, unit_revision) = {
+        let view = store.source_page(page).await.unwrap();
+        (view.units[0].id, view.units[0].revision)
+    };
+    let router = app(store.clone());
+    let correction = "\nx".repeat(10_000);
+    let rationale = "y\n".repeat(2_500);
+    let body = serde_urlencoded::to_string([
+        ("revision", unit_revision.to_string()),
+        ("state", "corrected".into()),
+        ("correction", correction.replace('\n', "\r\n")),
+        ("actor", "fixture-reviewer".into()),
+        ("rationale", rationale.replace('\n', "\r\n")),
+    ])
+    .unwrap();
+    assert!(body.contains("%0D%0A"));
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/sources/pages/{page}/units/{unit_id}"))
+                .header("host", "localhost:3000")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::SEE_OTHER,
+        "20,000 typed characters"
+    );
+    let view = store.source_page(page).await.unwrap();
+    assert_eq!(view.units[0].correction, correction, "stored with LF");
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!("/sources/pages/{page}"))
+                .header("host", "localhost:3000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = String::from_utf8(
+        to_bytes(response.into_body(), 4_000_000)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let history: String = scraper::Html::parse_document(&html)
+        .select(&scraper::Selector::parse("pre.evidence-text").unwrap())
+        .next()
+        .expect("history correction")
+        .text()
+        .collect();
+    assert_eq!(
+        history, correction,
+        "history <pre> keeps the leading newline"
+    );
+}
