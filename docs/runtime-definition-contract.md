@@ -332,7 +332,9 @@ editable; a per-property `editable: false` flag and an item catalogue are a late
   also scrolls it into view
   (the new row's first control, the list's Add button after Remove, the moved row's move
   button at its new position). A draft from an older revision shows "The saved sheet
-  changed (revision N → M); saving this draft will be refused." List sheets also render a
+  changed (revision N → M); saving this draft will be refused with a conflict (409)."
+  The `role="status"` message is part of a freshly loaded page, which screen readers do not
+  reliably announce; the focused control and its name carry the result. List sheets also render a
   Save button before the groups, so Enter saves.
 - **Change summary** (history page of revision N of a runtime sheet with a supported pin):
   stored values only, names and addresses but never values. It lists name and notes
@@ -355,7 +357,16 @@ editable; a per-property `editable: false` flag and an item catalogue are a late
   needs about 8.4 Mbit/s. A re-render echoes the draft only when its decoded values total ≤
   1 MiB (a larger draft could never be stored); otherwise it answers 422 with an alert:
   "Nothing was saved; copy large text before submitting." Each submitted string is echoed
-  in full at most once; second visible contexts show a 64-character excerpt.
+  in full at most once (the submitted revision included); second visible contexts show a
+  64-character excerpt. Textareas emit a sacrificial newline after the opening tag, so values
+  that start with newlines round-trip exactly. The 5 MiB limit is enforced on the body
+  itself, with or without a `Content-Length`. The single runtime permit is taken before the body is
+  read, so buffering happens under it: at most one sheet POST (≤ 5 MiB) buffers at a time and
+  any other runtime request answers 503 meanwhile, an accepted risk alongside the 5 s
+  slow-upload hold. If edit rights are lost between a
+  rejected save and its re-render, the answer is a plain 403 and the draft is not re-rendered
+  (nothing is saved). The page-size bound covers the editor chrome and controls, not the
+  formula sections of a formula definition (see the M4 plan D7).
 
 ## 6. Capability states and future task/history seams
 

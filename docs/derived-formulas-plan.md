@@ -1160,7 +1160,8 @@ full set below before it was committed.
 - The `formula_eval` example build; `source_fixture` generation (now with
   `list-definition.json`); Ruff check and format; the tools unittest suite, 452 run (39
   skipped); actionlint; `cargo about generate --locked --fail`; `cargo audit --deny warnings`
-  (333 crates, 1,334 advisories; the one networked run besides the step-3 fetch).
+  (333 crates scanned against an advisory database of 1,334 entries, no findings; the one
+  networked run besides the step-3 fetch).
 - Release build; `cargo package --locked --allow-dirty --offline` (including its verify
   build), `verify_source_package.py`, `cargo vendor --offline` and `package_release.py`
   (revision recorded as `tree-aac0b3a…`).
@@ -1241,6 +1242,29 @@ nothing-written assertions of 19/20 and the saved-revision assertions of 23).
 
 - The independent implementation review (plan step 9) with Sol, Sonnet and the third chain.
 - The `#list-f` deviation above, and the slimmed heavy tests.
+
+**Implementation-review fixes (2026-10-17)**
+
+Review: Sonnet MERGE, Sol MERGE AFTER FIXES, Space Bunny (third chain) MERGE AFTER FIXES; all
+three accepted the D5 deviation. Record:
+[reviews/2026-10-17-derived-formulas-m4-impl.md](reviews/2026-10-17-derived-formulas-m4-impl.md).
+Fixes: the visible submitted revision is excerpted (Sol Major 1); every private-sheet
+textarea emits a sacrificial newline (Sol Major 2); the streamed-body 413 guard (Space Bunny
+F1, adjudicated not a defect); D7 and the contract state what the page bound covers (F2); the
+`form_budget` approximation comment and a second calibration (F3); the optional-first-
+property autofocus test (F4); plan revision 3.2 (F5); the `outside_increasing` invariant
+(F6); the documented lost-draft 403 path (F7); the buffering risk (Sonnet); wording nits.
+
+| Test | Kind | Base or mutation | Failure seen |
+|---|---|---|---|
+| `malformed_near_cap_revision_is_echoed_once` | executed red | `18c6a07` templates and `web.rs` | 2,000,014 `&#34;`, want 1,000,078 |
+| `leading_newlines_survive_ops_rejected_saves_and_reloads` | executed red; mutation | `18c6a07`; list textarea without the newline | "saved reload: notes" `"notes"` vs `"\nnotes"`; failed |
+| `stale_op_warns` (new wording) | executed red | `18c6a07` | old wording |
+| browser list stage, leading newlines | executed red | release build without the newline | "Leading newlines lost after draft operations" |
+| `streamed_body_over_5mib_without_length_is_413` | guard; mutation | `DefaultBodyLimit::disable()` on the sheet POSTs | failed |
+| `add_focuses_the_set_select_of_an_optional_first_property` | guard; mutation | Set/Not set select never autofocused | failed |
+| `all_optional_worst_label_page_is_within_the_unit_bound` | guard (measurement) | — | 246 bytes per unit |
+| `TextareaNewlineTests` (smoke form reader) | executed red | `smoke_release.py` before the fix | `'\nplain'` vs `'plain'`; found by the first gate rerun (`smoke_auth` failed "Persisted field differs: equipment") |
 
 ## Appendix A: superseded custom-spec design (revision 1)
 

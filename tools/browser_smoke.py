@@ -579,6 +579,19 @@ def run_list_browser(page, campaign, version, submit):
     page.locator('input[name="row-1-1-2"]').fill("1")
     page.locator('input[name="row-1-1-3"]').fill("1")
     page.locator('select[name="row-1-1-4"]').select_option("true")
+    # Leading newlines survive every round trip (a parser drops the first newline after
+    # <textarea>; the template emits a sacrificial one).
+    page.locator('select[name="set-1-0-5"]').select_option("present")
+    page.locator('textarea[name="row-1-0-5"]').fill("\n\nkept note")
+    page.locator('textarea[name="notes"]').fill("\nsheet notes")
+
+    def newlines_kept(context):
+        require(
+            page.locator('textarea[name="row-1-0-5"]').input_value() == "\n\nkept note"
+            and page.locator('textarea[name="notes"]').input_value() == "\nsheet notes",
+            f"Leading newlines lost after {context}",
+        )
+
     page.locator('textarea[name="row-1-1-5"]').focus()
     page.keyboard.press("Tab")
     require(active() == "up-1-1", "Tab did not reach Move row 2 up")
@@ -593,6 +606,7 @@ def run_list_browser(page, campaign, version, submit):
         "Edge move buttons are not disabled",
     )
     press("Space")
+    newlines_kept("draft operations")
     require(active() == "up-1-1", "Move down to the end did not focus its Move up")
     require(
         page.locator('input[name="row-1-1-0"]').input_value() == "Torch"
@@ -605,6 +619,12 @@ def run_list_browser(page, campaign, version, submit):
     require(
         page.locator('input[name="row-1-1-2"]').input_value() == "not a number",
         "A draft op lost an invalid row value",
+    )
+    submit(page, page.get_by_role("button", name="Save full private sheet").first, 422)
+    newlines_kept("a rejected save")
+    require(
+        page.locator('input[name="row-1-1-2"]').input_value() == "not a number",
+        "A rejected save lost the draft",
     )
     submit(page, button("Remove row 3 of Equipment"), 200)
     require(active() == "add-1", "Remove did not focus the Add button")
@@ -624,12 +644,15 @@ def run_list_browser(page, campaign, version, submit):
     # Save: load 2*3 + 4*1 = 10 passes; then a violation.
     submit(page, page.get_by_role("button", name="Save full private sheet").first)
     require(load.inner_text() == "10", "Load not recomputed after the moves")
+    page.reload()
+    newlines_kept("a saved reload")
     page.locator('input[name="row-1-1-2"]').fill("9")
     submit(page, page.get_by_role("button", name="Save full private sheet").first)
     require(
         "Load is at most 10." in page.locator("#advisory-checks").inner_text(),
         "List advisory violation not shown",
     )
+    newlines_kept("a second save")
     page.goto(list_sheet + "/history/3")
     summary = page.locator("section#change-summary")
     require(

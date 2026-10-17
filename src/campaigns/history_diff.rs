@@ -167,7 +167,11 @@ pub(crate) fn outside_increasing(sequence: &[usize]) -> Vec<usize> {
         let chosen = (start..n)
             .rev()
             .find(|&j| longest[j] == need && last.is_none_or(|last| sequence[j] > sequence[last]));
-        let Some(chosen) = chosen else { break };
+        // Invariant: `longest[last] == need + 1` (or `need == length` at the start), so
+        // some later position continues the subsequence with exactly `need` elements; the
+        // search cannot fail for any input. A failure would be a bug in `longest`, and a
+        // partial subsequence would silently over-report moves, so it is not absorbed.
+        let chosen = chosen.expect("a longest-subsequence continuation always exists");
         kept.insert(chosen);
         last = Some(chosen);
         need -= 1;

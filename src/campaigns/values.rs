@@ -214,6 +214,13 @@ fn choices(control: Control, options: Option<&Vec<crate::definitions::Choice>>) 
 ///   (2 + properties).
 ///
 /// Choices are the enum options + 1, or 3 for a boolean.
+///
+/// The unit terms are deliberately approximate, not a literal element count: an optional
+/// property renders its value control plus a Set/Not set select (charged as the "+ 2"), and a
+/// re-render may add one "invalid submitted" option per select. `UNIT_MARKUP_BYTES` (2,048
+/// bytes per unit) carries that slack. Calibration (M4 §17, labels of 100 `"`): 622 bytes per
+/// unit for 32 required integers and the all-optional-boolean measurement in
+/// `worst_label_page_markup_is_within_the_unit_bound`.
 pub(crate) fn form_budget(definition: &Definition) -> FormCounts {
     let rows = crate::definitions::formula::MAX_LIST_ITEMS;
     let mut counts = FormCounts {

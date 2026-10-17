@@ -138,6 +138,14 @@ at master `8174be6`.
 No round-3 finding was rejected. The user's open questions Q5 and Q6 keep their defaults (Q5
 amended by N-B).
 
+## Implementation-review amendment (revision 3.2)
+
+The implementation dropped D5's `#list-f` fragment after the browser stage demonstrated that
+it blocks autofocus (parent plan §17 negative control). All three implementation reviewers
+(Sonnet, Sol, Space Bunny) accepted the deviation; the plan text was amended in place as
+revision 3.2, with the other implementation-review fixes. Record:
+[2026-10-17-derived-formulas-m4-impl.md](2026-10-17-derived-formulas-m4-impl.md).
+
 ## Status
 
 Revision 3.1 resolves every round-1, round-2 and round-3 finding in plan text and is ready for

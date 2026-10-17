@@ -435,7 +435,11 @@ class FormFields(HTMLParser):
                 self.forms[self.active_form][self.textarea] += data
 
     def handle_endtag(self, tag):
-        if tag == "textarea":
+        if tag == "textarea" and self.textarea:
+            # HTML parsing drops one newline right after <textarea>; html.parser does not.
+            for values in (self.values, self.forms.get(self.active_form, {})):
+                if values.get(self.textarea, "").startswith("\n"):
+                    values[self.textarea] = values[self.textarea][1:]
             self.textarea = None
         if tag == "form":
             self.active_form = None

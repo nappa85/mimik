@@ -1457,7 +1457,8 @@ async fn stale_op_warns() {
     let setup = list_setup(&list_definition()).await;
     let created = abc(&setup).await;
     let html = sheet_page(&setup).await;
-    let warning = "The saved sheet changed (revision 1 → 2); saving this draft will be refused.";
+    let warning = "The saved sheet changed (revision 1 → 2); saving this draft will be refused \
+                   with a conflict (409). Copy your changes, reload and re-apply them.";
     let (_, current) = setup
         .post("/private-sheets/1", clicked(&html, "add-1"))
         .await;
@@ -3093,4 +3094,198 @@ async fn slow_5mib_upload_holds_the_runtime_permit_at_most_the_request_timeout()
         response.status()
     );
     assert!(held <= std::time::Duration::from_millis(5_600), "{held:?}");
+}
+
+// ---- Implementation-review fixes (2026-10-17) ----
+
+/// Sol Major 1: a malformed submitted revision is echoed in full once (the hidden control);
+/// the visible text shows a 64-character excerpt, so the page stays within the RE3-1 bound.
+#[tokio::test]
+async fn malformed_near_cap_revision_is_echoed_once() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    create_rows(&setup, 1).await;
+    let chrome = sheet_page(&setup).await.matches("&#34;").count();
+    let quotes = "\"".repeat(1_000_000);
+    let mut form = list_form(
+        1,
+        vec![equipment_row(0, "r1-1", "Rope", "1", None, None, "false")],
+    );
+    set(&mut form, "revision", &quotes);
+    let (status, html) = big_post(
+        &setup,
+        "/private-sheets/1",
+        serde_urlencoded::to_string(form).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(reopen(&setup, 1).await.revision, 1, "nothing saved");
+    assert_eq!(
+        get(&submitted_by(&html, None), "revision"),
+        quotes,
+        "hidden value kept"
+    );
+    assert_eq!(html.matches("&#34;").count(), chrome + 1_000_000 + 64);
+    let units = render_units(&list_definition(), &[0, 1, 0]);
+    assert!(html.len() <= page_bound(units), "{} bytes", html.len());
+}
+
+/// Sol Major 2: values that start with one or two newlines survive every textarea round
+/// trip (a parser drops the first newline after `<textarea>`): a draft op, a rejected save,
+/// a saved reload and an unchanged second save.
+#[tokio::test]
+async fn leading_newlines_survive_ops_rejected_saves_and_reloads() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let mut definition = hostile_definition();
+    definition["fields"].as_array_mut().unwrap().push(
+        json!({"id": "essay", "label": "Essay", "control": "multiline",
+                     "nullable": false, "mapping": mapped()}),
+    );
+    definition["groups"][0]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push("essay".into());
+    let setup = list_setup(&definition).await;
+    let mut snapshot = blank(&setup, 1).await;
+    snapshot.sheet_id = 1;
+    snapshot.notes = "\nnotes".into();
+    snapshot.data = json!({"label": "x", "essay": "\n\nscalar",
+                           "gear": [{"id": "r1-1", "name": "n", "story": "\nrow"},
+                                    {"id": "r1-2", "name": "m", "story": "\n\nsecond"}]});
+    let created = write(&setup, 1, snapshot, "create").await.unwrap();
+    let expect = |html: &str, context: &str| {
+        let form = submitted_by(html, None);
+        for (key, want) in [
+            ("notes", "\nnotes"),
+            ("value-essay", "\n\nscalar"),
+            ("row-1-0-1", "\nrow"),
+            ("row-1-1-1", "\n\nsecond"),
+        ] {
+            assert_eq!(get(&form, key), want, "{context}: {key}");
+        }
+    };
+    let view = sheet_page(&setup).await;
+    expect(&view, "saved reload");
+    let (status, op) = setup
+        .post("/private-sheets/1", clicked(&view, "add-1"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    expect(&op, "draft op");
+    let mut rejected = submitted(&view);
+    set(&mut rejected, "row-1-0-2", "not-an-option");
+    set(&mut rejected, "set-1-0-2", "present");
+    let (status, page) = setup.post("/private-sheets/1", rejected).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    expect(&page, "rejected save");
+    assert_eq!(
+        setup.post("/private-sheets/1", submitted(&view)).await.0,
+        StatusCode::SEE_OTHER
+    );
+    let saved = reopen(&setup, 1).await;
+    assert_eq!(saved.revision, 2);
+    assert_eq!(
+        (saved.data, saved.notes),
+        (created.data, created.notes),
+        "unchanged save"
+    );
+    expect(&sheet_page(&setup).await, "second reload");
+}
+
+/// Third F1 (adjudicated: the limit is enforced on the body): a signed-in principal streaming
+/// more than 5 MiB with no Content-Length gets 413.
+#[tokio::test]
+async fn streamed_body_over_5mib_without_length_is_413() {
+    use tower::ServiceExt;
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    create_rows(&setup, 1).await;
+    let chunk = 64 * 1024;
+    let count = super::super::web::SHEET_POST_BYTES / chunk + 2;
+    let chunks = futures_util::stream::iter(
+        (0..count)
+            .map(move |_| Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![b'a'; chunk]))),
+    );
+    let request = axum::http::Request::builder()
+        .uri("/private-sheets/1")
+        .method("POST")
+        .header("host", "127.0.0.1:3000")
+        .header("cookie", setup.auth[1].fixture_cookie())
+        .header("origin", "http://127.0.0.1:3000")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(axum::body::Body::from_stream(chunks))
+        .unwrap();
+    assert!(request.headers().get("content-length").is_none());
+    let response = setup.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+/// Third F4: on a list whose first property is optional, Add focuses that property's
+/// Set/Not set select, and nothing else.
+#[tokio::test]
+async fn add_focuses_the_set_select_of_an_optional_first_property() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let mut definition = list_definition();
+    definition["fields"][2]["items"]["properties"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, property("note", "Note", "text", true));
+    let setup = list_setup(&definition).await;
+    let (_, page) = setup.get(&create_path(&setup)).await;
+    let (status, added) = setup
+        .post(&create_path(&setup), clicked(&page, "add-2"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(autofocus(&added), ["set-2-0-0"]);
+}
+
+/// Third F3 calibration: the opposite row shape to the integer one, every property an
+/// optional boolean (a value select and a Set/Not set select), stays within the unit bound.
+/// Twenty properties keep the definition within the publication budget (31,748 units).
+#[tokio::test]
+async fn all_optional_worst_label_page_is_within_the_unit_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let label = "\"".repeat(100);
+    let properties: Vec<Value> = (0..20)
+        .map(|p| {
+            property(
+                &format!("p{p:02}_{}", "b".repeat(12)),
+                &label,
+                "boolean",
+                true,
+            )
+        })
+        .collect();
+    let mut definition = quoted_lists_definition(1, 20);
+    definition["fields"][0]["items"]["properties"] = Value::Array(properties);
+    let setup = list_setup(&definition).await;
+    let field = &definition["fields"][0];
+    let items: Vec<Value> = (1..=256)
+        .map(|k| {
+            let mut item = json!({"id": format!("r1-{k}")});
+            for p in field["items"]["properties"].as_array().unwrap() {
+                item[p["id"].as_str().unwrap()] = true.into();
+            }
+            item
+        })
+        .collect();
+    let mut snapshot = blank(&setup, 1).await;
+    snapshot.sheet_id = 1;
+    snapshot.data = json!({field["id"].as_str().unwrap(): items});
+    write(&setup, 1, snapshot, "create").await.unwrap();
+    let response =
+        super::router_request(&setup.app, &setup.auth[1], "/private-sheets/1", None).await;
+    let html = axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
+        .await
+        .unwrap();
+    let units = render_units(&definition, &[256]);
+    println!(
+        "all-optional worst-label page: {} bytes, {units} units",
+        html.len()
+    );
+    assert!(html.len() <= FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES);
 }

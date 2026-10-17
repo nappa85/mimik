@@ -185,6 +185,17 @@ class WorkspaceFormTests(unittest.TestCase):
         )
 
 
+class TextareaNewlineTests(unittest.TestCase):
+    def test_one_leading_newline_after_the_textarea_tag_is_dropped_like_a_browser(self):
+        parser = FormFields()
+        parser.feed(
+            '<form action="/s"><textarea name="a">\nplain</textarea>'
+            '<textarea name="b">\n\nkept</textarea><textarea name="c">x</textarea></form>'
+        )
+        self.assertEqual(parser.forms["/s"], {"a": "plain", "b": "\nkept", "c": "x"})
+        self.assertEqual(parser.values["b"], "\nkept")
+
+
 class VersionSelectionTests(unittest.TestCase):
     PAGE = (
         '<a href="/campaigns/4/sheets/new?version=1">Generic v1</a>'

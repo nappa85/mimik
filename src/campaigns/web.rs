@@ -625,6 +625,9 @@ struct PrivateTemplate<'a> {
     name: &'a str,
     notes: &'a str,
     revision: String,
+    /// The submitted revision as shown in visible text: an excerpt, so the hidden control
+    /// is its only full echo (RE3-1).
+    revision_excerpt: String,
     native: bool,
     create: bool,
     pin: String,
@@ -754,6 +757,7 @@ fn render_private(
         alert: &notice.alert,
         name,
         notes,
+        revision_excerpt: excerpt(&revision),
         revision,
         native,
         create,
@@ -1054,7 +1058,7 @@ async fn draft_op(
             .and_then(|pin| op.apply(pin.definition(), &mut form));
         if submitted != view.snapshot.revision {
             let stale = format!(
-                "The saved sheet changed (revision {submitted} → {}); saving this draft will be refused.",
+                "The saved sheet changed (revision {submitted} → {}); saving this draft will be refused with a conflict (409). Copy your changes, reload and re-apply them.",
                 view.snapshot.revision
             );
             view.warning = if view.warning.is_empty() {
@@ -1254,6 +1258,10 @@ async fn rejected_editor(
         Some(permit) => permit,
         None => crate::definitions::admit().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
     };
+    // A second, accepted loss path: if edit rights were lost between the rejected save and
+    // this reload (a departure, removal or custody change racing the save), the sheet is
+    // read-only for this caller and the draft is not re-rendered; the answer is the plain
+    // 403 access-denied document. Nothing was saved either way.
     let (view, permit) = load_editor(state, auth, id, version, permit).await?;
     if !view.editable {
         return Err(StatusCode::FORBIDDEN);

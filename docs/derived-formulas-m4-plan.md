@@ -5,7 +5,12 @@ GO-with-amendments RR1–RR5, Sonnet GO-with-amendments N1–N10, third unavaila
 resolved those findings and took in two changed user decisions (reorder and a change summary
 are now in M4). Revision 3 was re-reviewed (Sol GO-with-amendments RE3-1 and RE3-2, Sonnet
 GO-with-amendments N-A to N-H, third unavailable); revision 3.1 applies those amendments in
-place (D5, D7, D8, Q5 and tests 20, 30–34, 42). Review record:
+place (D5, D7, D8, Q5 and tests 20, 30–34, 42). **Revision 3.2 (implementation review,
+2026-10-17)** amends D5, D7, D11 and tests 25 and 42 in place: op buttons carry no `#list-f`
+fragment (it blocks autofocus; parent plan §17 negative control, accepted by all three
+implementation reviewers), the submitted revision is excerpted in visible text, textareas get
+a sacrificial newline, and D7 states what the page bound covers. Review records:
+[reviews/2026-10-17-derived-formulas-m4-impl.md](reviews/2026-10-17-derived-formulas-m4-impl.md) and
 [reviews/2026-10-16-derived-formulas-m4-plan.md](reviews/2026-10-16-derived-formulas-m4-plan.md).
 Not implemented. §1 was re-verified read-only against master `39cb421` (no `src/`, `templates/`,
 `tools/` or `tests/` change since `1ddbf17`). The worktree `../mimik-wt/formula` starts with
@@ -180,8 +185,11 @@ draft; Save persists).**
 - At 256 rows the Add button is disabled with "limit reached" text. If the revision differs from
   the current one, an advisory warning reads "The saved sheet changed (revision N → M); saving
   this draft will be refused."
-- **Focus and scroll.** `formaction="<action>#list-f"` (trusted numeric indices only) scrolls to
-  the list. Exactly one `autofocus` per page:
+- **Focus and scroll (revision 3.2).** Op buttons post to the form's own action with **no URL
+  fragment**: Chromium does not run autofocus when the URL fragment names an element (parent
+  plan §17: the browser stage fails with `#list-f` and passes without it), so the earlier
+  `formaction="<action>#list-f"` was dropped at implementation review; the autofocused control
+  scrolls into view instead. Exactly one `autofocus` per page:
   - after Add, on the new row's first control;
   - after Remove, on the list's Add button;
   - after Move up, on the moved row's Move up button at its new position, or on its Move down
@@ -266,7 +274,12 @@ length, the schema (8,000 / 20,000) plus `maxlength`; stored bytes, `snapshots::
     "…";
   - a row's hidden ID is echoed in full once, as the hidden `value`; the row legend shows at
     most the first 64 characters (a valid ID is ≤ 64);
-  - text inputs, textareas, Name and General notes are echoed once.
+  - text inputs, textareas, Name and General notes are echoed once;
+  - the submitted revision is echoed in full once, in the hidden control; the page's
+    "submitted/form revision" text shows a 64-character excerpt (revision 3.2, Sol Major 1).
+  Every textarea emits one sacrificial newline after its opening tag, because HTML parsing
+  drops the first newline there; values that start with newlines round-trip exactly
+  (revision 3.2, Sol Major 2).
   So a re-render is ≤ `FIXED_PAGE_BYTES` + units × `UNIT_MARKUP_BYTES` + 5 × `ECHO_BYTES`
   (Askama escapes `"` as the 5-byte `&#34;`, the widest escape), where `UNIT_MARKUP_BYTES`
   includes one 64-character excerpt escaped (≤ 320 bytes). Step 7 derives both constants from
@@ -274,6 +287,13 @@ length, the schema (8,000 / 20,000) plus `maxlength`; stored bytes, `snapshots::
   contexts (invalid enum and boolean values, invalid states and hidden IDs made of `"`), so a
   body of 5 MiB of quotes cannot produce a 25 MiB page. A save over 1 MiB stored, but within
   the echo cap (or over the profile cap), → 422 with the draft kept.
+- **What the page bound covers (revision 3.2, third reviewer F2).** `FIXED_PAGE_BYTES` covers
+  the editor chrome only (headings, pin JSON, notices, the Name and notes controls), and the
+  units cover the input controls, options and row elements. It is **not** a bound on the
+  formula sections of a formula definition: derived-field expressions, check messages and
+  explanations are bounded by the definition's 256 KiB content cap (each rendered at most
+  twice, escaped at ≤ 5 bytes per character), and each derived value by its field's text
+  limit (20,000 characters). The tests that assert the bound use formula-free fixtures.
 
 **D8. History: ID-labelled rows and a read-only change summary (user decision Q4).**
 - **Rows.** `/history/N` shows each row as a read-only fieldset, legend "Row 2 · ID r1-2",
@@ -359,8 +379,8 @@ tables: rows stack, with `fieldset{min-width:0}` and the flex-wrapping button ro
 Witnesses go in their real contexts: `</textarea>` in item text; `"` and `'` in attribute
 values (the hidden-ID echo, text `value=`, invalid enum and Set/Not set echoes); `<script>` in
 list, property and option labels, in the status message and in change-summary labels. These run
-on the view, op, 422, 409, history and change-summary pages. `formaction` must equal the
-generated same-origin path plus `#list-f`.
+on the view, op, 422, 409, history and change-summary pages. No op button carries a
+`formaction`; the form action must equal the generated same-origin path (revision 3.2).
 - **Parser selection (N9, RR1).** Tests parse the DOM with the maintained `scraper` crate, a
   dev-dependency only, adopted at the start of step 3 with a recorded selection note. At
   adoption, pick the newest `scraper` release whose `html5ever` matches an already-locked
@@ -432,7 +452,7 @@ through the bypass until step 8.
 | 22 | 4 | same | `add_at_256_is_422_with_message`; `bad_op_or_index_is_400`; `two_ops_is_400` | Add at 256 answers 400, not 422; the others are guards |
 | 23 | 4 | same | `ops_need_csrf_and_edit_rights`; `stale_op_warns`; `ops_never_evaluate_draft`; `op_never_reveals_saved_ids` | the warning text is absent; the CSRF and rights cases are guards |
 | 24 | 4 | same | `unknown_id_draft_op_rerenders_then_save_422` (current) and `409` (stale) | the op answers 400 |
-| 25 | 4 | same | `op_buttons_have_formnovalidate_and_formaction`; `single_autofocus_after_add_remove_and_each_move` (incl. a move to the edge) | attributes absent |
+| 25 | 4 | same | `op_buttons_have_formnovalidate_and_no_fragment` (revision 3.2; was `…_and_formaction`); `single_autofocus_after_add_remove_and_each_move` (incl. a move to the edge) | attributes absent |
 | 26 | 4 | same | `op_button_names_and_status_messages` (row number in each name; three message forms) | absent |
 | 27 | 4 | same | `create_page_adds_rows_then_creates` | the op answers 400 |
 | 28 | 5 | same | `list_history_rows_have_stable_ids_and_no_ops` (incl. the test 6 snapshot); `history_address_grammar` | no row fieldsets in history |
@@ -514,7 +534,7 @@ in its commit (RR5, N10):
    `groups`/`render_private`); the template list branch and CSS; the `op=save` buttons, top and
    bottom, on list sheets; the M2 refusal strings removed.
 4. **Draft ops** (tests 18–27). `values::Op` parse and apply for add, remove, up and down
-   (caller `save_private`); `formnovalidate`, `formaction`, `autofocus`, edge rules, messages,
+   (caller `save_private`); `formnovalidate`, `autofocus` (no `formaction`, revision 3.2), edge rules, messages,
    the 256 limit, the stale warning, the button-row CSS.
 5. **History rows and change summary, derived values, escaping** (tests 28–37). History legends
    (caller `render_private`); `history_diff::diff` (caller `private_read`'s history path, which
