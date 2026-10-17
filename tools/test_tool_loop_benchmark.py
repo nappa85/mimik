@@ -608,6 +608,10 @@ def summary_rows(n_cases, correct, false_supported, split="heldout"):
                 "model_label": "m",
                 "split": split,
                 "case_id": f"c{i}",
+                # held-out rows carry the frozen hash (§11 item 8: unpinned ones are refused)
+                **(
+                    {"heldout_cases_sha256": tl.HELDOUT_FROZEN_SHA256} if split == "heldout" else {}
+                ),
                 "outcome": "answer",
                 "score": {
                     "expected_outcome": "answer",

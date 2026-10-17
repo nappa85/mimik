@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Canonical live runner for tools/tool_loop_benchmark.py (harness v3). Prototype tier.
 # Models come from the registry tools/models.json (tools/model_registry.py): a new model is a
-# registry entry, never a change here. The held-out split is an empty placeholder until the
-# blind writer delivers it; the harness refuses to run it.
+# registry entry, never a change here. The held-out split runs only the frozen blind case file
+# (plan §11 item 8): HELDOUT_CASES (default: the pin's frozen path) must hash to the pin in
+# tools/heldout-v3-pin.json, which must equal the harness's code anchor; the file is mounted
+# read-only and the harness verifies it again from one read before parsing.
 #
 # Usage: tools/run_tool_loop_benchmark.sh <model-key> <split> [seeds] [ctx]
 #   model-key: a key of tools/models.json (python3 tools/model_registry.py list)
@@ -16,6 +18,7 @@
 #   NUDGE (1) TURNS_REMAINING (0) SEARCH_NOTES (0) SANITIZE_ECHO (1) PENDING_CURRENT (1)
 #   UNTRUSTED (0)   harness flags H1, H2a, H2b, H3, H5, H6 as 0|1
 #   CASES           comma-separated case ids;  CASES_FILE  hashed subset (tools/case-subsets/)
+#   HELDOUT_CASES   held-out split only: the frozen case file (default: the pin's path)
 #   QUIET=1         harness --quiet-progress (no per-case outcome on stderr; plan §11 item 3)
 #   PREFLIGHT_CASE  dev case id: 1-case, seed-17 dev run on the same server before the arm
 #   BUDGET_SECONDS  harness run budget (default: seconds left before the cutoff - 900)
@@ -350,17 +353,24 @@ fi
 # ---- held-out hash gate (plan §11 item 8): only the pinned case file, mounted read-only
 heldout_mount=() heldout_args=()
 if [ "$hsplit" = heldout ]; then
-  pin_file=$ROOT/tools/heldout-v3-pin.json
-  pin_line=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["sha256"], d["default_path"])' "$pin_file") \
-    || fail 2 config "held-out pin $pin_file unreadable"
-  read -r heldout_pin_sha heldout_default <<< "$pin_line"
+  # The pin is loaded through the harness's own loader, so the code anchor
+  # (HELDOUT_FROZEN_SHA256) is checked here too; one value per call keeps paths space-safe.
+  pin_value() {
+    PYTHONDONTWRITEBYTECODE=1 python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import tool_loop_benchmark as tl; print(tl.load_heldout_pin(tl.HELDOUT_PIN)[sys.argv[2]])' "$ROOT/tools" "$1"
+  }
+  heldout_pin_sha=$(pin_value sha256) || fail 2 config "held-out pin unreadable or not the code anchor"
+  heldout_pin_file_sha=$(pin_value pin_sha256) || fail 2 config "held-out pin unreadable"
+  heldout_default=$(pin_value default_path) || fail 2 config "held-out pin unreadable"
   heldout=${HELDOUT_CASES:-$heldout_default}
-  heldout_real=$(realpath -e -- "$heldout" 2>/dev/null) || fail 5 heldout_missing "held-out case file $heldout not found"
-  [ -f "$heldout_real" ] || fail 5 heldout_missing "held-out case file $heldout_real is not a regular file"
+  case $heldout in *$'\t'*|*$'\n'*) fail 2 config "HELDOUT_CASES contains a tab or newline" ;; esac
+  heldout_real=$(realpath -e -- "$heldout" 2>/dev/null) || fail 5 heldout_missing "held-out case file not found"
+  case $heldout_real in *$'\t'*|*$'\n'*) fail 5 heldout_missing "held-out path contains a tab or newline" ;; esac
+  [ -f "$heldout_real" ] || fail 5 heldout_missing "held-out case file is not a regular file"
   heldout_line=$(check_run 120 --mount type=bind,src="$heldout_real",dst=/heldout/cases-heldout.json,readonly \
     "$CHECK_IMAGE" sha256sum /heldout/cases-heldout.json)
   [ "${heldout_line%% *}" = "$heldout_pin_sha" ] || fail 5 heldout_hash "held-out case file sha256 differs from the pin"
-  echo "heldout_cases_sha256=${heldout_line%% *} heldout_cases=$heldout_real" >> "$prov"
+  printf 'heldout_cases_sha256=%s heldout_pin_sha256=%s heldout_cases=%s\n' \
+    "${heldout_line%% *}" "$heldout_pin_file_sha" "$heldout_real" >> "$prov"
   heldout_mount=(--mount "type=bind,src=$heldout_real,dst=/heldout/cases-heldout.json,readonly")
   heldout_args=(--heldout-cases /heldout/cases-heldout.json)
 fi
@@ -527,7 +537,7 @@ run_harness() {  # run_harness <phase> <args...>: sets phase_rc; records <phase>
     --mount type=bind,src="$ROOT/tools",dst=/tools,readonly \
     --mount type=bind,src="$pack",dst=/pack,readonly \
     --mount type=volume,src=mimik-formula-target,dst=/formula,readonly \
-    --mount type=bind,src="$out",dst=/out "${heldout_mount[@]}" \
+    --mount type=bind,src="$out",dst=/out ${heldout_mount[@]+"${heldout_mount[@]}"} \
     "$HARNESS_IMAGE" "$@" >/dev/null || fail 12 infra_docker "harness container did not start ($phase)"
   started=$(date +%s)
   limit=$(( phase_budget > 0 ? phase_budget + max_turns * ${request_timeout%.*} + 600 : 0 ))
@@ -565,7 +575,7 @@ ledger_name=ledger-$(date +%Y%m%dT%H%M%S).jsonl
 arm_args=()
 [ -z "${ARM:-}" ] || arm_args=(--arm "$ARM")
 timing main
-cli=("${common[@]}" --split "$hsplit" "${heldout_args[@]}" "${case_args[@]}" --seeds "$seeds" "${arm_args[@]}"
+cli=("${common[@]}" --split "$hsplit" ${heldout_args[@]+"${heldout_args[@]}"} "${case_args[@]}" --seeds "$seeds" "${arm_args[@]}"
   --budget-seconds "$phase_budget" "${phase_deadline[@]}" --output "/out/$ledger_name")
 { echo "harness_cli=${cli[*]}"; echo "ledger_file=$ledger_name"; } >> "$prov"
 run_harness main "${cli[@]}"

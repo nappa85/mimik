@@ -662,7 +662,6 @@ class Queue:
         fan_reader=None,
         decision_registry=None,
         router_runner=ROUTER_RUNNER,
-        heldout_pin=None,
     ):
         self.q = queue
         self.registry = registry
@@ -707,7 +706,6 @@ class Queue:
         if self.decision is None and any(a["kind"] == "router" for a in queue["arms"]):
             self.decision = decision_models.load()
         self.router_runner = Path(router_runner)
-        self.heldout_pin = Path(heldout_pin or tl.HELDOUT_PIN)
         self.router_probes = {}  # router key -> its complete, eligible probe summary.json
         self.router_ineligible = {}  # router key -> why (failed or incomplete probe)
         self.router_screens = set()  # router keys whose screen unit completed
@@ -792,24 +790,44 @@ class Queue:
 
     # -- held-out hash gate (plan §11 item 8)
     def heldout_gate(self, cfg):
-        """(path, pin) of the pinned held-out case file; QueueError unless its sha256 matches."""
+        """(path, pin, case ids) of the pinned held-out file: read once, hashed, then only the
+        ids taken from those same bytes (review of 0b9742d). QueueError on any mismatch."""
         try:
-            pin = tl.load_heldout_pin(self.heldout_pin)
+            pin = tl.load_heldout_pin(tl.HELDOUT_PIN)
         except tl.PackError as error:
             raise QueueError(f"held-out pin: {error}") from None
         path = Path(cfg.get("heldout_cases") or pin["default_path"])
-        if not path.is_file():
-            raise QueueError(f"held-out case file {path} is missing")
-        if tl.file_digest(path) != pin["sha256"]:
-            raise QueueError("held-out case file sha256 differs from the pin")
-        return path, pin
+        try:
+            raw = tl.read_verified_heldout(path, pin)
+        except SystemExit as error:
+            raise QueueError(str(error).removeprefix("held-out gate: ")) from None
+        ids = [c["id"] for c in json.loads(raw.decode("utf-8"))["cases"]]
+        return path, pin, ids
+
+    def heldout_cases(self, cfg) -> list:
+        """The held-out job cases: the whole frozen set, or a validated selection of it."""
+        _, pin, ids = self.heldout_gate(cfg)
+        if cfg.get("cases"):
+            chosen = cfg["cases"].split(",")
+            if not set(chosen) <= set(ids):
+                raise QueueError("held-out cases: ids not in the frozen set")
+            return chosen
+        if cfg.get("cases_file"):
+            doc = json.loads(Path(cfg["cases_file"]).read_text(encoding="utf-8"))
+            if doc.get("split") != "heldout" or doc.get("source_cases_sha256") != pin["sha256"]:
+                raise QueueError(
+                    "held-out cases_file: not a subset of the frozen file (source hash)"
+                )
+            if not set(doc["case_ids"]) <= set(ids):
+                raise QueueError("held-out cases_file: ids not in the frozen set")
+            return list(doc["case_ids"])
+        return ids
 
     # -- plan and estimates
     def requested_cases(self, arm) -> list:
         cfg = arm["config"]
-        if cfg["split"] == "heldout":  # ids from the gated file only
-            path, _ = self.heldout_gate(cfg)
-            return [c["id"] for c in json.loads(path.read_text(encoding="utf-8"))["cases"]]
+        if cfg["split"] == "heldout":  # ids from the verified bytes only
+            return self.heldout_cases(cfg)
         if cfg["split"] == "smoke":
             return list(SMOKE_CASES)
         if cfg.get("cases"):
@@ -948,7 +966,9 @@ class Queue:
             doc = json.loads(Path(cfg["cases_file"]).read_text(encoding="utf-8"))
             header["case_subset_sha256"] = doc.get("sha256")
         if cfg["split"] == "heldout":
-            header["heldout_cases_sha256"] = self.heldout_gate(cfg)[1]["sha256"]
+            _, pin, _ = self.heldout_gate(cfg)
+            header["heldout_cases_sha256"] = pin["sha256"]
+            header["heldout_pin_sha256"] = pin["pin_sha256"]
         cases = self.requested_cases(arm)
         return {"header": header, "jobs": {(c, s) for s in seeds for c in cases}}
 
@@ -980,7 +1000,7 @@ class Queue:
             return self.router_prechecks(arm)
         if cfg["split"] == "heldout":
             try:
-                self.heldout_gate(cfg)
+                self.heldout_cases(cfg)
             except QueueError as error:
                 return "refuse", f"held-out gate: {error}"
         entry = self.registry["models"][cfg["model"]]
@@ -1670,7 +1690,7 @@ class Queue:
         not_before = None
         if cfg["split"] == "heldout":  # §11 item 8: before any estimate reads the case file
             try:
-                self.heldout_gate(cfg)
+                self.heldout_cases(cfg)
             except QueueError as error:
                 self.transition(arm, "refused", reason=f"held-out gate: {error}")
                 return "refused"

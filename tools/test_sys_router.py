@@ -355,11 +355,19 @@ class SysRouterTests(unittest.TestCase):
         self.assertEqual(sorted(s.get("arm_type", "model") for s in summaries), ["model", "system"])
         system = next(s for s in summaries if s.get("arm_type") == "system")
         self.assertEqual(system["bar"]["verdict"], "N/A (system arm)")
-        held = dict(system, split="heldout")
+        held = dict(system, split="heldout", heldout_cases_sha256=[tl.HELDOUT_FROZEN_SHA256])
         self.assertEqual(tl.bar_verdict(held)["verdict"], "N/A (system arm)")
         model = next(s for s in summaries if s.get("arm_type") is None)
         self.assertEqual(
-            tl.bar_verdict(dict(model, split="heldout", unique_cases=200))["verdict"], "PENDING"
+            tl.bar_verdict(
+                dict(
+                    model,
+                    split="heldout",
+                    unique_cases=200,
+                    heldout_cases_sha256=[tl.HELDOUT_FROZEN_SHA256],
+                )
+            )["verdict"],
+            "PENDING",
         )
         self.assertEqual(system["router_failures"], 1)
 

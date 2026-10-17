@@ -1253,3 +1253,16 @@ product decision.
 the `cases-heldout.json` hash recorded in each ledger header. With `MIMIK_V2_LEDGERS` mounted,
 missing git history is a test **failure**, not a skip. In a root container on the bind-mounted
 repo, run `git config --global --add safe.directory /w` before the suite.
+
+## Held-out hash gate (plan §11 item 8)
+
+A held-out run uses only the frozen blind case file. The pin (`tools/heldout-v3-pin.json`:
+sha256, 165 cases, outcome counts, default path) must equal the code anchor
+`HELDOUT_FROZEN_SHA256`. Harness: `--split heldout --heldout-cases FILE` (default: the pin's
+path); the file is read once, refused if missing or if its sha256 differs, parsed from the
+verified bytes, and its counts must equal the pin's. Runner: `HELDOUT_CASES` (checked in a
+check container, then mounted read-only at `/heldout/cases-heldout.json`). Queue:
+`heldout_cases` on held-out arms, with `cases` / `cases_file` subsets allowed when their source
+hash is the pin. Ledgers: `heldout_cases_sha256` and `heldout_pin_sha256` in the header and the
+case hash on every held-out row; summaries and merges refuse anything else. Details:
+`docs/tool-loop-heldout-v3-freeze.md`.

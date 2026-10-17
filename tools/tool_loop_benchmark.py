@@ -597,11 +597,13 @@ def pack_change_path(change: dict) -> dict:
 class Pack:
     """A demo pack: rules, definition, characters and case splits, validated on load."""
 
-    def __init__(self, root: Path, engine_factory=None, heldout_file=None):
+    def __init__(self, root: Path, engine_factory=None, heldout_bytes=None, heldout_path=None):
         self.root = Path(root)
-        # Held-out cases from an explicit file (§11 item 8); None: the pack's own file, which
-        # only validation reads. heldout_source records the bytes actually loaded.
-        self.heldout_file = None if heldout_file is None else Path(heldout_file)
+        # Held-out cases from bytes already read once and verified against the pin (§11 item
+        # 8); None: the pack's own file, which only validation reads. heldout_source records
+        # the sha256 of exactly the bytes parsed.
+        self.heldout_bytes = heldout_bytes
+        self.heldout_path = None if heldout_path is None else str(heldout_path)
         self.heldout_source = None
         self.rules = parse_rules((self.root / "rules.md").read_text(encoding="utf-8"))
         self.rule_ids = {r["rule_id"] for r in self.rules}
@@ -656,10 +658,12 @@ class Pack:
         seen = set()
         for split in ("dev", "heldout"):
             path = self.root / f"cases-{split}.json"
-            if split == "heldout" and self.heldout_file is not None:
-                path = self.heldout_file
-                raw = path.read_bytes()  # hashed and parsed from the same bytes
-                self.heldout_source = {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest()}
+            if split == "heldout" and self.heldout_bytes is not None:
+                raw = self.heldout_bytes  # the verified bytes: hashed and parsed are the same
+                self.heldout_source = {
+                    "path": self.heldout_path,
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                }
                 try:
                     doc = json.loads(raw.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -2200,6 +2204,10 @@ def summarize(rows: list[dict]) -> list[dict]:
             sanitised_calls=sum(r.get("sanitised_calls") or 0 for r in group),
             length_finishes=sum(r.get("length_finishes") or 0 for r in group),
         )
+        if split == "heldout":
+            summary["heldout_cases_sha256"] = sorted(
+                {str(r.get("heldout_cases_sha256")) for r in group}
+            )
         if arm_type:  # SYS-R system arm (absent for model arms: C0 summaries unchanged)
             summary["arm_type"] = arm_type
             summary["router_failures"] = sum(
@@ -2234,6 +2242,14 @@ def bar_verdict(summary: dict) -> dict:
             "variants": {},
             "reasons": ["bar applies to held-out only"],
             "verdict": "N/A",
+        }
+    if summary.get("heldout_cases_sha256") != [HELDOUT_FROZEN_SHA256]:
+        return {
+            "label": BAR_LABEL,
+            "criteria": criteria,
+            "variants": {},
+            "reasons": ["held-out rows are not from the frozen case file (heldout_cases_sha256)"],
+            "verdict": "REFUSED",
         }
     common = []
     if summary["not_run"]:
@@ -2728,11 +2744,14 @@ def offline_audit(pack: Pack, index: RuleIndex, max_turns: int = MAX_TURNS) -> t
 
 # ---------------------------------------------------------------- CLI
 def open_pack(args) -> Pack:
-    heldout = None
+    heldout = path = None
     if getattr(args, "split", "dev") == "heldout":
-        heldout = gated_heldout_file(args)
+        path, heldout = gated_heldout_bytes(args)
     pack = Pack(
-        args.pack, engine_factory=lambda d: CelCliEngine(d, args.formula_cli), heldout_file=heldout
+        args.pack,
+        engine_factory=lambda d: CelCliEngine(d, args.formula_cli),
+        heldout_bytes=heldout,
+        heldout_path=path,
     )
     if heldout is not None:
         try:
@@ -2745,6 +2764,9 @@ def open_pack(args) -> Pack:
 
 # ---------------------------------------------------------------- held-out hash gate (§11 item 8)
 HELDOUT_PIN = Path(__file__).resolve().parent / "heldout-v3-pin.json"
+# The code anchor: the pin JSON must name exactly this hash, so editing the JSON alone cannot
+# move the frozen set (review of 0b9742d). Tests patch both constants; nothing else can.
+HELDOUT_FROZEN_SHA256 = "6f11af05f27347ea31a50996b0e6b6eea4ccbfa3254a085cd7699d4d8ec68974"
 _PIN_KEYS = {"encoding", "split", "sha256", "cases", "outcomes", "default_path", "freeze_record"}
 
 
@@ -2767,21 +2789,34 @@ def load_heldout_pin(path) -> dict:
         or sum(outcomes.values()) != pin["cases"]
     ):
         raise PackError("held-out pin: outcome counts must be integers summing to cases")
+    if pin["sha256"] != HELDOUT_FROZEN_SHA256:
+        raise PackError("held-out pin: sha256 is not the code anchor HELDOUT_FROZEN_SHA256")
+    pin["pin_sha256"] = file_digest(Path(path))
     return pin
 
 
-def gated_heldout_file(args) -> Path:
-    """The explicit held-out case file, refused unless its sha256 equals the pin. The file is
-    hashed before anything parses it."""
-    pin = load_heldout_pin(getattr(args, "heldout_pin", None) or HELDOUT_PIN)
-    args.heldout_pin_doc = pin
-    path = Path(getattr(args, "heldout_cases", None) or pin["default_path"])
+def read_verified_heldout(path, pin) -> bytes:
+    """Read the held-out file once and return its bytes only if their sha256 is the pin's.
+    Nothing parses held-out bytes that were not verified (review of 0b9742d: TOCTOU)."""
+    path = Path(path)
     if not path.is_file():
         raise SystemExit(f"held-out gate: case file {path} is missing")
-    actual = file_digest(path)
+    raw = path.read_bytes()
+    actual = hashlib.sha256(raw).hexdigest()
     if actual != pin["sha256"]:
         raise SystemExit(f"held-out gate: case file sha256 {actual} != pinned {pin['sha256']}")
-    return path
+    return raw
+
+
+def gated_heldout_bytes(args):
+    """(path, verified bytes) of the explicit held-out case file under the committed pin."""
+    try:
+        pin = load_heldout_pin(HELDOUT_PIN)
+    except PackError as error:
+        raise SystemExit(f"held-out gate: {error}") from None
+    args.heldout_pin_doc = pin
+    path = Path(getattr(args, "heldout_cases", None) or pin["default_path"])
+    return path, read_verified_heldout(path, pin)
 
 
 def gate_heldout_pack(pack: Pack, pin) -> None:
@@ -2986,6 +3021,7 @@ def run(args, model, out, clock=time.monotonic, pack=None, wall=time.time) -> li
     }
     if args.split == "heldout":  # absent from every dev header
         header["heldout_cases_sha256"] = pack.heldout_source["sha256"]
+        header["heldout_pin_sha256"] = args.heldout_pin_doc["pin_sha256"]
     if router is not None:  # SYS-R only: absent from every C0 header
         header.update(
             arm_type="system",
@@ -3023,6 +3059,8 @@ def run(args, model, out, clock=time.monotonic, pack=None, wall=time.time) -> li
             "tags": copy.deepcopy(case.get("tags")),
             "seed": seed,
         }
+        if args.split == "heldout":  # held-out rows only: dev rows unchanged
+            base["heldout_cases_sha256"] = pack.heldout_source["sha256"]
         decision = None
         if router is not None:
             base["arm_type"] = "system"
@@ -3223,6 +3261,8 @@ GROUP_IDENTITY = (
     "case_ids",
     "arm_type",
     "router_decisions_sha256",
+    "heldout_cases_sha256",
+    "heldout_pin_sha256",
 )
 ROW_HEADER_FIELDS = ("model_label", "arm", "split", "arm_type")
 
@@ -3272,6 +3312,15 @@ def load_ledgers(paths) -> list[dict]:
                         f"{path}: episode {row.get('case_id')} has {field} {row.get(field)!r}, "
                         f"header {header.get(field)!r}; refusing it"
                     )
+        if header.get("split") == "heldout":
+            if header.get("heldout_cases_sha256") != HELDOUT_FROZEN_SHA256:
+                raise SystemExit(
+                    f"{path}: held-out ledger not from the frozen case file; refusing it"
+                )
+            if any(r.get("heldout_cases_sha256") != HELDOUT_FROZEN_SHA256 for r in episodes):
+                raise SystemExit(
+                    f"{path}: held-out rows not from the frozen case file; refusing it"
+                )
         system = header.get("arm_type") == "system"
         if header.get("arm_type") not in (None, "system"):
             raise SystemExit(f"{path}: unknown arm_type {header.get('arm_type')!r}; refusing it")
@@ -3459,7 +3508,6 @@ def build_parser():
         help="held-out case file (default: the pin's frozen path); refused unless its sha256 "
         "equals the pin",
     )
-    p.add_argument("--heldout-pin", type=Path, help=argparse.SUPPRESS)  # tests inject a pin
     p.add_argument("--validate-pack", action="store_true", help="validate the pack and exit")
     p.add_argument("--summarize", nargs="+", type=Path, metavar="LEDGER", help="summarize ledgers")
     p.add_argument(
@@ -3510,16 +3558,25 @@ def _main(argv=None):
         if not args.output:
             raise SystemExit("--write-case-subset needs --output")
         source = args.pack / f"cases-{args.split}.json"
+        raw = None
         if args.split == "heldout":
-            source = gated_heldout_file(args)  # hashed before it is parsed
-        cases = json.loads(source.read_text(encoding="utf-8"))["cases"]
+            _, raw = gated_heldout_bytes(args)  # one read, verified, then parsed
+        else:
+            raw = source.read_bytes()
+        cases = json.loads(raw.decode("utf-8"))["cases"]
         name = args.subset_name or f"{args.split}-{args.write_case_subset}"
-        doc = case_subset(cases, args.write_case_subset, name, args.split, file_digest(source))
+        source_sha = hashlib.sha256(raw).hexdigest()
+        doc = case_subset(cases, args.write_case_subset, name, args.split, source_sha)
         with args.output.open("x", encoding="utf-8") as out:
             out.write(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
         print(json.dumps({"name": name, "size": len(doc["case_ids"]), "sha256": doc["sha256"]}))
         return 0
     if args.validate_pack:
+        if args.split == "heldout" and not args.allow_heldout_gold_replay:
+            raise SystemExit(
+                "--validate-pack on heldout replays its gold; pass --allow-heldout-gold-replay "
+                "to do it deliberately (counts and pass/fail only are printed)"
+            )
         pack = open_pack(args)
         try:
             counts = {split: len(cases) for split, cases in pack.cases.items()}
@@ -3536,6 +3593,22 @@ def _main(argv=None):
                 "notes_check": notes,
                 "oil_check": oil,
             }
+            if args.split == "heldout":  # counts and pass/fail only: no per-case gold details
+                report = {
+                    "rules": len(pack.rules),
+                    "characters": len(pack.characters),
+                    "cases": counts,
+                    "heldout": {
+                        "cases": counts.get("heldout", 0),
+                        "expected_replay_passed": not replay["heldout"]["failed"],
+                        "expected_replay_failed_count": len(replay["heldout"]["failed"]),
+                    },
+                    "dev_expected_replay_passed": not replay.get("dev", {}).get("failed"),
+                    "notes_check_passed": not (
+                        notes["mismatches"] or notes["unresolved"] or notes["violated_cases"]
+                    ),
+                    "oil_check_passed": not oil["mismatches"],
+                }
             print(json.dumps(report))
         finally:
             pack.close()

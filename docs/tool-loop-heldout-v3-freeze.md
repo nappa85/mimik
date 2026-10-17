@@ -18,6 +18,22 @@ the runner (`HELDOUT_CASES`, mounted read-only) and the queue refuse a held-out 
 case file's sha256 equals the pin; the file is hashed before it is parsed, and the loaded
 counts must equal the pinned ones. A held-out ledger header records `heldout_cases_sha256`.
 
+Hardening after review (2026-10-17, `docs/reviews/2026-10-17-heldout-gate.md`):
+- **Code anchor:** the pin JSON must name exactly `HELDOUT_FROZEN_SHA256` in
+  `tools/tool_loop_benchmark.py`; editing the JSON alone refuses every held-out run. There is
+  no CLI or environment override of the pin.
+- **One read:** harness, queue and `--write-case-subset` read the file once, compare those
+  bytes with the pin and parse the same bytes; nothing parses unverified bytes.
+- **Ledgers:** held-out headers record `heldout_cases_sha256` and `heldout_pin_sha256`, rows
+  carry `heldout_cases_sha256`; `load_ledgers`, merges and `bar_verdict` refuse anything that
+  is not the frozen hash. `pack_hashes["cases-heldout.json"]` in a header is the pack's empty
+  placeholder, never the run's source; the source is `heldout_cases_sha256`.
+- **Subsets:** held-out arms may use `cases` or `cases_file` (the 100-case prefix arm); a
+  subset's `source_cases_sha256` must be the pin.
+- **Gold:** `--validate-pack --split heldout` refuses without `--allow-heldout-gold-replay`, and
+  with it prints counts and pass/fail only. Under the blind protocol the main session never
+  passes that flag.
+
 ## Counts
 
 | | Count |

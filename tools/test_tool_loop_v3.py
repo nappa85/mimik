@@ -1456,6 +1456,7 @@ class ReviewCaseCoverageTests(unittest.TestCase):
         rows += [scored(f"c{i}", "answer", correct=True, seed=29) for i in range(109)]
         for row in rows:
             row["split"] = "heldout"
+            row["heldout_cases_sha256"] = tl.HELDOUT_FROZEN_SHA256
         (s,) = tl.summarize(rows)
         reasons = s["bar"]["variants"]["all_cases"]["reasons"]
         self.assertEqual(s["bar"]["variants"]["all_cases"]["verdict"], "FAIL")
@@ -1611,20 +1612,19 @@ class ReviewCliTests(CliMixin, Base):
             with self.assertRaises(SystemExit) as raised:
                 self.dry_run(tmp, "--split", "heldout", "--dry-run-expected")
             self.assertIn("--allow-heldout-gold-replay", str(raised.exception))
-            from test_heldout_gate import synthetic  # a gated synthetic file (§11 item 8)
+            from test_heldout_gate import pinned, synthetic  # a gated synthetic file (§11 item 8)
 
             path, pin_path, _ = synthetic(tmp)
-            code, rows = self.dry_run(
-                tmp,
-                "--split",
-                "heldout",
-                "--dry-run-expected",
-                "--allow-heldout-gold-replay",
-                "--heldout-cases",
-                str(path),
-                "--heldout-pin",
-                str(pin_path),
-            )
+            with pinned(pin_path):
+                code, rows = self.dry_run(
+                    tmp,
+                    "--split",
+                    "heldout",
+                    "--dry-run-expected",
+                    "--allow-heldout-gold-replay",
+                    "--heldout-cases",
+                    str(path),
+                )
         self.assertEqual(code, 0)
         self.assertTrue(rows[0]["allow_heldout_gold_replay"])
 

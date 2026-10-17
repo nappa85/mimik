@@ -399,6 +399,13 @@ class RunnerTests(unittest.TestCase):
             "freeze_record": "docs/tool-loop-heldout-v3-freeze.md",
         }
         (self.repo / "tools" / "heldout-v3-pin.json").write_text(json.dumps(pin))
+        # Test-only: move the code anchor in the copied repo (production cannot: review of
+        # 0b9742d removed every override).
+        harness = self.repo / "tools" / "tool_loop_benchmark.py"
+        text = harness.read_text()
+        anchor = 'HELDOUT_FROZEN_SHA256 = "6f11af05f27347ea31a50996b0e6b6eea4ccbfa3254a085cd7699d4d8ec68974"'
+        self.assertIn(anchor, text)
+        harness.write_text(text.replace(anchor, f'HELDOUT_FROZEN_SHA256 = "{pin["sha256"]}"'))
         git = [
             "git",
             "-c",
@@ -440,6 +447,35 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 5)
         self.assertIn("failure=heldout_missing", (out / "provenance.txt").read_text())
         self.assertFalse((self.log / "server.json").exists())
+
+    def test_heldout_path_with_a_newline_is_refused(self):
+        """Review of 0b9742d (provenance injection): no tab or newline in HELDOUT_CASES."""
+        path, _ = self.synthetic_heldout()
+        link = self.tmp / "frozen" / "a\ncheck_only=1"
+        link.symlink_to(path)
+        proc, out = self.run_runner("qwen35-9b", "heldout", SEEDS="17", HELDOUT_CASES=str(link))
+        self.assertEqual(proc.returncode, 2)
+        self.assertNotIn("check_only", rq.parse_provenance(out / "provenance.txt"))
+
+    def test_an_edited_pin_json_alone_is_refused(self):
+        """Review of 0b9742d: the pin JSON must equal the harness's code anchor."""
+        path, pin = self.synthetic_heldout()
+        harness = self.repo / "tools" / "tool_loop_benchmark.py"
+        text = harness.read_text()
+        moved = 'HELDOUT_FROZEN_SHA256 = "' + "1" * 64 + '"'
+        harness.write_text(text.replace(f'HELDOUT_FROZEN_SHA256 = "{pin["sha256"]}"', moved))
+        proc, out = self.run_runner("qwen35-9b", "heldout", SEEDS="17", HELDOUT_CASES=str(path))
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("code anchor", (out / "provenance.txt").read_text())
+
+    def test_optional_arrays_expand_safely_under_set_u(self):
+        """Review of 0b9742d (Sonnet F6): empty arrays under set -u fail on bash < 4.4."""
+        text = (TOOLS / "run_tool_loop_benchmark.sh").read_text()
+        for name in ("heldout_mount", "heldout_args"):
+            uses = [line for line in text.splitlines() if f"{name}[@]" in line]
+            self.assertTrue(uses)
+            for line in uses:
+                self.assertIn(f"${{{name}[@]+", line, line)
 
     def test_pass_through_reaches_server_and_header(self):
         proc, out = self.run_runner(
