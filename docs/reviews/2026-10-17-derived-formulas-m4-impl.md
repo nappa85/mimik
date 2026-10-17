@@ -39,8 +39,29 @@ Implementation summary and evidence: [parent plan §17](../derived-formulas-plan
 
 ## Verification
 
-See parent plan §17 ("Implementation-review fixes") for the gate set rerun on the fixed
-tree. Review findings are not proof of correctness.
+Fix commit `3225a5c` (tree `2cbd51b`); the full gate set ran on that tree before the commit,
+every container at `--cpus 2`:
+
+- fmt; strict Clippy; `cargo test --locked --all-targets --all-features`: 447 passed, 0
+  failed, 1 ignored (300 library tests); release formula tests 82 passed; release
+  measurements 7 passed; `formula_eval` build; `source_fixture`; Ruff check and format;
+  tools unittest 452 run (39 skipped); actionlint; `cargo about --fail`; `cargo audit --deny
+  warnings` (333 crates scanned, no findings).
+- Release build 21,049,464 bytes (+246,944 against the master `f9d34e0` baseline of
+  20,802,520, +1.19%); `cargo package --offline` and `verify_source_package.py`; `cargo vendor`
+  and `package_release.py`. SHA-256: runtime archive
+  `a34583e8b0e00a00de8b49b9dd5c7ebb15a75fe90c5577805538dc43caaca6db`, source crate
+  `924a0c6b2399639ceadc35cedfcd2eaf29d28153ab13c894cdaf7559d1f303b0`, dependency sources
+  `58be801102dab843036058155f60e676f2168376506c4c4eee04f0fc93ac0244`; checksums verified,
+  unpacked binary equal to the release build.
+- `smoke_release.py --auth` on the unpacked binary; offline Chromium with the CI flags at both
+  viewports (`mimik-browser:m4`, rebuilt with the current tool files); fresh offline rebuild
+  of the delivered source with an empty `CARGO_HOME` (5 min 34 s); `lan_smoke.py` (with the
+  `--cpus=2` docker shim): all passed.
+- An earlier pass on tree `c90257e` failed `smoke_release.py` (the S2 follow-up above); it was
+  fixed and the whole set rerun.
+
+Review findings are not proof of correctness.
 
 ## Status
 
