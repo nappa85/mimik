@@ -197,6 +197,35 @@ equality; `smoke_release.py --auth`; Chromium at both viewports; the fresh offli
 | Sonnet nit (material else branch) | — | The empty completion textarea is asserted empty in `material_crlf_at_the_limit_is_stored_as_lf_and_shown_intact`. A guard: an empty textarea is empty with or without the sacrificial LF, so no mutation can distinguish it; the newline is kept for consistency (F3 of the final review). |
 | F9 | Not changed: bounded and correct. | — |
 
+### Verification of the last-review fixes
+
+Commit `6a2d21b` (tree `9dbf78f`); the full gate set ran on that tree before the commit, every
+container at `--cpus 2`:
+
+- fmt; strict Clippy.
+- 459 tests passed, 0 failed, 1 ignored (309 library tests); release formula tests 82; release
+  measurements 7.
+- `formula_eval`; `source_fixture`; Ruff; tools unittest 457 run (39 skipped); actionlint;
+  `cargo about --fail`; `cargo audit` (333 crates, no findings).
+- Release build 21,037,656 bytes (+235,136 against the master `f9d34e0` baseline of
+  20,802,520, +1.13%).
+- Package, verify, vendor and release archives. SHA-256: runtime
+  `5682f99a50c1f62ef09113547d0686c52ca1ca121b91676b5efa16729feda0f6`, source
+  `ec1fa3d0dad4a969e1c75f7770c9e700dcd538a93dd466d4db0440fe1a8be621`, dependencies
+  `9dc6cb0a5073da0c53538b817bd23e849e168c753a4ad492b795573091ab0c07`. Checksums verified and
+  the unpacked binary is identical to the release build.
+- `smoke_release.py --auth`; Chromium at both viewports; the fresh offline rebuild (5 min
+  24 s); `lan_smoke.py`.
+
+All passed.
+
+Two incidents during the rerun, neither on the gated tree:
+
+- Tree `dcf4a8d` failed one M3 raw-markup test, fixed as recorded above.
+- An overlapping second gate run, started while the first was still going, made
+  `source_fixture` collide. Both runs were stopped, and the set was rerun once, alone, on
+  tree `9dbf78f`.
+
 ## Status
 
 All Major and Minor findings are fixed or documented; T-F1 was rejected with source evidence
