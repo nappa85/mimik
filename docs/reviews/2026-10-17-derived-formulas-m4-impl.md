@@ -105,6 +105,20 @@ revision twice), N7 ("LF-exact").
 | N7 | Plan D7 and the contract say "LF-exact" (a browser submits CR LF as LF). | — |
 | Sonnet Nit 5 | The old `=1.2.2` pin of `form_urlencoded` had no recorded rationale (it was the locked version at adoption); `"1.2"` stays, with `Cargo.lock` still selecting 1.2.2. | — |
 
+### Verification of the final fixes
+
+Commit `f80a245` (tree `a5168e3`); the full gate set ran on that tree before the commit, every
+container at `--cpus 2`: fmt; strict Clippy; 451 tests passed, 0 failed, 1 ignored (303 library
+tests); release formula tests 82; release measurements 7; `formula_eval`; `source_fixture`;
+Ruff; tools unittest 454 run (39 skipped); actionlint; `cargo about --fail`; `cargo audit`
+(333 crates, no findings); release build 21,054,776 bytes (+252,256 against the master
+`f9d34e0` baseline of 20,802,520, +1.21%); package, verify, vendor and release archives
+(SHA-256 runtime `95eee0e870993f473ecbd732c45a1de0b7a3d394ff5b3a64689ab31480cd22c2`, source
+`3d4aa4be0564b517a387b714ff06a16b133214a21c70bf537ef692bf7d7b0e5a`, dependencies
+`94605ae7c2818665349a5ea7e068e16c3edac4eaba3ddb9f78809136378205f8`), checksums and binary
+equality; `smoke_release.py --auth`; Chromium at both viewports; the fresh offline rebuild
+(6 min 6 s); `lan_smoke.py`. All passed.
+
 ## Status
 
 All Major and Minor findings are fixed or documented; T-F1 was rejected with source evidence
