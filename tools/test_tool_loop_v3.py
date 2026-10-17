@@ -1205,7 +1205,8 @@ class ValidatePackAuditTests(CliMixin, Base):
         self.assertIn(dev["max_case"], {c["id"] for c in self.pack.cases["dev"]})
         self.assertGreater(dev["largest_tool_result_bytes"], 0)
         self.assertEqual(report["expected_replay"]["dev"], {"cases": 6, "correct": 6, "failed": []})
-        self.assertEqual(report["expected_replay"]["heldout"]["cases"], 1)
+        # Round 2 of the held-out gate review (Sol 2): dev validation never touches held-out.
+        self.assertNotIn("heldout", report["expected_replay"])
 
     def test_expected_replay_failure_fails_validate(self):
         """A proposal gold that violates a constraint loads, but its replay is not correct."""
@@ -1454,9 +1455,12 @@ class ReviewCaseCoverageTests(unittest.TestCase):
     def test_incomplete_seed_coverage_fails_the_bar(self):
         rows = [scored(f"c{i}", "answer", correct=True, seed=17) for i in range(110)]
         rows += [scored(f"c{i}", "answer", correct=True, seed=29) for i in range(109)]
+        from test_tool_loop_benchmark import live_heldout_fields
+
+        fields = live_heldout_fields(sorted({r["case_id"] for r in rows}))
         for row in rows:
             row["split"] = "heldout"
-            row["heldout_cases_sha256"] = tl.HELDOUT_FROZEN_SHA256
+            row.update(fields)
         (s,) = tl.summarize(rows)
         reasons = s["bar"]["variants"]["all_cases"]["reasons"]
         self.assertEqual(s["bar"]["variants"]["all_cases"]["verdict"], "FAIL")

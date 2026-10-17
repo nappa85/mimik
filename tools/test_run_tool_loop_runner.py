@@ -397,6 +397,7 @@ class RunnerTests(unittest.TestCase):
             "outcomes": {case["expected"]["outcome"]: 1},
             "default_path": str(path),
             "freeze_record": "docs/tool-loop-heldout-v3-freeze.md",
+            "verdict_case_sets": [{"name": "full", "rule": "all"}],
         }
         (self.repo / "tools" / "heldout-v3-pin.json").write_text(json.dumps(pin))
         # Test-only: move the code anchor in the copied repo (production cannot: review of
@@ -457,6 +458,40 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertNotIn("check_only", rq.parse_provenance(out / "provenance.txt"))
 
+    def test_heldout_progress_is_forced_quiet(self):
+        """Round 2 (Sonnet M1): QUIET=0 printed per-case outcomes for held-out runs."""
+        path, _ = self.synthetic_heldout()
+        proc, out = self.run_runner(
+            "qwen35-9b", "heldout", SEEDS="17", QUIET="0", HELDOUT_CASES=str(path)
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        main = [json.loads(x) for x in (self.log / "harness-calls.jsonl").read_text().splitlines()][
+            -1
+        ]
+        self.assertIn("--quiet-progress", main)
+        self.assertIn("quiet_forced=heldout", (out / "provenance.txt").read_text())
+
+    def test_heldout_path_with_a_space_is_refused_and_injects_nothing(self):
+        """Round 2 (Sol 3): a space-delimited `failure=window` in the path became a field."""
+        path, _ = self.synthetic_heldout()
+        spaced = self.tmp / "frozen failure=window"
+        spaced.write_bytes(path.read_bytes())
+        proc, out = self.run_runner("qwen35-9b", "heldout", SEEDS="17", HELDOUT_CASES=str(spaced))
+        self.assertEqual(proc.returncode, 2)
+        prov = rq.parse_provenance(out / "provenance.txt")
+        self.assertEqual(prov.get("failure"), "config")
+
+    def test_failure_details_never_add_provenance_lines(self):
+        """Space Bunny B4: an unvalidated value in a failure message could add a line."""
+        proc, out = self.run_runner(
+            "qwen35-9b", "dev", CASES_FILE=str(self.tmp / "x\nfailure=heldout_hash")
+        )
+        self.assertEqual(proc.returncode, 2)
+        prov = rq.parse_provenance(out / "provenance.txt")
+        self.assertEqual(prov.get("failure"), "config")
+        lines = (out / "provenance.txt").read_text().splitlines()
+        self.assertFalse(any(line.startswith("failure=heldout_hash") for line in lines))
+
     def test_an_edited_pin_json_alone_is_refused(self):
         """Review of 0b9742d: the pin JSON must equal the harness's code anchor."""
         path, pin = self.synthetic_heldout()
@@ -471,7 +506,9 @@ class RunnerTests(unittest.TestCase):
     def test_optional_arrays_expand_safely_under_set_u(self):
         """Review of 0b9742d (Sonnet F6): empty arrays under set -u fail on bash < 4.4."""
         text = (TOOLS / "run_tool_loop_benchmark.sh").read_text()
-        for name in ("heldout_mount", "heldout_args"):
+        names = ("heldout_mount", "heldout_args", "cutoff_args", "gpu_devices", "reg_server_args")
+        names += ("quiet", "phase_deadline", "case_args", "arm_args")
+        for name in names:
             uses = [line for line in text.splitlines() if f"{name}[@]" in line]
             self.assertTrue(uses)
             for line in uses:

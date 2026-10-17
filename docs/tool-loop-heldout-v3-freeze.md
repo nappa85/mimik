@@ -33,6 +33,26 @@ Hardening after review (2026-10-17, `docs/reviews/2026-10-17-heldout-gate.md`):
 - **Gold:** `--validate-pack --split heldout` refuses without `--allow-heldout-gold-replay`, and
   with it prints counts and pass/fail only. Under the blind protocol the main session never
   passes that flag.
+- **Round 2 (re-review of `f4b5e15`):**
+  - **Verdict case sets** are registered in the pin (`verdict_case_sets`): `full` (all 165) and
+    `h1-prefix-100` (the first 100 cases in frozen file order, plan §11 H1), both defined by
+    rule from the file order, never from labels. Their id-set hashes are computed at run time
+    from the verified bytes and recorded in each header (`heldout_case_set`); the pin may later
+    carry each set's `sha256` (filled by an id-only step, never by reading gold). A run on any
+    other id list is refused, and `bar_verdict` refuses a summary whose case set is not
+    registered or does not match its rows.
+  - **Dry runs never verdict:** held-out rows carry `dry_run`, `dry_run_expected` and
+    `allow_heldout_gold_replay`; `bar_verdict` refuses any held-out summary with one set.
+  - **No per-case output:** held-out progress is always quiet (harness and runner); held-out
+    validation errors and unknown `--cases` ids are reported as counts, never ids or fields;
+    dev runs and dev validation never load the pack's own held-out file.
+  - **Subsets:** `--write-case-subset --split heldout` writes ids only (no `outcome_counts`),
+    for registered prefix sizes only.
+  - **Paths:** whitespace in `HELDOUT_CASES` or its resolved path is refused; `fail()` never
+    adds provenance lines.
+- **Limitation (tamper evidence):** the hash chain is self-asserted. Anyone who can write a
+  results directory can write the anchor into a fabricated ledger; the gate assumes no write
+  access to results by untrusted parties and is not tamper-evident.
 
 ## Counts
 

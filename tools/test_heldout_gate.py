@@ -23,11 +23,15 @@ TOOLS = Path(__file__).resolve().parent
 FROZEN_SHA = "6f11af05f27347ea31a50996b0e6b6eea4ccbfa3254a085cd7699d4d8ec68974"
 
 
-def synthetic(tmp, cases=None):
-    """A held-out case file and a pin naming its sha256 and counts."""
+def synthetic(tmp, cases=None, n=None, prefix=None):
+    """A held-out case file and a pin naming its sha256, counts and registered verdict case
+    sets (the full set, and a frozen-order prefix of `prefix` cases when given)."""
     doc = json.loads((FIXTURE / "cases-heldout.json").read_text())
     if cases is not None:
         doc["cases"] = cases
+    if n is not None:
+        base = doc["cases"][0]
+        doc["cases"] = [dict(base, id=f"h3-s-{k:03d}") for k in range(1, n + 1)]
     path = Path(tmp) / "frozen" / "cases-heldout.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc))
@@ -42,6 +46,12 @@ def synthetic(tmp, cases=None):
         "outcomes": outcomes,
         "default_path": str(path),
         "freeze_record": "docs/tool-loop-heldout-v3-freeze.md",
+        "verdict_case_sets": [{"name": "full", "rule": "all"}]
+        + (
+            [{"name": f"prefix-{prefix}", "rule": "frozen_order_prefix", "size": prefix}]
+            if prefix
+            else []
+        ),
     }
     pin_path = Path(tmp) / "pin.json"
     pin_path.write_text(json.dumps(pin))
@@ -215,7 +225,7 @@ class HarnessGateTests(unittest.TestCase):
 
     def test_heldout_subset_files_come_from_one_verified_read(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path, pin_path, doc = synthetic(tmp)
+            path, pin_path, doc = synthetic(tmp, prefix=1)
             out = Path(tmp) / "subset.json"
             argv = ["--pack", str(FIXTURE), "--split", "heldout", "--write-case-subset", "1"]
             argv += ["--output", str(out), "--heldout-cases", str(path)]
@@ -299,6 +309,139 @@ class ValidatePackTests(unittest.TestCase):
             report = json.loads(text.splitlines()[0])
             self.assertEqual(report["heldout"]["cases"], len(doc["cases"]))
             self.assertIs(report["heldout"]["expected_replay_passed"], True)
+
+
+class ReviewRoundTwoTests(unittest.TestCase):
+    """Re-review of f4b5e15 (docs/reviews/2026-10-17-heldout-gate.md, round 2)."""
+
+    def run_cli(self, argv, pin_path):
+        err, out = io.StringIO(), io.StringIO()
+        with pinned(pin_path), contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            code = tl.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def base(self, tmp, path, *extra):
+        out = Path(tmp) / f"l-{len(list(Path(tmp).iterdir()))}.jsonl"
+        argv = ["--pack", str(FIXTURE), "--split", "heldout", "--model-label", "m", "--dry-run"]
+        return [*argv, "--output", str(out), "--heldout-cases", str(path), *extra], out
+
+    def test_heldout_progress_is_always_quiet(self):
+        """Sonnet M1: per-case `id outcome= correct=` lines reached stderr unless QUIET=1."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path, pin_path, doc = synthetic(tmp)
+            argv, _ = self.base(tmp, path)
+            code, out, err = self.run_cli(argv, pin_path)
+            self.assertEqual(code, 0)
+            for case in doc["cases"]:
+                self.assertNotIn(case["id"], err)
+                self.assertNotIn(case["id"], out)
+            self.assertNotIn("correct=", err)
+
+    def test_heldout_validation_errors_do_not_echo_case_content(self):
+        """Sonnet M1: validate_case errors on the held-out pack named ids and fields."""
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = json.loads((FIXTURE / "cases-heldout.json").read_text())["cases"][0]
+            bad = dict(bad, id="h3-secret-001", character="nobody-xyz")
+            path, pin_path, _ = synthetic(tmp, cases=[bad])
+            argv, _ = self.base(tmp, path)
+            with self.assertRaises(SystemExit) as raised:
+                self.run_cli(argv, pin_path)
+            message = str(raised.exception)
+            self.assertNotIn("h3-secret-001", message)
+            self.assertNotIn("nobody-xyz", message)
+            self.assertIn("1 of 1", message)
+
+    def test_heldout_subset_artifact_carries_no_gold_and_only_registered_sizes(self):
+        """Sol 1: the held-out subset file had outcome_counts; prefixes of every size leaked
+        every label. Now: frozen-order prefixes of registered sizes only, no gold field."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path, pin_path, doc = synthetic(tmp, n=5, prefix=3)
+            out = Path(tmp) / "subset.json"
+            argv = ["--pack", str(FIXTURE), "--split", "heldout", "--write-case-subset", "3"]
+            argv += ["--output", str(out), "--heldout-cases", str(path)]
+            code, _, _ = self.run_cli(argv, pin_path)
+            self.assertEqual(code, 0)
+            subset = json.loads(out.read_text())
+            self.assertNotIn("outcome_counts", subset)
+            self.assertNotIn("expected", json.dumps(subset))
+            self.assertEqual(subset["rule"], "frozen_order_prefix")
+            self.assertEqual(subset["case_ids"], [c["id"] for c in doc["cases"][:3]])
+            out.unlink()
+            argv[argv.index("3")] = "2"  # an unregistered size
+            with self.assertRaisesRegex(SystemExit, "registered"):
+                self.run_cli(argv, pin_path)
+
+    def test_registered_case_sets_only_and_recorded(self):
+        """Space Bunny B1: any id list of >= 100 frozen cases could pass the bar."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path, pin_path, doc = synthetic(tmp, n=5, prefix=3)
+            ids = [c["id"] for c in doc["cases"]]
+            argv, out = self.base(tmp, path, "--cases", ",".join(ids[:2]))
+            with self.assertRaisesRegex(SystemExit, "registered"):
+                self.run_cli(argv, pin_path)
+            argv, out = self.base(tmp, path, "--cases", ",".join(ids[:3]))
+            self.assertEqual(self.run_cli(argv, pin_path)[0], 0)
+            header = json.loads(out.read_text().splitlines()[0])
+            want = hashlib.sha256(json.dumps(sorted(ids[:3])).encode()).hexdigest()
+            self.assertEqual(header["heldout_case_set"], {"name": "prefix-3", "sha256": want})
+            self.assertIn("heldout_case_set", tl.GROUP_IDENTITY)
+
+    def test_bar_refuses_unregistered_or_mismatching_case_sets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, pin_path, doc = synthetic(tmp, n=5)
+            argv, out = self.base(tmp, path)
+            self.run_cli(argv, pin_path)
+            rows = [json.loads(x) for x in out.read_text().splitlines() if '"episode"' in x]
+            with pinned(pin_path):
+                summary = tl.summarize(rows)[0]
+                live = {
+                    "dry_run": False,
+                    "dry_run_expected": False,
+                    "allow_heldout_gold_replay": False,
+                }
+                self.assertNotEqual(
+                    tl.bar_verdict(dict(summary, unique_cases=200, **live))["verdict"], "REFUSED"
+                )
+                dropped = tl.summarize(rows[1:])[0]  # the case set no longer matches its hash
+                verdict = tl.bar_verdict(dict(dropped, unique_cases=200, **live))
+                self.assertEqual(verdict["verdict"], "REFUSED")
+                self.assertIn("registered", " ".join(verdict["reasons"]))
+
+    def test_bar_refuses_dry_run_and_gold_replay_summaries(self):
+        """Space Bunny B2: a scripted gold replay ledger summarised like a live A0 run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path, pin_path, _ = synthetic(tmp)
+            argv, out = self.base(tmp, path, "--dry-run-expected", "--allow-heldout-gold-replay")
+            self.assertEqual(self.run_cli(argv, pin_path)[0], 0)
+            rows = [json.loads(x) for x in out.read_text().splitlines() if '"episode"' in x]
+            with pinned(pin_path):
+                summary = tl.summarize(rows)[0]
+            self.assertTrue(summary["dry_run"])
+            self.assertTrue(summary["dry_run_expected"])
+            self.assertTrue(summary["allow_heldout_gold_replay"])
+            with pinned(pin_path):
+                verdict = tl.bar_verdict(dict(summary, unique_cases=200))
+            self.assertEqual(verdict["verdict"], "REFUSED")
+            self.assertIn("dry run", " ".join(verdict["reasons"]))
+
+    def test_dev_validation_never_touches_a_heldout_file(self):
+        """Sol 2: default/dev --validate-pack loaded, replayed and printed held-out cases."""
+        with tempfile.TemporaryDirectory() as tmp:
+            import shutil
+
+            root = Path(tmp) / "pack"
+            shutil.copytree(FIXTURE, root)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                tl.main(["--pack", str(root), "--validate-pack"])
+            report = json.loads(out.getvalue().splitlines()[0])
+            self.assertEqual(set(report["cases"]), {"dev"})
+            self.assertNotIn("heldout", report["expected_replay"])
+            heldout_ids = [
+                c["id"] for c in json.loads((root / "cases-heldout.json").read_text())["cases"]
+            ]
+            for case_id in heldout_ids:
+                self.assertNotIn(case_id, out.getvalue())
 
 
 if __name__ == "__main__":

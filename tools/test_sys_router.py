@@ -365,6 +365,11 @@ class SysRouterTests(unittest.TestCase):
                     split="heldout",
                     unique_cases=200,
                     heldout_cases_sha256=[tl.HELDOUT_FROZEN_SHA256],
+                    heldout_case_set=[json.dumps({"name": "full", "sha256": "x"}, sort_keys=True)],
+                    case_set_sha256="x",
+                    dry_run=False,
+                    dry_run_expected=False,
+                    allow_heldout_gold_replay=False,
                 )
             )["verdict"],
             "PENDING",

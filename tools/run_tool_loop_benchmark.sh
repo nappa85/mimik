@@ -193,9 +193,10 @@ pack=$ROOT/examples/tool-loop-demo
 out=${OUT_DIR:-$RUN_BASE/$key/$split-$(date +%Y%m%dT%H%M%S)}
 mkdir -p "$out"
 prov=$out/provenance.txt
-fail() {  # fail <exit> <class> <message>
-  echo "$3" >&2
-  { echo "failure=$2"; echo "failure_detail=$3"; } >> "$prov"
+fail() {  # fail <exit> <class> <message>: the message never adds a provenance line
+  local detail=${3//[$'\t\r\n']/ }
+  echo "$detail" >&2
+  printf 'failure=%s\nfailure_detail=%s\n' "$2" "$detail" >> "$prov"
   exit "$1"
 }
 {
@@ -278,7 +279,7 @@ gate_now='' gate_left='' gate_cutoff=''
 window() {  # window <margin>: sets gate_*; returns 1 if the window is closed within margin
   local line cutoff_args=()
   [ -z "${WINDOW_END:-}" ] || cutoff_args=(--cutoff "$WINDOW_END")
-  line=$(python3 "$ROOT/tools/run_queue.py" window-check --margin "$1" "${cutoff_args[@]}") \
+  line=$(python3 "$ROOT/tools/run_queue.py" window-check --margin "$1" ${cutoff_args[@]+"${cutoff_args[@]}"}) \
     || { gate_line=$line; return 1; }
   gate_line=$line
   gate_now=$(sed -n 's/.* now=\([0-9]*\).*/\1/p' <<< "$line")
@@ -362,9 +363,10 @@ if [ "$hsplit" = heldout ]; then
   heldout_pin_file_sha=$(pin_value pin_sha256) || fail 2 config "held-out pin unreadable"
   heldout_default=$(pin_value default_path) || fail 2 config "held-out pin unreadable"
   heldout=${HELDOUT_CASES:-$heldout_default}
-  case $heldout in *$'\t'*|*$'\n'*) fail 2 config "HELDOUT_CASES contains a tab or newline" ;; esac
+  # No whitespace at all: provenance is space-delimited key=value (round 2, Sol 3).
+  case $heldout in *[[:space:]]*) fail 2 config "HELDOUT_CASES contains whitespace" ;; esac
   heldout_real=$(realpath -e -- "$heldout" 2>/dev/null) || fail 5 heldout_missing "held-out case file not found"
-  case $heldout_real in *$'\t'*|*$'\n'*) fail 5 heldout_missing "held-out path contains a tab or newline" ;; esac
+  case $heldout_real in *[[:space:]]*) fail 2 config "the held-out path contains whitespace" ;; esac
   [ -f "$heldout_real" ] || fail 5 heldout_missing "held-out case file is not a regular file"
   heldout_line=$(check_run 120 --mount type=bind,src="$heldout_real",dst=/heldout/cases-heldout.json,readonly \
     "$CHECK_IMAGE" sha256sum /heldout/cases-heldout.json)
@@ -480,9 +482,9 @@ t0=$(date +%s)
 dk run -d --init --pull never --name "$SRV" "${LABELS[@]}" --network "$NET" --network-alias server \
   --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
   --memory "$srv_memory" --memory-swap "$srv_memory" --cpus 6 --pids-limit 512 \
-  "${gpu_devices[@]}" \
+  ${gpu_devices[@]+"${gpu_devices[@]}"} \
   --mount type=bind,src="$model_real",dst=/models/model.gguf,readonly \
-  "$reg_image" "${reg_server_args[@]}" >/dev/null || fail 4 server_start "server container did not start"
+  "$reg_image" ${reg_server_args[@]+"${reg_server_args[@]}"} >/dev/null || fail 4 server_start "server container did not start"
 server_failed() {  # server_failed <class> <message>: a VRAM allocation failure is infra_vram
   if timeout --foreground -k 10 60 docker logs "$SRV" 2>&1 | grep -Eqi "$VRAM_PATTERN"; then
     fail 4 infra_vram "$2 (VRAM allocation failure in the server log)"
@@ -505,11 +507,15 @@ timeout --foreground -k 5 30 docker exec "$SRV" curl -sf http://127.0.0.1:8080/p
 # ---- harness (detached; polled for the window edge and the queue)
 quiet=()
 [ "${QUIET:-0}" = 1 ] && quiet=(--quiet-progress)
+if [ "$hsplit" = heldout ]; then  # held-out progress is never per case (round 2, Sonnet M1)
+  [ "${QUIET:-1}" = 1 ] || echo "quiet_forced=heldout (QUIET=${QUIET} ignored)" >> "$prov"
+  quiet=(--quiet-progress)
+fi
 common=(python3 /tools/tool_loop_benchmark.py --pack /pack --endpoint http://server:8080
   --model-label "$reg_label" --temperature "$temperature" --top-p "$top_p"
   --max-tokens "$max_tokens" --max-turns "$max_turns" --thinking "$thinking"
   --thinking-capability "$reg_thinking" --cache-prompt --tool-choice auto --device "$reg_device"
-  --request-timeout "$request_timeout" --ctx "$ctx" "${flags[@]}" "${quiet[@]}"
+  --request-timeout "$request_timeout" --ctx "$ctx" "${flags[@]}" ${quiet[@]+"${quiet[@]}"}
   --server-config "$reg_server_config"
   --formula-cli "/formula/$CLI_IN_VOLUME" --model-sha256 "$actual_model_sha"
   --provenance "git_head=$git_head" --provenance "git_dirty_paths=$git_dirty"
@@ -561,7 +567,7 @@ echo "pack=$pack" >> "$prov"
 if [ -n "${PREFLIGHT_CASE:-}" ]; then
   timing preflight
   pre=(--split dev --cases "$PREFLIGHT_CASE" --seeds 17 --arm "${ARM:-none}-preflight"
-    --budget-seconds "$phase_budget" "${phase_deadline[@]}" --output /out/preflight-ledger.jsonl)
+    --budget-seconds "$phase_budget" ${phase_deadline[@]+"${phase_deadline[@]}"} --output /out/preflight-ledger.jsonl)
   echo "preflight_cli=${common[*]} ${pre[*]}" >> "$prov"
   run_harness preflight "${common[@]}" "${pre[@]}"
   [ "$phase_rc" = 0 ] || fail 6 preflight "1-case preflight ($PREFLIGHT_CASE) failed with exit $phase_rc"
@@ -575,8 +581,8 @@ ledger_name=ledger-$(date +%Y%m%dT%H%M%S).jsonl
 arm_args=()
 [ -z "${ARM:-}" ] || arm_args=(--arm "$ARM")
 timing main
-cli=("${common[@]}" --split "$hsplit" ${heldout_args[@]+"${heldout_args[@]}"} "${case_args[@]}" --seeds "$seeds" "${arm_args[@]}"
-  --budget-seconds "$phase_budget" "${phase_deadline[@]}" --output "/out/$ledger_name")
+cli=("${common[@]}" --split "$hsplit" ${heldout_args[@]+"${heldout_args[@]}"} ${case_args[@]+"${case_args[@]}"} --seeds "$seeds" ${arm_args[@]+"${arm_args[@]}"}
+  --budget-seconds "$phase_budget" ${phase_deadline[@]+"${phase_deadline[@]}"} --output "/out/$ledger_name")
 { echo "harness_cli=${cli[*]}"; echo "ledger_file=$ledger_name"; } >> "$prov"
 run_harness main "${cli[@]}"
 [ "$phase_rc" = 0 ] || exit "$phase_rc"

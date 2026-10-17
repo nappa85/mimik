@@ -13,5 +13,16 @@
     "refuse": 12
   },
   "default_path": "/media/data/mimik/blind-heldout/frozen/cases-heldout.json",
-  "freeze_record": "docs/tool-loop-heldout-v3-freeze.md"
+  "freeze_record": "docs/tool-loop-heldout-v3-freeze.md",
+  "verdict_case_sets": [
+    {
+      "name": "full",
+      "rule": "all"
+    },
+    {
+      "name": "h1-prefix-100",
+      "rule": "frozen_order_prefix",
+      "size": 100
+    }
+  ]
 }

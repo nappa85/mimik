@@ -485,9 +485,9 @@ shown red by mutation: removing the derived-preview marking, and changing a READ
   gold.
 
 - Scoring variants S1–S4 / lenient, `--labels`, `test_nudged_episode_scored_both_ways`
-  (S4), the selection script and the manifest/hash gate (the held-out runner refusing a case
-  file whose hash differs from the frozen one, §11 item 8): they wait for the re-review of the
-  amended plan §6–§8. The runner pass-through and the queue are built (next section).
+  (S4) and the selection script: they wait for the re-review of the amended plan §6–§8. The
+  held-out hash gate (§11 item 8) is built (section "Held-out hash gate"), as are the runner
+  pass-through and the queue (next section).
 - The H3 live confirmation (a 3-case dev smoke with forced truncation, §11 item 25) needs
   inference.
 - The blind held-out, its gold review and the ambiguity adjudication (§4, §11 items 9–14).
@@ -1264,5 +1264,7 @@ verified bytes, and its counts must equal the pin's. Runner: `HELDOUT_CASES` (ch
 check container, then mounted read-only at `/heldout/cases-heldout.json`). Queue:
 `heldout_cases` on held-out arms, with `cases` / `cases_file` subsets allowed when their source
 hash is the pin. Ledgers: `heldout_cases_sha256` and `heldout_pin_sha256` in the header and the
-case hash on every held-out row; summaries and merges refuse anything else. Details:
-`docs/tool-loop-heldout-v3-freeze.md`.
+case hash on every held-out row; summaries and merges refuse anything else. Registered
+verdict case sets only (the full set and the frozen-order 100-case prefix, `verdict_case_sets`
+in the pin); a dry-run or gold-replay held-out ledger never yields a verdict; held-out progress
+is always quiet; held-out subsets carry ids only. Details: `docs/tool-loop-heldout-v3-freeze.md`.

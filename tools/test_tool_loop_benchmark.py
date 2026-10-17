@@ -599,8 +599,21 @@ class OutcomeTests(Base):
         self.assertEqual(row["outcome"], "error")
 
 
+def live_heldout_fields(case_ids):
+    """What a live, gated full-set held-out run puts on every row (§11 item 8, review rounds
+    1-2): the frozen hash, the registered `full` case set, and no dry run or gold replay."""
+    return {
+        "heldout_cases_sha256": tl.HELDOUT_FROZEN_SHA256,
+        "heldout_case_set": {"name": "full", "sha256": tl.case_set_sha256(case_ids)},
+        "dry_run": False,
+        "dry_run_expected": False,
+        "allow_heldout_gold_replay": False,
+    }
+
+
 def summary_rows(n_cases, correct, false_supported, split="heldout"):
     rows = []
+    fields = live_heldout_fields([f"c{i}" for i in range(n_cases)]) if split == "heldout" else {}
     for i in range(n_cases):
         rows.append(
             {
@@ -608,10 +621,7 @@ def summary_rows(n_cases, correct, false_supported, split="heldout"):
                 "model_label": "m",
                 "split": split,
                 "case_id": f"c{i}",
-                # held-out rows carry the frozen hash (§11 item 8: unpinned ones are refused)
-                **(
-                    {"heldout_cases_sha256": tl.HELDOUT_FROZEN_SHA256} if split == "heldout" else {}
-                ),
+                **fields,  # held-out rows: gated, registered, live (unpinned ones are refused)
                 "outcome": "answer",
                 "score": {
                     "expected_outcome": "answer",

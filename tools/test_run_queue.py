@@ -1656,6 +1656,12 @@ class HeldoutGateQueueTests(Harness):
             "outcomes": outcomes,
             "default_path": str(path),
             "freeze_record": "docs/tool-loop-heldout-v3-freeze.md",
+            "verdict_case_sets": [{"name": "full", "rule": "all"}]
+            + (
+                [{"name": "h1-prefix-100", "rule": "frozen_order_prefix", "size": 100}]
+                if n >= 100
+                else []
+            ),
         }
         pin_path = self.root / "pin.json"
         pin_path.write_text(json.dumps(pin))
@@ -1709,16 +1715,16 @@ class HeldoutGateQueueTests(Harness):
     def test_a_100_case_subset_arm_runs_end_to_end(self):
         """Review of 0b9742d: held-out arms ignored cases/cases_file (the H1 prefix arm)."""
         path, pin, cases = self.pinned(n=165)
-        doc = tl.case_subset(
-            [dict(c, expected=c["expected"]) for c in cases],
-            100,
-            "heldout-100",
-            "heldout",
-            pin["sha256"],
-        )
+        frozen = [c["id"] for c in cases]
+        doc = tl.heldout_subset(frozen, 100, "heldout-100", pin, pin["sha256"])
         subset = self.root / "heldout-100.json"
         subset.write_text(json.dumps(doc))
-        extra = {"heldout_cases_sha256": pin["sha256"], "heldout_pin_sha256": pin["pin_sha256"]}
+        case_set = {"name": "h1-prefix-100", "sha256": tl.case_set_sha256(frozen[:100])}
+        extra = {
+            "heldout_cases_sha256": pin["sha256"],
+            "heldout_pin_sha256": pin["pin_sha256"],
+            "heldout_case_set": case_set,
+        }
         q = self.make(
             queue_doc(
                 [arm("h1", split="heldout", heldout_cases=str(path), cases_file=str(subset))]
@@ -1729,7 +1735,10 @@ class HeldoutGateQueueTests(Harness):
                     {
                         "seconds": 600,
                         "header_extra": extra,
-                        "row_extra": {"heldout_cases_sha256": pin["sha256"]},
+                        "row_extra": {
+                            "heldout_cases_sha256": pin["sha256"],
+                            "heldout_case_set": case_set,
+                        },
                     }
                 ]
             },
@@ -1743,7 +1752,12 @@ class HeldoutGateQueueTests(Harness):
 
     def test_a_subset_of_another_source_is_refused(self):
         path, pin, cases = self.pinned(n=3)
-        doc = tl.case_subset(cases, 2, "x", "heldout", "0" * 64)
+        doc = {
+            "split": "heldout",
+            "rule": "frozen_order_prefix",
+            "source_cases_sha256": "0" * 64,
+            "case_ids": [c["id"] for c in cases[:2]],
+        }
         subset = self.root / "other.json"
         subset.write_text(json.dumps(doc))
         q = self.make(
@@ -1753,6 +1767,15 @@ class HeldoutGateQueueTests(Harness):
         manifest = q.run()
         self.assertEqual(manifest["arms"][0]["state"], "refused")
         self.assertIn("source hash", manifest["arms"][0]["reason"])
+
+    def test_an_unregistered_case_list_is_refused(self):
+        """Round 2 (Space Bunny B1): an ad-hoc id list of frozen cases is not a verdict set."""
+        path, _, cases = self.pinned(n=3)
+        chosen = ",".join(c["id"] for c in cases[:2])
+        doc = queue_doc([arm("h", split="heldout", heldout_cases=str(path), cases=chosen)])
+        manifest = self.make(doc, self.START).run()
+        self.assertEqual(manifest["arms"][0]["state"], "refused")
+        self.assertIn("registered", manifest["arms"][0]["reason"])
 
     def test_heldout_cases_only_on_heldout_arms(self):
         path = self.root / "q.json"

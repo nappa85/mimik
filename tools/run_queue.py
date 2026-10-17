@@ -804,24 +804,30 @@ class Queue:
         ids = [c["id"] for c in json.loads(raw.decode("utf-8"))["cases"]]
         return path, pin, ids
 
-    def heldout_cases(self, cfg) -> list:
-        """The held-out job cases: the whole frozen set, or a validated selection of it."""
+    def heldout_selection(self, cfg):
+        """(case ids, registered case set) of a held-out arm: the whole frozen set or a
+        registered frozen-order prefix, never an ad-hoc id list (round 2, Space Bunny B1)."""
         _, pin, ids = self.heldout_gate(cfg)
+        chosen = ids
         if cfg.get("cases"):
             chosen = cfg["cases"].split(",")
-            if not set(chosen) <= set(ids):
-                raise QueueError("held-out cases: ids not in the frozen set")
-            return chosen
-        if cfg.get("cases_file"):
+        elif cfg.get("cases_file"):
             doc = json.loads(Path(cfg["cases_file"]).read_text(encoding="utf-8"))
-            if doc.get("split") != "heldout" or doc.get("source_cases_sha256") != pin["sha256"]:
-                raise QueueError(
-                    "held-out cases_file: not a subset of the frozen file (source hash)"
-                )
-            if not set(doc["case_ids"]) <= set(ids):
-                raise QueueError("held-out cases_file: ids not in the frozen set")
-            return list(doc["case_ids"])
-        return ids
+            if (
+                doc.get("split") != "heldout"
+                or doc.get("rule") != "frozen_order_prefix"
+                or doc.get("source_cases_sha256") != pin["sha256"]
+            ):
+                raise QueueError("held-out cases_file: not a frozen-order subset (source hash)")
+            chosen = list(doc["case_ids"])
+        try:
+            case_set = tl.registered_case_set(ids, chosen, pin)
+        except tl.PackError as error:
+            raise QueueError(str(error)) from None
+        return chosen, case_set
+
+    def heldout_cases(self, cfg) -> list:
+        return self.heldout_selection(cfg)[0]
 
     # -- plan and estimates
     def requested_cases(self, arm) -> list:
@@ -969,6 +975,7 @@ class Queue:
             _, pin, _ = self.heldout_gate(cfg)
             header["heldout_cases_sha256"] = pin["sha256"]
             header["heldout_pin_sha256"] = pin["pin_sha256"]
+            header["heldout_case_set"] = self.heldout_selection(cfg)[1]
         cases = self.requested_cases(arm)
         return {"header": header, "jobs": {(c, s) for s in seeds for c in cases}}
 
