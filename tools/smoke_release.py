@@ -958,21 +958,8 @@ def latest_version(directory, definition_id):
     return row[0]
 
 
-def prepare_workspace_materials(binary, directory, fixture):
-    """Original synthetic fixtures only; no real manual/model approval.
-
-    Returns the published version IDs of the generic and the formula definition.
-    """
-    registry_cli(
-        binary,
-        directory,
-        "import-source",
-        "--bundle",
-        str(fixture / "adapter-bundle"),
-        "--pdf",
-        str(fixture / "original.pdf"),
-    )
-    prepare_unknown_registry_source(binary, directory, fixture)
+def unknown_source_mapping(directory, fixture):
+    """The synthetic unknown source's reference and first unit, as definition evidence."""
     with sqlite3.connect(directory / "smoke.sqlite3") as db:
         source, page, unit = db.execute(
             "SELECT s.id,p.id,u.id FROM sources s JOIN source_pages p ON p.source_id=s.id "
@@ -984,6 +971,78 @@ def prepare_workspace_materials(binary, directory, fixture):
         "state": "mapped",
         "regions": [{"source_id": source, "page_id": page, "unit_id": unit}],
     }
+    return sources, mapping
+
+
+def publish_list_definition(binary, directory, fixture):
+    """Publishes the synthetic list definition (M4); returns its version ID."""
+    sources, mapping = unknown_source_mapping(directory, fixture)
+    definition = json.loads((fixture / "list-definition.json").read_text())
+    definition["sources"] = sources
+    definition["fields"][0]["mapping"] = mapping
+    published = publish_definition(binary, directory, definition, "synthetic-list-definition.json")
+    require(
+        published["deterministic_rules"] == "formulas-advisory",
+        "List definition is not published as advisory",
+    )
+    print(f"List definition published as version ID {published['id']}")
+    return published["id"]
+
+
+def smoke_list_sheet(directory, cookie, campaign, html):
+    """A list sheet: Add re-renders without writing, Save assigns r1-1, history summarises."""
+    version = latest_version(directory, "list-sheet")
+    print(f"List runtime sheet uses published version ID {version} (definition 'list-sheet')")
+    action, form, _ = workspace_form(version_link(html, campaign, version), cookie)
+    response = auth_request(action, cookie=cookie, form=dict(form, op="add-1"))
+    require(response[0] == 200, "List Add did not re-render the draft")
+    require("Row added to Equipment. Not saved yet." in response[2], "List Add message missing")
+    parser = FormFields()
+    parser.feed(response[2])
+    form = dict(parser.forms[action])
+    require(form.get("id-1-0") == "", "Added list row is not a new row")
+    form.update(
+        {
+            "name": "List private sheet",
+            "value-name": "Lister",
+            "row-1-0-0": "Rope",
+            "set-1-0-1": "absent",
+            "row-1-0-2": "2",
+            "row-1-0-3": "3",
+            "row-1-0-4": "false",
+            "set-1-0-5": "absent",
+        }
+    )
+    sheet = workspace_submit(cookie, action, form)
+    _, saved, page = workspace_form(sheet, cookie)
+    require(saved.get("id-1-0") == "r1-1", "List row did not get the host ID r1-1")
+    require('<dd class="evidence-text">6</dd>' in page, "List-derived load missing")
+    workspace_submit(cookie, sheet, saved, **{"row-1-0-2": "5"})
+    history = auth_request(sheet + "/history/2", cookie=cookie)
+    require(history[0] == 200, "List history unavailable")
+    require(
+        "Changes in revision 2" in history[2] and "equipment/r1-1/quantity" in history[2],
+        "List change summary missing",
+    )
+    return sheet
+
+
+def prepare_workspace_materials(binary, directory, fixture):
+    """Original synthetic fixtures only; no real manual/model approval.
+
+    Returns the published version IDs of the generic, the formula and the list definition.
+    """
+    registry_cli(
+        binary,
+        directory,
+        "import-source",
+        "--bundle",
+        str(fixture / "adapter-bundle"),
+        "--pdf",
+        str(fixture / "original.pdf"),
+    )
+    prepare_unknown_registry_source(binary, directory, fixture)
+    sources, mapping = unknown_source_mapping(directory, fixture)
     definition = json.loads((fixture / "definition.json").read_text())
     definition["sources"] = sources
     definition["fields"][0]["mapping"] = mapping
@@ -998,7 +1057,7 @@ def prepare_workspace_materials(binary, directory, fixture):
         published["deterministic_rules"] == "formulas-advisory",
         "Formula definition is not published as advisory",
     )
-    return generic["id"], published["id"]
+    return generic["id"], published["id"], publish_list_definition(binary, directory, fixture)
 
 
 def auth_login(cookie, fields, login, password):
@@ -1162,13 +1221,14 @@ def smoke_workspace(binary, directory, cookie, player, passwords):
         "Pinned runtime history unavailable",
     )
     auth_error(auth_request(generic_sheet, cookie=owner_cookie), 403, "Access denied.")
+    smoke_list_sheet(directory, cookie, generic, html)
     with sqlite3.connect(directory / "smoke.sqlite3") as db:
         require(
-            db.execute("SELECT count(*) FROM private_sheets").fetchone()[0] == 3,
+            db.execute("SELECT count(*) FROM private_sheets").fetchone()[0] == 4,
             "Unexpected private sheet count",
         )
         require(
-            db.execute("SELECT count(*) FROM private_sheet_history").fetchone()[0] == 6,
+            db.execute("SELECT count(*) FROM private_sheet_history").fetchone()[0] == 8,
             "Private mutation history is incomplete",
         )
         require(
@@ -1773,6 +1833,7 @@ def main():
                 definition_snapshot, publication_snapshots = smoke_publication(
                     binary, directory, fixture, definition_snapshot
                 )
+                publish_list_definition(binary, directory, fixture)
             for path, content_type in [
                 ("/assets/app.css", "text/css"),
                 ("/assets/htmx.min.js", "text/javascript"),

@@ -48,7 +48,7 @@ Owner access. The flag conflicts with `--no-auth` and cannot accompany CLI subco
    save; a violating save succeeds and the next view lists the violation. A failed save
    (422/409) re-renders the draft, with derived values and checks shown separately as
    "computed from saved revision N", never from the unsaved draft.
-5. List fields (M4; publishable once the M4 gate lift lands): Add, Remove, Move up and
+5. List fields (M4, publishable): Add, Remove, Move up and
    Move down change only the unsaved draft, and Save persists the whole sheet. New rows get
    host IDs `r<revision>-<k>` on save. A stale save answers 409 before value checks; the
    draft keeps its submitted revision and a warning names both revisions. Each history

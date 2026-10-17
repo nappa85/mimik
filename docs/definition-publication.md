@@ -58,7 +58,12 @@ no list fields) publish like any other definition. The approval output reports
 whose rule evidence is still unresolved in `unresolved_formulas` and
 `unresolved_constraints` (omitted when empty; formula-free output is unchanged).
 Unresolved rule evidence does not block publication; it stays visible. Definitions with
-a list field are refused with `list-editing-unsupported` until list editing ships (M4).
+list fields publish too (M4), provided their worst-case sheet form fits the publication
+budget: at most 32,768 render units (one control, option or row element with its label;
+lists counted full at 256 rows with every optional property present), 65,536 form pairs
+and 32,768 stored decoder nodes; otherwise approval refuses `list-form-exceeds-limit`.
+Only the render units bind under the admitted maxima; the pair and node counts are
+redundant safeguards (plan `derived-formulas-m4-plan.md` D7).
 
 Sheets pinned to a formula definition evaluate it on every view, save and history page,
 from the stored values and the immutable pin. A stale or withdrawn approval does not stop

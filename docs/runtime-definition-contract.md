@@ -43,8 +43,8 @@ cel-mimik-1", `docs/derived-formulas-plan.md`). Their results are **advisory**: 
 values are computed from the stored values and the immutable pin on every view, save
 and history page, are never stored or submitted, and checks never block a save or rule
 on legality. List fields (`control: list`) are editable on private sheets (M4, §5 "List
-fields"); their publication is enabled by the M4 gate lift, the last M4 step. Until then
-they are admitted in drafts but stay unpublishable.
+fields") and publishable within the render-unit budget (`list-form-exceeds-limit`,
+`docs/definition-publication.md`).
 
 How each result is shown (`src/campaigns/formulas.rs`, one exhaustive match): a value is
 shown as text (integers as decimals, booleans as True/False, enums by option label); an
@@ -327,7 +327,9 @@ editable; a per-property `editable: false` flag and an item catalogue are a late
   authorization, edit rights and the runtime permit. A move swaps a row with its
   neighbour: values, Set/Not set states and the hidden ID together. Row 1's Move up and the
   last row's Move down are disabled; a submitted edge move is forged (400). Op buttons carry
-  `formnovalidate` and `formaction="<action>#list-f"`; exactly one control gets `autofocus`
+  `formnovalidate` and post to the form's own action with no URL fragment (a fragment that
+  names an element blocks `autofocus` in browsers); exactly one control gets `autofocus`, which
+  also scrolls it into view
   (the new row's first control, the list's Add button after Remove, the moved row's move
   button at its new position). A draft from an older revision shows "The saved sheet
   changed (revision N → M); saving this draft will be refused." List sheets also render a

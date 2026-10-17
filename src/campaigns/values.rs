@@ -173,6 +173,89 @@ pub(crate) fn integer(raw: &str) -> Result<i64, AppError> {
         .map_err(|_| AppError::Invalid("Integer outside signed i64 range."))
 }
 
+/// The render-unit limit of a sheet page at publication (plan D7): one unit is one control,
+/// option or row element with its label, so a page's markup is bounded per unit.
+pub(crate) const RENDER_UNITS: usize = 32_768;
+/// An upper bound on a stored snapshot's nodes outside `data` (the envelope, pin and data
+/// root), measured by a test with the decoder's own counter.
+pub(crate) const ENVELOPE_NODES: usize = 32;
+
+/// The three publication counts of a definition with every list full (256 rows) and every
+/// optional property present (plan D7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FormCounts {
+    pub units: usize,
+    pub pairs: usize,
+    pub nodes: usize,
+}
+
+/// The publication limits: render units, form pairs and stored decoder nodes.
+pub(crate) const FORM_LIMITS: FormCounts = FormCounts {
+    units: RENDER_UNITS,
+    pairs: super::transport::SHEET_FORM_PAIRS,
+    nodes: crate::definitions::decode::MAX_NODES,
+};
+
+fn choices(control: Control, options: Option<&Vec<crate::definitions::Choice>>) -> usize {
+    match control {
+        Control::Enumeration => options.map_or(0, Vec::len) + 1,
+        Control::Boolean => 3,
+        _ => 0,
+    }
+}
+
+/// The worst-case form of `definition` (plan D7):
+///
+/// - render units: per scalar 1 + choices, plus 2 if nullable; per list 4 + 256 × (4 + the
+///   sum over its properties of 1 + choices, plus 2 if optional);
+/// - pairs: 5, plus per non-derived scalar 1 (2 if nullable), plus per list 256 × (1 +
+///   properties + optional properties);
+/// - nodes: `ENVELOPE_NODES` + 1, plus 1 per non-derived scalar, plus per list 1 + 256 ×
+///   (2 + properties).
+///
+/// Choices are the enum options + 1, or 3 for a boolean.
+pub(crate) fn form_budget(definition: &Definition) -> FormCounts {
+    let rows = crate::definitions::formula::MAX_LIST_ITEMS;
+    let mut counts = FormCounts {
+        units: 0,
+        pairs: 5,
+        nodes: ENVELOPE_NODES + 1,
+    };
+    for field in &definition.fields {
+        if field.control == Control::List {
+            let properties = properties(field);
+            let per_row: usize = properties
+                .iter()
+                .map(|property| {
+                    1 + choices(property.control, property.options.as_ref())
+                        + if property.optional { 2 } else { 0 }
+                })
+                .sum();
+            let optional = properties
+                .iter()
+                .filter(|property| property.optional)
+                .count();
+            counts.units += 4 + rows * (4 + per_row);
+            counts.pairs += rows * (1 + properties.len() + optional);
+            counts.nodes += 1 + rows * (2 + properties.len());
+        } else {
+            counts.units += 1
+                + choices(field.control, field.options.as_ref())
+                + if field.nullable { 2 } else { 0 };
+            if field.formula.is_none() {
+                counts.pairs += if field.nullable { 2 } else { 1 };
+                counts.nodes += 1;
+            }
+        }
+    }
+    counts
+}
+
+/// Whether every count is within its limit.
+pub(crate) fn within(counts: FormCounts, limits: FormCounts) -> bool {
+    counts.units <= limits.units && counts.pairs <= limits.pairs && counts.nodes <= limits.nodes
+}
+
 /// The declared properties of a list field (empty for any other field).
 pub(crate) fn properties(field: &Field) -> &[crate::definitions::ItemProperty] {
     field

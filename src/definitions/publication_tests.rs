@@ -186,7 +186,7 @@ async fn approve(store: &Store, id: i64) -> Result<PublishedDefinition, Definiti
 }
 
 #[tokio::test]
-async fn list_definitions_stay_drafts_until_editing_ships() {
+async fn list_definition_publishes() {
     let _guard = super::super::TEST_RESOURCE_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let (store, body) = formula_store(dir.path()).await;
@@ -194,8 +194,16 @@ async fn list_definitions_stay_drafts_until_editing_ships() {
         .save_definition_draft(serde_json::to_vec(&body).unwrap(), 0)
         .await
         .unwrap();
-    let error = approve(&store, draft.id).await.unwrap_err();
-    assert_eq!(publication_code(&error), "list-editing-unsupported");
+    // M4 lifted the list gate: the list formula definition publishes, advisory.
+    let published = approve(&store, draft.id).await.unwrap();
+    assert_eq!(published.deterministic_rules, "formulas-advisory");
+    assert!(
+        published
+            .definition
+            .fields
+            .iter()
+            .any(|field| field.control == super::super::Control::List)
+    );
     // Without the list field (and the formulas that read it) a formula definition publishes:
     // M3 evaluates it on view, save and history. Its results are advisory.
     let mut scalar = body.clone();
@@ -388,4 +396,158 @@ async fn formula_evidence_units_are_captured_in_the_wiring_snapshot() {
     let after = store.compare_definition(draft.id, false).await.unwrap();
     assert_eq!(captured(&after), Some(2));
     assert_ne!(before.comparison_hash, after.comparison_hash);
+}
+
+mod budget {
+    use crate::campaigns::values::{ENVELOPE_NODES, FORM_LIMITS, FormCounts, form_budget, within};
+    use crate::definitions::Definition;
+    use serde_json::{Value, json};
+
+    fn property(n: usize, control: &str, optional: bool) -> Value {
+        let mut value = json!({"id": format!("p{n}"), "label": "P", "control": control,
+                               "optional": optional});
+        if control == "enum" {
+            value["options"] = (0..128)
+                .map(|o| json!({"id": format!("o{o}"), "label": "O"}))
+                .collect();
+        }
+        value
+    }
+
+    fn scalar(n: usize, control: &str, nullable: bool, formula: bool) -> Value {
+        let mut value = json!({"id": format!("s{n}"), "label": "S", "control": control,
+                               "nullable": nullable,
+                               "mapping": {"state": "unresolved", "reason": "x"}});
+        if control == "enum" {
+            value["options"] = (0..128)
+                .map(|o| json!({"id": format!("o{o}"), "label": "O"}))
+                .collect();
+        }
+        if formula {
+            value["formula"] = json!({"expr": "1", "rule_ids": [],
+                                      "evidence": {"state": "unresolved", "reason": "x"}});
+        }
+        value
+    }
+
+    /// Built by serde directly: these extremes exceed admission's size limits on purpose.
+    fn definition(fields: Vec<Value>) -> Definition {
+        serde_json::from_value(json!({
+            "contract_version": 1, "game_id": "g", "edition_id": "e", "definition_id": "d",
+            "title": "T", "sources": [], "fields": Value::Array(fields), "groups": [],
+            "formula_profile": 1
+        }))
+        .unwrap()
+    }
+
+    fn list(n: usize, properties: Vec<Value>) -> Value {
+        json!({"id": format!("l{n}"), "label": "L", "control": "list", "nullable": false,
+               "mapping": {"state": "unresolved", "reason": "x"},
+               "items": {"properties": Value::Array(properties)}})
+    }
+
+    #[test]
+    fn form_budget_counts_match_arithmetic() {
+        // A nullable enum of 128 options, a boolean, a derived integer and one list with a
+        // required integer and an optional enum of 128 options.
+        let counts = form_budget(&definition(vec![
+            scalar(0, "enum", true, false),
+            scalar(1, "boolean", false, false),
+            scalar(2, "integer", false, true),
+            list(
+                0,
+                vec![property(0, "integer", false), property(1, "enum", true)],
+            ),
+        ]));
+        let per_row = 1 + (1 + 129 + 2);
+        assert_eq!(
+            counts,
+            FormCounts {
+                units: (1 + 129 + 2) + (1 + 3) + 1 + (4 + 256 * (4 + per_row)),
+                pairs: 5 + 2 + 1 + 256 * (1 + 2 + 1),
+                nodes: ENVELOPE_NODES + 1 + 2 + (1 + 256 * (2 + 2)),
+            }
+        );
+    }
+
+    #[test]
+    fn within_refuses_each_count_with_test_limits() {
+        let limits = FormCounts {
+            units: 10,
+            pairs: 20,
+            nodes: 30,
+        };
+        assert!(within(limits, limits), "at every limit");
+        for (counts, which) in [
+            (
+                FormCounts {
+                    units: 11,
+                    ..limits
+                },
+                "units",
+            ),
+            (
+                FormCounts {
+                    pairs: 21,
+                    ..limits
+                },
+                "pairs",
+            ),
+            (
+                FormCounts {
+                    nodes: 31,
+                    ..limits
+                },
+                "nodes",
+            ),
+        ] {
+            assert!(!within(counts, limits), "{which} over its limit");
+        }
+        assert_eq!(FORM_LIMITS.units, 32_768);
+        assert_eq!(FORM_LIMITS.pairs, 65_536);
+        assert_eq!(FORM_LIMITS.nodes, 32_768);
+    }
+
+    #[test]
+    fn pairs_and_nodes_are_dominated_by_render_units() {
+        const { assert!(ENVELOPE_NODES < 514) };
+        let lists = |control: &str, optional: bool| -> Vec<Value> {
+            (0..32)
+                .map(|l| list(l, (0..32).map(|p| property(p, control, optional)).collect()))
+                .collect()
+        };
+        let extremes: Vec<(&str, Vec<Value>)> = vec![
+            ("32 lists x 32 integers", lists("integer", false)),
+            ("32 lists x 32 enums of 128", lists("enum", false)),
+            ("32 lists x 32 optional integers", lists("integer", true)),
+            (
+                "one list of one integer",
+                vec![list(0, vec![property(0, "integer", false)])],
+            ),
+            (
+                "256 nullable enums",
+                (0..256).map(|n| scalar(n, "enum", true, false)).collect(),
+            ),
+            (
+                "256 texts",
+                (0..256).map(|n| scalar(n, "text", false, false)).collect(),
+            ),
+            (
+                "256 derived",
+                (0..256)
+                    .map(|n| scalar(n, "integer", false, true))
+                    .collect(),
+            ),
+        ];
+        for (name, fields) in extremes {
+            let has_list = fields.iter().any(|field| field["control"] == "list");
+            let counts = form_budget(&definition(fields));
+            assert!(counts.pairs <= counts.units + 5, "{name}: {counts:?}");
+            if has_list {
+                assert!(counts.nodes < counts.units, "{name}: {counts:?}");
+            } else {
+                assert!(counts.nodes <= ENVELOPE_NODES + 257, "{name}: {counts:?}");
+            }
+        }
+    }
 }

@@ -9,18 +9,6 @@ use std::collections::BTreeSet;
 const SNAPSHOT_LIMIT: usize = 1024 * 1024;
 #[cfg(test)]
 thread_local! { static SNAPSHOTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
-#[cfg(test)]
-thread_local! {
-    /// Route tests of unshipped sheet capabilities (list fields, until M4) publish on their
-    /// own test thread only.
-    static UNSHIPPED_FOR_TESTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Lets the current test thread publish definitions the publication gate still refuses.
-#[cfg(test)]
-pub(crate) fn publish_unshipped_for_tests() {
-    UNSHIPPED_FOR_TESTS.with(|allowed| allowed.set(true));
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -133,20 +121,13 @@ fn deterministic_rules(definition: &Definition) -> &'static str {
     }
 }
 
-/// List definitions stay drafts until list editing ships (M4), so no sheet can pin a
-/// definition it cannot edit. Scalar formula definitions publish: sheets evaluate them on
-/// view, save and history (M3), with advisory results.
+/// Every definition the sheet editor can render publishes (M4: lists included), provided its
+/// worst-case form fits the render, pair and stored-node budget (plan D7): only render
+/// units bind under the admitted maxima; pairs and nodes are redundant safeguards.
 fn publishable(definition: &Definition) -> Result<(), DefinitionError> {
-    #[cfg(test)]
-    if UNSHIPPED_FOR_TESTS.with(std::cell::Cell::get) {
-        return Ok(());
-    }
-    if definition
-        .fields
-        .iter()
-        .any(|field| field.control == super::Control::List)
-    {
-        return Err(invalid("list-editing-unsupported"));
+    let counts = crate::campaigns::values::form_budget(definition);
+    if !crate::campaigns::values::within(counts, crate::campaigns::values::FORM_LIMITS) {
+        return Err(invalid("list-form-exceeds-limit"));
     }
     Ok(())
 }

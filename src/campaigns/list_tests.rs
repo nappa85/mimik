@@ -73,10 +73,8 @@ fn integer_lists_definition(lists: usize) -> Value {
     })
 }
 
-/// Lists are unpublishable until the M4 gate lift; until then these tests publish on their
-/// own test thread through the test-only path.
+/// Publishes a list definition through the real publication path (the M4 gate lift).
 async fn list_setup(definition: &Value) -> Setup {
-    crate::definitions::publish_unshipped_for_tests();
     setup(definition).await
 }
 
@@ -117,8 +115,18 @@ async fn write(
     snapshot: PrivateSnapshot,
     operation: &'static str,
 ) -> Result<PrivateSnapshot, AppError> {
+    write_pinned(setup, auth, snapshot, operation, setup.version).await
+}
+
+/// `write` with the immutable pin of definition version `version`.
+async fn write_pinned(
+    setup: &Setup,
+    auth: usize,
+    snapshot: PrivateSnapshot,
+    operation: &'static str,
+    version: i64,
+) -> Result<PrivateSnapshot, AppError> {
     let auth: RequestAuth = setup.auth[auth].clone();
-    let version = setup.version;
     setup
         .store
         .run_campaign(auth.clone(), move |db| {
@@ -437,11 +445,44 @@ fn integer_items(lists: usize) -> Value {
 async fn writer_refuses_undecodable_snapshot_atomically() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
-    let setup = list_setup(&integer_lists_definition(4)).await;
+    let setup = list_setup(&list_definition()).await;
+    // Four lists of 256 × 32 integers are refused at publication by the render and node
+    // budgets (step 8), so the writer is reached directly: the admitted definition is stored
+    // as a version row without being published.
+    let definition = integer_lists_definition(4);
+    let pin = crate::definitions::private_pin::for_tests(&definition);
+    assert!(
+        !super::values::within(
+            super::values::form_budget(pin.definition()),
+            super::values::FORM_LIMITS
+        ),
+        "unpublishable"
+    );
+    let (content, hash) = (pin.raw.content.clone(), pin.raw.hash.clone());
+    let version: i64 = setup
+        .store
+        .run(move |db| {
+            db.execute(
+                "INSERT INTO definition_versions(game_id,edition_id,definition_id,version,content,content_hash) VALUES('synthetic-game','first','integer-lists',1,?1,?2)",
+                params![content, hash],
+            )?;
+            Ok(db.last_insert_rowid())
+        })
+        .await
+        .unwrap();
+    let mut snapshot = blank(&setup, 1).await;
+    snapshot.sheet_id = 1;
+    snapshot.pin = snapshots::Pin::Runtime {
+        version_id: version,
+        version: 1,
+        content_hash: pin.raw.hash.clone(),
+        schema: 1,
+    };
     let values = integer_items(4);
     // Small enough for the 1 MiB byte cap, too many nodes for the sheet decoder.
     assert!(serde_json::to_vec(&values).unwrap().len() < 300 * 1024);
-    let result = create(&setup, values).await;
+    snapshot.data = values;
+    let result = write_pinned(&setup, 1, snapshot, "create", version).await;
     match result {
         Err(AppError::Invalid(reason)) => {
             assert_eq!(reason, "Private snapshot exceeds the sheet decoder limits.");
@@ -1520,7 +1561,10 @@ async fn unknown_id_draft_op_rerenders_then_save_422_or_409() {
 }
 
 #[tokio::test]
-async fn op_buttons_have_formnovalidate_and_formaction() {
+/// Op buttons skip browser validation and post to the form's own action, with no URL
+/// fragment: a fragment that names an element blocks `autofocus` in browsers, and the
+/// focused control already scrolls into view.
+async fn op_buttons_have_formnovalidate_and_no_fragment() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let setup = list_setup(&list_definition()).await;
@@ -1540,13 +1584,10 @@ async fn op_buttons_have_formnovalidate_and_formaction() {
             let value = button.value();
             let op = value.attr("value").unwrap();
             assert!(value.attr("formnovalidate").is_some(), "{op}");
-            let f = op.split('-').nth(1).unwrap();
-            assert_eq!(
-                value.attr("formaction"),
-                Some(format!("{action}#list-{f}").as_str()),
-                "{op}"
-            );
+            assert_eq!(value.attr("formaction"), None, "{op}");
         }
+        let form = parsed.select(&selector("form")).next().unwrap();
+        assert_eq!(form.value().attr("action"), Some(action.as_str()));
         for save in parsed.select(&selector("button[value=save]")) {
             assert!(
                 save.value().attr("formnovalidate").is_none(),
@@ -2004,15 +2045,16 @@ async fn change_summary_unavailable_for_an_unsupported_runtime_pin() {
     );
 }
 
-/// `lists` lists of 32 integer properties whose labels are 100 `"` (the widest escape).
-fn quoted_lists_definition(lists: usize) -> Value {
+/// `lists` lists of `properties` integer properties whose labels are 100 `"` (the widest
+/// escape).
+fn quoted_lists_definition(lists: usize, properties: usize) -> Value {
     let label = "\"".repeat(100);
     let fields: Vec<Value> = (0..lists)
         .map(|l| {
             list(
                 &format!("l{l}_{}", "a".repeat(61)),
                 &label,
-                (0..32)
+                (0..properties)
                     .map(|p| {
                         property(
                             &format!("p{p:02}_{}", "b".repeat(12)),
@@ -2056,12 +2098,14 @@ async fn change_summary_large_diff_is_bounded() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     assert_eq!(SUMMARY_BYTES, 1_675_264);
-    let definition = quoted_lists_definition(3);
+    // Ten properties: 9 of 10 change in an edited row, so each line lists the maximum 8
+    // labels plus "and 1 more", not a reused slot.
+    let definition = quoted_lists_definition(3, 10);
     let setup = list_setup(&definition).await;
     let ids: Vec<String> = (0..3)
         .map(|l| definition["fields"][l]["id"].as_str().unwrap().to_owned())
         .collect();
-    let properties: Vec<String> = (0..32)
+    let properties: Vec<String> = (0..10)
         .map(|p| {
             definition["fields"][0]["items"]["properties"][p]["id"]
                 .as_str()
@@ -2069,12 +2113,11 @@ async fn change_summary_large_diff_is_bounded() {
                 .to_owned()
         })
         .collect();
-    let rows = |revision: i64, value: i64| -> Vec<Value> {
-        (1..=256)
+    let rows = |count: usize, revision: i64, value: i64| -> Vec<Value> {
+        (1..=count)
             .map(|k| {
                 let mut item = json!({"id": format!("r{revision}-{k}")});
                 for (p, property) in properties.iter().enumerate() {
-                    // Property 0 never changes, so 31 of 32 change: an edit, not a reuse.
                     item[property] = if p == 0 { 0.into() } else { value.into() };
                 }
                 item
@@ -2083,12 +2126,12 @@ async fn change_summary_large_diff_is_bounded() {
     };
     let mut first = blank(&setup, 1).await;
     first.sheet_id = 1;
-    first.data =
-        json!({ids[0].clone(): rows(1, 0), ids[1].clone(): rows(1, 0), ids[2].clone(): rows(1, 0)});
+    first.data = json!({ids[0].clone(): rows(256, 1, 0), ids[1].clone(): rows(20, 1, 0),
+                        ids[2].clone(): rows(20, 1, 0)});
     let first = write(&setup, 1, first, "create").await.unwrap();
     // Lists 0 and 1: every row edited; list 2: every row replaced.
-    let second =
-        json!({ids[0].clone(): rows(1, 1), ids[1].clone(): rows(1, 1), ids[2].clone(): rows(2, 0)});
+    let second = json!({ids[0].clone(): rows(256, 1, 1), ids[1].clone(): rows(20, 1, 1),
+                        ids[2].clone(): rows(20, 2, 0)});
     edit(&setup, &first, second).await.unwrap();
     let response = super::router_request(
         &setup.app,
@@ -2113,16 +2156,16 @@ async fn change_summary_large_diff_is_bounded() {
         .take(200)
     {
         assert_eq!(li.select(&selector("code")).count(), 9, "entry + 8 labels");
-        assert!(li.text().collect::<String>().ends_with(" and 23 more."));
+        assert!(li.text().collect::<String>().ends_with(" and 1 more."));
     }
     let label = "\"".repeat(100);
     let overflow = lines.last().unwrap();
     assert_eq!(
         overflow,
         &format!(
-            "and 824 more changes. Totals: {label}: 0 added, 0 removed, 256 edited, 0 moved; \
-             {label}: 0 added, 0 removed, 256 edited, 0 moved; \
-             {label}: 256 added, 256 removed, 0 edited, 0 moved."
+            "and 116 more changes. Totals: {label}: 0 added, 0 removed, 256 edited, 0 moved; \
+             {label}: 0 added, 0 removed, 20 edited, 0 moved; \
+             {label}: 20 added, 20 removed, 0 edited, 0 moved."
         )
     );
     let raw = raw_summary(&html);
@@ -2281,13 +2324,18 @@ async fn list_payloads_escaped_in_context() {
         .text()
         .collect();
     assert_eq!(textarea, story, "history textarea");
-    // Every formaction is the generated same-origin path plus #list-f.
-    for button in scraper::Html::parse_document(&view).select(&selector("button[formaction]")) {
-        assert_eq!(
-            button.value().attr("formaction"),
-            Some("/private-sheets/1#list-1")
-        );
-    }
+    // Ops post to the generated same-origin form action; no button overrides it.
+    let parsed = scraper::Html::parse_document(&view);
+    assert_eq!(parsed.select(&selector("button[formaction]")).count(), 0);
+    assert_eq!(
+        parsed
+            .select(&selector("form"))
+            .next()
+            .unwrap()
+            .value()
+            .attr("action"),
+        Some("/private-sheets/1")
+    );
 }
 
 /// The unpacked-gate list fixture (`list-definition.json`) publishes, round-trips through
@@ -2609,46 +2657,440 @@ async fn one_mib_of_quotes_is_echoed_within_bound() {
     );
 }
 
-/// The worst-label sheet (labels of 100 `"`, 3 lists × 256 rows × 32 properties) stays
-/// within the per-unit markup bound (no echo).
+/// The worst-label sheet (labels of 100 `"`, 256 rows × 32 properties) stays within the
+/// per-unit markup bound (no echo).
 #[tokio::test]
 async fn worst_label_page_markup_is_within_the_unit_bound() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
-    let definition = quoted_lists_definition(3);
+    let definition = quoted_lists_definition(1, 32);
     let setup = list_setup(&definition).await;
-    let mut values = serde_json::Map::new();
-    for l in 0..3 {
-        let id = definition["fields"][l]["id"].as_str().unwrap().to_owned();
-        let items: Vec<Value> = (1..=256)
-            .map(|k| {
-                let mut item = json!({"id": format!("r1-{k}")});
-                for p in definition["fields"][l]["items"]["properties"]
-                    .as_array()
-                    .unwrap()
-                {
-                    item[p["id"].as_str().unwrap()] = 0.into();
-                }
-                item
-            })
-            .collect();
-        values.insert(id, items.into());
-    }
+    let field = &definition["fields"][0];
+    let items: Vec<Value> = (1..=256)
+        .map(|k| {
+            let mut item = json!({"id": format!("r1-{k}")});
+            for p in field["items"]["properties"].as_array().unwrap() {
+                item[p["id"].as_str().unwrap()] = 0.into();
+            }
+            item
+        })
+        .collect();
     let mut snapshot = blank(&setup, 1).await;
     snapshot.sheet_id = 1;
-    snapshot.data = values.into();
+    snapshot.data = json!({field["id"].as_str().unwrap(): items});
     write(&setup, 1, snapshot, "create").await.unwrap();
     let response =
         super::router_request(&setup.app, &setup.auth[1], "/private-sheets/1", None).await;
     let html = axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
         .await
         .unwrap();
-    let units = render_units(&definition, &[256, 256, 256]);
-    assert_eq!(units, 27_660);
+    let units = render_units(&definition, &[256]);
+    assert_eq!(units, 9_220);
     assert!(
         html.len() <= FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES,
         "{} bytes for {units} units",
         html.len()
     );
     println!("worst-label view page: {} bytes, {units} units", html.len());
+}
+
+// ---- Step 8: the gate lift, the publication budget and end-to-end lists (plan D7) ----
+
+/// List `l` of the budget fixture: 32 properties, of which `BUDGET_OPTIONAL[l]` leading ones
+/// are optional integers, list 0's last property a required boolean, the rest integers.
+const BUDGET_OPTIONAL: [usize; 3] = [3, 3, 2];
+
+fn budget_property(l: usize, p: usize) -> Value {
+    if l == 0 && p == 31 {
+        property("p31", "P31", "boolean", false)
+    } else {
+        property(
+            &format!("p{p}"),
+            &format!("P{p}"),
+            "integer",
+            p < BUDGET_OPTIONAL[l],
+        )
+    }
+}
+
+/// Exactly `RENDER_UNITS` render units plus `extra` one-unit text fields (admission allows
+/// 2,048 enum options in all, so the budget is reached through list rows): three lists of 32
+/// properties, 12 + 256 × (45 + 42 + 40) = 32,524 units, plus 244 texts.
+fn budget_definition(extra: usize) -> Value {
+    let mut fields: Vec<Value> = (0..3)
+        .map(|l| {
+            list(
+                &format!("l{l}"),
+                &format!("List {l}"),
+                (0..32).map(|p| budget_property(l, p)).collect(),
+            )
+        })
+        .collect();
+    for t in 0..244 + extra {
+        fields.push(
+            json!({"id": format!("t{t}"), "label": format!("T{t}"), "control": "text",
+                           "nullable": false, "mapping": mapped()}),
+        );
+    }
+    let ids: Vec<Value> = fields.iter().map(|field| field["id"].clone()).collect();
+    json!({
+        "contract_version": 1, "game_id": "synthetic-game", "edition_id": "first",
+        "definition_id": "budget", "title": "Budget",
+        "sources": [{"source_id": 1, "pdf_sha256": "0".repeat(64), "roles": ["sheet"]}],
+        "fields": fields, "formula_profile": 1,
+        "groups": [{"id": "main", "label": "Main", "fields": ids, "column_hint": "main"}],
+    })
+}
+
+#[tokio::test]
+async fn render_budget_boundary_publishes_and_plus_one_refuses() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let at = budget_definition(0);
+    let pin = crate::definitions::private_pin::for_tests(&at);
+    let counts = super::values::form_budget(pin.definition());
+    assert_eq!(counts.units, super::values::RENDER_UNITS);
+    let setup = list_setup(&at).await;
+    assert!(setup.version > 0, "the boundary definition published");
+    let mut over = budget_definition(1);
+    over["definition_id"] = "budget-over".into();
+    let draft = setup
+        .store
+        .save_definition_draft(serde_json::to_vec(&over).unwrap(), 0)
+        .await
+        .unwrap();
+    let comparison = setup
+        .store
+        .compare_definition(draft.id, false)
+        .await
+        .unwrap();
+    let error = setup
+        .store
+        .approve_definition(
+            draft.id,
+            false,
+            crate::definitions::ApprovalRequest {
+                comparison_hash: comparison.comparison_hash,
+                actor: "Synthetic test".into(),
+                rationale: "Synthetic original compared".into(),
+                originals_compared: true,
+            },
+        )
+        .await
+        .unwrap_err();
+    match error {
+        crate::definitions::DefinitionError::Invalid(report) => {
+            assert_eq!(report.diagnostics[0].code, "list-form-exceeds-limit");
+        }
+        other => panic!("want Invalid, got {other:?}"),
+    }
+}
+
+/// Every node of a JSON value, counted like the decoder (one per value).
+fn json_nodes(value: &Value) -> usize {
+    1 + match value {
+        Value::Array(items) => items.iter().map(json_nodes).sum(),
+        Value::Object(map) => map.values().map(json_nodes).sum(),
+        _ => 0,
+    }
+}
+
+async fn timed_get(setup: &Setup, path: &str) -> (StatusCode, usize, std::time::Duration) {
+    let started = std::time::Instant::now();
+    let response = super::router_request(&setup.app, &setup.auth[2], path, None).await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
+        .await
+        .unwrap();
+    (status, bytes.len(), started.elapsed())
+}
+
+/// The full exact-budget form: every row present and values up to the stored cap.
+fn budget_form(revision: i64, op: Option<&str>) -> Vec<(String, String)> {
+    let mut form = vec![
+        pair("csrf", "a".repeat(64)),
+        pair("revision", revision.to_string()),
+        pair("name", "Exact budget"),
+        pair("notes", ""),
+    ];
+    for t in 0..244 {
+        form.push(pair(format!("value-t{t}"), "x".repeat(1_200)));
+    }
+    for (f, optional) in BUDGET_OPTIONAL.iter().enumerate() {
+        for r in 0..256 {
+            form.push(pair(format!("id-{f}-{r}"), ""));
+            for p in 0..32 {
+                let value = if f == 0 && p == 31 {
+                    "true".to_owned()
+                } else {
+                    i64::MIN.to_string()
+                };
+                form.push(pair(format!("row-{f}-{r}-{p}"), value));
+                if p < *optional {
+                    form.push(pair(format!("set-{f}-{r}-{p}"), "present"));
+                }
+            }
+        }
+    }
+    if let Some(op) = op {
+        form.push(pair("op", op));
+    }
+    form
+}
+
+/// Posts `form` as `auth[2]`, printing the status, body bytes and time (report-only).
+async fn measured_post(
+    setup: &Setup,
+    path: &str,
+    form: &[(String, String)],
+    what: &str,
+) -> (StatusCode, usize) {
+    use tower::ServiceExt;
+    let body = serde_urlencoded::to_string(form).unwrap();
+    let request = axum::http::Request::builder()
+        .uri(path)
+        .method("POST")
+        .header("host", "127.0.0.1:3000")
+        .header("cookie", setup.auth[2].fixture_cookie())
+        .header("origin", "http://127.0.0.1:3000")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(axum::body::Body::from(body.clone()))
+        .unwrap();
+    let started = std::time::Instant::now();
+    let response = setup.app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
+        .await
+        .unwrap()
+        .len();
+    println!(
+        "{what}: {} pairs, {} body bytes -> {status}, {bytes} page bytes in {:?}",
+        form.len(),
+        body.len(),
+        started.elapsed()
+    );
+    (status, bytes)
+}
+
+/// The exact-budget definition (test 45's boundary) with every row present and values up to
+/// the stored cap saves through the form, reopens and freezes; its envelope stays within
+/// `ENVELOPE_NODES`; its pages stay within the D7 and D8 bounds (sizes and times printed,
+/// report-only).
+#[tokio::test]
+async fn exact_budget_sheet_saves_reopens_and_freezes() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&budget_definition(0)).await;
+    join_player(&setup).await;
+    let path = create_path(&setup);
+    let bound = FIXED_PAGE_BYTES + super::values::RENDER_UNITS * UNIT_MARKUP_BYTES;
+    let (status, bytes) = measured_post(
+        &setup,
+        &path,
+        &budget_form(0, Some("up-0-1")),
+        "exact-budget op",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(bytes <= bound + 5 * super::super::web::ECHO_BYTES);
+    let mut invalid = budget_form(0, None);
+    set(&mut invalid, "row-0-0-31", "maybe");
+    let (status, bytes) = measured_post(&setup, &path, &invalid, "exact-budget 422").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(bytes <= bound + 5 * super::super::web::ECHO_BYTES);
+    let (status, _) =
+        measured_post(&setup, &path, &budget_form(0, None), "exact-budget save").await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let saved = reopen(&setup, 2).await;
+    let content = serde_json::to_string(&saved).unwrap();
+    assert!(content.len() <= snapshots::MAX_BYTES, "{}", content.len());
+    let envelope =
+        crate::definitions::decode::sheet_nodes(content.as_bytes()) - json_nodes(&saved.data);
+    println!(
+        "exact-budget snapshot: {} bytes, envelope nodes {envelope}",
+        content.len()
+    );
+    assert!(envelope <= super::values::ENVELOPE_NODES, "{envelope}");
+    let (status, bytes, time) = timed_get(&setup, "/private-sheets/1").await;
+    assert_eq!(status, StatusCode::OK);
+    println!("exact-budget GET: {bytes} bytes in {time:?}");
+    assert!(bytes <= bound);
+    // Test 34 rerun on this fixture: every row edited in 31 of 32 properties.
+    let mut snapshot = saved.clone();
+    for l in 0..3 {
+        for item in snapshot.data[format!("l{l}")].as_array_mut().unwrap() {
+            for p in 1..31 {
+                item[format!("p{p}")] = 0.into();
+            }
+            item["p31"] = if l == 0 { false.into() } else { 0.into() };
+        }
+    }
+    write(&setup, 2, snapshot, "edit").await.unwrap();
+    let response = super::router_request(
+        &setup.app,
+        &setup.auth[2],
+        "/private-sheets/1/history/2",
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let summary = raw_summary(&html);
+    println!(
+        "exact-budget change summary: {} bytes, history page {} bytes",
+        summary.len(),
+        html.len()
+    );
+    assert!(summary.len() <= SUMMARY_BYTES);
+    assert_eq!(summary_lines(&html).len(), 201);
+    remove_player(&setup).await;
+    let frozen = reopen(&setup, 2).await;
+    assert_eq!((frozen.state.as_str(), frozen.revision), ("frozen", 3));
+}
+
+/// The Lantern Reach pack, published for real, created through the sheet form (its item IDs
+/// become host IDs r1-k), shows the character's stored derived values.
+#[tokio::test]
+async fn lantern_reach_list_sheet_end_to_end() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let pack: Value =
+        serde_json::from_slice(crate::definitions::formula_pack_tests::DEFINITION).unwrap();
+    let mut definition = crate::definitions::formula_pack_tests::envelope(&pack);
+    definition["sources"] =
+        json!([{"source_id": 1, "pdf_sha256": "0".repeat(64), "roles": ["sheet"]}]);
+    definition["fields"][0]["mapping"] = mapped();
+    definition["edition_id"] = "first".into();
+    definition["game_id"] = "synthetic-game".into();
+    let setup = list_setup(&definition).await;
+    let character: Value =
+        serde_json::from_slice(crate::definitions::formula_pack_tests::CHARACTER).unwrap();
+    let values = &character["values"];
+    let pin = crate::definitions::private_pin::for_tests(&definition);
+    let mut form = vec![
+        pair("csrf", "a".repeat(64)),
+        pair("revision", "0"),
+        pair("name", "Bram Holt"),
+        pair("notes", ""),
+    ];
+    let mut expected = Vec::new();
+    for (f, field) in pin.definition().fields.iter().enumerate() {
+        let value = &values[&field.id];
+        if field.formula.is_some() {
+            expected.push(match value {
+                Value::Bool(true) => "True".to_owned(),
+                Value::Bool(false) => "False".to_owned(),
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            });
+        } else if field.control == crate::definitions::Control::List {
+            for (r, item) in value.as_array().unwrap().iter().enumerate() {
+                form.push(pair(format!("id-{f}-{r}"), ""));
+                for (p, property) in super::values::properties(field).iter().enumerate() {
+                    let raw = item.get(&property.id).map(|v| match v {
+                        Value::String(text) => text.clone(),
+                        other => other.to_string(),
+                    });
+                    form.push(pair(
+                        format!("row-{f}-{r}-{p}"),
+                        raw.clone().unwrap_or_default(),
+                    ));
+                    if property.optional {
+                        form.push(pair(
+                            format!("set-{f}-{r}-{p}"),
+                            if raw.is_some() { "present" } else { "absent" },
+                        ));
+                    }
+                }
+            }
+        } else {
+            form.push(pair(
+                format!("value-{}", field.id),
+                match value {
+                    Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                },
+            ));
+        }
+    }
+    assert_eq!(
+        setup.post(&create_path(&setup), form).await.0,
+        StatusCode::SEE_OTHER
+    );
+    let saved = reopen(&setup, 1).await;
+    let ids: Vec<&str> = saved.data["equipment"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["r1-1", "r1-2", "r1-3", "r1-4", "r1-5"]);
+    let html = sheet_page(&setup).await;
+    let derived: Vec<String> = scraper::Html::parse_document(&html)
+        .select(&selector("dl.derived dd"))
+        .map(|dd| dd.text().collect())
+        .collect();
+    assert_eq!(derived, expected, "derived results unchanged by the re-ID");
+    assert!(html.contains("Advisory checks: 0 violated"));
+}
+
+/// Plan §6 (report-only, with a bound): a slow 5 MiB upload by a signed-in principal holds the
+/// runtime (JOBS) permit, taken before the body, for at most the 5 s request timeout.
+#[tokio::test]
+async fn slow_5mib_upload_holds_the_runtime_permit_at_most_the_request_timeout() {
+    use tower::ServiceExt;
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    create_rows(&setup, 1).await;
+    // 5 MiB in 64 chunks, one every 100 ms: the body would take 6.4 s.
+    let chunk = super::super::web::SHEET_POST_BYTES / 64;
+    let chunks = futures_util::stream::unfold(0_usize, move |sent| async move {
+        if sent == 64 {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        Some((
+            Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![b'a'; chunk])),
+            sent + 1,
+        ))
+    });
+    let request = axum::http::Request::builder()
+        .uri("/private-sheets/1")
+        .method("POST")
+        .header("host", "127.0.0.1:3000")
+        .header("cookie", setup.auth[1].fixture_cookie())
+        .header("origin", "http://127.0.0.1:3000")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(axum::body::Body::from_stream(chunks))
+        .unwrap();
+    let started = std::time::Instant::now();
+    let upload = tokio::spawn(setup.app.clone().oneshot(request));
+    let mut blocked = false;
+    let held = loop {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        match crate::definitions::admit().ok() {
+            Some(permit) if blocked => {
+                drop(permit);
+                break started.elapsed();
+            }
+            Some(permit) => drop(permit),
+            None if started.elapsed() > std::time::Duration::from_secs(20) => {
+                panic!("the runtime permit was never released")
+            }
+            None => blocked = true,
+        }
+    };
+    let response = upload.await.unwrap().unwrap();
+    println!(
+        "slow 5 MiB upload: runtime permit held {held:?}, response {}",
+        response.status()
+    );
+    assert!(held <= std::time::Duration::from_millis(5_600), "{held:?}");
 }

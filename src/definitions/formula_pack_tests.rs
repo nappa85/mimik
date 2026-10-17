@@ -5,8 +5,10 @@ use super::{formula, private_pin};
 use serde_json::{Map, Value, json};
 use std::time::Instant;
 
-const DEFINITION: &[u8] = include_bytes!("../../examples/tool-loop-demo/definition.json");
-const CHARACTER: &[u8] = include_bytes!("../../examples/tool-loop-demo/characters/bram-holt.json");
+pub(crate) const DEFINITION: &[u8] =
+    include_bytes!("../../examples/tool-loop-demo/definition.json");
+pub(crate) const CHARACTER: &[u8] =
+    include_bytes!("../../examples/tool-loop-demo/characters/bram-holt.json");
 
 fn unresolved() -> Value {
     json!({"state": "unresolved", "reason": "Synthetic pack"})
@@ -34,7 +36,7 @@ fn control(item: &Value, out: &mut Map<String, Value>) {
 /// pack's `encoding`, `rules_revision` and `formula_language` have no envelope member
 /// (`deny_unknown_fields`) and are dropped; rule IDs are lowercased; every field sits in one
 /// group. Expectations come from the stored characters, never from engine output.
-fn envelope(pack: &Value) -> Value {
+pub(crate) fn envelope(pack: &Value) -> Value {
     let mut fields = Vec::new();
     for item in pack["fields"].as_array().unwrap() {
         let mut field = Map::new();
