@@ -110,3 +110,21 @@ runner. The committed pin loads under its anchors. The frozen file was touched o
 authorised ids-only script and by `sha256sum -c --status` (which matches).
 
 Handoff: re-review of round 3 before any A0 verdict run.
+
+## Round 4 (re-review of `66f56c1`)
+
+- **Sol:** **CLEARED** for A0 held-out runs (two Lows).
+- **Sonnet:** **CLEARED** (one Low, plus optional Info items).
+- **Third reviewer unavailable** (`--chain third` preflight); proceeded with the two main
+  reviews per AGENTS.md.
+
+| ID | Sev. | Finding | Fix | Regression test (red at `66f56c1` → green) |
+|---|---|---|---|---|
+| Sol 1, Sonnet 1 | Low | The outer `FormulaInfraError` handler matched `"heldout" in argv`, so `--split=heldout` (or an abbreviation) printed the error and its stderr tail | `_split_of` parses the arguments with the harness's own parser; anything other than a clean `dev` parse gets the generic message | `test_outer_fault_handler_parses_the_split` (red) |
+| Sol 2 | Low | The membership regression test changed the set size, so a size check alone could keep it green | New same-size forgery: one id replaced by an unregistered one, case order and rows updated, with (a) a recomputed digest and (b) the registered digest falsely attached; both refused by `load_ledgers` and `bar_verdict` | `test_same_size_replacement_sets_are_refused_by_digest` (coverage: green before and after, the digest checks already existed) |
+| Sonnet 2 | Low | `load_ledgers` did not cross-check each row's `heldout_pin_sha256` against the header | Refused on any mismatch | `test_row_pin_digests_must_match_the_header` (red) |
+| Sonnet (Info) | Info | `QUIET` other than 0/1 exits on dev too; double opt-in flags in test helpers | Kept: strict validation is intended, and the duplicate flag is harmless | — |
+
+Verification (round 4): gate on `harness-v3` (`--cpus 2`): ruff clean, **718 tests, 11 skipped,
+1 error** (the environmental `test_package`); the queue fixture's rows now carry the pin digest
+like real rows. Then merged into master (see `TODO.md`).

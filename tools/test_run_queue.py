@@ -1763,6 +1763,7 @@ class HeldoutGateQueueTests(Harness):
                         "header_extra": extra,
                         "row_extra": {
                             "heldout_cases_sha256": pin["sha256"],
+                            "heldout_pin_sha256": pin["pin_sha256"],
                             "heldout_case_set": case_set,
                         },
                     }

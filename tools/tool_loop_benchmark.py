@@ -3514,6 +3514,12 @@ def load_ledgers(paths) -> list[dict]:
                 or any(r.get("heldout_case_set") != case_set for r in episodes)
             ):
                 raise SystemExit(f"{path}: held-out case set is not a registered set; refusing it")
+            if any(
+                r.get("heldout_pin_sha256") != header.get("heldout_pin_sha256") for r in episodes
+            ):
+                raise SystemExit(
+                    f"{path}: a held-out row's pin digest differs from the header; refusing it"
+                )
             if header.get("heldout_pin_sha256") != HELDOUT_PIN_SHA256:
                 raise SystemExit(
                     f"{path}: held-out ledger not made under the anchored pin; refusing it"
@@ -3733,12 +3739,23 @@ def parse_server_config(text):
 HELDOUT_FAULT = "aborted: formula engine infrastructure fault (details withheld on held-out)"
 
 
+def _split_of(argv) -> str:
+    """The split argparse would choose (abbreviations and --split=… included); "unknown"
+    when the arguments do not parse, which the fault handler treats like held-out."""
+    parser = build_parser()
+    parser.exit_on_error = False
+    try:
+        args, _ = parser.parse_known_args(list(sys.argv[1:] if argv is None else argv))
+    except (argparse.ArgumentError, SystemExit):
+        return "unknown"
+    return args.split
+
+
 def main(argv=None):
     try:
         return _main(argv)
     except FormulaInfraError as error:
-        argv_list = list(sys.argv[1:] if argv is None else argv)
-        if "heldout" in argv_list:  # no formula text or stderr tail from held-out cases
+        if _split_of(argv) != "dev":  # held-out or unparsable: no formula text or tail
             print(HELDOUT_FAULT, file=sys.stderr)
         else:
             print(f"aborted: {error}\n{error.stderr_tail}", file=sys.stderr)

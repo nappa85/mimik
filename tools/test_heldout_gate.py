@@ -688,5 +688,77 @@ class ReviewRoundThreeTests(unittest.TestCase):
             self.assertNotIn("SECRET", out + err)
 
 
+class ReviewRoundFourTests(unittest.TestCase):
+    """Re-review of 66f56c1 (docs/reviews/2026-10-17-heldout-gate.md, round 4)."""
+
+    def ledger(self, tmp, n=5):
+        path, pin_path, doc = synthetic(tmp, n=n)
+        out = Path(tmp) / "l.jsonl"
+        argv = ["--pack", str(FIXTURE), "--split", "heldout", "--model-label", "m", "--dry-run"]
+        argv += ["--allow-heldout-gold-replay", "--output", str(out), "--heldout-cases", str(path)]
+        with pinned(pin_path), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(tl.main(argv), 0)
+        return out, pin_path, doc
+
+    def test_outer_fault_handler_parses_the_split(self):
+        """Sol 1 / Sonnet 1: `--split=heldout` slipped past the `"heldout" in argv` match."""
+        fault = tl.FormulaInfraError("SECRET-FORMULA")
+        fault.stderr_tail = "SECRET-TAIL"
+        for argv in (["--split=heldout"], ["--split", "heldout"], ["--sp", "heldout"]):
+            err = io.StringIO()
+            with patch.object(tl, "_main", side_effect=fault), contextlib.redirect_stderr(err):
+                self.assertEqual(tl.main([*argv, "--pack", "x"]), 3)
+            self.assertNotIn("SECRET", err.getvalue(), argv)
+        err = io.StringIO()  # dev keeps the full diagnostic
+        with patch.object(tl, "_main", side_effect=fault), contextlib.redirect_stderr(err):
+            tl.main(["--pack", "x"])
+        self.assertIn("SECRET-TAIL", err.getvalue())
+
+    def same_size_forgery(self, ledger, doc, claim_registered):
+        rows = [json.loads(x) for x in ledger.read_text().splitlines()]
+        victim, intruder = doc["cases"][0]["id"], "h3-s-999"
+        order = [intruder if c == victim else c for c in rows[0]["case_order"]]
+        registered = rows[0]["heldout_case_set"]
+        claim = (
+            dict(registered)
+            if claim_registered
+            else {"name": "full", "sha256": tl.case_set_sha256(order)}
+        )
+        rows[0].update(case_order=order, heldout_case_set=claim)
+        for r in rows:
+            if r.get("event") == "episode":
+                r["heldout_case_set"] = claim
+                if r["case_id"] == victim:
+                    r["case_id"] = intruder
+        ledger.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        return [r for r in rows if r.get("event") == "episode"]
+
+    def test_same_size_replacement_sets_are_refused_by_digest(self):
+        """Sol 2: the size check alone must not carry the membership test."""
+        live = {"dry_run": False, "dry_run_expected": False, "allow_heldout_gold_replay": False}
+        for claim_registered in (False, True):
+            with tempfile.TemporaryDirectory() as tmp:
+                ledger, pin_path, doc = self.ledger(tmp)
+                episodes = self.same_size_forgery(ledger, doc, claim_registered)
+                with pinned(pin_path):
+                    with self.assertRaisesRegex(SystemExit, "case set"):
+                        tl.load_ledgers([ledger])
+                    summary = tl.summarize(episodes)[0]
+                    self.assertEqual(summary["unique_cases"], 5)  # the size is right
+                    verdict = tl.bar_verdict(dict(summary, **live))
+                self.assertEqual(verdict["verdict"], "REFUSED")
+                self.assertIn("registered", " ".join(verdict["reasons"]))
+
+    def test_row_pin_digests_must_match_the_header(self):
+        """Sonnet 2: load_ledgers did not cross-check each row's heldout_pin_sha256."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, pin_path, _ = self.ledger(tmp)
+            rows = [json.loads(x) for x in ledger.read_text().splitlines()]
+            next(r for r in rows if r.get("event") == "episode")["heldout_pin_sha256"] = "0" * 64
+            ledger.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            with pinned(pin_path), self.assertRaisesRegex(SystemExit, "pin"):
+                tl.load_ledgers([ledger])
+
+
 if __name__ == "__main__":
     unittest.main()
