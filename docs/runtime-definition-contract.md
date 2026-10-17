@@ -332,7 +332,8 @@ editable; a per-property `editable: false` flag and an item catalogue are a late
   also scrolls it into view
   (the new row's first control, the list's Add button after Remove, the moved row's move
   button at its new position). A draft from an older revision shows "The saved sheet
-  changed (revision N → M); saving this draft will be refused with a conflict (409)."
+  changed (revision N → M); saving this draft will be refused with a conflict (409). Copy your changes, reload and
+  re-apply them."
   The `role="status"` message is part of a freshly loaded page, which screen readers do not
   reliably announce; the focused control and its name carry the result. List sheets also render a
   Save button before the groups, so Enter saves.
@@ -359,7 +360,8 @@ editable; a per-property `editable: false` flag and an item catalogue are a late
   "Nothing was saved; copy large text before submitting." Each submitted string is echoed
   in full at most once (the submitted revision included); second visible contexts show a
   64-character excerpt. Textareas emit a sacrificial newline after the opening tag, so values
-  that start with newlines round-trip exactly. The 5 MiB limit is enforced on the body
+  that start with newlines round-trip LF-exact (a browser submits CR LF as LF, so a stored
+  CR is not preserved through the form). The 5 MiB limit is enforced on the body
   itself, with or without a `Content-Length`. The single runtime permit is taken before the body is
   read, so buffering happens under it: at most one sheet POST (≤ 5 MiB) buffers at a time and
   any other runtime request answers 503 meanwhile, an accepted risk alongside the 5 s

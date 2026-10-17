@@ -195,6 +195,17 @@ class TextareaNewlineTests(unittest.TestCase):
         self.assertEqual(parser.forms["/s"], {"a": "plain", "b": "\nkept", "c": "x"})
         self.assertEqual(parser.values["b"], "\nkept")
 
+    def test_literal_crlf_and_cr_are_normalised_before_the_initial_newline_rule(self):
+        parser = FormFields()
+        parser.feed(
+            '<form action="/s"><textarea name="a">\r\nplain</textarea>'
+            '<textarea name="b">\rplain</textarea><textarea name="c">\r\n\r\nkept\r\n</textarea>'
+            '<textarea name="d">&#13;ref</textarea></form>'
+        )
+        self.assertEqual(
+            parser.forms["/s"], {"a": "plain", "b": "plain", "c": "\nkept\n", "d": "\rref"}
+        )
+
 
 class VersionSelectionTests(unittest.TestCase):
     PAGE = (

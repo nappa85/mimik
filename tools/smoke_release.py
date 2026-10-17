@@ -394,6 +394,11 @@ def prepare_definition_draft(binary, directory, fixture):
 
 
 class FormFields(HTMLParser):
+    def feed(self, data):
+        # HTML input-stream preprocessing: literal CRLF and lone CR become LF before
+        # tokenisation (character references such as &#13; are decoded later, untouched).
+        super().feed(data.replace("\r\n", "\n").replace("\r", "\n"))
+
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.values = {}

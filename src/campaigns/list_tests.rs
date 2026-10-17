@@ -3289,3 +3289,55 @@ async fn all_optional_worst_label_page_is_within_the_unit_bound() {
     );
     assert!(html.len() <= FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES);
 }
+
+/// Re-review (Sonnet minor 1, Space Bunny N1): private NATIVE sheets keep leading newlines in
+/// their textareas through a rejected save, a reload and an unchanged save (native sheets have
+/// no draft operations).
+#[tokio::test]
+async fn native_sheet_textareas_keep_leading_newlines() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    let campaign = setup
+        .store
+        .create_campaign(
+            setup.auth[1].clone(),
+            "Native".into(),
+            "mork-borg".into(),
+            "it-2025".into(),
+        )
+        .await
+        .unwrap();
+    let mut native = super::native(campaign, 2);
+    native.data["description"] = "\ndescription".into();
+    native.data["weapon_one"] = "\n\nweapon".into();
+    native.data["equipment"] = "\nequipment".into();
+    let created = super::insert_native(&setup.store, setup.auth[1].clone(), native).await;
+    let expect = |html: &str, context: &str| {
+        let form = submitted_by(html, None);
+        for (key, want) in [
+            ("description", "\ndescription"),
+            ("weapon_one", "\n\nweapon"),
+            ("equipment", "\nequipment"),
+        ] {
+            assert_eq!(get(&form, key), want, "{context}: {key}");
+        }
+    };
+    let view = sheet_page(&setup).await;
+    expect(&view, "saved reload");
+    let mut rejected = submitted(&view);
+    set(&mut rejected, "agility", "x");
+    let (status, page) = setup.post("/private-sheets/1", rejected).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    expect(&page, "rejected save");
+    assert_eq!(
+        setup.post("/private-sheets/1", submitted(&view)).await.0,
+        StatusCode::SEE_OTHER
+    );
+    let saved = reopen(&setup, 1).await;
+    assert_eq!(saved.revision, 2);
+    for key in ["description", "weapon_one", "equipment"] {
+        assert_eq!(saved.data[key], created.data[key], "unchanged save: {key}");
+    }
+    expect(&sheet_page(&setup).await, "second reload");
+}

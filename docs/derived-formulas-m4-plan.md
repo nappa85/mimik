@@ -278,8 +278,8 @@ length, the schema (8,000 / 20,000) plus `maxlength`; stored bytes, `snapshots::
   - the submitted revision is echoed in full once, in the hidden control; the page's
     "submitted/form revision" text shows a 64-character excerpt (revision 3.2, Sol Major 1).
   Every textarea emits one sacrificial newline after its opening tag, because HTML parsing
-  drops the first newline there; values that start with newlines round-trip exactly
-  (revision 3.2, Sol Major 2).
+  drops the first newline there; values that start with newlines round-trip
+  LF-exact (CR is normalised by browsers) (revision 3.2, Sol Major 2).
   So a re-render is ≤ `FIXED_PAGE_BYTES` + units × `UNIT_MARKUP_BYTES` + 5 × `ECHO_BYTES`
   (Askama escapes `"` as the 5-byte `&#34;`, the widest escape), where `UNIT_MARKUP_BYTES`
   includes one 64-character excerpt escaped (≤ 320 bytes). Step 7 derives both constants from

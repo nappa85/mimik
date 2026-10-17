@@ -214,3 +214,81 @@ async fn home_and_browser_assets_are_available_locally() {
         );
     }
 }
+
+/// Re-review (Space Bunny N2): the legacy editor's notes keep leading newlines through a
+/// reload, a stale (rejected) save and an unchanged save. Its revision is an integer, so a
+/// malformed one is refused before any echo (N6).
+#[tokio::test]
+async fn legacy_editor_notes_keep_leading_newlines() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("test.sqlite3")).unwrap();
+    let router = app(store.clone());
+    let mut record = input();
+    record.notes = "\n\nlegacy notes".into();
+    store.create(record).await.unwrap();
+    let notes = |html: &str| -> String {
+        scraper::Html::parse_document(html)
+            .select(&scraper::Selector::parse("textarea[name=notes]").unwrap())
+            .next()
+            .unwrap()
+            .text()
+            .collect()
+    };
+    let read = |response: axum::response::Response| async move {
+        String::from_utf8(
+            to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
+    };
+    let get = Request::builder()
+        .uri("/characters/1")
+        .header("host", "127.0.0.1:3000")
+        .body(Body::empty())
+        .unwrap();
+    let page = read(router.clone().oneshot(get).await.unwrap()).await;
+    assert_eq!(notes(&page), "\n\nlegacy notes", "reload");
+    let form = |revision: &str| {
+        serde_urlencoded::to_string([
+            ("name", "Elara"),
+            ("system_id", "dnd"),
+            ("edition", "Example edition"),
+            ("notes", "\n\nlegacy notes"),
+            ("revision", revision),
+        ])
+        .unwrap()
+    };
+    let response = router
+        .clone()
+        .oneshot(post("/characters/1", &form("1"), false))
+        .await
+        .unwrap();
+    assert!(response.status().is_success() || response.status().is_redirection());
+    assert_eq!(
+        store.get(1).await.unwrap().input.notes,
+        "\n\nlegacy notes",
+        "unchanged save"
+    );
+    let stale = read(
+        router
+            .clone()
+            .oneshot(post("/characters/1", &form("1"), false))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(stale.contains("another tab"));
+    assert_eq!(notes(&stale), "\n\nlegacy notes", "rejected save");
+    let quotes = "\"".repeat(10_000);
+    let response = router
+        .oneshot(post("/characters/1", &form(&quotes), false))
+        .await
+        .unwrap();
+    assert!(response.status().is_client_error());
+    assert!(
+        read(response).await.matches("&#34;").count() < 64,
+        "revision not echoed"
+    );
+}

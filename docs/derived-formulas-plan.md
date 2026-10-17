@@ -1264,6 +1264,11 @@ property autofocus test (F4); plan revision 3.2 (F5); the `outside_increasing` i
 | `streamed_body_over_5mib_without_length_is_413` | guard; mutation | `DefaultBodyLimit::disable()` on the sheet POSTs | failed |
 | `add_focuses_the_set_select_of_an_optional_first_property` | guard; mutation | Set/Not set select never autofocused | failed |
 | `all_optional_worst_label_page_is_within_the_unit_bound` | guard (measurement) | — | 246 bytes per unit |
+| `TextareaNewlineTests` CRLF/CR case (re-review, Sol) | executed red | reader before `feed` normalisation | `'\r\nplain'` vs `'plain'` |
+| `native_sheet_textareas_keep_leading_newlines` (re-review) | guard; mutation | native description textarea without the newline | failed |
+| `material_textareas_keep_leading_newlines` (re-review N2) | executed red | `material_page.html` before the newline | `"corrected text"` vs `"\ncorrected text"` |
+| `legacy_editor_notes_keep_leading_newlines` (re-review N2, N6) | executed red | `editor.html` before the newline | `"\nlegacy notes"` vs `"\n\nlegacy notes"` |
+| `material_malformed_revision_is_not_echoed` (re-review N6) | guard | — | revision is `i64`: refused before rendering |
 | `TextareaNewlineTests` (smoke form reader) | executed red | `smoke_release.py` before the fix | `'\nplain'` vs `'plain'`; found by the first gate rerun (`smoke_auth` failed "Persisted field differs: equipment") |
 
 ## Appendix A: superseded custom-spec design (revision 1)

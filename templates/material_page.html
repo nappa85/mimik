@@ -27,7 +27,7 @@
 <form method="post" action="/admin/materials/pages/{{ page.id }}/units/{{ unit.id }}">
 <input type="hidden" name="csrf" value="{{ csrf }}">
 {% if loop.first %}{% if let Some(draft) = draft %}
-<p>Submitted revision {{ draft.revision }}</p><input type="hidden" name="revision" value="{{ draft.revision }}">
+<p>Submitted revision {{ draft.revision|truncate(64) }}</p><input type="hidden" name="revision" value="{{ draft.revision }}">
 {% else %}<input type="hidden" name="revision" value="{{ unit.revision }}">{% endif %}
 {% else %}<input type="hidden" name="revision" value="{{ unit.revision }}">{% endif %}
 <label>Decision after comparing original
@@ -37,9 +37,11 @@
 <option value="rejected" {% if unit.state == "rejected" %}selected{% endif %}>Rejected / not evidence</option>
 </select></label>
 <label>Separate correction (plain text; only for corrected decision, at most 20,000 Unicode characters)
-<textarea name="correction">{{ unit.correction }}</textarea></label>
+<textarea name="correction">
+{{ unit.correction }}</textarea></label>
 <label>Rationale / what you checked (at most 5,000 Unicode characters)
-<textarea name="rationale" required>{% if loop.first %}{% if let Some(draft) = draft %}{{ draft.rationale }}{% endif %}{% endif %}</textarea></label>
+<textarea name="rationale" required>
+{% if loop.first %}{% if let Some(draft) = draft %}{{ draft.rationale }}{% endif %}{% endif %}</textarea></label>
 <p>Reviewer identity is recorded from your signed-in Owner account.</p><button>Record decision</button>
 </form></article>
 {% endfor %}
@@ -49,9 +51,10 @@
 <p>Resolve every unit, including other unit pages, and inspect the entire original page for omitted rules, table rows, symbols, footnotes and exceptions. This explicit decision is separate from unit review; model suggestions cannot approve it.</p>
 <form method="post" action="/admin/materials/pages/{{ page.id }}"><input type="hidden" name="csrf" value="{{ csrf }}">
 {% if let Some(form) = completion %}
-<p>Submitted page revision {{ form.revision }}</p><input type="hidden" name="revision" value="{{ form.revision }}">
+<p>Submitted page revision {{ form.revision|truncate(64) }}</p><input type="hidden" name="revision" value="{{ form.revision }}">
 <label>Confirmed printed page label (or 'unnumbered', at most 50 Unicode characters)<input name="printed_label" value="{{ form.printed_label }}" required></label>
-<label>Completeness rationale (at most 5,000 Unicode characters)<textarea name="rationale" required>{{ form.rationale }}</textarea></label>
+<label>Completeness rationale (at most 5,000 Unicode characters)<textarea name="rationale" required>
+{{ form.rationale }}</textarea></label>
 {% else %}
 <input type="hidden" name="revision" value="{{ page.revision }}">
 <label>Confirmed printed page label (or 'unnumbered', at most 50 Unicode characters)<input name="printed_label" value="{{ page.printed_label }}" required></label>

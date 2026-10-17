@@ -63,6 +63,48 @@ every container at `--cpus 2`:
 
 Review findings are not proof of correctness.
 
+## Re-review (fix commits `3225a5c`, `68e9697`)
+
+Run in parallel by the main session with fresh contexts, read-only:
+- Sonnet subagent: **MERGE** (Minor 1: no native-sheet newline test; Nit 5: the old
+  `=1.2.2` pin had no recorded rationale).
+- Sol (`openai/gpt-6.1-sol`): **MERGE AFTER FIXES**. Every disposition verified by source
+  inspection; one Minor: the smoke's textarea reader did not normalise literal CRLF and lone CR
+  to LF before the initial-newline rule, as browsers do. It confirmed that the runtime permit
+  is held through body extraction (`Extension<RuntimeAdmission>` is extracted before `Bytes`).
+- Space Bunny (third chain): **MERGE AFTER FIXES**. Per-finding table (summary):
+
+| ID | Space Bunny's verdict |
+|---|---|
+| S1 | Verified (excerpt on a char boundary; test reaches the single-echo count) |
+| S1 audit | Verified for `private_sheet.html` (see N6 for other templates) |
+| S2 | Verified for the three templates; native half untested (N1); other templates lossy (N2) |
+| S2 follow-up | Verified; cannot hide a persistence bug |
+| T-F1 | Verified; the guard discriminates (see N4 on which layer answers) |
+| T-F2, T-F3, T-F4, T-F5, T-F6 | Verified |
+| T-F7 | Verified as documented; no test (N3) |
+| SN1 | Verified (permit before body; one sheet POST buffers at a time) |
+| N-1 … N-4 | Verified (contract quotation truncated, N5) |
+
+New findings, all Minor or Nit, nothing Blocking or Major: N1 (native newline test missing),
+N2 (five other templates still lose a leading newline), N3 (T-F7 untested), N4 (state what the
+streamed guard proves), N5 (truncated quotation), N6 (legacy editor and material page show the
+revision twice), N7 ("LF-exact").
+
+## Final fixes
+
+| Finding | Disposition | Regression |
+|---|---|---|
+| Sol Minor (CRLF/CR) | `FormFields.feed` normalises literal CRLF and CR to LF before tokenisation, so character references such as `&#13;` stay distinct; then the initial-LF rule applies. | `TextareaNewlineTests.test_literal_crlf_and_cr_are_normalised_before_the_initial_newline_rule` (`\r\nplain`, `\rplain`, a CRLF-heavy value, `&#13;`); executed red: `'\r\nplain'` vs `'plain'` |
+| Sonnet Minor 1, Space Bunny N1 (native) | Test only; the native template already had the newline. | `native_sheet_textareas_keep_leading_newlines` (description, weapon_one, equipment through a rejected save, a reload and an unchanged save; native sheets have no draft ops). Guard; mutation "description textarea without the newline" fails it |
+| N2 (decided: fix) | Sacrificial newline added to every textarea with a value in `material_page.html`, `source_page.html`, `editor.html`, `index.html` and `mork_context.html` (empty textareas unchanged). Helper audit: only `smoke_release.py`'s `FormFields` reads textareas from HTML, and it now models browsers; `browser_smoke.py`, `material_browser.py` and `admin_ruleset_browser.py` use Chromium. | `material_textareas_keep_leading_newlines` (stored correction and a rejected draft's rationale; executed red: `"corrected text"` vs `"\ncorrected text"`); `tests/foundation.rs::legacy_editor_notes_keep_leading_newlines` (reload, unchanged save, stale re-render; executed red: `"\nlegacy notes"` vs `"\n\nlegacy notes"`) |
+| N6 (decided: fix) | **Adjudicated not reachable**: both revisions are `i64` (`CharacterInput::revision`, the materials form structs), so a malformed revision is refused before any page renders and the double echo shows at most 20 digits. The visible copies use Askama's `truncate(64)` anyway, defensively. | `material_malformed_revision_is_not_echoed` and the malformed-revision part of `legacy_editor_notes_keep_leading_newlines` (guards: 4xx, no draft re-render, fewer than 64 `&#34;`) |
+| N3 (T-F7 403 path) | **Not tested; recorded why.** The window lies between two awaited steps of one handler, after a database-rejected save; the only seam there (`AFTER_FAILED_SAVE`) is a synchronous hook that cannot run the async store calls a departure needs, so a test would need a new async test seam in shipped code for a documented, nothing-saved 403. | — |
+| N4 | The streamed guard proves that a body without `Content-Length` is bounded (413, whichever layer answers; the router-wide 1 MiB layer also covers these routes). That the 5 MiB limit, not 1 MiB, is the one that applies to sheet POSTs is pinned by `sheet_post_accepts_5mib_and_413s_5mib_plus_1` (exactly 5 MiB is not 413). | — |
+| N5 | The contract quotes the full stale warning. | — |
+| N7 | Plan D7 and the contract say "LF-exact" (a browser submits CR LF as LF). | — |
+| Sonnet Nit 5 | The old `=1.2.2` pin of `form_urlencoded` had no recorded rationale (it was the locked version at adoption); `"1.2"` stays, with `Cargo.lock` still selecting 1.2.2. | — |
+
 ## Status
 
 All Major and Minor findings are fixed or documented; T-F1 was rejected with source evidence
