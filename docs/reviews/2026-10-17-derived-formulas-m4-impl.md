@@ -267,3 +267,16 @@ and is pinned by a guard test. The fix commits go to a re-review of the fixes be
 | 3. Why the transport normalises every value | Recorded in a code comment and in the contract. No campaign field's CR is meaningful: IDs are slugs, revisions are decimal, CSRF tokens are hex, and options and states are fixed words. A trailing `%0D` becomes a trailing LF, which still fails each field's own grammar. A future byte-exact field would need an exemption. | — |
 | 4. The `lf` wrappers outside forms | Recorded in the `form_text` doc comment and the contract. The wrappers apply wherever those structs are deserialised; there is no non-form use today. | — |
 | 5. Extra allocation (nit) | `newlines_to_lf` now makes one pass with one allocation, and none when the value holds no CR. | `form_text::tests::crlf_and_cr_become_lf`, extended with mixed CR runs and multibyte text. |
+
+### Follow-up review and merge
+
+- **Reviewers:** Sol, Sonnet and Space Bunny all reviewed `abf9b36` and all returned **MERGE**.
+- **Merge:** merged into master. Master was an ancestor of the branch, so the merged tree is the gated tree.
+- **Gates run on `abf9b36`:** fmt, strict Clippy, 463 tests, the release build, `smoke_release.py --auth`, and the tools suite.
+- **Not rerun:** packaging, Chromium, the fresh rebuild, LAN, `cargo about` and `cargo audit`. No dependency changed.
+- **Space Bunny F4** (possible `clippy::while_let_on_iterator`): not a defect. Strict Clippy passed on `abf9b36`, and the loop body calls `next_if_eq` on the iterator, so a `for` loop cannot replace it.
+- **Remaining follow-ups (Minor):**
+  - Space Bunny F1: no CRLF-at-limit test for `PageReview.rationale` or the material completion rationale.
+  - Space Bunny F2: the migration note should say that a CRLF value written by a pre-change build may only exist in the latest revision.
+  - Space Bunny F3: reword "still fails its own grammar".
+  - Wording nits.
