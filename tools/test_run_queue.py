@@ -16,6 +16,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import model_registry
@@ -203,12 +204,20 @@ def fake_header(env, key, split, b):
         "thinking_capability": entry["capabilities"]["thinking"],
         "server": {
             "image": entry["server_image"],
-            "args": model_registry.server_args(entry, ctx, None if moe is None else int(moe)),
+            "args": model_registry.server_args(
+                entry,
+                ctx,
+                None if moe is None else int(moe),
+                device=env.get("DEVICE", "gpu"),
+                threads=int(env["THREADS"]) if env.get("THREADS") else None,
+            ),
         },
+        "device": env.get("DEVICE", "gpu"),
         "planned_episodes": len(cases) * len(seeds),
         "case_order": cases,
         "case_subset": subset,
     }
+    header.update(b.get("header_extra", {}))  # e.g. the held-out case and pin hashes
     return header, cases, seeds
 
 
@@ -252,6 +261,7 @@ def write_attempt(out: Path, b: dict, env: dict, argv) -> int:
                 "case_id": case,
                 "seed": seed,
                 "outcome": outcome,
+                **b.get("row_extra", {}),
             }
         )
     if b.get("row_arm"):
@@ -291,6 +301,23 @@ def write_attempt(out: Path, b: dict, env: dict, argv) -> int:
             f"       eval time = {b['eval_ms']:9.2f} ms /   100 tokens (x ms per token)\n"
         )
     return b.get("runner_exit", main_exit)
+
+
+def cool_gpu(edge=45.0, junction=50.0):
+    return {
+        "amdgpu:edge": {"value": edge, "crit": 100.0},
+        "amdgpu:junction": {"value": junction, "crit": 110.0},
+        "nvme:Composite": {"value": 40.0, "crit": 84.85},
+    }
+
+
+def manual_fan(enable=1, pwm=255, rpm=3200):
+    return {
+        "pwm1_enable": enable,
+        "pwm1": pwm,
+        "fan1_input": rpm,
+        "path": "/sys/class/hwmon/hwmonX",
+    }
 
 
 def queue_doc(arms, **extra):
@@ -336,6 +363,8 @@ class Harness(unittest.TestCase):
 
         kw.setdefault("vram_reader", lambda: None)
         self.watchdog = kw.setdefault("watchdog", FakeWatchdog())
+        kw.setdefault("thermal_reader", lambda: cool_gpu())
+        kw.setdefault("fan_reader", lambda: manual_fan())
         return rq.Queue(
             rq.load_queue(path, REGISTRY),
             REGISTRY,
@@ -676,7 +705,7 @@ class ReviewFixGateTests(Harness):
         manifest = q.run()
         self.assertEqual(manifest["arms"][0]["attempts"][0]["infra"], "infra_vram")
         self.assertEqual(manifest["arms"][0]["state"], "complete")
-        self.assertEqual(self.clock.sleeps.count(5), 2)  # waited for the release
+        self.assertEqual(self.clock.sleeps.count(3), 2)  # waited for the release
         self.assertIn(47, self.clock.sleeps)  # then cooled down
 
 
@@ -1236,6 +1265,261 @@ class ReviewThreeTests(Harness):
         self.assertGreater(sup.fresh_seconds, 30 + rq.run_watchdog.WORST_TICK_SECONDS)
 
 
+class ThermalQueueTests(Harness):
+    """Thermal guard (2026-10-16, after the 18:52 shutdown)."""
+
+    START = at(2026, 10, SAT, 10, 0)
+
+    def reader(self, schedule):
+        """schedule: [(seconds after start, sensors)]; the last entry at or before now wins."""
+
+        def read():
+            elapsed = self.clock.now - self.START
+            current = schedule[0][1]
+            for t, sensors in schedule:
+                if elapsed >= t:
+                    current = sensors
+            return current() if callable(current) else current
+
+        return read
+
+    def test_sustained_heat_stops_cools_and_reruns_the_whole_arm(self):
+        hot = cool_gpu(70, 97)
+        # Hot from 60 s to 300 s after start (the first attempt), then cool.
+        schedule = [(0, cool_gpu()), (60, hot), (300, cool_gpu(50, 55))]
+        doc = queue_doc([arm("a", max_arm_seconds=7200)])
+        q = self.make(
+            doc,
+            self.START,
+            plan={"a": [{"seconds": 1200}, {}]},
+            thermal_reader=self.reader(schedule),
+        )
+        manifest = q.run()
+        attempts = manifest["arms"][0]["attempts"]
+        self.assertEqual(attempts[0]["status"], "incomplete_thermal")
+        self.assertEqual(attempts[0]["failure"], "thermal")
+        self.assertIn("junction 97.0", attempts[0]["reason"])
+        self.assertIn(signal.SIGTERM, self.launcher.signals)
+        self.assertEqual(attempts[0]["temperatures"]["amdgpu:junction"]["max"], 97.0)
+        log = (q.dir / "queue.log").read_text()
+        self.assertIn("thermal_cooldown_end", log)
+        second = dt.datetime.fromisoformat(attempts[1]["started"])
+        self.assertGreaterEqual(second, dt.datetime(2026, 10, SAT, 10, 10))  # >= 5 min cool
+        self.assertEqual(manifest["arms"][0]["state"], "complete")
+        self.assertEqual(manifest["thermal"]["thermal_stops"], 1)
+        self.assertIn("amdgpu:edge", manifest["thermal"]["sensors_found"])
+
+    def test_short_spike_does_not_stop(self):
+        # Edge 85 °C for 10 s (< the 20 s sustain), junction under 90.
+        schedule = [(0, cool_gpu()), (60, cool_gpu(85, 88)), (70, cool_gpu())]
+        q = self.make(queue_doc([arm("a")]), self.START, thermal_reader=self.reader(schedule))
+        manifest = q.run()
+        self.assertEqual(manifest["arms"][0]["state"], "complete")
+        self.assertEqual(len(manifest["arms"][0]["attempts"]), 1)
+
+    def test_crit_proximity_stops_immediately(self):
+        schedule = [(0, cool_gpu()), (30, cool_gpu(70, 106)), (60, cool_gpu())]
+        q = self.make(queue_doc([arm("a")]), self.START, thermal_reader=self.reader(schedule))
+        manifest = q.run()
+        first = manifest["arms"][0]["attempts"][0]
+        self.assertEqual(first["status"], "incomplete_thermal")
+        self.assertIn("crit proximity", first["reason"])
+        self.assertLessEqual(
+            dt.datetime.fromisoformat(first["ended"]), dt.datetime(2026, 10, SAT, 10, 1)
+        )
+
+    def test_gpu_sensor_disappearing_is_thermal_unknown(self):
+        schedule = [(0, cool_gpu()), (30, {"nvme:Composite": {"value": 40.0, "crit": 84.85}})]
+        schedule.append((90, cool_gpu()))
+        q = self.make(queue_doc([arm("a")]), self.START, thermal_reader=self.reader(schedule))
+        manifest = q.run()
+        first = manifest["arms"][0]["attempts"][0]
+        self.assertEqual(
+            (first["status"], first["failure"]), ("incomplete_thermal", "thermal_unknown")
+        )
+
+    def test_two_thermal_stops_end_the_session(self):
+        hot = cool_gpu(90, 97)
+        # Hot during every attempt, cool between them (cooldown passes).
+        state = {"hot": True}
+
+        def read():
+            return hot if q.handle is not None and state["hot"] else cool_gpu()
+
+        q = self.make(
+            queue_doc([arm("a", max_arm_seconds=7200), arm("b")]),
+            self.START,
+            plan={"a": [{"seconds": 1200}]},
+            thermal_reader=read,
+        )
+        manifest = q.run()
+        self.assertEqual(manifest["state"], "stopped")
+        self.assertIn("2 thermal stops", manifest["stop_reason"])
+        self.assertEqual(len(manifest["arms"][0]["attempts"]), 2)
+        self.assertEqual(manifest["arms"][1]["state"], "pending")
+
+    def test_unreadable_gpu_before_launch_never_counts_as_cool(self):
+        q = self.make(queue_doc([arm("a")]), self.START, thermal_reader=lambda: {})
+        manifest = q.run()
+        self.assertEqual(self.launcher.launches, [])
+        self.assertEqual(manifest["state"], "stopped")
+        self.assertIn("did not cool down", manifest["stop_reason"])
+        self.assertIn("thermal_cooldown_cap", (q.dir / "queue.log").read_text())
+
+    def test_fan_not_manual_refuses_the_arm(self):
+        q = self.make(
+            queue_doc([arm("a"), arm("b")]),
+            self.START,
+            fan_reader=lambda: manual_fan(enable=2, pwm=56),
+        )
+        manifest = q.run()
+        self.assertEqual(self.launcher.launches, [])
+        self.assertEqual(self.launcher.checks, [])
+        reason = manifest["arms"][0]["reason"]
+        self.assertTrue(reason.startswith("fan_not_manual"), reason)
+        self.assertIn("sudo tee /sys/class/hwmon/hwmonX/pwm1_enable", reason)
+
+    def test_pwm_reverting_to_auto_mid_run_stops_with_fan_fault(self):
+        state = {"auto": False}
+
+        def fan():
+            return manual_fan(enable=2, pwm=56) if state["auto"] else manual_fan()
+
+        def flip(clock):
+            if q.handle is not None and self.launcher.launches and clock.now >= self.START + 60:
+                state["auto"] = True
+
+        doc = queue_doc([arm("a", max_arm_seconds=7200), arm("b")])
+        q = self.make(doc, self.START, plan={"a": [{"seconds": 1200}]}, fan_reader=fan)
+        self.clock.on_sleep = flip
+        manifest = q.run()
+        first = manifest["arms"][0]["attempts"][0]
+        self.assertEqual((first["status"], first["failure"]), ("incomplete_thermal", "fan_fault"))
+        self.assertIn("not manual", first["reason"])
+        ended = dt.datetime.fromisoformat(first["ended"])
+        self.assertLessEqual(ended, dt.datetime(2026, 10, SAT, 10, 1, 30))  # within ~10 s
+        self.assertEqual(manifest["state"], "stopped")
+        self.assertIn("fan fault", manifest["stop_reason"])
+        self.assertEqual(manifest["arms"][1]["state"], "pending")
+
+    def test_sampling_every_5_s_and_limits_in_the_manifest(self):
+        reads = []
+
+        def read():
+            reads.append(self.clock.now)
+            return cool_gpu()
+
+        q = self.make(
+            queue_doc([arm("a")]), self.START, thermal_reader=read, plan={"a": [{"seconds": 60}]}
+        )
+        manifest = q.run()
+        during = [t for t in reads if t > self.START]
+        gaps = {round(b - a) for a, b in zip(during, during[1:], strict=False)}
+        self.assertEqual(gaps, {5})
+        limits = manifest["thermal"]["limits"]
+        self.assertEqual(
+            (limits["junction_stop_c"], limits["edge_c"], limits["sample_seconds"]),
+            (90.0, 80.0, 5.0),
+        )
+        self.assertIn("amdgpu:fan1_rpm", manifest["arms"][0]["attempts"][0]["temperatures"])
+
+    def test_thermal_limits_in_the_queue_file(self):
+        path = self.root / "t.json"
+        path.write_text(
+            json.dumps(queue_doc([arm("a")], thermal={"edge_c": 80, "junction_stop_c": 90}))
+        )
+        q = rq.load_queue(path, REGISTRY)
+        self.assertEqual((q["thermal"]["edge_c"], q["thermal"]["junction_stop_c"]), (80, 90.0))
+        path.write_text(json.dumps(queue_doc([arm("a")], thermal={"fan": 1})))
+        with self.assertRaises(rq.QueueError):
+            rq.load_queue(path, REGISTRY)
+
+
+class CpuQueueTests(Harness):
+    """CPU-only arms (GPU cooling fault): no fan precondition, no GPU stops, still sampled."""
+
+    START = at(2026, 10, SAT, 10, 0)
+
+    def test_cpu_arm_env_identity_and_estimate(self):
+        doc = queue_doc(
+            [
+                arm(
+                    "a",
+                    model="lfm25-8b-a1b",
+                    split="dev",
+                    cases_file=str(SUBSET),
+                    device="cpu",
+                    threads=6,
+                )
+            ]
+        )
+        q = self.make(
+            doc,
+            self.START,
+            fan_reader=lambda: manual_fan(enable=2, pwm=56),
+            plan={"a": [{"seconds": 600}]},
+        )
+        spe, source = q.seconds_per_episode(q.arms[0])
+        self.assertEqual((spe, source), (360.0, "CPU default"))
+        manifest = q.run()
+        self.assertEqual(manifest["arms"][0]["state"], "complete", manifest["arms"][0])
+        _, env = self.launcher.launches[0]
+        self.assertEqual((env["DEVICE"], env["THREADS"]), ("cpu", "6"))
+        self.assertEqual(manifest["arms"][0]["device"], "cpu")
+
+    def test_hot_gpu_does_not_stop_a_cpu_arm_but_is_recorded(self):
+        hot = cool_gpu(85, 97)
+        doc = queue_doc([arm("a", device="cpu", max_arm_seconds=7200)])
+        q = self.make(doc, self.START, thermal_reader=lambda: hot, plan={"a": [{"seconds": 600}]})
+        manifest = q.run()
+        attempt = manifest["arms"][0]["attempts"][0]
+        self.assertEqual(attempt["status"], "complete")
+        self.assertEqual(attempt["temperatures"]["amdgpu:junction"]["max"], 97)
+        self.assertEqual(manifest["thermal"]["cpu_temperature"], "unavailable on this host")
+
+    def test_gpu_arm_still_refused_without_the_fan(self):
+        q = self.make(
+            queue_doc([arm("a")]), self.START, fan_reader=lambda: manual_fan(enable=2, pwm=56)
+        )
+        manifest = q.run()
+        self.assertTrue(manifest["arms"][0]["reason"].startswith("fan_not_manual"))
+
+    def test_preflight_measurement_sets_the_cpu_estimate(self):
+        doc = queue_doc([arm("a", model="lfm25-8b-a1b", device="cpu")])
+        q = self.make(doc, self.START, plan={"a": [{"kind": "harness_fail"}]})
+        q.run()  # main failed, but its preflight measured one episode
+        spe, source = q.seconds_per_episode(q.arms[0])
+        self.assertEqual((spe, source), (30.0, "measured this session"))  # preflight 30 s
+
+    def test_queue_file_device_validation(self):
+        path = self.root / "d.json"
+        path.write_text(json.dumps(queue_doc([arm("a", device="tpu")])))
+        with self.assertRaises(rq.QueueError):
+            rq.load_queue(path, REGISTRY)
+        path.write_text(json.dumps(queue_doc([arm("a", device="cpu", threads=0)])))
+        with self.assertRaises(rq.QueueError):
+            rq.load_queue(path, REGISTRY)
+
+    def test_committed_cpu_queue(self):
+        q = rq.load_queue(TOOLS / "queues" / "screen-candidates-cpu-s40.json", REGISTRY)
+        self.assertEqual(
+            [a["model"] for a in q["arms"]],
+            ["lfm25-8b-a1b", "minicpm5-2b", "lfm25-2.6b", "granite42-3b", "gemma4-e4b"],
+        )
+        self.assertEqual({a["device"] for a in q["arms"]}, {"cpu"})
+        gpu = rq.load_queue(TOOLS / "queues" / "screen-candidates-s40.json", REGISTRY)
+        ref = {a["model"]: a for a in gpu["arms"]}
+        for a in q["arms"]:
+            gpu_env = {k: v for k, v in ref[a["model"]]["env"].items()}
+            cpu_env = {
+                k: v for k, v in a["env"].items() if k not in ("REQUEST_TIMEOUT", "HEALTH_WAIT")
+            }
+            self.assertEqual(cpu_env, gpu_env)  # same C0 flags, ctx and sampling
+            self.assertEqual(a["cases_file"], ref[a["model"]]["cases_file"])
+            self.assertEqual((a["seeds"], a["split"]), (ref[a["model"]]["seeds"], "dev"))
+            self.assertEqual(a["arm"], ref[a["model"]]["arm"] + "-cpu")
+
+
 class SupervisorTests(unittest.TestCase):
     def test_heartbeat_freshness_and_pid(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1299,6 +1583,8 @@ class ProcessLauncherTests(unittest.TestCase):
                 runner=runner,
                 poll_seconds=0.05,
                 watchdog=FakeWatchdog(),
+                thermal_reader=lambda: cool_gpu(),
+                fan_reader=lambda: manual_fan(),
                 console=console.append,
                 env={"MIMIK_MODEL_ROOT": str(models), "PATH": os.environ.get("PATH", "")},
             )
@@ -1345,6 +1631,184 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(values["main_exit"], "0")
         self.assertEqual(values["failure_detail"], "server not healthy after 900s")
         self.assertEqual(values["harness_file_git_status"], "clean")
+
+
+class ConsoleMaskTests(unittest.TestCase):
+    def test_every_case_id_shape_is_masked(self):
+        """Gate review R3-6: held-out ids like h3-001 were not masked on the console."""
+        text = rq.console_safe("h3-001, h3-1001, dev-005, ho-141 and h3-s-002")
+        for raw in ("h3-001", "h3-1001", "dev-005", "ho-141", "h3-s-002"):
+            self.assertNotIn(raw, text)
+
+
+class HeldoutGateQueueTests(Harness):
+    """§11 item 8 in the queue: a held-out arm runs only the pinned case file."""
+
+    START = at(2026, 10, SAT, 10, 0)
+
+    def pinned(self, tamper=False, n=1):
+        import hashlib
+
+        dev = json.loads((TOOLS.parent / "examples/tool-loop-demo/cases-dev.json").read_text())
+        cases = [dict(c, id=f"h3-q-{k:03d}") for k, c in enumerate(dev["cases"][:n], 1)]
+        path = self.root / "frozen-cases-heldout.json"
+        path.write_text(json.dumps({"encoding": 1, "split": "heldout", "cases": cases}))
+        outcomes = {}
+        for c in cases:
+            outcomes[c["expected"]["outcome"]] = outcomes.get(c["expected"]["outcome"], 0) + 1
+        pin = {
+            "encoding": 1,
+            "split": "heldout",
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "cases": n,
+            "outcomes": outcomes,
+            "default_path": str(path),
+            "freeze_record": "docs/tool-loop-heldout-v3-freeze.md",
+            "verdict_case_sets": [
+                {
+                    "name": "full",
+                    "rule": "all",
+                    "size": n,
+                    "sha256": tl.case_set_sha256([c["id"] for c in cases]),
+                }
+            ]
+            + (
+                [
+                    {
+                        "name": "h1-prefix-100",
+                        "rule": "frozen_order_prefix",
+                        "size": 100,
+                        "sha256": tl.case_set_sha256([c["id"] for c in cases[:100]]),
+                    }
+                ]
+                if n >= 100
+                else []
+            ),
+        }
+        pin_path = self.root / "pin.json"
+        pin_path.write_text(json.dumps(pin))
+        pin["pin_sha256"] = hashlib.sha256(pin_path.read_bytes()).hexdigest()
+        if tamper:
+            path.write_text(path.read_text() + " ")
+        self.enterContext(unittest.mock.patch.object(tl, "HELDOUT_PIN", pin_path))
+        self.enterContext(unittest.mock.patch.object(tl, "HELDOUT_FROZEN_SHA256", pin["sha256"]))
+        self.enterContext(
+            unittest.mock.patch.object(tl, "HELDOUT_VERDICT_CASE_SETS", pin["verdict_case_sets"])
+        )
+        self.enterContext(unittest.mock.patch.object(tl, "HELDOUT_PIN_SHA256", pin["pin_sha256"]))
+        return path, pin, cases
+
+    def test_heldout_arm_with_a_mismatching_file_is_refused(self):
+        path, _, _ = self.pinned(tamper=True)
+        q = self.make(queue_doc([arm("h", split="heldout", heldout_cases=str(path))]), self.START)
+        manifest = q.run()
+        self.assertEqual(manifest["arms"][0]["state"], "refused")
+        self.assertIn("held-out", manifest["arms"][0]["reason"])
+        self.assertEqual(self.launcher.launches, [])
+
+    def test_heldout_arm_passes_the_file_and_expects_its_hashes(self):
+        path, pin, _ = self.pinned()
+        q = self.make(queue_doc([arm("h", split="heldout", heldout_cases=str(path))]), self.START)
+        a = q.arms[0]
+        env = q.env_for(a, self.root, rq.window_end(self.START))
+        self.assertEqual(env["HELDOUT_CASES"], str(path))
+        plan = q.plan(a, env)
+        self.assertEqual(plan["header"]["heldout_cases_sha256"], pin["sha256"])
+        self.assertEqual(plan["header"]["heldout_pin_sha256"], pin["pin_sha256"])
+        self.assertEqual(plan["jobs"], {("h3-q-001", 17)})
+
+    def test_case_ids_come_from_one_verified_read(self):
+        """Review of 0b9742d: the queue hashed, then re-read and parsed the file."""
+        path, _, cases = self.pinned()
+        pinned_bytes = path.read_bytes()
+        path.write_text(
+            json.dumps({"encoding": 1, "split": "heldout", "cases": [dict(cases[0], id="swapped")]})
+        )
+        real = Path.read_bytes
+        calls = []
+
+        def first_then_real(self_path):
+            if Path(self_path) == path:
+                calls.append(1)
+                return pinned_bytes if len(calls) == 1 else real(self_path)
+            return real(self_path)
+
+        q = self.make(queue_doc([arm("h", split="heldout", heldout_cases=str(path))]), self.START)
+        with unittest.mock.patch.object(Path, "read_bytes", first_then_real):
+            ids = q.requested_cases(q.arms[0])
+        self.assertEqual(ids, ["h3-q-001"])
+
+    def test_a_100_case_subset_arm_runs_end_to_end(self):
+        """Review of 0b9742d: held-out arms ignored cases/cases_file (the H1 prefix arm)."""
+        path, pin, cases = self.pinned(n=165)
+        frozen = [c["id"] for c in cases]
+        doc = tl.heldout_subset(frozen, 100, "heldout-100", pin, pin["sha256"])
+        subset = self.root / "heldout-100.json"
+        subset.write_text(json.dumps(doc))
+        case_set = {"name": "h1-prefix-100", "sha256": tl.case_set_sha256(frozen[:100])}
+        extra = {
+            "heldout_cases_sha256": pin["sha256"],
+            "heldout_pin_sha256": pin["pin_sha256"],
+            "heldout_case_set": case_set,
+        }
+        q = self.make(
+            queue_doc(
+                [arm("h1", split="heldout", heldout_cases=str(path), cases_file=str(subset))]
+            ),
+            self.START,
+            plan={
+                "h1": [
+                    {
+                        "seconds": 600,
+                        "header_extra": extra,
+                        "row_extra": {
+                            "heldout_cases_sha256": pin["sha256"],
+                            "heldout_pin_sha256": pin["pin_sha256"],
+                            "heldout_case_set": case_set,
+                        },
+                    }
+                ]
+            },
+        )
+        self.assertEqual(q.episodes(q.arms[0]), 100)
+        manifest = q.run()
+        self.assertEqual(manifest["arms"][0]["state"], "complete", manifest["arms"][0])
+        _, env = self.launcher.launches[0]
+        self.assertEqual(env["CASES_FILE"], str(subset))
+        self.assertEqual(env["HELDOUT_CASES"], str(path))
+
+    def test_a_subset_of_another_source_is_refused(self):
+        path, pin, cases = self.pinned(n=3)
+        doc = {
+            "split": "heldout",
+            "rule": "frozen_order_prefix",
+            "source_cases_sha256": "0" * 64,
+            "case_ids": [c["id"] for c in cases[:2]],
+        }
+        subset = self.root / "other.json"
+        subset.write_text(json.dumps(doc))
+        q = self.make(
+            queue_doc([arm("h", split="heldout", heldout_cases=str(path), cases_file=str(subset))]),
+            self.START,
+        )
+        manifest = q.run()
+        self.assertEqual(manifest["arms"][0]["state"], "refused")
+        self.assertIn("source hash", manifest["arms"][0]["reason"])
+
+    def test_an_unregistered_case_list_is_refused(self):
+        """Round 2 (Space Bunny B1): an ad-hoc id list of frozen cases is not a verdict set."""
+        path, _, cases = self.pinned(n=3)
+        chosen = ",".join(c["id"] for c in cases[:2])
+        doc = queue_doc([arm("h", split="heldout", heldout_cases=str(path), cases=chosen)])
+        manifest = self.make(doc, self.START).run()
+        self.assertEqual(manifest["arms"][0]["state"], "refused")
+        self.assertIn("registered", manifest["arms"][0]["reason"])
+
+    def test_heldout_cases_only_on_heldout_arms(self):
+        path = self.root / "q.json"
+        path.write_text(json.dumps(queue_doc([arm("d", split="dev", heldout_cases="/x.json")])))
+        with self.assertRaises(rq.QueueError):
+            rq.load_queue(path, REGISTRY)
 
 
 if __name__ == "__main__":

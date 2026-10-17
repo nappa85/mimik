@@ -280,5 +280,33 @@ class ShellExportTests(unittest.TestCase):
         self.assertIn("schema", proc.stderr)
 
 
+class CpuDeviceTests(unittest.TestCase):
+    """CPU-only mode while the GPU cooling is faulty (user decision 2026-10-16)."""
+
+    def test_cpu_server_args(self):
+        doc = mr.validate(registry())
+        args = mr.server_args(doc["models"]["lfm25-8b-a1b"], ctx=24576, device="cpu", threads=6)
+        self.assertEqual(args[args.index("--n-gpu-layers") + 1], "0")
+        self.assertEqual(args[args.index("--threads") + 1], "6")
+        gpu = mr.server_args(doc["models"]["lfm25-8b-a1b"], ctx=24576)
+        self.assertEqual(gpu[gpu.index("--n-gpu-layers") + 1], "99")
+        with self.assertRaises(mr.RegistryError):
+            mr.server_args(doc["models"]["lfm25-8b-a1b"], ctx=24576, device="tpu")
+        with self.assertRaises(mr.RegistryError):
+            mr.server_args(doc["models"]["lfm25-8b-a1b"], ctx=24576, device="cpu", threads=0)
+
+    def test_cpu_shell_exports_timeouts(self):
+        doc = mr.validate(registry())
+        out = mr.shell_exports(doc, "lfm25-8b-a1b", ctx=24576, device="cpu", threads=4)
+        self.assertIn("reg_device=cpu", out)
+        self.assertIn(f"reg_request_timeout={mr.CPU_REQUEST_TIMEOUT}", out)
+        self.assertEqual(mr.CPU_REQUEST_TIMEOUT, 900)
+        self.assertIn("--n-gpu-layers 0", out)
+        self.assertIn("--threads 4", out)
+        self.assertEqual(mr.CPU_SECONDS_PER_EPISODE, 360)
+        gpu = mr.shell_exports(doc, "lfm25-8b-a1b", ctx=24576)
+        self.assertIn("reg_device=gpu", gpu)
+
+
 if __name__ == "__main__":
     unittest.main()

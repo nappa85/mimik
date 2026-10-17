@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "name": "screen-candidates-cpu-s40",
+  "description": "CPU-only copy of screen-candidates-s40 while the GPU cooling is faulty (user decision 2026-10-16: no GPU inference until it is re-pasted). Same 40-case dev screen, seed 17 and C0 settings; device cpu (no /dev/dri in the server container, -ngl 0, 6 threads), request timeout 900 s, health wait 1800 s. The 8B dense models are left out (too slow on CPU). Exploratory: never a verdict arm, never comparable to GPU ledgers (device is in the identity).",
+  "defaults": {
+    "split": "dev",
+    "seeds": "17",
+    "arm": "S40-c0-cpu",
+    "device": "cpu",
+    "threads": 6,
+    "cases_file": "tools/case-subsets/dev-screen-40.json",
+    "env": {
+      "CTX": 24576,
+      "MAX_TURNS": 8,
+      "MAX_TOKENS": 4096,
+      "THINKING": "off",
+      "TEMPERATURE": "0.1",
+      "TOP_P": "0.95",
+      "NUDGE": 1,
+      "TURNS_REMAINING": 0,
+      "SEARCH_NOTES": 0,
+      "SANITIZE_ECHO": 1,
+      "PENDING_CURRENT": 1,
+      "UNTRUSTED": 0,
+      "REQUEST_TIMEOUT": 900,
+      "HEALTH_WAIT": 1800
+    }
+  },
+  "preflight_case": "dev-001",
+  "quiet": true,
+  "max_consecutive_failures": 2,
+  "disk_checks": [
+    {"path": "/var/lib/docker", "min_free_gb": 10},
+    {"path": "/media/data", "min_free_gb": 10}
+  ],
+  "arms": [
+    {"id": "s40-cpu-lfm25-8b-a1b", "model": "lfm25-8b-a1b"},
+    {"id": "s40-cpu-minicpm5-2b", "model": "minicpm5-2b"},
+    {"id": "s40-cpu-lfm25-2.6b", "model": "lfm25-2.6b"},
+    {"id": "s40-cpu-granite42-3b", "model": "granite42-3b"},
+    {"id": "s40-cpu-gemma4-e4b", "model": "gemma4-e4b"}
+  ]
+}

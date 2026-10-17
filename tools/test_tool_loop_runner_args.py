@@ -334,5 +334,21 @@ class SubsetIdentityTests(unittest.TestCase):
             self.assertIn("case_subset", str(raised.exception))
 
 
+class DeviceIdentityTests(RunnerCliMixin, Base):
+    def test_device_in_header_and_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, rows, _, _ = self.run_split(tmp, "--cases", "spend-focus", "--device", "cpu")
+            self.assertEqual(rows[0]["device"], "cpu")
+            _, rows, _, _ = self.run_split(tmp, "--cases", "spend-focus")
+            self.assertEqual(rows[0]["device"], "gpu")
+        self.assertIn("device", tl.GROUP_IDENTITY)
+        with tempfile.TemporaryDirectory() as tmp:
+            a = write_ledger(tmp, "a.jsonl", device="gpu")
+            b = write_ledger(tmp, "b.jsonl", device="cpu", episodes=[episode_row("c1", seed=29)])
+            with self.assertRaises(SystemExit) as raised:
+                tl.load_ledgers([a, b])
+            self.assertIn("device", str(raised.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

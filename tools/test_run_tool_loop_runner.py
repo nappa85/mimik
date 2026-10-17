@@ -11,6 +11,7 @@ case statement) and the review regressions against 7bb41d6.
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -33,6 +34,7 @@ COPIED = (
     "toolloop_ops.py",
     "tool_loop_benchmark.py",
     "run_watchdog.py",
+    "heldout-v3-pin.json",
 )
 SUBSET = TOOLS / "case-subsets" / "dev-screen-40.json"
 OWNED = "mimik-toolloop-v3-"
@@ -129,8 +131,8 @@ if args[0] == "run":
             continue
         if a.startswith("/formula/"):
             a = env["MIMIK_FORMULA_EVAL"]
-        for dst in ("/tools", "/pack", "/out"):
-            if a == dst or a.startswith(dst + "/"):
+        for dst in ("/tools", "/pack", "/out", "/heldout/cases-heldout.json"):
+            if dst in mounts and (a == dst or a.startswith(dst + "/")):
                 a = mounts[dst] + a[len(dst):]
         mapped.append(a)
     with open(log / "harness-calls.jsonl", "a") as h:
@@ -141,7 +143,8 @@ if args[0] == "run":
         save()
         print("beef")
         sys.exit(0)
-    proc = subprocess.run([sys.executable] + mapped[1:] + ["--dry-run"], capture_output=True, text=True)
+    extra = ["--dry-run"] + (["--allow-heldout-gold-replay"] if "heldout" in mapped else [])
+    proc = subprocess.run([sys.executable] + mapped[1:] + extra, capture_output=True, text=True)
     oom = bool(env.get("FAKE_MAIN_OOM")) and phase == "main"
     state["c"][name] = {"status": "exited", "rc": 137 if oom else proc.returncode, "oom": oom,
                         "out": proc.stdout, "err": proc.stderr, "label": "v3", "run": labels["mimik.toolloop.run"]}
@@ -281,6 +284,23 @@ class RunnerTests(unittest.TestCase):
         self.real, self.sha = real, hashlib.sha256(b"fake gguf").hexdigest()
         self.formula_sha = hashlib.sha256(Path(FORMULA).read_bytes()).hexdigest()
         self.clock = self.tmp / "clock"
+        # A fake hwmon tree: GPU cool, fan manual at 255 (the runner's fan precondition).
+        self.dri = self.tmp / "dri"  # stand-ins for /dev/dri/renderD128 and card0
+        self.dri.mkdir()
+        for node in ("renderD128", "card0"):
+            (self.dri / node).write_text("")
+        self.hwmon = self.tmp / "hwmon"
+        chip = self.hwmon / "hwmon3"
+        chip.mkdir(parents=True)
+        for name, value in (
+            ("name", "amdgpu"),
+            ("temp1_input", "44000"),
+            ("temp1_label", "edge"),
+            ("pwm1_enable", "1"),
+            ("pwm1", "255"),
+            ("fan1_input", "3200"),
+        ):
+            (chip / name).write_text(value + "\n")
 
     def runner_env(self, **env):
         return self._env(env)
@@ -310,6 +330,9 @@ class RunnerTests(unittest.TestCase):
             "MODEL_SHA256": self.sha,
             "SCHEDULE_OVERRIDE": "user-approved",
             "RUNNER_POLL_SECONDS": "0",
+            "MIMIK_TEST_MODE": "1",
+            "MIMIK_TEST_HWMON": str(self.hwmon),
+            "MIMIK_TEST_DRI": str(self.dri),
             "OUT_DIR": str(self.tmp / f"out-{len(list(self.tmp.iterdir()))}"),
         }
         base.update({k: v for k, v in env.items() if v is not None})
@@ -359,6 +382,160 @@ class RunnerTests(unittest.TestCase):
         owned = [n for n, c in state["c"].items() if n.startswith(OWNED) and c.get("label") == "v3"]
         self.assertEqual(owned, [])
         self.assertEqual({n: v for n, v in state["n"].items() if v.get("label") == "v3"}, {})
+
+    def synthetic_heldout(self, tamper=False):
+        """A synthetic held-out file (one demo dev case under a new id) and a matching pin in
+        the copied repo; never the real frozen file (§11 item 8)."""
+        dev = json.loads((DEMO / "cases-dev.json").read_text())["cases"][0]
+        case = dict(dev, id="h3-test-001")
+        path = self.tmp / "frozen" / "cases-heldout.json"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps({"encoding": 1, "split": "heldout", "cases": [case]}))
+        pin = {
+            "encoding": 1,
+            "split": "heldout",
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "cases": 1,
+            "outcomes": {case["expected"]["outcome"]: 1},
+            "default_path": str(path),
+            "freeze_record": "docs/tool-loop-heldout-v3-freeze.md",
+            "verdict_case_sets": [
+                {
+                    "name": "full",
+                    "rule": "all",
+                    "size": 1,
+                    "sha256": hashlib.sha256(json.dumps(["h3-test-001"]).encode()).hexdigest(),
+                }
+            ],
+        }
+        (self.repo / "tools" / "heldout-v3-pin.json").write_text(json.dumps(pin))
+        # Test-only: move the code anchor in the copied repo (production cannot: review of
+        # 0b9742d removed every override).
+        harness = self.repo / "tools" / "tool_loop_benchmark.py"
+        text = harness.read_text()
+        anchor = 'HELDOUT_FROZEN_SHA256 = "6f11af05f27347ea31a50996b0e6b6eea4ccbfa3254a085cd7699d4d8ec68974"'
+        self.assertIn(anchor, text)
+        text = text.replace(anchor, f'HELDOUT_FROZEN_SHA256 = "{pin["sha256"]}"')
+        pin_sha = hashlib.sha256(
+            (self.repo / "tools" / "heldout-v3-pin.json").read_bytes()
+        ).hexdigest()
+        text = re.sub(
+            r'HELDOUT_PIN_SHA256 = "[0-9a-f]{64}"', f'HELDOUT_PIN_SHA256 = "{pin_sha}"', text
+        )
+        text = re.sub(
+            r"HELDOUT_VERDICT_CASE_SETS = \[.*\]  # noqa: E501",
+            "HELDOUT_VERDICT_CASE_SETS = "
+            + json.dumps(pin["verdict_case_sets"])
+            + "  # noqa: E501",
+            text,
+        )
+        harness.write_text(text)
+        git = [
+            "git",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "-C",
+            str(self.repo),
+        ]
+        subprocess.run(git + ["commit", "-qam", "pin"], check=True)
+        if tamper:
+            path.write_text(path.read_text() + " ")
+        return path, pin
+
+    def test_heldout_runs_only_the_pinned_file_mounted_read_only(self):
+        """§11 item 8: before, the held-out split ran the pack's own file with no hash gate."""
+        path, pin = self.synthetic_heldout()
+        proc, out = self.run_runner(
+            "qwen35-9b", "heldout", SEEDS="17", BUDGET_SECONDS="0", HELDOUT_CASES=str(path)
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr + (out / "main.stderr").read_text())
+        calls = [json.loads(x) for x in (self.log / "harness-calls.jsonl").read_text().splitlines()]
+        main = calls[-1]
+        self.assertEqual(main[main.index("--heldout-cases") + 1], "/heldout/cases-heldout.json")
+        header = self.ledger(out)[0]
+        self.assertEqual(header["heldout_cases_sha256"], pin["sha256"])
+        docker = (self.log / "calls.jsonl").read_text()
+        self.assertIn(f"src={path},dst=/heldout/cases-heldout.json,readonly", docker)
+        self.assertIn(f"heldout_cases_sha256={pin['sha256']}", (out / "provenance.txt").read_text())
+
+    def test_heldout_hash_mismatch_or_missing_file_is_refused(self):
+        path, _ = self.synthetic_heldout(tamper=True)
+        proc, out = self.run_runner("qwen35-9b", "heldout", SEEDS="17", HELDOUT_CASES=str(path))
+        self.assertEqual(proc.returncode, 5)
+        self.assertIn("failure=heldout_hash", (out / "provenance.txt").read_text())
+        proc, out = self.run_runner(
+            "qwen35-9b", "heldout", SEEDS="17", HELDOUT_CASES=str(self.tmp / "absent.json")
+        )
+        self.assertEqual(proc.returncode, 5)
+        self.assertIn("failure=heldout_missing", (out / "provenance.txt").read_text())
+        self.assertFalse((self.log / "server.json").exists())
+
+    def test_heldout_path_with_a_newline_is_refused(self):
+        """Review of 0b9742d (provenance injection): no tab or newline in HELDOUT_CASES."""
+        path, _ = self.synthetic_heldout()
+        link = self.tmp / "frozen" / "a\ncheck_only=1"
+        link.symlink_to(path)
+        proc, out = self.run_runner("qwen35-9b", "heldout", SEEDS="17", HELDOUT_CASES=str(link))
+        self.assertEqual(proc.returncode, 2)
+        self.assertNotIn("check_only", rq.parse_provenance(out / "provenance.txt"))
+
+    def test_heldout_progress_is_forced_quiet(self):
+        """Round 2 (Sonnet M1): QUIET=0 printed per-case outcomes for held-out runs."""
+        path, _ = self.synthetic_heldout()
+        proc, out = self.run_runner(
+            "qwen35-9b", "heldout", SEEDS="17", QUIET="0", HELDOUT_CASES=str(path)
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        main = [json.loads(x) for x in (self.log / "harness-calls.jsonl").read_text().splitlines()][
+            -1
+        ]
+        self.assertIn("--quiet-progress", main)
+        self.assertIn("quiet_forced=heldout", (out / "provenance.txt").read_text())
+
+    def test_heldout_path_with_a_space_is_refused_and_injects_nothing(self):
+        """Round 2 (Sol 3): a space-delimited `failure=window` in the path became a field."""
+        path, _ = self.synthetic_heldout()
+        spaced = self.tmp / "frozen failure=window"
+        spaced.write_bytes(path.read_bytes())
+        proc, out = self.run_runner("qwen35-9b", "heldout", SEEDS="17", HELDOUT_CASES=str(spaced))
+        self.assertEqual(proc.returncode, 2)
+        prov = rq.parse_provenance(out / "provenance.txt")
+        self.assertEqual(prov.get("failure"), "config")
+
+    def test_failure_details_never_add_provenance_lines(self):
+        """Space Bunny B4: an unvalidated value in a failure message could add a line."""
+        proc, out = self.run_runner(
+            "qwen35-9b", "dev", CASES_FILE=str(self.tmp / "x\nfailure=heldout_hash")
+        )
+        self.assertEqual(proc.returncode, 2)
+        prov = rq.parse_provenance(out / "provenance.txt")
+        self.assertEqual(prov.get("failure"), "config")
+        lines = (out / "provenance.txt").read_text().splitlines()
+        self.assertFalse(any(line.startswith("failure=heldout_hash") for line in lines))
+
+    def test_an_edited_pin_json_alone_is_refused(self):
+        """Review of 0b9742d: the pin JSON must equal the harness's code anchor."""
+        path, pin = self.synthetic_heldout()
+        harness = self.repo / "tools" / "tool_loop_benchmark.py"
+        text = harness.read_text()
+        moved = 'HELDOUT_FROZEN_SHA256 = "' + "1" * 64 + '"'
+        harness.write_text(text.replace(f'HELDOUT_FROZEN_SHA256 = "{pin["sha256"]}"', moved))
+        proc, out = self.run_runner("qwen35-9b", "heldout", SEEDS="17", HELDOUT_CASES=str(path))
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("code anchor", (out / "provenance.txt").read_text())
+
+    def test_optional_arrays_expand_safely_under_set_u(self):
+        """Review of 0b9742d (Sonnet F6): empty arrays under set -u fail on bash < 4.4."""
+        text = (TOOLS / "run_tool_loop_benchmark.sh").read_text()
+        names = ("heldout_mount", "heldout_args", "cutoff_args", "gpu_devices", "reg_server_args")
+        names += ("quiet", "phase_deadline", "case_args", "arm_args")
+        for name in names:
+            uses = [line for line in text.splitlines() if f"{name}[@]" in line]
+            self.assertTrue(uses)
+            for line in uses:
+                self.assertIn(f"${{{name}[@]+", line, line)
 
     def test_pass_through_reaches_server_and_header(self):
         proc, out = self.run_runner(
@@ -783,6 +960,62 @@ class RunnerTests(unittest.TestCase):
         proc, _ = self.run_runner("qwen3-4b-2507", "smoke", "17", CHECK_ONLY="1")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertFalse(any(c[0] in ("stop", "pause") for c in self.calls()))
+
+    # ---- thermal guard
+    def test_temperatures_before_and_peak_in_provenance(self):
+        proc, out = self.run_runner("qwen3-4b-2507", "smoke", "17")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        prov = self.prov(out)
+        self.assertEqual(prov["temp_amdgpu_edge_before"], "44.0")
+        self.assertEqual(prov["temp_amdgpu_edge_peak"], "44.0")
+
+    def test_fan_not_manual_refuses_before_the_server_load(self):
+        for key, value in (("pwm1_enable", "2"), ("pwm1", "200")):
+            with self.subTest(key=key):
+                (self.hwmon / "hwmon3" / "pwm1_enable").write_text("1\n")
+                (self.hwmon / "hwmon3" / "pwm1").write_text("255\n")
+                (self.hwmon / "hwmon3" / key).write_text(value + "\n")
+                proc, out = self.run_runner("qwen3-4b-2507", "smoke", "17")
+                self.assertEqual(proc.returncode, 14, proc.stderr)
+                text = (out / "provenance.txt").read_text()
+                self.assertIn("failure=fan_not_manual", text)
+                self.assertIn("sudo tee", text)
+                self.assertFalse((self.log / "server.json").exists())
+
+    # ---- CPU-only mode (GPU cooling fault, 2026-10-16)
+    def test_cpu_arm_has_no_gpu_devices_and_ngl_0(self):
+        (self.hwmon / "hwmon3" / "pwm1_enable").write_text("2\n")  # auto fan: irrelevant on CPU
+        proc, out = self.run_runner("qwen3-4b-2507", "smoke", "17", DEVICE="cpu", THREADS="6")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        server = self.server()
+        self.assertNotIn("--device", server["opts"])
+        self.assertNotIn("--group-add", server["opts"])
+        args = server["args"]
+        self.assertEqual(args[args.index("--n-gpu-layers") + 1], "0")
+        self.assertEqual(args[args.index("--threads") + 1], "6")
+        prov = self.prov(out)
+        self.assertEqual(prov["device"], "cpu")
+        self.assertEqual(prov["cpu_temperature"], "unavailable")
+        self.assertIn("temp_amdgpu_edge_before", prov)
+        self.assertNotIn("fan_pwm1_enable", prov)  # the fan precondition is skipped
+        header = self.ledger(out)[0]
+        self.assertEqual(header["device"], "cpu")
+        calls = [json.loads(x) for x in (self.log / "harness-calls.jsonl").read_text().splitlines()]
+        self.assertEqual(calls[-1][calls[-1].index("--request-timeout") + 1], "900")
+
+    def test_gpu_arm_still_needs_the_fan_and_gpu_devices(self):
+        proc, _ = self.run_runner("qwen3-4b-2507", "smoke", "17")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("--device", self.server()["opts"])
+        (self.hwmon / "hwmon3" / "pwm1_enable").write_text("2\n")
+        proc, _ = self.run_runner("qwen3-4b-2507", "smoke", "17", DEVICE="gpu")
+        self.assertEqual(proc.returncode, 14, proc.stderr)
+
+    def test_bad_device_or_threads_refused(self):
+        for env in ({"DEVICE": "tpu"}, {"DEVICE": "cpu", "THREADS": "0"}):
+            with self.subTest(env=env):
+                proc, _ = self.run_runner("qwen3-4b-2507", "smoke", "17", **env)
+                self.assertEqual(proc.returncode, 2, proc.stderr)
 
     def test_shellcheck_clean_if_available(self):
         if not shutil.which("shellcheck"):

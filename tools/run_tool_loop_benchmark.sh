@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Canonical live runner for tools/tool_loop_benchmark.py (harness v3). Prototype tier.
 # Models come from the registry tools/models.json (tools/model_registry.py): a new model is a
-# registry entry, never a change here. The held-out split is an empty placeholder until the
-# blind writer delivers it; the harness refuses to run it.
+# registry entry, never a change here. The held-out split runs only the frozen blind case file
+# (plan §11 item 8): HELDOUT_CASES (default: the pin's frozen path) must hash to the pin in
+# tools/heldout-v3-pin.json, which must equal the harness's code anchor; the file is mounted
+# read-only and the harness verifies it again from one read before parsing.
 #
 # Usage: tools/run_tool_loop_benchmark.sh <model-key> <split> [seeds] [ctx]
 #   model-key: a key of tools/models.json (python3 tools/model_registry.py list)
@@ -16,12 +18,16 @@
 #   NUDGE (1) TURNS_REMAINING (0) SEARCH_NOTES (0) SANITIZE_ECHO (1) PENDING_CURRENT (1)
 #   UNTRUSTED (0)   harness flags H1, H2a, H2b, H3, H5, H6 as 0|1
 #   CASES           comma-separated case ids;  CASES_FILE  hashed subset (tools/case-subsets/)
+#   HELDOUT_CASES   held-out split only: the frozen case file (default: the pin's path)
 #   QUIET=1         harness --quiet-progress (no per-case outcome on stderr; plan §11 item 3)
 #   PREFLIGHT_CASE  dev case id: 1-case, seed-17 dev run on the same server before the arm
 #   BUDGET_SECONDS  harness run budget (default: seconds left before the cutoff - 900)
 #   WINDOW_END      absolute cutoff (epoch s; the queue passes the window end)
 #   QUEUE_PID       the queue's pid: the runner stops if that process is gone
 #   N_CPU_MOE       llama.cpp --n-cpu-moe (required where the registry says so)
+#   DEVICE          gpu (default) | cpu: no /dev/dri in the server container, -ngl 0, request
+#                   timeout >= 900 s, health wait >= 1800 s, no fan precondition
+#   THREADS         llama.cpp --threads (default: registry; 6 for cpu)
 #   MIMIK_MODEL_ROOT  model root (default: registry model_root)
 #   MODEL_PATH / MODEL_SHA256      override the model file and its expected sha256
 #   HASH_CACHE      file of model hashes verified this session (the queue sets it)
@@ -48,8 +54,8 @@
 # failure=<class> on any runner failure (tools/run_queue.py reads it).
 # Exit codes: 2 usage/config, 3 CLI hash, 4 server start/health/VRAM, 5 model file/hash,
 # 6 preflight, 9 another run active, 10 schedule window, 11 cleanup unresolved, 12 docker
-# failure, 13 queue gone, 130/143 signal; otherwise the harness exit code (3 formula
-# infrastructure fault, 4 fail-fast abort).
+# failure, 13 queue gone, 14 GPU fan not manual, 130/143 signal; otherwise the harness exit
+# code (3 formula infrastructure fault, 4 fail-fast abort).
 set -euo pipefail
 export TZ=:/etc/localtime
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -98,6 +104,7 @@ ours() {  # ours <name>: the container exists and carries this run's label
   [ "$(dk inspect -f '{{index .Config.Labels "mimik.toolloop.run"}}' "$1" 2>/dev/null)" = "$RUN_ID" ]
 }
 check_registry=${CHECK_REGISTRY:-$MAIN/target/tool-loop-check-containers.txt}
+mkdir -p "$(dirname "$check_registry")"
 owned_names() {  # owned containers: label AND name prefix; fails if docker cannot list
   local names
   names=$(dk ps -a --filter "label=$LABEL" --format '{{.Names}}') || return 1
@@ -120,6 +127,15 @@ ctx_arg=${4:-${CTX:-}}
 reg_cmd=(python3 "$ROOT/tools/model_registry.py" shell "$key")
 [ -z "$ctx_arg" ] || reg_cmd+=(--ctx "$ctx_arg")
 [ -z "${N_CPU_MOE:-}" ] || reg_cmd+=(--n-cpu-moe "$N_CPU_MOE")
+# DEVICE=cpu (GPU cooling fault, 2026-10-16): no /dev/dri in the server container, -ngl 0.
+device=${DEVICE:-gpu}
+case $device in gpu|cpu) ;; *) die 2 "DEVICE must be gpu or cpu" ;; esac
+reg_cmd+=(--device "$device")
+if [ -n "${THREADS:-}" ]; then
+  { is_uint "$THREADS" && [ "$THREADS" -ge 1 ] && [ "$THREADS" -le 64 ]; } \
+    || die 2 "THREADS must be 1..64"
+  reg_cmd+=(--threads "$THREADS")
+fi
 # Declared here so the names are visible; the registry tool assigns them.
 reg_label=''
 reg_path=''
@@ -135,6 +151,7 @@ reg_request_timeout=''
 reg_thinking=''
 reg_tools=''
 reg_vram_budget=''
+reg_device=''
 reg_server_config=''
 reg_server_args=()
 reg=$("${reg_cmd[@]}") || exit 2
@@ -152,6 +169,7 @@ for v in request_timeout temperature top_p; do
   [[ ${!v} =~ ^[0-9]+([.][0-9]+)?$ ]] || die 2 "$v must be a non-negative number"
 done
 case $thinking in off|on|default) ;; *) die 2 "THINKING must be off, on or default" ;; esac
+case ${QUIET:-0} in 0|1) ;; *) die 2 "QUIET must be 0 or 1" ;; esac  # never echoed raw (round 3)
 flags=()
 for spec in NUDGE:nudge:1 TURNS_REMAINING:turns-remaining:0 SEARCH_NOTES:search-notes:0 \
   SANITIZE_ECHO:sanitize-echo:1 PENDING_CURRENT:pending-current:1 UNTRUSTED:untrusted-marking:0; do
@@ -176,16 +194,18 @@ pack=$ROOT/examples/tool-loop-demo
 out=${OUT_DIR:-$RUN_BASE/$key/$split-$(date +%Y%m%dT%H%M%S)}
 mkdir -p "$out"
 prov=$out/provenance.txt
-fail() {  # fail <exit> <class> <message>
-  echo "$3" >&2
-  { echo "failure=$2"; echo "failure_detail=$3"; } >> "$prov"
+fail() {  # fail <exit> <class> <message>: the message never adds a provenance line
+  local detail=${3//[$'\t\r\n']/ }
+  echo "$detail" >&2
+  printf 'failure=%s\nfailure_detail=%s\n' "$2" "$detail" >> "$prov"
   exit "$1"
 }
 {
   echo "date_start=$(date -Is)"
   echo "runner=tools/run_tool_loop_benchmark.sh harness=v3 key=$key split=$split arm=${ARM:-}"
   echo "window_end=${WINDOW_END:-} queue_pid=${QUEUE_PID:-} vram_budget_bytes=$reg_vram_budget"
-  echo "run_id=$RUN_ID docker_context=$docker_context"
+  echo "run_id=$RUN_ID docker_context=$docker_context device=$reg_device"
+  echo "cpu_temperature=unavailable (no CPU sensor on this host: no k10temp in /sys/class/hwmon)"
 } > "$prov"
 cases_file_sha=
 if [ -n "${CASES_FILE:-}" ]; then
@@ -223,6 +243,7 @@ cleanup() {
     if ours "$SRV"; then dk stop -t 10 "$SRV" >/dev/null 2>&1 || true; fi
     echo "server_oom_killed=$(dk inspect -f '{{.State.OOMKilled}}' "$SRV" 2>/dev/null || echo unknown)" >> "$prov"
     timeout --foreground -k 10 120 docker logs "$SRV" > "$out/server.log" 2>&1 || true
+    temps --print-peaks >> "$prov"
   fi
   if listing=$(owned_names); then
     for name in $listing; do dk rm -f "$name" >/dev/null 2>&1 || true; done
@@ -259,7 +280,7 @@ gate_now='' gate_left='' gate_cutoff=''
 window() {  # window <margin>: sets gate_*; returns 1 if the window is closed within margin
   local line cutoff_args=()
   [ -z "${WINDOW_END:-}" ] || cutoff_args=(--cutoff "$WINDOW_END")
-  line=$(python3 "$ROOT/tools/run_queue.py" window-check --margin "$1" "${cutoff_args[@]}") \
+  line=$(python3 "$ROOT/tools/run_queue.py" window-check --margin "$1" ${cutoff_args[@]+"${cutoff_args[@]}"}) \
     || { gate_line=$line; return 1; }
   gate_line=$line
   gate_now=$(sed -n 's/.* now=\([0-9]*\).*/\1/p' <<< "$line")
@@ -330,6 +351,31 @@ cli_line=$(check_run 120 --mount type=volume,src=mimik-formula-target,dst=/formu
 actual_cli_sha=${cli_line%% *}
 if [ "$actual_cli_sha" != "$CLI_SHA" ]; then
   fail 3 cli_hash "formula_eval sha256 $actual_cli_sha != pinned $CLI_SHA"
+fi
+# ---- held-out hash gate (plan §11 item 8): only the pinned case file, mounted read-only
+heldout_mount=() heldout_args=()
+if [ "$hsplit" = heldout ]; then
+  # The pin is loaded through the harness's own loader, so the code anchor
+  # (HELDOUT_FROZEN_SHA256) is checked here too; one value per call keeps paths space-safe.
+  pin_value() {
+    PYTHONDONTWRITEBYTECODE=1 python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import tool_loop_benchmark as tl; print(tl.load_heldout_pin(tl.HELDOUT_PIN)[sys.argv[2]])' "$ROOT/tools" "$1"
+  }
+  heldout_pin_sha=$(pin_value sha256) || fail 2 config "held-out pin unreadable or not the code anchor"
+  heldout_pin_file_sha=$(pin_value pin_sha256) || fail 2 config "held-out pin unreadable"
+  heldout_default=$(pin_value default_path) || fail 2 config "held-out pin unreadable"
+  heldout=${HELDOUT_CASES:-$heldout_default}
+  # No whitespace at all: provenance is space-delimited key=value (round 2, Sol 3).
+  case $heldout in *[[:space:]]*) fail 2 config "HELDOUT_CASES contains whitespace" ;; esac
+  heldout_real=$(realpath -e -- "$heldout" 2>/dev/null) || fail 5 heldout_missing "held-out case file not found"
+  case $heldout_real in *[[:space:]]*) fail 2 config "the held-out path contains whitespace" ;; esac
+  [ -f "$heldout_real" ] || fail 5 heldout_missing "held-out case file is not a regular file"
+  heldout_line=$(check_run 120 --mount type=bind,src="$heldout_real",dst=/heldout/cases-heldout.json,readonly \
+    "$CHECK_IMAGE" sha256sum /heldout/cases-heldout.json)
+  [ "${heldout_line%% *}" = "$heldout_pin_sha" ] || fail 5 heldout_hash "held-out case file sha256 differs from the pin"
+  printf 'heldout_cases_sha256=%s heldout_pin_sha256=%s heldout_cases=%s\n' \
+    "${heldout_line%% *}" "$heldout_pin_file_sha" "$heldout_real" >> "$prov"
+  heldout_mount=(--mount "type=bind,src=$heldout_real,dst=/heldout/cases-heldout.json,readonly")
+  heldout_args=(--heldout-cases /heldout/cases-heldout.json)
 fi
 IFS=' ' read -r st_size st_mtime st_inode st_dev <<< "$(stat -c '%s %.9Y %i %d' "$model_real")"
 hash_source=hashed actual_model_sha=''
@@ -402,6 +448,31 @@ fi
 # ---- server
 gate server
 echo "vram_used_before=$(vram) swap_used_mib_before=$(swap_used)" >> "$prov"
+temps() {  # temperatures from /sys/class/hwmon by sensor name; the peak file keeps maxima
+  timeout --foreground -k 5 30 python3 "$ROOT/tools/toolloop_ops.py" temps \
+    --peak-file "$out/temps-peak.json" "$@" 2>/dev/null || echo "temp_sensors=unreadable"
+}
+temps --prefix before >> "$prov"
+# The GPU fan must be manual at >= 230 (auto held ~22 % PWM while the junction reached SW CTF
+# on 2026-10-16); the manual setting resets on reboot.
+gpu_devices=()
+if [ "$reg_device" = gpu ]; then
+  if ! fan_line=$(timeout --foreground -k 5 30 python3 "$ROOT/tools/toolloop_ops.py" fancheck \
+    2> "$out/fancheck.err"); then
+    fail 14 fan_not_manual "$(tr '\n' ' ' < "$out/fancheck.err")"
+  fi
+  echo "$fan_line" >> "$prov"
+  dri=/dev/dri  # the test tree replaces it only in test mode
+  if [ "${MIMIK_TEST_MODE:-}" = 1 ] && [ -n "${MIMIK_TEST_DRI:-}" ]; then dri=$MIMIK_TEST_DRI; fi
+  if ! render_gid=$(stat -c %g "$dri/renderD128" 2>/dev/null) \
+    || ! card_gid=$(stat -c %g "$dri/card0" 2>/dev/null); then
+    fail 12 infra_docker "GPU device nodes $dri/renderD128 or $dri/card0 missing"
+  fi
+  gpu_devices=(--device "$dri/renderD128" --device "$dri/card0"
+    --group-add "$render_gid" --group-add "$card_gid")
+else
+  echo "fan_precondition=skipped (device cpu: no GPU device in the container)" >> "$prov"
+fi
 if net_state=$(dk network inspect -f '{{.Internal}} {{index .Labels "mimik.toolloop"}}' "$NET" 2>/dev/null); then
   [ "$net_state" = "true v3" ] || fail 12 infra_docker "network $NET exists and is not internal and owned ($net_state)"
 else
@@ -412,10 +483,9 @@ t0=$(date +%s)
 dk run -d --init --pull never --name "$SRV" "${LABELS[@]}" --network "$NET" --network-alias server \
   --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
   --memory "$srv_memory" --memory-swap "$srv_memory" --cpus 6 --pids-limit 512 \
-  --device /dev/dri/renderD128 --device /dev/dri/card0 \
-  --group-add "$(stat -c %g /dev/dri/renderD128)" --group-add "$(stat -c %g /dev/dri/card0)" \
+  ${gpu_devices[@]+"${gpu_devices[@]}"} \
   --mount type=bind,src="$model_real",dst=/models/model.gguf,readonly \
-  "$reg_image" "${reg_server_args[@]}" >/dev/null || fail 4 server_start "server container did not start"
+  "$reg_image" ${reg_server_args[@]+"${reg_server_args[@]}"} >/dev/null || fail 4 server_start "server container did not start"
 server_failed() {  # server_failed <class> <message>: a VRAM allocation failure is infra_vram
   if timeout --foreground -k 10 60 docker logs "$SRV" 2>&1 | grep -Eqi "$VRAM_PATTERN"; then
     fail 4 infra_vram "$2 (VRAM allocation failure in the server log)"
@@ -428,6 +498,7 @@ while [ $(( $(date +%s) - t0 )) -lt "$health_wait" ]; do
   state=$(dk inspect -f '{{.State.Running}}' "$SRV" 2>/dev/null || echo gone)
   [ "$state" = true ] || server_failed server_start "server exited during load"
   still_allowed "server load"
+  temps >/dev/null
   sleep 2
 done
 [ $healthy = 1 ] || server_failed server_health "server not healthy after ${health_wait}s"
@@ -437,11 +508,15 @@ timeout --foreground -k 5 30 docker exec "$SRV" curl -sf http://127.0.0.1:8080/p
 # ---- harness (detached; polled for the window edge and the queue)
 quiet=()
 [ "${QUIET:-0}" = 1 ] && quiet=(--quiet-progress)
+if [ "$hsplit" = heldout ]; then  # held-out progress is never per case (round 2, Sonnet M1)
+  [ "${QUIET:-1}" = 1 ] || echo "quiet_forced=heldout (QUIET=0 ignored)" >> "$prov"
+  quiet=(--quiet-progress)
+fi
 common=(python3 /tools/tool_loop_benchmark.py --pack /pack --endpoint http://server:8080
   --model-label "$reg_label" --temperature "$temperature" --top-p "$top_p"
   --max-tokens "$max_tokens" --max-turns "$max_turns" --thinking "$thinking"
-  --thinking-capability "$reg_thinking" --cache-prompt --tool-choice auto
-  --request-timeout "$request_timeout" --ctx "$ctx" "${flags[@]}" "${quiet[@]}"
+  --thinking-capability "$reg_thinking" --cache-prompt --tool-choice auto --device "$reg_device"
+  --request-timeout "$request_timeout" --ctx "$ctx" "${flags[@]}" ${quiet[@]+"${quiet[@]}"}
   --server-config "$reg_server_config"
   --formula-cli "/formula/$CLI_IN_VOLUME" --model-sha256 "$actual_model_sha"
   --provenance "git_head=$git_head" --provenance "git_dirty_paths=$git_dirty"
@@ -469,7 +544,7 @@ run_harness() {  # run_harness <phase> <args...>: sets phase_rc; records <phase>
     --mount type=bind,src="$ROOT/tools",dst=/tools,readonly \
     --mount type=bind,src="$pack",dst=/pack,readonly \
     --mount type=volume,src=mimik-formula-target,dst=/formula,readonly \
-    --mount type=bind,src="$out",dst=/out \
+    --mount type=bind,src="$out",dst=/out ${heldout_mount[@]+"${heldout_mount[@]}"} \
     "$HARNESS_IMAGE" "$@" >/dev/null || fail 12 infra_docker "harness container did not start ($phase)"
   started=$(date +%s)
   limit=$(( phase_budget > 0 ? phase_budget + max_turns * ${request_timeout%.*} + 600 : 0 ))
@@ -478,6 +553,7 @@ run_harness() {  # run_harness <phase> <args...>: sets phase_rc; records <phase>
       || fail 12 infra_docker "docker inspect of the harness failed ($phase)"
     case $status in exited*|dead*) break ;; esac
     still_allowed "$phase"
+    temps >/dev/null
     if [ "$limit" -gt 0 ] && [ $(( $(date +%s) - started )) -gt "$limit" ]; then
       fail 12 infra_docker "harness exceeded its time limit ${limit}s ($phase)"
     fi
@@ -492,7 +568,7 @@ echo "pack=$pack" >> "$prov"
 if [ -n "${PREFLIGHT_CASE:-}" ]; then
   timing preflight
   pre=(--split dev --cases "$PREFLIGHT_CASE" --seeds 17 --arm "${ARM:-none}-preflight"
-    --budget-seconds "$phase_budget" "${phase_deadline[@]}" --output /out/preflight-ledger.jsonl)
+    --budget-seconds "$phase_budget" ${phase_deadline[@]+"${phase_deadline[@]}"} --output /out/preflight-ledger.jsonl)
   echo "preflight_cli=${common[*]} ${pre[*]}" >> "$prov"
   run_harness preflight "${common[@]}" "${pre[@]}"
   [ "$phase_rc" = 0 ] || fail 6 preflight "1-case preflight ($PREFLIGHT_CASE) failed with exit $phase_rc"
@@ -506,8 +582,8 @@ ledger_name=ledger-$(date +%Y%m%dT%H%M%S).jsonl
 arm_args=()
 [ -z "${ARM:-}" ] || arm_args=(--arm "$ARM")
 timing main
-cli=("${common[@]}" --split "$hsplit" "${case_args[@]}" --seeds "$seeds" "${arm_args[@]}"
-  --budget-seconds "$phase_budget" "${phase_deadline[@]}" --output "/out/$ledger_name")
+cli=("${common[@]}" --split "$hsplit" ${heldout_args[@]+"${heldout_args[@]}"} ${case_args[@]+"${case_args[@]}"} --seeds "$seeds" ${arm_args[@]+"${arm_args[@]}"}
+  --budget-seconds "$phase_budget" ${phase_deadline[@]+"${phase_deadline[@]}"} --output "/out/$ledger_name")
 { echo "harness_cli=${cli[*]}"; echo "ledger_file=$ledger_name"; } >> "$prov"
 run_harness main "${cli[@]}"
 [ "$phase_rc" = 0 ] || exit "$phase_rc"

@@ -103,9 +103,14 @@ class FrozenLaunchTests(unittest.TestCase):
                 self.assertIn("refusing", proc.stderr)
 
     def test_refuses_while_a_queue_or_watchdog_runs(self):
-        fake = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(30)", "run_watchdog.py"]
+        mention = subprocess.Popen(  # a command line that only mentions the name
+            ["sh", "-c", "sleep 30 # see tools/run_queue.py run", "x"]
         )
+        self.addCleanup(mention.kill)
+        self.assertEqual(self.launch("--print", "HEAD", "tools/queues/a.json").returncode, 0)
+        script = self.tmp / "run_watchdog.py"
+        script.write_text("import time\ntime.sleep(30)\n")
+        fake = subprocess.Popen([sys.executable, str(script)])
         self.addCleanup(fake.kill)
         proc = self.launch("--print", "HEAD", "tools/queues/a.json")
         self.assertEqual(proc.returncode, 2)

@@ -35,6 +35,7 @@ The console gets one line per arm transition and never a per-case outcome (plan 
 import argparse
 import datetime as dt
 import fcntl
+import importlib
 import json
 import os
 import re
@@ -58,8 +59,26 @@ from toolloop_ops import (  # noqa: F401 (re-exported for callers and tests)
     window_end,
 )
 
+
+class _Lazy:
+    """Router arms only: the tool-loop path (and window-check) never imports these modules."""
+
+    def __init__(self, name):
+        self._name, self._module = name, None
+
+    def __getattr__(self, attr):
+        if self._module is None:
+            self._module = importlib.import_module(self._name)
+        return getattr(self._module, attr)
+
+
+decision_models = _Lazy("decision_models")
+dr = _Lazy("decision_router")
+
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "tools" / "run_tool_loop_benchmark.sh"
+ROUTER_RUNNER = ROOT / "tools" / "run_decision_router.sh"
+ROUTER_UNITS = ("probe", "screen", "ablation")  # decisions per unit: dr.unit_decisions()
 WATCHDOG = ROOT / "tools" / "run_watchdog.py"
 PACK = ROOT / "examples" / "tool-loop-demo"
 SCHEMA = 1
@@ -146,6 +165,24 @@ ARM_KEYS = {
     "g0",
     "n_cpu_moe_from_g0",
     "preflight_case",
+    "device",
+    "threads",
+    "kind",
+    "heldout_cases",
+}
+# Router arms (decision-router plan §5): their own keys, no tool-loop field and no defaults.
+ROUTER_ARM_KEYS = {
+    "id",
+    "kind",
+    "router",
+    "unit",
+    "arm",
+    "required",
+    "retry",
+    "device",
+    "max_arm_seconds",
+    "max_projection_seconds",
+    "end_margin_seconds",
 }
 QUEUE_KEYS = {
     "schema",
@@ -163,11 +200,66 @@ QUEUE_KEYS = {
     "startup_seconds",
     "estimate_factor",
     "g0",
+    "thermal",
 }
 G0_KEYS = {"vram_max_bytes", "swap_growth_max_mib", "deadline_seconds"}
 
 
-def load_queue(path: Path, registry: dict) -> dict:
+def load_router_arm(raw: dict, where: str, seen: set, decision: dict) -> dict:
+    unknown = set(raw) - ROUTER_ARM_KEYS
+    if unknown:
+        raise QueueError(f"{where}: router arms do not take {sorted(unknown)}")
+    if not isinstance(raw.get("id"), str) or not ID_RE.match(raw["id"]) or raw["id"] in seen:
+        raise QueueError(f"{where}: id must be unique and match {ID_RE.pattern}")
+    seen.add(raw["id"])
+    entry = decision["routers"].get(raw.get("router"))
+    if entry is None:
+        raise QueueError(f"{where}: router {raw.get('router')!r} is not in decision_models.json")
+    if raw.get("unit") not in ROUTER_UNITS:
+        raise QueueError(f"{where}: unit must be one of {list(ROUTER_UNITS)}")
+    device = raw.get("device", "cpu")
+    if device != "cpu" or device not in entry["devices"]:
+        raise QueueError(f"{where}: router arms are CPU-only while the GPU is out of service")
+    label = raw.get("arm")
+    if not isinstance(label, str) or not label.startswith("SYS-") or not ID_RE.match(label.lower()):
+        raise QueueError(f"{where}: a router arm label is a system label starting with SYS-")
+    arm = {
+        "id": raw["id"],
+        "kind": "router",
+        "router": raw["router"],
+        "unit": raw["unit"],
+        "arm": label,
+        "required": raw.get("required", True),
+        "retry": raw.get("retry", False),
+        "device": "cpu",
+        "threads": entry["threads"],
+        "split": "dev",
+        "model": None,
+        "seeds": "17",
+        "env": {},
+        "g0": False,
+        "preflight_case": None,
+        "cases": None,
+        "cases_file": None,
+        "max_arm_seconds": raw.get("max_arm_seconds"),
+        "max_projection_seconds": raw.get("max_projection_seconds"),
+        "end_margin_seconds": raw.get("end_margin_seconds"),
+    }
+    for flag in ("required", "retry"):
+        if not isinstance(arm[flag], bool):
+            raise QueueError(f"{where}: {flag} must be true or false")
+    for name in ("max_arm_seconds", "max_projection_seconds", "end_margin_seconds"):
+        value = arm[name]
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0
+        ):
+            raise QueueError(f"{where}: {name} must be positive")
+    if arm["unit"] == "probe" and (arm["max_projection_seconds"] or arm["end_margin_seconds"]):
+        raise QueueError(f"{where}: projection caps apply to screen and ablation units")
+    return arm
+
+
+def load_queue(path: Path, registry: dict, decision=None) -> dict:
     doc = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(doc, dict) or doc.get("schema") != SCHEMA:
         raise QueueError(f"queue: schema must be {SCHEMA}")
@@ -204,6 +296,13 @@ def load_queue(path: Path, registry: dict) -> dict:
             q["session_deadline"] = epoch(dt.datetime.fromisoformat(doc["session_deadline"]))
         except (TypeError, ValueError):
             raise QueueError("queue: session_deadline must be a local ISO time") from None
+    thermal = doc.get("thermal", {})
+    if not isinstance(thermal, dict) or set(thermal) - set(ops.THERMAL_DEFAULTS):
+        raise QueueError(f"queue: thermal may hold {sorted(ops.THERMAL_DEFAULTS)}")
+    for key, value in thermal.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise QueueError(f"queue: thermal.{key} must be a positive number")
+    q["thermal"] = dict(ops.THERMAL_DEFAULTS, **thermal)
     g0 = doc.get("g0", {})
     if not isinstance(g0, dict) or set(g0) - G0_KEYS:
         raise QueueError(f"queue: g0 may hold {sorted(G0_KEYS)}")
@@ -232,11 +331,28 @@ def load_queue(path: Path, registry: dict) -> dict:
     seen = set()
     for n, raw in enumerate(arms):
         where = f"arms[{n}]"
+        if isinstance(raw, dict) and raw.get("kind", "toolloop") not in ("toolloop", "router"):
+            raise QueueError(f"{where}: kind must be toolloop or router")
+        if isinstance(raw, dict) and raw.get("kind") == "router":
+            if decision is None:
+                decision = decision_models.load()
+            q["arms"].append(load_router_arm(raw, where, seen, decision))
+            continue
         if not isinstance(raw, dict) or set(raw) - ARM_KEYS:
             raise QueueError(f"{where}: unknown keys {sorted(set(raw) - ARM_KEYS)}")
-        arm = {"preflight_case": preflight, "required": True, "retry": True, "g0": False}
+        arm = {
+            "kind": "toolloop",
+            "preflight_case": preflight,
+            "required": True,
+            "retry": True,
+            "g0": False,
+            "device": "gpu",
+            "threads": None,
+        }
         arm.update(defaults)
         arm.update(raw)
+        if arm["kind"] != "toolloop":
+            raise QueueError(f"{where}: defaults cannot set kind")
         arm["env"] = _env_values(dict(defaults.get("env", {}), **raw.get("env", {})), where)
         if not isinstance(arm.get("id"), str) or not ID_RE.match(arm["id"]) or arm["id"] in seen:
             raise QueueError(f"{where}: id must be unique and match {ID_RE.pattern}")
@@ -258,9 +374,22 @@ def load_queue(path: Path, registry: dict) -> dict:
             raise QueueError(f"{where}: smoke has a fixed case list")
         if arm.get("cases_file") is not None:
             arm["cases_file"] = str((ROOT / arm["cases_file"]).resolve())
+        if arm.get("heldout_cases") is not None and (
+            arm["split"] != "heldout" or not os.path.isabs(str(arm["heldout_cases"]))
+        ):
+            raise QueueError(f"{where}: heldout_cases is an absolute path on held-out arms only")
         for flag in ("required", "retry", "g0"):
             if not isinstance(arm[flag], bool):
                 raise QueueError(f"{where}: {flag} must be true or false")
+        if arm["device"] not in model_registry.DEVICES:
+            raise QueueError(f"{where}: device must be one of {list(model_registry.DEVICES)}")
+        threads = arm["threads"]
+        if threads is not None and (
+            isinstance(threads, bool) or not isinstance(threads, int) or not 1 <= threads <= 64
+        ):
+            raise QueueError(f"{where}: threads must be an integer 1..64")
+        if arm["device"] == "cpu" and arm["g0"]:
+            raise QueueError(f"{where}: a g0 arm measures the GPU; it cannot be device cpu")
         if arm["g0"]:
             arm["required"], arm["retry"] = False, False  # a failed load is a G0 result
             if "N_CPU_MOE" not in arm["env"]:
@@ -441,7 +570,7 @@ class WatchdogSupervisor:
         log_path: Path,
         fresh_seconds=None,
         ready_timeout=60,
-        interval=30,
+        interval=10,
     ):
         # Fresh means newer than one interval plus the watchdog's worst-case tick.
         if fresh_seconds is None:
@@ -490,7 +619,9 @@ class NoWatchdog:
         return False
 
 
-CASE_ID_RE = re.compile(r"\b[a-z]{2,8}-\d{3}\b")
+# Any id shape: letters (optionally with digits, e.g. h3) and a numeric part of 3+ digits
+# (gate review R3-6: h3-001 was not masked by the old letters-only prefix).
+CASE_ID_RE = re.compile(r"\b[a-z][a-z0-9]{0,7}(?:-[a-z0-9]{1,8})?-\d{3,}\b")
 
 
 def console_safe(text) -> str:
@@ -529,6 +660,10 @@ class Queue:
         vram_wait_seconds=180.0,
         extra_env=None,
         watchdog=None,
+        thermal_reader=None,
+        fan_reader=None,
+        decision_registry=None,
+        router_runner=ROUTER_RUNNER,
     ):
         self.q = queue
         self.registry = registry
@@ -546,9 +681,13 @@ class Queue:
         self.grace_seconds = grace_seconds
         self.console = console or (lambda line: print(line, flush=True))
         self.base_env = dict(os.environ if env is None else env)
-        self.extra_env = dict(extra_env or {})
+        self.extra_env = dict(extra_env or {})  # Python-only seam (real-docker smoke test)
         self.watchdog = watchdog or NoWatchdog()
-        self.watchdog_lost = self.cleanup_lost = False  # Python-only seam (real-docker smoke test)
+        self.watchdog_lost = self.cleanup_lost = False
+        self.thermal_reader = thermal_reader or (lambda: ops.read_sensors(ops.HWMON))
+        self.fan_reader = fan_reader or (lambda: ops.read_fan(ops.HWMON))
+        self.thermal_stops = 0
+        self.sensors_found = None
         self.vram_reader = vram_reader or read_vram
         self.cooldown_seconds = cooldown_seconds
         self.vram_wait_seconds = vram_wait_seconds
@@ -565,6 +704,13 @@ class Queue:
             {"id": a["id"], "state": "pending", "attempts": [], "config": a} for a in queue["arms"]
         ]
         self.hash_cache = self.dir / "hash-cache.txt"
+        self.decision = decision_registry
+        if self.decision is None and any(a["kind"] == "router" for a in queue["arms"]):
+            self.decision = decision_models.load()
+        self.router_runner = Path(router_runner)
+        self.router_probes = {}  # router key -> its complete, eligible probe summary.json
+        self.router_ineligible = {}  # router key -> why (failed or incomplete probe)
+        self.router_screens = set()  # router keys whose screen unit completed
 
     # -- logging and manifest
     def log(self, event, **fields):
@@ -597,6 +743,12 @@ class Queue:
             "missing_required": missing,
             "study_complete": self.state == "done" and not missing,
             "g0": self.g0_results,
+            "thermal": {
+                "sensors_found": self.sensors_found,
+                "thermal_stops": self.thermal_stops,
+                "limits": self.q["thermal"],
+                "cpu_temperature": "unavailable on this host",
+            },
             # Loud, never silent: diagnostics the runner could not read (review round 3).
             "warnings": [
                 f"{a['id']} attempt {r['attempt']}: {w}"
@@ -607,13 +759,16 @@ class Queue:
             "arms": [
                 {
                     "id": a["id"],
-                    "model": a["config"]["model"],
+                    "kind": a["config"]["kind"],
+                    "model": a["config"]["model"] or a["config"].get("router"),
+                    "unit": a["config"].get("unit"),
                     "arm": a["config"]["arm"],
                     "split": a["config"]["split"],
+                    "device": a["config"]["device"],
                     "required": a["config"]["required"],
-                    "vram_budget_bytes": self.registry["models"][a["config"]["model"]][
-                        "vram_budget_bytes"
-                    ],
+                    "vram_budget_bytes": None
+                    if a["config"]["kind"] == "router"
+                    else self.registry["models"][a["config"]["model"]]["vram_budget_bytes"],
                     "state": a["state"],
                     "reason": a.get("reason"),
                     "selected_n_cpu_moe": a.get("selected_n_cpu_moe"),
@@ -635,9 +790,52 @@ class Queue:
         self.console(f"queue stopped: {console_safe(reason)}")
         self.write_manifest()
 
+    # -- held-out hash gate (plan §11 item 8)
+    def heldout_gate(self, cfg):
+        """(path, pin, case ids) of the pinned held-out file: read once, hashed, then only the
+        ids taken from those same bytes (review of 0b9742d). QueueError on any mismatch."""
+        try:
+            pin = tl.load_heldout_pin(tl.HELDOUT_PIN)
+        except tl.PackError as error:
+            raise QueueError(f"held-out pin: {error}") from None
+        path = Path(cfg.get("heldout_cases") or pin["default_path"])
+        try:
+            raw = tl.read_verified_heldout(path, pin)
+        except SystemExit as error:
+            raise QueueError(str(error).removeprefix("held-out gate: ")) from None
+        ids = [c["id"] for c in json.loads(raw.decode("utf-8"))["cases"]]
+        return path, pin, ids
+
+    def heldout_selection(self, cfg):
+        """(case ids, registered case set) of a held-out arm: the whole frozen set or a
+        registered frozen-order prefix, never an ad-hoc id list (round 2, Space Bunny B1)."""
+        _, pin, ids = self.heldout_gate(cfg)
+        chosen = ids
+        if cfg.get("cases"):
+            chosen = cfg["cases"].split(",")
+        elif cfg.get("cases_file"):
+            doc = json.loads(Path(cfg["cases_file"]).read_text(encoding="utf-8"))
+            if (
+                doc.get("split") != "heldout"
+                or doc.get("rule") != "frozen_order_prefix"
+                or doc.get("source_cases_sha256") != pin["sha256"]
+            ):
+                raise QueueError("held-out cases_file: not a frozen-order subset (source hash)")
+            chosen = list(doc["case_ids"])
+        try:
+            case_set = tl.registered_case_set(ids, chosen, pin)
+        except tl.PackError as error:
+            raise QueueError(str(error)) from None
+        return chosen, case_set
+
+    def heldout_cases(self, cfg) -> list:
+        return self.heldout_selection(cfg)[0]
+
     # -- plan and estimates
     def requested_cases(self, arm) -> list:
         cfg = arm["config"]
+        if cfg["split"] == "heldout":  # ids from the verified bytes only
+            return self.heldout_cases(cfg)
         if cfg["split"] == "smoke":
             return list(SMOKE_CASES)
         if cfg.get("cases"):
@@ -653,13 +851,61 @@ class Queue:
         cfg = arm["config"]
         if cfg.get("seconds_per_episode"):
             return float(cfg["seconds_per_episode"]), "queue file"
-        if cfg["model"] in self.measured_spe:
-            return self.measured_spe[cfg["model"]], "measured this session"
+        key = (cfg["model"], cfg["device"])
+        if key in self.measured_spe:
+            return self.measured_spe[key], "measured this session"
+        if cfg["device"] == "cpu":
+            return float(model_registry.CPU_SECONDS_PER_EPISODE), "CPU default"
         entry = self.registry["models"][cfg["model"]]
         return float(entry["seconds_per_episode"]), "registry"
 
+    # -- router arms (decision-router plan §5, §7)
+    def router_bytes(self, key) -> int:
+        return sum(f["size"] for f in self.decision["routers"][key]["files"])
+
+    def router_projection(self, key, unit) -> float:
+        """§7 wall_u; RouterError when the router has no complete, eligible probe."""
+        summary = None
+        if unit != "probe":
+            if key in self.router_ineligible:
+                raise dr.RouterError(f"ineligible: {self.router_ineligible[key]}")
+            if key not in self.router_probes:
+                raise dr.RouterError("ineligible: no complete probe of this router in the session")
+            summary = json.loads(Path(self.router_probes[key]).read_text(encoding="utf-8"))
+        entry = self.decision["routers"][key]
+        return dr.unit_timeouts(
+            unit, self.router_bytes(key), summary, key if summary else None, entry
+        )["projection_seconds"]
+
+    def router_admission(self, arm):
+        """None, or (state, reason): probe gate, projection cap and end margin."""
+        cfg = arm["config"]
+        key, unit = cfg["router"], cfg["unit"]
+        try:
+            self.router_projection(key, unit)
+        except dr.RouterError as error:
+            return "refused", str(error)
+        if unit == "ablation" and key not in self.router_screens:
+            return "skipped", "the router's screen unit did not complete in this session"
+        remaining = (
+            [unit] if unit == "ablation" else ([unit, "ablation"] if unit == "screen" else [unit])
+        )
+        total = sum(self.router_projection(key, u) for u in remaining)
+        cap = cfg.get("max_projection_seconds")
+        if cap and unit == "screen" and total > cap:
+            return "skipped", f"projection {total / 3600:.1f} h over the cap {cap / 3600:.1f} h"
+        margin = cfg.get("end_margin_seconds")
+        if margin and unit == "screen":
+            now = self.clock.time()
+            end = self.cutoff(window_end(now))
+            if now + total > end - margin:
+                return "skipped", f"projected end within {margin / 3600:.1f} h of the deadline"
+        return None
+
     def estimate(self, arm) -> float:
         cfg = arm["config"]
+        if cfg["kind"] == "router":
+            return self.router_projection(cfg["router"], cfg["unit"])
         entry = self.registry["models"][cfg["model"]]
         spe, _ = self.seconds_per_episode(arm)
         episodes = self.episodes(arm) + (1 if cfg.get("preflight_case") else 0)
@@ -672,6 +918,12 @@ class Queue:
         sha = self.registry["models"][key]["sha256"]
         return self.hash_cache.exists() and sha in self.hash_cache.read_text(encoding="utf-8")
 
+    @staticmethod
+    def threads(cfg):
+        if cfg["threads"] is not None:
+            return cfg["threads"]
+        return model_registry.CPU_THREADS if cfg["device"] == "cpu" else None
+
     def plan(self, arm, env) -> dict:
         """What the ledger must show for this arm (strict completeness, review fix 6)."""
         cfg = arm["config"]
@@ -680,7 +932,13 @@ class Queue:
         moe = env.get("N_CPU_MOE")
         server = {
             "image": entry["server_image"],
-            "args": model_registry.server_args(entry, ctx, None if moe is None else int(moe)),
+            "args": model_registry.server_args(
+                entry,
+                ctx,
+                None if moe is None else int(moe),
+                device=cfg["device"],
+                threads=self.threads(cfg),
+            ),
         }
         flags = {
             name: env.get(var, "1" if on else "0") == "1" for var, (name, on) in FLAG_ENV.items()
@@ -710,10 +968,16 @@ class Queue:
             },
             "thinking_capability": entry["capabilities"]["thinking"],
             "server": server,
+            "device": cfg["device"],
         }
         if cfg.get("cases_file"):
             doc = json.loads(Path(cfg["cases_file"]).read_text(encoding="utf-8"))
             header["case_subset_sha256"] = doc.get("sha256")
+        if cfg["split"] == "heldout":
+            _, pin, _ = self.heldout_gate(cfg)
+            header["heldout_cases_sha256"] = pin["sha256"]
+            header["heldout_pin_sha256"] = pin["pin_sha256"]
+            header["heldout_case_set"] = self.heldout_selection(cfg)[1]
         cases = self.requested_cases(arm)
         return {"header": header, "jobs": {(c, s) for s in seeds for c in cases}}
 
@@ -721,9 +985,33 @@ class Queue:
     def model_path(self, key) -> Path:
         return model_registry.model_file(self.registry, key, env=self.base_env)
 
+    def router_prechecks(self, arm):
+        problems = decision_models.check_files(
+            self.decision, arm["config"]["router"], env=self.base_env
+        )
+        if problems:
+            return "refuse", f"router artefacts: {problems[0]}"
+        for check in self.q["disk_checks"]:
+            where = check["path"]
+            if not os.path.exists(where):
+                return "refuse", f"disk check path {where} does not exist"
+            free = self.disk_free(where)
+            if free < check["min_free_gb"] * 1e9:
+                return "stop", f"disk low: {where} has {free / 1e9:.1f} GB free"
+        if not self.lock_probe():
+            return "stop", "lock held: another tool-loop run is active"
+        return "ok", None
+
     def prechecks(self, arm):
         """Returns ('ok', None) | ('refuse', why) | ('stop', why)."""
         cfg = arm["config"]
+        if cfg["kind"] == "router":
+            return self.router_prechecks(arm)
+        if cfg["split"] == "heldout":
+            try:
+                self.heldout_cases(cfg)
+            except QueueError as error:
+                return "refuse", f"held-out gate: {error}"
         entry = self.registry["models"][cfg["model"]]
         if not entry["downloaded"]:
             return "refuse", f"{cfg['model']} is registered but not downloaded"
@@ -742,6 +1030,12 @@ class Queue:
                 return "stop", f"disk low: {where} has {free / 1e9:.1f} GB free"
         if not self.lock_probe():
             return "stop", "lock held: another tool-loop run is active"
+        problem = None
+        if cfg["device"] == "gpu":
+            problem = ops.fan_precondition(self.read_fan(), self.q["thermal"])
+        if problem:
+            self.log("fan_not_manual", detail=problem)
+            return "refuse", f"fan_not_manual: {problem}"
         return "ok", None
 
     # -- schedule
@@ -780,6 +1074,18 @@ class Queue:
         cfg = arm["config"]
         env = {k: self.base_env[k] for k in ENV_ALLOW if k in self.base_env}
         env["TZ"] = ":/etc/localtime"
+        if cfg["kind"] == "router":
+            env.update(
+                OUT_DIR=str(attempt_dir),
+                HASH_CACHE=str(self.hash_cache),
+                QUIET="1" if self.q["quiet"] else "0",
+                WINDOW_END=str(int(self.cutoff(window_close))),
+                QUEUE_PID=str(os.getpid()),
+            )
+            if cfg["unit"] != "probe" and cfg["router"] in self.router_probes:
+                env["PROBE_SUMMARY"] = str(self.router_probes[cfg["router"]])
+            env.update(self.extra_env)
+            return env
         env.update(cfg["env"])
         env.update(
             ARM=cfg["arm"],
@@ -796,10 +1102,55 @@ class Queue:
             env["CASES"] = cfg["cases"]
         if cfg.get("cases_file"):
             env["CASES_FILE"] = cfg["cases_file"]
+        env["DEVICE"] = cfg["device"]
+        if cfg["split"] == "heldout":
+            env["HELDOUT_CASES"] = str(self.heldout_gate(cfg)[0])
+        if self.threads(cfg) is not None:
+            env["THREADS"] = str(self.threads(cfg))
         if arm.get("selected_n_cpu_moe") is not None:
             env["N_CPU_MOE"] = str(arm["selected_n_cpu_moe"])
         env.update(self.extra_env)
         return env
+
+    def read_thermal(self) -> dict:
+        try:
+            sensors = self.thermal_reader()
+        except Exception as error:  # noqa: BLE001 (unreadable is never cool)
+            self.log("thermal_read_error", error=f"{type(error).__name__}: {error}")
+            return {}
+        if self.sensors_found is None:
+            self.sensors_found = sorted(sensors)
+            self.log("thermal_sensors", sensors=self.sensors_found)
+        return sensors
+
+    def read_fan(self) -> dict:
+        try:
+            return self.fan_reader()
+        except Exception as error:  # noqa: BLE001 (an unreadable fan counts as a fault)
+            self.log("fan_read_error", error=f"{type(error).__name__}: {error}")
+            return {"pwm1_enable": None, "pwm1": None, "fan1_input": None, "path": None}
+
+    def thermal_ready(self) -> bool:
+        """Before heavy work: the GPU must be readable and under its limits, else cool down."""
+        guard = ops.ThermalGuard(self.q["thermal"])
+        sensors = self.read_thermal()
+        verdict, why = guard.check(sensors, self.clock.time())
+        edge = sensors.get(ops.GPU_EDGE, {}).get("value")
+        if verdict is None and edge is not None and edge < self.q["thermal"]["edge_c"]:
+            return True
+        self.log("thermal_not_ready", verdict=verdict, reason=why, edge=edge)
+        return self.cool_down()
+
+    def cool_down(self) -> bool:
+        self.log("thermal_cooldown_start")
+        ok = ops.cooled(
+            self.read_thermal,
+            self.clock,
+            self.q["thermal"],
+            log=lambda edge: self.log("thermal_cooldown_cap", edge=edge),
+        )
+        self.log("thermal_cooldown_end", cooled=ok)
+        return ok
 
     def cutoff(self, window_close: float) -> float:
         """The absolute cutoff for the runner: the window end or the session end, if earlier."""
@@ -823,7 +1174,7 @@ class Queue:
         start = self.clock.time()
         close = window_end(start)
         env = self.env_for(arm, attempt_dir, close)
-        argv = [str(self.runner), cfg["model"], cfg["split"]]
+        argv = self.argv(cfg)
         estimate = self.estimate(arm)
         limits = {"window": close - self.q["stop_margin_seconds"]}
         limits["arm_deadline"] = start + (cfg.get("max_arm_seconds") or 2 * estimate + 600)
@@ -844,6 +1195,8 @@ class Queue:
         arm["attempts"].append(record)
         self.transition(arm, "running", attempt=number, estimate=round(estimate))
         rc = stopped_by = None
+        guard = ops.ThermalGuard(self.q["thermal"])
+        next_sample = start
         try:
             self.handle = self.launcher.start(
                 argv, env, attempt_dir / "runner.stdout", attempt_dir / "runner.stderr"
@@ -854,23 +1207,51 @@ class Queue:
                     break
                 now = self.clock.time()
                 hit = [name for name, at in limits.items() if now >= at]
+                if not hit and now >= next_sample:
+                    next_sample = now + self.q["thermal"]["sample_seconds"]
+                    if cfg["device"] == "cpu":
+                        # No GPU work: GPU stops and the fan rules do not apply; the samples are
+                        # still recorded and the watchdog keeps its hard limits.
+                        guard.record(self.read_thermal(), self.read_fan())
+                        verdict = reason = None
+                    else:
+                        verdict, reason = guard.check(self.read_thermal(), now, self.read_fan())
+                    if verdict:
+                        hit = [verdict]
+                        record["thermal_reason"] = reason
                 if not hit and not self.watchdog.alive() and not self.watchdog.ensure():
                     hit = ["watchdog"]
                 if hit:
                     stopped_by = hit[0]
                     rc = self.terminate()
                     break
-                nearest = min(limits.values())
+                nearest = min([*limits.values(), next_sample])
                 self.clock.sleep(min(self.poll_seconds, max(0.5, nearest - now)))
         finally:
             if self.handle is not None and self.handle.poll() is None:
                 rc = self.terminate()  # an exception mid-attempt: never leave the runner
             self.handle = None
             record["queue_cleanup"] = self.cleanup_checked()  # after every attempt
+            record["temperatures"] = guard.stats
         record["runner_exit"] = rc
         record["ended"] = local(self.clock.time()).isoformat(timespec="seconds")
-        record.update(self.classify(arm, attempt_dir, env, rc, stopped_by, record["queue_cleanup"]))
+        result = self.classify(arm, attempt_dir, env, rc, stopped_by, record["queue_cleanup"])
+        if (
+            stopped_by in ("thermal", "thermal_unknown", "fan_fault")
+            and result["status"] != "failed"
+        ):
+            result.update(
+                status="incomplete_thermal",
+                failure=stopped_by,
+                reason=f"{stopped_by}: {record.get('thermal_reason')}",
+            )
+        record.update(result)
         return record
+
+    def argv(self, cfg) -> list:
+        if cfg["kind"] == "router":
+            return [str(self.router_runner), cfg["router"], cfg["unit"]]
+        return [str(self.runner), cfg["model"], cfg["split"]]
 
     def terminate(self):
         """SIGTERM to the runner's process group, then SIGKILL; None if it will not die."""
@@ -882,7 +1263,111 @@ class Queue:
             rc = self.handle.wait(self.grace_seconds)
         return rc
 
+    @staticmethod
+    def router_unit_check(attempt_dir: Path, unit: str) -> dict:
+        """Every binding and the exact frozen job set (plan §5; review Sol 4, B1)."""
+        check = dr.check_attempt(attempt_dir, unit)
+        loaded = check.get("unit") or {}
+        summary = loaded.get("summary") or {}
+        reasons = list(check["errors"])
+        if unit == "probe" and loaded and len(loaded["planned"]) != 3:
+            reasons.append(f"{len(loaded['planned'])} probe decisions != 3")
+        return {
+            "complete": not reasons,
+            "reasons": reasons,
+            "not_run": loaded.get("not_run"),
+            "planned": len(loaded.get("planned") or []),
+            "stopped": summary.get("stopped"),
+            "restarts": summary.get("restarts"),
+        }
+
+    def classify_router(self, arm, attempt_dir: Path, rc, stopped_by, cleanup) -> dict:
+        prov = parse_provenance(attempt_dir / "provenance.txt")
+        out = {"provenance": bool(prov), "failure": prov.get("failure"), "warnings": []}
+        unit_dir = attempt_dir / "unit"
+        check = None
+        if (unit_dir / "summary.json").exists():
+            check = self.router_unit_check(attempt_dir, arm["config"]["unit"])
+            out["unit_check"] = check
+            out["ledger"] = str(unit_dir / "decisions.jsonl")
+        if not cleanup.get("ok"):
+            return dict(
+                out,
+                status="failed",
+                infra=None,
+                reason="queue cleanup unresolved",
+                cleanup_unresolved=True,
+            )
+        if rc is None:
+            return dict(
+                out,
+                status="failed",
+                infra=None,
+                reason="runner did not exit",
+                cleanup_unresolved=True,
+            )
+        if stopped_by is not None:
+            status = {
+                "window": "incomplete_by_window",
+                "arm_deadline": "arm_timeout",
+                "session_deadline": "session_deadline",
+                "watchdog": "failed",
+            }.get(stopped_by, "failed")
+            return dict(out, status=status, infra=None, reason=f"stopped: {stopped_by}")
+        if not prov:
+            return dict(out, status="failed", infra=None, reason=f"no provenance.txt (exit {rc})")
+        if prov.get("cleanup_verified") != "true":
+            return dict(
+                out,
+                status="failed",
+                infra=None,
+                reason="runner cleanup not verified",
+                cleanup_unresolved=prov.get("cleanup_verified") == "false",
+            )
+        if "true" in (prov.get("router_oom_killed"), prov.get("main_oom_killed")):
+            return dict(out, status="failed", infra=None, reason="router container OOM-killed")
+        failure = prov.get("failure")
+        if failure == "window":
+            return dict(
+                out, status="incomplete_by_window", infra=None, reason=prov.get("failure_detail")
+            )
+        if failure is not None:
+            return dict(
+                out, status="failed", infra=None, reason=f"{failure}: {prov.get('failure_detail')}"
+            )
+        if prov.get("main_exit") is None or check is None:
+            return dict(out, status="failed", infra=None, reason=f"no unit result (exit {rc})")
+        if check["complete"] and prov.get("main_exit") == "0" and rc == 0:
+            return dict(out, status="complete", infra=None)
+        if str(check.get("stopped") or "").startswith("deadline"):
+            return dict(out, status="incomplete_by_window", infra=None, reason=check["stopped"])
+        return dict(
+            out, status="incomplete", infra=None, reason="; ".join(check["reasons"]) or f"exit {rc}"
+        )
+
+    def router_completed(self, arm, record):
+        """After a complete unit: register an eligible probe, or mark the router ineligible."""
+        cfg = arm["config"]
+        key = cfg["router"]
+        if cfg["unit"] == "screen":
+            self.router_screens.add(key)
+        if cfg["unit"] != "probe":
+            return
+        path = Path(record["dir"]) / "unit" / "summary.json"
+        try:
+            dr.probe_result(
+                json.loads(path.read_text(encoding="utf-8")), key, self.decision["routers"][key]
+            )
+        except (OSError, ValueError) as error:
+            self.router_ineligible[key] = str(error)
+            self.log("router_ineligible", router=key, reason=str(error))
+            return
+        self.router_probes[key] = str(path)
+        self.log("router_probe", router=key, summary=str(path))
+
     def classify(self, arm, attempt_dir: Path, env, rc, stopped_by, cleanup) -> dict:
+        if arm["config"]["kind"] == "router":
+            return self.classify_router(arm, attempt_dir, rc, stopped_by, cleanup)
         prov = parse_provenance(attempt_dir / "provenance.txt")
         out = {"provenance": bool(prov), "failure": prov.get("failure")}
         out["warnings"] = diagnostics_warnings(prov)
@@ -920,6 +1405,9 @@ class Queue:
                 "session_deadline": "session_deadline",
                 "g0_deadline": "arm_timeout",
                 "watchdog": "failed",
+                "thermal": "incomplete_thermal",
+                "thermal_unknown": "incomplete_thermal",
+                "fan_fault": "incomplete_thermal",
             }[stopped_by]
             return dict(out, status=status, infra=None, reason=f"stopped: {stopped_by}")
         if not prov:
@@ -967,11 +1455,19 @@ class Queue:
     # -- measurements
     def record_measurements(self, arm, record):
         cfg = arm["config"]
+        if cfg["kind"] == "router":
+            return
         prov = parse_provenance(Path(record["dir"]) / "provenance.txt")
         wall = _int_or_none(prov.get("main_wall_seconds"))
         check = record.get("ledger_check") or {}
+        key = (cfg["model"], cfg["device"])
         if record["status"] == "complete" and wall and check.get("run"):
-            self.measured_spe[cfg["model"]] = wall / check["run"]
+            self.measured_spe[key] = wall / check["run"]
+        elif key not in self.measured_spe:
+            preflight = _int_or_none(prov.get("preflight_wall_seconds"))
+            if preflight and prov.get("preflight_exit") == "0":
+                self.measured_spe[key] = float(preflight)  # one measured episode
+                self.log("spe_from_preflight", arm=arm["id"], seconds=preflight)
         if not cfg["g0"]:
             return
         vram = [_int_or_none(prov.get(k)) for k in ("vram_used_loaded", "vram_used_end")]
@@ -1048,7 +1544,7 @@ class Queue:
             if self.clock.time() - start >= self.vram_wait_seconds:
                 self.log("vram_not_released", used=used, baseline=baseline)
                 break
-            self.clock.sleep(5)
+            self.clock.sleep(3)
         self.clock.sleep(self.cooldown_seconds)
 
     # -- main loop
@@ -1167,7 +1663,7 @@ class Queue:
         rc = None
         try:
             self.handle = self.launcher.start(
-                [str(self.runner), cfg["model"], cfg["split"]],
+                self.argv(cfg),
                 env,
                 check_dir / "runner.stdout",
                 check_dir / "runner.stderr",
@@ -1201,6 +1697,19 @@ class Queue:
         cfg = arm["config"]
         retried = window_reruns = 0
         not_before = None
+        if cfg["split"] == "heldout":  # §11 item 8: before any estimate reads the case file
+            try:
+                self.heldout_cases(cfg)
+            except QueueError as error:
+                self.transition(arm, "refused", reason=f"held-out gate: {error}")
+                return "refused"
+        if cfg["kind"] == "router":
+            admission = self.router_admission(arm)
+            if admission is not None:
+                self.transition(arm, admission[0], reason=admission[1])
+                if cfg["unit"] == "probe":
+                    self.router_ineligible[cfg["router"]] = admission[1]
+                return admission[0]
         while True:
             if not self.wait_for_window(arm, not_before):
                 return arm["state"]
@@ -1235,6 +1744,10 @@ class Queue:
                 self.transition(arm, "not_started", reason="watchdog unavailable")
                 self.stop("watchdog unavailable: no heavy work without it")
                 return "not_started"
+            if cfg["device"] == "gpu" and not self.thermal_ready():
+                self.transition(arm, "not_started", reason="GPU did not cool down")
+                self.stop("thermal: GPU did not cool down within the cap")
+                return "not_started"
             if self.g0_expired(arm):  # rechecked after every wait and precheck
                 self.transition(arm, "skipped", reason="G0 deadline passed")
                 return "skipped"
@@ -1251,11 +1764,34 @@ class Queue:
                 self.transition(arm, "failed", reason=record.get("reason"))
                 self.stop("cleanup unresolved: heavy work may still be running")
                 return "failed"
+            if status == "incomplete_thermal" and record.get("failure") == "fan_fault":
+                self.thermal_stops += 1
+                self.transition(arm, "incomplete_thermal", reason=record.get("reason"))
+                self.stop(f"fan fault: {record.get('reason')}")  # a person must fix the fan
+                return "incomplete_thermal"
+            if status == "incomplete_thermal":
+                self.thermal_stops += 1
+                self.transition(arm, "incomplete_thermal", reason=record.get("reason"))
+                if self.thermal_stops >= self.q["thermal"]["max_thermal_stops"]:
+                    self.stop(f"{self.thermal_stops} thermal stops in this session")
+                    return "incomplete_thermal"
+                if not self.cool_down():
+                    self.stop("thermal: GPU did not cool down within the cap")
+                    return "incomplete_thermal"
+                continue  # whole-arm rerun after the cooldown
             if status == "complete":
                 record["excluded"] = False
                 arm["ledger"] = record.get("ledger")
+                if cfg["kind"] == "router":
+                    self.router_completed(arm, record)
                 self.transition(arm, "complete")
                 return "complete"
+            if (
+                cfg["kind"] == "router"
+                and cfg["unit"] == "probe"
+                and status != "incomplete_by_window"
+            ):
+                self.router_ineligible[cfg["router"]] = f"probe {status}"
             if record.get("infra") in INFRA_CLASSES and cfg["retry"] and not retried:
                 retried = 1
                 self.transition(arm, "retry", reason=f"infrastructure: {record['infra']}")
@@ -1360,6 +1896,14 @@ def main(argv=None) -> int:
     if args.command == "check":
         q = Queue(queue, registry, ROOT / "target" / "queue-check-unused")  # nothing written
         for arm in q.arms:
+            if arm["config"]["kind"] == "router":
+                cfg = arm["config"]
+                try:
+                    estimate = f"{q.estimate(arm) / 3600:.2f}h"
+                except dr.RouterError:
+                    estimate = "after its probe"
+                print(f"{arm['id']}: router {cfg['router']} {cfg['unit']} estimate={estimate}")
+                continue
             spe, source = q.seconds_per_episode(arm)
             print(
                 f"{arm['id']}: {arm['config']['model']} {arm['config']['split']} "

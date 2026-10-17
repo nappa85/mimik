@@ -599,8 +599,40 @@ class OutcomeTests(Base):
         self.assertEqual(row["outcome"], "error")
 
 
+FIXTURE_PIN_SHA256 = "f" * 64
+
+
+def fixture_case_set(case_ids):
+    return {"name": f"fixture-{len(case_ids)}", "sha256": tl.case_set_sha256(case_ids)}
+
+
+def live_heldout_fields(case_ids):
+    """What a live, gated held-out run puts on every row (§11 item 8, review rounds 1-3): the
+    frozen hash, a registered case set, the anchored pin digest, no dry run or gold replay.
+    Bar-logic fixtures register their synthetic set with `fixture_pins` (test-only)."""
+    return {
+        "heldout_cases_sha256": tl.HELDOUT_FROZEN_SHA256,
+        "heldout_pin_sha256": FIXTURE_PIN_SHA256,
+        "heldout_case_set": fixture_case_set(case_ids),
+        "dry_run": False,
+        "dry_run_expected": False,
+        "allow_heldout_gold_replay": False,
+    }
+
+
+def fixture_pin_patches(*sizes):
+    import unittest.mock
+
+    sets = [dict(fixture_case_set([f"c{i}" for i in range(n)]), rule="all", size=n) for n in sizes]
+    return [
+        unittest.mock.patch.object(tl, "HELDOUT_VERDICT_CASE_SETS", sets),
+        unittest.mock.patch.object(tl, "HELDOUT_PIN_SHA256", FIXTURE_PIN_SHA256),
+    ]
+
+
 def summary_rows(n_cases, correct, false_supported, split="heldout"):
     rows = []
+    fields = live_heldout_fields([f"c{i}" for i in range(n_cases)]) if split == "heldout" else {}
     for i in range(n_cases):
         rows.append(
             {
@@ -608,6 +640,7 @@ def summary_rows(n_cases, correct, false_supported, split="heldout"):
                 "model_label": "m",
                 "split": split,
                 "case_id": f"c{i}",
+                **fields,  # held-out rows: gated, registered, live (unpinned ones are refused)
                 "outcome": "answer",
                 "score": {
                     "expected_outcome": "answer",
@@ -631,6 +664,10 @@ def summary_rows(n_cases, correct, false_supported, split="heldout"):
 
 
 class SummaryTests(unittest.TestCase):
+    def setUp(self):
+        for patcher in fixture_pin_patches(99, 100, 110, 200):
+            self.enterContext(patcher)
+
     def verdicts(self, summary):
         bar = summary["bar"]
         self.assertEqual(bar["label"], "bar: pending denominator choice")

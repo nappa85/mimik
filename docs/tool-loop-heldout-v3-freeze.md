@@ -11,8 +11,61 @@ repository** so that development agents cannot read it by accident:
 **sha256 `6f11af05f27347ea31a50996b0e6b6eea4ccbfa3254a085cd7699d4d8ec68974`**
 
 Only the v3 verdict arms (plan §11: A0, and any arm pre-registered before A0's first episode)
-may read it. A held-out run must refuse any case file whose hash differs (plan §11 item 8).
-That gate is still to be implemented in the runner and queue before A0.
+may read it. **Hash gate (plan §11 item 8), implemented 2026-10-17:** the pin — this sha256,
+165 cases and the outcome counts below — lives in one committed file,
+`tools/heldout-v3-pin.json`. The harness (`--heldout-cases`, default the frozen path above),
+the runner (`HELDOUT_CASES`, mounted read-only) and the queue refuse a held-out run unless the
+case file's sha256 equals the pin; the file is hashed before it is parsed, and the loaded
+counts must equal the pinned ones. A held-out ledger header records `heldout_cases_sha256`.
+
+Hardening after review (2026-10-17, `docs/reviews/2026-10-17-heldout-gate.md`):
+- **Code anchor:** the pin JSON must name exactly `HELDOUT_FROZEN_SHA256` in
+  `tools/tool_loop_benchmark.py`; editing the JSON alone refuses every held-out run. There is
+  no CLI or environment override of the pin.
+- **One read:** harness, queue and `--write-case-subset` read the file once, compare those
+  bytes with the pin and parse the same bytes; nothing parses unverified bytes.
+- **Ledgers:** held-out headers record `heldout_cases_sha256` and `heldout_pin_sha256`, rows
+  carry `heldout_cases_sha256`; `load_ledgers`, merges and `bar_verdict` refuse anything that
+  is not the frozen hash. `pack_hashes["cases-heldout.json"]` in a header is the pack's empty
+  placeholder, never the run's source; the source is `heldout_cases_sha256`.
+- **Subsets:** held-out arms may use `cases` or `cases_file` (the 100-case prefix arm); a
+  subset's `source_cases_sha256` must be the pin.
+- **Gold:** `--validate-pack --split heldout` refuses without `--allow-heldout-gold-replay`, and
+  with it prints counts and pass/fail only. Under the blind protocol the main session never
+  passes that flag.
+- **Round 2 (re-review of `f4b5e15`):**
+  - **Verdict case sets** are registered in the pin (`verdict_case_sets`): `full` (all 165) and
+    `h1-prefix-100` (the first 100 cases in frozen file order, plan §11 H1), both defined by
+    rule from the file order, never from labels. Their id-set hashes are computed at run time
+    from the verified bytes and recorded in each header (`heldout_case_set`); the pin may later
+    carry each set's `sha256` (filled by an id-only step, never by reading gold). A run on any
+    other id list is refused, and `bar_verdict` refuses a summary whose case set is not
+    registered or does not match its rows.
+  - **Dry runs never verdict:** held-out rows carry `dry_run`, `dry_run_expected` and
+    `allow_heldout_gold_replay`; `bar_verdict` refuses any held-out summary with one set.
+  - **No per-case output:** held-out progress is always quiet (harness and runner); held-out
+    validation errors and unknown `--cases` ids are reported as counts, never ids or fields;
+    dev runs and dev validation never load the pack's own held-out file.
+  - **Subsets:** `--write-case-subset --split heldout` writes ids only (no `outcome_counts`),
+    for registered prefix sizes only.
+  - **Paths:** whitespace in `HELDOUT_CASES` or its resolved path is refused; `fail()` never
+    adds provenance lines.
+- **Round 3 (re-review of `7ed4887`):**
+  - **Per-set digests filled** by the one authorised ids-only computation (it read the file
+    through `read_verified_heldout` and printed only digests and counts): `full` 165 cases
+    `4f5f0b03…bfce1`, `h1-prefix-100` 100 cases `9d576842…24f4a5`. They are in the pin and, with
+    the pin file's own digest (`HELDOUT_PIN_SHA256`), code constants beside
+    `HELDOUT_FROZEN_SHA256`; `load_heldout_pin` refuses any other `verdict_case_sets` or pin
+    bytes.
+  - **Ledgers and verdicts** check the recorded set name, digest, size and `case_order`
+    re-hash against those constants; the verdict needs only the ledger and the code.
+  - **Ledger policy:** held-out ledgers hold per-case gold by necessity (scoring); mode 0600;
+    read only through `--summarize`'s aggregate output; nobody reads or prints their rows.
+    `--episodes-csv` and held-out `--dry-run` need `--allow-heldout-gold-replay`, which the
+    blind protocol never passes.
+- **Limitation (tamper evidence):** the hash chain is self-asserted. Anyone who can write a
+  results directory can write the anchor into a fabricated ledger; the gate assumes no write
+  access to results by untrusted parties and is not tamper-evident.
 
 ## Counts
 

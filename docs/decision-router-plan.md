@@ -1,9 +1,9 @@
 # Decision router plan (prototype tier)
 
-2026-10-16. Status: **revision 3.** Revision 2 was re-reviewed (Sol NO-GO on N1, with N2–N4
-medium; Sonnet GO-with-amendments N1–N7; third unavailable); revision 3 resolves those findings
-in plan text and needs a short re-review of §3, §4 and §7 before any code. The user authorised
-the dev-only track (v3 plan §12, `39cb421`). Nothing built or run. Review record:
+2026-10-16. Status: **revision 3.1.** Revision 3 was re-reviewed (round 3: Sol and Sonnet both
+GO-with-amendments; third unavailable); revision 3.1 applies those amendments in place (list
+in "Revision 3.1 amendments" at the end) and is the frozen spec for the implementation. The
+user authorised the dev-only track (v3 plan §12, `39cb421`). Review record:
 [reviews/2026-10-16-decision-router-plan.md](reviews/2026-10-16-decision-router-plan.md).
 Code base: branch `harness-v3` at `b085aa4` (v3 harness, registry, queue, CPU device mode).
 **The GPU is out of service** (cooling fault, junction 29→86 °C in 2 s under compute), so
@@ -45,7 +45,11 @@ every step below is CPU-only; GPU items wait behind the *GPU repaired* gate (§7
 
 **Recomputed locally** (no case text read)
 - Dev pack: 174 cases — proposal 67, answer 38, conflict 29, ask_rule 14, ask_fact 14, stale 8,
-  refuse 4 (105 supported, 69 at-risk); 34 Italian.
+  refuse 4 (105 supported, 69 at-risk); 34 Italian. **Pack revision 3 (merged 2026-10-17):
+  175 cases, ask_rule 15 (105 supported, 70 at-risk).** The code derives every count from the
+  pack: on rev3 the screen unit is 215 decisions, the gate needs ≥ 84/105 recall and ≤ 8 of 175
+  failures, and zero unsafe has Wilson upper bounds 0/175 → 2.15%, 0/70 → 5.20%. The 174-case
+  figures below are the revision-3 text and are kept for the record.
 - S40, 9B, seed 17 (`run-79fddee1d17d`, 9B ledger, `score` fields only): correct 25/40,
   false support 8/40. Cross-kind 3 (conflict→answer, ask_rule→answer, stale→proposal); value
   5 (wrong_answer 2, wrong_proposal 2, over_cap 1); 4 supported cases ended in the other
@@ -106,7 +110,8 @@ applicability predicate).
   retrieved rules, question and options under the backend's own template. It reports min,
   median, p90 and max, per router, and the count over `n_ctx`. It loads no weights, runs capped
   at 2 cores and is allowed outside the window. §7 projects from these counts, not from the
-  assumed 3k.
+  assumed 3k. **Measured on rev3 (2026-10-17):** max 2,546 (Kev), 2,601 (Qwen3-4B), 2,612
+  (Qwen3.5-9B) tokens, none over 8192 ([implementation notes](decision-router-implementation.md)).
 
 **Question.** One generic question; 7 options = the `SYSTEM_PROMPT` outcome lines, verbatim,
 hashed, fixed IDs in the canonical order. Routes to `stale` are reported, never claimed
@@ -165,10 +170,15 @@ positive claim.
 
 **Decision records.** Every (case, order) gets exactly one record:
 - success: `status: completed`, 7 probabilities keyed by the canonical IDs, finite, ≥ 0, sum
-  1 ± 1e-6;
-- failure: `status` ∈ {`failed`, `timeout`, `invalid_distribution`, `over_context`}, an error
-  class, `probabilities: null`. A worker output that fails distribution validation becomes
-  `invalid_distribution`; it is never repaired into a prediction.
+  1 ± 1e-6. That tolerance is **one shared constant** (`SUM_TOLERANCE`): the runner sends it
+  in every request, the worker validates with it, and the runner validates again with the same
+  value (the legacy 4-label benchmark keeps its own 1e-5 default);
+- failure: `status` ∈ {`failed`, `timeout`, `invalid_distribution`, `over_context`}, an
+  `error_class` field, `probabilities: null`. A worker output that fails distribution
+  validation (in the worker, reported as `error_class: invalid_distribution`, or in the
+  runner) becomes `invalid_distribution`; it is never repaired into a prediction.
+- The router's canonical tie rule (earlier canonical ID) replaces the legacy alphabetical one
+  everywhere in the router path; the legacy benchmark's own scoring is unchanged.
 - `not_run` (deadline or a stopped worker) is not a decision: a unit holding one is
   **incomplete**.
 
@@ -190,14 +200,23 @@ positive claim.
 routes, so both supported-correct and unsafe counts are non-increasing in τ: the smallest
 feasible τ is the unique best choice.
 
-**Folds (deterministic, seed recorded).** `fold_seed = 20261016`. For each kind in canonical
-order, its cases are sorted by `sha256(f"{fold_seed}:{case_id}")` and dealt round-robin into
-folds 0–4; the fold pointer carries over between kinds and is never reset. Fold sizes are
-35, 35, 35, 35, 34. Refuse (4) lands in four folds, one each, so one fold holds no refuse case;
-stale (8) splits 2/2/2/1/1 or a rotation of it. The fold file (case id → fold) is hashed and
-frozen. The report shows a 5 × 7 table of held and inner counts per kind. Limitation: rare
-classes are too small for per-fold claims; with refuse absent from one held fold, that fold
-says nothing about refuse.
+**Folds (deterministic, seed recorded, grouped).** `fold_seed = 20261016`.
+- **Groups (rev. 3.1, Sonnet A7).** Non-text metadata only: cases sharing (character, sorted
+  `gold_rule_ids`, expected outcome) form one group. On the dev pack, 42 cases fall in 19
+  multi-case groups (16 of 2, 2 of 3, 1 of 4; 9 of them pair an English and an Italian case),
+  so they may be translations or near-duplicates. A group is never split across folds. No case
+  text was read to form or check the groups; groups that share text but not this key are not
+  detected (residual leakage, reported).
+- For each kind in canonical order, its groups are sorted by
+  `sha256(f"{fold_seed}:{first case id of the group}")` and dealt round-robin, whole, into folds
+  0–4; the fold pointer carries over between kinds and is never reset.
+- Fold sizes are therefore those the deal produces (recorded in the fold file and the report;
+  the ungrouped 35/35/35/35/34 no longer holds). Computed on the rev3 dev pack: 35/38/33/34/35;
+  fold 4 holds no stale case and fold 3 no refuse case (fold document sha256 `97abdc5a…99f9`). Refuse and stale land as the deal gives them
+  (each listed in the 5 × 7 table), so some fold may hold none of them.
+- The fold file (case id → fold, plus the group key of each case) is hashed and frozen. The
+  report shows a 5 × 7 table of held and inner counts per kind. Limitation: rare classes are
+  too small for per-fold claims; a held fold without refuse says nothing about refuse.
 
 **Per-router procedure** (run for each router separately; baselines are evaluated on the same
 folds without τ):
@@ -237,7 +256,9 @@ gate, refit and choice rules, and all hashes are committed before inference.
   support;
 - every other routed-supported case → **`replay-unresolved`**: counted as incorrect, kept in
   its own column, and **never added to false support**;
-- a router failure → routed `ask_rule`, flagged `router_failure` in its own column.
+- a router failure → routed `ask_rule`, flagged `router_failure` in its own column, and
+  **never correct** (even when the expected kind is `ask_rule`; rev. 3.1, Sonnet A6). The
+  same holds in live SYS-R ledgers.
 The report gives resolved correct, resolved false support (as `score()` computes it), the
 replay-unresolved count, and one line labelled as a worst-case bound: "false support ≤
 resolved + replay-unresolved". Router terminals carry no message or citations and are reported
@@ -246,8 +267,8 @@ as such. It is exploratory and non-gating for any live claim.
 **Live SYS-R** (`--router-decisions FILE`; off by default, v3 byte-identical when off).
 Routed at-risk: host-written terminal (`terminal.tool="router"`, no model call). Routed
 supported: `allowed_finishers` drops the other supported finisher; `respond` and `ask_user`
-stay; no hint. A failure record routes to the `ask_rule` host terminal and is flagged
-`router_failure` in the ledger. First a 3-case live smoke with forced restriction, then dev
+stay; no hint. A failure record routes to the `ask_rule` host terminal, is flagged
+`router_failure` in the ledger and is scored as never correct. First a 3-case live smoke with forced restriction, then dev
 174; dev-only.
 
 **Decision-file integrity.** Header: router runtime, image digest, model artefact hashes,
@@ -281,16 +302,40 @@ the GPU is out. Workers take `choices`, `question`, `n_ctx` and `device`, defaul
 
 **Timeouts and deadline.** `local_decision_benchmark.py` gains `--ready-timeout` and
 `--decision-timeout`; their defaults stay 180 s, so the existing benchmark is unchanged.
-- The router runner sets the ready timeout (load, hash, readiness) to the artefact bytes over
-  the probe-measured disk rate (floor 40 MB/s) plus 600 s, and the decision timeout to 3 × the
-  probe's slowest decision, clamped to 180–1,800 s.
+- **Probe caps (rev. 3.1, Sol N3).** The probe unit's own caps never depend on probe results:
+  ready timeout = artefact bytes / 5 MB/s + 600 s, decision timeout 1,800 s, both bounded by
+  the deadline as below. A probe unit that fails or is incomplete makes that router
+  **ineligible**: its screen and ablation units are refused, never estimated from the probe
+  decisions that did succeed.
+- After a complete probe, the router runner sets the ready timeout (load, hash, readiness) to
+  the artefact bytes over min(probe-measured disk rate, 40 MB/s) plus 600 s (never assuming a
+  faster disk than 40 MB/s, even when the probe read from the page cache), and the decision
+  timeout to 3 × the probe's slowest decision, clamped to 180–1,800 s.
 - Both are bounded by `deadline_epoch − now − 120 s`. The runner does not start a decision
   whose timeout would cross the deadline; it marks the rest `not_run` and the unit incomplete.
-- `deadline_epoch` = the earlier of the window end and **Monday 2026-10-19 09:00** local. At the
-  deadline the runner kills the container. An incomplete unit is never gate-evaluable.
-- A decision timeout still kills the worker. The runner restarts it **at most once per unit**
-  (re-hashing the artefacts) and retries that decision once. A second kill makes the rest
-  `not_run`.
+- `deadline_epoch` = the earlier of the window end, the queue's session end and **Monday
+  2026-10-19 09:00** local. At the deadline the runner kills the container. An incomplete unit
+  is never gate-evaluable.
+- **No legacy run budget (rev. 3.1, Sonnet A5).** The router driver does not use the legacy
+  benchmark's `--budget-seconds` (default 1,200 s); its only time limits are the timeouts above
+  and the deadline. A test runs a unit whose total time exceeds 1,200 s on a fake clock.
+- **Timeout sequence (rev. 3.1, Sonnet A1/A2).** A decision timeout still kills the worker.
+  - First timeout on a case: the runner restarts the worker (re-hashing the artefacts) and
+    retries that case once.
+  - A second timeout on that case: the case is recorded as `timeout` and the worker is
+    restarted again; the unit continues with the next case.
+  - A worker that exits during a decision is handled the same way, with status `failed` and
+    `error_class: worker_exit`.
+  - Restarts are capped at **N = 3 per unit** (screen and ablation each have their own cap). The
+    probe's own cap is 1: any failed probe decision already makes the router ineligible. When a fourth restart would be needed, the rest is `not_run` and the
+    unit incomplete. A test shows that one deterministic timeout does not collapse the unit.
+  - The final record of a retried case is the retry's result; every attempt, including the
+    original, is kept in the unit's attempt log.
+  - **Worker logs (Sonnet A4):** one log per worker start, `worker-<n>.log`, never truncated by
+    a restart (tested).
+- **Restart accounting (Sol N4).** Restarts are counted per unit and never shared between
+  units. The §7 projection charges every allowed restart in every unit with its worst case: the
+  decision timeout waited out, the kill wait (15 s), and a full reload and re-hash.
 
 **Queue:** arm `kind: toolloop|router`; router estimate = the §7 projection; completeness =
 exact case coverage with no `not_run`. CPU inference and model loads are heavy work under the
@@ -319,8 +364,8 @@ sampling and watchdog hard limits apply; CPU temperature recorded as unavailable
 - **Records:** success and failure schemas; an invalid distribution becomes
   `invalid_distribution`, never a prediction; failures preserved through CV, completeness and
   replay; a `not_run` record makes the unit incomplete and the gate refuses it.
-- **Selection:** the fold allocation is reproducible from the seed, sizes 35/35/35/35/34, refuse
-  in four folds, and the per-stratum table matches; nested CV never sees the held fold (pair:
+- **Selection:** the fold allocation is reproducible from the seed, groups are never split
+  (rev. 3.1), the recorded sizes match the deal, and the per-stratum table matches; nested CV never sees the held fold (pair:
   planted leakage detected); folds with different τ_i pool correctly; an infeasible fold gets
   `NONE` and the gate fails on recall; the gate needs completeness, zero unsafe, recall and
   coverage; refit uses all 174 and `NONE` makes the router null; router-choice ties follow the
@@ -330,9 +375,12 @@ sampling and watchdog hard limits apply; CPU temperature recorded as unavailable
   resolved + unresolved; router failures get their own column.
 - **Timeouts:** with the legacy cap made injectable and set to 1 s, a fake decision taking 2 s
   under a 5 s decision timeout completes and the next decision runs on the same process (the
-  legacy path fails it); readiness uses the ready timeout; one restart after a timeout, and a
-  second timeout marks the rest `not_run`; the deadline stops new decisions and the unit is
-  incomplete; the defaults stay 180 s.
+  legacy path fails it); readiness uses the ready timeout; one deterministic timeout restarts
+  the worker, retries the case and the unit completes; a timeout on the retry records the case
+  as `timeout` and the unit continues; the fourth needed restart marks the rest `not_run`; the
+  attempt log keeps the original; worker logs survive restarts; a unit longer than 1,200 s
+  completes; the probe caps do not depend on probe results; the deadline stops new decisions
+  and the unit is incomplete; the defaults stay 180 s (rev. 3.1).
 - **CPU mode:** CPU → zero layers / GPU → Vulkan still required; a device node present (fake
   `/dev` root) refuses; an offload line above 0 refuses; unknown device refused; CPU provenance
   recorded, with `llama_supports_gpu_offload()` labelled a build property; worker defaults
@@ -361,28 +409,36 @@ Before any run they are replaced by: the §2 token counts × the probe-measured 
 | R1 Qwen3-4B dense | 15–25 tok/s | ≈120–200 s | ≈12.9–21.4 h |
 | R3 Qwen3.5-9B dense | 7–12 tok/s | ≈250–430 s | ≈26.8–46.1 h |
 
-**What a router's projection covers.** Decisions: 174 main + 40 reversed + 80 ablation = 294
-(ablations budgeted at the full-state rate, which is conservative). Projected wall time =
-2 × (load + hash) [the second for the one allowed restart] + 294 × 1.05 [the retried
-decisions] × 1.25 [safety factor] × the measured seconds per decision. The table's last column
-uses that formula without load and hash. Probes (3 states at the measured token p50, p90 and
-max × 3 backbones, incl. load and HDD hash): ≈1–1.5 h, budgeted separately.
+**What a router's projection covers (rev. 3.1).** Decisions: 174 main + 40 reversed + 80
+ablation = 294 (ablations budgeted at the full-state rate, which is conservative). Per unit u
+with n_u decisions (214 screen, 80 ablation), N = 3 allowed restarts, L = load + hash at the
+ready-timeout rate, T = the decision timeout and K = 15 s kill wait:
+
+  wall_u = L + N × (T + K + L) + n_u × 1.05 × 1.25 × s,
+
+where s is the probe-measured seconds per decision (its slowest probe decision, not the
+median). A router's evaluation is wall_screen + wall_ablation; the queue admits a unit only if
+its own wall_u fits before the deadline. The table's last column uses only the n × 1.05 × 1.25
+× s term. Probes (3 states at the measured token p50, p90 and max × 3 backbones, incl. load
+and HDD hash) are budgeted separately at their own caps (§5).
 
 **Units and evaluability.** Per router, the screen unit (214) and the ablation unit (80) run in
 that order. Only a complete screen unit is gate-evaluable; a complete ablation unit is needed
 for any positive claim (§2).
 
-**R3's 12 h cap** covers its whole evaluation: load, hash, restart allowance, screen and
-ablation units, retries and the safety factor, but not its probe. R3 runs only if that
-projection is ≤ 12 h **and** its projected end, after the actual R1 and R4 runs, is ≥ 1 h before
-Monday 09:00. With the table's rates the cap needs ≤ 112 s per decision, so R3 is not expected
-to run on CPU.
+**R3's 12 h cap** covers its whole evaluation: both units' wall_u above (load, hash, every
+allowed restart with its timeout and reload, retries and the safety factor), but not its probe.
+R3 runs only if that projection is ≤ 12 h **and** its projected end, after the actual R1 and R4
+runs, is ≥ 1 h before Monday 09:00. Before rev. 3.1 the cap needed ≤ 112 s per decision; the
+restart charges (2 units × 3 × (T + K + L)) lower that further, so R3 is not expected to run on
+CPU.
 
 1. **Now (no inference):** the short re-review of revision 3, then code and tests; freeze §3;
    the token measurement (§2).
-2. **After the CPU screen queue (≈04:00 Saturday 2026-10-17)**, window ≈53 h to Monday 09:00:
-   the probes; then R1, then R4, each only if its projection fits the remaining window; R3 under
-   its cap. Then, in minutes and without inference: CV, baselines, the S40 replay.
+2. **After the CPU screen queue (≈04:00 Saturday 2026-10-17)**, window ≈53 h to Monday 09:00
+   (session end 08:30): the probes; then R4 (Kev-0.8B, the cheapest unit, first by the main
+   session's instruction of 2026-10-16), then R1, each only if its projection fits the remaining
+   window; R3 under its cap. Then, in minutes and without inference: CV, baselines, the S40 replay.
 3. **GPU repaired gate:** D0 (9B on 174, ≈2.4 h on GPU), oracle recompute, full replay,
    live SYS-R smoke and dev run; reconsider L0, Qwen3-8B and Kev-4B.
 4. **Before any held-out use:** independent results review; pre-register (§1) or record null.
@@ -402,3 +458,20 @@ machine schedule names model loads and inference as heavy).
 6. **Keep the discarded 4B as a router backbone?** *Default: yes, router role only.*
 7. **Run Kev-0.8B as an out-of-distribution probe** (§2)? *Default: yes; it is the cheapest
    unit.*
+
+## Revision 3.1 amendments (round 3 re-review, both GO-with-amendments)
+
+| ID | Source | Amendment (where) |
+|---|---|---|
+| A1 | Sonnet | Timeout sequence: restart + one retry, a second timeout records `timeout` and restarts again; cap N = 3 restarts per unit; one deterministic timeout never collapses a unit (§5, §6) |
+| A2 | Sonnet | The final record is the retry's, the original stays in the attempt log; the projection charges worst-case timeout + reload per allowed restart (§5, §7) |
+| A3 | Sonnet | One shared tolerance `SUM_TOLERANCE` (1e-6) for worker and runner; canonical tie rule replaces the alphabetical one in the router path; `error_class` maps worker failures to `invalid_distribution` (§3) |
+| A4 | Sonnet | Per-start worker logs `worker-<n>.log`, never truncated (§5, §6) |
+| A5 | Sonnet | No legacy 1,200 s budget in router mode; deadline only; tested (§5) |
+| A6 | Sonnet | `router_failure` is never correct, in replay and live (§4) |
+| A7 | Sonnet | Metadata groups (character, gold rule ids, outcome) are never split across folds; residual text-level leakage reported (§3) |
+| N3 | Sol | The probe has its own caps, independent of probe results; a failed or incomplete probe makes the router ineligible (§5) |
+| N4 | Sol | Restarts counted per unit, both units' restart costs (timeout wait, kill wait, reload) in the projection and R3's cap (§5, §7) |
+| — | Sol | Closed: N1 and N2 (selection algorithm, failure records) |
+| — | main session | Ready timeout rate = min(measured, 40 MB/s) (clarifies "floor 40 MB/s"); R4 runs before R1 (§5, §7) |
+| — | implementer | Probe restart cap 1; without a measured disk rate (artefacts read from the session hash cache) the unit ready timeout uses the probe's 5 MB/s; an ablation unit runs only after its router's screen unit completed; the decision file header must carry the §4 provenance and a passed gate (§4, §5) |

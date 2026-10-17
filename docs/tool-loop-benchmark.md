@@ -406,8 +406,9 @@ added.
   types only). `--dry-run --dry-run-expected` runs the same replay through the full loop into a
   ledger. On the held-out split it is refused unless `--allow-heldout-gold-replay` is given
   (recorded in the header), because the ledger would then contain the gold outcomes.
-  `--validate-pack` still replays the held-out internally and prints only counts and failing
-  ids.
+  `--validate-pack` validates dev only by default; `--validate-pack --split heldout` needs the
+  same opt-in and then prints counts and pass/fail only (no ids). Any held-out `--dry-run` needs
+  the opt-in too.
 - **Prompt audit:** UTF-8 JSON bytes of system prompt, user context, history and tool schemas at
   each model call of the replay, with every prompt-growing flag on (`AUDIT_FLAGS`). The token
   figure is an estimate at 2.5 bytes per token (no tokenizer is bundled); exact counts need the
@@ -485,9 +486,9 @@ shown red by mutation: removing the derived-preview marking, and changing a READ
   gold.
 
 - Scoring variants S1–S4 / lenient, `--labels`, `test_nudged_episode_scored_both_ways`
-  (S4), the selection script and the manifest/hash gate (the held-out runner refusing a case
-  file whose hash differs from the frozen one, §11 item 8): they wait for the re-review of the
-  amended plan §6–§8. The runner pass-through and the queue are built (next section).
+  (S4) and the selection script: they wait for the re-review of the amended plan §6–§8. The
+  held-out hash gate (§11 item 8) is built (section "Held-out hash gate"), as are the runner
+  pass-through and the queue (next section).
 - The H3 live confirmation (a 3-case dev smoke with forced truncation, §11 item 25) needs
   inference.
 - The blind held-out, its gold review and the ambiguity adjudication (§4, §11 items 9–14).
@@ -1010,6 +1011,160 @@ Recorded by the coordinator's decision instead of further fixes; each with its m
   `--init` in the containers); there is no direct cgroup or process kill of container
   processes.
 
+### Thermal guard (2026-10-16)
+
+Added after the PC shut down at 18:52 on 2026-10-16 during the candidate screen (MiniCPM5-2B
+arm). The shutdown was orderly (docker got SIGTERM at 18:51:53; the queue logged
+`queue_stopped signal 15`); the cause is unknown and overheating is suspected. No unattended
+GPU run starts without this guard. The interrupted runner's cleanup could not list
+containers while docker was shutting down (`cleanup_verified=false`, `failure=cleanup` in the
+MiniCPM5-2B attempt); its exited server and harness containers and the network survived the
+reboot. Their logs were saved beside that attempt as `postmortem-srv.log` and
+`postmortem-harness.log`, then the owned objects were removed through the reconcile path
+(`toolloop_ops.Docker().cleanup()`, ok). The server log ends with an orderly
+`cleaning up before exit`.
+
+- **Sensors** (`toolloop_ops.read_sensors`): `/sys/class/hwmon/*`, found by each chip's
+  `name` file, never by hwmon index (it can change across boots); keys are
+  `<chip>:<label or tempN>` with the value and the chip's own `tempN_crit` in °C. An
+  unreadable input is kept with value `None` and is never treated as cool. On this host the
+  chips are `amdgpu` (`edge`, `junction`, `mem`, each with `crit`), `nvme` (`Composite` with
+  `crit`, `Sensor 1`, `Sensor 2`) and `acpitz` (`temp1`, `temp2`). **There is no CPU
+  temperature sensor on this host** (no `k10temp`), so CPU temperature is neither logged nor
+  guarded.
+- **Logging:** the queue samples every `sample_seconds` (30 s) during an attempt and writes
+  min, max and last per sensor into the attempt (`temperatures`); the manifest's `thermal`
+  block lists the sensors found, the limits and the session's thermal stops. The runner writes
+  `temp_<sensor>_before` before the server starts and `temp_<sensor>_peak` (maximum over its
+  health and harness polls) at cleanup.
+- **Stop rules** (queue file `thermal`, defaults shown): GPU junction (or edge if there is no
+  junction sensor) ≥ `junction_c` 95 °C, or edge ≥ `edge_c` 88 °C, continuously for
+  `sustain_seconds` 60 s; or any sensor at or above its own `crit` minus `crit_margin_c` 5 °C
+  (immediate). A missing or unreadable GPU sensor is `thermal_unknown`. Either stops the
+  attempt through the normal stop and cleanup path; the attempt is `incomplete_thermal`
+  (`failure` `thermal` or `thermal_unknown`) and the arm is rerun later as a whole arm.
+- **Cooldown:** after a thermal stop, and before any launch if the GPU is unreadable or over a
+  limit, no heavy work until the GPU edge is ≤ `cooldown_edge_c` 60 °C for
+  `cooldown_hold_seconds` 300 s in a row (an unreadable sample resets the hold), capped at
+  `cooldown_cap_seconds` 2700 s; reaching the cap stops the queue. `max_thermal_stops` 2
+  thermal stops in one session stop the queue.
+- **Watchdog:** independently of the queue, every tick the watchdog applies the hard limit
+  (any sensor at or above its crit minus 5 °C) and removes the owned containers
+  (`removed_thermal`). A sensor read error is logged; the queue owns the `thermal_unknown`
+  rule.
+- Tests: `test_thermal.py` (sysfs discovery by name, unreadable inputs, the runner CLI, the
+  sustained rule, a short spike, crit proximity, a missing sensor, cooldown hold and cap),
+  `ThermalQueueTests` (sustained stop, cooldown and whole-arm rerun, short spike, crit,
+  disappearing GPU sensor, two strikes, unreadable before launch, queue-file limits),
+  `ThermalWatchdogTests` (hard limit, below it, read error) and a runner provenance test.
+  Failing first: all red before the sampler and the guard existed. Mutation checks (each
+  killed): no sustain window; no crit check; a missing GPU sensor read as cool; the cooldown
+  accepting unreadable samples; no cooldown cap; no thermal sampling in the attempt; no
+  two-strike stop (the test then never ends: killed by its timeout); no cooldown after a stop;
+  no pre-launch check; no watchdog hard limit.
+
+#### Stricter guard (2026-10-16, after the cause was confirmed)
+
+The kernel logged `amdgpu: GPU over temperature range (SW CTF)` three times at 18:50–18:51,
+then the system shut down. A supervised fan test (main session) measured: on **auto fan** the
+firmware held PWM at about 22 % (1,200 RPM) while the junction climbed to 86 °C within 60 s
+at about 105 W with the edge only at 61 °C; with **manual pwm 255 plus a room fan** the
+junction plateaued at 76–79 °C for 5 min at 110 W (3,100–3,400 RPM). The power cap cannot be
+lowered meaningfully (`power1_cap_min` 134 W). The guard was tightened accordingly; these
+rules **replace** the stop rules above (all are queue-file `thermal` parameters, recorded in
+the manifest's `thermal.limits`):
+
+| Parameter | Default | Rule |
+|---|---|---|
+| `junction_stop_c` | 90 °C | GPU junction (edge if no junction sensor) at or above: immediate stop |
+| `edge_c`, `edge_sustain_seconds` | 80 °C, 20 s | GPU edge at or above, continuously |
+| `crit_margin_c` | 5 °C | any sensor at or above its own crit minus this: immediate |
+| `fan_pwm_min` | 230 | precondition and during the attempt: `pwm1_enable` = 1 (manual) and `pwm1` ≥ this |
+| `fan_rpm_min`, `fan_rpm_check_above_c` | 2000 RPM, 60 °C | `fan1_input` below this while the junction is above that |
+| `fan_fault_seconds` | 10 s | a fan problem lasting this long stops with `fan_fault` |
+| `sample_seconds` | 5 s | sampling during attempts (was 30 s) |
+| `cooldown_edge_c`, `cooldown_hold_seconds`, `cooldown_cap_seconds`, `max_thermal_stops` | 60 °C, 300 s, 2700 s, 2 | unchanged |
+
+- **Fan precondition:** the queue's prechecks and the runner (before the server load) read
+  `pwm1_enable`, `pwm1` and `fan1_input` of the chip named `amdgpu` and refuse unless the fan
+  is manual at ≥ 230: the arm is refused as `fan_not_manual` (runner exit 14,
+  `failure=fan_not_manual`), with the command to set it, for example
+  `echo 1 | sudo tee /sys/class/hwmon/hwmon<N>/pwm1_enable && echo 255 | sudo tee
+  /sys/class/hwmon/hwmon<N>/pwm1` (the path of the `amdgpu` chip is filled in). The manual
+  setting resets on reboot, so this catches a forgotten setup after a restart. The runner's
+  check uses the default `fan_pwm_min`; the queue's uses the queue file's value.
+- **During an attempt:** `pwm1_enable` leaving manual, `pwm1` < 230, an unreadable fan, or
+  `fan1_input` < 2000 RPM while the junction is above 60 °C, lasting 10 s, stops the attempt
+  as `fan_fault` (attempt `incomplete_thermal`). Because the fan will not fix itself, a fan
+  fault stops the queue for the session; it counts as a thermal stop.
+- **Watchdog:** checks every `--interval` (now 10 s by default, at most 60) the crit − 5 °C
+  hard limit and an emergency GPU junction ≥ 95 °C (`--emergency-junction`), and removes the
+  owned containers when either is exceeded. The queue starts it with the 10 s interval.
+- The fan readings (`amdgpu:fan1_rpm`, `amdgpu:pwm1`) appear with the temperatures in each
+  attempt's `temperatures`.
+- Tests: `test_thermal.py` now 20 (junction 90 immediate, edge 80 for 20 s, a short edge spike,
+  crit, missing sensor, edge for an absent junction, pwm reverting to auto mid-run, a short fan
+  glitch, low RPM only when warm, unreadable fan, stats, defaults, fan read by name, the
+  precondition and the `fancheck` CLI); queue thermal tests now 10 (fan precondition refusal,
+  pwm reverting to auto mid-run, 5 s sampling and the manifest limits added); watchdog
+  emergency junction and 10 s interval; runner `fan_not_manual` refusal before the server
+  load. Mutation checks (each killed): no immediate junction stop; no edge sustain; no fan
+  fault; fan glitch fatal; manual mode not required; no fan precheck; fan not sampled; no
+  emergency junction.
+- **Not run:** any of this under a real GPU load. The screens launched by the main session at
+  20:08 from `run-4e16649e9c10` use the previous guard plus the main session's interim
+  interlock script; this stricter guard applies to launches from a later commit.
+
+### CPU device mode (2026-10-16, GPU cooling fault)
+
+A 20 s diagnostic showed a cooling hardware fault: the forced 700 MHz sclk cap did not hold
+under compute (2,470–2,495 MHz, 142 W) and the junction went from 29 to 86 °C in 2 s with the
+edge at 42 °C (poor die contact). User decision: **CPU-only runs until the GPU is re-pasted;
+no GPU inference at all.**
+
+- **Per arm** `device: "cpu"` (queue file, also in `defaults`) and `threads` (1–64, default 6
+  on this Ryzen 5 1600, 6 cores / 12 threads); the runner takes `DEVICE=cpu` and `THREADS`.
+- **Server container:** no `/dev/dri` device nodes and no video/render `--group-add`, so
+  llama.cpp cannot reach the GPU, even for prompt processing; `--n-gpu-layers 0`,
+  `--threads N`; `--n-cpu-moe` is dropped (every layer is on the CPU). GPU arms are
+  unchanged, and a GPU arm without the device nodes now fails clearly (`infra_docker`).
+- **Identity:** `device` is in provenance (`device=cpu`), in the ledger header (harness
+  `--device`) and in `GROUP_IDENTITY`, and the server vector differs (`-ngl 0`, threads), so
+  CPU and GPU ledgers never merge.
+- **Thermal:** the fan precondition (`fan_precondition=skipped`) and the GPU temperature and fan
+  stops do not apply to CPU arms. The queue still samples every 5 s and records the GPU, NVMe
+  and ACPI temperatures and the fan; the runner still records `temp_*_before`/`_peak`; the
+  watchdog keeps its hard limits (crit − 5 °C, junction ≥ 95 °C) for every arm. CPU
+  temperature is not readable on this host (no `k10temp`): recorded as
+  `cpu_temperature=unavailable` in provenance and in the manifest.
+- **Timeouts and estimates:** request timeout ≥ 900 s per request and health wait ≥ 1800 s
+  (`model_registry.CPU_REQUEST_TIMEOUT`, `CPU_HEALTH_WAIT`); the queue file also sets them.
+  Seconds per episode: the queue file, else a measurement this session for the same model and
+  device (a completed arm, or the preflight's single episode when the main run did not
+  complete), else the conservative CPU default of 360 s (`CPU_SECONDS_PER_EPISODE`).
+- **Queue file** `tools/queues/screen-candidates-cpu-s40.json`: the same 40-case dev screen,
+  seed 17 and C0 settings as `screen-candidates-s40` (arm label `S40-c0-cpu`), in the order
+  lfm25-8b-a1b (MoE, 1B active), minicpm5-2b, lfm25-2.6b, granite42-3b, gemma4-e4b; the 8B
+  dense models are left out (too slow on CPU).
+- Tests: registry CPU args and timeouts; harness `--device` in the header and the identity;
+  runner (no `/dev/dri`, no `--group-add`, `-ngl 0`, threads, request timeout 900, fan
+  precondition skipped on CPU and enforced on GPU, bad device or threads refused); queue (env,
+  CPU estimate, hot GPU does not stop a CPU arm but is recorded, GPU arm still refused without
+  the fan, preflight measurement, device validation, the committed CPU queue). Red against
+  `0841275`: 10 of 12 new tests; the GPU-still-needs-the-fan tests held there by design, and
+  the device-validation test passed there for the wrong reason (unknown key).
+- **Measured CPU preflight (2026-10-16 20:38–20:42, host, one dev case):** lfm25-8b-a1b,
+  `DEVICE=cpu THREADS=6 CASES=dev-001 SEEDS=17 CTX=24576`, runner exit 0,
+  `cleanup_verified=true`. The model hash took about 5 min from the HDD and the pre-warm 46 s;
+  the server was healthy in 3 s. The episode took **122 s** (harness wall 124 s): 3 turns,
+  outcome `proposal`, scored correct; request latencies 48.9, 60.4 and 12.9 s; 9,185 prompt
+  and 1,677 completion tokens. The server log shows prompt processing at about 59–67 tokens/s
+  (the first prefill: 2,699 tokens in 40.3 s) and generation at about 23–24 tokens/s. VRAM use
+  stayed at its idle 579,670,016 B before, while loaded and at the end, so the GPU was not
+  used; GPU edge and junction peaked at 31 °C, NVMe Composite at 32.85 °C; server memory peak
+  4.42 GB, no swap. One case only: other cases and the dense models will differ; the queue
+  still starts from the 360 s default and switches to the session's own preflight measurement.
+
 ## Limitations
 
 - A model that writes a finishing call as plain text gets `no_outcome`. This is deliberate,
@@ -1099,3 +1254,27 @@ product decision.
 the `cases-heldout.json` hash recorded in each ledger header. With `MIMIK_V2_LEDGERS` mounted,
 missing git history is a test **failure**, not a skip. In a root container on the bind-mounted
 repo, run `git config --global --add safe.directory /w` before the suite.
+
+## Held-out hash gate (plan §11 item 8)
+
+A held-out run uses only the frozen blind case file. The pin (`tools/heldout-v3-pin.json`:
+sha256, 165 cases, outcome counts, default path) must equal the code anchor
+`HELDOUT_FROZEN_SHA256`. Harness: `--split heldout --heldout-cases FILE` (default: the pin's
+path); the file is read once, refused if missing or if its sha256 differs, parsed from the
+verified bytes, and its counts must equal the pin's. Runner: `HELDOUT_CASES` (checked in a
+check container, then mounted read-only at `/heldout/cases-heldout.json`). Queue:
+`heldout_cases` on held-out arms, with `cases` / `cases_file` subsets allowed when their source
+hash is the pin. Ledgers: `heldout_cases_sha256` and `heldout_pin_sha256` in the header and the
+case hash on every held-out row; summaries and merges refuse anything else. Registered
+verdict case sets only (the full set and the frozen-order 100-case prefix, `verdict_case_sets`
+in the pin); a dry-run or gold-replay held-out ledger never yields a verdict; held-out progress
+is always quiet; held-out subsets carry ids only. Details: `docs/tool-loop-heldout-v3-freeze.md`.
+
+**Held-out ledger policy (gate review round 3, main-session decision).** Held-out ledgers
+contain per-case gold and correctness, because scoring needs them. They are written with mode
+0600 and read only through `--summarize`'s aggregate output. Agents and the main session never
+open, read or print held-out ledger rows; `--episodes-csv` (and any other per-case export)
+refuses held-out rows unless `--allow-heldout-gold-replay` is given, which the blind protocol
+never does. Verdicts are reproducible from the ledger alone: `bar_verdict` checks the recorded
+pin digest and case-set digests against code constants (`HELDOUT_PIN_SHA256`,
+`HELDOUT_VERDICT_CASE_SETS`), not the live pin file.

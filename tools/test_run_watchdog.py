@@ -17,6 +17,13 @@ from pathlib import Path
 import run_watchdog as wd
 import toolloop_ops as ops
 
+_EMPTY_HWMON = tempfile.mkdtemp(prefix="no-hwmon-")
+
+
+def setUpModule():
+    # Unit tests never read the host's real sensors: an empty hwmon tree reads as no sensors.
+    ops.HWMON = Path(_EMPTY_HWMON)
+
 
 def at(*args):
     return dt.datetime(*args).timestamp()
@@ -343,6 +350,59 @@ class ReviewThreeWatchdogTests(WatchdogBase):
 
         ops.Docker(run=run, check_registry=registry).cleanup()
         self.assertEqual(sorted(removed), sorted([check, ops.SERVER]))
+
+
+class ThermalWatchdogTests(WatchdogBase):
+    def hot(self, value=106.0):
+        return {
+            "amdgpu:edge": {"value": 70.0, "crit": 100.0},
+            "amdgpu:junction": {"value": value, "crit": 110.0},
+        }
+
+    def test_hard_limit_removes_owned_containers_inside_the_window(self):
+        docker = FakeDocker([ops.SERVER])
+        self.clock = FakeClock(at(2026, 10, 17, 12, 0))  # Saturday: the window is open
+        dog = wd.Watchdog(docker, lambda: True, self.clock, self.log, thermal_reader=self.hot)
+        self.assertEqual(dog.tick(), "removed_thermal")
+        self.assertEqual(docker.owned(), [])
+        row = json.loads(self.log.read_text().splitlines()[-1])
+        self.assertIn("amdgpu:junction", row["breaches"][0])
+
+    def test_below_the_hard_limit_leaves_live_work_alone(self):
+        docker = FakeDocker([ops.SERVER])
+        self.clock = FakeClock(at(2026, 10, 17, 12, 0))
+        dog = wd.Watchdog(
+            docker, lambda: True, self.clock, self.log, thermal_reader=lambda: self.hot(94.9)
+        )
+        self.assertEqual(dog.tick(), "ok")
+        self.assertEqual(docker.cleanups, 0)
+
+    def test_emergency_junction_95(self):
+        docker = FakeDocker([ops.SERVER])
+        self.clock = FakeClock(at(2026, 10, 17, 12, 0))
+        dog = wd.Watchdog(
+            docker, lambda: True, self.clock, self.log, thermal_reader=lambda: self.hot(95.0)
+        )
+        self.assertEqual(dog.tick(), "removed_thermal")
+        row = json.loads(self.log.read_text().splitlines()[-1])
+        self.assertIn("junction 95.0", row["breaches"][-1])
+
+    def test_watchdog_checks_every_10_s_by_default(self):
+        import inspect
+
+        self.assertEqual(inspect.signature(wd.Watchdog).parameters["interval"].default, 10)
+        source = Path(wd.__file__).read_text()
+        self.assertIn('parser.add_argument("--interval", type=float, default=10)', source)
+
+    def test_sensor_read_error_is_logged_not_fatal(self):
+        def broken():
+            raise OSError("hwmon gone")
+
+        docker = FakeDocker([ops.SERVER])
+        self.clock = FakeClock(at(2026, 10, 17, 12, 0))
+        dog = wd.Watchdog(docker, lambda: True, self.clock, self.log, thermal_reader=broken)
+        self.assertEqual(dog.tick(), "ok")
+        self.assertIn("thermal_read_error", self.log.read_text())
 
 
 class LabelTests(unittest.TestCase):

@@ -78,6 +78,30 @@ one part of Sol R8 was outdated rather than wrong.
 No round-2 finding was judged wrong. Sonnet N2's numeric sentinel was replaced by `NONE` for
 the reason given.
 
+## Round 3 findings (revision 3)
+
+Re-review of revision 3 (`0b5fcc2`), read-only. **Sol** (`openai/gpt-6.1-sol`, `--chain main`):
+**GO-with-amendments**; N1/N2 closed, N3 and N4 medium. **Sonnet** (fresh subagent):
+**GO-with-amendments**, A1–A7. Third reviewer not retried for this short round. Adjudicated by
+the implementer against `harness-v3` at `fd35140` (merge of master). Revision 3.1 applies every
+amendment in place; table at the end of the plan.
+
+| ID | Sev. | Verdict | Evidence | Disposition (revision 3.1) |
+|---|---|---|---|---|
+| Sol N1/N2 | — | Closed | §3 algorithm and failure records | None |
+| Sol N3 | Med | Valid | §5 derived the decision timeout from the probe but gave the probe no cap of its own; legacy waits are 180 s (`local_decision_benchmark.py:491`, `:538`) | §5 probe caps (bytes / 5 MB/s + 600 s; 1,800 s), deadline-bounded; failed or incomplete probe → router ineligible |
+| Sol N4 | Med | Valid | One restart per unit but two units, and §7 budgeted one restart in total, without the timeout wait | §5 restart accounting per unit; §7 wall_u formula charging T + K + L per allowed restart in every unit; R3 cap includes both |
+| Son A1 | Med | Valid | One timeout plus one restart per unit makes one slow case end the unit | §5 sequence: restart + retry, second timeout = `timeout` + restart, N = 3 per unit; §6 test |
+| Son A2 | Med | Valid | Retry result vs original not specified | §5 final = retry, attempt log keeps all; §7 charges |
+| Son A3 | Med | Valid | Worker validates at 1e-5 (`:96-110`) while §3 says 1e-6; legacy ties are alphabetical (`:110`); the worker's failure carries no class (`:349-367`) | §3 `SUM_TOLERANCE` shared and sent in the request; canonical ties; `error_class` |
+| Son A4 | Low | Valid | `Worker` opens its log with mode `w` (`:376`), so a restart truncates it | §5 per-start logs; §6 test |
+| Son A5 | Med | Valid | `--budget-seconds` defaults to 1,200 s (`:472`), below every CPU unit | §5 router driver without the legacy budget; test |
+| Son A6 | Low | Valid | A failure routed to `ask_rule` could score correct on an `ask_rule` case | §4 never correct (replay and live) |
+| Son A7 | Med | Valid-partial | Recomputed from non-text metadata: 19 multi-case groups, 42 cases (9 en/it pairs) | §3 grouped folds; text-level near-duplicates not detectable without reading case text, recorded as residual |
+
+No round-3 finding was rejected. One clarification was added by the implementer: §5's "floor
+40 MB/s" is read as never assuming a disk faster than 40 MB/s for the ready timeout.
+
 ## Regression checks and verification
 
 - Documentation only. Code line citations re-read on `harness-v3`; dev pack counts recomputed
@@ -90,8 +114,9 @@ the reason given.
 
 ## Blockers and handoff
 
-- **Re-review:** a short independent review of revision 3 (§3, §4, §7 especially) before any
-  code; Sol's round-2 verdict was NO-GO.
+- **Re-review:** done (round 3, both GO-with-amendments); revision 3.1 applies the amendments.
+  Implementation proceeds under the prototype tier; an independent review is still required
+  before router results drive any decision.
 - **User:** confirm or change the defaults in the plan's questions, including the new coverage
   floor (95%) and running Kev-0.8B as an out-of-distribution probe.
 - Router inference starts only after the CPU screen queue (≈04:00 Saturday), via the queue

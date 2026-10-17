@@ -155,7 +155,8 @@ class TagTests(Base):
                 self.assertEqual(pack.cases["heldout"], [])
                 argv = ["--pack", str(root), "--split", "heldout", "--model-label", "m"]
                 args = tl.build_parser().parse_args([*argv, "--dry-run", "--output", "x"])
-                with self.assertRaisesRegex(tl.PackError, "no heldout cases"):
+                # §11 item 8: an ungated held-out pack never runs (before: "no heldout cases").
+                with self.assertRaisesRegex(tl.PackError, "hash gate"):
                     tl.run(args, tl.ScriptedModel(), io.StringIO(), pack=pack)
             finally:
                 pack.close()
@@ -1204,7 +1205,8 @@ class ValidatePackAuditTests(CliMixin, Base):
         self.assertIn(dev["max_case"], {c["id"] for c in self.pack.cases["dev"]})
         self.assertGreater(dev["largest_tool_result_bytes"], 0)
         self.assertEqual(report["expected_replay"]["dev"], {"cases": 6, "correct": 6, "failed": []})
-        self.assertEqual(report["expected_replay"]["heldout"]["cases"], 1)
+        # Round 2 of the held-out gate review (Sol 2): dev validation never touches held-out.
+        self.assertNotIn("heldout", report["expected_replay"])
 
     def test_expected_replay_failure_fails_validate(self):
         """A proposal gold that violates a constraint loads, but its replay is not correct."""
@@ -1453,8 +1455,14 @@ class ReviewCaseCoverageTests(unittest.TestCase):
     def test_incomplete_seed_coverage_fails_the_bar(self):
         rows = [scored(f"c{i}", "answer", correct=True, seed=17) for i in range(110)]
         rows += [scored(f"c{i}", "answer", correct=True, seed=29) for i in range(109)]
+        from test_tool_loop_benchmark import fixture_pin_patches, live_heldout_fields
+
+        fields = live_heldout_fields([f"c{i}" for i in range(110)])
         for row in rows:
             row["split"] = "heldout"
+            row.update(fields)
+        for patcher in fixture_pin_patches(110):
+            self.enterContext(patcher)
         (s,) = tl.summarize(rows)
         reasons = s["bar"]["variants"]["all_cases"]["reasons"]
         self.assertEqual(s["bar"]["variants"]["all_cases"]["verdict"], "FAIL")
@@ -1610,9 +1618,19 @@ class ReviewCliTests(CliMixin, Base):
             with self.assertRaises(SystemExit) as raised:
                 self.dry_run(tmp, "--split", "heldout", "--dry-run-expected")
             self.assertIn("--allow-heldout-gold-replay", str(raised.exception))
-            code, rows = self.dry_run(
-                tmp, "--split", "heldout", "--dry-run-expected", "--allow-heldout-gold-replay"
-            )
+            from test_heldout_gate import pinned, synthetic  # a gated synthetic file (§11 item 8)
+
+            path, pin_path, _ = synthetic(tmp)
+            with pinned(pin_path):
+                code, rows = self.dry_run(
+                    tmp,
+                    "--split",
+                    "heldout",
+                    "--dry-run-expected",
+                    "--allow-heldout-gold-replay",
+                    "--heldout-cases",
+                    str(path),
+                )
         self.assertEqual(code, 0)
         self.assertTrue(rows[0]["allow_heldout_gold_replay"])
 
