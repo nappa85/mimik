@@ -149,6 +149,20 @@ equality; `smoke_release.py --auth`; Chromium at both viewports; the fresh offli
 | Space Bunny F5 | Noted; no change. | — |
 | Sonnet nit | `legacy_editor_notes_keep_leading_newlines` asserts 303 exactly. | — |
 
+### Verification of the final-review fixes
+
+Commit `24a08ca` (tree `ac6b775`); the full gate set ran on that tree before the commit, every
+container at `--cpus 2`: fmt; strict Clippy; 454 tests passed, 0 failed, 1 ignored (306 library
+tests); release formula tests 82; release measurements 7; `formula_eval`; `source_fixture`;
+Ruff; tools unittest 455 run (39 skipped); actionlint; `cargo about --fail`; `cargo audit`
+(333 crates, no findings); release build 21,045,592 bytes (+243,072 against the master
+`f9d34e0` baseline of 20,802,520, +1.17%); package, verify, vendor and release archives
+(SHA-256 runtime `a3404ff123abdeb9fdb798fd0f76036c36bd6fe099723bcbc3e88e6e7897d76a`, source
+`ed2c0f55068c85058da4563a88ee5049eda11501d08db308d275b7911d7e3ec7`, dependencies
+`dcae9cc95078b60625bb701ffab465534f14da995a5a7b1dad9fc8c79467847e`), checksums and binary
+equality; `smoke_release.py --auth`; Chromium at both viewports; the fresh offline rebuild
+(5 min 11 s); `lan_smoke.py`. All passed.
+
 ## Status
 
 All Major and Minor findings are fixed or documented; T-F1 was rejected with source evidence
