@@ -3341,3 +3341,74 @@ async fn native_sheet_textareas_keep_leading_newlines() {
     }
     expect(&sheet_page(&setup).await, "second reload");
 }
+
+/// Final review (Sol): native form submission serialises textarea line breaks as CR LF. The
+/// transport normalises CR LF and CR to LF, so an unchanged browser Save stores the same
+/// bytes and a `%0D%0A` body is stored with LF.
+#[tokio::test]
+async fn browser_crlf_submission_is_stored_as_lf() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let mut definition = hostile_definition();
+    definition["fields"].as_array_mut().unwrap().push(
+        json!({"id": "essay", "label": "Essay", "control": "multiline",
+                     "nullable": false, "mapping": mapped()}),
+    );
+    definition["groups"][0]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push("essay".into());
+    let setup = list_setup(&definition).await;
+    let mut snapshot = blank(&setup, 1).await;
+    snapshot.sheet_id = 1;
+    snapshot.notes = "\nnotes\nsecond line".into();
+    snapshot.data = json!({"label": "x", "essay": "\n\nscalar\nmore",
+                           "gear": [{"id": "r1-1", "name": "n", "story": "\nrow\nend"}]});
+    let created = write(&setup, 1, snapshot, "create").await.unwrap();
+    // What a browser sends for the unchanged page: textarea line breaks as CR LF.
+    let view = sheet_page(&setup).await;
+    let textareas = ["notes", "value-essay", "row-1-0-1"];
+    let browser: Vec<(String, String)> = submitted(&view)
+        .into_iter()
+        .map(|(key, value)| {
+            let value = if textareas.contains(&key.as_str()) {
+                value.replace('\n', "\r\n")
+            } else {
+                value
+            };
+            (key, value)
+        })
+        .collect();
+    assert!(
+        serde_urlencoded::to_string(&browser)
+            .unwrap()
+            .contains("%0D%0A")
+    );
+    assert_eq!(
+        setup.post("/private-sheets/1", browser).await.0,
+        StatusCode::SEE_OTHER
+    );
+    let saved = reopen(&setup, 1).await;
+    assert_eq!(saved.revision, 2);
+    assert_eq!(
+        serde_json::to_string(&(&saved.data, &saved.notes)).unwrap(),
+        serde_json::to_string(&(&created.data, &created.notes)).unwrap(),
+        "an unchanged browser Save stores byte-identical values"
+    );
+    // A raw CR LF / lone CR body is stored with LF.
+    let mut form = submitted(&sheet_page(&setup).await);
+    set(&mut form, "value-essay", "a\r\nb\rc");
+    assert_eq!(
+        setup.post("/private-sheets/1", form).await.0,
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(reopen(&setup, 1).await.data["essay"], "a\nb\nc");
+    // Length limits count the normalised text: 20,000 CR LF pairs are 20,000 notes characters.
+    let mut form = submitted(&sheet_page(&setup).await);
+    set(&mut form, "notes", &"\r\n".repeat(20_000));
+    assert_eq!(
+        setup.post("/private-sheets/1", form).await.0,
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(reopen(&setup, 1).await.notes, "\n".repeat(20_000));
+}

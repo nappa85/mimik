@@ -195,6 +195,14 @@ class TextareaNewlineTests(unittest.TestCase):
         self.assertEqual(parser.forms["/s"], {"a": "plain", "b": "\nkept", "c": "x"})
         self.assertEqual(parser.values["b"], "\nkept")
 
+    def test_a_crlf_split_across_two_feeds_is_one_newline(self):
+        parser = FormFields()
+        parser.feed('<form action="/s"><textarea name="a">\r')
+        parser.feed('\nplain</textarea><textarea name="b">x\r')
+        parser.feed("</textarea></form>")
+        parser.close()
+        self.assertEqual(parser.forms["/s"], {"a": "plain", "b": "x\n"})
+
     def test_literal_crlf_and_cr_are_normalised_before_the_initial_newline_rule(self):
         parser = FormFields()
         parser.feed(

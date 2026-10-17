@@ -58,7 +58,8 @@
 {% else %}
 <input type="hidden" name="revision" value="{{ page.revision }}">
 <label>Confirmed printed page label (or 'unnumbered', at most 50 Unicode characters)<input name="printed_label" value="{{ page.printed_label }}" required></label>
-<label>Completeness rationale (at most 5,000 Unicode characters)<textarea name="rationale" required></textarea></label>
+<label>Completeness rationale (at most 5,000 Unicode characters)<textarea name="rationale" required>
+</textarea></label>
 {% endif %}<button>Confirm inspected page completeness</button></form></section>
 </section></div>
 <section class="panel"><h2>Append-only review history</h2>

@@ -40,9 +40,20 @@ impl<'de> Visitor<'de> for PairsSeed {
                     "duplicate key or form expansion limit",
                 ));
             }
-            pairs.push((key, value));
+            pairs.push((key, newlines_to_lf(value)));
         }
         Ok(Pairs(pairs))
+    }
+}
+
+/// Native form submission serialises textarea line breaks as CR LF; the textarea API value
+/// (and canonical storage) uses LF. Every submitted value therefore has CR LF and lone CR
+/// normalised to LF before any validation, so length limits count the normalised text.
+fn newlines_to_lf(value: String) -> String {
+    if value.contains('\r') {
+        value.replace("\r\n", "\n").replace('\r', "\n")
+    } else {
+        value
     }
 }
 
@@ -124,6 +135,19 @@ mod tests {
         assert!(Pairs::parse_limited(long.as_bytes(), SHEET_FORM_PAIRS).is_err());
         let edge = format!("{}=0", "k".repeat(70));
         assert!(Pairs::parse_limited(edge.as_bytes(), SHEET_FORM_PAIRS).is_ok());
+    }
+
+    #[test]
+    fn submitted_values_have_crlf_and_cr_normalised_to_lf() {
+        let pairs = Pairs::parse(b"a=%0D%0Aone%0D%0Atwo&b=%0Dthree&c=plain").unwrap();
+        assert_eq!(
+            pairs.0,
+            [
+                ("a".to_owned(), "\none\ntwo".to_owned()),
+                ("b".to_owned(), "\nthree".to_owned()),
+                ("c".to_owned(), "plain".to_owned()),
+            ]
+        );
     }
 
     /// Debug build, 65,536 pairs: set admission is linear; the old per-pair `contains` over

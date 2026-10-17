@@ -397,9 +397,21 @@ class FormFields(HTMLParser):
     def feed(self, data):
         # HTML input-stream preprocessing: literal CRLF and lone CR become LF before
         # tokenisation (character references such as &#13; are decoded later, untouched).
+        # A trailing CR is held back, so a CRLF split across two feeds stays one newline.
+        data = self.pending_cr + data
+        self.pending_cr = "\r" if data.endswith("\r") else ""
+        if self.pending_cr:
+            data = data[:-1]
         super().feed(data.replace("\r\n", "\n").replace("\r", "\n"))
 
+    def close(self):
+        if self.pending_cr:
+            self.pending_cr = ""
+            super().feed("\n")
+        super().close()
+
     def __init__(self):
+        self.pending_cr = ""
         super().__init__(convert_charrefs=True)
         self.values = {}
         self.textarea = None
@@ -733,11 +745,17 @@ def smoke_sources():
     correction = dict(
         fields.forms[unit_path],
         state="corrected",
-        correction="Verified fixture correction",
+        correction="\nVerified fixture correction",
         actor="smoke-reviewer",
         rationale="Synthetic correction test",
     )
     require(request(unit_path, correction)[0] == 303, "Correction failed")
+    fields = FormFields()
+    fields.feed(request(path)[2])
+    require(
+        fields.forms[unit_path].get("correction") == "\nVerified fixture correction",
+        "Source correction lost its leading newline",
+    )
     require("No reviewed match" in request(query)[2], "Changed page remained searchable")
     fields = FormFields()
     fields.feed(request(path)[2])
@@ -756,7 +774,11 @@ def smoke_sources():
         }
     )
     require(
-        '<pre class="evidence-text">Verified fixture correction' in request(correction_query)[2],
+        re.search(
+            r'<pre class="evidence-text">\n?Verified fixture correction',
+            request(correction_query)[2],
+        )
+        is not None,
         "Corrected evidence missing",
     )
     return correction_query
@@ -802,8 +824,15 @@ def smoke_positive_advice():
         "blocking_armor": "no",
         "disoriented": "no",
         "power_uses": "3",
+        "goal": "\n\nreach the gate",
     }
     html = request(path + "/context", context)[2]
+    goal = FormFields()
+    goal.feed(html)
+    require(
+        goal.values.get("goal") == "\n\nreach the gate",
+        "Context goal lost its leading newlines",
+    )
     require(
         "Ordinary melee attack — blocked standard path" in html,
         "Exhausted ordinary action not blocked",
@@ -2038,8 +2067,11 @@ def main():
             )
             if correction_query:
                 require(
-                    '<pre class="evidence-text">Verified fixture correction'
-                    in request(correction_query)[2],
+                    re.search(
+                        r'<pre class="evidence-text">\n?Verified fixture correction',
+                        request(correction_query)[2],
+                    )
+                    is not None,
                     "Reviewed evidence persistence failed",
                 )
         finally:

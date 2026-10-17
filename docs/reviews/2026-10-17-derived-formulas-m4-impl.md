@@ -102,7 +102,7 @@ revision twice), N7 ("LF-exact").
 | N3 (T-F7 403 path) | **Not tested; recorded why.** The window lies between two awaited steps of one handler, after a database-rejected save; the only seam there (`AFTER_FAILED_SAVE`) is a synchronous hook that cannot run the async store calls a departure needs, so a test would need a new async test seam in shipped code for a documented, nothing-saved 403. | — |
 | N4 | The streamed guard proves that a body without `Content-Length` is bounded (413, whichever layer answers; the router-wide 1 MiB layer also covers these routes). That the 5 MiB limit, not 1 MiB, is the one that applies to sheet POSTs is pinned by `sheet_post_accepts_5mib_and_413s_5mib_plus_1` (exactly 5 MiB is not 413). | — |
 | N5 | The contract quotes the full stale warning. | — |
-| N7 | Plan D7 and the contract say "LF-exact" (a browser submits CR LF as LF). | — |
+| N7 | Plan D7 and the contract said "LF-exact" (a browser submits CR LF as LF). **Superseded by the final review:** that description of browser submission was wrong; see "Final review". | — |
 | Sonnet Nit 5 | The old `=1.2.2` pin of `form_urlencoded` had no recorded rationale (it was the locked version at adoption); `"1.2"` stays, with `Cargo.lock` still selecting 1.2.2. | — |
 
 ### Verification of the final fixes
@@ -118,6 +118,36 @@ Ruff; tools unittest 454 run (39 skipped); actionlint; `cargo about --fail`; `ca
 `94605ae7c2818665349a5ea7e068e16c3edac4eaba3ddb9f78809136378205f8`), checksums and binary
 equality; `smoke_release.py --auth`; Chromium at both viewports; the fresh offline rebuild
 (6 min 6 s); `lan_smoke.py`. All passed.
+
+## Final review (commit `1745e36`)
+
+- Sonnet: **MERGE**, with a nit: `tests/foundation.rs` accepted any success or redirect.
+- Sol: **MERGE AFTER FIXES**, Minor. N7 described browser form serialisation incorrectly. HTML
+  parsing turns CR LF into LF, but a native form submission serialises textarea line breaks as
+  CR LF (`%0D%0A`), and `campaigns::transport` stored them raw. An unchanged browser Save of
+  `"\nnotes"` therefore stored `"\r\nnotes"`. The tests did not catch it, because the
+  `submitted` helper posts the DOM text (LF) directly. Confirmed by the main session.
+- Space Bunny: **MERGE AFTER FIXES**, Minor and Nit only. It verified the textarea newline
+  claims (18 valued textareas, each with exactly one sacrificial LF, nothing stripped twice)
+  and N6 (every revision field is `i64`).
+  - F1: `FormFields.feed` was not chunk-safe; a CR LF split across feeds became two newlines.
+  - F2: the smoke's newline strip made it blind to a missing sacrificial newline on
+    `index.html`, `mork_context.html`, `source_page.html` and the material completion branch.
+  - F3: the empty completion textarea had no sacrificial newline.
+  - F4: the contract documented the guarantee only for M4 sheets.
+  - F5: the N6 guards are weak discriminators; their discriminating assertions are the 4xx
+    status and "no draft re-render".
+
+| Finding | Disposition | Regression |
+|---|---|---|
+| Sol (CR LF storage) | `campaigns::transport` normalises CR LF and lone CR to LF in every submitted value while decoding. This covers private runtime and native sheets and every campaign route. It runs before validation, so the 20,000-character limits count the normalised text. The legacy `/characters`, source-review and material-review forms use their own extractors with no shared decode point; they keep CR LF, recorded as a known limitation in the contract. Plan D7, the contract and this record now separate "textarea content is preserved" from "canonical storage is LF". | `submitted_values_have_crlf_and_cr_normalised_to_lf` (unit test); `browser_crlf_submission_is_stored_as_lf` covers an unchanged browser Save with CR LF (stored bytes identical), a raw `a\r\nb\rc` (stored `a\nb\nc`) and 20,000 CR LF pairs accepted as 20,000 characters. It failed first: `"\r\n\r\nscalar…"` was stored. |
+| Space Bunny F1 | `FormFields.feed` holds back a trailing CR until the next feed or `close()`. | `test_a_crlf_split_across_two_feeds_is_one_newline`; failed first: `'\nplain'` vs `'plain'` |
+| Space Bunny F2 | The smoke's source-review round trip stores the correction `"\nVerified fixture correction"` and reads it back. The positive-advice context posts the goal `"\n\nreach the gate"` and reads it back. A scraper test covers the material completion-rationale branch. | Smoke mutation: a release build of `mork_context.html` without the newline failed `smoke_release.py --auth` with "Context goal lost its leading newlines". `material_completion_rationale_keeps_leading_newlines` is a guard; a mutation removing that branch's newline fails it. |
+| F2 follow-up | The first gate pass on the final-review tree failed `smoke_release.py` ("Reviewed evidence persistence failed"): the post-restart search check still expected the correction without its new leading newline. It now accepts the optional newline like the first check, and the whole set was rerun. | the smoke itself |
+| Space Bunny F3 | The empty completion textarea also emits the sacrificial newline, for consistency. | — |
+| Space Bunny F4 | The contract's line-break paragraph lists every template that carries the newline. | — |
+| Space Bunny F5 | Noted; no change. | — |
+| Sonnet nit | `legacy_editor_notes_keep_leading_newlines` asserts 303 exactly. | — |
 
 ## Status
 

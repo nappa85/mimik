@@ -1174,3 +1174,35 @@ async fn router_get(
         .await
         .unwrap()
 }
+
+/// Final review (Space Bunny F2): the page-completeness rationale of a rejected draft keeps its
+/// leading newlines (the `Some(form)` branch of the completion textarea).
+#[tokio::test]
+async fn material_completion_rationale_keeps_leading_newlines() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let form = vec![
+        ("csrf".into(), "a".repeat(64)),
+        ("revision".into(), "0".into()),
+        ("printed_label".into(), "1".into()),
+        ("rationale".into(), "\n\nwhole page checked".into()),
+    ];
+    let response = document_at(&app, &auth[0], "/admin/materials/pages/1", form).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let html = body(response).await;
+    let page = scraper::Html::parse_document(&html);
+    let rationale: String = page
+        .select(
+            &scraper::Selector::parse(
+                "form[action=\"/admin/materials/pages/1\"] textarea[name=rationale]",
+            )
+            .unwrap(),
+        )
+        .next()
+        .expect("completion rationale")
+        .text()
+        .collect();
+    assert_eq!(rationale, "\n\nwhole page checked");
+}

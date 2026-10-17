@@ -265,7 +265,11 @@ async fn legacy_editor_notes_keep_leading_newlines() {
         .oneshot(post("/characters/1", &form("1"), false))
         .await
         .unwrap();
-    assert!(response.status().is_success() || response.status().is_redirection());
+    assert_eq!(
+        response.status(),
+        StatusCode::SEE_OTHER,
+        "unchanged non-htmx save"
+    );
     assert_eq!(
         store.get(1).await.unwrap().input.notes,
         "\n\nlegacy notes",

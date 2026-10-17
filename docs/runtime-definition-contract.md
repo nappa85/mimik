@@ -359,9 +359,19 @@ editable; a per-property `editable: false` flag and an item catalogue are a late
   1 MiB (a larger draft could never be stored); otherwise it answers 422 with an alert:
   "Nothing was saved; copy large text before submitting." Each submitted string is echoed
   in full at most once (the submitted revision included); second visible contexts show a
-  64-character excerpt. Textareas emit a sacrificial newline after the opening tag, so values
-  that start with newlines round-trip LF-exact (a browser submits CR LF as LF, so a stored
-  CR is not preserved through the form). The 5 MiB limit is enforced on the body
+  64-character excerpt. Two separate guarantees cover line breaks:
+  - *Textarea content is preserved.* Every textarea in the application (private sheets,
+    list cells, native fields, and also the legacy editor, character creation, the MÖRK BORG
+    context page, source review and material review) emits a sacrificial newline after its
+    opening tag, because HTML parsing drops the first newline there; leading newlines show
+    and resubmit intact.
+  - *Canonical storage is LF.* A native form submission serialises textarea line breaks as
+    CR LF. The private-sheet and campaign transport (`campaigns::transport`) normalises CR LF
+    and lone CR to LF in every submitted value before validation (length limits count the
+    normalised text), so an unchanged browser Save stores byte-identical values and stored
+    text never contains CR. **Known limitation:** the legacy `/characters` editor and the
+    source- and material-review forms decode with their own form extractors, with no shared
+    decode point; they store browser-submitted line breaks as CR LF. The 5 MiB limit is enforced on the body
   itself, with or without a `Content-Length`. The single runtime permit is taken before the body is
   read, so buffering happens under it: at most one sheet POST (≤ 5 MiB) buffers at a time and
   any other runtime request answers 503 meanwhile, an accepted risk alongside the 5 s
