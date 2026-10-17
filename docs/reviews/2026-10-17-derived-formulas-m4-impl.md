@@ -231,3 +231,29 @@ Two incidents during the rerun, neither on the gated tree:
 All Major and Minor findings are fixed or documented; T-F1 was rejected with source evidence
 and is pinned by a guard test. The fix commits go to a re-review of the fixes before merge
 (main session).
+
+## Closing review (2a67a99) and merge
+
+- **Reviewers.**
+  - OpenAI Sol (`openai/gpt-6.1-sol`): **MERGE**.
+  - Sonnet subagent: **MERGE**.
+  - Space Bunny (`opencode/space-bunny-free`): **MERGE**.
+  - None raised Blocking or Major findings.
+- **Merge policy** (stated to the reviewers in advance): only Blocking or Major findings hold the merge. Minor and Nit findings go to the follow-up list below.
+- **Merge.** The branch was merged into master as `758ccf4`. Master `f9d34e0` was an ancestor of the branch, so the merged tree equals `2a67a99`. That is gated tree `9dbf78f` plus documentation only. The gates were not rerun after the merge.
+
+### Follow-up list (Minor and Nit, not merge-holding)
+
+1. **CRLF round-trip tests for three decoders** (Sol, Sonnet, Space Bunny M1).
+   - Add one per decoder: `SheetForm` (each MÖRK BORG textarea), `mork_advice::Context.goal`, `games::CreateRequest.notes`.
+   - Also add a creation-page leading-newline round trip.
+   - Reason: removing a `deserialize_with` attribute would not fail any current test.
+2. **Scope the LF guarantee in the wording** (Space Bunny, Sonnet nit).
+   - Applies to `release-scope.md` and the contract.
+   - Change it to "textarea-backed fields plus campaign-transport values".
+   - Single-line inputs such as `printed_label` and credentials are not normalised, and must not be.
+3. **Record why campaign transport normalises every value** (Space Bunny).
+   - This includes hidden IDs and states, so a trailing `%0D` is now accepted as the clean value.
+   - Any future byte-exact field routed through `Pairs` would need an exemption.
+4. **Note that the `lf` serde wrappers also affect non-form deserialisation** of those structs (Sonnet). There is no current use.
+5. **Nits:** the extra allocation in the `lf` helpers, and the remaining items in the reviewers' texts.

@@ -4,6 +4,7 @@ Last updated: 2026-10-16.
 
 ## Resume here
 
+- [x] **M4 plain list editing MERGED** (`758ccf4`). Four review rounds with Sol, Sonnet and Space Bunny; the closing round was MERGE from all three. Follow-ups are listed in `docs/reviews/2026-10-17-derived-formulas-m4-impl.md`, "Closing review" section (decoder CRLF tests, LF-guarantee wording).
 - **Plans and decisions (2026-10-16, evening):**
   - **ACTIVE — M4 implemented on branch `derived-formulas`** (worktree `mimik-wt/formula`, local commits `381f416`…`92cd03f`, rebased on master `f9d34e0`, not merged). Plan revision 3.1 (round-3 amendments RE3-1, RE3-2, N-A…N-H) in `381f416`; steps 1–8 one commit each; summary, measurements, gate evidence and the red→green table in `docs/derived-formulas-plan.md` §17.
     - [x] Full gate set on the step-8 candidate (tree `aac0b3a`): fmt, strict Clippy, 442 tests, release formula tests, examples, Ruff/unittest, actionlint, about, audit, release build (+245,888 bytes vs master), package/vendor/release archives, checksums and binary equality, `smoke_release.py --auth`, Chromium at both viewports, fresh offline rebuild, LAN/proxy gate.
