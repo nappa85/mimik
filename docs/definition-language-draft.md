@@ -5,9 +5,14 @@ yet a basis for code. Record and agreed order of work:
 [reviews/2026-10-18-definition-language-draft.md](reviews/2026-10-18-definition-language-draft.md).
 The YAML example below is an authoring sketch. It is **not admissible** under `cel-mimik-1`
 (nested macros, dereference, indexing, reserved `int`, truncating division), and §"How to
-validate" step 3 is superseded by the review's order of work. Pending user decisions:
-- whether rule violations warn or block;
-- how transitions such as unpaid purchases are checked when players edit directly.
+validate" step 3 is superseded by the review's order of work. User decisions (2026-10-18):
+1. **Rule violations warn and never block.** Every change is logged and can be reverted.
+   Where possible, the app suggests a correction.
+2. **Advancement is context-driven.** An edit that only makes sense inside an advancement
+   (for example raising max HP directly) is warned as unsupported, because the context is
+   missing. Starting from the trigger (raising the level) opens that context. The app then
+   highlights a "happy path": which fields can or should change, with hints on each field. It
+   checks the changes against the state before the advancement.
 
 ## Why
 
