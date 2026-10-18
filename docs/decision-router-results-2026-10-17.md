@@ -98,13 +98,18 @@ Baselines on the same folds: B-ask 15/175 correct, 0 unsafe; B-risk 29/175, 0 un
 
 ## Addendum (2026-10-18): R3 Qwen3.5-9B
 
-Status: **self-analysis, under independent review** (`docs/reviews/2026-10-18-router-r3-results.md`);
-it does not drive a decision until that review is recorded.
+Status: **reviewed** (Sol and Sonnet with independent recomputation: CONFIRMED WITH CORRECTIONS,
+applied; `docs/reviews/2026-10-18-router-r3-results.md`).
 
 - Queue `tools/queues/router-cpu-dev-r3.json`, frozen `0b7c694edf8518f91cb96386051d8697e84db57c`,
   CPU, 2026-10-17 22:50 – 2026-10-18 14:54, under the user's time-limited schedule override
-  (removed automatically when the queue ended). Probe, screen (215 records, 0 failures) and
-  ablation (80, 0 failures) complete.
+  (removed automatically when the queue ended). Probe (3 records; queue log `probe-r3`
+  complete 23:06:18), screen (215 records, 0 failures) and ablation (80, 0 failures) complete.
+- **Pre-registered cap overridden.** Plan §2/§7 allow R3 only if its whole evaluation projects
+  ≤ 12 h. The projection was 39.1 h (`router-cpu-dev.json` skipped it). On 2026-10-17 the user
+  decided to run it anyway; `router-cpu-dev-r3.json` drops the cap, and the schedule override
+  is a separate grant. Realised: screen 14.9 h, ablation 0.9 h. The cap is a budget rule, not a
+  scoring rule; the gate result does not depend on it.
 - Analysis from the run's own frozen worktree (`decision_router.py select --router R3`, then
   `overlay` on the same C0 9B S40 ledger). A first attempt from the b5a4f50 worktree was
   correctly refused by the code-identity check (`router_sha256`, `render_sha256` differ); it
@@ -116,7 +121,8 @@ it does not drive a decision until that review is recorded.
 | Raw top-1 correct | 87/175 |
 | Raw top-1 unsafe (all / at-risk) | 26/175 / 26/70 |
 | Raw supported recall | 48/105 (proposal 19/67, answer 29/38) |
-| Outer-fold τ_i | 0.95 in all 5 folds |
+| Outer-fold τ_i | 0.95 in all 5 folds (so out-of-fold routes equal `route(·, 0.95)` on all 175) |
+| Supported routes at τ = 0.95 | 18/175 (coverage 10.3%), 18/18 correct, 0 unsafe; no statistical certification (Wilson upper bounds of zero unsafe 2.15% / 5.20%) |
 | Inner unsafe per fold at 0.90 / 0.95 | 3, 4, 3, 2, 4 / 0 in every fold |
 | Out-of-fold correct / unsafe / supported recall | 73/175, 0/175, 18/105 (proposal 2/67, answer 16/38) |
 | Gate | fail (recall 18/105 < 84) |
@@ -131,16 +137,57 @@ it does not drive a decision until that review is recorded.
 Reading:
 - R3 is the first router with a feasible threshold: τ = 0.95 gives zero unsafe routes on every
   inner set and zero over the 175 out-of-fold routes, and its at-risk top-1 beats the
-  constant-risk baseline. It improves with the state over both ablations, and its choice is
-  less order-sensitive than R4's or R1's (11/40 flips).
-- It fails on recall. Its raw top-1 labels 38 of the 67 proposal cases as `answer`; below τ,
-  those cases fall to the at-risk argmax, mostly `conflict` (44 of 67 out of fold). Only 2 of
-  67 proposals are routed `proposal`. The proposal-against-answer split, not the
-  supported-against-at-risk split, is where it loses most supported cases. Possible
-  contributors (unmeasured): the proposal option's `propose_change` preview wording and the C0
-  entries without values (see Limitations above).
-- Per plan §3 the result is **null** for R3 too: no live SYS-R decision file.
-- Exploratory and not pre-registered: whether a router asked only "supported or at-risk"
-  (leaving proposal against answer to the tool loop) would pass is a new question. It would
-  need its own plan, frozen before any rerun, and these dev data are now seen.
+  constant-risk baseline (marginally: Wilson lower bound 44.1% against 41.4%; "not null" is
+  not a positive claim). Full state beats both ablations under the registered rule (23/40
+  against 9 and 9), but the empty state is one identical prompt answered `answer` 40 times, so
+  its 9/40 is just the answer cases, and full state only modestly beats a constant `proposal`
+  (15/40) on this subset.
+- No threshold can rescue it: the policy can only remove supported routes, and the raw
+  exact-kind ceiling is 48/105, already below the 84/105 floor.
+- It fails on recall, for two reasons of comparable size (87 out-of-fold supported misses):
+  - **raw exact-kind errors** (57): 38 proposal cases labelled `answer`, 19 supported cases
+    labelled an at-risk kind;
+  - **threshold loss** (30): supported cases whose raw top-1 was right but below τ = 0.95
+    (proposal 19 → 2, answer 29 → 16).
+  Below τ these cases fall to the at-risk argmax, mostly `conflict` (44 of 67 proposals).
+- The proposal → answer confusion depends on option order: on the 15 proposal-expected flip
+  cases, canonical order picks answer 10, proposal 5; reversed order picks answer 3,
+  proposal 6, conflict 5 (reversed accuracy 25/40 against 23/40 canonical). Overall the
+  canonical top-1 is `answer` on 80/175 cases against 38 expected. 11/40 flips is lower than
+  R4 or R1 but still high.
+- **Instrument defect (named for any follow-up):** the proposal option's precondition ("after
+  a propose_change preview that is correct and has no violations") cannot be met from the
+  router's input, which has no preview, while `answer` ("for questions that need no change")
+  is decidable from it. This asymmetry predicts the observed proposal → answer direction; the
+  ablations cannot detect it, since they remove evidence rather than supply the preview. Any
+  re-specified option set must make every branch decidable from the state actually rendered.
+  (Separately, only collection entries lack values; top-level sheet fields carry them.) Examples: dev-015 "Light my lamp."
+  p(answer) 0.87, p(proposal) 0.07; dev-017 "We wait two watches in the cellar with my lamp
+  burning." p(answer) 0.81, p(proposal) 0.03. The router was never offered an option phrased
+  as "the request requires editing the sheet". Its size is not measured.
+- **The binary follow-up is not promising for this model and prompt** (exploratory, post hoc,
+  tuned on seen dev data, optimistic): using p(proposal) + p(answer) as "supported" mass, ≥ 0.95
+  admits 29/105 supported and 2/70 at-risk cases; zero at-risk needs ≥ 0.98, which admits
+  10/105. Both are far below the 84/105 floor, so fixing proposal against answer alone would
+  not make this router pass; separating supported from at-risk is also too weak. (Collapsing
+  the raw top-1 labels gives 86/105 supported, two above the floor, but with 26/70 at-risk
+  cases also called supported, so it is not a zero-unsafe result.) Any re-scoring of these
+  retained records is post hoc on seen data and can never be confirmatory, whenever a plan is
+  frozen: a new plan must freeze both its readout and the status of these 175 records as
+  development data.
+- S40 replay, plan §0's narrow hypothesis: against C0 alone, the routed system has 5 fewer
+  false supports (8 → 3) and 9 fewer correct (25 → 16). Routed at-risk correctness is scored
+  against rev3 expected outcomes; committed supported routes keep the pre-rev3 ledger's score.
+  The overlay report keeps totals only (no per-case rows); see the review record.
+- S40 replay: the 3 false supports are routed-answer cases where C0 itself gave a wrong value
+  (dev-011, dev-027, ho-051), not router unsafe routes: zero unsafe routes does not mean zero
+  false support. The routed system scores worse than C0 alone (16/40 against 25/40), so the
+  safe threshold has no system value here. The C0 ledger predates rev3: its expected outcomes
+  equal rev3's for all 40 ids, but value-level false-support flags come from the old pack, and
+  this mixes versions in a way the oracle (`docs/decision-router-implementation.md`) avoided;
+  descriptive only.
+- Per plan §3 the result is **null** for R3 too: no live SYS-R decision file. With R4, R1 and
+  R3 all null, the raw-readout decision router does not reach the gate with these models,
+  this prompt and this state.
+- Note: 141 of the 175 dev ids are named `ho-*`; they are dev cases (`split: dev`), not held-out.
 - 242 s per decision on CPU is far from interactive use.
