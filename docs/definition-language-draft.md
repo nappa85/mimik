@@ -131,9 +131,8 @@ fully, half casters count half") are one more formula. They need no Rust change.
 
 - **Method:** the main session's general knowledge of the mechanics, not the PDFs. The
   owner's library covers archetypes A (three games, one of them Italian), D (one) and F (one),
-  plus one d6-pool game (D) with campaign tiers and keywords.
-- **Coverage:** C and E have no game in the library, so they are covered from general
-  knowledge only.
+  plus one d6-pool game (D) with campaign tiers and keywords, and one narrative investigation game (C) built around cards and spends.
+- **Coverage:** E has no game in the library and is covered from general knowledge only.
 - **What is recorded:** gaps, and only at a structural level. No game text or tables.
 
 | # | Gap | Seen in | Proposed fix (to review) |
@@ -153,8 +152,11 @@ fully, half casters count half") are one more formula. They need no Rust change.
 | G13 | **Tags (keyword sets).** Faction and species keywords gate options and interact with rules; requirements like "has keyword X" or "any of these keywords" | D (d6-pool game) | a `set of enum/text` value type with `contains`/`intersects`; catalogue filters use it |
 | G14 | **Campaign-level limits on the character.** The campaign's tier caps ratings and sets starting XP and which archetypes are allowed; a party pool is shared | D (d6-pool game), F | same campaign-scoped entity as G8; character formulas may read it (read-only) |
 | G15 | **Cumulative cost tables.** Raising a rating from a to b costs the sum of the per-step costs | D | a host function `table_sum(table, from, to)`, or a precomputed cumulative column |
+| G16 | **Cards with a lifecycle.** Persistent advantages and problems are cards held by the character: gained, played, discarded, cancelled by a matching card, some carried over to the next adventure. Effects are mostly free text | C (investigation game) | catalogue entries instanced with a `state` enum and a `pairs_with` reference; the effect text is a text rule shown on click; the app tracks the hand, it doesn't adjudicate the effect |
+| G17 | **Scenario scope.** Spendable pools are separate from ratings, and they refill at the start of each adventure; some state lasts one adventure only | C, D | a third state scope between character and campaign (`scenario`), plus the G11 `scenario_start` event; pool ≤ rating is an ordinary constraint |
+| G18 | **Abilities without numbers.** Having an investigative ability gives its clues automatically; only extra benefits cost spends | C | boolean fields plus a pool; no new block, recorded to confirm the blocks don't assume numbers |
 
-**Result.** No game needs Rust code specific to it. G1, G2 and G4 are the significant
+**Result.** No game needs Rust code specific to it. G1, G2, G4 and G17 are the significant
 additions; the rest are small extensions of blocks already in the draft. G8 depends on the
 campaign workspace.
 
