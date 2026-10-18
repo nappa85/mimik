@@ -127,6 +127,34 @@ fully, half casters count half") are one more formula. They need no Rust change.
    plus owner review is the main cost, and it is the part to measure next.
 6. **Over-generality:** every block added must be justified by an archetype above.
 
+## Paper check against the owner's games (2026-10-18)
+
+- **Method:** the main session's general knowledge of the mechanics, not the PDFs. The
+  owner's library covers archetypes A (three games, one of them Italian), D (one) and F (one),
+  plus one percentile or dice-pool game whose edition is still to confirm.
+- **Coverage:** C and E have no game in the library, so they are covered from general
+  knowledge only.
+- **What is recorded:** gaps, and only at a structural level. No game text or tables.
+
+| # | Gap | Seen in | Proposed fix (to review) |
+|---|---|---|---|
+| G1 | **Typed modifier stacking.** Bonuses of the same type don't add up, only the highest counts; penalties work the same way; some values are "the best of several formulas" | A (strongly in one game) | a `modifier` block: `{target, type, value, source}`, with a stacking policy per type (`sum`, `max`, `min`); plus a `max_of` over alternative formulas |
+| G2 | **Multi-state box tracks with conversion.** Boxes are empty, light or heavy; when the track is full, light damage converts to heavy; incoming damage may be halved first | D | box track type with per-state counts, plus host functions for "count in state" and "first box in state"; the conversion is an action |
+| G3 | **Ordered action steps with intermediate values.** Damage goes to a temporary pool first, then the remainder to the main pool | A, D | `let` bindings inside an action: each assignment can use earlier results |
+| G4 | **Choices keyed to a schedule and to which class gained the level.** E.g. a feat at class levels 4/8/…, or per-category picks at fixed character levels | A | the flow carries context (`gained_class`, `new_level`); a choice's `when` is a formula over that context |
+| G5 | **Prerequisite graphs inside catalogues.** An item needs other items or ranks; a power needs a rank in another discipline-like trait; a spell can be taken at higher ranks | A, D | references between catalogue entries, plus prerequisite formulas evaluated against the character |
+| G6 | **Choice with distinct picks and conditional effects.** Pick 4 different attributes; each gets +2, or +1 above a threshold | A | `distinct: true` on choices, with the effect as a formula of the current value |
+| G7 | **Costs that depend on how the character relates to the item.** A trait costs more if it is out of the character's clan or class; cost depends on how many matching aptitudes the character has | D, percentile game | table keyed on a computed key (already formulas + tables; confirm the lookup can take a formula key) |
+| G8 | **State outside the character.** Campaign-wide doom trackers, party resources | F | campaign-scoped entity (ties to the campaign workspace plan) |
+| G9 | **Values rolled at creation or level-up.** HP = attribute + one die; random tables | A, F | dice notation stays text; the player enters the result; a constraint checks the result is in the die's range; random tables are catalogues with a roll range |
+| G10 | **Fractional units.** Light items count as a tenth of a unit | A | integer scaled units (store tenths), declared in the field |
+| G11 | **Durations and events.** Conditions that drop by 1 at a time step; resources that refill on rest or at dawn | A, D, F | named events (`rest_short`, `dawn`) that run a list of actions; no clock in the engine |
+| G12 | **Localised definitions.** An Italian game, and Italian and English editions of the same rules | A | labels and catalogue text in the source language; edition identity already exists |
+
+**Result.** No game needs Rust code specific to it. G1, G2 and G4 are the significant
+additions; the rest are small extensions of blocks already in the draft. G8 depends on the
+campaign workspace.
+
 ## How to validate this draft (proposed)
 
 1. **On paper:** describe one real game from the owner's PDFs per archetype with these blocks.
