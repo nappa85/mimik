@@ -1,6 +1,6 @@
 # Read-only catalogue plan (step 1 of the definition-language order of work)
 
-2026-10-18. Status: **revision 2.1** (rev 2 re-review amendments R1–R16 in §7, binding over the body). Revision 2 Revision 1 (`3b63274`) was reviewed by Sol
+2026-10-18. Status: **revision 2.2: cleared for step 0.** The rev 2 re-review amendments R1–R16 and the rev 2.1 final-check amendments R17–R28 in §7 are binding over the body. Revision 2 Revision 1 (`3b63274`) was reviewed by Sol
 (NO-GO), Sonnet (GO WITH AMENDMENTS) and Space Bunny (GO WITH AMENDMENTS). The record is
 [reviews/2026-10-18-catalogue-plan.md](reviews/2026-10-18-catalogue-plan.md); §6 maps every
 finding to this revision. No code yet.
@@ -672,3 +672,118 @@ disclosure boundary) and `campaign-workspace.md` (R15). The search helpers get t
 - a catalogue linked by two definitions;
 - colliding keys across two catalogues;
 - a frozen-sheet custodian reading the catalogue.
+
+## 8. Revision 2.2 amendments (rev 2.1 final check; binding)
+
+Final check of rev 2.1:
+- Sol: **GO WITH AMENDMENTS**, no Blocking findings; "no further plan-review round is
+  necessary".
+- Sonnet: **GO WITH AMENDMENTS**, no Blocking findings. It asks for a short check of the
+  concrete seal-trigger SQL; that happens in step 2's implementation review.
+
+**R17 (Sonnet 1). Projections carry everything readers use, and the seal binds all of it.**
+- `catalogue_entries` gains:
+  - `desc_kind` (`units` | `owner_text`);
+  - `owner_text`;
+  - `properties`, the per-entry canonical JSON, bounded.
+- `catalogue_entry_units` gains `source_id` and `page_id`.
+- R1's equality covers every one of these columns.
+- A `BEFORE INSERT` trigger on `catalogue_entry_units` checks, from columns only:
+  - the unit is on that page and the page is in that source;
+  - the source is finalized and has the catalogue's pair.
+- Entry pages and the picker read projections only, never `content`.
+
+**R18 (Sonnet 2, Sol R1 note). The seal SQL is linear.**
+- Set equality is two `EXCEPT` queries in each direction, over `json_each` flattened once.
+  Entry units use `json_each(e.value, '$.description.units')` in a join.
+- Correlated `NOT EXISTS` scans over `content` are forbidden.
+- Absent `retired` is normalised with `COALESCE(json_extract(…), 0)`. Ordinals are 0-based.
+- Step 0 measures the seal trigger alone at maximum size.
+
+**R19 (Sonnet 3, Sol R1). Seal order and guards.**
+- A seal's version must equal the maximum sealed version + 1, and no lower version may be
+  unsealed.
+- Readers choose "latest" through `catalogue_seals`.
+- Pre-insert replacement guards cover every primary and unique key of every immutable table,
+  including the projections, the type table and the seals (the pattern of `008:33-41`).
+- Rust checks rows-affected on every insert.
+
+**R20 (Sonnet 4, Sol A5). FTS.**
+- A surrogate table `catalogues(id INTEGER PRIMARY KEY, game_id, edition_id, catalogue_id)`
+  gives an integer catalogue id. The FTS rowid encodes `catalogue_id * 2^20 + entry ordinal`, so
+  a catalogue's FTS rows are deleted with a rowid range.
+- FTS is joined back on `(version_id, key)` of the latest sealed version of **that**
+  catalogue, so keys that collide across catalogues can't leak.
+- The integrity check compares identity, name and multiplicity, then runs FTS5
+  `integrity-check`.
+- The repair command rebuilds the index from the latest sealed projections in one transaction.
+
+**R21 (Sonnet 5). Prefix reads.**
+- Metadata and text are read in one read transaction.
+- Effective text is `correction` when the state is `corrected`, else `raw_text`
+  (`publication.rs:238-242`).
+- Keep the `typeof(…) = 'text'` guard (`search.rs:125-140`).
+- Byte bounds come from the BLOB length. A unit containing NUL is shown as "description
+  unavailable (source text malformed)".
+
+**R22 (Sol A1, Sonnet 7). Draft-op submitters.**
+- Every catalogue draft-op button has `formnovalidate`. This includes the hidden default
+  button, which stays enabled and form-associated.
+- The hidden default comes before every field in tree order. It is hidden with the
+  clip-based visually-hidden style, not `aria-hidden`.
+- Save keeps browser validation.
+- While a panel is open, Enter in any single-line field searches. This is documented.
+- `SHEET_FORM_PAIRS` and its assertion (`transport.rs:158`) are raised by 2.
+- Tests:
+  - keyboard-only search on a sheet with an empty required Name;
+  - Chromium at both viewports.
+
+**R23 (Sol A2). Exact picker state.**
+- When the panel is closed, `catalogue-q` and `catalogue-open` are both absent. When it is
+  open, both are present.
+- `Pairs::admit` admits them conditionally from the submitted key set (it requires equality,
+  `transport.rs:86-94`), then their values are validated. One without the other answers 400.
+- Add, Remove, Up and Down **close and clear** the picker.
+- Publication-time `form_budget().pairs` counts the two controls in the worst case.
+
+**R24 (Sol A3). Pick sets presence.** Picking into an optional `catalogue_ref` sets
+`set-f-r-p=present`. Test Pick → Save starting from an absent optional property. Only Pick takes
+a `:` suffix; Save, Browse, Search and the existing ops refuse one.
+
+**R25 (Sol A4, Sonnet 8). The second boundary.**
+- R6's transaction B extends the existing `private_badge` boundary (`sheets.rs:309-345`):
+  - it reloads the resource;
+  - `RawSnapshot::corresponds` checks it against the validated snapshot;
+  - it recomputes editability and readiness;
+  - it keeps the separate branch for creating a sheet;
+  - it re-checks auth before commit.
+- Catalogue lookups run in that transaction.
+- `draft_op` gains this DB phase for Browse, Search and Pick, with the permit threaded through
+  rendering and error re-renders.
+- The existing `rejected_editor` re-acquire (a 503 can lose a draft) is recorded as an existing
+  limitation. Picker traffic makes it more likely, and step 0 measures that.
+
+**R26 (Sol R14, Sonnet 6). Match-site audit instead of a compiler claim.**
+- Wildcard arms at the sites listed become explicit `CatalogueRef` arms: `values.rs:201`,
+  `history_diff.rs:304`, `private_pin.rs:139`, `formula_admission.rs:70-75` and
+  `admission.rs:120-140`. Where a wildcard is intentional, it is kept and commented.
+- Negative tests:
+  - a top-level `catalogue_ref` field;
+  - `catalogue_ref` without its member;
+  - `catalogue_ref` with `options`;
+  - a `catalogue_ref` member on another control.
+
+**R27 (Sonnet 9, 10; Sol R9). Writer and readiness.**
+- The membership check runs after `host_item_ids` and conflict detection in
+  `snapshots::write`, for custodian and Master edits alike.
+- A retired key is refused on create, since there is no previous data. On edit it is allowed
+  only if the same list property already held it. This is not a quantity rule. Freeze skips
+  the check.
+- Readiness means a sealed version exists and the type exists in `catalogue_entry_types`. It
+  does no content verification (R5).
+
+**R28 (Sonnet 12, Sol R7/R8). Calibration covers the full request path.**
+- Step 0 timings include `private_pin::validate` per catalogue request. Routes that don't
+  evaluate formulas use `validate_for_write`.
+- Step 0 also covers the full `substr` query path, the publish transaction including the seal
+  and FTS, and server-save latency during a CLI publish.
