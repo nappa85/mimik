@@ -95,3 +95,52 @@ Baselines on the same folds: B-ask 15/175 correct, 0 unsafe; B-risk 29/175, 0 un
   routers (not about R4 and R1).
 - The S40 replay uses a C0 ledger from before pack rev3; it is descriptive only.
 - 152 s per decision for R1 on CPU would be impractical interactively even if it passed.
+
+## Addendum (2026-10-18): R3 Qwen3.5-9B
+
+Status: **self-analysis, under independent review** (`docs/reviews/2026-10-18-router-r3-results.md`);
+it does not drive a decision until that review is recorded.
+
+- Queue `tools/queues/router-cpu-dev-r3.json`, frozen `0b7c694edf8518f91cb96386051d8697e84db57c`,
+  CPU, 2026-10-17 22:50 – 2026-10-18 14:54, under the user's time-limited schedule override
+  (removed automatically when the queue ended). Probe, screen (215 records, 0 failures) and
+  ablation (80, 0 failures) complete.
+- Analysis from the run's own frozen worktree (`decision_router.py select --router R3`, then
+  `overlay` on the same C0 9B S40 ledger). A first attempt from the b5a4f50 worktree was
+  correctly refused by the code-identity check (`router_sha256`, `render_sha256` differ); it
+  is not used. Reports: `docs/results/router-dev-2026-10-17/select-r3.json`,
+  `overlay-s40-r3.json`.
+
+| | R3 Qwen3.5-9B |
+|---|---|
+| Raw top-1 correct | 87/175 |
+| Raw top-1 unsafe (all / at-risk) | 26/175 / 26/70 |
+| Raw supported recall | 48/105 (proposal 19/67, answer 29/38) |
+| Outer-fold τ_i | 0.95 in all 5 folds |
+| Inner unsafe per fold at 0.90 / 0.95 | 3, 4, 3, 2, 4 / 0 in every fold |
+| Out-of-fold correct / unsafe / supported recall | 73/175, 0/175, 18/105 (proposal 2/67, answer 16/38) |
+| Gate | fail (recall 18/105 < 84) |
+| Falsifier: at-risk top-1 vs B-risk 41.4% | 39/70 (Wilson 44.1–66.8%), **not null** |
+| Ablation full / empty / request-only (of 40) | 23 / 9 / 9 |
+| Order flips (of 40) | 11 |
+| ECE / Brier | 0.237 / 0.703 |
+| Median s per decision / peak RSS | 241.9 s / 8.5 GiB |
+| S40 replay (out-of-fold routes, C0 9B ledger) | 16/40 correct, 3/40 false support, 0 unresolved, 35/40 routed at-risk (C0 alone 25/40, 8/40) |
+| Claim | none (gate failed) |
+
+Reading:
+- R3 is the first router with a feasible threshold: τ = 0.95 gives zero unsafe routes on every
+  inner set and zero over the 175 out-of-fold routes, and its at-risk top-1 beats the
+  constant-risk baseline. It improves with the state over both ablations, and its choice is
+  less order-sensitive than R4's or R1's (11/40 flips).
+- It fails on recall. Its raw top-1 labels 38 of the 67 proposal cases as `answer`; below τ,
+  those cases fall to the at-risk argmax, mostly `conflict` (44 of 67 out of fold). Only 2 of
+  67 proposals are routed `proposal`. The proposal-against-answer split, not the
+  supported-against-at-risk split, is where it loses most supported cases. Possible
+  contributors (unmeasured): the proposal option's `propose_change` preview wording and the C0
+  entries without values (see Limitations above).
+- Per plan §3 the result is **null** for R3 too: no live SYS-R decision file.
+- Exploratory and not pre-registered: whether a router asked only "supported or at-risk"
+  (leaving proposal against answer to the tool loop) would pass is a new question. It would
+  need its own plan, frozen before any rerun, and these dev data are now seen.
+- 242 s per decision on CPU is far from interactive use.
