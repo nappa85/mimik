@@ -1,7 +1,13 @@
 # Game definition language: building-block draft (2026-10-18)
 
-Status: **draft for discussion with the user. Not reviewed, not a plan.** It needs an
-independent adversarial review before any of it drives code.
+Status: **reviewed 2026-10-18 (Sol, Sonnet, Space Bunny): SOUND WITH CHANGES.** It is not
+yet a basis for code. Record and agreed order of work:
+[reviews/2026-10-18-definition-language-draft.md](reviews/2026-10-18-definition-language-draft.md).
+The YAML example below is an authoring sketch. It is **not admissible** under `cel-mimik-1`
+(nested macros, dereference, indexing, reserved `int`, truncating division), and §"How to
+validate" step 3 is superseded by the review's order of work. Pending user decisions:
+- whether rule violations warn or block;
+- how transitions such as unpaid purchases are checked when players edit directly.
 
 ## Why
 
@@ -156,7 +162,8 @@ fully, half casters count half") are one more formula. They need no Rust change.
 | G17 | **Scenario scope.** Spendable pools are separate from ratings, and they refill at the start of each adventure; some state lasts one adventure only | C, D | a third state scope between character and campaign (`scenario`), plus the G11 `scenario_start` event; pool ≤ rating is an ordinary constraint |
 | G18 | **Abilities without numbers.** Having an investigative ability gives its clues automatically; only extra benefits cost spends | C | boolean fields plus a pool; no new block, recorded to confirm the blocks don't assume numbers |
 
-**Result.** No game needs Rust code specific to it. G1, G2, G4 and G17 are the significant
+**Result.** For the mechanic slices examined from memory, no per-game Rust code was found
+necessary; executable coverage is unverified. G1, G2, G4 and G17 are the significant
 additions; the rest are small extensions of blocks already in the draft. G8 depends on the
 campaign workspace.
 
