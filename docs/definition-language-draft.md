@@ -131,7 +131,7 @@ fully, half casters count half") are one more formula. They need no Rust change.
 
 - **Method:** the main session's general knowledge of the mechanics, not the PDFs. The
   owner's library covers archetypes A (three games, one of them Italian), D (one) and F (one),
-  plus one percentile or dice-pool game whose edition is still to confirm.
+  plus one d6-pool game (D) with campaign tiers and keywords.
 - **Coverage:** C and E have no game in the library, so they are covered from general
   knowledge only.
 - **What is recorded:** gaps, and only at a structural level. No game text or tables.
@@ -150,6 +150,9 @@ fully, half casters count half") are one more formula. They need no Rust change.
 | G10 | **Fractional units.** Light items count as a tenth of a unit | A | integer scaled units (store tenths), declared in the field |
 | G11 | **Durations and events.** Conditions that drop by 1 at a time step; resources that refill on rest or at dawn | A, D, F | named events (`rest_short`, `dawn`) that run a list of actions; no clock in the engine |
 | G12 | **Localised definitions.** An Italian game, and Italian and English editions of the same rules | A | labels and catalogue text in the source language; edition identity already exists |
+| G13 | **Tags (keyword sets).** Faction and species keywords gate options and interact with rules; requirements like "has keyword X" or "any of these keywords" | D (d6-pool game) | a `set of enum/text` value type with `contains`/`intersects`; catalogue filters use it |
+| G14 | **Campaign-level limits on the character.** The campaign's tier caps ratings and sets starting XP and which archetypes are allowed; a party pool is shared | D (d6-pool game), F | same campaign-scoped entity as G8; character formulas may read it (read-only) |
+| G15 | **Cumulative cost tables.** Raising a rating from a to b costs the sum of the per-step costs | D | a host function `table_sum(table, from, to)`, or a precomputed cumulative column |
 
 **Result.** No game needs Rust code specific to it. G1, G2 and G4 are the significant
 additions; the rest are small extensions of blocks already in the draft. G8 depends on the
