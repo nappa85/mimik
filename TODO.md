@@ -13,7 +13,7 @@ Last updated: 2026-10-16.
     - rev 2: Sol NO-GO, Sonnet GO WITH AMENDMENTS, third chain unavailable;
     - rev 2.1: Sol and Sonnet GO WITH AMENDMENTS, applied as R17-R28 with no further round.
     Record: `docs/reviews/2026-10-18-catalogue-plan.md`.
-  - [ ] Step 0: calibration spike (prototype, not merged) against the R8 acceptance criteria.
+  - [x] Step 0 calibration (`docs/catalogue-calibration-2026-10-18.md`, spike branch `catalogue-spike`, not merged): every R8 criterion met at 4,096 and 8,192 entries with 8 catalogues. Publish lock ≤ 1.06 s, request p95 ≤ 29 ms, RSS 241 MB. D5 changes: 8,192 entries, owner text 1 MiB total. Step 2 re-measures CLI RSS and separate-process contention.
   - [ ] Steps 1-5, with each step's implementation reviewed. Step 2's review includes the concrete seal-trigger SQL.
 - [x] **M4 plain list editing MERGED** (`758ccf4`). Four review rounds with Sol, Sonnet and Space Bunny; the closing round was MERGE from all three. Follow-ups are listed in `docs/reviews/2026-10-17-derived-formulas-m4-impl.md`, "Closing review" section (decoder CRLF tests, LF-guarantee wording).
 - **Held-out ledger policy (main session, 2026-10-17):** held-out ledgers contain per-case gold; they are read only through `tool_loop_benchmark.py --summarize`'s aggregate output. Agents and the main session never open, read or print held-out ledger rows, never pass `--allow-heldout-gold-replay`, and never read the frozen case file (details: `docs/tool-loop-heldout-v3-freeze.md`).

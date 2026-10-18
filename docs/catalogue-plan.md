@@ -787,3 +787,13 @@ a `:` suffix; Save, Browse, Search and the existing ops refuse one.
   evaluate formulas use `validate_for_write`.
 - Step 0 also covers the full `substr` query path, the publish transaction including the seal
   and FTS, and server-save latency during a CLI publish.
+
+## 9. Step 0 results (binding over D5)
+
+Calibration: [catalogue-calibration-2026-10-18.md](catalogue-calibration-2026-10-18.md).
+Every R8 criterion was met at both 4,096 and 8,192 entries with 8 linked catalogues.
+- **D5 entries become 8,192** (R11).
+- The owner-text total becomes **1 MiB** (at most 20,000 scalars per entry), so the canonical
+  draft stays under 4 MiB.
+- Step 2 must re-measure the real CLI publish RSS and the separate-process contention, and
+  falls back to 4,096 entries if the CLI exceeds 256 MiB.
