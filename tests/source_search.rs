@@ -58,7 +58,7 @@ fn open_seeded(dir: &Path, seeder: impl FnOnce(&Connection)) -> Store {
     // Seed as a pre-search-schema database so reopening exercises the upgrade backfill.
     schema_fixture::drop_search_schema(&db);
     db.execute_batch(&format!(
-        "PRAGMA user_version={}; PRAGMA foreign_keys=ON;",
+        "DROP TABLE catalogue_drafts; PRAGMA user_version={}; PRAGMA foreign_keys=ON;",
         mimik::sources::SEARCH_SCHEMA - 1
     ))
     .unwrap();

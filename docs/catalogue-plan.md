@@ -797,3 +797,84 @@ Every R8 criterion was met at both 4,096 and 8,192 entries with 8 linked catalog
   draft stays under 4 MiB.
 - Step 2 must re-measure the real CLI publish RSS and the separate-process contention, and
   falls back to 4,096 entries if the CLI exceeds 256 MiB.
+
+## 10. Step 1 implementation notes (2026-10-18)
+
+Branch `catalogue`. Scope: §3 step 1 only (decode profile, schema, domain checks, canonical
+encoding and hash, `catalogue_drafts` in migration 019, `import-catalogue-draft` and
+`show-catalogue-draft`). Operator documentation: [catalogue-publication.md](catalogue-publication.md).
+Code: `src/catalogues/{mod,decode,admission,store}.rs`, `schemas/catalogue-v1.json`,
+`schemas/catalogue-example.json`, `migrations/019_catalogues.sql`.
+
+**Decisions taken in step 1 (not fixed by the plan):**
+- A text property value is at most 1,000 scalars.
+- At least one entry type is required; zero entries are allowed.
+- The pair must be registered, nonnative and adapter-free, mirroring
+  `definitions::store::references`.
+- Entry `properties` is the one object without `additionalProperties: false`: it is a map
+  keyed by declared property ids, closed by the exact-key-set domain check.
+- The decoder lives in `src/catalogues/decode.rs`, a sibling of `definitions::decode`, with a
+  position-aware member table (entry `properties` are keyed by author ids, so key-only limits
+  as in `definitions::decode::limits` would not work).
+- The owner-text total counts UTF-8 bytes; the per-entry cap counts scalars.
+- The canonical cap is checked but unreachable from admitted input (canonicalisation never
+  lengthens an accepted spelling), so it has no input-level test.
+- Commands share the definition admission permit (`definitions::JOBS`).
+
+**Red → green.** The red runs used the final tests against (a) the implementation with its
+checks stubbed out (decoder replaced by plain `serde_json`, schema and domain checks skipped,
+source references returning `Ok`), and (b) the tree without migration 019. The green run is the
+real implementation.
+
+| Test | Red (a) stubbed checks | Red (b) no migration 019 | Green |
+|---|---|---|---|
+| `admission_tests::canonical_encoding_has_a_frozen_independent_hash_vector` | fail | n/a | pass |
+| `…::source_order_and_property_spelling_are_normalised_but_author_order_is_identity` | fail | n/a | pass |
+| `…::decoder_rejects_duplicate_and_escaped_equivalent_keys_at_every_level` | fail | n/a | pass |
+| `…::unknown_members_are_rejected_at_every_level` | fail | n/a | pass |
+| `…::identifiers_follow_the_registry_grammar_with_a_leading_letter` | fail | n/a | pass |
+| `…::duplicate_ids_keys_sources_and_units_are_rejected` | fail | n/a | pass |
+| `…::entry_types_and_property_key_sets_and_controls_must_match` | fail | n/a | pass |
+| `…::descriptions_are_units_xor_owner_text` | fail | n/a | pass |
+| `…::string_limits_count_scalars_and_reject_one_more` | fail | n/a | pass |
+| `…::array_limits_accept_the_limit_and_reject_one_more` | fail | n/a | pass |
+| `…::entry_count_accepts_8192_and_rejects_8193` | fail | n/a | pass |
+| `…::owner_text_total_is_capped_at_one_mebibyte_of_utf8` | fail | n/a | pass |
+| `…::distinct_units_are_capped_per_catalogue` | fail | n/a | pass |
+| `…::decoder_node_depth_and_byte_caps_reject_one_more` | fail | n/a | pass |
+| `…::every_rejection_in_this_suite_is_redacted_including_schema_paths` | fail | n/a | pass |
+| `…::definition_decoder_constants_are_unchanged_by_the_catalogue_profile` | pass (guard: the definition decoder was never changed) | n/a | pass |
+| `tests/catalogues.rs::cli_import_and_show_print_metadata_only` | fail | fail | pass |
+| `…::cli_failure_paths_are_redacted_and_save_nothing` | fail | fail | pass |
+| `…::cli_conflict_unknown_and_corrupt_draft_paths_are_redacted` | split out of the previous test after the red runs | — | pass |
+| `…::units_must_be_on_their_page_in_a_listed_finalized_source_of_the_pair` | fail | fail | pass |
+| `…::sources_must_be_finalized` | fail | fail | pass |
+| `…::revisions_are_checked_and_reads_reverify_content` | pass (no check stubbed) | fail | pass |
+| `…::storage_rejects_malformed_rows_and_identity_rebinding` | pass (SQL constraints) | fail | pass |
+| `…::cross_process_create_has_one_winner` | pass (SQL uniqueness) | fail | pass |
+| `…::populated_schema18_database_upgrades_to_19_atomically` | pass (migration present) | fail | pass |
+
+The first green run also found two test defects, fixed before the final run: the hash constant
+was a placeholder (frozen from the run, after the canonical bytes and an in-test SHA-256 of them
+both matched), and the node-cap document exceeded 4 MiB (member names shortened). Six
+existing schema-rewind fixtures (`tests/support/schema_fixture.rs`, `tests/source_search.rs`
+and four `src/campaigns/*_tests.rs`) now drop `catalogue_drafts`, which is newer than every
+rewind target, as they already did for registry history.
+
+**Measurements** (release build, container `mimik-ci:latest`, `--cpus 6`, Ryzen 5 1600 shared
+host, Sunday evening, single runs; fresh child accounting per process). Synthetic drafts: one
+type with 16 integer properties, 100-scalar names, owner text totalling about 1 MiB, no unit
+references (so the per-unit reference queries are not exercised).
+
+| Case | Input bytes | Command | Wall ms | Peak RSS KiB |
+|---|---:|---|---:|---:|
+| 8,192 entries | 3,638,306 | import, create (rev 0) | 325 | 94,820 |
+| 8,192 entries | 3,638,306 | import, update (rev 1, rev 2) | 333, 320 | 94,632, 94,436 |
+| 8,192 entries | — | show | 255 | 63,000 |
+| 4,096 entries | 2,343,970 | import (rev 0, 1, 2) | 199, 207, 209 | 63,244, 63,156, 62,980 |
+| Baseline `list-rulesets` | — | — | 15 | 12,896 |
+
+The 8,192-entry import stays far below the R8 CLI ceiling of 256 MiB. Step 2 measures the
+publish path (projections, seal, FTS) and separate-process contention, as §9 requires.
+
+**Not yet done:** independent review of this step.

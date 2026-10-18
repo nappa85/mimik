@@ -2491,7 +2491,7 @@ async fn populated_schema12_upgrade_preserves_owner_development_records_and_sess
                     .unwrap(),
             )?;
             crate::sources::search::drop_schema(db)?;
-            db.execute_batch("PRAGMA user_version=12;")?;
+            db.execute_batch("DROP TABLE catalogue_drafts; PRAGMA user_version=12;")?;
             Ok(())
         })
         .await

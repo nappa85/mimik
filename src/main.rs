@@ -90,6 +90,19 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         after_id: i64,
     },
+    /// Import a strict catalogue as a draft; zero expected revision means create only.
+    /// Prints metadata only (ids, revision, hash, counts), never names, keys or text.
+    ImportCatalogueDraft {
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[arg(long)]
+        expected_revision: i64,
+    },
+    /// Show a stored catalogue draft's metadata by its positive database row ID.
+    ShowCatalogueDraft {
+        #[arg(long)]
+        id: i64,
+    },
     /// Register a stable game/edition pair; this does not enable a generic sheet.
     RegisterRuleset {
         #[arg(long)]
@@ -355,6 +368,32 @@ async fn publication_command(
                 .await?;
             println!("Current wiring approval withdrawn; immutable history retained.");
         }
+        other => return catalogue_command(store, other).await,
+    }
+    Ok(None)
+}
+
+/// Catalogue drafts print metadata only (plan D6); errors carry static codes.
+async fn catalogue_command(
+    store: &Store,
+    command: Command,
+) -> Result<Option<Command>, Box<dyn std::error::Error>> {
+    match command {
+        Command::ImportCatalogueDraft {
+            file,
+            expected_revision,
+        } => println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &store
+                    .import_catalogue_draft(&file, expected_revision)
+                    .await?
+            )?
+        ),
+        Command::ShowCatalogueDraft { id } => println!(
+            "{}",
+            serde_json::to_string_pretty(&store.catalogue_draft(id).await?)?
+        ),
         other => return Ok(Some(other)),
     }
     Ok(None)

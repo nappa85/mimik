@@ -46,6 +46,8 @@ fn remove_empty_accounts(db: &rusqlite::Connection) {
         "account_credentials",
         "account_owner",
         "accounts",
+        // Catalogue drafts (schema 19) are newer than every rewind target as well.
+        "catalogue_drafts",
     ];
     // Collect every count before validating or dropping any table.
     let counts = tables.map(|table| {
@@ -176,6 +178,8 @@ fn rewind_finalization(db: &rusqlite::Connection, remigrate: bool) {
             "../../migrations/016_registry_administration.sql"
         ))
         .unwrap();
+        db.execute_batch(include_str!("../../migrations/019_catalogues.sql"))
+            .unwrap();
         // Search objects (017+) were kept intact for the live session, so the schema is
         // current again; derived rows need no re-application.
         db.pragma_update(None, "user_version", current_schema())

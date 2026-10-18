@@ -627,7 +627,7 @@ async fn populated_schema15_upgrade_preserves_registry_and_adds_unattributed_his
                 .ok_or(AppError::Invalid("registry migration missing"))?;
             crate::sources::search::drop_schema(db)?;
             db.execute_batch(&format!(
-                "DROP TABLE registry_web_events; DROP TABLE registry_events; PRAGMA user_version={};",
+                "DROP TABLE registry_web_events; DROP TABLE registry_events; DROP TABLE catalogue_drafts; PRAGMA user_version={};",
                 registry - 1
             ))?;
             Ok(())
