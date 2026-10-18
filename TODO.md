@@ -8,7 +8,13 @@ Last updated: 2026-10-16.
   - [x] Independent review (Sol, Sonnet, Space Bunny): SOUND WITH CHANGES; 6 Blocking (CEL profile, save-blocking vs advisory contract, transition legality, catalogue storage, references/identity, cross-scope reads). Record `docs/reviews/2026-10-18-definition-language-draft.md` with the agreed order of work.
   - [x] **User decisions (2026-10-18):** (1) violations warn, never block; log, revert, suggest a correction where possible; (2) advancement is context-driven: an out-of-context edit (e.g. max HP) warns; raising the level opens a context that highlights the fields to edit, with hints, checked against the before state.
   - [ ] Revise the draft (rev 2) with the decisions.
-  - [ ] **Catalogue plan** rev 2 (`docs/catalogue-plan.md`): user decisions Q1-Q5 recorded (citation only; unchecked shown; owner entries allowed; unknown items invalid; no sharing switch). Append-only catalogue linked by id, live descriptions, pick flow via draft ops, calibration first. Re-review in progress (rev 1 record `docs/reviews/2026-10-18-catalogue-plan.md`).
+  - [x] **Catalogue plan** rev 2.2 (`docs/catalogue-plan.md`) cleared for step 0 after three rounds:
+    - rev 1: Sol NO-GO, Sonnet and Space Bunny GO WITH AMENDMENTS;
+    - rev 2: Sol NO-GO, Sonnet GO WITH AMENDMENTS, third chain unavailable;
+    - rev 2.1: Sol and Sonnet GO WITH AMENDMENTS, applied as R17-R28 with no further round.
+    Record: `docs/reviews/2026-10-18-catalogue-plan.md`.
+  - [ ] Step 0: calibration spike (prototype, not merged) against the R8 acceptance criteria.
+  - [ ] Steps 1-5, with each step's implementation reviewed. Step 2's review includes the concrete seal-trigger SQL.
 - [x] **M4 plain list editing MERGED** (`758ccf4`). Four review rounds with Sol, Sonnet and Space Bunny; the closing round was MERGE from all three. Follow-ups are listed in `docs/reviews/2026-10-17-derived-formulas-m4-impl.md`, "Closing review" section (decoder CRLF tests, LF-guarantee wording).
 - **Held-out ledger policy (main session, 2026-10-17):** held-out ledgers contain per-case gold; they are read only through `tool_loop_benchmark.py --summarize`'s aggregate output. Agents and the main session never open, read or print held-out ledger rows, never pass `--allow-heldout-gold-replay`, and never read the frozen case file (details: `docs/tool-loop-heldout-v3-freeze.md`).
 - **Plans and decisions (2026-10-16, evening):**

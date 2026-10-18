@@ -80,3 +80,28 @@ These go into rev 2:
 
 **Verification.** Static only. Blocking findings B3–B5 were checked against
 `snapshots.rs:271-286`, `decode.rs:9,21-37,175`, `values.rs:155,196` and `publication.rs:221-251`.
+
+## Round 2: re-review of revision 2 (`2179a60`)
+
+| Reviewer | Verdict |
+|---|---|
+| Sol | **NO-GO**. Blocking: the seal must bind the relational projections to the hashed content, because D9 skips membership checks on reads, history and freeze. Majors: FK/FTS deployability, the picker op grammar, picker form state, bounded prefix reads, cross-process contention, and the validated-pin boundary |
+| Sonnet | **GO WITH AMENDMENTS**: op grammar, `q` admission, the Enter key, the entry-type table, per-request re-verification cost, the DB step in render/Pick, and minors |
+| Third chain | **Unavailable**. Space Bunny, DeepSeek and Muse all failed preflight (timeouts). Proceeded with the two main reviews, as `AGENTS.md` allows |
+
+All findings were applied as R1–R16 in revision 2.1 (`673fef6`, plan §7).
+
+## Round 3: final check of revision 2.1 (`673fef6`)
+
+| Reviewer | Verdict |
+|---|---|
+| Sol | **GO WITH AMENDMENTS**. R1 closes the Blocking finding, and the two-way equality is implementable in a SQLite trigger. No new Blocking issue. A1–A4 (submitters need `formnovalidate`, exact picker state and closing it on row ops, Pick sets presence, the second boundary extends `private_badge`), A5 (FTS integrity), and an R14 correction. "No further plan-review round is necessary" |
+| Sonnet | **GO WITH AMENDMENTS**, no Blocking findings. The projections must carry source/page/kind/owner text/properties inside the seal equality; the seal SQL must use linear `EXCEPT`; seal ordering; an FTS surrogate id and rowid-range deletes; prefix-read details; R14 is wrong (wildcard arms); hidden button technique and form-pairs bump; readiness definition; calibration covers pin validation. It recommends a short check of the concrete trigger SQL |
+| Third chain | Retried; see below |
+
+All findings were applied as R17–R28 in revision 2.2 (`8d14f65`, plan §8).
+
+**Status: the plan is cleared for step 0** (calibration spike, prototype tier, not merged).
+- The concrete migration and seal-trigger SQL get their own independent review in step 2,
+  which also serves as Sonnet's requested SQL check.
+- The implementation of every step is reviewed before it is marked complete.
