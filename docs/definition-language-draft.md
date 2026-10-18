@@ -19,8 +19,10 @@ validate" step 3 is superseded by the review's order of work. User decisions (20
 **Assist players; don't police them.** At a real table the GM trusts the players, and anyone
 can cheat with a pencil. Mimik adds visibility and help for the player, not surveillance.
 - Warnings are help, addressed to the person editing the sheet, with a suggested correction.
-- No GM alert feeds, no "violations" dashboards, no audit views built to monitor players.
-  The existing history stays an ordinary record of edits.
+- Policing is not the target, but GM review is allowed. Like asking a player to hand over a
+  paper sheet, a GM with access may open a sheet, see its warnings and history, and help fix
+  it. What is not built: automatic GM alert feeds or monitoring dashboards whose purpose is
+  watching players.
 - The target user may not know the rules, even in a very complex game. Guidance (hints on
   fields, guided advancement, descriptions on click, plain explanations) should let them play
   almost without reading the manual.
