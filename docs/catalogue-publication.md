@@ -27,8 +27,10 @@ cited source (`sources.md`). Then:
 - `show-catalogue-draft` re-decodes the stored draft and checks its canonical bytes, hash and
   identity. It does not re-check source references, which are checked at every save.
 - Commands share the definition admission permit: one nonqueued job per process. A second job
-  in the same process answers busy; separate processes rely on SQLite transactions and the
-  unique identity (one creator wins).
+  in the same process answers busy. A save takes the SQLite write lock (`BEGIN IMMEDIATE`)
+  before its reference checks and revision lookup, so concurrent saves from other processes
+  wait (5 s busy timeout); saves of different catalogues all succeed, and of two saves of one
+  catalogue with the same expected revision one wins and the other answers a conflict.
 
 ### Redaction
 
@@ -39,8 +41,10 @@ or values, labels, the title, owner text or unit text** (plan D6).
   `content_hash`, `status` and `counts` (sources, entry types, entries, retired, owner-written,
   unit references, distinct units).
 - Errors are static codes with index-only paths such as `/entries/12/description:
-  unit-page-source-mismatch`. Schema paths replace every author-chosen segment (a property id or
-  an unknown member) with `*`.
+  unit-page-source-mismatch`. Schema paths are walked against the envelope structure: indices
+  are kept only at array positions and member names only where that member exists; the first
+  other segment and everything after it become `*`. Entry-property keys are always redacted,
+  whatever their spelling.
 - Sentinel tests (`tests/catalogues.rs`, `src/catalogues/admission_tests.rs`) place distinctive
   synthetic strings in every author-chosen member and check stdout and stderr on success and on
   failure paths: decode, schema, domain, source references, a non-finalized source, conflicts,
@@ -80,6 +84,8 @@ an original synthetic example.
 - A description is either 1–16 unit references or `owner_text` (non-blank). An entry may not
   cite the same unit twice. Every cited source must be listed in `sources`.
 - Labels, names, the title and owner text may not be blank. Text is not normalised.
+- Names, labels, the title and text property values may not contain control characters
+  (`char::is_control`, C0 and C1). Owner text allows line feed and tab only.
 - `retired` absent and `retired: false` are the same state.
 
 ### Source references (checked at every save, in the write transaction)

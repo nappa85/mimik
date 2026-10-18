@@ -7,7 +7,7 @@ use super::{
     invalid,
 };
 use crate::{Store, registry::RulesetKey};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{collections::BTreeSet, path::Path};
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -117,8 +117,12 @@ fn save(
     db: &mut Connection,
     data: &Admitted,
     expected: i64,
+    after_read: impl FnOnce(),
 ) -> Result<CatalogueDraftSummary, CatalogueError> {
-    let tx = db.transaction()?;
+    // IMMEDIATE: take the write lock before the reads, so a concurrent writer waits (busy
+    // timeout) instead of failing to upgrade a read lock, and a same-identity loser sees the
+    // committed revision and answers Conflict.
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     references(&tx, data)?;
     let catalogue = &data.catalogue;
     let existing: Option<(i64, i64)> = tx
@@ -128,6 +132,7 @@ fn save(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
+    after_read();
     let (id, revision) = match existing {
         None if expected == 0 => {
             tx.execute(
@@ -164,7 +169,7 @@ impl Store {
         // The DB worker owns the permit even if its async caller is cancelled.
         self.run(move |db| {
             let _permit = job.permit;
-            Ok(save(db, &job.data, expected_revision))
+            Ok(save(db, &job.data, expected_revision, || {}))
         })
         .await?
     }
@@ -241,5 +246,120 @@ impl Store {
         })
         .await
         .map_err(|_| CatalogueError::Worker)?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        sync::{Arc, Condvar, Mutex},
+        time::Duration,
+    };
+
+    /// Two parties meet after their read phase, or give up after a timeout (a writer that
+    /// holds the write lock keeps the other from reaching its read phase at all).
+    #[derive(Default)]
+    struct Rendezvous {
+        arrived: Mutex<usize>,
+        turn: Condvar,
+    }
+
+    impl Rendezvous {
+        fn arrive(&self) {
+            let mut arrived = self.arrived.lock().unwrap();
+            *arrived += 1;
+            self.turn.notify_all();
+            let _ = self
+                .turn
+                .wait_timeout_while(arrived, Duration::from_secs(2), |count| *count < 2)
+                .unwrap();
+        }
+    }
+
+    fn draft(catalogue_id: &str, title: &str) -> Admitted {
+        let value = serde_json::json!({
+            "contract_version": 1, "game_id": "synthetic-game", "edition_id": "first",
+            "catalogue_id": catalogue_id, "title": title, "sources": [],
+            "entry_types": [{"id": "charm", "label": "Charm", "properties": []}],
+            "entries": [{"key": "house-charm", "type": "charm", "name": "House Charm",
+                         "properties": {}, "description": {"owner_text": "Synthetic."}}]
+        });
+        admission::validate(&serde_json::to_vec(&value).unwrap()).unwrap()
+    }
+
+    async fn database() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("race.sqlite3");
+        let store = Store::open(&path).unwrap();
+        store
+            .register_ruleset(crate::registry::RegisterRuleset {
+                game_id: "synthetic-game".into(),
+                game_label: "Synthetic game".into(),
+                edition_id: "first".into(),
+                edition_label: "First edition".into(),
+            })
+            .await
+            .unwrap();
+        (dir, path)
+    }
+
+    /// Run two saves on separate connections whose read phases would overlap.
+    fn race(
+        path: &std::path::Path,
+        jobs: [(Admitted, i64); 2],
+    ) -> Vec<Result<CatalogueDraftSummary, CatalogueError>> {
+        let meet = Arc::new(Rendezvous::default());
+        let threads: Vec<_> = jobs
+            .into_iter()
+            .map(|(data, expected)| {
+                let meet = meet.clone();
+                let path = path.to_owned();
+                std::thread::spawn(move || {
+                    let mut db = Connection::open(path).unwrap();
+                    db.busy_timeout(Duration::from_secs(10)).unwrap();
+                    db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+                    save(&mut db, &data, expected, || meet.arrive())
+                })
+            })
+            .collect();
+        threads.into_iter().map(|t| t.join().unwrap()).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_saves_of_different_catalogues_both_succeed() {
+        let (_dir, path) = database().await;
+        let results = race(
+            &path,
+            [(draft("spells", "One"), 0), (draft("items", "Two"), 0)],
+        );
+        for result in &results {
+            assert!(result.is_ok(), "{result:?}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_saves_of_one_catalogue_give_one_winner_and_a_conflict() {
+        let (_dir, path) = database().await;
+        for expected in [0, 1] {
+            let results = race(
+                &path,
+                [
+                    (draft("spells", "One"), expected),
+                    (draft("spells", "Two"), expected),
+                ],
+            );
+            assert_eq!(
+                results.iter().filter(|r| r.is_ok()).count(),
+                1,
+                "{results:?}"
+            );
+            assert!(
+                results
+                    .iter()
+                    .any(|r| matches!(r, Err(CatalogueError::Conflict))),
+                "{results:?}"
+            );
+        }
     }
 }

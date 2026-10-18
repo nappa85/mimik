@@ -183,30 +183,53 @@ fn source_order_and_property_spelling_are_normalised_but_author_order_is_identit
     );
 }
 
+/// `key` with its first scalar spelled as a JSON `\\uXXXX` escape (an escaped-equivalent key).
+fn escaped(key: &str) -> String {
+    let mut chars = key.chars();
+    let first = chars.next().unwrap();
+    let spelled = format!(
+        "{}u{:04x}{}",
+        char::from(92),
+        u32::from(first),
+        chars.as_str()
+    );
+    assert!(
+        spelled.starts_with(char::from(92)),
+        "escape lost: {spelled}"
+    );
+    assert_eq!(
+        serde_json::from_str::<String>(&format!("\"{spelled}\"")).unwrap(),
+        key
+    );
+    spelled
+}
+
 #[test]
 fn decoder_rejects_duplicate_and_escaped_equivalent_keys_at_every_level() {
     let compact = serde_json::to_string(&example()).unwrap();
-    for (from, to) in [
+    // (level, an existing member, its value spelling)
+    for (level, key, value) in [
+        ("root", "contract_version", "1"),
+        ("entry type", "id", "\"charm\""),
+        ("entry", "name", "\"House Charm\""),
+        ("entry properties", "level", "1"),
         (
-            r#""contract_version":1"#,
-            r#""contract_version":1,"contract_version":1"#,
+            "description",
+            "owner_text",
+            "\"A small synthetic charm written for this fixture.\"",
         ),
-        (
-            r#""contract_version":1"#,
-            r#""contract_version":1,"contract_version":1"#,
-        ),
-        (
-            r#""name":"House Charm""#,
-            r#""name":"House Charm","name":"Other""#,
-        ),
-        (r#""level":1"#, r#""level":1,"level":2"#),
-        (r#""level":1"#, r#""level":1,"level":2"#),
-        (r#""unit_id":977"#, r#""unit_id":977,"unit_id":978"#),
-        (r#""id":"charm""#, r#""id":"charm","id":"charm""#),
+        ("unit", "unit_id", "977"),
     ] {
-        assert!(compact.contains(from), "{from}");
-        let code = rejected_bytes(compact.replacen(from, to, 1).as_bytes());
-        assert_eq!(code, "malformed-json-or-duplicate-key-or-input-limit");
+        let from = format!("\"{key}\":{value}");
+        assert!(compact.contains(&from), "{level}: {from}");
+        for spelling in [key.to_owned(), escaped(key)] {
+            let to = format!("{from},\"{spelling}\":{value}");
+            let code = rejected_bytes(compact.replacen(&from, &to, 1).as_bytes());
+            assert_eq!(
+                code, "malformed-json-or-duplicate-key-or-input-limit",
+                "{level}: {spelling}"
+            );
+        }
     }
     for raw in [
         compact.replace(r#""level":1"#, r#""level":1.0"#),
@@ -617,4 +640,131 @@ fn every_rejection_in_this_suite_is_redacted_including_schema_paths() {
     let mut value = base;
     value["entries"][1]["properties"]["zqxprop"] = "zqxvalue".repeat(200).into();
     rejected(&value);
+}
+
+/// The first diagnostic path of a rejection.
+fn rejected_path(value: &Value) -> String {
+    let Err(CatalogueError::Invalid(report)) = validate(&bytes(value)) else {
+        panic!("expected an invalid-report rejection");
+    };
+    report.diagnostics[0].path.clone()
+}
+
+#[test]
+fn schema_paths_redact_author_keys_by_position_not_spelling() {
+    // A numeric property key and property keys spelled like envelope members, each carrying
+    // a schema-invalid value: their spelling must never reach the path.
+    for key in [
+        "314159265358979",
+        "name",
+        "properties",
+        "0",
+        "units",
+        "label",
+    ] {
+        let mut value = example();
+        value["entries"][1]["properties"] = json!({ key: null });
+        let path = rejected_path(&value);
+        assert_eq!(path, "/entries/1/properties/*", "{key}");
+    }
+    // Numeric segments survive only at array positions, members only where they exist.
+    let mut value = example();
+    value["sources"][1]["source_id"] = json!(0);
+    assert_eq!(rejected_path(&value), "/sources/1/source_id");
+    // Units sit under the description `oneOf`, reported at the description.
+    let mut value = example();
+    value["entries"][0]["description"]["units"][1]["unit_id"] = json!(0);
+    assert_eq!(rejected_path(&value), "/entries/0/description");
+    let mut value = example();
+    value["entry_types"][0]["properties"][1]["options"][1]["label"] = json!("");
+    assert_eq!(
+        rejected_path(&value),
+        "/entry_types/0/properties/1/options/1/label"
+    );
+}
+
+#[test]
+fn control_characters_are_rejected_in_names_labels_and_text_values() {
+    for pointer in [
+        "/title",
+        "/entry_types/0/label",
+        "/entry_types/0/properties/0/label",
+        "/entry_types/0/properties/1/options/0/label",
+        "/entries/0/name",
+        "/entries/0/properties/range",
+    ] {
+        for control in ['\u{0}', '\u{7}', '\n', '\t', '\u{1b}', '\u{85}'] {
+            let mut value = example();
+            *value.pointer_mut(pointer).unwrap() = format!("Text{control}more").into();
+            assert_eq!(
+                rejected(&value),
+                "control-character-in-text",
+                "{pointer} {control:?}"
+            );
+        }
+    }
+    let pointer = "/entries/1/description/owner_text";
+    let mut value = example();
+    *value.pointer_mut(pointer).unwrap() = "Line one\n\tLine two".into();
+    accepted(&value);
+    for control in ['\u{0}', '\u{7}', '\r', '\u{1b}', '\u{85}'] {
+        *value.pointer_mut(pointer).unwrap() = format!("Text{control}more").into();
+        assert_eq!(rejected(&value), "control-character-in-text", "{control:?}");
+    }
+}
+
+#[test]
+fn containers_where_scalars_belong_are_rejected() {
+    for pointer in [
+        "/title",
+        "/catalogue_id",
+        "/sources/0/source_id",
+        "/sources/0/pdf_sha256",
+        "/entry_types/0/id",
+        "/entry_types/0/properties/0/control",
+        "/entry_types/0/properties/1/options/0/label",
+        "/entries/0/key",
+        "/entries/0/name",
+        "/entries/2/retired",
+        "/entries/0/properties/level",
+        "/entries/1/description/owner_text",
+        "/entries/0/description/units/0/unit_id",
+    ] {
+        for container in [json!({}), json!([]), json!({"a": 1}), json!([1])] {
+            let mut value = example();
+            *value.pointer_mut(pointer).unwrap() = container.clone();
+            rejected(&value);
+        }
+    }
+}
+
+#[test]
+fn redaction_walks_the_envelope_structure() {
+    for (path, kept) in [
+        ("", ""),
+        ("/entries/3/name", "/entries/3/name"),
+        ("/entries/3/properties", "/entries/3/properties"),
+        ("/entries/3/properties/name", "/entries/3/properties/*"),
+        ("/entries/3/properties/12345/0", "/entries/3/properties/*"),
+        ("/entries/name", "/entries/*"),
+        ("/entries/03", "/entries/*"),
+        ("/12345", "/*"),
+        ("/name", "/*"),
+        ("/title/0", "/title/*"),
+        ("/sources/2/units", "/sources/2/*"),
+        (
+            "/entry_types/1/properties/4/options/7/label",
+            "/entry_types/1/properties/4/options/7/label",
+        ),
+        (
+            "/entries/0/description/units/15/page_id",
+            "/entries/0/description/units/15/page_id",
+        ),
+        (
+            "/entries/0/description/owner_text/x",
+            "/entries/0/description/owner_text/*",
+        ),
+    ] {
+        assert_eq!(admission::redacted_path(path), kept, "{path}");
+    }
 }

@@ -40,49 +40,83 @@ pub(super) fn hash(bytes: &[u8]) -> String {
     hex::encode(hash.finalize())
 }
 
-/// Envelope member names that may appear in a diagnostic path. Any other segment is
-/// author-chosen (a property id or an unknown member) and is replaced by `*`.
-const MEMBERS: &[&str] = &[
-    "contract_version",
-    "game_id",
-    "edition_id",
-    "catalogue_id",
-    "title",
-    "sources",
-    "source_id",
-    "pdf_sha256",
-    "entry_types",
-    "id",
-    "label",
-    "properties",
-    "control",
-    "options",
-    "entries",
-    "key",
-    "type",
-    "name",
-    "retired",
-    "description",
-    "units",
-    "page_id",
-    "unit_id",
-    "owner_text",
-];
+/// A position in the catalogue envelope while walking a schema error path.
+#[derive(Clone, Copy)]
+enum Position {
+    Root,
+    Sources,
+    Source,
+    Types,
+    Type,
+    Properties,
+    Property,
+    Options,
+    Choice,
+    Entries,
+    Entry,
+    Description,
+    Units,
+    Unit,
+    Scalar,
+}
 
-fn redacted_path(path: &str) -> String {
-    path.split('/')
-        .map(|segment| {
-            if segment.is_empty()
-                || segment.bytes().all(|byte| byte.is_ascii_digit())
-                || MEMBERS.contains(&segment)
-            {
-                segment
-            } else {
-                "*"
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("/")
+/// The position after `segment` at `position`, or `None` when the segment is not a fixed
+/// envelope member or an index at an array position (an author key, such as an entry
+/// property id or an unknown member, whatever its spelling).
+fn step(position: Position, segment: &str) -> Option<Position> {
+    use Position::{
+        Choice, Description, Entries, Entry, Options, Properties, Property, Root, Scalar, Source,
+        Sources, Type, Types, Unit, Units,
+    };
+    let index = !segment.is_empty()
+        && segment.len() <= 5
+        && segment.bytes().all(|byte| byte.is_ascii_digit())
+        && (segment == "0" || !segment.starts_with('0'));
+    Some(match (position, segment) {
+        (Sources, _) if index => Source,
+        (Types, _) if index => Type,
+        (Properties, _) if index => Property,
+        (Options, _) if index => Choice,
+        (Entries, _) if index => Entry,
+        (Units, _) if index => Unit,
+        (Root, "contract_version" | "game_id" | "edition_id" | "catalogue_id" | "title")
+        | (Source, "source_id" | "pdf_sha256")
+        | (Type | Choice, "id" | "label")
+        | (Property, "id" | "label" | "control")
+        | (Entry, "key" | "type" | "name" | "retired")
+        | (Description, "owner_text")
+        | (Unit, "source_id" | "page_id" | "unit_id") => Scalar,
+        (Root, "sources") => Sources,
+        (Root, "entry_types") => Types,
+        (Root, "entries") => Entries,
+        (Type, "properties") => Properties,
+        (Property, "options") => Options,
+        (Entry, "description") => Description,
+        (Description, "units") => Units,
+        _ => return None,
+    })
+}
+
+/// Keep a schema error path only as far as it follows the envelope structure; the first
+/// author-chosen segment and everything after it become a single `*`.
+pub(super) fn redacted_path(path: &str) -> String {
+    let mut position = Position::Root;
+    let mut kept = String::new();
+    for segment in path.split('/').skip(1) {
+        let next = match (position, segment) {
+            // Entry properties are a map: every child segment is an author key.
+            (Position::Entry, "properties") => Some(Position::Scalar),
+            _ => step(position, segment),
+        };
+        let Some(next) = next else {
+            kept.push_str("/*");
+            break;
+        };
+        kept.push('/');
+        kept.push_str(segment);
+        position = next;
+    }
+    kept
 }
 
 /// Admit a catalogue envelope. Every rejection is a static code with an index-only path.
@@ -126,10 +160,36 @@ fn label(value: &str) -> bool {
     !value.trim().is_empty()
 }
 
+/// Names, labels, the title and text property values: no control characters at all.
+fn plain(value: &str) -> bool {
+    !value.chars().any(char::is_control)
+}
+
+/// Owner text: line feeds and tabs are its only control characters.
+fn prose(value: &str) -> bool {
+    !value
+        .chars()
+        .any(|scalar| scalar.is_control() && !matches!(scalar, '\n' | '\t'))
+}
+
+const CONTROL: &str = "control-character-in-text";
+
 fn types(catalogue: &Catalogue) -> Result<BTreeMap<&str, usize>, CatalogueError> {
     let mut ids = BTreeMap::new();
     for (index, entry_type) in catalogue.entry_types.iter().enumerate() {
         let path = format!("/entry_types/{index}");
+        if !plain(&entry_type.label)
+            || entry_type.properties.iter().any(|property| {
+                !plain(&property.label)
+                    || property
+                        .options
+                        .iter()
+                        .flatten()
+                        .any(|option| !plain(&option.label))
+            })
+        {
+            return Err(invalid(&path, CONTROL));
+        }
         if !crate::registry::valid_id(&entry_type.id)
             || ids.insert(entry_type.id.as_str(), index).is_some()
             || !label(&entry_type.label)
@@ -185,6 +245,9 @@ fn properties(
             .remove(&property.id)
             .ok_or_else(|| invalid(path, "property-key-set-mismatch"))?;
         let matches = match (&property.control, &value) {
+            (PropertyControl::Text, PropertyValue::Text(text)) if !plain(text) => {
+                return Err(invalid(path, CONTROL));
+            }
             (PropertyControl::Text, PropertyValue::Text(_))
             | (PropertyControl::Integer, PropertyValue::Integer(_))
             | (PropertyControl::Boolean, PropertyValue::Boolean(_)) => true,
@@ -215,6 +278,9 @@ fn domain(catalogue: &mut Catalogue) -> Result<CatalogueCounts, CatalogueError> 
         if !crate::registry::valid_id(id) {
             return Err(invalid(path, "invalid-stable-id"));
         }
+    }
+    if !plain(&catalogue.title) {
+        return Err(invalid("/title", CONTROL));
     }
     if !label(&catalogue.title) {
         return Err(invalid("/title", "title-required"));
@@ -254,6 +320,9 @@ fn domain(catalogue: &mut Catalogue) -> Result<CatalogueCounts, CatalogueError> 
         if !crate::registry::valid_id(&entry.key) || !keys.insert(entry.key.clone()) {
             return Err(invalid(&path, "invalid-or-duplicate-entry-key"));
         }
+        if !plain(&entry.name) {
+            return Err(invalid(&path, CONTROL));
+        }
         if !label(&entry.name) {
             return Err(invalid(&path, "entry-name-required"));
         }
@@ -277,6 +346,7 @@ fn domain(catalogue: &mut Catalogue) -> Result<CatalogueCounts, CatalogueError> 
                 }
                 counts.unit_references += units.len();
             }
+            (None, Some(text)) if !prose(text) => return Err(invalid(&path, CONTROL)),
             (None, Some(text)) if label(text) && text.chars().count() <= decode::MAX_OWNER_TEXT => {
                 owner_bytes = owner_bytes.saturating_add(text.len());
                 counts.owner_written += 1;

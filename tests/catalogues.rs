@@ -344,7 +344,8 @@ async fn units_must_be_on_their_page_in_a_listed_finalized_source_of_the_pair() 
         let error = fixture.save(&value_object, 0).await.unwrap_err();
         assert_eq!(code(&error), expected, "{member}");
     }
-    // A second listed source of the same pair, but the unit is not in it.
+    // A listed source id that does not exist at all fails the source check before any
+    // unit check (cross-wired real sources are covered by `cross_wired_real_sources_*`).
     let mut other = base.clone();
     other["sources"]
         .as_array_mut()
@@ -556,6 +557,14 @@ async fn cross_process_create_has_one_winner() {
     assert_eq!(outputs.iter().filter(|o| o.status.success()).count(), 1);
     for output in &outputs {
         assert_redacted(output);
+        if !output.status.success() {
+            // The loser is a revision conflict, never a storage (lock) failure.
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("Conflict"),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
     assert_eq!(fixture.drafts(), 1);
 }
@@ -620,5 +629,142 @@ async fn populated_schema18_database_upgrades_to_19_atomically() {
         })
         .unwrap(),
         0
+    );
+}
+
+#[tokio::test]
+async fn cli_schema_paths_never_echo_author_property_keys() {
+    let _guard = TEST_LOCK.lock().await;
+    let fixture = fixture().await;
+    for key in ["314159265358979", "name", "properties"] {
+        let mut value = fixture.catalogue();
+        value["entries"][0]["properties"]
+            .as_object_mut()
+            .unwrap()
+            .insert(key.into(), Value::Null);
+        let file = fixture.write("numeric.json", &serde_json::to_vec(&value).unwrap());
+        let output = fixture.import(&file, 0);
+        assert!(!output.status.success());
+        assert_redacted(&output);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains(&format!("properties/{key}")), "{stderr}");
+        assert!(stderr.contains("/entries/0/properties/*"), "{stderr}");
+    }
+}
+
+/// A second real, finalized source of the same pair (same synthetic PDF, its own bundle).
+async fn second_source(fixture: &Fixture) -> (i64, i64, i64) {
+    let second = fixture.root.join("second-bundle");
+    std::fs::create_dir(&second).unwrap();
+    let first = fixture.root.join("unknown-bundle");
+    for name in ["source.json", "page-1.png"] {
+        std::fs::copy(first.join(name), second.join(name)).unwrap();
+    }
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(first.join("bundle.json")).unwrap()).unwrap();
+    manifest["source_id"] = json!("synthetic-second-core");
+    manifest["title"] = json!("Second synthetic source");
+    std::fs::write(
+        second.join("bundle.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    fixture
+        .store
+        .import_source(&second, &fixture.root.join("original.pdf"))
+        .await
+        .unwrap();
+    let source = fixture
+        .store
+        .sources()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|source| source.id != fixture.source)
+        .unwrap();
+    let page = fixture.store.source_page(source.pages[0].id).await.unwrap();
+    assert_ne!(page.id, fixture.page);
+    (source.id, page.id, page.units[0].id)
+}
+
+#[tokio::test]
+async fn cross_wired_real_sources_are_rejected() {
+    let _guard = TEST_LOCK.lock().await;
+    let fixture = fixture().await;
+    let (source_b, page_b, unit_b) = second_source(&fixture).await;
+    let mut base = fixture.catalogue();
+    base["sources"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"source_id": source_b, "pdf_sha256": fixture.pdf_hash}));
+    // Both sources and every id exist; only the relationships are wrong.
+    let (a, pa, ua) = (fixture.source, fixture.page, fixture.unit);
+    for (label, source, page, unit) in [
+        ("unit and page of A cited with source B", source_b, pa, ua),
+        (
+            "unit of A cited with page and source B",
+            source_b,
+            page_b,
+            ua,
+        ),
+        ("unit of A cited with page of B and source A", a, page_b, ua),
+        ("unit of B cited with page and source A", a, pa, unit_b),
+    ] {
+        let mut value = base.clone();
+        value["entries"][0]["description"]["units"] =
+            json!([{"source_id": source, "page_id": page, "unit_id": unit}]);
+        let error = fixture.save(&value, 0).await.unwrap_err();
+        assert_eq!(code(&error), "unit-page-source-mismatch", "{label}");
+    }
+    assert_eq!(fixture.drafts(), 0);
+    // Correct wiring of both sources is accepted.
+    base["entries"][0]["description"]["units"] = json!([
+        {"source_id": a, "page_id": pa, "unit_id": ua},
+        {"source_id": source_b, "page_id": page_b, "unit_id": unit_b}
+    ]);
+    assert_eq!(fixture.save(&base, 0).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn identical_content_with_the_current_revision_still_advances_it() {
+    let _guard = TEST_LOCK.lock().await;
+    let fixture = fixture().await;
+    let bytes = serde_json::to_vec(&fixture.catalogue()).unwrap();
+    let first = fixture
+        .store
+        .save_catalogue_draft(bytes.clone(), 0)
+        .await
+        .unwrap();
+    let second = fixture.store.save_catalogue_draft(bytes, 1).await.unwrap();
+    assert_eq!((first.revision, second.revision), (1, 2));
+    assert_eq!(first.content_hash, second.content_hash);
+    assert_eq!(first.id, second.id);
+}
+
+#[tokio::test]
+async fn a_nonnative_pair_with_a_built_in_adapter_is_refused() {
+    let _guard = TEST_LOCK.lock().await;
+    let fixture = fixture().await;
+    // The only adapter pair ships registered as native and registry editions are immutable,
+    // so no product path builds this state. This test database drops the immutability
+    // trigger and flips the flag, to reach the adapter predicate on its own.
+    let db = rusqlite::Connection::open(&fixture.database).unwrap();
+    db.execute_batch("DROP TRIGGER registry_editions_immutable_update")
+        .unwrap();
+    let changed = db
+        .execute(
+            "UPDATE registry_editions SET native=0 WHERE game_id='mork-borg' AND edition_id='it-2025'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    let mut value = fixture.catalogue();
+    value["game_id"] = "mork-borg".into();
+    value["edition_id"] = "it-2025".into();
+    value["sources"] = json!([]);
+    value["entries"][0]["description"] = json!({"owner_text": "Synthetic."});
+    assert_eq!(
+        code(&fixture.save(&value, 0).await.unwrap_err()),
+        "registered-nonnative-ruleset-required"
     );
 }

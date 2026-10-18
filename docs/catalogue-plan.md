@@ -877,4 +877,23 @@ references (so the per-unit reference queries are not exercised).
 The 8,192-entry import stays far below the R8 CLI ceiling of 256 MiB. Step 2 measures the
 publish path (projections, seal, FTS) and separate-process contention, as §9 requires.
 
-**Not yet done:** independent review of this step.
+**Review round 1 fixes** (Sol: FIX THEN MERGE; Sonnet: FIX THEN MERGE; third chain pending).
+Each regression was run against the pre-fix tree (only a no-op `after_read` hook added to
+`save` for the race tests) or, where the check already existed, against a narrow mutation of
+that check, then against the fix.
+
+| Item | Regression | Red | Green |
+|---|---|---|---|
+| Sol F1 redaction by position | `schema_paths_redact_author_keys_by_position_not_spelling`, `cli_schema_paths_never_echo_author_property_keys` (keys `314159265358979`, `name`, `properties`, `0`, `units`, `label`), `redaction_walks_the_envelope_structure` | both fail on the pre-fix tree (numeric and member-named keys kept) | pass; the path walker keeps indices only at array positions, members only where they exist, and always redacts entry-property keys |
+| Sol F2 / Sonnet 2 IMMEDIATE save | `store::tests::concurrent_saves_of_different_catalogues_both_succeed`, `…_of_one_catalogue_give_one_winner_and_a_conflict` (separate connections, a rendezvous after the read phase, create and update) | both fail: the loser gets `Storage(DatabaseBusy)` | pass with `TransactionBehavior::Immediate`; the cross-process CLI race now also requires the loser to report `Conflict` |
+| Sol F3 / Sonnet 1 escaped duplicates | `decoder_rejects_duplicate_and_escaped_equivalent_keys_at_every_level` now builds `\uXXXX` spellings in code and asserts the backslash survives (the earlier fixture strings had lost their escapes) at root, entry type, entry, entry properties, description and unit | mutation: duplicate-key check removed → fails | pass |
+| Sol F3 / Sonnet 1 cross-wired sources | `cross_wired_real_sources_are_rejected`: two real finalized sources of the pair, every id exists, four wrong relationships | mutation `p.source_id=?3` removed → fails; mutation unit→page join replaced by `ON 1` → fails | pass |
+| Sonnet 3 control characters | `control_characters_are_rejected_in_names_labels_and_text_values` (U+0000, U+0007, LF, TAB, ESC, U+0085 in title, labels, option labels, names, text values; owner text allows LF and TAB only) | fails (accepted) | pass (`control-character-in-text`) |
+| Sonnet 4 adapter pair | `a_nonnative_pair_with_a_built_in_adapter_is_refused` (test DB drops the registry immutability trigger and flips `native`; no product path builds this state) | mutation: adapter predicate removed → fails | pass |
+| Sonnet 4 coverage | `identical_content_with_the_current_revision_still_advances_it`, `containers_where_scalars_belong_are_rejected` | pass on the pre-fix tree (behaviour already present; coverage only) | pass |
+
+Accepted without code change: Sol F4 (the admission worker lifecycle duplicates
+`definitions::store`). The definition draft save keeps its deferred transaction; the
+coordinator records that as a known pre-existing issue.
+
+**Not yet done:** re-review of these fixes.
