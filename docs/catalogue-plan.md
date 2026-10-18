@@ -1,8 +1,8 @@
 # Read-only catalogue plan (step 1 of the definition-language order of work)
 
-2026-10-18. Status: **revision 2, for re-review.** Revision 1 (`3b63274`) was reviewed by Sol
+2026-10-18. Status: **revision 2.1** (rev 2 re-review amendments R1–R16 in §7, binding over the body). Revision 2 Revision 1 (`3b63274`) was reviewed by Sol
 (NO-GO), Sonnet (GO WITH AMENDMENTS) and Space Bunny (GO WITH AMENDMENTS). The record is
-[reviews/2026-10-18-catalogue-plan.md](reviews/2026-10-18-catalogue-plan.md); §8 maps every
+[reviews/2026-10-18-catalogue-plan.md](reviews/2026-10-18-catalogue-plan.md); §6 maps every
 finding to this revision. No code yet.
 
 Context:
@@ -50,8 +50,9 @@ No model is involved anywhere in this plan.
 ## 1. Facts this plan rests on (verified 2026-10-18; rev 1 errors corrected)
 
 - **Definition decoder.**
-  - `decode::parse` and `parse_sheet` share `Seed` with per-member `limits()`: the default is
-    an array of 256 and a string of 5,000 (`decode.rs:21-37`).
+  - `decode::parse` uses `Seed` with per-member `limits()`: the default is an array of 256 and
+    a string of 5,000 (`decode.rs:21-37`). `parse_sheet` shares `Seed`, but sheet `data` has its
+    own 20,000-scalar string branch (`decode.rs:116-129`).
   - Nodes are capped by `MAX_NODES` = 32,768 (`decode.rs:9`). The same constant is the list
     form-budget node bound (`values.rs:196`).
   - Raw input is capped at 256 KiB for definitions and 1 MiB for sheets (`decode.rs:173-177`).
@@ -78,7 +79,9 @@ No model is involved anywhere in this plan.
   - the guarded reads `guarded` and `read_guarded`;
   - `Budget`, a SQLite progress handler with a 1 s wall-clock budget (`:11-15`, `:174-188`);
   - `interrupted`.
-  The FTS tokenizer is `unicode61 remove_diacritics 2`.
+  The FTS tokenizer is `unicode61 remove_diacritics 2`. `guarded`, `read_guarded`, `Budget`
+  and `interrupted` are private today, so reusing them needs a narrow `pub(crate)` widening.
+  `guarded` is an all-or-nothing size check, not a prefix read (`search.rs:125-140`).
 - **Sheets.**
   - `private_read` loads and authorizes inside one transaction; it decodes the immutable pin
     and validates values outside the database mutex in `spawn_blocking`
@@ -133,13 +136,13 @@ No model is involved anywhere in this plan.
       "properties": { "level": 1, "school": "light" },
       "description": { "units": [{ "source_id": 3, "page_id": 41, "unit_id": 977 }] } },
     { "key": "house-charm", "type": "spell", "name": "House Charm",
-      "properties": { "level": 0 }, "retired": false,
+      "properties": { "level": 0, "school": "light" }, "retired": false,
       "description": { "owner_text": "…" } } ] }
 ```
 
 Rules:
-- **Identifiers.** IDs, keys and option ids use `registry::valid_id` (lowercase letters,
-  digits and `-`, 1–64 characters). Names use the definition's sources and options shapes.
+- **Identifiers.** IDs, keys and option ids use `registry::valid_id`: a leading lowercase
+  letter, then lowercase letters, digits or `-`, 1–64 characters in all (`registry.rs:41-46`). Names use the definition's sources and options shapes.
 - **Entries.**
   - `type` must name a declared entry type.
   - `properties` must be exactly the declared keys of that type with matching controls, all
@@ -231,8 +234,8 @@ mimik show-catalogue-version --game G --edition E --catalogue C [--version V]
 ```
 
 - **Comparison** reports counts only: entries, types, owner-written, units and badge counts,
-  plus a diff against the latest version (added keys, retired keys, keys whose description
-  references changed). It also reports refusals (dropped or retyped keys) and the ticket.
+  plus a diff against the latest version, as **counts only**: added keys, retired keys and
+  keys whose description references changed. It also reports refusals (dropped or retyped keys) and the ticket.
 - **The ticket hash** covers:
   - the draft id, revision and content hash;
   - the latest sealed version (number and hash), or "none";
@@ -465,3 +468,207 @@ Re-review of this revision by Sol and Sonnet in parallel, plus the third chain, 
 | Sonnet F5 (homebrew) | Q4 user decision: invalid; D3 append-only lets the owner add items later |
 | Sonnet F23, Space Bunny M9 (missing tests) | §3 per-step test lists |
 | Sol 12 (§1 errors) | §1 rewritten |
+
+## 7. Revision 2.1 amendments (rev 2 re-review; binding over the body)
+
+Re-review of rev 2:
+- Sonnet: GO WITH AMENDMENTS.
+- Sol: NO-GO, with one Blocking finding.
+- Third chain: see the review record.
+
+**R1 (Sol 1, Blocking). Seal invariant: projections equal the hashed content.**
+- `catalogue_seals` is inserted last in the publish transaction. Its insert trigger requires
+  **exact two-way set equality**, computed with `json_each` over the version's canonical
+  `content` (once, at seal time only), between the content and:
+  - `catalogue_entry_types(version_id, type_id)`;
+  - `catalogue_entries(version_id, key, type_id, name, retired)`;
+  - `catalogue_entry_units(version_id, key, ordinal, unit_id)`.
+- Each table must also have the content's row count.
+- Before inserting, Rust verifies that the canonical content re-hashes to the version hash.
+- Only after the equality check does the trigger apply the append-only comparison with the
+  previous sealed version (no type or key missing, no changed type). It compares projections,
+  which are now proven equal to the content.
+- Inserting into any projection of a sealed version is refused.
+- Tests:
+  - a same-count substitution (`a, c` in place of `a, b`);
+  - a wrong type, a wrong retired flag, a wrong unit or ordinal;
+  - an extra or a missing row in each table;
+  - a content/projection mismatch with matching counts;
+  - an empty type retained across versions;
+  - a crash or rollback mid-publish leaves no sealed or partial version.
+
+**R2 (Sol 2, Sonnet M4/m1). Deployable foreign keys; FTS as a derived index.**
+- `catalogue_entry_units` stores only `unit_id`, with a foreign key to `source_units(id)`.
+- The envelope's `source_id` and `page_id` are checked against `source_units.page_id` and
+  `source_pages.source_id` in Rust at admission. An insert trigger re-checks them through
+  joins, and page and source are derived through joins at read time. No composite foreign key
+  is created.
+- `catalogue_entry_types` is added (Sonnet M4). The D8 check "the referenced type exists"
+  reads it, never the JSON.
+- `catalogue_names_fts` is a **derived, latest-only index**:
+  - the publish transaction deletes that catalogue's FTS rows and inserts the new version's
+    names;
+  - its columns are `name`, plus `UNINDEXED` `catalogue_row_id` and `key`;
+  - queries join back to `catalogue_entries` of the latest sealed version, with the FTS table
+    first (CROSS JOIN, as in `search.rs:152`).
+- FTS is exempt from the immutability triggers, since virtual tables can't have them. A
+  `rebuild-catalogue-index` CLI command and an integrity check (FTS key set = latest
+  projection) repair it.
+- Index `catalogue_entries(version_id, type_id, name, key)`, and
+  `catalogue_entry_units(unit_id)` for badge joins (Sonnet N7).
+- The v18 → v19 upgrade test, on a populated database, also publishes and browses afterward.
+
+**R3 (Sol 3, Sonnet M1). Property-addressed ops.**
+- New ops: `browse-f-r-p`, `search-f-r-p` and `pick-f-r-p:<key>`, where p is the item
+  property index.
+- Parsing:
+  1. split on the first `:`;
+  2. parse the left side with the existing grammar, plus a third index;
+  3. validate the key with `valid_id`.
+- The whole op is at most 100 bytes.
+- `Op` loses `Copy` and keeps `Clone`.
+- The op must name a `catalogue_ref` property of an existing row. Anything else answers 400.
+- Tests:
+  - keys containing `-`;
+  - a missing or extra `:`;
+  - an out-of-range index;
+  - a non-`catalogue_ref` property;
+  - an op over the length limit;
+  - Save round-trip of a picked key.
+
+**R4 (Sol 4, Sonnet M2/M3). Picker form state and the Enter key.**
+- Two new form keys:
+  - `catalogue-q`, the query, at most 100 scalars;
+  - `catalogue-open`, which records which (f, r, p) panel is open and must match a valid
+    address.
+- Both are admitted by `sheet_keys` only for definitions with a `catalogue_ref`. `values::form`
+  ignores them, so they are never stored, and they count against the pair and `ECHO_BYTES`
+  budgets.
+- While a panel is open, the first submit control in tree order is a visually hidden default
+  button `op=search-f-r-p` (`tabindex="-1"`, outside the accessibility tree), so Enter in the
+  query field searches instead of saving.
+- Tests:
+  - keyboard-only search with Enter;
+  - Enter in an ordinary field with no panel open still saves;
+  - the query is never stored;
+  - forged `catalogue-open` values.
+
+**R5 (Sonnet M5). No per-request re-verification of the 4 MiB content.**
+- The content hash and the projection equality are checked:
+  - at publish (R1);
+  - by `show-catalogue-version`;
+  - by an Owner integrity check command, `verify-catalogues`.
+- Requests check only that the version is sealed and that its identity columns (pair,
+  catalogue id) match.
+- D7's "Rust re-verifies … on every read" is withdrawn.
+
+**R6 (Sol 7, Sonnet M6, N3). Request phases and the pin boundary.** Catalogue routes and
+catalogue-aware sheet renders follow `private_read`'s pattern, keeping the permit through
+every phase:
+1. **Transaction A:** `recheck`, `authorize_read`, load the raw snapshot and pin.
+2. **`spawn_blocking`:**
+   - `private_pin::validate` (or `validate_for_write` where no formulas are needed);
+   - `match_pin`;
+   - unsupported pins refused (Sonnet N3);
+   - the draft form parsed, for ops.
+3. **Transaction B:**
+   - `recheck` and `authorize_read` again;
+   - the catalogue id checked against the validated pin's `catalogues` and pair;
+   - bounded lookups:
+     - names and badges for the keys on the page, grouped by (catalogue, type);
+     - picker results;
+     - Pick key validation.
+4. **Render.**
+
+Tests: corrupt pin, hash or pair; an unsupported pin; revocation between A and B; the permit
+held across all phases, for Browse, Search and Pick.
+
+**R7 (Sol 5, Sonnet m4). Bounded prefix reads.**
+- First, one metadata query covers **all** referenced units: state, page `complete`,
+  `printed_label`, PDF page, and the effective byte length via `length(CAST(… AS BLOB))`. Any
+  rejected unit means "description unavailable", even when it sits after the cut-off point.
+- Then the units are read in order with `substr(effective, 1, remaining_chars)`. The display
+  cap is **20,000 characters per entry**, at most 80 KB of UTF-8, which replaces "64 KiB". The
+  cut is character-safe, because SQLite's `substr` on TEXT counts characters.
+- When the text is cut, a "continues in the manual at p. X" note names the page of the
+  first unit that was not fully shown.
+- Owner text is at most 20,000 characters, so it is never cut.
+- Tests:
+  - an oversized first unit;
+  - a cumulative cut;
+  - a multibyte character at the cut;
+  - a rejected unit after the cut;
+  - owner text.
+
+**R8 (Sol 6, Sonnet m8). Contention, measured correctly.**
+- Two separate measurements:
+  - **CLI against server:** a separate process, contending through the SQLite write lock
+    (busy timeout 5 s, `store.rs:72`). Not `JOBS`, which is per process.
+  - **Within the server:** contention for the `JOBS` permit.
+- **Acceptance criteria for step 0**, on this machine, in release mode:
+  - the publish write transaction holds the lock for **≤ 2 s** at the maximum size;
+  - a concurrent server save waits and succeeds, rather than failing;
+  - CLI peak RSS **≤ 256 MiB**;
+  - browse, entry and pick page server time **p95 ≤ 250 ms** with 8 linked catalogues at
+    their maxima.
+- If a criterion fails, D5 limits are lowered before the schema is written.
+- D5's sentence about 503 is replaced by these two measurements.
+
+**R9 (Sol D9, Sonnet m3). Writer and retired keys.**
+- The membership check lives in `snapshots::write` (`snapshots.rs:306`), for create and edit,
+  after revision-conflict precedence.
+- Queries are grouped by (catalogue, entry type), with at most 4,096 bound keys in total.
+- **A retired key is accepted only if** the same list property already held it somewhere in
+  the previous revision. New picks of retired entries are refused.
+- Freeze, reads and history stay unchecked (monotonic).
+- Tests:
+  - direct writer calls (not only the web handler);
+  - forged POST values;
+  - a retired key that is kept versus newly added;
+  - the largest IN query.
+
+**R10 (Sol D3). Readiness stays independent of catalogue versions.** The three D8 checks
+verify existence and integrity only. Catalogue state never enters the definition wiring
+snapshot or its hash. The approval envelope keeps its 8 keys (`009:11-36`, Sonnet m7), so a
+catalogue publication never makes a definition approval stale.
+
+Regression: catalogue v1 → v2 with existing sheets and history; definition and snapshot hashes
+unchanged, formula results unchanged, new-sheet readiness intact.
+
+**R11 (Sol D3). Capacity.** Retirement doesn't free capacity. A catalogue at 4,096 keys can't
+accept another house item. This is documented in `catalogue-publication.md`. Step 0 checks
+whether 8,192 entries also meets R8. If it does, D5's entry limit becomes 8,192.
+
+**R12 (Sonnet N5, Space Bunny B3 rev 1). Badge wording.**
+- **Reviewed** entries say: "Source text reviewed. Which passages form this entry was chosen by
+  the catalogue author."
+- **Unchecked** entries say: "Extracted from your manual; not yet reviewed."
+- The always-on "not compared" sentence is dropped as contradictory.
+
+**R13 (Sonnet m9). Browse cursor and order.**
+- Results are always ordered by `(name, key)`, including with `q`, where FTS is a filter
+  only, never a rank.
+- The cursor is `after=<key>`, validated with `valid_id`. The server looks up that key's
+  `(name, key)` in the latest version and seeks from there; an unknown key restarts from the
+  beginning.
+- Tests: duplicate names, a cursor key from another type.
+
+**R14 (Sonnet m5). Every `Control` match site gets a `CatalogueRef` arm:** `values.rs:92`,
+`:201` and `:543`, `web.rs:572`, `formula_admission.rs:219`, `history_diff.rs:304` and
+`private_pin.rs:139`. Clippy's non-exhaustive match makes a missing arm a compile error;
+tests cover each behaviour.
+
+**R15 (Sonnet N1, N2, N4).**
+- The history page says that descriptions show the current text.
+- `campaign-workspace.md` documents that a departed custodian keeps reading catalogue text
+  through a frozen sheet, consistent with Q5.
+- Formula literals naming catalogue keys are unchecked (a note in the contract).
+
+**R16 (Sol 8, Sonnet N6).** The docs list in step 5 adds `definition-publication.md` (the
+disclosure boundary) and `campaign-workspace.md` (R15). The search helpers get the
+`pub(crate)` widening noted in §1.
+
+**Additional tests** (Sonnet), on top of those above:
+- a catalogue linked by two definitions;
+- colliding keys across two catalogues;
+- a frozen-sheet custodian reading the catalogue.
