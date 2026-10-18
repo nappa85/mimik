@@ -6,7 +6,7 @@
 //! (`migrations/019_catalogues.sql`) independently binds the projections to the hashed content.
 use super::{
     Catalogue, CatalogueCounts, CatalogueError,
-    admission::{self, Admitted},
+    admission::{self, ADMISSION_PROFILE, Admitted},
     invalid,
     store::{Draft, admit, load_draft, references},
 };
@@ -70,7 +70,8 @@ struct UnitRow {
     source_id: i64,
 }
 
-/// The relational projections of one version, in content order.
+/// The relational projections of one version: types and entries in content order, unit rows
+/// by (entry key, ordinal).
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Projections {
     types: Vec<TypeRow>,
@@ -120,9 +121,15 @@ fn projections(catalogue: &Catalogue) -> Result<Projections, CatalogueError> {
             });
         }
     }
+    // Canonical order shared with `read_projections`: unit rows by (entry key, ordinal).
+    result
+        .units
+        .sort_by(|a, b| (&a.key, a.ordinal).cmp(&(&b.key, b.ordinal)));
     Ok(result)
 }
 
+/// Every projection row of `version_id`, each table read on its own (no joins), so a row the
+/// content does not account for, such as a unit row without its entry, makes them differ.
 fn read_projections(db: &Connection, version_id: i64) -> Result<Projections, CatalogueError> {
     let mut result = Projections::default();
     let mut types = db.prepare_cached("SELECT type_id,ordinal,label,properties FROM catalogue_entry_types WHERE version_id=?1 ORDER BY ordinal")?;
@@ -151,7 +158,7 @@ fn read_projections(db: &Connection, version_id: i64) -> Result<Projections, Cat
             })
         })?
         .collect::<Result<_, _>>()?;
-    let mut units = db.prepare_cached("SELECT u.key,u.ordinal,u.unit_id,u.page_id,u.source_id FROM catalogue_entry_units u JOIN catalogue_entries e ON e.version_id=u.version_id AND e.key=u.key WHERE u.version_id=?1 ORDER BY e.ordinal,u.ordinal")?;
+    let mut units = db.prepare_cached("SELECT key,ordinal,unit_id,page_id,source_id FROM catalogue_entry_units WHERE version_id=?1 ORDER BY key,ordinal")?;
     result.units = units
         .query_map([version_id], |row| {
             Ok(UnitRow {
@@ -657,8 +664,8 @@ pub(super) fn publish_in(
         .map_or(Some(1), |current| current.version.checked_add(1))
         .ok_or_else(|| publication("version-overflow"))?;
     one(db.execute(
-        "INSERT INTO catalogue_versions(catalogue,game_id,edition_id,catalogue_id,version,title,content,content_hash,draft_id,draft_revision,comparison_hash,actor,rationale) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-        params![surrogate, catalogue.game_id, catalogue.edition_id, catalogue.catalogue_id, version, catalogue.title, draft.data.content, draft.data.hash, draft.id, draft.revision, check.comparison_hash, request.actor, request.rationale],
+        "INSERT INTO catalogue_versions(catalogue,game_id,edition_id,catalogue_id,version,title,content,content_hash,draft_id,draft_revision,comparison_hash,actor,rationale,admission_profile) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+        params![surrogate, catalogue.game_id, catalogue.edition_id, catalogue.catalogue_id, version, catalogue.title, draft.data.content, draft.data.hash, draft.id, draft.revision, check.comparison_hash, request.actor, request.rationale, ADMISSION_PROFILE],
     )?)?;
     let version_id = db.last_insert_rowid();
     checkpoint(Stage::Projections)?;
@@ -732,8 +739,9 @@ fn insert_projections(
     Ok(())
 }
 
-/// Re-verify one stored version (R5): sealed, bounded content that re-admits to the same
-/// canonical bytes and hash, identity columns, and projections equal to the content.
+/// Re-verify one stored version (R5): sealed, bounded content that re-admits, under the
+/// admission profile it was published with, to the same canonical bytes and hash, identity
+/// columns, and projections equal to the content.
 fn verify_version(
     db: &Connection,
     version_id: i64,
@@ -743,10 +751,11 @@ fn verify_version(
         hash: String,
         identity: [String; 4],
         sealed: bool,
+        profile: String,
     }
     let row = db
         .query_row(
-            "SELECT CASE WHEN length(CAST(v.content AS BLOB))<=4194304 THEN v.content END,v.content_hash,v.game_id,v.edition_id,v.catalogue_id,v.title,EXISTS(SELECT 1 FROM catalogue_seals s WHERE s.version_id=v.id) FROM catalogue_versions v JOIN catalogues c ON c.id=v.catalogue AND c.game_id=v.game_id AND c.edition_id=v.edition_id AND c.catalogue_id=v.catalogue_id WHERE v.id=?1",
+            "SELECT CASE WHEN length(CAST(v.content AS BLOB))<=4194304 THEN v.content END,v.content_hash,v.game_id,v.edition_id,v.catalogue_id,v.title,EXISTS(SELECT 1 FROM catalogue_seals s WHERE s.version_id=v.id),v.admission_profile FROM catalogue_versions v JOIN catalogues c ON c.id=v.catalogue AND c.game_id=v.game_id AND c.edition_id=v.edition_id AND c.catalogue_id=v.catalogue_id WHERE v.id=?1",
             [version_id],
             |row| {
                 Ok(Stored {
@@ -754,6 +763,7 @@ fn verify_version(
                     hash: row.get(1)?,
                     identity: [row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?],
                     sealed: row.get(6)?,
+                    profile: row.get(7)?,
                 })
             },
         )
@@ -763,6 +773,7 @@ fn verify_version(
         hash: stored_hash,
         identity: [game, edition, catalogue_id, title],
         sealed,
+        profile,
     }) = row
     else {
         return Ok(Err("version-identity-mismatch"));
@@ -773,7 +784,10 @@ fn verify_version(
     let Some(content) = content else {
         return Ok(Err("content-byte-limit"));
     };
-    let Ok(data) = admission::validate(content.as_bytes()) else {
+    let Some(admitted) = admission::validate_profile(&profile, content.as_bytes()) else {
+        return Ok(Err("unknown-admission-profile"));
+    };
+    let Ok(data) = admitted else {
         return Ok(Err("content-not-admissible"));
     };
     if data.content != content || data.hash != stored_hash {
@@ -819,7 +833,7 @@ pub struct CatalogueIndexRebuild {
 }
 
 /// FTS identity, name and multiplicity against the latest sealed projections (R20).
-fn index_matches(db: &Connection) -> Result<(bool, i64), CatalogueError> {
+fn index_matches(db: &Connection) -> rusqlite::Result<(bool, i64)> {
     let sql = format!(
         "WITH latest AS ({LATEST}), expected AS (SELECT (l.catalogue<<{ROWID_SHIFT})+e.ordinal AS rid,l.catalogue AS catalogue,e.key AS key,e.name AS name FROM latest l JOIN catalogue_entries e ON e.version_id=l.version_id) \
          SELECT (SELECT count(*) FROM (SELECT rowid,catalogue_row_id,key,name FROM catalogue_names_fts EXCEPT SELECT rid,catalogue,key,name FROM expected)), \
@@ -833,15 +847,122 @@ fn index_matches(db: &Connection) -> Result<(bool, i64), CatalogueError> {
     Ok((extra == 0 && missing == 0 && actual == expected, actual))
 }
 
-fn index_definition_matches(db: &Connection) -> Result<bool, CatalogueError> {
-    let sql: Option<String> = db
+/// Every catalogue table with foreign keys (the name index has none).
+const CATALOGUE_TABLES: [&str; 7] = [
+    "catalogue_drafts",
+    "catalogues",
+    "catalogue_versions",
+    "catalogue_entry_types",
+    "catalogue_entries",
+    "catalogue_entry_units",
+    "catalogue_seals",
+];
+
+fn problem(catalogue: i64, version: Option<i64>, code: &'static str) -> IntegrityProblem {
+    IntegrityProblem {
+        catalogue,
+        version,
+        code,
+    }
+}
+
+/// A statement over the name index: storage conditions that say nothing about the index
+/// (busy, locked, I/O, memory, interruption, full disk) and non-`SQLite` errors propagate; any
+/// other `SQLite` failure (corruption above all) is `None`, a damaged index.
+fn index_outcome<T>(result: rusqlite::Result<T>) -> Result<Option<T>, CatalogueError> {
+    use rusqlite::ErrorCode;
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::SqliteFailure(failure, _))
+            if !matches!(
+                failure.code,
+                ErrorCode::DatabaseBusy
+                    | ErrorCode::DatabaseLocked
+                    | ErrorCode::SystemIoFailure
+                    | ErrorCode::OutOfMemory
+                    | ErrorCode::OperationInterrupted
+                    | ErrorCode::DiskFull
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// FTS5's `integrity-check`: true when it passes, false when it reports damage.
+fn integrity_outcome(result: rusqlite::Result<usize>) -> Result<bool, CatalogueError> {
+    Ok(index_outcome(result)?.is_some())
+}
+
+/// Structure across versions: catalogue-table foreign keys, contiguous version numbers from 1
+/// per catalogue, and no catalogue identity without a version. Each foreign-key check is its
+/// own statement, so no single read spans the whole check.
+fn structure(
+    db: &Connection,
+    versions: &[(i64, i64, i64)],
+) -> Result<Vec<IntegrityProblem>, CatalogueError> {
+    let mut problems = Vec::new();
+    let mut expected = BTreeMap::new();
+    let mut gaps = BTreeSet::new();
+    for &(_, catalogue, version) in versions {
+        let next = expected.entry(catalogue).or_insert(1);
+        if version != *next && gaps.insert(catalogue) {
+            problems.push(problem(catalogue, Some(version), "version-sequence-gap"));
+        }
+        *next = version.saturating_add(1);
+    }
+    let mut empty = db.prepare("SELECT id FROM catalogues c WHERE NOT EXISTS(SELECT 1 FROM catalogue_versions v WHERE v.catalogue=c.id) ORDER BY id")?;
+    for catalogue in empty.query_map([], |row| row.get::<_, i64>(0))? {
+        problems.push(problem(catalogue?, None, "catalogue-without-versions"));
+    }
+    for table in CATALOGUE_TABLES {
+        let violated = db
+            .prepare(&format!("PRAGMA foreign_key_check({table})"))?
+            .exists([])?;
+        if violated {
+            problems.push(problem(0, None, "foreign-key-violation"));
+            break;
+        }
+    }
+    Ok(problems)
+}
+
+/// The name index: its definition first, and only for the migrated definition the row
+/// comparison and FTS5's own integrity check. Returns the problems and the index row count
+/// (0 when the index is missing or differently defined).
+fn index_problems(db: &Connection) -> Result<(Vec<IntegrityProblem>, i64), CatalogueError> {
+    let definition: Option<Option<String>> = db
         .query_row(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='catalogue_names_fts'",
+            "SELECT sql FROM sqlite_master WHERE name='catalogue_names_fts'",
             [],
             |row| row.get(0),
         )
         .optional()?;
-    Ok(sql.as_deref() == Some(NAME_INDEX))
+    match definition {
+        None => return Ok((vec![problem(0, None, "name-index-missing")], 0)),
+        Some(sql) if sql.as_deref() != Some(NAME_INDEX) => {
+            return Ok((vec![problem(0, None, "name-index-definition-mismatch")], 0));
+        }
+        Some(_) => {}
+    }
+    let mut problems = Vec::new();
+    let Some((matches, index_rows)) = index_outcome(index_matches(db))? else {
+        return Ok((
+            vec![problem(0, None, "name-index-integrity-check-failed")],
+            0,
+        ));
+    };
+    if !matches {
+        problems.push(problem(0, None, "name-index-mismatch"));
+    }
+    if !integrity_outcome(db.execute(
+        "INSERT INTO catalogue_names_fts(catalogue_names_fts) VALUES ('integrity-check')",
+        [],
+    ))? {
+        problems.push(problem(0, None, "name-index-integrity-check-failed"));
+    }
+    Ok((problems, index_rows))
 }
 
 fn verify_all(db: &mut Connection) -> Result<CatalogueVerification, CatalogueError> {
@@ -860,43 +981,14 @@ fn verify_all(db: &mut Connection) -> Result<CatalogueVerification, CatalogueErr
     for &(version_id, catalogue, version) in &versions {
         let tx = db.transaction()?;
         if let Err(code) = verify_version(&tx, version_id)? {
-            problems.push(IntegrityProblem {
-                catalogue,
-                version: Some(version),
-                code,
-            });
+            problems.push(problem(catalogue, Some(version), code));
         }
         tx.commit()?;
     }
+    problems.extend(structure(db, &versions)?);
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (matches, index_rows) = index_matches(&tx)?;
-    if !index_definition_matches(&tx)? {
-        problems.push(IntegrityProblem {
-            catalogue: 0,
-            version: None,
-            code: "name-index-definition-mismatch",
-        });
-    }
-    if !matches {
-        problems.push(IntegrityProblem {
-            catalogue: 0,
-            version: None,
-            code: "name-index-mismatch",
-        });
-    }
-    if tx
-        .execute(
-            "INSERT INTO catalogue_names_fts(catalogue_names_fts) VALUES ('integrity-check')",
-            [],
-        )
-        .is_err()
-    {
-        problems.push(IntegrityProblem {
-            catalogue: 0,
-            version: None,
-            code: "name-index-integrity-check-failed",
-        });
-    }
+    let (index, index_rows) = index_problems(&tx)?;
+    problems.extend(index);
     tx.rollback()?;
     Ok(CatalogueVerification {
         catalogues: usize::try_from(catalogues).map_err(|_| CatalogueError::Configuration)?,

@@ -824,3 +824,59 @@ fn redaction_walks_the_envelope_structure() {
         assert_eq!(admission::redacted_path(path), kept, "{path}");
     }
 }
+
+#[test]
+fn total_unit_references_are_capped_per_catalogue() {
+    // 24,576 references (1,536 entries x 16) over the 16,384 distinct units: within the
+    // distinct cap, so only the total trips.
+    let entries = |extra: usize| {
+        let mut entries: Vec<Value> = (0..1_536_i64)
+            .map(|entry| {
+                spell(
+                    &format!("e{entry}"),
+                    &(0..16_i64)
+                        .map(|k| json!({"source_id": 1, "page_id": 2, "unit_id": (entry * 16 + k) % 16_384 + 1}))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        if extra > 0 {
+            entries.push(spell(
+                "extra",
+                &(0..extra)
+                    .map(|k| json!({"source_id": 1, "page_id": 2, "unit_id": k + 1}))
+                    .collect::<Vec<_>>(),
+            ));
+        }
+        with_array("/entries", entries)
+    };
+    let at_cap = accepted(&entries(0));
+    assert_eq!(
+        (at_cap.counts.unit_references, at_cap.counts.distinct_units),
+        (admission::MAX_UNIT_REFERENCES, 16_384)
+    );
+    assert_eq!(admission::MAX_UNIT_REFERENCES, 24_576);
+    assert_eq!(rejected(&entries(1)), "unit-reference-limit");
+}
+
+#[test]
+fn blank_looking_names_labels_and_text_are_rejected() {
+    // Braille pattern blank and Hangul fillers render as nothing; alone (or with spaces) they
+    // make a name or label look empty. Mixed with visible text they stay allowed.
+    for pointer in [
+        "/title",
+        "/entry_types/0/label",
+        "/entry_types/0/properties/0/label",
+        "/entry_types/0/properties/1/options/0/label",
+        "/entries/0/name",
+        "/entries/1/description/owner_text",
+    ] {
+        for scalar in ['\u{2800}', '\u{3164}', '\u{115f}', '\u{1160}', '\u{ffa0}'] {
+            let mut value = example();
+            *value.pointer_mut(pointer).unwrap() = format!(" {scalar}{scalar} ").into();
+            rejected(&value);
+            *value.pointer_mut(pointer).unwrap() = format!("Text{scalar}more").into();
+            accepted(&value);
+        }
+    }
+}

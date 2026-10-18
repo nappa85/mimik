@@ -207,7 +207,7 @@ struct Rows {
 /// current content; returns its id.
 fn manual_version(db: &Connection, catalogue: i64, version: i64, draft: i64) -> i64 {
     db.execute(
-        "INSERT INTO catalogue_versions(catalogue,game_id,edition_id,catalogue_id,version,title,content,content_hash,draft_id,draft_revision,comparison_hash,actor,rationale) SELECT ?1,game_id,edition_id,catalogue_id,?2,json_extract(content,'$.title'),content,content_hash,id,revision,?3,'fixture','fixture' FROM catalogue_drafts WHERE id=?4",
+        "INSERT INTO catalogue_versions(catalogue,game_id,edition_id,catalogue_id,version,title,content,content_hash,draft_id,draft_revision,comparison_hash,actor,rationale,admission_profile) SELECT ?1,game_id,edition_id,catalogue_id,?2,json_extract(content,'$.title'),content,content_hash,id,revision,?3,'fixture','fixture','catalogue-admission-1' FROM catalogue_drafts WHERE id=?4",
         params![catalogue, version, "c".repeat(64), draft],
     )
     .unwrap();
@@ -510,7 +510,7 @@ async fn seals_follow_version_order_and_versions_follow_their_draft() {
     for version in [1, 3] {
         let error = tx
             .execute(
-                "INSERT INTO catalogue_versions(catalogue,game_id,edition_id,catalogue_id,version,title,content,content_hash,draft_id,draft_revision,comparison_hash,actor,rationale) SELECT ?1,game_id,edition_id,catalogue_id,?2,json_extract(content,'$.title'),content,content_hash,id,revision,?3,'a','r' FROM catalogue_drafts WHERE id=?4",
+                "INSERT INTO catalogue_versions(catalogue,game_id,edition_id,catalogue_id,version,title,content,content_hash,draft_id,draft_revision,comparison_hash,actor,rationale,admission_profile) SELECT ?1,game_id,edition_id,catalogue_id,?2,json_extract(content,'$.title'),content,content_hash,id,revision,?3,'a','r','catalogue-admission-1' FROM catalogue_drafts WHERE id=?4",
                 params![catalogue, version, "c".repeat(64), draft],
             )
             .unwrap_err()
@@ -521,13 +521,13 @@ async fn seals_follow_version_order_and_versions_follow_their_draft() {
         );
     }
     let error = error_text(tx.execute(
-        "INSERT INTO catalogue_versions(catalogue,game_id,edition_id,catalogue_id,version,title,content,content_hash,draft_id,draft_revision,comparison_hash,actor,rationale) SELECT ?1,game_id,edition_id,catalogue_id,2,'Other',json_set(content,'$.title','Other'),content_hash,id,revision,?2,'a','r' FROM catalogue_drafts WHERE id=?3",
+        "INSERT INTO catalogue_versions(catalogue,game_id,edition_id,catalogue_id,version,title,content,content_hash,draft_id,draft_revision,comparison_hash,actor,rationale,admission_profile) SELECT ?1,game_id,edition_id,catalogue_id,2,'Other',json_set(content,'$.title','Other'),content_hash,id,revision,?2,'a','r','catalogue-admission-1' FROM catalogue_drafts WHERE id=?3",
         params![catalogue, "c".repeat(64), draft],
     ));
     assert!(error.contains(provenance), "{error}");
     manual_version(&tx, catalogue, 2, draft);
     let error = error_text(tx.execute(
-        "INSERT INTO catalogue_versions(catalogue,game_id,edition_id,catalogue_id,version,title,content,content_hash,draft_id,draft_revision,comparison_hash,actor,rationale) SELECT ?1,game_id,edition_id,catalogue_id,3,json_extract(content,'$.title'),content,content_hash,id,revision,?2,'a','r' FROM catalogue_drafts WHERE id=?3",
+        "INSERT INTO catalogue_versions(catalogue,game_id,edition_id,catalogue_id,version,title,content,content_hash,draft_id,draft_revision,comparison_hash,actor,rationale,admission_profile) SELECT ?1,game_id,edition_id,catalogue_id,3,json_extract(content,'$.title'),content,content_hash,id,revision,?2,'a','r','catalogue-admission-1' FROM catalogue_drafts WHERE id=?3",
         params![catalogue, "c".repeat(64), draft],
     ));
     assert!(error.contains(provenance), "unsealed predecessor: {error}");
@@ -1551,4 +1551,329 @@ async fn cross_process_publish_race_has_one_winner() {
     }
     assert_eq!(fixture.count("catalogue_versions"), 1);
     assert_eq!(fixture.count("catalogue_seals"), 1);
+}
+
+// ---------------------------------------------------------------------------------------
+// Step-2 review fixes (plan §12): verification gaps, admission profiles, index damage.
+// ---------------------------------------------------------------------------------------
+
+/// A tampering connection: foreign keys off, as an operator's raw `SQLite` shell would be.
+fn tamper_db(fixture: &Fixture) -> Connection {
+    let db = Connection::open(&fixture.database).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    db.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    db
+}
+
+fn show_spells(fixture: &Fixture) -> Output {
+    fixture.cli(&[
+        "show-catalogue-version",
+        "--game",
+        "synthetic-game",
+        "--edition",
+        "first",
+        "--catalogue",
+        "spells",
+    ])
+}
+
+/// Verify through the CLI; the problems as sorted `(catalogue, version, code)` triples.
+fn verify_problems(fixture: &Fixture) -> Vec<(i64, Option<i64>, String)> {
+    let output = fixture.cli(&["verify-catalogues"]);
+    assert_redacted(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+        panic!(
+            "verify did not report: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert_eq!(
+        output.status.success(),
+        report["status"] == "ok",
+        "{report}"
+    );
+    let mut problems: Vec<(i64, Option<i64>, String)> = report["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|problem| {
+            (
+                problem["catalogue"].as_i64().unwrap(),
+                problem["version"].as_i64(),
+                problem["code"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    problems.sort();
+    problems
+}
+
+/// An expected integrity problem: catalogue surrogate, version number, static code.
+type Problem = (i64, Option<i64>, &'static str);
+
+fn expected(problems: &[Problem]) -> Vec<(i64, Option<i64>, String)> {
+    let mut problems: Vec<_> = problems
+        .iter()
+        .map(|(catalogue, version, code)| (*catalogue, *version, (*code).to_owned()))
+        .collect();
+    problems.sort();
+    problems
+}
+
+#[tokio::test]
+async fn orphan_unit_rows_fail_show_and_verify() {
+    let _guard = TEST_LOCK.lock().await;
+    let fixture = fixture().await;
+    let published = fixture.publish(&rich(&fixture)).await.unwrap();
+    output_json(&show_spells(&fixture));
+    let db = tamper_db(&fixture);
+    // Guards dropped in this test database only, to model storage tampering: a unit row
+    // whose entry key does not exist in the version (a valid unit, page and source).
+    db.execute_batch(
+        "DROP TRIGGER catalogue_entry_units_sealed; DROP TRIGGER catalogue_entry_units_insert;",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO catalogue_entry_units VALUES(?1,'zqxkey-orphan',0,?2,?3,?4)",
+        params![
+            published.version.version_id,
+            fixture.unit,
+            fixture.page,
+            fixture.source
+        ],
+    )
+    .unwrap();
+    failed(&show_spells(&fixture), "projection-mismatch");
+    let problems = verify_problems(&fixture);
+    assert!(
+        problems.contains(&(1, Some(1), "projection-mismatch".into())),
+        "{problems:?}"
+    );
+}
+
+#[tokio::test]
+async fn versions_record_their_admission_profile_and_verify_dispatches_on_it() {
+    let _guard = TEST_LOCK.lock().await;
+    let fixture = fixture().await;
+    let published = fixture.publish(&rich(&fixture)).await.unwrap();
+    let version_id = published.version.version_id;
+    let db = fixture.db();
+    let profile: String = db
+        .query_row(
+            "SELECT admission_profile FROM catalogue_versions WHERE id=?1",
+            [version_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(profile, "catalogue-admission-1");
+    // The CHECK admits only known profiles, and a version must name one.
+    let copy = |profile: &str| {
+        format!(
+            "INSERT INTO catalogue_versions(catalogue,game_id,edition_id,catalogue_id,version,title,content,content_hash,draft_id,draft_revision,comparison_hash,actor,rationale,admission_profile) SELECT catalogue,game_id,edition_id,catalogue_id,2,title,content,content_hash,draft_id,draft_revision,comparison_hash,actor,rationale,{profile} FROM catalogue_versions WHERE id={version_id}"
+        )
+    };
+    for profile in ["'catalogue-admission-2'", "''", "NULL"] {
+        let error = error_text(db.execute(&copy(profile), []));
+        assert!(error.contains("constraint failed"), "{profile}: {error}");
+    }
+    // Verification dispatches on the stored profile: a profile this build does not know
+    // (allowed here by widening the CHECK in this test database only) is reported, not
+    // re-admitted under the current rules.
+    let tamper = tamper_db(&fixture);
+    let schema_version: i64 = tamper
+        .query_row("PRAGMA schema_version", [], |row| row.get(0))
+        .unwrap();
+    tamper
+        .execute_batch(&format!(
+            "PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql,'IN (''catalogue-admission-1'')','IN (''catalogue-admission-1'',''catalogue-admission-0'')') WHERE name='catalogue_versions'; PRAGMA schema_version={}; PRAGMA writable_schema=OFF;",
+            schema_version + 1
+        ))
+        .unwrap();
+    drop(tamper);
+    let tamper = tamper_db(&fixture);
+    tamper
+        .execute_batch("DROP TRIGGER catalogue_versions_update; UPDATE catalogue_versions SET admission_profile='catalogue-admission-0';")
+        .unwrap();
+    failed(&show_spells(&fixture), "unknown-admission-profile");
+    assert_eq!(
+        verify_problems(&fixture),
+        expected(&[(1, Some(1), "unknown-admission-profile")])
+    );
+    tamper
+        .execute_batch("UPDATE catalogue_versions SET admission_profile='catalogue-admission-1';")
+        .unwrap();
+    output_json(&show_spells(&fixture));
+    assert_eq!(verify_problems(&fixture), expected(&[]));
+}
+
+#[tokio::test]
+async fn verify_reports_a_missing_or_reshaped_name_index_without_aborting() {
+    let _guard = TEST_LOCK.lock().await;
+    let fixture = fixture().await;
+    fixture.publish(&rich(&fixture)).await.unwrap();
+    let db = fixture.db();
+    for (damage, code) in [
+        ("DROP TABLE catalogue_names_fts", "name-index-missing"),
+        (
+            "DROP TABLE catalogue_names_fts; CREATE VIRTUAL TABLE catalogue_names_fts USING fts5(name, other UNINDEXED)",
+            "name-index-definition-mismatch",
+        ),
+        (
+            "DROP TABLE catalogue_names_fts; CREATE TABLE catalogue_names_fts(name TEXT)",
+            "name-index-definition-mismatch",
+        ),
+    ] {
+        db.execute_batch(damage).unwrap();
+        let report = fixture.store.verify_catalogues().await.unwrap();
+        assert_eq!(
+            report
+                .problems
+                .iter()
+                .map(|p| (p.catalogue, p.version, p.code))
+                .collect::<Vec<_>>(),
+            [(0, None, code)],
+            "{damage}"
+        );
+        assert_eq!((report.versions, report.status), (1, "failed"));
+        assert_eq!(verify_problems(&fixture), expected(&[(0, None, code)]));
+        fixture.store.rebuild_catalogue_index().await.unwrap();
+        assert_eq!(
+            fixture.store.verify_catalogues().await.unwrap().status,
+            "ok",
+            "{damage}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn verify_reports_foreign_keys_sequence_seals_identity_and_extra_rows() {
+    let _guard = TEST_LOCK.lock().await;
+    let fixture = fixture().await;
+    let base = rich(&fixture);
+    fixture.publish(&base).await.unwrap();
+    let mut next = base.clone();
+    next["entries"].as_array_mut().unwrap().push(json!({
+        "key": "zqxkey-added", "type": "charm", "name": "Added zqxname", "properties": {},
+        "description": {"owner_text": "zqxowner added text"}}));
+    let second = fixture.publish(&next).await.unwrap();
+    let v2 = second.version.version_id;
+    assert_eq!(verify_problems(&fixture), expected(&[]));
+    let db = tamper_db(&fixture);
+    db.execute_batch(
+        "DROP TRIGGER catalogue_entry_types_sealed; DROP TRIGGER catalogue_entry_types_delete;
+         DROP TRIGGER catalogue_entries_delete; DROP TRIGGER catalogue_seals_delete;
+         DROP TRIGGER catalogue_versions_update; DROP TRIGGER catalogues_update;
+         DROP TRIGGER catalogues_delete;",
+    )
+    .unwrap();
+    let fk = (0, None, "foreign-key-violation");
+    let cases: [(String, String, Vec<Problem>); 6] = [
+        (
+            "INSERT INTO catalogue_entry_types VALUES(1,'extra',9,'Extra','[]')".into(),
+            "DELETE FROM catalogue_entry_types WHERE version_id=1 AND type_id='extra'".into(),
+            vec![(1, Some(1), "projection-mismatch")],
+        ),
+        (
+            "UPDATE catalogues SET catalogue_id='renamed'".into(),
+            "UPDATE catalogues SET catalogue_id='spells'".into(),
+            vec![
+                fk,
+                (1, Some(1), "version-identity-mismatch"),
+                (1, Some(2), "version-identity-mismatch"),
+            ],
+        ),
+        (
+            format!("DELETE FROM catalogue_seals WHERE version_id={v2}"),
+            format!("INSERT INTO catalogue_seals(version_id) VALUES({v2})"),
+            vec![(1, Some(2), "version-not-sealed"), (0, None, "name-index-mismatch")],
+        ),
+        (
+            "INSERT INTO catalogue_entries VALUES(99,'orphan',0,'spell','Orphan',0,'owner_text','x','{}')".into(),
+            "DELETE FROM catalogue_entries WHERE version_id=99".into(),
+            vec![fk],
+        ),
+        (
+            format!("UPDATE catalogue_versions SET version=3 WHERE id={v2}"),
+            format!("UPDATE catalogue_versions SET version=2 WHERE id={v2}"),
+            vec![(1, Some(3), "version-sequence-gap")],
+        ),
+        (
+            "INSERT INTO catalogues(game_id,edition_id,catalogue_id) VALUES('synthetic-game','first','orphaned')".into(),
+            "DELETE FROM catalogues WHERE catalogue_id='orphaned'".into(),
+            vec![(2, None, "catalogue-without-versions")],
+        ),
+    ];
+    for (tamper, restore, problems) in cases {
+        db.execute_batch(&tamper).unwrap();
+        assert_eq!(verify_problems(&fixture), expected(&problems), "{tamper}");
+        db.execute_batch(&restore).unwrap();
+        assert_eq!(verify_problems(&fixture), expected(&[]), "{restore}");
+    }
+}
+
+#[tokio::test]
+async fn identical_content_citing_a_now_rejected_unit_is_refused() {
+    let _guard = TEST_LOCK.lock().await;
+    let fixture = fixture().await;
+    let base = rich(&fixture);
+    fixture.publish(&base).await.unwrap();
+    let rows = fixture.published_rows();
+    fixture.review_unit("rejected").await;
+    let id = fixture.draft(&base).await;
+    let compared = fixture.compare(id).await;
+    assert!(compared.changes.identical);
+    assert_eq!(compared.refusals.rejected_units, 1);
+    assert!(!compared.publishable);
+    let error = fixture
+        .store
+        .publish_catalogue(id, request(&compared.comparison_hash))
+        .await
+        .unwrap_err();
+    assert_eq!(code(&error), "rejected-units");
+    assert_eq!(fixture.published_rows(), rows);
+}
+
+#[tokio::test]
+async fn a_failed_replacement_publication_keeps_the_previous_index_rows() {
+    let _guard = TEST_LOCK.lock().await;
+    let fixture = fixture().await;
+    let base = rich(&fixture);
+    fixture.publish(&base).await.unwrap();
+    let index = || -> Vec<(i64, String, i64, String)> {
+        fixture
+            .db()
+            .prepare(
+                "SELECT rowid,name,catalogue_row_id,key FROM catalogue_names_fts ORDER BY rowid",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let before = index();
+    let rows = fixture.published_rows();
+    let mut next = base.clone();
+    next["entries"][0]["name"] = "Renamed zqxname".into();
+    let id = fixture.draft(&next).await;
+    let ticket = fixture.compare(id).await.comparison_hash;
+    fixture
+        .db()
+        .execute_batch("CREATE TRIGGER zz_fail BEFORE INSERT ON catalogue_seals BEGIN SELECT RAISE(ABORT,'synthetic seal failure'); END;")
+        .unwrap();
+    let error = fixture
+        .store
+        .publish_catalogue(id, request(&ticket))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, CatalogueError::Storage(_)), "{error:?}");
+    assert_eq!(index(), before);
+    assert_eq!(fixture.published_rows(), rows);
+    fixture.db().execute_batch("DROP TRIGGER zz_fail").unwrap();
+    assert_eq!(
+        fixture.store.verify_catalogues().await.unwrap().status,
+        "ok"
+    );
 }

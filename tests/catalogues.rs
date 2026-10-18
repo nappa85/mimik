@@ -184,7 +184,7 @@ async fn cli_conflict_unknown_and_corrupt_draft_paths_are_redacted() {
     }
     let db = rusqlite::Connection::open(&fixture.database).unwrap();
     db.execute(
-        "UPDATE catalogue_drafts SET content_hash=?1",
+        "UPDATE catalogue_drafts SET content_hash=?1,revision=revision+1",
         ["0".repeat(64)],
     )
     .unwrap();
@@ -353,6 +353,9 @@ async fn storage_rejects_malformed_rows_and_identity_rebinding() {
     for sql in [
         "UPDATE catalogue_drafts SET revision=0",
         "UPDATE catalogue_drafts SET revision=1.5",
+        // Every rewrite advances the revision by exactly one (no silent content swap).
+        "UPDATE catalogue_drafts SET content=json_set(content,'$.title','Rewritten')",
+        "UPDATE catalogue_drafts SET revision=revision+2",
         "UPDATE catalogue_drafts SET id=0",
         "UPDATE catalogue_drafts SET catalogue_id='other'",
         "UPDATE catalogue_drafts SET content='[]'",
@@ -374,7 +377,7 @@ async fn storage_rejects_malformed_rows_and_identity_rebinding() {
     // Same-identity rebinding through two coordinated changes is the trigger's job.
     let error = db
         .execute(
-            "UPDATE catalogue_drafts SET catalogue_id='other',content=json_set(content,'$.catalogue_id','other')",
+            "UPDATE catalogue_drafts SET catalogue_id='other',content=json_set(content,'$.catalogue_id','other'),revision=revision+1",
             [],
         )
         .unwrap_err();
@@ -386,7 +389,7 @@ async fn storage_rejects_malformed_rows_and_identity_rebinding() {
     assert_eq!(fixture.store.catalogue_draft(1).await.unwrap().revision, 1);
     // A content change that keeps the stored hash is detected on read.
     db.execute(
-        "UPDATE catalogue_drafts SET content=json_set(content,'$.title','Changed')",
+        "UPDATE catalogue_drafts SET content=json_set(content,'$.title','Changed'),revision=revision+1",
         [],
     )
     .unwrap();

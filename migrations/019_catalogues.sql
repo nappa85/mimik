@@ -16,6 +16,11 @@ CREATE TABLE catalogue_drafts (
 CREATE TRIGGER catalogue_draft_identity_immutable BEFORE UPDATE ON catalogue_drafts
 WHEN NEW.id<>OLD.id OR NEW.game_id<>OLD.game_id OR NEW.edition_id<>OLD.edition_id OR NEW.catalogue_id<>OLD.catalogue_id
 BEGIN SELECT RAISE(ABORT,'Catalogue draft identity is immutable'); END;
+-- Every draft rewrite advances the revision by exactly one, so content never changes under an
+-- unchanged revision (versions keep their own content copy either way).
+CREATE TRIGGER catalogue_draft_revision_advances BEFORE UPDATE ON catalogue_drafts
+WHEN NEW.revision IS NOT OLD.revision+1
+BEGIN SELECT RAISE(ABORT,'Catalogue draft revision must advance by one'); END;
 
 -- Integer surrogate per (game, edition, catalogue) (R20): the name-index rowid is
 -- id * 2^20 + entry ordinal, so the id stays below 2^43.
@@ -29,8 +34,9 @@ CREATE TABLE catalogues (
     FOREIGN KEY (game_id,edition_id) REFERENCES registry_editions(game_id,edition_id) ON DELETE RESTRICT
 ) STRICT;
 
--- Immutable published versions. Identity and title columns must equal the content's;
--- provenance (draft id and revision with identical content and hash) is checked on insert.
+-- Immutable published versions (every column, the admission profile included). Identity and
+-- title columns must equal the content's; provenance (draft id and revision with identical
+-- content and hash) is checked on insert.
 CREATE TABLE catalogue_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
     catalogue INTEGER NOT NULL,
@@ -47,6 +53,9 @@ CREATE TABLE catalogue_versions (
     actor TEXT NOT NULL CHECK (instr(actor,char(0))=0 AND length(actor) BETWEEN 1 AND 100),
     rationale TEXT NOT NULL CHECK (instr(rationale,char(0))=0 AND length(rationale) BETWEEN 1 AND 5000),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- The admission rules the content was published under; verification re-admits with them.
+    -- A tightened rule set is a new profile id added here, never a change to an old one.
+    admission_profile TEXT NOT NULL CHECK (admission_profile IN ('catalogue-admission-1')),
     CHECK (json_type(content,'$.contract_version')='integer' AND json_extract(content,'$.contract_version') IS 1 AND json_extract(content,'$.game_id') IS game_id AND json_extract(content,'$.edition_id') IS edition_id AND json_extract(content,'$.catalogue_id') IS catalogue_id AND json_extract(content,'$.title') IS title),
     UNIQUE (catalogue,version),
     FOREIGN KEY (catalogue,game_id,edition_id,catalogue_id) REFERENCES catalogues(id,game_id,edition_id,catalogue_id) ON DELETE RESTRICT

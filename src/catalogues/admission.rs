@@ -13,8 +13,17 @@ use std::{
 
 /// Distinct `(source, page, unit)` references in one catalogue (D5).
 pub(super) const MAX_DISTINCT_UNITS: usize = 16_384;
+/// Unit references in one catalogue, counted with repetition (plan §12): the seal compares
+/// every reference row, so this cap bounds the publication's write-lock hold together with
+/// the entry and byte caps. 24,576 is 3 per entry at 8,192 entries; the profiled worst shape
+/// at this cap (every reference used, 16 properties per type, 4 MiB) holds the lock for about
+/// 1.7 s on update, where 32,768 reached 2.0-2.1 s, over the 2 s budget (plan §12).
+pub(super) const MAX_UNIT_REFERENCES: usize = 24_576;
 /// Total UTF-8 bytes of every entry's owner text (plan §9).
 pub(super) const MAX_OWNER_TEXT_TOTAL: usize = 1024 * 1024;
+/// The admission rules a version was published under (plan §12). Tightening any rule means a
+/// new profile id with its own validator; old profiles keep validating old versions.
+pub(super) const ADMISSION_PROFILE: &str = "catalogue-admission-1";
 
 static VALIDATOR: LazyLock<Result<jsonschema::Validator, ()>> = LazyLock::new(|| {
     let schema: serde_json::Value =
@@ -119,6 +128,18 @@ pub(super) fn redacted_path(path: &str) -> String {
     kept
 }
 
+/// Re-admit stored content under the profile it was published with, or `None` when this
+/// build does not know that profile.
+pub(super) fn validate_profile(
+    profile: &str,
+    bytes: &[u8],
+) -> Option<Result<Admitted, CatalogueError>> {
+    match profile {
+        ADMISSION_PROFILE => Some(validate(bytes)),
+        _ => None,
+    }
+}
+
 /// Admit a catalogue envelope. Every rejection is a static code with an index-only path.
 pub(super) fn validate(bytes: &[u8]) -> Result<Admitted, CatalogueError> {
     let value = decode::parse_catalogue(bytes)?;
@@ -156,8 +177,15 @@ pub(super) fn validate(bytes: &[u8]) -> Result<Admitted, CatalogueError> {
     })
 }
 
+/// Scalars that render as nothing although they are not whitespace: the Braille pattern
+/// blank and the Hangul fillers. Alone (or with whitespace) they make text look empty.
+const BLANK_LOOKING: [char; 5] = ['\u{2800}', '\u{3164}', '\u{115f}', '\u{1160}', '\u{ffa0}'];
+
+/// Required text: at least one scalar that is neither whitespace nor blank-looking.
 fn label(value: &str) -> bool {
-    !value.trim().is_empty()
+    value
+        .chars()
+        .any(|scalar| !scalar.is_whitespace() && !BLANK_LOOKING.contains(&scalar))
 }
 
 /// Names, labels, the title and text property values: no control characters at all.
@@ -399,12 +427,21 @@ fn domain(catalogue: &mut Catalogue) -> Result<CatalogueCounts, CatalogueError> 
         }
     }
     catalogue.entries = entries;
-    if distinct.len() > MAX_DISTINCT_UNITS {
+    counts.distinct_units = distinct.len();
+    totals(&counts, owner_bytes)?;
+    Ok(counts)
+}
+
+/// Catalogue-wide totals (D5, plan §9 and §12).
+fn totals(counts: &CatalogueCounts, owner_bytes: usize) -> Result<(), CatalogueError> {
+    if counts.unit_references > MAX_UNIT_REFERENCES {
+        return Err(invalid("/entries", "unit-reference-limit"));
+    }
+    if counts.distinct_units > MAX_DISTINCT_UNITS {
         return Err(invalid("/entries", "distinct-unit-limit"));
     }
     if owner_bytes > MAX_OWNER_TEXT_TOTAL {
         return Err(invalid("/entries", "owner-text-total-limit"));
     }
-    counts.distinct_units = distinct.len();
-    Ok(counts)
+    Ok(())
 }

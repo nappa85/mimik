@@ -234,3 +234,47 @@ async fn projection_inserts_scale_linearly() {
         "insert work grew more than 2.6x for 2x entries ({small} -> {large})"
     );
 }
+
+#[test]
+fn integrity_check_storage_errors_propagate_and_failures_are_reported() {
+    use rusqlite::{Error, ffi};
+    let failure = |code| Err(Error::SqliteFailure(ffi::Error::new(code), None));
+    for code in [
+        ffi::SQLITE_BUSY,
+        ffi::SQLITE_LOCKED,
+        ffi::SQLITE_IOERR,
+        ffi::SQLITE_NOMEM,
+        ffi::SQLITE_INTERRUPT,
+        ffi::SQLITE_FULL,
+    ] {
+        assert!(
+            matches!(
+                super::integrity_outcome(failure(code)),
+                Err(CatalogueError::Storage(_))
+            ),
+            "{code}"
+        );
+    }
+    for code in [
+        ffi::SQLITE_CORRUPT_VTAB,
+        ffi::SQLITE_CORRUPT,
+        ffi::SQLITE_ERROR,
+    ] {
+        assert!(!super::integrity_outcome(failure(code)).unwrap(), "{code}");
+    }
+    assert!(super::integrity_outcome(Ok(1)).unwrap());
+}
+
+#[test]
+fn drop_schema_matches_the_integration_fixture() {
+    // `DROP_SCHEMA` (unit tests) and `DROP_CATALOGUE_SCHEMA` (integration tests, which cannot
+    // see crate-private items) must name the same objects in the same order.
+    let fixture = include_str!("../../tests/support/catalogue_fixture.rs");
+    assert!(
+        fixture.contains(&format!(
+            "DROP_CATALOGUE_SCHEMA: &str = \"{}\";",
+            crate::catalogues::DROP_SCHEMA
+        )),
+        "tests/support/catalogue_fixture.rs DROP_CATALOGUE_SCHEMA drifted"
+    );
+}

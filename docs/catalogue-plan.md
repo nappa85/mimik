@@ -397,7 +397,12 @@ Each step uses failing-first tests, then code, and gets its own review.
      - live badges: review, rejection, page completion and a page label change;
      - the 64 KiB cut-off;
      - the search budget is interrupted;
-     - cursor order with duplicate names.
+     - cursor order with duplicate names;
+     - name search never passes raw user text to `MATCH`: tokens are quoted as phrases (the
+       existing `fts_query` builder) and their count is bounded (§12);
+     - owner text is rendered in an isolated bidi context (`<bdi>` or `unicode-bidi:
+       isolate`, `white-space: pre-wrap`), with a browser test that a bidi override in owner
+       text cannot reorder the surrounding name, citation or controls (§12).
    - **Value:** players can already browse and read the catalogue from their sheet after this
      step.
 4. **`catalogue_ref`.**
@@ -928,7 +933,7 @@ profile `tools/catalogue_profile.py`.
 - `verify-catalogues` re-admits stored content with the current admission rules. A rule
   tightened after release would report older versions as `content-not-admissible`; no such
   versions exist yet (the branch is unmerged), and a future tightening needs a versioned
-  profile.
+  profile. *Superseded in §12: versions record their admission profile.*
 - Step-1 review item 7: names, labels, the title and text property values refuse Unicode Cf,
   Zl and Zp (`format-or-separator-character-in-text`); owner text refuses Zl and Zp but keeps
   Cf for right-to-left prose. Library: `unicode-general-category` 1.1.0 (Apache-2.0), already
@@ -1014,6 +1019,9 @@ commit with a 5 s busy timeout. It **waited 1,531–1,632 ms and succeeded** in 
 commit, plus up to about 100 ms of SQLite busy-handler sleep granularity, so the lock is held
 for at most about 1.6 s.
 
+*The contention method and the R8 conclusion below are superseded by §12* (the probe measured
+only the remaining hold, and only for v3).
+
 **R8 at 8,192 entries:** lock held ≤ 2 s (about 1.5–1.6 s), a concurrent writer waits and
 succeeds, CLI peak RSS about 125 MiB ≤ 256 MiB. **The D5 limit stays 8,192**; no fallback to
 4,096. The margin on the lock is thinner than in step 0 (0.9–1.1 s there) because the ticket
@@ -1034,3 +1042,169 @@ step-1 tools tree (`548cc84`) in the same container and is untouched by this ste
 
 **Not yet done:** independent review of this step (including the concrete seal SQL, as the
 plan review asked).
+
+## 12. Step 2 review fixes (2026-10-19)
+
+Review of `aa23ace`: Sol FIX THEN MERGE, Sonnet FIX THEN MERGE, third chain unavailable.
+Adjudicated items and what changed (code: `src/catalogues/{admission,publication}.rs`,
+`migrations/019_catalogues.sql` edited in place since it is unmerged; tests
+`tests/catalogue_publication.rs`, `tests/catalogues.rs`, `src/catalogues/admission_tests.rs`,
+`src/catalogues/publication_tests.rs`; profile `tools/catalogue_profile.py`; operator docs
+[catalogue-publication.md](catalogue-publication.md)).
+
+**Must fix.**
+1. *Orphan unit rows hidden by a join (Sol F2, Sonnet F4).* `read_projections` now reads every
+   `catalogue_entry_units` row of the version by `version_id` alone, ordered by `(key,
+   ordinal)`; the Rust projections sort unit rows the same way. A unit row whose entry does
+   not exist makes the projections differ (`projection-mismatch`).
+2. *R8 lock-hold evidence (both F1).*
+   - (a) New admission cap: **24,576 unit references per catalogue**, counted with repetition
+     (`unit-reference-limit`, `admission::MAX_UNIT_REFERENCES`), tested at the cap and cap + 1.
+     The brief proposed 32,768; measured below, the worst admitted shape at 32,768 held the
+     lock for 1.99–2.07 s on update (over 2 s in the full run), so the cap was lowered to
+     24,576 (3 per entry at 8,192 entries). The entry cap stays 8,192.
+   - (b) `tools/catalogue_profile.py` now measures the hold with both endpoints: a poller
+     thread probes the write lock without waiting (`BEGIN IMMEDIATE`, zero busy timeout,
+     `ROLLBACK`) every ~1 ms from before the publish process is launched until it exits. The
+     first refused probe bounds the acquisition, the first free probe after it the release;
+     the report gives the hold as a lower and an upper bound (they differ by one poll period,
+     about 1 ms; the largest gap between polls was 12.9 ms, once).
+   - (c) Every publish is probed: v1, v2 (update) and v3 of the calibrated shape, and a
+     maximum fan-out catalogue at the caps, published (`fanout_v1`) and updated (`fanout_v2`,
+     one property changed). The calibrated shape now cites 3 units per unit-backed entry
+     (21,504 references at 8,192; it cited 4, 28,672, which the new cap refuses).
+   - The contender that waits on the lock runs the server's write pattern on its own
+     connection: `BEGIN IMMEDIATE` with the server's 5 s busy timeout (`src/store.rs`), one
+     insert, `COMMIT`. **This is the lock-level equivalent of a sheet save**: a sheet save is
+     an `IMMEDIATE` write transaction (`src/campaigns/sheets.rs`) on a connection with the same
+     5 s busy timeout; the
+     probe does not exercise the HTTP route or the sheet's own work inside the transaction.
+     The 5 s busy timeout, not the 2 s plan budget, is where a concurrent save would actually
+     fail. Commit includes `fsync`, so the hold depends on the disk.
+3. *Verification under current rules (Sonnet F2).* `catalogue_versions.admission_profile TEXT
+   NOT NULL CHECK (admission_profile IN ('catalogue-admission-1'))`, written at publish
+   (`admission::ADMISSION_PROFILE`); the column is immutable with the rest of the row
+   (`catalogue_versions_update`). Verify and show dispatch re-admission on the stored profile
+   (`admission::validate_profile`); an unknown profile is `unknown-admission-profile`.
+   Tightening a rule means a new profile id, its validator and a CHECK widened by migration;
+   old profiles keep validating old versions.
+4. *Index damage aborted the report (Sol F4).* Verify checks the index definition first:
+   missing → `name-index-missing`, different → `name-index-definition-mismatch`; the row
+   comparison and FTS5 `integrity-check` run only on the migrated definition. A non-storage
+   SQLite failure in them is reported as `name-index-integrity-check-failed`.
+5. *Verify additions (Sonnet F4).* `PRAGMA foreign_key_check` on each catalogue table
+   (`foreign-key-violation`, one statement per table), version numbers contiguous from 1 per
+   catalogue (`version-sequence-gap`), no catalogue identity without a version
+   (`catalogue-without-versions`); unsealed versions were already reported as
+   `version-not-sealed` (code kept). The FTS5 integrity check now propagates busy, locked,
+   I/O, out-of-memory, interrupt and disk-full errors instead of reporting them as index
+   damage. Tamper tests: extra projection row, identity mismatch, missing seal, orphan row of a
+   missing version, renumbered version, catalogue without versions.
+
+**Document only, and the cheap code items taken.**
+- Redaction guarantee narrowed (Sol F3): stored catalogue content is never printed; clap's
+  argument-parse errors echo the operator's own command-line input and are out of scope.
+- Owner text keeps Cf for bidi prose (Sonnet F3): step 3's checklist (§3) now requires isolated
+  bidi rendering with a browser test. Names refusing Cf also refuse ZWNJ/ZWJ/soft hyphen:
+  accepted and documented; Unicode 16.0 tables, later-assigned Cf unknown. **Blank-looking
+  text refused** (trivial): names, labels, the title and owner text need a scalar that is
+  neither whitespace nor U+2800/U+115F/U+1160/U+3164/U+FFA0; mixed with visible text these
+  stay allowed.
+- Draft rewrites (Sonnet F5): **trigger `catalogue_draft_revision_advances`** refuses any draft
+  update that does not advance the revision by exactly one (cheap; versions keep their own
+  content either way). Three tamper statements in `tests/catalogues.rs` now bump the revision
+  so they still reach the check they target.
+- Unsealed manual versions block the catalogue (Sonnet F6): operator note in the docs.
+- `DROP_SCHEMA` duplication (Sonnet F7): unit test `drop_schema_matches_the_integration_fixture`
+  requires the fixture's `DROP_CATALOGUE_SCHEMA` to equal it (integration tests cannot see the
+  crate-private constant).
+- Identical content citing a now-rejected unit answers `rejected-units`: accepted, the
+  exception is documented next to the identical-content promise, with an explicit test. Test
+  added: a failed replacement publication keeps the previous index rows.
+- Search (step 3): never pass raw user text to `MATCH`; quote tokens as phrases and bound
+  their count (§3 checklist).
+
+**Red → green.** Run A (01:01): the new tests written first, against the unfixed `aa23ace`
+code. Run B (01:05): after the fixes, with the tamper connection corrected to switch foreign
+keys off (the bundled SQLite enables them by default, so in run A two tests failed at setup,
+not on the defect), the fix under test temporarily reverted: the unit-row join and unsorted
+Rust units restored, `structure()` skipped, and the integrity outcome mapped back to
+`is_ok()`. Green: final tree, both runs repeated by the full gate.
+
+| Test | Red | Green |
+|---|---|---|
+| `tests/catalogue_publication.rs::orphan_unit_rows_fail_show_and_verify` | B: show succeeded ("unexpected success") | pass |
+| `…::verify_reports_foreign_keys_sequence_seals_identity_and_extra_rows` | B: `foreign-key-violation` missing (first failing case: catalogue identity renamed) | pass |
+| `…::versions_record_their_admission_profile_and_verify_dispatches_on_it` | A: no `admission_profile` column | pass |
+| `…::verify_reports_a_missing_or_reshaped_name_index_without_aborting` | A: verify returned a storage error | pass |
+| `…::identical_content_citing_a_now_rejected_unit_is_refused` | pass in A (behaviour existed; documentation item) | pass |
+| `…::a_failed_replacement_publication_keeps_the_previous_index_rows` | pass in A (behaviour existed; Sol's requested test) | pass |
+| `tests/catalogues.rs::storage_rejects_malformed_rows_and_identity_rebinding` (content rewrite without revision bump, revision skip) | A: rewrite accepted | pass |
+| `src/catalogues/admission_tests.rs::total_unit_references_are_capped_per_catalogue` | A: cap + 1 accepted | pass |
+| `…::blank_looking_names_labels_and_text_are_rejected` | A: blank-looking title accepted | pass |
+| `src/catalogues/publication_tests.rs::integrity_check_storage_errors_propagate_and_failures_are_reported` | B: busy reported as a failed check | pass |
+| `…::drop_schema_matches_the_integration_fixture` | guard (both constants already equal) | pass |
+| `tools/test_catalogue_profile.py::LockProbeTests` (2), `…::test_fanout_sits_at_the_reference_property_and_byte_caps` | new helper code (prototype tier) | pass |
+
+**Measurements** (`tools/catalogue_profile.py`, release build, container `mimik-ci:latest`,
+`--cpus 6`, Ryzen 5 1600 shared host, Monday 01:12–01:15; two full runs at 8,192 and one at
+4,096; database on the container's overlay filesystem). Each command ran in a fresh wrapper
+process (peak RSS by `RUSAGE_CHILDREN`). Hold = write-lock hold of the publish, lower–upper
+bound from the probe, over both runs; "after launch" is when the publish acquired the lock.
+Contender waits are coarse (SQLite's busy handler sleeps up to 100 ms between retries).
+
+| Case (N = 8,192) | Draft bytes | References | Publish wall ms | Lock acquired after launch ms | **Lock hold ms** | Contender wait ms, result | Peak RSS KiB |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| v1 (8,190 entries, new) | 3,215,441 | 21,498 | 1,519–1,580 | 257–275 | **1,287–1,322** | 1,331–1,332, ok | 116,860–117,068 |
+| v2 (8,191, update) | 3,215,719 | 21,501 | 1,820–1,849 | 263–275 | **1,584–1,609** | 1,631–1,632, ok | 116,924–117,004 |
+| v3 (8,192, update) | 3,215,997 | 21,504 | 1,422–1,444 | 258–267 | **1,187–1,205** | 1,231–1,232, ok | 116,736–117,996 |
+| fan-out v1 (new) | 4,173,017 | 24,576 | 2,153–2,154 | 398–428 | **1,736–1,755** | 1,732, ok | 143,892–145,220 |
+| fan-out v2 (update) | 4,173,018 | 24,576 | 2,228 | 381–400 | **1,841–1,845** | 1,832, ok | 144,204–144,404 |
+
+Other commands at 8,192 (both runs): import 302–515 ms, peak RSS ≤ 121,320 KiB; compare
+333–567 ms, ≤ 86,828 KiB; `show-catalogue-version` 348–350 ms, 70,532–70,868 KiB;
+`verify-catalogues` over 5 versions (2 catalogues, structure and foreign-key checks included)
+2,490–2,507 ms, 92,024–92,648 KiB, status ok; `rebuild-catalogue-index` 199–244 ms; baseline
+`list-rulesets` 41 ms, 16,740 KiB. At 4,096: holds 567–642 ms (calibrated) and 1,456–1,512 ms
+(fan-out at the full 24,576 references and 4 MiB), RSS ≤ 129,616 KiB.
+
+Cap selection, fan-out only (one run each, a fresh database without the calibrated catalogue,
+so about 50–70 ms faster than in the full run):
+
+| References | fan-out v1 hold ms | fan-out v2 hold ms | Peak RSS KiB |
+|---:|---:|---:|---:|
+| 16,384 | 1,382 | 1,497 | 137,940 |
+| 24,576 | 1,586 | 1,682 | 147,068 |
+| 32,768 | 1,819 | 1,993 | 153,960 |
+
+In the first full run at 32,768 (before the cap change), fan-out v2 held the lock for
+2,065–2,067 ms and fan-out v1 for 1,909–1,910 ms; the calibrated v2 (then 28,672 references)
+1,766–1,767 ms.
+
+Every CLI process also takes the write lock for about 30–40 ms when it opens the store
+(`Store::migrate` runs in an `IMMEDIATE` transaction even when nothing migrates); the probe
+reports it separately and the contender only starts after 50 ms of refusal, so it is not
+attributed to publication.
+
+**R8 at 8,192 entries, with the caps above:** worst measured hold 1,845 ms ≤ 2 s (margin about
+0.15 s on this host), a concurrent server-pattern writer waits and succeeds in every case, peak
+CLI RSS about 142 MiB ≤ 256 MiB. The margin is thin: a slower disk or a busier host could
+exceed 2 s, though not the 5 s busy timeout at these sizes. If later measurements on the
+target hardware exceed 2 s, lower `MAX_UNIT_REFERENCES` to 16,384 (1.5 s here) before the
+entry cap.
+
+**Limitations:** one host, two runs; the database lives on the container's overlay filesystem;
+units all unreviewed; the contender is the lock-level equivalent of a sheet save, not the HTTP
+route; the fan-out shape trades owner text for references and properties to stay within
+4 MiB (owner text 54 bytes per owner-written entry), and other distributions within the caps
+were not profiled.
+
+**Author gate** (container, `--cpus 6`, Monday 01:16–01:26): `cargo fmt --check` and pedantic
+Clippy (`--all-targets --all-features -D warnings`) clean; `cargo test --locked --all-targets
+--all-features` all passed: 525 tests (339 library, 27 publication and 13 draft integration
+tests among them), 1 pre-existing ignored; `ruff check tools` and `ruff format --check tools`
+clean; tools unittest 730 run, 11 skipped, **1 error:
+`test_run_queue.ProcessLauncherTests.test_fake_runner_script`**, the known pre-existing error
+(identical on `548cc84` and `aa23ace`), untouched here.
+
+**Not yet done:** independent re-review of these fixes.

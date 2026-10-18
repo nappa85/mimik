@@ -21,7 +21,10 @@ cited source (`sources.md`). Then:
 
 - Revision 0 creates only; an existing `(game, edition, catalogue)` draft conflicts. A matching
   revision updates and increments it once, including for identical content; a stale revision
-  changes nothing.
+  changes nothing. The trigger `catalogue_draft_revision_advances` refuses any draft update
+  that does not advance the revision by exactly one, so draft content cannot be rewritten
+  under an unchanged revision even from a raw SQLite shell (published versions keep their own
+  content copy, so their integrity never depended on it).
 - The row ID is a positive database ID, distinct from the catalogue id. Draft identity
   (`game_id`, `edition_id`, `catalogue_id`) is immutable.
 - `show-catalogue-draft` re-decodes the stored draft and checks its canonical bytes, hash and
@@ -45,6 +48,9 @@ or values, labels, the title, owner text or unit text** (plan D6).
   are kept only at array positions and member names only where that member exists; the first
   other segment and everything after it become `*`. Entry-property keys are always redacted,
   whatever their spelling.
+- The guarantee covers stored catalogue content. Argument-parse errors (a non-numeric `--id`,
+  an unknown flag) are clap's own diagnostics before any catalogue code runs; they echo the
+  operator's own command-line input, which is not stored content, and are out of scope.
 - Sentinel tests (`tests/catalogues.rs`, `src/catalogues/admission_tests.rs`) place distinctive
   synthetic strings in every author-chosen member and check stdout and stderr on success and on
   failure paths: decode, schema, domain, source references, a non-finalized source, conflicts,
@@ -83,15 +89,25 @@ an original synthetic example.
   ids). Options are allowed only on `enum`, which needs 1–128 unique options.
 - A description is either 1–16 unit references or `owner_text` (non-blank). An entry may not
   cite the same unit twice. Every cited source must be listed in `sources`.
-- Labels, names, the title and owner text may not be blank. Text is not normalised.
+- Labels, names, the title and owner text may not be blank: at least one scalar must be
+  neither whitespace nor blank-looking (the Braille pattern blank U+2800 and the Hangul fillers
+  U+115F, U+1160, U+3164, U+FFA0, which render as nothing). Mixed with visible text they stay
+  allowed (Braille text needs U+2800). Text is not normalised.
 - Names, labels, the title and text property values may not contain control characters
   (`char::is_control`, C0 and C1), invisible format characters (Unicode category Cf: bidi
   overrides and isolates, zero-width characters, the byte-order mark, soft hyphen, tags) or
   line and paragraph separators (Zl, Zp). A name made only of such characters is therefore
   refused too. Codes: `control-character-in-text`, `format-or-separator-character-in-text`.
+  Refusing Cf also refuses the joiners ZWNJ/ZWJ (U+200C/U+200D) and the soft hyphen, which
+  some scripts and hyphenation use in names: accepted, since short labels can be written
+  without them. Categories come from `unicode-general-category` 1.1.0 (Unicode 16.0); a
+  character assigned Cf in a later Unicode version is not known to be Cf and passes.
 - Owner text allows line feed and tab as its only control characters and refuses Zl and Zp.
   **Normalise owner text to LF line endings before import**: CR (and so CRLF) is refused.
-  Format characters (Cf) stay allowed in owner text, which right-to-left prose needs.
+  Format characters (Cf) stay allowed in owner text, which right-to-left prose needs. Owner
+  text can therefore carry bidi overrides; plan step 3 must render it in an isolated bidi
+  context (`<bdi>` or `unicode-bidi: isolate`, with `white-space: pre-wrap`) so it cannot
+  reorder the surrounding names, citations and controls, with a browser test.
 - `retired` absent and `retired: false` are the same state.
 
 ### Source references (checked at every save, in the write transaction)
@@ -117,10 +133,15 @@ an original synthetic example.
 | Options per enum | 128 |
 | Entries | 8,192 |
 | Units per entry | 1–16 |
+| Unit references per catalogue (with repetition) | 24,576 (`unit-reference-limit`) |
 | Distinct units per catalogue | 16,384 |
 | Names, labels, title | 100 scalars |
 | Text property value | 1,000 scalars |
 | `owner_text` | 20,000 scalars per entry, 1 MiB (UTF-8 bytes) in total |
+
+The reference cap bounds publication's write-lock hold (the seal compares every reference
+row): at 32,768 the worst admitted shape held the lock for about 2.0–2.1 s on update, over
+the plan's 2 s budget; at 24,576 it holds it for about 1.85 s (plan §12).
 
 The catalogue profile is separate from the definition decoder: `definitions::decode::MAX_NODES`
 (32,768), its 256 KiB input cap and the list form budget are unchanged, and a regression test
@@ -204,7 +225,9 @@ IMMEDIATE` transaction**:
 3. any refusal answers its static codes (`dropped-entry-keys`, `retyped-entry-keys`,
    `dropped-entry-types`, `rejected-units`) and publishes nothing;
 4. content identical to the latest version publishes nothing and reports that version with
-   `"published": false`;
+   `"published": false`. **Exception:** refusals are checked first, so identical content
+   citing a unit that was rejected after publication answers `rejected-units` instead (the
+   published version is unchanged; its badge shows the entry as unavailable);
 5. otherwise the canonical content is re-hashed, and the catalogue identity row (first time
    only), the version (number = latest + 1, with draft id and revision, ticket, actor and
    rationale), the projections, the name-index rows and finally the seal are inserted. Every
@@ -240,6 +263,13 @@ Indexes: `catalogue_entries(version_id, type_id, name, key)` and
 `catalogue_entry_units(unit_id)`. Readers use the projections only, never the content, and
 choose "latest" through `catalogue_seals`.
 
+Each version also records its `admission_profile` (currently `catalogue-admission-1`, the only
+value the column's CHECK admits). Verification re-admits stored content under the profile it
+was published with. Tightening any admission rule means a new profile id with its own
+validator and a migration widening the CHECK; old profiles keep validating old versions, so a
+stricter rule never turns an existing version into an integrity failure. A profile this build
+does not know is reported as `unknown-admission-profile`.
+
 Triggers (all named, each with a regression test in `tests/catalogue_publication.rs`):
 
 - **UPDATE and DELETE** are refused on all six tables.
@@ -264,13 +294,31 @@ rowid range. Queries join back on `(version, key)` of the latest sealed version 
 catalogue, so keys that collide across catalogues cannot mix. It has no immutability triggers.
 
 `verify-catalogues` is the Owner integrity check. For every version, in its own short read
-transaction: the version is sealed, its content is within bounds, re-admits to the same
-canonical bytes and hash, matches its identity and title columns, and its projections equal
-those built from the content in Rust (an implementation independent of the seal SQL). Then the
-index: its definition equals the migration's, its rows equal the latest projections in
-identity, name and multiplicity, and FTS5 `integrity-check` passes. It prints counts and a
-list of problems (`catalogue` and `version` numbers with a static code; `catalogue: 0` means
-the whole index) and exits non-zero when any problem exists.
+transaction: the version is sealed (`version-not-sealed`), its content is within bounds,
+re-admits under its recorded admission profile to the same canonical bytes and hash, matches
+its identity and title columns (`version-identity-mismatch`), and its projections equal those
+built from the content in Rust (`projection-mismatch`; an implementation independent of the
+seal SQL). Every projection row of the version is read table by table without joins, so a
+row the content does not account for, such as a unit row whose entry does not exist, is a
+mismatch. Then the structure across versions: version numbers run 1, 2, … per catalogue
+(`version-sequence-gap` at the first break), every catalogue identity has a version
+(`catalogue-without-versions`), and `PRAGMA foreign_key_check` finds nothing in any catalogue
+table (`foreign-key-violation`; one statement per table). Then the index, in an `IMMEDIATE`
+transaction that is rolled back: its definition first (`name-index-missing`,
+`name-index-definition-mismatch`; the row checks are then skipped and `index_rows` is 0), then
+its rows against the latest projections in identity, name and multiplicity
+(`name-index-mismatch`), then FTS5 `integrity-check` (`name-index-integrity-check-failed`).
+Busy, locked, I/O, out-of-memory, interrupted and disk-full conditions there are storage
+errors and fail the command; any other SQLite failure is reported as a damaged index. It
+prints counts and a list of problems (`catalogue` and `version` numbers with a static code;
+`catalogue: 0` means the whole index or the whole schema) and exits non-zero when any problem
+exists. Cost grows with stored history (all versions, and the foreign-key scan of every
+catalogue table); at 5 versions of up to 8,192 entries it took about 2.5 s.
+
+**Operator note.** The application only ever writes a version and its seal in one
+transaction. A version inserted by hand without a seal (outside the application) blocks that
+catalogue: the order trigger refuses any later version while an unsealed one exists. Verify
+reports it as `version-not-sealed`; recovery is restoring the database from a backup.
 
 `show-catalogue-version` re-verifies the shown version the same way (R5). Requests (later
 steps) check only that a version is sealed and its identity columns match.
@@ -281,12 +329,20 @@ fills it from the latest sealed projections, in one transaction.
 ### Redaction
 
 As for drafts: no command prints names, keys, labels, the title, owner text, unit text, the
-actor or the rationale. `tests/catalogue_publication.rs` places sentinels in all of them and
+actor or the rationale (argument-parse errors, which echo the operator's own input, are out
+of scope as described under Drafts). `tests/catalogue_publication.rs` places sentinels in all of them and
 checks stdout and stderr of every command on success and on failure (stale ticket, refusals,
 malformed ticket, actor or rationale, unknown draft or version, malformed ids, tampered
 versions and index).
 
 ### Measured cost (release, real CLI, 8,192 entries)
 
-See plan §11: publication peaks at about 125 MiB RSS; a separate process's write transaction
-waits about 1.5 s and then succeeds.
+Plan §12 (supersedes §11's contention estimate). The write lock is measured with both
+endpoints by a non-blocking probe started before the publish process. Publication holds it for
+about 1.2–1.6 s on the calibrated shape (3.2 MB, 21,504 references) and about 1.74–1.84 s on
+the worst admitted shape (4 MiB, 24,576 references, 16 properties per type, update); peak RSS
+at most about 142 MiB. A concurrent writer using the server's pattern (`BEGIN IMMEDIATE`, 5 s
+busy timeout, one insert, commit: the lock-level equivalent of a sheet save) waits and
+succeeds in every case. The 5 s busy timeout (`src/store.rs`) is the real failure point: a
+publish holding the lock longer than that would make concurrent sheet saves fail with a
+storage error. Commit cost includes `fsync`, so it depends on the disk.
