@@ -16,7 +16,7 @@ struct Job {
     permit: OwnedSemaphorePermit,
 }
 
-fn admit() -> Result<OwnedSemaphorePermit, CatalogueError> {
+pub(super) fn admit() -> Result<OwnedSemaphorePermit, CatalogueError> {
     crate::definitions::admit().map_err(|_| CatalogueError::Busy)
 }
 
@@ -45,7 +45,7 @@ async fn prepare(
 /// Source consistency at draft save (plan D2): the registered pair, each listed source of
 /// that exact pair with the stated PDF hash and finalized, and each referenced unit on its
 /// page in its source. Rejected units stay allowed in drafts.
-fn references(db: &Connection, data: &Admitted) -> Result<(), CatalogueError> {
+pub(super) fn references(db: &Connection, data: &Admitted) -> Result<(), CatalogueError> {
     let catalogue = &data.catalogue;
     let key = RulesetKey {
         game_id: catalogue.game_id.clone(),
@@ -210,43 +210,58 @@ impl Store {
     /// # Errors
     /// Rejects saturation, unknown IDs, corrupt content/hash/identity or storage failures.
     pub async fn catalogue_draft(&self, id: i64) -> Result<CatalogueDraftSummary, CatalogueError> {
-        if id <= 0 {
-            return Err(invalid("/id", "positive-row-id-required"));
-        }
-        let permit = admit()?;
-        let (content, stored_hash, revision, game, edition, catalogue_id, permit) = self
-            .run(move |db| {
-                let row: Option<(Option<String>, String, i64, String, String, String)> = db
-                    .query_row(
-                        "SELECT CASE WHEN length(CAST(content AS BLOB))<=4194304 THEN content END,content_hash,revision,game_id,edition_id,catalogue_id FROM catalogue_drafts WHERE id=?1",
-                        [id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
-                    )
-                    .optional()?;
-                let (content, hash, revision, game, edition, catalogue_id) =
-                    row.ok_or(crate::AppError::NotFound)?;
-                let content = content.ok_or(crate::AppError::Invalid(
-                    "Stored catalogue draft exceeds its size bound.",
-                ))?;
-                Ok((content, hash, revision, game, edition, catalogue_id, permit))
-            })
-            .await?;
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            let data = admission::validate(content.as_bytes())?;
-            if data.content != content
-                || data.hash != stored_hash
-                || data.catalogue.game_id != game
-                || data.catalogue.edition_id != edition
-                || data.catalogue.catalogue_id != catalogue_id
-            {
-                return Err(invalid("/", "stored-draft-identity-or-hash-mismatch"));
-            }
-            Ok(summary(id, revision, &data))
-        })
-        .await
-        .map_err(|_| CatalogueError::Worker)?
+        let (draft, _permit) = load_draft(self, id).await?;
+        Ok(summary(draft.id, draft.revision, &draft.data))
     }
+}
+
+/// A stored draft, re-admitted and checked against its stored hash and identity.
+pub(super) struct Draft {
+    pub id: i64,
+    pub revision: i64,
+    pub data: Admitted,
+}
+
+/// Take the admission permit, read draft `id` and re-admit it outside the database mutex.
+pub(super) async fn load_draft(
+    store: &Store,
+    id: i64,
+) -> Result<(Draft, OwnedSemaphorePermit), CatalogueError> {
+    if id <= 0 {
+        return Err(invalid("/id", "positive-row-id-required"));
+    }
+    let permit = admit()?;
+    let (content, stored_hash, revision, game, edition, catalogue_id, permit) = store
+        .run(move |db| {
+            let row: Option<(Option<String>, String, i64, String, String, String)> = db
+                .query_row(
+                    "SELECT CASE WHEN length(CAST(content AS BLOB))<=4194304 THEN content END,content_hash,revision,game_id,edition_id,catalogue_id FROM catalogue_drafts WHERE id=?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+                )
+                .optional()?;
+            let (content, hash, revision, game, edition, catalogue_id) =
+                row.ok_or(crate::AppError::NotFound)?;
+            let content = content.ok_or(crate::AppError::Invalid(
+                "Stored catalogue draft exceeds its size bound.",
+            ))?;
+            Ok((content, hash, revision, game, edition, catalogue_id, permit))
+        })
+        .await?;
+    tokio::task::spawn_blocking(move || {
+        let data = admission::validate(content.as_bytes())?;
+        if data.content != content
+            || data.hash != stored_hash
+            || data.catalogue.game_id != game
+            || data.catalogue.edition_id != edition
+            || data.catalogue.catalogue_id != catalogue_id
+        {
+            return Err(invalid("/", "stored-draft-identity-or-hash-mismatch"));
+        }
+        Ok((Draft { id, revision, data }, permit))
+    })
+    .await
+    .map_err(|_| CatalogueError::Worker)?
 }
 
 #[cfg(test)]

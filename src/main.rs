@@ -103,6 +103,37 @@ enum Command {
         #[arg(long)]
         id: i64,
     },
+    /// Compare a catalogue draft with its latest sealed version: counts and a ticket only.
+    CompareCatalogue {
+        #[arg(long)]
+        id: i64,
+    },
+    /// Publish a catalogue draft as the next sealed version with the exact current ticket.
+    PublishCatalogue {
+        #[arg(long)]
+        id: i64,
+        #[arg(long)]
+        comparison_hash: String,
+        #[arg(long)]
+        actor: String,
+        #[arg(long)]
+        rationale: String,
+    },
+    /// Show a sealed catalogue version's metadata (latest by default) after re-verifying it.
+    ShowCatalogueVersion {
+        #[arg(long)]
+        game: String,
+        #[arg(long)]
+        edition: String,
+        #[arg(long)]
+        catalogue: String,
+        #[arg(long)]
+        version: Option<i64>,
+    },
+    /// Owner integrity check of every catalogue version and the name index.
+    VerifyCatalogues,
+    /// Rebuild the derived catalogue name index from the latest sealed versions.
+    RebuildCatalogueIndex,
     /// Register a stable game/edition pair; this does not enable a generic sheet.
     RegisterRuleset {
         #[arg(long)]
@@ -393,6 +424,54 @@ async fn catalogue_command(
         Command::ShowCatalogueDraft { id } => println!(
             "{}",
             serde_json::to_string_pretty(&store.catalogue_draft(id).await?)?
+        ),
+        Command::CompareCatalogue { id } => println!(
+            "{}",
+            serde_json::to_string_pretty(&store.compare_catalogue(id).await?)?
+        ),
+        Command::PublishCatalogue {
+            id,
+            comparison_hash,
+            actor,
+            rationale,
+        } => println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &store
+                    .publish_catalogue(
+                        id,
+                        mimik::catalogues::PublishRequest {
+                            comparison_hash,
+                            actor,
+                            rationale,
+                        },
+                    )
+                    .await?
+            )?
+        ),
+        Command::ShowCatalogueVersion {
+            game,
+            edition,
+            catalogue,
+            version,
+        } => println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &store
+                    .catalogue_version(game, edition, catalogue, version)
+                    .await?
+            )?
+        ),
+        Command::VerifyCatalogues => {
+            let report = store.verify_catalogues().await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.problems.is_empty() {
+                return Err("Catalogue integrity check failed.".into());
+            }
+        }
+        Command::RebuildCatalogueIndex => println!(
+            "{}",
+            serde_json::to_string_pretty(&store.rebuild_catalogue_index().await?)?
         ),
         other => return Ok(Some(other)),
     }

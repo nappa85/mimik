@@ -1,10 +1,10 @@
 # Catalogue publication
 
 Read-only game catalogues: spells, items and other entries that a sheet can cite. Plan:
-[catalogue-plan.md](catalogue-plan.md). **Implemented so far: step 1, drafts only.**
-Comparison, publication, sealed versions, the name index, definition linkage and the sheet
-routes are later steps; until they land, a catalogue draft is never visible to players and
-never changes a sheet.
+[catalogue-plan.md](catalogue-plan.md). **Implemented so far: steps 1–2** (drafts, and the
+comparison, publication, integrity check and name-index repair of sealed versions).
+Definition linkage and the sheet routes are later steps; until they land, nothing published
+here is visible to players or changes a sheet.
 
 ## Drafts
 
@@ -85,7 +85,13 @@ an original synthetic example.
   cite the same unit twice. Every cited source must be listed in `sources`.
 - Labels, names, the title and owner text may not be blank. Text is not normalised.
 - Names, labels, the title and text property values may not contain control characters
-  (`char::is_control`, C0 and C1). Owner text allows line feed and tab only.
+  (`char::is_control`, C0 and C1), invisible format characters (Unicode category Cf: bidi
+  overrides and isolates, zero-width characters, the byte-order mark, soft hyphen, tags) or
+  line and paragraph separators (Zl, Zp). A name made only of such characters is therefore
+  refused too. Codes: `control-character-in-text`, `format-or-separator-character-in-text`.
+- Owner text allows line feed and tab as its only control characters and refuses Zl and Zp.
+  **Normalise owner text to LF line endings before import**: CR (and so CRLF) is refused.
+  Format characters (Cf) stay allowed in owner text, which right-to-left prose needs.
 - `retired` absent and `retired: false` are the same state.
 
 ### Source references (checked at every save, in the write transaction)
@@ -142,5 +148,145 @@ Schema 19 (`migrations/019_catalogues.sql`) adds the STRICT table `catalogue_dra
 positive autoincrement ids and revisions, a registry foreign key, NUL-free slug checks, a JSON
 object of at most 4 MiB whose `contract_version` and identity match the columns, an exact
 64-byte lowercase-hex hash, a unique identity and the trigger
-`catalogue_draft_identity_immutable`. The migration is additive and atomic. Later steps extend
-the same migration before it is merged.
+`catalogue_draft_identity_immutable`. The publication tables below are in the same migration,
+which is additive and atomic: a failure anywhere leaves schema 18 with no catalogue object.
+
+## Publication
+
+### Operator commands
+
+```sh
+./target/release/mimik compare-catalogue --id 1
+./target/release/mimik publish-catalogue --id 1 --comparison-hash <ticket> \
+    --actor "Owner" --rationale "First spell list"
+./target/release/mimik show-catalogue-version --game synthetic-game --edition first \
+    --catalogue spells [--version 2]
+./target/release/mimik verify-catalogues
+./target/release/mimik rebuild-catalogue-index
+```
+
+Commands share the definition admission permit (one nonqueued job per process).
+
+### Comparison and the ticket
+
+`compare-catalogue` re-admits the stored draft, re-checks its source references and compares
+it with the latest sealed version of the same `(game, edition, catalogue)`, in one read
+transaction. It prints counts only:
+
+- `counts`: the draft's counts (as `show-catalogue-draft`);
+- `units`: distinct referenced units by review state (unreviewed, accepted, corrected,
+  rejected);
+- `badges`: entries by the badge they would show now (owner-written; reviewed: every unit
+  accepted or corrected and every cited page complete; unavailable: any unit rejected;
+  otherwise unchecked);
+- `changes` against the latest version: `identical`, added entries and entry types, newly
+  retired and un-retired entries, entries whose unit references changed, entries whose owner
+  text changed;
+- `refusals`: dropped entry keys, retyped entry keys, dropped entry types, rejected units;
+- `publishable` (no refusal) and `comparison_hash`, the ticket.
+
+The ticket is SHA-256 over `b"mimik-catalogue-comparison-v1\0"` and the canonical JSON of:
+the draft id, revision and content hash; the latest sealed version number and content hash, or
+`null`; and, for every distinct referenced unit in id order, `(unit_id, unit revision, state,
+page_id, page revision)`. A unit review, a page completion or a printed-label change advances a
+bound revision, so any of them, a new draft revision or another publication makes the ticket
+stale.
+
+### Publishing
+
+`publish-catalogue` validates the actor (1–100 characters) and rationale (1–5,000), like
+definition approvals, and the ticket format (64 lowercase hex). Then, in **one `BEGIN
+IMMEDIATE` transaction**:
+
+1. the draft row must still have the admitted revision and hash (else a conflict);
+2. the comparison is recomputed; a different ticket answers `StaleComparison` and publishes
+   nothing;
+3. any refusal answers its static codes (`dropped-entry-keys`, `retyped-entry-keys`,
+   `dropped-entry-types`, `rejected-units`) and publishes nothing;
+4. content identical to the latest version publishes nothing and reports that version with
+   `"published": false`;
+5. otherwise the canonical content is re-hashed, and the catalogue identity row (first time
+   only), the version (number = latest + 1, with draft id and revision, ticket, actor and
+   rationale), the projections, the name-index rows and finally the seal are inserted. Every
+   insert must affect exactly one row.
+
+Any error rolls everything back: no partial or unsealed version remains (tests cover an
+injected failure before each stage, a failing seal and a process killed mid-publication).
+A concurrent publication of the same catalogue from another process waits for the write lock
+(5 s busy timeout) and then answers `StaleComparison`, since the latest version changed.
+
+Append-only (plan D3): a version may add entries and entry types, change names, properties,
+descriptions and owner text, and retire or un-retire entries. It may not drop an entry key or
+an entry type (even one with no entries), or change an entry's type. Retirement does not free
+capacity: a catalogue at 8,192 keys cannot take another entry.
+
+Output (publish and show): `version_id`, `game_id`, `edition_id`, `catalogue_id`, `version`,
+`latest_version`, `content_hash`, `draft_id`, `draft_revision`, `created_at`,
+`status: "sealed"`, `counts`, and for publish `published`. Actor and rationale are stored
+but never printed.
+
+### Sealed versions and their projections
+
+| Table | Holds | Keys |
+|---|---|---|
+| `catalogues` | integer surrogate per `(game, edition, catalogue)`, below 2^43 | id; identity |
+| `catalogue_versions` | content, hash, identity and title columns checked against the content, draft provenance, ticket, actor, rationale | id; `(catalogue, version)` |
+| `catalogue_entry_types` | type id, ordinal, label, property declarations (JSON) | `(version, type)`; `(version, ordinal)` |
+| `catalogue_entries` | key, ordinal, type, name, retired, `desc_kind`, owner text, properties (JSON) | `(version, key)`; `(version, ordinal)` |
+| `catalogue_entry_units` | key, ordinal (author order, 0-based), unit id (foreign key), page and source ids | `(version, key, ordinal)` |
+| `catalogue_seals` | the sealed versions | version |
+
+Indexes: `catalogue_entries(version_id, type_id, name, key)` and
+`catalogue_entry_units(unit_id)`. Readers use the projections only, never the content, and
+choose "latest" through `catalogue_seals`.
+
+Triggers (all named, each with a regression test in `tests/catalogue_publication.rs`):
+
+- **UPDATE and DELETE** are refused on all six tables.
+- **Replacement guards** refuse an insert that collides with any primary or unique key, so
+  `INSERT OR REPLACE` cannot delete a published row. Each key is probed by its own index.
+- **Sealed versions** refuse new types, entries and units.
+- **Version order and provenance**: version numbers are contiguous, a new version starts only
+  when every earlier one is sealed, and its content and hash equal the named draft revision's.
+- **Unit rows** must name a unit on that page, a page in that source, and a finalized source
+  of the catalogue's pair.
+- **The seal** requires its version to be the latest sealed + 1 with no unsealed lower version;
+  then exact two-way equality (two `EXCEPT` queries each way over `json_each` of the content,
+  plus equal row counts) between the content and each projection, covering every column above;
+  then the append-only rule against the previous sealed version.
+
+### Integrity check and the name index
+
+`catalogue_names_fts` (FTS5, `unicode61 remove_diacritics 2`, prefix 3) is a derived,
+latest-only index of entry names with `catalogue_row_id` and `key` unindexed; the rowid is
+`catalogue surrogate × 2^20 + entry ordinal`. Publication replaces that catalogue's rows by
+rowid range. Queries join back on `(version, key)` of the latest sealed version of that
+catalogue, so keys that collide across catalogues cannot mix. It has no immutability triggers.
+
+`verify-catalogues` is the Owner integrity check. For every version, in its own short read
+transaction: the version is sealed, its content is within bounds, re-admits to the same
+canonical bytes and hash, matches its identity and title columns, and its projections equal
+those built from the content in Rust (an implementation independent of the seal SQL). Then the
+index: its definition equals the migration's, its rows equal the latest projections in
+identity, name and multiplicity, and FTS5 `integrity-check` passes. It prints counts and a
+list of problems (`catalogue` and `version` numbers with a static code; `catalogue: 0` means
+the whole index) and exits non-zero when any problem exists.
+
+`show-catalogue-version` re-verifies the shown version the same way (R5). Requests (later
+steps) check only that a version is sealed and its identity columns match.
+
+`rebuild-catalogue-index` drops and recreates the index with the migration's definition and
+fills it from the latest sealed projections, in one transaction.
+
+### Redaction
+
+As for drafts: no command prints names, keys, labels, the title, owner text, unit text, the
+actor or the rationale. `tests/catalogue_publication.rs` places sentinels in all of them and
+checks stdout and stderr of every command on success and on failure (stale ticket, refusals,
+malformed ticket, actor or rationale, unknown draft or version, malformed ids, tampered
+versions and index).
+
+### Measured cost (release, real CLI, 8,192 entries)
+
+See plan §11: publication peaks at about 125 MiB RSS; a separate process's write transaction
+waits about 1.5 s and then succeeds.

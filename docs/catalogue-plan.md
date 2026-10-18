@@ -897,3 +897,140 @@ Accepted without code change: Sol F4 (the admission worker lifecycle duplicates
 coordinator records that as a known pre-existing issue.
 
 **Not yet done:** re-review of these fixes.
+
+## 11. Step 2 implementation notes (2026-10-19)
+
+Branch `catalogue`. Scope: §3 step 2 only (migration 019 extended with versions, projections,
+seals and the name index; `compare-catalogue`, `publish-catalogue`, `show-catalogue-version`,
+`verify-catalogues`, `rebuild-catalogue-index`), plus step-1 review items 7–8. Operator
+documentation: [catalogue-publication.md](catalogue-publication.md#publication). Code:
+`src/catalogues/publication.rs`, `migrations/019_catalogues.sql`, `src/main.rs`; tests
+`tests/catalogue_publication.rs`, `src/catalogues/publication_tests.rs`,
+`src/catalogues/admission_tests.rs`; shared fixture `tests/support/catalogue_fixture.rs`;
+profile `tools/catalogue_profile.py`.
+
+**Decisions taken in step 2 (not fixed by the plan):**
+- `catalogue_entry_types` also carries the type's ordinal, label and property declarations
+  (JSON), and `catalogue_versions` a `title` column, so readers never need `content` (R17's
+  intent); the seal's equality covers all of them.
+- Versions record draft provenance (draft id and revision), the ticket, actor and rationale. A
+  version insert trigger requires contiguous numbers, every earlier version sealed, and
+  content and hash equal to the named draft revision's (the `009` provenance pattern).
+- Refusals are checked before "identical": identical content whose units were rejected after
+  publication answers `rejected-units` rather than reporting the existing version.
+- The source-reference check (`references`) runs again inside the publish transaction; its
+  cost is inside the measured lock time.
+- The name index has `prefix = '3'`, matching `source_search_fts` and the prefix pieces of
+  `fts_query`. The calibration spike had no prefix index; the measurements below include it.
+- `rebuild-catalogue-index` drops and recreates the index from `NAME_INDEX`, a Rust constant
+  equal to the migration's statement (a test compares `sqlite_master` after both), so it also
+  repairs corrupt shadow tables.
+- `verify-catalogues` re-admits stored content with the current admission rules. A rule
+  tightened after release would report older versions as `content-not-admissible`; no such
+  versions exist yet (the branch is unmerged), and a future tightening needs a versioned
+  profile.
+- Step-1 review item 7: names, labels, the title and text property values refuse Unicode Cf,
+  Zl and Zp (`format-or-separator-character-in-text`); owner text refuses Zl and Zp but keeps
+  Cf for right-to-left prose. Library: `unicode-general-category` 1.1.0 (Apache-2.0), already
+  in the shipped tree through `jsonschema`, now a direct pinned dependency. Item 8: "normalise
+  owner text to LF" is documented.
+- The seal and version replacement guards are shadowed by the order checks (a replacement
+  always also breaks the order); they stay as defence in depth, and their own refusals are
+  tested in a test database without the order trigger.
+
+**Found during the profile:** replacement guards written as one `EXISTS(... key=NEW.key OR
+ordinal=NEW.ordinal)` could not use an index, so each insert scanned the version and
+publication was quadratic: 10.5 s at 8,192 entries. Each key now has its own `EXISTS`.
+Regression `publication::tests::projection_inserts_scale_linearly` counts SQLite VM steps for
+1,024 and 2,048 entries: red at 3.92× with the old trigger, green below 2.6×.
+
+**Red → green.** Red runs used the final tests against (a) migration 019 without any step-2
+trigger; (b) the Rust checks stubbed (ticket bound to the draft only, no refusals, never
+identical, no projection, hash or index comparison in verify, no index row delete at publish,
+rebuild a no-op); (c) publication without its transaction (autocommit); (d) entry properties
+encoded through `serde_json::Value` (sorted keys); (e) admission without the Cf/Zl/Zp check.
+Green is the real implementation.
+
+| Test | Red | Green |
+|---|---|---|
+| `tests/catalogue_publication.rs::seal_requires_entries_equal_to_the_content` (same-count substitution, wrong type, retired, name, owner text, properties, order, extra, missing) | (a) | pass |
+| `…::seal_requires_entry_types_equal_to_the_content` | (a) | pass |
+| `…::seal_requires_entry_units_equal_to_the_content` (wrong unit, swapped ordinals, extra, missing) | (a) | pass |
+| `…::seal_refuses_dropped_or_retyped_keys_and_dropped_types` (empty type included) | (a) | pass |
+| `…::seals_follow_version_order_and_versions_follow_their_draft` | (a) | pass |
+| `…::published_rows_reject_update_delete_replace_and_sealed_inserts` | (a) | pass |
+| `…::replacement_guards_cover_every_key_of_an_unsealed_version` | (a) | pass |
+| `…::unit_rows_must_match_their_page_finalized_source_and_pair` | (a) | pass |
+| `…::tampered_versions_fail_show_and_verify` | (a) setup, (b) | pass |
+| `…::cli_compare_publish_show_verify_and_rebuild_print_metadata_only` | (b) | pass |
+| `…::cli_identical_content_publishes_nothing` | (b) | pass |
+| `…::cli_failure_paths_are_redacted_and_publish_nothing` | (b) | pass |
+| `…::dropped_or_retyped_keys_and_types_are_refused` | (b) | pass |
+| `…::empty_types_are_retained_and_changes_are_counted` | (b) | pass |
+| `…::intervening_changes_stale_the_ticket` (unit review, page completion, label change, draft revision, another publication) | (b) | pass |
+| `…::name_index_is_checked_and_rebuilt` (colliding keys across catalogues) | (b) | pass |
+| `…::name_index_corruption_and_definition_drift_are_reported_and_repaired` | (b) | pass |
+| `…::cross_process_publish_race_has_one_winner` | (b): the stubbed ticket does not bind the latest version, so the loser publishes again; not red under (c), where the outcome of this race is the same | pass |
+| `…::crash_mid_publish_leaves_no_partial_or_sealed_version` (process killed inside the transaction, hot journal rolled back) | (c) | pass |
+| `…::failing_seal_rolls_back_the_whole_publication` | (c) | pass |
+| `…::escaped_and_multilingual_text_seals` | (d) | pass |
+| `src/catalogues/publication_tests.rs::a_failure_before_any_stage_rolls_back_the_whole_publication` | pass in every red run (guard: it calls the transactional core directly) | pass |
+| `…::rust_projections_equal_the_stored_rows_in_author_unit_order` | pass in every red run (guard) | pass |
+| `…::projection_inserts_scale_linearly` | old OR trigger (3.92×) | pass |
+| `admission_tests::format_and_separator_characters_are_rejected_in_names_labels_and_text_values` | (e) | pass |
+| `tests/catalogues.rs::populated_schema18_database_upgrades_to_19_atomically` (now rewinds every catalogue object, fails on a late conflicting object, then publishes and runs an FTS query) | pass in (a)/(b) (the upgrade itself is unchanged) | pass |
+
+Some tests were split or tightened after the first red runs (seal equality into three tests,
+the identical-content CLI case and index corruption into their own tests, guard messages
+that SQLite's trigger order can mask); the red runs above were repeated with the final tests.
+
+**Measurements** (`tools/catalogue_profile.py`, release build, container `mimik-ci:latest`,
+`--cpus 6`, Ryzen 5 1600 shared host, Monday 00:20–00:28, two runs at 8,192 and one at
+4,096). Each command ran in a fresh wrapper process (peak RSS by `RUSAGE_CHILDREN`). The draft
+follows the calibration: 8 types × 2 properties, every 8th entry owner-written (1 MiB in all),
+the others citing 4 units of one finalized 1,024-page × 16-unit synthetic source. v1 holds
+N − 2 entries; v2 and v3 each add one (append-only), so v3 is at the cap.
+
+| Case (N = 8,192) | Wall ms | Peak RSS KiB |
+|---|---:|---:|
+| Baseline `list-rulesets` | 42–47 | 16,100 |
+| v1 import (3,543,860 bytes) | 324–392 | 101,000–101,400 |
+| v1 compare (no previous version) | 342–346 | 71,700–72,500 |
+| v1 publish | 1,712–1,813 | 127,000–127,600 |
+| v2 compare (with previous version) | 660–684 | 71,900–72,300 |
+| v2 publish | 2,220–2,298 | 126,700–127,200 |
+| v3 publish (at 8,192) | 1,764–1,843 | 127,000–127,300 |
+| show-catalogue-version | 566–620 | 77,500–78,600 |
+| verify-catalogues (3 versions) | 1,914–1,926 | 79,800–80,500 |
+| rebuild-catalogue-index | 145–170 | 16,100–16,400 |
+
+At 4,096: v1–v3 publish 802–989 ms, peak RSS about 86,200 KiB.
+
+**Separate-process contention (R8).** During the v3 publish, a second Python process (system
+SQLite 3.50.4) probed the write lock without waiting from 150 ms after start (past the CLI's
+start-up and draft load) and, on the first refusal, ran `BEGIN IMMEDIATE`, an insert and a
+commit with a 5 s busy timeout. It **waited 1,531–1,632 ms and succeeded** in all three runs at
+8,192 (830 ms at 4,096). The wait spans the publish transaction from its comparison to its
+commit, plus up to about 100 ms of SQLite busy-handler sleep granularity, so the lock is held
+for at most about 1.6 s.
+
+**R8 at 8,192 entries:** lock held ≤ 2 s (about 1.5–1.6 s), a concurrent writer waits and
+succeeds, CLI peak RSS about 125 MiB ≤ 256 MiB. **The D5 limit stays 8,192**; no fallback to
+4,096. The margin on the lock is thinner than in step 0 (0.9–1.1 s there) because the ticket
+recomputation, including the source-reference and unit-state reads and the previous
+projection, now runs inside the lock. In-server `JOBS` contention does not apply to the CLI
+(another process).
+
+**Limitations:** single machine, few runs, shared host; units all unreviewed; the contended
+writer is a plain insert, not a server sheet save; the crash test relies on the rollback
+journal (`-journal` file), as noted in the step-1 review (re-check if WAL is enabled).
+
+**Author gate** (container, `--cpus 6`, Monday 00:33–00:47): `cargo fmt --check` and pedantic
+Clippy clean; `cargo test --locked --all-targets --all-features` all passed (335 library tests,
+21 publication and 13 draft integration tests among them; 1 pre-existing ignored); `ruff check`
+and `ruff format --check` clean; tools unittest 727 run, 11 skipped, **1 error:
+`test_run_queue.ProcessLauncherTests.test_fake_runner_script`**, which fails identically on the
+step-1 tools tree (`548cc84`) in the same container and is untouched by this step.
+
+**Not yet done:** independent review of this step (including the concrete seal SQL, as the
+plan review asked).

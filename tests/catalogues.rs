@@ -1,152 +1,19 @@
 //! Catalogue drafts (plan `docs/catalogue-plan.md` §3 step 1): source consistency, revisions,
 //! storage constraints, the schema-19 upgrade and CLI redaction. All fixtures are synthetic.
-use mimik::{Store, catalogues::CatalogueError, registry::RegisterRuleset, sources::UnitReview};
-use serde_json::{Value, json};
-use std::{
-    path::{Path, PathBuf},
-    process::{Command, Output},
+use mimik::{
+    Store,
+    catalogues::{CatalogueError, PublishRequest},
+    registry::RegisterRuleset,
+    sources::UnitReview,
 };
+use serde_json::{Value, json};
+use std::process::{Command, Output};
 
-#[path = "support/source_fixture.rs"]
-mod source_fixture;
-
-static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// Distinctive synthetic strings placed in names, keys, property ids/values, labels, the
-/// title and owner text; plus the fixture's unit text. None may appear in any output.
-const SENTINELS: &[&str] = &[
-    "zqxname",
-    "zqxkey",
-    "zqxowner",
-    "zqxprop",
-    "zqxvalue",
-    "zqxlabel",
-    "zqxtitle",
-    "zqxmember",
-    "Strength capacity",
-];
-
-struct Fixture {
-    _dir: tempfile::TempDir,
-    root: PathBuf,
-    database: PathBuf,
-    store: Store,
-    source: i64,
-    pdf_hash: String,
-    page: i64,
-    unit: i64,
-}
-
-async fn fixture() -> Fixture {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().to_owned();
-    source_fixture::fixture_pair(&root).unwrap();
-    let database = root.join("catalogue.sqlite3");
-    let store = Store::open(&database).unwrap();
-    store
-        .register_ruleset(RegisterRuleset {
-            game_id: "synthetic-game".into(),
-            game_label: "Synthetic game".into(),
-            edition_id: "first".into(),
-            edition_label: "First edition".into(),
-        })
-        .await
-        .unwrap();
-    store
-        .import_source(&root.join("unknown-bundle"), &root.join("original.pdf"))
-        .await
-        .unwrap();
-    let source = store.sources().await.unwrap().remove(0);
-    let page = store.source_page(source.pages[0].id).await.unwrap();
-    Fixture {
-        _dir: dir,
-        root,
-        database,
-        store,
-        source: source.id,
-        pdf_hash: source.pdf_hash,
-        page: page.id,
-        unit: page.units[0].id,
-    }
-}
-
-impl Fixture {
-    /// A catalogue citing the fixture unit, with a sentinel in every author-chosen string.
-    fn catalogue(&self) -> Value {
-        json!({
-            "contract_version": 1, "game_id": "synthetic-game", "edition_id": "first",
-            "catalogue_id": "spells", "title": "Title zqxtitle",
-            "sources": [{"source_id": self.source, "pdf_sha256": self.pdf_hash}],
-            "entry_types": [{"id": "spell", "label": "zqxlabel", "properties": [
-                {"id": "zqxprop", "label": "Prop zqxlabel", "control": "text"},
-                {"id": "level", "label": "Level", "control": "integer"}]}],
-            "entries": [
-                {"key": "zqxkey-flare", "type": "spell", "name": "Name zqxname",
-                 "properties": {"zqxprop": "zqxvalue", "level": 1},
-                 "description": {"units": [{"source_id": self.source, "page_id": self.page, "unit_id": self.unit}]}},
-                {"key": "zqxkey-charm", "type": "spell", "name": "Charm zqxname", "retired": true,
-                 "properties": {"zqxprop": "", "level": 0},
-                 "description": {"owner_text": "zqxowner synthetic house text"}}]
-        })
-    }
-
-    async fn save(&self, value: &Value, revision: i64) -> Result<i64, CatalogueError> {
-        self.store
-            .save_catalogue_draft(serde_json::to_vec(value).unwrap(), revision)
-            .await
-            .map(|draft| draft.revision)
-    }
-
-    fn write(&self, name: &str, value: &[u8]) -> PathBuf {
-        let path = self.root.join(name);
-        std::fs::write(&path, value).unwrap();
-        path
-    }
-
-    fn cli(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_mimik"))
-            .arg("--database")
-            .arg(&self.database)
-            .args(args)
-            .output()
-            .unwrap()
-    }
-
-    fn import(&self, file: &Path, revision: i64) -> Output {
-        self.cli(&[
-            "import-catalogue-draft",
-            "--file",
-            file.to_str().unwrap(),
-            "--expected-revision",
-            &revision.to_string(),
-        ])
-    }
-
-    fn drafts(&self) -> i64 {
-        rusqlite::Connection::open(&self.database)
-            .unwrap()
-            .query_row("SELECT count(*) FROM catalogue_drafts", [], |row| {
-                row.get(0)
-            })
-            .unwrap()
-    }
-}
-
-fn assert_redacted(output: &Output) {
-    for stream in [&output.stdout, &output.stderr] {
-        let text = String::from_utf8_lossy(stream);
-        for sentinel in SENTINELS {
-            assert!(!text.contains(sentinel), "output leaked {sentinel}: {text}");
-        }
-    }
-}
-
-fn code(error: &CatalogueError) -> &str {
-    match error {
-        CatalogueError::Invalid(report) => &report.diagnostics[0].code,
-        other => panic!("unexpected error {other:?}"),
-    }
-}
+#[path = "support/catalogue_fixture.rs"]
+mod catalogue_fixture;
+use catalogue_fixture::{
+    DROP_CATALOGUE_SCHEMA, TEST_LOCK, assert_redacted, code, fixture, second_source,
+};
 
 #[tokio::test]
 async fn cli_import_and_show_print_metadata_only() {
@@ -594,10 +461,20 @@ async fn populated_schema18_database_upgrades_to_19_atomically() {
     assert_eq!(before.0, 1);
     assert_eq!(before.2, 1);
     // Rewind to a genuine schema-18 shape.
-    db.execute_batch("DROP TABLE catalogue_drafts; PRAGMA user_version=18;")
-        .unwrap();
-    // A conflicting object makes the upgrade fail as a whole, leaving schema 18.
-    db.execute_batch("CREATE TABLE catalogue_drafts(zqxmember TEXT);")
+    db.execute_batch(DROP_CATALOGUE_SCHEMA).unwrap();
+    db.execute_batch("PRAGMA user_version=18;").unwrap();
+    let catalogue_objects = |db: &rusqlite::Connection| -> i64 {
+        db.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name LIKE 'catalogue%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(catalogue_objects(&db), 0);
+    // A conflicting object late in the migration makes the upgrade fail as a whole, leaving
+    // schema 18 with no catalogue object at all.
+    db.execute_batch("CREATE TABLE catalogue_seals(zqxmember TEXT);")
         .unwrap();
     drop(db);
     assert!(Store::open(database).is_err());
@@ -607,7 +484,8 @@ async fn populated_schema18_database_upgrades_to_19_atomically() {
             .unwrap(),
         18
     );
-    db.execute_batch("DROP TABLE catalogue_drafts;").unwrap();
+    assert_eq!(catalogue_objects(&db), 1);
+    db.execute_batch("DROP TABLE catalogue_seals;").unwrap();
     drop(db);
     let reopened = Store::open(database).unwrap();
     let db = rusqlite::Connection::open(database).unwrap();
@@ -623,6 +501,29 @@ async fn populated_schema18_database_upgrades_to_19_atomically() {
         .await
         .unwrap();
     assert_eq!(saved.revision, 1);
+    // The upgraded database publishes, and the name index answers a query (R2).
+    let comparison = reopened.compare_catalogue(saved.id).await.unwrap();
+    let published = reopened
+        .publish_catalogue(
+            saved.id,
+            PublishRequest {
+                comparison_hash: comparison.comparison_hash,
+                actor: "fixture-operator".into(),
+                rationale: "Synthetic upgrade publication".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(published.published);
+    assert_eq!(published.version.version, 1);
+    let hits: i64 = db
+        .query_row(
+            "SELECT count(*) FROM catalogue_names_fts CROSS JOIN catalogue_entries e ON e.version_id=?1 AND e.key=catalogue_names_fts.key WHERE catalogue_names_fts MATCH 'charm'",
+            [published.version.version_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(hits, 1);
     assert_eq!(
         db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
             row.get::<_, i64>(0)
@@ -650,41 +551,6 @@ async fn cli_schema_paths_never_echo_author_property_keys() {
         assert!(!stderr.contains(&format!("properties/{key}")), "{stderr}");
         assert!(stderr.contains("/entries/0/properties/*"), "{stderr}");
     }
-}
-
-/// A second real, finalized source of the same pair (same synthetic PDF, its own bundle).
-async fn second_source(fixture: &Fixture) -> (i64, i64, i64) {
-    let second = fixture.root.join("second-bundle");
-    std::fs::create_dir(&second).unwrap();
-    let first = fixture.root.join("unknown-bundle");
-    for name in ["source.json", "page-1.png"] {
-        std::fs::copy(first.join(name), second.join(name)).unwrap();
-    }
-    let mut manifest: Value =
-        serde_json::from_slice(&std::fs::read(first.join("bundle.json")).unwrap()).unwrap();
-    manifest["source_id"] = json!("synthetic-second-core");
-    manifest["title"] = json!("Second synthetic source");
-    std::fs::write(
-        second.join("bundle.json"),
-        serde_json::to_vec(&manifest).unwrap(),
-    )
-    .unwrap();
-    fixture
-        .store
-        .import_source(&second, &fixture.root.join("original.pdf"))
-        .await
-        .unwrap();
-    let source = fixture
-        .store
-        .sources()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|source| source.id != fixture.source)
-        .unwrap();
-    let page = fixture.store.source_page(source.pages[0].id).await.unwrap();
-    assert_ne!(page.id, fixture.page);
-    (source.id, page.id, page.units[0].id)
 }
 
 #[tokio::test]

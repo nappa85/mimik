@@ -713,6 +713,62 @@ fn control_characters_are_rejected_in_names_labels_and_text_values() {
     }
 }
 
+/// Step 1 review item 7: invisible format characters (Cf: bidi overrides, zero-width, BOM, soft
+/// hyphen) and line/paragraph separators (Zl, Zp) are refused in every displayed short text,
+/// including a name made only of them. Owner text refuses Zl and Zp (normalise to LF) and
+/// keeps Cf, which right-to-left prose needs.
+#[test]
+fn format_and_separator_characters_are_rejected_in_names_labels_and_text_values() {
+    let cf = [
+        '\u{200b}',
+        '\u{200d}',
+        '\u{202e}',
+        '\u{2066}',
+        '\u{feff}',
+        '\u{ad}',
+        '\u{e0001}',
+    ];
+    let separators = ['\u{2028}', '\u{2029}'];
+    for pointer in [
+        "/title",
+        "/entry_types/0/label",
+        "/entry_types/0/properties/0/label",
+        "/entry_types/0/properties/1/options/0/label",
+        "/entries/0/name",
+        "/entries/0/properties/range",
+    ] {
+        for scalar in cf.iter().chain(&separators) {
+            let mut value = example();
+            *value.pointer_mut(pointer).unwrap() = format!("Text{scalar}more").into();
+            assert_eq!(
+                rejected(&value),
+                "format-or-separator-character-in-text",
+                "{pointer} {scalar:?}"
+            );
+            *value.pointer_mut(pointer).unwrap() = scalar.to_string().repeat(3).into();
+            assert_eq!(
+                rejected(&value),
+                "format-or-separator-character-in-text",
+                "{pointer} only {scalar:?}"
+            );
+        }
+    }
+    let pointer = "/entries/1/description/owner_text";
+    let mut value = example();
+    for scalar in cf {
+        *value.pointer_mut(pointer).unwrap() = format!("Text{scalar}more").into();
+        accepted(&value);
+    }
+    for scalar in separators {
+        *value.pointer_mut(pointer).unwrap() = format!("Text{scalar}more").into();
+        assert_eq!(
+            rejected(&value),
+            "format-or-separator-character-in-text",
+            "{scalar:?}"
+        );
+    }
+}
+
 #[test]
 fn containers_where_scalars_belong_are_rejected() {
     for pointer in [

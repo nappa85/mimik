@@ -172,7 +172,27 @@ fn prose(value: &str) -> bool {
         .any(|scalar| scalar.is_control() && !matches!(scalar, '\n' | '\t'))
 }
 
+/// Line and paragraph separators (Zl, Zp): never allowed; text uses LF.
+fn separator(scalar: char) -> bool {
+    use unicode_general_category::{GeneralCategory, get_general_category};
+    matches!(
+        get_general_category(scalar),
+        GeneralCategory::LineSeparator | GeneralCategory::ParagraphSeparator
+    )
+}
+
+/// Short displayed text (names, labels, the title, text property values) also refuses
+/// invisible format characters (Cf: bidi overrides, zero-width, BOM, soft hyphen), which can
+/// spoof or hide what a reader sees.
+fn visible(value: &str) -> bool {
+    use unicode_general_category::{GeneralCategory, get_general_category};
+    !value
+        .chars()
+        .any(|scalar| separator(scalar) || get_general_category(scalar) == GeneralCategory::Format)
+}
+
 const CONTROL: &str = "control-character-in-text";
+const FORMAT: &str = "format-or-separator-character-in-text";
 
 fn types(catalogue: &Catalogue) -> Result<BTreeMap<&str, usize>, CatalogueError> {
     let mut ids = BTreeMap::new();
@@ -189,6 +209,18 @@ fn types(catalogue: &Catalogue) -> Result<BTreeMap<&str, usize>, CatalogueError>
             })
         {
             return Err(invalid(&path, CONTROL));
+        }
+        if !visible(&entry_type.label)
+            || entry_type.properties.iter().any(|property| {
+                !visible(&property.label)
+                    || property
+                        .options
+                        .iter()
+                        .flatten()
+                        .any(|option| !visible(&option.label))
+            })
+        {
+            return Err(invalid(&path, FORMAT));
         }
         if !crate::registry::valid_id(&entry_type.id)
             || ids.insert(entry_type.id.as_str(), index).is_some()
@@ -248,6 +280,9 @@ fn properties(
             (PropertyControl::Text, PropertyValue::Text(text)) if !plain(text) => {
                 return Err(invalid(path, CONTROL));
             }
+            (PropertyControl::Text, PropertyValue::Text(text)) if !visible(text) => {
+                return Err(invalid(path, FORMAT));
+            }
             (PropertyControl::Text, PropertyValue::Text(_))
             | (PropertyControl::Integer, PropertyValue::Integer(_))
             | (PropertyControl::Boolean, PropertyValue::Boolean(_)) => true,
@@ -281,6 +316,9 @@ fn domain(catalogue: &mut Catalogue) -> Result<CatalogueCounts, CatalogueError> 
     }
     if !plain(&catalogue.title) {
         return Err(invalid("/title", CONTROL));
+    }
+    if !visible(&catalogue.title) {
+        return Err(invalid("/title", FORMAT));
     }
     if !label(&catalogue.title) {
         return Err(invalid("/title", "title-required"));
@@ -323,6 +361,9 @@ fn domain(catalogue: &mut Catalogue) -> Result<CatalogueCounts, CatalogueError> 
         if !plain(&entry.name) {
             return Err(invalid(&path, CONTROL));
         }
+        if !visible(&entry.name) {
+            return Err(invalid(&path, FORMAT));
+        }
         if !label(&entry.name) {
             return Err(invalid(&path, "entry-name-required"));
         }
@@ -347,6 +388,9 @@ fn domain(catalogue: &mut Catalogue) -> Result<CatalogueCounts, CatalogueError> 
                 counts.unit_references += units.len();
             }
             (None, Some(text)) if !prose(text) => return Err(invalid(&path, CONTROL)),
+            (None, Some(text)) if text.chars().any(separator) => {
+                return Err(invalid(&path, FORMAT));
+            }
             (None, Some(text)) if label(text) && text.chars().count() <= decode::MAX_OWNER_TEXT => {
                 owner_bytes = owner_bytes.saturating_add(text.len());
                 counts.owner_written += 1;

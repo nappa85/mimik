@@ -1,13 +1,24 @@
 //! Read-only game catalogues (plan `docs/catalogue-plan.md`). Step 1: the strict envelope,
-//! its canonical identity and revisioned drafts. Drafts never publish anything.
+//! its canonical identity and revisioned drafts. Step 2: comparison, publication of immutable
+//! sealed versions with projections and a name index, integrity check and index repair.
 //!
 //! Redaction (plan D6): no error, diagnostic or summary carries entry names, keys, property
 //! ids or values, owner text or unit text. Diagnostics are static codes with index-only paths.
 mod admission;
 pub(crate) mod decode;
+mod publication;
 mod store;
 
 pub use decode::MAX_BYTES;
+
+/// Every catalogue object, children first, for test fixtures that rewind to older schemas.
+#[cfg(test)]
+pub(crate) const DROP_SCHEMA: &str = "DROP TABLE catalogue_names_fts; DROP TABLE catalogue_seals; DROP TABLE catalogue_entry_units; DROP TABLE catalogue_entries; DROP TABLE catalogue_entry_types; DROP TABLE catalogue_versions; DROP TABLE catalogues; DROP TABLE catalogue_drafts;";
+pub use publication::{
+    BadgeCounts, CatalogueComparison, CatalogueIndexRebuild, CatalogueVerification,
+    CatalogueVersionSummary, ChangeCounts, IntegrityProblem, PublishRequest, PublishedCatalogue,
+    RefusalCounts, UnitStates,
+};
 
 use crate::definitions::{Diagnostic, ValidationReport};
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
@@ -21,7 +32,9 @@ pub enum CatalogueError {
     Invalid(ValidationReport),
     #[error("Catalogue draft changed, or expected revision does not match. No changes saved.")]
     Conflict,
-    #[error("Catalogue draft not found.")]
+    #[error("Catalogue comparison ticket is stale; compare again. Nothing published.")]
+    StaleComparison,
+    #[error("Catalogue draft or version not found.")]
     NotFound,
     #[error("Catalogue worker failed.")]
     Worker,

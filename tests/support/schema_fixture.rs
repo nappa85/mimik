@@ -46,7 +46,15 @@ fn remove_empty_accounts(db: &rusqlite::Connection) {
         "account_credentials",
         "account_owner",
         "accounts",
-        // Catalogue drafts (schema 19) are newer than every rewind target as well.
+        // Catalogue objects (schema 19) are newer than every rewind target as well; children
+        // first.
+        "catalogue_names_fts",
+        "catalogue_seals",
+        "catalogue_entry_units",
+        "catalogue_entries",
+        "catalogue_entry_types",
+        "catalogue_versions",
+        "catalogues",
         "catalogue_drafts",
     ];
     // Collect every count before validating or dropping any table.
