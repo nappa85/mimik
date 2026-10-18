@@ -97,7 +97,7 @@ All findings were applied as R1–R16 in revision 2.1 (`673fef6`, plan §7).
 |---|---|
 | Sol | **GO WITH AMENDMENTS**. R1 closes the Blocking finding, and the two-way equality is implementable in a SQLite trigger. No new Blocking issue. A1–A4 (submitters need `formnovalidate`, exact picker state and closing it on row ops, Pick sets presence, the second boundary extends `private_badge`), A5 (FTS integrity), and an R14 correction. "No further plan-review round is necessary" |
 | Sonnet | **GO WITH AMENDMENTS**, no Blocking findings. The projections must carry source/page/kind/owner text/properties inside the seal equality; the seal SQL must use linear `EXCEPT`; seal ordering; an FTS surrogate id and rowid-range deletes; prefix-read details; R14 is wrong (wildcard arms); hidden button technique and form-pairs bump; readiness definition; calibration covers pin validation. It recommends a short check of the concrete trigger SQL |
-| Third chain | Retried; see below |
+| Third chain | **Unavailable** again: Space Bunny, DeepSeek and Muse failed preflight. Proceeded with the two main reviews, as `AGENTS.md` allows |
 
 All findings were applied as R17–R28 in revision 2.2 (`8d14f65`, plan §8).
 
