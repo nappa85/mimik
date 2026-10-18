@@ -4,6 +4,8 @@ Last updated: 2026-10-16.
 
 ## Resume here
 
+- **Direction change (user, 2026-10-18):** players edit sheets themselves; the app checks legality, helps with arithmetic (damage), guides advancement, offers legal choices (multiclass spells), shows item descriptions; chat is last. The engine stays game-agnostic: Rust knows only structural blocks, game concepts live in the definition, and the LLM's main job becomes *authoring* definitions from manuals with owner review (not judging each edit at play time). Draft: `docs/definition-language-draft.md` (unreviewed).
+  - [ ] Walk through the draft with the user; validate on paper against the owner's PDFs (local only); independent review before code.
 - [x] **M4 plain list editing MERGED** (`758ccf4`). Four review rounds with Sol, Sonnet and Space Bunny; the closing round was MERGE from all three. Follow-ups are listed in `docs/reviews/2026-10-17-derived-formulas-m4-impl.md`, "Closing review" section (decoder CRLF tests, LF-guarantee wording).
 - **Held-out ledger policy (main session, 2026-10-17):** held-out ledgers contain per-case gold; they are read only through `tool_loop_benchmark.py --summarize`'s aggregate output. Agents and the main session never open, read or print held-out ledger rows, never pass `--allow-heldout-gold-replay`, and never read the frozen case file (details: `docs/tool-loop-heldout-v3-freeze.md`).
 - **Plans and decisions (2026-10-16, evening):**
