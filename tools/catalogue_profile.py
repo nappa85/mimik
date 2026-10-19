@@ -16,8 +16,10 @@ shapes at the caps, each published and updated: maximum fan-out, FTS-heavy names
 §12-§14). They are the worst measured cases on the profiling host, not a proof that no
 admitted shape costs more. The R8 gate (`--max-hold-ms`, finite and positive, 2,000 by
 default) exits 1 when no publication was gated, a hold's upper bound exceeds the budget or
-cannot be bounded, or the contender was requested and did not wait through a publish and
-succeed. A `--no-contender` run gates the hold only; R8 needs a passing run of each kind.
+cannot be bounded, the contender was requested and did not wait through every publish and
+succeed, or the run is not complete at the caps (Rust entry and reference caps, every shape,
+the calibrated cases) unless `--allow-partial` (cap selection; never R8 evidence). A
+`--no-contender` run gates the hold only; R8 needs a passing run of each kind.
 """
 
 import argparse
@@ -58,7 +60,8 @@ WORDS = [
     "tide",
 ]
 ZEROS = "0" * 64
-# Admission limits the shapes sit at, copied from src/catalogues/{decode,admission}.rs.
+# Admission limits, copied from src/catalogues/{decode,admission}.rs (the shapes sit at all
+# of them except MAX_DISTINCT_UNITS, which the reference cap keeps out of reach).
 # `RUST_LIMITS` names each one's Rust constant; tools/test_catalogue_profile.py parses the
 # Rust sources and fails when they differ, so a Rust-only cap change cannot silently profile
 # a non-worst shape (plan §14).
@@ -811,10 +814,10 @@ def contender_result(contender, probes, published, origin):
     }
 
 
-def r8_failures(name, publish, max_hold_ms):
+def r8_failures(name, publish, max_hold_ms, contender_expected=False):
     """R8 gate (plan §14) for one publish: a bounded hold whose upper bound is within
-    `max_hold_ms`, and, when the contender ran, a contender that waited through the publish
-    and succeeded. Returns the failures as text."""
+    `max_hold_ms`, and, when the contender ran or was requested, a contender that waited
+    through the publish and succeeded. Returns the failures as text."""
     failures = []
     hold = publish["lock"]["publish_hold"]
     if not hold["bounded"]:
@@ -822,7 +825,9 @@ def r8_failures(name, publish, max_hold_ms):
     elif hold["hold_ms_upper"] > max_hold_ms:
         failures.append(f"{name}: hold upper bound {hold['hold_ms_upper']} ms > {max_hold_ms}")
     contender = publish["lock"].get("contender")
-    if contender is not None:
+    if contender is None and contender_expected:
+        failures.append(f"{name}: the contender was requested but did not run")
+    elif contender is not None:
         if not contender["success"]:
             failures.append(f"{name}: contender did not succeed ({contender.get('error')})")
         elif not contender["waited_through_publish"]:
@@ -830,31 +835,55 @@ def r8_failures(name, publish, max_hold_ms):
     return failures
 
 
-def r8_gate(report, max_hold_ms, contender_expected):
-    """The report's R8 gate (plan §14), fail-closed: it fails when no publication was gated,
-    when the contender was requested but no publication observed it, or when any
-    publication fails `r8_failures`. Runs without the contender gate the hold only; R8's
-    "a concurrent save waits and succeeds" needs a passing run with the contender too."""
+def r8_gate(report, max_hold_ms, contender_expected, coverage=None, allow_partial=False):
+    """The report's R8 gate (plan §14-§16), fail-closed: it fails when no publication was
+    gated, when any publication fails `r8_failures` (including a requested contender that
+    did not run for it), or, unless `allow_partial` (cap-selection and exploratory runs), when
+    the run is not complete at the caps: `coverage` must show the Rust entry and reference
+    caps, every shape in `SHAPES` and the calibrated v1-v3 cases. Runs without the contender
+    gate the hold only; R8's "a concurrent save waits and succeeds" needs a passing run with
+    the contender too."""
     failures = []
+    coverage = coverage or {}
+    at_caps = (
+        coverage.get("entries") == MAX_ENTRIES
+        and coverage.get("references") == MAX_UNIT_REFERENCES
+        and sorted(coverage.get("shapes", ())) == sorted(SHAPES)
+        and coverage.get("calibrated", True)
+    )
     publications = 0
     contender_observed = False
     for name, case in report.items():
         if isinstance(case, dict) and isinstance(case.get("publish"), dict):
             publications += 1
             contender_observed |= case["publish"]["lock"].get("contender") is not None
-            failures += r8_failures(name, case["publish"], max_hold_ms)
+            failures += r8_failures(name, case["publish"], max_hold_ms, contender_expected)
     if publications == 0:
         failures.append("no publication was gated")
     elif contender_expected and not contender_observed:
         failures.append("the contender was requested but never observed")
+    if not at_caps and not allow_partial:
+        failures.append("not a complete run at the caps (pass --allow-partial to gate it anyway)")
     return {
         "max_hold_ms": max_hold_ms,
+        "coverage": coverage,
+        "at_caps": at_caps,
+        "partial_allowed": allow_partial,
         "publications": publications,
         "contender_observed": contender_observed,
         "scope": "hold and contender" if contender_expected else "hold only",
         "passed": not failures,
         "failures": failures,
     }
+
+
+def shape_list(text):
+    """`--shapes`: a comma-separated, non-empty list of known shapes."""
+    shapes = [shape for shape in text.split(",") if shape]
+    unknown = [shape for shape in shapes if shape not in SHAPES]
+    if not shapes or unknown:
+        raise argparse.ArgumentTypeError(f"choose from {', '.join(SHAPES)}")
+    return shapes
 
 
 def hold_budget(text):
@@ -945,7 +974,12 @@ def main():
         help="R8 gate: fail when a publish's hold upper bound exceeds this (plan §14)",
     )
     parser.add_argument("--fanout-only", action="store_true")
-    parser.add_argument("--shapes", default=",".join(SHAPES))
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="gate a run below the caps or with fewer shapes (cap selection); never R8 evidence",
+    )
+    parser.add_argument("--shapes", type=shape_list, default=list(SHAPES))
     parser.add_argument("rest", nargs="*")
     args = parser.parse_args()
     if args.measure:
@@ -983,7 +1017,7 @@ def main():
         if not args.no_fanout:
             # Shapes at the caps (plan §12, §13), each a catalogue of its own, published then
             # updated (the update replaces that catalogue's name index rows).
-            for shape in args.shapes.split(","):
+            for shape in args.shapes:
                 build = SHAPES[shape]
                 for variant, step in enumerate(("v1", "v2")):
                     name = f"{shape}_{step}"
@@ -996,7 +1030,7 @@ def main():
                     )
         catalogues = [] if args.fanout_only else ["spells"]
         if not args.no_fanout:
-            catalogues += [CATALOGUE_IDS[shape] for shape in args.shapes.split(",")]
+            catalogues += [CATALOGUE_IDS[shape] for shape in args.shapes]
         for catalogue in catalogues:
             show = measured(
                 args.binary,
@@ -1028,7 +1062,15 @@ def main():
         verified = json.loads(report["verify"].pop("stdout"))
         report["verify"]["status"] = verified["status"]
         report["verify"]["versions"] = verified["versions"]
-        report["r8_gate"] = r8_gate(report, args.max_hold_ms, contend is not None)
+        coverage = {
+            "entries": args.entries,
+            "references": args.references,
+            "shapes": [] if args.no_fanout else args.shapes,
+            "calibrated": not args.fanout_only,
+        }
+        report["r8_gate"] = r8_gate(
+            report, args.max_hold_ms, contend is not None, coverage, args.allow_partial
+        )
         print(json.dumps(report, indent=2))
         if not report["r8_gate"]["passed"]:
             sys.exit(1)

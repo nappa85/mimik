@@ -1057,3 +1057,21 @@ fn admission_profile_one_is_pinned() {
         "5c2b30ea1a7f7fe0c26bda4cbce889f6dd5c99a7e16abe0add73bd1e873d5cb7"
     );
 }
+
+#[test]
+fn migration_ordinal_bounds_follow_the_caps() {
+    // Space Bunny round 5 F7: the storage CHECKs repeat the entry, type and unit caps; a cap
+    // lowered in Rust must not leave a looser bound in migration 019.
+    let migration = include_str!("../../migrations/019_catalogues.sql");
+    for cap in [decode::MAX_TYPES, decode::MAX_ENTRIES, decode::MAX_UNITS] {
+        let bound = format!(
+            "ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 0 AND {})",
+            cap - 1
+        );
+        assert_eq!(migration.matches(&bound).count(), 1, "{bound}");
+    }
+    assert_eq!(
+        migration.matches("ordinal INTEGER NOT NULL CHECK").count(),
+        3
+    );
+}

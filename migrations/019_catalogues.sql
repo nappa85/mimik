@@ -74,7 +74,7 @@ CREATE TABLE catalogue_entry_types (
 CREATE TABLE catalogue_entries (
     version_id INTEGER NOT NULL REFERENCES catalogue_versions(id) ON DELETE RESTRICT,
     key TEXT NOT NULL CHECK (instr(key,char(0))=0 AND length(CAST(key AS BLOB)) BETWEEN 1 AND 64 AND key GLOB '[a-z]*' AND key NOT GLOB '*[^a-z0-9-]*'),
-    ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 0 AND 8191),
+    ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 0 AND 6143),
     type_id TEXT NOT NULL,
     name TEXT NOT NULL CHECK (instr(name,char(0))=0 AND length(name) BETWEEN 1 AND 100),
     retired INTEGER NOT NULL CHECK (retired IN (0,1)),

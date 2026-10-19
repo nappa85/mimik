@@ -1580,3 +1580,29 @@ The record is `docs/reviews/2026-10-19-catalogue-step2.md`.
 - Tools unittest (`discover -s tools` from the root): 747 run, 11 skipped, **1 error, the known `test_run_queue.ProcessLauncherTests.test_fake_runner_script`**.
 
 There were no profiling reruns. No cap or shape changed, and the gate's bound computation (`publish_span`) is unchanged.
+
+## 16. Step 2 round-5 review fixes (2026-10-19)
+
+Round 5 reviewed `5d3c538`:
+- Sol: MERGE-READY.
+- Space Bunny: MERGE-READY.
+- Sonnet: FIX THEN MERGE. Its points were profiler coverage and the `TODO.md` merge conflict.
+
+No Blocking findings. The record is `docs/reviews/2026-10-19-catalogue-step2.md`, rows 17–21.
+
+| Item | Change | Red → green |
+|---|---|---|
+| Sonnet 1, Space Bunny F1: the gate passed reduced runs (`--entries 64`, `--references 0`, `--shapes fanout`, `--fanout-only`) | `r8_gate` records `coverage` (entries, references, shapes, calibrated) and `at_caps`, and fails unless the run is complete at the Rust caps. `--allow-partial` is for cap-selection runs and is never R8 evidence. `--shapes` is validated by `shape_list`, so an empty or unknown shape is refused | Red: `test_the_gate_requires_a_complete_run_at_the_caps` (`r8_gate` had no `coverage`). Green |
+| Space Bunny F2: the contender was checked once per run, not per publication | `r8_failures(..., contender_expected)` fails a publication that has no contender when one was requested | Red: `test_a_requested_contender_is_required_on_every_publication`. Green |
+| Space Bunny F7: migration 019 bounded entry ordinals at 8,191 | Changed to 6,143. `migration_ordinal_bounds_follow_the_caps` ties the three ordinal CHECKs (types, entries, units) to the Rust caps | Red on the old migration (`left: 0, right: 1`). Green |
+| Space Bunny F5, F8, F9; Sonnet 3 | The record names `5d3c538` and gains the round-5 rows. The 3,000-trial simulation is attributed to Sonnet's own scratch run. The `RUST_LIMITS` comment is corrected. The operator docs describe every gate condition and the hold-only scope | Prose only |
+| Sonnet 1, merge | The `TODO.md` conflict with master `e6ecc30` is resolved at merge time | — |
+
+There were no profiling reruns: caps, shapes and `publish_span` are unchanged. The recorded closing runs were complete runs at the caps (§14).
+
+**Gate** (container, `--cpus 6`, Monday 04:16–04:27):
+- `cargo fmt --check`: clean after `cargo fmt` of the new test.
+- Pedantic Clippy (`-D warnings`): clean.
+- `cargo test --locked --all-targets --all-features`: 540 passed, 0 failed, 1 pre-existing ignored, over 37 binaries.
+- `ruff check tools` and `ruff format --check tools`: clean.
+- Tools unittest: 749 run, 11 skipped, **1 error, the known `test_fake_runner_script`**.

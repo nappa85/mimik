@@ -356,9 +356,13 @@ the calibrated shape (2.2 MB, 5,376 references) and at most 1.81 s in the worst 
 (4 MiB, 6,144 references, 99-scalar names of 3-character tokens, update); the
 declaration-heavy shape (32 types x 16 enum properties x 128 options) held it for at most
 1.12 s. Peak RSS at most about 173 MiB (publish of the declaration-heavy shape). These are the
-worst measured cases, not a proof that no admitted shape costs more. The profiler fails
-(`--max-hold-ms`, 2,000 by default) when a hold's upper bound exceeds the budget, cannot be
-bounded, or the contender does not wait through the publish and succeed. A concurrent writer
+worst measured cases, not a proof that no admitted shape costs more. The profiler's R8 gate
+(`--max-hold-ms`, finite and positive, 2,000 by default) fails when no publication was gated,
+a hold's upper bound exceeds the budget or cannot be bounded, the contender was requested and
+did not wait through every publish and succeed, or the run is not complete at the caps (the
+Rust entry and reference caps, every shape, the calibrated cases) unless `--allow-partial` is
+given for cap selection; a partial run is never R8 evidence. A `--no-contender` run gates the
+hold only (`scope: "hold only"`): R8 needs a passing run of each kind. A concurrent writer
 using the server's pattern (`BEGIN IMMEDIATE`, 5 s busy timeout, one insert, commit: the
 lock-level equivalent of a sheet save) waits through the publish and succeeds in every case.
 The 5 s busy timeout (`src/store.rs`) is the real failure point: a publish holding the lock

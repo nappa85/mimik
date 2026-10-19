@@ -2,7 +2,8 @@
 
 **Scope.**
 - Branch `catalogue`: `aa23ace` (step 2), review fixes `cb9ddb8` (round 1), `339b23c`
-  (round 2), `4a7c399` (round 3) and the round-4 fix commit recorded in plan §15.
+  (round 2), `4a7c399` (round 3), `5d3c538` (round 4) and the round-5 fix commit recorded in
+  plan §16.
 - Contents:
   - migration 019 extended (catalogues, versions, entry types, entries, entry units, seals,
     triggers, the latest-only FTS5 name index);
@@ -23,6 +24,7 @@
 | 2 | `cb9ddb8` | FIX THEN MERGE | FIX THEN MERGE | unavailable (startup error, then preflight failures on retry) |
 | 3 | `339b23c` | FIX THEN MERGE | MERGE-READY | Space Bunny: MERGE-READY |
 | 4 | `4a7c399` | FIX THEN MERGE (profiler gate only) | MERGE-READY | Space Bunny: MERGE-READY |
+| 5 | `5d3c538` | MERGE-READY | FIX THEN MERGE (profiler coverage, TODO merge conflict) | Space Bunny: MERGE-READY |
 
 - No reviewer reported a Blocking finding in any round.
 - **Seal SQL:** every reviewer found it sound. Sonnet ran tamper sequences against a scratch
@@ -44,14 +46,19 @@
 | 6 | 1 | Sol F3 | Minor | clap parse errors echo argv | The guarantee is narrowed in the docs: stored content is never printed, while argv is the operator's own input |
 | 7 | 2–3 | Sol 2, Sonnet A, Sonnet r3, Space Bunny | Major / Minor | The fan-out shape was not the worst admitted shape. Long names, 3-character tokens, 64-scalar keys and declaration-heavy shapes were all unprofiled | Profiled. Their holds forced the caps down step by step, ending at **6,144 entries and 6,144 unit references** (`MAX_ENTRIES`, schema `maxItems`, `MAX_UNIT_REFERENCES`). The worst measured hold is 1,804.0 ms (the fts3 update), and the docs say "worst measured on this host", not a proven bound |
 | 8 | 2 | Sol 1 | Major | Probe timestamps were taken before `BEGIN`, so the bounds were not bounds | Fixed (§13): full probe windows |
-| 9 | 3 | Sol 1 | Major | Transaction attribution: the startup lock, then the contender, then the publish could cap the release with the contender's earlier acquisition | Fixed (§14): `publish_span` runs from the last free probe that reads the old version count to the first that reads the new count, and is conservative by construction. The contender cap was removed. Space Bunny and Sonnet (in a 3,000-trial simulation) had found the previous bounds sound; Sol's case needed two missed gaps. It was fixed anyway because the fix was cheap and makes the evidence airtight |
+| 9 | 3 | Sol 1 | Major | Transaction attribution: the startup lock, then the contender, then the publish could cap the release with the contender's earlier acquisition | Fixed (§14): `publish_span` runs from the last free probe that reads the old version count to the first that reads the new count, and is conservative by construction. The contender cap was removed. Space Bunny (static) and Sonnet (a 3,000-trial randomized simulation Sonnet ran itself in a scratch directory; the repository's own randomized test runs 500 trials) had found the previous bounds sound; Sol's case needed two missed gaps. It was fixed anyway because the fix was cheap and makes the evidence airtight |
 | 10 | 2–3 | Sonnet B, Sonnet r3, Space Bunny M3 | Minor | Invisible-only text was admitted: Cf-only owner text, lone Mn, and blank-looking text property values | Fixed: `label()` requires a scalar that is not whitespace, blank-looking, Cf or Mn. A non-empty text property value must pass it, and `""` remains the explicit "no value" |
 | 11 | 3 | Space Bunny M5 | Minor | The profiler's caps were copied by hand from Rust | Fixed: `RUST_LIMITS` is parsed from the Rust sources by a test. Round 4 added `MAX_DISTINCT_UNITS` and a duplicate-name check |
-| 12 | 4 | Sol 1 | Major (tool) | The R8 gate passed with zero gated publications, or with a NaN or infinite budget | Fixed in the round-4 commit (§15): `r8_gate` fails when no publication was gated, or when the contender was requested but not observed; `hold_budget` rejects budgets that are non-finite or ≤ 0. Regressions added |
+| 12 | 4 | Sol 1 | Major (tool) | The R8 gate passed with zero gated publications, or with a NaN or infinite budget | Fixed in `5d3c538` (§15) for those cases: `r8_gate` fails when no publication was gated, or when the contender was requested but not observed; `hold_budget` rejects budgets that are non-finite or ≤ 0. Reduced runs still passed until #17 |
 | 13 | 4 | Sol 2 | Minor | The acquisition and release endpoint intervals could belong to the store-open lock or the contender | Fixed: they are renamed `indicative_*`, and the outer `span_after_ms` is the one reported as the bound |
 | 14 | 4 | Sol 3, Sonnet, Space Bunny M1 | Minor | Stale "8,192 cap" docstrings; comment and docs overstated that the keys shape failed at 4,096 references | Fixed |
 | 15 | 4 | Space Bunny | Minor | The profile pin did not cover the Mn rule | Fixed: the pin test freezes `label()` on an accept/reject table |
 | 16 | 4 | Sol 4 | Minor | The real-lock profiler test records "released" before COMMIT | Open as a follow-up: the gate's bound does not depend on it (the closing free probe must take the write lock). A controlled commit-phase regression is in the step-3 follow-ups |
+| 17 | 5 | Sonnet 1, Space Bunny F1 | Major (tool) | The gate passed reduced runs (fewer entries or references, a subset of shapes, no calibrated cases) | Fixed in the round-5 commit (§16): the gate records `coverage` and `at_caps` and fails unless the run is complete at the Rust caps, or `--allow-partial` is given (cap selection, never R8 evidence). `--shapes` is validated |
+| 18 | 5 | Space Bunny F2 | Minor | Contender presence was checked across the run, not per publication | Fixed: `r8_failures` requires the contender on every publication when requested |
+| 19 | 5 | Space Bunny F7 | Minor | Migration 019 still bounded entry ordinals at 8,191 after the entry cap fell to 6,144 | Fixed: 6,143. `migration_ordinal_bounds_follow_the_caps` ties the type, entry and unit ordinal CHECKs to the Rust caps (red on the old migration, then green) |
+| 20 | 5 | Space Bunny F5, F8, F9; Sonnet 3 | Minor | Fix commit not named; `RUST_LIMITS` comment overstated; operator docs missed the new gate conditions; review record row 12 overstated "fails closed" | Fixed in docs and comments |
+| 21 | 5 | Sonnet 1 | Major (mechanical) | Merging into master conflicts in `TODO.md` (master `e6ecc30` edits the same lines) | Resolved at merge time, keeping the branch's step-1/2 entries |
 
 **Accepted author decisions:**
 - identical content that cites a now-rejected unit is refused with `rejected-units`

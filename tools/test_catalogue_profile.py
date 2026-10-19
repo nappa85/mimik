@@ -22,6 +22,7 @@ from catalogue_profile import (
     MAX_UNIT_REFERENCES,
     OWNER_TOTAL,
     RUST_LIMITS,
+    SHAPES,
     ProbeError,
     Rng,
     declaration_heavy,
@@ -384,15 +385,43 @@ class R8GateTests(unittest.TestCase):
         self.assertFalse(r8_gate({}, 2000.0, contender_expected=False)["passed"])
         self.assertFalse(r8_gate({"rebuild": {}}, 2000.0, contender_expected=True)["passed"])
         no_contender = {"v1": {"publish": self.publish(1.0)}}
-        gate = r8_gate(no_contender, 2000.0, contender_expected=False)
+        full = {"entries": MAX_ENTRIES, "references": MAX_UNIT_REFERENCES, "shapes": list(SHAPES)}
+        gate = r8_gate(no_contender, 2000.0, False, coverage=full)
         self.assertTrue(gate["passed"])
         self.assertEqual(gate["publications"], 1)
         self.assertFalse(gate["contender_observed"])
         self.assertFalse(r8_gate(no_contender, 2000.0, contender_expected=True)["passed"])
         observed = {"v1": {"publish": self.publish(1.0, good)}}
-        gate = r8_gate(observed, 2000.0, contender_expected=True)
+        gate = r8_gate(observed, 2000.0, True, coverage=full)
         self.assertTrue(gate["passed"])
         self.assertTrue(gate["contender_observed"])
+
+    def test_the_gate_requires_a_complete_run_at_the_caps(self):
+        # Sonnet and Space Bunny round 5: a reduced profile (fewer entries or references, a
+        # subset of shapes, no calibrated cases) must not pass as R8 evidence.
+        full = {"entries": MAX_ENTRIES, "references": MAX_UNIT_REFERENCES, "shapes": list(SHAPES)}
+        cases = {"v1": {"publish": self.publish(1.0)}}
+        self.assertTrue(r8_gate(cases, 2000.0, False, coverage=full)["passed"])
+        for partial in (
+            {**full, "entries": 64},
+            {**full, "references": 0},
+            {**full, "shapes": ["fanout"]},
+            {**full, "calibrated": False},
+        ):
+            gate = r8_gate(cases, 2000.0, False, coverage=partial)
+            self.assertFalse(gate["passed"], partial)
+            self.assertFalse(gate["at_caps"])
+            self.assertTrue(r8_gate(cases, 2000.0, False, partial, allow_partial=True)["passed"])
+
+    def test_a_requested_contender_is_required_on_every_publication(self):
+        # Space Bunny round 5 F2: a publication without contender evidence fails on its own.
+        good = {"success": True, "waited_through_publish": True}
+        mixed = {
+            "a": {"publish": self.publish(1.0, good)},
+            "b": {"publish": self.publish(1.0)},
+        }
+        self.assertFalse(r8_gate(mixed, 2000.0, contender_expected=True)["passed"])
+        self.assertEqual(len(r8_failures("b", self.publish(1.0), 2000.0, True)), 1)
 
     def test_the_budget_must_be_finite_and_positive(self):
         # Sol round 4: `hold > nan` is always false, so a NaN budget passed every hold.
