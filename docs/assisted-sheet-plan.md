@@ -55,6 +55,7 @@ they want; the app computes, warns, suggests and offers Undo; nothing is forced.
 | **D-W** | **Reminder trigger:** any decrease of a top-level number field asks the model whether something on the sheet could react. The model judges relevance; there is no owner marking | §3c |
 | **D-Y** | Formula profile `cel-mimik-1` may still change until the first release; "a pinned definition is never reinterpreted" applies from the first release on. No profile bump, no legacy behaviour kept (2026-10-19, slice 1.4 review) | §12, `derived-formulas-plan.md` |
 | **D-Z** | Nullable integer fields get the same unknown guard: any formula or check that reads an unknown integer, nullable or not, is not evaluated ("a value it uses is unknown"). `== null` is no fallback for integers in the POC; later, definitions may choose a fallback for unknown (2026-10-19, slice 1.4 review) | §12 |
+| **D-AA** | With JavaScript, a field also saves when the player leaves it (blur/change), only if its value changed since its last save or offer; Enter still saves, and without JavaScript Enter remains the only way (refines D-C; 2026-10-19, after testing slice 1.3) | Step 2a |
 
 **Main-session defaults** (recorded as defaults; the user may revise them).
 
@@ -962,6 +963,11 @@ The legacy full form is kept, with whole-sheet 409.
 
 - Scope: `SheetPage` CSP, the asset route, fetch saves with per-unit `base`, the save response
   with derived values and checks, string integers.
+- **Save on leaving the field (D-AA):** a changed field saves on blur/change, through the same
+  per-unit route as Enter; an unchanged field sends nothing; a field left while its previous save
+  is in flight queues one save of the latest value. Tests: Tab out of a changed HP saves once;
+  Tab out of an unchanged HP sends no request; Enter followed by blur saves once; the no-JS run
+  still saves only on Enter.
 - Tests:
   - final headers on 200, 409 and 422;
   - other routes unchanged;
