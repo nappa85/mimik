@@ -16,15 +16,18 @@ licensed under AGPL-3.0-only; see `LICENSE` and the licensing section of the
   [campaigns](docs/campaigns.md).
 - **Game definitions.** Games are described by data, not code: an Owner registers games and
   editions, imports strict definition drafts and publishes them after an explicit comparison
-  against reviewed sources ([runtime definitions](docs/runtime-definition-contract.md)).
+  of the field wiring against the original page images; that approval does not imply the
+  source evidence was reviewed ([runtime definitions](docs/runtime-definition-contract.md)).
   Derived values and checks use a bounded CEL profile and are advisory: they never block a save
   ([formulas](docs/formulas.md)). Read-only [catalogues](docs/catalogues.md) can be browsed
   through a sheet.
 - **Assisted entry.** Number cells accept sums such as `84 -15`, record change notes with Undo,
   accept unknown values and save per field ([assisted entry](docs/assisted-entry.md)).
 - **Sources.** Owner-supplied manuals are imported locally with page images, preserved tables
-  and a review history ([sources and retrieval](docs/sources-and-retrieval.md)). Manuals never
-  leave the machine.
+  and a review history ([sources and retrieval](docs/sources-and-retrieval.md)). In normal
+  operation manuals never leave the machine; the optional extraction reviewer
+  (`tools/review_extraction.py`), when explicitly invoked, sends page blocks and page images to
+  the HTTPS endpoint the owner selects.
 - **Native MÖRK BORG sheet** for the Italian 2025 core rules, once that exact source is
   registered.
 - No language model is integrated into the application. Model evaluation is prototype tooling

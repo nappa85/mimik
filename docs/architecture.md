@@ -50,8 +50,7 @@ one process-wide quota (burst 10, then one per 6 s), checks Host and
 Origin against the configured authority, and sets `Cache-Control: no-store`,
 `X-Content-Type-Options: nosniff`, `Content-Security-Policy: frame-ancestors 'none'`,
 `X-Frame-Options: DENY` and `Referrer-Policy: same-origin`. The router-wide body limit is
-8 KiB; sheet create/edit POSTs accept 5 MiB after a pre-body principal check, per-field saves
-256 KiB, switch/Undo 8 KiB (`src/campaigns/web.rs`).
+8 KiB; sheet routes have their own limits (table in `docs/campaigns.md`, "Limits").
 
 ## Modules (`src/`)
 
@@ -117,7 +116,8 @@ migrations.
   (`extract_manual.py`, `review_extraction.py`, `prepare_review.py`, `source_bundle.py`,
   `evidence_forest.py`), profilers (`*_profile.py`), and benchmark prototypes (tool-loop,
   local RAG, decision models and router, model screens, `fetch_models.py`, queue runners).
-  Benchmarks follow the prototype tier and never ship. Tests are `tools/test_*.py`.
+  Benchmarks follow the prototype tier: they are not part of or required by the runtime
+  binary, but ship in the corresponding source package (`Cargo.toml` `include`). Tests are `tools/test_*.py`.
 - **Development examples (`examples/`):** `source_fixture` (synthetic source bundle for tests
   and smoke), `formula_eval` (JSON-lines bridge to the formula engine for Python prototypes;
   excluded from the source package), `qr_decode`, profilers; demo packs

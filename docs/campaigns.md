@@ -78,9 +78,10 @@ freezes.
 
 ## Revisions, history and conflicts
 
-- Each sheet has a revision; every successful create, edit (including a no-op save) and
-  freeze appends an immutable `private_sheet_history` row with the full resulting
-  snapshot, hash, operation, actor ID and epoch, one-way session digest and time. Live
+- Each sheet has a revision; every successful create, edit and freeze appends an immutable
+  `private_sheet_history` row. A no-op save (nothing changed) writes no revision (D-U); an
+  edit whose data is unchanged but that records a new change note still writes one. Each row
+  holds the full resulting snapshot, hash, operation, actor ID and epoch, one-way session digest and time. Live
   row and history row are linked by deferred foreign keys; history cannot be updated or
   deleted.
 - Snapshots are host-canonical JSON with a versioned, domain-separated hash used to

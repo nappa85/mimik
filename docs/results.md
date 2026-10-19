@@ -15,8 +15,8 @@ described in [evaluation-tooling.md](evaluation-tooling.md).
   (one finalized source of 1,024 × 16 units, all unreviewed). Calibrated shape v1–v3 plus five
   worst-case shapes (fan-out, FTS-heavy, fts3, 64-scalar keys, declaration-heavy), each
   published and updated. Holds are conservative upper bounds from `--no-contender` runs (three
-  runs at 6,144, two more with the contender). A step 0 in-process spike (2026-10-18, same
-  container) gave the starting point.
+  runs at 6,144, two more with the contender). Read latencies come from an in-process
+  measurement (2026-10-18, same container).
 - **Numbers** (closing runs at 6,144 entries / 6,144 references):
   - Calibrated shape (2.2 MB, 5,376 references): hold ≤ 764 ms; publish RSS ≤ 82 MiB.
   - Worst measured: fts3 update (4 MiB, 99-scalar names of 3-character tokens) 1,804.0 ms;
@@ -27,7 +27,7 @@ described in [evaluation-tooling.md](evaluation-tooling.md).
     runs) 4,096 references; 6,144 entries with 8,192 references passed by 0.01 s.
   - Other commands: import ≤ 644 ms, compare ≤ 629 ms, show ≤ 612 ms, `verify-catalogues`
     8.4 s over 13 versions, rebuild ≤ 1,043 ms.
-  - Reads (step 0 spike, 8 catalogues): browse p95 0.78 ms, search p95 29 ms, entry p95
+  - Reads (in-process, 8 catalogues): browse p95 0.78 ms, search p95 29 ms, entry p95
     0.42 ms at 8,192 entries. Worst admitted browse page through `read::browse` (50 entries ×
     16 units of 256 KiB, `measure_the_worst_browse_page`): 416–441 ms.
 - **Conclusion:** caps are 6,144 entries and 6,144 references (one per entry), owner text
@@ -177,7 +177,7 @@ described in [evaluation-tooling.md](evaluation-tooling.md).
   thinking on, more turns, other quantisations and temperatures. Scoring leniencies by design:
   value-only answer matching, empty citation lists count as valid, `answer` on an expected
   proposal is incorrect but not false support, `no_outcome` is never false support.
-  Independently reviewed (three reviewers); corrections are applied above.
+  Independently reviewed (three reviewers).
 
 ## Small-model candidates: CPU S40 screens (2026-10-17)
 
@@ -243,7 +243,7 @@ described in [evaluation-tooling.md](evaluation-tooling.md).
   by user decision (budget rule only). The S40 replay mixes a pre-rev3 ledger with rev3
   expected outcomes. A post hoc binary supported/at-risk readout for R3 admits only 10/105 at
   zero at-risk. The 175 records are now development data. Independently reviewed with
-  recomputation; corrections applied.
+  recomputation.
 
 ## Reviewer benchmark (2026-10-16, concluded)
 

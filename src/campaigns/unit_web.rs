@@ -6,9 +6,9 @@
 //! the `JOBS` permit, the read and edit rights (403; an unsupported pin is read-only, so it
 //! is 403 too), then key admission and the route checks (400: a malformed or zero `base`, a
 //! native pin, an ID outside the slug grammar, not in the pin, derived or a list). The value is read against the live revision
-//! L: a submission equal to the saved value is "No change" (D-U), even from a stale page;
-//! otherwise a `base` above L, or a unit whose value differs between `base` and L, is a
-//! conflict (409) that re-renders the page with the draft and every `base` at L. The write
+//! L: a `base` above L is a conflict (409); then a submission equal to the saved value is
+//! "No change" (D-U), even from a stale page; otherwise a unit whose value differs between
+//! `base` and L is a conflict (409) that re-renders the page with the draft and every `base` at L. The write
 //! goes through the sheet writer, which rechecks rights, the active state and that L is
 //! still live inside its `IMMEDIATE` transaction.
 use super::{AppError, AuthState, Notice, Redirect, StatusCode, error, rejected_editor, rendered};

@@ -41,8 +41,9 @@ empirically, but cannot confirm it statistically.
   the runner (`HELDOUT_CASES`, mounted read-only) and the queue (`heldout_cases`) all refuse a
   missing file, a hash mismatch or a count mismatch.
 - Held-out ledger headers record `heldout_cases_sha256`, `heldout_pin_sha256` and
-  `heldout_case_set`; `load_ledgers`, merges and `bar_verdict` refuse any other hash, an
-  unregistered case set, and dry-run or gold-replay rows.
+  `heldout_case_set`; `load_ledgers`, merges and `bar_verdict` refuse any other hash and an
+  unregistered case set. Dry-run and gold-replay ledgers may be loaded, but `bar_verdict`
+  refuses them a verdict.
 - Tests: `tools/test_heldout_gate.py` (synthetic files and injected pins only).
 
 ## Ledger and access policy

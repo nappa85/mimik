@@ -91,7 +91,9 @@ a finished RPG companion.
 **Not certified:** physical phone or router setups; Windows, macOS or other CPU architectures;
 browsers other than Chromium; public internet exposure; path-prefix proxying; model inference or
 API providers; PDF extraction or OCR; accuracy of any real manual's extraction; fidelity to
-official sheet layouts; any game's rules legality.
+official sheet layouts; any game's rules legality; tamper evidence of change notes (they are
+not sealed or verified); protection against unbounded growth (no per-account write-rate limit
+or storage guard for sheet history and notes).
 
 ## Licensing
 

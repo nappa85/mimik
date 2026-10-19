@@ -2,7 +2,8 @@
 
 How runtime (definition-driven) private sheets accept, record and present what the player
 types. Decision IDs are in `docs/decisions.md`; remaining work in `docs/assisted-sheet-plan.md`.
-Native MÖRK BORG sheets keep their strict htmx editor; none of this applies to them.
+None of this applies to native MÖRK BORG sheets: authenticated native private sheets are plain
+full-form POST pages without scripts; only the `--no-auth` prototype's native editor uses htmx.
 
 | Concern | Code |
 |---|---|
@@ -112,7 +113,9 @@ On a saved page the reader may edit, the current note of a cell may offer:
   `sum`, `sign_literal`, `switched`, `confirmed`, `reverted` or `erased`, a recorded `before`
   that differs from `after`, and the cell still holding `after`. Not for scribbles, new
   cells, row notes, text cells or pages without edit rights. Undo of an Undo works. Enum
-  values show their option IDs.
+  values show their option IDs. When the note's `before` is `{"absent":true}` (an optional
+  property that was not set), Undo makes the property absent again, not `null`
+  (`assist.rs`, `NoteValue::Absent`).
 
 Routes `POST /private-sheets/{id}/switch` and `/undo` take an 8 KiB body
 (`ASSIST_POST_BYTES`) with exactly `csrf`, `base`, `note` (`<revision>:<address>`), posted by
@@ -220,8 +223,28 @@ pixel-identical pages. Data is canonical and versioned, never mapped to PDF coor
   list ("Move row 2 of Equipment up", "Remove row 2 of Equipment") and "Add Equipment row"
   (disabled at 256 rows), which re-render the draft until Save or Save list. Targets are at
   least 24 × 24 CSS px; rows stack without tables at 390 px. History shows rows read-only.
-- The native MÖRK BORG editor uses htmx; its layout follows the owner-supplied blank sheet
+- The native MÖRK BORG layout follows the owner-supplied blank sheet (htmx only in the
+  `--no-auth` prototype's editor)
   (kept locally; exact edition and fidelity unverified). Logos, art and fonts keep their rights.
 - Print styling exists only for the native sheet; exporting the publisher's PDF is not a goal.
 - Automated Chromium runs at 1280 × 720 and 390 × 844 cover editing, long text, reflow and
   kept drafts. No approved official layout, print or cross-browser result is claimed.
+
+## Demo
+
+`tools/assist_demo.py` (dev tool, synthetic data only) builds a fresh data directory, publishes
+the `assist-sheet` demo definition, creates a demo Owner and player with generated dummy
+passwords and a campaign with one sheet (HP 84, Max HP 84, Armour −1), then serves loopback
+auth mode on `http://127.0.0.1:3000` until interrupted:
+
+```sh
+cargo build --release --locked
+cargo run --locked --example source_fixture -- target/demo-source
+python3 tools/assist_demo.py target/release/mimik --fixture target/demo-source --data target/assist-demo
+```
+
+`--exit-after-setup` stops once the sheet exists. The definition
+(`tests/support/source_fixture.rs`, `assist_definition`): integers Current HP, Max HP,
+Armour modifier and nullable Luck; an Equipment list (Item name, Quantity, Weight, optional
+Broken boolean); derived Load = `sum(equipment.map(i, i.quantity * i.weight))`; the check
+`hp <= max_hp`.

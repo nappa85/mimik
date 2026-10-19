@@ -22,7 +22,7 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 - **ASSIST-L8** [tests] No browser test of the busy page (it would need a test hook in the shipped binary); covered through the full auth router.
 - **ASSIST-L9** [history] Undo and history show enum option IDs ("was guard"), not labels.
 - **ASSIST-L10** [entry] The switch offer lasts until the cell changes (no dismissal records); step 2c must not rely on its lifetime or treat a shown offer as confirmation.
-- **RR-L1** [sheets] No sheet validity flag (RR-3): an invalid sheet is not marked "not validated". Add it as an assisted-plan step and build it.
+- **RR-L1** [sheets] No sheet validity flag (RR-3, ASSIST-4): an invalid sheet is not marked "Not validated" yet. Scheduled as assisted-plan slice 1.7.
 
 ## Formulas and sheet values
 
@@ -34,7 +34,7 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 - **F-DEPTH** [formulas] The expanded-AST depth limit (64) rejects flat operator chains of more than about 60 terms (`depth_exceeded`); authors split long sums into derived fields.
 - **F-NONDET** [formulas] `deadline_exceeded` and `internal_error` are non-deterministic, so history can differ under load; an abandoned request keeps the JOBS permit until its blocking step ends.
 - **F-EDITABLE** [lists] Every list property is editable, including stats that should be fixed; no `editable: false` and no item identity beyond row slots.
-- **F-PERMIT** [lists] On create/edit POSTs the JOBS permit is taken before the 5 MiB body is buffered, so any signed-in principal can hold it up to 5 s. Take it after buffering.
+- **F-PERMIT** [lists] On the create POST the JOBS permit is taken before the 5 MiB body is buffered (runtime middleware), so any signed-in principal can hold it up to 5 s; edit and unit saves already buffer, parse and check CSRF first. Closed by taking create's permit after buffering.
 - **F-TIMEOUT** [lists] The 5 s timeout covers the body: a 5 MiB POST needs about 8.4 Mbit/s; slower clients time out and nothing is saved (realistic list forms are about 100 KB).
 - **F-SLOTS** [history] The change summary describes row slots, not items, and shows no values (RR-10 allows them): an overwritten row reads "all properties changed". Value diffs, revert from history and an index summary are not built.
 
@@ -84,6 +84,7 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 - **AUTH-L7** [accounts] Credential-file durability is verified only for Linux local filesystems with working fsync, not power loss.
 - **AUTH-L9** [deployment] Behind a proxy, Mimik sees only the proxy; client network restrictions depend entirely on the proxy configuration.
 - **AUTH-L10** [security] `--dev-owner-play` still lets the Owner play through SQL and route guards (AUTH-3). Remove it (`src/main.rs`, `src/auth/`) as its own reviewed change, deciding what happens to development Owner memberships and custody in existing databases.
+- **AUTH-L11** [tests] `cli_owner_reset_can_complete_in_browser_and_existing_session_forms_are_readonly` (`src/campaigns/administration_tests.rs`) can get a 408 under full-suite load: real argon2 runs inside the fixed 5 s request timeout (`src/auth/mod.rs`), which tests cannot inject. It passed in the 2026-10-19 full run. Closed by an injectable timeout for tests.
 - **CAMP-L1** [campaigns] Transfer, frozen-sheet reactivation, soft delete, Owner restore, purge and rollback are decided (CAMP-9 to CAMP-12) but not built; nothing can be deleted. Rollback semantics are undecided: ask the user when the lifecycle slice is selected.
 - **CAMP-L2** [campaigns] The creator cannot leave, be removed or hand over the campaign; no creator succession.
 - **CAMP-L4** [campaigns] Prototype character records cannot move into campaigns, and changing a campaign's ruleset or moving a sheet across rulesets has no policy.

@@ -75,8 +75,9 @@ options?}` with a scalar control (no nested list). Each stored record also has a
 the list form are described in [formulas.md](formulas.md#lists-and-plain-list-editing).
 
 **Formulas and constraints.** A field with `formula: {expr, rule_ids, evidence}` is derived:
-computed on every view, save and history page from stored values and the immutable pin,
-never stored or submitted. A derived field must not be nullable or a list. Constraints are
+computed on saved-sheet views and history views (including the GET that follows a save) from
+stored values and the immutable pin, never stored or submitted; a successful save POST
+evaluates nothing. A derived field must not be nullable or a list. Constraints are
 `{id, expr, rule_ids, message ≤ 500, evidence}`; violations are shown, never enforced. `expr`
 is 1–1,024 characters; `rule_ids` is up to 16 slugs, canonicalised as a sorted set. Formula
 evidence must cite selected `core` or `supplement` sources; a sheet source alone does not back

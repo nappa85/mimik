@@ -9,7 +9,8 @@ Decision IDs (D-…, U…, P…) are defined in `docs/decisions.md`. What is bui
 notes and scribbles, switch and Undo, unknown values, per-field save, the busy page, the page
 bound) is described in `docs/assisted-entry.md`; this plan only adds to it.
 
-Remaining, in order: **1.5b** per-cell list save, **1.6** quick-add, **2a** JavaScript,
+Remaining, in order: **1.5b** per-cell list save, **1.6** quick-add, **1.7** validity flag,
+**2a** JavaScript,
 **2b** crate and runtime selection (prototype tier, may run in parallel), **2c**
 interpretation, **3** bundles and reminders, **4** suggestions and "Which Sword?", **5** docs
 and gate.
@@ -45,8 +46,13 @@ refused.
 | Remove, Move up, Move down | `lists/{list}/rows/{host}/{remove\|up\|down}` | `csrf`, `base` | Remove: the row's existence and all its values; Move: the list's order of host IDs |
 
 - Routes refuse with 400, before any write: derived fields, IDs not in the pin, IDs outside the
-  slug grammar, host IDs not in the live snapshot. A cell of a row removed since the page was
-  read is a conflict, not a forged request (as switch and Undo already do).
+  slug grammar.
+- Host-ID checks, in this order, for both cell and row-action routes (decided 2026-10-19,
+  coordinator default): (1) `base` malformed → 400; (2) `base` above L → 409; (3) the host ID
+  is not in the base snapshot → 400 (forged or unknown row); (4) the host ID is in the base
+  snapshot but not in L (removed since) → 409 conflict with re-render, as switch and Undo
+  already do; (5) the value-based conflict check and the no-op check, as in 1.5a.
+- A forged edge move (Move up on the first row, Move down on the last) → 400.
 - Row actions are separate forms, so Enter can never trigger Remove or Move. Remove and Move
   write at once (D-V). Move has no Undo; the reverse move is one click.
 - **Remove** writes one row note `{"row":"present"}` → `{"row":"absent"}` and the page shows
@@ -56,10 +62,13 @@ refused.
   (removed IDs never return), writing a `reverted` note. A full list (256 rows) refuses it
   with a message. The re-added row is new: its cells have no Undo until edited again.
   `assist::undoable` excludes row notes today; 1.5b adds the row path.
+- **Undo of an optional property** whose before value is `{"absent":true}` makes that property
+  absent again (not `null`, not empty).
 - **New row form:** one row's controls; Enter saves the row. A required enum or boolean must
   be chosen; required numbers may be blank (unknown). Host IDs are allocated in the
   transaction (`r<rev>-k`) and returned in the response. At most one note per integer, enum or
-  boolean property (≤ 32).
+  boolean property (≤ 32). Add stops at 256 rows (the list cap) with a message; nothing is
+  written.
 - The create page keeps the one full form with its draft operations. The legacy full-form
   edit POST stays accepted with whole-sheet 409.
 - Migration 020's address CHECK refuses one-character `meta:` suffixes; no route writes
@@ -69,13 +78,16 @@ refused.
 
 - A list may declare `"quick_add": {"name": <text property>, "quantity": <integer
   property>?}`; omitted when absent, so existing definition hashes are unchanged.
-- Admission refuses it when the list has a required enum or boolean property, or when it
-  names a property of the wrong type.
+- Admission refuses it when the list has a required enum or boolean property, when the list
+  has a required text or multiline property other than the mapped name (decided 2026-10-19,
+  coordinator default: no quick-add line is shown for such lists; regression case required),
+  or when it names a property of the wrong type.
 - Deterministic parse of `text` (≤ 200 characters): `^(\d{1,6})\s+(.+)$` → quantity and name;
   `^(.+?)\s*[x×]\s*(\d{1,6})$` → name and quantity; otherwise the whole text is the name with
   quantity 1; an empty name → "Nothing to add".
-- Other required numbers are `null` (unknown); optional properties are absent. One revision,
-  no note.
+- The mapped name and quantity are always filled, even when they are optional properties.
+  Other required numbers are `null` (unknown); every other optional property is absent. One
+  revision, no note.
 
 ### 1.3 JavaScript (2a)
 
@@ -139,7 +151,8 @@ refused.
 - **Output:** a strict JSON schema whose expression field has a `pattern`; terms are literals
   or `@field` references; operators `+ − × ÷` and parentheses; `÷` is rounded at once with
   `floor` or `ceil`, or must be exact (`none`); every literal must appear in the phrase or
-  equal the target's value; the display shows base, expression and effect, labelled "the
+  equal the target's value (the only exception is the step-3 catalogue provenance extension,
+  §1.5); the display shows base, expression and effect, labelled "the
   assistant's reading". `max_tokens` 128, measured in 2b, raised to 256 if bundles truncate.
 - **Jobs:** one worker; a queue of 4 in total and 1 per account (counting running work);
   supersession checked before the capacity refusal; 60 s queue and 30 s run deadlines; at most
@@ -180,12 +193,19 @@ refused.
   member, and linked entry text (≤ 2,000 characters, quoted) when exactly one entry matches or
   the stored key resolves. Output `{relevant, row, hint ≤ 120, option?}`, the option being a
   bundle. Display: a dismissible hint (client-side only), never blocking or auto-applying.
-  Injection is contained by the schema, the provenance rule (numbers from entry text are
-  labelled), the full display and confirmation.
+  Injection is contained by the schema, the provenance extension below, the full display and
+  confirmation.
+- **Catalogue provenance extension (decided 2026-10-19, coordinator default):** in a reminder
+  option, a number may also come from the text of the catalogue entry the reminder cites, and
+  only if it appears literally in that entry's text. The cited entry is bound by catalogue
+  version and entry key (part of the D-P read set). The option is displayed with its source
+  ("from Shield: …"). Every other number must pass the step-2c rule (in the phrase, or equal
+  to the target's value); outside reminders the step-2c rule stays strict.
 - **Catalogue member:** an optional `"catalogue": {"id": <link>, "entry_type": <id>?, "key":
   <property>}` on a text item property. `key` names a declared optional text property of the
   same list holding the remembered entry key (D-R); it is rendered as the link, never a
-  control. Checked at admission: the key property exists, is optional text, is not itself
+  control. Checked at the three step-3 catalogue-link sites (draft save, publication
+  snapshot, readiness): the key property exists, is optional text, is not itself
   catalogue-backed, and is used by at most one hint. Resolved only through the immutable pin.
   Omitted when absent, so old hashes are kept.
 - **Linking on view** (rules 1–2 here, 3–4 in step 4): names are normalised (NFKC, case-fold,
@@ -240,7 +260,14 @@ Tests:
   a full list (256) → refused with a message;
 - a new row with a required enum unset → refused; with a blank number → unknown; the new-row
   form writes ≤ 32 notes;
-- the R1 two-tab sequence with a dirty row cell; page-bound fixtures rerun;
+- the two-tab sequence (as in `two_tabs_without_script_keep_each_units_base`,
+  `src/campaigns/unit_tests.rs`: tab A has a dirty cell, tab B saves that cell, tab A saves
+  another cell, then tab A's dirty cell → 409 with the draft kept) with a dirty row cell;
+  page-bound fixtures rerun;
+- host checks in the §1.1 order: a host not in the base snapshot → 400; a host in the base but
+  removed since → 409; for cells and for each row action;
+- Add on a 256-row list → refused with a message, nothing written; a forged edge move → 400;
+  Undo of an optional property with before `{"absent":true}` → the property is absent;
 - Chromium no-JS run at 1280 and 390.
 
 ### 1.6 Quick-add
@@ -249,8 +276,20 @@ Scope: §1.2 (schema member, admission refusals, parse, route). Visible: "3 torc
 adds Torches ×3; "healing potion x2" adds the potion ×2. The demo definition gains
 `quick_add`. Tests: both patterns, a plain name (→ 1), an empty name, a 7-digit count
 (treated as part of the name), 200 characters; a required enum in the list → admission
-refusal; unknown values for other required numbers; no notes written; old definition hashes
+refusal; a required text or multiline property other than the mapped name → admission refusal
+and no quick-add line; an optional mapped name or quantity is still filled; unknown values for other required numbers; no notes written; old definition hashes
 unchanged.
+
+### 1.7 Validity flag (RR-3)
+
+Scope (decided 2026-10-19, coordinator default): the sheet shows **"Not validated"** whenever
+any check is violated, not evaluated or in error, or when rule coverage is unavailable for the
+pin; otherwise it shows nothing extra. Saving is always allowed; the flag never blocks, hides
+or changes a value. It is computed on view from the saved revision (like derived values), not
+stored. Shown in the sheet header and on each history revision. Tests: one violated check →
+flag; a not-evaluated check (unknown input) → flag; an evaluation error → flag; a pin without
+rule coverage → flag; all checks passed with coverage → no flag; a save of a flagged sheet
+succeeds; history shows the flag per revision; no-JS and 390 px layouts.
 
 ### 2a JavaScript foundation
 
@@ -261,7 +300,7 @@ Scope: §1.3 without the combobox. Tests:
   their refusals; other routes unchanged;
 - a multipart body still gets 415 and the module sends URL-encoded;
 - 9007199254740993 round-trips; integers are strings recursively;
-- R1 with JS: a saved HP response leaves the dirty Armour `base` alone, and Armour → 409;
+- the two-tab sequence with JS: a saved HP response leaves the dirty Armour `base` alone, and Armour → 409;
 - draft generations: a delayed HP response after the player typed 60 without submitting keeps
   the 60 and updates the base; repeated with a queued second save;
 - projection ordering: HP (revision 11) and Equipment (12) responses arrive reversed; both
@@ -311,7 +350,10 @@ remembered key, entry version or context enum changed with every number unchange
 bundle Undo all-or-nothing; a reminder only on a decrease of a top-level integer, none with the
 assistant off, not taking the account cap; duplicate names without a key → no entry text in
 the prompt; text and multiline never in the prompt (asserted on the stub request); entry text
-cut to 2,000; injection in entry text → at most a fully shown option.
+cut to 2,000; injection in entry text → at most a fully shown option; provenance extension: a
+number in the cited entry's text → allowed and shown "from <entry>: …"; a number injected
+into the entry text of a different (uncited) entry → option dropped; a number in no source
+(neither the phrase, the target's value nor the cited entry text) → option dropped.
 
 ### 4 Suggestions and "Which Sword?"
 
@@ -323,11 +365,12 @@ dangling key shows no link; p95 measured.
 
 ### 5 Docs, release scope, gate
 
-- Update `docs/assisted-entry.md`, `release-scope.md` (schema 20, one script under a strict
-  CSP, the local model as confirm-only), the runtime definition contract (`quick_add` and
+- Update `docs/assisted-entry.md`, `release-scope.md` (schema 20, one script on sheet pages under
+  a strict CSP, the local model as confirm-only), the runtime definition contract (`quick_add` and
   `catalogue` members), publication and dependency docs; replace the statements this work
   reverses: catalogue Q4 (not in the catalogue is a warning, "Which Sword?" remembered), the
-  D9/R9 writer membership check (not built; the key is advisory), "no script" on sheets,
+  D9/R9 writer membership check (not built; the key is advisory), "no script on sheet pages" (other
+  pages already serve `account-sharing.js` and `source-regions.js`),
   "no model proposes", the accuracy bar (waived, D-D), and "the LLM does not judge at play
   time" (narrow confirmable proposals and reminders).
 - `cargo about`, audit, packaging, and the unpacked smoke with the assistant off and once with
@@ -341,7 +384,7 @@ dangling key shows no link; p95 measured.
   build and size delta.
 - Browser (Chromium at 1280 × 720 and 390 × 844, demo data, with and without JS): per-cell
   Enter, buttons for selects and checkboxes, row actions, quick-add, notes, switch, Undo,
-  unknowns, the R1 two-tab sequence, derived and check refresh, CSP headers and no violations,
+  unknowns, the two-tab sequence, derived and check refresh, CSP headers and no violations,
   combobox keyboard and IME, no overflow.
 - Model screen (prototype tier, `tools/assist_eval.py` with unit tests; results note with
   exact scope, denominators and limitations; reviewed; no pass bar, D-D): p50/p95 latency at 2

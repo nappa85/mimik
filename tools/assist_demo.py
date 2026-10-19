@@ -1,4 +1,4 @@
-"""Assisted-sheet demo launcher (dev tool, prototype tier; assisted sheet plan §5 Demo).
+"""Assisted-sheet demo launcher (dev tool, prototype tier; docs/assisted-entry.md "Demo").
 
 Builds a fresh local data directory from the synthetic source fixture, publishes the
 `assist-sheet` definition, creates a demo Owner and player with generated dummy local

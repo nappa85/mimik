@@ -6,7 +6,8 @@ Python evaluation tooling under `tools/`. Results are in [results.md](results.md
 
 - **The Rust application has no provider or model integration.** `Cargo.toml` has no LLM
   client crate, and nothing in `src/` calls a model. Every model use today is prototype tooling
-  under `tools/` that runs in containers and never ships.
+  under `tools/` that runs in containers; it is not part of the runtime binary, but ships in
+  the corresponding source package.
 - The provider direction is a decision (D-H in [decisions.md](decisions.md)), not code.
 
 ## Model registry and downloads

@@ -12,7 +12,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
-1. 1.5b, then 1.6 quick-add; each slice gets an implementation review.
+1. 1.5b, then 1.6 quick-add, then 1.7 validity flag (RR-3); each slice gets an implementation
+   review.
 2. 2a JavaScript, including D-AA (save on leaving the field).
 3. 2b crate and runtime selection (STROT via pyo3 or a Rust port among the candidates, judged
    on results).
@@ -38,6 +39,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Other next actions
 
+- Remove `--dev-owner-play` (AUTH-L10), with its own security review.
+- Replace capacity caps with safety-only limits (RR-L2).
 - Catalogues step 5 for the merged steps 1–3: local-data inventory entries, the D12 CI check
   (no non-synthetic catalogue rows in fixtures or packages), the R15 note in
   `docs/campaigns.md`, release-scope update, and a LAN smoke with the synthetic catalogue.

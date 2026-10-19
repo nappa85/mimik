@@ -63,6 +63,10 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 - **P4** (2026-10-19) The D-X3 wait covers unit routes and full-form and list-form edits; switch, Undo and create keep the immediate 503. CSRF and session are checked before the wait.
 - **P5** (2026-10-19) Unit save order: malformed or zero `base` 400, `base` above L 409, no-op "No change" 200, changed unit 409, refused value 422.
 - **P9** (2026-10-19) A scribble is quoted under its cell to 32 characters; its control echoes it in full.
+- **ASSIST-2** (2026-10-19, coordinator default) Row-unit host checks for cells and row actions, in order: malformed `base` 400, `base` above L 409, host not in the base snapshot 400, host in the base but removed since 409, then value conflict and no-op; a forged edge move is 400; Add stops at 256 rows; Undo with before `{"absent":true}` makes the property absent.
+- **ASSIST-3** (2026-10-19, coordinator default) Quick-add is refused at admission (no quick-add line) for lists with a required text or multiline property other than the mapped name; the mapped name and quantity are filled even when optional.
+- **ASSIST-4** (2026-10-19, coordinator default) Validity flag (RR-3, slice 1.7): the sheet header and each history revision show "Not validated" when any check is violated, not evaluated or in error, or rule coverage is unavailable; saving is always allowed.
+- **ASSIST-5** (2026-10-19, coordinator default) Reminder provenance extension: a reminder option may use a number only if it appears in the text of the catalogue entry it cites, bound by catalogue version and entry key, and the option shows its source ("from Shield: …"); everywhere else every number must appear in the phrase or equal the target's value.
 
 ## Formulas and sheet values
 
@@ -87,7 +91,7 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 - **D2** (2026-10-16) Sheet POSTs are parsed with a 65,536-pair cap, then CSRF and authorization, then an O(n) exact-key admission; a bad key set answers 400.
 - **D3** (2026-10-16) Item IDs are host-managed: each new ID is `r<N>-<k>` (N the revision written, k the list's new-row number), enforced by the writer after the conflict check; IDs label row slots and never return once removed.
 - **D4** (2026-10-16) Save precedence: 413, 400 parse, 403 (CSRF, rights, read-only), 400 keys and ops, op re-render 200, stale 409, 422 values and IDs, then the writer's 409/422.
-- **D5** (2026-10-16, refined 2026-10-17) Add, Remove, Move up/down re-render an unsaved draft and never write; edge moves are disabled (forged: 400) and Add stops at 256 rows.
+- **D5** (2026-10-16, refined 2026-10-17) On the create page and the interim list forms (P1) until 1.5b, Add, Remove, Move up/down re-render an unsaved draft and never write (on saved sheets from 1.5b, D-V applies); edge moves are disabled (forged: 400) and Add stops at 256 rows.
 - **D6** (2026-10-16) List sheets render a "Save full private sheet" button (`op=save`) before the groups so Enter saves.
 - **D7** (2026-10-16, refined 2026-10-19) Create/edit POSTs accept 5 MiB after a cookie-only principal check; drafts over 1 MiB answer 422 unechoed; publication refuses a worst-case form over 32,768 units, 65,536 pairs or 32,768 nodes (`list-form-exceeds-limit`).
 - **D8** (2026-10-16) History shows read-only rows and "Changes in revision N" against a revalidated N − 1 (names and addresses, at most 200 lines); any failure degrades to "unavailable".

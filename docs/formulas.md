@@ -138,7 +138,9 @@ never values.
 
 - `null` is the unknown value of every integer field and every integer item property,
   nullable or not. Text, enum and boolean values accept `null` only when the field is
-  nullable; optional item properties are absent keys, never `null`.
+  nullable. An optional item property may be absent (no key); a present integer property may
+  be `null` (unknown) whether or not it is optional. Absent and unknown are different states
+  (`has()` is true for a present unknown, L-U3).
 - A formula whose static read set contains an unknown integer field, or an integer property
   that is `null` in any item, is not run and reports `null_value` (D-Z). This holds on
   untaken branches (`true || vitality == 0` is `null_value`) because CEL would otherwise give
@@ -185,19 +187,17 @@ is no per-property read-only flag and no item catalogue in the definition.
 As built, with the details in decisions D1–D11 (`campaigns/values.rs`, `transport.rs`,
 `web.rs`, `snapshots.rs`, `history_diff.rs`):
 
-- Form keys `id-f-r`, `row-f-r-p`, `set-f-r-p` and the clicked `op` (`save`, `add-f`,
-  `remove-f-r`, `up-f-r`, `down-f-r`), admitted as an exact key set after CSRF and rights,
-  with a 65,536-pair cap (`SHEET_FORM_PAIRS`).
-- New rows get host IDs `r<N>-<k>`, enforced by the writer (`snapshots::host_item_ids`); IDs
-  label row slots, not items.
-- Add, Remove, Move up and Move down re-render an unsaved draft (200, never written, never
-  evaluated, "… Not saved yet."); Save persists. A stale revision answers 409 before values
-  are validated.
-- Create/edit POST bodies up to 5 MiB (`SHEET_POST_BYTES`); drafts echoed up to 1 MiB
-  (`ECHO_BYTES`). Publication refuses a definition whose worst-case form exceeds 32,768 render
-  units (`values::RENDER_UNITS`, `form_budget`) → `list-form-exceeds-limit`.
-- History shows ID-labelled read-only rows and a "Changes in revision N" summary of stored
-  data (names only, no values, at most 200 lines).
+- Full-form list transport: exact key set `id-f-r`, `row-f-r-p`, `set-f-r-p` plus the clicked
+  `op`, at most 65,536 pairs (`SHEET_FORM_PAIRS`); host IDs `r<N>-<k>` enforced by the writer
+  (`snapshots::host_item_ids`). Body and echo limits: `docs/campaigns.md`; per-unit routes:
+  `docs/assisted-entry.md`.
+- On the create page and the interim list forms (P1) until 1.5b, Add, Remove, Move up and Move
+  down re-render an unsaved draft (200, never written, never evaluated); Save persists (D5).
+- Publication refuses a definition whose worst-case form exceeds 32,768 render units
+  (`values::RENDER_UNITS`) → `list-form-exceeds-limit` (D7; headroom in
+  `docs/assisted-entry.md`).
+- History shows ID-labelled read-only rows and a "Changes in revision N" summary (names only,
+  at most 200 lines).
 
 ## Conformance fixture
 
