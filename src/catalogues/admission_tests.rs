@@ -1061,17 +1061,44 @@ fn admission_profile_one_is_pinned() {
 #[test]
 fn migration_ordinal_bounds_follow_the_caps() {
     // Space Bunny round 5 F7: the storage CHECKs repeat the entry, type and unit caps; a cap
-    // lowered in Rust must not leave a looser bound in migration 019.
+    // lowered in Rust must not leave a looser bound in migration 019. Round 6 (review row 22):
+    // each bound is matched inside its own table, so bounds swapped between tables fail.
     let migration = include_str!("../../migrations/019_catalogues.sql");
-    for cap in [decode::MAX_TYPES, decode::MAX_ENTRIES, decode::MAX_UNITS] {
+    assert_eq!(ordinal_bounds_by_table(migration), Ok(()));
+    let swapped = migration
+        .replace("BETWEEN 0 AND 31)", "BETWEEN 0 AND @)")
+        .replace("BETWEEN 0 AND 6143)", "BETWEEN 0 AND 31)")
+        .replace("BETWEEN 0 AND @)", "BETWEEN 0 AND 6143)");
+    assert_ne!(swapped, migration);
+    assert!(ordinal_bounds_by_table(&swapped).is_err());
+}
+
+/// Each projection table's own `ordinal` CHECK equals its Rust cap minus one.
+fn ordinal_bounds_by_table(migration: &str) -> Result<(), String> {
+    for (table, cap) in [
+        ("catalogue_entry_types", decode::MAX_TYPES),
+        ("catalogue_entries", decode::MAX_ENTRIES),
+        ("catalogue_entry_units", decode::MAX_UNITS),
+    ] {
+        let start = migration
+            .find(&format!("CREATE TABLE {table} ("))
+            .ok_or(format!("{table} missing"))?;
+        let body = &migration[start..];
+        let body = &body[..body
+            .find(") STRICT")
+            .ok_or(format!("{table} unterminated"))?];
         let bound = format!(
             "ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 0 AND {})",
             cap - 1
         );
-        assert_eq!(migration.matches(&bound).count(), 1, "{bound}");
+        if body.matches(&bound).count() != 1
+            || body.matches("ordinal INTEGER NOT NULL CHECK").count() != 1
+        {
+            return Err(format!("{table}: {bound}"));
+        }
     }
-    assert_eq!(
-        migration.matches("ordinal INTEGER NOT NULL CHECK").count(),
-        3
-    );
+    if migration.matches("ordinal INTEGER NOT NULL CHECK").count() != 3 {
+        return Err("unexpected ordinal CHECK".into());
+    }
+    Ok(())
 }

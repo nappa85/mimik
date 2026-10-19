@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The name index, verbatim as in migration 019 (a test compares it with `sqlite_master`).
 pub(super) const NAME_INDEX: &str = "CREATE VIRTUAL TABLE catalogue_names_fts USING fts5(name, catalogue_row_id UNINDEXED, key UNINDEXED, tokenize = 'unicode61 remove_diacritics 2', prefix = '3')";
 /// Index rowid = catalogue surrogate id << 20 | entry ordinal (entries < 2^20).
-const ROWID_SHIFT: u32 = 20;
+pub(super) const ROWID_SHIFT: u32 = 20;
 const _: () = assert!(super::decode::MAX_ENTRIES < 1 << ROWID_SHIFT);
 const TICKET_PREFIX: &[u8] = b"mimik-catalogue-comparison-v1\0";
 /// Latest sealed version of every catalogue (used by the index check and rebuild).

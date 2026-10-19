@@ -37,6 +37,9 @@ footer { color: #555e57; font-size: .85rem; }
 .source-extract table { border-collapse: collapse; width: 100%; }
 .source-extract td, .source-extract th { border: 1px solid #aaa; padding: .4rem; }
 .evidence-text { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+/* Catalogue text (owner or manual): kept line breaks, isolated from the surrounding layout. */
+.catalogue-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.catalogue-text bdi, .catalogue-results bdi, .catalogue-nav bdi, .citations bdi { unicode-bidi: isolate; }
 article.panel { margin-bottom: 1rem; }
 .mork-sheet { background: #141414; color: #fff; border: 4px solid #151515; }
 .mork-sheet-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, .8fr) minmax(0, 1.4fr); gap: 1.3rem; }

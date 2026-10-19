@@ -1,5 +1,7 @@
 //! Strict declarative proposals. Draft storage never approves evidence or enables a sheet.
 mod admission;
+#[cfg(test)]
+mod catalogue_link_tests;
 pub(crate) mod decode;
 mod formula_admission;
 // Public so `examples/formula_eval.rs` (development CLI) links and the library-only
@@ -114,6 +116,19 @@ pub struct Definition {
     pub formula_profile: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constraints: Vec<Constraint>,
+    /// Linked read-only catalogues, by id within the definition's pair (catalogue plan D3/D8),
+    /// in author order (the sheet's display order). Omitted when absent, so the canonical bytes
+    /// and hashes of unlinked definitions are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub catalogues: Vec<CatalogueLink>,
+}
+
+/// A link to a catalogue of the same game and edition. It never names a version: readers use
+/// the latest sealed version, and append-only publication keeps every key valid (plan D3).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogueLink {
+    pub id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

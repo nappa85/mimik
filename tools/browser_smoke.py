@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
 from admin_ruleset_browser import run_admin_ruleset_browser
+from catalogue_browser import run_catalogue_browser
 from material_browser import run_material_browser
 from smoke_release import (
     AUTH_DENIED_PATHS,
@@ -821,6 +822,8 @@ def run_workspace_browser(
             owner_page.goto(runtime_sheet).status == 403,
             "Cross-campaign collaborator access leaked",
         )
+        stage = "catalogue reading"
+        run_catalogue_browser(page, runtime_sheet, owner_page, no_overflow)
         stage = "formula sheet"
         run_formula_browser(page, generic, formula_version, submit)
         stage = "list sheet"

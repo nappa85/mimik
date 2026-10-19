@@ -1,10 +1,11 @@
 # Catalogue publication
 
 Read-only game catalogues: spells, items and other entries that a sheet can cite. Plan:
-[catalogue-plan.md](catalogue-plan.md). **Implemented so far: steps 1–2** (drafts, and the
-comparison, publication, integrity check and name-index repair of sealed versions).
-Definition linkage and the sheet routes are later steps; until they land, nothing published
-here is visible to players or changes a sheet.
+[catalogue-plan.md](catalogue-plan.md). **Implemented so far: steps 1–3** (drafts; the
+comparison, publication, integrity check and name-index repair of sealed versions; and the
+definition link with the read-only routes reached through a sheet, under
+[Reading through a sheet](#reading-through-a-sheet)). Picking entries into sheet rows
+(`catalogue_ref`) is step 4; until it lands, catalogues are read, never stored in a sheet.
 
 ## Drafts
 
@@ -367,3 +368,93 @@ using the server's pattern (`BEGIN IMMEDIATE`, 5 s busy timeout, one insert, com
 lock-level equivalent of a sheet save) waits through the publish and succeeds in every case.
 The 5 s busy timeout (`src/store.rs`) is the real failure point: a publish holding the lock
 longer than that would make concurrent sheet saves fail with a storage error. Commit cost includes `fsync`, so it depends on the disk.
+
+## Reading through a sheet
+
+Plan §3 step 3 (D4, D8, D11, R5–R7, R10, R12, R13, R20, R21, R27).
+
+### Linking a catalogue to a definition
+
+A definition links catalogues by id with its optional `catalogues` member (at most 8,
+`[{"id": "spells"}]`; see [runtime-definition-contract.md](runtime-definition-contract.md#linked-catalogues)).
+The link names no version and always means the catalogue of the definition's own game and
+edition. **Publish the catalogue first:** a definition draft that links a catalogue without a
+sealed version is refused at save (`/catalogues/N linked-catalogue-not-published`), again in
+the definition comparison and its approval transaction, and the readiness check reports the
+definition's wiring as stale if the catalogue ever lacks a sealed version (only damage can
+cause that: sealed versions are append-only). The check is existence only; catalogue
+versions never enter the definition's wiring snapshot or its hash, so publishing a new
+catalogue version never makes a definition approval stale.
+
+### Routes
+
+- `GET /private-sheets/{id}/catalogue/{catalogue}` browses: 50 entries per page, ordered by
+  `(name, key)`, with an optional entry type (`type`), name search (`q`) and an exclusive
+  cursor (`after=<key>`; an unknown key restarts from the beginning).
+- `GET /private-sheets/{id}/catalogue/{catalogue}/{key}` shows one entry.
+
+The sheet page lists its definition's catalogues with links that open in a new tab, so an
+unsaved draft stays in the sheet's tab. Both routes are reached only through a sheet the
+reader may read (its custodian, including a departed custodian of a frozen sheet, or an
+active Master of its campaign; never the production Owner) and the sheet's immutable runtime
+pin must link the catalogue. Native and unsupported pins, unlinked, unknown or other games'
+catalogues, unknown keys and unknown entry types all answer exactly like an unreadable sheet
+(403), so the routes cannot probe what exists; malformed ids, cursors, unknown query
+parameters and queries over 100 scalars answer 400 before any lookup.
+
+Each request holds the single runtime permit through every phase: a first read transaction
+(session recheck, read authorization, the snapshot and pin), validation outside the
+database lock (snapshot decode, write-only pin validation, pin match, the link), a second
+read transaction (session recheck and authorization again, the sheet must still correspond
+to what was validated, the pin row unchanged, then the bounded catalogue lookups), and the
+render. The routes are not rate-limited; the single permit bounds them, as it bounds sheet
+reads, and a busy server answers 503. Pages load no script and no images (players see
+citations only, plan Q1).
+
+Readers use the latest sealed version, chosen through `catalogue_seals`, and only its
+projections; a request checks that the version is sealed and that its identity columns
+match. Content hashes and projection equality are checked at publication, by
+`show-catalogue-version` and by `verify-catalogues` (R5).
+
+### What an entry page shows
+
+Names, descriptions, badges and citations are **current reference aids**: they always come
+from the latest catalogue version and today's source review, and the page says so ("Current
+text"). Nothing is materialised.
+
+| Badge | When |
+|---|---|
+| Owner-written | The entry has owner text (a house rule or homebrew entry) |
+| Reviewed extraction | Every cited unit is accepted or corrected and every cited page is complete. The page adds: "Source text reviewed. Which passages form this entry was chosen by the catalogue author." |
+| Unchecked source text | Any cited unit is unreviewed or any cited page is incomplete: "Extracted from your manual; not yet reviewed." |
+| Description unavailable | Any cited unit is rejected now. No passage of the entry is shown, even one before the cut-off; the citation stays |
+
+Unit text is the correction for corrected units, otherwise the raw text. The metadata of every
+cited unit is read first; the texts follow in author order, cut at **20,000 characters per
+entry** (character-safe; at most 80 KB of UTF-8). A cut entry ends with "Continues in the
+manual at p. X (PDF page N)", naming the page of the first unit not fully shown. A unit whose
+text is not text, contains NUL or exceeds its bound shows "Description unavailable (source
+text malformed)" instead of any text. Owner text (at most 20,000 characters) is never cut.
+Each citation is the source title, the current printed page label and the PDF page number,
+read live.
+
+All catalogue and manual text is escaped, kept with its line breaks (`white-space:
+pre-wrap`) and wrapped in `<bdi>`, so right-to-left text and bidirectional controls in owner
+or unit text (owner text keeps Unicode Cf for right-to-left prose) cannot reorder the
+surrounding names, citations or controls. A Chromium check covers an unterminated
+right-to-left override in owner text (`tools/catalogue_browser.py`).
+
+### Search
+
+Name search uses the name index (`unicode61 remove_diacritics 2`, 3-character prefixes)
+through the existing query builder: raw text never reaches `MATCH`; every word or quoted
+phrase becomes a quoted string joined with a generated `AND` (operators, column filters and
+`NEAR` are plain words), at most 16 pieces and 100 scalars. Results are filtered, never
+ranked: the order stays `(name, key)`. The index is joined back on the latest sealed version
+of the same catalogue and restricted to its rowid range, so keys shared by two catalogues
+cannot leak. Every browse statement runs under the search time budget (1 s); a query that
+exceeds it, has no letters or digits, contains control characters or has more than 16 pieces
+re-renders the search form with a static message (422).
+
+Retired entries stay listed with a "Retired" badge and their entry pages stay readable: they
+are valid on existing rows and only stop being offered for new picks (step 4).

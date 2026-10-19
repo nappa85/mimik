@@ -1629,3 +1629,129 @@ Gate on the merge result (container, `--cpus 6`, Monday 04:32–04:43):
 - Tools unittest: 751 run, 11 skipped, 1 error, the known `test_fake_runner_script`.
 
 The release build, the packaging smoke tests, Chromium and LAN checks were not run, because step 2 adds no route, page or template. They belong to step 5's full gate.
+
+## 17. Step 3 implementation notes (2026-10-19)
+
+Branch `catalogue-step3` from master `b640fca`. Scope: §3 step 3 (the `catalogues`
+definition member, the three-site checks, the browse and entry routes reached through a
+sheet, with no `catalogue_ref`), the §12 carry items (quoted `MATCH`, isolated bidi
+rendering with a browser test) and review row 22 (ordinal pin by table). Operator
+documentation: [catalogue-publication.md](catalogue-publication.md#reading-through-a-sheet),
+[runtime-definition-contract.md](runtime-definition-contract.md#linked-catalogues),
+[definition-drafts.md](definition-drafts.md).
+
+Code:
+- `src/definitions/{mod,decode,admission,store,publication}.rs`, `schemas/definition-v1.json`:
+  the member (`CatalogueLink`, last, omitted when empty), decode limit (8 links), domain check
+  (registry slugs, unique), and `linked_catalogues` in `store::references` (sites 1 and 2: draft
+  save, and the comparison and approval transaction through `snapshot`) and in
+  `private_evidence_available` (site 3: a missing sealed version makes readiness `Stale`).
+- `src/catalogues/read.rs`: latest sealed version (through `catalogue_seals`, identity columns
+  checked), browse (50 per page, `(name, key)` order and exclusive cursor, optional type and
+  name search through `fts_query`, joined back on the same catalogue's latest version and
+  restricted to its rowid range, every statement under `Budget`), entry (metadata of every
+  cited unit first, then `substr` prefixes up to 20,000 characters, live badges and
+  citations). `src/sources/search.rs`: `guarded`, `read_guarded`, `Budget`, `interrupted`
+  widened to `pub(crate)` (R16).
+- `src/campaigns/catalogue.rs`: `Store::private_catalogue`, the R6/R25 phases under the runtime
+  permit; `links` for the sheet page. `src/campaigns/catalogue_web.rs`, templates
+  `catalogue_browse.html`, `catalogue_entry.html`, `private_sheet.html` (a "Catalogues"
+  section, links in a new tab), `assets/app.css`.
+- Browser: `tools/catalogue_browser.py` (called from `browser_smoke.py`'s workspace stage);
+  `smoke_release.py` publishes a synthetic catalogue through the CLI and links it from the
+  generic workspace definition; `containers/browser.Dockerfile` copies the new module.
+
+**Decisions taken in step 3 (not fixed by the plan; conservative choices):**
+1. *Refusal shape.* The test list says "return 404"; D11 says "the same 404/403 shape as
+   today". Today an unreadable sheet answers 403 (`AppError::NotFound` maps to 403 in the
+   campaign routes). Every refusal (unreadable or unknown sheet, native or unsupported pin,
+   unlinked, unknown or other games' catalogue, unknown key, unknown entry type) returns
+   `NotFound`, and the tests require the **byte-identical response of an unreadable sheet**
+   (403). Malformed path segments, cursors, types, unknown or duplicate query parameters and
+   queries over 100 scalars answer 400 before any lookup (syntax only, nothing probed).
+2. *Member spelling.* `catalogues: []` is refused (`minItems` 1) rather than canonicalised
+   away, so there is one spelling of "no links". Author order is kept and is identity (the
+   sheet's display order), as for fields.
+3. *Readiness and reading are separate.* Catalogue routes require a readable sheet and a
+   sealed version of the linked catalogue, not current wiring: a sheet whose approval went
+   stale stays readable with its catalogues, as the sheet itself does.
+4. *Retired entries* stay in browse results with a "Retired" badge and their entry pages stay
+   readable; only picking (step 4) stops offering them.
+5. *Malformed units.* If any cited unit is not text, holds NUL or exceeds 256 KiB, the whole
+   description shows "Description unavailable (source text malformed)", like a rejection;
+   no partial text.
+6. *A concurrent sheet save* between the two read transactions answers 409 (the
+   `private_badge` rule); the reader reloads.
+7. *A query that cannot run* (no letters or digits, control characters, more than 16 pieces,
+   the time budget) re-renders the search form with the static message, status 422, marked
+   as a trusted page so the auth layer keeps its body.
+8. *Badge of a unit-sourced entry with no unit rows* (only damage causes it) is "Unchecked",
+   never "Reviewed" (found in self-review, test first).
+9. The sheet page lists catalogue links on view and history pages, not on the create page
+   (the routes need a saved sheet).
+
+**Red → green.** Red runs used the final tests against: (S) a skeleton (definition schema,
+decoder, domain check and readiness site at master, the save-site call removed, browse,
+entry, the store method and the sheet links stubbed to empty or `NotFound`); or one narrow
+mutation of the final code each, named below. Green is the final tree (05:37–05:43 run).
+
+| Test | Red | Green |
+|---|---|---|
+| `definitions::catalogue_link_tests::catalogue_links_are_closed_bounded_and_unique` | S; mutation: domain check accepts any id (invalid and duplicate links admitted) | pass |
+| `…::catalogue_links_are_the_last_member_and_part_of_the_identity` | S (member refused by the schema) | pass |
+| `…::frozen_definition_vectors_are_unchanged_without_catalogues` | guard in S; mutation: member serialised when empty (`"catalogues":[]` appended, hash changed) | pass |
+| `catalogues::read::tests::browse_orders_by_name_then_key_with_an_exclusive_cursor` | S; mutation: cursor seek removed | pass |
+| `…::name_search_quotes_every_token_and_filters_without_ranking` | S; mutation: raw `q` passed to `MATCH` | pass |
+| `…::colliding_keys_across_catalogues_never_leak_and_only_the_latest_names_match` | S; mutation: index join not restricted to the catalogue's rowid range (the other catalogue's row joined the colliding key) | pass |
+| `…::browse_is_interrupted_past_its_time_budget` | S; mutation: budget raised to an hour | pass |
+| `catalogues::read::badge_tests::unit_badges_follow_states_and_page_completion` | mutation: no cited unit counts as reviewed (the pre-fix behaviour) | pass |
+| `campaigns::tests::catalogue_tests::sheet_links_its_catalogues_and_routes_follow_the_sheet_read_matrix` (custodian, Master, other player, outsider, Owner, frozen sheet, disabled account) | S | pass |
+| `…::unlinked_unknown_foreign_and_native_catalogues_answer_like_an_unreadable_sheet` | S | pass |
+| `…::entry_badges_descriptions_and_citations_are_live` (review, correction, page completion, label change, rejection) | S; mutations: rejection does not hide text; printed label not read | pass |
+| `…::descriptions_are_cut_at_20000_characters_and_owner_text_never` (oversized first unit, cumulative cut, multibyte cut, NUL, owner text, hostile markup, rejected unit after the cut) | S; mutations: no cut; badge from the first unit only; `<bdi>` removed from owner and unit text; `<bdi>` removed from owner text only | pass |
+| `…::catalogue_reads_hold_the_permit_and_recheck_grants_after_validation` (Entry, Search, and revocation between the transactions) | S; mutation: the second transaction's recheck and authorization removed | pass |
+| `…::definition_links_are_checked_at_save_publication_and_readiness` | S; mutations: save-site call removed (sites 1 and 2 share `references`); check moved from `references` to the draft save only (site 2 red at the approval); readiness site removed (site 3 red) | pass |
+| `…::catalogue_publication_never_stales_definitions_or_sheets` (R10: v1 → v2 with existing sheets; two definitions link one catalogue) | S | pass |
+| `…::browse_pages_link_to_the_next_page_with_the_filters` | S | pass |
+| `…::corrupt_pins_and_snapshots_are_refused` | S, at setup only (a guard: the corrupt cases are refused by existing checks) | pass |
+| `catalogues::admission_tests::migration_ordinal_bounds_follow_the_caps` (row 22: bounds matched by table, swapped bounds refused) | mutation: the previous by-value matching (accepted swapped bounds) | pass |
+| Chromium `tools/catalogue_browser.py` in `browser_smoke.py --auth`, 1280×720 and 390×844 | release binary built with `<bdi>` removed from the entry template: "Owner text is not in an isolated pre-wrap bidi context" | pass, both viewports |
+
+The first green run also found test defects, fixed before the final runs: a tamper statement
+needed foreign keys off; Askama escapes `&` and `<` as `&#38;` and `&#60;`, so one owner-text
+assertion was tightened to that spelling (it had an alternative that did not require
+`<bdi>`; the owner-only `<bdi>` mutation above was run after the fix).
+
+**Gate** (container `mimik-ci:latest`, `--cpus 6`, Monday 2026-10-19, before 09:00):
+- `cargo fmt --check`: clean (05:37). Pedantic Clippy (`--all-targets --all-features -D
+  warnings`): clean (05:37).
+- `cargo test --locked --all-targets --all-features` (05:37–05:43): **557 passed**, 0 failed,
+  1 pre-existing ignored, over 37 binaries (master: 540; 17 new tests).
+- `ruff check tools`, `ruff format --check tools`: clean. Tools unittest (05:43–05:52): 751
+  run, 11 skipped, **1 error: the known `test_run_queue.ProcessLauncherTests.test_fake_runner_script`**,
+  so the helper suite is not fully green, as on master.
+- Release build of the final tree (05:52) and `browser_smoke.py --auth` in `mimik-browser`
+  (`--network=none --cpus=2`, the CI flags, the worktree's `tools/` mounted on `/checks`),
+  05:53–05:54: every stage passed, the catalogue stage at both viewports.
+- `smoke_release.py --auth` against the release binary (`--cpus 2`, 05:28–05:29, tree before
+  the badge fix, which does not touch the CLI paths it runs): passed.
+
+**Not run:** `cargo audit`, `cargo about`, packaging and the unpacked-archive checks, the LAN
+smoke (it now also publishes the synthetic catalogue through `prepare_workspace_materials`),
+and any profiling: the R8 page-time criterion (p95 ≤ 250 ms with 8 linked catalogues) was met
+by the step 0 spike, but the real routes (two transactions, write-only pin validation) were
+not re-measured. Step 5's docs (`release-scope.md`, `local-setup.md`/`sources.md` inventory,
+`campaign-workspace.md` R15 notes, README) are not written yet.
+
+**Carry items.** Done: quoted `MATCH` with bounded pieces; isolated bidi rendering with the
+Chromium check; ordinal pin by table (review row 22). **Open:** review row 16 (a controlled
+commit-phase regression for the profiler's real-lock test), prototype tier, not attempted.
+
+**Open questions** (recorded, not blocking):
+- Whether "404" in the step's test list was meant literally; the routes return the existing
+  403 refusal shape (decision 1).
+- Whether a sheet with stale wiring should still read its catalogues (decision 3 keeps them
+  readable).
+- Whether retired entries belong in browse results (decision 4 lists them with a badge).
+
+**Not yet done:** independent review of this step.

@@ -32,7 +32,10 @@ sources, fields, groups. Controls: text/multiline/integer/boolean/enum. No scrip
 decimals, nested/repeating controls, unknown properties or uploaded schema hooks.
 Derived fields, constraints and list fields follow the formula profile
 (`formula_profile: 1`, see `runtime-definition-contract.md` and
-`derived-formulas-plan.md` §6). Each field occurs exactly once in ordered groups; hints only
+`derived-formulas-plan.md` §6). The optional last member `catalogues` (1–8 unique
+`{"id": slug}` links, author order kept) links published catalogues of the same pair; each
+must have a sealed version when the draft is saved (`runtime-definition-contract.md`,
+"Linked catalogues"). Each field occurs exactly once in ordered groups; hints only
 auto/main/sidebar. Field/group IDs have separate namespaces; choices unique per
 field. IDs follow the registry slug grammar; whitespace-only labels/reasons fail.
 

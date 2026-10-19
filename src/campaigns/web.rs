@@ -29,9 +29,9 @@ use tokio::sync::OwnedSemaphorePermit;
 use tower_sessions::Session;
 
 #[derive(Clone)]
-struct RuntimeAdmission(Arc<Mutex<Option<OwnedSemaphorePermit>>>);
+pub(super) struct RuntimeAdmission(Arc<Mutex<Option<OwnedSemaphorePermit>>>);
 impl RuntimeAdmission {
-    fn take(&self) -> Result<OwnedSemaphorePermit, StatusCode> {
+    pub(super) fn take(&self) -> Result<OwnedSemaphorePermit, StatusCode> {
         self.0
             .lock()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -106,6 +106,14 @@ pub(crate) fn routes() -> Router<AuthState> {
             get(read_sheet).merge(sheet_post(edit_sheet)),
         )
         .route("/private-sheets/{id}/history/{revision}", get(read_history))
+        .route(
+            "/private-sheets/{id}/catalogue/{catalogue}",
+            get(super::catalogue_web::browse),
+        )
+        .route(
+            "/private-sheets/{id}/catalogue/{catalogue}/{key}",
+            get(super::catalogue_web::entry),
+        )
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn(runtime));
     Router::new()
@@ -120,7 +128,7 @@ pub(crate) fn routes() -> Router<AuthState> {
         .merge(sheets)
 }
 
-fn error(error: impl std::borrow::Borrow<AppError>) -> StatusCode {
+pub(super) fn error(error: impl std::borrow::Borrow<AppError>) -> StatusCode {
     match error.borrow() {
         AppError::NotFound => StatusCode::FORBIDDEN,
         AppError::Conflict => StatusCode::CONFLICT,
@@ -130,7 +138,7 @@ fn error(error: impl std::borrow::Borrow<AppError>) -> StatusCode {
     }
 }
 
-type ResultResponse = Result<Response, StatusCode>;
+pub(super) type ResultResponse = Result<Response, StatusCode>;
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct Page {

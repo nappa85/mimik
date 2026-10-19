@@ -8,8 +8,9 @@ type Mutation = Box<dyn Fn(&mut Value)>;
 const EXAMPLE: &[u8] = include_bytes!("../../schemas/definition-formula-example.json");
 /// Canonical bytes of a formula-free definition exercising every pre-M2 member, captured
 /// from the pre-M2 implementation. New members must not change them.
-const FORMULA_FREE_HASH: &str = "b8f29f75a700c85c57cfc5ba7566a095b35ec0e25e1151651ad55457c4c58737";
-const FORMULA_FREE_CONTENT: &str = r#"{"contract_version":1,"game_id":"synthetic-game","edition_id":"first","definition_id":"plain","title":"Plain","sources":[{"source_id":2,"pdf_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","roles":["core","sheet"]}],"fields":[{"id":"name","label":"Name","control":"text","nullable":true,"help":"h","options":null,"mapping":{"state":"mapped","regions":[{"source_id":2,"page_id":3,"unit_id":1},{"source_id":2,"page_id":9,"unit_id":4}]}},{"id":"size","label":"Size","control":"enum","nullable":false,"help":null,"options":[{"id":"small","label":"Small"},{"id":"big","label":"Big"}],"mapping":{"state":"unresolved","reason":"r"}},{"id":"hit-points","label":"HP","control":"integer","nullable":false,"help":null,"options":null,"mapping":{"state":"unresolved","reason":"r"}}],"groups":[{"id":"main","label":"Main","fields":["name","size","hit-points"],"column_hint":"sidebar"}]}"#;
+pub(super) const FORMULA_FREE_HASH: &str =
+    "b8f29f75a700c85c57cfc5ba7566a095b35ec0e25e1151651ad55457c4c58737";
+pub(super) const FORMULA_FREE_CONTENT: &str = r#"{"contract_version":1,"game_id":"synthetic-game","edition_id":"first","definition_id":"plain","title":"Plain","sources":[{"source_id":2,"pdf_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","roles":["core","sheet"]}],"fields":[{"id":"name","label":"Name","control":"text","nullable":true,"help":"h","options":null,"mapping":{"state":"mapped","regions":[{"source_id":2,"page_id":3,"unit_id":1},{"source_id":2,"page_id":9,"unit_id":4}]}},{"id":"size","label":"Size","control":"enum","nullable":false,"help":null,"options":[{"id":"small","label":"Small"},{"id":"big","label":"Big"}],"mapping":{"state":"unresolved","reason":"r"}},{"id":"hit-points","label":"HP","control":"integer","nullable":false,"help":null,"options":null,"mapping":{"state":"unresolved","reason":"r"}}],"groups":[{"id":"main","label":"Main","fields":["name","size","hit-points"],"column_hint":"sidebar"}]}"#;
 
 fn example() -> Value {
     serde_json::from_slice(EXAMPLE).unwrap()
@@ -32,7 +33,7 @@ fn admit(value: &Value) -> Result<admission::Admitted, DefinitionError> {
     admission::validate(&serde_json::to_vec(value).unwrap())
 }
 
-fn formula_free() -> Value {
+pub(super) fn formula_free() -> Value {
     json!({
         "contract_version": 1, "game_id": "synthetic-game", "edition_id": "first",
         "definition_id": "plain", "title": "Plain",

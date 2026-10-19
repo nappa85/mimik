@@ -572,6 +572,10 @@ fn private_evidence_available(
             available = false;
         }
     }
+    // Catalogue plan D8: linked catalogues are dependencies too (existence only, R10/R27).
+    if !super::store::linked_catalogues_available(db, data)? {
+        available = false;
+    }
     Ok(available)
 }
 

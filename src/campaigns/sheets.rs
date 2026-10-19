@@ -32,6 +32,9 @@ pub(crate) struct SheetView {
     pub editable: bool,
     /// History pages only: the change summary against the previous revision (plan D8).
     pub changes: Option<super::history_diff::Changes>,
+    /// Catalogues linked by the pinned definition (catalogue plan D11), read in the final
+    /// read boundary; empty on the create page, which has no sheet to read them through.
+    pub catalogues: Vec<super::catalogue::LinkView>,
 }
 
 /// The change summary of history revision `snapshot` against its validated predecessor.
@@ -160,6 +163,7 @@ impl Store {
                     warning,
                     editable,
                     changes,
+                    catalogues: Vec::new(),
                 },
                 permit,
             ))
@@ -231,6 +235,7 @@ impl Store {
                     warning: String::new(),
                     editable: true,
                     changes: None,
+                    catalogues: Vec::new(),
                 },
                 permit,
             ))
@@ -337,6 +342,9 @@ impl Store {
                     Err(AppError::NotFound) => false,
                     Err(error) => return Err(error),
                 };
+            }
+            if let Some(pin)=view.immutable.as_ref().filter(|_|!create){
+                view.catalogues=super::catalogue::links(&tx,pin)?;
             }
             if let Some(pin)=&view.immutable{
                 let status=pin.readiness(&tx)?;
