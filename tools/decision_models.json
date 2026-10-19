@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "description": "Decision-router backbones (docs/decision-router-plan.md \u00a75). Separate from tools/models.json; every artefact is hashed before load.",
+  "description": "Decision-router backbones (docs/evaluation-tooling.md). Separate from tools/models.json; every artefact is hashed before load.",
   "model_root": "/media/data/mimik/models",
   "routers": {
     "r4-kev-0.8b": {

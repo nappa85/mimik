@@ -1,6 +1,6 @@
 """Decision router SYS-R: policy, records, folds, CV, gate, replay, states, decision file.
 
-docs/decision-router-plan.md revision 3.1 §0, §2-§4, §6. New module: red = module absent; the
+docs/evaluation-tooling.md (decision router). New module: red = module absent; the
 paired tests (planted leak, interleave order, planted fold leakage, forged entries) carry their
 own negative control.
 """

@@ -1,4 +1,4 @@
-"""Isolated router state builder (docs/decision-router-plan.md §2). Prototype tier.
+"""Isolated router state builder (docs/evaluation-tooling.md, decision router). Prototype tier.
 
 It runs in its own process over a derived case file that holds only `key`, `character`,
 `request` and `setup` per entry, and over a pack directory that holds no case file at all, so

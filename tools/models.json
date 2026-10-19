@@ -43,7 +43,7 @@
       "vram_budget_bytes": 7516192768,
       "vram_budget_source": "estimate: 5.29 GiB weights + KV at ctx 24576 (hybrid attention, unmeasured) + buffers; measure at the first screen",
       "licence": "Apache-2.0 (model card front matter; no LICENSE file at the pinned revision)",
-      "notes": "docs/model-fetch-2026-10-15.md"
+      "notes": "docs/evaluation-tooling.md (model registry and downloads)"
     },
     "qwen3-4b-2507": {
       "label": "qwen3-4b-instruct-2507-q4_k_m",
@@ -85,7 +85,7 @@
       "vram_budget_bytes": 6871947673,
       "vram_budget_source": "estimate: 2.33 GiB weights + 3.4 GiB f16 KV at 24576 (36 layers x 8 KV heads x 128) + buffers",
       "licence": "Apache-2.0 upstream (Qwen/Qwen3-4B-Instruct-2507 cdbee75f); third-party quantisation, no redistribution clearance inferred",
-      "notes": "docs/local-rag-benchmark-plan.md; AnyJev readout in docs/local-hierarchy-screen-2026-10-15.md"
+      "notes": "docs/results.md (local RAG benchmark; AnyJev readout in the hierarchy screen)"
     },
     "qwen36-35b-a3b": {
       "label": "qwen3.6-35b-a3b-q4_k_m",
@@ -169,7 +169,7 @@
       "vram_budget_bytes": 3221225472,
       "vram_budget_source": "candidate sheet: 2.4 GiB at 24k f16 KV + 0.6 GiB buffers (estimate)",
       "licence": "Apache-2.0",
-      "notes": "docs/small-model-candidates-2026-10-16.md #1. Revision is a prefix from the sheet: pin the full commit with tools/fetch_models.py before download. Italian not stated. Downloaded and sha256-verified 1792160926 (unix)."
+      "notes": "docs/results.md (CPU S40 screens) #1. Italian not stated. Downloaded and sha256-verified 1792160926 (unix)."
     },
     "lfm25-2.6b": {
       "label": "lfm2.5-2.6b-q4_k_m",
@@ -211,7 +211,7 @@
       "vram_budget_bytes": 2791728742,
       "vram_budget_source": "candidate sheet: 2.0 GiB at 24k + 0.6 GiB buffers (estimate)",
       "licence": "LFM Open License v1.0 (commercial use only below US$10M annual revenue; not OSI)",
-      "notes": "docs/small-model-candidates-2026-10-16.md #2. Downloaded and sha256-verified 1792161452 (unix)."
+      "notes": "docs/results.md (CPU S40 screens) #2. Downloaded and sha256-verified 1792161452 (unix)."
     },
     "lfm25-8b-a1b": {
       "label": "lfm2.5-8b-a1b-q4_k_m",
@@ -253,7 +253,7 @@
       "vram_budget_bytes": 6120328396,
       "vram_budget_source": "candidate sheet: 5.1 GiB at 24k + 0.6 GiB buffers (estimate)",
       "licence": "LFM Open License v1.0 (commercial use only below US$10M annual revenue; not OSI)",
-      "notes": "docs/small-model-candidates-2026-10-16.md #3. MoE, fits fully on the GPU (estimate). Downloaded and sha256-verified 1792160436 (unix)."
+      "notes": "docs/results.md (CPU S40 screens) #3. MoE, fits fully on the GPU (estimate). Downloaded and sha256-verified 1792160436 (unix)."
     },
     "granite42-3b": {
       "label": "granite-4.2-3b-q4_k_m",
@@ -299,7 +299,7 @@
       "vram_budget_bytes": 4939212390,
       "vram_budget_source": "candidate sheet: 4.0 GiB at 24k + 0.6 GiB buffers (estimate)",
       "licence": "Apache-2.0",
-      "notes": "docs/small-model-candidates-2026-10-16.md #4a. Qwen3-Coder XML handler; the 4.2 template is not in the pinned llama.cpp tests. Downloaded and sha256-verified 1792158730 (unix)."
+      "notes": "docs/results.md (CPU S40 screens) #4a. Qwen3-Coder XML handler; the 4.2 template is not in the pinned llama.cpp tests. Downloaded and sha256-verified 1792158730 (unix)."
     },
     "granite42-8b": {
       "label": "granite-4.2-8b-q4_k_m",
@@ -345,7 +345,7 @@
       "vram_budget_bytes": 7945689497,
       "vram_budget_source": "candidate sheet: about 7.0 GiB with q8_0 KV at 24k plus buffers, borderline (estimate)",
       "licence": "Apache-2.0",
-      "notes": "docs/small-model-candidates-2026-10-16.md #4b. Fits 8 GB at 24k only with q8_0 KV (estimate, about 7.0 GiB plus buffers, borderline); quantised V needs flash attention on Vulkan. Downloaded and sha256-verified 1792166396 (unix)."
+      "notes": "docs/results.md (CPU S40 screens) #4b. Fits 8 GB at 24k only with q8_0 KV (estimate, about 7.0 GiB plus buffers, borderline); quantised V needs flash attention on Vulkan. Downloaded and sha256-verified 1792166396 (unix)."
     },
     "llama31-8b": {
       "label": "llama-3.1-8b-instruct-q4_k_m",
@@ -387,7 +387,7 @@
       "vram_budget_bytes": 7194070220,
       "vram_budget_source": "candidate sheet: about 6.7 GiB with q8_0 KV at 24k including buffers (estimate)",
       "licence": "Llama 3.1 Community License (attribution, naming and acceptable-use terms; not open source). Gated upstream; third-party GGUF",
-      "notes": "docs/small-model-candidates-2026-10-16.md #5. Tool calls go through the generic autoparser at b11610 (no pinned parse test). Needs q8_0 KV at 24k (estimate). Downloaded and sha256-verified 1792167988 (unix)."
+      "notes": "docs/results.md (CPU S40 screens) #5. Tool calls go through the generic autoparser at b11610 (no pinned parse test). Needs q8_0 KV at 24k (estimate). Downloaded and sha256-verified 1792167988 (unix)."
     },
     "ministral3-8b": {
       "label": "ministral-3-8b-instruct-2512-q4_k_m",
@@ -429,7 +429,7 @@
       "vram_budget_bytes": 7516192768,
       "vram_budget_source": "candidate sheet: about 7.0 GiB with q8_0 KV at 24k including buffers, tight (estimate)",
       "licence": "Apache-2.0",
-      "notes": "docs/small-model-candidates-2026-10-16.md S1. Vision-language model; the runner passes --no-mmproj. Needs q8_0 KV at 24k (estimate, tight). Downloaded and sha256-verified 1792164655 (unix)."
+      "notes": "docs/results.md (CPU S40 screens) S1. Vision-language model; the runner passes --no-mmproj. Needs q8_0 KV at 24k (estimate, tight). Downloaded and sha256-verified 1792164655 (unix)."
     },
     "gemma4-e4b": {
       "label": "gemma-4-e4b-it-q4_0",
@@ -471,7 +471,7 @@
       "vram_budget_bytes": 5690831667,
       "vram_budget_source": "candidate sheet: 4.7 GiB (Q4_0, sliding-window KV) + 0.6 GiB buffers (estimate)",
       "licence": "Apache-2.0 (Gemma 4 licence page; separate prohibited-use policy page)",
-      "notes": "docs/small-model-candidates-2026-10-16.md S2. Official ggml-org Q4_0 chosen (the sheet's VRAM estimate is for Q4_0); the third-party unsloth Q4_K_M (4,977,171,584 B, 85a896a0...ab87) is the alternative. Downloaded and sha256-verified 1792162902 (unix)."
+      "notes": "docs/results.md (CPU S40 screens) S2. Official ggml-org Q4_0 chosen (the sheet's VRAM estimate is for Q4_0); the third-party unsloth Q4_K_M (4,977,171,584 B, 85a896a0...ab87) is the alternative. Downloaded and sha256-verified 1792162902 (unix)."
     }
   }
 }

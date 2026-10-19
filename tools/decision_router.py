@@ -1,4 +1,4 @@
-"""Dev-only decision router SYS-R (docs/decision-router-plan.md, revision 3.1). Prototype tier.
+"""Dev-only decision router SYS-R (docs/evaluation-tooling.md). Prototype tier.
 
 Host-side, stdlib only. Everything here is frozen before inference (plan §3 "Freeze"):
 - the question, the 7 options (the SYSTEM_PROMPT outcome lines) and their hash;

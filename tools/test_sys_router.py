@@ -6,7 +6,7 @@ the demo dev split (two seeds, expected replay) to the digest produced by the un
 pre-router harness merged with master f9d34e0, on the rev3 pack (computed with this file's own normalisation), so the router code must
 leave C0 byte-identical when it is off. A pack change legitimately changes the digest: then
 recompute it by running c0_ledger_text with the previous commit's tool_loop_benchmark on the new
-pack (docs/decision-router-implementation.md), never by copying the current output.
+pack, never by copying the current output.
 """
 
 import copy

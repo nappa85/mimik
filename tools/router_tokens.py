@@ -1,4 +1,4 @@
-"""Vocab-only prompt token measurement (docs/decision-router-plan.md §2). Prototype tier.
+"""Vocab-only prompt token measurement (docs/evaluation-tooling.md). Prototype tier.
 
 Runs in a decision image. Loads tokenizers only, never weights, and runs no inference:
 - GGUF backbones (AnyJev): `llama_cpp.Llama(model_path, vocab_only=True, n_gpu_layers=0)`,

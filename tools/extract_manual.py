@@ -35,7 +35,7 @@ def main():
         from marker.renderers.markdown import MarkdownRenderer
     except (ImportError, importlib.metadata.PackageNotFoundError) as error:
         raise ValueError(
-            "Marker prototype dependencies are unavailable. See docs/extraction-prototype.md."
+            "Marker prototype dependencies are unavailable. See docs/sources-and-retrieval.md."
         ) from error
 
     config = {

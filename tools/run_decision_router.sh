@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runner for one decision-router unit (docs/decision-router-plan.md §5, rev. 3.1). Prototype tier.
+# Runner for one decision-router unit (docs/evaluation-tooling.md). Prototype tier.
 # Same safety contract as tools/run_tool_loop_benchmark.sh: the shared runner lock (strictly
 # sequential with the tool-loop runs), one Docker endpoint, schedule gates before every heavy
 # step, an absolute cutoff, ownership labels on every container, bounded docker calls, verified

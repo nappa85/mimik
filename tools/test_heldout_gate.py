@@ -1,7 +1,7 @@
-"""Held-out hash gate (docs/tool-loop-harness-v3-plan.md §11 item 8). Failing-first.
+"""Held-out hash gate (docs/tool-loop-heldout-v3-freeze.md). Failing-first.
 
 Round 1 (0b9742d): a held-out run read the pack's own cases-heldout.json with no hash check.
-Round 2 (review of 0b9742d, docs/reviews/2026-10-17-heldout-gate.md): the pin could be replaced
+Round 2 (review of 0b9742d): the pin could be replaced
 from the CLI, ledgers did not enforce the frozen hash, the file was hashed and parsed in separate
 reads, and --validate-pack printed held-out gold details. Every test uses synthetic case files;
 a synthetic pin is injected only by patching the module constants (no CLI or env override).
@@ -342,7 +342,7 @@ class ValidatePackTests(unittest.TestCase):
 
 
 class ReviewRoundTwoTests(unittest.TestCase):
-    """Re-review of f4b5e15 (docs/reviews/2026-10-17-heldout-gate.md, round 2)."""
+    """Re-review of f4b5e15 (held-out gate review, round 2)."""
 
     def run_cli(self, argv, pin_path):
         err, out = io.StringIO(), io.StringIO()
@@ -482,7 +482,7 @@ class ReviewRoundTwoTests(unittest.TestCase):
 
 
 class ReviewRoundThreeTests(unittest.TestCase):
-    """Re-review of 7ed4887 (docs/reviews/2026-10-17-heldout-gate.md, round 3)."""
+    """Re-review of 7ed4887 (held-out gate review, round 3)."""
 
     DIGESTS = {
         "full": "4f5f0b031f6f2595ff3bae8f73fa6ce94b7787d30559bef63b4e04fab6bbfce1",
@@ -689,7 +689,7 @@ class ReviewRoundThreeTests(unittest.TestCase):
 
 
 class ReviewRoundFourTests(unittest.TestCase):
-    """Re-review of 66f56c1 (docs/reviews/2026-10-17-heldout-gate.md, round 4)."""
+    """Re-review of 66f56c1 (held-out gate review, round 4)."""
 
     def ledger(self, tmp, n=5):
         path, pin_path, doc = synthetic(tmp, n=n)

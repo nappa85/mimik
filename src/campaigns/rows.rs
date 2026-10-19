@@ -1,4 +1,4 @@
-//! List units (assisted sheet slice 1.5b, plan §3a "Per-cell save", D-C, D-S, D-V): a saved
+//! List units (assisted sheet slice 1.5b; `docs/assisted-entry.md`, D-C, D-S, D-V): a saved
 //! row's cell, the new-row form, and Remove, Move up and Move down of one row, each saved on
 //! its own.
 //!
@@ -27,7 +27,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// The most notes one new-row form records: one per integer, enum or boolean property, and a
-/// list has at most 32 properties (the definition decoder's cap, plan §3a "Bounds").
+/// list has at most 32 properties (the definition decoder's cap).
 pub(crate) const MAX_ROW_NOTES: usize = 32;
 
 /// A list unit's plan and what its answer needs.

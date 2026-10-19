@@ -1,4 +1,4 @@
-"""Profile catalogue publication through the real CLI (plan docs/catalogue-plan.md R8, §9).
+"""Profile catalogue publication through the real CLI (docs/catalogues.md, R8).
 
 Synthetic data only. Seeds a scratch database with one finalized synthetic source
 (1,024 pages x 16 units), imports a catalogue draft at the plan's maxima, and measures
@@ -12,7 +12,7 @@ holds the lock. R8 hold evidence comes from `--no-contender` runs (conservative 
 runs with the contender report its wait and success, and loose bounds. Cases: v1, v2
 (update) and v3 of the calibrated shape, then five
 shapes at the caps, each published and updated: maximum fan-out, FTS-heavy names (4- and
-3-character tokens), 64-scalar keys and declaration-heavy types (plan docs/catalogue-plan.md
+3-character tokens), 64-scalar keys and declaration-heavy types (catalogue plan
 §12-§14). They are the worst measured cases on the profiling host, not a proof that no
 admitted shape costs more. The R8 gate (`--max-hold-ms`, finite and positive, 2,000 by
 default) exits 1 when no publication was gated, a hold's upper bound exceeds the budget or

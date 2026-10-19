@@ -1,5 +1,5 @@
-//! Slice 1.5b "Per-cell save: lists, new row, row actions" (assisted sheet plan §3a
-//! "Per-cell save", D-C, D-S, D-V, D-M, D-X3; §3f; §5 slice 1.5b): each saved row cell
+//! Slice 1.5b "Per-cell save: lists, new row, row actions" (`docs/assisted-entry.md`, "Saving
+//! a saved sheet"; D-C, D-S, D-V, D-M, D-X3): each saved row cell
 //! saves on its own (`cells/{f}/{r}/{p}`, the row named by its index at the form's `base`),
 //! a new-row form adds one row (`lists/{f}/rows`), and each row has Remove, Move up and Move
 //! down (`lists/{f}/rows/{r}/{remove|up|down}`). Remove protects the row's values and is
@@ -1447,4 +1447,38 @@ async fn a_move_returns_to_the_moved_rows_move_button() {
         assert_eq!(status, StatusCode::OK, "{query}");
         assert!(!html.contains("autofocus"), "{query}");
     }
+}
+
+/// R1 with a dirty row cell (plan §3a): tab A has an unsaved Quantity of row 2; tab B saves
+/// that Quantity; tab A saves row 1's Weight, which succeeds; tab A's row-2 form still has
+/// its old `base`, so its save is 409 with the stored value and the draft both kept.
+#[tokio::test]
+async fn two_tabs_without_script_keep_each_cells_base() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    three_rows(&setup).await;
+    let tab_a = page(&setup).await;
+    let tab_b = page(&setup).await;
+    assert_eq!(
+        enter(&setup, &tab_b, "row-4-1-1", "5").await.0,
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        enter(&setup, &tab_a, "row-4-0-2", "4").await.0,
+        StatusCode::SEE_OTHER
+    );
+    let (status, html) = enter(&setup, &tab_a, "row-4-1-1", "8").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(unit_form(&html, "row-4-1-1", None).1[2], pair("value", "8"));
+    assert_eq!(unit_form(&html, "row-4-1-1", None).1[1], pair("base", "3"));
+    let data = saved(&setup, 1).await.1;
+    assert_eq!(
+        (
+            &data["equipment"][1]["quantity"],
+            &data["equipment"][0]["weight"]
+        ),
+        (&json!(5), &json!(4)),
+        "stored kept"
+    );
 }

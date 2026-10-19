@@ -40,7 +40,7 @@ pub const MAX_LISTS: usize = 32;
 pub const MAX_PROPERTIES: usize = 32;
 pub const MAX_OPTIONS: usize = 128;
 pub const MAX_FORMULAS: usize = 384;
-/// Static work units per definition (see `docs/derived-formulas-plan.md` for calibration).
+/// Static work units per definition (calibration: `docs/formulas.md`, "Static limits").
 pub const MAX_COST: u64 = 2_000_000;
 /// Parsing and evaluation run on a dedicated thread with this stack: the ANTLR-generated parser
 /// and `cel`'s recursive evaluator overflow a 2 MiB stack in debug builds well inside the
