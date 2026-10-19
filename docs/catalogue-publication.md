@@ -399,12 +399,20 @@ sheet's current revision. A catalogue whose sealed title is damaged is listed as
 unavailable and its pages show the catalogue id instead of the title. Both routes are reached only through a sheet the
 reader may read (its custodian, including a departed custodian of a frozen sheet, or an
 active Master of its campaign; never the production Owner) and the sheet's immutable runtime
-pin must link the catalogue. Native and unsupported pins, unlinked, unknown or other games'
-catalogues, unknown keys and unknown entry types all answer exactly like an unreadable sheet
-(403), so the routes cannot probe what exists; malformed ids, cursors, unknown query
-parameters and queries over 100 scalars answer 400 before any lookup, and before the session
-is checked (a syntax check only, so an anonymous request can tell 400 from 403 but learns
-nothing about what exists).
+pin must link the catalogue. Errors explain themselves (user decision 2026-10-19, plan §19):
+
+| Status | When | Page |
+|---|---|---|
+| 400 | Malformed sheet id, catalogue id, entry key, type or cursor; an unknown or repeated query parameter; a query over 100 scalars | "Invalid catalogue address": what a valid address looks like, and a link to the reader's sheets. Answered before any lookup and before the session is checked (syntax only: an anonymous request can tell 400 from 403 but learns nothing about what exists) |
+| 403 | Every refusal: an unreadable or unknown sheet (including the production Owner), a native or unsupported pin, a catalogue that is unlinked, unknown, of another game or edition, or without a sealed version, and a grant or session revoked between the two read transactions | "Catalogue unavailable": "This catalogue can't be opened from this sheet. Either it isn't linked to the sheet's game definition, it hasn't been published yet, or you can't read this sheet.", with links back to the sheet and to the reader's sheets. **One page for every cause**: its only variable is the sheet link, taken from the address, so it never says which check failed or whether another game's catalogue exists (D11, R6) |
+| 404 | Every check passed (the reader may browse this catalogue) but the entry key, or the `type` filter, is not in its latest sealed version | “No entry “key” in Title.” (or "No entry type …"), with links to browse the catalogue and back to the sheet. This reveals nothing new: the reader can already browse every entry and type |
+
+An unknown cursor (`after`) still restarts from the beginning, as a cursor can go stale
+when a new version is published. A key that exists in another catalogue or another game is
+"not found" in this one, with the same page as a key that exists nowhere. These pages are
+marked so the authentication layer keeps their body instead of its generic error page. An
+ended session still answers the session layer's 401 (a sign-in redirect for a browser), as
+on the sheet page; the sheet page itself keeps its own generic 403.
 
 Each request holds the single runtime permit through every phase: a first read transaction
 (session recheck, read authorization, the snapshot and pin), validation outside the

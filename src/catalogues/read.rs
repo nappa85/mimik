@@ -165,6 +165,9 @@ pub(crate) enum BrowseFailure {
     /// The reader's query cannot run: no searchable words, control characters, more than 16
     /// pieces, or the time budget. Its static message is shown with the search form.
     Query(&'static str),
+    /// The type filter names no entry type of this version: the reader is inside the
+    /// catalogue and can see its types, so the route answers "not found" (plan §19).
+    UnknownType,
     /// Anything else (refusals, damage, storage): never presented as a query problem.
     Other(AppError),
 }
@@ -201,6 +204,7 @@ impl From<BrowseFailure> for AppError {
     fn from(failure: BrowseFailure) -> Self {
         match failure {
             BrowseFailure::Query(message) => Self::Invalid(message),
+            BrowseFailure::UnknownType => Self::NotFound,
             BrowseFailure::Other(error) => error,
         }
     }
@@ -212,8 +216,8 @@ impl From<BrowseFailure> for AppError {
 ///
 /// # Errors
 /// `Query` for a query without searchable words, with control characters or more than 16
-/// pieces, or one that exceeds the time budget; `Other(NotFound)` for an entry type the
-/// version does not declare; `Other` for storage failures and damage.
+/// pieces, or one that exceeds the time budget; `UnknownType` for an entry type the version
+/// does not declare; `Other` for storage failures and damage.
 pub(crate) fn browse(
     db: &Connection,
     linked: &Linked,
@@ -243,7 +247,7 @@ fn browse_within(
     if let Some(entry_type) = &query.entry_type
         && !types.iter().any(|(id, _)| id == entry_type)
     {
-        return Err(AppError::NotFound.into());
+        return Err(BrowseFailure::UnknownType);
     }
     // An unknown cursor key restarts from the beginning (R13).
     let cursor: Option<(String, String)> = match &query.after {

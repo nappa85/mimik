@@ -1826,3 +1826,107 @@ returns any other touched file to `HEAD`, and the comment is fixed below.
 - Release build (07:19) and `browser_smoke.py --auth` (CI flags, `--cpus=2`), 07:20–07:21:
   every stage passed, the catalogue stage at both viewports.
 - `smoke_release.py --auth` (`--cpus 2`), 07:21–07:22: passed.
+
+## 19. User decisions on step-3 deviations (2026-10-19)
+
+Branch `catalogue-decisions` from master `eece89b`. The user ruled on the §17 open questions
+and the step-3 deviations.
+
+1. **Caps.** Raising the 6,144-entry / 6,144-reference caps (for example by the name-index
+   experiment of §14) is premature optimisation; the priority is a working proof of concept.
+   Caps stay 6,144 / 6,144. Recorded only.
+2. **"404 should be not found, ok for 403 and give a meaningful error."** Implemented:
+   - **404, not found:** only once every check has passed (readable sheet, supported runtime
+     pin, catalogue linked by the pinned definition, latest sealed version found), an entry
+     key that is not in that version answers 404: “No entry “key” in Title.”, with links to
+     browse the catalogue and back to the sheet. The store returns it as a body
+     (`Body::NoEntry`), not an error, so the final session recheck of transaction B still
+     runs before it is rendered. It reveals nothing new: the reader can browse every entry.
+     A key of another catalogue or game reads exactly like a key that exists nowhere.
+   - **Unknown `type` filter: 404 too** (“No entry type “potion” in Title.”, link to browse
+     all entries). The type list is shown in the browse form, so its absence reveals nothing,
+     and a stale filtered link (a type removed by a new version) is better explained than
+     silently empty. `read::browse` returns the new `BrowseFailure::UnknownType` instead of
+     `Other(NotFound)`, and it is reported only inside the linked catalogue (on any refusal
+     the request never reaches it). **Unknown cursor (`after`): unchanged**, it restarts from
+     the beginning (R13): a cursor goes stale on every publication, and restarting is a usable
+     page, not an error.
+   - **403, refusals, meaningful and uniform. Choice: (a), a catalogue-specific page.** Every
+     refusal (unreadable or unknown sheet, production Owner, native or unsupported pin,
+     unlinked, unknown, other games' or unsealed catalogue, grant or session revoked between
+     the transactions) answers one page, "Catalogue unavailable": "This catalogue can't be
+     opened from this sheet. Either it isn't linked to the sheet's game definition, it hasn't
+     been published yet, or you can't read this sheet." with links to the sheet (from the
+     address) and to the reader's sheets. Option (b), rewording the shared 403, was rejected:
+     that body is the auth layer's generic 403 (`errors::plain` / `errors::document`: "Access
+     denied." / "Your form may have expired…"), shared with CSRF and origin failures and every
+     other route, so a catalogue-specific explanation cannot live there without changing
+     unrelated pages. The byte-identity tests now compare catalogue refusals with each other
+     (the outsider's refusal for the same sheet id is the reference), not with the sheet
+     page. The production Owner's refusal comes from `request_auth` (403 before the store);
+     the route maps that 403 to the same page (found by the first green run, below). An
+     ended session keeps the session layer's 401, as on the sheet page.
+   - **400, malformed:** answered before any lookup and before the session check, as before,
+     now with "Invalid catalogue address" and what a valid address looks like. Path and query
+     extractor rejections (non-numeric sheet id, unknown or repeated parameter) are taken as
+     `Result` extractors so they get the same page instead of axum's plain rejection.
+   - The three pages are marked `CatalogueNotice`; the auth layer keeps a marked body at 400,
+     403 and 404 only (`campaigns::web::catalogue_notice`), for plain requests and for
+     browser document navigations alike. No other route is affected.
+3. **Out-of-date (stale) wiring keeps catalogues readable** (§17 decision 3): confirmed by the
+   user, no change.
+4. **Retired entries stay in browse results with a "Retired" badge** (§17 decision 4):
+   confirmed by the user, no change.
+
+Code: `src/campaigns/catalogue_web.rs` (notices, `Result` extractors, the Owner mapping),
+`src/campaigns/catalogue.rs` (`Body::NoEntry`, `Body::NoType`), `src/catalogues/read.rs`
+(`BrowseFailure::UnknownType`), `src/campaigns/web.rs` (`CatalogueNotice`), `src/auth/mod.rs`
+(two exemptions), `templates/catalogue_notice.html`. Operator documentation:
+[catalogue-publication.md](catalogue-publication.md#reading-through-a-sheet). The Chromium and
+process smoke checks assert only the 403 status of an outsider's browse, not its body, so
+they are unchanged.
+
+**Red → green.** Red: the final tests against master `eece89b`'s code (07:36 run: 7 of 19
+catalogue route tests failed), plus the narrow cases named.
+
+| Test | Red | Green |
+|---|---|---|
+| `campaigns::tests::catalogue_tests::missing_entries_and_types_of_a_linked_catalogue_are_not_found` (unknown key, key of an unlinked catalogue, key of another game, key of another linked catalogue, unknown type with and without `q`/`after`; plain and document requests; empty type and unknown cursor still 200) | master: 403 "Access denied." | pass |
+| `…::refusals_are_uniform_and_explain_themselves` (unlinked, other game, unknown catalogue, unknown catalogue with a key, other player, outsider, production Owner, unknown sheet, native pin, unsealed catalogue; every body equal to the outsider's refusal for that sheet id and containing the message; plain and document requests) | master: "Access denied." without the message. First green attempt: the production Owner still got "Access denied." (`request_auth`'s 403 bypassed the notice); fixed by the mapping | pass |
+| `…::malformed_addresses_answer_400_before_any_lookup_and_say_why` (non-numeric sheet id on both routes, bad catalogue id, key, type, cursor, unknown and repeated parameters, 101-scalar query; reader and outsider identical; plain and document requests) | master: "Invalid request." | pass |
+| `…::catalogues_are_confined_to_the_pair_the_seal_and_the_catalogue` (other edition's key and the unsealed v2's key now 404 without their content) | master: 403 | pass |
+| `…::corrupt_pins_and_snapshots_are_refused`, `…::a_consistently_rewritten_unsupported_pin_is_refused_by_the_route`, `…::sheet_links_its_catalogues_and_routes_follow_the_sheet_read_matrix` (compare with the catalogue refusal) | master: "Access denied." without the message | pass |
+| Mutation: the auth boundary's document-presentation exemption for `CatalogueNotice` removed | the three new tests fail on their document-navigation requests (generic error page) | pass after restore |
+| `catalogues::read::tests` (unknown type is `UnknownType`) | updated with the variant | pass |
+
+Test defect found by the first green run: the disabled-custodian case of the read-matrix test
+had been changed to expect the catalogue refusal, but the custodian *is* the reader there, so
+its session ends and both the sheet and the routes answer the session layer's 401; the test
+again compares with the sheet page.
+
+**Gate** (container `mimik-ci:latest`, Monday 2026-10-19, all before 09:00, so `--cpus 6`
+or less was allowed; final tree):
+- `cargo fmt --check` and pedantic Clippy (`--all-targets --all-features -D warnings`):
+  clean (07:42, `--cpus 6`). The first Clippy run found `nonminimal_bool` in the auth
+  normaliser (fixed by naming the `explained` condition) and `too_many_lines` in the
+  confinement test (a `no_spell` helper).
+- `cargo test --locked --all-targets --all-features` (07:43–07:49, `--cpus 6`): **568
+  passed**, 0 failed, 2 ignored (the pre-existing one and `measure_the_worst_browse_page`),
+  37 result lines (step 3: 566; one test replaced by three).
+- `ruff check tools`, `ruff format --check tools`: clean (07:44, `--cpus 2`).
+- Tools unittest (`CI=1`, `MIMIK_FORMULA_EVAL` from the built `formula_eval` example, the
+  cargo registry cache and the main repository's git directory mounted, `--cpus 4`),
+  07:56–08:01: **751 run, 11 skipped, OK**. The known `test_fake_runner_script` error did
+  not occur in this environment. An earlier run without the registry cache (07:51–07:56,
+  `--cpus 6`) had one environmental error, `test_package` (`cargo package --list` needs the
+  registry), and passed `test_fake_runner_script`.
+- Release build (07:49–07:51, `--cpus 4`) and `browser_smoke.py --auth` in `mimik-browser`
+  (`--network=none --cpus=2 --memory=4g --shm-size=1g --pids-limit=1024 --cap-drop=ALL
+  --security-opt=no-new-privileges`, the worktree's `tools/` mounted on `/checks`),
+  07:57–07:58: every stage passed, the catalogue stage at both viewports.
+- `smoke_release.py --auth --source-fixture` against that release binary (`--cpus 2`),
+  07:58–07:59: passed.
+
+**Not run:** `cargo audit`, `cargo about`, packaging and the unpacked-archive checks, the LAN
+smoke, profiling. **Not yet done:** independent review of this change set (required before it
+is marked complete or merged).

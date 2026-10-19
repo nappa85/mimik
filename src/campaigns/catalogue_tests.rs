@@ -309,6 +309,53 @@ async fn get(app: &axum::Router, auth: &RequestAuth, path: &str) -> (StatusCode,
     (status, String::from_utf8(body.to_vec()).unwrap())
 }
 
+/// A browser navigation: the auth layer's document presentation applies to error pages.
+async fn navigate(app: &axum::Router, auth: &RequestAuth, path: &str) -> (StatusCode, String) {
+    use tower::ServiceExt;
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(path)
+                .header("host", "127.0.0.1:3000")
+                .header("accept", "text/html")
+                .header("sec-fetch-mode", "navigate")
+                .header("sec-fetch-dest", "document")
+                .header("cookie", auth.fixture_cookie())
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
+        .await
+        .unwrap();
+    (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+/// The uniform catalogue refusal's explanation (plan §19).
+const REFUSED: &str = "This catalogue can’t be opened from this sheet.";
+
+/// The uniform catalogue refusal for `sheet`, as the outsider (account 5) receives it: 403
+/// with the explanation and links back, the same for every cause (plan §19).
+async fn refusal(world: &World, sheet: i64) -> (StatusCode, String) {
+    let refused = get(
+        &world.app,
+        &world.auth[4],
+        &format!("/private-sheets/{sheet}/catalogue/spells"),
+    )
+    .await;
+    assert_eq!(refused.0, StatusCode::FORBIDDEN, "{}", refused.1);
+    assert!(refused.1.contains(REFUSED), "{}", refused.1);
+    assert!(
+        refused
+            .1
+            .contains(&format!("href=\"/private-sheets/{sheet}\""))
+    );
+    refused
+}
+
 async fn revision(store: &Store, sql: &'static str, id: i64) -> i64 {
     store
         .run(move |db| Ok(db.query_row(sql, [id], |row| row.get(0))?))
@@ -407,7 +454,7 @@ async fn sheet_links_its_catalogues_and_routes_follow_the_sheet_read_matrix() {
     assert!(!sheet.contains("<script"), "sheet pages load no script");
     let reader = |auth: usize| (world.app.clone(), world.auth[auth].clone());
     // Custodian (3) and Master (2) read; another player (4), an outsider (5) and the
-    // production Owner (1) are refused like an unreadable sheet.
+    // production Owner (1) receive the uniform catalogue refusal.
     for (account, expected) in [
         (2, StatusCode::OK),
         (1, StatusCode::OK),
@@ -447,7 +494,8 @@ async fn sheet_links_its_catalogues_and_routes_follow_the_sheet_read_matrix() {
             );
         }
     }
-    // A disabled custodian is refused exactly like the sheet itself.
+    // A disabled custodian's session ends: catalogue routes answer exactly like the sheet
+    // (the session layer's 401, before any catalogue check).
     world
         .store
         .run(|db| {
@@ -460,7 +508,7 @@ async fn sheet_links_its_catalogues_and_routes_follow_the_sheet_read_matrix() {
         .await
         .unwrap();
     let refused = get(&world.app, &world.auth[2], "/private-sheets/1").await;
-    assert_ne!(refused.0, StatusCode::OK);
+    assert_eq!(refused.0, StatusCode::UNAUTHORIZED);
     for path in PATHS {
         assert_eq!(
             get(&world.app, &world.auth[2], path).await,
@@ -471,7 +519,7 @@ async fn sheet_links_its_catalogues_and_routes_follow_the_sheet_read_matrix() {
 }
 
 #[tokio::test]
-async fn unlinked_unknown_foreign_and_native_catalogues_answer_like_an_unreadable_sheet() {
+async fn refusals_are_uniform_and_explain_themselves() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let world = world().await;
@@ -493,72 +541,182 @@ async fn unlinked_unknown_foreign_and_native_catalogues_answer_like_an_unreadabl
         get(&world.app, &world.auth[1], "/private-sheets/2").await.0,
         StatusCode::OK
     );
-    let unreadable = get(&world.app, &world.auth[4], "/private-sheets/1").await;
-    assert_eq!(unreadable.0, StatusCode::FORBIDDEN);
-    for (account, path) in [
+    let reference = refusal(&world, 1).await;
+    // The refusal names no catalogue, title or cause.
+    for hidden in ["spells", "Spells", "Access denied", "could not be accepted"] {
+        assert!(!reference.1.contains(hidden), "{hidden}");
+    }
+    let mut causes = vec![
+        // Unlinked catalogue of the same pair; another game's catalogue id; unknown id.
         (2, "/private-sheets/1/catalogue/bestiary"),
         (2, "/private-sheets/1/catalogue/bestiary/beast"),
         (2, "/private-sheets/1/catalogue/tomes"),
         (2, "/private-sheets/1/catalogue/nothing"),
-        (2, "/private-sheets/1/catalogue/spells/nothing"),
-        (2, "/private-sheets/1/catalogue/spells/beast"),
-        (2, "/private-sheets/1/catalogue/spells/other-only"),
-        (2, "/private-sheets/1/catalogue/items/giant"),
+        (2, "/private-sheets/1/catalogue/nothing/beast"),
         (1, "/private-sheets/1/catalogue/bestiary"),
+        // Readers who cannot read the sheet, for linked catalogues and existing keys.
+        (3, "/private-sheets/1/catalogue/spells"),
+        (3, "/private-sheets/1/catalogue/spells/lantern-flare"),
+        (3, "/private-sheets/1/catalogue/spells/nothing"),
+        (3, "/private-sheets/1/catalogue/spells?type=potion"),
+        (4, "/private-sheets/1/catalogue/nothing"),
+        // The production Owner reads no sheet.
+        (0, "/private-sheets/1/catalogue/items/lantern-flare"),
+        (0, "/private-sheets/1/catalogue/spells/nothing"),
+    ];
+    // An unknown sheet and a native pin.
+    let other_sheets = [
         (1, "/private-sheets/99/catalogue/spells"),
+        (1, "/private-sheets/99/catalogue/spells/nothing"),
         (1, "/private-sheets/2/catalogue/spells"),
         (1, "/private-sheets/2/catalogue/spells/lantern-flare"),
-        (4, "/private-sheets/1/catalogue/nothing"),
-    ] {
+        (1, "/private-sheets/2/catalogue/spells?type=potion"),
+    ];
+    for (account, path) in causes.iter().chain(other_sheets.iter()) {
+        let sheet = if path.starts_with("/private-sheets/99/") {
+            "99"
+        } else if path.starts_with("/private-sheets/2/") {
+            "2"
+        } else {
+            "1"
+        };
+        // Identical to every other cause, apart from the sheet link taken from the address.
+        let expected = (
+            reference.0,
+            reference
+                .1
+                .replace("/private-sheets/1\"", &format!("/private-sheets/{sheet}\"")),
+        );
+        assert_eq!(
+            get(&world.app, &world.auth[*account], path).await,
+            expected,
+            "{path}"
+        );
+        assert_eq!(
+            navigate(&world.app, &world.auth[*account], path).await,
+            expected,
+            "document: {path}"
+        );
+    }
+    // A linked catalogue without a sealed version.
+    remove_seals(&world.store, "items").await;
+    causes = vec![
+        (2, "/private-sheets/1/catalogue/items"),
+        (2, "/private-sheets/1/catalogue/items/lantern-flare"),
+        (2, "/private-sheets/1/catalogue/items/nothing"),
+    ];
+    for (account, path) in causes {
         assert_eq!(
             get(&world.app, &world.auth[account], path).await,
-            unreadable,
+            reference,
             "{path}"
         );
     }
-    // Syntax is checked before any lookup.
+}
+
+#[tokio::test]
+async fn missing_entries_and_types_of_a_linked_catalogue_are_not_found() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let world = world().await;
+    let spells = "<bdi>Spells &#60;i&#62;of&#60;/i&#62; light</bdi>";
+    let found = |path: &'static str| {
+        let (app, auth) = (world.app.clone(), world.auth[2].clone());
+        async move {
+            let page = get(&app, &auth, path).await;
+            assert_eq!(page.0, StatusCode::NOT_FOUND, "{path}: {}", page.1);
+            assert_eq!(navigate(&app, &auth, path).await, page, "document: {path}");
+            page.1
+        }
+    };
+    // Unknown keys, a key of an unlinked catalogue and a key of another game's catalogue all
+    // read the same: the entry is not in this catalogue.
+    let nothing = found("/private-sheets/1/catalogue/spells/nothing").await;
+    assert!(
+        nothing.contains(&format!("No entry “nothing” in {spells}.")),
+        "{nothing}"
+    );
+    assert!(nothing.contains("href=\"/private-sheets/1/catalogue/spells\""));
+    assert!(nothing.contains("href=\"/private-sheets/1\""));
+    for (path, key) in [
+        ("/private-sheets/1/catalogue/spells/beast", "beast"),
+        (
+            "/private-sheets/1/catalogue/spells/other-only",
+            "other-only",
+        ),
+    ] {
+        assert_eq!(found(path).await.replace(key, "nothing"), nothing, "{path}");
+    }
+    // A key of another linked catalogue (`giant` is a spell) is not an item.
+    let giant = found("/private-sheets/1/catalogue/items/giant").await;
+    assert!(giant.contains("No entry “giant” in <bdi>Synthetic items</bdi>."));
+    assert!(giant.contains("href=\"/private-sheets/1/catalogue/items\""));
+    assert!(!giant.contains("Giant Text"));
+    // An undeclared type filter, with or without a search and a cursor.
+    let potion = found("/private-sheets/1/catalogue/spells?type=potion").await;
+    assert!(
+        potion.contains(&format!("No entry type “potion” in {spells}.")),
+        "{potion}"
+    );
+    assert!(potion.contains("href=\"/private-sheets/1/catalogue/spells\""));
+    assert_eq!(
+        found("/private-sheets/1/catalogue/spells?type=potion&q=lantern&after=giant").await,
+        potion
+    );
+    // An empty type means all types; an unknown cursor restarts from the beginning (R13).
     for path in [
+        "/private-sheets/1/catalogue/spells?type=&q=&after=",
+        "/private-sheets/1/catalogue/spells?after=nothing",
+    ] {
+        assert_eq!(
+            get(&world.app, &world.auth[2], path).await.0,
+            StatusCode::OK,
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn malformed_addresses_answer_400_before_any_lookup_and_say_why() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let world = world().await;
+    let long = format!("/private-sheets/1/catalogue/spells?q={}", "a".repeat(101));
+    let mut first: Option<(StatusCode, String)> = None;
+    for path in [
+        "/private-sheets/x/catalogue/spells",
+        "/private-sheets/x/catalogue/spells/lantern-flare",
         "/private-sheets/1/catalogue/Spells",
         "/private-sheets/1/catalogue/spells/Lantern_Flare",
         "/private-sheets/1/catalogue/spells?type=Spell",
         "/private-sheets/1/catalogue/spells?after=-x",
         "/private-sheets/1/catalogue/spells?unknown=1",
         "/private-sheets/1/catalogue/spells?q=a&q=b",
+        long.as_str(),
     ] {
-        assert_eq!(
-            get(&world.app, &world.auth[2], path).await.0,
-            StatusCode::BAD_REQUEST,
-            "{path}"
-        );
+        // The reader and an outsider get the same page: syntax only, nothing is looked up.
+        for account in [2, 4] {
+            let page = get(&world.app, &world.auth[account], path).await;
+            assert_eq!(page.0, StatusCode::BAD_REQUEST, "{path}");
+            assert!(
+                page.1.contains("This catalogue address is not valid."),
+                "{path}: {}",
+                page.1
+            );
+            assert_eq!(
+                navigate(&world.app, &world.auth[account], path).await,
+                page,
+                "{path}"
+            );
+            match &first {
+                Some(first) => assert_eq!(&page, first, "{path}"),
+                None => first = Some(page),
+            }
+        }
     }
-    let long = format!("/private-sheets/1/catalogue/spells?q={}", "a".repeat(101));
-    assert_eq!(
-        get(&world.app, &world.auth[2], &long).await.0,
-        StatusCode::BAD_REQUEST
-    );
     let limit = format!("/private-sheets/1/catalogue/spells?q={}", "a".repeat(100));
     assert_eq!(
         get(&world.app, &world.auth[2], &limit).await.0,
-        StatusCode::OK
-    );
-    // An unknown type is refused like an unknown catalogue; an empty one means all types.
-    assert_eq!(
-        get(
-            &world.app,
-            &world.auth[2],
-            "/private-sheets/1/catalogue/spells?type=potion"
-        )
-        .await,
-        unreadable
-    );
-    assert_eq!(
-        get(
-            &world.app,
-            &world.auth[2],
-            "/private-sheets/1/catalogue/spells?type=&q=&after="
-        )
-        .await
-        .0,
         StatusCode::OK
     );
 }
@@ -809,7 +967,7 @@ async fn corrupt_pins_and_snapshots_are_refused() {
             "snapshot hash",
             "private_sheet_history_update",
             "UPDATE private_sheet_history SET hash='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'",
-            // The bounded loader finds no valid current event: refused like an unreadable sheet.
+            // The bounded loader finds no valid current event: the uniform refusal.
             StatusCode::FORBIDDEN,
         ),
         // R6: a corrupt pair. The pinned definition row names another game.
@@ -819,7 +977,7 @@ async fn corrupt_pins_and_snapshots_are_refused() {
             "UPDATE definition_versions SET game_id='other-game'",
             StatusCode::UNPROCESSABLE_ENTITY,
         ),
-        // Isolated pin-column damage: the bounded loader refuses it like an unreadable sheet,
+        // Isolated pin-column damage: the bounded loader refuses it (the uniform refusal),
         // because `private_sheet_events_valid` requires the stored snapshot's pin to equal
         // `json(s.pin)`. A coordinated rewrite of the pin, snapshots and hashes passes the
         // loader and reaches the route's own arm instead
@@ -833,7 +991,7 @@ async fn corrupt_pins_and_snapshots_are_refused() {
     ];
     for (damage, trigger, statement, expected) in damages {
         let world = world().await;
-        let unreadable = get(&world.app, &world.auth[4], "/private-sheets/1").await;
+        let unreadable = refusal(&world, 1).await;
         tamper(&world.store, trigger, statement.into()).await;
         for path in PATHS {
             let (status, html) = get(&world.app, &world.auth[2], path).await;
@@ -1232,12 +1390,26 @@ async fn the_second_transaction_rechecks_the_sheet_the_pin_and_the_session() {
     assert!(matches!(revoked, Err(AppError::NotFound)), "{revoked:?}");
 }
 
+/// The 404 page of `key` in the linked `spells` catalogue, as the custodian reads it.
+async fn no_spell(world: &World, key: &str) -> String {
+    let (status, html) = get(
+        &world.app,
+        &world.auth[2],
+        &format!("/private-sheets/1/catalogue/spells/{key}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{html}");
+    assert!(html.contains(&format!(
+        "No entry “{key}” in <bdi>Spells &#60;i&#62;of&#60;/i&#62; light</bdi>."
+    )));
+    html
+}
+
 #[tokio::test]
 async fn catalogues_are_confined_to_the_pair_the_seal_and_the_catalogue() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let world = world().await;
-    let unreadable = get(&world.app, &world.auth[4], "/private-sheets/1").await;
     // The same game and catalogue id in another edition, at a higher version.
     world
         .store
@@ -1264,15 +1436,10 @@ async fn catalogues_are_confined_to_the_pair_the_seal_and_the_catalogue() {
     publish_catalogue(&world.store, &second, 0).await;
     second["title"] = "Second edition spells, again".into();
     publish_catalogue(&world.store, &second, 1).await;
-    assert_eq!(
-        get(
-            &world.app,
-            &world.auth[2],
-            "/private-sheets/1/catalogue/spells/second-only"
-        )
-        .await,
-        unreadable
-    );
+    // The key exists only in the other edition: not found in this catalogue, nothing shown.
+    // The key exists only in the other edition: not found in this catalogue, nothing shown.
+    let html = no_spell(&world, "second-only").await;
+    assert!(!html.contains("Second Edition") && !html.contains("Elsewhere"));
     let (_, found) = get(
         &world.app,
         &world.auth[2],
@@ -1318,15 +1485,8 @@ async fn catalogues_are_confined_to_the_pair_the_seal_and_the_catalogue() {
         db.execute("INSERT INTO catalogue_entries(version_id,key,ordinal,type_id,name,retired,desc_kind,owner_text,properties) VALUES(?1,'unsealed-only',0,'charm','Unsealed Only',0,'owner_text','Never sealed.','{}')", [unsealed])?;
         Ok(())
     }).await.unwrap();
-    assert_eq!(
-        get(
-            &world.app,
-            &world.auth[2],
-            "/private-sheets/1/catalogue/spells/unsealed-only"
-        )
-        .await,
-        unreadable
-    );
+    let html = no_spell(&world, "unsealed-only").await;
+    assert!(!html.contains("Unsealed") && !html.contains("Never sealed"));
     let (status, sealed) = get(
         &world.app,
         &world.auth[2],
@@ -1521,7 +1681,7 @@ async fn a_consistently_rewritten_unsupported_pin_is_refused_by_the_route() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let world = world().await;
-    let unreadable = get(&world.app, &world.auth[4], "/private-sheets/1").await;
+    let unreadable = refusal(&world, 1).await;
     rewrite_pin_consistently(&world.store).await;
     // The loader accepts the rewrite: the sheet reads as an unsupported, read-only pin.
     let (status, sheet) = get(&world.app, &world.auth[2], "/private-sheets/1").await;

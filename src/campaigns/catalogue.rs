@@ -2,9 +2,12 @@
 //!
 //! A catalogue is reached only through a sheet the reader may read: its immutable runtime pin
 //! must link the catalogue by id, within the pin's own game and edition, and the latest sealed
-//! version is read. Native pins, unsupported pins, unlinked or unknown catalogues, unknown keys
-//! and unreadable sheets all answer `NotFound`, the shape of an unreadable sheet, so the routes
-//! cannot be used to probe what exists.
+//! version is read. Native pins, unsupported pins, unlinked, unknown or unsealed catalogues and
+//! unreadable sheets all answer `NotFound`, which the routes render as one uniform refusal, so
+//! they cannot be used to probe what exists or which check failed. Only once every check has
+//! passed (the reader is inside a catalogue it may browse) does an unknown entry key or entry
+//! type become [`Body::NoEntry`] or [`Body::NoType`] (plan §19): that reveals nothing the
+//! browse page does not already show.
 //!
 //! Phases, all under the caller's runtime permit (R6):
 //! 1. transaction A: recheck the session, authorize the read, load the raw snapshot and pin;
@@ -38,6 +41,10 @@ pub(crate) enum Body {
     /// The query could not run (no searchable words, control characters, more than 16 pieces,
     /// or the time budget); the static message is shown with the search form.
     Problem(&'static str),
+    /// No entry with this key in the latest sealed version.
+    NoEntry(String),
+    /// The type filter names no entry type of the latest sealed version.
+    NoType(String),
 }
 
 pub(crate) struct CataloguePage {
@@ -129,11 +136,15 @@ impl Store {
                 Request::Browse(query) => match read::browse(&tx, &linked, &query) {
                     Ok(page) => Body::Browse(page),
                     Err(read::BrowseFailure::Query(message)) => Body::Problem(message),
+                    Err(read::BrowseFailure::UnknownType) => {
+                        Body::NoType(query.entry_type.unwrap_or_default())
+                    }
                     Err(read::BrowseFailure::Other(error)) => return Err(error),
                 },
-                Request::Entry(key) => {
-                    Body::Entry(read::entry(&tx, &linked, &key)?.ok_or(AppError::NotFound)?)
-                }
+                Request::Entry(key) => match read::entry(&tx, &linked, &key)? {
+                    Some(entry) => Body::Entry(entry),
+                    None => Body::NoEntry(key),
+                },
             };
             auth.recheck(&tx)?;
             tx.commit()?;
