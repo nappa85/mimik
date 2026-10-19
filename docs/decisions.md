@@ -1,0 +1,261 @@
+# Decisions in force
+
+One line per decision, with its date and ID. Superseded decisions are removed; git history has the rest.
+Bare plan IDs are namespaced by section: under "Catalogues", D1–D12, Q and R are the catalogue plan's; under "Formulas and sheet values", D1–D11 are the list-editing (M4) plan's, cited in code as "plan Dn", and F- and M3- prefixes mark the earlier formula plans.
+Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, review, containers, secrets) live in `AGENTS.md`.
+
+## Product direction and rules review
+
+- **PROD-1** (2026-10-11) Mimik is a standalone, open-source, sheet-first companion for players at a physical table; it is not a virtual tabletop.
+- **PROD-2** (2026-10-19) Assisted paper sheet: help the player as much as possible and never force anything; improve paper and pencil rather than replace it.
+- **PROD-3** (2026-10-18) Assist, don't police (DL-1, DL-2): violations warn and never block; every change is logged and revertible, with a suggested fix where possible. A Master may open a sheet, its warnings and history; no automatic GM alert feeds or dashboards.
+- **PROD-4** (2026-10-18) Advancement is context-driven (DL-3): an out-of-context edit (such as max HP) warns; raising the level opens a guided context that highlights the fields to change, with hints, checked against the before state.
+- **PROD-5** (2026-10-15, refined 2026-10-18) The core is game-agnostic (DL-4): games are runtime definitions (data) from owner-supplied sheets and manuals; Rust knows only structural blocks; no new per-game compiled logic. Native MÖRK BORG code is an evaluation fixture.
+- **PROD-6** (2026-10-11, refined 2026-10-15) Extension uses declarative definitions and packs; executable plugins (WASM or subprocess) only for gaps the data contract demonstrably cannot cover; incomplete coverage is shown as incomplete.
+- **PROD-7** (2026-10-15) A game package can enable several books, each with its own identity, edition, revision and section tree; cross-book references and precedence are explicit, never merged by title.
+- **PROD-12** (2026-10-15, refined 2026-10-19) Derived values are declarative CEL formulas evaluated in Rust, never template JavaScript; no other scripting language or rules DSL is added.
+- **PROD-15** (2026-10-13) Self-hosted on a private LAN, never publicly exposed; instance owners supply lawfully obtained manuals and are responsible for their use.
+- **PROD-18** (2026-10-15, extended 2026-10-19) The Owner may register rulesets, publish and withdraw definitions and administer catalogues from the browser as well as the CLI, through the same shared transitions, with account-attributed audit and no campaign access; Masters and players have no registry rights.
+- **PROD-22** (2026-10-12) Prototype records are disposable: wipe them rather than weaken new schemas, invariants or permissions; no implicit compatibility exception in new definitions.
+- **RR-1** (2026-10-19) Number fields accept anything the player types; the app warns and offers a solution instead of refusing.
+- **RR-2** (2026-10-19) An item not in the catalogue is accepted with a warning and the catalogue match offered (reverses catalogue Q4); without a match the app cannot know the item's details.
+- **RR-3** (2026-10-19) Saving is always allowed, but a sheet that a formula or ruleset shows to be invalid (a warrior with spells, max HP out of range) is flagged as not validated.
+- **RR-4** (2026-10-19) Typeahead and suggestions accept anything the user writes, suggest a correction, then validate.
+- **RR-5** (2026-10-19) JavaScript may make sheets interactive: list row actions, typeahead, catalogue picking and live recompute.
+- **RR-7** (2026-10-19) Controls are chosen per field: derived values may later become overridable, and fields (booleans included) may need custom inputs.
+- **RR-8** (2026-10-19) Capacity limits (campaigns, sheets, catalogue entries) are safety-only: generous technical bounds against runaway memory or disk use, far above any real group's needs; no product-level caps.
+- **RR-10** (2026-10-19) History is not limited to naming what changed; it may show values.
+
+## Assisted sheet entry
+
+- **D-B / D-R** (2026-10-19) A picked catalogue name is stored as plain text; once the player answers "Which Sword?", the entry key is stored beside it in a declared optional text property, and the cell still shows the text.
+- **D-C / D-S** (2026-10-19) Each field and list cell saves on its own on Enter; lists keep Add, Remove and Move, plus a quick-add line ("3 torches", "healing potion x2") with a deterministic parse in the POC.
+- **D-AA** (2026-10-19) With JavaScript a field also saves when the player leaves it, only if its value changed since its last save or offer; without JavaScript Enter is the only way.
+- **D-D** (2026-10-19) The model quality bar (EVAL-1) is waived for the POC and revisited before release; engineering gates stay.
+- **D-E** (2026-10-19) The sheet's readers (custodian and Masters) see raw scribbles and change notes in history.
+- **D-F / D-J** (2026-10-19) The model reads the phrase, the target, stored number and enum fields, list-row item names and their linked catalogue entry text; never notes, backstory or multiline text.
+- **D-G** (2026-10-19) Only the assistant and live suggestions need JavaScript; typing, arithmetic, notes, Undo and every save work without it.
+- **D-H** (2026-10-19) The provider client comes from an established Rust library (`genai` or `rig-core`); if none can send the structured-output schema or grammar, stop and ask. Candidates (Project-STROT via pyo3 or a Rust port included) are judged on results.
+- **D-I / D-K** (2026-10-19) Multi-field bundles (applied and undone as one) and dismissible reminders are their own step after model interpretation; POC knowledge is item names plus linked entry text.
+- **D-M** (2026-10-19) `null` is the unknown value of every integer cell: blank input is unknown, and an unreadable number in a new row, newly present property or on create is stored as unknown with its scribble.
+- **D-N / D-X1** (2026-10-19) Undo covers the last change of each field only, including a blanked (`erased`) value; older history is viewable.
+- **D-O** (2026-10-19) A name links to a catalogue entry automatically only when exactly one eligible entry matches; otherwise the sheet asks "Which Sword?".
+- **D-P** (2026-10-19) Stale or expired model proposals never become a literal; they need reconfirmation.
+- **D-Q / D-X4** (2026-10-19) Sign-led input ("-15") on a number field is applied literally, then a non-blocking, dismissible offer "Did you mean 84 − 15 = 69?" switches in one click; multi-term input ("84 -15") is computed directly.
+- **V3** (2026-10-19) "-5+3" is a sign-led sum: applied as −2 and offered relative to the value before ("84 − 5 + 3 = 82"); the leading sign must touch its digits.
+- **ASSIST-1** (2026-10-19) U+00A0 and U+202F count as spaces in number entry; other Unicode spaces and full-width digits stay unreadable.
+- **D-T** (2026-10-19) Change notes are written in the save's transaction, insert-only, for integer, enum and boolean cells only; sealing and verification come before release (L1).
+- **D-U / D-X2** (2026-10-19) A save that changes nothing writes no revision and no note. History has no cap in the POC; a per-account write-rate limit or storage guard is required before release.
+- **D-V** (2026-10-19) Removing a list row happens at once, with Undo right after; no confirmation.
+- **D-W** (2026-10-19) Any saved decrease of a top-level number field may trigger a reminder; the model judges relevance, with no owner marking.
+- **D-X3** (2026-10-19) Sheet writes wait up to 2 s for the `JOBS` permit, then answer a styled 503 page that keeps the player's entry; reads do not wait.
+- **U4** (2026-10-19) On a nullable integer field, "Known" with a blank value is unknown (`erased`), not refused.
+- **U7** (2026-10-19) Number input a note cannot hold faithfully (over 200 characters, or control characters) is refused with 422 instead of becoming a scribble.
+- **U8** (2026-10-19) An unknown shows as `placeholder="?"` on an empty control (never a literal "?" value), or as "? (unknown)" under a scribble.
+- **N2** (2026-10-19) A cell whose current note is a scribble on its saved value echoes the scribble in its control, so re-posting is a no-op; accepting the kept value requires typing it.
+- **N3** (2026-10-19) New cells (create, new rows) get notes only for interpreted sums and scribbles, not for plain literals.
+- **N7** (2026-10-19) A note insert must name the sheet's live, active `create`/`edit` revision under the request auth of that revision's actor.
+- **S1** (2026-10-19) Switch and Undo post exactly `csrf`, `base`, `note` and are bound to the note (still current, cell still holding its `after`), not to the page revision.
+- **S3** (2026-10-19) "Hide" on the switch offer is CSS-only and stores nothing; the offer returns on reload while its note is current.
+- **S5** (2026-10-19) Undo is offered only when the note's value before differs from its value after.
+- **P1** (2026-10-19) Until slice 1.5b, each list on a saved page is its own form posting that list's rows to the full-form route; the full-form key set stays accepted.
+- **P2** (2026-10-19) A unit form's single Save comes after its control; a list form's "Save list" comes first.
+- **P4** (2026-10-19) The D-X3 wait covers unit routes and full-form and list-form edits; switch, Undo and create keep the immediate 503. CSRF and session are checked before the wait.
+- **P5** (2026-10-19) Unit save order: malformed or zero `base` 400, `base` above L 409, no-op "No change" 200, changed unit 409, refused value 422.
+- **P9** (2026-10-19) A scribble is quoted under its cell to 32 characters; its control echoes it in full.
+
+## Formulas and sheet values
+
+- **F-CEL** (2026-10-15) Derived fields and advisory checks use CEL via the `cel` crate, restricted to profile `cel-mimik-1`; CEL semantics are accepted as is (truncating integer division, commutative error-absorbing `&&`/`||`). CEL is used only here.
+- **F-D1** (2026-10-15) Formulas, lists and constraints extend definition contract 1 additively behind the hashed root marker `formula_profile: 1`; formula-free definitions keep byte-identical canonical bytes and hashes; approval snapshots stay encoding 1.
+- **F-D2** (2026-10-15) Field IDs may contain `-` and `_`, but only `[a-z][a-z0-9_]*` IDs are declared to formulas; list fields and item properties must be identifier-shaped; `id` is reserved for the host item ID.
+- **F-1** (2026-10-15) Derived values are never stored or defaulted; a failure is an explicit error state. A formula field cannot be nullable or a list; checks are tri-state and an error is neither pass nor violated.
+- **F-2** (2026-10-15) The static budget (`MAX_COST` = 2,000,000 units per definition) is the deterministic bound; the 500 ms deadline is a safety net, and `deadline_exceeded`, like `internal_error`, shows as a state, logged without values.
+- **F-3** (2026-10-15, recorded 2026-10-16) `cel =0.15.0` (no default features) and `antlr4rust` 0.6.0 are pinned and gated by `pinned_engine_versions_in_lockfile`; `schemas/formula-conformance-v1.json` is SHA-256-locked; the engine stays behind `formula::{Compiled, Evaluation, Code}`.
+- **D-Y** (2026-10-19) `cel-mimik-1` may change until the first release with no profile bump or legacy behaviour; "a pinned definition is never reinterpreted" and "a semantic change needs `formula_profile: 2`" apply from the first release.
+- **D-Z** (2026-10-19) A formula or check that reads an unknown (`null`) integer, nullable or not, is not evaluated and reports `null_value`; `== null` is no fallback for integers. Nullable text, enum and boolean keep CEL null semantics.
+- **U2** (2026-10-19) The unknown guard is static: a formula whose read set names an unknown integer field, or an item property unknown in any item, is not run, even on a branch that would not be taken.
+- **M3-D1** (2026-10-16) The immutable pin carries the compiled formulas; no compile cache keyed by pin hash unless measurements justify one.
+- **M3-D2** (2026-10-16) Evaluation runs at render time, once per response, in the existing blocking step under the JOBS permit, after the final authorization recheck.
+- **M3-D4** (2026-10-16) Every state's wording comes from one exhaustive match over the codes; checks sit in "Advisory checks" (never block saving, not a legality ruling); expressions are in a collapsed "How this is computed".
+- **M3-D5** (2026-10-16) Saves keep post/redirect/get: the POST evaluates nothing and a violating save is never blocked; a rejected save re-renders the draft beside the saved revision's results; drafts are never evaluated.
+- **M3-D6** (2026-10-16) History recomputes from the sheet's pin; stale or withdrawn approval does not stop evaluation; create evaluates nothing; a change with an error on either side reads as unknown.
+- **M3-Q5** (2026-10-16) `dependency_failed` names the first derived field it reads, in evaluation order, whose own result is an error.
+- **M3-K40** (2026-10-16) Stored inputs the formula layer does not declare are projected away before evaluation; any other undeclared key is refused; only an `InputError` renders "Derived values unavailable" (200).
+- **M4-SCOPE** (2026-10-16) Lists ship as plain list editing: every declared list property is editable; a per-property `editable` flag and an item catalogue in the definition are later.
+- **D1** (2026-10-16) List form keys are positional: `id-f-r`, `row-f-r-p`, `set-f-r-p` (`present`/`absent`) and `op` from the clicked submitter; indices match `0|[1-9][0-9]{0,2}`; submitted row order is saved order.
+- **D2** (2026-10-16) Sheet POSTs are parsed with a 65,536-pair cap, then CSRF and authorization, then an O(n) exact-key admission; a bad key set answers 400.
+- **D3** (2026-10-16) Item IDs are host-managed: each new ID is `r<N>-<k>` (N the revision written, k the list's new-row number), enforced by the writer after the conflict check; IDs label row slots and never return once removed.
+- **D4** (2026-10-16) Save precedence: 413, 400 parse, 403 (CSRF, rights, read-only), 400 keys and ops, op re-render 200, stale 409, 422 values and IDs, then the writer's 409/422.
+- **D5** (2026-10-16, refined 2026-10-17) Add, Remove, Move up/down re-render an unsaved draft and never write; edge moves are disabled (forged: 400) and Add stops at 256 rows.
+- **D6** (2026-10-16) List sheets render a "Save full private sheet" button (`op=save`) before the groups so Enter saves.
+- **D7** (2026-10-16, refined 2026-10-19) Create/edit POSTs accept 5 MiB after a cookie-only principal check; drafts over 1 MiB answer 422 unechoed; publication refuses a worst-case form over 32,768 units, 65,536 pairs or 32,768 nodes (`list-form-exceeds-limit`).
+- **D8** (2026-10-16) History shows read-only rows and "Changes in revision N" against a revalidated N − 1 (names and addresses, at most 200 lines); any failure degrades to "unavailable".
+- **D9** (2026-10-16) List editing needs no engine change: derived fields cannot be lists, op and rejected re-renders show the saved revision's results, and `item.id` is the host ID.
+- **D10** (2026-10-16) Each list is a fieldset of row fieldsets with labelled controls and no tables; optional properties get a Set/Not set select.
+- **D11** (2026-10-16, refined 2026-10-17) List output uses Askama default escaping (no `|safe`), no op button has `formaction`, and page tests parse the DOM with dev-only `scraper`.
+
+## Runtime definitions, registry and publication
+
+- **DEF-2** (2026-10-12) Definitions use a closed Mimik envelope validated against the embedded trusted `schemas/definition-v1.json`; uploaded JSON Schema, `$ref`, regex, formats and remote or file retrieval are never compiled.
+- **DEF-4** (2026-10-12) Definition identity is SHA-256 over `mimik-definition-v1\0` plus Mimik's canonical encoding; new optional members are appended last and omitted when absent, so existing bytes and hashes never change.
+- **DEF-5** (2026-10-12) One non-queued definition admission job per process, acquired before reading input and held until blocking work ends even if the caller is cancelled.
+- **DEF-6** (2026-10-12) Drafts and source mappings never enable sheets or approve evidence; a mapping to an unreviewed unit is allowed and stays unreviewed.
+- **DEF-7** (2026-10-12) Creation never manufactures defaults; `null` means unknown, and `nullable` is a storage and form choice, not a statement about the game's rules.
+- **DL-5** (2026-10-18) Derived values read only the sheet's own stored values and pin; campaign- or scenario-scope reads need their own world-state revision plan first.
+- **REG-1** (2026-10-12) Game, edition and alias identities are stable slugs, insert-only and exactly matched; nothing is inferred from filenames, case or approximate labels.
+- **REG-2** (2026-10-12) Compiled adapters activate only on the canonical registered pair; the native pair cannot be shadowed by registration, aliases or definitions and accepts only its seeded alias.
+- **REG-3** (2026-10-12) Version-2 source bundles require a registered stable pair; v1 imports of built-in legacy systems may stay unresolved, other v1 systems need an exact alias.
+- **REG-5** (2026-10-15) Registry history records only newly created editions and aliases; exact repeats write nothing, and earlier registrations get no invented history.
+- **PUB-1** (2026-10-13) Wiring approval is an explicit human comparison of mappings with original page images (`--originals-compared`), bound to an exact comparison ticket; any change since is a conflict.
+- **PUB-2** (2026-10-13) Published versions, approvals and withdrawals are immutable; identical content reuses the latest version, changed content gets the next, and withdrawal never falls back to an older approval.
+- **PUB-3** (2026-10-13) Invalidation is page-scoped: any review on a captured page stales the approval, which never revives because content looks identical; only explicit reapproval restores it.
+- **PUB-4** (2026-10-12) Stale, withdrawn or never-approved wiring blocks new sheet creation only; existing sheets stay on their pin, readable and editable, with a warning.
+- **PUB-5** (2026-10-16) Unresolved field mappings and unresolved formula or constraint evidence do not block publication; they stay listed in the output.
+
+## Catalogues
+
+- **Q1** (2026-10-18) Players see citations only (source, printed page, PDF page); manual page images beside an entry are allowed after the assisted-sheet POC (RR-9).
+- **Q2** (2026-10-18) Entries whose source text is not yet reviewed are shown with an "Unchecked source text" badge.
+- **Q3** (2026-10-18) Owner-written entries (house rules, homebrew) are allowed, with an "Owner-written" badge.
+- **Q5** (2026-10-18) No switch restricts catalogue text: whoever can read a sheet linked to the catalogue (custodian, campaign Masters) can read it; catalogue data never enters packages or the repo.
+- **D1** (2026-10-18) Catalogues are a separate artifact from definitions: revisioned editable drafts; published versions immutable and insert-only, guarded against UPDATE, DELETE and `INSERT OR REPLACE`.
+- **D2** (2026-10-18) The envelope is closed, with its own trusted schema and decode profile (definition decoder limits unchanged); unit order is the author's and part of the identity.
+- **D3** (2026-10-18) A catalogue is identified by (game, edition, id) and linked by id, never version; readers use the latest sealed version; publication is append-only (retire instead of dropping or retyping); texts are labelled "current text".
+- **D4** (2026-10-18, refined 2026-10-19) Descriptions and badges are computed live from cited units and pages, nothing materialised; a rejected or malformed cited unit hides the whole description and keeps the citations.
+- **D5** (2026-10-18, refined 2026-10-19) Limits: 6,144 entries and unit references per catalogue, owner text 20,000 scalars per entry and 1 MiB total, 4 MiB draft, 8 links per definition, 50 per page, queries of 100 scalars and 16 pieces.
+- **D6** (2026-10-18) Publication is CLI-only (compare, then publish with the exact ticket, actor and rationale); no withdrawal; no command or error prints catalogue content, actor or rationale.
+- **D8** (2026-10-18) A definition links catalogues with the optional `catalogues` member; a sealed version of each linked catalogue of the same pair is required at draft save, in the publication snapshot and at readiness.
+- **D11** (2026-10-18, refined 2026-10-19) Catalogue routes are reached only through a readable sheet whose pin links the catalogue; malformed address 400, refusal one uniform 403, missing key or type 404; an unknown cursor restarts.
+- **D12** (2026-10-18) Catalogue rows are manual-derived local data: they belong in the local-data inventory, and no fixture or packaged artifact may contain non-synthetic rows.
+- **R1** (2026-10-18) The seal is inserted last and requires exact two-way equality between the hashed content and every projection column, then the append-only rule; Rust re-hashes the content first.
+- **R2** (2026-10-18) Only `unit_id` has a foreign key; page and source are checked by trigger and joins; the name index is derived, latest-only, rebuilt by `rebuild-catalogue-index`, checked by `verify-catalogues`.
+- **R5** (2026-10-18) Requests check only that a version is sealed with matching identity columns; hash and projection equality are checked at publish, by `show-catalogue-version` and `verify-catalogues`.
+- **R6** (2026-10-18) Catalogue requests hold the runtime permit through two read transactions (each rechecks session and authorization) with pin validation outside the database mutex in between.
+- **R7** (2026-10-18) Entry text is cut at 20,000 characters (character-safe) with a "continues in the manual" citation; owner text is never cut.
+- **R8** (2026-10-18) Acceptance at the caps: publish lock ≤ 2 s, a concurrent writer waits and succeeds, CLI RSS ≤ 256 MiB, page p95 ≤ 250 ms; a failed criterion lowers the caps.
+- **R10** (2026-10-18) Catalogue state never enters the definition wiring snapshot, its hash or the approval envelope, so a new catalogue version never stales a definition or sheet.
+- **R11** (2026-10-18) Retirement does not free capacity.
+- **R12** (2026-10-18) Badge wording: Reviewed "Source text reviewed. Which passages form this entry was chosen by the catalogue author."; Unchecked "Extracted from your manual; not yet reviewed."
+- **R13** (2026-10-18) Browse is ordered by (name, key); search filters and never ranks; the cursor is `after=<key>`.
+- **R15** (2026-10-18) A departed custodian keeps reading catalogue text through the frozen sheet.
+- **R17** (2026-10-18) Projections carry everything readers use (description kind, owner text, properties, unit source and page); readers never read `content`.
+- **R18** (2026-10-18) Seal SQL is linear: two `EXCEPT` queries per direction over `json_each`, no correlated scans over content.
+- **R19** (2026-10-18) Seals follow version order with no unsealed lower version; every key of every immutable table has a replacement guard; every insert checks rows affected.
+- **R20** (2026-10-18) The name-index rowid is catalogue surrogate × 2^20 + entry ordinal; search joins back on (version, key) of the latest sealed version.
+- **R21** (2026-10-18) Effective unit text is the correction for corrected units, else raw text, guarded by type and byte length; NUL or non-text makes the description unavailable.
+- **R25** (2026-10-18) The second transaction reloads the sheet and requires it to match the validated snapshot and the pin row to be unchanged; a sheet saved in between answers 409.
+- **R27** (2026-10-18) Readiness means each linked catalogue has a sealed version; no content verification.
+- **CAT-1** (2026-10-19) Any change to admission rules after publication outside tests needs a new admission profile id; old profiles keep validating old versions.
+- **CAT-2** (2026-10-19) Identical content citing a unit rejected since publication is refused with `rejected-units`, not reported as unchanged.
+- **CAT-3** (2026-10-19) Owner text keeps Unicode Cf for right-to-left prose, rendered in an isolated bidi context, LF-only; short labels refuse Cf, Zl, Zp and control characters.
+- **CAT-4** (2026-10-19) `catalogues: []` is refused, so "no links" has one spelling (absent).
+- **CAT-5** (2026-10-19) A sheet whose wiring went stale keeps reading its catalogues (confirmed by the user).
+- **CAT-6** (2026-10-19) Retired entries stay in browse with a "Retired" badge and their pages stay readable (confirmed by the user).
+- **CAT-7** (2026-10-19) History and create pages list no catalogue links; the routes read the sheet's current revision.
+- **CAT-8** (2026-10-19) The 403 refusal is a catalogue-specific page, not a rewording of the shared auth 403.
+
+## Campaigns
+
+- **CAMP-1** (2026-10-12) Any enrolled player can create a campaign and becomes its Master; joining is a request a Master accepts or declines; Master is a per-campaign role.
+- **CAMP-2** (2026-10-12) A campaign binds one exact registered `(game_id, edition_id)`; sheets and definition versions must match it, never inferred from a family or label; cross-pair creation is refused.
+- **CAMP-3** (2026-10-12) Sheet values and history are private to the custodian and current Masters; other members and the Owner have no access.
+- **CAMP-4** (2026-10-13) The original creator alone promotes and demotes additional Masters, who do not expire and do not inherit that authority.
+- **CAMP-5** (2026-10-13) Sheets belong to their player; only the player decides a transfer; departure, removal or disablement never reassigns custody.
+- **CAMP-6** (2026-10-13) Departure or removal freezes the player's sheets in that campaign, still linked; the player and current Masters keep read-only access; former Masters keep none.
+- **CAMP-7** (2026-10-12) Every sheet change is recorded in transactional history; rollback, when added, creates a new revision.
+- **CAMP-8** (2026-10-12) Prototype (legacy) sheets stay unassigned until an explicit migration; never silently shared.
+- **CAMP-9** (2026-10-15) Transfer is initiated by the current player and accepted by the recipient, within the same campaign; history keeps the prior custodian.
+- **CAMP-10** (2026-10-15) A frozen sheet is never unfrozen automatically or by the player alone: after rejoining, the player submits it to a Master, whose approval makes it editable.
+- **CAMP-11** (2026-10-15) A player may soft-delete their own sheet (hidden, history kept); the Owner restores it without gaining read or edit access.
+- **CAMP-12** (2026-10-15) Physical purge is Owner-only, removes everything including the audit trail, needs typed confirmation and is the one exception to recoverable history.
+- **CAMP-13** (2026-10-15) A ruleset or definition may be deleted only when nothing references it (campaign, sheet, pin or publication).
+
+## Accounts, auth and sessions
+
+- **AUTH-1** (2026-10-12) Accounts come only from Owner-issued invitations; users set their own passwords; no open sign-up, no email delivery.
+- **AUTH-2** (2026-10-13, refined 2026-10-14) Passwords: at least 15 Unicode scalars for the Owner and 12 for players, at most 128 scalars and 512 bytes; no character classes; bytes never trimmed or normalized.
+- **AUTH-3** (2026-10-13, refined 2026-10-19) The Owner account is administration-only: it never plays or acts as a Master, even with leftover grants or custody; there is no Owner gameplay override (`--dev-owner-play` is to be removed).
+- **AUTH-4** (2026-10-13) Owner administration (invite, reset, disable) gives no sheet or history access; resets and disablement end the target's sessions through the account epoch.
+- **AUTH-5** (2026-10-13) The CLI is trusted local operator authority, not web authentication; passwords and tokens enter only through protected private files, never command-line values.
+- **AUTH-6** (2026-10-14) `mimik` serves authenticated LAN by default; `--no-auth` is the explicit loopback-only prototype; the old `--auth` flag is removed with no alias.
+- **AUTH-7** (2026-10-14) The default database is `data/mimik.sqlite3`, directory created automatically; `--database` and `MIMIK_DATABASE` override it.
+- **AUTH-8** (2026-10-14) TLS is optional, provided by a reverse proxy declared with `--external-url` / `MIMIK_EXTERNAL_URL` (root origin only); there is no `internal_url`.
+- **AUTH-9** (2026-10-14) Invitation and reset links carry the token in the URL fragment, are shared as one link with Copy button and local QR code, and are consumed only by an explicit password submission.
+- **AUTH-10** (2026-10-14) Owner reset issuance and Owner disablement stay CLI-only; the browser can complete a CLI-issued Owner reset.
+- **AUTH-11** (2026-10-14) Failed sign-ins stay on the styled form with one generic message for unknown, disabled and wrong-password accounts; login names ignore surrounding spaces and ASCII case.
+- **AUTH-12** (2026-10-15) Owner recovery will be a local CLI command, run with server shell access, that issues a fresh Owner reset token.
+- **AUTH-13** (2026-10-15) The Owner may re-enable a disabled player, keeping memberships; re-enabling advances the epoch so old sessions stay revoked.
+
+## Sources and retrieval
+
+- **SRC-1** (2026-10-11) Sources enter only through `import-source`, from an allowlisted prepared directory (no symlinks or special files, bounded sizes) plus the original PDF; no browser uploads, archives, URLs or nested imports.
+- **SRC-2** (2026-10-11) PDF identity is separate from extraction-run identity; imports declare game, edition, PDF page indexes, extractor version and hashed artifacts, carry no approvals and start `unreviewed`; runs are never merged into a book certificate.
+- **SRC-3** (2026-10-11) Artefacts (PDF, raw extraction, manifest, page PNGs) are private SQLite BLOBs written in one transaction, immutable at import and served by database id only; Mimik never renders PDFs at run time.
+- **SRC-4** (2026-10-11) Accept, correct, reject and page-complete are explicit decisions with actor, rationale and expected revision; corrections are kept apart from raw HTML; history is append-only; unreviewed children never leak through approved parents.
+- **SRC-5** (2026-10-14) In authenticated mode the review actor is the signed-in Owner with immutable attribution (account, epoch, session digest); free-text reviewer labels exist only in the `--no-auth` prototype.
+- **SRC-6** (2026-10-11) Output from models and the optional API reviewer is a suggestion only: it never promotes, corrects or approves evidence, and a no-issue response certifies nothing.
+- **SRC-7** (2026-10-11) Displayed extraction HTML passes the `ammonia` allowlist: text, list and table structure, bounded spans, no URLs, styles or scripts.
+- **SRC-8** (2026-10-12) Region previews are bounding-rectangle crops made with `png`, one process-wide job at a time, with the full page always offered; a preview is never evidence.
+- **SRC-9** (2026-10-11) Disagreeing sources (MÖRK BORG IT and EN) are both recorded; precedence is decided explicitly, never by merging.
+- **EXT-1** (2026-10-11) Extraction is optional, containerised Python: Marker, keeping JSON blocks, polygons and table HTML; Markdown is a reading view only; generative `use_llm` repair is disabled.
+- **EXT-3** (2026-10-15) Scalable admission, not full human rereading: bounded frontier image/block review, then targeted human review of discrepancies and high-impact passages, then stratified checks; model review never counts as human approval.
+- **RET-1** (2026-10-15) Lookup is bundled SQLite FTS5, `unicode61 remove_diacritics 2` (not `porter`), bm25, over a derived search text from html2text `plain_no_decorate`; raw evidence rows are never rewritten; no vector server.
+- **RET-2** (2026-10-15) Lookup searches only accepted or corrected units on complete pages of the exact edition (and optional source set), filtered in the ranking statement; results distinguish unsupported edition, incomplete coverage and no reviewed match.
+- **RET-3** (2026-10-15) Citations pin `unit_id` and `unit_revision`, never rank position, because bm25 statistics are corpus-wide.
+- **RET-4** (2026-10-15) User query text reaches FTS5 only as generated quoted strings, 1–200 characters and at most 16 pieces.
+- **RET-5** (2026-10-15) Vector search and RRF are deferred; when added, both lists come from the same filtered eligible set, starting with brute-force cosine in Rust, `sqlite-vec` only on demonstrated need.
+
+## Evaluation, models and harness
+
+- **HARN-1** (2026-10-15, refined 2026-10-19) Models talk to the app through a tool loop (`search_rules`, `read_fields`, `propose_change`, `ask_user`, explicit finishing calls); the host validates every call, fills old values, revisions and addresses, and renders the diff.
+- **HARN-2** (2026-10-15, refined 2026-10-19) The model may interpret and propose at play time (RR-6); output changes a sheet only after explicit player confirmation; legality stays advisory.
+- **HARN-4** (2026-10-15) The play-time model is text-only; vision models are allowed only for offline ingestion (Marker/Surya, Docling, MinerU).
+- **HARN-6** (2026-10-15, refined 2026-10-19) Ordinary use runs on a local model (a small CPU model for the assisted sheet) with retrieval over extracted text and no silent hosted fallback; a hosted API key serves only optional OCR/extraction review.
+- **HW-1** (2026-10-11) The first target is this host (Ryzen 5 1600, ~32 GB RAM, RX 6650 XT 8 GB); inference is vendor-neutral Vulkan with CPU fallback, never CUDA or ROCm, and optional: sheets work without a model or GPU.
+- **EVAL-1** (2026-10-15, refined 2026-10-19) Release bar for model-dependent work: ≥ 90% correct and ≤ 2% false-supported on ≥ 100 unique held-out cases with no `not_run`, strict scoring. Waived for the POC (D-D).
+- **EVAL-2** (2026-10-15) False-supported is reported over all held-out cases and over at-risk cases (expected ask, conflict, stale, refuse); wrong-but-valid proposals and wrong answers count. The user picks the bar's denominator once data exist.
+- **EVAL-3** (2026-10-15) Model selection: a fast screen of 6–10 candidates, then 2–3 finalists on fresh held-out real-game cases; native heads and samplers are preserved; blocked candidates get a reason.
+- **EVAL-4** (2026-10-15) An oracle-evidence control (human-selected passages, no answers) separates retrieval from reasoning failures; extraction, retrieval, context and reasoning failures are reported separately.
+- **EVAL-5** (2026-10-15) MÖRK BORG (Italian 2025) is the first playable trial and a bounded, edition-pinned Italian legacy Pathfinder 2e slice the rule-heavy stress test; editions are never mixed.
+- **TL-2** (2026-10-16) Answers are scored by typed value as a multiset, ignoring keys, up to len(expected) + 1 values; more is `over_cap` and counts as false support; key-match rates are diagnostics only.
+- **TL-3** (2026-10-16) Strict scoring is the verdict; a lenient variant is pre-registered and reported beside it, never instead; scoring leniencies kept by design are disclosed with every run.
+- **TL-4** (2026-10-16) A stale request is report-only (no re-proposal). Untrusted-text marking (H6) is its own arm, off in the C0 base.
+- **TL-5** (2026-10-16) A held-out set anyone has read becomes dev data; the v3 verdict uses only the frozen blind set (`docs/tool-loop-heldout-v3-freeze.md`) and arms pre-registered before its first verdict episode.
+- **TL-HO** (2026-10-17) Held-out ledgers are read only via `tool_loop_benchmark.py --summarize` aggregates: never open their rows, never pass `--allow-heldout-gold-replay`, never read the frozen case file.
+- **TL-6** (2026-10-16) Unattended runs launch from a frozen detached worktree (`tools/launch_frozen_queue.sh`) and are analysed from the same frozen copy.
+- **TL-SCREEN** (2026-10-17) Gemma 4 E4B, LFM2.5-2.6B, LFM2.5-8B-A1B, Granite 4.2 3B and MiniCPM5-2B are dropped as standalone tool-loop models (based on an unreviewed CPU screen).
+- **TL-ROUTER** (2026-10-17, refined 2026-10-18) Router configs R4, R1, R3 are dropped; a follow-up freezes a new readout before inference and treats the 175 router records as dev data.
+- **PACK-6** (2026-10-16) A request breaking a constraint or rule as stated is `conflict` even if a legal alternative exists, unless a rule resolves the excess (then `proposal` with that change); naming the alternative is not scored.
+- **PACK-7** (2026-10-16) Equipment stats are fixed (changing one is `conflict`); gaining or losing items is bookkeeping; a stat with no field is `answer` if a rule fixes it, else `ask_rule`.
+- **PACK-8** (2026-10-16) When time is part of a calculation the player must state it (`ask_fact`, no default); a duration the rules leave undefined gives `ask_rule`.
+- **PACK-9** (2026-10-16) The night of a long rest is two watches (long rest only; night travel length comes from LR2-36 and LR2-37).
+- **PACK-10** (2026-10-16) "armor" alone means the derived sheet total.
+- **PACK-11** (2026-10-16) Requests needing a new or removed entry, or using up an entry's last unit, have no gold outcome and are outside the blind writer's scope until list editing and an item catalogue exist.
+
+## Dependencies
+
+Versions and exact pins are in `Cargo.toml`; CI checks licences (`cargo about`) and advisories (`cargo audit`).
+
+- **DEP-1** (2026-10-11) HTTP and HTML: Axum 0.8 on Tokio 1 with Askama 0.14 escaped templates; storage: rusqlite 0.37 with bundled SQLite (`functions`, `hooks`), no system SQLite.
+- **DEP-2** (2026-10-11) Generic infrastructure comes from crates (clap, serde, sha2, rustix, lopdf, png, ammonia, html2text); Mimik writes no PDF or HTML parser, hash or storage engine.
+- **DEP-3** (2026-10-11) The two html5ever versions pulled in by ammonia and html2text are accepted; reassess when upstream converges rather than replacing either crate.
+- **DEP-4** (2026-10-12) Definition and catalogue schemas use `jsonschema` (Draft 2020-12, offline, no default features) on trusted embedded schemas only; custom code is the bounded Serde visitor and domain checks.
+- **DEP-5** (2026-10-12) The client is htmx 2.0.8 with the response-targets 2.0.4 extension, bundled with sources and licences (`assets/README.md`); no custom client error infrastructure.
+- **DEP-6** (2026-10-13) Sessions use `tower-sessions` 0.15 with Mimik's rusqlite store (`src/auth/persistence.rs`) and epoch binding; published SQLite stores conflict with `libsqlite3-sys`, and `axum-login` 0.18 needs sessions 0.14.
+- **DEP-7** (2026-10-13) Passwords use `argon2` (Argon2id defaults, `zeroize`), `getrandom`, `zeroize` and `subtle`; login throttling uses `governor` as one process-wide quota. No bespoke crypto.
+- **DEP-8** (2026-10-14) Sharing uses `qrcode` (SVG only), `if-addrs` for LAN discovery and `url` for the external URL.
+- **DEP-11** (2026-10-16) `nom` 7/8, `bit-set`/`bit-vec` and dev-only `cssparser` 0.37/0.38 and `phf` duplicates are accepted transitive duplicates.
+- **DEP-12** (2026-10-19) Catalogue display-safety checks use `unicode-general-category =1.1.0`, already in the tree through jsonschema.
+- **DEP-13** (2026-10-16, refined 2026-10-19) Test-only crates (`scraper`, `proptest`, `rqrr`, `tempfile`, `tower`, `futures-util`) never enter the release binary.
+- **DEP-14** (2026-10-19) Advisories are taken even when unreachable: ammonia is locked at 4.2.4 for RUSTSEC-2026-0373, and `sources::sanitizer_tests` pins that no `style` attribute survives sanitisation.
+- **DEP-15** (2026-10-11) Release tooling is pinned in containers (cargo-audit, cargo-about, Ruff, actionlint, pathspec, Playwright Chromium); no custom linter, licence analyser or browser engine.
+
+## Licensing and release
+
+- **REL-1** (2026-10-11, refined 2026-10-16) Mimik's code is AGPL-3.0-only (manuals, artwork and weights are not relicensed); licences outside `about.toml` fail closed; MPL-2.0 and MIT-0 are accepted only for the crates named there.
+- **REL-2** (2026-10-11) Every binary ships with corresponding source (allowlisted Cargo package, vendored sources, `BUILD.txt`/`SOURCE.txt`, `SHA256SUMS`); `verify_source_package.py` rejects data, PDFs, databases and images except `logo.png`.
+- **REL-3** (2026-10-11) Only archives from a successful `deployable` run of the same revision are published, never rebuilt after the gate; `deployable` as a required status is configured on the hosting side.
+- **REL-4** (2026-10-11) The release binary is built on Ubuntu 22.04 (glibc 2.35) in the CI container.
+- **REL-5** (2026-10-11) Every route checks Host and Origin against the configured authority (DNS-rebinding defence); forwarding headers never select authority or scheme.
+- **REL-6** (2026-10-12) The root `logo.png` is the user-supplied logo, embedded unmodified and allowlisted in the source package.

@@ -1,1136 +1,353 @@
-# Assisted sheet MVP plan: lenient input, CPU interpretation, suggestions, undo
+# Assisted sheet plan: remaining steps
 
-2026-10-19. **Revision 3.1.** Base: master `0921f6c`. Code is unchanged since `4c8d653`, and
-references were re-checked there.
+Direction (user, 2026-10-19): "Help the user as much as we can, but don't force anything;
+improve paper and pencil, don't replace it." The player writes what they want; the app
+computes, warns, suggests and offers Undo. Model output is only ever a confirmable proposal;
+legality stays advisory and Rust does all arithmetic.
 
-**Rev 3** (`0921f6c`): Sol and Sonnet both **GO WITH AMENDMENTS**, with no Blocking findings;
-the third chain was unavailable. Slice 1.1 may start. Rev 3.1 folds in their amendments and
-the user decisions D-V and D-W, and records the main-session defaults D-X1 to D-X4. Rev 3.1
-changes are amendments requested by the rev-3 reviews; slices touching them get
-implementation review. Review record:
-[reviews/2026-10-19-assisted-sheet-plan.md](reviews/2026-10-19-assisted-sheet-plan.md).
+Decision IDs (D-…, U…, P…) are defined in `docs/decisions.md`. What is built (number entry,
+notes and scribbles, switch and Undo, unknown values, per-field save, the busy page, the page
+bound) is described in `docs/assisted-entry.md`; this plan only adds to it.
 
-Review history:
-- **Rev 1** (`71a7841`): Sol NO-GO, Sonnet GO WITH AMENDMENTS. Answered by user decisions D-A
-  to D-P and by rev 2.
-- **Rev 2** (`cfd3475`): Sol **NO-GO**, with Blocking R1–R3, Majors M1–M7 and minors m1–m2.
-  Sonnet **GO WITH AMENDMENTS**, with M-A to M-H and m1–m8. The third chain was unavailable.
+Remaining, in order: **1.5b** per-cell list save, **1.6** quick-add, **2a** JavaScript,
+**2b** crate and runtime selection (prototype tier, may run in parallel), **2c**
+interpretation, **3** bundles and reminders, **4** suggestions and "Which Sword?", **5** docs
+and gate.
 
-User decisions D-Q to D-U then simplified the design:
-- sign-led input is literal;
-- notes are simple;
-- each list cell saves on Enter;
-- no-op saves write nothing.
+Every step: its own branch; failing-first tests with the red run recorded; independent
+implementation review before merge; built and tested on 2 cores on weekdays. 1.5b and 1.6
+keep the demo (`tools/assist_demo.py`) usable. Any step that adds per-cell markup reruns the
+worst-case page fixtures in `src/campaigns/list_tests.rs` (tightest headroom today 3.1%) and
+never enlarges the budget.
 
-Rev 3 drops the machinery those decisions make unnecessary: the pool marker, the pool choices,
-seals and read-time verification, and whole-list saves. It resolves R1 and R2 with contracts
-and tests, and slices step 1 into six small demo-able parts. Finding map: §8. This revision
-needs a re-review before slice 1.1 starts.
+**POC cuts** (no security or integrity risk): player `*` and `/`; interpreting text, enum or
+boolean cells; notes and Undo for text cells; seals and note verification (D-T); dismissal
+records; Undo of creation, row add and moves; forced Undo; live preview; a keyed rate
+limiter; Gemma; changes to the native MÖRK BORG editor. Non-goals: legality rulings,
+automatic application of model output, chat, manual RAG, `catalogue_ref` membership checks,
+hosted providers, GPU, models above about 4B.
 
-## 0. Direction and decisions
+## 1. Design for the remaining steps
 
-"We're improving the paper and pencil paradigm, not replacing it." The player writes what
-they want; the app computes, warns, suggests and offers Undo; nothing is forced.
+### 1.1 Row units (1.5b)
 
-**Binding decisions** (user, 2026-10-19). D-A and D-L are superseded by D-Q.
+Replace the interim list forms (P1) with per-cell and per-row routes. Same contract as the
+1.5a unit routes: exact keys, typed addresses, `base` in `1..=L` (malformed 400, above L 409),
+value-based conflicts on two snapshots, patch applied to L, stale no-op "No change", 409
+re-render with the draft and `base` = L, D-X3 wait and busy page, native and unsupported pins
+refused.
 
-| # | Decision | Where |
-|---|---|---|
-| D-B / D-R | A picked name is stored as **plain text**. When the player answers "Which Sword?", the **entry key is stored next to the name**; the cell still shows the text | §3e |
-| D-C / D-S | **Each field and each list cell saves on its own on Enter.** Lists keep Add (+), Remove and Move. A **quick-add line** under each list ("3 torches", "healing potion x2") adds a row, with a deterministic parse in the POC | §3a, §3g |
-| D-D | The model quality bar is waived for the POC and revisited before release. Engineering gates stay | §7 |
-| D-E | Masters see raw scribbles and change notes in history | §3f |
-| D-F / D-J | The model reads the phrase, the target, and the sheet's number and enum fields. It may also read list-row item names and their linked catalogue entry text. Never notes, backstory or multiline text | §3b |
-| D-G | The assistant and live suggestions need JavaScript. Typing, arithmetic, notes and Undo work without it | §3g |
-| D-H | Provider client from an established Rust library only (`genai` or `rig-core`). If none can send the structured-output schema or grammar: **stop and ask** | §3b |
-| D-I / D-K | Multi-field **bundles**, applied and undone as one, and dismissible **reminders**, as their own step right after model interpretation. POC knowledge: item names plus linked entry text | §3c, §5 |
-| D-M | An unreadable required number (a new row, a newly present property, or a create) is stored as **unknown**, with the scribble and a warning | §3a |
-| D-N | Undo covers **the last change of each field only**. Older history is viewable | §3f |
-| D-O | Link a name automatically only when exactly one eligible entry matches; otherwise ask "Which Sword?" | §3e |
-| D-P | Stale or expired proposals never become a literal; they need reconfirmation | §3b |
-| **D-Q** | **Sign-led input** ("-15", "+3") on **any** number field is applied **literally** (HP becomes −15). Right after, the app asks **"Did you mean 84 − 15 = 69?"**, with one click to switch. Multi-term input ("84 -15") is computed directly. No pool marking | §3a |
-| **D-T** | Change notes are **simple**: written in the save's transaction, with no updates or deletes. Sealing and verification come later, before release. The tamper window is a recorded POC limitation | §3a, §6 |
-| **D-U** | History has no limit. **A save that changes nothing writes no revision** | §3a |
-| **D-V** | **Removing a list row happens at once, with Undo right after** (like crossing out on paper). No confirmation | §3a, §3f |
-| **D-W** | **Reminder trigger:** any decrease of a top-level number field asks the model whether something on the sheet could react. The model judges relevance; there is no owner marking | §3c |
-| **D-Y** | Formula profile `cel-mimik-1` may still change until the first release; "a pinned definition is never reinterpreted" applies from the first release on. No profile bump, no legacy behaviour kept (2026-10-19, slice 1.4 review) | §12, `derived-formulas-plan.md` |
-| **D-Z** | Nullable integer fields get the same unknown guard: any formula or check that reads an unknown integer, nullable or not, is not evaluated ("a value it uses is unknown"). `== null` is no fallback for integers in the POC; later, definitions may choose a fallback for unknown (2026-10-19, slice 1.4 review) | §12 |
-| **D-AA** | With JavaScript, a field also saves when the player leaves it (blur/change), only if its value changed since its last save or offer; Enter still saves, and without JavaScript Enter remains the only way (refines D-C; 2026-10-19, after testing slice 1.3) | Step 2a |
+| Unit | Route | Keys | Protected value |
+|---|---|---|---|
+| Saved-row cell | `cells/{list}/{host}/{property}` | `csrf`, `base`, `value`, plus `set` if optional | the cell's value and the row's existence |
+| New row (Add +) | `lists/{list}/rows` | `csrf`, `base`, `row-{p}` and `set-{p}` for that one row | none (append only) |
+| Quick-add (1.6) | `lists/{list}/quick` | `csrf`, `base`, `text` | none (append only) |
+| Remove, Move up, Move down | `lists/{list}/rows/{host}/{remove\|up\|down}` | `csrf`, `base` | Remove: the row's existence and all its values; Move: the list's order of host IDs |
 
-**Main-session defaults** (recorded as defaults; the user may revise them).
+- Routes refuse with 400, before any write: derived fields, IDs not in the pin, IDs outside the
+  slug grammar, host IDs not in the live snapshot. A cell of a row removed since the page was
+  read is a conflict, not a forged request (as switch and Undo already do).
+- Row actions are separate forms, so Enter can never trigger Remove or Move. Remove and Move
+  write at once (D-V). Move has no Undo; the reverse move is one click.
+- **Remove** writes one row note `{"row":"present"}` → `{"row":"absent"}` and the page shows
+  "Row removed · Undo". **Undo of Remove** reads the row from the revision before the removal
+  through the validated history reader, requires that no row with that host ID exists, and
+  re-inserts it at its old index clamped to the current length with a new host ID `r<L+1>-1`
+  (removed IDs never return), writing a `reverted` note. A full list (256 rows) refuses it
+  with a message. The re-added row is new: its cells have no Undo until edited again.
+  `assist::undoable` excludes row notes today; 1.5b adds the row path.
+- **New row form:** one row's controls; Enter saves the row. A required enum or boolean must
+  be chosen; required numbers may be blank (unknown). Host IDs are allocated in the
+  transaction (`r<rev>-k`) and returned in the response. At most one note per integer, enum or
+  boolean property (≤ 32).
+- The create page keeps the one full form with its draft operations. The legacy full-form
+  edit POST stays accepted with whole-sheet 409.
+- Migration 020's address CHECK refuses one-character `meta:` suffixes; no route writes
+  `meta:` notes. If any step starts writing them, it adds a migration fixing the CHECK first.
 
-| # | Default | Where |
-|---|---|---|
-| D-X1 | A blanked (`erased`) value is Undo-eligible (Sonnet rev-3 M1) | §3f |
-| D-X2 | D-U's "no history cap" stands for the POC. A per-account write-rate limit or storage guard is **required before release** (risk register, §6) | §6 |
-| D-X3 | No-JS 503 on per-cell saves: sheet writes wait a short, bounded time for the `JOBS` permit, then show a styled 503 page that keeps the draft (Sonnet rev-3 M3) | §3a |
-| D-X4 | The "Did you mean" offer after sign-led input stays on every number field (the user chose it). It is non-blocking and dismissible | §3a |
+### 1.2 Quick-add (1.6)
 
-## 1. Goal and POC scope
+- A list may declare `"quick_add": {"name": <text property>, "quantity": <integer
+  property>?}`; omitted when absent, so existing definition hashes are unchanged.
+- Admission refuses it when the list has a required enum or boolean property, or when it
+  names a property of the wrong type.
+- Deterministic parse of `text` (≤ 200 characters): `^(\d{1,6})\s+(.+)$` → quantity and name;
+  `^(.+?)\s*[x×]\s*(\d{1,6})$` → name and quantity; otherwise the whole text is the name with
+  quantity 1; an empty name → "Nothing to add".
+- Other required numbers are `null` (unknown); optional properties are absent. One revision,
+  no note.
 
-**User value.**
-- "84 -15" + Enter → 69, shown as "84 − 15 = 69 · Undo".
-- "-15" + Enter → HP −15, then "Did you mean 84 − 15 = 69? [Yes]".
-- "lots" in a new row's Quantity keeps the row, shown as "?" with the scribble.
-- "3 torches" + Enter under Equipment adds the row.
-- "took 15 fire damage" → the assistant offers "HP 84 → 69".
-- After damage, "Did you consider your Shield?" offers a bundle.
-- "heal" lists healing items; "sord" → "Did you mean Sword?".
+### 1.3 JavaScript (2a)
 
-**POC scope.** Steps in user order (D-K):
-1. Lenient numbers, notes, D-Q switch, Undo, unknown values, per-cell save, quick-add (slices
-   1.1–1.6).
-2. JS foundation, crate and runtime selection, interpretation.
-3. Bundles and reminders.
-4. Suggestions and "Which Sword?".
-5. Docs and gate.
+- One module, `assets/sheet-assist.js`, loaded with `<script type="module">` on sheet pages.
+  Without it every save, Undo, switch, quick-add and row action keeps working through PRG
+  (D-G).
+- **CSP:** a `SheetPage` response extension applied in `normalize` gives `default-src
+  'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none';
+  form-action 'self'; frame-ancestors 'none'; require-trusted-types-for 'script';
+  trusted-types 'none'`. The inline `style="min-width:0"` in `private_sheet.html` moves to
+  `app.css`; the module uses classes, never `setAttribute('style')` or `innerHTML`. Error pages
+  from outer middleware (timeout, 503) keep the default header; document that.
+- **Asset route:** the auth router serves only `app.css` and `logo.png` today; add the module.
+- **Transport:** requests are `URLSearchParams` bodies (`post_origin` refuses multipart with
+  415); responses are JSON; integers and revisions are strings, recursively (list values,
+  note values, revisions).
+- **Save response:** `{revision, unit: {address, value, note?}, derived: [{id, text}],
+  checks: {violated, not_evaluated, passed, items: [{id, status, message}]}}`, computed from
+  the new revision. The module updates the saved unit, the derived texts and the checks
+  section only; no other input and no other unit's `base` moves.
+- **Per-unit state:** after a save the module updates `base` only for the saved unit, and
+  only when the response revision is newer. Requests per unit are serialised (one in flight,
+  the latest queued); a late response for an older request is ignored. A draft generation
+  counter per unit increments on `input`; a response always updates the unit's acknowledged
+  value and `base`, but replaces the control's text only if the draft is still the submitted
+  generation. Derived values and checks have their own projection revision and update only
+  from a response at least as new.
+- **Save on leaving the field (D-AA):** a changed field also saves on blur/change through the
+  same per-unit route as Enter; an unchanged field (equal to its last save or offer) sends
+  nothing; leaving a field while its previous save is in flight queues one save of the latest
+  value. `change` saves selects and checkboxes. Enter still saves; without JavaScript Enter
+  remains the only way.
+- Accessibility: live region, real buttons, focus returning to the cell, 24 × 24 px targets,
+  390 px layout.
 
-**Cut from the POC.** None of these carries a security or integrity risk; each is in §6
-"Later".
-- Player `*` and `/`.
-- Pool marking.
-- Interpreting text, enum or boolean cells.
-- Notes and Undo for text cells (history keeps every text revision).
-- Seals and note verification (D-T).
-- Dismissal records.
-- Undo of creation, row add and moves. Row **removal** gets Undo (D-V, §3f).
-- Forced Undo ("set back anyway").
-- Live preview.
-- A keyed rate limiter.
-- Gemma in the screen.
-- Changes to the native MÖRK BORG editor (it keeps its strict path, `web.rs:685`).
+### 1.4 Interpretation service (2b, 2c)
 
-**Non-goals.** No legality rulings, no automatic application of model output, no chat, no
-manual RAG, no `catalogue_ref` membership checks, no hosted provider, no GPU, nothing above
-about 4B.
+- **Shape:** an `Interpreter` trait, a `StubInterpreter` and a crate adapter. Assistant off is
+  the default and the app stays fully usable with it off.
+- **Crate selection (D-H):** an established Rust provider library (`genai` or `rig-core`),
+  checked against an axum stub for: loopback HTTP; structured-output pass-through; no
+  redirects, proxy or hosted fallback; a bounded body; a timeout and cancellation that closes
+  the connection; licence and footprint; maintenance. If none can send the schema or grammar:
+  stop and ask.
+- **Candidates are judged on results, not on project rules** (user, 2026-10-19). Besides
+  genai or rig over a local model, screen strot-ai/Project-STROT (MIT, Python: compile-time
+  LLM synthesis, deterministic per-record decisions with calibrated confidence), called from
+  Rust through pyo3 or ported to Rust. If a winner conflicts with a rule (D-H, Rust-only
+  runtime, the lightweight standalone binary), the results note states the conflict and its
+  cost and the user decides whether to bend the rule.
+- **Runtime:** llama-server on an `--internal` network plus a pinned forwarder bound only to
+  `127.0.0.1:8091` with a fixed upstream (never a general proxy); `--cpus 2 --threads 2`,
+  memory, swap and PID limits; the model hash-checked before mounting. Model screen:
+  `qwen3-4b-2507` and `granite42-3b`, fallback `minicpm5-2b`, on the pinned llama.cpp image
+  with the hardened runner flags of `tools/run_tool_loop_benchmark.sh`.
+- **Endpoint:** an IP literal, `127.0.0.1` or `::1`; host names refused.
+- **Context (D-F, D-J):** phrase and target first; then other stored integer and enum fields
+  in definition order until 4 KiB (derived fields excluded from context and from `@`
+  references); catalogue entry text last (step 3), cut first when space runs out. Every
+  dynamic string is untrusted data.
+- **Output:** a strict JSON schema whose expression field has a `pattern`; terms are literals
+  or `@field` references; operators `+ − × ÷` and parentheses; `÷` is rounded at once with
+  `floor` or `ceil`, or must be exact (`none`); every literal must appear in the phrase or
+  equal the target's value; the display shows base, expression and effect, labelled "the
+  assistant's reading". `max_tokens` 128, measured in 2b, raised to 256 if bundles truncate.
+- **Jobs:** one worker; a queue of 4 in total and 1 per account (counting running work);
+  supersession checked before the capacity refusal; 60 s queue and 30 s run deadlines; at most
+  64 records, at most 6 non-terminal (queue, running, reminder), so terminal eviction always
+  makes room; 128-bit IDs; poll and apply recheck rights; the `JOBS` permit is not held during
+  the model call. A reminder job (step 3) uses its own low-priority slot bound to the account
+  and does not take the per-account cap.
+- **Flow (JS):** a cell save records `unresolved` and the module starts a job; "Thinking…" in
+  `role="status"`; then 1–3 options with base, expression and effect, or the choices of an
+  `ambiguous` reply; **Use** posts the apply route; ignoring them leaves the scribble. The
+  apply route must not rely on how long a switch offer stays on screen or treat a shown offer
+  as confirmation.
+- **Proposal freshness (D-P):** when a job finishes, Rust validates each option and stores its
+  bound read/write set: every write target (address, value at the job's base revision, host
+  ID for row cells), every `@` reference (address and value), the displayed effect (before →
+  after per target), and for reminders and bundles the supplied context (each list-row name
+  sent, its remembered key, the catalogue version and entry key of any entry text, every enum
+  value). Bundle targets must be distinct; a duplicate drops the option. The guarantee covers
+  exactly this set, not the model's relevance judgement.
+- **Apply:** `POST /private-sheets/{id}/proposals/{job}/{n}` (`csrf`), in one `IMMEDIATE`
+  transaction: recheck rights and the active state; check the job binding and that it is not
+  already applied (single use, marked consumed only after commit); require every bound
+  address to hold its bound value and every bound row to exist; re-evaluate and require the
+  effect to equal the displayed one; write with `confirmed` notes sharing a `bundle` number.
+  Any mismatch or expiry: "Something this proposal used has changed: ask again", nothing
+  written, never a literal fallback. An unrelated field change does not invalidate it.
 
-## 2. Facts from the current code (master `0921f6c`)
+### 1.5 Bundles and reminders (3)
 
-**Values and save.**
-- `values::integer` (`values.rs:164-174`) accepts exact decimal only. `scalar_value`
-  (`:541-552`), `values::form` (`:614-656`) and `reconcile` (`:558-612`) refuse anything else.
-- One `Invalid` refuses the whole save with 422 (`web.rs:1210-1230`).
-- `apply_save` checks the revision first (409, `:1124-1148`). The save does PRG
-  (`web.rs:1236`).
-- Saved values render as `Value::to_string()` (`web.rs:837-844`), and the full form re-posts
-  every field (`private_sheet.html:12`).
-- Name and notes go through `name_notes` (`campaigns/mod.rs:74-84`): an empty name is refused.
-- Required enum and boolean cells without a value are refused (`values.rs:541-548`).
-- Field IDs follow `valid_field_id` (`definitions/admission.rs:96-103`). A definition field may
-  be called `name` or `notes`, so it can collide with the envelope's Name and Notes (Sol rev-2
-  M1). The current form avoids this with distinct keys (`name` vs `value-name`).
+- **Bundles:** up to 4 changes to integer, enum or boolean addresses (scalars or saved-row
+  cells by host ID), no row adds or removes; one revision; notes sharing `bundle`; freshness
+  as above. Undo on any member reverts all members, only if every member's current note is
+  still that bundle and holds its `after`; otherwise nothing is reverted and the page lists
+  what changed.
+- **Reminders (D-W):** triggered by a saved decrease of any top-level integer field, with the
+  assistant on and JavaScript present; the model's `relevant` flag judges relevance. Context:
+  the decrease, numbers and enums, list-row names from properties with the `catalogue`
+  member, and linked entry text (≤ 2,000 characters, quoted) when exactly one entry matches or
+  the stored key resolves. Output `{relevant, row, hint ≤ 120, option?}`, the option being a
+  bundle. Display: a dismissible hint (client-side only), never blocking or auto-applying.
+  Injection is contained by the schema, the provenance rule (numbers from entry text are
+  labelled), the full display and confirmation.
+- **Catalogue member:** an optional `"catalogue": {"id": <link>, "entry_type": <id>?, "key":
+  <property>}` on a text item property. `key` names a declared optional text property of the
+  same list holding the remembered entry key (D-R); it is rendered as the link, never a
+  control. Checked at admission: the key property exists, is optional text, is not itself
+  catalogue-backed, and is used by at most one hint. Resolved only through the immutable pin.
+  Omitted when absent, so old hashes are kept.
+- **Linking on view** (rules 1–2 here, 3–4 in step 4): names are normalised (NFKC, case-fold,
+  diacritics removed, whitespace collapsed). (1) If the stored key resolves to an eligible
+  entry (linked catalogue, type filter, not retired) whose normalised name equals the cell's,
+  link it. (2) Otherwise link exactly one eligible exact match (D-O).
 
-**Null.**
-- Integer cells are `{"type":"integer"}` (`values.rs:94`), and "`null` never appears inside
-  items" (`:116`).
-- `private_pin::list_values` rejects non-i64 item integers, null included
-  (`private_pin.rs:97-117`).
-- Formula inputs refuse `null` on non-nullable scalars (`convert.rs:111-118`) and inside
-  records (`convert.rs:89-97`). Either refusal fails the whole evaluation.
-- The existing wording for `Code::NullValue` is "a value it uses is unknown (null)"
-  (`formulas.rs:23`). Dependents say "it uses X, which could not be computed"
-  (`formulas.rs:187-195`).
+### 1.6 Names, "Which Sword?", suggestions (4)
 
-**Writer and history.**
-- `private_save_keeping` runs authorization, pin checks and `snapshots::write` in one
-  `IMMEDIATE` transaction (`sheets.rs:266-306`).
-- `snapshots::write` is the sole writer (`snapshots.rs:306-406`). Operations are `create`,
-  `edit` and `freeze`; a stale revision gets 409 (`:338`); a removed host ID never returns
-  (`:67-70`).
-- History is append-only, and its triggers bind each event to the live row
-  (`migrations/012_campaigns.sql:95-127`).
-- The change summary is values-free (`history_diff.rs:1-5`).
+- (3) Several matches: "Which Sword?" lists the candidates (name · type · catalogue); choosing
+  one posts `cells/{list}/{host}/{key}` with the entry key: one revision, no note; the link is
+  remembered (D-R). (4) None: "Not in the catalogue" plus Browse; with JS, "Did you mean…?" on
+  demand. Saving the name cell with a different name clears the key in the same revision.
+  A dangling key just shows no link.
+- **Suggest route** (JS): read rights and pin correspondence rechecked per request; no `JOBS`
+  permit, a pool of 4, 429 at saturation; query 2–64 scalars and ≤ 256 bytes; prefix match on
+  cached names, then FTS, then an on-demand typo pass (±2 characters of length, ≤ 20,000
+  comparisons and 20 ms, outside the DB mutex); the type filter on every path; a name cache
+  LRU-bounded at 32 MiB, names only; p95 ≤ 50 ms, measured. Picking a suggestion stores the
+  name, plus its key when it is one of duplicates.
+- **Combobox:** `aria-controls` and unique option IDs; while open, Enter selects and does not
+  submit; IME composition respected; debounce, `AbortController` and a generation counter.
 
-**Concurrency and transport.**
-- One SQLite connection behind a mutex (`store.rs:35`, `:107-132`).
-- Sheet routes hold the `JOBS` permit of 1, and a busy server answers 503
-  (`definitions/mod.rs:29-37`, `campaigns/web.rs:42-56`).
-- Auth mode: 8 global permits and a 5 s request timeout (`auth/mod.rs:37-38`, `:205-238`).
-- `post_origin` accepts POST bodies as `application/x-www-form-urlencoded` only, and anything
-  else gets 415 (`auth/mod.rs:453-478`). So a `fetch(FormData)` multipart body would fail.
-
-**JavaScript and CSP.**
-- The sheet loads no script (`private_sheet.html:1`) and has an inline
-  `style="min-width:0"` (`:7`).
-- The auth router serves only `app.css` and `logo.png` (`auth/mod.rs:191-193`).
-- `normalize` sets `frame-ancestors 'none'` on every response (`auth/mod.rs:429-450`).
-
-**Catalogues.** FTS name index (`019_catalogues.sql:111`). `fts_query` bounds pieces, not
-bytes (`search.rs:66-121`). Browse confinement (`read.rs:221-310`, `:344`). Names are not
-unique (`019:74-89`). Badges are live; sealed versions are immutable.
-
-**Demo assets.**
-- `tests/support/source_fixture.rs` writes the synthetic definitions (`:57-95`), run as
-  `cargo run --locked --example source_fixture -- <dir>` (`ci.yml:34`).
-- `tools/smoke_release.py` drives registry, import, publish, accounts and campaign
-  (`:329-395`, `:478-700`).
-
-**Models.** Unchanged from rev 2:
-- screen `qwen3-4b-2507` and `granite42-3b`; fallback `minicpm5-2b`;
-- pinned llama.cpp image and the hardened runner flags (`run_tool_loop_benchmark.sh:476-487`);
-- `json_schema` was exercised in `local_rag_benchmark.py:385-406`;
-- no measurement at 2 threads.
-
-## 3. Design
-
-### 3a. Numbers, notes, unknown values, per-cell save
-
-**Grammar.** Applies to integer cells only.
-- It lives in a **new module**, `campaigns::entry`. `values::integer` stays strict, because it
-  also parses protocol integers such as submitted revisions (`web.rs:1074`, `:1127`); its test
-  at `campaigns/tests.rs:484-486` is kept (Sol slice-1.1 constraint, Sonnet m1).
-- Input is trimmed of ASCII spaces and tabs.
-- NUL and control characters other than tab are refused as unreadable (Sonnet m6).
-- More than 200 characters is refused **server-side**, whatever the `maxlength`.
-- The arithmetic parser reads at most 64 scalars.
-
-```
-int     = DIGIT+                    ; ASCII only; leading zeros allowed ("007" = 7)
-sign    = "+" | "-" | "−"           ; U+2212 accepted
-literal = [sign] int                ; the literal value, on every field (D-Q)
-sum     = int 1*( ws* sign ws* int ); "84 -15" = 69, "84-15+3" = 72; unsigned terms only
-```
-
-- Evaluation is left to right in **i128**, and **each term is checked** as it is parsed and
-  added. The result must fit i64, otherwise the input is unresolved. `-9223372036854775808`
-  parses.
-- **Literals:** "+5" = 5, "−5" (U+2212) = −5, "-0" = 0, "0007" = 7. A sign must touch its
-  digits, so "- 5" is unresolved.
-- **Unresolved:** "84--15", "84+-2", "5.", "1 2", "5 -", a lone sign, full-width digits, words,
-  `*` and `/`.
-- **Empty or whitespace-only input** (spaces, tabs) = blank.
-- **Blank** = unknown (D-M). On nullable fields the existing Known/Unknown select still rules.
-
-**D-Q switch.**
-- A sign-led literal on a cell whose saved value is a known integer `b` is applied literally,
-  and the note records `b`.
-- The sheet then shows "Did you mean 84 − 15 = 69? [Yes]" as a small form posting
-  `/private-sheets/{id}/switch` with `note` and the cell's `base`.
-- **Freshness:** in the transaction, the note must be the **current note** of its address and
-  the cell's current value must equal the note's `after`. It then writes `b ± n` with op
-  `switched`. Otherwise nothing is written: "HP changed since; not switched".
-- A switch is single-use, because its own write replaces the current note.
-- No offer when there was no known before-value (a new row, or unknown).
-- **Checked arithmetic** (Sol minor 1, Sonnet m8): `b ± n` uses checked i64 arithmetic. On
-  overflow there is no offer.
-- **D-U wins:** entering `-1` when the saved value is already −1 is a no-op. There is no
-  revision, no note and no offer.
-- **D-X4:** the offer is shown on every number field. It is non-blocking, and a client-side
-  dismiss hides it.
-
-**Unknown values (D-M; Sol rev-2 M5, Sonnet M-B, M-G).** `null` becomes a legitimate value for
-**every integer cell**, as the "internal empty value" D-M asks for. The full path:
-- **Value schema:** integer cells generate `["integer","null"]`, list properties included
-  (relaxes `values.rs:94`, `:116`). This only accepts more, so old snapshots stay valid.
-  - The nullable wrapper (`values.rs:140-150`) must be **idempotent**: adding `null` to a type
-    that already admits it must not build a nested type array (Sol M5).
-- **Null formula results** (Sol M5): `convert::result` (`convert.rs:158-175`) classifies a CEL
-  `Null` result as `TypeMismatch`. Slice 1.4 maps a `Null` result to `Code::NullValue`, so
-  `copy_hp = hp` with an unknown `hp` gets "a value it uses is unknown (null)".
-- **CEL equality** (Sonnet m9): in CEL `null == 0` evaluates without error, to `false`. Checks
-  written with `==`, `has()` or a ternary can therefore *pass or fail* on an unknown instead of
-  showing "not evaluated". Slice 1.4 tests these three forms and documents them in a profile
-  note. It also updates `runtime-definition-contract.md:279`, which today says `null` is valid
-  "only if the approved field is nullable".
-- **Domain:** `private_pin::list_values` accepts `null` for integer properties
-  (`private_pin.rs:111-116`).
-- **Formulas:** `convert::inputs` and `convert::record` map `null` on integer inputs and
-  properties to CEL `Null` instead of refusing (`convert.rs:89-97`, `:111-118`). A formula that
-  reads it fails per field with the **existing** wording "a value it uses is unknown (null)",
-  and its dependents get "it uses Load, which could not be computed". Rev 2's "Quantity is
-  unknown" wording is withdrawn (Sonnet M-G). Other formulas still compute.
-- **No provenance rule.** Rev 2 accepted `null` only with a scribble; that is dropped. A player
-  may already set any value on their own sheet, so an unknown without a scribble carries no
-  integrity risk. This also removes the ordering issue in Sonnet M-B: the rule would have run
-  inside `snapshots::write` before any notes existed.
-- **Edit with a known saved value and an unreadable input:** the value is **kept**, and an
-  `unresolved` note holds the scribble. **New row, newly present property, or create:**
-  `null` plus the note.
-- **Undo** may restore `null`. **Freeze** copies the data unchanged. **History diff:** null
-  versus a number counts as a change.
-- The sheet shows "?" plus the scribble.
-- **Create still refuses** an empty Name and unselected required enum or boolean controls
-  (`campaigns/mod.rs:74-84`, `values.rs:541-548`). D-M covers unreadable numbers only, and the
-  rev-2 claim "create never refuses on content" is narrowed accordingly (Sol rev-2 question 5).
-
-**Change notes (D-T).** Migration 020 adds one table:
-
-```
-private_sheet_notes(sheet_id, revision, address, op, raw, before, after, bundle, target)
-  PRIMARY KEY (sheet_id, revision, address)
-```
-
-- `address` is typed (M1 below). `op` ∈ `literal`, `sum`, `sign_literal`, `switched`,
-  `unresolved`, `erased`, `confirmed`, `reverted`. The `op` itself records which reading was
-  applied (Sonnet M-E).
-- `raw` is the typed input, ≤ 200 characters.
-- `before` and `after` use a small **typed note value** (Sol M4, Sonnet M2), stored as canonical
-  JSON of at most 80 bytes:
-  - `{"absent":true}` — an optional property not set; absence is distinct from unknown;
-  - `{"unknown":true}` — `null`;
-  - `{"int":"-15"}` — i64 as a decimal string;
-  - `{"enum":"<id>"}` — up to 64 characters, so the 80-byte bound fits the longest admitted ID;
-  - `{"bool":true}`;
-  - `{"row":"absent"}` / `{"row":"present"}` — the row-level states of a removed row (D-V).
-
-  A whole removed row is not stored in the note; its Undo reads the row from history, §3f.
-- `bundle` is a small integer or null. `target` is the revision an Undo reverted.
-- **Scope (Sol rev-2 M4):** notes are written for **integer, enum and boolean cells only**.
-  Text and multiline edits write none; history already holds every revision. That removes the
-  long-text problem.
-- A note is written for **every** value change of an in-scope cell, plus `unresolved` when the
-  value is kept. So the **current note** of an address is its latest note.
-- **Integrity in the POC:**
-  - inserted after `snapshots::write`, in the same `IMMEDIATE` transaction;
-  - triggers abort UPDATE and DELETE, with replacement guards;
-  - an insert must name the live revision of an existing history row;
-  - any failure rolls back the whole save.
-
-  **No seal and no read-time verification (D-T):** a process with database write access could
-  add notes to the current revision. This is recorded as limitation L1 (§6), to be fixed before
-  release by sealing. Rev-2 R3 (the migration window) and Sonnet M-C (verification cost) fall
-  away with it.
-- **Bounds** (Sonnet m5):
-  - a per-cell save writes 1 note; bundles write ≤ 4;
-  - a **new-row form** writes at most one note per integer, enum or boolean property of that row
-    (≤ 32, the item-property cap);
-  - **quick-add** writes none;
-  - a row removal writes one `{"row":…}` note;
-  - the legacy full form and the create form write at most one note per in-scope cell, capped at
-    256 per revision. Above that the save gets 422 as a size limit.
-- The display of a scribble (`raw`) is escaped and inside `<bdi>` (Sonnet m6).
-
-**No-op saves (D-U; Sonnet m2).**
-- A cell is unchanged when its **parsed** value equals the saved value. The comparison is per
-  control:
-  - integer: the parsed i64 (or unknown);
-  - text and multiline: exact string;
-  - Name: after trim, as `name_notes` stores it;
-  - Notes: exact;
-  - enum: option ID;
-  - boolean: the value;
-  - nullable pair: state plus value;
-  - optional property: presence plus value.
-- A save in which nothing changes writes **no revision and no note**. The page says "No
-  change". Rights and the active state are **still rechecked** before that answer (Sol minor 2).
-- **Two record-only changes** write a revision with unchanged data and a note. They are the
-  only data-unchanged revisions:
-  1. An `unresolved` scribble on a kept value.
-  2. **Accepting the kept value after a scribble** (Sol M4): when the address's current note is
-     `unresolved` and the player enters a value equal to the saved one, a `literal` note
-     resolves the scribble. Otherwise "enter 84 to clear it" would be a no-op and the scribble
-     would never go away.
-- There is no separate "Keep" button (Sonnet m7).
-
-**Typed addresses (Sol rev-2 M1).**
-- Forms: `meta:name`, `meta:notes`, `field:<id>`, `cell:<list>/<host-id>/<property>`.
-- In routes: `/private-sheets/{id}/meta/{name|notes}`, `/fields/{field_id}` and
-  `/cells/{list}/{host_id}/{property}`.
-- Notes, conflicts, jobs, Undo and switch all use them, so a definition field called `name` or
-  `notes` never collides with the metadata.
-- The data part reuses `history_diff::address` (`history_diff.rs:16-22`) for row cells
-  (Sonnet m4).
-- Routes refuse, with 400 and before any write:
-  - derived (formula) fields;
-  - IDs that are not in the pin;
-  - IDs that fail the slug grammar (`valid_field_id`, `admission.rs:96-103`);
-  - host IDs that are not in the live snapshot.
-
-**Per-cell save (D-C, D-S; Sol rev-2 M2, M3; Sonnet M-F, m1).** On the edit page:
-
-| Unit | Form | Admitted keys |
-|---|---|---|
-| Name, Notes | `meta/…` | `csrf`, `base`, `value` |
-| Scalar field | `fields/{id}` | `csrf`, `base`, `value`, plus `null` if nullable |
-| Saved-row cell | `cells/{list}/{host}/{prop}` | `csrf`, `base`, `value`, plus `set` if optional |
-| New row (Add +) | `lists/{list}/rows` | `csrf`, `base`, and `row-{p}` and `set-{p}` for that one row |
-| Quick-add line | `lists/{list}/quick` | `csrf`, `base`, `text` |
-| Remove, Move up, Move down | `lists/{list}/rows/{host}/{remove\|up\|down}` | `csrf`, `base` |
-
-- **One form per unit, each with a single visible Save submit button**, so it is the default
-  submitter (slice 1.5a, P2: a unit's Save follows its control; a list form's Save list,
-  among many buttons, comes first).
-- Enter in a single-line input submits it. Selects, checkboxes, nullable pairs and multiline
-  cells save with that button, since they have no Enter (Sonnet M-F). With JS, `change` saves
-  selects and checkboxes.
-- **Row actions are separate forms**, so Enter can never trigger Remove or Move.
-- Remove and Move write at once. **Remove gets "Row removed · Undo" right after** (D-V, §3f).
-  Move has no Undo; the reverse move is one click.
-- **New row** form: one row's controls, Enter saves the row. A required enum or boolean must
-  still be chosen; required numbers may be blank (unknown, D-M).
-- New host IDs are allocated inside the transaction (`r<rev>-k`, as today) and returned in the
-  response (Sonnet m8).
-- **No pending choices exist any more.** D-Q applies a literal and offers the switch afterwards,
-  so rev-2 M3 (multiple ambiguous cells in one list save) disappears with the pool choices.
-- Each route **refuses native and unsupported pins** (Sonnet m1).
-- **The create page stays one full form.** It writes notes for interpreted numbers.
-- The legacy full-form edit POST stays accepted, with whole-sheet 409 and D-U (Sonnet m2). With
-  D-Q literals, re-posting is safe.
-
-**Conflicts and base revisions (R1; Sol M3, Sonnet m3).**
-- Each form carries `base`: the revision at which that unit's **displayed** value was read.
-- `base` must be an integer within `1..=L`. A malformed value gets 400; a base above L (forged)
-  gets 409.
-- **The conflict rule compares values, not intervening history.** The server loads
-  `base` with `snapshots::raw_load(…, Some(base))` and the live snapshot L, in the same
-  transaction, and answers 409 when the unit's **protected value differs** between them.
-  - An ABA change (84 → 69 → 84) is therefore *not* a conflict. That is deliberate: the
-    displayed value is still the true one, and checking every intervening revision would decode
-    unbounded history under the single DB mutex.
-  - Exactly two snapshots are decoded per write.
-
-  | Unit | Protected value |
-  |---|---|
-  | Metadata, scalar field, saved-row cell | that address's value, plus the row's existence for cells |
-  | New row | nothing (it only appends) |
-  | Quick-add | nothing (it only appends) |
-  | Remove | the row's existence **and all of its property values** (a stale Remove after another tab edited the row gets 409) |
-  | Move up / down | the list's **order of host IDs** (a stale Move after a reorder, add or remove gets 409) |
-
-- The patch is always applied to the **freshly loaded live snapshot** L, never to the historical
-  base, and L + 1 is written.
-- **Store change:** `private_save_keeping` (`sheets.rs:279`) today requires the whole-sheet
-  revision to equal the live one. The new routes pass `(base, unit)` and use this rule instead;
-  the legacy full-form and create paths keep the whole-sheet check.
-- A **stale no-op** (the value already equals the submission) answers "No change" rather than
-  409.
-- After a 409 the re-rendered form carries `base` = L and the player's draft, so a second
-  Enter is a conscious overwrite.
-- **Busy server (D-X3):** sheet write routes wait up to 2 s for the `JOBS` permit instead of
-  failing at once (`definitions/mod.rs:33-37` uses `try_acquire`). Then they answer a styled
-  503 page that re-renders the player's submitted input with "Server busy; press Enter
-  again". The wait fits inside the 5 s request timeout. Reads keep `try_acquire`.
-- **Without JS**, every save does PRG, and the whole page is re-read, so every `base` equals L.
-  Text typed in another field without pressing Enter is lost on that reload. That is accepted
-  and documented.
-- **With JS (§3g)**, after a save the module updates `base` **only for the saved unit**, and
-  only if the response revision is newer than that unit's current base. Every other unit keeps
-  its own base, so an unrelated save never rebases a dirty draft.
-- Requests per unit are serialised: one in flight, the latest queued. A late response for an
-  older request is ignored.
-- **Draft generations (Sol M1).** Per unit, the module keeps a draft generation counter that
-  increments on every `input` event. A successful response:
-  - always updates that unit's acknowledged saved value and `base`;
-  - replaces the control's text **only if** the draft is still the generation that was
-    submitted.
-
-  A value typed while the save was in flight is kept, and so is a queued second save.
-- **Shared read-only projection (Sol M2).** Derived values and checks have their own
-  projection revision. A response updates them only when its revision is ≥ the projection's
-  current revision. Per-unit acknowledgements stay independent, so out-of-order responses from
-  different units never regress Load or the checks.
-- **R1 test:** tab A at revision 10 has an unsaved Armour edit; tab B saves Armour (11); tab A
-  saves HP (12). Tab A's Armour form still has `base` 10, so saving it gets **409** with the
-  stored value and the draft both kept. The same sequence is repeated with a dirty row cell.
-
-**Quick-add (D-S).**
-- A list may declare the optional member `"quick_add": {"name": <text property>, "quantity":
-  <integer property>?}`.
-- Admission refuses it when the list has a required enum or boolean property, because a quick
-  add could not fill it, or when it names a property of the wrong type.
-- Deterministic parse of `text` (≤ 200 characters):
-  - `^(\d{1,6})\s+(.+)$` → quantity and name;
-  - `^(.+?)\s*[x×]\s*(\d{1,6})$` → name and quantity;
-  - otherwise name = the whole text and quantity = 1;
-  - an empty name → "Nothing to add".
-- Other required numbers are `null` (unknown); optional properties are absent.
-- One revision; no note.
-
-### 3b. Interpretation service (CPU)
-
-Unchanged from rev 2 except where noted.
-- **Shape:** an `Interpreter` trait, a `StubInterpreter`, and a crate adapter.
-- **Crate selection:** the six contract items, checked against an axum stub: loopback HTTP;
-  structured-output pass-through; no redirects, proxy or hosted fallback; a bounded body; a
-  timeout and cancellation that closes the connection; licence and footprint; maintenance.
-  D-H applies: stop and ask.
-- **Runtime:** llama-server on an `--internal` network, plus a pinned forwarder bound only to
-  `127.0.0.1:8091`. The flags are `--cpus 2 --threads 2`, plus memory, swap and PID limits.
-  The model is hash-checked before it is mounted.
-  - The forwarder has a **fixed upstream** and must not act as a general proxy.
-  - Step 2b verifies that the inference container really cannot reach the outside.
-- **Endpoint (Sonnet m4):** must be an IP literal, `127.0.0.1` or `::1`; host names are
-  refused. Assistant off is the default.
-- **Context (D-F, D-J):**
-  - phrase and target first;
-  - then other **stored** integer and enum fields in definition order, until 4 KiB. Derived
-    fields are excluded from context and from `@` references (Sonnet m5);
-  - catalogue entry text last, in step 3, cut first when space runs out (Sol rev-2 m2).
-  - All dynamic strings are untrusted data.
-- **Output:**
-  - a strict JSON schema whose expression field has a `pattern`;
-  - terms are literals or `@field` references;
-  - operators are `+ − × ÷` and parentheses;
-  - `÷` is rounded at once with `floor` or `ceil`, or must be exact (`none`);
-  - every literal must appear in the phrase or equal the target's value;
-  - the display shows base, expression and effect, and the reason is "the assistant's
-    reading";
-  - `max_tokens` 128, measured in 2b and raised to 256 if bundles get truncated.
-- **Jobs (Sol rev-2 m2):**
-  - one worker; a queue of 4 in total and 1 per account. The per-account limit **counts
-    running work**. Supersession is checked **before** the capacity refusal;
-  - a 60 s queue deadline and a 30 s run deadline;
-  - at most 64 records. Non-terminal records are at most 6 (queue, running, reminder), so
-    terminal eviction always makes room;
-  - 128-bit IDs; poll and apply recheck rights;
-  - a reminder job (step 3) uses its own low-priority slot, bound to the account, and does not
-    consume the per-account cap (Sonnet m6).
-
-**Proposal freshness (R2, Sonnet M-A; D-P).** When a job finishes, Rust validates each option
-and stores its **bound read/write set**:
-- every write target: address, value at the job's base revision and, for row cells, the row's
-  host ID;
-- every `@` reference: address and value;
-- the **displayed effect**: before → after for each target;
-- for reminders and bundles (Sol M6), the **supplied context** as well:
-  - each list-row name the prompt carried;
-  - its remembered key;
-  - the identity (catalogue version and entry key) of any entry text sent;
-  - every enum value in the context.
-
-  All of these are bounded by the 4 KiB prompt. A changed item name, key or enum therefore
-  invalidates the option even when the numbers are unchanged.
-
-Bundle targets must be distinct; a duplicate drops the option. The freshness guarantee covers
-exactly this bound set. It does not claim that the model's relevance judgement was right
-(injection is contained, not prevented).
-
-`POST /private-sheets/{id}/proposals/{job}/{n}` (`csrf`) then does, in one `IMMEDIATE`
-transaction:
-1. Recheck rights and that the sheet is active.
-2. Check that the job binding matches and that the job is **not already applied**: jobs are
-   single-use and marked consumed after the write.
-3. Require **every address in the read/write set to still hold its bound value** and every
-   bound row to exist.
-4. Re-evaluate, and require the **effect to equal the displayed effect**.
-5. Write, with notes `confirmed` sharing a `bundle` number.
-
-Any mismatch, or an expired job, gets "Something this proposal used has changed: ask again",
-nothing is written, and there is never a literal fallback. A change to an unrelated field does
-not invalidate the proposal.
-
-### 3c. Confirm, bundles, reminders
-
-- **Interpretation (JS):**
-  1. A cell save records `unresolved`, and the module starts a job.
-  2. It shows "Thinking…" in `role="status"`.
-  3. Then 1–3 options with base, expression and effect, or the choices of an `ambiguous` reply.
-  4. **Use** → the apply route. Ignoring the options leaves the scribble.
-- **Bundles (step 3):**
-  - up to 4 changes to integer, enum or boolean addresses (scalars, or saved-row cells by host
-    ID); no row adds or removes;
-  - one revision, with notes sharing `bundle`;
-  - freshness as in §3b.
-- **Reminders (step 3):**
-  - **Trigger (D-W):** a saved **decrease of any top-level integer field**, with the assistant
-    on and JavaScript present. There is no owner marking. The model's `relevant` flag judges
-    relevance, and the low-priority slot bounds the cost.
-  - **Context:** the decrease, numbers and enums, list-row names from properties that carry
-    the `catalogue` member, and linked entry text when exactly one entry matches or the stored
-    key (D-R) resolves. Entry text is ≤ 2,000 characters and quoted.
-  - **Output:** `{relevant, row, hint ≤ 120, option?}`, where the option is a bundle.
-  - **Display:** a dismissible hint (client-side only); it never blocks or auto-applies.
-  - Injection is contained by the schema, the provenance rule (numbers taken from entry text
-    are labelled as such), the full display, and confirmation.
-
-### 3d. Warnings
+### 1.7 Warnings still to add
 
 | Warning | Source | Stored | Shown |
 |---|---|---|---|
-| Not understood (value kept or unknown) | `unresolved` / `erased` note | yes | next to the cell, until a newer note |
-| "Did you mean 84 − 15 = 69?" | `sign_literal` current note | yes | next to the cell |
 | Assistant failure, expiry, busy, stale | job / apply | no | inline (JS) |
-| Not in catalogue / which one | §3e on view | no | next to the cell |
-| Advisory check | existing formulas (`web.rs:732-748`) | no | existing section |
-
-Warnings never block, and each is tied to its control with `aria-describedby`. The top-of-page
-count is cut.
-
-### 3e. Names, "Which Sword?", suggestions
-
-**Member.** An optional `"catalogue": {"id": <link>, "entry_type": <id>?, "key": <property>}`
-on a **text** item property.
-- `key` names a declared **optional text** property of the same list that holds the remembered
-  entry key (D-R). It is an ordinary declared property, so the value schema, formulas, history
-  and freeze need no special case.
-- It is rendered as the link, never as a control.
-- Checked at the three step-3 sites, plus local checks: the key property exists, is optional
-  text, is not itself catalogue-backed, and is used by at most one hint.
-- The member is resolved only through the immutable pin.
-
-**Linking on view.** The name is normalised (NFKC, case-folded, diacritics removed, whitespace
-collapsed).
-1. If the stored key resolves to an eligible entry (the linked catalogue, the type filter, not
-   retired) **and** its normalised name equals the cell's name: link it.
-2. Otherwise, exactly one eligible exact match: link it.
-3. Several matches: "Which Sword?" lists the candidates (name · type · catalogue). Choosing one
-   posts `cells/{list}/{host}/{key}` with the entry key: one revision, no note. The link is
-   remembered from then on (D-R).
-4. None: "Not in the catalogue" plus Browse. With JS, also "Did you mean…?" on demand.
-
-When the name cell is saved with a different name, the server **clears the key** in the same
-revision. A stale key cannot point at the wrong entry.
-
-**Suggestions** (step 4, JS). As in rev 2:
-- read rights and pin correspondence rechecked per request;
-- no `JOBS` permit, a pool of 4, and 429 at saturation;
-- the query is 2–64 scalars and ≤ 256 bytes;
-- a prefix match on cached names, then FTS, then an on-demand typo pass;
-- the typo pass is bounded: within ±2 characters of length, at most 20,000 comparisons and
-  20 ms, outside the mutex;
-- the type filter applies on every path;
-- the name cache is LRU-bounded by bytes (32 MiB), filled once, and holds names only;
-- p95 ≤ 50 ms, measured.
-
-Picking a suggestion stores the name, and its key when the picked entry is one of duplicates.
-
-### 3f. Undo (D-N) and history (D-E)
-
-- **Eligible:** the current note of an in-scope address when:
-  - its op is `literal`, `sum`, `sign_literal`, `switched`, `confirmed`, `reverted` or
-    **`erased`** (D-X1);
-  - its `before` is recorded. An `{"absent":true}` before means Undo makes the optional
-    property absent again, so present ↔ absent is undoable;
-  - the sheet is active.
-- **Not eligible:** `unresolved`, creation, new rows, text cells, frozen sheets.
-- **Row removal (D-V):** the removal note `{"row":"present"}` → `{"row":"absent"}` offers
-  "Row removed · Undo". Undo:
-  1. reads the row from the revision before the removal, through the validated history reader;
-  2. requires that no row with that host ID exists now;
-  3. re-inserts it at its old index, clamped to the current length, with a **new host ID**
-     `r<L+1>-1`, because removed IDs never return (`snapshots.rs:67-70`);
-  4. writes a `reverted` note.
-
-  The re-added row is a new row for later notes, so its cells have no Undo until they are edited
-  again.
-- `POST /private-sheets/{id}/undo` with `csrf` and `note` (revision and address). In one
-  transaction:
-  1. Recheck rights.
-  2. Require the note to still be the current note of the address and the current value to
-     equal its `after`.
-  3. Write `before`, with op `reverted` and `target`.
-- If the cell changed since, there is nothing to undo: the newer change has its own note.
-  **No forced Undo in the POC.** That removes Sol rev-2 M6 (binding a forced confirmation).
-- A double submit → the second finds the note no longer current: "already undone".
-- **Bundles:** Undo on a member reverts **all** members, and only if every member's current
-  note is still that bundle and holds its `after`. Otherwise nothing is reverted and the page
-  lists what changed. There is no partial Undo.
-- **History:** each revision lists its notes (raw, before → after) next to the values-free
-  diff. Readers are the sheet's readers: the custodian and Masters.
-
-### 3g. JavaScript (D-G)
-
-- One module, `assets/sheet-assist.js`, loaded with `<script type="module">` on sheet pages.
-- **CSP:** a `SheetPage` response extension, applied in `normalize`, gives `default-src 'self';
-  script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self';
-  frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'`.
-  - The inline style moves to CSS.
-  - The module uses classes, never `setAttribute('style')` (Sonnet m3).
-  - Error pages from outer middleware (timeout, 503) keep the default header; documented.
-- **Transport (Sol rev-2 m1):**
-  - requests are `URLSearchParams` bodies (`application/x-www-form-urlencoded`), which
-    `post_origin` accepts;
-  - responses are JSON, and the DOM is built with `createElement` and `textContent` only (no
-    `innerHTML`);
-  - integers and revisions are carried as **strings**.
-- **Save response (Sol rev-2 M7):**
-
-  ```
-  {revision, unit: {address, value, note?}, derived: [{id, text}],
-   checks: {violated, not_evaluated, passed, items: [{id, status, message}]}}
-  ```
-
-  - everything is computed from the new saved revision;
-  - the module updates the saved unit, every derived value's text and the advisory-checks
-    section, all read-only nodes. **No input other than the saved unit is touched**, and no
-    other unit's `base` moves (R1).
-- **Combobox:**
-  - `aria-controls` and unique option IDs;
-  - while the list is open, Enter selects and does not submit;
-  - IME composition is respected;
-  - a debounce, `AbortController` and a generation counter.
-- Live region, real buttons, focus returning to the cell, 24 × 24 px targets, 390 px layout.
-- **Without JS**, every save, Undo, switch, quick-add and row action works through PRG.
-
-### 3h. Security summary
-
-- Model output passes the schema, the grammar, literal provenance, Rust evaluation and
-  read/write-set freshness. It is rendered escaped inside `<bdi>`.
-- Rights are rechecked on every request and inside every write transaction.
-- **Limits:** raw ≤ 200; notes ≤ 256 per revision; prompt ≤ 4 KiB; the job and record caps of
-  §3b; the suggest bounds of §3e.
-- Loopback IP only; the model server has no egress; no redirects or proxies; no prompts in
-  logs; no secrets.
-- **Known POC limitation L1:** unsealed notes (D-T).
-
-## 4. What changes versus existing rules and plans
-
-| Existing | Where | Change |
-|---|---|---|
-| Q4: item not in the catalogue is invalid | `catalogue-plan.md:29` | Warning with suggestions; "Which Sword?" is remembered (D-R) |
-| D9/R9 writer membership check | `catalogue-plan.md:295-307`, `:624-636` | Not built. The remembered key is advisory: a dangling key just shows no link |
-| No JavaScript on sheets; "no script" in the gate | `catalogue-plan.md:102`, `release-scope.md:139`, `auth/mod.rs:191-193` | One module under a strict CSP; no-JS editing kept (D-G) |
-| One full-page Save; M4 list drafts with Add, Remove, Move and Save | `sheet-presentation.md:15-16` | Per-cell forms saved on Enter. Row actions and quick-add write immediately (D-C, D-S). The create page keeps the full form and the M4 draft ops |
-| Strict integers; one bad integer refuses the whole save | `values.rs:164-174`, `web.rs:1210-1230` | Literal, sum, or unresolved (value kept or unknown). A sign-led input is literal, with the switch offered (D-Q) |
-| No `null` in non-nullable integers or inside items; formulas refuse it | `values.rs:94`, `:116`, `private_pin.rs:97-117`, `convert.rs:89-97`, `:111-118` | `null` = unknown, admitted for every integer cell; formulas fail per field |
-| Stale page → whole-sheet 409 | `web.rs:1124-1148` | Per-unit 409 against the unit's `base`. The legacy full form keeps whole-sheet 409 |
-| Every save writes a revision | `snapshots.rs:306-406` | No-op saves write nothing (D-U) |
-| History summary values-free | `history_diff.rs:1-5` | The diff is unchanged; notes with values are shown next to it (D-E) |
-| Catalogue plan non-goals (LLM, revert) | `catalogue-plan.md:36-47` | In scope; legality stays out |
-| LLM authors definitions and doesn't judge at play time | `definition-language-draft.md:43-48` | Narrow play-time use: confirmable proposals and reminders |
-| "No model proposes" | `release-scope.md:149` | Local model, confirm-only; updated in step 5 |
-| Accuracy bar | `discovery.md:177-179` | Waived for the POC (D-D) |
-| No pool, quick-add or name-key definition members | `runtime-definition-contract.md` | New optional `quick_add` (list) and `catalogue` (text item property) members, omitted when absent so old hashes are kept. The rev-2 pool marker is dropped (D-Q) |
-
-**What stays.**
-- Model output never silently alters a sheet, and legality is advisory.
-- Rust does all arithmetic.
-- `snapshots::write` is the sole writer; history is append-only, and rollback is a new revision.
-- CSRF and authorization, immutable pins, size limits, manuals local, containers, no hosted
-  fallback, the app usable with the assistant off.
-
-## 5. Steps
-
-Each slice and step:
-- has its own branch;
-- has failing-first tests, with the red run recorded;
-- is independently reviewed before merge (implementation review);
-- is built and tested on 2 cores on weekdays.
-
-Slices 1.1 to 1.6 go into master one by one, and each leaves the demo usable.
-
-### Demo (lands with slice 1.1)
-
-`tests/support/source_fixture.rs` gains `assist_definition()`, written as
-`assist-definition.json` by `fixture_pair` (`:57-95`). It reuses the closures and the pattern of
-`list_definition()` (`:97-156`) (Sonnet m12). Game `synthetic-game/first`, definition
-`assist-sheet`, fields:
-- `hp` "Current HP" and `max_hp` "Max HP";
-- `armour` "Armour modifier" (starts at −1);
-- `luck` "Luck" (nullable);
-- `equipment` with `name` (text), `quantity` (integer), `weight` (integer) and `broken`
-  (optional boolean);
-- derived `load` = `sum(equipment.map(i, i.quantity * i.weight))`, and the check
-  `hp <= max_hp`.
-
-Slice 1.6 and step 3 add their members to it (`quick_add`, `catalogue` plus `key`, a demo
-catalogue). The `name`/`notes` collision test in 1.5a reuses `list_definition()`, which already
-has a field with id `name`.
-
-`tools/assist_demo.py` is a dev tool (prototype tier) built on the `smoke_release.py` helpers:
-1. It starts from a fresh data directory.
-2. It registers the ruleset, imports the source fixture and publishes the definition.
-3. It creates an owner and a player with generated dummy local passwords, and prints them.
-4. It creates a campaign and a sheet (HP 84, Max HP 84, Armour −1).
-5. It serves `--loopback` and prints the URL and logins.
-
-```
-cargo build --locked -j 2
-cargo run --locked -j 2 --example source_fixture -- target/assist-demo/fixture
-python3 tools/assist_demo.py target/debug/mimik --fixture target/assist-demo/fixture \
-    --data target/assist-demo/data
-# open the printed http://127.0.0.1:<port>/private-sheets/<id> and log in as the player
-```
-
-Each slice states what the demo can do at that point. After 1.1 it is still the full-page
-form with one Save, and unreadable input is still refused. After 1.2 a sum shows "84 − 15 =
-69" under the cell, unreadable text over a known number keeps it with a scribble, an
-unchanged Save writes nothing, and history lists the notes (§10). After 1.3 "-15" stores
-−15 and offers "Did you mean 84 − 15 = 69? [Yes] Hide"; Yes stores 69, and every changed
-number, choice or yes/no cell offers Undo of its last change (§11).
-
-### Step 1: seven slices (no JavaScript, no model)
-
-#### 1.1 Sums on the existing save — execution-ready
-
-**Visible result.** In the demo, "84 -15" + Save in Current HP stores 69. "-1" stays −1. On a
-phone keyboard, the minus key and space are available in integer cells.
-
-**Scope.** Exactly the following; nothing else changes.
-1. **New module `src/campaigns/entry.rs`** (pure, no I/O):
-   `pub(crate) fn number(raw: &str) -> Result<i64, Unreadable>`.
-   - It implements the §3a grammar: literal and sum, ASCII space and tab trimming, the
-     200-character server-side cap, the 64-scalar parser cap, NUL and control characters
-     refused, checked i128 accumulation per term, and the i64 result range.
-   - Blank is `Unreadable` in 1.1; unknown values arrive in 1.4.
-2. **`values::integer` is untouched** (protocol integers and revisions, `web.rs:1074`,
-   `:1127`), and its test `campaigns/tests.rs:484-486` stays.
-3. **Integration:** `scalar_value` (`values.rs:541-552`) calls `entry::number` for
-   `Control::Integer`. That single call site serves both `values::form` (scalar fields,
-   `:648-652`) and `reconcile` (list rows, `:604-605`). An `Unreadable` maps to the same
-   `AppError::Invalid` as today, so behaviour stays 422 with the draft.
-4. **`inputmode`** (Sonnet M4): the runtime integer inputs drop `inputmode="numeric"`, which on
-   iOS hides the minus key and space:
-   - `templates/private_sheet.html:12`;
-   - `templates/private_list_field.html:6`.
-
-   They get no `inputmode` (plain text keyboard). The native
-   templates (`native_fields.html`, `mork_context.html`) are untouched.
-5. The demo (above).
-
-**Not in 1.1:** notes, display of the sum, D-Q switch, unknown values, per-cell forms,
-JavaScript, CSP.
-
-**Grammar table** (unit tests on `entry::number`, red first against a stub that returns `Err`):
-
-| Input | Result |
-|---|---|
-| `69`, `+5`, `-5`, `−5` (U+2212), `-0`, `0007` | 69, 5, −5, −5, 0, 7 |
-| `84 -15`, `84-15`, `84 - 15`, `84-15+3`, `\t84 -15\t` | 69, 69, 69, 72, 69 |
-| `-9223372036854775808`, `9223372036854775807` | i64::MIN, i64::MAX |
-| `9223372036854775807+1`, `-9223372036854775808-1`, a 40-digit literal | Unreadable (range) |
-| 32 terms whose running sum leaves i128 never (checked per term) | correct or range error, no panic |
-| `84--15`, `84+-2`, `- 5`, `5 -`, `-`, `+`, `1 2`, `5.`, `１２` (full-width), `1e2`, `x`, `2*3`, `6/2` | Unreadable |
-| empty, spaces only, tabs only | Unreadable (blank; becomes unknown in 1.4) |
-| 201 characters (padded valid sum), 65 scalars, an embedded NUL, `\u{7}` | Unreadable |
-
-Plus a property test: arbitrary strings up to 300 characters never panic, and every accepted
-input re-parses to the same value from its canonical decimal output.
-
-**Connected-save tests** (through the router with the existing test harness, red first):
-- **Scalar sum:** POST the full form with `value-hp=84 -15` → 303, and the saved snapshot
-  `hp = 69`.
-- **List sum:** a row's `quantity` = `2+1` → the saved item has `quantity = 3`.
-- **Canonical negative re-post (B1 regression):** with `armour = −1` saved, re-post the
-  unchanged form (`value-armour=-1`) while editing General notes → `armour` stays −1. Repeat for
-  a list-row integer −3.
-- **Unreadable still 422:** `value-hp=lots` → 422 with the draft and nothing saved, the same as
-  today's behaviour and message class.
-- **Native strictness unchanged:** a native MÖRK BORG edit with `hp=84 -15` is still refused
-  by `native_draft(...).validate()` (`web.rs:685`), and `values::integer("+1")` is still `Err`.
-- **Template:** the rendered runtime integer input has no `inputmode="numeric"`, and native
-  templates still do (DOM test with `scraper`).
-
-**Browser.** The existing Chromium gate stays green. One added check at 390 × 844: typing
-`84 -15` into Current HP and saving stores 69.
-
-**Review.** Implementation review (Sol and Sonnet, plus the third chain if available).
-
-#### 1.2 Notes and scribbles
-
-**Scope:**
-- migration 020 (the simple note table, D-T, with the typed note value of §3a);
-- notes for sums, literals, enums and booleans, including present ↔ absent;
-- an unreadable integer on a **known saved value** keeps the value with an `unresolved` note;
-- no-op saves write nothing (D-U), with rights still rechecked;
-- accepting the kept value resolves a scribble;
-- note display, with scribbles inside `<bdi>`.
-
-**Not yet** (Sonnet m10): unreadable input on a **new row or create** still gets 422 until 1.4.
-
-**Visible:** "84 − 15 = 69" next to HP; "lots" → "kept 84 · 'lots' not understood".
-
-**Tests:**
-- a note is written in the transaction, and a failure after `snapshots::write` rolls back
-  everything (test hook);
-- UPDATE, DELETE and replacement abort;
-- an insert naming a non-live revision aborts;
-- notes are read back exactly from the typed note value: `{"absent":true}` versus
-  `{"unknown":true}`, a 64-character enum ID within 80 bytes, booleans;
-- a later literal replaces a scribble as the current note;
-- entering the kept value after a scribble → a `literal` note and a data-unchanged revision;
-- a no-op save → no revision, and a no-op with revoked rights → 403, not "No change";
-- the per-control no-op comparisons: `007` vs 7, a Name with trailing spaces, an enum, a
-  nullable pair, an optional absent vs present;
-- 257 notes → 422;
-- text edits write no note;
-- freeze writes none, and existing notes stay readable;
-- a Master sees raw text in history (D-E);
-- a scribble with RTL characters renders inside `<bdi>`;
-- raw text with NUL or control characters → unreadable.
-
-#### 1.3 Switch and Undo
-
-**Scope:** `sign_literal` notes plus the switch route (checked arithmetic, D-U precedence,
-D-X4 dismiss); the Undo route, including `erased` (D-X1) and present ↔ absent. Bundles come
-later.
-
-**Visible:** "-15" → HP −15 · "Did you mean 84 − 15 = 69? [Yes]"; "84 − 15 = 69 · Undo".
-
-**Tests:**
-- "-1" on armour sets −1 (D-Q);
-- re-entering "-1" over −1 → no revision and no offer;
-- switch → 69 with `switched`;
-- a second switch is refused; a switch after another change is refused;
-- no offer without a known before-value;
-- no offer when `b ± n` overflows (`b = i64::MIN`, input `-1` → `b − 1` overflows);
-- Undo of literal, sum, switched, enum/boolean changes, `erased` (in 1.4) and present → absent;
-- Undo not offered on create, a new row, `unresolved`, text or frozen;
-- a double submit gets "already undone";
-- Undo of an Undo;
-- rights revoked → 403.
-
-#### 1.4 Unknown values
-
-**Scope:**
-- the `null` path through schema (idempotent nullable composition), domain, formula inputs and
-  records, the `Null` result mapping, freeze, history and Undo;
-- blank → `erased`;
-- new rows and create stop refusing unreadable numbers;
-- "?" display;
-- the profile note and `runtime-definition-contract.md:279`.
-
-**Visible:** "lots" in a new row's Quantity → "?" plus the scribble; Load says "Not computed: a
-value it uses is unknown (null)".
-
-**Tests:**
-- a new row or newly present property with an unreadable value → `null` and a note;
-- create with "lots" → created with unknown;
-- `list_values` accepts null;
-- an existing **nullable** integer definition still compiles its schema (no nested type array);
-- `convert::record` and `convert::inputs` map null, so a reader fails per field and the others
-  compute;
-- `copy = hp` with unknown `hp` → `NullValue` wording, not `TypeMismatch`; an item-property
-  copy, the same;
-- arithmetic on null → `NullValue`;
-- **CEL forms** (Sonnet m9): `hp == 0`, `has(...)` and `hp > 0 ? a : b` with unknown `hp` are
-  pinned to their actual results and documented; none of them errors silently into a pass;
-- a dependent says "it uses Load, which could not be computed";
-- Undo restores `null`; Undo of `erased` restores the number;
-- freeze with nulls;
-- the history diff counts null versus a number;
-- an empty Name and a required enum on create are still refused;
-- historical formulas use historical values.
-
-#### 1.5a Per-field save: metadata and scalar fields (Sonnet m11)
-
-**Scope:**
-- the `meta/…` and `fields/{id}` routes with exact key sets and typed addresses;
-- route refusals (derived, unknown and non-slug IDs; native and unsupported pins);
-- per-unit `base` with bounds and value-based conflicts;
-- a stale no-op answers "No change", and after a 409 the form carries `base` = L;
-- the store's whole-sheet check is bypassed only for these routes;
-- one form per unit with a first Save button;
-- the D-X3 bounded permit wait and styled 503.
-
-The legacy full form is kept, with whole-sheet 409.
-
-**Visible:** Enter in HP saves HP alone; selects and checkboxes save with their button.
-
-**Tests:**
-- `list_definition()`'s `name` field plus the metadata Name save separately;
-- two fields saved from one page revision both succeed;
-- the same field from a stale base whose value differs → 409, with the draft and `base` = L;
-- ABA → no conflict (documented);
-- `base` 0 or above L → 400 or 409;
-- a derived field route → 400;
-- a native pin → refused;
-- the permit held by another request for 1 s → the save succeeds; held for 3 s → styled 503
-  with the input;
-- the R1 two-tab sequence (no-JS `base`);
-- the legacy full form keeps whole-sheet 409;
-- Chromium no-JS run at 1280 and 390 (Enter, select button, multiline button).
-
-#### 1.5b Per-cell save: lists, new row, row actions
-
-**Scope:**
-- the `cells/…`, `lists/{list}/rows` and row-action routes;
-- Remove protects the row's values, Move protects the order;
-- Remove writes a row note, with Undo (D-V);
-- the new-row form;
-- host IDs returned.
-
-**Visible:** Enter in a row's Quantity saves that cell; Remove → "Row removed · Undo".
-
-**Tests:**
-- Enter in the first, middle and last row saves only that cell and never adds, moves or removes
-  a row;
-- two cells of different rows saved from one page both succeed;
-- a stale cell → 409;
-- a stale Remove after another tab edited that row → 409;
-- a stale Move after a reorder, add or remove → 409;
-- a removed row's cell → 400;
-- Undo of Remove re-inserts the row with a new host ID at the clamped index;
-- Undo of Remove when the list is full (256) → refused with a message;
-- a new row with a required enum unset → refused; with a blank number → unknown (1.4);
-- the new-row form writes ≤ 32 notes;
-- Chromium no-JS run.
-
-#### 1.6 Quick-add
-
-**Scope:** the `quick_add` member (schema, admission refusals) and the parse.
-
-**Visible:** "3 torches" + Enter adds Torches ×3; "healing potion x2" adds the potion ×2.
-
-**Tests:**
-- both patterns, a plain name (→ 1), an empty name, a 7-digit count (→ treated as a name), and
-  200 characters;
-- a required enum in the list → admission refusal;
-- unknown values for other required numbers;
-- no notes written;
-- old definition hashes unchanged.
-
-### Step 2a: JavaScript foundation
-
-- Scope: `SheetPage` CSP, the asset route, fetch saves with per-unit `base`, the save response
-  with derived values and checks, string integers.
-- **Save on leaving the field (D-AA):** a changed field saves on blur/change, through the same
-  per-unit route as Enter; an unchanged field sends nothing; a field left while its previous save
-  is in flight queues one save of the latest value. Tests: Tab out of a changed HP saves once;
-  Tab out of an unchanged HP sends no request; Enter followed by blur saves once; the no-JS run
-  still saves only on Enter.
-- Tests:
-  - final headers on 200, 409 and 422;
-  - other routes unchanged;
-  - a multipart body still gets 415 and the module sends URL-encoded;
-  - 9007199254740993 round-trips;
-  - **R1 with JS:** a saved HP response leaves the dirty Armour `base` alone, and Armour → 409;
-  - **Same-unit draft generations (Sol M1):** a delayed HP response arrives after the player
-    typed 60 without submitting → the 60 stays and the base updates; repeated with a queued
-    second save;
-  - **Shared projection ordering (Sol M2):** HP (revision 11) and Equipment (revision 12)
-    responses arrive reversed → both units acknowledge, and Load and the checks show
-    revision 12;
-  - a save that changes `load` and `hp <= max_hp` updates both read-only regions without
-    touching other inputs;
-  - integers are strings **recursively**: list values, note before/after values and revisions
-    (Sol minor 2);
-  - the final CSP header after `normalize`, on the new routes and on their refusals;
-  - no CSP violations, and no `innerHTML` or style attributes (lint test over the module);
-  - the inline style from `private_sheet.html:7` moved to `app.css` (Sonnet m13);
-  - the no-JS run is still green.
-
-### Step 2b: Crate and runtime selection (prototype tier; parallel to step 1)
-
-- The crate contract items and D-H stop.
-- The topology, with egress tests from inside the model container **and** from the forwarder,
-  which must not proxy anywhere but its fixed upstream (Sol minor 2).
-- A latency and schema screen (§7); output tokens measured.
-- A results note, reviewed before it picks the crate and model.
-- **Candidate approaches are judged on results, not on project rules (user, 2026-10-19).** Besides
-  genai/rig over a local model, screen strot-ai/Project-STROT (MIT, Python: compile-time LLM
-  synthesis, deterministic per-record decisions with calibrated confidence), called from Rust via
-  pyo3 or ported to Rust. If a candidate wins but conflicts with a rule (D-H, Rust-only runtime,
-  the lightweight standalone binary), the results note states the conflict and its cost, and the
-  user decides whether to bend the rule.
-
-### Step 2c: Interpretation
-
-- Scope: trait, stub, adapter; IP-literal loopback config; worker, queue and records; poll; the
-  apply route with read/write-set binding; the UI.
-- Tests:
-  - schema-invalid, grammar-invalid, literal provenance (`84 + 915` dropped), a text field
-    referenced, `÷` on negatives, division by zero;
-  - the queue: the 5th and the account's 2nd → 429; supersession before capacity; cancellation
-    (the fake server sees the disconnect); the 60 s and 30 s deadlines; 64 records;
-  - **R2:**
-    - a referenced field changes while the target does not → refused;
-    - a referenced row disappears → refused;
-    - effect mismatch → refused;
-    - a second apply → refused, including two concurrent applies: exactly one writes, and the
-      consumed flag is set only after the transaction commits;
-    - another sheet's or another account's job, or an invalid option index → refused;
-    - an unrelated field change → still applied;
-  - the job store keeps at most 6 non-terminal records under reminder creation, supersession
-    and cancellation (Sol minor 2);
-  - expired job → no write and no literal;
-  - another account's job, or revoked rights → not found or 403;
-  - `JOBS` free during the model call;
-  - a host name or non-loopback endpoint refused;
-  - assistant off is honest everywhere;
-  - no player text in logs.
-- One live smoke, recorded as live inference.
-
-### Step 3: Bundles and reminders
-
-- Scope: the item-property `catalogue` member with `key`; the unique and key linking on view
-  (rule 1–2 of §3e); a demo catalogue; bundles; reminder jobs and hints.
-- Tests:
-  - bundle of 4 in one revision; a 5th change dropped; duplicate targets dropped;
-  - one bundle member changed → apply refused;
-  - **contextual freshness (Sol M6):** a reminder bundle whose row name, remembered key, entry
-    version or context enum changed, with every number unchanged → apply refused;
-  - bundle Undo all-or-nothing;
-  - reminder only on a decrease of a top-level integer; none with the assistant off; it does
-    not take the account cap;
-  - duplicate names without a key → no entry text in the prompt;
-  - text and multiline never in the prompt (asserted on the stub request);
-  - entry text cut to 2,000; injection in entry text → at most a fully shown option.
-
-### Step 4: Suggestions and "Which Sword?"
-
-- Scope: the suggest route, cache, matching, combobox, the on-demand typo pass, the "Which
-  Sword?" chooser, and key clearing on rename.
-- Tests:
-  - confinement: forged address, unlinked catalogue, other game, native, unsupported or corrupt
-    pin;
-  - the type filter on every path;
-  - 2-character prefix; typo distance 1 and 2; diacritics;
-  - query bounds; typo-pass bounds; cache bytes;
-  - no `JOBS` 503; 429;
-  - escaping;
-  - choosing among duplicates stores the key and the link persists;
-  - renaming clears the key;
-  - a dangling key shows no link;
-  - p95 measured.
-
-### Step 5: Docs, release scope, gate
-
-- Contract, presentation, release-scope, publication and dependency docs.
-- `cargo about`, audit, packaging, and the unpacked smoke with the assistant off.
-- The assistant scope: "local endpoint, POC quality, not certified (D-D)"; L1 listed.
-
-## 6. Risks, limitations, later, questions
-
-**Known POC limitations.**
-- **L1:** notes are unsealed (D-T). A process with database write access could add notes to the
-  current revision. Notes are help, not evidence, until sealing lands.
-- **L2:** without JS, text typed in another field and not entered is lost on reload.
-- **L3:** conflicts compare two snapshots, so an ABA change of a unit is not detected
-  (§3a). This is deliberate.
-
-**Risks.**
-- **R1:** latency at 2 threads is unmeasured.
-- **R2:** model quality is unknown, and the bar is waived. The display and confirmation are the
-  safeguard.
-- **R3:** reminder prompts carry catalogue text (contained, not prevented).
-- **R4:** a crate gap would stop step 2c (D-H).
-- **R5:** one revision per Enter makes history long. D-U removes no-ops; there is no cap.
-- **R6:** the forwarder is a new pinned image.
-- **R7 (D-X2):** history has no cap (D-U). **Before release** a per-account write-rate limit or
-  a storage guard is required. Sonnet rev-3 M5 is recorded here, not solved in the POC.
-
-**Later.**
-- Sealing and verifying notes (before release).
-- Player `*` and `/`.
-- Text, enum and boolean interpretation.
-- Notes and Undo for text.
-- Undo of moves and creation; forced and arbitrary restore.
-- A write-rate limit or storage guard (D-X2, before release).
-- Owner-reviewed rules for reminders without a model (D-I).
-- A model for quick-add.
-- More threads off-hours.
-- The quality bar.
-- Retiring the legacy full-form edit POST.
-
-**Decided:**
-- rev-1 Q1–Q6 → D-A to D-D (Q5: Gemma excluded);
-- rev-2 Q1 → D-Q, Q2 → D-R, Q3 → D-S;
-- rev-3 Q1 → D-V (immediate Remove with Undo), Q2 → D-W (any decrease; model judges);
-- forced Undo → not in the POC;
-- "create never refuses" → narrowed (§3a);
-- main-session defaults D-X1 to D-X4 (§0), which the user may revise.
-
-**Open questions for the user:** none blocking. D-X1 to D-X4 are defaults the user may revise.
-
-## 7. Verification
-
-- **Rust gate:** fmt, strict Clippy, locked tests (red then green), audit, `cargo about`, release
-  build, size delta; 2 cores on weekdays.
-- **Browser** (Chromium at 1280 × 720 and 390 × 844, demo data, with and without JS):
-  - per-cell Enter, buttons for selects and checkboxes, row actions, quick-add;
-  - notes, switch, Undo, "?" unknowns;
-  - R1 two-tab;
-  - derived and check refresh;
-  - CSP headers and no violations;
-  - combobox keyboard and IME;
-  - no overflow.
-- **Process smoke:** the unpacked archive with the assistant off, and once with the stub
-  endpoint.
-- **Model screen** (prototype tier, `tools/assist_eval.py` with unit tests; a results note with
-  exact scope, denominators and limitations; reviewed; **no pass bar**, D-D):
-  - p50/p95 latency at 2 threads, schema-valid rate, output-token use;
-  - per class: correct within the first 3, and false-confident.
+| Not in catalogue / which one | linking on view | no | next to the cell |
+
+Every warning is non-blocking and tied to its control with `aria-describedby`.
+
+### 1.8 Security summary
+
+Model output passes the schema, the grammar, literal provenance, Rust evaluation and
+read/write-set freshness, and is rendered escaped inside `<bdi>`. Rights are rechecked on every
+request and inside every write transaction. Limits: raw ≤ 200, notes ≤ 256 per revision,
+prompt ≤ 4 KiB, the job and record caps, the suggest bounds. Loopback IP only; the model server
+has no egress; no redirects or proxies; no prompts or player text in logs; no secrets.
+
+## 2. Steps
+
+### 1.5b Per-cell save: lists, new row, row actions
+
+Scope: §1.1. Visible: Enter in a row's Quantity saves that cell; Remove → "Row removed · Undo".
+Tests:
+- Enter in the first, middle and last row saves only that cell and never adds, moves or
+  removes a row; two cells of different rows saved from one page both succeed;
+- a stale cell → 409; a stale Remove after another tab edited that row → 409; a stale Move
+  after a reorder, add or remove → 409; a removed row's cell → refused;
+- Undo of Remove re-inserts the row with a new host ID at the clamped index; Undo of Remove on
+  a full list (256) → refused with a message;
+- a new row with a required enum unset → refused; with a blank number → unknown; the new-row
+  form writes ≤ 32 notes;
+- the R1 two-tab sequence with a dirty row cell; page-bound fixtures rerun;
+- Chromium no-JS run at 1280 and 390.
+
+### 1.6 Quick-add
+
+Scope: §1.2 (schema member, admission refusals, parse, route). Visible: "3 torches" + Enter
+adds Torches ×3; "healing potion x2" adds the potion ×2. The demo definition gains
+`quick_add`. Tests: both patterns, a plain name (→ 1), an empty name, a 7-digit count
+(treated as part of the name), 200 characters; a required enum in the list → admission
+refusal; unknown values for other required numbers; no notes written; old definition hashes
+unchanged.
+
+### 2a JavaScript foundation
+
+Scope: §1.3 without the combobox. Tests:
+- D-AA: Tab out of a changed HP saves once; Tab out of an unchanged HP sends no request;
+  Enter followed by blur saves once; the no-JS run still saves only on Enter;
+- final headers on 200, 409 and 422; the final CSP after `normalize` on the new routes and
+  their refusals; other routes unchanged;
+- a multipart body still gets 415 and the module sends URL-encoded;
+- 9007199254740993 round-trips; integers are strings recursively;
+- R1 with JS: a saved HP response leaves the dirty Armour `base` alone, and Armour → 409;
+- draft generations: a delayed HP response after the player typed 60 without submitting keeps
+  the 60 and updates the base; repeated with a queued second save;
+- projection ordering: HP (revision 11) and Equipment (12) responses arrive reversed; both
+  units acknowledge, Load and the checks show revision 12;
+- a save that changes `load` and `hp <= max_hp` updates both read-only regions without
+  touching other inputs;
+- no CSP violations; a lint test over the module refuses `innerHTML` and style attributes;
+- the inline style moved to `app.css`; the no-JS browser run still green.
+
+### 2b Crate and runtime selection (prototype tier; may run in parallel)
+
+Scope: §1.4 crate items and the D-H stop; the topology with egress tests from inside the model
+container and from the forwarder (which must not proxy anywhere but its upstream); a latency
+and schema screen (§3) with output tokens measured; the STROT candidate judged on the same
+results. Output: a results note, independently reviewed before it picks the crate, model or
+approach.
+
+### 2c Interpretation
+
+Scope: trait, stub, adapter; IP-literal loopback config; worker, queue and records; poll; the
+apply route with read/write-set binding; the UI. Tests:
+- schema-invalid, grammar-invalid, literal provenance (`84 + 915` dropped), a text field
+  referenced, `÷` on negatives, division by zero;
+- queue: the 5th job and the account's 2nd → 429; supersession before capacity; cancellation
+  (the fake server sees the disconnect); the 60 s and 30 s deadlines; 64 records; at most 6
+  non-terminal records under reminder creation, supersession and cancellation;
+- freshness: a referenced field changes while the target does not → refused; a referenced row
+  disappears → refused; effect mismatch → refused; a second apply, including two concurrent
+  applies (exactly one writes, consumed set only after commit) → refused; another sheet's or
+  account's job or an invalid option index → refused; an unrelated field change → still
+  applied; an expired job → no write and no literal;
+- another account's job or revoked rights → not found or 403; `JOBS` free during the model
+  call; a host name or non-loopback endpoint refused; assistant off is honest everywhere; no
+  player text in logs;
+- one live smoke, reported as live inference.
+
+Idea to evaluate here (2026-10-19, from Project-STROT): gate suggestions on calibrated
+confidence (a warning only below the threshold) and keep a known-answer set every model or
+prompt change must pass; the set doubles as the way back to the waived quality bar (D-D).
+
+### 3 Bundles and reminders
+
+Scope: §1.5 (catalogue member with `key`, linking rules 1–2, a demo catalogue, bundles,
+reminder jobs and hints). Tests: a bundle of 4 in one revision, a 5th change dropped, duplicate
+targets dropped; one member changed → apply refused; contextual freshness (row name,
+remembered key, entry version or context enum changed with every number unchanged → refused);
+bundle Undo all-or-nothing; a reminder only on a decrease of a top-level integer, none with the
+assistant off, not taking the account cap; duplicate names without a key → no entry text in
+the prompt; text and multiline never in the prompt (asserted on the stub request); entry text
+cut to 2,000; injection in entry text → at most a fully shown option.
+
+### 4 Suggestions and "Which Sword?"
+
+Scope: §1.6. Tests: confinement (forged address, unlinked catalogue, other game, native,
+unsupported or corrupt pin); the type filter on every path; 2-character prefix; typo distance
+1 and 2; diacritics; query, typo-pass and cache-byte bounds; no `JOBS` 503; 429; escaping;
+choosing among duplicates stores the key and the link persists; renaming clears the key; a
+dangling key shows no link; p95 measured.
+
+### 5 Docs, release scope, gate
+
+- Update `docs/assisted-entry.md`, `release-scope.md` (schema 20, one script under a strict
+  CSP, the local model as confirm-only), the runtime definition contract (`quick_add` and
+  `catalogue` members), publication and dependency docs; replace the statements this work
+  reverses: catalogue Q4 (not in the catalogue is a warning, "Which Sword?" remembered), the
+  D9/R9 writer membership check (not built; the key is advisory), "no script" on sheets,
+  "no model proposes", the accuracy bar (waived, D-D), and "the LLM does not judge at play
+  time" (narrow confirmable proposals and reminders).
+- `cargo about`, audit, packaging, and the unpacked smoke with the assistant off and once with
+  the stub endpoint.
+- Assistant scope stated as "local endpoint, POC quality, not certified (D-D)", with L1 and the
+  other open limitations listed.
+
+## 3. Verification
+
+- Rust gate: fmt, strict Clippy, locked tests (red then green), audit, `cargo about`, release
+  build and size delta.
+- Browser (Chromium at 1280 × 720 and 390 × 844, demo data, with and without JS): per-cell
+  Enter, buttons for selects and checkboxes, row actions, quick-add, notes, switch, Undo,
+  unknowns, the R1 two-tab sequence, derived and check refresh, CSP headers and no violations,
+  combobox keyboard and IME, no overflow.
+- Model screen (prototype tier, `tools/assist_eval.py` with unit tests; results note with
+  exact scope, denominators and limitations; reviewed; no pass bar, D-D): p50/p95 latency at 2
+  threads, schema-valid rate, output tokens; per class, correct within the first 3 and
+  false-confident. Fast-path inputs never reach the model; results are per class, not general
+  accuracy.
 
   | Class | n |
   |---|---|
@@ -1142,1120 +359,18 @@ The legacy full form is kept, with whole-sheet 409.
   | Injection hidden in context | 8 |
   | Reminder relevance (step 3) | 8 |
 
-  Fast-path inputs never reach the model. Results are reported per class; this is not a measure
-  of general accuracy.
-- Unit, connected-router, browser and live-inference evidence are reported separately, and a
-  check that was not run is never reported as passed.
-
-## 8. Review finding map
-
-**Rev 1 → rev 2** (still valid unless noted).
-
-| Finding | Resolution | Section |
-|---|---|---|
-| Sol B1, Sonnet B1: re-posted negatives | Superseded by D-Q: every sign-led input is literal, so re-posting is idempotent; no-op rule (D-U) | §3a |
-| Sol B2: stale proposal → literal | Dedicated apply route, no literal fallback (D-P); extended by R2 | §3b |
-| Sol B3: note integrity | Replaced by D-T simple notes plus limitation L1; sealing later | §3a, §6 |
-| Sol M1, Sonnet M1: grammar | Formal grammar; player `*` and `/` cut | §3a |
-| Sol M2: unresolved new rows | D-M `null` for every integer cell, full path | §3a |
-| Sol M3, Sonnet M3: note lifecycle | Every in-scope change writes a note; current note = latest; scribble until a newer note | §3a |
-| Sol M4, Sonnet M7: job bounds | One worker, caps, deadlines, records | §3b |
-| Sol M5: auth on poll and apply | Rechecks per request and inside the transaction | §3b |
-| Sol M6, Sonnet M2: drafts and keys | Per-unit routes with exact keys | §3a |
-| Sol M7: Undo semantics | Current-note rule; no force; bundle all-or-nothing | §3f |
-| Sol M8–M10, Sonnet M9: suggestions | Pin confinement, bounds, unique or keyed linking | §3e |
-| Sol M11, Sonnet M8: CSP | Set in `normalize` | §3g |
-| Sol M12: i64 in JS | Strings | §3g |
-| Sol M13, Sonnet M5, M6: injection | `@` references, literal provenance, narrow guarantee | §3b |
-| Sol M14: demo | Fixture and `assist_demo.py` | §5 |
-| Sol (container), Sonnet M10 | Internal network, forwarder, crate contract, D-H | §3b |
-
-**Rev 2 → rev 3.**
-
-| Finding | Resolution | Section, test |
-|---|---|---|
-| **Sol R1:** an unrelated save rebases dirty drafts | Per-unit `base`; JS updates only the saved unit's base; requests serialised and late responses ignored | §3a, §3g; slices 1.5 and 2a, two-tab test |
-| **Sol R2, Sonnet M-A:** freshness binds the target only | Bound read/write set and displayed effect; single-use jobs; unrelated changes harmless | §3b; step 2c R2 tests |
-| **Sol R3:** migration window on existing revisions | Moot: no seals in the POC (D-T); recorded as L1, to be solved with sealing before release | §3a, §6 |
-| Sol M1: metadata and field addresses collide | Typed addresses in routes, notes, jobs and Undo | §3a; slice 1.5 test |
-| Sol M2, Sonnet M-F: Enter submission contract | One form per unit with a first Save button; row actions as separate forms; buttons for selects, checkboxes and multiline | §3a; slice 1.5 tests |
-| Sol M3: pool choices in list or legacy saves | Moot: D-Q leaves no pending choices; the switch comes after the save | §3a |
-| Sol M4: notes can't represent all changes; long text; choice discriminator | Typed `before` and `after` for integer, enum and boolean; text out of note scope; `op` discriminator (also Sonnet M-E) | §3a; slice 1.2 |
-| Sol M5, Sonnet M-B, M-G: unknown path incomplete | Schema, `list_values`, `convert::record` and `inputs`, freeze, history, Undo; provenance rule dropped; existing wording used | §3a; slice 1.4 |
-| Sol M6: forced Undo freshness; bundle semantics | No forced Undo; bundle all-or-nothing | §3f; slice 1.3, step 3 |
-| Sol M7: derived and checks stale after a fetch save | The save response carries derived values and checks; the module updates only read-only regions | §3g; step 2a test |
-| Sol m1: multipart 415; `innerHTML` vs Trusted Types | URL-encoded bodies, JSON responses, DOM built with `textContent` | §3g; step 2a |
-| Sol m2: context overflow; record saturation; supersession order; output tokens | Truncation order; ≤ 6 non-terminal; supersession first; tokens measured | §3b; steps 2b, 2c |
-| Sol security notes (forwarder upstream, egress check) | Fixed upstream; egress test | §3b; step 2b |
-| Sol question 5: "create never refuses" | Narrowed: unreadable numbers only | §3a; slice 1.4 test |
-| Sol suggested slicing | Slices 1.1–1.6, the first very small | §5 |
-| Sonnet M-C: verification cost | Moot (D-T) | — |
-| Sonnet M-D: step 1a too large | Six slices | §5 |
-| Sonnet M-H: history growth | D-U: no-op writes nothing; no cap | §3a |
-| Sonnet m1–m8 | m1: native pins refused. m2: legacy full form keeps whole-sheet 409. m3: no style attributes, outer error pages documented. m4: IP-literal loopback. m5: derived fields excluded from context and references. m6: reminder slot. m7: no Keep, no data-unchanged revision except a scribble. m8: host IDs returned | §3a, §3b, §3g |
-
-**Rev 3 → rev 3.1** (both reviewers GO WITH AMENDMENTS, with no Blocking findings).
-
-| Finding | Resolution | Section, test |
-|---|---|---|
-| Sol slice-1.1 constraints: separate parser; connected-save tests | `campaigns::entry`, with `values::integer` strict; scalar sum, list sum, canonical negative re-post, unreadable 422, native strictness, template | §3a; slice 1.1 |
-| Sol M1: in-flight save overwrites a newer draft of the same unit | Per-unit draft generation; the control is replaced only if the draft is unchanged | §3a; step 2a |
-| Sol M2: cross-unit out-of-order responses regress derived values | A separate projection revision for derived values and checks | §3a; step 2a |
-| Sol M3, Sonnet m3: conflict semantics; Remove and Move; base bounds | Value-based rule on two snapshots (ABA accepted, L3); protected values per unit; patch applied to live L; the store bypasses the whole-sheet check only for new routes; `base` in `1..=L`; stale no-op → "No change"; `base` = L after a 409 | §3a; slices 1.5a, 1.5b |
-| Sol M4, Sonnet M2: absent vs null; enum size; clearing a scribble under D-U | Typed note value (absent, unknown, int, enum, bool, row) ≤ 80 bytes; accepting the kept value writes a `literal` note | §3a; slice 1.2 |
-| Sol M5: nested nullable schema; `Null` result is a `TypeMismatch` | Idempotent nullable composition; `Null` result → `NullValue` | §3a; slice 1.4 |
-| Sol M6: contextual freshness for reminders | Bind names, keys, entry identity and enums in the context; narrow guarantee stated | §3b; step 3 |
-| Sol minor 1, Sonnet m8: switch overflow; D-U precedence | Checked `b ± n`; an unchanged input → no offer | §3a; slice 1.3 |
-| Sol minor 2: executable security tests | No-op rights recheck; concurrent apply; recursive string integers; final CSP; forwarder egress; job-store invariant | slices 1.2, 2a, 2b, 2c |
-| Sonnet M1 → D-X1 | `erased` is Undo-eligible | §3f; slice 1.3 |
-| Sonnet M3 → D-X3 | Bounded permit wait (2 s), then a styled 503 that keeps the draft | §3a; slice 1.5a |
-| Sonnet M4: `inputmode="numeric"` hides the minus key on iOS | Removed on runtime integer inputs; 390 px check | slice 1.1 |
-| Sonnet M5 → D-X2 | No cap in the POC; rate limit or storage guard before release (R7) | §6 |
-| Sonnet m1 | Grammar table with "+5", "−5", "-0", lone sign, "- 5", "1 2", "5 -", empty, tabs, 201 characters, zero padding, checked per term; `values::integer` test kept | slice 1.1 |
-| Sonnet m2 | Per-control no-op comparison, Name after trim | §3a; slice 1.2 |
-| Sonnet m4 | Derived, unknown and non-slug IDs refused; `history_diff::address` reused | §3a; slice 1.5a |
-| Sonnet m5 | Note counts for the new-row form (≤ 32), quick-add (0) and row removal (1) | §3a |
-| Sonnet m6 | NUL and control characters refused; scribbles inside `<bdi>` | §3a; slice 1.2 |
-| Sonnet m9 | CEL `==`, `has()` and ternary over null pinned and documented; contract line updated | §3a; slice 1.4 |
-| Sonnet m10 | New-row and create input still get 422 until 1.4 | slice 1.2 |
-| Sonnet m11 | 1.5 split into 1.5a and 1.5b | §5 |
-| Sonnet m12 | `list_definition()` reused for the collision test; demo built on its pattern | §5 Demo, 1.5a |
-| Sonnet m13 | Inline style moved to CSS | step 2a |
-| User D-V, D-W | Remove with Undo; any-decrease reminder trigger | §3a, §3c, §3f |
-
-## 9. Slice 1.1 implementation notes
-
-Branch `assist-1.1` (from master `4d07932`). Built exactly the slice-1.1 scope of §5: the
-`campaigns::entry` parser, its integration at `scalar_value`, the `inputmode` removal, the
-demo fixture and launcher, and the 390 px browser check. Nothing from later slices.
-
-**What was built.**
-- `src/campaigns/entry.rs`: `number(raw) -> Result<i64, Unreadable>`. It refuses more than
-  200 characters (counted as characters, before trimming), then NUL and every control
-  character except tab, then trims ASCII spaces and tabs. A blank input is `Blank`. It then
-  splits the text into signed digit runs (a sign-led literal, or an unsigned first term
-  followed by `ws* sign ws* int` terms, at most 64), and only then evaluates them left to
-  right in checked `i128`; the result must fit `i64`. `Unreadable` has six kinds (`Blank`,
-  `TooLong`, `Control`, `Syntax`, `TooManyScalars`, `Range`), each with a refusal message.
-- `values::scalar_value` calls it for `Control::Integer`, so scalar fields and list rows, on
-  create and edit, read sums. An `Unreadable` maps to `AppError::Invalid(message)`: still 422
-  with the draft, "No changes saved: …" as before. `values::integer` is unchanged, and its
-  test at `campaigns/tests.rs:484-486` stays.
-- `templates/private_sheet.html` and `templates/private_list_field.html`: integer inputs
-  have no `inputmode`. Text inputs keep `maxlength="8000"`. Native templates are untouched.
-- Demo: `assist_definition()` in `tests/support/source_fixture.rs` (written as
-  `assist-definition.json` by `fixture_pair`); `publish_assist_definition()` in
-  `tools/smoke_release.py`; `tools/assist_demo.py` with `tools/test_assist_demo.py`.
-- Browser: `run_assist_browser` in `tools/browser_smoke.py`, run in the auth workspace stage.
-- Dev-dependency `proptest =1.12.0` (`default-features = false`, `std`) for the property
-  tests. One networked `cargo add`/`cargo fetch` in `mimik-ci` from an allowlisted copy
-  (`Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, stub targets); every later build was
-  offline. New locked packages: `proptest 1.12.0`, `rand_xorshift 0.5.0`, `unarray 0.1.4`
-  (all MIT OR Apache-2.0); the rest of its graph (`rand 0.10`, `regex-syntax`, `bitflags`,
-  `num-traits`, `chacha20`, `core_detect`) was already locked. Dev-only; it never enters the
-  release binary.
-
-**Deviations from the plan (code reality wins, intent kept).**
-
-| # | Plan said | Done | Why |
-|---|---|---|---|
-| V1 | Table row "32 terms whose running sum leaves i128 never" | 32 five-digit terms (exact), 9 × i64::MAX (leaves i64, stays in i128, `Range`), 5 adds and 4 subtractions of i64::MAX (back to i64::MAX), three 38-digit terms (the second addition overflows i128, `Range`), a 39-digit term (`Range`) | The 200-character cap admits at most 10 terms of i64::MAX, so "32 terms" and "leaves i64" cannot both hold; the cases split the two properties |
-| V2 | `-9223372036854775808-1` is "Unreadable (range)" | Unreadable as `Syntax`; the range case is `0-9223372036854775808-1` | §3a's grammar has an unsigned first term in a sum, so a sign-led input with more terms is not a sum. Both are Unreadable, so the user-visible outcome (422) is the same |
-| V3 | "`-5+3`" is not listed | `Syntax` (unreadable) | Same grammar rule: a sign-led input is one literal (D-Q). Recorded so 1.3 can decide whether to offer anything |
-| V4 | The existing `list_values_tests::item_integers_exact_i64` was not mentioned | Updated: `01`, `+1` and ` 1` in a list row are now read (1), plus `2+1` and `84 -15`; `1.0`, empty, `9223372036854775808`, `1 2`, `84--15` and `x` are still refused; the i64::MIN edge stays | It pinned the old strict row parsing, which §3a deliberately replaces (zero padding, `+5`, trimming). It is a spec change, not a weakened check |
-| V5 | `formula_tests::history_recomputes_identically` asserted `inputmode="numeric"` on a runtime integer | Asserts `value="4" disabled` | Direct consequence of scope item 4 |
-| V6 | The browser check runs at 390 × 844 | It runs at both viewports (the workspace stage runs per viewport) | Superset; the 390 px run is the one the plan asks for |
-| V7 | Demo command `cargo build --locked -j 2` | Same, plus a container variant for the weekday window | The machine schedule caps builds at 2 cores on weekdays |
-
-**Red → green.**
-
-| Test | Red (before) | Green (after) |
-|---|---|---|
-| `entry::tests::literals_are_their_value`, `sums_are_computed_left_to_right`, `i64_bounds`, `every_term_is_checked`, `limits_and_control_characters`, `blank_is_unreadable`, `generated_sums_match_i128` | FAILED against the stub `number` (always `Err(Syntax)`), 10:48 | pass |
-| `entry::tests::unreadable_shapes`, `arbitrary_input_never_panics`, `grammar_alphabet_never_panics`, `messages_name_the_problem` | pass against the stub (a constant `Err` satisfies them) | pass |
-| `entry_save_tests::scalar_sum_saves_its_result` | FAILED (422 on `84 -15`, old strict parser) | pass |
-| `entry_save_tests::list_row_sum_saves_its_result` | FAILED (422 on `2+1`) | pass |
-| `entry_save_tests::runtime_integer_inputs_have_no_numeric_inputmode` | FAILED (`inputmode="numeric"` present) | pass |
-| `entry_save_tests::canonical_negatives_survive_a_re_post` | pass (guard: the strict parser also kept `-1`) | pass; mutation "sign-led literal unreadable" makes it fail |
-| `entry_save_tests::unreadable_entry_is_still_422_with_the_draft` | pass (guard) | pass; mutation "unreadable read as 0" makes it fail |
-| `entry_save_tests::native_sheets_and_protocol_integers_stay_strict` | pass (guard) | pass; mutation "`values::integer` falls back to `entry::number`" makes it fail |
-| `list_values_tests::item_integers_exact_i64` (updated, V4) | — | pass |
-| First green run | `every_term_is_checked` and `i64_bounds` failed on two test-design errors (V1, V2) | fixed in the tests, not the parser |
-
-The three mutation runs (10:55–10:56, `--cpus 2`) restored the sources afterwards (checked
-with `cmp`). The proptest regression file written by the stub red run was deleted: it held
-the stub's failure, not a parser defect.
-
-**Gate** (Monday 2026-10-19, inside the weekday window, so every build and test ran in a
-container with `--cpus 2` and `CARGO_BUILD_JOBS=2`; image `mimik-ci:latest`, target volume
-`mimik-catalogue-target`, registry volume `mimik-cargo-cache`, `--network none`):
-- `cargo fmt --check` and `cargo clippy --locked --all-targets --all-features -- -D warnings`
-  (pedantic): clean (10:58–10:59). The first Clippy run found two `useless_vec` in the tests.
-- `cargo test --locked --all-targets --all-features` (10:59–11:07): **585 passed**, 0 failed,
-  2 ignored (the pre-existing ones), 37 result lines.
-- `ruff check tools`, `ruff format --check tools`: clean (11:10).
-- Tools unittest (`CI=1`, `MIMIK_FORMULA_EVAL` from the built `formula_eval` example, the
-  registry cache and the main repository's git directory mounted), 11:10–11:15: **757 run,
-  11 skipped, OK**. The known `test_fake_runner_script` error did not occur.
-- Release build (11:07–11:10) and the source fixture example (now also writing
-  `assist-definition.json`).
-- `smoke_release.py --auth --source-fixture` against the release binary (11:15–11:16):
-  passed.
-- `browser_smoke.py --auth` in `mimik-browser` (`--network=none --cpus=2 --memory=4g
-  --shm-size=1g --pids-limit=1024 --cap-drop=ALL --security-opt=no-new-privileges`, the
-  worktree's `tools/` mounted on `/checks`), 11:15–11:17: every stage passed, including the
-  new assisted stage at 1280 × 720 and 390 × 844. A copy of the tools with the expected value
-  changed to 70 failed with "The typed sum 84 -15 did not save 69", so the stage runs.
-- Demo launcher (11:18, in `mimik-ci`, debug binary): `--exit-after-setup` created the sheet
-  and stopped cleanly; a serving run stopped by SIGINT after 8 s shut the server down.
-
-**Not run:** `cargo audit`, `cargo about`, packaging and the unpacked-archive checks, the LAN
-smoke. **Not yet done:** the independent implementation review (Sol and Sonnet, plus the
-third chain), required before merge.
-
-**Demo commands** (from the worktree root; synthetic data only):
-
-```
-rm -rf target/assist-demo
-cargo build --locked -j 2
-cargo run --locked -j 2 --example source_fixture -- target/assist-demo/fixture
-python3 tools/assist_demo.py target/debug/mimik --fixture target/assist-demo/fixture \
-    --data target/assist-demo/data
-```
-
-The launcher prints the sheet URL (`http://127.0.0.1:3000/private-sheets/1`) and the player
-and Owner logins with freshly generated dummy passwords. Open the URL, sign in as
-`demo-player`, type `84 -15` into Current HP and press Enter: it saves 69. Armour stays −1
-on every save. `lots` is still refused with the draft kept (unknown values arrive in 1.4).
-Ctrl-C stops the server. Port 3000 must be free. `--exit-after-setup` builds the data and
-stops without serving. On weekdays 09:00–18:00 the two cargo commands may run instead in
-`mimik-ci` with `--cpus 2 -e CARGO_BUILD_JOBS=2` and the worktree mounted on `/workspace`.
-
-### 9.1 Review fixes (round 1)
-
-Review of `813a9d9`: Sonnet MERGE-READY; Sol FIX THEN MERGE (no functional defect); the third
-chain was unavailable. Dispositions:
-
-| Finding | Disposition | Test, red → green |
-|---|---|---|
-| Sol Minor 1: show the accumulation is checked, not wrapping | Added `entry::tests::accumulation_overflow_is_not_cancelled_by_later_terms`: with A = 38 nines, `A+A-A-A` (exactly 0) is `Range` at the second term; `A-A+A-A` is `Ok(0)` | Under a wrapping mutation (`wrapping_add`/`wrapping_sub` in `number`) only this test failed (11:27, `--cpus 2`); the existing three-38-digit case still passed, because its wrapped result is outside i64 anyway. Restored source (checked with `cmp`): 12/12 pass |
-| Sol Minor 2: `Range` doc | Now: a term, or the running sum after a term, overflows i128, or the final result is outside i64; a term or the running sum may exceed i64 when the result fits | doc only |
-| Sonnet Minor: demo data directory and account inputs | `fresh_directory` creates the data directory with mode 0700 (and sets 0700 on an accepted empty one). Password files and the invitation token live in `account-inputs` (0700, files 0600) only while the CLI reads them; `create_accounts` removes the directory in a `finally`, so also after a failed step. They are not needed later, because the launcher prints the generated passwords | `test_data_directory_is_private`, `test_inputs_removed_after_setup`, `test_inputs_removed_after_a_failure`: red first (mode 493 ≠ 448; `account-inputs` left behind), then green |
-| Sol Major: required release gates | Run against the candidate, below. `cargo audit` found **RUSTSEC-2026-0373** in `ammonia 4.2.3` (case-sensitive CSS `url(` matching when filtering style properties). Fixed by `ammonia 4.2.4` (lockfile only, same dependency set; one networked `cargo fetch` in `mimik-ci` from an allowlisted copy, checksum verified by `--locked`) | Not reproducible in Mimik: the source sanitizer allows no `style` attribute. Guard test `sources::sanitizer_tests::style_attributes_never_survive_in_any_case` passes on 4.2.3 and 4.2.4 (11:29–11:30); recorded in `dependency-decisions.md` with the proptest selection |
-
-**Gate on the candidate** (code commit `3aca432`; this record is folded into the same
-commit afterwards and changes only docs and TODO). Monday 2026-10-19, weekday window: every
-build and test in a container with `--cpus 2` and `CARGO_BUILD_JOBS=2`. Times are CEST
-(container logs are UTC).
-
-| Gate | Time | Cap | Result |
-|---|---|---|---|
-| `cargo fmt --check`, pedantic Clippy `-D warnings` (crate re-checked after a touch) | 12:00 | 2 | clean |
-| `ruff check tools`, `ruff format --check tools` | 12:00 | 2 | clean |
-| `cargo test --locked --all-targets --all-features` | 11:32–11:40 | 2 | **587 passed**, 0 failed, 2 ignored, 37 result lines |
-| `formula_eval` example, `source_fixture` example | 11:40–11:41 | 2 | built; fixture includes `assist-definition.json` |
-| Tools unittest (`CI=1`, `MIMIK_FORMULA_EVAL`, registry cache and git dir mounted) | 11:41–11:45 | 2 | OK, 11 skipped |
-| `actionlint .github/workflows/ci.yml` | 11:45 | 2 | clean |
-| `cargo audit --deny warnings` (advisory DB fetched in the container from `github.com/RustSec/advisory-db`, tip `999ec89`, 2026-10-17; then `--no-fetch`) | 11:28 / 11:30 | 2 | 1 vulnerability (above), then **clean** after the fix |
-| `cargo about generate --locked --fail about.hbs` | 11:45–11:46 | 2 | passed (notices 497,325 bytes) |
-| `cargo build --release --locked` | 11:46–11:48 | 2 | built (21,929,144 bytes) |
-| `cargo package --locked --allow-dirty` (verify build) and `verify_source_package.py` | 11:48–11:49 | 2 | passed; "Corresponding-source member allowlist verified" |
-| `cargo vendor --locked target/vendor`, `package_release.py --version 0.1.0 --revision 3aca432…` | 11:49–11:50 | 2 | archives, source crate, dependency sources and `SHA256SUMS` created |
-| Unpacked artifact: `sha256sum --check`, unpack, `smoke_release.py --auth --source-fixture` on the unpacked binary | 11:50–11:51 | 2 | all three checksums OK; smoke passed |
-| Offline corresponding-source rebuild (unpacked source crate plus dependency sources, empty `CARGO_HOME`, `--network=none`, `cargo build --release --offline --locked`) | 11:51–11:56 | 2 | built. Not byte-identical to the shipped binary (the build path differs); CI does not claim reproducibility |
-| `browser_smoke.py --auth` in `mimik-browser` (CI flags) on the unpacked binary | 11:56–11:57 | 2 | every stage passed, the assisted stage at both viewports |
-| `lan_smoke.py` (internal Docker networks, separate Chromium client, HTTPS proxy, QR decode) on the unpacked binary and source | 11:57–12:00 | 2 | passed; no containers or networks left. The script's client and server runs set `--cpus=2`; its denier and offline QR-decoder runs do not, so a local `docker` shim on `PATH` added `--cpus=2 -e CARGO_BUILD_JOBS=2` to any `docker run` without `--cpus` (machine schedule). No physical-phone or router test is claimed |
-
-Nothing in the list was skipped.
-
-## 10. Slice 1.2 implementation notes
-
-Branch `assist-1.2` (from master `cccd9ff`, which merged slice 1.1). Built the slice-1.2 scope
-of §5 ("Notes and scribbles") and the four slice-1.1 review follow-ups (review record rows 6,
-7, 8 and 10). Nothing from later slices: no switch or Undo routes, no `sign_literal` or
-`erased` notes, no `null` for non-nullable integers, no per-cell forms, no JavaScript.
-
-**What was built.**
-- **Migration 020** (`migrations/020_sheet_notes.sql`, `SCHEMA_VERSION` 20):
-  `private_sheet_notes(sheet_id, revision, address, op, raw, before, after, bundle, target)`,
-  primary key `(sheet_id, revision, address)`, a foreign key to the history row, and an index
-  for the current note of an address. Column checks: a typed address (`field:`, `cell:`,
-  `meta:`), the eight plan ops, `raw` ≤ 200 characters without NUL, `before`/`after` JSON
-  objects ≤ 80 bytes. Triggers: UPDATE and DELETE abort; an insert aborts when the row exists
-  (the replacement guard: `INSERT OR REPLACE` deletes without firing delete triggers), when
-  it does not name the sheet's live, active `create`/`edit` revision, when the request auth is
-  not that revision's actor (`campaign_request_auth`), or past 256 notes per revision.
-- **`campaigns::notes`**: the typed note value (`absent`, `unknown`, `int` as a decimal
-  string, `enum`, `bool`, `row`) with canonical encoding ≤ 80 bytes and a decoder that reads
-  only canonical text; `Op`; typed addresses (`field:<id>`, `cell:<list>/<host>/<property>`
-  through `history_diff::address`); `insert` (in the save's transaction), `current` (the
-  latest note of each live address, one indexed lookup per address through `json_each`) and
-  `of_revision`.
-- **`values::form` and `reconcile`** read cells through a `Recorder` that collects notes:
-  - a changed integer, enum or boolean cell of a saved sheet gets a note: `sum` for a sum,
-    otherwise `literal` (a sign-led input too, until 1.3 adds `sign_literal`); Known ↔ Unknown
-    and Set ↔ Not set are `literal` notes with an empty `raw` and typed `before`/`after`
-    (`{"absent":true}` stays distinct from `{"unknown":true}`);
-  - an unreadable entry (syntax, more than 64 numbers, out of range) over a **known saved
-    integer** keeps the integer with an `unresolved` note; elsewhere it is still 422;
-  - entering the kept value when the current note is a scribble on it writes a `literal`
-    note and a data-unchanged revision (§3a);
-  - text, multiline, Name and General notes write none.
-- **`entry::read`** returns the value and whether it was a sum; **`entry::sum_text`** shows a
-  sum normalised ("84 -15" → "84 − 15").
-- **No-op saves (D-U)**: `apply_save` reports whether anything changes (name after trim,
-  notes, data and notes compared; the per-control comparisons of §3a follow from comparing
-  parsed values). A no-op calls `Store::private_unchanged`, which rechecks the request auth,
-  edit rights, the active state and the revision in a transaction, then answers 200 with the
-  saved page and "No change: every value equals the saved sheet, so nothing was saved." A
-  stale no-op gets the usual 409 with the draft; lost rights get 403.
-- **Writer**: `private_save_keeping` inserts the notes after `snapshots::write` in the same
-  `IMMEDIATE` transaction; any failure rolls back the revision too.
-- **Display**: next to an integer cell whose current note is a sum, "84 − 15 = 69"; a scribble
-  shows "kept 84 · ‘lots’ not understood", with the raw text escaped inside `<bdi>` and the
-  input `aria-describedby` the note. History revision pages list that revision's notes (address,
-  op, raw inside `<bdi>`, before → after) in the change summary for the custodian and Masters
-  (D-E).
-- **Follow-ups**: the sanitizer guard test puts its `<td>` in a table row and asserts an
-  allowed `colspan` survives (row 6); `fresh_directory` documents the chmod of a
-  caller-supplied empty directory (row 7); `test_assist_demo.py` injects a dedicated
-  `SyntheticCliFailure` and catches only that (row 8); `lan_smoke.py` caps every container
-  with `--cpus` (new option, default 2, validated 1–64) and gives the QR decoder
-  `CARGO_BUILD_JOBS` to match (row 10).
-- **Browser**: the assisted stage of `browser_smoke.py` also checks the sum note, the scribble
-  (value kept, raw inside `<bdi>`, the input showing the scribble), "No change" for an unchanged
-  Enter (200), and a later number clearing the scribble, at both viewports.
-
-**Deviations from the plan (code reality wins, intent kept).**
-
-| # | Plan said | Done | Why |
-|---|---|---|---|
-| N1 | An unreadable integer on a known saved value keeps the value with an `unresolved` note | Kept for syntax, more than 64 numbers and out-of-range input. Blank, over-long (> 200 characters) and control-character input is still 422 | Blank is the slice-1.4 input for "unknown" (`erased`); recording it as a scribble now would change meaning later. Over-long and control-character text cannot be stored faithfully as `raw` (≤ 200, no controls), and §3a already calls it unreadable |
-| N2 | (not specified) | A cell whose current note is a scribble on its saved value renders the scribble text in its input | The legacy full form re-posts every field. Showing the kept value would make every save elsewhere silently "accept" every scribble (§3a rule) and turn a plain re-post into a revision. Showing the scribble makes the re-post a no-op; accepting needs the value typed |
-| N3 | §3a: a note for every value change; the create form at most one note per in-scope cell | Create and new rows write notes only for sums (§5: "It writes notes for interpreted numbers"); literals, Unknown and Not set on new cells write none | A new cell has no `before`, so there is nothing to undo (§3f) or show for a literal. It also keeps sheets at the publication budget creatable: the exact-budget sheet has far more than 256 in-scope cells and would otherwise hit the 256-note limit |
-| N4 | `op` `sign_literal` for sign-led input | `literal` in 1.2 | §5 puts `sign_literal` with the switch in slice 1.3; the table already admits it, so 1.3 needs no migration |
-| N5 | "The page says No change" | 200 with the saved page and the message in `role="status"`, not a 303 | There is no flash store, so a redirect could not carry the message. A refresh re-posts a no-op, which writes nothing |
-| N6 | D-U for "a save" | Also the native MÖRK BORG full form | The comparison is generic in `apply_save`; native validation is unchanged |
-| N7 | Insert must name the live revision | Also: only for an active `create`/`edit` revision, and only under the request auth of that revision's actor | Defence in depth at no cost. L1 remains: that actor's session can still add notes to the live revision |
-| N8 | — | Existing tests changed for D-U and scribbles: `rendered_form_round_trips`, `list_sheet_rendered_form_round_trips`, `leading_newlines_survive_ops_rejected_saves_and_reloads`, `native_sheet_textareas_keep_leading_newlines` and `browser_crlf_submission_is_stored_as_lf` now expect "No change" and no revision for an unchanged post (stronger: byte-identical without writing); the two router tests, `stale_invalid_draft_conflicts` and the native conflict make a real edit first; `failed_save_rerender_labels_the_saved_revision`, `formula_text_is_escaped`, `failed_save_rerender_keeps_draft_and_submitted_revision` and the slice-1.1 `unreadable_entry_is_still_422_with_the_draft` use input that is still refused (blank, > 200 characters, control characters, new rows) | Spec changes of D-U and §3a, not weakened checks; every 422 and 409 path is still exercised |
-| N9 | — | Upgrade tests that rewind to older schemas drop the note table (`DROP_NOTES_SCHEMA`, `schema_fixture`, `tests/catalogues.rs`, `tests/source_search.rs`); `formula_tests::Setup::_dir` is now `dir` | Same pattern as the catalogue rewind; Clippy pedantic refuses an underscore binding in use |
-
-**Red → green.** Red runs at 12:08 (Python) and 12:22–12:24 (Rust, `--cpus 2`) against a stub:
-`notes::insert`, `current` and `of_revision` did nothing, `apply_save` always reported a
-change, `keeps_value` was always false, and migration 020 had its table without triggers.
-The stub was then replaced by the saved sources (checked: no stub markers left).
-
-| Test | Red (stub) | Green |
-|---|---|---|
-| `notes_tests::sums_and_literals_are_noted_with_the_save_and_shown` | FAILED (no notes) | pass |
-| `notes_tests::an_unreadable_entry_keeps_a_known_value_with_a_scribble` | FAILED (422) | pass |
-| `notes_tests::a_later_literal_replaces_a_scribble_as_the_current_note` | FAILED | pass |
-| `notes_tests::entering_the_kept_value_resolves_a_scribble` | FAILED | pass; mutation "no scribble acceptance" fails it |
-| `notes_tests::a_save_that_changes_nothing_writes_nothing` (split later; `text_edits_write_no_note_and_presence_is_noted` holds its second half) | FAILED (303, revision written) | pass |
-| `notes_tests::enum_boolean_and_unknown_notes_read_back_exactly` | FAILED | pass |
-| `notes_tests::a_no_op_with_revoked_rights_is_403` | FAILED (303) | pass |
-| `notes_tests::masters_see_raw_text_in_history` | FAILED | pass |
-| `notes_tests::scribbles_render_escaped_inside_bdi` | FAILED | pass |
-| `notes_tests::freeze_writes_no_note_and_notes_stay_readable` | FAILED | pass |
-| `notes_tests::more_than_256_notes_are_refused` | FAILED (0 notes stored) | pass |
-| `notes_tests::a_failure_after_the_snapshot_write_rolls_back_everything` | FAILED | pass |
-| `notes_tests::notes_are_insert_only` (split later; `note_inserts_need_the_revision_actor` holds the auth and L1 half) | FAILED (no triggers) | pass; mutation "no replacement guard" fails it |
-| `notes_tests::populated_schema19_upgrade_adds_the_note_table` | FAILED | pass |
-| `notes_tests::unkeepable_input_is_still_422` | pass (guard: the stub refused everything) | pass; mutation "every unreadable kind keeps the value" fails it |
-| `entry::tests::only_unreadable_text_keeps_a_known_value` | FAILED | pass |
-| `entry::tests::readings_tell_sums_from_literals` | pass (not stubbed) | pass; mutation "a literal is a sum" fails it |
-| `notes::tests::*` (5 value, op and address tests) | pass (not stubbed) | pass |
-| `sources::sanitizer_tests::style_attributes_never_survive_in_any_case` (row 6) | — | pass; mutation "`td` allows no `colspan`" fails it, so the table branch now runs |
-| `test_lan_smoke.test_every_container_is_cpu_capped`, `test_cpu_cap_must_be_a_small_positive_integer` (row 10) | FAILED (denier uncapped; no `cpu_cap`) | pass |
-| `test_assist_demo.AccountInputTests` (row 8) | — (refactor of the test itself) | pass |
-
-First green run: four test-design errors, fixed in the tests: the note-limit definition lacked
-`formula_profile`; an insert-only case reused an address that already had a note at revision
-1 (so the replacement guard fired before the live-revision check); the upgrade test's
-reopened store needed the fixture clock; and the history assertion compared askama's `&#60;`
-with scraper's `&lt;`. The first full run then failed 12 existing tests, all from D-U, the
-scribble rule or the note limit; they are N8 (and N3 for the exact-budget sheet). The four
-mutation runs (12:45–12:48, `--cpus 2`) restored the sources afterwards.
-
-**Demo after 1.2** (same commands as §9). In Current HP, `84 -15` + Enter saves 69 and shows
-"84 − 15 = 69" under the cell. `lots` + Enter keeps 69 and shows "kept 69 · ‘lots’ not
-understood"; the cell keeps showing `lots`. Enter again on the unchanged page answers "No
-change" and writes nothing. `69` (or any number) clears the scribble. The Full history link
-shows each revision's notes with what was typed. Blank, a new row's unreadable quantity and an
-unreadable number on the create page are still refused (until 1.4).
-
-**Gate** (code commit `5b405cd`; this record is folded into the same commit afterwards and
-changes only docs). Monday 2026-10-19, inside the weekday window: every build and test ran in
-`mimik-ci:latest` with `--cpus 2`, `CARGO_BUILD_JOBS=2` and `--network none` (target volume
-`mimik-catalogue-target`, registry volume `mimik-cargo-cache`); the browser and LAN containers
-ran with `--cpus=2`. Times are CEST.
-
-| Gate | Time | Cap | Result |
-|---|---|---|---|
-| `cargo fmt --check`, pedantic Clippy `-D warnings` | 12:37, again 13:01 on the commit | 2 | clean (first runs found `too_many_lines` ×3, `type_complexity`, `used_underscore_binding`; fixed by splitting functions and tests, a type alias and renaming `Setup::_dir`) |
-| `cargo test --locked --all-targets --all-features` | 12:37–12:45 | 2 | **611 passed**, 0 failed, 2 ignored (the pre-existing ones), 37 result lines |
-| `ruff check tools`, `ruff format --check tools` (worktree root) | 12:50 | 2 | clean |
-| Tools unittest (`CI=1`, `MIMIK_FORMULA_EVAL`, main git dir mounted read-only) | 12:50–12:54 | 2 | **762 run, OK**, 11 skipped |
-| `formula_eval` and `source_fixture` examples, release build | 12:47–12:50 | 2 | built; release binary 22,028,568 bytes (+99,424 over slice 1.1) |
-| `smoke_release.py --auth --source-fixture` (release binary) | 12:54–12:55 | 2 | passed |
-| `browser_smoke.py --auth` in `mimik-browser` (CI flags, worktree `tools/` on `/checks`) | 12:55–12:56 | 2 | every stage passed, the assisted stage at both viewports. A copy expecting "kept 68" failed with "The scribble lots did not keep 69 with its note" (12:57–12:58), so the new checks run |
-| `actionlint .github/workflows/ci.yml` | 13:01 | 2 | clean |
-| `cargo audit --no-fetch --deny warnings` (slice-1.1 advisory DB copy, tip `999ec89d`, 2026-10-17, 1,338 advisories) | 13:01 | 2 | clean, exit 0; `Cargo.lock` unchanged (no dependency change) |
-| `cargo about generate --locked --fail about.hbs` | 13:01–13:02 | 2 | passed (497,325 bytes, unchanged) |
-| `cargo package --locked --allow-dirty` (verify build), `verify_source_package.py` | 13:02–13:03 | 2 | passed; allowlist verified |
-| `cargo vendor --locked`, `package_release.py --version 0.1.0 --revision 5b405cd…` | 13:03 | 2 | archives, source crate, dependency sources and `SHA256SUMS` created |
-| Unpacked artifact: `sha256sum --check`, unpack, `smoke_release.py --auth --source-fixture` | 13:03–13:04 | 2 | three checksums OK; smoke passed |
-| `browser_smoke.py --auth` on the unpacked binary | 13:04–13:05 | 2 | every stage passed |
-| `lan_smoke.py` (now capping every container itself, default `--cpus 2`) on the unpacked binary and source | 13:06–13:08 | 2 | passed; no containers or networks left; no local shim needed |
-| Demo launcher `--exit-after-setup` (release binary) | 13:08 | 2 | sheet created; stopped cleanly |
-
-**Not run:** the offline corresponding-source rebuild (no build-input change beyond the
-crate's own sources; CI runs it), a serving demo session in a real browser by hand. **Not yet
-done:** the independent implementation review (Sol and Sonnet, plus the third chain),
-required before merge. `release-scope.md` is not updated for schema 20 (as for schema 19 and
-slice 1.1, the assisted sheet's release scope is step 5).
-
-## 11. Slice 1.3 implementation notes
-
-Branch `assist-1.3` (from master `9d29dfe`, which merged slices 1.1 and 1.2). Built the slice-1.3
-scope of §5 ("Switch and Undo") and the slice-1.2 review follow-ups (review record rows 1, 2
-and 4). Nothing from later slices: no `null` for non-nullable integers and no `erased` writer
-(1.4), no per-cell forms or `meta:` addresses (1.5a), no row Remove + Undo (D-V, 1.5b), no
-bundles, no JavaScript. No migration (020 already admits `sign_literal`, `switched`,
-`reverted` and `target`) and no dependency change.
-
-**What was built.**
-- **D-Q literals:** a sign-led entry writes a `sign_literal` note (`values::Recorder`); the
-  value is applied literally as before. Accepting a scribble's kept value stays a `literal`
-  note, whatever its sign (§3a), so it never offers a switch.
-- **`campaigns::assist`** (pure): `locate` and `value_at` read one typed address of a stored
-  snapshot (a non-derived integer, enum or boolean field, or such a property of a live row;
-  `Absent` for an optional property not set); `set` writes a typed value back (a number,
-  unknown, an enum ID, a boolean, or removal of an optional property); `parse_key` reads the
-  note key `<revision>:<address>`; `switch_value` is b + n in checked `i64` for a current
-  `sign_literal` note over a known number whose raw text spells the cell's value; `undoable`
-  is §3f's rule (ops `literal`, `sum`, `sign_literal`, `switched`, `confirmed`, `reverted`,
-  `erased`; a recorded value before that differs from the value after; the cell still holds
-  the value after; row notes excluded).
-- **Routes** `POST /private-sheets/{id}/switch` and `/undo` (`campaigns/assist_web.rs`), in the
-  runtime router (the `JOBS` permit), with an 8 KiB body limit, under the auth layer's origin
-  and content-type checks. Precedence as for sheet saves: parse, CSRF, request auth, rights
-  (403, frozen and read-only included), then exact keys `csrf`, `base`, `note` (400), the
-  note key and the address (400), then the binding (409). The write goes through
-  `private_save_keeping`, which now also rechecks **bound notes** inside its `IMMEDIATE`
-  transaction: each must still be the current note of its address, with the live value equal
-  to its `after` (`sheets::bound_notes_hold`), after the existing auth, rights, active-state,
-  revision and pin rechecks. Success is PRG (303). A switch writes `switched` (raw = what was
-  typed, before = the literal, after = b + n); Undo writes `reverted` (before = the undone
-  `after`, after = its `before`, `target` = the undone revision).
-- **Display** (`templates/private_entry_actions.html`): under a cell whose current note offers
-  them, "Did you mean <bdi>84 − 15</bdi> = 69? [Yes] Hide" and "Last change: was 84 [Undo]". The
-  input is `aria-describedby` its note and offer. A switched cell shows "84 − 15 = 69"; a
-  sign-led sum shows like a sum ("−5 + 3 = −2"). History lists "undid revision N".
-- **Follow-ups:** `browser_smoke.py` compares the revision before and after the unchanged
-  Enter (row 1); `notes_tests::a_no_op_after_the_session_ended_is_403` and
-  `a_no_op_over_an_intervening_revision_is_409` (row 2, hook-driven); 
-  `list_tests::browser_crlf_edit_is_stored_with_lf` (row 4).
-- **Defect found and fixed:** `notes::current` (slice 1.2) joined `json_each` and the note
-  table with a plain `JOIN`; SQLite's planner made the note table the outer loop, O(notes ×
-  addresses). A sheet whose 8,192 cells all have notes took 22 s to read (debug build) and
-  every page request timed out. A `CROSS JOIN` fixes the loop order (one indexed probe per
-  address): 0.38 s.
-- **Browser:** the assisted stage types `-15` over 70, checks the literal and the offer
-  "Did you mean 70 − 15 = 55?", hides it with Hide (no script), checks it is back after a
-  reload, clicks Yes (55, "70 − 15 = 55", no offer), then Undo (−15), at both viewports.
-
-**Decisions asked for by the main session.**
-- **Note V3 (`-5+3`)**: a sign-led entry with more terms is a **sign-led sum**, applied
-  literally as its own value (−2) with a `sign_literal` note, shown like a sum and offered
-  relative to the value before ("Did you mean 84 − 5 + 3 = 82?"). D-Q says sign-led input is
-  literal and multi-term input is computed directly; this reading satisfies both, and the
-  owner's rules review ("number fields accept anything; warn and offer a solution") rules out
-  keeping it unreadable. The leading sign must still touch its digits ("- 5+3" stays
-  unreadable). `-9223372036854775808-1` is now `Range` (was `Syntax`; V2).
-- **NBSP:** U+00A0 and U+202F (narrow no-break space, used by some keyboards and pasted text)
-  count as spaces: trimmed, and allowed between terms. Other Unicode spaces (U+2003, U+2009)
-  stay unreadable, as do full-width digits. Slice-1.1 review row 5 is closed by this.
-
-**Deviations from the plan (code reality wins, intent kept).**
-
-| # | Plan said | Done | Why |
-|---|---|---|---|
-| S1 | Switch posts `note` and `base`; Undo posts `csrf` and `note` | Both post exactly `csrf`, `base`, `note`. `base` must be canonical and ≥ 1 (400), the note's revision ≤ `base` (400: it cannot have been shown), `base` above the live revision 409 | One shape for both routes; `base` binds the request to the page that showed the note. The binding itself is the note (current, value = `after`), not the page revision, so an unrelated save in another tab leaves the offer valid (§3a's value rule, not a whole-sheet 409) |
-| S2 | "a small form posting `/switch`" next to the cell | Two page-level forms (`assist-switch`, `assist-undo`, hidden inputs `csrf` and `base`) after the sheet form; each button sits next to its cell, belongs to its form through the `form` attribute, and carries `name="note" value="<revision>:<address>"`. Buttons are named by `aria-labelledby` (button, cell label, row legend), not by repeated label text | Forms cannot nest inside the sheet form. One form per action plus repeated labels (up to 100 quote characters, 500 bytes escaped) broke the per-unit page bound of D7; the regression test with an offer and Undo on every one of 8,192 cells measures about 0.9 KB per cell, 13.0 MB against the 18.9 MB bound. Enter in the sheet still saves it: only buttons owned by the sheet form are its default |
-| S3 | D-X4 "a client-side dismiss hides it" | A visually hidden, unnamed checkbox with a visible "Hide" label; CSS (`:checked`) hides the offer. No script, never submitted, no dismissal record (cut from the POC), so the offer is back on reload while its note is current | Works without JavaScript under any CSP; dismissal records are §1 "Cut" |
-| S4 | No offer without a known before-value or on overflow | Also none when b = 0 (b + n = n: nothing to switch) and none when the raw text does not spell the note's value (a forged note, L1) | Nothing to offer in either case |
-| S5 | Undo eligible when `before` is recorded | Also requires `before` ≠ `after` | The data-unchanged `literal` note that accepts a scribble would otherwise offer an Undo that changes nothing |
-| S6 | "a double submit → 'already undone'"; refusals keep drafts | 409 with the saved sheet re-read and "Not switched: Current HP changed since, or it was already switched." / "Nothing undone: Current HP changed since, or this change was already undone." Nothing is written | The switch and Undo forms carry no draft. As with every no-JS PRG (§3a), text typed elsewhere in the sheet form without Enter is not carried by a click on Yes or Undo; the sheet form's own refusals keep their drafts as before |
-| S7 | — | A write refused as `Invalid` inside the transaction (for example a failed note insert) answers 422 with the saved sheet | Same classes as sheet saves |
-| S8 | — | Undo shows enum option IDs, as history does ("was guard") | Labels are slice-1.5a work with the per-field forms |
-| S9 | — | `notes_tests::sums_and_literals_are_noted_with_the_save_and_shown` expects `sign_literal` for Armour "-3" | The 1.3 spec change that N4 anticipated, not a weakened check |
-| S10 | — | Test helpers `default_submitter` and `submitted_by` honour the `form` attribute; `notes_tests` helpers are `pub(super)` for `assist_tests`; new test hook `sheets::BEFORE_SAVE_RECHECK` | HTML form-owner semantics; reuse instead of copies |
-| S11 | Erased Undo "(in 1.4)" | `erased` is in the eligible set now; its test forges the op with the insert hook on a Known → Unknown change | Nothing writes `erased` before 1.4 |
-| S12 | — | The bound-note recheck also compares the live value with `after`; no mutation can make that half red on its own, because the same-revision check already implies it | Recorded as defence in depth |
-
-**Red → green.** Red run at 13:36 (`--cpus 2`) against stubs: `assist::{locate, value_at,
-set, parse_key, switch_value, undoable}` returned nothing, `entry::offer_text` returned
-`None`, `Reading::signed` was always false; the routes and templates were real.
-
-| Test | Red | Green |
-|---|---|---|
-| `entry::tests::sign_led_sums_are_applied_literally`, `no_break_spaces_count_as_spaces`, `offers_spell_the_relative_reading`, `readings_tell_sums_from_literals` (updated) | FAILED (stub, old grammar) | pass |
-| `assist::tests::*` (4) | FAILED (stubs) | pass; mutation "wrapping add" fails `the_switch_adds_the_literal_to_the_value_before` |
-| `assist_tests::sign_led_input_is_applied_literally_with_the_offer`, `the_switch_writes_the_relative_reading_once`, `the_switch_is_bound_to_the_displayed_note`, `no_offer_without_a_known_before_value_or_on_overflow`, `undo_restores_the_last_change_of_a_cell`, `switch_and_undo_work_on_list_cells`, `undo_is_not_offered_where_nothing_can_be_undone`, `an_erased_value_is_undoable`, `rights_are_rechecked_inside_the_transaction`, `switch_and_undo_forms_stay_out_of_the_sheet_form` | FAILED (11 tests then; one was split later) | pass; mutation "wrapping add" also fails `no_offer_…` |
-| `assist_tests::the_binding_is_rechecked_inside_the_transaction` | FAILED | pass; mutation "no `bound_notes_hold`" fails it |
-| `assist_tests::malformed_and_forged_requests_write_nothing` | (split from `the_switch_is_bound_…`, which was red) | pass |
-| `notes_tests::a_no_op_after_the_session_ended_is_403` (row 2) | pass (guard) | pass; mutation "no session rechecks in `private_unchanged`" fails it |
-| `notes_tests::a_no_op_over_an_intervening_revision_is_409` (row 2) | FAILED on a test-design error ("No change" matched "No changes saved") | pass; mutation "no revision check in `private_unchanged`" fails it |
-| `list_tests::browser_crlf_edit_is_stored_with_lf` (row 4) | pass (guard) | pass; mutation "CR kept" (`newlines_to_lf` a no-op) fails it |
-| `assist_tests::foreign_origin_and_content_type_are_refused` | written after the routes (guard of the existing auth-layer checks) | pass: foreign Origin 403, `text/plain` and multipart 415, nothing written |
-| `list_tests::worst_label_page_with_every_switch_and_undo_is_within_the_unit_bound` | FAILED at 14:12: "Request timed out" (the `notes::current` defect; 22 s read) | pass after the `CROSS JOIN` fix (14:16) |
-
-First green run (13:38): four failures, three test-design errors (an edit that also changed
-HP, a reader that was the disabled Master, a rolled-back-note check that looked at the whole
-revision) and S9. The five mutation runs (13:40–13:42, `--cpus 2`) restored the sources
-afterwards (checked with `cmp`).
-
-The browser stage locates Current HP by `#value-hp` after the first save: Playwright's
-`get_by_label` also matches elements that name themselves through `aria-labelledby`, so the
-label now matches the input and its buttons. The stage instead checks that exactly one
-textbox is named "Current HP", and clicks "Yes Current HP" and "Undo Current HP" by
-accessible name. That is also what assistive technology hears (S2).
-
-**Gate** (Monday 2026-10-19, inside the weekday window: every build and test in
-`mimik-ci:latest` with `--cpus 2`, `CARGO_BUILD_JOBS=2`, `--network none`, target volume
-`mimik-catalogue-target`, registry volume `mimik-cargo-cache`; the browser container with the
-CI flags and `--cpus=2`). Times are CEST.
-
-| Gate | Time | Cap | Result |
-|---|---|---|---|
-| `cargo fmt --check` | 14:26, 14:41 | 2 | the 14:26 run found one unformatted assert in the last-added test; formatted, clean at 14:41 |
-| pedantic Clippy `-D warnings` | 14:26, again 14:41 after formatting | 2 | clean. Earlier runs found `similar_names`, `dead_code` (the `Located::control` field) and `too_many_lines` ×3, all fixed by renaming, removal and splitting |
-| `cargo test --locked --all-targets --all-features` | 14:26–14:33 | 2 | **635 passed**, 0 failed, 2 ignored (the existing ones), 37 result lines. After formatting, `assist_tests` again: 13 passed (14:41) |
-| `ruff check tools`, `ruff format --check tools` (worktree root) | 14:33, again 14:46 after the last browser edit | 2 | clean |
-| `formula_eval` and `source_fixture` examples | 14:33 | 2 | built; fixture written |
-| Tools unittest (`CI=1`, `MIMIK_FORMULA_EVAL`, main git dir mounted read-only) | 14:34–14:38 | 2 | **762 run, OK**, 11 skipped. `browser_smoke.py` changed afterwards (14:45, locators only) and has no unit tests; ruff is clean on it |
-| `actionlint .github/workflows/ci.yml` | 14:38 | 2 | clean |
-| `cargo build --release --locked` | 14:38–14:41 | 2 | built; 22,141,944 bytes (+113,376 over slice 1.2) |
-| `smoke_release.py --auth --source-fixture` (release binary) | 14:42 | 2 | passed |
-| `browser_smoke.py --auth` (`mimik-browser`, CI flags, worktree `tools/` on `/checks`) | 14:46–14:47 | 2 | every stage passed, the assisted stage at both viewports. A copy that clicks "Yes Max HP" instead failed at the assisted sheet (14:47–14:48), so the new checks run. An earlier run (14:43) failed on the `get_by_label` ambiguity above |
-| Demo launcher `--exit-after-setup` (release binary of 14:01, same tree minus tests and markup) | 14:05 | 2 | sheet created; stopped cleanly |
-
-**Not run** (no migration and no dependency change; `Cargo.lock` is unchanged): `cargo audit`,
-`cargo about`, `cargo package` / `verify_source_package.py`, vendoring and
-`package_release.py`, the unpacked-artifact smoke, `lan_smoke.py`, the offline
-corresponding-source rebuild, and a hand-driven demo session in a real browser. **Not yet
-done:** the independent implementation review (Sol and Sonnet, plus the third chain),
-required before merge.
-
-**Demo after 1.3** (same commands as §9). In Current HP (84), `-15` + Enter stores −15 and
-shows "Did you mean 84 − 15 = 69? [Yes] Hide" under the cell, with "Last change: was 84
-[Undo]". Hide dismisses the offer until the next reload. Yes stores 69, shows "84 − 15 = 69"
-and offers Undo (back to −15). Undo works on any changed number, Luck's Known/Unknown,
-Equipment quantities, and Broken's Set/Not set. Undo of an Undo puts the change back. A second
-click on an old Yes or Undo (another tab, or the Back button) says "Not switched…" or "Nothing
-undone…" and changes nothing. `-5+3` is stored as −2 and offers "84 − 5 + 3 = 82". History
-lists each switch and "undid revision N".
-
-### 11.1 Review fixes (round 1)
-
-Review of `9ff30d8`: Sol FIX THEN MERGE (one Major), Sonnet MERGE-READY with minors; the third
-chain was unavailable. Scratch reviews are summarised in the review record. Dispositions:
-
-| Finding | Disposition | Test, red → green |
-|---|---|---|
-| Sol Major: the worst-case page test used raw `-0`, so it never rendered a long sum note or a long offer | New `noted_worst_page` fixture (8,192 cells, labels of 100 `"`) with three worst cases: the longest sign-led sum with the widest terms (`-11` × 64, 192 characters, 64 numbers) carrying a sum note, a relative offer and Undo; slice 1.2's plain sum (`11+11…`, 64 numbers) with Undo; slice 1.2's scribble (200 `"`). The page bound is restored **by rendering, not by a new budget**: every expression shown under a cell or in an offer, and a scribble's note, is elided to the existing 64-character excerpt (`EXCERPT_CHARS`, D7 RE3-1) with "…". History keeps the full text, and a scribble is still echoed in full once, in its control. `FIXED_PAGE_BYTES` and `UNIT_MARKUP_BYTES` are unchanged | Red at 14:57 (`--cpus 2`): sign-led **20,973,171** bytes and scribble **23,078,941** bytes against the **18,948,096**-byte bound; plain sum 12,267,270 (within). Green at 14:58: 15,165,043 / 17,532,957 / 10,219,270. So slice 1.2 had the same gap, for scribbles rather than plain sums, and the same test now covers it. `long_expressions_are_elided_on_the_sheet_and_kept_in_history`: mutation "offer not elided" fails it |
-| Sonnet M1: a switch or Undo for a row removed since returned a bare 400 | `assist::in_pin` tells an address the pin has (stale when its row is gone: 409 "Not switched: The cell changed since…" / "Nothing undone: The cell…") from one it lacks (forged: 400). The `forged()` case "unknown row" is now 409 | `a_stale_action_on_a_removed_row_is_409`; mutation "missing row → 400" fails it and `malformed_and_forged_requests_write_nothing` |
-| Sol Minor 3: row-cell button names omitted the list | The list legend has `id="list-legend-<f>"`; row buttons are labelled by the cell label, the list legend and the row legend ("Yes Quantity Spares Row 1 of 1 · ID r1-1") | `row_actions_name_their_list` (two lists, same property, same host `r1-1`); mutation "no list legend" fails it and `switch_and_undo_work_on_list_cells` |
-| Sol Minor 2: rendering searched rows per cell, O(P × R²) | `ListView::offer` passes the known location (`assist::row(list, r, property)`) after checking that the rendered row is the saved row at that index; POST lookups keep `locate` | Covered by the existing list and page tests (no behaviour change) |
-| Sonnet M4: `label-{field.id}` vs `label-{f}-{r}-{p}` could collide | No change needed: definition admission requires every field ID to start with a lowercase ASCII letter (`definitions/admission.rs:96-113`), and row keys start with a digit, as do the `note-`, `offer-`, `legend-` and `list-legend-` ids | — (recorded) |
-| Sonnet M3: activating Hide dropped keyboard focus to the body | Fixed: the checked checkbox stays in place (visually hidden; shown again while focused), named "Hide the suggestion", so focus stays and Space brings the offer back | Covered by `sign_led_input_…` (name) and the browser stage (Hide hides the offer) |
-| Sonnet M2: a kept scribble becomes the current note and hides the previous Undo | Known behaviour, consistent with "the last change" (D-N): the scribble is the last thing written to the cell | — |
-| Sonnet M5: `target` on reverted notes is not constrained by the table | Known limitation inside L1 (unsealed notes): only the revision actor can insert notes, and nothing reads `target` for a decision (history display only) | — |
-| Sonnet M6: the offer lasts until the cell changes | Known behaviour (no dismissal records). Step 2c must not rely on the offer's lifetime or treat a shown offer as confirmation | — |
-
-Mutation runs 15:01–15:02 (`--cpus 2`), sources restored and checked with `cmp`.
-
-**Gate on the round-1 candidate** (code commit `f50d5ab`; this record changes only docs).
-Monday 2026-10-19, weekday window: every build and test in `mimik-ci:latest` with `--cpus 2`,
-`CARGO_BUILD_JOBS=2`, `--network none`; browser container with the CI flags. Times CEST.
-
-| Gate | Time | Cap | Result |
-|---|---|---|---|
-| `cargo fmt --check`, pedantic Clippy `-D warnings` | 15:03 | 2 | clean |
-| `cargo test --locked --all-targets --all-features` | 15:03–15:12 | 2 | **640 passed**, 0 failed, 2 ignored, 37 result lines |
-| `ruff check tools`, `ruff format --check tools` | 15:12 | 2 | clean |
-| `formula_eval`, `source_fixture` examples; tools unittest (`CI=1`, main git dir read-only) | 15:12–15:16 | 2 | built; **OK**, 11 skipped |
-| `actionlint` | 15:16 | 2 | clean |
-| `cargo audit --no-fetch --deny warnings` (the existing advisory DB copy in the registry volume, 1,338 advisories) | 15:17 | 2 | clean, no vulnerability; `Cargo.lock` unchanged |
-| `cargo about generate --locked --fail about.hbs` | 15:17 | 2 | passed (497,325 bytes, unchanged) |
-| `cargo build --release --locked` | 15:17–15:20 | 2 | 22,138,680 bytes |
-| `cargo package --locked --allow-dirty` | 15:20–15:44 | 2 | hung retrying `index.crates.io` under `--network none` (stopped); rerun with `--offline` (the registry cache is complete): packaged, verify build passed (15:49) |
-| `verify_source_package.py`; `cargo vendor --locked --offline`; `package_release.py --revision f50d5ab…` | 15:49 | 2 | allowlist verified; archives, source crate, dependency sources, `SHA256SUMS` |
-| Unpacked artifact: `sha256sum --check`, unpack, `smoke_release.py --auth --source-fixture` | 15:50 | 2 | three checksums OK; smoke passed |
-| `browser_smoke.py --auth` on the unpacked binary | 15:50–15:52 | 2 | every stage passed, the assisted stage at both viewports; the "Yes Max HP" negative copy failed at the assisted sheet (15:52–15:53) |
-
-**Not run:** `lan_smoke.py` and the offline corresponding-source rebuild (not asked for this
-round; no build-input change beyond the crate's own sources), and a hand-driven demo session.
-**Not yet done:** re-review of the round-1 fixes.
-
-### 11.2 Review fixes (round 2)
-
-Review of `bbfb935`: Sol FIX THEN MERGE (one Major), Sonnet MERGE-READY with minors; the third
-chain was unavailable. Before starting, `git status` showed the worktree clean at `bbfb935`.
-The read-only Sonnet reviewer's attempted `git checkout --detach` had been denied by the
-permission layer and changed nothing.
-
-| Finding | Disposition | Test, red → green |
-|---|---|---|
-| Sol Major: scalar fields could break the D7 bound (a 64-character field ID repeated in about 16 DOM references per field, all inside one 2,048-byte unit) | Scalars now use their **field index** as the DOM suffix of their label, note and actions (`note-0`, `offer-0`, `was-0`, `switch-0`, `undo-0`, `label-0`, `dismiss-0`), as row cells already use `f-r-p`. The input keeps `id`/`name` `value-<id>`. No budget change. Fixed ids in tests and `browser_smoke.py` follow (`#note-hp` → `#note-0`) | `worst_label_scalar_page_with_every_switch_and_undo_is_within_the_unit_bound` (256 integer fields, 64-character IDs, labels of 100 `"`, the densest long sign-led sum, offer and Undo on each): red at 16:01, **720,924** bytes against **589,824**; green at 16:05, **492,970** |
-| Sol Major, list fixture | Strengthened: list and property IDs of 64 characters; the densest long sign-led entry (`-1` × 63 then a 19-digit term: 146 characters, 64 numbers, value −9,223,372,036,854,775,063) over `i64::MAX`; long sums with `i64::MIN` before; an enum column whose Undo shows a 64-character option ID; scribbles of 200 `"`. Row IDs: superseded by §11.3 (the round-2 argument assumed host IDs only; retained rows may carry any valid 64-character ID, now in the fixture) | Green at 16:09: sign-led with enum column **17,211,774** / 20,520,960 (16%); sign-led on 32 integer columns **17,139,334** / 18,948,096 (9.5%); long sum **10,989,337** / 18,948,096; scribble **17,688,624** / 18,948,096 (**6.6%** headroom, the tightest; with Sonnet's estimate of 7.5% on the shorter IDs) |
-| Both, Minor: elision could cut inside a number ("84 − 15 + 3… = 3012") | Expressions are now cut at term boundaries (`entry::spelled`, `SHOWN_CHARS` = 64 characters of terms; the first piece is always shown), with an explicit count, "84 − 11 − 11 … (+52 more terms)", and the result is always in full. Scribble notes keep the 64-character excerpt: the cut is at a character boundary, so a grapheme cluster can be split. `unicode-segmentation` is not in the lock file; adding it for a cosmetic cut is recorded as a limitation rather than done | `entry::tests::long_expressions_are_cut_at_term_boundaries` (exact cut positions, the singular "term", wide terms never partial, short expressions unchanged) and the updated `long_expressions_are_elided_on_the_sheet_and_kept_in_history` (exact note and offer): both red at 15:59 against the character excerpt, green at 16:04. First green run had one test-design error (a 204-character input, over the 200 limit) |
-| Both, Minor: the note lookup in `ListView::new` still searched rows | It takes row `r`'s saved item by index, checked by ID, like the actions | Covered by the list and page tests |
-| Nit: doc comment line mid-paragraph on `Actions::of` | Fixed | — |
-| Recorded | A 409 for any non-empty host on a valid list and property does not prove the row ever existed. That is deliberate: it reveals nothing the page did not already show, and stale and forged requests write nothing alike | — |
-
-Not changed: `Cargo.lock`, so `cargo audit` and `cargo about` are not rerun this round.
-
-**Gate on the round-2 candidate** (code commit `967e99c`; this record changes only docs).
-Monday 2026-10-19, weekday window, `mimik-ci:latest` with `--cpus 2`, `CARGO_BUILD_JOBS=2`,
-`--network none`; browser container with the CI flags. Times CEST.
-
-| Gate | Time | Cap | Result |
-|---|---|---|---|
-| `cargo fmt --check`, pedantic Clippy `-D warnings` | 16:10 | 2 | clean (an earlier run found `format_push_string` and `doc_markdown`, both fixed) |
-| `cargo test --locked --all-targets --all-features` | 16:10–16:19 | 2 | **642 passed**, 0 failed, 2 ignored, 37 result lines |
-| ruff check / format | 16:19 | 2 | clean |
-| examples; tools unittest | 16:19–16:24 | 2 | built; **OK**, 11 skipped |
-| actionlint | 16:24 | 2 | clean |
-| release build | 16:24–16:27 | 2 | 22,161,368 bytes |
-| `cargo package --locked --offline --allow-dirty`, `verify_source_package.py`, `cargo vendor --offline`, `package_release.py --revision 967e99c…` | 16:27 | 2 | packaged and verified; archives, source crate, dependency sources, `SHA256SUMS` |
-| Unpacked artifact: `sha256sum --check`, `smoke_release.py --auth --source-fixture` | 16:28 | 2 | three checksums OK; smoke passed |
-| `browser_smoke.py --auth` on the unpacked binary | 16:28–16:30 | 2 | every stage passed; the "Yes Max HP" negative copy failed at the assisted sheet (16:30–16:31) |
-
-**Not run:** `cargo audit`, `cargo about` (`Cargo.lock` unchanged since round 1, where both
-were clean), `lan_smoke.py`, the offline corresponding-source rebuild, a hand-driven demo
-session. **Not yet done:** re-review of the round-2 fixes.
-
-### 11.3 Review fixes (round 3)
-
-Review of `1606436`: Sonnet MERGE-READY; Sol FIX THEN MERGE (one Major, adjudicated by the main
-session as a D7 documentation gap rather than a slice-1.3 defect). The worktree was clean at
-`1606436`.
-
-| Finding | Disposition | Measurement |
-|---|---|---|
-| Sol Major: field help (≤ 2,000 characters) is rendered in full and is not in the unit bound | Documented. `derived-formulas-m4-plan.md` D7 "What the page bound covers" now names field and group labels and help. Labels (≤ 100 characters) are charged inside their units: a scalar's label is rendered once, a list's label in its legend, three times per row (Move up, Move down, Remove) and once in Add, and a property label once per row cell (twice when optional). Help (once per field) and group labels (once each) are **definition text**, bounded by the 256 KiB content cap at ≤ 5 bytes per character. All definition text together (expressions and messages are rendered at most twice) adds at most **2,621,440 bytes** (2.5 MiB) on top of `FIXED_PAGE_BYTES` + units × `UNIT_MARKUP_BYTES`. Rendering and admission are unchanged. None of the fixtures that assert the unit bound carries help, and no test comment claims the bound covers help | Sol's example: 64 scalars × 1,000 `"` of help render 320,000 bytes, from 128,000 bytes of definition JSON. That is within the 2.5 MiB term, outside the units |
-| Sol Minor: the §11.2 row-ID bound assumed host IDs `r<rev>-<k>` | Corrected. Retained pre-M4 rows may carry any valid ID (`registry::valid_id`: lowercase letter first, `[a-z0-9-]`, ≤ 64 bytes, so no escaping growth); only rows new to a revision must be host IDs. A row ID appears **twice per row** (the hidden ID input and the row legend's excerpt) and **at most twice per cell** (the switch and Undo buttons' note keys). The list fixture now seeds every row through `legacy_create` with a 64-character retained ID (`i001-xxx…`) | Re-measured at 16:36: sign-led with enum column **18,183,914** / 20,520,960 (11%); 32 sign-led columns **18,126,430** / 18,948,096 (**4.3%**, now the tightest list case); long sum 11,497,841 / 18,948,096; scribble 17,718,536 / 18,948,096 (6.5%). All within; no rendering change |
-| Sonnet Minor: a scalar scribble worst case | `worst_label_scalar_page_with_every_long_scribble_is_within_the_unit_bound`: 256 scalars with 64-character IDs and labels of 100 `"`, each a 200-`"` scribble over `i64::MIN`, echoed in full in the input (asserted) | Passed on its first run (16:36): **574,206** / 589,824 (2.6% headroom, the tightest case overall). No rendering change needed |
-
-Only tests and docs changed, so the gate this round is the affected tests (the six worst-label
-page tests and the `assist`, `entry` and `notes` modules), `cargo fmt --check` and pedantic
-Clippy, all at 2 CPUs on 2026-10-19. Times: the page tests 16:35–16:37, fmt and Clippy 16:38,
-the five test modules (`assist`, `assist_tests`, `entry`, `notes_tests`, `list_tests`) 16:38–16:41: **127 passed**, 0 failed. The full `cargo test` was not rerun: code outside tests is
-unchanged since `967e99c`, whose full run passed (642 tests).
-
-## 12. Slice 1.4 implementation notes
-
-Branch `assist-1.4` (from master `5686980`, which merged slices 1.1 to 1.3). Built the slice-1.4
-scope of §5 ("Unknown values"): the `null` path, blank → `erased`, unknown new cells, "?"
-display, and the profile and contract notes. Nothing from later slices: no per-field or
-per-cell routes, no `meta:` addresses, no row Remove + Undo, no quick-add, no JavaScript. **No
-migration** (020 already admits `erased` and typed `{"unknown":true}` values; the value schema
-is derived at runtime) and no dependency change, so the slice-1.2 follow-up (migration 020's
-`address` length CHECK refuses 6-byte `meta:` addresses, review record 1.2 row 3) stays with
-slice 1.5a, which first writes `meta:` addresses.
-
-**What was built.**
-- **Schema** (`values::schema_json`, split out of `schema`): integer cells, list properties
-  included, are `{"type":["integer","null"]}`. The nullable wrapper (`values::nullable`) is
-  idempotent: it adds `null` only to a type (and enum) that does not already admit it, so a
-  nullable integer stays `["integer","null"]` instead of a nested type array, which the
-  validator builder refuses. Old snapshots stay valid (the schema only accepts more).
-- **Domain:** `private_pin::list_values` accepts `null` for integer properties; text, enum and
-  boolean properties still refuse it (JSON Schema), and integers above `i64` still fail.
-- **Entry** (`values::Recorder::cell`, D-M, D-X1):
-  - blank input (spaces, tabs, no-break spaces) is unknown (`null`); when it replaces a
-    recorded value (a number, or an optional property that was not set) it writes an `erased`
-    note with the typed text; over unknown it changes nothing; in a new cell it writes no
-    note;
-  - an unreadable number (syntax, more than 64 numbers, out of range) keeps the saved value,
-    a number **or unknown**, with an `unresolved` note (slice 1.2); in a new row, a newly
-    present property or on create the cell becomes unknown with an `unresolved` note whose
-    `before` is absent (none) or `{"absent":true}`;
-  - control-character and over-long input is still refused (422) everywhere: it cannot be
-    kept as a faithful scribble;
-  - re-posting the same scribble writes nothing; entering a value equal to the saved one
-    (blank over unknown included) resolves a current scribble with a `literal` note (§3a).
-- **Formulas** (`definitions::formula`):
-  - `convert::inputs` and `convert::record` map `null` on integer fields and integer item
-    properties to CEL `Null` (each charged to the input budget like any value); other types
-    still refuse it (`invalid_input`);
-  - `convert::result` maps a `Null` result to `null_value` (was `type_mismatch`); a
-    constraint whose result is `Null` is `null_value` too;
-  - **read-set guard** (U2): the checker records the declared scalar fields a formula reads
-    and the item properties it selects (`has()` excluded); a formula that reads an unknown
-    integer field (nullable or not since review round 1, D-Z), or an integer property that
-    is unknown in any item, is not run
-    and reports `null_value`; its dependents report `dependency_failed` ("it uses Load, which
-    could not be computed"). Other formulas still compute.
-- **Display:** an empty integer control has `placeholder="?"`; a scribble that left a cell
-  unknown shows "? (unknown) · ‘lots’ not understood" (the control echoes the scribble); an
-  erased value shows no note line, only "Last change: was 84 [Undo]". Load shows "Not
-  computed: a value it uses is unknown (null)." with `null_value`.
-- **Undo** needed no change: `erased` was already eligible (slice 1.3, S11), `assist::set`
-  already writes `null`, and the schema now admits it on every integer cell. Freeze copies
-  data unchanged; history diffs compare stored values, so null versus a number is a change.
-- **Docs:** profile note in `derived-formulas-plan.md` §4 "Value conversion" (the three CEL
-  forms and the guard); `runtime-definition-contract.md` (the `null` row, creation, list
-  values).
-- **Browser:** the assisted stage blanks Current HP (empty, `placeholder="?"`, "Last change:
-  was -15", the HP check not evaluated with the null reason), undoes it, then adds an
-  Equipment row with Quantity "lots" ("? (unknown) · ‘lots’ not understood", the scribble in
-  `<bdi>`, Load "Not computed: a value it uses is unknown (null)"), at both viewports.
-
-**Decisions (where the plan left it open) and deviations.**
-
-| # | Plan said | Done | Why |
-|---|---|---|---|
-| U1 | "`convert::inputs` and `convert::record` map `null`" | The hash-locked conformance fixture changes: `field-null-not-nullable` and `item-null-property` now evaluate (were `invalid_input`); new cases `field-null-text`, `field-null-bool`, `field-null-enum`, `item-null-bool-property`, `unknown-*` (copy, arithmetic, `==`, `!=`, ternary, short-circuit, unread field, item sum, item `==`, item `has()`, unread item), `null-copy-nullable`, `null-nullable-not-equals`, sheet `unknown-dependents`. The lock moves to `193d8b79…` (Rust and Python). The profile ID stays `cel-mimik-1` | **Settled by user decision D-Y** (review round 1): profile 1 may change until the first release, with no bump and no legacy behaviour; the fixture note records content revision 2 and the lock moved again to `5af7ce8f…` with D-Z. The admitted subset is unchanged. Outcomes over values a sheet could already store **did** change (Sonnet Minor 1, Sol Blocking 1): the result of a null copy of a nullable field, or a constraint returning `Null`, is `null_value` instead of `type_mismatch`, and with D-Z every formula reading a null nullable integer is `null_value` (see §12.1) |
-| U2 | "CEL forms … pinned to their actual results and documented; none of them errors silently into a pass" | Raw CEL gives `vitality == 0` → false and `vitality != 0` → true on null, so a check could pass on an unknown. The read-set guard makes every form that reads an unknown `null_value` ("not evaluated"); `has(item.p)` on an unknown property is true (presence) | Pinning raw CEL would have pinned a silent pass. The guard is static (identifiers and item selections), so it also applies on a branch that would not be taken (`true || vitality == 0` → `null_value`): conservative, documented |
-| U3 | — | **Superseded by D-Z** (review round 1): nullable integers are guarded too. (Was: nullable fields keep CEL's own null semantics, outside the guard.) Nullable text, enum and boolean fields keep CEL semantics | Sol Major 2: a cleared nullable integer could pass `luck != 0` or compute `luck == 0 ? 10 : 20` = 20 |
-| U4 | "On nullable fields the existing Known/Unknown select still rules" | Unknown still stores `null` whatever the text (op `literal`, as before). **Known with a blank value is unknown too** (`erased`) instead of 422 | "Blank = unknown" (D-M) and "nothing is forced": refusing would force the player to switch the select |
-| U5 | blank → `erased` | `erased` whenever blank input changes a recorded value, including a newly present optional property left blank (`{"absent":true}` → unknown). The note's `raw` is the typed text (spaces kept, as every note keeps what was typed). A blank new cell writes no note | One op for "the player cleared it"; a new cell has nothing to record (a note documents a change or a reading) |
-| U6 | "value kept" for an unreadable edit | An unreadable entry over a saved **unknown** keeps unknown (`before` = `after` = unknown, `unresolved`) | Same rule as a kept number; re-posting the page stays a no-op |
-| U7 | D-M: "an unreadable required number … stored as unknown" | Control-character and over-long input is still refused (422) in new rows and on create too | Slice 1.2 refuses them over kept values for the same reason: the note could not hold the input faithfully (raw ≤ 200, no NUL) |
-| U8 | "The sheet shows '?' plus the scribble" | "?" as the `placeholder` of an empty integer control (an unknown without a scribble: erased or created blank), and "? (unknown) · ‘…’ not understood" under a scribbled unknown. The control itself stays empty, so re-posting never sends "?" as a scribble | A literal "?" value would come back as an unreadable entry on the next save. The visible "(unknown)" gives assistive technology words, not only a sign |
-| U9 | — | Existing tests that used blank or unreadable integers to provoke 422 now use a control character (`create_page_never_evaluates_and_create_saves`, `formula_text_is_escaped`, `stale_invalid_draft_conflicts`, `failed_save_rerender_keeps_draft_and_submitted_revision`); `item_integers_exact_i64`, `optional_state_is_explicit` and `pinned_list_values_are_exact_and_derived_values_are_not_inputs` now expect unknown for integers and still refuse a boolean `null`; slice 1.2's "until 1.4" tests are updated to the 1.4 spec and renamed (`unkeepable_entry_is_still_422_with_the_draft`) | The spec change the 1.2 notes announced ("until 1.4"), not weakened checks: each still proves a refusal, with input that 1.4 still refuses |
-| U10 | — | `assist_tests` helpers `click`, `edit`, `text`, `action` are `pub(super)` for the new `unknown_tests` module | Reuse instead of copies |
-| U11 | Page bound (D7): rerun the worst cases if markup grows | All six existing worst-case page tests rerun (unchanged sizes); a new null worst case, `worst_label_pages_with_every_unknown_are_within_the_unit_bound` | See the measurements below; no budget change, no rendering change needed |
-
-**Page bound (D7).** Rerun 17:00–17:03 (`--cpus 2`). The existing fixtures render no empty
-integer control and no unknown note, so their sizes are unchanged: sign-led with enum
-18,183,914 / 20,520,960 (11%); 32 sign-led columns 18,126,430 / 18,948,096 (4.3%); long sum
-11,497,841; scribble 17,718,536 (6.5%); scalar switch/Undo 492,970 / 589,824; scalar scribble
-574,206 / 589,824 (2.6%). New null worst cases (64-character IDs, labels of 100 `"`, 256 rows
-of 64-character retained IDs): every integer cell erased with `placeholder="?"` and Undo back
-to `i64::MIN`, every enum cell with Undo: 10,489,329 / 20,520,960; 32 erased columns
-10,182,897 / 18,948,096; every integer cell unknown under a 200-`"` scribble: 17,603,848 /
-18,948,096 (7.1%); 256 wide scalars erased 295,324 / 589,824; 256 wide scalars unknown under
-the scribble 570,622 / 589,824 (3.3%). The tightest case overall is still slice 1.3's scalar
-scribble (2.6%): "? (unknown)" is shorter than "kept −9223372036854775808".
-
-**Red → green.** Red run at 16:56 (`--cpus 2`) with every test written and only
-`values::schema_json` split out (no behaviour change): 15 of the 23 selected tests failed.
-
-| Test | Red | Green |
-|---|---|---|
-| `formula::tests::unknown_integers_are_converted_and_other_formulas_compute` | FAILED (`invalid_input`) | pass; M8 and M9 fail it |
-| `formula::tests::a_null_result_is_null_value_not_type_mismatch` | FAILED | pass; M4 fails it |
-| `formula::tests::cel_forms_over_an_unknown_are_not_evaluated` | FAILED | pass; M1 fails it |
-| `formula::tests::conformance_expressions`, `conformance_sheets` (fixture updated, lock moved) | FAILED | pass; M1 and M4 fail `conformance_expressions` |
-| `unknown_tests::unreadable_numbers_in_new_cells_are_unknown_with_a_note` | FAILED | pass; M3, M5, M6 fail it |
-| `unknown_tests::blank_erases_a_known_number_and_unkeepable_input_is_refused` | FAILED | pass; M5, M6 fail it |
-| `unknown_tests::the_value_schema_admits_null_for_every_integer_cell` | FAILED | pass; M2, M5 fail it |
-| `unknown_tests::lots_in_a_new_row_is_unknown_with_its_scribble` | FAILED (422) | pass; M2, M3, M5 fail it |
-| `unknown_tests::create_with_lots_is_created_with_unknown` | FAILED (422) | pass; M2, M3, M5, M6 fail it |
-| `unknown_tests::an_empty_name_and_unset_required_choices_still_refuse_create` | FAILED (the valid create with "lots" got 422) | pass |
-| `unknown_tests::blank_erases_and_undo_restores_the_number` | FAILED (422) | pass; M2, M6, M7 fail it |
-| `unknown_tests::unknowns_survive_freeze_and_history_uses_historical_values` | FAILED (422) | pass; M2, M3, M5, M6 fail it |
-| `list_tests::worst_label_pages_with_every_unknown_are_within_the_unit_bound` | FAILED (the seeded null data was refused) | pass; M5, M7 fail it |
-| `entry_save_tests::unkeepable_entry_is_still_422_with_the_draft` (updated) | FAILED on a test-design error (a NUL in the echoed draft is replaced by U+FFFD by the HTML parser; that case was dropped, `notes_tests` covers NUL) | pass |
-| `notes_tests::unkeepable_input_is_still_422` (updated) | pass (guard: still refused) | pass |
-
-First green run of the selection 16:58–17:00. The first full run (17:03–17:13) found the seven
-existing tests of U9; fixed and green at 17:15. Mutation runs 17:14–17:21 and 17:34–17:37 (`--cpus 2`), each
-restoring its source afterwards (checked with `cmp`, all identical):
-
-| Mutation | Fails |
-|---|---|
-| M1 read-set guard off | `cel_forms_over_an_unknown_are_not_evaluated`, `conformance_expressions` |
-| M2 nullable wrapper always wraps (not idempotent) | 9 tests, including `the_value_schema_admits_null_for_every_integer_cell` (the assist pin no longer builds) |
-| M3 new cells refuse unreadable numbers | 5 `unknown_tests` |
-| M4 a `null` result is `type_mismatch` | `a_null_result_is_null_value_not_type_mismatch`, `conformance_expressions` |
-| M5 `list_values` refuses `null` | 8 tests, including the null page worst case |
-| M6 blank refused (slice 1.2 behaviour) | 5 `unknown_tests` |
-| M7 no `placeholder="?"` on scalars | `blank_erases_and_undo_restores_the_number`, the null page worst case |
-| M8 `convert::inputs` refuses `null` on a non-nullable integer | 7 tests, including `unknown_integers_are_converted_and_other_formulas_compute` and both conformance tests |
-| M9 `convert::record` refuses `null` on an integer property | 7 tests, including `lots_in_a_new_row_is_unknown_with_its_scribble` |
-
-**Gate** (Monday 2026-10-19, inside the weekday window: every build and test in
-`mimik-ci:latest` with `--cpus 2`, `CARGO_BUILD_JOBS=2`, `--network none`, target volume
-`mimik-catalogue-target`, registry volume `mimik-cargo-cache`; the browser container with the
-CI flags and `--cpus=2`). Times are CEST. Code commit `8e761d5`; this record changes only docs.
-
-| Gate | Time | Cap | Result |
-|---|---|---|---|
-| `cargo fmt --check` | 17:24, 17:38 | 2 | the 17:24 run found one unformatted assert in `unknown_tests`; formatted, clean at 17:38 |
-| pedantic Clippy `-D warnings` | 17:23, 17:24, 17:38 | 2 | clean. The first run found `type_complexity` and `semicolon_if_nothing_returned` in a test table, rewritten |
-| `cargo test --locked --all-targets --all-features` | 17:24–17:34 | 2 | **655 passed**, 0 failed, 2 ignored (the existing ones), 37 result lines. Afterwards only formatting changed |
-| `ruff check tools`, `ruff format --check tools` | 17:24 | 2 | clean |
-| `formula_eval` and `source_fixture` examples | 17:38–17:39 | 2 | built. **Correction (round 1):** the fixture run failed with "File exists" (its output was discarded), so these smokes used the slice-1.3 fixture; a fresh one written at 19:02 is identical (`diff -r`) |
-| Tools unittest (`CI=1`, `MIMIK_FORMULA_EVAL`, main git dir mounted read-only) | 17:39–17:43 | 2 | **762 run, OK**, 11 skipped (includes the moved fixture lock in `test_formula_cli.py`) |
-| `actionlint .github/workflows/ci.yml` | 17:43 | 2 | clean |
-| `cargo build --release --locked` | 17:43–17:46 | 2 | 22,181,592 bytes (+20,224 over slice 1.3 round 2) |
-| `smoke_release.py --auth --source-fixture` (release binary) | 17:46–17:47 | 2 | passed |
-| `browser_smoke.py --auth` (`mimik-browser`, CI flags, worktree `tools/` on `/checks`) | 17:47–17:48 | 2 | every stage passed, the assisted stage (now with the erased and unknown checks) at both viewports |
-| Negative control: a copy of `tools/` expecting "? (known)" under the new row | 17:48–17:49 | 2 | failed with "The new row's unreadable Quantity is not unknown with its scribble", so the new checks run |
-
-**Not run** (`Cargo.lock` and migrations unchanged): `cargo audit`, `cargo about`,
-`cargo package` / `verify_source_package.py`, vendoring and `package_release.py`, the
-unpacked-artifact smoke (the smoke ran on the release binary instead), `lan_smoke.py`, the
-offline corresponding-source rebuild, the demo launcher and a hand-driven demo session in a
-real browser. **Not yet done:** the independent implementation review (Sol and Sonnet, plus
-the third chain), required before merge; it should look at U1 (fixture outcome change under
-the same profile ID) and U2 (the read-set guard) in particular.
-
-**Demo after 1.4** (same commands as §9). Clear Current HP and press Enter: the cell is empty
-with a "?" placeholder, "Last change: was 84 [Undo]" is offered, and the HP check reads "Not
-evaluated … a value it uses is unknown (null)"; Undo puts 84 back. Add an Equipment row,
-type "lots" as its Quantity and press Enter: the row is saved, the cell keeps "lots" and shows
-"? (unknown) · ‘lots’ not understood", and Load reads "Not computed: a value it uses is
-unknown (null)." Typing 2 there computes Load again and offers Undo back to unknown. Creating
-a sheet with "lots" in Current HP also works (unknown with the scribble); an empty Name or an
-unselected choice is still refused.
-
-### 12.1 Review fixes (round 1)
-
-Review of `6127bcd`: Sol FIX THEN MERGE (Blocking 1: the profile changed outcomes for
-already-storable data; Major 2: nullable integers outside the guard; Minor 3), Sonnet
-MERGE-READY with minors; the third chain was unavailable. User decisions D-Y and D-Z (§0)
-settle Blocking 1 and Major 2.
-
-| Finding | Disposition | Test, red → green |
-|---|---|---|
-| Sol Blocking 1, Sonnet Minor 1: U1's "every outcome over storable values is unchanged" is false (a null copy of a nullable field and a constraint returning `Null` were `type_mismatch`, now `null_value`) | **D-Y:** `cel-mimik-1` may change until the first release; no bump, no legacy behaviour. `derived-formulas-plan.md` (profile marker contract and the profile note) states it and lists the changed outcomes; U1 corrected; the fixture's note records content revision 2; the hash-lock comment names D-Y | Docs; the fixture lock moved to `5af7ce8f…` (Rust and Python) |
-| Sol Major 2: a cleared nullable integer passes `luck != 0` and computes `luck == 0 ? 10 : 20` = 20 | **D-Z:** `convert::unknowns` guards every null integer field, nullable or not (the `!nullable` exemption is gone); U3 superseded. Nullable text, enum and boolean fields keep CEL semantics. Fixture: `null-equals` (`luck == null`, was `true`) and `null-nullable-not-equals` (`luck != 0`, was `true`) are now `null_value`; new `null-nullable-ternary`, `null-nullable-in` (`null_value`) and `known-nullable-in` (`true`). `null-arith`, `null-compare` and `null-copy-nullable` were already `null_value`; `null-not-equals-known` and `known-nullable-arith` (luck 5) are unchanged | `cel_forms_over_an_unknown_are_not_evaluated` (`luck != 0`, `luck in [1, 2]`, `luck == null` not evaluated, `luck == 0 ? 10 : 20` not computed; known luck evaluates) and `conformance_expressions`: red 18:34 (`[Pass, Violated, Pass]`; `true`, `true`, `20`), green 18:35. Mutation M10 (the exemption back) fails both |
-| Sol Minor 3: no connected regression for blank over a scribbled unknown | `a_blank_save_resolves_the_scribble_of_an_unknown_cell`: one data-unchanged revision with a `literal` note, the scribble gone, then a further blank save is "No change" | Passed on its first run (18:35): a guard of existing behaviour |
-| Sol (escaping): the unknown branch had no escaping regression | `a_scribble_on_an_unknown_cell_renders_escaped_inside_bdi` (RTL text and `<b>x</b>`, sheet and history) | Passed on its first run (guard) |
-| Sonnet Minor 5: an erased or blank unknown has only `placeholder="?"` | One `<span id="unknown-hint" hidden>Unknown value</span>` per runtime sheet; an empty integer control (scalar or row cell) has `aria-describedby="unknown-hint"` (a scribbled unknown is described by its note instead). The browser stage checks it | `an_empty_integer_control_is_described_as_unknown`: red 18:34, green 18:35; mutation M11 (no hint) fails it. The browser negative copy expecting `unknown-hint-x` failed (19:05–19:06) |
-
-**Limitations recorded** (POC; none blocks the slice):
-- **L-U1:** a save that would write more than 256 notes (unreadable or erased cells included)
-  is refused with 422, the note cap of §3h.
-- **L-U2:** no rollback path: an older binary refuses a sheet holding `null` in a non-nullable
-  integer (its value schema does not admit it).
-- **L-U3:** `has(item.p)` is true for a property that is present but unknown; it is no proof
-  that the value is known.
-- **L-U4 (D-Z):** a definition cannot give an unknown integer a fallback; `== null` no longer
-  works as one on integers. Later: let definitions choose a fallback for unknown.
-
-**Page bound (D7), rerun.** The hint adds 51 bytes per page and 30 bytes per empty integer
-control. A first rerun (18:40) ran on a build left over from mutation M11: the mutation script
-restored sources with `copy2`, which keeps the older modification time, so Cargo saw no change.
-The script now touches restored files. The earlier gate runs were not affected (each followed a
-source edit). Rerun 18:44–18:46 on a fresh build, with the hint counted
-(`unknown-hint` appears once per empty integer control plus the hint itself): every value
-erased with Undo 10,743,332 / 20,520,960; 32 erased columns 10,445,092 / 18,948,096; unknown
-under a long scribble 17,603,899 / 18,948,096 (7.1%); 256 wide scalars erased 303,567 /
-589,824; 256 wide scalars unknown under a scribble 570,673 / 589,824 (3.2%). Existing cases
-+51 bytes each; the tightest is still the slice-1.3 scalar scribble, 574,257 / 589,824 (2.6%).
-No budget change.
-
-**Gate on the round-1 candidate** (code commit `3d40e21`; this record changes only docs).
-Monday 2026-10-19 after 18:00: builds and tests in `mimik-ci:latest` with `--cpus 6`,
-`CARGO_BUILD_JOBS=6`, `--network none`; the browser container with the CI flags and
-`--cpus=2`. Times CEST.
-
-| Gate | Time | Cap | Result |
-|---|---|---|---|
-| `cargo fmt --check`, pedantic Clippy `-D warnings` (after touching every changed source) | 18:47–18:48 | 6 | clean |
-| `cargo test --locked --all-targets --all-features` | 18:48–18:57 | 6 | **658 passed**, 0 failed, 2 ignored, 37 result lines |
-| ruff check / format | 18:57 | 2 | clean |
-| examples; tools unittest (`CI=1`, main git dir read-only); actionlint | 18:57–19:02 | 6 | built; **OK**, 11 skipped; clean |
-| `source_fixture` into a fresh directory | 19:02 | 6 | written; identical to the one the smokes used before |
-| `cargo build --release --locked` | 19:02–19:03 | 6 | 22,179,288 bytes |
-| `smoke_release.py --auth --source-fixture` | 19:03–19:04 | 6 | passed |
-| `browser_smoke.py --auth` (with the hint check) | 19:04–19:05 | 2 | every stage passed, the assisted stage at both viewports |
-| Negative control (expects `unknown-hint-x`) | 19:05–19:06 | 2 | failed with "The blanked Current HP is not unknown with Undo" |
-
-**Not run** (`Cargo.lock` and migrations unchanged): `cargo audit`, `cargo about`, packaging,
-vendoring, `package_release.py`, the unpacked-artifact smoke, `lan_smoke.py`, the offline
-source rebuild, the demo launcher and a hand-driven session. **Not yet done:** re-review of the
-round-1 fixes.
-
-## 13. Slice 1.5a implementation notes
-
-Branch `assist-1.5a` (from master `21b6559`, which merged slices 1.1 to 1.4). Built the
-slice-1.5a scope of §5 ("Per-field save: metadata and scalar fields"): the `meta/…` and
-`fields/{id}` routes, value-based conflicts against each unit's `base`, one form per unit on
-the saved page, and the D-X3 bounded permit wait with a styled busy page. Nothing from
-later slices: no `cells/…`, `lists/{list}/rows` or row-action routes, no row Remove + Undo
-(1.5b), no quick-add (1.6), no JavaScript (2a). No migration and no dependency change.
-
-**What was built.**
-- **Routes** (`campaigns/unit_web.rs`, outside the `runtime` layer): `POST
-  /private-sheets/{id}/meta/{name|notes}` and `/fields/{field_id}`, a 256 KiB body limit
-  and the pre-body principal check. Precedence: parse (400), CSRF and request auth (403),
-  the bounded permit wait (D-X3), the read and edit rights (403, frozen, read-only and
-  unsupported pins included, §13.1), then (400) native pins, an ID outside the slug grammar,
-  not in the pin, derived or a list, and the exact key set (`csrf`, `base`, `value`, plus `null`
-  for a nullable field).
-- **Units** (`campaigns/unit.rs`, pure): `Unit::{Name, Notes, Field(f)}`, their keys, their
-  protected value (Name and Notes text, a field's stored value) and `apply`, which reads the
-  value exactly as the full form does (`values::scalar`, extracted from `values::form`, and
-  `name_notes`), writes the field's change note through the same `Recorder`, validates the
-  patched data against the pin and reports whether anything changed (D-U).
-- **Conflicts:** the read loads the live revision L and, when `1 <= base <= L`, revision
-  `base` in one read transaction (`Store::private_read_base`; `base` is decoded and checked
-  against the pin like L). Order: a malformed or zero `base` is 400; then the value is
-  read against L, so a submission equal to L's value answers "No change" (200, rights and
-  revision rechecked, no revision) even from a stale page; then `base` above L, or a unit
-  whose protected value differs between `base` and L, is 409; then a refused value is 422.
-  An A → B → A change is no conflict (L3). The patch is applied to L only; the writer
-  rechecks rights, the active state and that L is still live inside its `IMMEDIATE`
-  transaction.
-- **Refusals re-render the live page** with the unit's draft in its control (focused,
-  `autofocus`), its note and actions hidden, every other unit at its saved value, and every
-  unit form's `base` at L, so pressing Enter again is a conscious overwrite. The status says
-  "Current HP not saved: it changed since this page was loaded (now revision 2). Your entry
-  is kept below; press Enter again to save it over the current value." A success redirects
-  (303) to the sheet with the saved unit's label as fragment (`#label-0`).
-- **D-X3:** `definitions::admit_within(2 s)` waits for the `JOBS` permit (reads keep
-  `try_acquire`). Without it the route answers the styled busy page: 503, `Retry-After: 1`,
-  "Server busy: nothing was saved. Your entry is kept below; press Enter again to save it.",
-  a form posting the same unit with the session's CSRF token, the submitted `base`, `null`
-  and the entry (a textarea when it holds a line break). Nothing is read or written. The
-  auth layer keeps its body (`SheetBusy` marker).
-- **Page** (`private_sheet.html`, new partials `private_groups.html`,
-  `private_scalar_field.html`, `private_sheet_busy.html`): a saved runtime page the reader
-  may edit has no full form. Name, each scalar field and General notes are each a form with
-  hidden `csrf` and `base` and one Save button (`aria-describedby` the unit's label); the
-  control's DOM id is `v<index>` (`meta-name`, `meta-notes`) and its names `value`/`null`.
-  Enter in a single-line input submits its own form; selects (enum, yes/no, Known/Unknown)
-  and multiline fields save with their button. The switch and Undo buttons sit inside the
-  unit's markup but belong to their own forms (`form`), so they are never the default
-  submitter. Create, native, read-only, frozen and history pages keep the one full form,
-  unchanged; so does the re-render of a refused full-form POST.
-- **List forms (interim, P1):** each list is its own form posting to `/private-sheets/{id}`
-  with `csrf`, `revision`, `list` (its field index), its draft `op` and that list's rows only
-  (`values::list_keys`). Its first button is "Save list". The server keeps every other value
-  saved (`values::form` with a scope; Name and General notes from the snapshot), checks
-  that the `op` acts on the same list (else 400) and keeps the whole-sheet 409 and D-U. A
-  draft-operation re-render drafts only that list; the other units keep their saved values,
-  notes and actions. Slice 1.5b replaces it with per-cell and per-row routes.
-- **Tools:** `smoke_release.py` saves the runtime field through its unit form and the list
-  through its list form (`FormFields` keeps every form; the first per action wins);
-  `browser_smoke.py` uses `unit_save` (checks the route and the exact key set) in the
-  formula, list, assisted and workspace stages.
-
-**Decisions (where the plan left it open) and deviations.**
-
-| # | Plan said | Done | Why |
-|---|---|---|---|
-| P1 | "The legacy full form is kept, with whole-sheet 409"; lists save per cell in 1.5b | On a saved editable page each list is its own **list form** posting to the full-form route with `csrf`, `revision`, `list`, `op` and that list's rows; every other value stays saved. The full-form key set is still admitted unchanged | Forms cannot nest: once Name and each field have their own form, no form can hold the whole sheet, and the exact key set (plan D2) refuses a partial full form. A list form is the smallest interim that keeps Add, Remove, Move and Save working until 1.5b. It keeps the whole-sheet 409 (a list saved from a stale page conflicts) |
-| P2 | "a single visible Save submit button, placed first in the form, so it is the default submitter" | A unit's Save comes **after** its control; a list form's Save list comes first | A unit form has one submit button of its own, so it is the default submitter wherever it is; the switch and Undo buttons in its markup belong to their forms through `form`. Save after the control reads in order (label, value, Save) and keeps the note under the control. A list form has many buttons, so its Save stays first |
-| P3 | — | Create, native, read-only, frozen and history pages, and the re-render of a refused full-form POST, keep the one full form with the `value-<id>` names | Create stays one form (§3a); native keeps its strict path; pages without edit rights have nothing to save; a full-form draft is shown in the form it came from, so its submitted revision still conflicts (no silent rebase) |
-| P4 | D-X3: "sheet write routes wait up to 2 s … styled 503 page that re-renders the player's submitted input" | The wait and the busy page are on the two unit routes and (since review round 1, §13.1) on the full-form and list-form save. The switch, Undo and create POSTs keep the plain 503 of the `runtime` layer. CSRF and session auth are checked before the wait; edit rights cannot be (they need the permit). The page shows the entry in a plain control labelled "Your entry" (the field's label needs a read), a textarea when it holds a line break | The no-JS Enter path the decision is about is the unit save. Echoing only to a session that passed CSRF keeps the busy page from echoing a cross-site POST. The echo is escaped; a unit entry is bounded by the 256 KiB unit body limit, a full or list form's by the echo bound (keys, values and per-pair markup ≤ 1 MiB, else not kept; §13.2) |
-| P5 | Order of "No change", 409 and 422 | Malformed or zero `base` 400 → no-op "No change" → `base` above L or a changed unit 409 → value refusal 422 | §3a: a stale no-op answers "No change" rather than 409; the full form's rule "the revision check precedes value validation" kept for units |
-| P6 | "loads base … and the live snapshot L, in the same transaction" and rechecks in the write | `base` and L are read in one read transaction under the `JOBS` permit; the write's `IMMEDIATE` transaction rechecks rights, the active state and that L is still live (else 409) | With one permit no other request writes between the read and the write, so comparing in the read is equivalent; a writer outside the permit gets a conservative 409 |
-| P7 | — | A successful unit save redirects to `/private-sheets/{id}#label-<f>` (`#meta-name-label`, `#meta-notes-label`) | Without script the page reloads; the fragment brings the player back to the unit. List forms keep no fragment (an element fragment blocks `autofocus`) |
-| P8 | Slice-1.2 review row 3: migration 020's `address` length CHECK (≥ 7 bytes) refuses 6-byte `meta:` addresses; fix with 021 if 1.5a writes `meta:` notes | **Not changed; no migration.** 1.5a writes no `meta:` note | Name and General notes are text, and notes are written for integer, enum and boolean cells only (§3a, D-T); the plan has no slice that writes `meta:` notes. The typed addresses are `meta:name` (9 bytes) and `meta:notes` (10), so the CHECK would accept them anyway; it only refuses a one-character `meta:` suffix, which no unit has. The follow-up stays open for the slice that first writes `meta:` notes, if any |
-| P9 | Page bound (D7): one form per unit adds markup; never enlarge the budget | A scribble is quoted under its cell to **32 characters** (was 64); the control above still echoes it in full | See the measurements below: with a form per field the scalar scribble worst case was 607,059 / 589,824 bytes. The excerpt duplicated text already shown in full in the control; 32 characters still name it |
-| P10 | — | Unit routes have a 256 KiB body limit and the pre-body principal check | A 20,000-character value at 4 bytes per character, URL-encoded |
-| P11 | Test "list_definition()'s `name` field plus the metadata Name" | The test uses the source fixture's `formula_definition()`, which also has a scalar field `name`, plus a multiline field and a nullable integer | One fixture covers the collision, the multiline button and the Known/Unknown pair; `list_definition()`'s `name` is the same kind of text field |
-| P12 | — | Existing tests that drove the edit page's full form now use the unit and list forms: helpers `unit_form`, `page_values` (every form's values under their full-form keys), `named` (the selector for a full-form name on either page) and `legacy_form` (the full-form POST equivalent to a page, for the transport tests of the still-accepted full-form route); `submitted_by` picks the clicked submitter's form, else the first form with a `revision` | The tests keep what they prove (round trips are no-ops, CR LF is stored as LF, escaping, focus, autofocus), on the page a browser now gets. None was weakened; `canonical_negatives_survive_a_re_post`, `rendered_form_round_trips`, `first_submitter_in_tree_order_is_op_save_before_groups` and `switch_and_undo_forms_stay_out_of_the_sheet_form` were rewritten for unit forms and still check the create page's full form |
-
-**Page bound (D7).** Every worst-case page fixture in `list_tests.rs` rerun (19:57–20:04,
-`--nocapture`). The 256-wide-scalar fixtures now render a form per field (64-character IDs
-in the action, the CSRF token and `base` in each). With the 64-character scribble excerpt
-the scalar scribble page was **607,059 / 589,824 bytes** and the unknown scribble page
-603,475 (both over; run of 19:35:46). With P9 (32 characters), on the final build:
-
-| Fixture | Bytes / bound | Headroom |
-|---|---|---|
-| 256 wide scalars with a long scribble | 566,099 / 589,824 | 4.0% (tightest) |
-| 256 wide scalars unknown with a long scribble | 562,515 / 589,824 | 4.6% |
-| 256 wide scalars with switch and Undo | 525,823 / 589,824 | 10.9% (was 492,970) |
-| 256 wide scalars erased, with Undo | 336,369 / 589,824 | 43% |
-| 32 sign-led columns, switch and Undo | 18,127,116 / 18,948,096 | 4.3% |
-| every long sign-led sum, switch and Undo | 18,184,600 / 20,520,960 | 11.4% |
-| every long scribble (list) | 16,408,502 / 18,948,096 | 13.4% (was 17,718,536) |
-| every unknown with a long scribble (list) | 16,293,814 / 18,948,096 | 14.0% |
-| every long sum and Undo | 11,498,527 / 18,948,096 | 39% |
-| every value erased, with Undo | 10,743,967 / 20,520,960 | 48% |
-| 32 erased columns, with Undo | 10,445,727 / 18,948,096 | 45% |
-| worst-label view page | 5,732,952 for 9,220 units | within |
-
-No budget changed. The tightest case is still a scalar scribble (4.0%, was 2.6%); slice 1.5b
-adds per-cell forms to the list pages, whose tightest case is 4.3%.
-
-**Red → green.** Every red run builds master's sources (`git archive master`) with this slice's
-test files copied in (`unit_tests.rs`, `tests.rs`, `formula_tests.rs`), in a scratch copy
-with its own target directory, so the worktree's build is untouched.
-
-| Test | Red (master) | Green |
-|---|---|---|
-| `unit_tests::enter_in_hp_saves_hp_alone` | FAILED (master shows "Save full private sheet") | pass |
-| `unit_tests::the_name_field_and_the_metadata_name_save_separately` | FAILED (no unit form) | pass |
-| `unit_tests::two_fields_saved_from_one_page_both_succeed` | FAILED (no unit form) | pass |
-| `unit_tests::a_stale_unit_conflicts_with_its_draft_and_base_l` | FAILED (no unit form) | pass; MU1, MU8 fail it |
-| `unit_tests::base_bounds` | FAILED (403, no route) | pass; MU2 fails it |
-| `unit_tests::unit_routes_refuse_what_they_do_not_name` | FAILED (403, no route) | pass; MU3, MU4, MU5 fail it |
-| `unit_tests::unit_routes_recheck_rights_before_keys` | FAILED (403 for the player's own save: no route) | pass |
-| `unit_tests::two_tabs_without_script_keep_each_units_base` | FAILED (no unit form) | pass; MU1 fails it |
-| `unit_tests::the_full_form_keeps_its_whole_sheet_conflict` | FAILED (no unit form for the first edit) | pass |
-| `unit_tests::a_unit_save_waits_briefly_for_the_permit` | FAILED (no unit form) | pass; MU6, MU7 fail it |
-| `unit_tests::a_list_form_saves_its_list_only` | FAILED (no unit form) | pass; MU9 fails it |
-| `unit_tests::unit_saves_note_numbers_as_the_full_form_does` | FAILED (no unit form) | pass |
-| `tests::native_sheets_refuse_unit_routes` | FAILED (403, no route) | pass; MU10 fails it |
-| `unit_tests::a_list_form_cannot_reach_another_list` | FAILED | pass |
-| `unit_tests::a_long_scribble_is_quoted_to_32_characters_under_its_cell` | FAILED | pass; MU11 fails it |
-| `test_smoke_release.FormListTests` (Python) | FAILED (the last list form won) | pass |
-
-Red runs (`--cpus 4`, `2` and `10`): 19:37:58–19:39:48 (the first 13 tests, all FAILED),
-19:57:40–19:58:07 (the two added later, both FAILED), and a final run of the final test
-files 20:10:11–20:10:24: **all 15 FAILED** (`no control "v0"`: master's page has no unit
-forms; 403: master has no unit routes, so the auth fallback refuses them). The Python test
-failed on master's `smoke_release.py` at 19:51:18 and passed on the branch at 19:51:11.
-First green of the campaign tests 19:46:39–19:53:52 (295 of 296; the one failure,
-`browser_crlf_submission_is_stored_as_lf`, posted the page's first form, fixed to use the
-unit forms); green 19:57:04–20:04: **298 passed**, 0 failed.
-
-The existing tests broken by the new page (32 in the run of 19:35:46–19:43, which also showed the page bound exceeded) were adapted as P12
-records; none was deleted or weakened.
-
-**Mutations** (`--cpus 10`, 20:04–20:10; each source restored with `copy2`, compared with
-`cmp` (all identical), then touched so Cargo rebuilds; `git diff --stat` identical before
-and after):
-
-| Mutation | Fails |
-|---|---|
-| MU1 no value-based conflict (`stale` always false) | `a_stale_unit_conflicts_with_its_draft_and_base_l`, `two_tabs_without_script_keep_each_units_base` |
-| MU2 `base` 0 admitted | `base_bounds` |
-| MU3 a derived field routed | `unit_routes_refuse_what_they_do_not_name` |
-| MU4 a list field routed | `unit_routes_refuse_what_they_do_not_name` |
-| MU5 a nullable field admitted without `null` | `unit_routes_refuse_what_they_do_not_name`, `a_unit_save_waits_briefly_for_the_permit` |
-| MU6 no permit wait (`Duration::ZERO`) | `a_unit_save_waits_briefly_for_the_permit` |
-| MU7 unbounded permit wait (60 s) | `a_unit_save_waits_briefly_for_the_permit` |
-| MU8 conflict checked before the no-op | `a_stale_unit_conflicts_with_its_draft_and_base_l` |
-| MU9 a list form reads every field | `a_list_form_saves_its_list_only` |
-| MU10 native pins answered 404 instead of 400 | `native_sheets_refuse_unit_routes` |
-| MU11 64-character scribble excerpt | `a_long_scribble_is_quoted_to_32_characters_under_its_cell`, `worst_label_scalar_page_with_every_long_scribble_is_within_the_unit_bound`, `worst_label_pages_with_every_unknown_are_within_the_unit_bound` |
-
-**Gate** (Monday 2026-10-19 after 18:00: builds and tests in `mimik-ci:latest` with
-`--cpus 10`, `CARGO_BUILD_JOBS=10`, `--network none`, target volume `mimik-catalogue-target`,
-registry volume `mimik-cargo-cache`, the main git directory mounted read-only; the browser
-container with the CI flags and `--cpus=2`). Times CEST.
-
-| Gate | Time | Cap | Result |
-|---|---|---|---|
-| `cargo fmt --check` | 20:10 | 10 | clean |
-| pedantic Clippy `-D warnings` | 19:54–19:56, 20:10 | 10 | clean. The first run found `too_many_lines` (the unit handler, `render_private`, `groups`, `save_private`) and `struct_excessive_bools` (the page template); fixed by splitting (`finish`, `list_view`, `shown_meta`, `control_names`, `FormulaMode::of`, `op_in_scope`) and a `UnitForms` struct |
-| `cargo test --locked --all-targets --all-features` | 20:10–20:20 | 10 | **673 passed**, 0 failed, 2 ignored (the existing ones), 37 result lines |
-| `ruff check tools`, `ruff format --check tools` | 20:20, 20:27 | 1 | `ruff check` clean; the format check found one line in `browser_smoke.py` (an edit made after the last format); formatted, clean at 20:27 (whitespace only) |
-| `formula_eval` and `source_fixture` examples | 20:20 | 10 | built; the fixture written into a freshly removed `/target/smoke-source` (listed afterwards) |
-| Tools unittest (`CI=1`, `MIMIK_FORMULA_EVAL`, main git dir read-only) | 20:20–20:25 | 10 | **OK**, 11 skipped (includes the new `FormListTests`) |
-| `actionlint .github/workflows/ci.yml` | 20:25 | 10 | clean |
-| `cargo build --release --locked` | 20:25–20:26 | 10 | 22,349,912 bytes (+170,624 over slice 1.4 round 1) |
-| `smoke_release.py --auth --source-fixture` (release binary) | 20:26 | 10 | passed (the runtime field saves through its unit form, the list through its list form) |
-| `browser_smoke.py --auth` (`mimik-browser`, CI flags, worktree `tools/` on `/checks`) | 20:27–20:28 | 2 | every stage passed at 1280 and 390 px: the formula stage saves Vitality by Enter, the multiline Story and the nullable Hit points with their buttons; the list stage saves General notes, then each list from its list form; the assisted stage checks HP's own form with one Save, Enter in HP posting exactly `csrf`, `base`, `value` to `fields/hp` and saving HP alone, and Luck saving its state with its button |
-| Negative control 1: a copy of `tools/` expecting `csrf`, `revision`, `value` | 20:28–20:29 | 2 | failed with "Unit save posted ['csrf', 'base', 'null', 'value'] … not a unit form to /fields/name" |
-| Negative control 2: a copy expecting two buttons in HP's form | 20:29–20:30 | 2 | failed with "Current HP is not in its own form with one Save button" (after the formula and list stages passed) |
-
-**Not run** (`Cargo.lock`, `Cargo.toml` and migrations unchanged): `cargo audit`, `cargo
-about`, `cargo package` / `verify_source_package.py`, vendoring and `package_release.py`,
-the unpacked-artifact smoke (the process smoke ran on the release binary instead),
-`lan_smoke.py`, the offline corresponding-source rebuild, the demo launcher and a
-hand-driven session in a real browser. **Not yet done:** the independent implementation
-review (Sol and Sonnet, plus the third chain), required before merge; it should look at P1
-(the interim list forms), P4 (the busy page before the rights check) and P9 (the shorter
-scribble excerpt) in particular. `release-scope.md` is updated with step 5, as for the
-earlier slices.
-
-**Demo after 1.5a** (same commands as §9). On the saved sheet, type "84 -15" in Current HP
-and press Enter: only HP is saved (one revision), the page comes back at Current HP with
-"84 − 15 = 69 · Undo"; Max HP and Armour keep their values and drafts typed in other fields
-without pressing Enter are lost on that reload (L2). Luck saves its Known/Unknown choice and
-value with its Save button; Name and General notes save with theirs. Open the sheet in two
-tabs: save Armour in the second, then press Enter in Armour in the first: 409, "Armour
-modifier not saved: it changed since this page was loaded (now revision N). Your entry is
-kept below; press Enter again to save it over the current value."; pressing Enter again
-saves it. Pressing Enter in HP in the first tab still saves (HP did not change). The
-Equipment list keeps Add, Remove, Move and its "Save list" button.
-
-### 13.1 Review fixes (round 1)
-
-Review of `ae16632`: Sol FIX THEN MERGE (Major 1, Minor 2), Sonnet FIX THEN MERGE (M1,
-m1–m6); the third chain was unavailable. Fixes on `assist-1.5a`, Monday 2026-10-19 after
-18:00 (`--cpus 10`).
-
-| Finding | Disposition | Test, red → green |
-|---|---|---|
-| Sol Major 1: in a real browser the styled busy page was replaced by the auth layer's generic busy document (the document-error exemption at `auth/mod.rs:257-265` missed `sheet_busy`), so the entry was lost; the route test sent no document headers | `sheet_busy` added to the document-error exemption | `unit_tests::the_busy_page_survives_a_browser_navigation` through the full auth router with `Accept: text/html`, `Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document`: 503, `Retry-After`, the escaped entry, action, `base` and `null`, a multiline entry in a textarea, and posting again succeeds once the permit is free. Red 20:39–20:40 (the generic page), green 20:41–20:42. Mutation MR1 (exemption removed) fails it and the list-form test |
-| Sol (same check): other refusals that keep a draft under document headers | 409 and 422 re-renders carry the trusted-editor marker; the stale "No change" is 200: already kept | `refused_unit_saves_keep_their_draft_in_a_browser`: passed on its first run (guard) |
-| Sonnet M1: the full-form and list-form save had no D-X3 wait, so a busy moment lost the typed rows | **Done, not deferred:** `POST /private-sheets/{id}` left the `runtime` layer and waits up to 2 s like a unit save; then a styled busy page keeps every submitted pair as a hidden input of a form posting to the sheet again ("Your changes are kept; press Save again"). The form is parsed without the permit only on that path (the auth layer's 8 request slots bound it); a form whose values exceed the re-render echo bound (1 MiB, plan D7) is not kept and the page says so. The create POST keeps `try_acquire` | `a_list_form_save_waits_briefly_for_the_permit` (held 1 s → saved; held 3 s → 503 keeping every pair, a quoted multi-line name included; posting again saves): red 20:39–20:40 (503 at once), green 20:41–20:42. Mutation MR2 (no wait) fails it |
-| Follow-on of M1: the edit save now takes the permit in its handler, after axum has read the body, so a slow upload no longer holds it (was: up to the 5 s request timeout) | `slow_5mib_upload_holds_the_runtime_permit_at_most_the_request_timeout` rewritten to the new, stronger property: during a 6.4 s trickled 5 MiB upload the permit is never busy, and the request ends with 408 within 5.6 s. Its old loop waited for the permit to become busy and never ended (the first gate run hung at 20:48–21:19 and was stopped) | passed 21:20–21:27 with the campaign tests (304 passed) |
-| Sonnet m2: every Save was named only "Save" (`aria-describedby` gives no name) | `aria-labelledby="save-<f> label-<f>"` on unit Saves ("Save Current HP"), `save-meta-name`/`save-meta-notes` with their labels, "Save list" with the list legend ("Save list Equipment") | `save_buttons_are_named_by_their_unit`: red 20:39–20:40, green 20:41–20:42; MR3 fails it. The browser stages now find the buttons by these exact names |
-| Sol Minor 2: an unsupported pin answered 403, not the documented 400 | **Documented 403:** an unsupported pin is read-only (no edit rights), so the rights check refuses it first, as every other route does; the docs said 400 | `catalogue_tests::unit_routes_refuse_an_unsupported_pin_as_read_only` (the consistently rewritten pin fixture; `meta/name`, `meta/notes` and an unknown field all 403, nothing written): passed on its first run (guard) |
-| Sonnet m3: the busy page did not say what the entry is for | "Your entry for Current HP" is not possible without a read (the label needs the pin, the read needs the permit); the page says "Your entry for the field hp", "for Name" or "for General notes". **Limitation:** an enum or yes/no entry is offered as text there (its control type needs the pin); posting it again is checked as usual | in `the_busy_page_survives_a_browser_navigation` |
-| Sonnet m4: no `default_submitter` assertion on a unit form | HP's first own button is `save-0` | in `save_buttons_are_named_by_their_unit` |
-| Sonnet m6: a refused unit save echoes up to 256 KiB on a page near the bound | Measured: one echo, within the bound plus the echo term | `list_tests::a_refused_unit_draft_re_render_is_within_the_bound_plus_its_echo` (the tightest page, 256 wide scalars with long scribbles, plus a 409 over 87,000 quotes): passed on its first run (guard). Size below |
-| Sonnet m1 (record only) | A unit save of the same value replaces another tab's scribble ("accepting the kept value" writes a `literal` note). It follows L3: a scribble is not a protected value | — |
-| Sonnet m5, Sol on P4 (record only) | The bounded wait lets any signed-in user queue for the global permit; at most 8 waiters (the auth layer's request slots) fill the admission cap for up to 2 s each. Bounded, no information leak; per-account fairness is a later item (with D-X2). Under load a bogus `meta/<x>` answers 400 (the route is checked before the wait), not 503 | — |
-| Plan wording (P2) | §3a no longer says "placed first in the form" | — |
-
-**Browser busy stage: not added.** Holding the runtime permit for more than 2 s from
-outside needs a request that holds it that long; the shipped binary has no such request and
-a test-only hook would ship in it. The busy page is covered through the full auth router
-with browser document headers instead.
-
-**Page bound (D7), rerun** after the button names (+18 bytes per unit): 20:45–20:48, every
-worst-case fixture within its bound: 256 wide scalars with a long scribble 571,581 / 589,824
-(**3.1%, the tightest**, was 4.0%); unknown under a scribble 567,997 (3.7%); switch and Undo
-531,305 (9.9%); erased 341,851; 32 sign-led columns 18,127,214 / 18,948,096 (4.3%); the list
-cases are unchanged (+98 bytes of page chrome). The refused 87,000-quote draft on the
-tightest page: 1,005,949 / 1,024,824 bytes (the per-unit bound plus 5 × the echoed bytes).
-No budget changed.
-
-Mutations (20:43–20:44, restored with `copy2`, `cmp` identical, touched; `git diff --stat`
-unchanged): MR1 (busy page not exempt from the document error page) fails
-`the_busy_page_survives_a_browser_navigation` and `a_list_form_save_waits_briefly_for_the_permit`;
-MR2 (the edit save without the wait) fails the list-form wait test; MR3 (unit Saves without
-`aria-labelledby`) fails `save_buttons_are_named_by_their_unit`.
-
-**Gate on the round-1 candidate** (after 18:00, `--cpus 10`, `--network none`, main git dir
-read-only; browser `--cpus=2`; times CEST). A first gate run (20:48) hung in the slow-upload
-test (row above) and was stopped at 21:19.
-
-| Gate | Time | Result |
-|---|---|---|
-| `cargo fmt --check` | 21:27, 21:43 | the 21:27 run found the rewritten slow-upload test unformatted; formatted, clean at 21:43 |
-| pedantic Clippy `-D warnings` | 20:43, 21:27, 21:43 | clean (`needless_pass_by_value` on the busy template and a needless borrow in a test fixed at 20:43) |
-| `cargo test --locked --all-targets --all-features` | 21:27–21:36 | **679 passed**, 0 failed, 2 ignored, 37 result lines (only formatting changed afterwards) |
-| ruff check / format | 21:36, 21:43 | check clean; one line of `browser_smoke.py` reformatted, clean at 21:43 |
-| examples, fresh `source_fixture` | 21:36–21:37 | built and written |
-| tools unittest (`CI=1`) | 21:37–21:41 | OK, 11 skipped |
-| actionlint | 21:41 | clean |
-| release build | 21:41–21:42 | 22,362,616 bytes |
-| `smoke_release.py --auth` | 21:42–21:43 | passed |
-| `browser_smoke.py --auth` | 21:43–21:45 | every stage passed at 1280 and 390 px; the Saves are found by their names ("Save Story", "Save Hit points", "Save General notes", "Save Luck", "Save list Equipment") |
-| Negative control (a copy looking for a button named just "Save") | 21:45–21:46 | failed in the formula stage, as intended |
-
-Not run (lock and migrations unchanged): audit, about, packaging, the unpacked-artifact
-smoke, `lan_smoke.py`. Not yet done: re-review of these fixes.
-
-### 13.2 Review fixes (round 2)
-
-Review of `3198d42`: Sol MERGE-READY with Minors, Sonnet FIX THEN MERGE (F1–F5). Fixes on
-`assist-1.5a`, Monday 2026-10-19 after 18:00 (`--cpus 10`). Red runs build `3198d42` with
-the new test files in a scratch copy (21:51–21:52); green 21:52–21:53.
-
-| Finding | Disposition | Test, red → green |
-|---|---|---|
-| Both: the rewritten slow-upload test lost the create route's coverage | Renamed to `slow_edit_upload_never_holds_the_runtime_permit`; new `slow_create_upload_holds_the_runtime_permit_at_most_the_request_timeout` keeps the original assertion (create takes the permit before the body: released by 5.6 s, 408). Both poll through `watch_permit`, which has a 20 s deadline | Both pass on `3198d42` and on the branch (characterisation) |
-| Sol Minor 1: the edit save waited for the permit before parsing, CSRF and the session | `edit_sheet` now parses, checks CSRF and the session, then waits; the parsed pairs feed both the save (`save_parsed`) and the busy page | `a_forged_edit_is_refused_at_once_while_busy` (forged token while the permit is held: 403 in under 1 s): red (waited 2 s), green |
-| Sonnet F3: the busy page's echo bound counted values only (about 24,000 unique 70-byte `%22` keys made a page of about 10 MB) | A form is kept only when its keys, values and 48 bytes of markup per pair total ≤ 1 MiB (`ECHO_BYTES`), so the page stays within its fixed chrome plus 5 × 1 MiB | `the_busy_page_of_a_form_is_bounded` (the 24,000-key form: "larger than this page can keep", under 4 KiB; a 1,000,000-quote value: kept, escaped once, within 64 KiB + 5 MiB): red (the page was echoed in full, past the reader's 4 MiB cap), green |
-| Sonnet F2, Sol Minor 2: docs | P4 row corrected (a full-form echo is bounded by the echo bound, not by 256 KiB); `runtime-definition-contract.md` separates create (permit held while buffering) from edit (buffered outside the permit: up to 8 × 5 MiB, about 40 MiB raw) | — |
-| F4 (record) | A body slower than about 3 s, followed by the 2 s wait, can reach the 5 s request timeout and get 408 instead of the busy page | — |
-| F5 (record) | `busy_form` echoes only the caller's own submission and reads neither the sheet nor the caller's rights on it (doc comment added) | — |
-| (record) | The parser runs outside the permit and, on a blocking thread, can outlive a cancelled request; its input is capped (5 MiB, 65,536 pairs) | — |
-
-**Gate on the round-2 candidate** (after 18:00, `--cpus 10`, `--network none`; browser
-`--cpus=2`; times CEST): `cargo fmt --check` and pedantic Clippy clean (21:54); `cargo test
---locked --all-targets --all-features` **682 passed**, 0 failed, 2 ignored (21:54–22:04);
-ruff check and format clean; examples and a fresh `source_fixture`; tools unittest OK, 11
-skipped (22:04–22:08); actionlint clean; release build 22,350,968 bytes (22:08–22:09);
-`smoke_release.py --auth` passed (22:09–22:10); `browser_smoke.py --auth` every stage
-passed at 1280 and 390 px (22:10–22:12). Not run (lock and migrations unchanged): audit,
-about, packaging, the unpacked-artifact smoke, `lan_smoke.py`.
+- Unit, connected-router, browser and live-inference evidence are reported separately.
+
+## 4. Risks and later
+
+Risks: latency at 2 threads is unmeasured; model quality is unknown and the bar is waived (the
+display and confirmation are the safeguard); reminder prompts carry catalogue text (contained,
+not prevented); a crate gap would stop 2c (D-H); one revision per Enter makes history long
+(no-ops write nothing, no cap; D-U); the forwarder is a new pinned image.
+
+Later: sealing and verifying notes (before release, L1); a per-account write-rate limit or
+storage guard (before release, D-U); player `*` and `/`; text, enum and boolean
+interpretation; notes and Undo for text; Undo of moves and creation, forced and arbitrary
+restore; owner-reviewed reminder rules without a model (D-I); a model for quick-add; more
+threads off-hours; the quality bar; retiring the legacy full-form edit POST; definitions
+choosing a fallback for unknown (L-U4).

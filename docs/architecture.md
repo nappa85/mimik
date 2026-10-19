@@ -1,76 +1,171 @@
-# Proposed architecture
+# Architecture
 
-Status: proposal pending discovery answers. Rust and htmx are user requirements; the specific libraries and deployment defaults below are recommendations.
+Mimik is a sheet-first tabletop RPG companion for players at a physical table. It is one
+standalone Rust binary (`mimik`, AGPL-3.0-only) that serves server-rendered HTML to browsers on
+the local network and stores everything in one SQLite file. No Node.js, Python, GPU, model
+runtime or internet access is needed at run time. No model is integrated into the application
+yet.
 
-## Product boundary
+## Runtime
 
-Confirmed: AGPL-3.0-only, standalone, sheet-first companion for players at a physical table. Optimize for readable/editable sheets and quick contextual rule access. Virtual-tabletop maps, immersive scene rendering, and full-table replacement are outside the initial scope.
+- **HTTP:** Axum 0.8 on Tokio (`src/main.rs`, `src/web.rs`, `src/auth/mod.rs`). Port 3000.
+- **HTML:** Askama 0.14 templates in `templates/` (38 files), escaped by default. Business logic
+  is on the server; forms work as native HTML forms.
+- **Browser scripts:** bundled in the binary from `assets/` and served locally:
+  `account-sharing.js` (copy link, QR, local dates; account and history pages),
+  `source-regions.js` (material review). htmx 2.0.8 and response-targets 2.0.4 are served only
+  by the unauthenticated prototype (`src/web.rs`). The authenticated router serves no htmx
+  (`src/auth/mod.rs`, fallback 403). Provenance and licences: `assets/README.md`.
+- **CLI:** clap 4 (`src/main.rs`, `src/account_cli.rs`). Without a subcommand the binary
+  serves; subcommands are local operator tools that share the server's domain transitions:
+  - accounts: `bootstrap-owner`, `invite-account`, `enroll-account`, `issue-account-reset`,
+    `complete-account-reset`, `disable-account`, `show-account`, `list-accounts`,
+    `verify-account-password`;
+  - registry: `register-ruleset`, `register-ruleset-alias`, `list-rulesets`;
+  - sources: `import-source`;
+  - definitions: `import-definition-draft`, `show-definition-draft`, `list-definition-drafts`,
+    `compare-definition`, `approve-definition`, `show-definition-version`,
+    `withdraw-definition`;
+  - catalogues: `import-catalogue-draft`, `show-catalogue-draft`, `compare-catalogue`,
+    `publish-catalogue`, `show-catalogue-version`, `verify-catalogues`,
+    `rebuild-catalogue-index`.
 
-## Accuracy boundary
+### Serving modes
 
-Qwen cannot provide a 100% accuracy guarantee. RAG improves grounding but does not eliminate missing retrieval, edition confusion, mistaken interpretation, or unsupported generation. Make an explicit, versioned rules engine authoritative for implemented calculations, validation, eligibility, and resource changes. Its own correctness depends on source review and meaningful rule tests.
+| Mode | Flags | Router | Listener |
+|---|---|---|---|
+| Authenticated LAN (default) | none; `--lan-address` picks the interface | `auth::serve_with_options` | `0.0.0.0:3000`; peers admitted from the chosen private IPv4 subnet or loopback (`src/network.rs`) |
+| Authenticated loopback | `--loopback` | same | `127.0.0.1:3000` |
+| Behind a TLS reverse proxy | `--external-url` or `MIMIK_EXTERNAL_URL` (root HTTP(S) origin) | same | as above |
+| Unauthenticated prototype | `--no-auth` | `web::app` | `127.0.0.1:3000` only |
 
-The model may interpret a question, propose structured context, summarize retrieved passages, and explain engine results. Model output must never directly update a sheet or establish action legality. Distinguish verified implemented rules, source excerpts, model explanations, unknown context, and GM adjudication in the UI.
+Authenticated startup refuses to serve until an Owner exists (`bootstrap-owner`). The
+prototype keeps the legacy identity/notes records and the native MÖRK BORG editor, isolated
+from the private campaign tables. `--dev-owner-play` (development only) lets the Owner use
+explicit gameplay grants.
 
-## Suggested stack
+The authenticated boundary (`src/auth/mod.rs`) admits at most 8 concurrent requests, times a
+request out after 5 s, rate-limits new form sessions, sign-in and credential redemption with
+one process-wide quota (burst 10, then one per 6 s), checks Host and
+Origin against the configured authority, and sets `Cache-Control: no-store`,
+`X-Content-Type-Options: nosniff`, `Content-Security-Policy: frame-ancestors 'none'`,
+`X-Frame-Options: DENY` and `Referrer-Policy: same-origin`. The router-wide body limit is
+8 KiB; sheet create/edit POSTs accept 5 MiB after a pre-body principal check, per-field saves
+256 KiB, switch/Undo 8 KiB (`src/campaigns/web.rs`).
 
-- Rust: Axum + Tokio for HTTP, Askama for escaped HTML templates.
-- UI: semantic HTML/CSS, htmx for partial updates; business logic on the server. htmx itself is JavaScript, so this means no application JavaScript framework, not literally a JavaScript-free browser.
-- Storage: SQLite initially, with schema migrations and transactional updates.
-- Inference: an established Rust multi-provider abstraction for commercial/local API models, with thin Mimik-specific typed-decision/review/explanation boundaries. Evaluate genai/Rig before provider integration; do not hand-write vendor protocols. Evaluate Kev and AnyJev/Tacit separately for specialized local decisions. See [provider research](provider-abstraction.md) and [decision-model research](decision-models.md).
-- Retrieval: begin with edition-filtered lexical search; add local embeddings and hybrid ranking after evaluating real manual questions. Vector search alone is not an accuracy guarantee.
+## Modules (`src/`)
 
-Shipping inference should favor a lightweight Rust/native integration, with CPU fallback and Vulkan evaluated for vendor-neutral GPU acceleration. Python reference servers are acceptable for prototypes. Specialized decision-model support must be proven in the runtime; see [hardware and runtime direction](hardware-and-runtime.md).
+| Module | Responsibility |
+|---|---|
+| `main.rs`, `account_cli.rs` | Argument parsing, serving modes, operator subcommands |
+| `lib.rs` | Module wiring, `AppError`, legacy prototype character input |
+| `store.rs` | `Store`: one rusqlite connection behind a mutex, run on `spawn_blocking`; migrations; `busy_timeout` 5 s, `foreign_keys = ON` |
+| `web.rs` | Unauthenticated prototype router: legacy characters, native MÖRK BORG sheet and context checklist, source routes, bundled assets |
+| `network.rs` | LAN/loopback selection, peer admission, canonical external URL |
+| `auth/` | Sign-in, sessions, request admission, security headers, error pages; Owner pages `/admin` (accounts), `/admin/materials` (source review), `/admin/rulesets` (registry) |
+| `accounts/` | Accounts, Owner binding, invitations, resets, disable, epochs; Argon2 hashing; protected credential files; browser transport |
+| `campaigns/` | Campaigns, membership and requests (`domain.rs`); private sheets (`sheets.rs`, `snapshots.rs` is the sole writer); value admission (`values.rs`, `transport.rs`); routes (`web.rs`); advisory formulas view (`formulas.rs`); history change summary (`history_diff.rs`); catalogue reading through a sheet (`catalogue.rs`, `catalogue_web.rs`); assisted entry: lenient numbers (`entry.rs`), change notes (`notes.rs`), switch and Undo (`assist.rs`, `assist_web.rs`), per-field save (`unit.rs`, `unit_web.rs`) |
+| `definitions/` | Declarative game definitions: strict decode, JSON Schema admission, revisioned drafts, immutable publication and withdrawal, private pins; CEL formula engine (`formula/`) and its admission |
+| `catalogues/` | Read-only game catalogues: decode, admission, drafts, sealed publication with projections and name index, read-only lookups |
+| `sources/` | Prepared-source import, page/unit review evidence, FTS5 lexical search, region previews, Owner material operations, prototype source routes |
+| `registry.rs`, `registry_admin.rs` | Immutable game/edition identities and legacy aliases; Owner browser registration |
+| `games.rs`, `mork_borg.rs`, `mork_form.rs`, `mork_advice.rs` | Native Italian-2025 MÖRK BORG adapter (`mork-borg-it-2025`), an exploration fixture |
+| `form_text.rs`, `local_file.rs`, `pagination.rs`, `presentation.rs` | CR LF → LF form text, bounded descriptor-based local reads, 50+1 keyset pages, date presentation |
 
-## Domain boundaries
+## Storage
 
-1. **System registry**: stable system/edition identifiers, adapter version, source set, supported capabilities.
-2. **Character storage**: per-system structured data, schema version, revision, inventory, resources, notes, and explicit overrides. Do not force every game into a D&D-shaped schema.
-3. **Rules adapter**: validation issues, derived fields, eligible options, prerequisites, resource costs, effects, and source references.
-4. **Sheet presentation**: mappings between canonical data and edition-specific official sheet fields; responsive editor plus official-layout view/export.
-5. **Situation context**: structured known facts, unknowns, targets, distances where applicable, conditions, equipment, remaining resources, and player intent. Free-text descriptions are proposals until confirmed.
-6. **Knowledge service**: document ingestion, provenance, edition/source filtering, retrieval, and answer evidence.
-7. **Decision service**: optional intent classification and ranking of engine-provided candidate IDs, with validated typed outputs and domain-evaluated uncertainty.
-8. **Explanation service**: deterministic explanations first; optional generative elaboration with source links and explicit uncertainty.
-9. **Campaign access and history (planned)**: separate technical Owner, campaign Master and character custody; server-side authorization, complete transactional edit history, version-aware rollback, soft deletion and Owner-only purge. See `collaboration-and-history.md`; these are not current runtime capabilities.
+One SQLite database, default `data/mimik.sqlite3` (`--database`, `MIMIK_DATABASE`). rusqlite
+0.37 with bundled SQLite (FTS5 included). Migrations are embedded (`src/store.rs`, `MIGRATIONS`)
+and applied in one `IMMEDIATE` transaction; `PRAGMA user_version` holds the schema version
+(`SCHEMA_VERSION = 20`). A database from a newer schema is refused. There are no down
+migrations.
 
-## Official sheet fidelity
+| Migration | Holds |
+|---|---|
+| 001–002 | Prototype characters and native MÖRK BORG sheets |
+| 003–004, 007, 009 | Sources, pages, units, review events, coverage; source finalization and page hashes; integrity retrofit |
+| 005 | Registry: games, editions, legacy aliases, character/source ruleset links |
+| 006, 008 | Definition drafts; definition versions, approvals, withdrawals |
+| 010–011 | Accounts, Owner, credentials, account events; auth sessions |
+| 012 | Campaigns, members, requests, private sheets, private sheet history, campaign events (largest schema migration) |
+| 013–016 | Owner administration-only rule; web attribution sidecars for accounts, materials and registry; registry events |
+| 017 | Derived FTS5 search text and index over reviewed units, with indexing failures |
+| 018 | Formula profile 1 (version bump only, no table change) |
+| 019 | Catalogues: drafts, versions, entry types, entries, unit references, seals (trigger-bound to the hashed content), name FTS index |
+| 020 | Private sheet change notes (assisted entry) |
 
-Confirmed: recreate the original sheet's recognizable structure in adaptive HTML/CSS. Preserve section grouping and visual hierarchy while allowing long text, repeated entries, and mobile reflow rather than fixed PDF fields. Each edition needs its actual template and canonical field mapping. Print/export is a separate future feature. See [sheet presentation](sheet-presentation.md). Review asset terms before bundling; ownership of a manual alone does not establish redistribution rights.
+## Areas
 
-## Dependency reuse policy
+- **Accounts, sign-in, sessions, LAN and proxy:** [auth-and-sessions.md](auth-and-sessions.md).
+- **Campaigns, private sheets, history:** [campaigns.md](campaigns.md).
+- **Game definitions:** [runtime-definition-contract.md](runtime-definition-contract.md).
+- **Derived values and checks (CEL `cel-mimik-1`):** [formulas.md](formulas.md).
+- **Catalogues:** [catalogues.md](catalogues.md).
+- **Assisted entry (sums, notes, switch, Undo, unknown values, per-field save):**
+  [assisted-entry.md](assisted-entry.md); remaining steps in
+  [assisted-sheet-plan.md](assisted-sheet-plan.md).
+- **Sources, review and retrieval:** [sources-and-retrieval.md](sources-and-retrieval.md).
+  Lexical search uses SQLite FTS5 (`unicode61 remove_diacritics 2`, bm25) over reviewed units
+  only (`src/sources/search.rs`); it is reachable from the prototype's `/sources/search`, not
+  from the authenticated workspace. There is no vector search.
 
-Before custom infrastructure, assess existing crates/libraries for maintained APIs, required capabilities, AGPL-compatible licensing, portability, and footprint. Record material selections or demonstrated gaps. Custom code should implement Mimik's domain behavior, not duplicate maintained provider clients, configuration parsers, storage engines, or extraction infrastructure.
+## Tooling outside the binary
 
-## Validation and context
+- **Python helpers (`tools/`, Python 3.12, Ruff):** release checks (`package_release.py`,
+  `verify_source_package.py`, `smoke_release.py`, `browser_smoke.py` with its
+  `*_browser.py` scenarios, `lan_smoke.py`), source preparation and review prototypes
+  (`extract_manual.py`, `review_extraction.py`, `prepare_review.py`, `source_bundle.py`,
+  `evidence_forest.py`), profilers (`*_profile.py`), and benchmark prototypes (tool-loop,
+  local RAG, decision models and router, model screens, `fetch_models.py`, queue runners).
+  Benchmarks follow the prototype tier and never ship. Tests are `tools/test_*.py`.
+- **Development examples (`examples/`):** `source_fixture` (synthetic source bundle for tests
+  and smoke), `formula_eval` (JSON-lines bridge to the formula engine for Python prototypes;
+  excluded from the source package), `qr_decode`, profilers; demo packs
+  `sheet-harness-demo/` and `tool-loop-demo/`.
+- **Schemas (`schemas/`):** definition and catalogue JSON Schemas and examples, the
+  SHA-256-locked formula conformance fixture, and `source-kinds.json` shared by Rust and Python.
+- **Containers (`containers/`):** every tool runs in a pinned container, never on the host.
+  `ci.Dockerfile` (Ubuntu 22.04, Rust 1.95.0, rustfmt, Clippy, actionlint 1.7.7, uv with Python
+  3.12.12, Ruff, cargo-audit 0.22.2, cargo-about 0.9.2), `browser.Dockerfile` (Playwright 1.56
+  Chromium), `extraction.Dockerfile` (Marker, CPU), `decision-benchmark.Dockerfile` and
+  `model-screen.Dockerfile` (local model evaluation).
 
-Separate invalid values, rule inconsistencies, missing facts, and intentional house-rule overrides. Derived values carry an explanation and source. Use transactional saves with revision checks to avoid silently overwriting concurrent edits. Advice can list an option as available, unavailable, or needing context; never equate “not yet implemented” with “illegal.”
+## CI (`.github/workflows/ci.yml`, workflow "Deployability")
 
-## RAG flow
+Runs on every push, pull request and manual dispatch, on `ubuntu-22.04`, with read-only
+contents permission and pinned actions.
 
-Current implementation (2026-10-15): the Rust app has only reviewed-only literal
-`LIKE` lookup (`src/sources/store.rs`). It has no ranking, FTS5, embeddings or
-model integration. Proposed hybrid retrieval and tool loop:
-[harness-assessment-2026-10-15.md](harness-assessment-2026-10-15.md#proposed-architecture-awaiting-user-decision).
+1. **checks** (in the `mimik-ci` container): `cargo fmt --check`; `cargo clippy --locked
+   --all-targets --all-features -- -D warnings`; `ruff check tools` and `ruff format --check
+   tools`; `cargo test --locked --all-targets --all-features`; build the `formula_eval`
+   example; generate the synthetic source fixture; `python -m unittest discover -s tools`;
+   `actionlint`; `cargo audit --deny warnings`; `cargo about generate --locked --fail`
+   (third-party notices); `cargo build --release --locked`; `cargo package` and
+   `verify_source_package.py` (member allowlist); `cargo vendor`; `package_release.py`. Uploads
+   the release archives with `SHA256SUMS` and the synthetic smoke inputs.
+2. **artifact-smoke:** verifies checksums, unpacks the runtime archive and runs
+   `smoke_release.py --auth` against the packaged binary from an isolated directory; then
+   rebuilds the source archive plus vendored dependencies with `--offline --locked`, no network
+   and an empty Cargo home.
+3. **browser-smoke:** runs `browser_smoke.py` in the Chromium container against the unpacked
+   binary, offline, with dropped capabilities and resource limits.
+4. **lan-smoke:** `lan_smoke.py` runs the unpacked binary on isolated container networks with
+   separate clients, a denied subnet and an HTTPS reverse proxy.
+5. **deployable:** always runs and fails unless all four jobs succeeded.
 
+What green means and what is not certified: [release-scope.md](release-scope.md).
 
-1. Register a source with title, edition, language, revision, document hash, and page metadata.
-2. Extract text, using OCR when needed; preserve printed page labels separately from PDF page indexes.
-3. Chunk by rule sections while retaining tables and cross-references where possible.
-   Before treating a section as verified evidence, compare its extraction against rendered PDF pages, preserve action glyph semantics, and record review state/corrections. See [source quality](source-quality.md). Unreviewed legacy Markdown/indexes are not authoritative.
-4. Filter by the character's exact system, edition, enabled books, and house-rule precedence before retrieval.
-5. Retrieve evidence for the question and relevant engine facts; ask for missing context or return insufficient evidence when necessary.
-6. Generate an explanation with source identifiers; validate that cited identifiers were actually retrieved. Citation existence does not prove that the claim is entailed, so evaluate that separately.
-7. Keep manual evidence separate from campaign notes and GM-only information.
+## Docs map
 
-Decided model interaction (user, 2026-10-15; not implemented): small tools (`search_rules`, `read_fields`, `propose_change`, `ask_user`). The host fills old values and revisions, evaluates declarative derived-field formulas in Rust and shows a diff for explicit confirmation, instead of the model emitting a complete typed patch in one response. Formula evaluation exists (M3): sheets evaluate their pinned formulas on view, save and history, and the library function `formula::preview` reports what a proposed change would change (derived values, new/resolved/unknown constraint outcomes). No tool loop, route or model integration calls it yet.
-
-Acceptance requires a curated set of questions and expected sources, edition-isolation checks, retrieval measurements, unsupported-answer behavior, and rule edge-case tests. Imported documents are data, never executable model instructions.
-
-## Extensibility
-
-The user's updated direction is runtime, model-assisted game definitions for unknown games. See `model-assisted-games.md`. The native MÖRK BORG fixture is exploratory, not the required extension path. Uploaded sheet/manual evidence should produce reviewed declarative schemas and task prompts that the generic Rust runtime can consume.
-
-Define an internal Rust adapter contract before implementing the first game. Capabilities should include sheet schema/layout, validation, calculations, situational options, action/spell explanations, source metadata, and import/export. Expose coverage so incomplete adapters are visibly incomplete.
-
-Use runtime declarative definitions for fields, layouts, source sets and advisory task configuration. The compiled MÖRK BORG module is only an exploration/compatibility fixture, not mandatory per-game code. Stabilize this data contract against unknown-game fixtures before considering executable WASM/subprocess plugins for demonstrated gaps. Host-controlled generic rendering and validated proposals keep storage and UI consistent.
+- [decisions.md](decisions.md): decisions in force.
+- [limitations.md](limitations.md): known limits and follow-ups.
+- [results.md](results.md): experiment and benchmark conclusions still in use.
+- [release-scope.md](release-scope.md): supported release and gate (shipped as the archive
+  README).
+- Reference: [auth-and-sessions.md](auth-and-sessions.md), [campaigns.md](campaigns.md),
+  [runtime-definition-contract.md](runtime-definition-contract.md), [formulas.md](formulas.md),
+  [catalogues.md](catalogues.md), [assisted-entry.md](assisted-entry.md),
+  [sources-and-retrieval.md](sources-and-retrieval.md).
+- Active plan: [assisted-sheet-plan.md](assisted-sheet-plan.md).
+- Prototype tooling: [evaluation-tooling.md](evaluation-tooling.md); held-out freeze record and
+  ledger policy: [tool-loop-heldout-v3-freeze.md](tool-loop-heldout-v3-freeze.md).
