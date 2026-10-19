@@ -997,6 +997,12 @@ The legacy full form is kept, with whole-sheet 409.
   which must not proxy anywhere but its fixed upstream (Sol minor 2).
 - A latency and schema screen (§7); output tokens measured.
 - A results note, reviewed before it picks the crate and model.
+- **Candidate approaches are judged on results, not on project rules (user, 2026-10-19).** Besides
+  genai/rig over a local model, screen strot-ai/Project-STROT (MIT, Python: compile-time LLM
+  synthesis, deterministic per-record decisions with calibrated confidence), called from Rust via
+  pyo3 or ported to Rust. If a candidate wins but conflicts with a rule (D-H, Rust-only runtime,
+  the lightweight standalone binary), the results note states the conflict and its cost, and the
+  user decides whether to bend the rule.
 
 ### Step 2c: Interpretation
 
