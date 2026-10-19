@@ -227,6 +227,26 @@ class FormFieldsLifecycleTests(unittest.TestCase):
         self.assertEqual(parser.forms["/s"], {"a": "plain"})
 
 
+class FormListTests(unittest.TestCase):
+    def test_the_first_form_per_action_wins_and_every_form_is_kept(self):
+        # A saved runtime sheet (assisted sheet slice 1.5a): unit forms, then two list forms
+        # posting to the sheet itself.
+        parser = FormFields()
+        parser.feed(
+            '<form action="/private-sheets/1/meta/name"><input name="value" value="N"></form>'
+            '<form action="/private-sheets/1"><input name="list" value="1"></form>'
+            '<form action="/private-sheets/1"><input name="list" value="2"></form>'
+        )
+        parser.close()
+        self.assertEqual(parser.forms["/private-sheets/1"], {"list": "1"})
+        self.assertEqual(parser.forms["/private-sheets/1/meta/name"], {"value": "N"})
+        self.assertEqual(
+            [action for action, _ in parser.form_list],
+            ["/private-sheets/1/meta/name", "/private-sheets/1", "/private-sheets/1"],
+        )
+        self.assertEqual(parser.form_list[2][1], {"list": "2"})
+
+
 class CorrectedEvidenceTests(unittest.TestCase):
     def test_the_search_check_requires_the_stored_leading_newline(self):
         self.assertTrue(

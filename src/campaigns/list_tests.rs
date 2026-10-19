@@ -926,18 +926,21 @@ fn submitted_helper_sends_only_the_clicked_submitter() {
     assert!(disabled.is_err(), "a disabled button cannot be clicked");
 }
 
+/// Plan D6: Enter in a list's text field uses its form's first submitter, Save, never Add,
+/// Remove or Move. The create page keeps the one full form with a top and a bottom Save;
+/// a saved page (slice 1.5a) puts each list in its own list form whose first button is its
+/// Save, and every scalar unit has its own single Save.
 #[tokio::test]
 async fn first_submitter_in_tree_order_is_op_save_before_groups() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let setup = list_setup(&list_definition()).await;
     create_rows(&setup, 2).await;
-    let (_, html) = setup.get("/private-sheets/1").await;
-    let page = scraper::Html::parse_document(&html);
-    let order: Vec<String> = page
-        .select(&selector(
-            "form button, form input[type=submit], form section.panel, form fieldset.list-field",
-        ))
+    let order = |html: &str, scope: &str| -> Vec<String> {
+        let page = scraper::Html::parse_document(html);
+        page.select(&selector(&format!(
+            "{scope} button, {scope} input[type=submit], {scope} section.panel, {scope} fieldset.list-field"
+        )))
         .map(|element| {
             let value = element.value();
             format!(
@@ -947,29 +950,57 @@ async fn first_submitter_in_tree_order_is_op_save_before_groups() {
                 value.attr("value").unwrap_or_default()
             )
         })
-        .collect();
-    assert_eq!(
-        order.first().map(String::as_str),
-        Some("button:op=save"),
-        "{order:?}"
+        .collect()
+    };
+    let path = format!(
+        "/campaigns/{}/sheets/new?version={}",
+        setup.campaign, setup.version
     );
+    let (_, create) = setup.get(&path).await;
+    let full = order(&create, "form");
+    assert_eq!(
+        full.first().map(String::as_str),
+        Some("button:op=save"),
+        "{full:?}"
+    );
+    assert_eq!(
+        full.iter().filter(|item| *item == "button:op=save").count(),
+        2
+    );
+    assert_eq!(full.last().map(String::as_str), Some("button:op=save"));
+    let (_, html) = setup.get("/private-sheets/1").await;
+    for f in [1, 2] {
+        let list = order(&html, &format!("form:has(#list-{f})"));
+        assert_eq!(
+            list.first().map(String::as_str),
+            Some("button:op=save"),
+            "{list:?}"
+        );
+        assert_eq!(
+            list.iter().filter(|item| *item == "button:op=save").count(),
+            1
+        );
+    }
     assert_eq!(
         super::formula_tests::default_submitter(&html),
         Some(("op".into(), "save".into()))
     );
-    let saves = order
-        .iter()
-        .filter(|item| *item == "button:op=save")
-        .count();
-    assert_eq!(saves, 2, "top and bottom Save: {order:?}");
-    assert_eq!(order.last().map(String::as_str), Some("button:op=save"));
-    // Scalar sheets keep their single (bottom) Save, now named op=save.
+    assert!(!html.contains("Save full private sheet"));
+    // Scalar sheets: every unit form has its single, unnamed Save.
     let scalar = setup_scalar().await;
     let (_, html) = scalar.get("/private-sheets/1").await;
     let page = scraper::Html::parse_document(&html);
-    let buttons: Vec<_> = page.select(&selector("form button")).collect();
-    assert_eq!(buttons.len(), 1);
-    assert_eq!(buttons[0].value().attr("value"), Some("save"));
+    let forms: Vec<_> = page
+        .select(&selector(
+            "form[action*=\"/fields/\"], form[action*=\"/meta/\"]",
+        ))
+        .collect();
+    assert!(forms.len() >= 4, "{}", forms.len());
+    for form in forms {
+        let buttons: Vec<_> = form.select(&selector("button:not([form])")).collect();
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].value().attr("name"), None);
+    }
 }
 
 async fn setup_scalar() -> Setup {
@@ -1594,7 +1625,11 @@ async fn op_buttons_have_formnovalidate_and_no_fragment() {
             assert!(value.attr("formnovalidate").is_some(), "{op}");
             assert_eq!(value.attr("formaction"), None, "{op}");
         }
-        let form = parsed.select(&selector("form")).next().unwrap();
+        // The full form, or each list form of a saved page (slice 1.5a), posts to the page.
+        let form = parsed
+            .select(&selector("form:has(button[name=op])"))
+            .next()
+            .unwrap();
         assert_eq!(form.value().attr("action"), Some(action.as_str()));
         for save in parsed.select(&selector("button[value=save]")) {
             assert!(
@@ -2337,7 +2372,7 @@ async fn list_payloads_escaped_in_context() {
     assert_eq!(parsed.select(&selector("button[formaction]")).count(), 0);
     assert_eq!(
         parsed
-            .select(&selector("form"))
+            .select(&selector("form:has(button[name=op])"))
             .next()
             .unwrap()
             .value()
@@ -3481,8 +3516,10 @@ async fn leading_newlines_survive_ops_rejected_saves_and_reloads() {
                            "gear": [{"id": "r1-1", "name": "n", "story": "\nrow"},
                                     {"id": "r1-2", "name": "m", "story": "\n\nsecond"}]});
     let created = write(&setup, 1, snapshot, "create").await.unwrap();
+    // Every form's controls: on a saved page General notes and the essay have their own
+    // forms (slice 1.5a).
     let expect = |html: &str, context: &str| {
-        let form = submitted_by(html, None);
+        let form = super::formula_tests::page_values(html);
         for (key, want) in [
             ("notes", "\nnotes"),
             ("value-essay", "\n\nscalar"),
@@ -3695,8 +3732,9 @@ async fn browser_crlf_submission_is_stored_as_lf() {
     let created = write(&setup, 1, snapshot, "create").await.unwrap();
     // What a browser sends for the unchanged page: textarea line breaks as CR LF.
     let view = sheet_page(&setup).await;
+    // The full-form POST of the page's values (the page itself has unit forms, 1.5a).
     let textareas = ["notes", "value-essay", "row-1-0-1"];
-    let browser: Vec<(String, String)> = submitted(&view)
+    let browser: Vec<(String, String)> = super::formula_tests::legacy_form(&view)
         .into_iter()
         .map(|(key, value)| {
             let value = if textareas.contains(&key.as_str()) {
@@ -3724,21 +3762,16 @@ async fn browser_crlf_submission_is_stored_as_lf() {
         serde_json::to_string(&(&created.data, &created.notes)).unwrap(),
         "an unchanged browser Save stores byte-identical values"
     );
-    // A raw CR LF / lone CR body is stored with LF.
-    let mut form = submitted(&sheet_page(&setup).await);
-    set(&mut form, "value-essay", "a\r\nb\rc");
-    assert_eq!(
-        setup.post("/private-sheets/1", form).await.0,
-        StatusCode::SEE_OTHER
-    );
+    // A raw CR LF / lone CR body is stored with LF, from the essay's own form (slice 1.5a).
+    let (action, mut form) = super::unit_tests::unit_form(&sheet_page(&setup).await, "v2", None);
+    set(&mut form, "value", "a\r\nb\rc");
+    assert_eq!(setup.post(&action, form).await.0, StatusCode::SEE_OTHER);
     assert_eq!(reopen(&setup, 1).await.data["essay"], "a\nb\nc");
     // Length limits count the normalised text: 20,000 CR LF pairs are 20,000 notes characters.
-    let mut form = submitted(&sheet_page(&setup).await);
-    set(&mut form, "notes", &"\r\n".repeat(20_000));
-    assert_eq!(
-        setup.post("/private-sheets/1", form).await.0,
-        StatusCode::SEE_OTHER
-    );
+    let (action, mut form) =
+        super::unit_tests::unit_form(&sheet_page(&setup).await, "meta-notes", None);
+    set(&mut form, "value", &"\r\n".repeat(20_000));
+    assert_eq!(setup.post(&action, form).await.0, StatusCode::SEE_OTHER);
     assert_eq!(reopen(&setup, 1).await.notes, "\n".repeat(20_000));
 }
 
@@ -3766,18 +3799,20 @@ async fn browser_crlf_edit_is_stored_with_lf() {
     snapshot.data = json!({"label": "x", "essay": "\n\nscalar\nmore",
                            "gear": [{"id": "r1-1", "name": "n", "story": "\nrow\nend"}]});
     let created = write(&setup, 1, snapshot, "create").await.unwrap();
+    // The full-form POST of the page's values (the page itself has unit forms, 1.5a).
     let textareas = ["notes", "value-essay", "row-1-0-1"];
-    let mut browser: Vec<(String, String)> = submitted(&sheet_page(&setup).await)
-        .into_iter()
-        .map(|(key, value)| {
-            let value = if textareas.contains(&key.as_str()) {
-                value.replace('\n', "\r\n")
-            } else {
-                value
-            };
-            (key, value)
-        })
-        .collect();
+    let mut browser: Vec<(String, String)> =
+        super::formula_tests::legacy_form(&sheet_page(&setup).await)
+            .into_iter()
+            .map(|(key, value)| {
+                let value = if textareas.contains(&key.as_str()) {
+                    value.replace('\n', "\r\n")
+                } else {
+                    value
+                };
+                (key, value)
+            })
+            .collect();
     set(&mut browser, "value-essay", "\r\nedited\r\nessay\r\n");
     assert!(
         serde_urlencoded::to_string(&browser)
@@ -3812,13 +3847,23 @@ async fn draft_op_rerender_has_crlf_normalised() {
     )
     .await
     .unwrap();
-    let mut form = clicked(&sheet_page(&setup).await, "add-1");
+    let page = sheet_page(&setup).await;
+    let mut form = clicked(&page, "add-1");
     set(&mut form, "row-1-0-1", "\r\nfirst\r\nsecond\rthird");
-    set(&mut form, "notes", "a\r\nb");
     let (status, html) = setup.post("/private-sheets/1", form).await;
     assert_eq!(status, StatusCode::OK);
     assert!(!html.contains('\r'), "no CR in the re-render");
     let echoed = submitted_by(&html, None);
     assert_eq!(get(&echoed, "row-1-0-1"), "\nfirst\nsecond\nthird");
-    assert_eq!(get(&echoed, "notes"), "a\nb");
+    // General notes save on their own (slice 1.5a): a refused one echoes its draft with LF.
+    let (action, mut notes) = super::unit_tests::unit_form(&page, "meta-notes", None);
+    set(&mut notes, "value", "a\r\nb");
+    set(&mut notes, "base", "9");
+    let (status, html) = setup.post(&action, notes).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(!html.contains('\r'), "no CR in the re-render");
+    assert_eq!(
+        get(&super::formula_tests::page_values(&html), "notes"),
+        "a\nb"
+    );
 }

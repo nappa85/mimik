@@ -307,14 +307,20 @@ async fn derived_fields_render_without_form_names() {
     for path in ["/private-sheets/1", "/private-sheets/1/history/1"] {
         let (status, html) = setup.get(path).await;
         assert_eq!(status, StatusCode::OK);
-        // History is read-only; its controls are the same form, disabled, and it has no
-        // Save button (`op=save`, plan D6).
-        let mut want = expected.clone();
-        if !path.contains("history") {
-            want.insert("op".into());
+        // History is read-only: one full form, disabled, with no Save button (`op=save`,
+        // plan D6). The saved page has a form per unit (slice 1.5a), each with `base`.
+        if path.contains("history") {
+            assert_eq!(names(&html), expected, "{path}");
+        } else {
+            let mut want = expected.clone();
+            want.remove("revision");
+            want.insert("base".into());
+            let shown: BTreeSet<String> =
+                page_values(&html).into_iter().map(|(key, _)| key).collect();
+            assert_eq!(shown, want, "{path}");
         }
-        assert_eq!(names(&html), want, "{path}");
         for id in DERIVED {
+            assert!(!html.contains(&format!("/fields/{id}\"")), "{path} {id}");
             assert!(
                 !html.contains(&format!("for=\"value-{id}\"")),
                 "{path} {id}"
@@ -505,10 +511,12 @@ async fn formula_text_is_escaped() {
         // Expression string literal, enum option label and an input echoed by a derived
         // text field (also inside the `value` attribute of the label input).
         assert_escaped(html, "label == \"<script>\"", context);
+        // The full form names the control `value-label`; a unit form (slice 1.5a) `value`.
         assert!(
-            escaped("<script>")
-                .iter()
-                .any(|text| html.contains(&format!("name=\"value-label\" value=\"{text}\""))),
+            escaped("<script>").iter().any(|text| {
+                html.contains(&format!("name=\"value-label\" value=\"{text}\""))
+                    || html.contains(&format!("id=\"v0\" name=\"value\" value=\"{text}\""))
+            }),
             "{context}: attribute value"
         );
     }
@@ -561,10 +569,13 @@ async fn quote_payloads_stay_one_attribute_value() {
             !html.contains("onfocus=\"x"),
             "{context}: attribute injected"
         );
+        // The full form (the re-render of a refused full-form POST) names the control
+        // `value-label`; its own form on the saved page (slice 1.5a) `value`.
         assert!(
-            escaped(payload)
-                .iter()
-                .any(|text| html.contains(&format!("name=\"value-label\" value=\"{text}\""))),
+            escaped(payload).iter().any(|text| {
+                html.contains(&format!("name=\"value-label\" value=\"{text}\""))
+                    || html.contains(&format!("id=\"v0\" name=\"value\" value=\"{text}\""))
+            }),
             "{context}: one attribute value"
         );
     }
@@ -810,10 +821,95 @@ fn disabled(element: scraper::ElementRef<'_>) -> bool {
 /// and disabled controls are left out.
 pub(super) fn submitted_by(html: &str, submitter: Option<(&str, &str)>) -> Vec<(String, String)> {
     let document = scraper::Html::parse_document(html);
-    let form = document
-        .select(&scraper::Selector::parse("form").unwrap())
-        .next()
+    // A clicked submitter submits its own form (a saved page has a form per list, 1.5a).
+    let form = submitter
+        .and_then(|(name, value)| {
+            let button = scraper::Selector::parse(&format!(
+                "button[name=\"{name}\"][value=\"{value}\"]:not([form])"
+            ))
+            .ok()?;
+            document
+                .select(&button)
+                .next()?
+                .ancestors()
+                .filter_map(scraper::ElementRef::wrap)
+                .find(|element| element.value().name() == "form")
+        })
+        .or_else(|| sheet_form(&document))
         .expect("a form");
+    form_pairs(form, submitter)
+}
+
+/// Every value the page shows in a form control, under its full-form key: a unit form's
+/// `value` (slice 1.5a) as `name`, `notes`, `value-<id>` (and `null` as `null-<id>`), list
+/// forms' controls under their own names.
+pub(super) fn page_values(html: &str) -> Vec<(String, String)> {
+    let document = scraper::Html::parse_document(html);
+    let mut values = Vec::new();
+    for form in document.select(&scraper::Selector::parse("form").unwrap()) {
+        let action = form.value().attr("action").unwrap_or_default();
+        let unit = action
+            .rsplit_once("/meta/")
+            .map(|(_, which)| (which.to_owned(), None))
+            .or_else(|| {
+                action
+                    .rsplit_once("/fields/")
+                    .map(|(_, id)| (format!("value-{id}"), Some(format!("null-{id}"))))
+            });
+        for (key, value) in form_pairs(form, None) {
+            let key = match (&unit, key.as_str()) {
+                (Some((value_key, _)), "value") => value_key.clone(),
+                (Some((_, Some(null_key))), "null") => null_key.clone(),
+                _ => key,
+            };
+            values.push((key, value));
+        }
+    }
+    values
+}
+
+/// A CSS selector for the control a full form names `name`; on a saved page (slice 1.5a)
+/// `value-<id>` is the `value` of the field's own form and `null-<id>` its `null`.
+pub(super) fn named(name: &str) -> String {
+    let unit = name
+        .strip_prefix("value-")
+        .map(|id| (id, "value"))
+        .or_else(|| name.strip_prefix("null-").map(|id| (id, "null")));
+    match unit {
+        Some((id, key)) => {
+            format!("[name=\"{name}\"], form[action$=\"/fields/{id}\"] [name=\"{key}\"]")
+        }
+        None => format!("[name=\"{name}\"]"),
+    }
+}
+
+/// The full-form POST equivalent to a saved page (the full form route stays accepted, slice
+/// 1.5a): every value the page shows under its full-form key, once, with the sheet
+/// `revision` (a list form's, else a unit's `base`) and without the unit and list markers.
+pub(super) fn legacy_form(html: &str) -> Vec<(String, String)> {
+    let values = page_values(html);
+    let revision = values
+        .iter()
+        .find(|(key, _)| key == "revision")
+        .or_else(|| values.iter().find(|(key, _)| key == "base"))
+        .map(|(_, value)| value.clone())
+        .expect("a revision");
+    let mut seen = BTreeSet::new();
+    let mut form = vec![("revision".to_owned(), revision)];
+    seen.insert("revision".to_owned());
+    for (key, value) in values {
+        if !matches!(key.as_str(), "base" | "list") && seen.insert(key.clone()) {
+            form.push((key, value));
+        }
+    }
+    form
+}
+
+/// What a browser submits for `form` when `submitter` (its name and value) is clicked.
+fn form_pairs(
+    form: scraper::ElementRef<'_>,
+    submitter: Option<(&str, &str)>,
+) -> Vec<(String, String)> {
     let controls = scraper::Selector::parse("input, textarea, select, button").unwrap();
     let option = scraper::Selector::parse("option").unwrap();
     let mut pairs = Vec::new();
@@ -864,13 +960,25 @@ pub(super) fn submitted_by(html: &str, submitter: Option<(&str, &str)>) -> Vec<(
     pairs
 }
 
+/// The sheet form: the first form carrying the sheet `revision`, the full form or, on a
+/// saved editable page (slice 1.5a), the first list's form (the units' own forms carry
+/// `base` instead); else the first form.
+fn sheet_form(document: &scraper::Html) -> Option<scraper::ElementRef<'_>> {
+    let revision = scraper::Selector::parse("input[name=revision]").unwrap();
+    let forms = scraper::Selector::parse("form").unwrap();
+    document
+        .select(&forms)
+        .find(|form| form.select(&revision).next().is_some())
+        .or_else(|| document.select(&forms).next())
+}
+
 /// The first submit button in tree order whose form owner is the sheet form: what Enter in
 /// a text field activates. A button with a `form` attribute (a slice-1.3 switch or Undo)
 /// belongs to its own form, so it is never the sheet's default.
 pub(super) fn default_submitter(html: &str) -> Option<(String, String)> {
     let document = scraper::Html::parse_document(html);
-    let selector = scraper::Selector::parse("form button, form input[type=submit]").unwrap();
-    document.select(&selector).find_map(|button| {
+    let selector = scraper::Selector::parse("button, input[type=submit]").unwrap();
+    sheet_form(&document)?.select(&selector).find_map(|button| {
         let element = button.value();
         let submit = element.attr("form").is_none()
             && (element.name() == "input"
@@ -892,8 +1000,9 @@ pub(super) fn submitted(html: &str) -> Vec<(String, String)> {
     submitted_by(html, named)
 }
 
-/// The rendered form, posted back unchanged, is a valid full save: no derived field leaks
-/// into it as a control (the M2 latent bug rendered every derived field as `value-<id>`).
+/// The rendered forms, posted back unchanged, are valid saves: no derived field leaks into
+/// them as a control (the M2 latent bug rendered every derived field as `value-<id>`). On a
+/// saved page each unit has its own form (slice 1.5a); unchanged, each is "No change".
 #[tokio::test]
 async fn rendered_form_round_trips() {
     let _auth_lock = crate::auth::test_resource_lock().await;
@@ -902,37 +1011,62 @@ async fn rendered_form_round_trips() {
     setup.create().await;
     let (_, data_before, _) = setup.stored().await;
     let (_, html) = setup.get("/private-sheets/1").await;
-    let form = submitted(&html);
-    // Unchanged, it is admitted and changes nothing, so nothing is written (D-U).
-    let (status, page) = setup.post("/private-sheets/1", form.clone()).await;
-    assert_eq!(status, StatusCode::OK, "{form:?}");
-    assert!(page.contains("No change"), "{page}");
-    assert_eq!(form.len(), 10, "{form:?}");
-    assert!(
-        form.contains(&("op".into(), "save".into())),
-        "the clicked Save"
+    let document = scraper::Html::parse_document(&html);
+    let units: Vec<(String, Vec<(String, String)>)> = document
+        .select(
+            &scraper::Selector::parse("form[action*=\"/fields/\"], form[action*=\"/meta/\"]")
+                .unwrap(),
+        )
+        .map(|form| {
+            (
+                form.value().attr("action").unwrap().to_owned(),
+                form_pairs(form, None),
+            )
+        })
+        .collect();
+    let actions: Vec<&str> = units.iter().map(|(action, _)| action.as_str()).collect();
+    assert_eq!(
+        actions,
+        [
+            "/private-sheets/1/meta/name",
+            "/private-sheets/1/fields/label",
+            "/private-sheets/1/fields/vitality",
+            "/private-sheets/1/fields/luck",
+            "/private-sheets/1/fields/kind",
+            "/private-sheets/1/meta/notes",
+        ]
     );
-    assert!(form.contains(&("value-label".into(), "<script>".into())));
+    // Unchanged, each is admitted and changes nothing, so nothing is written (D-U).
+    for (action, form) in &units {
+        let (status, page) = setup.post(action, form.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{action} {form:?}");
+        assert!(page.contains("No change"), "{page}");
+    }
+    assert!(units[1].1.contains(&("value".into(), "<script>".into())));
     let (revision, data, history) = setup.stored().await;
     assert_eq!((revision, history), (1, 1));
     assert_eq!(data, data_before);
-    // With one edit it is a valid full save.
-    let mut edited = form;
+    // With one edit it is a valid save.
+    let mut edited = units[5].1.clone();
     for (key, value) in &mut edited {
-        if key == "notes" {
+        if key == "value" {
             *value = "Edited".into();
         }
     }
     assert_eq!(
-        setup.post("/private-sheets/1", edited).await.0,
+        setup.post(&units[5].0, edited).await.0,
         StatusCode::SEE_OTHER
     );
     let (revision, data, history) = setup.stored().await;
     assert_eq!((revision, history), (2, 2));
     assert_eq!(data, data_before);
-    // The create page round-trips into a first save too, once values are entered.
+    // The create page keeps the one full form and round-trips into a first save.
     let (_, create) = setup.get(&setup.create_path()).await;
     let mut form = submitted(&create);
+    assert!(
+        form.contains(&("op".into(), "save".into())),
+        "the clicked Save"
+    );
     for (key, value) in &mut form {
         match key.as_str() {
             "name" => *value = "Second".into(),

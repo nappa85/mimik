@@ -93,7 +93,7 @@ pub(super) fn validate_compiled(
 /// Field and list item-property IDs: the registry slug plus `_`, so formulas (CEL
 /// identifiers cannot contain `-`) can reference multi-word fields. Every other ID keeps the
 /// registry slug grammar.
-pub(super) fn valid_field_id(value: &str) -> bool {
+pub(crate) fn valid_field_id(value: &str) -> bool {
     (1..=64).contains(&value.len())
         && value.as_bytes()[0].is_ascii_lowercase()
         && value.bytes().all(|byte| {

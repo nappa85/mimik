@@ -77,3 +77,4 @@ article.panel { margin-bottom: 1rem; }
 .offer-dismiss:focus-visible + .offer-body label { outline: 2px solid #285d4c; }
 .offer-dismiss:checked + .offer-body { display: none; }
 .offer-dismiss:checked:focus-visible { position: static; width: 24px; height: 24px; opacity: 1; display: inline-block; }
+.sheet-units form > button { margin: .4rem 0 .6rem; padding: .4rem 1rem; min-width: 24px; min-height: 24px; }

@@ -197,10 +197,11 @@ pub(super) fn inner(html: &str, selector: &str) -> Option<String> {
         .map(|element| element.inner_html())
 }
 
-/// The `value` of the control named `name`.
+/// The `value` of the control named `name`, or of the unit control a full form would name
+/// so (`value-hp` is the `value` of HP's own form on a saved page, slice 1.5a).
 pub(super) fn value(html: &str, name: &str) -> Option<String> {
     let page = scraper::Html::parse_document(html);
-    page.select(&scraper::Selector::parse(&format!("[name=\"{name}\"]")).unwrap())
+    page.select(&scraper::Selector::parse(&super::formula_tests::named(name)).unwrap())
         .next()
         .and_then(|element| element.value().attr("value").map(str::to_owned))
 }

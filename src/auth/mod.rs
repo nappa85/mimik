@@ -386,7 +386,8 @@ fn normalize(mut response: Response) -> Response {
     // Pages that explain their own error keep their body at any status they are marked for.
     let explained = errors::trusted(&response)
         || materials::trusted(&response)
-        || crate::campaigns::web::catalogue_notice(&response);
+        || crate::campaigns::web::catalogue_notice(&response)
+        || crate::campaigns::web::sheet_busy(&response);
     if (status.is_client_error() || status.is_server_error())
         && !explained
         && !(matches!(

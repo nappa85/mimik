@@ -38,6 +38,8 @@ mod material_tests;
 mod notes_tests;
 #[path = "registry_tests.rs"]
 mod registry_tests;
+#[path = "unit_tests.rs"]
+mod unit_tests;
 #[path = "unknown_tests.rs"]
 mod unknown_tests;
 
@@ -668,6 +670,71 @@ async fn actual_router_campaign_native_full_replace_escaped_drafts_private_legac
         StatusCode::BAD_REQUEST
     );
     assert!(store.list().await.unwrap().is_empty());
+}
+
+/// Slice 1.5a (Sonnet m1): the per-field routes refuse native sheets (400, nothing written);
+/// the native editor keeps its one full form.
+#[tokio::test]
+async fn native_sheets_refuse_unit_routes() {
+    use axum::http::StatusCode;
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    store.run(|db|{db.execute("INSERT INTO sources(bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES('native-fixture','fixture','Fixture','mork-borg','Italian fixture','it','fixture',x'',x'',x'',1)",[])?;db.execute("INSERT INTO source_rulesets VALUES(1,'mork-borg','it-2025')",[])?;Ok(())}).await.unwrap();
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let campaign = vec![
+        ("csrf".into(), "a".repeat(64)),
+        ("title".into(), "Native campaign".into()),
+        ("game_id".into(), "mork-borg".into()),
+        ("edition_id".into(), "it-2025".into()),
+    ];
+    let response = router_request(&app, &auth[1], "/campaigns", Some(campaign)).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let response = router_request(
+        &app,
+        &auth[1],
+        "/campaigns/1/sheets/new",
+        Some(native_form()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let page = router_request(&app, &auth[1], "/private-sheets/1", None).await;
+    let html = String::from_utf8(
+        axum::body::to_bytes(page.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        html.contains("Save full private sheet"),
+        "the full form stays"
+    );
+    assert!(!html.contains("/meta/name") && !html.contains("/fields/"));
+    for path in [
+        "/private-sheets/1/meta/name",
+        "/private-sheets/1/meta/notes",
+        "/private-sheets/1/fields/hp",
+    ] {
+        let unit = vec![
+            ("csrf".into(), "a".repeat(64)),
+            ("base".into(), "1".into()),
+            ("value".into(), "7".into()),
+        ];
+        let response = router_request(&app, &auth[1], path, Some(unit)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+    }
+    let revision: i64 = store
+        .run(|db| {
+            Ok(
+                db.query_row("SELECT revision FROM private_sheets WHERE id=1", [], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(revision, 1, "nothing written");
 }
 
 /// Native sheets have no immutable pin, so nothing is evaluated or shown as advisory.

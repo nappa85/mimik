@@ -80,7 +80,15 @@ impl Pairs {
             .map(|(_, value)| value.as_str())
             .ok_or(axum::http::StatusCode::FORBIDDEN)
     }
-    pub(super) fn keys(&self) -> impl Iterator<Item = &str> {
+    /// The value of the pair `key`, before admission (a list form's `list`, a unit's
+    /// `base`, the echo of a busy answer).
+    pub(super) fn value(&self, key: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, value)| value.as_str())
+    }
+    pub(super) fn keys(&self) -> impl Iterator<Item = &str> + Clone {
         self.0.iter().map(|(key, _)| key.as_str())
     }
     /// Closed-key admission: exactly the expected key set, in O(pairs) set lookups.
