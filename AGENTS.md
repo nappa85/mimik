@@ -5,6 +5,7 @@
 - **Machine schedule (user decision 2026-10-16):**
   - Monday to Friday, 09:00–18:00: no heavy operations (GPU inference, model loads, uncapped builds). Rust builds and tests are allowed during those hours, capped at 2 cores.
   - Weekends: the GPU and heavy work are allowed 24 hours a day.
+  - Small CPU models (about 4B parameters or less, quantized, no GPU) may run during weekday hours too, capped at 2 cores like builds (user decision 2026-10-19).
   - Model downloads are allowed without asking after licence and compatibility checks; store them under `/media/data/mimik` (slow magnetic disk, plenty of space), pinned and hash-verified.
   - Unattended runs must enforce the window themselves and never wait for input.
 - Prefer existing maintained crates/libraries over reinventing infrastructure. Before custom implementation, check fit, license compatibility, maintenance, API/capability coverage, portability, and dependency/runtime cost. Record meaningful selection decisions; custom code should cover Mimik-specific behavior or demonstrated gaps.
