@@ -420,8 +420,8 @@ async fn a_stale_move_after_a_reorder_add_or_remove_conflicts() {
     }
 }
 
-/// Routes refuse what they do not name, with 400 and nothing written: a removed row's
-/// cell, a row missing at `base`, non-canonical or out-of-range indices, a list index that
+/// Routes refuse what they do not name, with 400 and nothing written: a row missing at
+/// `base`, non-canonical or out-of-range indices, a list index that
 /// is a scalar or derived field, and key sets other than the cell's.
 #[tokio::test]
 async fn list_routes_refuse_what_they_do_not_name() {

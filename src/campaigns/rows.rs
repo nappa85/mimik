@@ -5,7 +5,8 @@
 //! A page names a row by its index at the revision it was read at (its `base`), so the
 //! routes stay short (plan D7). Every plan first maps that index to the row's host ID in
 //! `base`, then finds the host in the live revision L, and applies the change there:
-//! - a cell protects its value and its row's existence (a row gone from L is 400);
+//! - a cell protects its value and its row's existence (a row missing at `base` is 400; one
+//!   removed since is a conflict that keeps the draft);
 //! - the new-row form protects nothing (it only appends);
 //! - Remove protects the row's existence and every property value (a removed row is "No
 //!   change"; an edited one a conflict);
@@ -104,8 +105,8 @@ fn refusal(failure: AppError) -> Result<Planned, StatusCode> {
 
 /// Cell `p` of row `r` (at `base`) of list field `f`, saved from its form (`value`, plus
 /// `set` for an optional property) into `snapshot` (L). Order as for a field (slice 1.5a,
-/// P5): a row missing at `base` or gone from L is 400; a submission equal to the saved
-/// value is "No change"; a value that differs between `base` and L is a conflict; then a
+/// P5): a row missing at `base` is 400; a row removed since is a conflict that keeps the
+/// draft; a submission equal to the saved value is "No change"; a value that differs between `base` and L is a conflict; then a
 /// refused value is 422.
 pub(crate) fn cell(
     pin: &ImmutablePin,
