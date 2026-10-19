@@ -32,6 +32,8 @@ pub(super) mod list_tests;
 mod list_values_tests;
 #[path = "material_tests.rs"]
 mod material_tests;
+#[path = "notes_tests.rs"]
+mod notes_tests;
 #[path = "registry_tests.rs"]
 mod registry_tests;
 
@@ -624,9 +626,13 @@ async fn actual_router_campaign_native_full_replace_escaped_drafts_private_legac
         StatusCode::SEE_OTHER
     );
     assert_native_page_has_no_formula_markers(&app, &auth[2]).await;
+    // An edit that changes something (an unchanged save writes nothing, D-U), so the
+    // re-post below is stale.
     for pair in &mut form {
-        if pair.0 == "revision" {
-            pair.1 = "1".into();
+        match pair.0.as_str() {
+            "revision" => pair.1 = "1".into(),
+            "notes" => pair.1 = "Edited private notes".into(),
+            _ => {}
         }
     }
     assert_eq!(
@@ -1585,10 +1591,13 @@ async fn actual_router_runtime_i64_nullable_stale_pin_edit_and_missing_evidence_
     .unwrap();
     assert!(html.contains("9007199254740993"));
     assert!(html.contains("evidence is unavailable"));
+    // The edit changes the notes: an unchanged save would write nothing (D-U).
     let mut edited = form;
     for pair in &mut edited {
-        if pair.0 == "revision" {
-            pair.1 = "1".into();
+        match pair.0.as_str() {
+            "revision" => pair.1 = "1".into(),
+            "notes" => pair.1 = "Edited".into(),
+            _ => {}
         }
     }
     assert_eq!(
@@ -2495,7 +2504,7 @@ async fn populated_schema12_upgrade_preserves_owner_development_records_and_sess
                     .unwrap(),
             )?;
             crate::sources::search::drop_schema(db)?;
-            db.execute_batch(crate::catalogues::DROP_SCHEMA)?;
+            db.execute_batch(crate::catalogues::DROP_SCHEMA)?;db.execute_batch(crate::campaigns::DROP_NOTES_SCHEMA)?;
             db.execute_batch("PRAGMA user_version=12;")?;
             Ok(())
         })

@@ -465,6 +465,8 @@ async fn populated_schema18_database_upgrades_to_19_atomically() {
     assert_eq!(before.2, 1);
     // Rewind to a genuine schema-18 shape.
     db.execute_batch(DROP_CATALOGUE_SCHEMA).unwrap();
+    // Schema 20 (change notes) is newer than the rewind target too.
+    db.execute_batch("DROP TABLE private_sheet_notes;").unwrap();
     db.execute_batch("PRAGMA user_version=18;").unwrap();
     let catalogue_objects = |db: &rusqlite::Connection| -> i64 {
         db.query_row(
@@ -495,9 +497,10 @@ async fn populated_schema18_database_upgrades_to_19_atomically() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        19
+        mimik::SCHEMA_VERSION
     );
-    assert_eq!(mimik::SCHEMA_VERSION, 19);
+    // Schema 19 added the catalogues; schema 20 (change notes) applies on the same upgrade.
+    assert_eq!(mimik::SCHEMA_VERSION, 20);
     assert_eq!(counts(&db), before);
     let saved = reopened
         .save_catalogue_draft(serde_json::to_vec(&fixture.catalogue()).unwrap(), 0)

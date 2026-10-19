@@ -1,6 +1,6 @@
 //! Slice 1.1 grammar table and property tests for `entry::number` (assisted sheet plan
 //! §3a, §5 slice 1.1).
-use super::{MAX_CHARS, MAX_SCALARS, Unreadable, number};
+use super::{MAX_CHARS, MAX_SCALARS, Reading, Unreadable, number, read, sum_text};
 use proptest::prelude::*;
 
 fn ok(cases: &[(&str, i64)]) {
@@ -242,5 +242,43 @@ proptest! {
         }
         let want = i64::try_from(exact).map_err(|_| Unreadable::Range);
         prop_assert_eq!(number(&raw), want);
+    }
+}
+
+/// Slice 1.2: a note records whether the entry was a sum, and a sum note shows it
+/// normalised.
+#[test]
+fn readings_tell_sums_from_literals() {
+    for (raw, value, sum) in [
+        ("84", 84, false),
+        ("-15", -15, false),
+        ("+3", 3, false),
+        ("0007", 7, false),
+        ("84 -15", 69, true),
+        ("84-15+3", 72, true),
+        ("\t1 + 1\t", 2, true),
+    ] {
+        assert_eq!(read(raw), Ok(Reading { value, sum }), "{raw:?}");
+    }
+    assert_eq!(read("lots"), Err(Unreadable::Syntax));
+    assert_eq!(sum_text("84 -15").as_deref(), Some("84 \u{2212} 15"));
+    assert_eq!(sum_text("084-15+03").as_deref(), Some("84 \u{2212} 15 + 3"));
+    assert_eq!(sum_text("84 \u{2212}15").as_deref(), Some("84 \u{2212} 15"));
+    for raw in ["84", "-15", "lots", "", "84--15"] {
+        assert_eq!(sum_text(raw), None, "{raw:?}");
+    }
+}
+
+#[test]
+fn only_unreadable_text_keeps_a_known_value() {
+    for kind in [
+        Unreadable::Syntax,
+        Unreadable::TooManyScalars,
+        Unreadable::Range,
+    ] {
+        assert!(kind.keeps_value(), "{kind:?}");
+    }
+    for kind in [Unreadable::Blank, Unreadable::TooLong, Unreadable::Control] {
+        assert!(!kind.keeps_value(), "{kind:?}");
     }
 }

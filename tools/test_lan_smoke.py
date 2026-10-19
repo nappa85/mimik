@@ -13,7 +13,7 @@ import lan_smoke
 
 
 class CleanupTests(unittest.TestCase):
-    def invoke_timeout(self, fail_network=False, decoder=False):
+    def invoke_timeout(self, fail_network=False, decoder=False, cpus="2"):
         calls = []
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -29,6 +29,7 @@ class CleanupTests(unittest.TestCase):
                 source_fixture=fixture,
                 ci_image="ci",
                 browser_image="browser",
+                cpus=cpus,
             )
 
             def run(command, **kwargs):
@@ -93,6 +94,27 @@ class CleanupTests(unittest.TestCase):
                 for command in calls
             )
         )
+
+    def test_every_container_is_cpu_capped(self):
+        """Machine schedule: no container may run uncapped (two cores on weekdays)."""
+        for cpus in ("2", "6"):
+            calls = self.invoke_timeout(decoder=True, cpus=cpus)
+            runs = [command for command in calls if command[1] == "run"]
+            self.assertEqual(len(runs), 4, runs)
+            for command in runs:
+                self.assertEqual(
+                    [part for part in command if part.startswith("--cpus")],
+                    [f"--cpus={cpus}"],
+                    command,
+                )
+            decoder = next(command for command in runs if "qr_decode" in command)
+            self.assertIn(f"CARGO_BUILD_JOBS={cpus}", decoder)
+
+    def test_cpu_cap_must_be_a_small_positive_integer(self):
+        self.assertEqual(lan_smoke.cpu_cap("2"), "2")
+        for bad in ("0", "-1", "1.5", "x", "", "65"):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=bad):
+                lan_smoke.cpu_cap(bad)
 
     def test_one_network_failure_does_not_skip_other_cleanup(self):
         calls = self.invoke_timeout(fail_network=True)

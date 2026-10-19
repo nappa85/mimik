@@ -5,6 +5,7 @@ mod domain;
 mod entry;
 mod formulas;
 mod history_diff;
+mod notes;
 mod sheets;
 mod snapshots;
 #[cfg(test)]
@@ -17,6 +18,10 @@ use crate::{AppError, auth::RequestAuth};
 use rusqlite::{Connection, OptionalExtension, params};
 
 pub(crate) use crate::pagination::Listing;
+
+/// Rewinds schema 20 (change notes, migration 020) for upgrade tests of older schemas.
+#[cfg(test)]
+pub(crate) const DROP_NOTES_SCHEMA: &str = "DROP TABLE private_sheet_notes;";
 
 #[derive(Clone)]
 pub(crate) struct Campaign {

@@ -44,6 +44,50 @@ impl Unreadable {
     }
 }
 
+/// A readable entry: its value and whether it was a sum of two or more numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Reading {
+    pub value: i64,
+    /// Two or more terms ("84 -15"); a literal ("84", "-15", "+3") is not a sum.
+    pub sum: bool,
+}
+
+impl Unreadable {
+    /// Whether a known saved value is kept, with the input recorded as a scribble (plan
+    /// §3a, slice 1.2). Blank (an unknown value from slice 1.4), over-long and
+    /// control-character input is refused instead: it cannot be kept as a faithful scribble.
+    pub(crate) fn keeps_value(self) -> bool {
+        matches!(self, Self::Syntax | Self::TooManyScalars | Self::Range)
+    }
+}
+
+/// Reads a player's number entry; see [`number`].
+pub(crate) fn read(raw: &str) -> Result<Reading, Unreadable> {
+    let (value, terms) = evaluate(raw)?;
+    Ok(Reading {
+        value,
+        sum: terms > 1,
+    })
+}
+
+/// The sum an entry spelled, normalised for display ("84 -15" → "84 − 15"), or `None` when
+/// the entry is not a readable sum. Magnitudes lose leading zeros; minus is U+2212.
+pub(crate) fn sum_text(raw: &str) -> Option<String> {
+    if !read(raw).is_ok_and(|reading| reading.sum) {
+        return None;
+    }
+    let text = raw.trim_matches(is_space);
+    let mut shown = String::new();
+    for (index, (negative, run)) in terms(text).ok()?.into_iter().enumerate() {
+        let magnitude = magnitude(run).ok()?;
+        if index > 0 {
+            shown.push_str(if negative { " \u{2212} " } else { " + " });
+        }
+        shown.push_str(&magnitude.to_string());
+    }
+    Some(shown)
+}
+
 /// Reads a player's number entry: a literal or an absolute sum (plan §3a grammar).
 ///
 /// ```text
@@ -56,6 +100,11 @@ impl Unreadable {
 /// Leading and trailing spaces and tabs are trimmed. Terms are added left to right in
 /// `i128`, each checked as it is parsed and added; the result must fit `i64`.
 pub(crate) fn number(raw: &str) -> Result<i64, Unreadable> {
+    evaluate(raw).map(|(value, _)| value)
+}
+
+/// The value of an entry and its number of terms.
+fn evaluate(raw: &str) -> Result<(i64, usize), Unreadable> {
     if raw.chars().nth(MAX_CHARS).is_some() {
         return Err(Unreadable::TooLong);
     }
@@ -67,7 +116,9 @@ pub(crate) fn number(raw: &str) -> Result<i64, Unreadable> {
         return Err(Unreadable::Blank);
     }
     let mut total: i128 = 0;
-    for (negative, run) in terms(text)? {
+    let terms = terms(text)?;
+    let count = terms.len();
+    for (negative, run) in terms {
         let term = magnitude(run)?;
         total = if negative {
             total.checked_sub(term)
@@ -76,7 +127,9 @@ pub(crate) fn number(raw: &str) -> Result<i64, Unreadable> {
         }
         .ok_or(Unreadable::Range)?;
     }
-    i64::try_from(total).map_err(|_| Unreadable::Range)
+    i64::try_from(total)
+        .map(|value| (value, count))
+        .map_err(|_| Unreadable::Range)
 }
 
 /// Splits trimmed, non-empty text into signed digit runs: one literal, or a sum.

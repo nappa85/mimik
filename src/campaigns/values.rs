@@ -1,9 +1,10 @@
+use super::notes::{Note, NoteValue, Op as NoteOp, Stored};
 use crate::{
     AppError,
     definitions::{Control, Definition, Field},
 };
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// A form index in the canonical grammar `0|[1-9][0-9]{0,2}` (plan D1).
 fn index(raw: &str) -> Option<usize> {
@@ -541,7 +542,7 @@ impl Op {
 fn scalar_value(control: Control, raw: &str) -> Result<Value, AppError> {
     Ok(match control {
         Control::Text | Control::Multiline | Control::Enumeration => Value::String(raw.into()),
-        // Player input: a literal or a sum (assisted sheet slice 1.1); still 422 if unreadable.
+        // Player input: a literal or a sum (assisted sheet slice 1.1); 422 if unreadable.
         Control::Integer => super::entry::number(raw)
             .map_err(|unreadable| AppError::Invalid(unreadable.message()))?
             .into(),
@@ -554,6 +555,153 @@ fn scalar_value(control: Control, raw: &str) -> Result<Value, AppError> {
     })
 }
 
+/// What a cell held before this save (plan §3a, slice 1.2).
+#[derive(Clone, Copy)]
+enum Prior<'a> {
+    /// No earlier value: create, or a new row.
+    New,
+    /// An optional property of a saved row that was not set.
+    Absent,
+    /// The saved value.
+    Saved(&'a Value),
+}
+
+impl Prior<'_> {
+    fn note_value(self, control: Control) -> Option<NoteValue> {
+        match self {
+            Self::New => None,
+            Self::Absent => Some(NoteValue::Absent),
+            Self::Saved(value) => NoteValue::of(control, value),
+        }
+    }
+}
+
+/// Collects the change notes of one save while its cells are read (plan §3a, D-T, D-U).
+pub(crate) struct Recorder<'a> {
+    current: &'a BTreeMap<String, Stored>,
+    pub notes: Vec<Note>,
+}
+
+impl<'a> Recorder<'a> {
+    pub(crate) fn new(current: &'a BTreeMap<String, Stored>) -> Self {
+        Self {
+            current,
+            notes: Vec::new(),
+        }
+    }
+
+    /// Whether the current note of `address` is a scribble on the value `after`.
+    fn scribbled(&self, address: &str, after: &NoteValue) -> Option<&Note> {
+        self.current
+            .get(address)
+            .map(|stored| &stored.note)
+            .filter(|note| note.op == NoteOp::Unresolved && &note.after == after)
+    }
+
+    /// Records a value: a note when a saved cell changed, when it accepts the kept value of a
+    /// scribble (a data-unchanged revision, plan §3a), or when a new cell (create, a new
+    /// row) got an interpreted number (a sum). Text cells record nothing.
+    fn record(
+        &mut self,
+        address: String,
+        op: NoteOp,
+        raw: &str,
+        prior: Prior<'_>,
+        control: Control,
+        after: Option<NoteValue>,
+    ) {
+        let Some(after) = after else { return };
+        let before = prior.note_value(control);
+        if before.is_none() && op != NoteOp::Sum {
+            return;
+        }
+        let changed = before.as_ref() != Some(&after);
+        if changed || self.scribbled(&address, &after).is_some() {
+            self.notes.push(Note {
+                address,
+                op,
+                raw: raw.into(),
+                before,
+                after,
+            });
+        }
+    }
+
+    /// Reads one present cell. An unreadable number over a known saved integer keeps that
+    /// integer with an `unresolved` note (unless the same scribble is already current, so
+    /// re-posting the page writes nothing); everywhere else it is refused (422) until slice 1.4.
+    fn cell(
+        &mut self,
+        address: String,
+        control: Control,
+        raw: &str,
+        prior: Prior<'_>,
+    ) -> Result<Value, AppError> {
+        if control != Control::Integer {
+            let value = scalar_value(control, raw)?;
+            let after = NoteValue::of(control, &value);
+            self.record(address, NoteOp::Literal, raw, prior, control, after);
+            return Ok(value);
+        }
+        match super::entry::read(raw) {
+            Ok(reading) => {
+                let op = if reading.sum {
+                    NoteOp::Sum
+                } else {
+                    NoteOp::Literal
+                };
+                self.record(
+                    address,
+                    op,
+                    raw,
+                    prior,
+                    control,
+                    Some(NoteValue::Int(reading.value)),
+                );
+                Ok(reading.value.into())
+            }
+            Err(unreadable) => {
+                let kept = match prior {
+                    Prior::Saved(value) if unreadable.keeps_value() => value.as_i64(),
+                    _ => None,
+                };
+                let Some(kept) = kept else {
+                    return Err(AppError::Invalid(unreadable.message()));
+                };
+                let after = NoteValue::Int(kept);
+                if self
+                    .scribbled(&address, &after)
+                    .is_none_or(|note| note.raw != raw)
+                {
+                    self.notes.push(Note {
+                        address,
+                        op: NoteOp::Unresolved,
+                        raw: raw.into(),
+                        before: Some(after.clone()),
+                        after,
+                    });
+                }
+                Ok(kept.into())
+            }
+        }
+    }
+
+    /// Records a cell set to `after` without reading input: unknown (`null`) through the
+    /// Known/Unknown select, or an optional property set to Not set.
+    /// Nothing is recorded for a new cell: a note documents a change of a saved cell or how
+    /// typed input was read.
+    fn state(&mut self, address: String, control: Control, prior: Prior<'_>, after: NoteValue) {
+        if !matches!(prior, Prior::New)
+            && matches!(
+                control,
+                Control::Integer | Control::Enumeration | Control::Boolean
+            )
+        {
+            self.record(address, NoteOp::Literal, "", prior, control, Some(after));
+        }
+    }
+}
+
 /// Turns a list draft into stored items (plan D3): an empty ID gets the next host ID
 /// `r<next>-<k>`, k = 1, 2, … over this list's new rows in row order; a non-empty ID must
 /// name a row of the saved list (anything else is tampering); IDs stay unique. Optional
@@ -563,25 +711,26 @@ pub(crate) fn reconcile(
     draft: &ListDraft,
     saved: &Value,
     next: i64,
+    recorder: &mut Recorder<'_>,
 ) -> Result<Value, AppError> {
     if draft.rows.len() > crate::definitions::formula::MAX_LIST_ITEMS {
         return Err(AppError::Invalid("A list holds at most 256 rows."));
     }
-    let known: HashSet<&str> = saved
+    let known: HashMap<&str, &Value> = saved
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|item| item["id"].as_str())
+        .filter_map(|item| Some((item["id"].as_str()?, item)))
         .collect();
     let mut seen = HashSet::new();
     let mut allocated = 0_usize;
     let mut items = Vec::with_capacity(draft.rows.len());
     for row in &draft.rows {
-        let id = if row.id.is_empty() {
+        let (id, saved_item) = if row.id.is_empty() {
             allocated += 1;
-            format!("r{next}-{allocated}")
-        } else if known.contains(row.id.as_str()) {
-            row.id.clone()
+            (format!("r{next}-{allocated}"), None)
+        } else if let Some(item) = known.get(row.id.as_str()) {
+            (row.id.clone(), Some(*item))
         } else {
             return Err(AppError::Invalid(
                 "A list row ID is not part of the saved sheet.",
@@ -591,12 +740,20 @@ pub(crate) fn reconcile(
             return Err(AppError::Invalid("List row IDs must be unique."));
         }
         let mut item = serde_json::Map::new();
-        item.insert("id".into(), Value::String(id));
+        item.insert("id".into(), Value::String(id.clone()));
         for (p, property) in properties(field).iter().enumerate() {
+            let address = super::notes::cell_address(&field.id, &id, &property.id);
+            let prior = match saved_item {
+                None => Prior::New,
+                Some(saved) => saved.get(&property.id).map_or(Prior::Absent, Prior::Saved),
+            };
             if property.optional {
                 match row.states.get(p).map(String::as_str) {
                     Some("present") => {}
-                    Some("absent") => continue,
+                    Some("absent") => {
+                        recorder.state(address, property.control, prior, NoteValue::Absent);
+                        continue;
+                    }
                     _ => {
                         return Err(AppError::Invalid(
                             "Select Set or Not set for every optional row property.",
@@ -605,21 +762,28 @@ pub(crate) fn reconcile(
                 }
             }
             let raw = row.values.get(p).map_or("", String::as_str);
-            item.insert(property.id.clone(), scalar_value(property.control, raw)?);
+            let value = recorder.cell(address, property.control, raw, prior)?;
+            item.insert(property.id.clone(), value);
         }
         items.push(Value::Object(item));
     }
     Ok(Value::Array(items))
 }
 
-/// The values of an admitted runtime form. `saved` and `revision` are the current saved
-/// data and revision: list rows reconcile against them (new IDs use `revision + 1`).
+/// The values of an admitted runtime form and their change notes (slice 1.2). `saved` and
+/// `revision` are the current saved data and revision: list rows reconcile against them
+/// (new IDs use `revision + 1`). `saved` is `None` on create, where every cell is new;
+/// `current` holds the current note of each saved address.
 pub(crate) fn form(
     definition: &Definition,
     form: &BTreeMap<String, String>,
-    saved: &Value,
+    saved: Option<&Value>,
     revision: i64,
-) -> Result<Value, AppError> {
+    current: &BTreeMap<String, Stored>,
+) -> Result<(Value, Vec<Note>), AppError> {
+    let mut recorder = Recorder::new(current);
+    let empty = Value::Object(serde_json::Map::new());
+    let saved_data = saved.unwrap_or(&empty);
     let next = revision
         .checked_add(1)
         .ok_or(AppError::Invalid("Sheet revision exhausted."))?;
@@ -632,7 +796,7 @@ pub(crate) fn form(
             let draft = ListDraft::submitted(f, field, form);
             values.insert(
                 field.id.clone(),
-                reconcile(field, &draft, &saved[&field.id], next)?,
+                reconcile(field, &draft, &saved_data[&field.id], next, &mut recorder)?,
             );
             continue;
         }
@@ -648,12 +812,17 @@ pub(crate) fn form(
         } else {
             false
         };
+        let address = super::notes::field_address(&field.id);
+        let prior = saved
+            .and_then(|saved| saved.get(&field.id))
+            .map_or(Prior::New, Prior::Saved);
         let value = if null {
+            recorder.state(address, field.control, prior, NoteValue::Unknown);
             Value::Null
         } else {
-            scalar_value(field.control, raw)?
+            recorder.cell(address, field.control, raw, prior)?
         };
         values.insert(field.id.clone(), value);
     }
-    Ok(Value::Object(values))
+    Ok((Value::Object(values), recorder.notes))
 }

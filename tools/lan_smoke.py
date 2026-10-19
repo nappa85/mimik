@@ -20,6 +20,14 @@ def docker(*arguments, check=True, timeout=900):
     return result
 
 
+def cpu_cap(value):
+    """A container CPU cap: a whole number of CPUs from 1 to 64. The machine schedule allows
+    two cores on weekdays 09:00-18:00, hence the default of 2."""
+    if not (value.isascii() and value.isdigit()) or not 1 <= int(value) <= 64:
+        raise argparse.ArgumentTypeError("--cpus must be a whole number from 1 to 64")
+    return str(int(value))
+
+
 def network_address(container, network):
     value = docker(
         "inspect",
@@ -38,6 +46,12 @@ def main():
     parser.add_argument("--source-fixture", required=True, type=Path)
     parser.add_argument("--ci-image", default="mimik-ci")
     parser.add_argument("--browser-image", default="mimik-browser")
+    parser.add_argument(
+        "--cpus",
+        type=cpu_cap,
+        default="2",
+        help="CPU cap of every container, and the decoder's CARGO_BUILD_JOBS (default 2)",
+    )
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
     source = args.source_root.resolve(strict=True)
@@ -66,7 +80,7 @@ def main():
                 server,
                 "--network",
                 primary,
-                "--cpus=2",
+                f"--cpus={args.cpus}",
                 "--memory=1g",
                 "--pids-limit=256",
                 "--cap-drop=ALL",
@@ -116,6 +130,7 @@ def main():
                 tag + "-denier",
                 "--network",
                 secondary,
+                f"--cpus={args.cpus}",
                 *mounts,
                 args.ci_image,
                 "python",
@@ -139,7 +154,7 @@ def main():
                 "HOME=/tmp",
                 "--network",
                 primary,
-                "--cpus=2",
+                f"--cpus={args.cpus}",
                 "--memory=4g",
                 "--shm-size=1g",
                 "--pids-limit=1024",
@@ -171,6 +186,9 @@ def main():
                 "--name",
                 tag + "-decoder",
                 "--network=none",
+                f"--cpus={args.cpus}",
+                "-e",
+                f"CARGO_BUILD_JOBS={args.cpus}",
                 "--mount",
                 f"type=bind,src={source},dst=/workspace",
                 "--mount",

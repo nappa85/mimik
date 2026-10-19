@@ -87,7 +87,8 @@ pub(super) async fn publish(store: &Store, definition: &Value) -> i64 {
 }
 
 pub(super) struct Setup {
-    pub _dir: tempfile::TempDir,
+    /// The temporary directory holding the database (`private.sqlite3`).
+    pub dir: tempfile::TempDir,
     pub store: Store,
     pub auth: Vec<RequestAuth>,
     pub app: axum::Router,
@@ -109,7 +110,7 @@ pub(super) async fn setup(definition: &Value) -> Setup {
         .unwrap();
     let app = crate::auth::app(store.clone()).await.unwrap();
     Setup {
-        _dir: dir,
+        dir,
         store,
         auth,
         app,
@@ -393,11 +394,11 @@ async fn failed_save_rerender_labels_the_saved_revision() {
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let setup = setup(&formula_definition()).await;
     setup.create().await;
-    let (status, html) = setup
-        .post("/private-sheets/1", form(1, "not-a-number", None))
-        .await;
+    // Over 200 characters: refused, not kept as a scribble (slice 1.2).
+    let draft = "9".repeat(201);
+    let (status, html) = setup.post("/private-sheets/1", form(1, &draft, None)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(html.contains("value=\"not-a-number\""), "draft kept");
+    assert!(html.contains(&format!("value=\"{draft}\"")), "draft kept");
     let results = section(&html, "formula-results");
     assert!(results.contains("Computed from saved revision 1 — not from your unsaved changes"));
     assert!(results.contains(
@@ -480,7 +481,8 @@ async fn formula_text_is_escaped() {
     let setup = setup(&formula_definition()).await;
     setup.create().await;
     let (_, view) = setup.get("/private-sheets/1").await;
-    let (status, rerender) = setup.post("/private-sheets/1", form(1, "bad", None)).await;
+    // A blank number is still refused (slice 1.2 keeps only readable-text scribbles).
+    let (status, rerender) = setup.post("/private-sheets/1", form(1, "", None)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let (_, history) = setup.get("/private-sheets/1/history/1").await;
     let (status, _) = setup.post("/private-sheets/1", form(1, "11", None)).await;
@@ -892,14 +894,30 @@ async fn rendered_form_round_trips() {
     let (_, data_before, _) = setup.stored().await;
     let (_, html) = setup.get("/private-sheets/1").await;
     let form = submitted(&html);
-    let (status, _) = setup.post("/private-sheets/1", form.clone()).await;
-    assert_eq!(status, StatusCode::SEE_OTHER, "{form:?}");
+    // Unchanged, it is admitted and changes nothing, so nothing is written (D-U).
+    let (status, page) = setup.post("/private-sheets/1", form.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{form:?}");
+    assert!(page.contains("No change"), "{page}");
     assert_eq!(form.len(), 10, "{form:?}");
     assert!(
         form.contains(&("op".into(), "save".into())),
         "the clicked Save"
     );
     assert!(form.contains(&("value-label".into(), "<script>".into())));
+    let (revision, data, history) = setup.stored().await;
+    assert_eq!((revision, history), (1, 1));
+    assert_eq!(data, data_before);
+    // With one edit it is a valid full save.
+    let mut edited = form;
+    for (key, value) in &mut edited {
+        if key == "notes" {
+            *value = "Edited".into();
+        }
+    }
+    assert_eq!(
+        setup.post("/private-sheets/1", edited).await.0,
+        StatusCode::SEE_OTHER
+    );
     let (revision, data, history) = setup.stored().await;
     assert_eq!((revision, history), (2, 2));
     assert_eq!(data, data_before);
