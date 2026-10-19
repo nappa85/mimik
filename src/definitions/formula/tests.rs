@@ -5,10 +5,10 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 const FIXTURE: &str = include_str!("../../../schemas/formula-conformance-v1.json");
-/// Hash lock of the golden fixture. Changing it requires a reviewed profile decision: an
-/// outcome change under a `cel`/`antlr4rust` bump means `formula_profile` 2, not an edit here.
-/// Until the first release profile 1 itself may still change (user decision D-Y; content
-/// revision 2, assisted sheet slice 1.4).
+/// Hash lock of the golden fixture. Changing it requires a reviewed profile decision. Until the
+/// first release profile 1 itself may still change (user decision D-Y; content revision 2,
+/// assisted sheet slice 1.4); from the first release on, an outcome change, including one under
+/// a `cel`/`antlr4rust` bump, means `formula_profile` 2, not an edit here.
 const FIXTURE_SHA256: &str = "5af7ce8f1610ca4a41a2a8ecd6b0f387b60c0989a7ef8287f116d5c925cb6b40";
 
 #[derive(Deserialize)]

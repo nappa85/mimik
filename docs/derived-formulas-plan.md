@@ -146,7 +146,7 @@ Anything not listed below fails admission with a path/code diagnostic.
 
 | Category | Allowed | Rejected |
 |---|---|---|
-| Literals | signed int, `true`/`false`, double-quoted or single-quoted strings, `null` only as an operand of `==`/`!=` against a nullable field | double, `u` uint, bytes, raw/triple-quoted strings (allowed only if they parse to plain strings; simpler to reject `r`/`b` prefixes) |
+| Literals | signed int, `true`/`false`, double-quoted or single-quoted strings, `null` only as an operand of `==`/`!=` against a nullable field (useful on nullable text, enum and boolean only: a formula that reads an unknown integer is not evaluated, D-Z) | double, `u` uint, bytes, raw/triple-quoted strings (allowed only if they parse to plain strings; simpler to reject `r`/`b` prefixes) |
 | Identifiers | declared non-list fields (scalars), list fields (only as a macro target, `size()` argument or `in` right-hand side), a macro iteration variable | undeclared names, type names (`int`, `bool`, …), CEL reserved words used as field IDs |
 | Selection | `<iter>.<declared item property>`, `has(<iter>.<declared item property>)` | any other select, list indexing `_[_]`, optional syntax `.?`/`[?]` |
 | Operators | `! && \|\| == != < <= > >= + - * / %`, unary `-`, ternary `?:`, `in` with a list-literal or list-field right-hand side | — |

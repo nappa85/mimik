@@ -21,7 +21,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Profile identity; any change to admitted semantics requires a new profile.
+/// Profile identity. From the first release on, any change to admitted semantics requires a
+/// new profile; until then profile 1 may still change (user decision D-Y).
 pub const PROFILE: &str = "cel-mimik-1";
 pub const MAX_SOURCE_BYTES: usize = 1024;
 /// Guard passed to the `cel` parser's own recursion counter.
