@@ -425,7 +425,9 @@ editable; a per-property `editable: false` flag and an item catalogue are a late
   buffered at once; with each one's decoded pairs (up to about 5 MiB more, 65,536 pairs at
   most) and a busy page of at most 5 MiB plus its chrome, the worst case is a few times that,
   still bounded, and a slow edit upload never holds the permit. Unit saves (`meta/…`,
-  `fields/…`) take at most 256 KiB, buffered the same way.
+  `fields/…`, and since slice 1.5b `cells/…`) take at most 256 KiB, a new-row form
+  (`lists/{f}/rows`) at most 5 MiB like the edit, and a row action (`lists/{f}/rows/{r}/…`)
+  at most 8 KiB, buffered the same way.
 - **Lost re-render.** If edit rights are lost between a rejected save and its re-render, the
   answer is a plain 403 and the draft is not re-rendered; nothing is saved.
 - **Page-size bound.** It covers the editor chrome and controls, not the formula sections of

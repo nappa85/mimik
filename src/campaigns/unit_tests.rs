@@ -734,8 +734,9 @@ async fn a_unit_save_waits_briefly_for_the_permit() {
     holder.await.unwrap();
 }
 
-/// Each list keeps its draft operations in its own list form (until slice 1.5b): Save list
-/// posts that list's rows only, so scalar fields keep their saved values and scribbles.
+/// A slice-1.5a list form (posted by a page loaded before slice 1.5b) still saves its list
+/// only: Save list posts that list's rows, so scalar fields keep their saved values and
+/// scribbles; its draft operations re-render in the full form, which can save them.
 #[tokio::test]
 async fn a_list_form_saves_its_list_only() {
     let _auth_lock = crate::auth::test_resource_lock().await;
@@ -804,8 +805,8 @@ async fn a_list_form_saves_its_list_only() {
         "{drafted}"
     );
     assert_eq!(
-        shown(&drafted, "v0"),
-        "lots",
+        super::notes_tests::value(&drafted, "value-hp").as_deref(),
+        Some("lots"),
         "the saved scribble, not a draft"
     );
     assert!(drafted.contains("id=\"row-4-1-0\""));
@@ -842,50 +843,36 @@ async fn a_list_form_saves_its_list_only() {
     assert_eq!(sheet(&setup).await.0, 3);
 }
 
-/// What the list form owning control `id` submits with its first button (Save list).
+/// The slice-1.5a list form of the list owning control `row-<f>-…`, as a page loaded before
+/// slice 1.5b posts it with its first button (Save list): `csrf`, `revision`, `list`, `op`
+/// and that list's rows. Slice 1.5b pages have a form per cell instead; the route still
+/// accepts this form from such pages.
 fn unit_form_list(html: &str, id: &str) -> (String, Pairs) {
-    let page = scraper::Html::parse_document(html);
-    let control = page
-        .select(&scraper::Selector::parse(&format!("[id=\"{id}\"]")).unwrap())
-        .next()
-        .unwrap();
-    let form = control
-        .ancestors()
-        .filter_map(scraper::ElementRef::wrap)
-        .find(|element| element.value().name() == "form")
-        .unwrap();
-    let controls = scraper::Selector::parse("input, select, button").unwrap();
-    let option = scraper::Selector::parse("option").unwrap();
-    let mut pairs = Pairs::new();
-    let mut clicked = false;
-    for element in form.select(&controls) {
-        let value = element.value();
-        let Some(name) = value.attr("name") else {
-            continue;
-        };
-        if value.attr("form").is_some() {
-            continue;
-        }
-        match value.name() {
-            "button" => {
-                if !clicked {
-                    clicked = true;
-                    pairs.push((name.into(), value.attr("value").unwrap_or_default().into()));
-                }
-            }
-            "select" => {
-                let options: Vec<_> = element.select(&option).collect();
-                let chosen = options
-                    .iter()
-                    .find(|option| option.value().attr("selected").is_some())
-                    .or(options.first())
-                    .unwrap();
-                pairs.push((name.into(), chosen.value().attr("value").unwrap().into()));
-            }
-            _ => pairs.push((name.into(), value.attr("value").unwrap_or_default().into())),
-        }
-    }
-    (form.value().attr("action").unwrap().to_owned(), pairs)
+    let f = id
+        .strip_prefix("row-")
+        .and_then(|rest| rest.split('-').next())
+        .expect("a row control");
+    let legacy = super::formula_tests::legacy_form(html);
+    let get = |key: &str| {
+        legacy
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, value)| value.clone())
+            .unwrap()
+    };
+    let mut pairs = vec![
+        pair("csrf", &get("csrf")),
+        pair("revision", &get("revision")),
+        pair("list", f),
+        pair("op", "save"),
+    ];
+    let prefixes = [format!("id-{f}-"), format!("row-{f}-"), format!("set-{f}-")];
+    pairs.extend(legacy.into_iter().filter(|(key, _)| {
+        prefixes
+            .iter()
+            .any(|prefix| key.starts_with(prefix.as_str()))
+    }));
+    ("/private-sheets/1".into(), pairs)
 }
 
 /// The unit page stays without script: unit forms post and redirect (PRG), and a scribble,
@@ -1006,17 +993,21 @@ async fn a_list_form_cannot_reach_another_list() {
         setup.campaign, setup.version
     );
     assert_eq!(setup.post(&path, create).await.0, StatusCode::SEE_OTHER);
-    let html = page(&setup).await;
+    // The empty lists' slice-1.5a list forms, as a page loaded before slice 1.5b posts them.
+    let list_form = |f: &str, op: &str| {
+        vec![
+            pair("csrf", &"a".repeat(64)),
+            pair("revision", "1"),
+            pair("list", f),
+            pair("op", op),
+        ]
+    };
     let (status, added) = setup
-        .post(
-            "/private-sheets/1",
-            super::formula_tests::submitted_by(&html, Some(("op", "add-2"))),
-        )
+        .post("/private-sheets/1", list_form("2", "add-2"))
         .await;
     assert_eq!(status, StatusCode::OK, "Add on its own list");
     assert!(added.contains("id=\"row-2-0-0\""));
-    let equipment = super::formula_tests::submitted_by(&html, Some(("op", "add-1")));
-    assert!(equipment.contains(&pair("list", "1")));
+    let equipment = list_form("1", "add-1");
     let mut other_op: Pairs = equipment
         .iter()
         .filter(|(key, _)| key != "op")
@@ -1222,7 +1213,8 @@ async fn a_list_form_save_waits_briefly_for_the_permit() {
 }
 
 /// Sonnet m2: every Save button has a real accessible name, its own text and its unit's
-/// label ("Save Current HP"), through `aria-labelledby`; so do Save list and the metadata.
+/// label ("Save Current HP"), through `aria-labelledby`; so do the metadata and the row
+/// cells (slice 1.5b: "Save Quantity Equipment Row 1").
 #[tokio::test]
 async fn save_buttons_are_named_by_their_unit() {
     let _auth_lock = crate::auth::test_resource_lock().await;
@@ -1235,7 +1227,10 @@ async fn save_buttons_are_named_by_their_unit() {
         ("save-3", "save-3 label-3"),
         ("save-meta-name", "save-meta-name meta-name-label"),
         ("save-meta-notes", "save-meta-notes meta-notes-label"),
-        ("save-list-4", "save-list-4 list-legend-4"),
+        (
+            "save-4-0-1",
+            "save-4-0-1 label-4-0-1 list-legend-4 legend-4-0",
+        ),
     ] {
         let page = scraper::Html::parse_document(&html);
         let element = page

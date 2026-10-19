@@ -499,8 +499,9 @@ async fn populated_schema18_database_upgrades_to_19_atomically() {
             .unwrap(),
         mimik::SCHEMA_VERSION
     );
-    // Schema 19 added the catalogues; schema 20 (change notes) applies on the same upgrade.
-    assert_eq!(mimik::SCHEMA_VERSION, 20);
+    // Schema 19 added the catalogues; schemas 20 (change notes) and 21 (row notes) apply on
+    // the same upgrade.
+    assert_eq!(mimik::SCHEMA_VERSION, 21);
     assert_eq!(counts(&db), before);
     let saved = reopened
         .save_catalogue_draft(serde_json::to_vec(&fixture.catalogue()).unwrap(), 0)

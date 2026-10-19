@@ -127,15 +127,19 @@ advisory derived values and checks to runtime definition sheets. Scope by sheet 
   failed-save, permit and unavailable-input cases are unit/connected-Router evidence.
 - **Runtime sheets with list fields (M4):** publishable within the render-unit budget
   (32,768 units; `list-form-exceeds-limit` otherwise). Rows are server-rendered fieldsets
-  with host IDs `r<revision>-<k>`; Add, Remove, Move up and Move down re-render the
-  unsaved draft and Save persists it; history revisions show a read-only change summary
-  against the previous revision. Create and edit POSTs accept 5 MiB (after a pre-body
+  with host IDs `r<revision>-<k>`; on the create page (and the legacy full form) Add,
+  Remove, Move up and Move down re-render the unsaved draft and Save persists it. On a saved
+  sheet (assisted sheet slice 1.5b) each row cell saves on its own on Enter, a new-row form
+  adds one row, and Remove, Move up and Move down write at once; Remove is followed by "Row
+  removed · Undo". History revisions show a read-only change summary against the previous
+  revision. Create and edit POSTs accept 5 MiB (after a pre-body
   principal check); drafts over 1 MiB decoded are not echoed. Process/browser evidence:
   `smoke_release.py --auth` publishes the synthetic list definition and checks Add, the
   host ID, a derived list sum and the change summary; the unpacked Chromium gate (1280 px
   and 390 px) checks Add on an empty create page, Enter saving through the top Save, host
-  IDs, Move up and down by keyboard with focus after each op, disabled edge moves, an op
-  keeping an invalid value, Remove, a violation, read-only history with its change
+  IDs, Move up and down by keyboard with focus after each op, disabled edge moves, Remove,
+  then on the saved sheet Enter in a row's Quantity saving that cell alone, the new-row
+  form, a keyboard Move, Remove with Undo, a violation, read-only history with its change
   summary, no script, and no overflow with a 32-property row and a 3,000-character note.
   Budget, echo, escaping, precedence, writer and history cases are unit/connected-Router
   evidence. Not certified: item catalogues, per-property `editable: false`, value-level

@@ -323,9 +323,12 @@ private_sheet_notes(sheet_id, revision, address, op, raw, before, after, bundle,
 - There is no separate "Keep" button (Sonnet m7).
 
 **Typed addresses (Sol rev-2 M1).**
-- Forms: `meta:name`, `meta:notes`, `field:<id>`, `cell:<list>/<host-id>/<property>`.
+- Forms: `meta:name`, `meta:notes`, `field:<id>`, `cell:<list>/<host-id>/<property>`, and
+  `row:<list>/<host-id>` for a whole row (its removal note, slice 1.5b; migration 021).
 - In routes: `/private-sheets/{id}/meta/{name|notes}`, `/fields/{field_id}` and
-  `/cells/{list}/{host_id}/{property}`.
+  `/cells/{f}/{r}/{p}`. List routes name the list field, the row and the property by
+  index; the row index is read at the form's `base` and mapped to its host ID there (slice
+  1.5b: three 64-character IDs per cell form did not fit the page bound, D7).
 - Notes, conflicts, jobs, Undo and switch all use them, so a definition field called `name` or
   `notes` never collides with the metadata.
 - The data part reuses `history_diff::address` (`history_diff.rs:16-22`) for row cells
@@ -342,10 +345,10 @@ private_sheet_notes(sheet_id, revision, address, op, raw, before, after, bundle,
 |---|---|---|
 | Name, Notes | `meta/…` | `csrf`, `base`, `value` |
 | Scalar field | `fields/{id}` | `csrf`, `base`, `value`, plus `null` if nullable |
-| Saved-row cell | `cells/{list}/{host}/{prop}` | `csrf`, `base`, `value`, plus `set` if optional |
-| New row (Add +) | `lists/{list}/rows` | `csrf`, `base`, and `row-{p}` and `set-{p}` for that one row |
-| Quick-add line | `lists/{list}/quick` | `csrf`, `base`, `text` |
-| Remove, Move up, Move down | `lists/{list}/rows/{host}/{remove\|up\|down}` | `csrf`, `base` |
+| Saved-row cell | `cells/{f}/{r}/{p}` | `csrf`, `base`, `value`, plus `set` if optional |
+| New row (Add +) | `lists/{f}/rows` | `csrf`, `base`, and `row-{p}` and `set-{p}` for that one row |
+| Quick-add line | `lists/{f}/quick` | `csrf`, `base`, `text` |
+| Remove, Move up, Move down | `lists/{f}/rows/{r}/{remove\|up\|down}` (one page-level form shared through `form`/`formaction`) | `csrf`, `base` |
 
 - **One form per unit, each with a single visible Save submit button**, so it is the default
   submitter (slice 1.5a, P2: a unit's Save follows its control; a list form's Save list,
@@ -603,7 +606,10 @@ Picking a suggestion stores the name, and its key when the picked entry is one o
 
   The re-added row is a new row for later notes, so its cells have no Undo until they are edited
   again.
-- `POST /private-sheets/{id}/undo` with `csrf` and `note` (revision and address). In one
+  A page offers this Undo for the list's latest row note only (one per list), while its row
+  is still away; the route accepts that note only.
+- `POST /private-sheets/{id}/undo` with `csrf` and `note` (revision and address; a row cell
+  may be named `<revision>:<f>.<r>.<p>`, its row index read at `base`, slice 1.5b). In one
   transaction:
   1. Recheck rights.
   2. Require the note to still be the current note of the address and the current value to

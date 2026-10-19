@@ -78,3 +78,6 @@ article.panel { margin-bottom: 1rem; }
 .offer-dismiss:checked + .offer-body { display: none; }
 .offer-dismiss:checked:focus-visible { position: static; width: 24px; height: 24px; opacity: 1; display: inline-block; }
 .sheet-units form > button { margin: .4rem 0 .6rem; padding: .4rem 1rem; min-width: 24px; min-height: 24px; }
+.list-row > form { min-width: 0; margin: 0; }
+.list-field > .entry-undo { margin: .4rem 0; overflow-wrap: anywhere; }
+.list-field > .entry-undo button, .new-row button { margin: 0 0 0 .5rem; padding: .3rem .8rem; min-width: 24px; min-height: 24px; }

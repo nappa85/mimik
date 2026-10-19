@@ -24,6 +24,8 @@ mod administration_tests;
 mod assist_tests;
 #[path = "catalogue_tests.rs"]
 mod catalogue_tests;
+#[path = "cell_tests.rs"]
+mod cell_tests;
 #[path = "entry_save_tests.rs"]
 mod entry_save_tests;
 #[path = "formula_tests.rs"]
@@ -711,10 +713,13 @@ async fn native_sheets_refuse_unit_routes() {
         "the full form stays"
     );
     assert!(!html.contains("/meta/name") && !html.contains("/fields/"));
+    assert!(!html.contains("/cells/") && !html.contains("/lists/"));
     for path in [
         "/private-sheets/1/meta/name",
         "/private-sheets/1/meta/notes",
         "/private-sheets/1/fields/hp",
+        // Slice 1.5b: a native sheet has no runtime lists either.
+        "/private-sheets/1/cells/0/0/0",
     ] {
         let unit = vec![
             ("csrf".into(), "a".repeat(64)),

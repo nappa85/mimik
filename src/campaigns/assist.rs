@@ -5,6 +5,9 @@
 //! cell still holds the value it wrote; Undo only for the current (last) change of the cell.
 //! The writer rechecks that binding inside the save's `IMMEDIATE` transaction
 //! ([`super::notes::Notes::bound`]). Arithmetic is checked `i64`.
+//!
+//! Slice 1.5b adds the whole-row address `row:<list>/<host>`: removing a row writes its note
+//! there, and Undo re-inserts the row from the revision before the removal (D-V, §3f).
 use super::notes::{Note, NoteValue, Op, Stored};
 use crate::{
     AppError,
@@ -26,6 +29,11 @@ enum Cell<'a> {
         index: usize,
         property: &'a ItemProperty,
     },
+    /// A whole row by its host ID, present or not (slice 1.5b).
+    Line {
+        list: &'a Field,
+        host: String,
+    },
 }
 
 /// The longest typed address (the note table's bound).
@@ -46,11 +54,15 @@ enum Target<'a, 's> {
         host: &'s str,
         property: &'a ItemProperty,
     },
+    Line {
+        list: &'a Field,
+        host: &'s str,
+    },
 }
 
-/// Parses a `field:<id>` or `cell:<list>/<host>/<property>` address against the pin: a
-/// non-derived integer, enum or boolean field, or such a property of a list, with a
-/// non-empty host ID and the exact canonical spelling.
+/// Parses a `field:<id>`, `cell:<list>/<host>/<property>` or `row:<list>/<host>` address
+/// against the pin: a non-derived integer, enum or boolean field, such a property of a
+/// list, or a row of a list, with a non-empty host ID and the exact canonical spelling.
 fn target<'a, 's>(definition: &'a Definition, address: &'s str) -> Option<Target<'a, 's>> {
     let editable = |id: &str| {
         definition
@@ -62,6 +74,13 @@ fn target<'a, 's>(definition: &'a Definition, address: &'s str) -> Option<Target
         return editable(id)
             .filter(|field| in_scope(field.control))
             .map(Target::Field);
+    }
+    if let Some(path) = address.strip_prefix("row:") {
+        let (list_id, host) = path.split_once('/')?;
+        let list = editable(list_id).filter(|field| field.control == Control::List)?;
+        return (crate::registry::valid_id(host)
+            && super::notes::row_address(list_id, host) == address)
+            .then_some(Target::Line { list, host });
     }
     let path = address.strip_prefix("cell:")?;
     let mut parts = path.splitn(3, '/');
@@ -111,7 +130,38 @@ pub(crate) fn locate<'a>(
                 .position(|item| item["id"].as_str() == Some(host))?;
             Some(row(list, index, property))
         }
+        Target::Line { list, host } => Some(Located {
+            label: format!("the row removed from {}", list.label),
+            cell: Cell::Line {
+                list,
+                host: host.to_owned(),
+            },
+        }),
     }
+}
+
+impl Located<'_> {
+    /// The list and host ID of a whole-row address (`row:`), else `None`.
+    pub(crate) fn line(&self) -> Option<(&Field, &str)> {
+        match &self.cell {
+            Cell::Line { list, host } => Some((list, host)),
+            _ => None,
+        }
+    }
+}
+
+/// List field `f` (not derived) and its in-scope property `p`: the row cell an indexed note
+/// key or route names, before any row is looked up.
+pub(crate) fn row_property(
+    definition: &Definition,
+    (f, p): (usize, usize),
+) -> Option<(&Field, &ItemProperty)> {
+    let list = definition
+        .fields
+        .get(f)
+        .filter(|field| field.control == Control::List && field.formula.is_none())?;
+    let property = super::values::properties(list).get(p)?;
+    Some((list, property))
 }
 
 /// The location of property `property` in row `index` of list `list`, when the caller
@@ -140,6 +190,12 @@ pub(crate) fn value_at(located: &Located<'_>, data: &Value) -> Option<NoteValue>
             None => None,
             Some(value) => NoteValue::of(property.control, value),
         },
+        Cell::Line { list, ref host } => Some(NoteValue::Row(
+            data[&list.id]
+                .as_array()?
+                .iter()
+                .any(|item| item["id"].as_str() == Some(host)),
+        )),
     }
 }
 
@@ -180,6 +236,8 @@ pub(crate) fn set(
                 None => return Err(refused()),
             }
         }
+        // A row comes back through [`restore`], never as a cell value.
+        Cell::Line { .. } => return Err(refused()),
     }
     Ok(())
 }
@@ -189,17 +247,54 @@ pub(crate) fn key(stored: &Stored) -> String {
     format!("{}:{}", stored.revision, stored.note.address)
 }
 
-/// Parses a note key: a canonical positive revision, then a `field:` or `cell:` address of
-/// at most 256 bytes with a non-empty rest.
-pub(crate) fn parse_key(raw: &str) -> Option<(i64, &str)> {
+/// What a note key names after its revision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Named<'a> {
+    /// A typed address (`field:`, `cell:` or `row:`).
+    Address(&'a str),
+    /// A row cell by indices `<f>.<r>.<p>` (slice 1.5b): list field `f`, row `r` of the
+    /// revision the page was read at (its `base`), property `p`. A sheet page names row cells
+    /// this way, so a switch or Undo button does not repeat three 64-character IDs (plan D7).
+    Indexed { f: usize, r: usize, p: usize },
+}
+
+/// Parses a note key: a canonical positive revision, then a `field:`, `cell:` or `row:`
+/// address of at most 256 bytes with a non-empty rest, or a row cell's canonical indices.
+pub(crate) fn parse_key(raw: &str) -> Option<(i64, Named<'_>)> {
     let (revision, address) = raw.split_once(':')?;
     let revision = super::values::integer(revision).ok().filter(|r| *r > 0)?;
-    let typed = ["field:", "cell:"].iter().any(|prefix| {
+    let typed = ["field:", "cell:", "row:"].iter().any(|prefix| {
         address
             .strip_prefix(prefix)
             .is_some_and(|rest| !rest.is_empty())
     });
-    (typed && address.len() <= MAX_ADDRESS_BYTES).then_some((revision, address))
+    if typed {
+        return (address.len() <= MAX_ADDRESS_BYTES).then_some((revision, Named::Address(address)));
+    }
+    let mut parts = address.split('.').map(super::values::index);
+    let (f, r, p) = (parts.next()??, parts.next()??, parts.next()??);
+    parts
+        .next()
+        .is_none()
+        .then_some((revision, Named::Indexed { f, r, p }))
+}
+
+/// The page key of a row cell: `<revision>:<f>.<r>.<p>` ([`Named::Indexed`]).
+pub(crate) fn indexed_key(revision: i64, (f, r, p): (usize, usize, usize)) -> String {
+    format!("{revision}:{f}.{r}.{p}")
+}
+
+/// The typed address of row cell `(f, r, p)` in `data` (the revision a page was read at):
+/// list field `f` (not derived), its row `r`, its in-scope property `p`; `None` otherwise.
+pub(crate) fn indexed_address(
+    definition: &Definition,
+    data: &Value,
+    (f, r, p): (usize, usize, usize),
+) -> Option<String> {
+    let (list, property) =
+        row_property(definition, (f, p)).filter(|(_, property)| in_scope(property.control))?;
+    let host = data[&list.id].as_array()?.get(r)?["id"].as_str()?;
+    Some(super::notes::cell_address(&list.id, host, &property.id))
 }
 
 /// The value the D-Q switch writes, b + n, for a current `sign_literal` note over the known
@@ -223,7 +318,7 @@ pub(crate) fn switch_value(stored: &Stored, current: Option<&NoteValue>) -> Opti
 
 /// Whether the current note of a cell can be undone (§3f, D-N, D-X1): a change with a
 /// recorded value before that differs from its value after, with the cell still holding
-/// that value after. Scribbles, new cells and row notes (slice 1.5b) are not undoable.
+/// that value after. Scribbles, new cells and row notes are not ([`removal_undoable`]).
 pub(crate) fn undoable(stored: &Stored, current: Option<&NoteValue>) -> bool {
     let note = &stored.note;
     matches!(
@@ -241,6 +336,57 @@ pub(crate) fn undoable(stored: &Stored, current: Option<&NoteValue>) -> bool {
         .is_some_and(|before| before != &note.after && !matches!(before, NoteValue::Row(_)))
         && !matches!(note.after, NoteValue::Row(_))
         && current == Some(&note.after)
+}
+
+/// Whether a row note offers Undo (D-V, §3f): a removal (`row present` → `row absent`)
+/// whose row is still absent (`current`). The Undo that restored it is not undoable: the
+/// row came back as a new row, which Remove removes.
+pub(crate) fn removal_undoable(stored: &Stored, current: Option<&NoteValue>) -> bool {
+    let note = &stored.note;
+    note.op == Op::Literal
+        && note.before == Some(NoteValue::Row(true))
+        && note.after == NoteValue::Row(false)
+        && current == Some(&NoteValue::Row(false))
+}
+
+/// The note a row removal writes on the row's address (D-V).
+pub(crate) fn removal_note(list: &str, host: &str) -> Note {
+    Note {
+        address: super::notes::row_address(list, host),
+        op: Op::Literal,
+        raw: String::new(),
+        before: Some(NoteValue::Row(true)),
+        after: NoteValue::Row(false),
+        target: None,
+    }
+}
+
+/// Undo of a removal (§3f): the row `host` as it was in `before` (the revision before the
+/// removal) goes back into `data` at its old index, clamped to the current length, with the
+/// new host ID `r<next>-1` (removed IDs never return, `snapshots.rs`). A full list is
+/// refused with a message; a row missing from `before` is `None` (nothing to restore).
+pub(crate) fn restore(
+    list: &Field,
+    host: &str,
+    before: &Value,
+    data: &mut Value,
+    next: i64,
+) -> Option<Result<(), AppError>> {
+    let (index, item) = before[&list.id]
+        .as_array()?
+        .iter()
+        .enumerate()
+        .find(|(_, item)| item["id"].as_str() == Some(host))?;
+    let rows = data[&list.id].as_array_mut()?;
+    if rows.len() >= crate::definitions::formula::MAX_LIST_ITEMS {
+        return Some(Err(AppError::Invalid(
+            "This list already holds 256 rows, the most a list can hold; remove a row first, then Undo.",
+        )));
+    }
+    let mut item = item.clone();
+    item["id"] = Value::String(format!("r{next}-1"));
+    rows.insert(index.min(rows.len()), item);
+    Some(Ok(()))
 }
 
 /// The note a switch writes: what was typed, from the literal to b + n.

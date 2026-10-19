@@ -2,7 +2,7 @@
 //! §5 slice 1.3): sign-led input is applied literally with a "Did you mean" switch, and the
 //! last change of each number, choice or yes/no cell can be undone. Both are bound to the
 //! displayed note and rechecked inside the save's transaction.
-use super::formula_tests::{Setup, body, setup, submitted};
+use super::formula_tests::{Setup, body, setup};
 use super::notes_tests::{
     Row, assist, choices, created, form, history_len, inner, note, notes, notes_at, page,
     player_sheet, row, saved, value,
@@ -39,10 +39,11 @@ pub(super) fn action(html: &str, id: &str) -> Option<(String, Pairs)> {
     Some((form.value().attr("action")?.to_owned(), pairs))
 }
 
-/// The ids of every switch and Undo button on the page, in page order.
+/// The ids of every switch and Undo button on the page, in page order (not the row actions
+/// of slice 1.5b, which share their own page-level form).
 fn offered(html: &str) -> Vec<String> {
     let page = scraper::Html::parse_document(html);
-    let buttons = scraper::Selector::parse("button[form]").unwrap();
+    let buttons = scraper::Selector::parse("button[form]:not([form=\"row-actions\"])").unwrap();
     page.select(&buttons)
         .filter_map(|button| button.value().attr("id").map(str::to_owned))
         .collect()
@@ -606,8 +607,10 @@ async fn switch_and_undo_work_on_list_cells() {
     );
     assert_eq!(text(&html, "#label-4-0-1").as_deref(), Some("Quantity"));
     assert_eq!(text(&html, "#list-legend-4").as_deref(), Some("Equipment"));
+    // The row is named by its number (slice 1.5b); the legend goes on with its ID.
+    assert_eq!(text(&html, "#legend-4-0").as_deref(), Some("Row 1"));
     assert!(
-        text(&html, "#legend-4-0")
+        text(&html, "#row-4-0 > legend")
             .unwrap()
             .starts_with("Row 1 of 1 · ID r1-1"),
         "{html}"
@@ -908,11 +911,16 @@ async fn switch_and_undo_forms_stay_out_of_the_sheet_form() {
         assert!(document.select(&nested).next().is_none(), "not nested");
     }
     assert_eq!(text(&html, "#label-0").as_deref(), Some("Current HP"));
-    // HP's form re-posted unchanged is a no-op save; so is the list form.
+    // HP's form re-posted unchanged is a no-op save; so is the page's legacy full form.
     let (status, again) = setup.post(&path, hp).await;
     assert_eq!(status, StatusCode::OK);
     assert!(again.contains("No change"));
-    let (status, again) = setup.post("/private-sheets/1", submitted(&html)).await;
+    let (status, again) = setup
+        .post(
+            "/private-sheets/1",
+            super::formula_tests::legacy_form(&html),
+        )
+        .await;
     assert_eq!(status, StatusCode::OK);
     assert!(again.contains("No change"));
 }
@@ -1051,14 +1059,8 @@ async fn row_actions_name_their_list() {
     let html = page(&setup).await;
     let equipment = labelled_name(&html, "switch-4-0-1");
     let spares = labelled_name(&html, "switch-6-0-1");
-    assert!(
-        equipment.starts_with("Yes Quantity Equipment Row 1 of 1"),
-        "{equipment}"
-    );
-    assert!(
-        spares.starts_with("Yes Quantity Spares Row 1 of 1"),
-        "{spares}"
-    );
+    assert_eq!(equipment, "Yes Quantity Equipment Row 1");
+    assert_eq!(spares, "Yes Quantity Spares Row 1");
     assert_ne!(equipment, spares);
 }
 

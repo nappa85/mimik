@@ -1166,15 +1166,16 @@ def smoke_list_sheet(directory, cookie, campaign, html):
         }
     )
     sheet = workspace_submit(cookie, action, form)
-    # Saved, the list saves from its own list form (slice 1.5a), the first form posting to
-    # the sheet itself.
-    _, saved, page = workspace_form(sheet, cookie, sheet)
+    # Saved, each row cell saves from its own form (assisted sheet slice 1.5b): the Quantity
+    # of row 1 posts csrf, base and value to cells/1/0/2.
+    cell = sheet + "/cells/1/0/2"
+    _, saved, page = workspace_form(sheet, cookie, cell)
     require(
-        saved.get("id-1-0") == "r1-1" and saved.get("list") == "1" and "name" not in saved,
-        "List row did not get the host ID r1-1 in its list form",
+        sorted(saved) == ["base", "csrf", "value"] and saved["value"] == "2" and "ID r1-1" in page,
+        "List row did not get the host ID r1-1, or its Quantity is not in its own cell form",
     )
     require('<dd class="evidence-text">6</dd>' in page, "List-derived load missing")
-    workspace_submit(cookie, sheet, saved, **{"row-1-0-2": "5"})
+    workspace_submit(cookie, cell, saved, value="5")
     history = auth_request(sheet + "/history/2", cookie=cookie)
     require(history[0] == 200, "List history unavailable")
     require(

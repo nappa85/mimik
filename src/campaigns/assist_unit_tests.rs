@@ -1,6 +1,6 @@
 //! Slice 1.3 helpers: note keys, the D-Q switch value (checked), Undo eligibility (D-N,
 //! D-X1), and reading or writing one typed address of a stored snapshot.
-use super::{key, locate, parse_key, set, switch_value, undoable, value_at};
+use super::{Named, indexed_key, key, locate, parse_key, set, switch_value, undoable, value_at};
 use crate::campaigns::notes::{Note, NoteValue, Op, Stored};
 use crate::definitions::Definition;
 use serde_json::{Value, json};
@@ -32,11 +32,24 @@ fn sign(raw: &str, before: i64, after: i64) -> Stored {
 fn keys_round_trip_and_refuse_malformed_text() {
     let note = sign("-15", 84, -15);
     assert_eq!(key(&note), "4:field:hp");
-    assert_eq!(parse_key("4:field:hp"), Some((4, "field:hp")));
+    assert_eq!(
+        parse_key("4:field:hp"),
+        Some((4, Named::Address("field:hp")))
+    );
     assert_eq!(
         parse_key("12:cell:equipment/r1-1/quantity"),
-        Some((12, "cell:equipment/r1-1/quantity"))
+        Some((12, Named::Address("cell:equipment/r1-1/quantity")))
     );
+    // Slice 1.5b: a removed row's address and a row cell's indices (read at the page's base).
+    assert_eq!(
+        parse_key("7:row:equipment/r1-1"),
+        Some((7, Named::Address("row:equipment/r1-1")))
+    );
+    assert_eq!(
+        parse_key("7:4.12.1"),
+        Some((7, Named::Indexed { f: 4, r: 12, p: 1 }))
+    );
+    assert_eq!(indexed_key(7, (4, 12, 1)), "7:4.12.1");
     for raw in [
         "",
         "4",
@@ -50,6 +63,13 @@ fn keys_round_trip_and_refuse_malformed_text() {
         "4:hp",
         "4:field:",
         "9223372036854775808:field:hp",
+        "4:row:",
+        "4:4.1",
+        "4:4.1.2.3",
+        "4:04.1.2",
+        "4:4.1.+2",
+        "4:4.1.1000",
+        "4:4..2",
     ] {
         assert_eq!(parse_key(raw), None, "{raw:?}");
     }
