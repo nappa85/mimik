@@ -57,6 +57,20 @@ async fn runtime(mut request: Request, next: Next) -> Response {
 #[derive(Clone)]
 pub(crate) struct PrivateTrustedEditor;
 
+/// Marks a catalogue route's own explanatory page (plan §19): 400 for a malformed address,
+/// 403 for the uniform refusal, 404 for an entry or type missing from a catalogue the reader
+/// may browse. The auth layer keeps such a body instead of its generic one.
+#[derive(Clone)]
+pub(crate) struct CatalogueNotice;
+
+/// Whether the auth layer keeps this response's body as a catalogue notice.
+pub(crate) fn catalogue_notice(response: &Response) -> bool {
+    matches!(
+        response.status(),
+        StatusCode::BAD_REQUEST | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
+    ) && response.extensions().get::<CatalogueNotice>().is_some()
+}
+
 /// Whether each `rejected_editor` call received the rejected save's own permit (tests only).
 #[cfg(test)]
 pub(super) static REJECTED_EDITOR_KEPT_PERMIT: Mutex<Vec<bool>> = Mutex::new(Vec::new());

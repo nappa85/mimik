@@ -138,7 +138,7 @@ async fn browse_orders_by_name_then_key_with_an_exclusive_cursor() {
             assert_eq!(after_spell, seek);
             assert!(matches!(
                 keys(db, "spells", &query(Some("potion"), None, None)),
-                Err(BrowseFailure::Other(AppError::NotFound))
+                Err(BrowseFailure::UnknownType)
             ));
             Ok(())
         })
