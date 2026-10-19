@@ -2705,14 +2705,12 @@ async fn worst_label_page_markup_is_within_the_unit_bound() {
 /// One stored note: address, op, raw, typed before and after (canonical JSON).
 type SeedNote = (String, &'static str, String, String, String);
 
-/// Creates sheet 1 with `data`, then writes `notes` 256 per revision (the table's limit) on
+/// Creates sheet 1 with `data` as a retained (pre-M4) sheet, so list rows may carry any
+/// valid 64-character ID, then writes `notes` 256 per revision (the table's limit) on
 /// data-unchanged revisions, and returns the served sheet page.
 async fn noted_page(definition: &Value, data: Value, notes: Vec<SeedNote>) -> String {
     let setup = list_setup(definition).await;
-    let mut snapshot = blank(&setup, 1).await;
-    snapshot.sheet_id = 1;
-    snapshot.data = data;
-    write(&setup, 1, snapshot, "create").await.unwrap();
+    legacy_create(&setup, 1, data).await;
     let version = setup.version;
     let auth = setup.auth[1].clone();
     setup
@@ -2828,9 +2826,11 @@ async fn wide_list_page(
     let mut notes = Vec::new();
     let items: Vec<Value> = (1..=256)
         .map(|k| {
-            let mut item = json!({"id": format!("r1-{k}")});
+            // The longest row ID a retained row may carry: 64 characters.
+            let host = format!("i{k:03}-{}", "x".repeat(59));
+            let mut item = json!({"id": host});
             for (p, choice) in &properties {
-                let address = format!("cell:{list}/r1-{k}/{p}");
+                let address = format!("cell:{list}/{host}/{p}");
                 if *choice {
                     item[p] = json!("b");
                     if enum_notes {
@@ -2899,13 +2899,9 @@ async fn worst_label_page_with_every_long_scribble_is_within_the_unit_bound() {
     within_unit_bound(&html, units, "every long scribble");
 }
 
-/// Review round 2 (Sol Major): scalar fields. 256 integer fields with 64-character IDs and
-/// labels of 100 `"`, each charged one unit, each showing the densest long sign-led sum, the
-/// offer and Undo.
-#[tokio::test]
-async fn worst_label_scalar_page_with_every_switch_and_undo_is_within_the_unit_bound() {
-    let _auth_lock = crate::auth::test_resource_lock().await;
-    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+/// 256 integer scalar fields with 64-character IDs and labels of 100 `"` (each charged one
+/// unit), every one holding `value` with the note (op, raw, before).
+async fn wide_scalar_page(value: i64, note: (&'static str, &str, i64)) -> (String, usize) {
     let label = "\"".repeat(100);
     let ids: Vec<String> = (0..256)
         .map(|f| format!("f{f:03}_{}", "x".repeat(59)))
@@ -2924,15 +2920,15 @@ async fn worst_label_scalar_page_with_every_switch_and_undo_is_within_the_unit_b
         "fields": fields,
         "groups": [{"id": "main", "label": "Main", "fields": ids, "column_hint": "main"}],
     });
-    let (raw, before, value) = densest_sign_led();
+    let (op, raw, before) = note;
     let mut data = serde_json::Map::new();
     let mut notes = Vec::new();
     for id in &ids {
         data.insert(id.clone(), value.into());
         notes.push((
             format!("field:{id}"),
-            "sign_literal",
-            raw.clone(),
+            op,
+            raw.to_owned(),
             int(before),
             int(value),
         ));
@@ -2940,9 +2936,37 @@ async fn worst_label_scalar_page_with_every_switch_and_undo_is_within_the_unit_b
     let html = noted_page(&definition, Value::Object(data), notes).await;
     let units = render_units(&definition, &[]);
     assert_eq!(units, 256);
+    (html, units)
+}
+
+/// Review round 2 (Sol Major): scalar fields, each showing the densest long sign-led sum,
+/// the offer and Undo.
+#[tokio::test]
+async fn worst_label_scalar_page_with_every_switch_and_undo_is_within_the_unit_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (raw, before, value) = densest_sign_led();
+    let (html, units) = wide_scalar_page(value, ("sign_literal", &raw, before)).await;
     assert_eq!(html.matches("form=\"assist-switch\"").count(), 256);
     assert_eq!(html.matches("form=\"assist-undo\"").count(), 256);
     within_unit_bound(&html, units, "256 wide scalars with switch and Undo");
+}
+
+/// Review round 3 (Sonnet): scalar fields, each with a 200-`"` scribble kept over an
+/// `i64::MIN` value; the scribble is echoed in full in the input.
+#[tokio::test]
+async fn worst_label_scalar_page_with_every_long_scribble_is_within_the_unit_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let raw = "\"".repeat(200);
+    let (html, units) = wide_scalar_page(i64::MIN, ("unresolved", &raw, i64::MIN)).await;
+    assert_eq!(html.matches("not understood").count(), 256);
+    assert_eq!(
+        html.matches(&"&#34;".repeat(200)).count(),
+        256,
+        "echoed in full"
+    );
+    within_unit_bound(&html, units, "256 wide scalars with a long scribble");
 }
 
 // ---- Step 8: the gate lift, the publication budget and end-to-end lists (plan D7) ----
