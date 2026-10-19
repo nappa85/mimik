@@ -19,7 +19,7 @@ pub(crate) const SHOWN_CHARS: usize = 64;
 /// Why an entry could not be read as a number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Unreadable {
-    /// Empty, or spaces only (an unknown value from slice 1.4 on).
+    /// Empty, or spaces only: an unknown value (D-M, slice 1.4).
     Blank,
     /// More than [`MAX_CHARS`] characters.
     TooLong,
@@ -60,9 +60,10 @@ pub(crate) struct Reading {
 }
 
 impl Unreadable {
-    /// Whether a known saved value is kept, with the input recorded as a scribble (plan
-    /// §3a, slice 1.2). Blank (an unknown value from slice 1.4), over-long and
-    /// control-character input is refused instead: it cannot be kept as a faithful scribble.
+    /// Whether the input is recorded as a scribble, keeping the saved value (plan §3a, slice
+    /// 1.2) or leaving a new cell unknown (slice 1.4). Blank input is unknown instead;
+    /// over-long and control-character input is refused: it cannot be kept as a faithful
+    /// scribble.
     pub(crate) fn keeps_value(self) -> bool {
         matches!(self, Self::Syntax | Self::TooManyScalars | Self::Range)
     }

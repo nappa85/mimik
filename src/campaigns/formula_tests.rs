@@ -481,8 +481,10 @@ async fn formula_text_is_escaped() {
     let setup = setup(&formula_definition()).await;
     setup.create().await;
     let (_, view) = setup.get("/private-sheets/1").await;
-    // A blank number is still refused (slice 1.2 keeps only readable-text scribbles).
-    let (status, rerender) = setup.post("/private-sheets/1", form(1, "", None)).await;
+    // A control character is still refused (blank is unknown since slice 1.4).
+    let (status, rerender) = setup
+        .post("/private-sheets/1", form(1, "\u{7}", None))
+        .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let (_, history) = setup.get("/private-sheets/1/history/1").await;
     let (status, _) = setup.post("/private-sheets/1", form(1, "11", None)).await;
@@ -686,9 +688,12 @@ async fn create_page_never_evaluates_and_create_saves() {
     let first_save = "Derived values are computed after the first save.";
     let (status, html) = setup.get(&setup.create_path()).await;
     assert_eq!(status, StatusCode::OK);
-    let (status, rejected) = setup.post(&setup.create_path(), form(0, "x", None)).await;
+    // A control character is still refused (since slice 1.4 "x" would create an unknown).
+    let (status, rejected) = setup
+        .post(&setup.create_path(), form(0, "x\u{7}", None))
+        .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(rejected.contains("value=\"x\""), "draft kept");
+    assert!(rejected.contains("value=\"x\u{7}\""), "draft kept");
     for (context, page) in [("create", &html), ("failed create", &rejected)] {
         assert!(
             section(page, "formula-results").contains(first_save),

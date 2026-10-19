@@ -88,22 +88,24 @@ fn optional_state_is_explicit() {
             state,
         );
     }
-    invalid(
-        values(&form(&[("", "N", "1", Some("x"), "present")]), &saved(), 1),
-        "present but not an integer",
-    );
+    // Present but not a number: unknown since slice 1.4.
+    let unknown = values(&form(&[("", "N", "1", Some("x"), "present")]), &saved(), 1).unwrap();
+    assert_eq!(unknown["equipment"][0]["armor"], Value::Null);
 }
 
 #[test]
 fn item_integers_exact_i64() {
     // Row integers are player entries (assisted sheet slice 1.1): zero padding, a plus sign,
-    // surrounding spaces and sums are read; anything else is still refused.
+    // surrounding spaces and sums are read. Since slice 1.4 anything else in a new row is
+    // unknown (`null`, with a scribble note); control characters are still refused.
     for raw in ["1.0", "", "9223372036854775808", "1 2", "84--15", "x"] {
-        invalid(
-            values(&form(&[("", "N", raw, None, "absent")]), &saved(), 1),
-            raw,
-        );
+        let read = values(&form(&[("", "N", raw, None, "absent")]), &saved(), 1).unwrap();
+        assert_eq!(read["equipment"][0]["quantity"], Value::Null, "{raw:?}");
     }
+    invalid(
+        values(&form(&[("", "N", "1\u{7}", None, "absent")]), &saved(), 1),
+        "control character",
+    );
     for (raw, want) in [("01", 1), ("+1", 1), (" 1", 1), ("2+1", 3), ("84 -15", 69)] {
         let read = values(&form(&[("", "N", raw, None, "absent")]), &saved(), 1).unwrap();
         assert_eq!(read["equipment"][0]["quantity"], want, "{raw:?}");

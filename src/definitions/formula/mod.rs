@@ -21,7 +21,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Profile identity; any change to admitted semantics requires a new profile.
+/// Profile identity. From the first release on, any change to admitted semantics requires a
+/// new profile; until then profile 1 may still change (user decision D-Y).
 pub const PROFILE: &str = "cel-mimik-1";
 pub const MAX_SOURCE_BYTES: usize = 1024;
 /// Guard passed to the `cel` parser's own recursion counter.
@@ -311,6 +312,17 @@ struct Formula {
     expr: cel::IdedExpr,
     /// Derived fields this formula reads.
     deps: BTreeSet<String>,
+    /// Declared scalar fields and `(list, property)` values it reads (slice 1.4).
+    reads: BTreeSet<String>,
+    item_reads: BTreeSet<(String, String)>,
+}
+
+impl Formula {
+    /// Whether the formula reads an unknown integer it cannot evaluate (slice 1.4).
+    fn reads_unknown(&self, unknowns: &convert::Unknowns) -> bool {
+        !self.reads.is_disjoint(&unknowns.fields)
+            || !self.item_reads.is_disjoint(&unknowns.properties)
+    }
 }
 
 /// Compiled, admitted formulas in topological order. Thread-safe for reuse across requests.
@@ -472,6 +484,7 @@ impl Compiled {
 
     fn evaluate_here(&self, values: &Json, deadline: Duration) -> Result<Evaluation, InputError> {
         let inputs = convert::inputs(&self.lookup, values)?;
+        let unknowns = convert::unknowns(&self.lookup, values);
         let started = Instant::now();
         let mut root = cel::Context::with_env(Arc::clone(&ENV));
         if functions::register(&mut root).is_err() {
@@ -489,6 +502,8 @@ impl Compiled {
                 Err(Code::DeadlineExceeded)
             } else if formula.deps.iter().any(|dep| failed.contains(dep)) {
                 Err(Code::DependencyFailed)
+            } else if formula.reads_unknown(&unknowns) {
+                Err(Code::NullValue)
             } else {
                 run(&formula.id, &formula.expr, &scope)
                     .and_then(|value| convert::result(formula.ty.as_ref(), &value))
@@ -509,10 +524,13 @@ impl Compiled {
                 Outcome::Error(Code::DeadlineExceeded)
             } else if formula.deps.iter().any(|dep| failed.contains(dep)) {
                 Outcome::Error(Code::DependencyFailed)
+            } else if formula.reads_unknown(&unknowns) {
+                Outcome::Error(Code::NullValue)
             } else {
                 match run(&formula.id, &formula.expr, &scope) {
                     Ok(cel::Value::Bool(true)) => Outcome::Pass,
                     Ok(cel::Value::Bool(false)) => Outcome::Violated,
+                    Ok(cel::Value::Null) => Outcome::Error(Code::NullValue),
                     Ok(_) => Outcome::Error(Code::TypeMismatch),
                     Err(code) => Outcome::Error(code),
                 }
@@ -547,6 +565,8 @@ fn formula_of(id: &str, ty: Option<ValueType>, compiled: profile::Checked) -> Fo
         ty,
         expr: compiled.expr,
         deps: compiled.deps,
+        reads: compiled.reads,
+        item_reads: compiled.item_reads,
     }
 }
 

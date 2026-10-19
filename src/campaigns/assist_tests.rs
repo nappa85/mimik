@@ -15,7 +15,7 @@ type Pairs = Vec<(String, String)>;
 
 /// The switch or Undo button with the DOM id `id`, and what it submits: the action of the
 /// form its `form` attribute names, that form's pairs, then the button's own pair.
-fn action(html: &str, id: &str) -> Option<(String, Pairs)> {
+pub(super) fn action(html: &str, id: &str) -> Option<(String, Pairs)> {
     let page = scraper::Html::parse_document(html);
     let buttons = scraper::Selector::parse(&format!("button[form][id=\"{id}\"]")).unwrap();
     let button = page.select(&buttons).next()?;
@@ -49,7 +49,7 @@ fn offered(html: &str) -> Vec<String> {
 }
 
 /// The text of the first element matching `selector`.
-fn text(html: &str, selector: &str) -> Option<String> {
+pub(super) fn text(html: &str, selector: &str) -> Option<String> {
     let page = scraper::Html::parse_document(html);
     page.select(&scraper::Selector::parse(selector).unwrap())
         .next()
@@ -57,7 +57,7 @@ fn text(html: &str, selector: &str) -> Option<String> {
 }
 
 /// Clicks the button with the id `id` and returns the answer.
-async fn click(setup: &Setup, html: &str, id: &str) -> (StatusCode, String) {
+pub(super) async fn click(setup: &Setup, html: &str, id: &str) -> (StatusCode, String) {
     let (path, pairs) = action(html, id).unwrap_or_else(|| panic!("no button {id:?} in {html}"));
     setup.post(&path, pairs).await
 }
@@ -77,7 +77,7 @@ async fn target(setup: &Setup, revision: i64, address: &'static str) -> Option<i
         .unwrap()
 }
 
-async fn edit(setup: &Setup, revision: i64, changes: &[(&str, &str)], rows: &[Row<'_>]) {
+pub(super) async fn edit(setup: &Setup, revision: i64, changes: &[(&str, &str)], rows: &[Row<'_>]) {
     let (status, html) = setup
         .post("/private-sheets/1", form(revision, changes, rows))
         .await;

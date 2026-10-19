@@ -5,9 +5,11 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 const FIXTURE: &str = include_str!("../../../schemas/formula-conformance-v1.json");
-/// Hash lock of the golden fixture. Changing it requires a reviewed profile decision: an
-/// outcome change under a `cel`/`antlr4rust` bump means `formula_profile` 2, not an edit here.
-const FIXTURE_SHA256: &str = "e2c264ed4d83c1800b5581cf75b06519661cd88caf9564b29b5e783c9c98aff5";
+/// Hash lock of the golden fixture. Changing it requires a reviewed profile decision. Until the
+/// first release profile 1 itself may still change (user decision D-Y; content revision 2,
+/// assisted sheet slice 1.4); from the first release on, an outcome change, including one under
+/// a `cel`/`antlr4rust` bump, means `formula_profile` 2, not an edit here.
+const FIXTURE_SHA256: &str = "5af7ce8f1610ca4a41a2a8ecd6b0f387b60c0989a7ef8287f116d5c925cb6b40";
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -1148,4 +1150,167 @@ fn largest_admitted_definition_ast_size_report() {
         std::mem::size_of::<cel::IdedExpr>(),
         compiled.cost()
     );
+}
+
+/// Constraint outcomes of `exprs` over `values`, in order.
+fn constraint_outcomes(exprs: &[&str], values: &Json) -> Vec<Outcome> {
+    let mut spec = basic();
+    spec.constraints = exprs
+        .iter()
+        .enumerate()
+        .map(|(index, expr)| ConstraintSpec {
+            id: format!("c{index}"),
+            expr: (*expr).into(),
+        })
+        .collect();
+    let compiled = Compiled::new(&spec).unwrap();
+    let evaluation = compiled.evaluate(values).unwrap();
+    evaluation
+        .constraints
+        .into_iter()
+        .map(|(_, outcome)| outcome)
+        .collect()
+}
+
+/// Basic values with `vitality` unknown and the coat's `weight` unknown (assisted sheet
+/// slice 1.4: `null` is the unknown value of every integer cell).
+fn unknown_values() -> Json {
+    let mut values = basic_values();
+    values["vitality"] = Json::Null;
+    values["equipment"][0]["weight"] = Json::Null;
+    values
+}
+
+/// Slice 1.4: `null` on a non-nullable integer field or an integer item property converts
+/// to CEL `Null` instead of refusing the whole evaluation; other types still refuse it.
+#[test]
+fn unknown_integers_are_converted_and_other_formulas_compute() {
+    let values = unknown_values();
+    assert_eq!(eval_one("zero + 1", &values), Ok(Scalar::Int(1)));
+    assert_eq!(eval_one("size(equipment)", &values), Ok(Scalar::Int(3)));
+    assert_eq!(
+        eval_one("sum(equipment.map(i, i.armor))", &{
+            let mut values = values.clone();
+            values["equipment"][2]["armor"] = json!(0);
+            values
+        }),
+        Ok(Scalar::Int(4))
+    );
+    assert_eq!(eval_one("vitality + 1", &values), Err(Code::NullValue));
+    assert_eq!(
+        eval_one("sum(equipment.map(i, i.weight))", &values),
+        Err(Code::NullValue)
+    );
+    for (key, value) in [
+        ("name", Json::Null),
+        ("flag", Json::Null),
+        ("kind", Json::Null),
+    ] {
+        let mut values = basic_values();
+        values[key] = value;
+        let compiled = Compiled::new(&derived("zero")).unwrap();
+        assert_eq!(
+            compiled.evaluate(&values).unwrap_err().code,
+            Code::InvalidInput,
+            "{key}"
+        );
+    }
+    let mut values = basic_values();
+    values["equipment"][0]["equipped"] = Json::Null;
+    let compiled = Compiled::new(&derived("zero")).unwrap();
+    assert_eq!(
+        compiled.evaluate(&values).unwrap_err().code,
+        Code::InvalidInput
+    );
+}
+
+/// Slice 1.4 (Sol rev-2 M5): a formula whose result is `null` reports `null_value`, the
+/// "a value it uses is unknown (null)" wording, never `type_mismatch`.
+#[test]
+fn a_null_result_is_null_value_not_type_mismatch() {
+    let values = unknown_values();
+    assert_eq!(eval_one("vitality", &values), Err(Code::NullValue));
+    assert_eq!(
+        eval_one(
+            "max_of(equipment.filter(i, i.id == \"coat-1\").map(i, i.weight), 0)",
+            &values
+        ),
+        Err(Code::NullValue)
+    );
+    // A nullable integer while null is unknown too (D-Z).
+    assert_eq!(eval_one("luck", &basic_values()), Err(Code::NullValue));
+    assert_eq!(
+        super::convert::result(Some(&ValueType::Int), &Value::Null),
+        Err(Code::NullValue)
+    );
+    assert_eq!(
+        super::convert::result(Some(&ValueType::Bool), &Value::Null),
+        Err(Code::NullValue)
+    );
+}
+
+/// Slice 1.4 (Sonnet m9): in CEL `null == 0` is `false` without an error, so `==`, `!=`,
+/// a ternary or a short-circuit over an unknown could pass or fail a check instead of
+/// showing "not evaluated". A formula that reads an unknown integer field (nullable or not,
+/// D-Z) or integer item property is therefore not run: it reports `null_value`, wherever the read
+/// sits. `has()` tests presence, not the value, so an unknown property is present.
+#[test]
+fn cel_forms_over_an_unknown_are_not_evaluated() {
+    let values = unknown_values();
+    let not_evaluated = Outcome::Error(Code::NullValue);
+    assert_eq!(
+        constraint_outcomes(
+            &[
+                "vitality == 0",
+                "vitality != 0",
+                "(vitality > 0 ? 1 : 2) == 1",
+                "true || vitality == 0",
+                "equipment.exists(i, i.weight == 0)",
+                "equipment.all(i, i.weight != 0)",
+                "equipment.all(i, has(i.weight))",
+                "zero == 0",
+            ],
+            &values
+        ),
+        vec![
+            not_evaluated,
+            not_evaluated,
+            not_evaluated,
+            not_evaluated,
+            not_evaluated,
+            not_evaluated,
+            Outcome::Pass,
+            Outcome::Pass,
+        ]
+    );
+    // The same forms over known values evaluate as before.
+    assert_eq!(
+        constraint_outcomes(
+            &[
+                "vitality == 0",
+                "vitality != 0",
+                "equipment.exists(i, i.weight == 0)"
+            ],
+            &basic_values()
+        ),
+        vec![Outcome::Violated, Outcome::Pass, Outcome::Violated]
+    );
+    // D-Z: a nullable integer gets the same guard (`luck` is null in the basic values), so
+    // `== null` is no fallback for an unknown integer either.
+    let forms = ["luck != 0", "luck in [1, 2]", "luck == null"];
+    assert_eq!(
+        constraint_outcomes(&forms, &basic_values()),
+        vec![not_evaluated; 3]
+    );
+    assert_eq!(
+        eval_one("luck == 0 ? 10 : 20", &basic_values()),
+        Err(Code::NullValue)
+    );
+    let mut known = basic_values();
+    known["luck"] = json!(1);
+    assert_eq!(
+        constraint_outcomes(&forms, &known),
+        vec![Outcome::Pass, Outcome::Pass, Outcome::Violated]
+    );
+    assert_eq!(eval_one("luck == 0 ? 10 : 20", &known), Ok(Scalar::Int(20)));
 }

@@ -916,19 +916,23 @@ async fn scribbles_render_escaped_inside_bdi() {
     );
 }
 
-/// Control characters, over-long and blank input cannot be kept as a scribble; new rows and
-/// create still refuse unreadable numbers until slice 1.4.
+/// Control characters and over-long input cannot be kept as a scribble: refused in saved
+/// cells, new rows and on create. (Blank input became unknown in slice 1.4.)
 #[tokio::test]
 async fn unkeepable_input_is_still_422() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let setup = setup(&assist()).await;
-    let create = form(0, &[("value-hp", "lots")], &[row("", "1")]);
-    assert_eq!(
-        setup.post(&create_path(&setup), create).await.0,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "create"
-    );
+    // Slice 1.4: blank and unreadable input in a new cell is unknown (`unknown_tests`);
+    // control-character and over-long input is still refused everywhere.
+    for hp in ["84\u{7}", "8\u{0}4"] {
+        let create = form(0, &[("value-hp", hp)], &[row("", "1")]);
+        assert_eq!(
+            setup.post(&create_path(&setup), create).await.0,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "create {hp:?}"
+        );
+    }
     created(&setup, &[]).await;
     let (_, before) = saved(&setup, 1).await;
     let long = format!("1{}", " ".repeat(200));
@@ -936,9 +940,8 @@ async fn unkeepable_input_is_still_422() {
         ("84\u{7}", vec![row("r1-1", "1")]),
         ("8\u{0}4", vec![row("r1-1", "1")]),
         (long.as_str(), vec![row("r1-1", "1")]),
-        ("", vec![row("r1-1", "1")]),
-        ("\t ", vec![row("r1-1", "1")]),
-        ("84", vec![row("r1-1", "1"), row("", "lots")]),
+        ("84", vec![row("r1-1", "1"), row("", "1\u{7}")]),
+        ("84", vec![row("r1-1", "1"), row("", long.as_str())]),
     ] {
         let edit = form(1, &[("value-hp", hp)], &rows);
         let (status, _) = setup.post("/private-sheets/1", edit).await;

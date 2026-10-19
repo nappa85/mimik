@@ -671,12 +671,14 @@ def run_list_browser(page, campaign, version, submit):
 
 
 def run_assist_browser(page, campaign, version):
-    """Assisted sheet slices 1.1 to 1.3: a sum typed into Current HP saves its result and
+    """Assisted sheet slices 1.1 to 1.4: a sum typed into Current HP saves its result and
     shows "84 − 15 = 69" next to the cell, a saved negative survives the re-post, an
     unreadable entry keeps the value with its scribble (inside `<bdi>`), an unchanged save
     writes nothing (same revision), integer inputs keep the plain keyboard (no `inputmode`,
-    which on phones hides minus and space), and "-15" is applied literally with the
-    "Did you mean" switch, which can be hidden, applied and undone."""
+    which on phones hides minus and space), "-15" is applied literally with the
+    "Did you mean" switch, which can be hidden, applied and undone, a blanked number is
+    unknown ("?") with Undo, and "lots" in a new row's Quantity keeps the row as unknown
+    with its scribble while Load says it is not computed."""
 
     def enter(field, status=303):
         with page.expect_response(lambda response: response.request.method == "POST") as response:
@@ -805,6 +807,48 @@ def run_assist_browser(page, campaign, version):
         "Undo did not restore -15",
     )
     no_overflow(page, "assisted sheet after Undo")
+    # Slice 1.4: a blank number is erased to unknown, shown as "?", and can be undone (D-X1).
+    hp = current_hp()
+    hp.fill("")
+    enter(hp)
+    page.goto(assisted)
+    checks = page.locator("#advisory-checks").inner_text()
+    require(
+        current_hp().input_value() == ""
+        and current_hp().get_attribute("placeholder") == "?"
+        and current_hp().get_attribute("aria-describedby") == "unknown-hint"
+        and page.locator("#unknown-hint").text_content() == "Unknown value"
+        and page.locator("#was-0").inner_text() == "Last change: was -15"
+        and "1 not evaluated" in checks
+        and "a value it uses is unknown (null)" in checks,
+        "The blanked Current HP is not unknown with Undo",
+    )
+    no_overflow(page, "assisted sheet with an erased value")
+    press("Undo Current HP")
+    page.goto(assisted)
+    require(current_hp().input_value() == "-15", "Undo did not restore the erased -15")
+    # "lots" in a new row's Quantity keeps the row: unknown, with the scribble (D-M).
+    press("Add Equipment row", status=200)
+    page.locator('input[name="row-4-0-0"]').fill("Torch")
+    page.locator('input[name="row-4-0-2"]').fill("1")
+    quantity = page.locator('input[name="row-4-0-1"]')
+    quantity.fill("lots")
+    enter(quantity)
+    page.goto(assisted)
+    row_note = page.locator("#note-4-0-1")
+    require(
+        page.locator('input[name="row-4-0-1"]').input_value() == "lots"
+        and row_note.count() == 1
+        and row_note.inner_text().strip() == "? (unknown) \u00b7 \u2018lots\u2019 not understood"
+        and page.locator("#note-4-0-1 bdi").inner_text() == "lots",
+        "The new row's unreadable Quantity is not unknown with its scribble",
+    )
+    require(
+        page.locator("dl.derived dd").inner_text().strip()
+        == "Not computed: a value it uses is unknown (null). null_value",
+        "Load does not say a value it uses is unknown",
+    )
+    no_overflow(page, "assisted sheet with an unknown row value")
 
 
 def run_workspace_browser(

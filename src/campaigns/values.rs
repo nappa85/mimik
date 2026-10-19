@@ -1,3 +1,4 @@
+use super::entry::Unreadable;
 use super::notes::{Note, NoteValue, Op as NoteOp, Stored};
 use crate::{
     AppError,
@@ -92,7 +93,8 @@ fn scalar_schema(
     Ok(match control {
         Control::Text => json!({"type":"string","maxLength":8000}),
         Control::Multiline => json!({"type":"string","maxLength":20000}),
-        Control::Integer => json!({"type":"integer"}),
+        // `null` is the unknown value of every integer cell (assisted sheet slice 1.4, D-M).
+        Control::Integer => json!({"type":["integer","null"]}),
         Control::Boolean => json!({"type":"boolean"}),
         Control::Enumeration => {
             json!({"type":"string","enum":options.ok_or(AppError::Invalid("Missing enum options."))?.iter().map(|c|Value::String(c.id.clone())).collect::<Vec<_>>()})
@@ -101,8 +103,9 @@ fn scalar_schema(
     })
 }
 
-/// Records with a host-managed `id` plus declared properties; `null` never appears inside
-/// items. ID grammar, uniqueness and i64 range are domain checks in `private_pin`.
+/// Records with a host-managed `id` plus declared properties; inside items `null` is only
+/// an integer property's unknown value (slice 1.4). ID grammar, uniqueness and i64 range are
+/// domain checks in `private_pin`.
 fn list_schema(field: &crate::definitions::Field) -> Result<Value, AppError> {
     let items = field
         .items
@@ -128,8 +131,35 @@ fn list_schema(field: &crate::definitions::Field) -> Result<Value, AppError> {
     )
 }
 
+/// Adds `null` to a property schema's type and enum. Idempotent (Sol M5): a type that already
+/// admits `null` (every integer since slice 1.4) is left as it is, never nested.
+fn nullable(property: &mut Value) {
+    let admits = |ty: &Value| match ty {
+        Value::Array(types) => types.iter().any(|ty| ty == "null"),
+        ty => ty == "null",
+    };
+    if !admits(&property["type"]) {
+        let ty = property["type"].clone();
+        property["type"] = json!([ty, "null"]);
+    }
+    if let Some(choices) = property.get_mut("enum").and_then(Value::as_array_mut)
+        && !choices.contains(&Value::Null)
+    {
+        choices.push(Value::Null);
+    }
+}
+
 /// Value schema of the editable inputs. Derived (formula) fields are never stored.
 pub(crate) fn schema(definition: &Definition) -> Result<jsonschema::Validator, AppError> {
+    let schema = schema_json(definition)?;
+    jsonschema::draft202012::options()
+        .offline()
+        .build(&schema)
+        .map_err(|_| AppError::Invalid("Derived validation schema failed."))
+}
+
+/// The JSON Schema document that [`schema`] compiles.
+pub(crate) fn schema_json(definition: &Definition) -> Result<Value, AppError> {
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
     for field in definition
@@ -144,11 +174,7 @@ pub(crate) fn schema(definition: &Definition) -> Result<jsonschema::Validator, A
             scalar_schema(field.control, field.options.as_ref())?
         };
         if field.nullable {
-            let ty = property["type"].clone();
-            property["type"] = json!([ty, "null"]);
-            if let Some(choices) = property.get_mut("enum").and_then(Value::as_array_mut) {
-                choices.push(Value::Null);
-            }
+            nullable(&mut property);
         }
         properties.insert(field.id.clone(), property);
     }
@@ -156,10 +182,7 @@ pub(crate) fn schema(definition: &Definition) -> Result<jsonschema::Validator, A
     if serde_json::to_vec(&schema)?.len() > 256 * 1024 {
         return Err(AppError::Invalid("Derived schema exceeds limit."));
     }
-    jsonschema::draft202012::options()
-        .offline()
-        .build(&schema)
-        .map_err(|_| AppError::Invalid("Derived validation schema failed."))
+    Ok(schema)
 }
 
 pub(crate) fn integer(raw: &str) -> Result<i64, AppError> {
@@ -633,9 +656,12 @@ impl<'a> Recorder<'a> {
         }
     }
 
-    /// Reads one present cell. An unreadable number over a known saved integer keeps that
-    /// integer with an `unresolved` note (unless the same scribble is already current, so
-    /// re-posting the page writes nothing); everywhere else it is refused (422) until slice 1.4.
+    /// Reads one present cell. Number cells follow D-M (slice 1.4): a blank number is unknown
+    /// (`null`), noted `erased` when it replaces a recorded value (D-X1); an unreadable
+    /// number keeps the saved value, a number or unknown, and a new cell (create, a new row,
+    /// a newly present property) becomes unknown; either way an `unresolved` note holds the
+    /// scribble (unless the same scribble is already current, so re-posting the page writes
+    /// nothing). Over-long and control-character input is refused (422).
     fn cell(
         &mut self,
         address: String,
@@ -669,15 +695,29 @@ impl<'a> Recorder<'a> {
                 );
                 Ok(reading.value.into())
             }
-            Err(unreadable) => {
-                let kept = match prior {
-                    Prior::Saved(value) if unreadable.keeps_value() => value.as_i64(),
-                    _ => None,
+            Err(Unreadable::Blank) => {
+                self.record(
+                    address,
+                    NoteOp::Erased,
+                    raw,
+                    prior,
+                    control,
+                    Some(NoteValue::Unknown),
+                );
+                Ok(Value::Null)
+            }
+            Err(unreadable) if unreadable.keeps_value() => {
+                let (kept, before) = match prior {
+                    Prior::Saved(value) => {
+                        let kept = NoteValue::of(control, value)
+                            .ok_or(AppError::Invalid(unreadable.message()))?;
+                        (value.clone(), Some(kept))
+                    }
+                    Prior::Absent => (Value::Null, Some(NoteValue::Absent)),
+                    Prior::New => (Value::Null, None),
                 };
-                let Some(kept) = kept else {
-                    return Err(AppError::Invalid(unreadable.message()));
-                };
-                let after = NoteValue::Int(kept);
+                let after =
+                    NoteValue::of(control, &kept).ok_or(AppError::Invalid(unreadable.message()))?;
                 if self
                     .scribbled(&address, &after)
                     .is_none_or(|note| note.raw != raw)
@@ -686,13 +726,14 @@ impl<'a> Recorder<'a> {
                         address,
                         op: NoteOp::Unresolved,
                         raw: raw.into(),
-                        before: Some(after.clone()),
+                        before,
                         after,
                         target: None,
                     });
                 }
-                Ok(kept.into())
+                Ok(kept)
             }
+            Err(unreadable) => Err(AppError::Invalid(unreadable.message())),
         }
     }
 

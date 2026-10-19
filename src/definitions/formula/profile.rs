@@ -218,6 +218,11 @@ impl Lookup {
 pub(super) struct Checked {
     pub expr: IdedExpr,
     pub deps: BTreeSet<String>,
+    /// Declared scalar fields the formula reads.
+    pub reads: BTreeSet<String>,
+    /// `(list, property)` values the formula reads through an iteration variable; a
+    /// `has()` presence test is not a value read.
+    pub item_reads: BTreeSet<(String, String)>,
 }
 
 /// Static type of a sub-expression.
@@ -337,6 +342,8 @@ pub(super) fn compile(
         multiplier: 1,
         cost: 0,
         deps: BTreeSet::new(),
+        reads: BTreeSet::new(),
+        item_reads: BTreeSet::new(),
     };
     let typed = checker.check(&expr).map_err(|code| reject(code, id))?;
     let expected = ty.map_or(Ty::Bool, from_value_type);
@@ -348,6 +355,8 @@ pub(super) fn compile(
         Checked {
             expr,
             deps: checker.deps,
+            reads: checker.reads,
+            item_reads: checker.item_reads,
         },
         checker.cost,
     ))
@@ -450,6 +459,8 @@ struct Checker<'a> {
     multiplier: u64,
     cost: u64,
     deps: BTreeSet<String>,
+    reads: BTreeSet<String>,
+    item_reads: BTreeSet<(String, String)>,
 }
 
 fn list_units() -> u64 {
@@ -488,6 +499,9 @@ impl Checker<'_> {
                     );
                 };
                 let property = self.property(&list, &select.field)?;
+                if !select.test {
+                    self.item_reads.insert((list, select.field.clone()));
+                }
                 Ok(Typed::of(if select.test { Ty::Bool } else { property }))
             }
             Expr::Call(call) => self.call(call),
@@ -524,6 +538,7 @@ impl Checker<'_> {
             return Ok(Typed::of(ty));
         }
         if let Some((ty, nullable)) = self.lookup.scalar(ident) {
+            self.reads.insert(ident.to_owned());
             return Ok(Typed {
                 ty: from_value_type(ty),
                 nullable: *nullable,

@@ -53,6 +53,8 @@ they want; the app computes, warns, suggests and offers Undo; nothing is forced.
 | **D-U** | History has no limit. **A save that changes nothing writes no revision** | §3a |
 | **D-V** | **Removing a list row happens at once, with Undo right after** (like crossing out on paper). No confirmation | §3a, §3f |
 | **D-W** | **Reminder trigger:** any decrease of a top-level number field asks the model whether something on the sheet could react. The model judges relevance; there is no owner marking | §3c |
+| **D-Y** | Formula profile `cel-mimik-1` may still change until the first release; "a pinned definition is never reinterpreted" applies from the first release on. No profile bump, no legacy behaviour kept (2026-10-19, slice 1.4 review) | §12, `derived-formulas-plan.md` |
+| **D-Z** | Nullable integer fields get the same unknown guard: any formula or check that reads an unknown integer, nullable or not, is not evaluated ("a value it uses is unknown"). `== null` is no fallback for integers in the POC; later, definitions may choose a fallback for unknown (2026-10-19, slice 1.4 review) | §12 |
 
 **Main-session defaults** (recorded as defaults; the user may revise them).
 
@@ -1739,3 +1741,222 @@ page tests and the `assist`, `entry` and `notes` modules), `cargo fmt --check` a
 Clippy, all at 2 CPUs on 2026-10-19. Times: the page tests 16:35–16:37, fmt and Clippy 16:38,
 the five test modules (`assist`, `assist_tests`, `entry`, `notes_tests`, `list_tests`) 16:38–16:41: **127 passed**, 0 failed. The full `cargo test` was not rerun: code outside tests is
 unchanged since `967e99c`, whose full run passed (642 tests).
+
+## 12. Slice 1.4 implementation notes
+
+Branch `assist-1.4` (from master `5686980`, which merged slices 1.1 to 1.3). Built the slice-1.4
+scope of §5 ("Unknown values"): the `null` path, blank → `erased`, unknown new cells, "?"
+display, and the profile and contract notes. Nothing from later slices: no per-field or
+per-cell routes, no `meta:` addresses, no row Remove + Undo, no quick-add, no JavaScript. **No
+migration** (020 already admits `erased` and typed `{"unknown":true}` values; the value schema
+is derived at runtime) and no dependency change, so the slice-1.2 follow-up (migration 020's
+`address` length CHECK refuses 6-byte `meta:` addresses, review record 1.2 row 3) stays with
+slice 1.5a, which first writes `meta:` addresses.
+
+**What was built.**
+- **Schema** (`values::schema_json`, split out of `schema`): integer cells, list properties
+  included, are `{"type":["integer","null"]}`. The nullable wrapper (`values::nullable`) is
+  idempotent: it adds `null` only to a type (and enum) that does not already admit it, so a
+  nullable integer stays `["integer","null"]` instead of a nested type array, which the
+  validator builder refuses. Old snapshots stay valid (the schema only accepts more).
+- **Domain:** `private_pin::list_values` accepts `null` for integer properties; text, enum and
+  boolean properties still refuse it (JSON Schema), and integers above `i64` still fail.
+- **Entry** (`values::Recorder::cell`, D-M, D-X1):
+  - blank input (spaces, tabs, no-break spaces) is unknown (`null`); when it replaces a
+    recorded value (a number, or an optional property that was not set) it writes an `erased`
+    note with the typed text; over unknown it changes nothing; in a new cell it writes no
+    note;
+  - an unreadable number (syntax, more than 64 numbers, out of range) keeps the saved value,
+    a number **or unknown**, with an `unresolved` note (slice 1.2); in a new row, a newly
+    present property or on create the cell becomes unknown with an `unresolved` note whose
+    `before` is absent (none) or `{"absent":true}`;
+  - control-character and over-long input is still refused (422) everywhere: it cannot be
+    kept as a faithful scribble;
+  - re-posting the same scribble writes nothing; entering a value equal to the saved one
+    (blank over unknown included) resolves a current scribble with a `literal` note (§3a).
+- **Formulas** (`definitions::formula`):
+  - `convert::inputs` and `convert::record` map `null` on integer fields and integer item
+    properties to CEL `Null` (each charged to the input budget like any value); other types
+    still refuse it (`invalid_input`);
+  - `convert::result` maps a `Null` result to `null_value` (was `type_mismatch`); a
+    constraint whose result is `Null` is `null_value` too;
+  - **read-set guard** (U2): the checker records the declared scalar fields a formula reads
+    and the item properties it selects (`has()` excluded); a formula that reads an unknown
+    integer field (nullable or not since review round 1, D-Z), or an integer property that
+    is unknown in any item, is not run
+    and reports `null_value`; its dependents report `dependency_failed` ("it uses Load, which
+    could not be computed"). Other formulas still compute.
+- **Display:** an empty integer control has `placeholder="?"`; a scribble that left a cell
+  unknown shows "? (unknown) · ‘lots’ not understood" (the control echoes the scribble); an
+  erased value shows no note line, only "Last change: was 84 [Undo]". Load shows "Not
+  computed: a value it uses is unknown (null)." with `null_value`.
+- **Undo** needed no change: `erased` was already eligible (slice 1.3, S11), `assist::set`
+  already writes `null`, and the schema now admits it on every integer cell. Freeze copies
+  data unchanged; history diffs compare stored values, so null versus a number is a change.
+- **Docs:** profile note in `derived-formulas-plan.md` §4 "Value conversion" (the three CEL
+  forms and the guard); `runtime-definition-contract.md` (the `null` row, creation, list
+  values).
+- **Browser:** the assisted stage blanks Current HP (empty, `placeholder="?"`, "Last change:
+  was -15", the HP check not evaluated with the null reason), undoes it, then adds an
+  Equipment row with Quantity "lots" ("? (unknown) · ‘lots’ not understood", the scribble in
+  `<bdi>`, Load "Not computed: a value it uses is unknown (null)"), at both viewports.
+
+**Decisions (where the plan left it open) and deviations.**
+
+| # | Plan said | Done | Why |
+|---|---|---|---|
+| U1 | "`convert::inputs` and `convert::record` map `null`" | The hash-locked conformance fixture changes: `field-null-not-nullable` and `item-null-property` now evaluate (were `invalid_input`); new cases `field-null-text`, `field-null-bool`, `field-null-enum`, `item-null-bool-property`, `unknown-*` (copy, arithmetic, `==`, `!=`, ternary, short-circuit, unread field, item sum, item `==`, item `has()`, unread item), `null-copy-nullable`, `null-nullable-not-equals`, sheet `unknown-dependents`. The lock moves to `193d8b79…` (Rust and Python). The profile ID stays `cel-mimik-1` | **Settled by user decision D-Y** (review round 1): profile 1 may change until the first release, with no bump and no legacy behaviour; the fixture note records content revision 2 and the lock moved again to `5af7ce8f…` with D-Z. The admitted subset is unchanged. Outcomes over values a sheet could already store **did** change (Sonnet Minor 1, Sol Blocking 1): the result of a null copy of a nullable field, or a constraint returning `Null`, is `null_value` instead of `type_mismatch`, and with D-Z every formula reading a null nullable integer is `null_value` (see §12.1) |
+| U2 | "CEL forms … pinned to their actual results and documented; none of them errors silently into a pass" | Raw CEL gives `vitality == 0` → false and `vitality != 0` → true on null, so a check could pass on an unknown. The read-set guard makes every form that reads an unknown `null_value` ("not evaluated"); `has(item.p)` on an unknown property is true (presence) | Pinning raw CEL would have pinned a silent pass. The guard is static (identifiers and item selections), so it also applies on a branch that would not be taken (`true || vitality == 0` → `null_value`): conservative, documented |
+| U3 | — | **Superseded by D-Z** (review round 1): nullable integers are guarded too. (Was: nullable fields keep CEL's own null semantics, outside the guard.) Nullable text, enum and boolean fields keep CEL semantics | Sol Major 2: a cleared nullable integer could pass `luck != 0` or compute `luck == 0 ? 10 : 20` = 20 |
+| U4 | "On nullable fields the existing Known/Unknown select still rules" | Unknown still stores `null` whatever the text (op `literal`, as before). **Known with a blank value is unknown too** (`erased`) instead of 422 | "Blank = unknown" (D-M) and "nothing is forced": refusing would force the player to switch the select |
+| U5 | blank → `erased` | `erased` whenever blank input changes a recorded value, including a newly present optional property left blank (`{"absent":true}` → unknown). The note's `raw` is the typed text (spaces kept, as every note keeps what was typed). A blank new cell writes no note | One op for "the player cleared it"; a new cell has nothing to record (a note documents a change or a reading) |
+| U6 | "value kept" for an unreadable edit | An unreadable entry over a saved **unknown** keeps unknown (`before` = `after` = unknown, `unresolved`) | Same rule as a kept number; re-posting the page stays a no-op |
+| U7 | D-M: "an unreadable required number … stored as unknown" | Control-character and over-long input is still refused (422) in new rows and on create too | Slice 1.2 refuses them over kept values for the same reason: the note could not hold the input faithfully (raw ≤ 200, no NUL) |
+| U8 | "The sheet shows '?' plus the scribble" | "?" as the `placeholder` of an empty integer control (an unknown without a scribble: erased or created blank), and "? (unknown) · ‘…’ not understood" under a scribbled unknown. The control itself stays empty, so re-posting never sends "?" as a scribble | A literal "?" value would come back as an unreadable entry on the next save. The visible "(unknown)" gives assistive technology words, not only a sign |
+| U9 | — | Existing tests that used blank or unreadable integers to provoke 422 now use a control character (`create_page_never_evaluates_and_create_saves`, `formula_text_is_escaped`, `stale_invalid_draft_conflicts`, `failed_save_rerender_keeps_draft_and_submitted_revision`); `item_integers_exact_i64`, `optional_state_is_explicit` and `pinned_list_values_are_exact_and_derived_values_are_not_inputs` now expect unknown for integers and still refuse a boolean `null`; slice 1.2's "until 1.4" tests are updated to the 1.4 spec and renamed (`unkeepable_entry_is_still_422_with_the_draft`) | The spec change the 1.2 notes announced ("until 1.4"), not weakened checks: each still proves a refusal, with input that 1.4 still refuses |
+| U10 | — | `assist_tests` helpers `click`, `edit`, `text`, `action` are `pub(super)` for the new `unknown_tests` module | Reuse instead of copies |
+| U11 | Page bound (D7): rerun the worst cases if markup grows | All six existing worst-case page tests rerun (unchanged sizes); a new null worst case, `worst_label_pages_with_every_unknown_are_within_the_unit_bound` | See the measurements below; no budget change, no rendering change needed |
+
+**Page bound (D7).** Rerun 17:00–17:03 (`--cpus 2`). The existing fixtures render no empty
+integer control and no unknown note, so their sizes are unchanged: sign-led with enum
+18,183,914 / 20,520,960 (11%); 32 sign-led columns 18,126,430 / 18,948,096 (4.3%); long sum
+11,497,841; scribble 17,718,536 (6.5%); scalar switch/Undo 492,970 / 589,824; scalar scribble
+574,206 / 589,824 (2.6%). New null worst cases (64-character IDs, labels of 100 `"`, 256 rows
+of 64-character retained IDs): every integer cell erased with `placeholder="?"` and Undo back
+to `i64::MIN`, every enum cell with Undo: 10,489,329 / 20,520,960; 32 erased columns
+10,182,897 / 18,948,096; every integer cell unknown under a 200-`"` scribble: 17,603,848 /
+18,948,096 (7.1%); 256 wide scalars erased 295,324 / 589,824; 256 wide scalars unknown under
+the scribble 570,622 / 589,824 (3.3%). The tightest case overall is still slice 1.3's scalar
+scribble (2.6%): "? (unknown)" is shorter than "kept −9223372036854775808".
+
+**Red → green.** Red run at 16:56 (`--cpus 2`) with every test written and only
+`values::schema_json` split out (no behaviour change): 15 of the 23 selected tests failed.
+
+| Test | Red | Green |
+|---|---|---|
+| `formula::tests::unknown_integers_are_converted_and_other_formulas_compute` | FAILED (`invalid_input`) | pass; M8 and M9 fail it |
+| `formula::tests::a_null_result_is_null_value_not_type_mismatch` | FAILED | pass; M4 fails it |
+| `formula::tests::cel_forms_over_an_unknown_are_not_evaluated` | FAILED | pass; M1 fails it |
+| `formula::tests::conformance_expressions`, `conformance_sheets` (fixture updated, lock moved) | FAILED | pass; M1 and M4 fail `conformance_expressions` |
+| `unknown_tests::unreadable_numbers_in_new_cells_are_unknown_with_a_note` | FAILED | pass; M3, M5, M6 fail it |
+| `unknown_tests::blank_erases_a_known_number_and_unkeepable_input_is_refused` | FAILED | pass; M5, M6 fail it |
+| `unknown_tests::the_value_schema_admits_null_for_every_integer_cell` | FAILED | pass; M2, M5 fail it |
+| `unknown_tests::lots_in_a_new_row_is_unknown_with_its_scribble` | FAILED (422) | pass; M2, M3, M5 fail it |
+| `unknown_tests::create_with_lots_is_created_with_unknown` | FAILED (422) | pass; M2, M3, M5, M6 fail it |
+| `unknown_tests::an_empty_name_and_unset_required_choices_still_refuse_create` | FAILED (the valid create with "lots" got 422) | pass |
+| `unknown_tests::blank_erases_and_undo_restores_the_number` | FAILED (422) | pass; M2, M6, M7 fail it |
+| `unknown_tests::unknowns_survive_freeze_and_history_uses_historical_values` | FAILED (422) | pass; M2, M3, M5, M6 fail it |
+| `list_tests::worst_label_pages_with_every_unknown_are_within_the_unit_bound` | FAILED (the seeded null data was refused) | pass; M5, M7 fail it |
+| `entry_save_tests::unkeepable_entry_is_still_422_with_the_draft` (updated) | FAILED on a test-design error (a NUL in the echoed draft is replaced by U+FFFD by the HTML parser; that case was dropped, `notes_tests` covers NUL) | pass |
+| `notes_tests::unkeepable_input_is_still_422` (updated) | pass (guard: still refused) | pass |
+
+First green run of the selection 16:58–17:00. The first full run (17:03–17:13) found the seven
+existing tests of U9; fixed and green at 17:15. Mutation runs 17:14–17:21 and 17:34–17:37 (`--cpus 2`), each
+restoring its source afterwards (checked with `cmp`, all identical):
+
+| Mutation | Fails |
+|---|---|
+| M1 read-set guard off | `cel_forms_over_an_unknown_are_not_evaluated`, `conformance_expressions` |
+| M2 nullable wrapper always wraps (not idempotent) | 9 tests, including `the_value_schema_admits_null_for_every_integer_cell` (the assist pin no longer builds) |
+| M3 new cells refuse unreadable numbers | 5 `unknown_tests` |
+| M4 a `null` result is `type_mismatch` | `a_null_result_is_null_value_not_type_mismatch`, `conformance_expressions` |
+| M5 `list_values` refuses `null` | 8 tests, including the null page worst case |
+| M6 blank refused (slice 1.2 behaviour) | 5 `unknown_tests` |
+| M7 no `placeholder="?"` on scalars | `blank_erases_and_undo_restores_the_number`, the null page worst case |
+| M8 `convert::inputs` refuses `null` on a non-nullable integer | 7 tests, including `unknown_integers_are_converted_and_other_formulas_compute` and both conformance tests |
+| M9 `convert::record` refuses `null` on an integer property | 7 tests, including `lots_in_a_new_row_is_unknown_with_its_scribble` |
+
+**Gate** (Monday 2026-10-19, inside the weekday window: every build and test in
+`mimik-ci:latest` with `--cpus 2`, `CARGO_BUILD_JOBS=2`, `--network none`, target volume
+`mimik-catalogue-target`, registry volume `mimik-cargo-cache`; the browser container with the
+CI flags and `--cpus=2`). Times are CEST. Code commit `8e761d5`; this record changes only docs.
+
+| Gate | Time | Cap | Result |
+|---|---|---|---|
+| `cargo fmt --check` | 17:24, 17:38 | 2 | the 17:24 run found one unformatted assert in `unknown_tests`; formatted, clean at 17:38 |
+| pedantic Clippy `-D warnings` | 17:23, 17:24, 17:38 | 2 | clean. The first run found `type_complexity` and `semicolon_if_nothing_returned` in a test table, rewritten |
+| `cargo test --locked --all-targets --all-features` | 17:24–17:34 | 2 | **655 passed**, 0 failed, 2 ignored (the existing ones), 37 result lines. Afterwards only formatting changed |
+| `ruff check tools`, `ruff format --check tools` | 17:24 | 2 | clean |
+| `formula_eval` and `source_fixture` examples | 17:38–17:39 | 2 | built. **Correction (round 1):** the fixture run failed with "File exists" (its output was discarded), so these smokes used the slice-1.3 fixture; a fresh one written at 19:02 is identical (`diff -r`) |
+| Tools unittest (`CI=1`, `MIMIK_FORMULA_EVAL`, main git dir mounted read-only) | 17:39–17:43 | 2 | **762 run, OK**, 11 skipped (includes the moved fixture lock in `test_formula_cli.py`) |
+| `actionlint .github/workflows/ci.yml` | 17:43 | 2 | clean |
+| `cargo build --release --locked` | 17:43–17:46 | 2 | 22,181,592 bytes (+20,224 over slice 1.3 round 2) |
+| `smoke_release.py --auth --source-fixture` (release binary) | 17:46–17:47 | 2 | passed |
+| `browser_smoke.py --auth` (`mimik-browser`, CI flags, worktree `tools/` on `/checks`) | 17:47–17:48 | 2 | every stage passed, the assisted stage (now with the erased and unknown checks) at both viewports |
+| Negative control: a copy of `tools/` expecting "? (known)" under the new row | 17:48–17:49 | 2 | failed with "The new row's unreadable Quantity is not unknown with its scribble", so the new checks run |
+
+**Not run** (`Cargo.lock` and migrations unchanged): `cargo audit`, `cargo about`,
+`cargo package` / `verify_source_package.py`, vendoring and `package_release.py`, the
+unpacked-artifact smoke (the smoke ran on the release binary instead), `lan_smoke.py`, the
+offline corresponding-source rebuild, the demo launcher and a hand-driven demo session in a
+real browser. **Not yet done:** the independent implementation review (Sol and Sonnet, plus
+the third chain), required before merge; it should look at U1 (fixture outcome change under
+the same profile ID) and U2 (the read-set guard) in particular.
+
+**Demo after 1.4** (same commands as §9). Clear Current HP and press Enter: the cell is empty
+with a "?" placeholder, "Last change: was 84 [Undo]" is offered, and the HP check reads "Not
+evaluated … a value it uses is unknown (null)"; Undo puts 84 back. Add an Equipment row,
+type "lots" as its Quantity and press Enter: the row is saved, the cell keeps "lots" and shows
+"? (unknown) · ‘lots’ not understood", and Load reads "Not computed: a value it uses is
+unknown (null)." Typing 2 there computes Load again and offers Undo back to unknown. Creating
+a sheet with "lots" in Current HP also works (unknown with the scribble); an empty Name or an
+unselected choice is still refused.
+
+### 12.1 Review fixes (round 1)
+
+Review of `6127bcd`: Sol FIX THEN MERGE (Blocking 1: the profile changed outcomes for
+already-storable data; Major 2: nullable integers outside the guard; Minor 3), Sonnet
+MERGE-READY with minors; the third chain was unavailable. User decisions D-Y and D-Z (§0)
+settle Blocking 1 and Major 2.
+
+| Finding | Disposition | Test, red → green |
+|---|---|---|
+| Sol Blocking 1, Sonnet Minor 1: U1's "every outcome over storable values is unchanged" is false (a null copy of a nullable field and a constraint returning `Null` were `type_mismatch`, now `null_value`) | **D-Y:** `cel-mimik-1` may change until the first release; no bump, no legacy behaviour. `derived-formulas-plan.md` (profile marker contract and the profile note) states it and lists the changed outcomes; U1 corrected; the fixture's note records content revision 2; the hash-lock comment names D-Y | Docs; the fixture lock moved to `5af7ce8f…` (Rust and Python) |
+| Sol Major 2: a cleared nullable integer passes `luck != 0` and computes `luck == 0 ? 10 : 20` = 20 | **D-Z:** `convert::unknowns` guards every null integer field, nullable or not (the `!nullable` exemption is gone); U3 superseded. Nullable text, enum and boolean fields keep CEL semantics. Fixture: `null-equals` (`luck == null`, was `true`) and `null-nullable-not-equals` (`luck != 0`, was `true`) are now `null_value`; new `null-nullable-ternary`, `null-nullable-in` (`null_value`) and `known-nullable-in` (`true`). `null-arith`, `null-compare` and `null-copy-nullable` were already `null_value`; `null-not-equals-known` and `known-nullable-arith` (luck 5) are unchanged | `cel_forms_over_an_unknown_are_not_evaluated` (`luck != 0`, `luck in [1, 2]`, `luck == null` not evaluated, `luck == 0 ? 10 : 20` not computed; known luck evaluates) and `conformance_expressions`: red 18:34 (`[Pass, Violated, Pass]`; `true`, `true`, `20`), green 18:35. Mutation M10 (the exemption back) fails both |
+| Sol Minor 3: no connected regression for blank over a scribbled unknown | `a_blank_save_resolves_the_scribble_of_an_unknown_cell`: one data-unchanged revision with a `literal` note, the scribble gone, then a further blank save is "No change" | Passed on its first run (18:35): a guard of existing behaviour |
+| Sol (escaping): the unknown branch had no escaping regression | `a_scribble_on_an_unknown_cell_renders_escaped_inside_bdi` (RTL text and `<b>x</b>`, sheet and history) | Passed on its first run (guard) |
+| Sonnet Minor 5: an erased or blank unknown has only `placeholder="?"` | One `<span id="unknown-hint" hidden>Unknown value</span>` per runtime sheet; an empty integer control (scalar or row cell) has `aria-describedby="unknown-hint"` (a scribbled unknown is described by its note instead). The browser stage checks it | `an_empty_integer_control_is_described_as_unknown`: red 18:34, green 18:35; mutation M11 (no hint) fails it. The browser negative copy expecting `unknown-hint-x` failed (19:05–19:06) |
+
+**Limitations recorded** (POC; none blocks the slice):
+- **L-U1:** a save that would write more than 256 notes (unreadable or erased cells included)
+  is refused with 422, the note cap of §3h.
+- **L-U2:** no rollback path: an older binary refuses a sheet holding `null` in a non-nullable
+  integer (its value schema does not admit it).
+- **L-U3:** `has(item.p)` is true for a property that is present but unknown; it is no proof
+  that the value is known.
+- **L-U4 (D-Z):** a definition cannot give an unknown integer a fallback; `== null` no longer
+  works as one on integers. Later: let definitions choose a fallback for unknown.
+
+**Page bound (D7), rerun.** The hint adds 51 bytes per page and 30 bytes per empty integer
+control. A first rerun (18:40) ran on a build left over from mutation M11: the mutation script
+restored sources with `copy2`, which keeps the older modification time, so Cargo saw no change.
+The script now touches restored files. The earlier gate runs were not affected (each followed a
+source edit). Rerun 18:44–18:46 on a fresh build, with the hint counted
+(`unknown-hint` appears once per empty integer control plus the hint itself): every value
+erased with Undo 10,743,332 / 20,520,960; 32 erased columns 10,445,092 / 18,948,096; unknown
+under a long scribble 17,603,899 / 18,948,096 (7.1%); 256 wide scalars erased 303,567 /
+589,824; 256 wide scalars unknown under a scribble 570,673 / 589,824 (3.2%). Existing cases
++51 bytes each; the tightest is still the slice-1.3 scalar scribble, 574,257 / 589,824 (2.6%).
+No budget change.
+
+**Gate on the round-1 candidate** (code commit `3d40e21`; this record changes only docs).
+Monday 2026-10-19 after 18:00: builds and tests in `mimik-ci:latest` with `--cpus 6`,
+`CARGO_BUILD_JOBS=6`, `--network none`; the browser container with the CI flags and
+`--cpus=2`. Times CEST.
+
+| Gate | Time | Cap | Result |
+|---|---|---|---|
+| `cargo fmt --check`, pedantic Clippy `-D warnings` (after touching every changed source) | 18:47–18:48 | 6 | clean |
+| `cargo test --locked --all-targets --all-features` | 18:48–18:57 | 6 | **658 passed**, 0 failed, 2 ignored, 37 result lines |
+| ruff check / format | 18:57 | 2 | clean |
+| examples; tools unittest (`CI=1`, main git dir read-only); actionlint | 18:57–19:02 | 6 | built; **OK**, 11 skipped; clean |
+| `source_fixture` into a fresh directory | 19:02 | 6 | written; identical to the one the smokes used before |
+| `cargo build --release --locked` | 19:02–19:03 | 6 | 22,179,288 bytes |
+| `smoke_release.py --auth --source-fixture` | 19:03–19:04 | 6 | passed |
+| `browser_smoke.py --auth` (with the hint check) | 19:04–19:05 | 2 | every stage passed, the assisted stage at both viewports |
+| Negative control (expects `unknown-hint-x`) | 19:05–19:06 | 2 | failed with "The blanked Current HP is not unknown with Undo" |
+
+**Not run** (`Cargo.lock` and migrations unchanged): `cargo audit`, `cargo about`, packaging,
+vendoring, `package_release.py`, the unpacked-artifact smoke, `lan_smoke.py`, the offline
+source rebuild, the demo launcher and a hand-driven session. **Not yet done:** re-review of the
+round-1 fixes.

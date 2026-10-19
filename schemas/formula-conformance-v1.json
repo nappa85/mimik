@@ -1,7 +1,7 @@
 {
  "version": 1,
  "profile": "cel-mimik-1",
- "note": "Golden, hash-locked conformance fixture for CEL profile mimik-1. Changing any outcome needs a reviewed profile decision; see docs/derived-formulas-plan.md.",
+ "note": "Golden, hash-locked conformance fixture for CEL profile mimik-1. Changing any outcome needs a reviewed profile decision; see docs/derived-formulas-plan.md. Content revision 2 (assisted sheet slice 1.4, user decision D-Y: profile cel-mimik-1 may change until the first release): unknown integers.",
  "declarations": {
   "basic": {
    "fields": [
@@ -927,7 +927,7 @@
    "type": "bool",
    "expr": "luck == null",
    "expect": {
-    "value": true
+    "error": "null_value"
    }
   },
   {
@@ -1445,7 +1445,7 @@
    "type": "int",
    "expr": "1",
    "expect": {
-    "input_error": "invalid_input"
+    "value": 1
    },
    "values": {
     "vitality": null
@@ -1457,7 +1457,7 @@
    "type": "int",
    "expr": "1",
    "expect": {
-    "input_error": "invalid_input"
+    "value": 1
    },
    "values": {
     "equipment": [
@@ -1469,6 +1469,276 @@
       "armor": null
      }
     ]
+   }
+  },
+  {
+   "id": "field-null-text",
+   "declarations": "basic",
+   "type": "int",
+   "expr": "1",
+   "expect": {
+    "input_error": "invalid_input"
+   },
+   "values": {
+    "name": null
+   }
+  },
+  {
+   "id": "field-null-bool",
+   "declarations": "basic",
+   "type": "int",
+   "expr": "1",
+   "expect": {
+    "input_error": "invalid_input"
+   },
+   "values": {
+    "flag": null
+   }
+  },
+  {
+   "id": "field-null-enum",
+   "declarations": "basic",
+   "type": "int",
+   "expr": "1",
+   "expect": {
+    "input_error": "invalid_input"
+   },
+   "values": {
+    "kind": null
+   }
+  },
+  {
+   "id": "item-null-bool-property",
+   "declarations": "basic",
+   "type": "int",
+   "expr": "1",
+   "expect": {
+    "input_error": "invalid_input"
+   },
+   "values": {
+    "equipment": [
+     {
+      "id": "a",
+      "kind": "tool",
+      "equipped": null,
+      "weight": 1
+     }
+    ]
+   }
+  },
+  {
+   "id": "unknown-copy",
+   "declarations": "basic",
+   "type": "int",
+   "expr": "vitality",
+   "expect": {
+    "error": "null_value"
+   },
+   "values": {
+    "vitality": null
+   }
+  },
+  {
+   "id": "unknown-arith",
+   "declarations": "basic",
+   "type": "int",
+   "expr": "vitality + 1",
+   "expect": {
+    "error": "null_value"
+   },
+   "values": {
+    "vitality": null
+   }
+  },
+  {
+   "id": "unknown-equals",
+   "declarations": "basic",
+   "type": "bool",
+   "expr": "vitality == 0",
+   "expect": {
+    "error": "null_value"
+   },
+   "values": {
+    "vitality": null
+   }
+  },
+  {
+   "id": "unknown-not-equals",
+   "declarations": "basic",
+   "type": "bool",
+   "expr": "vitality != 0",
+   "expect": {
+    "error": "null_value"
+   },
+   "values": {
+    "vitality": null
+   }
+  },
+  {
+   "id": "unknown-ternary",
+   "declarations": "basic",
+   "type": "int",
+   "expr": "vitality > 0 ? 1 : 2",
+   "expect": {
+    "error": "null_value"
+   },
+   "values": {
+    "vitality": null
+   }
+  },
+  {
+   "id": "unknown-short-circuit",
+   "declarations": "basic",
+   "type": "bool",
+   "expr": "true || vitality == 0",
+   "expect": {
+    "error": "null_value"
+   },
+   "values": {
+    "vitality": null
+   }
+  },
+  {
+   "id": "unknown-unread",
+   "declarations": "basic",
+   "type": "int",
+   "expr": "zero + 1",
+   "expect": {
+    "value": 1
+   },
+   "values": {
+    "vitality": null
+   }
+  },
+  {
+   "id": "unknown-item-sum",
+   "declarations": "basic",
+   "type": "int",
+   "expr": "sum(equipment.map(i, i.weight))",
+   "expect": {
+    "error": "null_value"
+   },
+   "values": {
+    "equipment": [
+     {
+      "id": "a",
+      "kind": "tool",
+      "equipped": false,
+      "weight": 1
+     },
+     {
+      "id": "b",
+      "kind": "tool",
+      "equipped": false,
+      "weight": null
+     }
+    ]
+   }
+  },
+  {
+   "id": "unknown-item-equals",
+   "declarations": "basic",
+   "type": "bool",
+   "expr": "equipment.exists(i, i.weight == 0)",
+   "expect": {
+    "error": "null_value"
+   },
+   "values": {
+    "equipment": [
+     {
+      "id": "a",
+      "kind": "tool",
+      "equipped": false,
+      "weight": null
+     }
+    ]
+   }
+  },
+  {
+   "id": "unknown-item-has",
+   "declarations": "basic",
+   "type": "bool",
+   "expr": "equipment.all(i, has(i.armor))",
+   "expect": {
+    "value": true
+   },
+   "values": {
+    "equipment": [
+     {
+      "id": "a",
+      "kind": "tool",
+      "equipped": false,
+      "weight": 1,
+      "armor": null
+     }
+    ]
+   }
+  },
+  {
+   "id": "unknown-item-unread",
+   "declarations": "basic",
+   "type": "int",
+   "expr": "size(equipment)",
+   "expect": {
+    "value": 1
+   },
+   "values": {
+    "equipment": [
+     {
+      "id": "a",
+      "kind": "tool",
+      "equipped": false,
+      "weight": null
+     }
+    ]
+   }
+  },
+  {
+   "id": "null-copy-nullable",
+   "declarations": "basic",
+   "type": "int",
+   "expr": "luck",
+   "expect": {
+    "error": "null_value"
+   }
+  },
+  {
+   "id": "null-nullable-not-equals",
+   "declarations": "basic",
+   "type": "bool",
+   "expr": "luck != 0",
+   "expect": {
+    "error": "null_value"
+   }
+  },
+  {
+   "id": "null-nullable-ternary",
+   "declarations": "basic",
+   "type": "int",
+   "expr": "luck == 0 ? 10 : 20",
+   "expect": {
+    "error": "null_value"
+   }
+  },
+  {
+   "id": "null-nullable-in",
+   "declarations": "basic",
+   "type": "bool",
+   "expr": "luck in [1, 2]",
+   "expect": {
+    "error": "null_value"
+   }
+  },
+  {
+   "id": "known-nullable-in",
+   "declarations": "basic",
+   "type": "bool",
+   "expr": "luck in [1, 2]",
+   "expect": {
+    "value": true
+   },
+   "values": {
+    "luck": 1
    }
   },
   {
@@ -2855,6 +3125,95 @@
       "error": "dependency_failed"
      },
      "independent": "pass"
+    }
+   }
+  },
+  {
+   "id": "unknown-dependents",
+   "declarations": "basic",
+   "derived": [
+    {
+     "id": "load",
+     "type": "int",
+     "expr": "vitality * 2"
+    },
+    {
+     "id": "pace",
+     "type": "int",
+     "expr": "load + 1"
+    },
+    {
+     "id": "free",
+     "type": "int",
+     "expr": "zero + 1"
+    }
+   ],
+   "constraints": [
+    {
+     "id": "pace-cap",
+     "expr": "pace < 10"
+    },
+    {
+     "id": "known",
+     "expr": "zero == 0"
+    }
+   ],
+   "values": {
+    "vitality": null,
+    "zero": 0,
+    "big": 9223372036854775807,
+    "small": -9223372036854775808,
+    "flag": true,
+    "name": "Mira",
+    "kind": "shield",
+    "luck": null,
+    "equipment": [
+     {
+      "id": "coat-1",
+      "kind": "outer-armor",
+      "equipped": true,
+      "weight": 2,
+      "armor": 1,
+      "category": "cloth"
+     },
+     {
+      "id": "vest-1",
+      "kind": "outer-armor",
+      "equipped": false,
+      "weight": 3,
+      "armor": 3,
+      "category": "mail"
+     },
+     {
+      "id": "lamp-1",
+      "kind": "lamp",
+      "equipped": false,
+      "weight": 1
+     }
+    ]
+   },
+   "expect": {
+    "order": [
+     "load",
+     "pace",
+     "free"
+    ],
+    "derived": {
+     "load": {
+      "error": "null_value"
+     },
+     "pace": {
+      "error": "dependency_failed"
+     },
+     "free": {
+      "value": 1
+     }
+    },
+    "constraints": {
+     "pace-cap": {
+      "error": "dependency_failed"
+     },
+     "known": "pass"
     }
    }
   },

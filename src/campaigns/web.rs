@@ -486,6 +486,8 @@ struct CellView {
     key: String,
     value: String,
     state: String,
+    /// An integer cell: empty, it is unknown (slice 1.4).
+    integer: bool,
     /// The cell's current change note, when it has something to show (slice 1.2).
     note: Option<NoteLine>,
     /// The switch offer and Undo from that note (slice 1.3).
@@ -573,9 +575,19 @@ impl Actions {
     }
 }
 
-/// The ids an input is described by: its note line and its switch offer.
-fn described_by(key: &str, note: Option<&NoteLine>, actions: Option<&Actions>) -> String {
+/// The ids an input is described by: its note line and its switch offer, or, for an empty
+/// integer control (an unknown value, slice 1.4), the page's one "Unknown value" hint, so the
+/// `placeholder="?"` is not its only cue.
+fn described_by(
+    key: &str,
+    note: Option<&NoteLine>,
+    actions: Option<&Actions>,
+    unknown: bool,
+) -> String {
     let mut ids = Vec::new();
+    if unknown {
+        ids.push("unknown-hint".to_owned());
+    }
     if note.is_some() {
         ids.push(format!("note-{key}"));
     }
@@ -595,6 +607,8 @@ struct NoteLine {
     text: String,
     /// The value the note resulted in.
     value: String,
+    /// The note left the cell unknown (`null`): the sheet shows "?" (slice 1.4).
+    unknown: bool,
 }
 
 impl NoteLine {
@@ -609,12 +623,14 @@ impl NoteLine {
             return None;
         }
         let value = note.after.text();
+        let unknown = note.after == super::notes::NoteValue::Unknown;
         match note.op {
             // A sign-led sum ("-5+3") is shown like a sum; a one-term literal shows nothing.
             super::notes::Op::Sum | super::notes::Op::SignLiteral => Some(Self {
                 kind: "sum",
                 text: super::entry::sum_text(&note.raw)?,
                 value,
+                unknown,
             }),
             // After a switch the cell shows the relative reading it applied: "84 − 15 = 69".
             super::notes::Op::Switched => {
@@ -626,12 +642,14 @@ impl NoteLine {
                     kind: "sum",
                     text: super::entry::offer_text(after.checked_sub(literal)?, &note.raw)?,
                     value,
+                    unknown,
                 })
             }
             super::notes::Op::Unresolved => Some(Self {
                 kind: "unresolved",
                 text: note.raw.clone(),
                 value,
+                unknown,
             }),
             _ => None,
         }
@@ -682,7 +700,12 @@ impl NoteRow {
 
 impl CellView {
     fn described_by(&self) -> String {
-        described_by(&self.key, self.note.as_ref(), self.actions.as_ref())
+        described_by(
+            &self.key,
+            self.note.as_ref(),
+            self.actions.as_ref(),
+            self.integer && self.value.is_empty(),
+        )
     }
     fn valid_boolean(&self) -> bool {
         matches!(self.value.as_str(), "" | "true" | "false")
@@ -800,6 +823,9 @@ impl ListView {
                             key: format!("{f}-{r}-{p}"),
                             value,
                             state,
+                            integer: declared.get(p).is_some_and(|property| {
+                                property.control == crate::definitions::Control::Integer
+                            }),
                             note,
                             actions: None,
                         }
@@ -892,7 +918,12 @@ fn choices(options: Option<&Vec<crate::definitions::Choice>>) -> Vec<(String, St
 
 impl FieldView {
     fn described_by(&self) -> String {
-        described_by(&self.key, self.note.as_ref(), self.actions.as_ref())
+        described_by(
+            &self.key,
+            self.note.as_ref(),
+            self.actions.as_ref(),
+            self.control == "integer" && self.value.is_empty(),
+        )
     }
     fn value_excerpt(&self) -> String {
         excerpt(&self.value)
