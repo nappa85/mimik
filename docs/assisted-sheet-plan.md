@@ -1203,3 +1203,148 @@ The legacy full form is kept, with whole-sheet 409.
 | Sonnet m12 | `list_definition()` reused for the collision test; demo built on its pattern | §5 Demo, 1.5a |
 | Sonnet m13 | Inline style moved to CSS | step 2a |
 | User D-V, D-W | Remove with Undo; any-decrease reminder trigger | §3a, §3c, §3f |
+
+## 9. Slice 1.1 implementation notes
+
+Branch `assist-1.1` (from master `4d07932`). Built exactly the slice-1.1 scope of §5: the
+`campaigns::entry` parser, its integration at `scalar_value`, the `inputmode` removal, the
+demo fixture and launcher, and the 390 px browser check. Nothing from later slices.
+
+**What was built.**
+- `src/campaigns/entry.rs`: `number(raw) -> Result<i64, Unreadable>`. It refuses more than
+  200 characters (counted as characters, before trimming), then NUL and every control
+  character except tab, then trims ASCII spaces and tabs. A blank input is `Blank`. It then
+  splits the text into signed digit runs (a sign-led literal, or an unsigned first term
+  followed by `ws* sign ws* int` terms, at most 64), and only then evaluates them left to
+  right in checked `i128`; the result must fit `i64`. `Unreadable` has six kinds (`Blank`,
+  `TooLong`, `Control`, `Syntax`, `TooManyScalars`, `Range`), each with a refusal message.
+- `values::scalar_value` calls it for `Control::Integer`, so scalar fields and list rows, on
+  create and edit, read sums. An `Unreadable` maps to `AppError::Invalid(message)`: still 422
+  with the draft, "No changes saved: …" as before. `values::integer` is unchanged, and its
+  test at `campaigns/tests.rs:484-486` stays.
+- `templates/private_sheet.html` and `templates/private_list_field.html`: integer inputs
+  have no `inputmode`. Text inputs keep `maxlength="8000"`. Native templates are untouched.
+- Demo: `assist_definition()` in `tests/support/source_fixture.rs` (written as
+  `assist-definition.json` by `fixture_pair`); `publish_assist_definition()` in
+  `tools/smoke_release.py`; `tools/assist_demo.py` with `tools/test_assist_demo.py`.
+- Browser: `run_assist_browser` in `tools/browser_smoke.py`, run in the auth workspace stage.
+- Dev-dependency `proptest =1.12.0` (`default-features = false`, `std`) for the property
+  tests. One networked `cargo add`/`cargo fetch` in `mimik-ci` from an allowlisted copy
+  (`Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, stub targets); every later build was
+  offline. New locked packages: `proptest 1.12.0`, `rand_xorshift 0.5.0`, `unarray 0.1.4`
+  (all MIT OR Apache-2.0); the rest of its graph (`rand 0.10`, `regex-syntax`, `bitflags`,
+  `num-traits`, `chacha20`, `core_detect`) was already locked. Dev-only; it never enters the
+  release binary.
+
+**Deviations from the plan (code reality wins, intent kept).**
+
+| # | Plan said | Done | Why |
+|---|---|---|---|
+| V1 | Table row "32 terms whose running sum leaves i128 never" | 32 five-digit terms (exact), 9 × i64::MAX (leaves i64, stays in i128, `Range`), 5 adds and 4 subtractions of i64::MAX (back to i64::MAX), three 38-digit terms (the second addition overflows i128, `Range`), a 39-digit term (`Range`) | The 200-character cap admits at most 10 terms of i64::MAX, so "32 terms" and "leaves i64" cannot both hold; the cases split the two properties |
+| V2 | `-9223372036854775808-1` is "Unreadable (range)" | Unreadable as `Syntax`; the range case is `0-9223372036854775808-1` | §3a's grammar has an unsigned first term in a sum, so a sign-led input with more terms is not a sum. Both are Unreadable, so the user-visible outcome (422) is the same |
+| V3 | "`-5+3`" is not listed | `Syntax` (unreadable) | Same grammar rule: a sign-led input is one literal (D-Q). Recorded so 1.3 can decide whether to offer anything |
+| V4 | The existing `list_values_tests::item_integers_exact_i64` was not mentioned | Updated: `01`, `+1` and ` 1` in a list row are now read (1), plus `2+1` and `84 -15`; `1.0`, empty, `9223372036854775808`, `1 2`, `84--15` and `x` are still refused; the i64::MIN edge stays | It pinned the old strict row parsing, which §3a deliberately replaces (zero padding, `+5`, trimming). It is a spec change, not a weakened check |
+| V5 | `formula_tests::history_recomputes_identically` asserted `inputmode="numeric"` on a runtime integer | Asserts `value="4" disabled` | Direct consequence of scope item 4 |
+| V6 | The browser check runs at 390 × 844 | It runs at both viewports (the workspace stage runs per viewport) | Superset; the 390 px run is the one the plan asks for |
+| V7 | Demo command `cargo build --locked -j 2` | Same, plus a container variant for the weekday window | The machine schedule caps builds at 2 cores on weekdays |
+
+**Red → green.**
+
+| Test | Red (before) | Green (after) |
+|---|---|---|
+| `entry::tests::literals_are_their_value`, `sums_are_computed_left_to_right`, `i64_bounds`, `every_term_is_checked`, `limits_and_control_characters`, `blank_is_unreadable`, `generated_sums_match_i128` | FAILED against the stub `number` (always `Err(Syntax)`), 10:48 | pass |
+| `entry::tests::unreadable_shapes`, `arbitrary_input_never_panics`, `grammar_alphabet_never_panics`, `messages_name_the_problem` | pass against the stub (a constant `Err` satisfies them) | pass |
+| `entry_save_tests::scalar_sum_saves_its_result` | FAILED (422 on `84 -15`, old strict parser) | pass |
+| `entry_save_tests::list_row_sum_saves_its_result` | FAILED (422 on `2+1`) | pass |
+| `entry_save_tests::runtime_integer_inputs_have_no_numeric_inputmode` | FAILED (`inputmode="numeric"` present) | pass |
+| `entry_save_tests::canonical_negatives_survive_a_re_post` | pass (guard: the strict parser also kept `-1`) | pass; mutation "sign-led literal unreadable" makes it fail |
+| `entry_save_tests::unreadable_entry_is_still_422_with_the_draft` | pass (guard) | pass; mutation "unreadable read as 0" makes it fail |
+| `entry_save_tests::native_sheets_and_protocol_integers_stay_strict` | pass (guard) | pass; mutation "`values::integer` falls back to `entry::number`" makes it fail |
+| `list_values_tests::item_integers_exact_i64` (updated, V4) | — | pass |
+| First green run | `every_term_is_checked` and `i64_bounds` failed on two test-design errors (V1, V2) | fixed in the tests, not the parser |
+
+The three mutation runs (10:55–10:56, `--cpus 2`) restored the sources afterwards (checked
+with `cmp`). The proptest regression file written by the stub red run was deleted: it held
+the stub's failure, not a parser defect.
+
+**Gate** (Monday 2026-10-19, inside the weekday window, so every build and test ran in a
+container with `--cpus 2` and `CARGO_BUILD_JOBS=2`; image `mimik-ci:latest`, target volume
+`mimik-catalogue-target`, registry volume `mimik-cargo-cache`, `--network none`):
+- `cargo fmt --check` and `cargo clippy --locked --all-targets --all-features -- -D warnings`
+  (pedantic): clean (10:58–10:59). The first Clippy run found two `useless_vec` in the tests.
+- `cargo test --locked --all-targets --all-features` (10:59–11:07): **585 passed**, 0 failed,
+  2 ignored (the pre-existing ones), 37 result lines.
+- `ruff check tools`, `ruff format --check tools`: clean (11:10).
+- Tools unittest (`CI=1`, `MIMIK_FORMULA_EVAL` from the built `formula_eval` example, the
+  registry cache and the main repository's git directory mounted), 11:10–11:15: **757 run,
+  11 skipped, OK**. The known `test_fake_runner_script` error did not occur.
+- Release build (11:07–11:10) and the source fixture example (now also writing
+  `assist-definition.json`).
+- `smoke_release.py --auth --source-fixture` against the release binary (11:15–11:16):
+  passed.
+- `browser_smoke.py --auth` in `mimik-browser` (`--network=none --cpus=2 --memory=4g
+  --shm-size=1g --pids-limit=1024 --cap-drop=ALL --security-opt=no-new-privileges`, the
+  worktree's `tools/` mounted on `/checks`), 11:15–11:17: every stage passed, including the
+  new assisted stage at 1280 × 720 and 390 × 844. A copy of the tools with the expected value
+  changed to 70 failed with "The typed sum 84 -15 did not save 69", so the stage runs.
+- Demo launcher (11:18, in `mimik-ci`, debug binary): `--exit-after-setup` created the sheet
+  and stopped cleanly; a serving run stopped by SIGINT after 8 s shut the server down.
+
+**Not run:** `cargo audit`, `cargo about`, packaging and the unpacked-archive checks, the LAN
+smoke. **Not yet done:** the independent implementation review (Sol and Sonnet, plus the
+third chain), required before merge.
+
+**Demo commands** (from the worktree root; synthetic data only):
+
+```
+rm -rf target/assist-demo
+cargo build --locked -j 2
+cargo run --locked -j 2 --example source_fixture -- target/assist-demo/fixture
+python3 tools/assist_demo.py target/debug/mimik --fixture target/assist-demo/fixture \
+    --data target/assist-demo/data
+```
+
+The launcher prints the sheet URL (`http://127.0.0.1:3000/private-sheets/1`) and the player
+and Owner logins with freshly generated dummy passwords. Open the URL, sign in as
+`demo-player`, type `84 -15` into Current HP and press Enter: it saves 69. Armour stays −1
+on every save. `lots` is still refused with the draft kept (unknown values arrive in 1.4).
+Ctrl-C stops the server. Port 3000 must be free. `--exit-after-setup` builds the data and
+stops without serving. On weekdays 09:00–18:00 the two cargo commands may run instead in
+`mimik-ci` with `--cpus 2 -e CARGO_BUILD_JOBS=2` and the worktree mounted on `/workspace`.
+
+### 9.1 Review fixes (round 1)
+
+Review of `813a9d9`: Sonnet MERGE-READY; Sol FIX THEN MERGE (no functional defect); the third
+chain was unavailable. Dispositions:
+
+| Finding | Disposition | Test, red → green |
+|---|---|---|
+| Sol Minor 1: show the accumulation is checked, not wrapping | Added `entry::tests::accumulation_overflow_is_not_cancelled_by_later_terms`: with A = 38 nines, `A+A-A-A` (exactly 0) is `Range` at the second term; `A-A+A-A` is `Ok(0)` | Under a wrapping mutation (`wrapping_add`/`wrapping_sub` in `number`) only this test failed (11:27, `--cpus 2`); the existing three-38-digit case still passed, because its wrapped result is outside i64 anyway. Restored source (checked with `cmp`): 12/12 pass |
+| Sol Minor 2: `Range` doc | Now: a term, or the running sum after a term, overflows i128, or the final result is outside i64; a term or the running sum may exceed i64 when the result fits | doc only |
+| Sonnet Minor: demo data directory and account inputs | `fresh_directory` creates the data directory with mode 0700 (and sets 0700 on an accepted empty one). Password files and the invitation token live in `account-inputs` (0700, files 0600) only while the CLI reads them; `create_accounts` removes the directory in a `finally`, so also after a failed step. They are not needed later, because the launcher prints the generated passwords | `test_data_directory_is_private`, `test_inputs_removed_after_setup`, `test_inputs_removed_after_a_failure`: red first (mode 493 ≠ 448; `account-inputs` left behind), then green |
+| Sol Major: required release gates | Run against the candidate, below. `cargo audit` found **RUSTSEC-2026-0373** in `ammonia 4.2.3` (case-sensitive CSS `url(` matching when filtering style properties). Fixed by `ammonia 4.2.4` (lockfile only, same dependency set; one networked `cargo fetch` in `mimik-ci` from an allowlisted copy, checksum verified by `--locked`) | Not reproducible in Mimik: the source sanitizer allows no `style` attribute. Guard test `sources::sanitizer_tests::style_attributes_never_survive_in_any_case` passes on 4.2.3 and 4.2.4 (11:29–11:30); recorded in `dependency-decisions.md` with the proptest selection |
+
+**Gate on the candidate** (code commit `3aca432`; this record is folded into the same
+commit afterwards and changes only docs and TODO). Monday 2026-10-19, weekday window: every
+build and test in a container with `--cpus 2` and `CARGO_BUILD_JOBS=2`. Times are CEST
+(container logs are UTC).
+
+| Gate | Time | Cap | Result |
+|---|---|---|---|
+| `cargo fmt --check`, pedantic Clippy `-D warnings` (crate re-checked after a touch) | 12:00 | 2 | clean |
+| `ruff check tools`, `ruff format --check tools` | 12:00 | 2 | clean |
+| `cargo test --locked --all-targets --all-features` | 11:32–11:40 | 2 | **587 passed**, 0 failed, 2 ignored, 37 result lines |
+| `formula_eval` example, `source_fixture` example | 11:40–11:41 | 2 | built; fixture includes `assist-definition.json` |
+| Tools unittest (`CI=1`, `MIMIK_FORMULA_EVAL`, registry cache and git dir mounted) | 11:41–11:45 | 2 | OK, 11 skipped |
+| `actionlint .github/workflows/ci.yml` | 11:45 | 2 | clean |
+| `cargo audit --deny warnings` (advisory DB fetched in the container from `github.com/RustSec/advisory-db`, tip `999ec89`, 2026-10-17; then `--no-fetch`) | 11:28 / 11:30 | 2 | 1 vulnerability (above), then **clean** after the fix |
+| `cargo about generate --locked --fail about.hbs` | 11:45–11:46 | 2 | passed (notices 497,325 bytes) |
+| `cargo build --release --locked` | 11:46–11:48 | 2 | built (21,929,144 bytes) |
+| `cargo package --locked --allow-dirty` (verify build) and `verify_source_package.py` | 11:48–11:49 | 2 | passed; "Corresponding-source member allowlist verified" |
+| `cargo vendor --locked target/vendor`, `package_release.py --version 0.1.0 --revision 3aca432…` | 11:49–11:50 | 2 | archives, source crate, dependency sources and `SHA256SUMS` created |
+| Unpacked artifact: `sha256sum --check`, unpack, `smoke_release.py --auth --source-fixture` on the unpacked binary | 11:50–11:51 | 2 | all three checksums OK; smoke passed |
+| Offline corresponding-source rebuild (unpacked source crate plus dependency sources, empty `CARGO_HOME`, `--network=none`, `cargo build --release --offline --locked`) | 11:51–11:56 | 2 | built. Not byte-identical to the shipped binary (the build path differs); CI does not claim reproducibility |
+| `browser_smoke.py --auth` in `mimik-browser` (CI flags) on the unpacked binary | 11:56–11:57 | 2 | every stage passed, the assisted stage at both viewports |
+| `lan_smoke.py` (internal Docker networks, separate Chromium client, HTTPS proxy, QR decode) on the unpacked binary and source | 11:57–12:00 | 2 | passed; no containers or networks left. The script's client and server runs set `--cpus=2`; its denier and offline QR-decoder runs do not, so a local `docker` shim on `PATH` added `--cpus=2 -e CARGO_BUILD_JOBS=2` to any `docker run` without `--cpus` (machine schedule). No physical-phone or router test is claimed |
+
+Nothing in the list was skipped.

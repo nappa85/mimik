@@ -91,6 +91,10 @@ pub fn fixture_pair(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         root.join("list-definition.json"),
         serde_json::to_vec(&list_definition())?,
     )?;
+    fs::write(
+        root.join("assist-definition.json"),
+        serde_json::to_vec(&assist_definition())?,
+    )?;
     Ok(())
 }
 
@@ -162,6 +166,51 @@ pub fn list_definition() -> serde_json::Value {
         "formula_profile": 1,
         "constraints": [{"id": "load-cap", "expr": "load <= 10", "rule_ids": ["synthetic-2"],
                          "message": "Load is at most 10.", "evidence": unresolved}]
+    })
+}
+
+/// The assisted-sheet demo definition (assisted sheet plan §5 Demo): Current and Max HP, an
+/// Armour modifier, a nullable Luck, an equipment list (name, quantity, weight, optional
+/// broken), a derived `load` and the advisory check `hp <= max_hp`. Built on the pattern of
+/// [`list_definition`]; later slices add their members to it.
+#[must_use]
+pub fn assist_definition() -> serde_json::Value {
+    let unresolved = json!({"state": "unresolved", "reason": "Synthetic fixture"});
+    let property = |id: &str, label: &str, control: &str, optional: bool| json!({"id": id, "label": label, "control": control, "optional": optional});
+    let field = |id: &str, label: &str, nullable: bool| {
+        json!({"id": id, "label": label, "control": "integer", "nullable": nullable,
+               "mapping": unresolved})
+    };
+    let equipment = vec![
+        property("name", "Item name", "text", false),
+        property("quantity", "Quantity", "integer", false),
+        property("weight", "Weight", "integer", false),
+        property("broken", "Broken", "boolean", true),
+    ];
+    let fields = vec![
+        field("hp", "Current HP", false),
+        field("max_hp", "Max HP", false),
+        field("armour", "Armour modifier", false),
+        field("luck", "Luck", true),
+        json!({"id": "equipment", "label": "Equipment", "control": "list", "nullable": false,
+               "mapping": unresolved, "items": {"properties": equipment}}),
+        json!({"id": "load", "label": "Load", "control": "integer", "nullable": false,
+               "mapping": unresolved,
+               "formula": {"expr": "sum(equipment.map(i, i.quantity * i.weight))",
+                           "rule_ids": ["synthetic-1"], "evidence": unresolved}}),
+    ];
+    json!({
+        "contract_version": 1, "game_id": "synthetic-game", "edition_id": "first",
+        "definition_id": "assist-sheet", "title": "Synthetic assisted sheet", "sources": [],
+        "fields": fields,
+        "groups": [
+            {"id": "vitals", "label": "Vitals",
+             "fields": ["hp", "max_hp", "armour", "luck", "load"], "column_hint": "main"},
+            {"id": "gear", "label": "Gear", "fields": ["equipment"], "column_hint": "main"},
+        ],
+        "formula_profile": 1,
+        "constraints": [{"id": "hp-cap", "expr": "hp <= max_hp", "rule_ids": ["synthetic-2"],
+                         "message": "Current HP is at most Max HP.", "evidence": unresolved}]
     })
 }
 

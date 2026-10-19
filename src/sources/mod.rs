@@ -203,3 +203,25 @@ pub(crate) fn review_identity(actor: &str, rationale: &str) -> Result<(), crate:
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod sanitizer_tests {
+    /// RUSTSEC-2026-0373 (ammonia < 4.2.4 matched the CSS `url(` function case-sensitively
+    /// when filtering style properties). The source sanitizer allows no attributes except
+    /// table spans, so `style` never survives whatever its case; this pins that.
+    #[test]
+    fn style_attributes_never_survive_in_any_case() {
+        for style in [
+            "background:url(javascript:alert(1))",
+            "background:URL(javascript:alert(1))",
+            "background:uRl(https://outside.example/x)",
+            "background-image:Url( 'https://outside.example/x' )",
+        ] {
+            let html = format!("<p style=\"{style}\">text</p><td style=\"{style}\">c</td>");
+            let clean = super::sanitized(&html).unwrap();
+            assert!(!clean.to_ascii_lowercase().contains("url"), "{clean}");
+            assert!(!clean.contains("style"), "{clean}");
+            assert!(clean.contains("<p>text</p>"), "{clean}");
+        }
+    }
+}

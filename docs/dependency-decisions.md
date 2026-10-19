@@ -139,3 +139,23 @@ the combined-tree measurements are in `docs/derived-formulas-plan.md` §2.
   `cargo audit` cover dev-dependencies (`about.toml` does not ignore them).
 - **Duplicates:** `cssparser` 0.37/0.38 and `phf` 0.13 coexist in the dev graph only.
 - **Fallback (not needed):** a dev-only walk over the already-locked `html5ever` tokenizer.
+
+## Test-only property testing: `proptest` 1.12.0 (selected 2026-10-19, assisted sheet slice 1.1)
+
+- **Need:** the lenient number parser (`campaigns::entry`) must never panic on arbitrary
+  input, and every accepted input must re-parse to the same value (assisted sheet plan §5,
+  slice 1.1).
+- **Choice:** `proptest = { version = "=1.12.0", default-features = false, features =
+  ["std"] }`, a **dev-dependency only**; it never enters the release binary. Maintained, the
+  standard Rust property-testing crate, MIT OR Apache-2.0. Without default features it adds
+  no fork/timeout machinery or tempfile persistence beyond its regression file.
+- **New locked packages** (one networked `cargo add`/`cargo fetch` in `mimik-ci` from an
+  allowlisted copy): `proptest 1.12.0`, `rand_xorshift 0.5.0`, `unarray 0.1.4`; the rest of
+  its graph was already locked.
+
+## Security update: `ammonia` 4.2.3 → 4.2.4 (2026-10-19)
+
+`cargo audit` reported RUSTSEC-2026-0373 (case-sensitive CSS `url(` matching in style
+property filtering, fixed in 4.2.4). Mimik's source sanitizer allows no `style` attribute,
+so the issue was not reachable; the patch release was taken anyway (lockfile only, same
+dependency set) and `sources::sanitizer_tests` pins that `style` never survives in any case.

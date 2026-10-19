@@ -17,6 +17,7 @@ from smoke_release import (
     prepare_auth_player,
     prepare_unknown_registry_source,
     prepare_workspace_materials,
+    publish_assist_definition,
     registry_cli,
     require,
     require_secret_free,
@@ -669,11 +670,53 @@ def run_list_browser(page, campaign, version, submit):
     no_overflow(page, "list history with its change summary")
 
 
+def run_assist_browser(page, campaign, version):
+    """Assisted sheet slice 1.1: a sum typed into Current HP saves its result, a saved
+    negative survives the re-post, and integer inputs keep the plain keyboard (no
+    `inputmode`, which on phones hides minus and space)."""
+
+    def enter(field):
+        with page.expect_response(lambda response: response.request.method == "POST") as response:
+            with page.expect_navigation(wait_until="domcontentloaded"):
+                field.press("Enter")
+        require(response.value.status == 303, "Assisted sheet Enter did not save")
+
+    page.goto(campaign + f"/sheets/new?version={version}")
+    page.locator('input[name="name"]').fill("Assisted browser private")
+    page.locator('input[name="value-max_hp"]').fill("84")
+    page.locator('input[name="value-armour"]').fill("-1")
+    page.locator('select[name="null-luck"]').select_option("unknown")
+    hp = page.get_by_label("Current HP", exact=True)
+    hp.fill("84")
+    enter(hp)
+    assisted = page.url
+    for name in ("value-hp", "value-max_hp", "value-armour", "value-luck"):
+        require(
+            page.locator(f'input[name="{name}"]').get_attribute("inputmode") is None,
+            f"Runtime integer input {name} restricts the phone keyboard",
+        )
+    hp = page.get_by_label("Current HP", exact=True)
+    hp.fill("")
+    hp.press_sequentially("84 -15")
+    enter(hp)
+    page.goto(assisted)
+    require(
+        page.get_by_label("Current HP", exact=True).input_value() == "69"
+        and page.locator('input[name="value-armour"]').input_value() == "-1",
+        "The typed sum 84 -15 did not save 69, or the saved negative changed",
+    )
+    require(
+        "0 violated, 0 not evaluated" in page.locator("#advisory-checks").inner_text(),
+        "Assisted sheet advisory check differs",
+    )
+    no_overflow(page, "assisted sheet after a typed sum")
+
+
 def run_workspace_browser(
     browser, page, viewport, binary, directory, collaborator, passwords, versions
 ):
     """Real campaign/native/runtime forms with an ordinary independent collaborator."""
-    version, formula_version, list_version = versions
+    version, formula_version, list_version, assist_version = versions
 
     def submit(tab, button, status=303):
         with tab.expect_response(lambda response: response.request.method == "POST") as response:
@@ -828,6 +871,8 @@ def run_workspace_browser(
         run_formula_browser(page, generic, formula_version, submit)
         stage = "list sheet"
         run_list_browser(page, generic, list_version, submit)
+        stage = "assisted sheet"
+        run_assist_browser(page, generic, assist_version)
         page.goto("http://127.0.0.1:3000/auth/session")
     except AssertionError:
         raise
@@ -1011,6 +1056,7 @@ def run_auth_scenario(browser, viewport, binary, directory, fixture):
     player = prepare_auth_player(binary, directory, passwords)
     collaborator = prepare_auth_player(binary, directory, passwords, login="table-helper")
     version, formula_version, list_version = prepare_workspace_materials(binary, directory, fixture)
+    assist_version = publish_assist_definition(binary, directory, fixture)
     process, log = start(binary, directory, auth=True)
     context = browser.new_context(viewport=viewport)
     context.set_default_timeout(15_000)
@@ -1154,7 +1200,7 @@ def run_auth_scenario(browser, viewport, binary, directory, fixture):
             directory,
             collaborator,
             passwords,
-            (version, formula_version, list_version),
+            (version, formula_version, list_version, assist_version),
         )
         for path in AUTH_DENIED_PATHS:
             response = page.goto("http://127.0.0.1:3000" + path)
