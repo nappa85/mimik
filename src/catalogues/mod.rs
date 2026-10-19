@@ -1,4 +1,4 @@
-//! Read-only game catalogues (plan `docs/catalogue-plan.md`). Step 1: the strict envelope,
+//! Read-only game catalogues (reference `docs/catalogues.md`). Step 1: the strict envelope,
 //! its canonical identity and revisioned drafts. Step 2: comparison, publication of immutable
 //! sealed versions with projections and a name index, integrity check and index repair.
 //! Step 3: the read-only lookups behind the sheet's catalogue routes (`read`).

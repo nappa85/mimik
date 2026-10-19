@@ -1,4 +1,4 @@
--- Change notes of runtime sheets (docs/assisted-sheet-plan.md §3a, decision D-T; slice 1.2).
+-- Change notes of runtime sheets (docs/assisted-entry.md; decision D-T).
 -- One note per in-scope cell (integer, enum, boolean) and revision. Notes are inserted after
 -- the snapshot write in the same IMMEDIATE transaction, only for the sheet's live revision,
 -- only under the request auth of that revision's actor, and never updated or deleted. They

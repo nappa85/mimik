@@ -1,4 +1,4 @@
-"""Decision-router worker changes (docs/decision-router-plan.md §2, §5, §6). Failing-first.
+"""Decision-router worker changes (docs/evaluation-tooling.md, decision router). Failing-first.
 
 No neural dependency: fake llama_cpp / anyjev / torch / kev modules stand in for the real
 libraries, so the worker code paths (question and options from the request, CPU mode, hash

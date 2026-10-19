@@ -20,7 +20,7 @@ Purpose:
 - supply at least 100 held-out cases, so the accuracy bar can be measured
   (≥ 90% correct and ≤ 2% false-supported). The v2 held-out was read during the v2
   failure analysis, so it is now development data; a fresh blind held-out is planned
-  (`docs/tool-loop-harness-v3-plan.md` §4 and §11).
+  (`docs/tool-loop-heldout-v3-freeze.md`).
 
 The existing reviewed pack in `../sheet-harness-demo/` is unchanged and separate.
 
@@ -67,13 +67,12 @@ The top level is `{"encoding":1,"game_id":"lantern-reach-demo","edition_id":"dem
   expressible as `{collection, entry_id, field, to}`, because the change format
   cannot add or remove entries. `kind` is not editable.
 - **Formulas** are CEL profile `cel-mimik-1` (translated 2026-10-15 using the
-  exact strings of `docs/derived-formulas-plan.md` §8, which are also the lantern
+  exact strings of the derived-formulas plan §8, which are also the lantern
   sheets of `schemas/formula-conformance-v1.json`). The benchmark evaluates them
   with the Rust `formula_eval` CLI. Several constraints guard `item.armor` with
   `has(item.armor) && …`, which relies on CEL's short-circuit `&&`. CEL `!` binds
   tighter than comparison, so always parenthesise after `!`. A differential replay
-  against the retired v1 evaluator found no difference on any case (see
-  `docs/tool-loop-benchmark.md`).
+  against the retired v1 evaluator found no difference on any case.
 - Rules that need human judgement are **not** formulas. Examples: scene ends,
   travel, rests, damage, the shaken focus limit and the down restrictions.
 
@@ -178,7 +177,7 @@ ho-058) is `answer`, never a proposal (LR2-45 item 5).
 
 Cases where two outcomes could both be defended were rewritten. Points 6–8 are the user's
 decisions of 2026-10-16 on the classes a blind adjudicator reviewed
-(`docs/tool-loop-pack-adjudication-2026-10-16.md`, "User decisions").
+(`docs/decisions.md`, PACK-*).
 
 ### Known open ambiguities (not decided)
 
@@ -285,8 +284,7 @@ constraint.
 ## Verification performed (2026-10-15)
 
 These checks were helper/unit-level only. **No model, provider or browser was
-run.** (Counts below are the 2026-10-15 state; for the v3 split see "Case counts" and
-`docs/tool-loop-benchmark.md`.)
+run.** (Counts below are the 2026-10-15 state; for the v3 split see "Case counts".)
 
 - All JSON parses. `tools/tool_loop_benchmark.py`'s `Pack` loader loaded the
   pack without errors: 44 rules; 33 dev and 141 held-out cases.
@@ -395,7 +393,7 @@ A test checks these against the files; the hashes inside the changelog are histo
 - `answer_values` are scored by typed value against the structured `values` of the
   `answer` tool (harness v2 and later), not by searching the answer text. The disclosed
   leniencies of that check (value-only matching, the int hedge, empty citations) are
-  listed in `docs/tool-loop-benchmark.md` and counted in every v3 summary.
+  listed in `docs/evaluation-tooling.md` and counted in every v3 summary.
 - Intended traps and judgement calls:
   - **ho-083** is a deliberate trap. Whether a short rest is allowed while
     bleeding is `ask_rule`, because LR2-30 leaves prerequisites unspecified.

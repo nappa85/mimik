@@ -809,7 +809,7 @@ async fn exact_words_rank_before_prefix_only_matches() {
 
 /// Measurement only (`cargo test --release --test source_search -- --ignored --nocapture`).
 #[tokio::test]
-#[ignore = "performance measurement; recorded in docs/hybrid-retrieval-plan.md"]
+#[ignore = "performance measurement; recorded in docs/results.md"]
 async fn measure_lookup_latency_on_100k_units() {
     const WORDS: [&str; 24] = [
         "veleno", "forza", "agilità", "presenza", "tenacia", "armatura", "scudo", "spada", "città",

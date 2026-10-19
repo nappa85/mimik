@@ -1,4 +1,4 @@
-"""Regressions for the independent review of 95cc971 (docs/reviews/2026-10-17-decision-router-impl.md).
+"""Regressions for the independent review of 95cc971.
 
 Each test failed against 95cc971 (run red first) for the reason in its docstring.
 Fixtures build real attempt directories (prepared states, plans, manifest, host mapping and a

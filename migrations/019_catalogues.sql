@@ -1,6 +1,6 @@
--- Read-only catalogues (docs/catalogue-plan.md). Revisioned drafts; immutable sealed versions
+-- Read-only catalogues (docs/catalogues.md). Revisioned drafts; immutable sealed versions
 -- whose relational projections the seal trigger binds to the hashed content; and the derived
--- latest-only name index. One unmerged migration for plan steps 1-2.
+-- latest-only name index.
 CREATE TABLE catalogue_drafts (
     id INTEGER PRIMARY KEY AUTOINCREMENT CHECK (id > 0),
     game_id TEXT NOT NULL CHECK (instr(game_id,char(0))=0 AND length(CAST(game_id AS BLOB)) BETWEEN 1 AND 64 AND game_id GLOB '[a-z]*' AND game_id NOT GLOB '*[^a-z0-9-]*'),

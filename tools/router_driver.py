@@ -1,4 +1,4 @@
-"""In-container driver for one decision-router unit (docs/decision-router-plan.md §5). Prototype.
+"""In-container driver for one decision-router unit (docs/evaluation-tooling.md). Prototype.
 
 Runs inside the router container (tools/run_decision_router.sh). It sees opaque state keys
 only, never case ids or anything scoring-related. One unit is `probe`, `screen` or

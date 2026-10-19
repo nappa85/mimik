@@ -179,7 +179,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let unindexed = store.search_index_failures().await?;
     if unindexed > 0 {
         eprintln!(
-            "warning: {unindexed} source unit(s) could not be normalised for search and are excluded from lookup; review them as corrected or rejected (see docs/source-import-contract.md)."
+            "warning: {unindexed} source unit(s) could not be normalised for search and are excluded from lookup; review them as corrected or rejected (see docs/sources-and-retrieval.md)."
         );
     }
     if let Some(command) = args.command {
@@ -330,7 +330,7 @@ async fn serve(
     if auth {
         match mimik::accounts::Accounts::new(store.clone()).require_owner_binding().await {
             Ok(())=>{},
-            Err(mimik::AppError::Invalid(_))=>return Err(format!("Owner setup is required for database {}.\nRun: mimik bootstrap-owner --login owner --display-name Owner --password-file private/owner.password\nUse the same --database or MIMIK_DATABASE setting as this launch. See docs/accounts.md for preparing the private password file.",path.display()).into()),
+            Err(mimik::AppError::Invalid(_))=>return Err(format!("Owner setup is required for database {}.\nRun: mimik bootstrap-owner --login owner --display-name Owner --password-file private/owner.password\nUse the same --database or MIMIK_DATABASE setting as this launch. See docs/auth-and-sessions.md for preparing the private password file.",path.display()).into()),
             Err(error)=>return Err(error.into()),
         }
     }

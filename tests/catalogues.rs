@@ -1,4 +1,4 @@
-//! Catalogue drafts (plan `docs/catalogue-plan.md` §3 step 1): source consistency, revisions,
+//! Catalogue drafts (`docs/catalogues.md`; catalogue plan step 1): source consistency, revisions,
 //! storage constraints, the schema-19 upgrade and CLI redaction. All fixtures are synthetic.
 use mimik::{
     Store,

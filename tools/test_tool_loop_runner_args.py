@@ -1,7 +1,6 @@
 """Harness side of the v3 run infrastructure (plan §11 items 3, 19, 26, 27): failing-first.
 
-Each test was run against commit 2566040 first; the red reasons are in
-docs/tool-loop-benchmark.md ("Run infrastructure").
+Each test was run against commit 2566040 first. Tooling reference: docs/evaluation-tooling.md.
 """
 
 import collections

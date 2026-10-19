@@ -1,7 +1,7 @@
-"""Harness v3 (docs/tool-loop-harness-v3-plan.md §3, §5, §11): failing-first tests.
+"""Harness v3 (docs/evaluation-tooling.md): failing-first tests.
 
 Each test here was run against the unchanged v2 code first and failed for the reason in its
-docstring; the red/green record is in docs/tool-loop-benchmark.md ("Harness v3").
+docstring.
 """
 
 import contextlib

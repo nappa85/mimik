@@ -1,4 +1,4 @@
-//! Catalogue publication (plan `docs/catalogue-plan.md` §3 step 2, R1/R2/R5/R17–R20): the seal
+//! Catalogue publication (`docs/catalogues.md`; catalogue plan step 2, R1/R2/R5/R17–R20): the seal
 //! and guard triggers, comparison tickets, append-only refusals, atomicity, races, the name
 //! index and CLI redaction. All fixtures are synthetic.
 use mimik::{

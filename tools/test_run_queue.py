@@ -1,8 +1,7 @@
 """Unattended queue (tools/run_queue.py): fake runner, fake clock (plan §11 item 26).
 
 Failing-first: run before tools/run_queue.py existed (ModuleNotFoundError), and the review
-regressions (ReviewFix* classes) against commit 7bb41d6; the mutation checks are listed in
-docs/tool-loop-benchmark.md ("Run infrastructure").
+regressions (ReviewFix* classes) against commit 7bb41d6. Reference: docs/evaluation-tooling.md.
 """
 
 import datetime as dt
