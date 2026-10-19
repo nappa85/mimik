@@ -33,7 +33,8 @@ pub(crate) struct SheetView {
     /// History pages only: the change summary against the previous revision (plan D8).
     pub changes: Option<super::history_diff::Changes>,
     /// Catalogues linked by the pinned definition (catalogue plan D11), read in the final
-    /// read boundary; empty on the create page, which has no sheet to read them through.
+    /// read boundary; empty on the create page (no sheet to read them through) and on history
+    /// pages (the routes read the current revision, not a historical pin).
     pub catalogues: Vec<super::catalogue::LinkView>,
 }
 
@@ -343,7 +344,9 @@ impl Store {
                     Err(error) => return Err(error),
                 };
             }
-            if let Some(pin)=view.immutable.as_ref().filter(|_|!create){
+            // Current pages only: the routes read through the sheet's current revision, so a
+            // history page (another revision's pin) lists no catalogue links.
+            if let Some(pin)=view.immutable.as_ref().filter(|_|!create && history.is_none()){
                 view.catalogues=super::catalogue::links(&tx,pin)?;
             }
             if let Some(pin)=&view.immutable{

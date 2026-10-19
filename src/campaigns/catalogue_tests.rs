@@ -53,6 +53,9 @@ async fn catalogue_source(store: &Store) {
         }
         // A unit whose text holds NUL (R21: shown as malformed, never as text).
         db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(7,4,'b7','text','[[0,0],[1,0],[1,1],[0,1]]','<p>Synthetic unit.</p>',CAST(x'5a00515a' AS TEXT))", [])?;
+        // A unit whose text is a BLOB, and one over the 256 KiB text bound (R21: malformed).
+        db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(11,4,'b11','text','[[0,0],[1,0],[1,1],[0,1]]','<p>Synthetic unit.</p>',CAST(x'5a515a' AS BLOB))", [])?;
+        db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(12,4,'b12','text','[[0,0],[1,0],[1,1],[0,1]]','<p>Synthetic unit.</p>',?1)", ["q".repeat(256 * 1024 + 1)])?;
         crate::sources::search::ensure(db)?;
         for page in 1..=4 {
             db.execute("INSERT INTO source_page_hashes VALUES(?1,1,?2)", params![page, ZEROS])?;
@@ -70,7 +73,7 @@ fn unit_entry(key: &str, name: &str, units: &[i64]) -> Value {
 }
 
 fn units_page(unit: i64) -> i64 {
-    if unit == 7 {
+    if matches!(unit, 7 | 11 | 12) {
         return 4;
     }
     units()
@@ -105,6 +108,9 @@ fn spells(extra: Vec<Value>) -> Value {
         unit_entry("malformed", "Malformed Text", &[7]),
         unit_entry("hostile", "Hostile <b>Name</b>", &[8]),
         unit_entry("cut-rejected", "Cut Then Rejected", &[3, 9]),
+        unit_entry("cut-nul", "Cut Then NUL", &[3, 7]),
+        unit_entry("cut-blob", "Cut Then BLOB", &[3, 11]),
+        unit_entry("cut-oversized", "Cut Then Oversized", &[3, 12]),
         owner_entry("house-charm", "charm", "House Charm", &house_text()),
     ];
     let mut retired = owner_entry("retired-charm", "charm", "Retired Charm", "Old charm.");
@@ -562,7 +568,7 @@ async fn entry_badges_descriptions_and_citations_are_live() {
     assert!(html.contains("Extracted from your manual; not yet reviewed."));
     assert!(html.contains("Lantern flare: a synthetic beam of light."));
     assert!(html.contains("Second passage of the flare."));
-    assert!(html.contains("<dt>Level</dt><dd><bdi>1</bdi></dd><dt>School</dt><dd><bdi>Light</bdi></dd><dt>Note</dt><dd><bdi>Bright</bdi></dd>"));
+    assert!(html.contains("<dt><bdi>Level</bdi></dt><dd><bdi>1</bdi></dd><dt><bdi>School</bdi></dt><dd><bdi>Light</bdi></dd><dt><bdi>Note</bdi></dt><dd><bdi>Bright</bdi></dd>"));
     assert!(html.contains("PDF page 1</li>"));
     assert!(!html.contains("<b>manual</b>"), "source titles are escaped");
     assert!(
@@ -570,6 +576,7 @@ async fn entry_badges_descriptions_and_citations_are_live() {
         "players get citations, never page images"
     );
     assert!(html.contains("Current text"));
+    assert!(html.contains("<p class=\"catalogue-type\"><bdi>Spell</bdi></p>"));
     // A review and a correction: the corrected text shows at once, the page is incomplete.
     review(&world.store, 1, "accepted", "").await;
     review(&world.store, 2, "corrected", "Corrected flare passage.").await;
@@ -604,14 +611,12 @@ async fn entry_badges_descriptions_and_citations_are_live() {
     )
     .await;
     assert!(browse.contains(
-        "<a href=\"/private-sheets/1/catalogue/spells/lantern-flare\"><bdi>Lantern Flare</bdi></a> · Spell <span class=\"badge\">Description unavailable</span>"
+        "<a href=\"/private-sheets/1/catalogue/spells/lantern-flare\"><bdi>Lantern Flare</bdi></a> · <bdi>Spell</bdi> <span class=\"badge\">Description unavailable</span>"
     ));
-    assert!(
-        browse.contains(
-            "<bdi>House Charm</bdi></a> · Charm <span class=\"badge\">Owner-written</span>"
-        )
-    );
-    assert!(browse.contains("<bdi>Retired Charm</bdi></a> · Charm <span class=\"badge\">Owner-written</span> <span class=\"badge\">Retired</span>"));
+    assert!(browse.contains(
+        "<bdi>House Charm</bdi></a> · <bdi>Charm</bdi> <span class=\"badge\">Owner-written</span>"
+    ));
+    assert!(browse.contains("<bdi>Retired Charm</bdi></a> · <bdi>Charm</bdi> <span class=\"badge\">Owner-written</span> <span class=\"badge\">Retired</span>"));
 }
 
 #[tokio::test]
@@ -753,43 +758,73 @@ async fn catalogue_reads_hold_the_permit_and_recheck_grants_after_validation() {
     }
 }
 
+/// Damage one stored row past its guards: the named immutability trigger is dropped and
+/// restored around `statement`, with foreign keys and CHECK constraints off meanwhile.
+async fn tamper(store: &Store, trigger: &'static str, statement: String) {
+    store
+        .run(move |db| {
+            let original: String = db.query_row(
+                "SELECT sql FROM sqlite_schema WHERE name=?1",
+                [trigger],
+                |row| row.get(0),
+            )?;
+            db.execute_batch(&format!(
+                "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON; DROP TRIGGER {trigger}"
+            ))?;
+            db.execute_batch(&statement)?;
+            db.execute_batch(&original)?;
+            db.execute_batch("PRAGMA ignore_check_constraints=OFF; PRAGMA foreign_keys=ON")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn corrupt_pins_and_snapshots_are_refused() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
-    for damage in ["definition hash", "snapshot hash"] {
+    let damages: [(&str, &str, &str, StatusCode); 4] = [
+        (
+            "definition hash",
+            "definition_versions_update",
+            "UPDATE definition_versions SET content_hash='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "snapshot hash",
+            "private_sheet_history_update",
+            "UPDATE private_sheet_history SET hash='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'",
+            // The bounded loader finds no valid current event: refused like an unreadable sheet.
+            StatusCode::FORBIDDEN,
+        ),
+        // R6: a corrupt pair. The pinned definition row names another game.
+        (
+            "definition pair",
+            "definition_versions_update",
+            "UPDATE definition_versions SET game_id='other-game'",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        // An unsupported runtime pin (schema 2) is refused like an unreadable sheet, before
+        // the pin is loaded.
+        (
+            "unsupported pin",
+            "private_sheets_update",
+            "UPDATE private_sheets SET pin=json_set(pin,'$.schema',2)",
+            StatusCode::FORBIDDEN,
+        ),
+    ];
+    for (damage, trigger, statement, expected) in damages {
         let world = world().await;
-        world
-            .store
-            .run(move |db| {
-                let (trigger, statement) = if damage == "definition hash" {
-                    (
-                        "definition_versions_update",
-                        "UPDATE definition_versions SET content_hash=?1",
-                    )
-                } else {
-                    (
-                        "private_sheet_history_update",
-                        "UPDATE private_sheet_history SET hash=?1",
-                    )
-                };
-                let original: String = db.query_row(
-                    "SELECT sql FROM sqlite_schema WHERE name=?1",
-                    [trigger],
-                    |row| row.get(0),
-                )?;
-                db.execute_batch(&format!("PRAGMA foreign_keys=OFF; DROP TRIGGER {trigger}"))?;
-                db.execute(statement, ["f".repeat(64)])?;
-                db.execute_batch(&original)?;
-                db.execute_batch("PRAGMA foreign_keys=ON")?;
-                Ok(())
-            })
-            .await
-            .unwrap();
+        let unreadable = get(&world.app, &world.auth[4], "/private-sheets/1").await;
+        tamper(&world.store, trigger, statement.into()).await;
         for path in PATHS {
             let (status, html) = get(&world.app, &world.auth[2], path).await;
-            assert_ne!(status, StatusCode::OK, "{damage}: {path}");
+            assert_eq!(status, expected, "{damage}: {path}");
             assert!(!html.contains("Lantern"), "{damage}: {path}");
+            if expected == StatusCode::FORBIDDEN {
+                assert_eq!((status, html), unreadable, "{damage}: {path}");
+            }
         }
     }
 }
@@ -1039,7 +1074,7 @@ async fn browse_pages_link_to_the_next_page_with_the_filters() {
         "{}",
         &first[first.find("Next").map_or(0, |at| at.saturating_sub(200))..]
     );
-    assert!(first.contains("<option value=\"charm\" selected>Charm</option>"));
+    assert!(first.contains("<option value=\"charm\" dir=\"auto\" selected>Charm</option>"));
     assert!(first.contains("value=\"echo\""));
     let (_, second) = get(
         &world.app,
@@ -1062,4 +1097,359 @@ async fn browse_pages_link_to_the_next_page_with_the_filters() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(problem.contains("Search text needs at least one word with letters or digits."));
     assert!(problem.contains("role=\"search\""));
+}
+
+/// What changes while a catalogue read is paused between validation and its second
+/// transaction (R6/R25; step 3 round-1 review, Sol 1 and Space Bunny M2/m8).
+#[derive(Clone, Copy, Debug)]
+enum Gap {
+    Nothing,
+    /// The custodian's sheet is saved: the second transaction must refuse a stale view (409).
+    SheetSaved,
+    /// The pinned definition row changes: `pin.unchanged` must refuse it.
+    PinChanged,
+    /// The reader's account epoch advances (session revoked): `auth.recheck` must refuse it.
+    SessionRevoked,
+}
+
+async fn across_the_gap(gap: Gap) -> Result<(), AppError> {
+    let world = world().await;
+    let (entered, waiting) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let entered = std::sync::Mutex::new(Some(entered));
+    let released = std::sync::Mutex::new(released);
+    *super::super::catalogue::AFTER_CATALOGUE_VALIDATION
+        .lock()
+        .unwrap() = Some(Arc::new(move || {
+        entered.lock().unwrap().take().unwrap().send(()).unwrap();
+        released
+            .lock()
+            .unwrap()
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+    }));
+    let store = world.store.clone();
+    let reader = world.auth[2].clone();
+    let permit = crate::definitions::admit().unwrap();
+    let reading = tokio::spawn(async move {
+        store
+            .private_catalogue(
+                reader,
+                1,
+                "spells".into(),
+                super::super::catalogue::Request::Entry("lantern-flare".into()),
+                permit,
+            )
+            .await
+            .map(|_| ())
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    match gap {
+        Gap::Nothing => {}
+        Gap::SheetSaved => {
+            let auth = world.auth[2].clone();
+            let version = world.version;
+            world
+                .store
+                .run_campaign(auth.clone(), move |db| {
+                    let tx =
+                        db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                    let mut snapshot = super::super::snapshots::load(&tx, 1)?;
+                    snapshot.name = "Saved meanwhile".into();
+                    let pin = crate::definitions::private_pin::validate(
+                        crate::definitions::private_pin::load(&tx, version)?,
+                    )?;
+                    super::super::snapshots::write(&tx, &auth, snapshot, "edit", Some(&pin))?;
+                    tx.commit()?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        Gap::PinChanged => {
+            tamper(
+                &world.store,
+                "definition_versions_update",
+                format!(
+                    "UPDATE definition_versions SET content_hash='{}' WHERE id={}",
+                    "e".repeat(64),
+                    world.version
+                ),
+            )
+            .await;
+        }
+        Gap::SessionRevoked => {
+            world
+                .store
+                .run(|db| {
+                    db.execute("UPDATE accounts SET epoch=2 WHERE id=3", [])?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    }
+    release.send(()).unwrap();
+    reading.await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_second_transaction_rechecks_the_sheet_the_pin_and_the_session() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    assert!(across_the_gap(Gap::Nothing).await.is_ok());
+    let saved = across_the_gap(Gap::SheetSaved).await;
+    assert!(matches!(saved, Err(AppError::Conflict)), "{saved:?}");
+    let changed = across_the_gap(Gap::PinChanged).await;
+    assert!(
+        matches!(
+            changed,
+            Err(AppError::Invalid("Immutable definition changed."))
+        ),
+        "{changed:?}"
+    );
+    let revoked = across_the_gap(Gap::SessionRevoked).await;
+    assert!(matches!(revoked, Err(AppError::NotFound)), "{revoked:?}");
+}
+
+#[tokio::test]
+async fn catalogues_are_confined_to_the_pair_the_seal_and_the_catalogue() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let world = world().await;
+    let unreadable = get(&world.app, &world.auth[4], "/private-sheets/1").await;
+    // The same game and catalogue id in another edition, at a higher version.
+    world
+        .store
+        .run(|db| {
+            db.execute(
+                "INSERT INTO registry_editions VALUES('synthetic-game','second','Second',0)",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut second = owner_catalogue(
+        "synthetic-game",
+        "spells",
+        &[owner_entry(
+            "second-only",
+            "item",
+            "Second Edition Spell",
+            "Elsewhere.",
+        )],
+    );
+    second["edition_id"] = "second".into();
+    publish_catalogue(&world.store, &second, 0).await;
+    second["title"] = "Second edition spells, again".into();
+    publish_catalogue(&world.store, &second, 1).await;
+    assert_eq!(
+        get(
+            &world.app,
+            &world.auth[2],
+            "/private-sheets/1/catalogue/spells/second-only"
+        )
+        .await,
+        unreadable
+    );
+    let (_, found) = get(
+        &world.app,
+        &world.auth[2],
+        "/private-sheets/1/catalogue/spells?q=second",
+    )
+    .await;
+    assert!(found.contains("No entries match.") && !found.contains("Second Edition"));
+    // A cursor key that exists only in another catalogue restarts from the beginning.
+    let (_, first_page) = get(
+        &world.app,
+        &world.auth[2],
+        "/private-sheets/1/catalogue/spells",
+    )
+    .await;
+    let (_, foreign_cursor) = get(
+        &world.app,
+        &world.auth[2],
+        "/private-sheets/1/catalogue/spells?after=other-only",
+    )
+    .await;
+    let results = |html: &str| {
+        let start = html.find("<ul").unwrap();
+        html[start..start + html[start..].find("</ul>").unwrap()].to_owned()
+    };
+    assert_eq!(results(&foreign_cursor), results(&first_page));
+    // A sealed v1 beside an unsealed v2: readers stay on v1.
+    let mut next = spells(vec![owner_entry(
+        "unsealed-only",
+        "charm",
+        "Unsealed Only",
+        "Never sealed.",
+    )]);
+    next["title"] = "Unsealed spells".into();
+    world
+        .store
+        .save_catalogue_draft(serde_json::to_vec(&next).unwrap(), 1)
+        .await
+        .unwrap();
+    world.store.run(|db| {
+        db.execute("INSERT INTO catalogue_versions(catalogue,game_id,edition_id,catalogue_id,version,title,content,content_hash,draft_id,draft_revision,comparison_hash,actor,rationale,admission_profile) SELECT c.id,d.game_id,d.edition_id,d.catalogue_id,2,json_extract(d.content,'$.title'),d.content,d.content_hash,d.id,d.revision,d.content_hash,'Synthetic operator','Unsealed fixture','catalogue-admission-1' FROM catalogue_drafts d JOIN catalogues c ON c.game_id=d.game_id AND c.edition_id=d.edition_id AND c.catalogue_id=d.catalogue_id WHERE d.game_id='synthetic-game' AND d.edition_id='first' AND d.catalogue_id='spells'", [])?;
+        let unsealed = db.last_insert_rowid();
+        db.execute("INSERT INTO catalogue_entry_types SELECT ?1,t.type_id,t.ordinal,t.label,t.properties FROM catalogue_entry_types t JOIN catalogue_versions v ON v.id=t.version_id WHERE v.game_id='synthetic-game' AND v.edition_id='first' AND v.catalogue_id='spells' AND v.version=1", [unsealed])?;
+        db.execute("INSERT INTO catalogue_entries(version_id,key,ordinal,type_id,name,retired,desc_kind,owner_text,properties) VALUES(?1,'unsealed-only',0,'charm','Unsealed Only',0,'owner_text','Never sealed.','{}')", [unsealed])?;
+        Ok(())
+    }).await.unwrap();
+    assert_eq!(
+        get(
+            &world.app,
+            &world.auth[2],
+            "/private-sheets/1/catalogue/spells/unsealed-only"
+        )
+        .await,
+        unreadable
+    );
+    let (status, sealed) = get(
+        &world.app,
+        &world.auth[2],
+        "/private-sheets/1/catalogue/spells",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(sealed.contains("<h1><bdi>Spells &#60;i&#62;of&#60;/i&#62; light</bdi></h1>"));
+    assert!(!sealed.contains("Unsealed"));
+}
+
+#[tokio::test]
+async fn malformed_units_hide_every_passage_and_never_show_reviewed() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let world = world().await;
+    // Review every unit of page 4 and complete it: a malformed text still never reads
+    // "Reviewed extraction", on browse or on the entry page.
+    for unit in [7, 8, 9, 10, 11, 12] {
+        review(&world.store, unit, "accepted", "").await;
+    }
+    complete(&world.store, 4, "iv").await;
+    let (_, browse) = get(
+        &world.app,
+        &world.auth[2],
+        "/private-sheets/1/catalogue/spells",
+    )
+    .await;
+    let (_, entry) = get(
+        &world.app,
+        &world.auth[2],
+        "/private-sheets/1/catalogue/spells/malformed",
+    )
+    .await;
+    assert!(browse.contains("<bdi>Malformed Text</bdi></a> · <bdi>Spell</bdi> <span class=\"badge\">Description unavailable</span>"));
+    assert!(browse.contains("<bdi>Hostile &#60;b&#62;Name&#60;/b&#62;</bdi></a> · <bdi>Spell</bdi> <span class=\"badge\">Reviewed extraction</span>"));
+    assert!(entry.contains("<span class=\"badge\">Description unavailable</span> The stored text of a cited passage cannot be read"));
+    assert!(entry.contains("Description unavailable (source text malformed)."));
+    assert!(!entry.contains("Reviewed extraction"));
+    // A long valid unit followed by a malformed one (NUL, BLOB, over 256 KiB): none of the
+    // first unit's 20,000 displayable characters is shown.
+    for key in ["cut-nul", "cut-blob", "cut-oversized"] {
+        let (status, html) = get(
+            &world.app,
+            &world.auth[2],
+            &format!("/private-sheets/1/catalogue/spells/{key}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{key}");
+        assert_eq!(count(&html, 'ж'), 0, "{key}");
+        assert!(
+            html.contains("Description unavailable (source text malformed)."),
+            "{key}"
+        );
+        assert!(
+            html.contains("PDF page 2</li>") && html.contains("p. <bdi>iv</bdi> (PDF page 4)</li>"),
+            "{key}"
+        );
+        assert!(browse.contains(&format!("/{key}\"><bdi>")), "{key}");
+    }
+    // An entry whose unit rows are missing (damage): the same badge and note on both routes.
+    tamper(
+        &world.store,
+        "catalogue_entry_units_delete",
+        "DELETE FROM catalogue_entry_units WHERE key='multibyte'".into(),
+    )
+    .await;
+    let (_, browse) = get(
+        &world.app,
+        &world.auth[2],
+        "/private-sheets/1/catalogue/spells",
+    )
+    .await;
+    assert!(browse.contains("<bdi>Multibyte Text</bdi></a> · <bdi>Spell</bdi> <span class=\"badge\">Description unavailable</span>"));
+    let (status, empty) = get(
+        &world.app,
+        &world.auth[2],
+        "/private-sheets/1/catalogue/spells/multibyte",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(empty.contains("Description unavailable (source text malformed)."));
+    assert_eq!(count(&empty, 'é'), 0);
+    // A retired entry's page stays readable and says so.
+    let (status, retired) = get(
+        &world.app,
+        &world.auth[2],
+        "/private-sheets/1/catalogue/spells/retired-charm",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(retired.contains("<span class=\"badge\">Retired</span> Kept for existing sheets"));
+    assert!(retired.contains("Old charm."));
+}
+
+#[tokio::test]
+async fn history_pages_omit_links_and_damaged_titles_degrade() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let world = world().await;
+    let (status, history) = get(&world.app, &world.auth[2], "/private-sheets/1/history/1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!history.contains("catalogues-heading") && !history.contains("/catalogue/"));
+    // A damaged (oversized) title: the sheet still renders, the link reads as unavailable,
+    // and the routes show the catalogue id instead.
+    tamper(
+        &world.store,
+        "catalogue_versions_update",
+        format!(
+            "UPDATE catalogue_versions SET title='{}' WHERE game_id='synthetic-game' AND catalogue_id='spells'",
+            "t".repeat(500)
+        ),
+    )
+    .await;
+    let (status, sheet) = get(&world.app, &world.auth[2], "/private-sheets/1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(sheet.contains("spells: catalogue unavailable"));
+    assert!(sheet.contains("href=\"/private-sheets/1/catalogue/items\""));
+    let (status, browse) = get(
+        &world.app,
+        &world.auth[2],
+        "/private-sheets/1/catalogue/spells",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(browse.contains("<h1><bdi>spells</bdi></h1>"));
+    assert!(!browse.contains("ttttt"));
+}
+
+#[tokio::test]
+async fn type_options_render_with_automatic_direction() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let world = world().await;
+    let (_, browse) = get(
+        &world.app,
+        &world.auth[2],
+        "/private-sheets/1/catalogue/spells",
+    )
+    .await;
+    // An <option> cannot hold <bdi>; `dir="auto"` gives each label its own direction.
+    assert!(browse.contains("<option value=\"spell\" dir=\"auto\">Spell</option>"));
 }

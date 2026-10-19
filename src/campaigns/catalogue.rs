@@ -48,7 +48,8 @@ pub(crate) struct CataloguePage {
 }
 
 /// A catalogue link shown on the sheet page: the id, and the latest sealed title (`None`
-/// when the catalogue has no sealed version any more, which only damage can cause).
+/// when the catalogue has no sealed version any more or its title is damaged; only damage
+/// can cause either, and the page then shows the link as unavailable).
 pub(crate) struct LinkView {
     pub id: String,
     pub title: Option<String>,
@@ -127,8 +128,8 @@ impl Store {
             let body = match request {
                 Request::Browse(query) => match read::browse(&tx, &linked, &query) {
                     Ok(page) => Body::Browse(page),
-                    Err(AppError::Invalid(message)) => Body::Problem(message),
-                    Err(error) => return Err(error),
+                    Err(read::BrowseFailure::Query(message)) => Body::Problem(message),
+                    Err(read::BrowseFailure::Other(error)) => return Err(error),
                 },
                 Request::Entry(key) => {
                     Body::Entry(read::entry(&tx, &linked, &key)?.ok_or(AppError::NotFound)?)
@@ -139,8 +140,9 @@ impl Store {
             Ok((
                 CataloguePage {
                     sheet_id: sheet,
+                    // A damaged title degrades to the catalogue id.
+                    title: linked.title.unwrap_or_else(|| catalogue.clone()),
                     catalogue,
-                    title: linked.title,
                     body,
                 },
                 permit,
@@ -168,7 +170,7 @@ pub(super) fn links(
                     &definition.edition_id,
                     &link.id,
                 )?
-                .map(|linked| linked.title),
+                .and_then(|linked| linked.title),
             })
         })
         .collect()

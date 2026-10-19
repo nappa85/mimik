@@ -20,10 +20,6 @@ pub(crate) const BROWSE_PAGE: usize = 50;
 pub(crate) const MAX_QUERY_SCALARS: usize = 100;
 /// Displayed description characters per entry (R7: replaces "64 KiB"; at most 80 KB of UTF-8).
 pub(crate) const DISPLAY_CHARACTERS: usize = 20_000;
-/// Largest effective unit text accepted for display: `raw_text` is at most 256 KiB at import
-/// and a correction at most 80,000 bytes (`publication.rs` of the definitions); a larger value
-/// is malformed.
-const MAX_UNIT_BYTES: i64 = 256 * 1024;
 /// Byte guard of names, labels and titles (100 scalars of at most 4 bytes).
 const LABEL_BYTES: usize = 400;
 /// The effective text of a unit (R21): the correction when the state is `corrected`.
@@ -33,14 +29,16 @@ const EFFECTIVE: &str = "CASE WHEN u.state='corrected' THEN u.correction ELSE u.
 pub(crate) struct Linked {
     pub version_id: i64,
     surrogate: i64,
-    pub title: String,
+    /// `None` when the stored title is outside its byte bound or not text (damage): readers
+    /// degrade to the catalogue id instead of failing the page.
+    pub title: Option<String>,
 }
 
 /// The latest sealed version of `(game, edition, catalogue)`, or `None` when the catalogue has
 /// no sealed version. The version's identity columns must equal the catalogue's.
 ///
 /// # Errors
-/// Storage failures, or a title outside its byte bound.
+/// Storage failures.
 pub(crate) fn latest_sealed(
     db: &Connection,
     game: &str,
@@ -56,7 +54,7 @@ pub(crate) fn latest_sealed(
             Ok(Linked {
                 version_id: row.get(0)?,
                 surrogate: row.get(1)?,
-                title: read_guarded(row, 2)?,
+                title: row.get(2)?,
             })
         })
         .optional()?)
@@ -69,6 +67,19 @@ pub(crate) enum Badge {
     Reviewed,
     Unchecked,
     Unavailable,
+    /// A cited unit's stored text is not text, holds NUL or exceeds its bound, or the entry
+    /// cites no unit at all (damage only).
+    Malformed,
+}
+
+/// A cited unit's effective text cannot be shown: not text, NUL, or over its byte bound.
+/// `raw_text` is at most 256 KiB at import and a correction at most 80,000 bytes, so a larger
+/// value is malformed.
+const MALFORMED: &str =
+    "(typeof(EFF)<>'text' OR length(CAST(EFF AS BLOB))>262144 OR instr(CAST(EFF AS BLOB),x'00')>0)";
+
+fn malformed() -> String {
+    MALFORMED.replace("EFF", EFFECTIVE)
 }
 
 impl Badge {
@@ -77,7 +88,7 @@ impl Badge {
             Self::OwnerWritten => "Owner-written",
             Self::Reviewed => "Reviewed extraction",
             Self::Unchecked => "Unchecked source text",
-            Self::Unavailable => "Description unavailable",
+            Self::Unavailable | Self::Malformed => "Description unavailable",
         }
     }
 
@@ -93,22 +104,30 @@ impl Badge {
             Self::Unavailable => {
                 "A cited passage was rejected in source review, so the text is not shown. The citation stays."
             }
+            Self::Malformed => {
+                "The stored text of a cited passage cannot be read (malformed), so the text is not shown."
+            }
         }
     }
 
-    /// Unit-sourced badge from each cited unit's state and its page's completeness. No cited
-    /// unit at all (only damage can cause it) is never "reviewed".
-    fn of_units<'a>(units: impl IntoIterator<Item = (&'a str, bool)>) -> Self {
+    /// Unit-sourced badge from each cited unit's (state, page complete, text malformed).
+    /// Browse and entry pages use this one rule, so they always agree. A rejection wins; then
+    /// a malformed text, or no cited unit at all (damage only), which is never "reviewed".
+    fn of_units<'a>(units: impl IntoIterator<Item = (&'a str, bool, bool)>) -> Self {
         let mut reviewed = true;
+        let mut malformed = false;
         let mut any = false;
-        for (state, complete) in units {
+        for (state, complete, unreadable) in units {
             any = true;
             if state == "rejected" {
                 return Self::Unavailable;
             }
+            malformed |= unreadable;
             reviewed &= matches!(state, "accepted" | "corrected") && complete;
         }
-        if reviewed && any {
+        if malformed || !any {
+            Self::Malformed
+        } else if reviewed {
             Self::Reviewed
         } else {
             Self::Unchecked
@@ -140,19 +159,59 @@ pub(crate) struct BrowsePage {
     pub more: bool,
 }
 
+/// Why a browse page could not be produced.
+#[derive(Debug)]
+pub(crate) enum BrowseFailure {
+    /// The reader's query cannot run: no searchable words, control characters, more than 16
+    /// pieces, or the time budget. Its static message is shown with the search form.
+    Query(&'static str),
+    /// Anything else (refusals, damage, storage): never presented as a query problem.
+    Other(AppError),
+}
+
+impl From<AppError> for BrowseFailure {
+    fn from(error: AppError) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl From<rusqlite::Error> for BrowseFailure {
+    /// A statement interrupted by the time budget is a query problem; every other `SQLite`
+    /// failure is not.
+    fn from(error: rusqlite::Error) -> Self {
+        let interruption =
+            error.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted);
+        match interrupted(error) {
+            AppError::Invalid(message) if interruption => Self::Query(message),
+            other => Self::Other(other),
+        }
+    }
+}
+
+/// Test closures run on the store's worker, whose error type is `AppError`.
+#[cfg(test)]
+impl From<BrowseFailure> for AppError {
+    fn from(failure: BrowseFailure) -> Self {
+        match failure {
+            BrowseFailure::Query(message) => Self::Invalid(message),
+            BrowseFailure::Other(error) => error,
+        }
+    }
+}
+
 /// One browse page: at most 50 entries ordered by `(name, key)`, after the cursor key's
 /// `(name, key)` (R13). With `q`, the name index is a filter only, never a rank. Every
 /// statement runs under the search time budget.
 ///
 /// # Errors
-/// `NotFound` for an entry type the version does not declare; `Invalid` for a query without
-/// searchable words, with control characters or more than 16 pieces, or one that exceeds the
-/// time budget; storage failures.
+/// `Query` for a query without searchable words, with control characters or more than 16
+/// pieces, or one that exceeds the time budget; `Other(NotFound)` for an entry type the
+/// version does not declare; `Other` for storage failures and damage.
 pub(crate) fn browse(
     db: &Connection,
     linked: &Linked,
     query: &BrowseQuery,
-) -> Result<BrowsePage, AppError> {
+) -> Result<BrowsePage, BrowseFailure> {
     browse_within(db, linked, query, QUERY_BUDGET)
 }
 
@@ -161,14 +220,23 @@ fn browse_within(
     linked: &Linked,
     query: &BrowseQuery,
     budget: Duration,
-) -> Result<BrowsePage, AppError> {
-    let expression = query.q.as_deref().map(fts_query).transpose()?;
+) -> Result<BrowsePage, BrowseFailure> {
+    let expression =
+        query
+            .q
+            .as_deref()
+            .map(fts_query)
+            .transpose()
+            .map_err(|error| match error {
+                AppError::Invalid(message) => BrowseFailure::Query(message),
+                other => BrowseFailure::Other(other),
+            })?;
     let _budget = Budget::start(db, budget);
     let types = types(db, linked.version_id)?;
     if let Some(entry_type) = &query.entry_type
         && !types.iter().any(|(id, _)| id == entry_type)
     {
-        return Err(AppError::NotFound);
+        return Err(AppError::NotFound.into());
     }
     // An unknown cursor key restarts from the beginning (R13).
     let cursor: Option<(String, String)> = match &query.after {
@@ -181,8 +249,7 @@ fn browse_within(
                 params![linked.version_id, key],
                 |row| Ok((read_guarded(row, 0)?, row.get(1)?)),
             )
-            .optional()
-            .map_err(interrupted)?,
+            .optional()?,
         None => None,
     };
     let (cursor_name, cursor_key) = cursor.unzip();
@@ -217,8 +284,10 @@ fn browse_within(
                 Badge::of_units(
                     states
                         .iter()
-                        .filter(|(unit_key, _, _)| unit_key == key)
-                        .map(|(_, state, complete)| (state.as_str(), *complete)),
+                        .filter(|(unit_key, _, _, _)| unit_key == key)
+                        .map(|(_, state, complete, malformed)| {
+                            (state.as_str(), *complete, *malformed)
+                        }),
                 )
             },
         })
@@ -235,7 +304,7 @@ fn entry_rows(
     entry_type: Option<&str>,
     expression: Option<&str>,
     cursor: Option<(&str, &str)>,
-) -> Result<Vec<EntryRow>, AppError> {
+) -> Result<Vec<EntryRow>, BrowseFailure> {
     let (cursor_name, cursor_key) = cursor.unzip();
     let name = guarded("e.name", LABEL_BYTES);
     let limit = BROWSE_PAGE + 1;
@@ -257,78 +326,77 @@ fn entry_rows(
         let base = linked
             .surrogate
             .checked_mul(1 << ROWID_SHIFT)
-            .ok_or(AppError::Invalid("Catalogue index identity out of range."))?;
+            .ok_or(BrowseFailure::Other(AppError::Invalid(
+                "Catalogue index identity out of range.",
+            )))?;
         let sql = format!(
             "SELECT e.key,{name},e.type_id,e.retired,e.desc_kind FROM catalogue_names_fts CROSS JOIN catalogue_entries e ON e.version_id=?1 AND e.key=catalogue_names_fts.key WHERE catalogue_names_fts MATCH ?5 AND catalogue_names_fts.rowid BETWEEN ?6 AND ?7 AND catalogue_names_fts.catalogue_row_id=?8 AND {filters} ORDER BY e.name,e.key LIMIT {limit}"
         );
-        let mut statement = db.prepare(&sql).map_err(interrupted)?;
-        let found = statement
-            .query_map(
-                params![
-                    linked.version_id,
-                    entry_type,
-                    cursor_name,
-                    cursor_key,
-                    expression,
-                    base,
-                    base + (1 << ROWID_SHIFT) - 1,
-                    linked.surrogate
-                ],
-                map,
-            )
-            .map_err(interrupted)?;
+        let mut statement = db.prepare(&sql)?;
+        let found = statement.query_map(
+            params![
+                linked.version_id,
+                entry_type,
+                cursor_name,
+                cursor_key,
+                expression,
+                base,
+                base + (1 << ROWID_SHIFT) - 1,
+                linked.surrogate
+            ],
+            map,
+        )?;
         for row in found {
-            rows.push(row.map_err(interrupted)?);
+            rows.push(row?);
         }
     } else {
         let sql = format!(
             "SELECT e.key,{name},e.type_id,e.retired,e.desc_kind FROM catalogue_entries e WHERE e.version_id=?1 AND {filters} ORDER BY e.name,e.key LIMIT {limit}"
         );
-        let mut statement = db.prepare(&sql).map_err(interrupted)?;
-        let found = statement
-            .query_map(
-                params![linked.version_id, entry_type, cursor_name, cursor_key],
-                map,
-            )
-            .map_err(interrupted)?;
+        let mut statement = db.prepare(&sql)?;
+        let found = statement.query_map(
+            params![linked.version_id, entry_type, cursor_name, cursor_key],
+            map,
+        )?;
         for row in found {
-            rows.push(row.map_err(interrupted)?);
+            rows.push(row?);
         }
     }
     Ok(rows)
 }
 
-fn types(db: &Connection, version_id: i64) -> Result<Vec<(String, String)>, AppError> {
-    let mut statement = db
-        .prepare(&format!(
-            "SELECT type_id,{} FROM catalogue_entry_types WHERE version_id=?1 ORDER BY ordinal",
-            guarded("label", LABEL_BYTES)
-        ))
-        .map_err(interrupted)?;
-    let rows = statement
-        .query_map([version_id], |row| Ok((row.get(0)?, read_guarded(row, 1)?)))
-        .map_err(interrupted)?;
-    rows.collect::<Result<_, _>>().map_err(interrupted)
+fn types(db: &Connection, version_id: i64) -> Result<Vec<(String, String)>, BrowseFailure> {
+    let mut statement = db.prepare(&format!(
+        "SELECT type_id,{} FROM catalogue_entry_types WHERE version_id=?1 ORDER BY ordinal",
+        guarded("label", LABEL_BYTES)
+    ))?;
+    let rows = statement.query_map([version_id], |row| Ok((row.get(0)?, read_guarded(row, 1)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// Live (key, unit state, page complete) rows of the given unit-sourced entries.
+/// Live (key, unit state, page complete, text malformed) rows of the given unit-sourced
+/// entries; the malformed test is the entry page's (`MALFORMED`).
 fn unit_states(
     db: &Connection,
     version_id: i64,
     keys: &[&str],
-) -> Result<Vec<(String, String, bool)>, AppError> {
+) -> Result<Vec<(String, String, bool, bool)>, BrowseFailure> {
     if keys.is_empty() {
         return Ok(Vec::new());
     }
-    let mut statement = db
-        .prepare("SELECT eu.key,u.state,p.complete FROM catalogue_entry_units eu JOIN source_units u ON u.id=eu.unit_id JOIN source_pages p ON p.id=u.page_id WHERE eu.version_id=?1 AND eu.key IN (SELECT value FROM json_each(?2))")
-        .map_err(interrupted)?;
-    let rows = statement
-        .query_map(params![version_id, serde_json::to_string(keys)?], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
-        .map_err(interrupted)?;
-    rows.collect::<Result<_, _>>().map_err(interrupted)
+    let sql = format!(
+        "SELECT eu.key,u.state,p.complete,{} FROM catalogue_entry_units eu JOIN source_units u ON u.id=eu.unit_id JOIN source_pages p ON p.id=u.page_id WHERE eu.version_id=?1 AND eu.key IN (SELECT value FROM json_each(?2))",
+        malformed()
+    );
+    let mut statement = db.prepare(&sql)?;
+    let rows = statement.query_map(
+        params![
+            version_id,
+            serde_json::to_string(keys).map_err(AppError::from)?
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    Ok(rows.collect::<Result<_, _>>()?)
 }
 
 /// Where a cited unit is in the manual, read live (D4).
@@ -370,10 +438,8 @@ struct UnitMeta {
     state: String,
     complete: bool,
     citation: Citation,
-    text: bool,
-    bytes: i64,
     characters: i64,
-    nul: bool,
+    malformed: bool,
 }
 
 /// The entry page of `key` in the latest sealed version, or `None` for an unknown key. The
@@ -428,25 +494,23 @@ pub(crate) fn entry(
         }));
     }
     let units = unit_metadata(db, linked.version_id, key)?;
-    if units.is_empty() {
-        return Err(AppError::Invalid("Catalogue entry cites no units."));
-    }
-    let badge = Badge::of_units(units.iter().map(|u| (u.state.as_str(), u.complete)));
+    let badge = Badge::of_units(
+        units
+            .iter()
+            .map(|u| (u.state.as_str(), u.complete, u.malformed)),
+    );
     let mut citations: Vec<Citation> = Vec::new();
     for unit in &units {
         if !citations.contains(&unit.citation) {
             citations.push(unit.citation.clone());
         }
     }
-    let description = if badge == Badge::Unavailable {
-        Description::Unavailable
-    } else if units
-        .iter()
-        .any(|u| !u.text || u.nul || !(0..=MAX_UNIT_BYTES).contains(&u.bytes))
-    {
-        Description::Malformed
-    } else {
-        unit_texts(db, &units)?
+    // The badge decides: every cited unit's metadata is in it, so a rejected or malformed
+    // unit after the cut-off still hides every passage, and browse shows the same badge.
+    let description = match badge {
+        Badge::Unavailable => Description::Unavailable,
+        Badge::Malformed => Description::Malformed,
+        _ => unit_texts(db, &units)?,
     };
     Ok(Some(EntryPage {
         name,
@@ -461,9 +525,10 @@ pub(crate) fn entry(
 
 fn unit_metadata(db: &Connection, version_id: i64, key: &str) -> Result<Vec<UnitMeta>, AppError> {
     let sql = format!(
-        "SELECT u.id,u.state,p.complete,{},{},p.pdf_page,typeof({EFFECTIVE})='text',length(CAST({EFFECTIVE} AS BLOB)),length({EFFECTIVE}),instr(CAST({EFFECTIVE} AS BLOB),x'00')>0 FROM catalogue_entry_units eu JOIN source_units u ON u.id=eu.unit_id JOIN source_pages p ON p.id=u.page_id JOIN sources s ON s.id=p.source_id WHERE eu.version_id=?1 AND eu.key=?2 ORDER BY eu.ordinal",
+        "SELECT u.id,u.state,p.complete,{},{},p.pdf_page,length({EFFECTIVE}),{} FROM catalogue_entry_units eu JOIN source_units u ON u.id=eu.unit_id JOIN source_pages p ON p.id=u.page_id JOIN sources s ON s.id=p.source_id WHERE eu.version_id=?1 AND eu.key=?2 ORDER BY eu.ordinal",
         guarded("s.title", 200),
         guarded("p.printed_label", 200),
+        malformed(),
     );
     let mut statement = db.prepare(&sql)?;
     let rows = statement.query_map(params![version_id, key], |row| {
@@ -476,10 +541,8 @@ fn unit_metadata(db: &Connection, version_id: i64, key: &str) -> Result<Vec<Unit
                 printed_label: read_guarded(row, 4)?,
                 pdf_page: row.get(5)?,
             },
-            text: row.get(6)?,
-            bytes: row.get::<_, Option<i64>>(7)?.unwrap_or(-1),
-            characters: row.get::<_, Option<i64>>(8)?.unwrap_or(-1),
-            nul: row.get::<_, Option<bool>>(9)?.unwrap_or(true),
+            characters: row.get::<_, Option<i64>>(6)?.unwrap_or(-1),
+            malformed: row.get::<_, Option<bool>>(7)?.unwrap_or(true),
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -559,7 +622,13 @@ mod badge_tests {
 
     #[test]
     fn unit_badges_follow_states_and_page_completion() {
-        let of = |units: &[(&str, bool)]| Badge::of_units(units.iter().copied());
+        let of = |units: &[(&str, bool)]| {
+            Badge::of_units(
+                units
+                    .iter()
+                    .map(|(state, complete)| (*state, *complete, false)),
+            )
+        };
         assert_eq!(
             of(&[("accepted", true), ("corrected", true)]),
             Badge::Reviewed
@@ -576,6 +645,16 @@ mod badge_tests {
             of(&[("unreviewed", false), ("rejected", true)]),
             Badge::Unavailable
         );
-        assert_eq!(of(&[]), Badge::Unchecked, "no cited unit is never reviewed");
+        assert_eq!(of(&[]), Badge::Malformed, "no cited unit is never reviewed");
+        // A malformed text is never "reviewed"; a rejection still wins.
+        let with = |units: &[(&str, bool, bool)]| Badge::of_units(units.iter().copied());
+        assert_eq!(
+            with(&[("accepted", true, false), ("accepted", true, true)]),
+            Badge::Malformed
+        );
+        assert_eq!(
+            with(&[("accepted", true, true), ("rejected", true, false)]),
+            Badge::Unavailable
+        );
     }
 }

@@ -35,11 +35,16 @@ LTR_ORDER = """(selector) => [...document.querySelectorAll(selector)].map((eleme
   return a.top + 2 < b.top || (Math.abs(a.top - b.top) <= 2 && a.left < b.left);
 })"""
 
-# Element boxes in document order must also read left-to-right, line by line.
+# Element boxes in document order must also read left-to-right, line by line: boxes whose
+# vertical extents overlap share a line (an inline-block badge is taller than its text).
 BOX_ORDER = """(selector) => {
   const boxes = [...document.querySelectorAll(selector)].map((e) => e.getBoundingClientRect());
-  return boxes.every((box, i) => i === 0 || boxes[i - 1].top + 2 < box.top
-    || (Math.abs(boxes[i - 1].top - box.top) <= 2 && boxes[i - 1].left < box.left));
+  return boxes.length > 1 && boxes.every((box, i) => {
+    if (i === 0) return true;
+    const before = boxes[i - 1];
+    const sameLine = before.top < box.bottom && box.top < before.bottom;
+    return sameLine ? before.left < box.left : before.bottom <= box.top + 2;
+  });
 }"""
 
 
@@ -52,6 +57,18 @@ def _no_script_or_image(page, label):
     require(
         page.locator("script").count() == 0 and page.locator("img").count() == 0,
         f"Catalogue {label} loads a script or shows an image",
+    )
+
+
+def _isolated(page, selector):
+    """Every match exists and is laid out in its own isolated bidi context."""
+    return page.evaluate(
+        """(selector) => {
+          const found = [...document.querySelectorAll(selector)];
+          return found.length > 0
+            && found.every((e) => getComputedStyle(e).unicodeBidi === 'isolate');
+        }""",
+        selector,
     )
 
 
@@ -81,6 +98,14 @@ def run_catalogue_browser(page, sheet, outsider, no_overflow):
         "Catalogue name search differs",
     )
     _ltr(page, "main > h1, nav.catalogue-nav, ul.catalogue-results li", "browse text")
+    # The right-to-left type label is isolated and its badge still follows it.
+    require(
+        _isolated(page, "ul.catalogue-results li bdi")
+        and page.evaluate(
+            BOX_ORDER, "ul.catalogue-results li > bdi, ul.catalogue-results li .badge"
+        ),
+        "Catalogue type label is not isolated or its badge moved",
+    )
     require(
         page.evaluate(BOX_ORDER, "form.catalogue-search input, form.catalogue-search button"),
         "Catalogue search controls are out of order",
@@ -109,17 +134,29 @@ def run_catalogue_browser(page, sheet, outsider, no_overflow):
         page.evaluate(BOX_ORDER, "nav.catalogue-nav a"),
         "Catalogue navigation controls are out of order",
     )
-    # The paragraph after the override still reads in document order.
+    # Right-to-left type and property labels are isolated; the long property value wraps.
+    require(
+        _isolated(page, "p.catalogue-type bdi")
+        and _isolated(page, "dl.catalogue-properties dt bdi")
+        and page.evaluate(
+            """() => [...document.querySelectorAll('dl.catalogue-properties dd')].every((e) =>
+              getComputedStyle(e).whiteSpace === 'pre-wrap'
+              && getComputedStyle(e).overflowWrap === 'anywhere')"""
+        ),
+        "Catalogue labels are not isolated or property values do not wrap",
+    )
+    # A text witness after the hostile owner text: the "Current text" paragraph that follows
+    # the description reads in order and sits below it.
+    _ltr(page, "p.catalogue-current", "text after the description")
     require(
         page.evaluate(
             """() => {
-              const heading = [...document.querySelectorAll('h2')].at(-1)
-                .getBoundingClientRect();
               const text = document.querySelector('#description').getBoundingClientRect();
-              return heading.bottom <= text.top + 1;
+              const after = document.querySelector('p.catalogue-current').getBoundingClientRect();
+              return text.bottom <= after.top + 1;
             }"""
         ),
-        "Description escaped its block",
+        "Text after the description moved",
     )
     # A unit-sourced entry: badge, live citation, no page image.
     page.goto(browse.rsplit("?", 1)[0] + "/lantern-flare")

@@ -1,7 +1,7 @@
 //! Catalogue plan §3 step 3: browse order and cursor (R13), quoted name search (§12),
 //! colliding keys (R20) and the search time budget, against published owner-written
 //! catalogues of a synthetic pair.
-use super::{BrowseQuery, Linked, browse, browse_within, latest_sealed};
+use super::{BrowseFailure, BrowseQuery, Linked, browse, browse_within, latest_sealed};
 use crate::{AppError, Store, catalogues::PublishRequest};
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -71,7 +71,7 @@ fn keys(
     db: &rusqlite::Connection,
     catalogue: &str,
     query: &BrowseQuery,
-) -> Result<(Vec<String>, bool), AppError> {
+) -> Result<(Vec<String>, bool), BrowseFailure> {
     let page = browse(db, &linked(db, catalogue), query)?;
     Ok((
         page.rows.into_iter().map(|row| row.key).collect(),
@@ -138,7 +138,7 @@ async fn browse_orders_by_name_then_key_with_an_exclusive_cursor() {
             assert_eq!(after_spell, seek);
             assert!(matches!(
                 keys(db, "spells", &query(Some("potion"), None, None)),
-                Err(AppError::NotFound)
+                Err(BrowseFailure::Other(AppError::NotFound))
             ));
             Ok(())
         })
@@ -192,7 +192,7 @@ async fn name_search_quotes_every_token_and_filters_without_ranking() {
                 ("ward\u{7}", "Search text must not contain control"),
             ] {
                 assert!(
-                    matches!(found(q), Err(AppError::Invalid(text)) if text.starts_with(message)),
+                    matches!(found(q), Err(BrowseFailure::Query(text)) if text.starts_with(message)),
                     "{q:?}"
                 );
             }
@@ -272,7 +272,7 @@ async fn browse_is_interrupted_past_its_time_budget() {
             for q in [Some("echo"), None] {
                 let interrupted = browse_within(db, &spells, &query(None, q, None), Duration::ZERO);
                 assert!(
-                    matches!(&interrupted, Err(AppError::Invalid(message)) if message.starts_with("Query too broad")),
+                    matches!(&interrupted, Err(BrowseFailure::Query(message)) if message.starts_with("Query too broad")),
                     "{q:?}: {:?}",
                     interrupted.err()
                 );
@@ -283,4 +283,40 @@ async fn browse_is_interrupted_past_its_time_budget() {
         .await
         .unwrap();
     assert_eq!(result, 100_000);
+}
+
+#[tokio::test]
+async fn index_identity_damage_is_never_presented_as_a_query_problem() {
+    let _lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (_dir, store) = store().await;
+    publish(
+        &store,
+        &catalogue("spells", &[owner("lantern", "spell", "Spell Lantern")]),
+        0,
+    )
+    .await;
+    store
+        .run(|db| {
+            let mut damaged = linked(db, "spells");
+            damaged.surrogate = i64::MAX;
+            let failure = browse(db, &damaged, &query(None, Some("lantern"), None));
+            assert!(
+                matches!(
+                    failure,
+                    Err(BrowseFailure::Other(AppError::Invalid(
+                        "Catalogue index identity out of range."
+                    )))
+                ),
+                "{:?}",
+                failure.err()
+            );
+            // A real query problem is still one.
+            assert!(matches!(
+                browse(db, &damaged, &query(None, Some("*"), None)),
+                Err(BrowseFailure::Query(_))
+            ));
+            Ok(())
+        })
+        .await
+        .unwrap();
 }

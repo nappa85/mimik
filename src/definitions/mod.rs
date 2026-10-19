@@ -119,6 +119,11 @@ pub struct Definition {
     /// Linked read-only catalogues, by id within the definition's pair (catalogue plan D3/D8),
     /// in author order (the sheet's display order). Omitted when absent, so the canonical bytes
     /// and hashes of unlinked definitions are unchanged.
+    ///
+    /// Unlike `constraints: []`, which predates this member and is accepted and canonicalised
+    /// away, an explicit `catalogues: []` is refused by the schema (`minItems: 1`): the member
+    /// is new, so it can have a single spelling of "no links" (absent) from the start, and an
+    /// empty list is more likely an authoring mistake than an intent.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub catalogues: Vec<CatalogueLink>,
 }

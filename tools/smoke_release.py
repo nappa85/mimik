@@ -987,7 +987,8 @@ CATALOGUE_RLO = "\u202e"
 def synthetic_catalogue(sources, mapping):
     """A linked catalogue of original synthetic text: one entry citing the synthetic unit and
     one owner-written entry whose text holds a line break and an unterminated right-to-left
-    override (catalogue plan §3 step 3)."""
+    override, right-to-left type and property labels, and a long unbroken property value
+    (catalogue plan §3 step 3)."""
     return {
         "contract_version": 1,
         "game_id": "synthetic-game",
@@ -1001,8 +1002,12 @@ def synthetic_catalogue(sources, mapping):
         "entry_types": [
             {
                 "id": "spell",
-                "label": "Spell",
-                "properties": [{"id": "level", "label": "Level", "control": "integer"}],
+                # Right-to-left labels (Unicode Cf such as RLO is refused in labels).
+                "label": "Spell \u05db\u05d9\u05e9\u05d5\u05e3",
+                "properties": [
+                    {"id": "level", "label": "\u05e8\u05de\u05d4 level", "control": "integer"},
+                    {"id": "note", "label": "Note", "control": "text"},
+                ],
             }
         ],
         "entries": [
@@ -1010,14 +1015,15 @@ def synthetic_catalogue(sources, mapping):
                 "key": "lantern-flare",
                 "type": "spell",
                 "name": "Lantern Flare",
-                "properties": {"level": 1},
+                "properties": {"level": 1, "note": ""},
                 "description": {"units": mapping["regions"][:1]},
             },
             {
                 "key": "ward-ink",
                 "type": "spell",
                 "name": "Ward Ink",
-                "properties": {"level": 2},
+                # One long unbroken value: the 390 px view must wrap it.
+                "properties": {"level": 2, "note": "w" * 400},
                 "description": {
                     "owner_text": "Ward ink protects a page.\nIts margin note reads "
                     + CATALOGUE_RLO

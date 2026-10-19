@@ -394,13 +394,17 @@ catalogue version never makes a definition approval stale.
 - `GET /private-sheets/{id}/catalogue/{catalogue}/{key}` shows one entry.
 
 The sheet page lists its definition's catalogues with links that open in a new tab, so an
-unsaved draft stays in the sheet's tab. Both routes are reached only through a sheet the
+unsaved draft stays in the sheet's tab. History pages list no links: the routes read the
+sheet's current revision. A catalogue whose sealed title is damaged is listed as
+unavailable and its pages show the catalogue id instead of the title. Both routes are reached only through a sheet the
 reader may read (its custodian, including a departed custodian of a frozen sheet, or an
 active Master of its campaign; never the production Owner) and the sheet's immutable runtime
 pin must link the catalogue. Native and unsupported pins, unlinked, unknown or other games'
 catalogues, unknown keys and unknown entry types all answer exactly like an unreadable sheet
 (403), so the routes cannot probe what exists; malformed ids, cursors, unknown query
-parameters and queries over 100 scalars answer 400 before any lookup.
+parameters and queries over 100 scalars answer 400 before any lookup, and before the session
+is checked (a syntax check only, so an anonymous request can tell 400 from 403 but learns
+nothing about what exists).
 
 Each request holds the single runtime permit through every phase: a first read transaction
 (session recheck, read authorization, the snapshot and pin), validation outside the
@@ -427,22 +431,28 @@ text"). Nothing is materialised.
 | Owner-written | The entry has owner text (a house rule or homebrew entry) |
 | Reviewed extraction | Every cited unit is accepted or corrected and every cited page is complete. The page adds: "Source text reviewed. Which passages form this entry was chosen by the catalogue author." |
 | Unchecked source text | Any cited unit is unreviewed or any cited page is incomplete: "Extracted from your manual; not yet reviewed." |
-| Description unavailable | Any cited unit is rejected now. No passage of the entry is shown, even one before the cut-off; the citation stays |
+| Description unavailable | Any cited unit is rejected now, or the stored text of a cited unit is malformed (not text, NUL, over 256 KiB), or (damage only) the entry cites no unit. No passage of the entry is shown, even one before the cut-off; the citations stay |
 
 Unit text is the correction for corrected units, otherwise the raw text. The metadata of every
 cited unit is read first; the texts follow in author order, cut at **20,000 characters per
 entry** (character-safe; at most 80 KB of UTF-8). A cut entry ends with "Continues in the
-manual at p. X (PDF page N)", naming the page of the first unit not fully shown. A unit whose
-text is not text, contains NUL or exceeds its bound shows "Description unavailable (source
-text malformed)" instead of any text. Owner text (at most 20,000 characters) is never cut.
+manual at p. X (PDF page N)", naming the page of the first unit not fully shown. A malformed
+unit anywhere in the entry, also after the cut-off, shows "Description unavailable (source
+text malformed)" instead of any text. Browse results and entry pages compute the badge with
+the same rule, so they always agree. Owner text (at most 20,000 characters) is never cut.
 Each citation is the source title, the current printed page label and the PDF page number,
 read live.
 
-All catalogue and manual text is escaped, kept with its line breaks (`white-space:
-pre-wrap`) and wrapped in `<bdi>`, so right-to-left text and bidirectional controls in owner
+All catalogue and manual text (names, the title, type and property labels, property values,
+owner and unit text, citations) is escaped, kept with its line breaks (`white-space:
+pre-wrap`; property values also wrap long words) and wrapped in `<bdi>`, so right-to-left text and bidirectional controls in owner
 or unit text (owner text keeps Unicode Cf for right-to-left prose) cannot reorder the
 surrounding names, citations or controls. A Chromium check covers an unterminated
-right-to-left override in owner text (`tools/catalogue_browser.py`).
+right-to-left override in owner text and right-to-left type and property labels
+(`tools/catalogue_browser.py`). Labels refuse Unicode Cf, so an override cannot occur in a
+label. The type filter's `<option>` elements cannot contain `<bdi>`; each option carries
+`dir="auto"` and is rendered by the native control as its own paragraph, so a label cannot
+reorder anything outside its option.
 
 ### Search
 
@@ -454,7 +464,10 @@ ranked: the order stays `(name, key)`. The index is joined back on the latest se
 of the same catalogue and restricted to its rowid range, so keys shared by two catalogues
 cannot leak. Every browse statement runs under the search time budget (1 s); a query that
 exceeds it, has no letters or digits, contains control characters or has more than 16 pieces
-re-renders the search form with a static message (422).
+re-renders the search form with a static message (422). Only these query problems do:
+damage or storage failures found while browsing answer as errors, never as a query problem.
+Neither route is rate-limited (the single runtime permit bounds them): a client that loops
+on searches delays sheet saves, which then answer 503 and can be retried.
 
 Retired entries stay listed with a "Retired" badge and their entry pages stay readable: they
 are valid on existing rows and only stop being offered for new picks (step 4).
