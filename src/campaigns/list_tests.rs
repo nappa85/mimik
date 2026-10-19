@@ -665,18 +665,20 @@ async fn stale_invalid_draft_conflicts() {
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let setup = setup(&super::formula_tests::formula_definition()).await;
     setup.create().await;
-    let current = super::formula_tests::form(1, "4", Some("2"));
+    // A real change (an unchanged save writes nothing, D-U).
+    let current = super::formula_tests::form(1, "5", Some("2"));
     assert_eq!(
         setup.post("/private-sheets/1", current).await.0,
         StatusCode::SEE_OTHER
     );
-    // Paired baseline: an invalid draft at the current revision is 422.
-    let invalid_current = super::formula_tests::form(2, "x", Some("2"));
+    // Paired baseline: an invalid draft at the current revision is 422 (a blank number is
+    // still refused; readable text over a known value is kept as a scribble from slice 1.2).
+    let invalid_current = super::formula_tests::form(2, "", Some("2"));
     assert_eq!(
         setup.post("/private-sheets/1", invalid_current).await.0,
         StatusCode::UNPROCESSABLE_ENTITY
     );
-    let stale = super::formula_tests::form(1, "x", Some("2"));
+    let stale = super::formula_tests::form(1, "", Some("2"));
     let (status, html) = setup.post("/private-sheets/1", stale).await;
     assert_eq!(status, StatusCode::CONFLICT, "scalar runtime");
     assert!(
@@ -699,8 +701,10 @@ async fn stale_invalid_draft_conflicts() {
     super::insert_native(store, setup.auth[1].clone(), native).await;
     let mut form = super::native_form();
     for (key, value) in &mut form {
-        if key == "revision" {
-            *value = "1".into();
+        match key.as_str() {
+            "revision" => *value = "1".into(),
+            "notes" => *value = "Edited".into(),
+            _ => {}
         }
     }
     assert_eq!(
@@ -786,10 +790,12 @@ async fn list_sheet_rendered_form_round_trips() {
     assert_eq!(status, StatusCode::OK);
     let form = super::formula_tests::submitted(&html);
     assert!(form.len() > 516, "{} pairs", form.len());
-    let (status, _) = setup.post("/private-sheets/1", form).await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
+    // Admitted unchanged, so nothing is written (D-U).
+    let (status, page) = setup.post("/private-sheets/1", form).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("No change"));
     let saved = reopen(&setup, 1).await;
-    assert_eq!(saved.revision, 2);
+    assert_eq!(saved.revision, 1);
     assert_eq!(saved.data, created.data, "unchanged round trip");
 }
 
@@ -858,7 +864,8 @@ async fn failed_save_rerender_keeps_draft_and_submitted_revision() {
     let form = list_form(
         1,
         vec![
-            equipment_row(0, "r1-1", "Kept <draft>", "x", None, None, "true"),
+            // A blank number is still refused (readable text would be kept as a scribble).
+            equipment_row(0, "r1-1", "Kept <draft>", "", None, None, "true"),
             equipment_row(
                 1,
                 "",
@@ -882,7 +889,7 @@ async fn failed_save_rerender_keeps_draft_and_submitted_revision() {
             .map(str::to_owned)
     };
     assert_eq!(value("row-1-0-0").as_deref(), Some("Kept <draft>"));
-    assert_eq!(value("row-1-0-1").as_deref(), Some("x"));
+    assert_eq!(value("row-1-0-1").as_deref(), Some(""));
     assert_eq!(value("id-1-1").as_deref(), Some(""));
     assert_eq!(value("row-1-1-2").as_deref(), Some("4"));
     assert_eq!(value("revision").as_deref(), Some("1"));
@@ -3179,12 +3186,13 @@ async fn leading_newlines_survive_ops_rejected_saves_and_reloads() {
     let (status, page) = setup.post("/private-sheets/1", rejected).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     expect(&page, "rejected save");
+    // The unchanged page is a no-op: leading newlines compare equal (D-U).
     assert_eq!(
         setup.post("/private-sheets/1", submitted(&view)).await.0,
-        StatusCode::SEE_OTHER
+        StatusCode::OK
     );
     let saved = reopen(&setup, 1).await;
-    assert_eq!(saved.revision, 2);
+    assert_eq!(saved.revision, 1);
     assert_eq!(
         (saved.data, saved.notes),
         (created.data, created.notes),
@@ -3330,12 +3338,13 @@ async fn native_sheet_textareas_keep_leading_newlines() {
     let (status, page) = setup.post("/private-sheets/1", rejected).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     expect(&page, "rejected save");
+    // The unchanged page is a no-op: leading newlines compare equal (D-U).
     assert_eq!(
         setup.post("/private-sheets/1", submitted(&view)).await.0,
-        StatusCode::SEE_OTHER
+        StatusCode::OK
     );
     let saved = reopen(&setup, 1).await;
-    assert_eq!(saved.revision, 2);
+    assert_eq!(saved.revision, 1);
     for key in ["description", "weapon_one", "equipment"] {
         assert_eq!(saved.data[key], created.data[key], "unchanged save: {key}");
     }
@@ -3384,12 +3393,13 @@ async fn browser_crlf_submission_is_stored_as_lf() {
             .unwrap()
             .contains("%0D%0A")
     );
+    // Normalised to LF it equals the saved text, so nothing is written (D-U).
     assert_eq!(
         setup.post("/private-sheets/1", browser).await.0,
-        StatusCode::SEE_OTHER
+        StatusCode::OK
     );
     let saved = reopen(&setup, 1).await;
-    assert_eq!(saved.revision, 2);
+    assert_eq!(saved.revision, 1);
     assert_eq!(
         serde_json::to_string(&(&saved.data, &saved.notes)).unwrap(),
         serde_json::to_string(&(&created.data, &created.notes)).unwrap(),

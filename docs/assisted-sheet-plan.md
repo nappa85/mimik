@@ -729,7 +729,9 @@ python3 tools/assist_demo.py target/debug/mimik --fixture target/assist-demo/fix
 ```
 
 Each slice states what the demo can do at that point. After 1.1 it is still the full-page
-form with one Save, and unreadable input is still refused.
+form with one Save, and unreadable input is still refused. After 1.2 a sum shows "84 − 15 =
+69" under the cell, unreadable text over a known number keeps it with a scribble, an
+unchanged Save writes nothing, and history lists the notes (§10).
 
 ### Step 1: seven slices (no JavaScript, no model)
 
@@ -1348,3 +1350,150 @@ build and test in a container with `--cpus 2` and `CARGO_BUILD_JOBS=2`. Times ar
 | `lan_smoke.py` (internal Docker networks, separate Chromium client, HTTPS proxy, QR decode) on the unpacked binary and source | 11:57–12:00 | 2 | passed; no containers or networks left. The script's client and server runs set `--cpus=2`; its denier and offline QR-decoder runs do not, so a local `docker` shim on `PATH` added `--cpus=2 -e CARGO_BUILD_JOBS=2` to any `docker run` without `--cpus` (machine schedule). No physical-phone or router test is claimed |
 
 Nothing in the list was skipped.
+
+## 10. Slice 1.2 implementation notes
+
+Branch `assist-1.2` (from master `cccd9ff`, which merged slice 1.1). Built the slice-1.2 scope
+of §5 ("Notes and scribbles") and the four slice-1.1 review follow-ups (review record rows 6,
+7, 8 and 10). Nothing from later slices: no switch or Undo routes, no `sign_literal` or
+`erased` notes, no `null` for non-nullable integers, no per-cell forms, no JavaScript.
+
+**What was built.**
+- **Migration 020** (`migrations/020_sheet_notes.sql`, `SCHEMA_VERSION` 20):
+  `private_sheet_notes(sheet_id, revision, address, op, raw, before, after, bundle, target)`,
+  primary key `(sheet_id, revision, address)`, a foreign key to the history row, and an index
+  for the current note of an address. Column checks: a typed address (`field:`, `cell:`,
+  `meta:`), the eight plan ops, `raw` ≤ 200 characters without NUL, `before`/`after` JSON
+  objects ≤ 80 bytes. Triggers: UPDATE and DELETE abort; an insert aborts when the row exists
+  (the replacement guard: `INSERT OR REPLACE` deletes without firing delete triggers), when
+  it does not name the sheet's live, active `create`/`edit` revision, when the request auth is
+  not that revision's actor (`campaign_request_auth`), or past 256 notes per revision.
+- **`campaigns::notes`**: the typed note value (`absent`, `unknown`, `int` as a decimal
+  string, `enum`, `bool`, `row`) with canonical encoding ≤ 80 bytes and a decoder that reads
+  only canonical text; `Op`; typed addresses (`field:<id>`, `cell:<list>/<host>/<property>`
+  through `history_diff::address`); `insert` (in the save's transaction), `current` (the
+  latest note of each live address, one indexed lookup per address through `json_each`) and
+  `of_revision`.
+- **`values::form` and `reconcile`** read cells through a `Recorder` that collects notes:
+  - a changed integer, enum or boolean cell of a saved sheet gets a note: `sum` for a sum,
+    otherwise `literal` (a sign-led input too, until 1.3 adds `sign_literal`); Known ↔ Unknown
+    and Set ↔ Not set are `literal` notes with an empty `raw` and typed `before`/`after`
+    (`{"absent":true}` stays distinct from `{"unknown":true}`);
+  - an unreadable entry (syntax, more than 64 numbers, out of range) over a **known saved
+    integer** keeps the integer with an `unresolved` note; elsewhere it is still 422;
+  - entering the kept value when the current note is a scribble on it writes a `literal`
+    note and a data-unchanged revision (§3a);
+  - text, multiline, Name and General notes write none.
+- **`entry::read`** returns the value and whether it was a sum; **`entry::sum_text`** shows a
+  sum normalised ("84 -15" → "84 − 15").
+- **No-op saves (D-U)**: `apply_save` reports whether anything changes (name after trim,
+  notes, data and notes compared; the per-control comparisons of §3a follow from comparing
+  parsed values). A no-op calls `Store::private_unchanged`, which rechecks the request auth,
+  edit rights, the active state and the revision in a transaction, then answers 200 with the
+  saved page and "No change: every value equals the saved sheet, so nothing was saved." A
+  stale no-op gets the usual 409 with the draft; lost rights get 403.
+- **Writer**: `private_save_keeping` inserts the notes after `snapshots::write` in the same
+  `IMMEDIATE` transaction; any failure rolls back the revision too.
+- **Display**: next to an integer cell whose current note is a sum, "84 − 15 = 69"; a scribble
+  shows "kept 84 · ‘lots’ not understood", with the raw text escaped inside `<bdi>` and the
+  input `aria-describedby` the note. History revision pages list that revision's notes (address,
+  op, raw inside `<bdi>`, before → after) in the change summary for the custodian and Masters
+  (D-E).
+- **Follow-ups**: the sanitizer guard test puts its `<td>` in a table row and asserts an
+  allowed `colspan` survives (row 6); `fresh_directory` documents the chmod of a
+  caller-supplied empty directory (row 7); `test_assist_demo.py` injects a dedicated
+  `SyntheticCliFailure` and catches only that (row 8); `lan_smoke.py` caps every container
+  with `--cpus` (new option, default 2, validated 1–64) and gives the QR decoder
+  `CARGO_BUILD_JOBS` to match (row 10).
+- **Browser**: the assisted stage of `browser_smoke.py` also checks the sum note, the scribble
+  (value kept, raw inside `<bdi>`, the input showing the scribble), "No change" for an unchanged
+  Enter (200), and a later number clearing the scribble, at both viewports.
+
+**Deviations from the plan (code reality wins, intent kept).**
+
+| # | Plan said | Done | Why |
+|---|---|---|---|
+| N1 | An unreadable integer on a known saved value keeps the value with an `unresolved` note | Kept for syntax, more than 64 numbers and out-of-range input. Blank, over-long (> 200 characters) and control-character input is still 422 | Blank is the slice-1.4 input for "unknown" (`erased`); recording it as a scribble now would change meaning later. Over-long and control-character text cannot be stored faithfully as `raw` (≤ 200, no controls), and §3a already calls it unreadable |
+| N2 | (not specified) | A cell whose current note is a scribble on its saved value renders the scribble text in its input | The legacy full form re-posts every field. Showing the kept value would make every save elsewhere silently "accept" every scribble (§3a rule) and turn a plain re-post into a revision. Showing the scribble makes the re-post a no-op; accepting needs the value typed |
+| N3 | §3a: a note for every value change; the create form at most one note per in-scope cell | Create and new rows write notes only for sums (§5: "It writes notes for interpreted numbers"); literals, Unknown and Not set on new cells write none | A new cell has no `before`, so there is nothing to undo (§3f) or show for a literal. It also keeps sheets at the publication budget creatable: the exact-budget sheet has far more than 256 in-scope cells and would otherwise hit the 256-note limit |
+| N4 | `op` `sign_literal` for sign-led input | `literal` in 1.2 | §5 puts `sign_literal` with the switch in slice 1.3; the table already admits it, so 1.3 needs no migration |
+| N5 | "The page says No change" | 200 with the saved page and the message in `role="status"`, not a 303 | There is no flash store, so a redirect could not carry the message. A refresh re-posts a no-op, which writes nothing |
+| N6 | D-U for "a save" | Also the native MÖRK BORG full form | The comparison is generic in `apply_save`; native validation is unchanged |
+| N7 | Insert must name the live revision | Also: only for an active `create`/`edit` revision, and only under the request auth of that revision's actor | Defence in depth at no cost. L1 remains: that actor's session can still add notes to the live revision |
+| N8 | — | Existing tests changed for D-U and scribbles: `rendered_form_round_trips`, `list_sheet_rendered_form_round_trips`, `leading_newlines_survive_ops_rejected_saves_and_reloads`, `native_sheet_textareas_keep_leading_newlines` and `browser_crlf_submission_is_stored_as_lf` now expect "No change" and no revision for an unchanged post (stronger: byte-identical without writing); the two router tests, `stale_invalid_draft_conflicts` and the native conflict make a real edit first; `failed_save_rerender_labels_the_saved_revision`, `formula_text_is_escaped`, `failed_save_rerender_keeps_draft_and_submitted_revision` and the slice-1.1 `unreadable_entry_is_still_422_with_the_draft` use input that is still refused (blank, > 200 characters, control characters, new rows) | Spec changes of D-U and §3a, not weakened checks; every 422 and 409 path is still exercised |
+| N9 | — | Upgrade tests that rewind to older schemas drop the note table (`DROP_NOTES_SCHEMA`, `schema_fixture`, `tests/catalogues.rs`, `tests/source_search.rs`); `formula_tests::Setup::_dir` is now `dir` | Same pattern as the catalogue rewind; Clippy pedantic refuses an underscore binding in use |
+
+**Red → green.** Red runs at 12:08 (Python) and 12:22–12:24 (Rust, `--cpus 2`) against a stub:
+`notes::insert`, `current` and `of_revision` did nothing, `apply_save` always reported a
+change, `keeps_value` was always false, and migration 020 had its table without triggers.
+The stub was then replaced by the saved sources (checked: no stub markers left).
+
+| Test | Red (stub) | Green |
+|---|---|---|
+| `notes_tests::sums_and_literals_are_noted_with_the_save_and_shown` | FAILED (no notes) | pass |
+| `notes_tests::an_unreadable_entry_keeps_a_known_value_with_a_scribble` | FAILED (422) | pass |
+| `notes_tests::a_later_literal_replaces_a_scribble_as_the_current_note` | FAILED | pass |
+| `notes_tests::entering_the_kept_value_resolves_a_scribble` | FAILED | pass; mutation "no scribble acceptance" fails it |
+| `notes_tests::a_save_that_changes_nothing_writes_nothing` (split later; `text_edits_write_no_note_and_presence_is_noted` holds its second half) | FAILED (303, revision written) | pass |
+| `notes_tests::enum_boolean_and_unknown_notes_read_back_exactly` | FAILED | pass |
+| `notes_tests::a_no_op_with_revoked_rights_is_403` | FAILED (303) | pass |
+| `notes_tests::masters_see_raw_text_in_history` | FAILED | pass |
+| `notes_tests::scribbles_render_escaped_inside_bdi` | FAILED | pass |
+| `notes_tests::freeze_writes_no_note_and_notes_stay_readable` | FAILED | pass |
+| `notes_tests::more_than_256_notes_are_refused` | FAILED (0 notes stored) | pass |
+| `notes_tests::a_failure_after_the_snapshot_write_rolls_back_everything` | FAILED | pass |
+| `notes_tests::notes_are_insert_only` (split later; `note_inserts_need_the_revision_actor` holds the auth and L1 half) | FAILED (no triggers) | pass; mutation "no replacement guard" fails it |
+| `notes_tests::populated_schema19_upgrade_adds_the_note_table` | FAILED | pass |
+| `notes_tests::unkeepable_input_is_still_422` | pass (guard: the stub refused everything) | pass; mutation "every unreadable kind keeps the value" fails it |
+| `entry::tests::only_unreadable_text_keeps_a_known_value` | FAILED | pass |
+| `entry::tests::readings_tell_sums_from_literals` | pass (not stubbed) | pass; mutation "a literal is a sum" fails it |
+| `notes::tests::*` (5 value, op and address tests) | pass (not stubbed) | pass |
+| `sources::sanitizer_tests::style_attributes_never_survive_in_any_case` (row 6) | — | pass; mutation "`td` allows no `colspan`" fails it, so the table branch now runs |
+| `test_lan_smoke.test_every_container_is_cpu_capped`, `test_cpu_cap_must_be_a_small_positive_integer` (row 10) | FAILED (denier uncapped; no `cpu_cap`) | pass |
+| `test_assist_demo.AccountInputTests` (row 8) | — (refactor of the test itself) | pass |
+
+First green run: four test-design errors, fixed in the tests: the note-limit definition lacked
+`formula_profile`; an insert-only case reused an address that already had a note at revision
+1 (so the replacement guard fired before the live-revision check); the upgrade test's
+reopened store needed the fixture clock; and the history assertion compared askama's `&#60;`
+with scraper's `&lt;`. The first full run then failed 12 existing tests, all from D-U, the
+scribble rule or the note limit; they are N8 (and N3 for the exact-budget sheet). The four
+mutation runs (12:45–12:48, `--cpus 2`) restored the sources afterwards.
+
+**Demo after 1.2** (same commands as §9). In Current HP, `84 -15` + Enter saves 69 and shows
+"84 − 15 = 69" under the cell. `lots` + Enter keeps 69 and shows "kept 69 · ‘lots’ not
+understood"; the cell keeps showing `lots`. Enter again on the unchanged page answers "No
+change" and writes nothing. `69` (or any number) clears the scribble. The Full history link
+shows each revision's notes with what was typed. Blank, a new row's unreadable quantity and an
+unreadable number on the create page are still refused (until 1.4).
+
+**Gate** (code commit `5b405cd`; this record is folded into the same commit afterwards and
+changes only docs). Monday 2026-10-19, inside the weekday window: every build and test ran in
+`mimik-ci:latest` with `--cpus 2`, `CARGO_BUILD_JOBS=2` and `--network none` (target volume
+`mimik-catalogue-target`, registry volume `mimik-cargo-cache`); the browser and LAN containers
+ran with `--cpus=2`. Times are CEST.
+
+| Gate | Time | Cap | Result |
+|---|---|---|---|
+| `cargo fmt --check`, pedantic Clippy `-D warnings` | 12:37, again 13:01 on the commit | 2 | clean (first runs found `too_many_lines` ×3, `type_complexity`, `used_underscore_binding`; fixed by splitting functions and tests, a type alias and renaming `Setup::_dir`) |
+| `cargo test --locked --all-targets --all-features` | 12:37–12:45 | 2 | **611 passed**, 0 failed, 2 ignored (the pre-existing ones), 37 result lines |
+| `ruff check tools`, `ruff format --check tools` (worktree root) | 12:50 | 2 | clean |
+| Tools unittest (`CI=1`, `MIMIK_FORMULA_EVAL`, main git dir mounted read-only) | 12:50–12:54 | 2 | **762 run, OK**, 11 skipped |
+| `formula_eval` and `source_fixture` examples, release build | 12:47–12:50 | 2 | built; release binary 22,028,568 bytes (+99,424 over slice 1.1) |
+| `smoke_release.py --auth --source-fixture` (release binary) | 12:54–12:55 | 2 | passed |
+| `browser_smoke.py --auth` in `mimik-browser` (CI flags, worktree `tools/` on `/checks`) | 12:55–12:56 | 2 | every stage passed, the assisted stage at both viewports. A copy expecting "kept 68" failed with "The scribble lots did not keep 69 with its note" (12:57–12:58), so the new checks run |
+| `actionlint .github/workflows/ci.yml` | 13:01 | 2 | clean |
+| `cargo audit --no-fetch --deny warnings` (slice-1.1 advisory DB copy, tip `999ec89d`, 2026-10-17, 1,338 advisories) | 13:01 | 2 | clean, exit 0; `Cargo.lock` unchanged (no dependency change) |
+| `cargo about generate --locked --fail about.hbs` | 13:01–13:02 | 2 | passed (497,325 bytes, unchanged) |
+| `cargo package --locked --allow-dirty` (verify build), `verify_source_package.py` | 13:02–13:03 | 2 | passed; allowlist verified |
+| `cargo vendor --locked`, `package_release.py --version 0.1.0 --revision 5b405cd…` | 13:03 | 2 | archives, source crate, dependency sources and `SHA256SUMS` created |
+| Unpacked artifact: `sha256sum --check`, unpack, `smoke_release.py --auth --source-fixture` | 13:03–13:04 | 2 | three checksums OK; smoke passed |
+| `browser_smoke.py --auth` on the unpacked binary | 13:04–13:05 | 2 | every stage passed |
+| `lan_smoke.py` (now capping every container itself, default `--cpus 2`) on the unpacked binary and source | 13:06–13:08 | 2 | passed; no containers or networks left; no local shim needed |
+| Demo launcher `--exit-after-setup` (release binary) | 13:08 | 2 | sheet created; stopped cleanly |
+
+**Not run:** the offline corresponding-source rebuild (no build-input change beyond the
+crate's own sources; CI runs it), a serving demo session in a real browser by hand. **Not yet
+done:** the independent implementation review (Sol and Sonnet, plus the third chain),
+required before merge. `release-scope.md` is not updated for schema 20 (as for schema 19 and
+slice 1.1, the assisted sheet's release scope is step 5).

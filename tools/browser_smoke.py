@@ -671,15 +671,21 @@ def run_list_browser(page, campaign, version, submit):
 
 
 def run_assist_browser(page, campaign, version):
-    """Assisted sheet slice 1.1: a sum typed into Current HP saves its result, a saved
-    negative survives the re-post, and integer inputs keep the plain keyboard (no
-    `inputmode`, which on phones hides minus and space)."""
+    """Assisted sheet slices 1.1 and 1.2: a sum typed into Current HP saves its result and
+    shows "84 − 15 = 69" next to the cell, a saved negative survives the re-post, an
+    unreadable entry keeps the value with its scribble (inside `<bdi>`), an unchanged save
+    writes nothing, and integer inputs keep the plain keyboard (no `inputmode`, which on
+    phones hides minus and space)."""
 
-    def enter(field):
+    def enter(field, status=303):
         with page.expect_response(lambda response: response.request.method == "POST") as response:
             with page.expect_navigation(wait_until="domcontentloaded"):
                 field.press("Enter")
-        require(response.value.status == 303, "Assisted sheet Enter did not save")
+        require(response.value.status == status, "Assisted sheet Enter status differs")
+
+    def note():
+        notes = page.locator("#note-hp")
+        return notes.inner_text().strip() if notes.count() else None
 
     page.goto(campaign + f"/sheets/new?version={version}")
     page.locator('input[name="name"]').fill("Assisted browser private")
@@ -709,7 +715,36 @@ def run_assist_browser(page, campaign, version):
         "0 violated, 0 not evaluated" in page.locator("#advisory-checks").inner_text(),
         "Assisted sheet advisory check differs",
     )
+    require(note() == "84 \u2212 15 = 69", "The sum note 84 − 15 = 69 is not shown")
     no_overflow(page, "assisted sheet after a typed sum")
+    # Slice 1.2: an unreadable entry keeps the saved value and shows the scribble.
+    hp = page.get_by_label("Current HP", exact=True)
+    hp.fill("lots")
+    enter(hp)
+    page.goto(assisted)
+    require(
+        note() == "kept 69 \u00b7 \u2018lots\u2019 not understood"
+        and page.locator("#note-hp bdi").inner_text() == "lots"
+        and page.get_by_label("Current HP", exact=True).input_value() == "lots",
+        "The scribble lots did not keep 69 with its note",
+    )
+    no_overflow(page, "assisted sheet with a scribble")
+    # Pressing Enter on the unchanged page writes nothing (D-U).
+    hp = page.get_by_label("Current HP", exact=True)
+    enter(hp, status=200)
+    require(
+        "No change" in page.locator('[role="status"]').inner_text(),
+        "An unchanged assisted save did not say No change",
+    )
+    # A later number replaces the scribble.
+    hp = page.get_by_label("Current HP", exact=True)
+    hp.fill("70")
+    enter(hp)
+    page.goto(assisted)
+    require(
+        note() is None and page.get_by_label("Current HP", exact=True).input_value() == "70",
+        "A new number did not replace the scribble",
+    )
 
 
 def run_workspace_browser(

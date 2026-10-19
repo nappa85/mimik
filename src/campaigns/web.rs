@@ -441,6 +441,8 @@ struct FieldView {
     rule_ids: String,
     /// The rows of a list field (plan D10); `None` for every other control.
     list: Option<ListView>,
+    /// The field's current change note, when it has something to show (slice 1.2).
+    note: Option<NoteLine>,
 }
 
 /// At most this many characters of a value shown in a second, visible context (plan D7
@@ -466,6 +468,77 @@ struct CellView {
     p: usize,
     value: String,
     state: String,
+    /// The cell's current change note, when it has something to show (slice 1.2).
+    note: Option<NoteLine>,
+}
+
+/// What a sheet page shows next to a cell from its current change note (assisted sheet
+/// slice 1.2): a sum ("84 − 15 = 69") or a scribble ("kept 84 · ‘lots’ not understood").
+/// Other notes show nothing on the sheet; history lists them all.
+struct NoteLine {
+    /// `sum` or `unresolved`.
+    kind: &'static str,
+    /// The normalised sum, or the raw scribble (rendered escaped inside `<bdi>`).
+    text: String,
+    /// The value the note resulted in.
+    value: String,
+}
+
+impl NoteLine {
+    /// The line for `stored` when it describes the saved value `saved` of a cell.
+    fn of(
+        stored: &super::notes::Stored,
+        control: crate::definitions::Control,
+        saved: &serde_json::Value,
+    ) -> Option<Self> {
+        let note = &stored.note;
+        if super::notes::NoteValue::of(control, saved).as_ref() != Some(&note.after) {
+            return None;
+        }
+        let value = note.after.text();
+        match note.op {
+            super::notes::Op::Sum => Some(Self {
+                kind: "sum",
+                text: super::entry::sum_text(&note.raw)?,
+                value,
+            }),
+            super::notes::Op::Unresolved => Some(Self {
+                kind: "unresolved",
+                text: note.raw.clone(),
+                value,
+            }),
+            _ => None,
+        }
+    }
+    /// A scribble keeps the saved value; its control shows what the player wrote.
+    fn scribble(&self) -> Option<&str> {
+        (self.kind == "unresolved").then_some(self.text.as_str())
+    }
+}
+
+/// One note of a history revision (D-E: the custodian and Masters see raw text).
+struct NoteRow {
+    address: String,
+    op: &'static str,
+    raw: String,
+    before: String,
+    after: String,
+}
+
+impl NoteRow {
+    fn of(stored: &super::notes::Stored) -> Self {
+        let note = &stored.note;
+        Self {
+            address: note.address.clone(),
+            op: note.op.as_str(),
+            raw: note.raw.clone(),
+            before: note
+                .before
+                .as_ref()
+                .map_or_else(|| "new".into(), super::notes::NoteValue::text),
+            after: note.after.text(),
+        }
+    }
 }
 
 impl CellView {
@@ -532,6 +605,7 @@ impl ListView {
         field: &crate::definitions::Field,
         draft: values::ListDraft,
         focus: Option<values::Focus>,
+        saved: Option<(&serde_json::Value, &BTreeMap<String, super::notes::Stored>)>,
     ) -> Self {
         let row_focus = |r: usize| match focus {
             Some(values::Focus::RowStart(list, row)) if (list, row) == (f, r) => RowFocus::Start,
@@ -548,20 +622,44 @@ impl ListView {
                 options: choices(property.options.as_ref()),
             })
             .collect();
+        let declared = values::properties(field);
+        // Notes are shown on a saved page only, never over a re-rendered draft.
+        let note = |id: &str, p: usize| {
+            let (saved, current) = saved?;
+            let property = declared.get(p)?;
+            let item = saved
+                .as_array()?
+                .iter()
+                .find(|item| item["id"].as_str() == Some(id))?;
+            let stored = current.get(&super::notes::cell_address(&field.id, id, &property.id))?;
+            NoteLine::of(stored, property.control, item.get(&property.id)?)
+        };
         let rows = draft
             .rows
             .into_iter()
             .enumerate()
             .map(|(r, row)| RowView {
                 r,
-                id: row.id,
                 cells: row
                     .values
                     .into_iter()
                     .zip(row.states)
                     .enumerate()
-                    .map(|(p, (value, state))| CellView { p, value, state })
+                    .map(|(p, (value, state))| {
+                        let note = note(&row.id, p);
+                        let value = note
+                            .as_ref()
+                            .and_then(NoteLine::scribble)
+                            .map_or(value, str::to_owned);
+                        CellView {
+                            p,
+                            value,
+                            state,
+                            note,
+                        }
+                    })
                     .collect(),
+                id: row.id,
                 focus: row_focus(r),
             })
             .collect();
@@ -658,6 +756,8 @@ struct PrivateTemplate<'a> {
     mode: FormulaMode,
     /// Evaluation of the saved snapshot; never of an unsaved draft.
     formulas: Option<FormulaView>,
+    /// A history page's change notes, with raw text (D-E).
+    revision_notes: Vec<NoteRow>,
 }
 
 /// How a runtime sheet shows its derived values.
@@ -803,6 +903,7 @@ fn render_private(
             (true, false, true) => FormulaMode::Draft,
         },
         formulas,
+        revision_notes: view.notes.revision.iter().map(NoteRow::of).collect(),
     }
     .render()
     .map_err(|_| AppError::Template)
@@ -832,11 +933,23 @@ fn groups(
                         || values::ListDraft::saved(field, saved),
                         |raw| values::ListDraft::submitted(f, field, raw),
                     );
-                    ListView::new(f, field, draft, focus)
+                    let notes = raw.is_none().then_some((saved, &view.notes.current));
+                    ListView::new(f, field, draft, focus, notes)
                 });
+                let note = view
+                    .notes
+                    .current
+                    .get(&super::notes::field_address(id))
+                    .filter(|_| raw.is_none())
+                    .and_then(|stored| NoteLine::of(stored, field.control, saved));
                 let value = raw
                     .and_then(|r| r.get(&format!("value-{id}")))
                     .cloned()
+                    .or_else(|| {
+                        note.as_ref()
+                            .and_then(NoteLine::scribble)
+                            .map(str::to_owned)
+                    })
                     .unwrap_or_else(|| match saved {
                         serde_json::Value::String(s) => s.clone(),
                         serde_json::Value::Null => String::new(),
@@ -874,6 +987,7 @@ fn groups(
                         .map(|formula| super::formulas::rule_list(&formula.rule_ids))
                         .unwrap_or_default(),
                     list,
+                    note,
                 });
             }
             groups.push(GroupView {
@@ -1120,31 +1234,47 @@ async fn draft_op(
     }
 }
 
-/// Validates an admitted save form into `view.snapshot` (plan D4 steps 5 and 6).
-fn apply_save(view: &mut SheetView, form: &BTreeMap<String, String>) -> Result<(), AppError> {
+/// Validates an admitted save form into `view.snapshot` and its change notes into
+/// `view.notes.pending` (plan D4 steps 5 and 6; assisted sheet slice 1.2). Returns whether
+/// anything changes: a save that changes no value and records no note is a no-op (D-U).
+fn apply_save(view: &mut SheetView, form: &BTreeMap<String, String>) -> Result<bool, AppError> {
     // The revision check precedes value validation: a stale draft answers 409 even when its
     // values are invalid.
     let revision = values::integer(&form["revision"])?;
     if revision != view.snapshot.revision {
         return Err(AppError::Conflict);
     }
+    let create = view.snapshot.sheet_id == 0;
     let name = super::name_notes(&form["name"], &form["notes"])?;
-    let data = if let Some(pin) = &view.immutable {
-        let data = values::form(
+    let (data, notes) = if let Some(pin) = &view.immutable {
+        let (data, notes) = values::form(
             pin.definition(),
             form,
-            &view.snapshot.data,
+            (!create).then_some(&view.snapshot.data),
             view.snapshot.revision,
+            &view.notes.current,
         )?;
         pin.validate_values(&data)?;
-        data
+        if notes.len() > super::notes::MAX_NOTES {
+            return Err(super::notes::too_many());
+        }
+        (data, notes)
     } else {
-        serde_json::to_value(native_draft(form).validate()?)?
+        (
+            serde_json::to_value(native_draft(form).validate()?)?,
+            Vec::new(),
+        )
     };
+    let changed = create
+        || name != view.snapshot.name
+        || form["notes"] != view.snapshot.notes
+        || data != view.snapshot.data
+        || !notes.is_empty();
     view.snapshot.name = name;
     view.snapshot.notes.clone_from(&form["notes"]);
     view.snapshot.data = data;
-    Ok(())
+    view.notes.pending = notes;
+    Ok(changed)
 }
 
 async fn save_private(
@@ -1210,23 +1340,14 @@ async fn save_private(
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if let Err(failure) = result {
-        let message = match &failure {
-            AppError::Invalid(reason) => format!(
-                "No changes saved: {reason} Check the full draft and its submitted revision."
-            ),
-            _ => "No changes saved. Check the full draft and its submitted revision.".into(),
-        };
-        let (view, permit) = rejected_editor(&state, auth, id, version, Some(permit)).await?;
-        return rendered(
-            view,
-            permit,
-            csrf,
-            Some(form),
-            error(failure),
-            Notice::status(message),
-        )
-        .await;
+    let changed = match result {
+        Ok(changed) => changed,
+        Err(failure) => {
+            return invalid_draft(&state, auth, (id, version), permit, csrf, form, failure).await;
+        }
+    };
+    if !changed {
+        return unchanged(&state, auth, (id, version), view, permit, csrf, form).await;
     }
     match state
         .store()
@@ -1254,6 +1375,83 @@ async fn save_private(
             .await
         }
         Err((failure, _)) => Err(error(failure)),
+    }
+}
+
+/// Re-renders a draft whose values were refused before any database step (plan D4 step 6).
+async fn invalid_draft(
+    state: &AuthState,
+    auth: auth::RequestAuth,
+    (id, version): (i64, Option<i64>),
+    permit: OwnedSemaphorePermit,
+    csrf: String,
+    form: BTreeMap<String, String>,
+    failure: AppError,
+) -> ResultResponse {
+    let message = match &failure {
+        AppError::Invalid(reason) => {
+            format!("No changes saved: {reason} Check the full draft and its submitted revision.")
+        }
+        _ => "No changes saved. Check the full draft and its submitted revision.".into(),
+    };
+    let (view, permit) = rejected_editor(state, auth, id, version, Some(permit)).await?;
+    rendered(
+        view,
+        permit,
+        csrf,
+        Some(form),
+        error(failure),
+        Notice::status(message),
+    )
+    .await
+}
+
+/// A save that changes nothing (D-U): nothing is written, but rights, the active state and
+/// the revision are still rechecked in a transaction before "No change". A stale page gets
+/// the usual 409 with its draft; lost rights get 403.
+async fn unchanged(
+    state: &AuthState,
+    auth: auth::RequestAuth,
+    (id, version): (i64, Option<i64>),
+    view: SheetView,
+    permit: OwnedSemaphorePermit,
+    csrf: String,
+    form: BTreeMap<String, String>,
+) -> ResultResponse {
+    match state
+        .store()
+        .private_unchanged(auth.clone(), view.snapshot.sheet_id, view.snapshot.revision)
+        .await
+    {
+        Ok(()) => {
+            rendered(
+                view,
+                permit,
+                csrf,
+                None,
+                StatusCode::OK,
+                Notice::status(
+                    "No change: every value equals the saved sheet, so nothing was saved.".into(),
+                ),
+            )
+            .await
+        }
+        Err(AppError::Conflict) => {
+            let (view, permit) = rejected_editor(state, auth, id, version, Some(permit)).await?;
+            rendered(
+                view,
+                permit,
+                csrf,
+                Some(form),
+                StatusCode::CONFLICT,
+                Notice::status(
+                    "No changes saved. Copy your draft, reload and reassess the submitted revision."
+                        .into(),
+                ),
+            )
+            .await
+        }
+        Err(failure) => Err(error(failure)),
     }
 }
 

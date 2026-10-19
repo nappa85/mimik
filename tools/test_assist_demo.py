@@ -36,6 +36,10 @@ class FreshDirectoryTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(empty.stat().st_mode), 0o700)
 
 
+class SyntheticCliFailure(Exception):
+    """The injected CLI failure; unittest assertion errors are never caught with it."""
+
+
 class AccountInputTests(unittest.TestCase):
     """Password and invitation files exist only while the CLI reads them."""
 
@@ -55,18 +59,21 @@ class AccountInputTests(unittest.TestCase):
                     Path(arguments[arguments.index("--token-output") + 1]), b"t" * 64
                 )
             if arguments[0] == fail_at:
-                raise AssertionError("synthetic CLI failure")
+                raise SyntheticCliFailure(arguments[0])
             return b"{}"
 
         with tempfile.TemporaryDirectory() as temp:
             directory = assist_demo.fresh_directory(Path(temp) / "data")
             with patch.object(assist_demo, "registry_cli", cli):
-                try:
+                if fail_at is None:
                     assist_demo.create_accounts(
                         Path("mimik"), directory, assist_demo.demo_passwords()
                     )
-                except AssertionError:
-                    pass
+                else:
+                    with self.assertRaises(SyntheticCliFailure):
+                        assist_demo.create_accounts(
+                            Path("mimik"), directory, assist_demo.demo_passwords()
+                        )
             remaining = sorted(path.name for path in directory.iterdir())
         return calls, remaining
 

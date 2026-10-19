@@ -33,7 +33,10 @@ fn values(
     revision: i64,
 ) -> Result<Value, AppError> {
     let pin = crate::definitions::private_pin::for_tests(&list_definition());
-    super::values::form(pin.definition(), form, saved, revision)
+    // Revision 0 is a create: there is no saved sheet, so every row is new.
+    let saved = (revision > 0).then_some(saved);
+    super::values::form(pin.definition(), form, saved, revision, &BTreeMap::new())
+        .map(|(data, _notes)| data)
 }
 
 fn saved() -> Value {
@@ -142,11 +145,13 @@ fn rows_over_256_refused() {
         values: vec!["t".into()],
         states: vec![String::new()],
     };
+    let current = BTreeMap::new();
+    let mut recorder = super::values::Recorder::new(&current);
     let full = super::values::ListDraft {
         rows: vec![row.clone(); 256],
     };
     assert_eq!(
-        super::values::reconcile(field, &full, &json!([]), 1)
+        super::values::reconcile(field, &full, &json!([]), 1, &mut recorder)
             .unwrap()
             .as_array()
             .unwrap()
@@ -157,7 +162,7 @@ fn rows_over_256_refused() {
         rows: vec![row; 257],
     };
     invalid(
-        super::values::reconcile(field, &over, &json!([]), 1),
+        super::values::reconcile(field, &over, &json!([]), 1, &mut recorder),
         "257 rows",
     );
 }

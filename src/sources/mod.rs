@@ -217,11 +217,16 @@ mod sanitizer_tests {
             "background:uRl(https://outside.example/x)",
             "background-image:Url( 'https://outside.example/x' )",
         ] {
-            let html = format!("<p style=\"{style}\">text</p><td style=\"{style}\">c</td>");
+            // The cell sits inside a table row: a bare `<td>` is dropped by the HTML parser
+            // before the attribute filter runs, so it would not exercise the table branch.
+            let html = format!(
+                "<p style=\"{style}\">text</p><table><tbody><tr><td colspan=\"2\" style=\"{style}\">c</td></tr></tbody></table>"
+            );
             let clean = super::sanitized(&html).unwrap();
             assert!(!clean.to_ascii_lowercase().contains("url"), "{clean}");
             assert!(!clean.contains("style"), "{clean}");
             assert!(clean.contains("<p>text</p>"), "{clean}");
+            assert!(clean.contains("<td colspan=\"2\">c</td>"), "{clean}");
         }
     }
 }

@@ -42,7 +42,10 @@ ROWS = (("Rope", "1", "1"), ("Torch", "3", "1"))
 
 def fresh_directory(path):
     """Create `path` with mode 0700, or accept it only when it is an empty directory (never
-    reuse data). The database and server log stay readable by the current user only."""
+    reuse data). The database and server log stay readable by the current user only.
+
+    An existing empty directory supplied by the caller is accepted and its mode is changed
+    to 0700 as well, so `--data` may name a directory the operator created beforehand."""
     if path.exists():
         require(path.is_dir() and not any(path.iterdir()), f"{path} is not an empty directory")
     else:

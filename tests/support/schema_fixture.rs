@@ -35,6 +35,8 @@ fn remove_empty_accounts(db: &rusqlite::Connection) {
         "registry_web_events",
         "source_web_events",
         "account_web_events",
+        // Change notes (schema 20) reference history; children first.
+        "private_sheet_notes",
         "private_sheet_history",
         "private_sheets",
         "campaign_events",

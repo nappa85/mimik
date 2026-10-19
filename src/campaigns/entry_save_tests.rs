@@ -171,6 +171,9 @@ async fn canonical_negatives_survive_a_re_post() {
     }
 }
 
+/// Slice 1.2 narrowed this: an unreadable entry over a known saved integer is kept with a
+/// scribble (`notes_tests`). Blank, control-character input, a new row and create still get
+/// 422 with the draft until slice 1.4.
 #[tokio::test]
 async fn unreadable_entry_is_still_422_with_the_draft() {
     let _auth_lock = crate::auth::test_resource_lock().await;
@@ -179,17 +182,18 @@ async fn unreadable_entry_is_still_422_with_the_draft() {
     created(&setup).await;
     let (_, before) = saved(&setup, 1).await;
     for (hp, quantity) in [
-        ("lots", "1"),
-        ("84", "84--15"),
         ("", "1"),
-        ("84 -15", "2 x"),
+        ("84\u{7}", "1"),
+        ("84", "lots"),
+        ("84 -15", "84--15"),
+        ("84", "2 x"),
     ] {
         let edit = form(
             1,
             hp,
             "-1",
             "kept draft",
-            &[("r1-1", "Rope", quantity, "1")],
+            &[("r1-1", "Rope", "1", "1"), ("", "Torch", quantity, "1")],
         );
         let (status, html) = setup.post("/private-sheets/1", edit).await;
         assert_eq!(
@@ -205,7 +209,7 @@ async fn unreadable_entry_is_still_422_with_the_draft() {
                 .and_then(|element| element.value().attr("value").map(str::to_owned))
         };
         assert_eq!(value("value-hp").as_deref(), Some(hp), "draft kept");
-        assert_eq!(value("row-4-0-1").as_deref(), Some(quantity), "draft kept");
+        assert_eq!(value("row-4-1-1").as_deref(), Some(quantity), "draft kept");
         assert_eq!(saved(&setup, 1).await, (1, before.clone()), "nothing saved");
     }
 }

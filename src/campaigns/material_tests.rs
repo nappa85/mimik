@@ -370,7 +370,7 @@ async fn material_schema14_upgrade_preserves_source_account_and_private_history(
         )
         .await
         .unwrap();
-    store.run(|db|{assert_eq!(db.query_row("SELECT count(*) FROM source_web_events",[],|r|r.get::<_,i64>(0))?,0);crate::sources::search::drop_schema(db)?;db.execute_batch("DROP TABLE registry_web_events; DROP TABLE registry_events; DROP TABLE source_web_events; DROP INDEX source_review_page_history; PRAGMA user_version=14;")?;db.execute_batch(crate::catalogues::DROP_SCHEMA)?;Ok(())}).await.unwrap();
+    store.run(|db|{assert_eq!(db.query_row("SELECT count(*) FROM source_web_events",[],|r|r.get::<_,i64>(0))?,0);crate::sources::search::drop_schema(db)?;db.execute_batch("DROP TABLE registry_web_events; DROP TABLE registry_events; DROP TABLE source_web_events; DROP INDEX source_review_page_history; PRAGMA user_version=14;")?;db.execute_batch(crate::catalogues::DROP_SCHEMA)?;db.execute_batch(crate::campaigns::DROP_NOTES_SCHEMA)?;Ok(())}).await.unwrap();
     let reopened = Store::open(&dir.path().join("private.sqlite3")).unwrap();
     reopened
         .run(|db| {

@@ -36,6 +36,9 @@ pub(crate) struct SheetView {
     /// read boundary; empty on the create page (no sheet to read them through) and on history
     /// pages (the routes read the current revision, not a historical pin).
     pub catalogues: Vec<super::catalogue::LinkView>,
+    /// Change notes (assisted sheet slice 1.2): the current note of each live address on a
+    /// current page, the revision's notes on a history page, and the notes a save writes.
+    pub notes: super::notes::Notes,
 }
 
 /// The change summary of history revision `snapshot` against its validated predecessor.
@@ -75,6 +78,13 @@ fn changes(
 pub(super) static AFTER_PRIVATE_VALIDATION: std::sync::Mutex<
     Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 > = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(super) type RecheckHook = Box<dyn FnOnce(&rusqlite::Connection) -> Result<(), AppError> + Send>;
+/// Runs once inside a no-op save's recheck transaction, before the rechecks (tests only).
+#[cfg(test)]
+pub(super) static BEFORE_UNCHANGED_RECHECK: std::sync::Mutex<Option<RecheckHook>> =
+    std::sync::Mutex::new(None);
 
 pub(super) fn match_pin(snapshot: &PrivateSnapshot, pin: &ImmutablePin) -> Result<(), AppError> {
     match &snapshot.pin {
@@ -165,6 +175,7 @@ impl Store {
                     editable,
                     changes,
                     catalogues: Vec::new(),
+                    notes: super::notes::Notes::default(),
                 },
                 permit,
             ))
@@ -237,6 +248,7 @@ impl Store {
                     editable: true,
                     changes: None,
                     catalogues: Vec::new(),
+                    notes: super::notes::Notes::default(),
                 },
                 permit,
             ))
@@ -293,6 +305,11 @@ impl Store {
                 view.snapshot.sheet_id=max.checked_add(1).ok_or(AppError::Conflict)?;
             }
             let result=snapshots::write(&tx,&auth,view.snapshot,if create{"create"}else{"edit"},view.immutable.as_ref())?;
+            // Change notes join the revision in the same transaction (D-T); any failure rolls
+            // the whole save back.
+            #[cfg(test)]
+            if let Some(hook)=super::notes::BEFORE_INSERT.lock().unwrap().take(){hook(&mut view.notes.pending)?;}
+            super::notes::insert(&tx,result.sheet_id,result.revision,&view.notes.pending)?;
             tx.commit()?;Ok(result.sheet_id)
             })();
             Ok((result,permit))
@@ -302,6 +319,34 @@ impl Store {
             Ok((Err(error), permit)) => Err((error, Some(permit))),
             Err(error) => Err((error, None)),
         }
+    }
+
+    /// The no-op save's answer (D-U): nothing is written, but the request's rights, the
+    /// sheet's active state and its revision are rechecked in a transaction, so a caller who
+    /// lost edit rights gets 403 (and a stale page 409) rather than "No change".
+    pub(crate) async fn private_unchanged(
+        &self,
+        auth: RequestAuth,
+        id: i64,
+        revision: i64,
+    ) -> Result<(), AppError> {
+        self.run_campaign(auth.clone(), move |db| {
+            let tx = db.transaction()?;
+            #[cfg(test)]
+            if let Some(hook) = BEFORE_UNCHANGED_RECHECK.lock().unwrap().take() {
+                hook(&tx)?;
+            }
+            auth.recheck(&tx)?;
+            let live = snapshots::load(&tx, id)?;
+            snapshots::authorize_edit(&tx, &auth, &live)?;
+            if live.revision != revision {
+                return Err(AppError::Conflict);
+            }
+            auth.recheck(&tx)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
     }
 
     async fn private_badge(
@@ -343,6 +388,16 @@ impl Store {
                     Err(AppError::NotFound) => false,
                     Err(error) => return Err(error),
                 };
+            }
+            // Change notes in the same read as the correspondence check: the current note of
+            // each live address, or a history page's own revision notes.
+            if let Some(pin)=view.immutable.as_ref().filter(|_|!create){
+                if let Some(revision)=history{
+                    view.notes.revision=super::notes::of_revision(&tx,view.snapshot.sheet_id,revision)?;
+                }else{
+                    let addresses=super::notes::addresses(pin.definition(),&view.snapshot.data);
+                    view.notes.current=super::notes::current(&tx,view.snapshot.sheet_id,&addresses)?;
+                }
             }
             // Current pages only: the routes read through the sheet's current revision, so a
             // history page (another revision's pin) lists no catalogue links.
