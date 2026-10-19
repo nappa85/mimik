@@ -269,14 +269,21 @@ async fn browse_is_interrupted_past_its_time_budget() {
             let within = browse_within(db, &spells, &query(None, Some("echo"), None), super::QUERY_BUDGET)?;
             assert_eq!(within.rows.len(), 50);
             assert!(within.more);
-            for q in [Some("echo"), None] {
-                let interrupted = browse_within(db, &spells, &query(None, q, None), Duration::ZERO);
-                assert!(
-                    matches!(&interrupted, Err(BrowseFailure::Query(message)) if message.starts_with("Query too broad")),
-                    "{q:?}: {:?}",
-                    interrupted.err()
-                );
-            }
+            // The reader's search is interrupted: a query problem ("add more words").
+            let searched = browse_within(db, &spells, &query(None, Some("echo"), None), Duration::ZERO);
+            assert!(
+                matches!(&searched, Err(BrowseFailure::Query(message)) if message.starts_with("Query too broad")),
+                "{:?}",
+                searched.err()
+            );
+            // A plain browse (no query) is interrupted too, but that is never the reader's
+            // query problem (round-2 review, Space Bunny F2).
+            let plain = browse_within(db, &spells, &query(None, None, None), Duration::ZERO);
+            assert!(
+                matches!(&plain, Err(BrowseFailure::Other(AppError::Invalid(_)))),
+                "{:?}",
+                plain.err()
+            );
             // The handler is removed afterwards: a statement well past the check interval runs.
             Ok(db.query_row("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<100000) SELECT count(*) FROM c", [], |row| row.get::<_, i64>(0))?)
         })
@@ -319,4 +326,67 @@ async fn index_identity_damage_is_never_presented_as_a_query_problem() {
         })
         .await
         .unwrap();
+}
+
+/// Round-2 measurement (Space Bunny F2): the worst admitted browse page, 50 unit-sourced
+/// entries each citing 16 distinct units of 256 KiB (800 references, under the 6,144 cap),
+/// so the badge probe scans 200 MiB of unit text. Run once in release with `--ignored`; the
+/// result is recorded in plan §18.
+#[tokio::test]
+#[ignore = "measurement: run in release with --ignored --nocapture"]
+async fn measure_the_worst_browse_page() {
+    let _lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (_dir, store) = store().await;
+    let zeros = "0".repeat(64);
+    let text = "a".repeat(256 * 1024);
+    store
+        .run(move |db| {
+            let prepared = json!({"contract_version":1,"extraction_sha256":zeros}).to_string();
+            db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES(1,?1,'fixture','Synthetic manual','synthetic-game','First','en',?1,x'',x'',?2,50)", rusqlite::params![zeros, prepared.as_bytes()])?;
+            db.execute("INSERT INTO source_rulesets VALUES(1,'synthetic-game','first')", [])?;
+            for page in 1..=50_i64 {
+                db.execute("INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(?1,1,?1,x'')", [page])?;
+                for unit in 0..16_i64 {
+                    db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(?1,?2,?3,'text','[]','<p>x</p>',?4)", rusqlite::params![page * 16 + unit, page, format!("b{unit}"), text])?;
+                }
+            }
+            crate::sources::search::ensure(db)?;
+            for page in 1..=50_i64 {
+                db.execute("INSERT INTO source_page_hashes VALUES(?1,1,?2)", rusqlite::params![page, zeros])?;
+            }
+            db.execute("INSERT INTO source_finalizations VALUES(1,?1,?1)", [&zeros])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let entries: Vec<Value> = (1..=50_i64)
+        .map(|page| {
+            json!({"key": format!("entry-{page:02}"), "type": "spell", "name": format!("Entry {page:02}"),
+                   "properties": {},
+                   "description": {"units": (0..16_i64).map(|unit| json!({"source_id": 1, "page_id": page, "unit_id": page * 16 + unit})).collect::<Vec<_>>()}})
+        })
+        .collect();
+    let mut value = catalogue("spells", &entries);
+    value["sources"] = json!([{"source_id": 1, "pdf_sha256": "0".repeat(64)}]);
+    publish(&store, &value, 0).await;
+    let timings = store
+        .run(|db| {
+            let spells = linked(db, "spells");
+            let mut timings = Vec::new();
+            for q in [None, Some("entry"), None, Some("entry")] {
+                let started = std::time::Instant::now();
+                let page = browse(db, &spells, &query(None, q, None))?;
+                assert_eq!(page.rows.len(), 50);
+                assert!(
+                    page.rows
+                        .iter()
+                        .all(|row| row.badge == super::Badge::Unchecked)
+                );
+                timings.push((q.is_some(), started.elapsed().as_secs_f64() * 1000.0));
+            }
+            Ok(timings)
+        })
+        .await
+        .unwrap();
+    println!("worst browse page (search, ms): {timings:?}");
 }

@@ -190,7 +190,7 @@ Rules:
 | Owner-written | `owner_text` |
 | Reviewed extraction | every unit is accepted or corrected, and every cited page is `complete` |
 | Unchecked source text | any unit is unreviewed, or any cited page is incomplete |
-| Description unavailable | any unit is `rejected` now. The text is never shown; the citation and the badge stay |
+| Description unavailable | any unit is `rejected` now; or (§18) the stored text of a cited unit is malformed (not text, NUL, over 256 KiB), or the entry's citations are missing (damage only). The text is never shown; the citations and the badge stay |
 
 - Every unit-sourced entry page also says: "Extracted from your manual. Not compared with
   the original page by Mimik." Catalogue publication certifies references, not text (D6).
@@ -1686,9 +1686,11 @@ Code:
    the time budget) re-renders the search form with the static message, status 422, marked
    as a trusted page so the auth layer keeps its body.
 8. *Badge of a unit-sourced entry with no unit rows* (only damage causes it) is "Unchecked",
-   never "Reviewed" (found in self-review, test first).
+   never "Reviewed" (found in self-review, test first). *Superseded by §18 (round 1, items 3
+   and 10): such an entry shows "Description unavailable" on both routes.*
 9. The sheet page lists catalogue links on view and history pages, not on the create page
-   (the routes need a saved sheet).
+   (the routes need a saved sheet). *Superseded by §18 (round 1, item 8): history pages list
+   no links either.*
 
 **Red → green.** Red runs used the final tests against: (S) a skeleton (definition schema,
 decoder, domain check and readiness site at master, the save-site call removed, browse,
@@ -1770,7 +1772,7 @@ was missing coverage); the browser reds used release binaries built from the mut
 | 1 | Sol 1 (Major), Space Bunny M2/m8, Sonnet: the pause-hook test protected only grant revocation | **Fixed (tests).** `the_second_transaction_rechecks_the_sheet_the_pin_and_the_session` pauses between the transactions and (a) changes nothing: read succeeds; (b) saves the sheet through the real writer: `Conflict` (409, decision 6); (c) rewrites the pinned definition row: `Invalid("Immutable definition changed.")`; (d) advances the custodian's account epoch: `NotFound`. The custodian is used for (d) because `authorize_read` admits a custodian without a grant, so only the session recheck can refuse | Red per guard: `corresponds` removed → (b) passes; `pin.unchanged` removed → (c) passes; both transaction-B `auth.recheck` calls removed → (d) passes. Green |
 | 2 | Sonnet: type labels, property labels and options were bare | **Fixed.** Type labels (browse rows, entry page) and `<dt>` labels are in `<bdi>`; options get `dir="auto"` (an `<option>` cannot hold elements; the native control lays each option out on its own, and labels refuse Cf, so no override can occur in a label; documented). **Adjusted:** the request for an RLO type and property label cannot be met, because admission refuses Cf in labels (`format_and_separator_characters_are_rejected_in_names_labels_and_text_values`); the Chromium fixture uses right-to-left (Hebrew) type and property labels instead and checks their computed isolation and that the badge still follows the type label | Rust: bare labels → `entry_badges…`, `browse_pages…`, `malformed_units…`, `type_options_render_with_automatic_direction` red. Chromium: bare labels → "Catalogue type label is not isolated or its badge moved". Green |
 | 3 | Space Bunny M1: a malformed unit kept "Reviewed", and browse could not see it | **Fixed.** One malformed predicate (`MALFORMED`: not text, NUL, over 256 KiB) feeds both `unit_states` (browse) and `unit_metadata` (entry), and one badge rule (`Badge::of_units`): rejection wins, then malformed or no unit (new `Badge::Malformed`, label "Description unavailable", its own sentence), then reviewed/unchecked. The entry's description now follows the badge | Red: browse ignoring malformed; badge ignoring malformed (both: `malformed_units_hide_every_passage_and_never_show_reviewed` shows "Reviewed extraction"); `badge_tests` extended. Green |
-| 4 | Sol 2, Space Bunny m3: confinement inferred from SQL; loose corrupt-pin test | **Fixed (tests).** `catalogues_are_confined_to_the_pair_the_seal_and_the_catalogue`: same game and catalogue id in another edition at a higher version; a cursor key that exists only in another catalogue (restarts); a sealed v1 beside an unsealed v2 (v2 built through the real draft-provenance trigger). `corrupt_pins_and_snapshots_are_refused` now asserts exact statuses: definition hash 422, definition pair (R6) 422, snapshot hash 403, and a rewritten pin column 403 byte-identical to an unreadable sheet. **Adjusted:** an *unsupported runtime pin* cannot be produced by damage, since the bounded loader binds the pin column to the event chain and refuses first; the route's own guard (runtime schema 1, `supported`) is defence in depth that no test reaches (the guard-removed mutation stays green); native pins already cover that branch's refusal | Red: edition predicate dropped; seal join dropped; cursor lookup not confined to the version (each fails its assertion). Green |
+| 4 | Sol 2, Space Bunny m3: confinement inferred from SQL; loose corrupt-pin test | **Fixed (tests).** `catalogues_are_confined_to_the_pair_the_seal_and_the_catalogue`: same game and catalogue id in another edition at a higher version; a cursor key that exists only in another catalogue (restarts); a sealed v1 beside an unsealed v2 (v2 built through the real draft-provenance trigger). `corrupt_pins_and_snapshots_are_refused` now asserts exact statuses: definition hash 422, definition pair (R6) 422, snapshot hash 403, and a rewritten pin column 403 byte-identical to an unreadable sheet. *Corrected in round 2 (item 1):* isolated damage to the pin column is refused by the bounded loader (the stored snapshot's pin must equal the column), but a coordinated rewrite of pin, snapshots and hashes passes the loader and reaches the route's arm (runtime schema 1, `supported`), which a new test pins; the round-1 claim that it "cannot be produced by damage" held only for isolated pin-column damage | Red: edition predicate dropped; seal join dropped; cursor lookup not confined to the version (each fails its assertion). Green |
 | 5 | Sol 3: malformed text after the cut-off untested | **Fixed (tests).** Entries citing the 25,000-character unit, then a NUL, a BLOB or a 256 KiB + 1 unit: no character of the first unit is shown, and the citations stay | Red: badge computed from the first unit only (the regression Sol described) → text shown. Green |
 | 6 | Sol 4: misleading browser comment, no witness after the description | **Fixed.** The "Current text" paragraph now follows the description; the Chromium check requires it to read left-to-right and sit below the description. The comment is corrected. Box order treats boxes whose vertical extents overlap as one line (an inline-block badge is taller than its text; found when the new label check first ran) | Green at both viewports |
 | 7 | Sonnet 4, Space Bunny m4: every `Invalid` became a query problem | **Fixed.** `read::BrowseFailure { Query, Other }`: only `fts_query` refusals and budget interruptions are `Query` (the 422 search form); damage such as "index identity out of range" and `NotFound` are `Other` and answer as errors | Red: identity error mapped as `Query` → `index_identity_damage_is_never_presented_as_a_query_problem`. Green |
@@ -1794,3 +1796,33 @@ was missing coverage); the browser reds used release binaries built from the mut
 
 **Not run:** `cargo audit`, `cargo about`, packaging, the LAN smoke, profiling (as in §17).
 Review row 16 stays open.
+
+### Step 3 round-2 minor fixes (2026-10-19)
+
+Round 2 reviewed `611acc0`: Sol, Sonnet and Space Bunny all **MERGE-READY**, no Blocking or
+Major findings. The minors below were folded in before the merge. Red runs as in round 1
+(final tests against one narrow mutation each).
+
+**Correction to round 1, item 4.** The round-1 commit claimed a relabelled pin-column case,
+but its test still carried the round-0 comment ("refused … before the pin is loaded") and
+label: a mutation run's restore copied an older backup over the edit. The restore now also
+returns any other touched file to `HEAD`, and the comment is fixed below.
+
+| # | Finding | Disposition | Red → green |
+|---|---|---|---|
+| 1 | Space Bunny F1, Sol: is the route's unsupported-pin arm reachable? | **Settled empirically.** *Isolated* pin-column damage (`UPDATE private_sheets SET pin=json_set(pin,'$.schema',2)`) is refused by the bounded loader, not by the arm: `private_sheet_events_valid` (migration 012) requires `json_extract(h.snapshot,'$.pin')=json(s.pin)`, so `raw_load` finds no valid current event and answers `NotFound` (403). A *coordinated* rewrite (pin column, current snapshot, history snapshot and both hashes, recomputed with the sheet hash) passes every loader check: the sheet page reads it as an unsupported, read-only pin (200), and only the route's arm refuses it. New test `a_consistently_rewritten_unsupported_pin_is_refused_by_the_route` pins that: 403, byte-identical to an unreadable sheet. The "cannot be produced by damage" wording is withdrawn; it held only for isolated pin-column damage | Mutations: `schema: 1` dropped from the pattern → **403** (green: `supported` still refuses schema 2); `snapshots::supported(..)` dropped → **403** (green: the `schema: 1` pattern still refuses); both dropped (the arm removed) → **422** "Request failed." (the pin loads and `match_pin` refuses later), red. Each half is redundant for schema 2; the test pins the arm, not each half |
+| 2 | Space Bunny F2: the badge probe's interruption was a query problem | **Fixed.** `From<rusqlite::Error>` now maps every SQLite failure, interruptions included, to `Other`; only the name-search statement maps its interruption to `Query` (`searched`). A plain browse, the types, the cursor and the badge probe never answer "Query too broad"; fail-closed is unchanged (an interrupted probe is an error, never a badge). **Measured** (`read_tests::measure_the_worst_browse_page`, `#[ignore]`, release build, container `--cpus 6`, Monday 07:05): the worst admitted page, 50 entries each citing 16 distinct units of exactly 256 KiB (800 references, 200 MiB scanned by the probe), took **416–421 ms** without a query and **417–441 ms** with one, two runs each, warm cache, overlay filesystem. That is within the 1 s budget but above R8's 250 ms page target, for an extreme shape (catalogues cite short units in practice); a cheaper probe (for example, not scanning for NUL on every request) is a follow-up that needs its own fail-closed argument | Red: interruptions mapped as before → `browse_is_interrupted_past_its_time_budget` (plain browse answered `Query`). Green |
+| 3 | Sol, Sonnet, Space Bunny F3: `Badge::Malformed` wording omitted missing citations | **Fixed.** Sentence: "The stored text of a cited passage cannot be read, or the citations of this entry are missing, so the text is not shown."; note: "Description unavailable (source text malformed or citations missing)."; `catalogue-publication.md` matches | Tests updated |
+| 4 | Sol, Space Bunny F5: stale records | **Fixed.** §17 decisions 8 and 9 are marked superseded by §18; the D4 badge table covers malformed text and missing citations | — |
+| 5 | Space Bunny F6, F8; Sol | **Added.** Browse badges of the cut-NUL, cut-BLOB and cut-oversized rows; the create page shows no catalogue section; route-level negative control `index_identity_damage_never_renders_the_query_problem_form` (the catalogue surrogate damaged to `i64::MAX`: a plain browse still answers 200, a search answers 422 without the search form) | Red: links listed on the create page → `sheet_links_…` (create assertion); identity error mapped as `Query` → the new route test (the search form rendered). Green |
+| 6 | Space Bunny F7: browse `unit_states` did not join `sources` | **Fixed** (trivial): `unit_states` now joins unit → page → source like `unit_metadata`. Test `a_lost_source_row_gives_the_same_badge_on_both_routes` (source row deleted past its guards): both routes show "Description unavailable" | Red: join removed → browse showed "Unchecked source text". Green |
+
+**Gate** (container `mimik-ci:latest`, `--cpus 6`, Monday 2026-10-19 before 09:00, final tree):
+- `cargo fmt --check` and pedantic Clippy (`-D warnings`): clean (07:08).
+- `cargo test --locked --all-targets --all-features` (07:08–07:14): **566 passed**, 0 failed,
+  2 ignored (the pre-existing one and the new `measure_the_worst_browse_page`), 37 binaries.
+- `ruff check tools`, `ruff format --check tools`: clean. Tools unittest (07:14–07:19): 751
+  run, 11 skipped, **1 error, the known `test_fake_runner_script`**.
+- Release build (07:19) and `browser_smoke.py --auth` (CI flags, `--cpus=2`), 07:20–07:21:
+  every stage passed, the catalogue stage at both viewports.
+- `smoke_release.py --auth` (`--cpus 2`), 07:21–07:22: passed.

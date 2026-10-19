@@ -105,7 +105,7 @@ impl Badge {
                 "A cited passage was rejected in source review, so the text is not shown. The citation stays."
             }
             Self::Malformed => {
-                "The stored text of a cited passage cannot be read (malformed), so the text is not shown."
+                "The stored text of a cited passage cannot be read, or the citations of this entry are missing, so the text is not shown."
             }
         }
     }
@@ -176,15 +176,22 @@ impl From<AppError> for BrowseFailure {
 }
 
 impl From<rusqlite::Error> for BrowseFailure {
-    /// A statement interrupted by the time budget is a query problem; every other `SQLite`
-    /// failure is not.
+    /// Every `SQLite` failure, a budget interruption included, is not the reader's query
+    /// problem: only the statement that runs the reader's search maps its interruption to
+    /// `Query` ([`searched`]). A plain browse, the types, the cursor and the badge probe can
+    /// never answer "query too broad".
     fn from(error: rusqlite::Error) -> Self {
-        let interruption =
-            error.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted);
-        match interrupted(error) {
-            AppError::Invalid(message) if interruption => Self::Query(message),
-            other => Self::Other(other),
-        }
+        Self::Other(interrupted(error))
+    }
+}
+
+/// Failures of the statement that runs the reader's name search: an interruption by the time
+/// budget is a query problem ("add more specific words"); anything else is not.
+fn searched(error: rusqlite::Error) -> BrowseFailure {
+    let interruption = error.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted);
+    match interrupted(error) {
+        AppError::Invalid(message) if interruption => BrowseFailure::Query(message),
+        other => BrowseFailure::Other(other),
     }
 }
 
@@ -332,22 +339,24 @@ fn entry_rows(
         let sql = format!(
             "SELECT e.key,{name},e.type_id,e.retired,e.desc_kind FROM catalogue_names_fts CROSS JOIN catalogue_entries e ON e.version_id=?1 AND e.key=catalogue_names_fts.key WHERE catalogue_names_fts MATCH ?5 AND catalogue_names_fts.rowid BETWEEN ?6 AND ?7 AND catalogue_names_fts.catalogue_row_id=?8 AND {filters} ORDER BY e.name,e.key LIMIT {limit}"
         );
-        let mut statement = db.prepare(&sql)?;
-        let found = statement.query_map(
-            params![
-                linked.version_id,
-                entry_type,
-                cursor_name,
-                cursor_key,
-                expression,
-                base,
-                base + (1 << ROWID_SHIFT) - 1,
-                linked.surrogate
-            ],
-            map,
-        )?;
+        let mut statement = db.prepare(&sql).map_err(searched)?;
+        let found = statement
+            .query_map(
+                params![
+                    linked.version_id,
+                    entry_type,
+                    cursor_name,
+                    cursor_key,
+                    expression,
+                    base,
+                    base + (1 << ROWID_SHIFT) - 1,
+                    linked.surrogate
+                ],
+                map,
+            )
+            .map_err(searched)?;
         for row in found {
-            rows.push(row?);
+            rows.push(row.map_err(searched)?);
         }
     } else {
         let sql = format!(
@@ -375,7 +384,8 @@ fn types(db: &Connection, version_id: i64) -> Result<Vec<(String, String)>, Brow
 }
 
 /// Live (key, unit state, page complete, text malformed) rows of the given unit-sourced
-/// entries; the malformed test is the entry page's (`MALFORMED`).
+/// entries, with the entry page's joins (unit, page, source) and malformed test
+/// (`MALFORMED`), so a lost row makes both pages show the same badge.
 fn unit_states(
     db: &Connection,
     version_id: i64,
@@ -385,7 +395,7 @@ fn unit_states(
         return Ok(Vec::new());
     }
     let sql = format!(
-        "SELECT eu.key,u.state,p.complete,{} FROM catalogue_entry_units eu JOIN source_units u ON u.id=eu.unit_id JOIN source_pages p ON p.id=u.page_id WHERE eu.version_id=?1 AND eu.key IN (SELECT value FROM json_each(?2))",
+        "SELECT eu.key,u.state,p.complete,{} FROM catalogue_entry_units eu JOIN source_units u ON u.id=eu.unit_id JOIN source_pages p ON p.id=u.page_id JOIN sources s ON s.id=p.source_id WHERE eu.version_id=?1 AND eu.key IN (SELECT value FROM json_each(?2))",
         malformed()
     );
     let mut statement = db.prepare(&sql)?;

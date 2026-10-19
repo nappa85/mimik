@@ -392,6 +392,18 @@ async fn sheet_links_its_catalogues_and_routes_follow_the_sheet_read_matrix() {
     assert!(sheet.contains("<bdi>Spells &#60;i&#62;of&#60;/i&#62; light</bdi>"));
     assert!(!sheet.contains("<i>of</i>"));
     assert!(!sheet.contains("bestiary"));
+    // The create page has no sheet to read catalogues through: no section.
+    let (status, create) = get(
+        &world.app,
+        &world.auth[2],
+        &format!(
+            "/campaigns/{}/sheets/new?version={}",
+            world.campaign, world.version
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!create.contains("catalogues-heading") && !create.contains("/catalogue/"));
     assert!(!sheet.contains("<script"), "sheet pages load no script");
     let reader = |auth: usize| (world.app.clone(), world.auth[auth].clone());
     // Custodian (3) and Master (2) read; another player (4), an outsider (5) and the
@@ -650,7 +662,9 @@ async fn descriptions_are_cut_at_20000_characters_and_owner_text_never() {
     assert!(multibyte.contains("Continues in the manual at PDF page 3."));
     // NUL in a unit: no text, a static note.
     let malformed = page("malformed").await;
-    assert!(malformed.contains("Description unavailable (source text malformed)."));
+    assert!(
+        malformed.contains("Description unavailable (source text malformed or citations missing).")
+    );
     assert!(!malformed.contains("ZQZ") && !malformed.contains("Z\u{0}"));
     // Owner text: whole, escaped, line breaks kept, isolated.
     let house = page("house-charm").await;
@@ -805,10 +819,13 @@ async fn corrupt_pins_and_snapshots_are_refused() {
             "UPDATE definition_versions SET game_id='other-game'",
             StatusCode::UNPROCESSABLE_ENTITY,
         ),
-        // An unsupported runtime pin (schema 2) is refused like an unreadable sheet, before
-        // the pin is loaded.
+        // Isolated pin-column damage: the bounded loader refuses it like an unreadable sheet,
+        // because `private_sheet_events_valid` requires the stored snapshot's pin to equal
+        // `json(s.pin)`. A coordinated rewrite of the pin, snapshots and hashes passes the
+        // loader and reaches the route's own arm instead
+        // (`a_consistently_rewritten_unsupported_pin_is_refused_by_the_route`).
         (
-            "unsupported pin",
+            "pin column",
             "private_sheets_update",
             "UPDATE private_sheets SET pin=json_set(pin,'$.schema',2)",
             StatusCode::FORBIDDEN,
@@ -1346,8 +1363,10 @@ async fn malformed_units_hide_every_passage_and_never_show_reviewed() {
     .await;
     assert!(browse.contains("<bdi>Malformed Text</bdi></a> · <bdi>Spell</bdi> <span class=\"badge\">Description unavailable</span>"));
     assert!(browse.contains("<bdi>Hostile &#60;b&#62;Name&#60;/b&#62;</bdi></a> · <bdi>Spell</bdi> <span class=\"badge\">Reviewed extraction</span>"));
-    assert!(entry.contains("<span class=\"badge\">Description unavailable</span> The stored text of a cited passage cannot be read"));
-    assert!(entry.contains("Description unavailable (source text malformed)."));
+    assert!(entry.contains("<span class=\"badge\">Description unavailable</span> The stored text of a cited passage cannot be read, or the citations of this entry are missing"));
+    assert!(
+        entry.contains("Description unavailable (source text malformed or citations missing).")
+    );
     assert!(!entry.contains("Reviewed extraction"));
     // A long valid unit followed by a malformed one (NUL, BLOB, over 256 KiB): none of the
     // first unit's 20,000 displayable characters is shown.
@@ -1361,14 +1380,24 @@ async fn malformed_units_hide_every_passage_and_never_show_reviewed() {
         assert_eq!(status, StatusCode::OK, "{key}");
         assert_eq!(count(&html, 'ж'), 0, "{key}");
         assert!(
-            html.contains("Description unavailable (source text malformed)."),
+            html.contains("Description unavailable (source text malformed or citations missing)."),
             "{key}"
         );
         assert!(
             html.contains("PDF page 2</li>") && html.contains("p. <bdi>iv</bdi> (PDF page 4)</li>"),
             "{key}"
         );
-        assert!(browse.contains(&format!("/{key}\"><bdi>")), "{key}");
+        assert!(
+            browse.contains(&format!(
+                "/{key}\"><bdi>{}</bdi></a> · <bdi>Spell</bdi> <span class=\"badge\">Description unavailable</span>",
+                match key {
+                    "cut-nul" => "Cut Then NUL",
+                    "cut-blob" => "Cut Then BLOB",
+                    _ => "Cut Then Oversized",
+                }
+            )),
+            "{key}"
+        );
     }
     // An entry whose unit rows are missing (damage): the same badge and note on both routes.
     tamper(
@@ -1391,7 +1420,9 @@ async fn malformed_units_hide_every_passage_and_never_show_reviewed() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(empty.contains("Description unavailable (source text malformed)."));
+    assert!(
+        empty.contains("Description unavailable (source text malformed or citations missing).")
+    );
     assert_eq!(count(&empty, 'é'), 0);
     // A retired entry's page stays readable and says so.
     let (status, retired) = get(
@@ -1452,4 +1483,128 @@ async fn type_options_render_with_automatic_direction() {
     .await;
     // An <option> cannot hold <bdi>; `dir="auto"` gives each label its own direction.
     assert!(browse.contains("<option value=\"spell\" dir=\"auto\">Spell</option>"));
+}
+
+/// Rewrites sheet 1's pin, current snapshot and history consistently (the loader's equality
+/// checks all hold) so that its runtime pin names an unsupported schema 2.
+async fn rewrite_pin_consistently(store: &Store) {
+    let content: String = store
+        .run(|db| {
+            Ok(db.query_row(
+                "SELECT json_set(snapshot,'$.pin.schema',2) FROM private_sheets WHERE id=1",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    let hash = super::super::snapshots::hash(content.as_bytes());
+    let quoted = content.replace('\'', "''");
+    tamper(
+        store,
+        "private_sheets_update",
+        format!("UPDATE private_sheets SET pin=json_set(pin,'$.schema',2),snapshot='{quoted}',hash='{hash}' WHERE id=1"),
+    )
+    .await;
+    tamper(
+        store,
+        "private_sheet_history_update",
+        format!(
+            "UPDATE private_sheet_history SET snapshot='{quoted}',hash='{hash}' WHERE sheet_id=1"
+        ),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_consistently_rewritten_unsupported_pin_is_refused_by_the_route() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let world = world().await;
+    let unreadable = get(&world.app, &world.auth[4], "/private-sheets/1").await;
+    rewrite_pin_consistently(&world.store).await;
+    // The loader accepts the rewrite: the sheet reads as an unsupported, read-only pin.
+    let (status, sheet) = get(&world.app, &world.auth[2], "/private-sheets/1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(sheet.contains("Unsupported immutable interpretation pin"));
+    assert!(!sheet.contains("catalogues-heading"));
+    // So only the route's own arm (runtime schema 1, supported) refuses it.
+    for path in PATHS {
+        assert_eq!(
+            get(&world.app, &world.auth[2], path).await,
+            unreadable,
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn index_identity_damage_never_renders_the_query_problem_form() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let world = world().await;
+    let largest = i64::MAX;
+    tamper(
+        &world.store,
+        "catalogue_versions_update",
+        format!("UPDATE catalogue_versions SET catalogue={largest} WHERE game_id='synthetic-game' AND edition_id='first' AND catalogue_id='spells'"),
+    )
+    .await;
+    tamper(
+        &world.store,
+        "catalogues_update",
+        format!("UPDATE catalogues SET id={largest} WHERE game_id='synthetic-game' AND edition_id='first' AND catalogue_id='spells'"),
+    )
+    .await;
+    // A plain browse does not use the index identity and still works.
+    let (status, _) = get(
+        &world.app,
+        &world.auth[2],
+        "/private-sheets/1/catalogue/spells",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // A search does, and the damage answers as an error, not as the reader's query problem.
+    let (status, html) = get(
+        &world.app,
+        &world.auth[2],
+        "/private-sheets/1/catalogue/spells?q=lantern",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        !html.contains("role=\"search\"") && !html.contains("index identity"),
+        "{html}"
+    );
+}
+
+#[tokio::test]
+async fn a_lost_source_row_gives_the_same_badge_on_both_routes() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let world = world().await;
+    tamper(
+        &world.store,
+        "sources_finalized_delete",
+        "DELETE FROM sources WHERE id=1".into(),
+    )
+    .await;
+    let (_, browse) = get(
+        &world.app,
+        &world.auth[2],
+        "/private-sheets/1/catalogue/spells",
+    )
+    .await;
+    assert!(browse.contains("<bdi>Lantern Flare</bdi></a> · <bdi>Spell</bdi> <span class=\"badge\">Description unavailable</span>"));
+    let (status, entry) = get(
+        &world.app,
+        &world.auth[2],
+        "/private-sheets/1/catalogue/spells/lantern-flare",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(entry.contains("<span class=\"badge\">Description unavailable</span>"));
+    assert!(
+        entry.contains("Description unavailable (source text malformed or citations missing).")
+    );
 }

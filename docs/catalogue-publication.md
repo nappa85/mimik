@@ -437,8 +437,10 @@ Unit text is the correction for corrected units, otherwise the raw text. The met
 cited unit is read first; the texts follow in author order, cut at **20,000 characters per
 entry** (character-safe; at most 80 KB of UTF-8). A cut entry ends with "Continues in the
 manual at p. X (PDF page N)", naming the page of the first unit not fully shown. A malformed
-unit anywhere in the entry, also after the cut-off, shows "Description unavailable (source
-text malformed)" instead of any text. Browse results and entry pages compute the badge with
+unit anywhere in the entry, also after the cut-off, or an entry whose citations are missing
+(damage only), shows "Description unavailable (source text malformed or citations missing)"
+instead of any text; its badge sentence says the stored text of a cited passage cannot be
+read or the citations of the entry are missing. Browse results and entry pages compute the badge with
 the same rule, so they always agree. Owner text (at most 20,000 characters) is never cut.
 Each citation is the source title, the current printed page label and the PDF page number,
 read live.
@@ -464,8 +466,11 @@ ranked: the order stays `(name, key)`. The index is joined back on the latest se
 of the same catalogue and restricted to its rowid range, so keys shared by two catalogues
 cannot leak. Every browse statement runs under the search time budget (1 s); a query that
 exceeds it, has no letters or digits, contains control characters or has more than 16 pieces
-re-renders the search form with a static message (422). Only these query problems do:
-damage or storage failures found while browsing answer as errors, never as a query problem.
+re-renders the search form with a static message (422). Only these query problems do, and
+only the statement that runs the reader's name search can time out as one: a plain browse,
+the badge probe (which reads every cited unit's text to detect malformed units) and damage
+or storage failures answer as errors, never as a query problem. The worst admitted page (50
+entries each citing 16 units of 256 KiB) took about 0.42 s on the profiling host (plan §18).
 Neither route is rate-limited (the single runtime permit bounds them): a client that loops
 on searches delays sheet saves, which then answer 503 and can be retried.
 
