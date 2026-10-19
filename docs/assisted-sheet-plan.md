@@ -1739,3 +1739,126 @@ page tests and the `assist`, `entry` and `notes` modules), `cargo fmt --check` a
 Clippy, all at 2 CPUs on 2026-10-19. Times: the page tests 16:35–16:37, fmt and Clippy 16:38,
 the five test modules (`assist`, `assist_tests`, `entry`, `notes_tests`, `list_tests`) 16:38–16:41: **127 passed**, 0 failed. The full `cargo test` was not rerun: code outside tests is
 unchanged since `967e99c`, whose full run passed (642 tests).
+
+## 12. Slice 1.4 implementation notes
+
+Branch `assist-1.4` (from master `5686980`, which merged slices 1.1 to 1.3). Built the slice-1.4
+scope of §5 ("Unknown values"): the `null` path, blank → `erased`, unknown new cells, "?"
+display, and the profile and contract notes. Nothing from later slices: no per-field or
+per-cell routes, no `meta:` addresses, no row Remove + Undo, no quick-add, no JavaScript. **No
+migration** (020 already admits `erased` and typed `{"unknown":true}` values; the value schema
+is derived at runtime) and no dependency change, so the slice-1.2 follow-up (migration 020's
+`address` length CHECK refuses 6-byte `meta:` addresses, review record 1.2 row 3) stays with
+slice 1.5a, which first writes `meta:` addresses.
+
+**What was built.**
+- **Schema** (`values::schema_json`, split out of `schema`): integer cells, list properties
+  included, are `{"type":["integer","null"]}`. The nullable wrapper (`values::nullable`) is
+  idempotent: it adds `null` only to a type (and enum) that does not already admit it, so a
+  nullable integer stays `["integer","null"]` instead of a nested type array, which the
+  validator builder refuses. Old snapshots stay valid (the schema only accepts more).
+- **Domain:** `private_pin::list_values` accepts `null` for integer properties; text, enum and
+  boolean properties still refuse it (JSON Schema), and integers above `i64` still fail.
+- **Entry** (`values::Recorder::cell`, D-M, D-X1):
+  - blank input (spaces, tabs, no-break spaces) is unknown (`null`); when it replaces a
+    recorded value (a number, or an optional property that was not set) it writes an `erased`
+    note with the typed text; over unknown it changes nothing; in a new cell it writes no
+    note;
+  - an unreadable number (syntax, more than 64 numbers, out of range) keeps the saved value,
+    a number **or unknown**, with an `unresolved` note (slice 1.2); in a new row, a newly
+    present property or on create the cell becomes unknown with an `unresolved` note whose
+    `before` is absent (none) or `{"absent":true}`;
+  - control-character and over-long input is still refused (422) everywhere: it cannot be
+    kept as a faithful scribble;
+  - re-posting the same scribble writes nothing; entering a value equal to the saved one
+    (blank over unknown included) resolves a current scribble with a `literal` note (§3a).
+- **Formulas** (`definitions::formula`):
+  - `convert::inputs` and `convert::record` map `null` on integer fields and integer item
+    properties to CEL `Null` (each charged to the input budget like any value); other types
+    still refuse it (`invalid_input`);
+  - `convert::result` maps a `Null` result to `null_value` (was `type_mismatch`); a
+    constraint whose result is `Null` is `null_value` too;
+  - **read-set guard** (U2): the checker records the declared scalar fields a formula reads
+    and the item properties it selects (`has()` excluded); a formula that reads an unknown
+    non-nullable integer field, or an integer property that is unknown in any item, is not run
+    and reports `null_value`; its dependents report `dependency_failed` ("it uses Load, which
+    could not be computed"). Other formulas still compute.
+- **Display:** an empty integer control has `placeholder="?"`; a scribble that left a cell
+  unknown shows "? (unknown) · ‘lots’ not understood" (the control echoes the scribble); an
+  erased value shows no note line, only "Last change: was 84 [Undo]". Load shows "Not
+  computed: a value it uses is unknown (null)." with `null_value`.
+- **Undo** needed no change: `erased` was already eligible (slice 1.3, S11), `assist::set`
+  already writes `null`, and the schema now admits it on every integer cell. Freeze copies
+  data unchanged; history diffs compare stored values, so null versus a number is a change.
+- **Docs:** profile note in `derived-formulas-plan.md` §4 "Value conversion" (the three CEL
+  forms and the guard); `runtime-definition-contract.md` (the `null` row, creation, list
+  values).
+- **Browser:** the assisted stage blanks Current HP (empty, `placeholder="?"`, "Last change:
+  was -15", the HP check not evaluated with the null reason), undoes it, then adds an
+  Equipment row with Quantity "lots" ("? (unknown) · ‘lots’ not understood", the scribble in
+  `<bdi>`, Load "Not computed: a value it uses is unknown (null)"), at both viewports.
+
+**Decisions (where the plan left it open) and deviations.**
+
+| # | Plan said | Done | Why |
+|---|---|---|---|
+| U1 | "`convert::inputs` and `convert::record` map `null`" | The hash-locked conformance fixture changes: `field-null-not-nullable` and `item-null-property` now evaluate (were `invalid_input`); new cases `field-null-text`, `field-null-bool`, `field-null-enum`, `item-null-bool-property`, `unknown-*` (copy, arithmetic, `==`, `!=`, ternary, short-circuit, unread field, item sum, item `==`, item `has()`, unread item), `null-copy-nullable`, `null-nullable-not-equals`, sheet `unknown-dependents`. The lock moves to `193d8b79…` (Rust and Python). The profile ID stays `cel-mimik-1` | The fixture's note asks for a reviewed profile decision: this is the reviewed plan's (rev 3.1, §3a) mandated change, and it is flagged for the implementation review. The admitted subset is unchanged, and so is every outcome over values a sheet could store before 1.4, so no stored sheet reads differently and no profile 2 is needed |
+| U2 | "CEL forms … pinned to their actual results and documented; none of them errors silently into a pass" | Raw CEL gives `vitality == 0` → false and `vitality != 0` → true on null, so a check could pass on an unknown. The read-set guard makes every form that reads an unknown `null_value` ("not evaluated"); `has(item.p)` on an unknown property is true (presence) | Pinning raw CEL would have pinned a silent pass. The guard is static (identifiers and item selections), so it also applies on a branch that would not be taken (`true || vitality == 0` → `null_value`): conservative, documented |
+| U3 | — | Nullable fields keep CEL's own null semantics (`luck == null` true, `luck != 0` true while null), outside the guard | Existing outcomes over nullable fields are unchanged (fixture cases `null-equals` etc.); their authors test `== null` |
+| U4 | "On nullable fields the existing Known/Unknown select still rules" | Unknown still stores `null` whatever the text (op `literal`, as before). **Known with a blank value is unknown too** (`erased`) instead of 422 | "Blank = unknown" (D-M) and "nothing is forced": refusing would force the player to switch the select |
+| U5 | blank → `erased` | `erased` whenever blank input changes a recorded value, including a newly present optional property left blank (`{"absent":true}` → unknown). The note's `raw` is the typed text (spaces kept, as every note keeps what was typed). A blank new cell writes no note | One op for "the player cleared it"; a new cell has nothing to record (a note documents a change or a reading) |
+| U6 | "value kept" for an unreadable edit | An unreadable entry over a saved **unknown** keeps unknown (`before` = `after` = unknown, `unresolved`) | Same rule as a kept number; re-posting the page stays a no-op |
+| U7 | D-M: "an unreadable required number … stored as unknown" | Control-character and over-long input is still refused (422) in new rows and on create too | Slice 1.2 refuses them over kept values for the same reason: the note could not hold the input faithfully (raw ≤ 200, no NUL) |
+| U8 | "The sheet shows '?' plus the scribble" | "?" as the `placeholder` of an empty integer control (an unknown without a scribble: erased or created blank), and "? (unknown) · ‘…’ not understood" under a scribbled unknown. The control itself stays empty, so re-posting never sends "?" as a scribble | A literal "?" value would come back as an unreadable entry on the next save. The visible "(unknown)" gives assistive technology words, not only a sign |
+| U9 | — | Existing tests that used blank or unreadable integers to provoke 422 now use a control character (`create_page_never_evaluates_and_create_saves`, `formula_text_is_escaped`, `stale_invalid_draft_conflicts`, `failed_save_rerender_keeps_draft_and_submitted_revision`); `item_integers_exact_i64`, `optional_state_is_explicit` and `pinned_list_values_are_exact_and_derived_values_are_not_inputs` now expect unknown for integers and still refuse a boolean `null`; slice 1.2's "until 1.4" tests are updated to the 1.4 spec and renamed (`unkeepable_entry_is_still_422_with_the_draft`) | The spec change the 1.2 notes announced ("until 1.4"), not weakened checks: each still proves a refusal, with input that 1.4 still refuses |
+| U10 | — | `assist_tests` helpers `click`, `edit`, `text`, `action` are `pub(super)` for the new `unknown_tests` module | Reuse instead of copies |
+| U11 | Page bound (D7): rerun the worst cases if markup grows | All six existing worst-case page tests rerun (unchanged sizes); a new null worst case, `worst_label_pages_with_every_unknown_are_within_the_unit_bound` | See the measurements below; no budget change, no rendering change needed |
+
+**Page bound (D7).** Rerun 17:00–17:03 (`--cpus 2`). The existing fixtures render no empty
+integer control and no unknown note, so their sizes are unchanged: sign-led with enum
+18,183,914 / 20,520,960 (11%); 32 sign-led columns 18,126,430 / 18,948,096 (4.3%); long sum
+11,497,841; scribble 17,718,536 (6.5%); scalar switch/Undo 492,970 / 589,824; scalar scribble
+574,206 / 589,824 (2.6%). New null worst cases (64-character IDs, labels of 100 `"`, 256 rows
+of 64-character retained IDs): every integer cell erased with `placeholder="?"` and Undo back
+to `i64::MIN`, every enum cell with Undo: 10,489,329 / 20,520,960; 32 erased columns
+10,182,897 / 18,948,096; every integer cell unknown under a 200-`"` scribble: 17,603,848 /
+18,948,096 (7.1%); 256 wide scalars erased 295,324 / 589,824; 256 wide scalars unknown under
+the scribble 570,622 / 589,824 (3.3%). The tightest case overall is still slice 1.3's scalar
+scribble (2.6%): "? (unknown)" is shorter than "kept −9223372036854775808".
+
+**Red → green.** Red run at 16:56 (`--cpus 2`) with every test written and only
+`values::schema_json` split out (no behaviour change): 15 of the 23 selected tests failed.
+
+| Test | Red | Green |
+|---|---|---|
+| `formula::tests::unknown_integers_are_converted_and_other_formulas_compute` | FAILED (`invalid_input`) | pass; M8 and M9 fail it |
+| `formula::tests::a_null_result_is_null_value_not_type_mismatch` | FAILED | pass; M4 fails it |
+| `formula::tests::cel_forms_over_an_unknown_are_not_evaluated` | FAILED | pass; M1 fails it |
+| `formula::tests::conformance_expressions`, `conformance_sheets` (fixture updated, lock moved) | FAILED | pass; M1 and M4 fail `conformance_expressions` |
+| `unknown_tests::unreadable_numbers_in_new_cells_are_unknown_with_a_note` | FAILED | pass; M3, M5, M6 fail it |
+| `unknown_tests::blank_erases_a_known_number_and_unkeepable_input_is_refused` | FAILED | pass; M5, M6 fail it |
+| `unknown_tests::the_value_schema_admits_null_for_every_integer_cell` | FAILED | pass; M2, M5 fail it |
+| `unknown_tests::lots_in_a_new_row_is_unknown_with_its_scribble` | FAILED (422) | pass; M2, M3, M5 fail it |
+| `unknown_tests::create_with_lots_is_created_with_unknown` | FAILED (422) | pass; M2, M3, M5, M6 fail it |
+| `unknown_tests::an_empty_name_and_unset_required_choices_still_refuse_create` | FAILED (the valid create with "lots" got 422) | pass |
+| `unknown_tests::blank_erases_and_undo_restores_the_number` | FAILED (422) | pass; M2, M6, M7 fail it |
+| `unknown_tests::unknowns_survive_freeze_and_history_uses_historical_values` | FAILED (422) | pass; M2, M3, M5, M6 fail it |
+| `list_tests::worst_label_pages_with_every_unknown_are_within_the_unit_bound` | FAILED (the seeded null data was refused) | pass; M5, M7 fail it |
+| `entry_save_tests::unkeepable_entry_is_still_422_with_the_draft` (updated) | FAILED on a test-design error (a NUL in the echoed draft is replaced by U+FFFD by the HTML parser; that case was dropped, `notes_tests` covers NUL) | pass |
+| `notes_tests::unkeepable_input_is_still_422` (updated) | pass (guard: still refused) | pass |
+
+First green run of the selection 16:58–17:00. The first full run (17:03–17:13) found the seven
+existing tests of U9; fixed and green at 17:15. Mutation runs 17:14–17:21 and 17:34–17:37 (`--cpus 2`), each
+restoring its source afterwards (checked with `cmp`, all identical):
+
+| Mutation | Fails |
+|---|---|
+| M1 read-set guard off | `cel_forms_over_an_unknown_are_not_evaluated`, `conformance_expressions` |
+| M2 nullable wrapper always wraps (not idempotent) | 9 tests, including `the_value_schema_admits_null_for_every_integer_cell` (the assist pin no longer builds) |
+| M3 new cells refuse unreadable numbers | 5 `unknown_tests` |
+| M4 a `null` result is `type_mismatch` | `a_null_result_is_null_value_not_type_mismatch`, `conformance_expressions` |
+| M5 `list_values` refuses `null` | 8 tests, including the null page worst case |
+| M6 blank refused (slice 1.2 behaviour) | 5 `unknown_tests` |
+| M7 no `placeholder="?"` on scalars | `blank_erases_and_undo_restores_the_number`, the null page worst case |
+| M8 `convert::inputs` refuses `null` on a non-nullable integer | 7 tests, including `unknown_integers_are_converted_and_other_formulas_compute` and both conformance tests |
+| M9 `convert::record` refuses `null` on an integer property | 7 tests, including `lots_in_a_new_row_is_unknown_with_its_scribble` |

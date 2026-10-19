@@ -172,21 +172,23 @@ async fn canonical_negatives_survive_a_re_post() {
 }
 
 /// Slice 1.2 narrowed this: an unreadable entry over a known saved integer is kept with a
-/// scribble (`notes_tests`). Blank, control-character input, a new row and create still get
-/// 422 with the draft until slice 1.4.
+/// scribble (`notes_tests`). Slice 1.4 narrowed it again: blank input is unknown, and an
+/// unreadable entry in a new row or on create is unknown with a scribble (`unknown_tests`).
+/// Control-character and over-long input still get 422 with the draft, in a saved cell and
+/// in a new row.
 #[tokio::test]
-async fn unreadable_entry_is_still_422_with_the_draft() {
+async fn unkeepable_entry_is_still_422_with_the_draft() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let setup = setup(&assist()).await;
     created(&setup).await;
     let (_, before) = saved(&setup, 1).await;
+    let long = format!("1{}", " ".repeat(200));
     for (hp, quantity) in [
-        ("", "1"),
         ("84\u{7}", "1"),
-        ("84", "lots"),
-        ("84 -15", "84--15"),
-        ("84", "2 x"),
+        (long.as_str(), "1"),
+        ("84", "2\u{7}"),
+        ("84 -15", long.as_str()),
     ] {
         let edit = form(
             1,

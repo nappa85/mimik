@@ -93,7 +93,8 @@ pub(crate) fn for_tests(definition: &serde_json::Value) -> ImmutablePin {
 }
 
 /// Host-managed item IDs (registry slug, unique per list) and exact i64 item integers; JSON
-/// Schema `integer` alone also accepts u64 values above `i64::MAX`.
+/// Schema `integer` alone also accepts u64 values above `i64::MAX`. `null` is an integer
+/// property's unknown value (assisted sheet slice 1.4).
 fn list_values(field: &super::Field, value: &serde_json::Value) -> Result<(), AppError> {
     let integers: Vec<&str> = field
         .items
@@ -111,7 +112,7 @@ fn list_values(field: &super::Field, value: &serde_json::Value) -> Result<(), Ap
         for property in &integers {
             if item
                 .get(*property)
-                .is_some_and(|number| number.as_i64().is_none())
+                .is_some_and(|number| !number.is_null() && number.as_i64().is_none())
             {
                 return Err(AppError::Invalid("Integer outside signed i64 range."));
             }

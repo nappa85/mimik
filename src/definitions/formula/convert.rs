@@ -89,8 +89,13 @@ fn record(
     for (id, ty) in properties {
         let child = format!("{path}/{id}");
         match object.get(id) {
-            // Absent optional properties are absent keys; `null` never appears in items.
+            // Absent optional properties are absent keys. `null` is only an integer
+            // property's unknown value (assisted sheet slice 1.4).
             None if optional.contains(id) => {}
+            Some(value @ Json::Null) if *ty == ValueType::Int => {
+                budget.take(value, &child)?;
+                map.insert(id.clone(), Value::Null);
+            }
             None | Some(Json::Null) => return Err(invalid(child)),
             Some(value) => {
                 map.insert(id.clone(), scalar(ty, value, &child, budget)?);
@@ -114,6 +119,11 @@ pub(super) fn inputs(lookup: &Lookup, values: &Json) -> Result<Vec<(String, Valu
         let value = match object.get(id) {
             None => return Err(invalid(path)),
             Some(Json::Null) if *nullable => Value::Null,
+            // `null` is the unknown value of every integer field (slice 1.4).
+            Some(value @ Json::Null) if *ty == ValueType::Int => {
+                budget.take(value, &path)?;
+                Value::Null
+            }
             Some(value) => scalar(ty, value, &path, &mut budget)?,
         };
         converted.push((id.clone(), value));
@@ -155,9 +165,41 @@ pub(super) fn inputs(lookup: &Lookup, values: &Json) -> Result<Vec<(String, Valu
     Ok(converted)
 }
 
+/// What a formula may not read (assisted sheet slice 1.4): integer fields that are unknown
+/// (`null`) without being declared nullable, and `(list, property)` pairs with an unknown
+/// item value. A formula reading either reports `null_value` without running, because CEL
+/// would evaluate `null == 0` to `false` (and `!=` to `true`) instead of failing.
+#[derive(Default)]
+pub(super) struct Unknowns {
+    pub fields: BTreeSet<String>,
+    pub properties: BTreeSet<(String, String)>,
+}
+
+/// The unknowns of input values that [`inputs`] accepted.
+pub(super) fn unknowns(lookup: &Lookup, values: &Json) -> Unknowns {
+    let mut unknowns = Unknowns::default();
+    for (id, (_, nullable)) in lookup.scalars() {
+        if !nullable && values.get(id).is_some_and(Json::is_null) {
+            unknowns.fields.insert(id.clone());
+        }
+    }
+    for id in lookup.lists() {
+        for item in values[id].as_array().into_iter().flatten() {
+            for (property, value) in item.as_object().into_iter().flatten() {
+                if value.is_null() {
+                    unknowns.properties.insert((id.clone(), property.clone()));
+                }
+            }
+        }
+    }
+    unknowns
+}
+
 /// Checks a derived result against its declared type, including enum options and text length.
+/// A `null` result (a nullable field copied while unknown) is `null_value` (Sol rev-2 M5).
 pub(super) fn result(ty: Option<&ValueType>, value: &Value) -> Result<Scalar, Code> {
     match (ty, value) {
+        (_, Value::Null) => Err(Code::NullValue),
         (Some(ValueType::Int), Value::Int(value)) => Ok(Scalar::Int(*value)),
         (Some(ValueType::Bool), Value::Bool(value)) => Ok(Scalar::Bool(*value)),
         (Some(ValueType::Text(max)), Value::String(text)) if text.chars().count() <= *max => {

@@ -276,7 +276,7 @@ remains confined to its existing compatibility editor.
 | Submitted canonical value | Behavior |
 | --- | --- |
 | Missing declared key or unknown key | Reject; never keep an omitted old value implicitly |
-| `null` | Unknown, valid only if the approved field is nullable |
+| `null` | Unknown. Valid for every integer field and integer list property (assisted sheet slice 1.4, D-M: a blank or unreadable number is stored as unknown); for every other control only if the approved field is nullable |
 | Text `""` / whitespace | Known empty / exact text retained; not silently null or trimmed |
 | Boolean `false` / `true` | Exact JSON boolean, distinct from null; no string/number coercion |
 | Integer `0` / negative | Exact signed i64, distinct from null; no gameplay bounds inferred |
@@ -296,7 +296,10 @@ two contradictory values/duplicate form keys; preserve malformed raw strings.
 Creation requires explicit valid full values: do not manufacture zero/false or
 other defaults. The create form may offer null for nullable fields but the player
 submits it explicitly. Required nonnullable fields need a value before saving;
-the UI describes this as structural completion, not game legality. Name is
+the UI describes this as structural completion, not game legality. Since assisted
+sheet slice 1.4 a blank or unreadable number is that value: it is stored as unknown
+(`null`, with the scribble as a change note), never as a default. Enum and boolean
+controls and the Name still need a value. Name is
 trimmed and must contain 1–100 characters; general notes retain exact text.
 
 Revisions are positive i64, transmitted as exact decimal strings in HTML/envelopes.
@@ -315,7 +318,8 @@ editable; a per-property `editable: false` flag and an item catalogue are a late
 
 - **Values.** A list is an array of at most 256 items. Each item has a host-managed `id`
   plus its declared properties; a required property is always present, an optional one is
-  present or absent (never `null`). Item integers are exact i64.
+  present or absent. Item integers are exact i64 or `null` (unknown, slice 1.4); no other
+  property holds `null`.
 - **Host IDs (slot labels).** A new row's ID is `r<N>-<k>`: N is the revision being written
   and k = 1, 2, … numbers that list's newly allocated rows in row order. The sole writer
   enforces it for runtime `create` and `edit` (freezing keeps the data unchanged): every ID

@@ -595,6 +595,8 @@ struct NoteLine {
     text: String,
     /// The value the note resulted in.
     value: String,
+    /// The note left the cell unknown (`null`): the sheet shows "?" (slice 1.4).
+    unknown: bool,
 }
 
 impl NoteLine {
@@ -609,12 +611,14 @@ impl NoteLine {
             return None;
         }
         let value = note.after.text();
+        let unknown = note.after == super::notes::NoteValue::Unknown;
         match note.op {
             // A sign-led sum ("-5+3") is shown like a sum; a one-term literal shows nothing.
             super::notes::Op::Sum | super::notes::Op::SignLiteral => Some(Self {
                 kind: "sum",
                 text: super::entry::sum_text(&note.raw)?,
                 value,
+                unknown,
             }),
             // After a switch the cell shows the relative reading it applied: "84 − 15 = 69".
             super::notes::Op::Switched => {
@@ -626,12 +630,14 @@ impl NoteLine {
                     kind: "sum",
                     text: super::entry::offer_text(after.checked_sub(literal)?, &note.raw)?,
                     value,
+                    unknown,
                 })
             }
             super::notes::Op::Unresolved => Some(Self {
                 kind: "unresolved",
                 text: note.raw.clone(),
                 value,
+                unknown,
             }),
             _ => None,
         }

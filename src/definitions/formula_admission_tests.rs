@@ -302,14 +302,22 @@ fn sheet_values() -> Value {
 fn pinned_list_values_are_exact_and_derived_values_are_not_inputs() {
     let pin = pin_for(&example());
     assert!(pin.validate_values(&sheet_values()).is_ok());
+    let mut unknown = sheet_values();
+    unknown["equipment"][0]["armor"] = Value::Null;
+    assert!(
+        pin.validate_values(&unknown).is_ok(),
+        "an unknown item integer"
+    );
     let invalid: Vec<(Mutation, &str)> = vec![
         (
             Box::new(|v| v["equipment"][0]["armor"] = json!(9_223_372_036_854_775_808_u64)),
             "item integer above i64",
         ),
         (
-            Box::new(|v| v["equipment"][0]["armor"] = Value::Null),
-            "null inside an item",
+            // An integer property's null is its unknown value (assisted sheet slice 1.4);
+            // every other property still refuses null.
+            Box::new(|v| v["equipment"][0]["equipped"] = Value::Null),
+            "null in a boolean item property",
         ),
         (
             Box::new(|v| v["equipment"][1]["id"] = "coat-1".into()),

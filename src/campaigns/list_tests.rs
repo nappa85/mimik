@@ -671,14 +671,14 @@ async fn stale_invalid_draft_conflicts() {
         setup.post("/private-sheets/1", current).await.0,
         StatusCode::SEE_OTHER
     );
-    // Paired baseline: an invalid draft at the current revision is 422 (a blank number is
-    // still refused; readable text over a known value is kept as a scribble from slice 1.2).
-    let invalid_current = super::formula_tests::form(2, "", Some("2"));
+    // Paired baseline: an invalid draft at the current revision is 422 (a control character
+    // is still refused; blank and unreadable numbers are unknown or scribbles since 1.4).
+    let invalid_current = super::formula_tests::form(2, "\u{7}", Some("2"));
     assert_eq!(
         setup.post("/private-sheets/1", invalid_current).await.0,
         StatusCode::UNPROCESSABLE_ENTITY
     );
-    let stale = super::formula_tests::form(1, "", Some("2"));
+    let stale = super::formula_tests::form(1, "\u{7}", Some("2"));
     let (status, html) = setup.post("/private-sheets/1", stale).await;
     assert_eq!(status, StatusCode::CONFLICT, "scalar runtime");
     assert!(
@@ -864,8 +864,8 @@ async fn failed_save_rerender_keeps_draft_and_submitted_revision() {
     let form = list_form(
         1,
         vec![
-            // A blank number is still refused (readable text would be kept as a scribble).
-            equipment_row(0, "r1-1", "Kept <draft>", "", None, None, "true"),
+            // A control character is still refused (blank is unknown since slice 1.4).
+            equipment_row(0, "r1-1", "Kept <draft>", "1\u{7}", None, None, "true"),
             equipment_row(
                 1,
                 "",
@@ -889,7 +889,7 @@ async fn failed_save_rerender_keeps_draft_and_submitted_revision() {
             .map(str::to_owned)
     };
     assert_eq!(value("row-1-0-0").as_deref(), Some("Kept <draft>"));
-    assert_eq!(value("row-1-0-1").as_deref(), Some(""));
+    assert_eq!(value("row-1-0-1").as_deref(), Some("1\u{7}"));
     assert_eq!(value("id-1-1").as_deref(), Some(""));
     assert_eq!(value("row-1-1-2").as_deref(), Some("4"));
     assert_eq!(value("revision").as_deref(), Some("1"));
@@ -2763,6 +2763,16 @@ fn int(value: i64) -> String {
     format!("{{\"int\":\"{value}\"}}")
 }
 
+/// The typed note value of a number, or of unknown (`None`, slice 1.4).
+fn typed(value: Option<i64>) -> String {
+    value.map_or_else(|| r#"{"unknown":true}"#.to_owned(), int)
+}
+
+/// The stored value of a number, or `null` for unknown.
+fn stored(value: Option<i64>) -> Value {
+    value.map_or(Value::Null, Value::from)
+}
+
 /// One list with a 64-character ID and 32 properties with 64-character IDs and labels of
 /// 100 `"`: all integers, or 31 integers and an enum (`with_enum`) whose options are a
 /// 64-character ID and `b`.
@@ -2806,12 +2816,12 @@ fn densest_sign_led() -> (String, i64, i64) {
     (raw, i64::MAX, value)
 }
 
-/// The wide list with 256 rows: every integer cell holds `value` with the note `note` (op,
-/// raw, before); with `enum_notes` the list has its enum column, every enum cell holding `b`
-/// and noted as changed from the 64-character option.
+/// The wide list with 256 rows: every integer cell holds `value` (`None`: unknown) with the
+/// note `note` (op, raw, before); with `enum_notes` the list has its enum column, every enum
+/// cell holding `b` and noted as changed from the 64-character option.
 async fn wide_list_page(
-    value: i64,
-    note: (&'static str, &str, i64),
+    value: Option<i64>,
+    note: (&'static str, &str, Option<i64>),
     enum_notes: bool,
 ) -> (String, usize) {
     let definition = wide_list_definition(enum_notes);
@@ -2839,9 +2849,9 @@ async fn wide_list_page(
                         notes.push((address, "literal", String::new(), before, after));
                     }
                 } else {
-                    item[p] = value.into();
+                    item[p] = stored(value);
                     let (op, raw, before) = note;
-                    notes.push((address, op, raw.to_owned(), int(before), int(value)));
+                    notes.push((address, op, raw.to_owned(), typed(before), typed(value)));
                 }
             }
             item
@@ -2861,13 +2871,15 @@ async fn worst_label_page_with_every_switch_and_undo_is_within_the_unit_bound() 
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (raw, before, value) = densest_sign_led();
-    let (html, units) = wide_list_page(value, ("sign_literal", &raw, before), true).await;
+    let (html, units) =
+        wide_list_page(Some(value), ("sign_literal", &raw, Some(before)), true).await;
     assert_eq!(html.matches("form=\"assist-switch\"").count(), 31 * 256);
     assert_eq!(html.matches("form=\"assist-undo\"").count(), 32 * 256);
     assert_eq!(html.matches("class=\"entry-note\"").count(), 31 * 256);
     within_unit_bound(&html, units, "every long sign-led sum, switch and Undo");
     // Without the enum column (fewer units, so a tighter bound): every cell sign-led.
-    let (html, units) = wide_list_page(value, ("sign_literal", &raw, before), false).await;
+    let (html, units) =
+        wide_list_page(Some(value), ("sign_literal", &raw, Some(before)), false).await;
     assert_eq!(units, 9_220);
     assert_eq!(html.matches("form=\"assist-switch\"").count(), 32 * 256);
     within_unit_bound(&html, units, "32 sign-led columns, switch and Undo");
@@ -2879,7 +2891,7 @@ async fn worst_label_page_with_every_long_sum_is_within_the_unit_bound() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let raw = format!("1{}", "+1".repeat(63));
-    let (html, units) = wide_list_page(64, ("sum", &raw, i64::MIN), false).await;
+    let (html, units) = wide_list_page(Some(64), ("sum", &raw, Some(i64::MIN)), false).await;
     assert_eq!(units, 9_220);
     assert_eq!(html.matches("form=\"assist-undo\"").count(), 32 * 256);
     assert_eq!(html.matches("class=\"entry-note\"").count(), 32 * 256);
@@ -2893,15 +2905,19 @@ async fn worst_label_page_with_every_long_scribble_is_within_the_unit_bound() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let raw = "\"".repeat(200);
-    let (html, units) = wide_list_page(i64::MIN, ("unresolved", &raw, i64::MIN), false).await;
+    let (html, units) =
+        wide_list_page(Some(i64::MIN), ("unresolved", &raw, Some(i64::MIN)), false).await;
     assert_eq!(units, 9_220);
     assert_eq!(html.matches("not understood").count(), 32 * 256);
     within_unit_bound(&html, units, "every long scribble");
 }
 
 /// 256 integer scalar fields with 64-character IDs and labels of 100 `"` (each charged one
-/// unit), every one holding `value` with the note (op, raw, before).
-async fn wide_scalar_page(value: i64, note: (&'static str, &str, i64)) -> (String, usize) {
+/// unit), every one holding `value` (`None`: unknown) with the note (op, raw, before).
+async fn wide_scalar_page(
+    value: Option<i64>,
+    note: (&'static str, &str, Option<i64>),
+) -> (String, usize) {
     let label = "\"".repeat(100);
     let ids: Vec<String> = (0..256)
         .map(|f| format!("f{f:03}_{}", "x".repeat(59)))
@@ -2924,13 +2940,13 @@ async fn wide_scalar_page(value: i64, note: (&'static str, &str, i64)) -> (Strin
     let mut data = serde_json::Map::new();
     let mut notes = Vec::new();
     for id in &ids {
-        data.insert(id.clone(), value.into());
+        data.insert(id.clone(), stored(value));
         notes.push((
             format!("field:{id}"),
             op,
             raw.to_owned(),
-            int(before),
-            int(value),
+            typed(before),
+            typed(value),
         ));
     }
     let html = noted_page(&definition, Value::Object(data), notes).await;
@@ -2946,7 +2962,7 @@ async fn worst_label_scalar_page_with_every_switch_and_undo_is_within_the_unit_b
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (raw, before, value) = densest_sign_led();
-    let (html, units) = wide_scalar_page(value, ("sign_literal", &raw, before)).await;
+    let (html, units) = wide_scalar_page(Some(value), ("sign_literal", &raw, Some(before))).await;
     assert_eq!(html.matches("form=\"assist-switch\"").count(), 256);
     assert_eq!(html.matches("form=\"assist-undo\"").count(), 256);
     within_unit_bound(&html, units, "256 wide scalars with switch and Undo");
@@ -2959,7 +2975,8 @@ async fn worst_label_scalar_page_with_every_long_scribble_is_within_the_unit_bou
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let raw = "\"".repeat(200);
-    let (html, units) = wide_scalar_page(i64::MIN, ("unresolved", &raw, i64::MIN)).await;
+    let (html, units) =
+        wide_scalar_page(Some(i64::MIN), ("unresolved", &raw, Some(i64::MIN))).await;
     assert_eq!(html.matches("not understood").count(), 256);
     assert_eq!(
         html.matches(&"&#34;".repeat(200)).count(),
@@ -2967,6 +2984,39 @@ async fn worst_label_scalar_page_with_every_long_scribble_is_within_the_unit_bou
         "echoed in full"
     );
     within_unit_bound(&html, units, "256 wide scalars with a long scribble");
+}
+
+/// Slice 1.4: unknown values add a "?" placeholder to empty integer controls and "?
+/// (unknown)" notes. Worst cases: every integer cell erased to unknown with Undo back to a
+/// 19-digit value (and every enum cell with Undo), and every integer cell unknown under a
+/// 200-`"` scribble, on the wide list and on wide scalars.
+#[tokio::test]
+async fn worst_label_pages_with_every_unknown_are_within_the_unit_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let erased = ("erased", "", Some(i64::MIN));
+    let (html, units) = wide_list_page(None, erased, true).await;
+    assert_eq!(html.matches("placeholder=\"?\"").count(), 31 * 256);
+    assert_eq!(html.matches("form=\"assist-undo\"").count(), 32 * 256);
+    within_unit_bound(&html, units, "every value erased, with Undo");
+    let (html, units) = wide_list_page(None, erased, false).await;
+    assert_eq!(html.matches("form=\"assist-undo\"").count(), 32 * 256);
+    within_unit_bound(&html, units, "32 erased columns, with Undo");
+    let raw = "\"".repeat(200);
+    let (html, units) = wide_list_page(None, ("unresolved", &raw, None), false).await;
+    assert_eq!(html.matches("? (unknown) · ").count(), 32 * 256);
+    within_unit_bound(&html, units, "every unknown with a long scribble");
+    let (html, units) = wide_scalar_page(None, erased).await;
+    assert_eq!(html.matches("placeholder=\"?\"").count(), 256);
+    assert_eq!(html.matches("form=\"assist-undo\"").count(), 256);
+    within_unit_bound(&html, units, "256 wide scalars erased, with Undo");
+    let (html, units) = wide_scalar_page(None, ("unresolved", &raw, None)).await;
+    assert_eq!(html.matches("? (unknown) · ").count(), 256);
+    within_unit_bound(
+        &html,
+        units,
+        "256 wide scalars unknown with a long scribble",
+    );
 }
 
 // ---- Step 8: the gate lift, the publication budget and end-to-end lists (plan D7) ----

@@ -38,6 +38,8 @@ mod material_tests;
 mod notes_tests;
 #[path = "registry_tests.rs"]
 mod registry_tests;
+#[path = "unknown_tests.rs"]
+mod unknown_tests;
 
 async fn fixture() -> (tempfile::TempDir, Store, Vec<RequestAuth>, Arc<AtomicI64>) {
     fixture_with_owner(1).await

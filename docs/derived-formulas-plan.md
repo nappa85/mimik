@@ -214,11 +214,39 @@ Arity and argument types are also checked statically.
 - integer → `Int` (never `UInt`);
 - bool → `Bool`;
 - string → `String(Arc)`;
-- `null` → `Null`, only for nullable scalars;
+- `null` → `Null`, for nullable scalars, and (assisted sheet slice 1.4) for every
+  integer field and integer item property, where it is the unknown value;
 - list → `List` of `Map` items.
 
 Item maps contain the host-managed `id` key plus the declared properties.
-Absent optional properties are absent keys, never `null`. Conversion happens
+Absent optional properties are absent keys; an integer property may hold `null`.
+
+**Profile note: unknown integers (assisted sheet slice 1.4).** The admitted subset
+is unchanged (`cel-mimik-1`; `vitality == null` is still rejected for a field that is
+not nullable), and so is every outcome over values a sheet could store before 1.4.
+What changed is the input contract and the outcome over `null`:
+
+- `null` on a non-nullable integer field or an integer item property converts to
+  CEL `Null` instead of refusing the whole evaluation (`invalid_input`). Text, enum
+  and boolean values still refuse it.
+- CEL evaluates `null == 0` to `false` and `null != 0` to `true` without an error,
+  so a check written with `==`, `!=`, a ternary or a short-circuit could pass or
+  fail on an unknown. A formula that **reads** an unknown non-nullable integer field,
+  or the value of an integer item property that is unknown in any item, therefore
+  does not run: it reports `null_value` ("a value it uses is unknown (null)"), and
+  its dependents `dependency_failed`. The read set is static (identifiers and item
+  property selections in the expression), so the rule holds on a branch that would
+  not be taken (`true || vitality == 0` is `null_value`). `has(item.p)` tests
+  presence, not the value: an unknown property is present.
+- A formula whose result is `null` (a copy of a nullable field while it is null)
+  reports `null_value`, not `type_mismatch`.
+- Nullable fields keep CEL's own null semantics (`luck == null` is true,
+  `luck != 0` is true while null): their authors chose an explicit unknown state
+  and test it with `== null`.
+
+The conformance fixture pins these outcomes (`unknown-*`, `field-null-*`,
+`item-null-*`, `null-copy-nullable`, `null-nullable-not-equals`, sheet
+`unknown-dependents`); its hash lock changed with them. Conversion happens
 **once per sheet evaluation**: one child scope holds all variables, and every
 derived field and constraint borrows it. Strings are shared `Arc`s rather than
 copied per formula. Derived results are added to the same scope in topological
@@ -300,7 +328,8 @@ identical bytes and hash. This exercises the `private_pin::validate` path.
     uses it.
   - The value schema is an array of at most 256 objects with
     `additionalProperties: false`. `id` plus non-optional properties are
-    required, and `null` never appears inside items.
+    required, and `null` never appears inside items (since assisted sheet slice 1.4,
+    except as an integer property's unknown value).
 
 **Canonical form:**
 
@@ -878,7 +907,8 @@ and list editing is M4.
 - **Values** (`campaigns/values.rs`, `private_pin.rs`):
   - Derived fields are excluded from the value schema, the form and the web save keys.
   - A list is an array of at most 256 objects with `id` plus declared properties, no
-    `additionalProperties` and no null.
+    `additionalProperties`, and no null except an integer property's unknown value
+    (assisted sheet slice 1.4).
   - `validate_values` adds item-ID slug/uniqueness checks, exact i64 item integers and a
     1 MiB aggregate size cap. The cap is the sheet-boundary gate from the M1 review.
   - `values::form` rejects list fields (`List editing is unsupported until milestone M4`).
