@@ -178,6 +178,49 @@ User decisions on the proposals in [harness-assessment-2026-10-15.md](harness-as
   at most 2% false-supported (unsupported claims presented as supported). This gates
   model-dependent product work, not admin work.
 
+## Rules review (user, 2026-10-19)
+
+The owner reviewed every rule in [rules-inventory.md](rules-inventory.md) on its review page
+(126 rules: 102 keep, 5 change, 19 drop). Kept rules stay as written. Changes and drops, which
+supersede earlier text wherever it still says otherwise:
+
+**Changed.**
+- **Number fields accept anything** (was: exact decimal i64 only). The app warns and offers a
+  solution instead of refusing ("accept anything, warn and offer a solution").
+- **Items not in the catalogue** (was Q4, "invalid"): accept anything, warn and offer the
+  catalogue match; without a match the app can't know the item's details.
+- **Sheet validity state** (was: constraint severity `error` blocks the save). Saving is always
+  allowed, but a sheet with demonstrably invalid content is flagged: "a warrior with spells, a
+  cleric with spells outside his allowed set, max HP too high or too low, anything that can be
+  demonstrated with a formula or a ruleset should cause the sheet to be flagged as error, we
+  allow saving but it's clear the system doesn't validate it".
+- **Typeahead and suggestions** (was: no datalist, no per-row select): "we accept anything the
+  user writes and suggest a correction, then validate".
+- **List row actions** (was: one round trip each, no script): script is allowed.
+
+**Dropped.**
+- No JavaScript on sheets, including the htmx denial on private sheet pages; "no application
+  JavaScript framework"; catalogue pick and view without JavaScript; full-page POST only with no
+  live recompute while typing; the 2026-10-15 rejection of template JavaScript for derived
+  values. JavaScript may make the sheet interactive, including live recompute.
+- Derived values are read-only text, never form controls.
+- Booleans are always unknown/true/false selects ("depends on the case, some fields will need
+  custom inputs").
+- Catalogue administration is CLI-only with no withdrawal (browser administration is allowed,
+  as for rulesets and definitions).
+- The model's role limited to authoring definitions and kept off the correctness path, and "no
+  LLM in the catalogue plan" (the model may interpret and propose at play time; the player
+  confirms).
+- The product capacity caps (campaigns, sheets, catalogue entries) as product rules.
+- History names only what changed, never values.
+- Manual page images are never shown to players (Q1).
+- `--dev-owner-play`: "Creating an user is quite easy, no need for those overrides that could
+  open up security issues".
+- "Don't call the current generic editor an official sheet."
+
+**Kept with a note.** The 20,000-character cut of catalogue descriptions: "We need to inquiry if
+that's a valid limit".
+
 ## Environment
 
 - Workspace initially empty: `/home/marco/Progetti/mimik`.
