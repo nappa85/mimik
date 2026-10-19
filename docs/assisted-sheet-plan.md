@@ -1,7 +1,14 @@
 # Assisted sheet MVP plan: lenient input, CPU interpretation, suggestions, undo
 
-2026-10-19. **Revision 3.** Base: master `cfd3475`. Code is unchanged since `4c8d653`, and
+2026-10-19. **Revision 3.1.** Base: master `0921f6c`. Code is unchanged since `4c8d653`, and
 references were re-checked there.
+
+**Rev 3** (`0921f6c`): Sol and Sonnet both **GO WITH AMENDMENTS**, with no Blocking findings;
+the third chain was unavailable. Slice 1.1 may start. Rev 3.1 folds in their amendments and
+the user decisions D-V and D-W, and records the main-session defaults D-X1 to D-X4. Rev 3.1
+changes are amendments requested by the rev-3 reviews; slices touching them get
+implementation review. Review record:
+[reviews/2026-10-19-assisted-sheet-plan.md](reviews/2026-10-19-assisted-sheet-plan.md).
 
 Review history:
 - **Rev 1** (`71a7841`): Sol NO-GO, Sonnet GO WITH AMENDMENTS. Answered by user decisions D-A
@@ -44,6 +51,17 @@ they want; the app computes, warns, suggests and offers Undo; nothing is forced.
 | **D-Q** | **Sign-led input** ("-15", "+3") on **any** number field is applied **literally** (HP becomes −15). Right after, the app asks **"Did you mean 84 − 15 = 69?"**, with one click to switch. Multi-term input ("84 -15") is computed directly. No pool marking | §3a |
 | **D-T** | Change notes are **simple**: written in the save's transaction, with no updates or deletes. Sealing and verification come later, before release. The tamper window is a recorded POC limitation | §3a, §6 |
 | **D-U** | History has no limit. **A save that changes nothing writes no revision** | §3a |
+| **D-V** | **Removing a list row happens at once, with Undo right after** (like crossing out on paper). No confirmation | §3a, §3f |
+| **D-W** | **Reminder trigger:** any decrease of a top-level number field asks the model whether something on the sheet could react. The model judges relevance; there is no owner marking | §3c |
+
+**Main-session defaults** (recorded as defaults; the user may revise them).
+
+| # | Default | Where |
+|---|---|---|
+| D-X1 | A blanked (`erased`) value is Undo-eligible (Sonnet rev-3 M1) | §3f |
+| D-X2 | D-U's "no history cap" stands for the POC. A per-account write-rate limit or storage guard is **required before release** (risk register, §6) | §6 |
+| D-X3 | No-JS 503 on per-cell saves: sheet writes wait a short, bounded time for the `JOBS` permit, then show a styled 503 page that keeps the draft (Sonnet rev-3 M3) | §3a |
+| D-X4 | The "Did you mean" offer after sign-led input stays on every number field (the user chose it). It is non-blocking and dismissible | §3a |
 
 ## 1. Goal and POC scope
 
@@ -72,7 +90,7 @@ they want; the app computes, warns, suggests and offers Undo; nothing is forced.
 - Notes and Undo for text cells (history keeps every text revision).
 - Seals and note verification (D-T).
 - Dismissal records.
-- Undo of creation, row add, row removal and moves.
+- Undo of creation, row add and moves. Row **removal** gets Undo (D-V, §3f).
 - Forced Undo ("set back anyway").
 - Live preview.
 - A keyed rate limiter.
@@ -83,7 +101,7 @@ they want; the app computes, warns, suggests and offers Undo; nothing is forced.
 manual RAG, no `catalogue_ref` membership checks, no hosted provider, no GPU, nothing above
 about 4B.
 
-## 2. Facts from the current code (master `cfd3475`)
+## 2. Facts from the current code (master `0921f6c`)
 
 **Values and save.**
 - `values::integer` (`values.rs:164-174`) accepts exact decimal only. `scalar_value`
@@ -154,8 +172,14 @@ unique (`019:74-89`). Badges are live; sealed versions are immutable.
 
 ### 3a. Numbers, notes, unknown values, per-cell save
 
-**Grammar.** Applies to integer cells only. Input is ASCII-trimmed, `maxlength` is 200, and the
-parser reads at most 64 scalars.
+**Grammar.** Applies to integer cells only.
+- It lives in a **new module**, `campaigns::entry`. `values::integer` stays strict, because it
+  also parses protocol integers such as submitted revisions (`web.rs:1074`, `:1127`); its test
+  at `campaigns/tests.rs:484-486` is kept (Sol slice-1.1 constraint, Sonnet m1).
+- Input is trimmed of ASCII spaces and tabs.
+- NUL and control characters other than tab are refused as unreadable (Sonnet m6).
+- More than 200 characters is refused **server-side**, whatever the `maxlength`.
+- The arithmetic parser reads at most 64 scalars.
 
 ```
 int     = DIGIT+                    ; ASCII only; leading zeros allowed ("007" = 7)
@@ -164,9 +188,14 @@ literal = [sign] int                ; the literal value, on every field (D-Q)
 sum     = int 1*( ws* sign ws* int ); "84 -15" = 69, "84-15+3" = 72; unsigned terms only
 ```
 
-- Evaluation is left to right in **i128**. The result must fit i64, otherwise the input is
-  unresolved. `-9223372036854775808` parses.
-- **Unresolved:** "84--15", "84+-2", "5.", full-width digits, words, `*` and `/`.
+- Evaluation is left to right in **i128**, and **each term is checked** as it is parsed and
+  added. The result must fit i64, otherwise the input is unresolved. `-9223372036854775808`
+  parses.
+- **Literals:** "+5" = 5, "−5" (U+2212) = −5, "-0" = 0, "0007" = 7. A sign must touch its
+  digits, so "- 5" is unresolved.
+- **Unresolved:** "84--15", "84+-2", "5.", "1 2", "5 -", a lone sign, full-width digits, words,
+  `*` and `/`.
+- **Empty or whitespace-only input** (spaces, tabs) = blank.
 - **Blank** = unknown (D-M). On nullable fields the existing Known/Unknown select still rules.
 
 **D-Q switch.**
@@ -179,11 +208,27 @@ sum     = int 1*( ws* sign ws* int ); "84 -15" = 69, "84-15+3" = 72; unsigned te
   `switched`. Otherwise nothing is written: "HP changed since; not switched".
 - A switch is single-use, because its own write replaces the current note.
 - No offer when there was no known before-value (a new row, or unknown).
+- **Checked arithmetic** (Sol minor 1, Sonnet m8): `b ± n` uses checked i64 arithmetic. On
+  overflow there is no offer.
+- **D-U wins:** entering `-1` when the saved value is already −1 is a no-op. There is no
+  revision, no note and no offer.
+- **D-X4:** the offer is shown on every number field. It is non-blocking, and a client-side
+  dismiss hides it.
 
 **Unknown values (D-M; Sol rev-2 M5, Sonnet M-B, M-G).** `null` becomes a legitimate value for
 **every integer cell**, as the "internal empty value" D-M asks for. The full path:
 - **Value schema:** integer cells generate `["integer","null"]`, list properties included
   (relaxes `values.rs:94`, `:116`). This only accepts more, so old snapshots stay valid.
+  - The nullable wrapper (`values.rs:140-150`) must be **idempotent**: adding `null` to a type
+    that already admits it must not build a nested type array (Sol M5).
+- **Null formula results** (Sol M5): `convert::result` (`convert.rs:158-175`) classifies a CEL
+  `Null` result as `TypeMismatch`. Slice 1.4 maps a `Null` result to `Code::NullValue`, so
+  `copy_hp = hp` with an unknown `hp` gets "a value it uses is unknown (null)".
+- **CEL equality** (Sonnet m9): in CEL `null == 0` evaluates without error, to `false`. Checks
+  written with `==`, `has()` or a ternary can therefore *pass or fail* on an unknown instead of
+  showing "not evaluated". Slice 1.4 tests these three forms and documents them in a profile
+  note. It also updates `runtime-definition-contract.md:279`, which today says `null` is valid
+  "only if the approved field is nullable".
 - **Domain:** `private_pin::list_values` accepts `null` for integer properties
   (`private_pin.rs:111-116`).
 - **Formulas:** `convert::inputs` and `convert::record` map `null` on integer inputs and
@@ -216,8 +261,17 @@ private_sheet_notes(sheet_id, revision, address, op, raw, before, after, bundle,
   `unresolved`, `erased`, `confirmed`, `reverted`. The `op` itself records which reading was
   applied (Sonnet M-E).
 - `raw` is the typed input, ≤ 200 characters.
-- `before` and `after` are canonical JSON scalars (integer, null, enum ID or boolean), ≤ 64
-  bytes each. `bundle` is a small integer or null. `target` is the revision an Undo reverted.
+- `before` and `after` use a small **typed note value** (Sol M4, Sonnet M2), stored as canonical
+  JSON of at most 80 bytes:
+  - `{"absent":true}` — an optional property not set; absence is distinct from unknown;
+  - `{"unknown":true}` — `null`;
+  - `{"int":"-15"}` — i64 as a decimal string;
+  - `{"enum":"<id>"}` — up to 64 characters, so the 80-byte bound fits the longest admitted ID;
+  - `{"bool":true}`;
+  - `{"row":"absent"}` / `{"row":"present"}` — the row-level states of a removed row (D-V).
+
+  A whole removed row is not stored in the note; its Undo reads the row from history, §3f.
+- `bundle` is a small integer or null. `target` is the revision an Undo reverted.
 - **Scope (Sol rev-2 M4):** notes are written for **integer, enum and boolean cells only**.
   Text and multiline edits write none; history already holds every revision. That removes the
   long-text problem.
@@ -233,19 +287,37 @@ private_sheet_notes(sheet_id, revision, address, op, raw, before, after, bundle,
   add notes to the current revision. This is recorded as limitation L1 (§6), to be fixed before
   release by sealing. Rev-2 R3 (the migration window) and Sonnet M-C (verification cost) fall
   away with it.
-- **Bounds:** per-cell saves write 1 note; bundles write ≤ 4. The legacy full form and the create
-  form write at most one note per in-scope cell, capped at 256 per revision. Above that the save
-  gets 422 as a size limit.
+- **Bounds** (Sonnet m5):
+  - a per-cell save writes 1 note; bundles write ≤ 4;
+  - a **new-row form** writes at most one note per integer, enum or boolean property of that row
+    (≤ 32, the item-property cap);
+  - **quick-add** writes none;
+  - a row removal writes one `{"row":…}` note;
+  - the legacy full form and the create form write at most one note per in-scope cell, capped at
+    256 per revision. Above that the save gets 422 as a size limit.
+- The display of a scribble (`raw`) is escaped and inside `<bdi>` (Sonnet m6).
 
-**No-op saves (D-U).**
-- A cell whose `trim(raw)` equals the canonical rendering of its saved value (decimal, or blank
-  for `null`) is unchanged.
+**No-op saves (D-U; Sonnet m2).**
+- A cell is unchanged when its **parsed** value equals the saved value. The comparison is per
+  control:
+  - integer: the parsed i64 (or unknown);
+  - text and multiline: exact string;
+  - Name: after trim, as `name_notes` stores it;
+  - Notes: exact;
+  - enum: option ID;
+  - boolean: the value;
+  - nullable pair: state plus value;
+  - optional property: presence plus value.
 - A save in which nothing changes writes **no revision and no note**. The page says "No
-  change".
-- An `unresolved` scribble on a kept value does change the record, so it writes a revision
-  whose data is unchanged and which carries the note. It is the only data-unchanged revision.
-- There is no separate "Keep" action (Sonnet m7): a scribble stays shown until the address gets
-  a newer note.
+  change". Rights and the active state are **still rechecked** before that answer (Sol minor 2).
+- **Two record-only changes** write a revision with unchanged data and a note. They are the
+  only data-unchanged revisions:
+  1. An `unresolved` scribble on a kept value.
+  2. **Accepting the kept value after a scribble** (Sol M4): when the address's current note is
+     `unresolved` and the player enters a value equal to the saved one, a `literal` note
+     resolves the scribble. Otherwise "enter 84 to clear it" would be a no-op and the scribble
+     would never go away.
+- There is no separate "Keep" button (Sonnet m7).
 
 **Typed addresses (Sol rev-2 M1).**
 - Forms: `meta:name`, `meta:notes`, `field:<id>`, `cell:<list>/<host-id>/<property>`.
@@ -253,6 +325,13 @@ private_sheet_notes(sheet_id, revision, address, op, raw, before, after, bundle,
   `/cells/{list}/{host_id}/{property}`.
 - Notes, conflicts, jobs, Undo and switch all use them, so a definition field called `name` or
   `notes` never collides with the metadata.
+- The data part reuses `history_diff::address` (`history_diff.rs:16-22`) for row cells
+  (Sonnet m4).
+- Routes refuse, with 400 and before any write:
+  - derived (formula) fields;
+  - IDs that are not in the pin;
+  - IDs that fail the slug grammar (`valid_field_id`, `admission.rs:96-103`);
+  - host IDs that are not in the live snapshot.
 
 **Per-cell save (D-C, D-S; Sol rev-2 M2, M3; Sonnet M-F, m1).** On the edit page:
 
@@ -271,8 +350,8 @@ private_sheet_notes(sheet_id, revision, address, op, raw, before, after, bundle,
   cells save with that button, since they have no Enter (Sonnet M-F). With JS, `change` saves
   selects and checkboxes.
 - **Row actions are separate forms**, so Enter can never trigger Remove or Move.
-- Remove and Move write at once. Remove has no undo in the POC; history keeps the row. That is
-  Q1.
+- Remove and Move write at once. **Remove gets "Row removed · Undo" right after** (D-V, §3f).
+  Move has no Undo; the reverse move is one click.
 - **New row** form: one row's controls, Enter saves the row. A required enum or boolean must
   still be chosen; required numbers may be blank (unknown, D-M).
 - New host IDs are allocated inside the transaction (`r<rev>-k`, as today) and returned in the
@@ -284,11 +363,39 @@ private_sheet_notes(sheet_id, revision, address, op, raw, before, after, bundle,
 - The legacy full-form edit POST stays accepted, with whole-sheet 409 and D-U (Sonnet m2). With
   D-Q literals, re-posting is safe.
 
-**Conflicts and base revisions (R1).**
+**Conflicts and base revisions (R1; Sol M3, Sonnet m3).**
 - Each form carries `base`: the revision at which that unit's **displayed** value was read.
-- The server answers 409 if the unit's address changed between `base` and the live revision
-  L; otherwise it writes L + 1. It loads `base` through `snapshots::raw_load(…, Some(base))`
-  in the same transaction.
+- `base` must be an integer within `1..=L`. A malformed value gets 400; a base above L (forged)
+  gets 409.
+- **The conflict rule compares values, not intervening history.** The server loads
+  `base` with `snapshots::raw_load(…, Some(base))` and the live snapshot L, in the same
+  transaction, and answers 409 when the unit's **protected value differs** between them.
+  - An ABA change (84 → 69 → 84) is therefore *not* a conflict. That is deliberate: the
+    displayed value is still the true one, and checking every intervening revision would decode
+    unbounded history under the single DB mutex.
+  - Exactly two snapshots are decoded per write.
+
+  | Unit | Protected value |
+  |---|---|
+  | Metadata, scalar field, saved-row cell | that address's value, plus the row's existence for cells |
+  | New row | nothing (it only appends) |
+  | Quick-add | nothing (it only appends) |
+  | Remove | the row's existence **and all of its property values** (a stale Remove after another tab edited the row gets 409) |
+  | Move up / down | the list's **order of host IDs** (a stale Move after a reorder, add or remove gets 409) |
+
+- The patch is always applied to the **freshly loaded live snapshot** L, never to the historical
+  base, and L + 1 is written.
+- **Store change:** `private_save_keeping` (`sheets.rs:279`) today requires the whole-sheet
+  revision to equal the live one. The new routes pass `(base, unit)` and use this rule instead;
+  the legacy full-form and create paths keep the whole-sheet check.
+- A **stale no-op** (the value already equals the submission) answers "No change" rather than
+  409.
+- After a 409 the re-rendered form carries `base` = L and the player's draft, so a second
+  Enter is a conscious overwrite.
+- **Busy server (D-X3):** sheet write routes wait up to 2 s for the `JOBS` permit instead of
+  failing at once (`definitions/mod.rs:33-37` uses `try_acquire`). Then they answer a styled
+  503 page that re-renders the player's submitted input with "Server busy; press Enter
+  again". The wait fits inside the 5 s request timeout. Reads keep `try_acquire`.
 - **Without JS**, every save does PRG, and the whole page is re-read, so every `base` equals L.
   Text typed in another field without pressing Enter is lost on that reload. That is accepted
   and documented.
@@ -297,6 +404,17 @@ private_sheet_notes(sheet_id, revision, address, op, raw, before, after, bundle,
   its own base, so an unrelated save never rebases a dirty draft.
 - Requests per unit are serialised: one in flight, the latest queued. A late response for an
   older request is ignored.
+- **Draft generations (Sol M1).** Per unit, the module keeps a draft generation counter that
+  increments on every `input` event. A successful response:
+  - always updates that unit's acknowledged saved value and `base`;
+  - replaces the control's text **only if** the draft is still the generation that was
+    submitted.
+
+  A value typed while the save was in flight is kept, and so is a queued second save.
+- **Shared read-only projection (Sol M2).** Derived values and checks have their own
+  projection revision. A response updates them only when its revision is ≥ the projection's
+  current revision. Per-unit acknowledgements stay independent, so out-of-order responses from
+  different units never regress Load or the checks.
 - **R1 test:** tab A at revision 10 has an unsaved Armour edit; tab B saves Armour (11); tab A
   saves HP (12). Tab A's Armour form still has `base` 10, so saving it gets **409** with the
   stored value and the draft both kept. The same sequence is repeated with a dirty row cell.
@@ -359,9 +477,19 @@ and stores its **bound read/write set**:
 - every write target: address, value at the job's base revision and, for row cells, the row's
   host ID;
 - every `@` reference: address and value;
-- the **displayed effect**: before → after for each target.
+- the **displayed effect**: before → after for each target;
+- for reminders and bundles (Sol M6), the **supplied context** as well:
+  - each list-row name the prompt carried;
+  - its remembered key;
+  - the identity (catalogue version and entry key) of any entry text sent;
+  - every enum value in the context.
 
-Bundle targets must be distinct; a duplicate drops the option.
+  All of these are bounded by the 4 KiB prompt. A changed item name, key or enum therefore
+  invalidates the option even when the numbers are unchanged.
+
+Bundle targets must be distinct; a duplicate drops the option. The freshness guarantee covers
+exactly this bound set. It does not claim that the model's relevance judgement was right
+(injection is contained, not prevented).
 
 `POST /private-sheets/{id}/proposals/{job}/{n}` (`csrf`) then does, in one `IMMEDIATE`
 transaction:
@@ -390,9 +518,9 @@ not invalidate the proposal.
   - one revision, with notes sharing `bundle`;
   - freshness as in §3b.
 - **Reminders (step 3):**
-  - **Trigger:** a saved **decrease of a top-level integer field**, with the assistant on and
-    JavaScript present. Pool marking is dropped (D-Q), so the trigger is generic. The model's
-    `relevant` flag filters, and the low-priority slot bounds the cost (Q2).
+  - **Trigger (D-W):** a saved **decrease of any top-level integer field**, with the assistant
+    on and JavaScript present. There is no owner marking. The model's `relevant` flag judges
+    relevance, and the low-priority slot bounds the cost.
   - **Context:** the decrease, numbers and enums, list-row names from properties that carry
     the `catalogue` member, and linked entry text when exactly one entry matches or the stored
     key (D-R) resolves. Entry text is ≤ 2,000 characters and quoted.
@@ -455,10 +583,22 @@ Picking a suggestion stores the name, and its key when the picked entry is one o
 ### 3f. Undo (D-N) and history (D-E)
 
 - **Eligible:** the current note of an in-scope address when:
-  - its op is `literal`, `sum`, `sign_literal`, `switched`, `confirmed` or `reverted`;
-  - its `before` is recorded (the address existed before);
+  - its op is `literal`, `sum`, `sign_literal`, `switched`, `confirmed`, `reverted` or
+    **`erased`** (D-X1);
+  - its `before` is recorded. An `{"absent":true}` before means Undo makes the optional
+    property absent again, so present ↔ absent is undoable;
   - the sheet is active.
-- **Not eligible:** `unresolved` and `erased`, creation, new rows, text cells, frozen sheets.
+- **Not eligible:** `unresolved`, creation, new rows, text cells, frozen sheets.
+- **Row removal (D-V):** the removal note `{"row":"present"}` → `{"row":"absent"}` offers
+  "Row removed · Undo". Undo:
+  1. reads the row from the revision before the removal, through the validated history reader;
+  2. requires that no row with that host ID exists now;
+  3. re-inserts it at its old index, clamped to the current length, with a **new host ID**
+     `r<L+1>-1`, because removed IDs never return (`snapshots.rs:67-70`);
+  4. writes a `reverted` note.
+
+  The re-added row is a new row for later notes, so its cells have no Undo until they are edited
+  again.
 - `POST /private-sheets/{id}/undo` with `csrf` and `note` (revision and address). In one
   transaction:
   1. Recheck rights.
@@ -547,29 +687,38 @@ Picking a suggestion stores the name, and its key when the picked entry is one o
 
 ## 5. Steps
 
-Each slice and step: its own branch, failing-first tests (red run recorded), an independent
-review before merge, and builds and tests on 2 cores on weekdays. Slices 1.1–1.6 go into
-master one by one, and each one leaves the demo usable.
+Each slice and step:
+- has its own branch;
+- has failing-first tests, with the red run recorded;
+- is independently reviewed before merge (implementation review);
+- is built and tested on 2 cores on weekdays.
+
+Slices 1.1 to 1.6 go into master one by one, and each leaves the demo usable.
 
 ### Demo (lands with slice 1.1)
 
 `tests/support/source_fixture.rs` gains `assist_definition()`, written as
-`assist-definition.json`. Game `synthetic-game/first`, definition `assist-sheet`:
+`assist-definition.json` by `fixture_pair` (`:57-95`). It reuses the closures and the pattern of
+`list_definition()` (`:97-156`) (Sonnet m12). Game `synthetic-game/first`, definition
+`assist-sheet`, fields:
 - `hp` "Current HP" and `max_hp` "Max HP";
 - `armour` "Armour modifier" (starts at −1);
 - `luck` "Luck" (nullable);
 - `equipment` with `name` (text), `quantity` (integer), `weight` (integer) and `broken`
   (optional boolean);
-- derived `load` = `sum(equipment.map(i, i.quantity * i.weight))`, and the check `hp <=
-  max_hp`.
+- derived `load` = `sum(equipment.map(i, i.quantity * i.weight))`, and the check
+  `hp <= max_hp`.
 
-Slices 1.6 and step 3 add their members to it (`quick_add`, `catalogue` plus `key`, a demo
-catalogue).
+Slice 1.6 and step 3 add their members to it (`quick_add`, `catalogue` plus `key`, a demo
+catalogue). The `name`/`notes` collision test in 1.5a reuses `list_definition()`, which already
+has a field with id `name`.
 
-`tools/assist_demo.py` is a dev tool (prototype tier) built on the `smoke_release.py` helpers. It
-starts from a fresh data directory, registers, imports, publishes, and creates an owner and a
-player with generated dummy local passwords (printed). It creates a campaign and a sheet (HP
-84, Max HP 84), serves `--loopback`, and prints the URL and logins.
+`tools/assist_demo.py` is a dev tool (prototype tier) built on the `smoke_release.py` helpers:
+1. It starts from a fresh data directory.
+2. It registers the ruleset, imports the source fixture and publishes the definition.
+3. It creates an owner and a player with generated dummy local passwords, and prints them.
+4. It creates a campaign and a sheet (HP 84, Max HP 84, Armour −1).
+5. It serves `--loopback` and prints the URL and logins.
 
 ```
 cargo build --locked -j 2
@@ -579,97 +728,229 @@ python3 tools/assist_demo.py target/debug/mimik --fixture target/assist-demo/fix
 # open the printed http://127.0.0.1:<port>/private-sheets/<id> and log in as the player
 ```
 
-### Step 1: six slices (no JavaScript, no model)
+Each slice states what the demo can do at that point. After 1.1 it is still the full-page
+form with one Save, and unreadable input is still refused.
 
-**1.1 Sums on the existing save (very small).**
-- Scope: the grammar module (literal and sum only); `values::form` and `reconcile` compute sums;
-  everything else unchanged (an unreadable integer still gets 422). The demo.
-- Visible: "84 -15" + Save → 69.
-- Tests:
-  - the grammar table: "84 -15" = 69, "84-15+3" = 72, "007" = 7;
-  - "84--15", "84+-2", "5." and full-width digits are refused as today;
-  - an `i64::MIN` literal, overflow, more than 64 scalars;
-  - a no-panic property test;
-  - a saved −1 re-posted stays −1 (B1 regression, now trivially green under D-Q);
-  - a list-row sum.
+### Step 1: seven slices (no JavaScript, no model)
 
-**1.2 Notes and scribbles.**
-- Scope: migration 020 (the simple note table, D-T); notes for sums, literals, enums and
-  booleans; an unreadable integer keeps its value with an `unresolved` note; no-op saves write
-  nothing (D-U); note display.
-- Visible: "84 − 15 = 69" next to HP; "lots" → "kept 84 · 'lots' not understood".
-- Tests:
-  - a note is written in the transaction, and a failure after `snapshots::write` rolls back
-    everything (test hook);
-  - UPDATE, DELETE and replacement abort;
-  - an insert naming a non-live revision aborts;
-  - a later literal replaces a scribble as the current note;
-  - a no-op save → no revision;
-  - a scribble on a kept value → a revision with unchanged data and a note;
-  - 257 notes → 422;
-  - text edits write no note;
-  - freeze writes none and existing notes stay readable;
-  - a Master sees raw text in history (D-E).
+#### 1.1 Sums on the existing save — execution-ready
 
-**1.3 Switch and Undo.**
-- Scope: `sign_literal` notes plus the switch route; the Undo route (bundles come later).
-- Visible: "-15" → HP −15 · "Did you mean 84 − 15 = 69? [Yes]"; "84 − 15 = 69 · Undo".
-- Tests:
-  - "-1" on armour sets −1 (D-Q);
-  - switch → 69 with `switched`; a second switch is refused; a switch after another change is
-    refused; no offer without a known before-value;
-  - Undo of literal, sum, switched and enum/boolean changes;
-  - not offered on create, a new row, `unresolved`, text or frozen;
-  - a double submit gets "already undone";
-  - Undo of an Undo;
-  - rights revoked → 403.
+**Visible result.** In the demo, "84 -15" + Save in Current HP stores 69. "-1" stays −1. On a
+phone keyboard, the minus key and space are available in integer cells.
 
-**1.4 Unknown values.**
-- Scope: the `null` path through schema, domain, formulas, freeze, history and Undo; blank →
-  `erased`; "?" display.
-- Visible: "lots" in a new row's Quantity → "?" plus the scribble; Load says "Not computed: a
-  value it uses is unknown (null)".
-- Tests:
-  - a new row or newly present property with an unreadable value → `null` and a note;
-  - create with "lots" → created unknown;
-  - `list_values` accepts null;
-  - `convert::record` and `convert::inputs` map null, so a reader fails per field and the
-    others compute;
-  - a dependent says "it uses Load, which could not be computed";
-  - Undo restores `null`;
-  - freeze with nulls;
-  - the history diff counts null versus a number;
-  - an empty Name and a required enum on create are still refused;
-  - historical formulas use historical values.
+**Scope.** Exactly the following; nothing else changes.
+1. **New module `src/campaigns/entry.rs`** (pure, no I/O):
+   `pub(crate) fn number(raw: &str) -> Result<i64, Unreadable>`.
+   - It implements the §3a grammar: literal and sum, ASCII space and tab trimming, the
+     200-character server-side cap, the 64-scalar parser cap, NUL and control characters
+     refused, checked i128 accumulation per term, and the i64 result range.
+   - Blank is `Unreadable` in 1.1; unknown values arrive in 1.4.
+2. **`values::integer` is untouched** (protocol integers and revisions, `web.rs:1074`,
+   `:1127`), and its test `campaigns/tests.rs:484-486` stays.
+3. **Integration:** `scalar_value` (`values.rs:541-552`) calls `entry::number` for
+   `Control::Integer`. That single call site serves both `values::form` (scalar fields,
+   `:648-652`) and `reconcile` (list rows, `:604-605`). An `Unreadable` maps to the same
+   `AppError::Invalid` as today, so behaviour stays 422 with the draft.
+4. **`inputmode`** (Sonnet M4): the runtime integer inputs drop `inputmode="numeric"`, which on
+   iOS hides the minus key and space:
+   - `templates/private_sheet.html:12`;
+   - `templates/private_list_field.html:6`.
 
-**1.5 Per-cell save.**
-- Scope: typed addresses and routes (§3a table) with exact key sets; per-unit `base` and 409; a
-  default Save button per form; row actions as separate forms; the new-row form; native pins
-  refused; the legacy full form kept.
-- Visible: Enter in HP saves HP alone; Enter in a row's Quantity saves that cell.
-- Tests:
-  - a definition with fields `name` and `notes` saves both metadata and both fields separately;
-  - two units saved from one page revision both succeed;
-  - the same unit from a stale base → 409 with the draft re-rendered;
-  - the R1 two-tab sequence (no-JS form `base`);
-  - Enter in the first, middle and last row saves only that cell and never adds, moves or
-    removes a row;
-  - selects, checkboxes and nullable pairs save with their button;
-  - multiline cells save with their button;
-  - new host IDs are returned;
-  - a native pin → refused;
-  - the legacy full form keeps whole-sheet 409;
-  - Chromium no-JS run at 1280 and 390.
+   They get no `inputmode` (plain text keyboard). The native
+   templates (`native_fields.html`, `mork_context.html`) are untouched.
+5. The demo (above).
 
-**1.6 Quick-add.**
-- Scope: the `quick_add` member (schema, admission refusals) and the parse.
-- Visible: "3 torches" + Enter adds Torches ×3; "healing potion x2" adds the potion ×2.
-- Tests:
-  - both patterns, a plain name (→ 1), an empty name, a 7-digit count (→ treated as a name), and
-    200 characters;
-  - a required enum in the list → admission refusal;
-  - unknown values for other required numbers;
-  - old definition hashes unchanged.
+**Not in 1.1:** notes, display of the sum, D-Q switch, unknown values, per-cell forms,
+JavaScript, CSP.
+
+**Grammar table** (unit tests on `entry::number`, red first against a stub that returns `Err`):
+
+| Input | Result |
+|---|---|
+| `69`, `+5`, `-5`, `−5` (U+2212), `-0`, `0007` | 69, 5, −5, −5, 0, 7 |
+| `84 -15`, `84-15`, `84 - 15`, `84-15+3`, `\t84 -15\t` | 69, 69, 69, 72, 69 |
+| `-9223372036854775808`, `9223372036854775807` | i64::MIN, i64::MAX |
+| `9223372036854775807+1`, `-9223372036854775808-1`, a 40-digit literal | Unreadable (range) |
+| 32 terms whose running sum leaves i128 never (checked per term) | correct or range error, no panic |
+| `84--15`, `84+-2`, `- 5`, `5 -`, `-`, `+`, `1 2`, `5.`, `１２` (full-width), `1e2`, `x`, `2*3`, `6/2` | Unreadable |
+| empty, spaces only, tabs only | Unreadable (blank; becomes unknown in 1.4) |
+| 201 characters (padded valid sum), 65 scalars, an embedded NUL, `\u{7}` | Unreadable |
+
+Plus a property test: arbitrary strings up to 300 characters never panic, and every accepted
+input re-parses to the same value from its canonical decimal output.
+
+**Connected-save tests** (through the router with the existing test harness, red first):
+- **Scalar sum:** POST the full form with `value-hp=84 -15` → 303, and the saved snapshot
+  `hp = 69`.
+- **List sum:** a row's `quantity` = `2+1` → the saved item has `quantity = 3`.
+- **Canonical negative re-post (B1 regression):** with `armour = −1` saved, re-post the
+  unchanged form (`value-armour=-1`) while editing General notes → `armour` stays −1. Repeat for
+  a list-row integer −3.
+- **Unreadable still 422:** `value-hp=lots` → 422 with the draft and nothing saved, the same as
+  today's behaviour and message class.
+- **Native strictness unchanged:** a native MÖRK BORG edit with `hp=84 -15` is still refused
+  by `native_draft(...).validate()` (`web.rs:685`), and `values::integer("+1")` is still `Err`.
+- **Template:** the rendered runtime integer input has no `inputmode="numeric"`, and native
+  templates still do (DOM test with `scraper`).
+
+**Browser.** The existing Chromium gate stays green. One added check at 390 × 844: typing
+`84 -15` into Current HP and saving stores 69.
+
+**Review.** Implementation review (Sol and Sonnet, plus the third chain if available).
+
+#### 1.2 Notes and scribbles
+
+**Scope:**
+- migration 020 (the simple note table, D-T, with the typed note value of §3a);
+- notes for sums, literals, enums and booleans, including present ↔ absent;
+- an unreadable integer on a **known saved value** keeps the value with an `unresolved` note;
+- no-op saves write nothing (D-U), with rights still rechecked;
+- accepting the kept value resolves a scribble;
+- note display, with scribbles inside `<bdi>`.
+
+**Not yet** (Sonnet m10): unreadable input on a **new row or create** still gets 422 until 1.4.
+
+**Visible:** "84 − 15 = 69" next to HP; "lots" → "kept 84 · 'lots' not understood".
+
+**Tests:**
+- a note is written in the transaction, and a failure after `snapshots::write` rolls back
+  everything (test hook);
+- UPDATE, DELETE and replacement abort;
+- an insert naming a non-live revision aborts;
+- notes are read back exactly from the typed note value: `{"absent":true}` versus
+  `{"unknown":true}`, a 64-character enum ID within 80 bytes, booleans;
+- a later literal replaces a scribble as the current note;
+- entering the kept value after a scribble → a `literal` note and a data-unchanged revision;
+- a no-op save → no revision, and a no-op with revoked rights → 403, not "No change";
+- the per-control no-op comparisons: `007` vs 7, a Name with trailing spaces, an enum, a
+  nullable pair, an optional absent vs present;
+- 257 notes → 422;
+- text edits write no note;
+- freeze writes none, and existing notes stay readable;
+- a Master sees raw text in history (D-E);
+- a scribble with RTL characters renders inside `<bdi>`;
+- raw text with NUL or control characters → unreadable.
+
+#### 1.3 Switch and Undo
+
+**Scope:** `sign_literal` notes plus the switch route (checked arithmetic, D-U precedence,
+D-X4 dismiss); the Undo route, including `erased` (D-X1) and present ↔ absent. Bundles come
+later.
+
+**Visible:** "-15" → HP −15 · "Did you mean 84 − 15 = 69? [Yes]"; "84 − 15 = 69 · Undo".
+
+**Tests:**
+- "-1" on armour sets −1 (D-Q);
+- re-entering "-1" over −1 → no revision and no offer;
+- switch → 69 with `switched`;
+- a second switch is refused; a switch after another change is refused;
+- no offer without a known before-value;
+- no offer when `b ± n` overflows (`b = i64::MIN`, input `-1` → `b − 1` overflows);
+- Undo of literal, sum, switched, enum/boolean changes, `erased` (in 1.4) and present → absent;
+- Undo not offered on create, a new row, `unresolved`, text or frozen;
+- a double submit gets "already undone";
+- Undo of an Undo;
+- rights revoked → 403.
+
+#### 1.4 Unknown values
+
+**Scope:**
+- the `null` path through schema (idempotent nullable composition), domain, formula inputs and
+  records, the `Null` result mapping, freeze, history and Undo;
+- blank → `erased`;
+- new rows and create stop refusing unreadable numbers;
+- "?" display;
+- the profile note and `runtime-definition-contract.md:279`.
+
+**Visible:** "lots" in a new row's Quantity → "?" plus the scribble; Load says "Not computed: a
+value it uses is unknown (null)".
+
+**Tests:**
+- a new row or newly present property with an unreadable value → `null` and a note;
+- create with "lots" → created with unknown;
+- `list_values` accepts null;
+- an existing **nullable** integer definition still compiles its schema (no nested type array);
+- `convert::record` and `convert::inputs` map null, so a reader fails per field and the others
+  compute;
+- `copy = hp` with unknown `hp` → `NullValue` wording, not `TypeMismatch`; an item-property
+  copy, the same;
+- arithmetic on null → `NullValue`;
+- **CEL forms** (Sonnet m9): `hp == 0`, `has(...)` and `hp > 0 ? a : b` with unknown `hp` are
+  pinned to their actual results and documented; none of them errors silently into a pass;
+- a dependent says "it uses Load, which could not be computed";
+- Undo restores `null`; Undo of `erased` restores the number;
+- freeze with nulls;
+- the history diff counts null versus a number;
+- an empty Name and a required enum on create are still refused;
+- historical formulas use historical values.
+
+#### 1.5a Per-field save: metadata and scalar fields (Sonnet m11)
+
+**Scope:**
+- the `meta/…` and `fields/{id}` routes with exact key sets and typed addresses;
+- route refusals (derived, unknown and non-slug IDs; native and unsupported pins);
+- per-unit `base` with bounds and value-based conflicts;
+- a stale no-op answers "No change", and after a 409 the form carries `base` = L;
+- the store's whole-sheet check is bypassed only for these routes;
+- one form per unit with a first Save button;
+- the D-X3 bounded permit wait and styled 503.
+
+The legacy full form is kept, with whole-sheet 409.
+
+**Visible:** Enter in HP saves HP alone; selects and checkboxes save with their button.
+
+**Tests:**
+- `list_definition()`'s `name` field plus the metadata Name save separately;
+- two fields saved from one page revision both succeed;
+- the same field from a stale base whose value differs → 409, with the draft and `base` = L;
+- ABA → no conflict (documented);
+- `base` 0 or above L → 400 or 409;
+- a derived field route → 400;
+- a native pin → refused;
+- the permit held by another request for 1 s → the save succeeds; held for 3 s → styled 503
+  with the input;
+- the R1 two-tab sequence (no-JS `base`);
+- the legacy full form keeps whole-sheet 409;
+- Chromium no-JS run at 1280 and 390 (Enter, select button, multiline button).
+
+#### 1.5b Per-cell save: lists, new row, row actions
+
+**Scope:**
+- the `cells/…`, `lists/{list}/rows` and row-action routes;
+- Remove protects the row's values, Move protects the order;
+- Remove writes a row note, with Undo (D-V);
+- the new-row form;
+- host IDs returned.
+
+**Visible:** Enter in a row's Quantity saves that cell; Remove → "Row removed · Undo".
+
+**Tests:**
+- Enter in the first, middle and last row saves only that cell and never adds, moves or removes
+  a row;
+- two cells of different rows saved from one page both succeed;
+- a stale cell → 409;
+- a stale Remove after another tab edited that row → 409;
+- a stale Move after a reorder, add or remove → 409;
+- a removed row's cell → 400;
+- Undo of Remove re-inserts the row with a new host ID at the clamped index;
+- Undo of Remove when the list is full (256) → refused with a message;
+- a new row with a required enum unset → refused; with a blank number → unknown (1.4);
+- the new-row form writes ≤ 32 notes;
+- Chromium no-JS run.
+
+#### 1.6 Quick-add
+
+**Scope:** the `quick_add` member (schema, admission refusals) and the parse.
+
+**Visible:** "3 torches" + Enter adds Torches ×3; "healing potion x2" adds the potion ×2.
+
+**Tests:**
+- both patterns, a plain name (→ 1), an empty name, a 7-digit count (→ treated as a name), and
+  200 characters;
+- a required enum in the list → admission refusal;
+- unknown values for other required numbers;
+- no notes written;
+- old definition hashes unchanged.
 
 ### Step 2a: JavaScript foundation
 
@@ -681,17 +962,26 @@ python3 tools/assist_demo.py target/debug/mimik --fixture target/assist-demo/fix
   - a multipart body still gets 415 and the module sends URL-encoded;
   - 9007199254740993 round-trips;
   - **R1 with JS:** a saved HP response leaves the dirty Armour `base` alone, and Armour → 409;
-  - out-of-order responses are ignored;
+  - **Same-unit draft generations (Sol M1):** a delayed HP response arrives after the player
+    typed 60 without submitting → the 60 stays and the base updates; repeated with a queued
+    second save;
+  - **Shared projection ordering (Sol M2):** HP (revision 11) and Equipment (revision 12)
+    responses arrive reversed → both units acknowledge, and Load and the checks show
+    revision 12;
   - a save that changes `load` and `hp <= max_hp` updates both read-only regions without
     touching other inputs;
+  - integers are strings **recursively**: list values, note before/after values and revisions
+    (Sol minor 2);
+  - the final CSP header after `normalize`, on the new routes and on their refusals;
   - no CSP violations, and no `innerHTML` or style attributes (lint test over the module);
+  - the inline style from `private_sheet.html:7` moved to `app.css` (Sonnet m13);
   - the no-JS run is still green.
 
 ### Step 2b: Crate and runtime selection (prototype tier; parallel to step 1)
 
 - The crate contract items and D-H stop.
-- The topology, with the egress test from inside the model container and the forwarder's fixed
-  upstream.
+- The topology, with egress tests from inside the model container **and** from the forwarder,
+  which must not proxy anywhere but its fixed upstream (Sol minor 2).
 - A latency and schema screen (§7); output tokens measured.
 - A results note, reviewed before it picks the crate and model.
 
@@ -708,8 +998,12 @@ python3 tools/assist_demo.py target/debug/mimik --fixture target/assist-demo/fix
     - a referenced field changes while the target does not → refused;
     - a referenced row disappears → refused;
     - effect mismatch → refused;
-    - a second apply → refused;
+    - a second apply → refused, including two concurrent applies: exactly one writes, and the
+      consumed flag is set only after the transaction commits;
+    - another sheet's or another account's job, or an invalid option index → refused;
     - an unrelated field change → still applied;
+  - the job store keeps at most 6 non-terminal records under reminder creation, supersession
+    and cancellation (Sol minor 2);
   - expired job → no write and no literal;
   - another account's job, or revoked rights → not found or 403;
   - `JOBS` free during the model call;
@@ -725,6 +1019,8 @@ python3 tools/assist_demo.py target/debug/mimik --fixture target/assist-demo/fix
 - Tests:
   - bundle of 4 in one revision; a 5th change dropped; duplicate targets dropped;
   - one bundle member changed → apply refused;
+  - **contextual freshness (Sol M6):** a reminder bundle whose row name, remembered key, entry
+    version or context enum changed, with every number unchanged → apply refused;
   - bundle Undo all-or-nothing;
   - reminder only on a decrease of a top-level integer; none with the assistant off; it does
     not take the account cap;
@@ -761,7 +1057,8 @@ python3 tools/assist_demo.py target/debug/mimik --fixture target/assist-demo/fix
 - **L1:** notes are unsealed (D-T). A process with database write access could add notes to the
   current revision. Notes are help, not evidence, until sealing lands.
 - **L2:** without JS, text typed in another field and not entered is lost on reload.
-- **L3:** Remove is immediate, and only history keeps the removed row (Q1).
+- **L3:** conflicts compare two snapshots, so an ABA change of a unit is not detected
+  (§3a). This is deliberate.
 
 **Risks.**
 - **R1:** latency at 2 threads is unmeasured.
@@ -771,13 +1068,16 @@ python3 tools/assist_demo.py target/debug/mimik --fixture target/assist-demo/fix
 - **R4:** a crate gap would stop step 2c (D-H).
 - **R5:** one revision per Enter makes history long. D-U removes no-ops; there is no cap.
 - **R6:** the forwarder is a new pinned image.
+- **R7 (D-X2):** history has no cap (D-U). **Before release** a per-account write-rate limit or
+  a storage guard is required. Sonnet rev-3 M5 is recorded here, not solved in the POC.
 
 **Later.**
 - Sealing and verifying notes (before release).
 - Player `*` and `/`.
 - Text, enum and boolean interpretation.
 - Notes and Undo for text.
-- Undo of removal, moves and creation; forced and arbitrary restore.
+- Undo of moves and creation; forced and arbitrary restore.
+- A write-rate limit or storage guard (D-X2, before release).
 - Owner-reviewed rules for reminders without a model (D-I).
 - A model for quick-add.
 - More threads off-hours.
@@ -787,16 +1087,12 @@ python3 tools/assist_demo.py target/debug/mimik --fixture target/assist-demo/fix
 **Decided:**
 - rev-1 Q1–Q6 → D-A to D-D (Q5: Gemma excluded);
 - rev-2 Q1 → D-Q, Q2 → D-R, Q3 → D-S;
+- rev-3 Q1 → D-V (immediate Remove with Undo), Q2 → D-W (any decrease; model judges);
 - forced Undo → not in the POC;
-- "create never refuses" → narrowed (§3a).
+- "create never refuses" → narrowed (§3a);
+- main-session defaults D-X1 to D-X4 (§0), which the user may revise.
 
-**Open questions for the user** (product choices only).
-1. **Q1:** should a row's **Remove** happen at once, recoverable only from history in the POC,
-   or ask "Remove Torches? [Remove] [Cancel]" first? The confirm step costs one extra click,
-   and an extra page without JavaScript.
-2. **Q2:** without pool marking, should a reminder be considered after a decrease of **any**
-   top-level number, with the model judging relevance? Or should the owner mark which fields
-   can trigger reminders (one optional definition flag)?
+**Open questions for the user:** none blocking. D-X1 to D-X4 are defaults the user may revise.
 
 ## 7. Verification
 
@@ -878,3 +1174,32 @@ python3 tools/assist_demo.py target/debug/mimik --fixture target/assist-demo/fix
 | Sonnet M-D: step 1a too large | Six slices | §5 |
 | Sonnet M-H: history growth | D-U: no-op writes nothing; no cap | §3a |
 | Sonnet m1–m8 | m1: native pins refused. m2: legacy full form keeps whole-sheet 409. m3: no style attributes, outer error pages documented. m4: IP-literal loopback. m5: derived fields excluded from context and references. m6: reminder slot. m7: no Keep, no data-unchanged revision except a scribble. m8: host IDs returned | §3a, §3b, §3g |
+
+**Rev 3 → rev 3.1** (both reviewers GO WITH AMENDMENTS, with no Blocking findings).
+
+| Finding | Resolution | Section, test |
+|---|---|---|
+| Sol slice-1.1 constraints: separate parser; connected-save tests | `campaigns::entry`, with `values::integer` strict; scalar sum, list sum, canonical negative re-post, unreadable 422, native strictness, template | §3a; slice 1.1 |
+| Sol M1: in-flight save overwrites a newer draft of the same unit | Per-unit draft generation; the control is replaced only if the draft is unchanged | §3a; step 2a |
+| Sol M2: cross-unit out-of-order responses regress derived values | A separate projection revision for derived values and checks | §3a; step 2a |
+| Sol M3, Sonnet m3: conflict semantics; Remove and Move; base bounds | Value-based rule on two snapshots (ABA accepted, L3); protected values per unit; patch applied to live L; the store bypasses the whole-sheet check only for new routes; `base` in `1..=L`; stale no-op → "No change"; `base` = L after a 409 | §3a; slices 1.5a, 1.5b |
+| Sol M4, Sonnet M2: absent vs null; enum size; clearing a scribble under D-U | Typed note value (absent, unknown, int, enum, bool, row) ≤ 80 bytes; accepting the kept value writes a `literal` note | §3a; slice 1.2 |
+| Sol M5: nested nullable schema; `Null` result is a `TypeMismatch` | Idempotent nullable composition; `Null` result → `NullValue` | §3a; slice 1.4 |
+| Sol M6: contextual freshness for reminders | Bind names, keys, entry identity and enums in the context; narrow guarantee stated | §3b; step 3 |
+| Sol minor 1, Sonnet m8: switch overflow; D-U precedence | Checked `b ± n`; an unchanged input → no offer | §3a; slice 1.3 |
+| Sol minor 2: executable security tests | No-op rights recheck; concurrent apply; recursive string integers; final CSP; forwarder egress; job-store invariant | slices 1.2, 2a, 2b, 2c |
+| Sonnet M1 → D-X1 | `erased` is Undo-eligible | §3f; slice 1.3 |
+| Sonnet M3 → D-X3 | Bounded permit wait (2 s), then a styled 503 that keeps the draft | §3a; slice 1.5a |
+| Sonnet M4: `inputmode="numeric"` hides the minus key on iOS | Removed on runtime integer inputs; 390 px check | slice 1.1 |
+| Sonnet M5 → D-X2 | No cap in the POC; rate limit or storage guard before release (R7) | §6 |
+| Sonnet m1 | Grammar table with "+5", "−5", "-0", lone sign, "- 5", "1 2", "5 -", empty, tabs, 201 characters, zero padding, checked per term; `values::integer` test kept | slice 1.1 |
+| Sonnet m2 | Per-control no-op comparison, Name after trim | §3a; slice 1.2 |
+| Sonnet m4 | Derived, unknown and non-slug IDs refused; `history_diff::address` reused | §3a; slice 1.5a |
+| Sonnet m5 | Note counts for the new-row form (≤ 32), quick-add (0) and row removal (1) | §3a |
+| Sonnet m6 | NUL and control characters refused; scribbles inside `<bdi>` | §3a; slice 1.2 |
+| Sonnet m9 | CEL `==`, `has()` and ternary over null pinned and documented; contract line updated | §3a; slice 1.4 |
+| Sonnet m10 | New-row and create input still get 422 until 1.4 | slice 1.2 |
+| Sonnet m11 | 1.5 split into 1.5a and 1.5b | §5 |
+| Sonnet m12 | `list_definition()` reused for the collision test; demo built on its pattern | §5 Demo, 1.5a |
+| Sonnet m13 | Inline style moved to CSS | step 2a |
+| User D-V, D-W | Remove with Undo; any-decrease reminder trigger | §3a, §3c, §3f |
