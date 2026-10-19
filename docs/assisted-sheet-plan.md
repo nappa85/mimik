@@ -347,8 +347,9 @@ private_sheet_notes(sheet_id, revision, address, op, raw, before, after, bundle,
 | Quick-add line | `lists/{list}/quick` | `csrf`, `base`, `text` |
 | Remove, Move up, Move down | `lists/{list}/rows/{host}/{remove\|up\|down}` | `csrf`, `base` |
 
-- **One form per unit, each with a single visible Save submit button**, placed first in the
-  form, so it is the default submitter.
+- **One form per unit, each with a single visible Save submit button**, so it is the default
+  submitter (slice 1.5a, P2: a unit's Save follows its control; a list form's Save list,
+  among many buttons, comes first).
 - Enter in a single-line input submits it. Selects, checkboxes, nullable pairs and multiline
   cells save with that button, since they have no Enter (Sonnet M-F). With JS, `change` saves
   selects and checkboxes.
@@ -1966,3 +1967,289 @@ Monday 2026-10-19 after 18:00: builds and tests in `mimik-ci:latest` with `--cpu
 vendoring, `package_release.py`, the unpacked-artifact smoke, `lan_smoke.py`, the offline
 source rebuild, the demo launcher and a hand-driven session. **Not yet done:** re-review of the
 round-1 fixes.
+
+## 13. Slice 1.5a implementation notes
+
+Branch `assist-1.5a` (from master `21b6559`, which merged slices 1.1 to 1.4). Built the
+slice-1.5a scope of §5 ("Per-field save: metadata and scalar fields"): the `meta/…` and
+`fields/{id}` routes, value-based conflicts against each unit's `base`, one form per unit on
+the saved page, and the D-X3 bounded permit wait with a styled busy page. Nothing from
+later slices: no `cells/…`, `lists/{list}/rows` or row-action routes, no row Remove + Undo
+(1.5b), no quick-add (1.6), no JavaScript (2a). No migration and no dependency change.
+
+**What was built.**
+- **Routes** (`campaigns/unit_web.rs`, outside the `runtime` layer): `POST
+  /private-sheets/{id}/meta/{name|notes}` and `/fields/{field_id}`, a 256 KiB body limit
+  and the pre-body principal check. Precedence: parse (400), CSRF and request auth (403),
+  the bounded permit wait (D-X3), the read and edit rights (403, frozen, read-only and
+  unsupported pins included, §13.1), then (400) native pins, an ID outside the slug grammar,
+  not in the pin, derived or a list, and the exact key set (`csrf`, `base`, `value`, plus `null`
+  for a nullable field).
+- **Units** (`campaigns/unit.rs`, pure): `Unit::{Name, Notes, Field(f)}`, their keys, their
+  protected value (Name and Notes text, a field's stored value) and `apply`, which reads the
+  value exactly as the full form does (`values::scalar`, extracted from `values::form`, and
+  `name_notes`), writes the field's change note through the same `Recorder`, validates the
+  patched data against the pin and reports whether anything changed (D-U).
+- **Conflicts:** the read loads the live revision L and, when `1 <= base <= L`, revision
+  `base` in one read transaction (`Store::private_read_base`; `base` is decoded and checked
+  against the pin like L). Order: a malformed or zero `base` is 400; then the value is
+  read against L, so a submission equal to L's value answers "No change" (200, rights and
+  revision rechecked, no revision) even from a stale page; then `base` above L, or a unit
+  whose protected value differs between `base` and L, is 409; then a refused value is 422.
+  An A → B → A change is no conflict (L3). The patch is applied to L only; the writer
+  rechecks rights, the active state and that L is still live inside its `IMMEDIATE`
+  transaction.
+- **Refusals re-render the live page** with the unit's draft in its control (focused,
+  `autofocus`), its note and actions hidden, every other unit at its saved value, and every
+  unit form's `base` at L, so pressing Enter again is a conscious overwrite. The status says
+  "Current HP not saved: it changed since this page was loaded (now revision 2). Your entry
+  is kept below; press Enter again to save it over the current value." A success redirects
+  (303) to the sheet with the saved unit's label as fragment (`#label-0`).
+- **D-X3:** `definitions::admit_within(2 s)` waits for the `JOBS` permit (reads keep
+  `try_acquire`). Without it the route answers the styled busy page: 503, `Retry-After: 1`,
+  "Server busy: nothing was saved. Your entry is kept below; press Enter again to save it.",
+  a form posting the same unit with the session's CSRF token, the submitted `base`, `null`
+  and the entry (a textarea when it holds a line break). Nothing is read or written. The
+  auth layer keeps its body (`SheetBusy` marker).
+- **Page** (`private_sheet.html`, new partials `private_groups.html`,
+  `private_scalar_field.html`, `private_sheet_busy.html`): a saved runtime page the reader
+  may edit has no full form. Name, each scalar field and General notes are each a form with
+  hidden `csrf` and `base` and one Save button (`aria-describedby` the unit's label); the
+  control's DOM id is `v<index>` (`meta-name`, `meta-notes`) and its names `value`/`null`.
+  Enter in a single-line input submits its own form; selects (enum, yes/no, Known/Unknown)
+  and multiline fields save with their button. The switch and Undo buttons sit inside the
+  unit's markup but belong to their own forms (`form`), so they are never the default
+  submitter. Create, native, read-only, frozen and history pages keep the one full form,
+  unchanged; so does the re-render of a refused full-form POST.
+- **List forms (interim, P1):** each list is its own form posting to `/private-sheets/{id}`
+  with `csrf`, `revision`, `list` (its field index), its draft `op` and that list's rows only
+  (`values::list_keys`). Its first button is "Save list". The server keeps every other value
+  saved (`values::form` with a scope; Name and General notes from the snapshot), checks
+  that the `op` acts on the same list (else 400) and keeps the whole-sheet 409 and D-U. A
+  draft-operation re-render drafts only that list; the other units keep their saved values,
+  notes and actions. Slice 1.5b replaces it with per-cell and per-row routes.
+- **Tools:** `smoke_release.py` saves the runtime field through its unit form and the list
+  through its list form (`FormFields` keeps every form; the first per action wins);
+  `browser_smoke.py` uses `unit_save` (checks the route and the exact key set) in the
+  formula, list, assisted and workspace stages.
+
+**Decisions (where the plan left it open) and deviations.**
+
+| # | Plan said | Done | Why |
+|---|---|---|---|
+| P1 | "The legacy full form is kept, with whole-sheet 409"; lists save per cell in 1.5b | On a saved editable page each list is its own **list form** posting to the full-form route with `csrf`, `revision`, `list`, `op` and that list's rows; every other value stays saved. The full-form key set is still admitted unchanged | Forms cannot nest: once Name and each field have their own form, no form can hold the whole sheet, and the exact key set (plan D2) refuses a partial full form. A list form is the smallest interim that keeps Add, Remove, Move and Save working until 1.5b. It keeps the whole-sheet 409 (a list saved from a stale page conflicts) |
+| P2 | "a single visible Save submit button, placed first in the form, so it is the default submitter" | A unit's Save comes **after** its control; a list form's Save list comes first | A unit form has one submit button of its own, so it is the default submitter wherever it is; the switch and Undo buttons in its markup belong to their forms through `form`. Save after the control reads in order (label, value, Save) and keeps the note under the control. A list form has many buttons, so its Save stays first |
+| P3 | — | Create, native, read-only, frozen and history pages, and the re-render of a refused full-form POST, keep the one full form with the `value-<id>` names | Create stays one form (§3a); native keeps its strict path; pages without edit rights have nothing to save; a full-form draft is shown in the form it came from, so its submitted revision still conflicts (no silent rebase) |
+| P4 | D-X3: "sheet write routes wait up to 2 s … styled 503 page that re-renders the player's submitted input" | The wait and the busy page are on the two unit routes and (since review round 1, §13.1) on the full-form and list-form save. The switch, Undo and create POSTs keep the plain 503 of the `runtime` layer. CSRF and session auth are checked before the wait; edit rights cannot be (they need the permit). The page shows the entry in a plain control labelled "Your entry" (the field's label needs a read), a textarea when it holds a line break | The no-JS Enter path the decision is about is the unit save. Echoing only to a session that passed CSRF keeps the busy page from echoing a cross-site POST. The echo is escaped; a unit entry is bounded by the 256 KiB unit body limit, a full or list form's by the echo bound (keys, values and per-pair markup ≤ 1 MiB, else not kept; §13.2) |
+| P5 | Order of "No change", 409 and 422 | Malformed or zero `base` 400 → no-op "No change" → `base` above L or a changed unit 409 → value refusal 422 | §3a: a stale no-op answers "No change" rather than 409; the full form's rule "the revision check precedes value validation" kept for units |
+| P6 | "loads base … and the live snapshot L, in the same transaction" and rechecks in the write | `base` and L are read in one read transaction under the `JOBS` permit; the write's `IMMEDIATE` transaction rechecks rights, the active state and that L is still live (else 409) | With one permit no other request writes between the read and the write, so comparing in the read is equivalent; a writer outside the permit gets a conservative 409 |
+| P7 | — | A successful unit save redirects to `/private-sheets/{id}#label-<f>` (`#meta-name-label`, `#meta-notes-label`) | Without script the page reloads; the fragment brings the player back to the unit. List forms keep no fragment (an element fragment blocks `autofocus`) |
+| P8 | Slice-1.2 review row 3: migration 020's `address` length CHECK (≥ 7 bytes) refuses 6-byte `meta:` addresses; fix with 021 if 1.5a writes `meta:` notes | **Not changed; no migration.** 1.5a writes no `meta:` note | Name and General notes are text, and notes are written for integer, enum and boolean cells only (§3a, D-T); the plan has no slice that writes `meta:` notes. The typed addresses are `meta:name` (9 bytes) and `meta:notes` (10), so the CHECK would accept them anyway; it only refuses a one-character `meta:` suffix, which no unit has. The follow-up stays open for the slice that first writes `meta:` notes, if any |
+| P9 | Page bound (D7): one form per unit adds markup; never enlarge the budget | A scribble is quoted under its cell to **32 characters** (was 64); the control above still echoes it in full | See the measurements below: with a form per field the scalar scribble worst case was 607,059 / 589,824 bytes. The excerpt duplicated text already shown in full in the control; 32 characters still name it |
+| P10 | — | Unit routes have a 256 KiB body limit and the pre-body principal check | A 20,000-character value at 4 bytes per character, URL-encoded |
+| P11 | Test "list_definition()'s `name` field plus the metadata Name" | The test uses the source fixture's `formula_definition()`, which also has a scalar field `name`, plus a multiline field and a nullable integer | One fixture covers the collision, the multiline button and the Known/Unknown pair; `list_definition()`'s `name` is the same kind of text field |
+| P12 | — | Existing tests that drove the edit page's full form now use the unit and list forms: helpers `unit_form`, `page_values` (every form's values under their full-form keys), `named` (the selector for a full-form name on either page) and `legacy_form` (the full-form POST equivalent to a page, for the transport tests of the still-accepted full-form route); `submitted_by` picks the clicked submitter's form, else the first form with a `revision` | The tests keep what they prove (round trips are no-ops, CR LF is stored as LF, escaping, focus, autofocus), on the page a browser now gets. None was weakened; `canonical_negatives_survive_a_re_post`, `rendered_form_round_trips`, `first_submitter_in_tree_order_is_op_save_before_groups` and `switch_and_undo_forms_stay_out_of_the_sheet_form` were rewritten for unit forms and still check the create page's full form |
+
+**Page bound (D7).** Every worst-case page fixture in `list_tests.rs` rerun (19:57–20:04,
+`--nocapture`). The 256-wide-scalar fixtures now render a form per field (64-character IDs
+in the action, the CSRF token and `base` in each). With the 64-character scribble excerpt
+the scalar scribble page was **607,059 / 589,824 bytes** and the unknown scribble page
+603,475 (both over; run of 19:35:46). With P9 (32 characters), on the final build:
+
+| Fixture | Bytes / bound | Headroom |
+|---|---|---|
+| 256 wide scalars with a long scribble | 566,099 / 589,824 | 4.0% (tightest) |
+| 256 wide scalars unknown with a long scribble | 562,515 / 589,824 | 4.6% |
+| 256 wide scalars with switch and Undo | 525,823 / 589,824 | 10.9% (was 492,970) |
+| 256 wide scalars erased, with Undo | 336,369 / 589,824 | 43% |
+| 32 sign-led columns, switch and Undo | 18,127,116 / 18,948,096 | 4.3% |
+| every long sign-led sum, switch and Undo | 18,184,600 / 20,520,960 | 11.4% |
+| every long scribble (list) | 16,408,502 / 18,948,096 | 13.4% (was 17,718,536) |
+| every unknown with a long scribble (list) | 16,293,814 / 18,948,096 | 14.0% |
+| every long sum and Undo | 11,498,527 / 18,948,096 | 39% |
+| every value erased, with Undo | 10,743,967 / 20,520,960 | 48% |
+| 32 erased columns, with Undo | 10,445,727 / 18,948,096 | 45% |
+| worst-label view page | 5,732,952 for 9,220 units | within |
+
+No budget changed. The tightest case is still a scalar scribble (4.0%, was 2.6%); slice 1.5b
+adds per-cell forms to the list pages, whose tightest case is 4.3%.
+
+**Red → green.** Every red run builds master's sources (`git archive master`) with this slice's
+test files copied in (`unit_tests.rs`, `tests.rs`, `formula_tests.rs`), in a scratch copy
+with its own target directory, so the worktree's build is untouched.
+
+| Test | Red (master) | Green |
+|---|---|---|
+| `unit_tests::enter_in_hp_saves_hp_alone` | FAILED (master shows "Save full private sheet") | pass |
+| `unit_tests::the_name_field_and_the_metadata_name_save_separately` | FAILED (no unit form) | pass |
+| `unit_tests::two_fields_saved_from_one_page_both_succeed` | FAILED (no unit form) | pass |
+| `unit_tests::a_stale_unit_conflicts_with_its_draft_and_base_l` | FAILED (no unit form) | pass; MU1, MU8 fail it |
+| `unit_tests::base_bounds` | FAILED (403, no route) | pass; MU2 fails it |
+| `unit_tests::unit_routes_refuse_what_they_do_not_name` | FAILED (403, no route) | pass; MU3, MU4, MU5 fail it |
+| `unit_tests::unit_routes_recheck_rights_before_keys` | FAILED (403 for the player's own save: no route) | pass |
+| `unit_tests::two_tabs_without_script_keep_each_units_base` | FAILED (no unit form) | pass; MU1 fails it |
+| `unit_tests::the_full_form_keeps_its_whole_sheet_conflict` | FAILED (no unit form for the first edit) | pass |
+| `unit_tests::a_unit_save_waits_briefly_for_the_permit` | FAILED (no unit form) | pass; MU6, MU7 fail it |
+| `unit_tests::a_list_form_saves_its_list_only` | FAILED (no unit form) | pass; MU9 fails it |
+| `unit_tests::unit_saves_note_numbers_as_the_full_form_does` | FAILED (no unit form) | pass |
+| `tests::native_sheets_refuse_unit_routes` | FAILED (403, no route) | pass; MU10 fails it |
+| `unit_tests::a_list_form_cannot_reach_another_list` | FAILED | pass |
+| `unit_tests::a_long_scribble_is_quoted_to_32_characters_under_its_cell` | FAILED | pass; MU11 fails it |
+| `test_smoke_release.FormListTests` (Python) | FAILED (the last list form won) | pass |
+
+Red runs (`--cpus 4`, `2` and `10`): 19:37:58–19:39:48 (the first 13 tests, all FAILED),
+19:57:40–19:58:07 (the two added later, both FAILED), and a final run of the final test
+files 20:10:11–20:10:24: **all 15 FAILED** (`no control "v0"`: master's page has no unit
+forms; 403: master has no unit routes, so the auth fallback refuses them). The Python test
+failed on master's `smoke_release.py` at 19:51:18 and passed on the branch at 19:51:11.
+First green of the campaign tests 19:46:39–19:53:52 (295 of 296; the one failure,
+`browser_crlf_submission_is_stored_as_lf`, posted the page's first form, fixed to use the
+unit forms); green 19:57:04–20:04: **298 passed**, 0 failed.
+
+The existing tests broken by the new page (32 in the run of 19:35:46–19:43, which also showed the page bound exceeded) were adapted as P12
+records; none was deleted or weakened.
+
+**Mutations** (`--cpus 10`, 20:04–20:10; each source restored with `copy2`, compared with
+`cmp` (all identical), then touched so Cargo rebuilds; `git diff --stat` identical before
+and after):
+
+| Mutation | Fails |
+|---|---|
+| MU1 no value-based conflict (`stale` always false) | `a_stale_unit_conflicts_with_its_draft_and_base_l`, `two_tabs_without_script_keep_each_units_base` |
+| MU2 `base` 0 admitted | `base_bounds` |
+| MU3 a derived field routed | `unit_routes_refuse_what_they_do_not_name` |
+| MU4 a list field routed | `unit_routes_refuse_what_they_do_not_name` |
+| MU5 a nullable field admitted without `null` | `unit_routes_refuse_what_they_do_not_name`, `a_unit_save_waits_briefly_for_the_permit` |
+| MU6 no permit wait (`Duration::ZERO`) | `a_unit_save_waits_briefly_for_the_permit` |
+| MU7 unbounded permit wait (60 s) | `a_unit_save_waits_briefly_for_the_permit` |
+| MU8 conflict checked before the no-op | `a_stale_unit_conflicts_with_its_draft_and_base_l` |
+| MU9 a list form reads every field | `a_list_form_saves_its_list_only` |
+| MU10 native pins answered 404 instead of 400 | `native_sheets_refuse_unit_routes` |
+| MU11 64-character scribble excerpt | `a_long_scribble_is_quoted_to_32_characters_under_its_cell`, `worst_label_scalar_page_with_every_long_scribble_is_within_the_unit_bound`, `worst_label_pages_with_every_unknown_are_within_the_unit_bound` |
+
+**Gate** (Monday 2026-10-19 after 18:00: builds and tests in `mimik-ci:latest` with
+`--cpus 10`, `CARGO_BUILD_JOBS=10`, `--network none`, target volume `mimik-catalogue-target`,
+registry volume `mimik-cargo-cache`, the main git directory mounted read-only; the browser
+container with the CI flags and `--cpus=2`). Times CEST.
+
+| Gate | Time | Cap | Result |
+|---|---|---|---|
+| `cargo fmt --check` | 20:10 | 10 | clean |
+| pedantic Clippy `-D warnings` | 19:54–19:56, 20:10 | 10 | clean. The first run found `too_many_lines` (the unit handler, `render_private`, `groups`, `save_private`) and `struct_excessive_bools` (the page template); fixed by splitting (`finish`, `list_view`, `shown_meta`, `control_names`, `FormulaMode::of`, `op_in_scope`) and a `UnitForms` struct |
+| `cargo test --locked --all-targets --all-features` | 20:10–20:20 | 10 | **673 passed**, 0 failed, 2 ignored (the existing ones), 37 result lines |
+| `ruff check tools`, `ruff format --check tools` | 20:20, 20:27 | 1 | `ruff check` clean; the format check found one line in `browser_smoke.py` (an edit made after the last format); formatted, clean at 20:27 (whitespace only) |
+| `formula_eval` and `source_fixture` examples | 20:20 | 10 | built; the fixture written into a freshly removed `/target/smoke-source` (listed afterwards) |
+| Tools unittest (`CI=1`, `MIMIK_FORMULA_EVAL`, main git dir read-only) | 20:20–20:25 | 10 | **OK**, 11 skipped (includes the new `FormListTests`) |
+| `actionlint .github/workflows/ci.yml` | 20:25 | 10 | clean |
+| `cargo build --release --locked` | 20:25–20:26 | 10 | 22,349,912 bytes (+170,624 over slice 1.4 round 1) |
+| `smoke_release.py --auth --source-fixture` (release binary) | 20:26 | 10 | passed (the runtime field saves through its unit form, the list through its list form) |
+| `browser_smoke.py --auth` (`mimik-browser`, CI flags, worktree `tools/` on `/checks`) | 20:27–20:28 | 2 | every stage passed at 1280 and 390 px: the formula stage saves Vitality by Enter, the multiline Story and the nullable Hit points with their buttons; the list stage saves General notes, then each list from its list form; the assisted stage checks HP's own form with one Save, Enter in HP posting exactly `csrf`, `base`, `value` to `fields/hp` and saving HP alone, and Luck saving its state with its button |
+| Negative control 1: a copy of `tools/` expecting `csrf`, `revision`, `value` | 20:28–20:29 | 2 | failed with "Unit save posted ['csrf', 'base', 'null', 'value'] … not a unit form to /fields/name" |
+| Negative control 2: a copy expecting two buttons in HP's form | 20:29–20:30 | 2 | failed with "Current HP is not in its own form with one Save button" (after the formula and list stages passed) |
+
+**Not run** (`Cargo.lock`, `Cargo.toml` and migrations unchanged): `cargo audit`, `cargo
+about`, `cargo package` / `verify_source_package.py`, vendoring and `package_release.py`,
+the unpacked-artifact smoke (the process smoke ran on the release binary instead),
+`lan_smoke.py`, the offline corresponding-source rebuild, the demo launcher and a
+hand-driven session in a real browser. **Not yet done:** the independent implementation
+review (Sol and Sonnet, plus the third chain), required before merge; it should look at P1
+(the interim list forms), P4 (the busy page before the rights check) and P9 (the shorter
+scribble excerpt) in particular. `release-scope.md` is updated with step 5, as for the
+earlier slices.
+
+**Demo after 1.5a** (same commands as §9). On the saved sheet, type "84 -15" in Current HP
+and press Enter: only HP is saved (one revision), the page comes back at Current HP with
+"84 − 15 = 69 · Undo"; Max HP and Armour keep their values and drafts typed in other fields
+without pressing Enter are lost on that reload (L2). Luck saves its Known/Unknown choice and
+value with its Save button; Name and General notes save with theirs. Open the sheet in two
+tabs: save Armour in the second, then press Enter in Armour in the first: 409, "Armour
+modifier not saved: it changed since this page was loaded (now revision N). Your entry is
+kept below; press Enter again to save it over the current value."; pressing Enter again
+saves it. Pressing Enter in HP in the first tab still saves (HP did not change). The
+Equipment list keeps Add, Remove, Move and its "Save list" button.
+
+### 13.1 Review fixes (round 1)
+
+Review of `ae16632`: Sol FIX THEN MERGE (Major 1, Minor 2), Sonnet FIX THEN MERGE (M1,
+m1–m6); the third chain was unavailable. Fixes on `assist-1.5a`, Monday 2026-10-19 after
+18:00 (`--cpus 10`).
+
+| Finding | Disposition | Test, red → green |
+|---|---|---|
+| Sol Major 1: in a real browser the styled busy page was replaced by the auth layer's generic busy document (the document-error exemption at `auth/mod.rs:257-265` missed `sheet_busy`), so the entry was lost; the route test sent no document headers | `sheet_busy` added to the document-error exemption | `unit_tests::the_busy_page_survives_a_browser_navigation` through the full auth router with `Accept: text/html`, `Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document`: 503, `Retry-After`, the escaped entry, action, `base` and `null`, a multiline entry in a textarea, and posting again succeeds once the permit is free. Red 20:39–20:40 (the generic page), green 20:41–20:42. Mutation MR1 (exemption removed) fails it and the list-form test |
+| Sol (same check): other refusals that keep a draft under document headers | 409 and 422 re-renders carry the trusted-editor marker; the stale "No change" is 200: already kept | `refused_unit_saves_keep_their_draft_in_a_browser`: passed on its first run (guard) |
+| Sonnet M1: the full-form and list-form save had no D-X3 wait, so a busy moment lost the typed rows | **Done, not deferred:** `POST /private-sheets/{id}` left the `runtime` layer and waits up to 2 s like a unit save; then a styled busy page keeps every submitted pair as a hidden input of a form posting to the sheet again ("Your changes are kept; press Save again"). The form is parsed without the permit only on that path (the auth layer's 8 request slots bound it); a form whose values exceed the re-render echo bound (1 MiB, plan D7) is not kept and the page says so. The create POST keeps `try_acquire` | `a_list_form_save_waits_briefly_for_the_permit` (held 1 s → saved; held 3 s → 503 keeping every pair, a quoted multi-line name included; posting again saves): red 20:39–20:40 (503 at once), green 20:41–20:42. Mutation MR2 (no wait) fails it |
+| Follow-on of M1: the edit save now takes the permit in its handler, after axum has read the body, so a slow upload no longer holds it (was: up to the 5 s request timeout) | `slow_5mib_upload_holds_the_runtime_permit_at_most_the_request_timeout` rewritten to the new, stronger property: during a 6.4 s trickled 5 MiB upload the permit is never busy, and the request ends with 408 within 5.6 s. Its old loop waited for the permit to become busy and never ended (the first gate run hung at 20:48–21:19 and was stopped) | passed 21:20–21:27 with the campaign tests (304 passed) |
+| Sonnet m2: every Save was named only "Save" (`aria-describedby` gives no name) | `aria-labelledby="save-<f> label-<f>"` on unit Saves ("Save Current HP"), `save-meta-name`/`save-meta-notes` with their labels, "Save list" with the list legend ("Save list Equipment") | `save_buttons_are_named_by_their_unit`: red 20:39–20:40, green 20:41–20:42; MR3 fails it. The browser stages now find the buttons by these exact names |
+| Sol Minor 2: an unsupported pin answered 403, not the documented 400 | **Documented 403:** an unsupported pin is read-only (no edit rights), so the rights check refuses it first, as every other route does; the docs said 400 | `catalogue_tests::unit_routes_refuse_an_unsupported_pin_as_read_only` (the consistently rewritten pin fixture; `meta/name`, `meta/notes` and an unknown field all 403, nothing written): passed on its first run (guard) |
+| Sonnet m3: the busy page did not say what the entry is for | "Your entry for Current HP" is not possible without a read (the label needs the pin, the read needs the permit); the page says "Your entry for the field hp", "for Name" or "for General notes". **Limitation:** an enum or yes/no entry is offered as text there (its control type needs the pin); posting it again is checked as usual | in `the_busy_page_survives_a_browser_navigation` |
+| Sonnet m4: no `default_submitter` assertion on a unit form | HP's first own button is `save-0` | in `save_buttons_are_named_by_their_unit` |
+| Sonnet m6: a refused unit save echoes up to 256 KiB on a page near the bound | Measured: one echo, within the bound plus the echo term | `list_tests::a_refused_unit_draft_re_render_is_within_the_bound_plus_its_echo` (the tightest page, 256 wide scalars with long scribbles, plus a 409 over 87,000 quotes): passed on its first run (guard). Size below |
+| Sonnet m1 (record only) | A unit save of the same value replaces another tab's scribble ("accepting the kept value" writes a `literal` note). It follows L3: a scribble is not a protected value | — |
+| Sonnet m5, Sol on P4 (record only) | The bounded wait lets any signed-in user queue for the global permit; at most 8 waiters (the auth layer's request slots) fill the admission cap for up to 2 s each. Bounded, no information leak; per-account fairness is a later item (with D-X2). Under load a bogus `meta/<x>` answers 400 (the route is checked before the wait), not 503 | — |
+| Plan wording (P2) | §3a no longer says "placed first in the form" | — |
+
+**Browser busy stage: not added.** Holding the runtime permit for more than 2 s from
+outside needs a request that holds it that long; the shipped binary has no such request and
+a test-only hook would ship in it. The busy page is covered through the full auth router
+with browser document headers instead.
+
+**Page bound (D7), rerun** after the button names (+18 bytes per unit): 20:45–20:48, every
+worst-case fixture within its bound: 256 wide scalars with a long scribble 571,581 / 589,824
+(**3.1%, the tightest**, was 4.0%); unknown under a scribble 567,997 (3.7%); switch and Undo
+531,305 (9.9%); erased 341,851; 32 sign-led columns 18,127,214 / 18,948,096 (4.3%); the list
+cases are unchanged (+98 bytes of page chrome). The refused 87,000-quote draft on the
+tightest page: 1,005,949 / 1,024,824 bytes (the per-unit bound plus 5 × the echoed bytes).
+No budget changed.
+
+Mutations (20:43–20:44, restored with `copy2`, `cmp` identical, touched; `git diff --stat`
+unchanged): MR1 (busy page not exempt from the document error page) fails
+`the_busy_page_survives_a_browser_navigation` and `a_list_form_save_waits_briefly_for_the_permit`;
+MR2 (the edit save without the wait) fails the list-form wait test; MR3 (unit Saves without
+`aria-labelledby`) fails `save_buttons_are_named_by_their_unit`.
+
+**Gate on the round-1 candidate** (after 18:00, `--cpus 10`, `--network none`, main git dir
+read-only; browser `--cpus=2`; times CEST). A first gate run (20:48) hung in the slow-upload
+test (row above) and was stopped at 21:19.
+
+| Gate | Time | Result |
+|---|---|---|
+| `cargo fmt --check` | 21:27, 21:43 | the 21:27 run found the rewritten slow-upload test unformatted; formatted, clean at 21:43 |
+| pedantic Clippy `-D warnings` | 20:43, 21:27, 21:43 | clean (`needless_pass_by_value` on the busy template and a needless borrow in a test fixed at 20:43) |
+| `cargo test --locked --all-targets --all-features` | 21:27–21:36 | **679 passed**, 0 failed, 2 ignored, 37 result lines (only formatting changed afterwards) |
+| ruff check / format | 21:36, 21:43 | check clean; one line of `browser_smoke.py` reformatted, clean at 21:43 |
+| examples, fresh `source_fixture` | 21:36–21:37 | built and written |
+| tools unittest (`CI=1`) | 21:37–21:41 | OK, 11 skipped |
+| actionlint | 21:41 | clean |
+| release build | 21:41–21:42 | 22,362,616 bytes |
+| `smoke_release.py --auth` | 21:42–21:43 | passed |
+| `browser_smoke.py --auth` | 21:43–21:45 | every stage passed at 1280 and 390 px; the Saves are found by their names ("Save Story", "Save Hit points", "Save General notes", "Save Luck", "Save list Equipment") |
+| Negative control (a copy looking for a button named just "Save") | 21:45–21:46 | failed in the formula stage, as intended |
+
+Not run (lock and migrations unchanged): audit, about, packaging, the unpacked-artifact
+smoke, `lan_smoke.py`. Not yet done: re-review of these fixes.
+
+### 13.2 Review fixes (round 2)
+
+Review of `3198d42`: Sol MERGE-READY with Minors, Sonnet FIX THEN MERGE (F1–F5). Fixes on
+`assist-1.5a`, Monday 2026-10-19 after 18:00 (`--cpus 10`). Red runs build `3198d42` with
+the new test files in a scratch copy (21:51–21:52); green 21:52–21:53.
+
+| Finding | Disposition | Test, red → green |
+|---|---|---|
+| Both: the rewritten slow-upload test lost the create route's coverage | Renamed to `slow_edit_upload_never_holds_the_runtime_permit`; new `slow_create_upload_holds_the_runtime_permit_at_most_the_request_timeout` keeps the original assertion (create takes the permit before the body: released by 5.6 s, 408). Both poll through `watch_permit`, which has a 20 s deadline | Both pass on `3198d42` and on the branch (characterisation) |
+| Sol Minor 1: the edit save waited for the permit before parsing, CSRF and the session | `edit_sheet` now parses, checks CSRF and the session, then waits; the parsed pairs feed both the save (`save_parsed`) and the busy page | `a_forged_edit_is_refused_at_once_while_busy` (forged token while the permit is held: 403 in under 1 s): red (waited 2 s), green |
+| Sonnet F3: the busy page's echo bound counted values only (about 24,000 unique 70-byte `%22` keys made a page of about 10 MB) | A form is kept only when its keys, values and 48 bytes of markup per pair total ≤ 1 MiB (`ECHO_BYTES`), so the page stays within its fixed chrome plus 5 × 1 MiB | `the_busy_page_of_a_form_is_bounded` (the 24,000-key form: "larger than this page can keep", under 4 KiB; a 1,000,000-quote value: kept, escaped once, within 64 KiB + 5 MiB): red (the page was echoed in full, past the reader's 4 MiB cap), green |
+| Sonnet F2, Sol Minor 2: docs | P4 row corrected (a full-form echo is bounded by the echo bound, not by 256 KiB); `runtime-definition-contract.md` separates create (permit held while buffering) from edit (buffered outside the permit: up to 8 × 5 MiB, about 40 MiB raw) | — |
+| F4 (record) | A body slower than about 3 s, followed by the 2 s wait, can reach the 5 s request timeout and get 408 instead of the busy page | — |
+| F5 (record) | `busy_form` echoes only the caller's own submission and reads neither the sheet nor the caller's rights on it (doc comment added) | — |
+| (record) | The parser runs outside the permit and, on a blocking thread, can outlive a cancelled request; its input is capped (5 MiB, 65,536 pairs) | — |
+
+**Gate on the round-2 candidate** (after 18:00, `--cpus 10`, `--network none`; browser
+`--cpus=2`; times CEST): `cargo fmt --check` and pedantic Clippy clean (21:54); `cargo test
+--locked --all-targets --all-features` **682 passed**, 0 failed, 2 ignored (21:54–22:04);
+ruff check and format clean; examples and a fresh `source_fixture`; tools unittest OK, 11
+skipped (22:04–22:08); actionlint clean; release build 22,350,968 bytes (22:08–22:09);
+`smoke_release.py --auth` passed (22:09–22:10); `browser_smoke.py --auth` every stage
+passed at 1280 and 390 px (22:10–22:12). Not run (lock and migrations unchanged): audit,
+about, packaging, the unpacked-artifact smoke, `lan_smoke.py`.

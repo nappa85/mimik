@@ -169,24 +169,56 @@ impl Store {
         history: Option<i64>,
         permit: OwnedSemaphorePermit,
     ) -> Result<(SheetView, OwnedSemaphorePermit), AppError> {
+        self.private_read_at(auth, id, history, None, permit)
+            .await
+            .map(|(view, _, permit)| (view, permit))
+    }
+
+    /// The live sheet and, for a per-unit save (slice 1.5a), its revision `base` when
+    /// `1 <= base <= live`, both read in one transaction, so a conflict compares the unit's
+    /// value at `base` with the value the patch is applied to. `base` itself is decoded and
+    /// checked against the pin like the live revision.
+    pub(crate) async fn private_read_base(
+        &self,
+        auth: RequestAuth,
+        id: i64,
+        base: Option<i64>,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<(SheetView, Option<PrivateSnapshot>, OwnedSemaphorePermit), AppError> {
+        self.private_read_at(auth, id, None, base, permit).await
+    }
+
+    async fn private_read_at(
+        &self,
+        auth: RequestAuth,
+        id: i64,
+        history: Option<i64>,
+        base: Option<i64>,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<(SheetView, Option<PrivateSnapshot>, OwnedSemaphorePermit), AppError> {
         let admitted_auth = auth.clone();
-        let (snapshot,raw,warning,editable,previous,permit)=self.run_bounded_auth(move |db|{
+        let (snapshot,raw,warning,editable,previous,base,permit)=self.run_bounded_auth(move |db|{
             let tx=db.transaction()?;auth.recheck(&tx)?;snapshots::authorize_read(&tx,&auth,id)?;
             let snapshot=snapshots::raw_load(&tx,id,history)?;
             // History pages also read revision N − 1 in the same transaction (plan D8).
             let previous=history.filter(|revision|*revision>1).map(|revision|snapshots::raw_load(&tx,id,Some(revision-1)));
+            let base=base.filter(|base|history.is_none()&&(1..=snapshot.identity.revision).contains(base)).map(|base|snapshots::raw_load(&tx,id,Some(base))).transpose()?;
             let editable=if history.is_some(){false}else{match snapshots::authorize_edit(&tx,&auth,&snapshot.identity){Ok(())=>true,Err(AppError::NotFound)=>false,Err(error)=>return Err(error)}};
             let raw=if let Pin::Runtime{version_id,schema:1,..}=snapshot.identity.pin{Some(private_pin::load(&tx,version_id)?)}else{None};
             let warning=if !snapshots::supported(&snapshot.identity){"Unsupported immutable interpretation pin. Retained canonical data is read-only; it has not been reinterpreted.".into()}else if history.is_some(){"Historical revision: a retained read-only snapshot.".into()}else if snapshot.identity.state=="frozen"{"Frozen on departure/removal. Rejoining does not reactivate this sheet.".into()}else if !editable{"Read-only: active custody/current campaign grants and an enabled supervising Master are required to edit.".into()}else{String::new()};
-            auth.recheck(&tx)?;tx.commit()?;Ok((snapshot,raw,warning,editable,previous,permit))
+            auth.recheck(&tx)?;tx.commit()?;Ok((snapshot,raw,warning,editable,previous,base,permit))
         }).await?;
         // Immutable definition decoding/compilation is outside the database mutex.
-        let (view, permit) = tokio::task::spawn_blocking(move || {
+        let (view, base, permit) = tokio::task::spawn_blocking(move || {
             let snapshot = snapshot.decode()?;
             let immutable = raw.map(private_pin::validate).transpose()?;
+            let base = base.map(snapshots::RawSnapshot::decode).transpose()?;
             if let Some(pin) = &immutable {
                 match_pin(&snapshot, pin)?;
                 pin.validate_values(&snapshot.data)?;
+                if let Some(base) = &base {
+                    match_pin(base, pin)?;
+                }
             }
             #[cfg(test)]
             if let Some(hook) = AFTER_PRIVATE_VALIDATION.lock().unwrap().take() {
@@ -203,13 +235,16 @@ impl Store {
                     catalogues: Vec::new(),
                     notes: super::notes::Notes::default(),
                 },
+                base,
                 permit,
             ))
         })
         .await
         .map_err(|_| AppError::Worker)??;
-        self.private_badge(admitted_auth, view, permit, false, history)
-            .await
+        let (view, permit) = self
+            .private_badge(admitted_auth, view, permit, false, history)
+            .await?;
+        Ok((view, base, permit))
     }
 
     #[cfg(test)]

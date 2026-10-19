@@ -27,7 +27,7 @@ accurately scoped. N1–N9 accepted; the N8 test adaptations are not weakened.
 |---|---|---|---|---|
 | 1 | Sol | Minor | The browser no-op check does not compare the revision before and after | Follow-up (slice 1.3); router test `notes_tests.rs:435-504` already pins it |
 | 2 | Sol | Minor | The no-op race test covers loss of edit rights only, not submitting-session invalidation or an intervening revision | Follow-up (slice 1.3): two hook-driven cases |
-| 3 | Sonnet | Minor | `address` length CHECK ≥ 7 bytes refuses 6-byte `meta:` addresses (probe-verified) | Follow-up in the slice that first writes `meta:` addresses (1.5a), via a new migration |
+| 3 | Sonnet | Minor | `address` length CHECK ≥ 7 bytes refuses 6-byte `meta:` addresses (probe-verified) | Follow-up in the slice that first writes `meta:` addresses, via a new migration. Slice 1.5a writes none (Name and General notes are text, out of note scope; `meta:name` and `meta:notes` are 9 and 10 bytes), so it stays open (plan §13 P8) |
 | 4 | Sonnet | Minor | Adapted CRLF/leading-newline tests no longer pin LF normalisation on a changed multiline save | Follow-up (slice 1.3): one edit-plus-CRLF test |
 | 5 | Sonnet | Note | The no-op path skips `admitted.unchanged(db)` (pin freshness); `authorize_edit` still refuses unsupported pins | Recorded |
 | 6 | Sonnet | Note | L1 is wider than N7 says: any process that can write the database can forge notes, and a malformed latest note hides a real scribble | Recorded under L1 (sealing before release) |

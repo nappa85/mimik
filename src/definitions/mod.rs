@@ -1,5 +1,7 @@
 //! Strict declarative proposals. Draft storage never approves evidence or enables a sheet.
 mod admission;
+/// The field ID grammar, also checked by the per-field sheet routes (slice 1.5a).
+pub(crate) use admission::valid_field_id;
 #[cfg(test)]
 mod catalogue_link_tests;
 pub(crate) mod decode;
@@ -34,6 +36,16 @@ pub(crate) fn admit() -> Result<OwnedSemaphorePermit, DefinitionError> {
     JOBS.clone()
         .try_acquire_owned()
         .map_err(|_| DefinitionError::Busy)
+}
+
+/// The `JOBS` permit for a sheet write (assisted sheet D-X3): waits up to `wait` for it
+/// instead of failing at once, so a player's save survives a short busy spell; `None` when
+/// the wait ends without a permit. Reads keep [`admit`].
+pub(crate) async fn admit_within(wait: std::time::Duration) -> Option<OwnedSemaphorePermit> {
+    tokio::time::timeout(wait, JOBS.clone().acquire_owned())
+        .await
+        .ok()?
+        .ok()
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -406,6 +406,11 @@ class FormFields(HTMLParser):
 
     def reset(self):
         self.pending_cr = ""
+        # Forms by action (the first form with an action wins: a runtime sheet's list forms
+        # share theirs) and every form in page order.
+        self.forms = {}
+        self.form_list = []
+        self.current = None
         super().reset()
 
     def close(self):
@@ -418,7 +423,6 @@ class FormFields(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.values = {}
         self.textarea = None
-        self.forms = {}
         self.active_form = None
         self.select = None
         self.first_option = False
@@ -427,16 +431,18 @@ class FormFields(HTMLParser):
         attrs = dict(attrs)
         if tag == "form":
             self.active_form = attrs.get("action")
-            self.forms[self.active_form] = {}
+            self.current = {}
+            self.form_list.append((self.active_form, self.current))
+            self.forms.setdefault(self.active_form, self.current)
         if tag == "input" and "name" in attrs:
             self.values[attrs["name"]] = attrs.get("value", "")
             if self.active_form:
-                self.forms[self.active_form][attrs["name"]] = attrs.get("value", "")
+                self.current[attrs["name"]] = attrs.get("value", "")
         if tag == "textarea" and "name" in attrs:
             self.textarea = attrs["name"]
             self.values[self.textarea] = ""
             if self.active_form:
-                self.forms[self.active_form][self.textarea] = ""
+                self.current[self.textarea] = ""
         if tag == "select" and "name" in attrs:
             self.select = attrs["name"]
             self.first_option = True
@@ -445,19 +451,19 @@ class FormFields(HTMLParser):
                 value = attrs.get("value", "")
                 self.values[self.select] = value
                 if self.active_form:
-                    self.forms[self.active_form][self.select] = value
+                    self.current[self.select] = value
             self.first_option = False
 
     def handle_data(self, data):
         if self.textarea:
             self.values[self.textarea] += data
             if self.active_form:
-                self.forms[self.active_form][self.textarea] += data
+                self.current[self.textarea] += data
 
     def handle_endtag(self, tag):
         if tag == "textarea" and self.textarea:
             # HTML parsing drops one newline right after <textarea>; html.parser does not.
-            for values in (self.values, self.forms.get(self.active_form, {})):
+            for values in (self.values, self.current if self.active_form else {}):
                 if values.get(self.textarea, "").startswith("\n"):
                     values[self.textarea] = values[self.textarea][1:]
             self.textarea = None
@@ -1160,8 +1166,13 @@ def smoke_list_sheet(directory, cookie, campaign, html):
         }
     )
     sheet = workspace_submit(cookie, action, form)
-    _, saved, page = workspace_form(sheet, cookie)
-    require(saved.get("id-1-0") == "r1-1", "List row did not get the host ID r1-1")
+    # Saved, the list saves from its own list form (slice 1.5a), the first form posting to
+    # the sheet itself.
+    _, saved, page = workspace_form(sheet, cookie, sheet)
+    require(
+        saved.get("id-1-0") == "r1-1" and saved.get("list") == "1" and "name" not in saved,
+        "List row did not get the host ID r1-1 in its list form",
+    )
     require('<dd class="evidence-text">6</dd>' in page, "List-derived load missing")
     workspace_submit(cookie, sheet, saved, **{"row-1-0-2": "5"})
     history = auth_request(sheet + "/history/2", cookie=cookie)
@@ -1365,8 +1376,18 @@ def smoke_workspace(binary, directory, cookie, player, passwords):
         name="Runtime private sheet",
         **{"value-name": "Canonical field", "null-name": "known"},
     )
-    _, generic_form, _ = workspace_form(generic_sheet, cookie)
-    workspace_submit(cookie, generic_sheet, generic_form, **{"value-name": ""})
+    # A saved runtime sheet saves each field from its own form (assisted sheet slice 1.5a).
+    field = generic_sheet + "/fields/name"
+    _, generic_form, _ = workspace_form(generic_sheet, cookie, field)
+    require(
+        set(generic_form) == {"csrf", "base", "null", "value"}
+        and generic_form["value"] == "Canonical field",
+        "Runtime field form differs",
+    )
+    require(
+        workspace_submit(cookie, field, generic_form, value="").endswith("#label-0"),
+        "Runtime field save did not return to its field",
+    )
     require(
         auth_request(generic_sheet + "/history/1", cookie=cookie)[0] == 200,
         "Pinned runtime history unavailable",

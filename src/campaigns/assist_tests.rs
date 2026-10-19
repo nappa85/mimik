@@ -2,7 +2,7 @@
 //! §5 slice 1.3): sign-led input is applied literally with a "Did you mean" switch, and the
 //! last change of each number, choice or yes/no cell can be undone. Both are bound to the
 //! displayed note and rechecked inside the save's transaction.
-use super::formula_tests::{Setup, body, default_submitter, setup, submitted};
+use super::formula_tests::{Setup, body, setup, submitted};
 use super::notes_tests::{
     Row, assist, choices, created, form, history_len, inner, note, notes, notes_at, page,
     player_sheet, row, saved, value,
@@ -860,8 +860,9 @@ async fn the_binding_is_rechecked_inside_the_transaction() {
     );
 }
 
-/// Each button submits its own small form; Enter in the sheet still saves the sheet, and
-/// the sheet form carries no switch or Undo key.
+/// Each button submits its own small form; Enter in HP still saves HP from HP's own form
+/// (slice 1.5a), which carries no switch or Undo key: the buttons inside its markup belong
+/// to the switch and Undo forms through `form`.
 #[tokio::test]
 async fn switch_and_undo_forms_stay_out_of_the_sheet_form() {
     let _auth_lock = crate::auth::test_resource_lock().await;
@@ -870,21 +871,21 @@ async fn switch_and_undo_forms_stay_out_of_the_sheet_form() {
     created(&setup, &[]).await;
     edit(&setup, 1, &[("value-hp", "-15")], &[row("r1-1", "1")]).await;
     let html = page(&setup).await;
+    let (path, hp) = super::unit_tests::unit_form(&html, "v0", None);
+    assert_eq!(path, "/private-sheets/1/fields/hp");
+    let keys: Vec<&str> = hp.iter().map(|(key, _)| key.as_str()).collect();
     assert_eq!(
-        default_submitter(&html),
-        Some(("op".to_owned(), "save".to_owned()))
-    );
-    let sheet = submitted(&html);
-    assert!(
-        sheet.iter().all(|(key, _)| key != "note" && key != "base"),
-        "{sheet:?}"
+        keys,
+        ["csrf", "base", "value"],
+        "no note key, an unnamed Save"
     );
     let document = scraper::Html::parse_document(&html);
     let buttons = scraper::Selector::parse("button[form]").unwrap();
-    let sheet_form = scraper::Selector::parse("form[action=\"/private-sheets/1\"]").unwrap();
-    let main = document.select(&sheet_form).next().unwrap();
+    let unit_form =
+        scraper::Selector::parse("form[action=\"/private-sheets/1/fields/hp\"]").unwrap();
+    let main = document.select(&unit_form).next().unwrap();
     let inside: Vec<_> = main.select(&buttons).collect();
-    assert_eq!(inside.len(), 2, "switch and Undo inside the sheet markup");
+    assert_eq!(inside.len(), 2, "switch and Undo inside HP's form markup");
     for (button, owner, labelled) in [
         (inside[0], "assist-switch", "switch-0 label-0"),
         (inside[1], "assist-undo", "undo-0 label-0"),
@@ -907,8 +908,11 @@ async fn switch_and_undo_forms_stay_out_of_the_sheet_form() {
         assert!(document.select(&nested).next().is_none(), "not nested");
     }
     assert_eq!(text(&html, "#label-0").as_deref(), Some("Current HP"));
-    // The sheet form re-posted unchanged is still a no-op save.
-    let (status, again) = setup.post("/private-sheets/1", sheet).await;
+    // HP's form re-posted unchanged is a no-op save; so is the list form.
+    let (status, again) = setup.post(&path, hp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(again.contains("No change"));
+    let (status, again) = setup.post("/private-sheets/1", submitted(&html)).await;
     assert_eq!(status, StatusCode::OK);
     assert!(again.contains("No change"));
 }

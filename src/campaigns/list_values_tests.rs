@@ -35,8 +35,14 @@ fn values(
     let pin = crate::definitions::private_pin::for_tests(&list_definition());
     // Revision 0 is a create: there is no saved sheet, so every row is new.
     let saved = (revision > 0).then_some(saved);
-    super::values::form(pin.definition(), form, saved, revision, &BTreeMap::new())
-        .map(|(data, _notes)| data)
+    super::values::form(
+        pin.definition(),
+        form,
+        (saved, revision),
+        &BTreeMap::new(),
+        None,
+    )
+    .map(|(data, _notes)| data)
 }
 
 fn saved() -> Value {

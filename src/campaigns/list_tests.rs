@@ -926,18 +926,21 @@ fn submitted_helper_sends_only_the_clicked_submitter() {
     assert!(disabled.is_err(), "a disabled button cannot be clicked");
 }
 
+/// Plan D6: Enter in a list's text field uses its form's first submitter, Save, never Add,
+/// Remove or Move. The create page keeps the one full form with a top and a bottom Save;
+/// a saved page (slice 1.5a) puts each list in its own list form whose first button is its
+/// Save, and every scalar unit has its own single Save.
 #[tokio::test]
 async fn first_submitter_in_tree_order_is_op_save_before_groups() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let setup = list_setup(&list_definition()).await;
     create_rows(&setup, 2).await;
-    let (_, html) = setup.get("/private-sheets/1").await;
-    let page = scraper::Html::parse_document(&html);
-    let order: Vec<String> = page
-        .select(&selector(
-            "form button, form input[type=submit], form section.panel, form fieldset.list-field",
-        ))
+    let order = |html: &str, scope: &str| -> Vec<String> {
+        let page = scraper::Html::parse_document(html);
+        page.select(&selector(&format!(
+            "{scope} button, {scope} input[type=submit], {scope} section.panel, {scope} fieldset.list-field"
+        )))
         .map(|element| {
             let value = element.value();
             format!(
@@ -947,29 +950,57 @@ async fn first_submitter_in_tree_order_is_op_save_before_groups() {
                 value.attr("value").unwrap_or_default()
             )
         })
-        .collect();
-    assert_eq!(
-        order.first().map(String::as_str),
-        Some("button:op=save"),
-        "{order:?}"
+        .collect()
+    };
+    let path = format!(
+        "/campaigns/{}/sheets/new?version={}",
+        setup.campaign, setup.version
     );
+    let (_, create) = setup.get(&path).await;
+    let full = order(&create, "form");
+    assert_eq!(
+        full.first().map(String::as_str),
+        Some("button:op=save"),
+        "{full:?}"
+    );
+    assert_eq!(
+        full.iter().filter(|item| *item == "button:op=save").count(),
+        2
+    );
+    assert_eq!(full.last().map(String::as_str), Some("button:op=save"));
+    let (_, html) = setup.get("/private-sheets/1").await;
+    for f in [1, 2] {
+        let list = order(&html, &format!("form:has(#list-{f})"));
+        assert_eq!(
+            list.first().map(String::as_str),
+            Some("button:op=save"),
+            "{list:?}"
+        );
+        assert_eq!(
+            list.iter().filter(|item| *item == "button:op=save").count(),
+            1
+        );
+    }
     assert_eq!(
         super::formula_tests::default_submitter(&html),
         Some(("op".into(), "save".into()))
     );
-    let saves = order
-        .iter()
-        .filter(|item| *item == "button:op=save")
-        .count();
-    assert_eq!(saves, 2, "top and bottom Save: {order:?}");
-    assert_eq!(order.last().map(String::as_str), Some("button:op=save"));
-    // Scalar sheets keep their single (bottom) Save, now named op=save.
+    assert!(!html.contains("Save full private sheet"));
+    // Scalar sheets: every unit form has its single, unnamed Save.
     let scalar = setup_scalar().await;
     let (_, html) = scalar.get("/private-sheets/1").await;
     let page = scraper::Html::parse_document(&html);
-    let buttons: Vec<_> = page.select(&selector("form button")).collect();
-    assert_eq!(buttons.len(), 1);
-    assert_eq!(buttons[0].value().attr("value"), Some("save"));
+    let forms: Vec<_> = page
+        .select(&selector(
+            "form[action*=\"/fields/\"], form[action*=\"/meta/\"]",
+        ))
+        .collect();
+    assert!(forms.len() >= 4, "{}", forms.len());
+    for form in forms {
+        let buttons: Vec<_> = form.select(&selector("button:not([form])")).collect();
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].value().attr("name"), None);
+    }
 }
 
 async fn setup_scalar() -> Setup {
@@ -1594,7 +1625,11 @@ async fn op_buttons_have_formnovalidate_and_no_fragment() {
             assert!(value.attr("formnovalidate").is_some(), "{op}");
             assert_eq!(value.attr("formaction"), None, "{op}");
         }
-        let form = parsed.select(&selector("form")).next().unwrap();
+        // The full form, or each list form of a saved page (slice 1.5a), posts to the page.
+        let form = parsed
+            .select(&selector("form:has(button[name=op])"))
+            .next()
+            .unwrap();
         assert_eq!(form.value().attr("action"), Some(action.as_str()));
         for save in parsed.select(&selector("button[value=save]")) {
             assert!(
@@ -2337,7 +2372,7 @@ async fn list_payloads_escaped_in_context() {
     assert_eq!(parsed.select(&selector("button[formaction]")).count(), 0);
     assert_eq!(
         parsed
-            .select(&selector("form"))
+            .select(&selector("form:has(button[name=op])"))
             .next()
             .unwrap()
             .value()
@@ -2709,6 +2744,11 @@ type SeedNote = (String, &'static str, String, String, String);
 /// valid 64-character ID, then writes `notes` 256 per revision (the table's limit) on
 /// data-unchanged revisions, and returns the served sheet page.
 async fn noted_page(definition: &Value, data: Value, notes: Vec<SeedNote>) -> String {
+    noted_setup(definition, data, notes).await.1
+}
+
+/// `noted_page`, with its setup.
+async fn noted_setup(definition: &Value, data: Value, notes: Vec<SeedNote>) -> (Setup, String) {
     let setup = list_setup(definition).await;
     legacy_create(&setup, 1, data).await;
     let version = setup.version;
@@ -2737,13 +2777,14 @@ async fn noted_page(definition: &Value, data: Value, notes: Vec<SeedNote>) -> St
         .unwrap();
     let response =
         super::router_request(&setup.app, &setup.auth[1], "/private-sheets/1", None).await;
-    String::from_utf8(
+    let html = String::from_utf8(
         axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
             .await
             .unwrap()
             .to_vec(),
     )
-    .unwrap()
+    .unwrap();
+    (setup, html)
 }
 
 fn within_unit_bound(html: &str, units: usize, label: &str) {
@@ -2918,6 +2959,15 @@ async fn wide_scalar_page(
     value: Option<i64>,
     note: (&'static str, &str, Option<i64>),
 ) -> (String, usize) {
+    let (_, html, units) = wide_scalar_setup(value, note).await;
+    (html, units)
+}
+
+/// `wide_scalar_page`, with its setup.
+async fn wide_scalar_setup(
+    value: Option<i64>,
+    note: (&'static str, &str, Option<i64>),
+) -> (Setup, String, usize) {
     let label = "\"".repeat(100);
     let ids: Vec<String> = (0..256)
         .map(|f| format!("f{f:03}_{}", "x".repeat(59)))
@@ -2949,10 +2999,49 @@ async fn wide_scalar_page(
             typed(value),
         ));
     }
-    let html = noted_page(&definition, Value::Object(data), notes).await;
+    let (setup, html) = noted_setup(&definition, Value::Object(data), notes).await;
     let units = render_units(&definition, &[]);
     assert_eq!(units, 256);
-    (html, units)
+    (setup, html, units)
+}
+
+/// Sonnet m6 (slice 1.5a review): a refused unit save echoes its draft once. On the tightest
+/// page (256 wide scalars with a long scribble), a conflict over the largest admitted body
+/// (256 KiB; a quote is three bytes URL-encoded and five escaped) stays within the per-unit
+/// bound plus the echo term of a re-render (plan D7: each echoed byte once, at most 5×).
+#[tokio::test]
+async fn a_refused_unit_draft_re_render_is_within_the_bound_plus_its_echo() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let raw = "\"".repeat(200);
+    let (setup, view, units) =
+        wide_scalar_setup(Some(i64::MIN), ("unresolved", &raw, Some(i64::MIN))).await;
+    let quotes = "\"".repeat(87_000);
+    let form = vec![
+        pair("csrf", "a".repeat(64)),
+        pair("base", "999"),
+        pair("value", quotes.as_str()),
+    ];
+    let (status, html) = big_post(
+        &setup,
+        &format!("/private-sheets/1/fields/f000_{}", "x".repeat(59)),
+        serde_urlencoded::to_string(form).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        html.matches(&"&#34;".repeat(87_000)).count(),
+        1,
+        "echoed once"
+    );
+    let echo = 5 * quotes.len();
+    let bound = FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES + echo;
+    assert!(html.len() <= bound, "{} > {bound}", html.len());
+    assert!(html.len() <= view.len() + echo, "only the draft is added");
+    println!(
+        "refused 87,000-quote unit draft on the wide scalar page: {} bytes (bound {bound})",
+        html.len()
+    );
 }
 
 /// Review round 2 (Sol Major): scalar fields, each showing the densest long sign-led sum,
@@ -3367,16 +3456,8 @@ async fn lantern_reach_list_sheet_end_to_end() {
     assert!(html.contains("Advisory checks: 0 violated"));
 }
 
-/// Plan §6 (report-only, with a bound): a slow 5 MiB upload by a signed-in principal holds the
-/// runtime (JOBS) permit, taken before the body, for at most the 5 s request timeout.
-#[tokio::test]
-async fn slow_5mib_upload_holds_the_runtime_permit_at_most_the_request_timeout() {
-    use tower::ServiceExt;
-    let _auth_lock = crate::auth::test_resource_lock().await;
-    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
-    let setup = list_setup(&list_definition()).await;
-    create_rows(&setup, 1).await;
-    // 5 MiB in 64 chunks, one every 100 ms: the body would take 6.4 s.
+/// A 5 MiB body trickled in 64 chunks, one every 100 ms (6.4 s in all), as a POST to `path`.
+fn trickled_post(setup: &Setup, path: &str) -> axum::http::Request<axum::body::Body> {
     let chunk = super::super::web::SHEET_POST_BYTES / 64;
     let chunks = futures_util::stream::unfold(0_usize, move |sent| async move {
         if sent == 64 {
@@ -3388,38 +3469,83 @@ async fn slow_5mib_upload_holds_the_runtime_permit_at_most_the_request_timeout()
             sent + 1,
         ))
     });
-    let request = axum::http::Request::builder()
-        .uri("/private-sheets/1")
+    axum::http::Request::builder()
+        .uri(path)
         .method("POST")
         .header("host", "127.0.0.1:3000")
         .header("cookie", setup.auth[1].fixture_cookie())
         .header("origin", "http://127.0.0.1:3000")
         .header("content-type", "application/x-www-form-urlencoded")
         .body(axum::body::Body::from_stream(chunks))
-        .unwrap();
+        .unwrap()
+}
+
+/// Polls the runtime permit every 50 ms until `upload` ends (deadline 20 s): when it was
+/// last busy, and the response.
+async fn watch_permit(
+    upload: tokio::task::JoinHandle<Result<axum::response::Response, std::convert::Infallible>>,
+    started: std::time::Instant,
+) -> (Option<std::time::Duration>, axum::response::Response) {
+    let mut busy = None;
+    while !upload.is_finished() {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "the upload never ended"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        match crate::definitions::admit() {
+            Ok(permit) => drop(permit),
+            Err(_) => busy = Some(started.elapsed()),
+        }
+    }
+    (busy, upload.await.unwrap().unwrap())
+}
+
+/// Plan §6 (report-only, with a bound): a slow 5 MiB create upload holds the runtime (JOBS)
+/// permit, taken before the body, for at most the 5 s request timeout, then gets 408.
+#[tokio::test]
+async fn slow_create_upload_holds_the_runtime_permit_at_most_the_request_timeout() {
+    use tower::ServiceExt;
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    let request = trickled_post(&setup, &create_path(&setup));
     let started = std::time::Instant::now();
     let upload = tokio::spawn(setup.app.clone().oneshot(request));
-    let mut blocked = false;
-    let held = loop {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        match crate::definitions::admit().ok() {
-            Some(permit) if blocked => {
-                drop(permit);
-                break started.elapsed();
-            }
-            Some(permit) => drop(permit),
-            None if started.elapsed() > std::time::Duration::from_secs(20) => {
-                panic!("the runtime permit was never released")
-            }
-            None => blocked = true,
-        }
-    };
-    let response = upload.await.unwrap().unwrap();
+    let (busy, response) = watch_permit(upload, started).await;
     println!(
-        "slow 5 MiB upload: runtime permit held {held:?}, response {}",
+        "slow 5 MiB create upload: permit last busy at {busy:?}, response {}",
         response.status()
     );
-    assert!(held <= std::time::Duration::from_millis(5_600), "{held:?}");
+    let busy = busy.expect("the create save holds the permit while it buffers");
+    assert!(busy <= std::time::Duration::from_millis(5_600), "{busy:?}");
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    // Released: a new request gets it at once.
+    drop(crate::definitions::admit().expect("released"));
+}
+
+/// Slice 1.5a review: the edit save buffers its body outside the runtime permit and takes the
+/// permit itself (the D-X3 wait), so a slow 5 MiB upload never holds it; the 5 s request
+/// timeout ends it with 408.
+#[tokio::test]
+async fn slow_edit_upload_never_holds_the_runtime_permit() {
+    use tower::ServiceExt;
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    create_rows(&setup, 1).await;
+    let request = trickled_post(&setup, "/private-sheets/1");
+    let started = std::time::Instant::now();
+    let upload = tokio::spawn(setup.app.clone().oneshot(request));
+    let (busy, response) = watch_permit(upload, started).await;
+    println!(
+        "slow 5 MiB edit upload: ended after {:?}, permit last busy at {busy:?}, response {}",
+        started.elapsed(),
+        response.status()
+    );
+    assert_eq!(busy, None, "the permit was never held");
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    assert!(started.elapsed() <= std::time::Duration::from_millis(5_600));
 }
 
 // ---- Implementation-review fixes (2026-10-17) ----
@@ -3481,8 +3607,10 @@ async fn leading_newlines_survive_ops_rejected_saves_and_reloads() {
                            "gear": [{"id": "r1-1", "name": "n", "story": "\nrow"},
                                     {"id": "r1-2", "name": "m", "story": "\n\nsecond"}]});
     let created = write(&setup, 1, snapshot, "create").await.unwrap();
+    // Every form's controls: on a saved page General notes and the essay have their own
+    // forms (slice 1.5a).
     let expect = |html: &str, context: &str| {
-        let form = submitted_by(html, None);
+        let form = super::formula_tests::page_values(html);
         for (key, want) in [
             ("notes", "\nnotes"),
             ("value-essay", "\n\nscalar"),
@@ -3695,8 +3823,9 @@ async fn browser_crlf_submission_is_stored_as_lf() {
     let created = write(&setup, 1, snapshot, "create").await.unwrap();
     // What a browser sends for the unchanged page: textarea line breaks as CR LF.
     let view = sheet_page(&setup).await;
+    // The full-form POST of the page's values (the page itself has unit forms, 1.5a).
     let textareas = ["notes", "value-essay", "row-1-0-1"];
-    let browser: Vec<(String, String)> = submitted(&view)
+    let browser: Vec<(String, String)> = super::formula_tests::legacy_form(&view)
         .into_iter()
         .map(|(key, value)| {
             let value = if textareas.contains(&key.as_str()) {
@@ -3724,21 +3853,16 @@ async fn browser_crlf_submission_is_stored_as_lf() {
         serde_json::to_string(&(&created.data, &created.notes)).unwrap(),
         "an unchanged browser Save stores byte-identical values"
     );
-    // A raw CR LF / lone CR body is stored with LF.
-    let mut form = submitted(&sheet_page(&setup).await);
-    set(&mut form, "value-essay", "a\r\nb\rc");
-    assert_eq!(
-        setup.post("/private-sheets/1", form).await.0,
-        StatusCode::SEE_OTHER
-    );
+    // A raw CR LF / lone CR body is stored with LF, from the essay's own form (slice 1.5a).
+    let (action, mut form) = super::unit_tests::unit_form(&sheet_page(&setup).await, "v2", None);
+    set(&mut form, "value", "a\r\nb\rc");
+    assert_eq!(setup.post(&action, form).await.0, StatusCode::SEE_OTHER);
     assert_eq!(reopen(&setup, 1).await.data["essay"], "a\nb\nc");
     // Length limits count the normalised text: 20,000 CR LF pairs are 20,000 notes characters.
-    let mut form = submitted(&sheet_page(&setup).await);
-    set(&mut form, "notes", &"\r\n".repeat(20_000));
-    assert_eq!(
-        setup.post("/private-sheets/1", form).await.0,
-        StatusCode::SEE_OTHER
-    );
+    let (action, mut form) =
+        super::unit_tests::unit_form(&sheet_page(&setup).await, "meta-notes", None);
+    set(&mut form, "value", &"\r\n".repeat(20_000));
+    assert_eq!(setup.post(&action, form).await.0, StatusCode::SEE_OTHER);
     assert_eq!(reopen(&setup, 1).await.notes, "\n".repeat(20_000));
 }
 
@@ -3766,18 +3890,20 @@ async fn browser_crlf_edit_is_stored_with_lf() {
     snapshot.data = json!({"label": "x", "essay": "\n\nscalar\nmore",
                            "gear": [{"id": "r1-1", "name": "n", "story": "\nrow\nend"}]});
     let created = write(&setup, 1, snapshot, "create").await.unwrap();
+    // The full-form POST of the page's values (the page itself has unit forms, 1.5a).
     let textareas = ["notes", "value-essay", "row-1-0-1"];
-    let mut browser: Vec<(String, String)> = submitted(&sheet_page(&setup).await)
-        .into_iter()
-        .map(|(key, value)| {
-            let value = if textareas.contains(&key.as_str()) {
-                value.replace('\n', "\r\n")
-            } else {
-                value
-            };
-            (key, value)
-        })
-        .collect();
+    let mut browser: Vec<(String, String)> =
+        super::formula_tests::legacy_form(&sheet_page(&setup).await)
+            .into_iter()
+            .map(|(key, value)| {
+                let value = if textareas.contains(&key.as_str()) {
+                    value.replace('\n', "\r\n")
+                } else {
+                    value
+                };
+                (key, value)
+            })
+            .collect();
     set(&mut browser, "value-essay", "\r\nedited\r\nessay\r\n");
     assert!(
         serde_urlencoded::to_string(&browser)
@@ -3812,13 +3938,23 @@ async fn draft_op_rerender_has_crlf_normalised() {
     )
     .await
     .unwrap();
-    let mut form = clicked(&sheet_page(&setup).await, "add-1");
+    let page = sheet_page(&setup).await;
+    let mut form = clicked(&page, "add-1");
     set(&mut form, "row-1-0-1", "\r\nfirst\r\nsecond\rthird");
-    set(&mut form, "notes", "a\r\nb");
     let (status, html) = setup.post("/private-sheets/1", form).await;
     assert_eq!(status, StatusCode::OK);
     assert!(!html.contains('\r'), "no CR in the re-render");
     let echoed = submitted_by(&html, None);
     assert_eq!(get(&echoed, "row-1-0-1"), "\nfirst\nsecond\nthird");
-    assert_eq!(get(&echoed, "notes"), "a\nb");
+    // General notes save on their own (slice 1.5a): a refused one echoes its draft with LF.
+    let (action, mut notes) = super::unit_tests::unit_form(&page, "meta-notes", None);
+    set(&mut notes, "value", "a\r\nb");
+    set(&mut notes, "base", "9");
+    let (status, html) = setup.post(&action, notes).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(!html.contains('\r'), "no CR in the re-render");
+    assert_eq!(
+        get(&super::formula_tests::page_values(&html), "notes"),
+        "a\nb"
+    );
 }

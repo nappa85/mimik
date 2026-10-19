@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// A form index in the canonical grammar `0|[1-9][0-9]{0,2}` (plan D1).
-fn index(raw: &str) -> Option<usize> {
+pub(crate) fn index(raw: &str) -> Option<usize> {
     let canonical = matches!(raw.len(), 1..=3)
         && raw.bytes().all(|b| b.is_ascii_digit())
         && (raw == "0" || !raw.starts_with('0'));
@@ -83,6 +83,35 @@ pub(crate) fn sheet_keys<'a>(
             }
         }
     }
+    Some(keys)
+}
+
+/// The exact key set of a list form (slice 1.5a): the page shows each list in its own
+/// form while scalar fields save on their own, so a list form carries `csrf`, `revision`,
+/// `list` (the list's field index `f`), its draft `op` if any, and the rows of list `f`
+/// only. `None` (400) when `f` is not a list or a submitted row belongs to another list.
+pub(crate) fn list_keys<'a>(
+    definition: &Definition,
+    f: usize,
+    submitted: impl Iterator<Item = &'a str> + Clone,
+) -> Option<HashSet<String>> {
+    if definition.fields.get(f)?.control != Control::List
+        || submitted.clone().any(|key| {
+            key.strip_prefix("id-")
+                .and_then(|rest| rest.split_once('-'))
+                .is_some_and(|(list, _)| index(list) != Some(f))
+        })
+    {
+        return None;
+    }
+    // Only list `f` has submitted rows, so the full key set holds no other list's rows.
+    let mut keys = sheet_keys(definition, submitted)?;
+    keys.retain(|key| {
+        !(matches!(key.as_str(), "name" | "notes")
+            || key.starts_with("value-")
+            || key.starts_with("null-"))
+    });
+    keys.insert("list".into());
     Some(keys)
 }
 
@@ -824,13 +853,14 @@ pub(crate) fn reconcile(
 /// The values of an admitted runtime form and their change notes (slice 1.2). `saved` and
 /// `revision` are the current saved data and revision: list rows reconcile against them
 /// (new IDs use `revision + 1`). `saved` is `None` on create, where every cell is new;
-/// `current` holds the current note of each saved address.
+/// `current` holds the current note of each saved address. A list form (`scope`, the list's
+/// field index, slice 1.5a) reads only that list; every other field keeps its saved value.
 pub(crate) fn form(
     definition: &Definition,
     form: &BTreeMap<String, String>,
-    saved: Option<&Value>,
-    revision: i64,
+    (saved, revision): (Option<&Value>, i64),
     current: &BTreeMap<String, Stored>,
+    scope: Option<usize>,
 ) -> Result<(Value, Vec<Note>), AppError> {
     let mut recorder = Recorder::new(current);
     let empty = Value::Object(serde_json::Map::new());
@@ -841,6 +871,12 @@ pub(crate) fn form(
     let mut values = serde_json::Map::new();
     for (f, field) in definition.fields.iter().enumerate() {
         if field.formula.is_some() {
+            continue;
+        }
+        if scope.is_some_and(|scope| scope != f) {
+            if let Some(value) = saved_data.get(&field.id) {
+                values.insert(field.id.clone(), value.clone());
+            }
             continue;
         }
         if field.control == Control::List {
@@ -854,26 +890,40 @@ pub(crate) fn form(
         let raw = form
             .get(&format!("value-{}", field.id))
             .ok_or(AppError::Invalid("Missing pinned field."))?;
-        let null = if field.nullable {
-            match form.get(&format!("null-{}", field.id)).map(String::as_str) {
-                Some("known") => false,
-                Some("unknown") => true,
-                _ => return Err(AppError::Invalid("Select explicit known/unknown state.")),
-            }
-        } else {
-            false
-        };
-        let address = super::notes::field_address(&field.id);
-        let prior = saved
-            .and_then(|saved| saved.get(&field.id))
-            .map_or(Prior::New, Prior::Saved);
-        let value = if null {
-            recorder.state(address, field.control, prior, NoteValue::Unknown);
-            Value::Null
-        } else {
-            recorder.cell(address, field.control, raw, prior)?
-        };
+        let null = form.get(&format!("null-{}", field.id)).map(String::as_str);
+        let prior = saved.and_then(|saved| saved.get(&field.id));
+        let value = scalar(field, raw, null, prior, &mut recorder)?;
         values.insert(field.id.clone(), value);
     }
     Ok((Value::Object(values), recorder.notes))
+}
+
+/// The value of one non-list, non-derived field from its submitted text `raw` and, for a
+/// nullable field, its Known/Unknown state `null`; `prior` is its saved value (`None` on
+/// create). Its change note, if any, goes to `recorder` (slice 1.2). Shared by the full form
+/// and the per-field route (slice 1.5a), so both read a field the same way.
+pub(crate) fn scalar(
+    field: &Field,
+    raw: &str,
+    null: Option<&str>,
+    prior: Option<&Value>,
+    recorder: &mut Recorder<'_>,
+) -> Result<Value, AppError> {
+    let null = if field.nullable {
+        match null {
+            Some("known") => false,
+            Some("unknown") => true,
+            _ => return Err(AppError::Invalid("Select explicit known/unknown state.")),
+        }
+    } else {
+        false
+    };
+    let address = super::notes::field_address(&field.id);
+    let prior = prior.map_or(Prior::New, Prior::Saved);
+    if null {
+        recorder.state(address, field.control, prior, NoteValue::Unknown);
+        Ok(Value::Null)
+    } else {
+        recorder.cell(address, field.control, raw, prior)
+    }
 }

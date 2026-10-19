@@ -25,7 +25,7 @@ fn unknown_scribble(raw: &str) -> String {
 /// The `placeholder` of the control named `name`.
 fn placeholder(html: &str, name: &str) -> Option<String> {
     let page = scraper::Html::parse_document(html);
-    page.select(&scraper::Selector::parse(&format!("[name=\"{name}\"]")).unwrap())
+    page.select(&scraper::Selector::parse(&super::formula_tests::named(name)).unwrap())
         .next()
         .and_then(|element| element.value().attr("placeholder").map(str::to_owned))
 }
@@ -79,7 +79,7 @@ type Saved = (
 fn list_save(form: &BTreeMap<String, String>, saved: Option<&Value>) -> Result<Saved, AppError> {
     let pin = crate::definitions::private_pin::for_tests(&super::list_tests::list_definition());
     let (data, notes) =
-        super::super::values::form(pin.definition(), form, saved, 1, &BTreeMap::new())?;
+        super::super::values::form(pin.definition(), form, (saved, 1), &BTreeMap::new(), None)?;
     pin.validate_values(&data)?;
     let notes = notes
         .into_iter()
@@ -652,7 +652,7 @@ async fn a_scribble_on_an_unknown_cell_renders_escaped_inside_bdi() {
 /// The ids the control named `name` is described by.
 fn described(html: &str, name: &str) -> Vec<String> {
     let page = scraper::Html::parse_document(html);
-    page.select(&scraper::Selector::parse(&format!("[name=\"{name}\"]")).unwrap())
+    page.select(&scraper::Selector::parse(&super::formula_tests::named(name)).unwrap())
         .next()
         .and_then(|element| element.value().attr("aria-describedby"))
         .map(|ids| ids.split(' ').map(str::to_owned).collect())

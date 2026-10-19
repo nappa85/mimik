@@ -436,6 +436,28 @@ def run_scenario(browser, viewport):
 FORMULA_DERIVED = ("pace", "echo", "marker")
 
 
+def unit_save(page, trigger, status=303, path=None, key="Enter"):
+    """Saves one unit of a saved runtime sheet (assisted sheet slice 1.5a): Enter in its
+    control, or a click on its Save button (`key=None`). The POST goes to the unit's own
+    route with exactly csrf, base and value (plus null for a nullable field)."""
+    with page.expect_response(lambda response: response.request.method == "POST") as response:
+        with page.expect_navigation(wait_until="domcontentloaded"):
+            if key is None:
+                trigger.click()
+            else:
+                trigger.press(key)
+    request = response.value.request
+    keys = [key for key, _ in parse_qsl(request.post_data or "", keep_blank_values=True)]
+    require(response.value.status == status, f"Unit save status differs ({request.url})")
+    if path is not None:
+        require(
+            urlsplit(request.url).path.endswith(path)
+            and sorted(keys) in (["base", "csrf", "value"], ["base", "csrf", "null", "value"]),
+            f"Unit save posted {keys} to {request.url}, not a unit form to {path}",
+        )
+    return keys
+
+
 def submitted_keys(request):
     return {key for key, _ in parse_qsl(request.post_data or "", keep_blank_values=True)}
 
@@ -482,8 +504,13 @@ def run_formula_browser(page, campaign, version, submit):
         "0 violated, 0 not evaluated" in page.locator("#advisory-checks").inner_text(),
         "Advisory checks missing after save",
     )
-    page.locator('input[name="value-vitality"]').fill("11")
-    submit(page, page.get_by_role("button", name="Save full private sheet", exact=True))
+    # Saved: each field saves on its own (slice 1.5a); no full-sheet Save is offered.
+    require(
+        page.get_by_role("button", name="Save full private sheet").count() == 0,
+        "A saved runtime sheet still offers the full-sheet Save",
+    )
+    page.locator("#v1").fill("11")
+    unit_save(page, page.locator("#v1"), path="/fields/vitality")
     checks = page.locator("#advisory-checks")
     require(
         "Violated" in checks.inner_text()
@@ -498,6 +525,34 @@ def run_formula_browser(page, campaign, version, submit):
         "Derived value not recomputed on save",
     )
     no_overflow(page, "formula sheet")
+    # A multiline field and a nullable field save with their Save button (no Enter).
+    story = page.locator("#v3")
+    story.fill("first line\nsecond line")
+    unit_save(
+        page,
+        page.get_by_role("button", name="Save Story", exact=True),
+        key=None,
+        path="/fields/story",
+    )
+    require(
+        page.locator("#v3").input_value() == "first line\nsecond line"
+        and page.locator("#v1").input_value() == "11",
+        "The multiline field did not save on its own",
+    )
+    hit_points = page.locator('form[action$="/fields/hit-points"]')
+    hit_points.locator('select[name="null"]').select_option("unknown")
+    unit_save(
+        page,
+        page.get_by_role("button", name="Save Hit points", exact=True),
+        key=None,
+        path="/fields/hit-points",
+    )
+    require(
+        page.locator('form[action$="/fields/hit-points"] select[name="null"]').input_value()
+        == "unknown",
+        "The nullable field's state did not save with its button",
+    )
+    no_overflow(page, "formula sheet with unit forms")
     for target in (formula_sheet, formula_sheet + "/history/1"):
         page.goto(target)
         marker = page.locator("details", has=page.locator("pre", has_text="name=="))
@@ -575,6 +630,28 @@ def run_list_browser(page, campaign, version, submit):
     )
     load = page.locator("dl.derived", has=page.locator("#label-load")).locator("dd")
     require(load.inner_text() == "6", "List-derived load missing after save")
+    # Saved, General notes save on their own (slice 1.5a) and each list keeps its draft
+    # operations in its own list form, whose first button is its Save.
+    page.locator("#meta-notes").fill("\nsheet notes")
+    unit_save(
+        page,
+        page.get_by_role("button", name="Save General notes", exact=True),
+        key=None,
+        path="/meta/notes",
+    )
+
+    require(
+        page.get_by_role("button", name="Save list Equipment", exact=True).count() == 1,
+        "Save list is not named with its list",
+    )
+
+    def save_list(f, status=303):
+        submit(
+            page,
+            page.locator(f"#save-list-{f}"),
+            status,
+        )
+
     # Add a second row, then move it up and back down by keyboard.
     submit(page, button("Add Equipment row"), 200)
     page.locator('input[name="row-1-1-0"]').fill("Torch")
@@ -585,12 +662,11 @@ def run_list_browser(page, campaign, version, submit):
     # <textarea>; the template emits a sacrificial one).
     page.locator('select[name="set-1-0-5"]').select_option("present")
     page.locator('textarea[name="row-1-0-5"]').fill("\n\nkept note")
-    page.locator('textarea[name="notes"]').fill("\nsheet notes")
 
     def newlines_kept(context):
         require(
             page.locator('textarea[name="row-1-0-5"]').input_value() == "\n\nkept note"
-            and page.locator('textarea[name="notes"]').input_value() == "\nsheet notes",
+            and page.locator("#meta-notes").input_value() == "\nsheet notes",
             f"Leading newlines lost after {context}",
         )
 
@@ -622,7 +698,7 @@ def run_list_browser(page, campaign, version, submit):
         page.locator('input[name="row-1-1-2"]').input_value() == "not a number",
         "A draft op lost an invalid row value",
     )
-    submit(page, page.get_by_role("button", name="Save full private sheet").first, 422)
+    save_list(1, 422)
     newlines_kept("a rejected save")
     require(
         page.locator('input[name="row-1-1-2"]').input_value() == "not a number",
@@ -634,6 +710,9 @@ def run_list_browser(page, campaign, version, submit):
     page.locator('input[name="row-1-1-2"]').fill("4")
     page.locator('select[name="set-1-1-5"]').select_option("present")
     page.locator('textarea[name="row-1-1-5"]').fill("long note " * 300)
+    # Save the Equipment list: load 2*3 + 4*1 = 10 passes (revision 3, the Torch is r3-1).
+    save_list(1)
+    require(load.inner_text() == "10", "Load not recomputed after the moves")
     submit(page, button("Add Traits row"), 200)
     no_overflow(page, "list sheet with a 32-property row and a 3,000-character note")
     for p in range(32):
@@ -643,23 +722,26 @@ def run_list_browser(page, campaign, version, submit):
             control.select_option(index=1)
         else:
             control.fill("1" if p % 5 == 1 else "trait")
-    # Save: load 2*3 + 4*1 = 10 passes; then a violation.
-    submit(page, page.get_by_role("button", name="Save full private sheet").first)
-    require(load.inner_text() == "10", "Load not recomputed after the moves")
+    save_list(2)
+    require(
+        page.locator('input[name="row-2-0-1"]').input_value() == "1" and load.inner_text() == "10",
+        "The Traits list did not save on its own",
+    )
     page.reload()
     newlines_kept("a saved reload")
+    # Then a violation (revision 5).
     page.locator('input[name="row-1-1-2"]').fill("9")
-    submit(page, page.get_by_role("button", name="Save full private sheet").first)
+    save_list(1)
     require(
         "Load is at most 10." in page.locator("#advisory-checks").inner_text(),
         "List advisory violation not shown",
     )
     newlines_kept("a second save")
-    page.goto(list_sheet + "/history/3")
+    page.goto(list_sheet + "/history/5")
     summary = page.locator("section#change-summary")
     require(
-        summary.get_by_role("heading", name="Changes in revision 3").count() == 1
-        and "equipment/r2-1/quantity" in summary.inner_text(),
+        summary.get_by_role("heading", name="Changes in revision 5").count() == 1
+        and "equipment/r3-1/quantity" in summary.inner_text(),
         "History change summary missing",
     )
     require(
@@ -695,11 +777,12 @@ def run_assist_browser(page, campaign, version):
 
     def current_hp():
         # By id after the first save: the switch and Undo buttons name themselves with the
-        # cell's label (aria-labelledby), which get_by_label also matches.
-        return page.locator("#value-hp")
+        # cell's label (aria-labelledby), which get_by_label also matches. Saved, HP is the
+        # control of its own form (slice 1.5a), with the DOM id of its field index.
+        return page.locator("#v0")
 
     def revision():
-        return page.locator('input[name="revision"]').input_value()
+        return page.locator('form[action$="/fields/hp"] input[name="base"]').input_value()
 
     def note():
         notes = page.locator("#note-0")
@@ -714,20 +797,26 @@ def run_assist_browser(page, campaign, version):
     hp.fill("84")
     enter(hp)
     assisted = page.url
-    for name in ("value-hp", "value-max_hp", "value-armour", "value-luck"):
+    for key in ("v0", "v1", "v2", "v3"):
         require(
-            page.locator(f'input[name="{name}"]').get_attribute("inputmode") is None,
-            f"Runtime integer input {name} restricts the phone keyboard",
+            page.locator(f"#{key}").get_attribute("inputmode") is None,
+            f"Runtime integer input {key} restricts the phone keyboard",
         )
+    require(
+        page.get_by_role("button", name="Save full private sheet").count() == 0
+        and page.locator('form[action$="/fields/hp"]').get_by_role("button").count() == 1,
+        "Current HP is not in its own form with one Save button",
+    )
+    # Slice 1.5a: Enter in Current HP saves HP alone (csrf, base, value to fields/hp).
+    page.locator("#v2").fill("7")
     hp = current_hp()
     hp.fill("")
     hp.press_sequentially("84 -15")
-    enter(hp)
+    unit_save(page, hp, path="/fields/hp")
     page.goto(assisted)
     require(
-        current_hp().input_value() == "69"
-        and page.locator('input[name="value-armour"]').input_value() == "-1",
-        "The typed sum 84 -15 did not save 69, or the saved negative changed",
+        current_hp().input_value() == "69" and page.locator("#v2").input_value() == "-1",
+        "The typed sum 84 -15 did not save 69 alone, or the saved negative changed",
     )
     require(
         "0 violated, 0 not evaluated" in page.locator("#advisory-checks").inner_text(),
@@ -827,6 +916,21 @@ def run_assist_browser(page, campaign, version):
     press("Undo Current HP")
     page.goto(assisted)
     require(current_hp().input_value() == "-15", "Undo did not restore the erased -15")
+    # The nullable Luck saves its Known/Unknown state and value with its Save button.
+    luck = page.locator('form[action$="/fields/luck"]')
+    luck.locator('select[name="null"]').select_option("known")
+    page.locator("#v3").fill("3")
+    unit_save(
+        page,
+        page.get_by_role("button", name="Save Luck", exact=True),
+        key=None,
+        path="/fields/luck",
+    )
+    require(
+        page.locator("#v3").input_value() == "3" and current_hp().input_value() == "-15",
+        "Luck did not save on its own with its button",
+    )
+    no_overflow(page, "assisted sheet unit forms")
     # "lots" in a new row's Quantity keeps the row: unknown, with the scribble (D-M).
     press("Add Equipment row", status=200)
     page.locator('input[name="row-4-0-0"]').fill("Torch")
@@ -991,8 +1095,8 @@ def run_workspace_browser(
         page.locator('input[name="value-name"]').fill("Original pinned field")
         submit(page, page.get_by_role("button", name="Save full private sheet", exact=True))
         runtime_sheet = page.url
-        page.locator('input[name="value-name"]').fill("Edited pinned field")
-        submit(page, page.get_by_role("button", name="Save full private sheet", exact=True))
+        page.locator("#v0").fill("Edited pinned field")
+        unit_save(page, page.locator("#v0"), path="/fields/name")
         no_overflow(page, "private runtime sheet")
         page.get_by_role("link", name="Full history", exact=True).click()
         page.locator('a[href$="/history/1"]').click()

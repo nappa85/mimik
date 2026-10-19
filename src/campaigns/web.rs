@@ -57,6 +57,17 @@ async fn runtime(mut request: Request, next: Next) -> Response {
 #[derive(Clone)]
 pub(crate) struct PrivateTrustedEditor;
 
+/// Marks a unit save's styled busy page (503, D-X3): the auth layer keeps its body, which
+/// holds the player's entry.
+#[derive(Clone)]
+pub(crate) struct SheetBusy;
+
+/// Whether the auth layer keeps this response's body as a sheet's busy page.
+pub(crate) fn sheet_busy(response: &Response) -> bool {
+    response.status() == StatusCode::SERVICE_UNAVAILABLE
+        && response.extensions().get::<SheetBusy>().is_some()
+}
+
 /// Marks a catalogue route's own explanatory page (plan §19): 400 for a malformed address,
 /// 403 for the uniform refusal, 404 for an entry or type missing from a catalogue the reader
 /// may browse. The auth layer keeps such a body instead of its generic one.
@@ -111,6 +122,8 @@ where
 
 #[path = "assist_web.rs"]
 mod assist_web;
+#[path = "unit_web.rs"]
+mod unit_web;
 
 pub(crate) fn routes() -> Router<AuthState> {
     let sheets = Router::new()
@@ -118,10 +131,7 @@ pub(crate) fn routes() -> Router<AuthState> {
             "/campaigns/{id}/sheets/new",
             get(new_sheet).merge(sheet_post(create_sheet)),
         )
-        .route(
-            "/private-sheets/{id}",
-            get(read_sheet).merge(sheet_post(edit_sheet)),
-        )
+        .route("/private-sheets/{id}", get(read_sheet))
         .route("/private-sheets/{id}/history/{revision}", get(read_history))
         .route(
             "/private-sheets/{id}/switch",
@@ -141,6 +151,15 @@ pub(crate) fn routes() -> Router<AuthState> {
         )
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn(runtime));
+    // Per-field saves (slice 1.5a) take the runtime permit themselves, with a bounded wait
+    // (D-X3), so they are outside the `runtime` layer.
+    let units = Router::new()
+        .route("/private-sheets/{id}/meta/{which}", post(unit_web::meta))
+        .route("/private-sheets/{id}/fields/{field}", post(unit_web::field))
+        .layer(DefaultBodyLimit::max(unit_web::UNIT_POST_BYTES))
+        .route_layer(middleware::from_fn(signed_in))
+        // The full-form and list-form save waits the same way (review round 1, Sonnet M1).
+        .route("/private-sheets/{id}", sheet_post(edit_sheet));
     Router::new()
         .route("/campaigns", get(index).post(create))
         .route("/campaigns/{id}", get(detail))
@@ -151,6 +170,7 @@ pub(crate) fn routes() -> Router<AuthState> {
         .route("/private-sheets/{id}/history", get(history))
         .layer(DefaultBodyLimit::max(8192))
         .merge(sheets)
+        .merge(units)
 }
 
 pub(super) fn error(error: impl std::borrow::Borrow<AppError>) -> StatusCode {
@@ -440,6 +460,14 @@ struct FieldView {
     /// The DOM id suffix of the field's note, label and actions: its index in the
     /// definition, so a 64-character field ID is not repeated in every reference (D7).
     key: String,
+    /// The control's DOM id and the names of its value and Known/Unknown controls: in a
+    /// field's own form (slice 1.5a) `v<key>`, `value` and `null`; in the full form
+    /// `value-<id>`, `value-<id>` and `null-<id>`.
+    control_id: String,
+    value_name: String,
+    null_name: String,
+    /// The control of a refused unit save's draft gets `autofocus` (slice 1.5a).
+    autofocus: bool,
     label: String,
     help: String,
     control: String,
@@ -465,8 +493,17 @@ struct FieldView {
 /// RE3-1): the full value is echoed once, in its control.
 const EXCERPT_CHARS: usize = 64;
 
+/// At most this many characters of a scribble quoted under its cell (slice 1.5a): the
+/// control right above echoes it in full, so the note only names it. Shorter than other
+/// excerpts so a scalar's own form fits the per-unit page bound (plan D7).
+const SCRIBBLE_EXCERPT_CHARS: usize = 32;
+
 fn excerpt(value: &str) -> String {
-    match value.char_indices().nth(EXCERPT_CHARS) {
+    cut(value, EXCERPT_CHARS)
+}
+
+fn cut(value: &str, chars: usize) -> String {
+    match value.char_indices().nth(chars) {
         Some((end, _)) => format!("{}…", &value[..end]),
         None => value.to_owned(),
     }
@@ -663,7 +700,7 @@ impl NoteLine {
     /// a cell's markup stays bounded (plan D7, slice 1.3 review).
     fn shown(&self) -> String {
         if self.kind == "unresolved" {
-            excerpt(&self.text)
+            cut(&self.text, SCRIBBLE_EXCERPT_CHARS)
         } else {
             self.text.clone()
         }
@@ -758,6 +795,10 @@ impl RowView {
 /// A list field: its index `f` in the definition (the form key prefix), properties and rows.
 struct ListView {
     f: usize,
+    /// The sheet revision its list form carries (slice 1.5a): a list draft's submitted
+    /// revision, so a stale draft still conflicts, else the saved revision. Each submitted
+    /// revision is echoed once (plan D7).
+    revision: String,
     properties: Vec<PropertyView>,
     rows: Vec<RowView>,
     /// The Add button gets `autofocus` (after Remove).
@@ -837,6 +878,7 @@ impl ListView {
             .collect();
         Self {
             f,
+            revision: String::new(),
             properties,
             rows,
             focus_add: focus == Some(values::Focus::Add(f)),
@@ -973,6 +1015,28 @@ struct PrivateTemplate<'a> {
     revision_notes: Vec<NoteRow>,
     /// The switch and Undo forms this page needs (slice 1.3), outside the sheet form.
     assist_forms: AssistForms,
+    /// Whether the page has a form per unit (slice 1.5a), and which metadata control a
+    /// refused unit save focuses.
+    unit_forms: UnitForms,
+}
+
+/// A saved runtime page the reader may edit has a form per unit (slice 1.5a): Name, General
+/// notes and each scalar field save on their own, each list from its list form. Create,
+/// native, read-only and history pages, and a refused full-form draft, keep the one full
+/// form.
+struct UnitForms {
+    shown: bool,
+    /// The metadata unit whose refused draft is shown, focused.
+    focus: Option<super::unit::Unit>,
+}
+
+impl UnitForms {
+    fn focus_name(&self) -> bool {
+        self.focus == Some(super::unit::Unit::Name)
+    }
+    fn focus_notes(&self) -> bool {
+        self.focus == Some(super::unit::Unit::Notes)
+    }
 }
 
 /// How a runtime sheet shows its derived values.
@@ -989,6 +1053,20 @@ enum FormulaMode {
 }
 
 impl FormulaMode {
+    fn of(view: &SheetView, create: bool, draft: bool) -> Self {
+        match (
+            view.immutable
+                .as_ref()
+                .is_some_and(|pin| pin.formulas().is_some()),
+            create,
+            draft,
+        ) {
+            (false, _, _) => Self::Absent,
+            (true, true, _) => Self::Create,
+            (true, false, false) => Self::Saved,
+            (true, false, true) => Self::Draft,
+        }
+    }
     fn shown(self) -> bool {
         self != Self::Absent
     }
@@ -1060,20 +1138,24 @@ fn render_private(
             })
         })
     };
+    // A full-form draft (a refused full-form POST) is re-rendered in the full form it came
+    // from; a list form's draft keeps the unit page.
+    let units = !create
+        && !native
+        && view.editable
+        && view.immutable.is_some()
+        && raw.is_none_or(|raw| list_scope(raw).is_some());
     let mut assist_forms = AssistForms::default();
+    let unit_draft = notice.draft.as_ref();
     let groups = groups(
         view,
-        raw,
+        (raw, unit_draft),
         formulas.as_ref(),
-        notice.focus,
+        (notice.focus, units),
         &mut assist_forms,
     )?;
-    let name = raw
-        .and_then(|r| r.get("name"))
-        .map_or(view.snapshot.name.as_str(), String::as_str);
-    let notes = raw
-        .and_then(|r| r.get("notes"))
-        .map_or(view.snapshot.notes.as_str(), String::as_str);
+    let name = shown_meta(view, (raw, unit_draft), super::unit::Unit::Name);
+    let notes = shown_meta(view, (raw, unit_draft), super::unit::Unit::Notes);
     let revision = raw
         .and_then(|r| r.get("revision"))
         .cloned()
@@ -1112,31 +1194,96 @@ fn render_private(
                 .iter()
                 .any(|field| field.control == crate::definitions::Control::List)
         }),
-        mode: match (
-            view.immutable
-                .as_ref()
-                .is_some_and(|pin| pin.formulas().is_some()),
-            create,
-            raw.is_some(),
-        ) {
-            (false, _, _) => FormulaMode::Absent,
-            (true, true, _) => FormulaMode::Create,
-            (true, false, false) => FormulaMode::Saved,
-            (true, false, true) => FormulaMode::Draft,
-        },
+        mode: FormulaMode::of(view, create, raw.is_some()),
         formulas,
         revision_notes: view.notes.revision.iter().map(NoteRow::of).collect(),
         assist_forms,
+        unit_forms: UnitForms {
+            shown: units,
+            focus: unit_draft
+                .map(|draft| draft.unit)
+                .filter(|unit| !matches!(unit, super::unit::Unit::Field(_))),
+        },
     }
     .render()
     .map_err(|_| AppError::Template)
 }
 
+/// The DOM id of a scalar field's control and the names of its value and Known/Unknown
+/// controls: in its own form (slice 1.5a) `v<f>`, `value` and `null`; in the full form
+/// `value-<id>`, `value-<id>` and `null-<id>`.
+fn control_names((f, id): (usize, &str), units: bool) -> (String, String, String) {
+    if units {
+        (format!("v{f}"), "value".into(), "null".into())
+    } else {
+        (
+            format!("value-{id}"),
+            format!("value-{id}"),
+            format!("null-{id}"),
+        )
+    }
+}
+
+/// The Name or General notes a page shows: a refused unit save's draft of it, a full-form
+/// draft's, or the saved text.
+fn shown_meta<'a>(
+    view: &'a SheetView,
+    (raw, draft): (
+        Option<&'a BTreeMap<String, String>>,
+        Option<&'a unit_web::UnitDraft>,
+    ),
+    unit: super::unit::Unit,
+) -> &'a str {
+    let (key, saved) = match unit {
+        super::unit::Unit::Name => ("name", &view.snapshot.name),
+        _ => ("notes", &view.snapshot.notes),
+    };
+    draft
+        .filter(|draft| draft.unit == unit)
+        .map(|draft| draft.value.as_str())
+        .or_else(|| raw.and_then(|r| r.get(key)).map(String::as_str))
+        .unwrap_or(saved.as_str())
+}
+
+/// The list view of list field `f`: a list draft (a full-form draft, or a list form's for this
+/// list) or the saved rows with their notes, switch and Undo.
+fn list_view(
+    view: &SheetView,
+    (f, field): (usize, &crate::definitions::Field),
+    raw: Option<&BTreeMap<String, String>>,
+    focus: Option<values::Focus>,
+    forms: &mut AssistForms,
+) -> ListView {
+    let saved = &view.snapshot.data[&field.id];
+    let list_raw = raw.filter(|raw| list_scope(raw).is_none_or(|scope| scope == f));
+    let draft = list_raw.map_or_else(
+        || values::ListDraft::saved(field, saved),
+        |raw| values::ListDraft::submitted(f, field, raw),
+    );
+    let notes = list_raw.is_none().then_some((saved, &view.notes.current));
+    let mut list = ListView::new(f, field, draft, focus, notes);
+    list.revision = list_raw
+        .and_then(|raw| raw.get("revision"))
+        .cloned()
+        .unwrap_or_else(|| view.snapshot.revision.to_string());
+    // Switch and Undo on a saved list only, never over a re-rendered draft.
+    if list_raw.is_none() {
+        list.offer(view, field, forms);
+    }
+    list
+}
+
+/// The groups of a runtime page. A full-form draft (`raw`) replaces every field it holds; a
+/// list form's draft only its own list; a refused unit save's draft (slice 1.5a) only its
+/// unit. Every other field shows its saved value with its note, switch and Undo.
 fn groups(
     view: &SheetView,
-    raw: Option<&BTreeMap<String, String>>,
+    (raw, draft): (
+        Option<&BTreeMap<String, String>>,
+        Option<&unit_web::UnitDraft>,
+    ),
     formulas: Option<&FormulaView>,
-    focus: Option<values::Focus>,
+    (focus, units): (Option<values::Focus>, bool),
     forms: &mut AssistForms,
 ) -> Result<Vec<GroupView>, AppError> {
     let mut groups = Vec::new();
@@ -1152,28 +1299,20 @@ fn groups(
                     .find(|(_, field)| &field.id == id)
                     .ok_or(AppError::Invalid("Invalid pinned group."))?;
                 let saved = &view.snapshot.data[id];
-                let list = (field.control == crate::definitions::Control::List).then(|| {
-                    let draft = raw.map_or_else(
-                        || values::ListDraft::saved(field, saved),
-                        |raw| values::ListDraft::submitted(f, field, raw),
-                    );
-                    let notes = raw.is_none().then_some((saved, &view.notes.current));
-                    let mut list = ListView::new(f, field, draft, focus, notes);
-                    // Switch and Undo on a saved page only, never over a re-rendered draft.
-                    if raw.is_none() {
-                        list.offer(view, field, forms);
-                    }
-                    list
-                });
+                let list = (field.control == crate::definitions::Control::List)
+                    .then(|| list_view(view, (f, field), raw, focus, forms));
+                let unit_draft = draft.filter(|draft| draft.unit == super::unit::Unit::Field(f));
+                let raw_value = raw.and_then(|r| r.get(&format!("value-{id}")));
+                let drafted = unit_draft.is_some() || raw_value.is_some();
                 let note = view
                     .notes
                     .current
                     .get(&super::notes::field_address(id))
-                    .filter(|_| raw.is_none())
+                    .filter(|_| !drafted)
                     .and_then(|stored| NoteLine::of(stored, field.control, saved));
-                let value = raw
-                    .and_then(|r| r.get(&format!("value-{id}")))
-                    .cloned()
+                let value = unit_draft
+                    .map(|draft| draft.value.clone())
+                    .or_else(|| raw_value.cloned())
                     .or_else(|| {
                         note.as_ref()
                             .and_then(NoteLine::scribble)
@@ -1184,13 +1323,18 @@ fn groups(
                         serde_json::Value::Null => String::new(),
                         v => v.to_string(),
                     });
-                let value_state = raw
-                    .and_then(|r| r.get(&format!("null-{id}")))
-                    .cloned()
+                let value_state = unit_draft
+                    .and_then(|draft| draft.null.clone())
+                    .or_else(|| raw.and_then(|r| r.get(&format!("null-{id}"))).cloned())
                     .unwrap_or_else(|| if saved.is_null() { "unknown" } else { "known" }.into());
+                let (control_id, value_name, null_name) = control_names((f, id), units);
                 fields.push(FieldView {
                     id: id.clone(),
                     key: f.to_string(),
+                    control_id,
+                    value_name,
+                    null_name,
+                    autofocus: unit_draft.is_some(),
                     label: field.label.clone(),
                     help: field.help.clone().unwrap_or_default(),
                     control: control_name(field.control).into(),
@@ -1217,7 +1361,7 @@ fn groups(
                         .map(|formula| super::formulas::rule_list(&formula.rule_ids))
                         .unwrap_or_default(),
                     list,
-                    actions: if raw.is_none() && field.formula.is_none() {
+                    actions: if !drafted && field.formula.is_none() {
                         let labelled = format!("label-{f}");
                         Actions::of(
                             view,
@@ -1242,12 +1386,14 @@ fn groups(
 }
 
 /// What a rendered sheet page announces: the `role="status"` message, an optional
-/// `role="alert"`, and the single `autofocus` target after a draft operation.
+/// `role="alert"`, the single `autofocus` target after a draft operation, and a refused unit
+/// save's draft (slice 1.5a).
 #[derive(Default)]
 struct Notice {
     message: String,
     alert: String,
     focus: Option<values::Focus>,
+    draft: Option<unit_web::UnitDraft>,
 }
 
 impl Notice {
@@ -1379,16 +1525,40 @@ async fn create_sheet(
     Extension(admission): Extension<RuntimeAdmission>,
     body: axum::body::Bytes,
 ) -> ResultResponse {
-    save_private(state, session, id, Some(version.version), admission, body).await
+    let permit = admission.take()?;
+    save_private(state, session, id, Some(version.version), permit, body).await
 }
+/// The full-form and list-form save (slice 1.5a review, Sonnet M1): like a unit save it
+/// parses its body and checks CSRF and the session (review round 2, Sol Minor 1), then
+/// waits a short, bounded time for the runtime permit (D-X3), then answers the styled busy
+/// page that keeps every submitted pair. The body is buffered and parsed outside the permit;
+/// its size and pair count are capped (5 MiB, 65,536 pairs) and the auth layer admits at
+/// most 8 requests at once.
 async fn edit_sheet(
     State(state): State<AuthState>,
     session: Session,
     Path(id): Path<i64>,
-    Extension(admission): Extension<RuntimeAdmission>,
     body: axum::body::Bytes,
 ) -> ResultResponse {
-    save_private(state, session, id, None, admission, body).await
+    let pairs = parse_sheet_form(body).await?;
+    auth::check_csrf(&session, pairs.csrf()?).await?;
+    let auth = auth::request_auth(&state, &session).await?;
+    let Some(permit) = crate::definitions::admit_within(unit_web::PERMIT_WAIT).await else {
+        let csrf = auth::token(&session)
+            .await?
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+        return unit_web::busy_form(id, &pairs, &csrf);
+    };
+    save_parsed(&state, &session, (id, None), (auth, permit), pairs).await
+}
+
+/// Parses a sheet POST body (up to 65,536 pairs) off the async workers.
+async fn parse_sheet_form(body: axum::body::Bytes) -> Result<super::transport::Pairs, StatusCode> {
+    tokio::task::spawn_blocking(move || {
+        super::transport::Pairs::parse_limited(&body, super::transport::SHEET_FORM_PAIRS)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
 }
 
 /// Closed-key admission of a sheet POST (plan D2). It is O(pairs) but may generate up to
@@ -1401,7 +1571,15 @@ async fn admit_form(
 ) -> Result<(BTreeMap<String, String>, SheetView, OwnedSemaphorePermit), StatusCode> {
     tokio::task::spawn_blocking(move || {
         let keys = if let Some(pin) = &view.immutable {
-            values::sheet_keys(pin.definition(), pairs.keys()).ok_or(StatusCode::BAD_REQUEST)?
+            match pairs.value("list") {
+                // A list form (slice 1.5a): one list's rows; every other value stays saved.
+                // The create page has only the full form.
+                Some(list) => values::index(list)
+                    .filter(|_| view.snapshot.sheet_id != 0)
+                    .and_then(|f| values::list_keys(pin.definition(), f, pairs.keys())),
+                None => values::sheet_keys(pin.definition(), pairs.keys()),
+            }
+            .ok_or(StatusCode::BAD_REQUEST)?
         } else {
             let mut keys: std::collections::HashSet<String> =
                 NATIVE_KEYS.iter().map(|s| (*s).into()).collect();
@@ -1476,6 +1654,25 @@ async fn draft_op(
     }
 }
 
+/// A list form's draft operation acts on its own list only (slice 1.5a).
+fn op_in_scope(form: &BTreeMap<String, String>, op: values::Op) -> bool {
+    match (list_scope(form), op) {
+        (
+            Some(scope),
+            values::Op::Add(f)
+            | values::Op::Remove(f, _)
+            | values::Op::Up(f, _)
+            | values::Op::Down(f, _),
+        ) => scope == f,
+        _ => true,
+    }
+}
+
+/// The list field index of an admitted list form (slice 1.5a); `None` for a full form.
+fn list_scope(form: &BTreeMap<String, String>) -> Option<usize> {
+    form.get("list").and_then(|list| values::index(list))
+}
+
 /// Validates an admitted save form into `view.snapshot` and its change notes into
 /// `view.notes.pending` (plan D4 steps 5 and 6; assisted sheet slice 1.2). Returns whether
 /// anything changes: a save that changes no value and records no note is a no-op (D-U).
@@ -1487,14 +1684,25 @@ fn apply_save(view: &mut SheetView, form: &BTreeMap<String, String>) -> Result<b
         return Err(AppError::Conflict);
     }
     let create = view.snapshot.sheet_id == 0;
-    let name = super::name_notes(&form["name"], &form["notes"])?;
+    let scope = list_scope(form);
+    // A list form keeps the saved Name and General notes (slice 1.5a).
+    let (name, notes_text) = match scope {
+        Some(_) => (view.snapshot.name.clone(), view.snapshot.notes.clone()),
+        None => (
+            super::name_notes(&form["name"], &form["notes"])?,
+            form["notes"].clone(),
+        ),
+    };
     let (data, notes) = if let Some(pin) = &view.immutable {
         let (data, notes) = values::form(
             pin.definition(),
             form,
-            (!create).then_some(&view.snapshot.data),
-            view.snapshot.revision,
+            (
+                (!create).then_some(&view.snapshot.data),
+                view.snapshot.revision,
+            ),
             &view.notes.current,
+            scope,
         )?;
         pin.validate_values(&data)?;
         if notes.len() > super::notes::MAX_NOTES {
@@ -1509,11 +1717,11 @@ fn apply_save(view: &mut SheetView, form: &BTreeMap<String, String>) -> Result<b
     };
     let changed = create
         || name != view.snapshot.name
-        || form["notes"] != view.snapshot.notes
+        || notes_text != view.snapshot.notes
         || data != view.snapshot.data
         || !notes.is_empty();
     view.snapshot.name = name;
-    view.snapshot.notes.clone_from(&form["notes"]);
+    view.snapshot.notes = notes_text;
     view.snapshot.data = data;
     view.notes.pending = notes;
     Ok(changed)
@@ -1524,22 +1732,28 @@ async fn save_private(
     session: Session,
     id: i64,
     version: Option<i64>,
-    admission: RuntimeAdmission,
+    permit: OwnedSemaphorePermit,
     body: axum::body::Bytes,
 ) -> ResultResponse {
-    let permit = admission.take()?;
-    let (pairs, permit) = tokio::task::spawn_blocking(move || {
-        Ok::<_, StatusCode>((
-            super::transport::Pairs::parse_limited(&body, super::transport::SHEET_FORM_PAIRS)?,
-            permit,
-        ))
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+    // The create save holds the permit while it parses (it is taken before the body).
+    let pairs = parse_sheet_form(body).await?;
     // Precedence (plan D4): parse, then CSRF and authorization, then key admission, so a
     // bad key set never answers anything but 403 to a caller without a token or rights.
     auth::check_csrf(&session, pairs.csrf()?).await?;
     let auth = auth::request_auth(&state, &session).await?;
+    save_parsed(&state, &session, (id, version), (auth, permit), pairs).await
+}
+
+/// A sheet save after parsing, CSRF and session auth: rights, key admission, then the
+/// draft operation or the save.
+async fn save_parsed(
+    state: &AuthState,
+    session: &Session,
+    (id, version): (i64, Option<i64>),
+    (auth, permit): (auth::RequestAuth, OwnedSemaphorePermit),
+    pairs: super::transport::Pairs,
+) -> ResultResponse {
+    let (state, session) = (state.clone(), session.clone());
     let (view, permit) = load_editor(&state, auth.clone(), id, version, permit).await?;
     if !view.editable {
         return Err(StatusCode::FORBIDDEN);
@@ -1553,6 +1767,9 @@ async fn save_private(
         &form,
     )
     .ok_or(StatusCode::BAD_REQUEST)?;
+    if !op_in_scope(&form, op) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let csrf = auth::token(&session)
         .await?
         .ok_or(StatusCode::UNAUTHORIZED)?;

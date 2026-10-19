@@ -135,8 +135,10 @@ async fn list_row_sum_saves_its_result() {
     );
 }
 
-/// B1 regression (plan §8): re-posting the rendered form keeps saved negatives, because a
-/// sign-led input is literal (D-Q). Covers a scalar and a list-row integer.
+/// B1 regression (plan §8): re-posting the rendered forms keeps saved negatives, because a
+/// sign-led input is literal (D-Q). Covers a scalar and a list-row integer. Since slice
+/// 1.5a each unit and each list posts its own form: Armour's form and the list form,
+/// re-posted unchanged, write nothing (D-U); General notes then save on their own.
 #[tokio::test]
 async fn canonical_negatives_survive_a_re_post() {
     let _auth_lock = crate::auth::test_resource_lock().await;
@@ -150,21 +152,25 @@ async fn canonical_negatives_survive_a_re_post() {
     let (_, before) = saved(&setup, 1).await;
     for round in 1..=2 {
         let (_, page) = setup.get("/private-sheets/1").await;
-        let mut rendered = submitted(&page);
-        assert!(
-            rendered.contains(&pair("value-armour", "-1")),
-            "{rendered:?}"
-        );
+        let (action, armour) = super::unit_tests::unit_form(&page, "v2", None);
+        assert!(armour.contains(&pair("value", "-1")), "{armour:?}");
+        let (status, html) = setup.post(&action, armour).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("No change"), "{html}");
+        let rendered = submitted(&page);
         assert!(rendered.contains(&pair("row-4-0-2", "-3")), "{rendered:?}");
-        for (key, value) in &mut rendered {
-            if key == "notes" {
+        assert_eq!(
+            setup.post("/private-sheets/1", rendered).await.0,
+            StatusCode::OK,
+            "the unchanged list form writes nothing"
+        );
+        let (action, mut notes) = super::unit_tests::unit_form(&page, "meta-notes", None);
+        for (key, value) in &mut notes {
+            if key == "value" {
                 *value = format!("General notes, round {round}");
             }
         }
-        assert_eq!(
-            setup.post("/private-sheets/1", rendered).await.0,
-            StatusCode::SEE_OTHER
-        );
+        assert_eq!(setup.post(&action, notes).await.0, StatusCode::SEE_OTHER);
         let (revision, data) = saved(&setup, 1).await;
         assert_eq!(revision, round + 1);
         assert_eq!(data, before, "values unchanged after re-post {round}");
@@ -271,9 +277,14 @@ async fn runtime_integer_inputs_have_no_numeric_inputmode() {
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let setup = setup(&assist()).await;
     created(&setup).await;
+    // By name on the full forms (create, native); by DOM id in the unit forms (slice 1.5a).
     let input = |html: &str, name: &str| {
         let page = scraper::Html::parse_document(html);
-        let selector = scraper::Selector::parse(&format!("input[name=\"{name}\"]")).unwrap();
+        let selector = if name.starts_with('#') {
+            scraper::Selector::parse(&format!("input{name}")).unwrap()
+        } else {
+            scraper::Selector::parse(&format!("input[name=\"{name}\"]")).unwrap()
+        };
         let element = page
             .select(&selector)
             .next()
@@ -283,7 +294,12 @@ async fn runtime_integer_inputs_have_no_numeric_inputmode() {
     for path in ["/private-sheets/1".to_owned(), create_path(&setup)] {
         let (status, html) = setup.get(&path).await;
         assert_eq!(status, StatusCode::OK);
-        for name in ["value-hp", "value-max_hp", "value-armour", "value-luck"] {
+        let names = if path == "/private-sheets/1" {
+            ["#v0", "#v1", "#v2", "#v3"]
+        } else {
+            ["value-hp", "value-max_hp", "value-armour", "value-luck"]
+        };
+        for name in names {
             assert_eq!(input(&html, name), None, "{path} {name}");
         }
         if path == "/private-sheets/1" {
