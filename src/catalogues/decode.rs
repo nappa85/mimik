@@ -22,7 +22,7 @@ pub(super) const MAX_KEYS: usize = 32;
 /// Key length in scalars (ids are at most 64 bytes).
 pub(super) const MAX_KEY: usize = 64;
 
-pub(crate) const MAX_ENTRIES: usize = 8_192;
+pub(crate) const MAX_ENTRIES: usize = 6_144;
 pub(crate) const MAX_TYPES: usize = 32;
 pub(crate) const MAX_PROPERTIES: usize = 16;
 pub(crate) const MAX_OPTIONS: usize = 128;

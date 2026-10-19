@@ -5,17 +5,22 @@ Synthetic data only. Seeds a scratch database with one finalized synthetic sourc
 `import-catalogue-draft`, `compare-catalogue`, `publish-catalogue`, `show-catalogue-version`,
 `verify-catalogues` and `rebuild-catalogue-index`, each in a fresh wrapper process so peak RSS
 is that command's own (RUSAGE_CHILDREN, as tools/definition_profile.py). Every publish runs
-under a lock probe (`LockProbe`, `publish_hold`) that bounds its write-lock hold from below and
-above from complete probe windows, with a contender that writes like the server (BEGIN
-IMMEDIATE, 5 s busy timeout) while the publish holds the lock (`--no-contender` drops it, for
-tighter lower bounds). Cases: v1, v2 (update) and v3 of the calibrated shape, then three
-shapes at the caps, each published and updated: maximum fan-out, FTS-heavy names and
-declaration-heavy types (plan docs/catalogue-plan.md §12, §13). They are the worst measured
-cases on the profiling host, not a proof that no admitted shape costs more.
+under a lock probe (`LockProbe`, `publish_span`) that bounds its write-lock hold between the
+last free probe that read the old version count and the first that read the new one, with a
+contender that writes like the server (BEGIN IMMEDIATE, 5 s busy timeout) while the publish
+holds the lock. R8 hold evidence comes from `--no-contender` runs (conservative upper bound);
+runs with the contender report its wait and success, and loose bounds. Cases: v1, v2 (update) and v3 of the calibrated shape, then five
+shapes at the caps, each published and updated: maximum fan-out, FTS-heavy names (4- and
+3-character tokens), 64-scalar keys and declaration-heavy types (plan docs/catalogue-plan.md
+§12-§14). They are the worst measured cases on the profiling host, not a proof that no
+admitted shape costs more. The R8 gate (`--max-hold-ms`, 2,000 by default) exits 1 when a
+hold's upper bound exceeds it, cannot be bounded, or the contender did not wait through the
+publish and succeed.
 """
 
 import argparse
 import json
+import math
 import resource
 import sqlite3
 import subprocess
@@ -32,7 +37,6 @@ UNITS_PER_PAGE = 16
 UNITS_PER_ENTRY = 1
 TYPES = 8
 OWNER_EVERY = 8
-OWNER_TOTAL = 1024 * 1024
 WORDS = [
     "lantern",
     "ombra",
@@ -52,10 +56,38 @@ WORDS = [
     "tide",
 ]
 ZEROS = "0" * 64
+# Admission limits the shapes sit at, copied from src/catalogues/{decode,admission}.rs.
+# `RUST_LIMITS` names each one's Rust constant; tools/test_catalogue_profile.py parses the
+# Rust sources and fails when they differ, so a Rust-only cap change cannot silently profile
+# a non-worst shape (plan §14).
 MAX_DRAFT_BYTES = 4 * 1024 * 1024
+MAX_NODES = 524_288
+MAX_ENTRIES = 6_144
+MAX_TYPES = 32
 MAX_PROPERTIES = 16
+MAX_OPTIONS = 128
 MAX_UNITS_PER_ENTRY = 16
-MAX_UNIT_REFERENCES = 8_192
+MAX_NAME = 100
+MAX_ID = 64
+MAX_TEXT_PROPERTY = 1_000
+MAX_OWNER_TEXT = 20_000
+MAX_UNIT_REFERENCES = 6_144
+OWNER_TOTAL = 1024 * 1024
+RUST_LIMITS = {
+    "MAX_BYTES": MAX_DRAFT_BYTES,
+    "MAX_NODES": MAX_NODES,
+    "MAX_ENTRIES": MAX_ENTRIES,
+    "MAX_TYPES": MAX_TYPES,
+    "MAX_PROPERTIES": MAX_PROPERTIES,
+    "MAX_OPTIONS": MAX_OPTIONS,
+    "MAX_UNITS": MAX_UNITS_PER_ENTRY,
+    "MAX_NAME": MAX_NAME,
+    "MAX_ID": MAX_ID,
+    "MAX_TEXT_PROPERTY": MAX_TEXT_PROPERTY,
+    "MAX_OWNER_TEXT": MAX_OWNER_TEXT,
+    "MAX_UNIT_REFERENCES": MAX_UNIT_REFERENCES,
+    "MAX_OWNER_TEXT_TOTAL": OWNER_TOTAL,
+}
 FANOUT_HEADROOM = 16 * 1024
 
 
@@ -91,7 +123,7 @@ def draft(entries, extra=0, catalogue_id="spells", capacity=None):
         for t in range(TYPES)
     ]
     owners = -(-(capacity or entries + extra) // OWNER_EVERY)
-    owner_len = min(OWNER_TOTAL // max(owners, 1), 20_000)
+    owner_len = min(OWNER_TOTAL // max(owners, 1), MAX_OWNER_TEXT)
     units_total = PAGES * UNITS_PER_PAGE
     listed = []
     for index in range(entries + extra):
@@ -140,7 +172,7 @@ def unique_token(counter, letters="abcdefghijklmnopqrstuvwxyz012345"):
 def fts_name(_rng, index):
     """A 100-scalar name of distinct tokens (plan §13 FTS-heavy shape): every token appears
     once in the whole catalogue, so the name index holds one posting list per token."""
-    return " ".join(unique_token(index * 20 + k) for k in range(20))[:100]
+    return " ".join(unique_token(index * 20 + k) for k in range(20))[:MAX_NAME]
 
 
 def short_name(rng, index):
@@ -148,7 +180,7 @@ def short_name(rng, index):
 
 
 def capped(
-    entries=8192,
+    entries=MAX_ENTRIES,
     variant=0,
     catalogue_id="fanout",
     references=MAX_UNIT_REFERENCES,
@@ -160,6 +192,7 @@ def capped(
     option_id=lambda n: f"o{n}",
     option_label=lambda n: f"Option {n}",
     property_id=lambda n: f"p{n:02}",
+    entry_key=lambda index: f"entry-{index:05}",
 ):
     """A catalogue at the caps (plan §12, §13): `types` types x 16 properties (controls in
     turn; enums with `options` choices), `references / 16` evenly spread entries citing 16
@@ -220,7 +253,7 @@ def capped(
                 properties[property_id(0)] = 1000  # integers are drawn below 1,000
             listed.append(
                 {
-                    "key": f"entry-{index:05}",
+                    "key": entry_key(index),
                     "type": f"type-{index % types}",
                     "name": name(rng, index),
                     "properties": properties,
@@ -244,24 +277,58 @@ def capped(
     room = MAX_DRAFT_BYTES - FANOUT_HEADROOM - base
     if room < 0:
         raise AssertionError(f"Skeleton exceeds the 4 MiB cap by {-room} bytes")
-    owner_len = max(1, min(20_000, OWNER_TOTAL // owners, 1 + room // owners))
+    owner_len = max(1, min(MAX_OWNER_TEXT, OWNER_TOTAL // owners, 1 + room // owners))
     room -= (owner_len - 1) * owners
     text_len = 1
     if text_properties:
-        text_len = max(1, min(1000, 1 + room // (entries * text_properties)))
+        text_len = max(1, min(MAX_TEXT_PROPERTY, 1 + room // (entries * text_properties)))
     return build(text_len, owner_len)
 
 
-def fanout(entries=8192, variant=0, catalogue_id="fanout", references=MAX_UNIT_REFERENCES):
+def fanout(entries=MAX_ENTRIES, variant=0, catalogue_id="fanout", references=MAX_UNIT_REFERENCES):
     """Maximum fan-out at the caps (plan §12): 8 types x 16 properties (integer, boolean,
     enum with 8 options, text), 3-word names, every reference used."""
     return capped(entries, variant, catalogue_id, references)
 
 
-def fts_heavy(entries=8192, variant=0, catalogue_id="names", references=MAX_UNIT_REFERENCES):
+def fts_heavy(entries=MAX_ENTRIES, variant=0, catalogue_id="names", references=MAX_UNIT_REFERENCES):
     """FTS-heavy (plan §13): the fan-out shape with 100-scalar names of tokens used once each
     in the catalogue (large vocabulary), every reference used; owner text gets fewer bytes."""
     return capped(entries, variant, catalogue_id, references, name=fts_name)
+
+
+def short_token(counter, letters="abcdefghijklmnopqrstuvwxyz0123456789"):
+    """A 3-character token, base-36 digits least significant first (46,656 distinct)."""
+    digits = []
+    for _ in range(3):
+        counter, digit = divmod(counter, len(letters))
+        digits.append(letters[digit])
+    return "".join(digits)
+
+
+def fts3_name(_rng, index):
+    """A 99-scalar name of 25 three-character tokens (plan §14): every token is its own
+    3-character prefix, and the 204,800 tokens cycle through all 46,656, so each appears
+    four or five times (more postings per token than `fts_name`)."""
+    return " ".join(short_token((index * 25 + k) % 36**3) for k in range(25))[:MAX_NAME]
+
+
+def fts3_heavy(
+    entries=MAX_ENTRIES, variant=0, catalogue_id="names3", references=MAX_UNIT_REFERENCES
+):
+    """FTS-heavy with 3-character tokens (plan §14, Sonnet round 3)."""
+    return capped(entries, variant, catalogue_id, references, name=fts3_name)
+
+
+def long_key(index):
+    """A 64-scalar entry key (the id cap), distinct per index."""
+    return f"entry-{index:05}-".ljust(MAX_ID, "k")
+
+
+def long_keys(entries=MAX_ENTRIES, variant=0, catalogue_id="keys", references=MAX_UNIT_REFERENCES):
+    """64-scalar keys on the FTS-heavy shape (plan §14, Sonnet round 3): keys are stored in
+    entry, unit, seal and name index rows; every reference used."""
+    return capped(entries, variant, catalogue_id, references, name=fts_name, entry_key=long_key)
 
 
 def compact_id(n):
@@ -270,7 +337,7 @@ def compact_id(n):
 
 
 def declaration_heavy(
-    entries=8192, variant=0, catalogue_id="declarations", references=MAX_UNIT_REFERENCES
+    entries=MAX_ENTRIES, variant=0, catalogue_id="declarations", references=MAX_UNIT_REFERENCES
 ):
     """Declaration-heavy (plan §13): 32 types x 16 enum properties x 128 options (65,536
     declared choices, compact ids and labels), every entry holding 16 enum values, and the
@@ -283,9 +350,9 @@ def declaration_heavy(
             variant,
             catalogue_id,
             count,
-            types=32,
+            types=MAX_TYPES,
             controls=("enum",),
-            options=128,
+            options=MAX_OPTIONS,
             option_id=compact_id,
             option_label=lambda n: compact_id(n).upper(),
             property_id=compact_id,
@@ -305,8 +372,20 @@ def declaration_heavy(
     return best
 
 
-SHAPES = {"fanout": fanout, "fts": fts_heavy, "declarations": declaration_heavy}
-CATALOGUE_IDS = {"fanout": "fanout", "fts": "names", "declarations": "declarations"}
+SHAPES = {
+    "fanout": fanout,
+    "fts": fts_heavy,
+    "declarations": declaration_heavy,
+    "fts3": fts3_heavy,
+    "keys": long_keys,
+}
+CATALOGUE_IDS = {
+    "fanout": "fanout",
+    "fts": "names",
+    "declarations": "declarations",
+    "fts3": "names3",
+    "keys": "keys",
+}
 
 
 def encoded(value):
@@ -417,102 +496,98 @@ def contended(error):
     )
 
 
-def publish_hold(probes, contender=None, published=None):
-    """Bound each refusal run's write-lock hold from complete probe windows (plan §13).
+def publish_span(probes, published):
+    """Bound the publish's write-lock hold from complete probe windows (plan §13, §14).
 
-    `probes` are `(start, end, free, versions)` in order from one thread, so their windows do not
-    overlap. A probe's lock attempt happened at an unknown instant inside `[start, end]` (the
-    thread may be descheduled anywhere in it): a free probe proves the lock was free at some
-    instant of its window, a refused one that it was held at some instant of its window. For
-    a hold `[A, R)` seen as refused probes `first..last` between free probes `before` and
-    `after`:
+    `probes` are `(start, end, free, versions)` in order from one thread, so their windows do
+    not overlap; `versions` is the catalogue version count the probe read (None when it could
+    not read). A free probe holds the write lock itself when it reads, so:
 
-    - `A` lies in `(before.start, first.end]` and `R` in `[last.start, after.end)`;
-    - so the hold is at least `last.start - first.end` (0 when negative) and at most
-      `after.end - before.start`.
+    - a free probe that read fewer than `published` versions (the count after the publish)
+      took the lock before the publish did: the publish acquired after its start;
+    - a free probe that read `published` took the lock after the publish released: the
+      publish released before its end.
 
-    The contender (`contender = (begin, acquired)`: when its waiting `BEGIN IMMEDIATE` was
-    issued and when it returned, `acquired` None if it never did) can hold the lock only from
-    some instant after `begin`, so a refused probe ending after `begin` may be the
-    contender's and is not attributed; and since it acquires only after the publish releases,
-    `acquired` also bounds that release from above.
+    The publish is identified by the version it adds, not by which refusal run looks like
+    it: between the last free probe that read the old count (`before`) and the first that read
+    the new one (`after`) every probe is refused, and the hold `[A, R)` lies inside
+    `(before.start, after.end)`. **`after.end - before.start` is a conservative upper bound**
+    of the hold whatever else ran between them (the CLI's store-open lock, the contender):
+    other transactions can only widen the span. The lower bound `last.start - first.end`
+    over the refused probes between them (0 when none or negative) is indicative only: a
+    refusal by another transaction in the same span (the store-open lock when no free probe
+    landed in the gap after it, or the contender) inflates it.
 
-    A refused probe also reads the number of catalogue versions (`versions`, None when the
-    read was refused too). The publish's version row becomes visible when it commits, which
-    is no later than its release, so a refused probe that still read fewer than `published`
-    (the count after the publish) ran before the release, contender or not: its start is a
-    lower bound of `R` too. A run with no attributable refused probe (the contender's own
-    hold) is dropped. Returns one dict per run, times in seconds:
-    `acquired` and `released` as (earliest, latest), `hold` as (lower, upper); a bound is None
-    when no probe or contender supplies it."""
-    begin, acquired = (None, None) if contender is None else contender
+    Returns `bounded` False with a `reason` when either free probe is missing (never a null
+    bound); otherwise `acquired` and `released` as (earliest, latest), `upper`, `lower` and
+    `refused` (the refused probes inside the span), times in seconds."""
 
-    def attributable(probe):
-        before_contender = begin is None or probe[1] <= begin
-        uncommitted = published is not None and probe[3] is not None and probe[3] < published
-        return before_contender or uncommitted
+    def read(probe, newer):
+        if not probe[2] or probe[3] is None or published is None:
+            return False
+        return probe[3] >= published if newer else probe[3] < published
 
-    runs = []
-    before = None
-    index = 0
-    while index < len(probes):
-        if probes[index][2]:
-            before = probes[index]
-            index += 1
-            continue
-        run_start = index
-        while index < len(probes) and not probes[index][2]:
-            index += 1
-        refused = probes[run_start:index]
-        after = probes[index] if index < len(probes) else None
-        held = [probe for probe in refused if attributable(probe)]
-        if not held:
-            continue
-        first, last = held[0], held[-1]
-        release_latest = None if after is None else after[1]
-        # The contender's wait began inside this run: its acquisition ends the hold.
-        if acquired is not None and begin >= first[0] and (after is None or begin <= after[1]):
-            release_latest = acquired if release_latest is None else min(release_latest, acquired)
-        acquire_earliest = None if before is None else before[0]
-        runs.append(
-            {
-                "acquired": (acquire_earliest, first[1]),
-                "released": (last[0], release_latest),
-                "hold": (
-                    max(0.0, last[0] - first[1]),
-                    None
-                    if acquire_earliest is None or release_latest is None
-                    else release_latest - acquire_earliest,
-                ),
-            }
-        )
-    return runs
-
-
-def run_ms(run, origin):
-    """One run of `publish_hold` in milliseconds, times relative to `origin` (the launch)."""
-
-    def at(value):
-        return None if value is None else round((value - origin) * 1000, 1)
-
-    def span(value):
-        return None if value is None else round(value * 1000, 1)
-
+    after = next((i for i, probe in enumerate(probes) if read(probe, True)), None)
+    if after is None:
+        return {"bounded": False, "reason": "no free probe read the published version"}
+    before = next((i for i in range(after - 1, -1, -1) if read(probes[i], False)), None)
+    if before is None:
+        return {"bounded": False, "reason": "no free probe read the previous version count"}
+    refused = [probe for probe in probes[before + 1 : after] if not probe[2]]
+    first_end = refused[0][1] if refused else probes[after][1]
+    last_start = refused[-1][0] if refused else probes[before][0]
     return {
-        "acquired_after_ms": [at(value) for value in run["acquired"]],
-        "released_after_ms": [at(value) for value in run["released"]],
-        "hold_ms_lower": span(run["hold"][0]),
-        "hold_ms_upper": span(run["hold"][1]),
+        "bounded": True,
+        "acquired": (probes[before][0], first_end),
+        "released": (last_start, probes[after][1]),
+        "upper": probes[after][1] - probes[before][0],
+        "lower": max(0.0, last_start - first_end) if refused else 0.0,
+        "refused": len(refused),
+    }
+
+
+def floor_ms(seconds):
+    """Seconds to milliseconds, rounded down to 0.1 ms (lower bounds round outward)."""
+    return math.floor(seconds * 10_000) / 10
+
+
+def ceil_ms(seconds):
+    """Seconds to milliseconds, rounded up to 0.1 ms (upper bounds round outward)."""
+    return math.ceil(seconds * 10_000) / 10
+
+
+def span_ms(span, origin, contender):
+    """`publish_span` in milliseconds, times relative to `origin` (the launch), every bound
+    rounded outward. With the contender the bounds are labelled loose (it may run inside)."""
+    if not span["bounded"]:
+        return {"bounded": False, "reason": span["reason"]}
+    return {
+        "bounded": True,
+        "bounds": "loose: the contender may hold the lock inside the span"
+        if contender
+        else "conservative upper; lower indicative",
+        "acquired_after_ms": [
+            floor_ms(span["acquired"][0] - origin),
+            ceil_ms(span["acquired"][1] - origin),
+        ],
+        "released_after_ms": [
+            floor_ms(span["released"][0] - origin),
+            ceil_ms(span["released"][1] - origin),
+        ],
+        "hold_ms_lower": floor_ms(span["lower"]),
+        "hold_ms_upper": ceil_ms(span["upper"]),
+        "refused_probes": span["refused"],
     }
 
 
 class LockProbe:
     """Probe the write lock without waiting from a thread (`BEGIN IMMEDIATE` with a zero busy
-    timeout, then `ROLLBACK`), recording each probe's start and completion. Once a refusal
+    timeout, a read of `marker`, then `ROLLBACK`), recording each probe's start, completion
+    and marker value (refused probes try the read too). Once a refusal
     has lasted `contend_after` seconds (past the ~30-40 ms lock every CLI process takes when
     it opens the store), a contender thread runs the server's write pattern on its own
-    connection: `BEGIN IMMEDIATE` with the server's 5 s busy timeout, one insert, `COMMIT`
-    (the lock-level equivalent of a sheet save). Any failure other than lock contention, in
+    connection: `BEGIN IMMEDIATE` with the server's 5 s busy timeout, a read of `marker`, one
+    insert, `COMMIT` (the lock-level equivalent of a sheet save). Any failure other than lock contention, in
     the poller or the contender, is kept and raised as `ProbeError` by `start`/`check`."""
 
     def __init__(self, database, contend_after=0.05, ready_probes=20, marker=None):
@@ -541,10 +616,12 @@ class LockProbe:
                 self.contender.update(success=False, error="busy after the 5 s timeout")
                 return
             self.contender["acquired"] = time.perf_counter()
+            if self.marker is not None:
+                self.contender["versions"] = db.execute(self.marker).fetchone()[0]
             db.execute("INSERT INTO profile_writes(at) VALUES('contended save')")
             db.execute("COMMIT")
             self.contender["success"] = True
-        except Exception as error:  # noqa: BLE001 - handed to the main thread as ProbeError
+        except Exception as error:  # handed to the main thread as ProbeError
             self.contender.update(success=False, error=repr(error))
             self.failure = self.failure or error
         finally:
@@ -569,7 +646,10 @@ class LockProbe:
                     free = False
                     versions = self.read_marker(db)
                 else:
-                    db.execute("ROLLBACK")
+                    try:
+                        versions = self.read_marker(db)
+                    finally:
+                        db.execute("ROLLBACK")
                     free = True
                 end = time.perf_counter()
                 self.probes.append((start, end, free, versions))
@@ -590,7 +670,7 @@ class LockProbe:
                         contender = threading.Thread(target=self.contend, daemon=True)
                         contender.start()
                 time.sleep(0.0005)
-        except Exception as error:  # noqa: BLE001 - handed to the main thread as ProbeError
+        except Exception as error:  # handed to the main thread as ProbeError
             self.failure = self.failure or error
         finally:
             if db is not None:
@@ -612,6 +692,19 @@ class LockProbe:
             if not contended(error):
                 raise
             return None
+
+    def settle(self, published, timeout):
+        """Wait at most `timeout` seconds for a free probe that read `published` versions, so
+        the span has its closing probe (`publish_span`); False if none came."""
+        deadline = time.perf_counter() + timeout
+        seen = 0
+        while time.perf_counter() < deadline and self.thread.is_alive():
+            probes = self.probes[seen:]
+            seen += len(probes)
+            if any(p[2] and p[3] is not None and p[3] >= published for p in probes):
+                return True
+            time.sleep(0.001)
+        return False
 
     def check(self):
         if self.failure is not None:
@@ -647,58 +740,81 @@ def probe_publish(
     marker=VERSIONS,
 ):
     """Run one publish (`run`, by default `measured`) under a `LockProbe` and report its
-    write-lock hold as conservative lower and upper bounds (plan §12, §13)."""
+    write-lock hold (`publish_span`: a conservative upper bound without the contender, loose
+    bounds with it) and the contender's result (plan §12, §13, §14)."""
     run = measured if run is None else run
     probe = LockProbe(database, contend_after, marker=marker)
     probe.start(ready_timeout)
+    published = None
     try:
         launched = time.perf_counter()
         measured_result = run(binary, database, command)
+        if marker is not None:
+            db = sqlite3.connect(database, timeout=5.0)
+            try:
+                published = db.execute(marker).fetchone()[0]
+            finally:
+                db.close()
+            probe.settle(published, 5.0)
     finally:
         probe.stop()
     probe.check()
-    published = None
-    if marker is not None:
-        db = sqlite3.connect(database, timeout=5.0)
-        try:
-            published = db.execute(marker).fetchone()[0]
-        finally:
-            db.close()
     contender = probe.contender
-    window = None if "begin" not in contender else (contender["begin"], contender.get("acquired"))
-    runs = [
-        r for r in publish_hold(probe.probes, window, published) if r["acquired"][1] >= launched
-    ]
-    main_run = max(runs, key=lambda r: r["hold"][0], default=None)
+    span = publish_span(probe.probes, published)
     after = [p for p in probe.probes if p[0] >= launched]
     lock = {
-        "refused_runs": len(runs),
         "probes": len(after),
-        "probe_window_max_ms": round(max((p[1] - p[0] for p in after), default=0) * 1000, 2),
-        "probe_gap_max_ms": round(
-            max((b[0] - a[1] for a, b in zip(after, after[1:], strict=False)), default=0) * 1000,
-            2,
+        "probe_window_max_ms": ceil_ms(max((p[1] - p[0] for p in after), default=0)),
+        "probe_gap_max_ms": ceil_ms(
+            max((b[0] - a[1] for a, b in zip(after, after[1:], strict=False)), default=0)
         ),
-        "publish_hold": None if main_run is None else run_ms(main_run, launched),
-        "other_runs_ms": [
-            [run_ms(r, launched)["hold_ms_lower"], run_ms(r, launched)["hold_ms_upper"]]
-            for r in runs
-            if r is not main_run
-        ],
+        "publish_hold": span_ms(span, launched, bool(contender)),
     }
-    if contender:
-        lock["contender"] = {
-            "success": contender.get("success", False),
-            "began_after_ms": None
-            if "begin" not in contender
-            else round((contender["begin"] - launched) * 1000, 1),
-            "wait_ms": None
-            if "acquired" not in contender
-            else round((contender["acquired"] - contender["begin"]) * 1000, 1),
-            "error": contender.get("error"),
-        }
+    if contend_after is not None:
+        lock["contender"] = contender_result(contender, probe.probes, published, launched)
     measured_result["lock"] = lock
     return measured_result
+
+
+def contender_result(contender, probes, published, origin):
+    """Whether the contender waited through the publish and succeeded (R8). It began before
+    the publish released when some probe that started no earlier than its `BEGIN` still read
+    the old version count, and it acquired after the release when its own read inside its
+    transaction saw `published` versions."""
+    if "begin" not in contender:
+        return {"started": False, "success": False, "waited_through_publish": False}
+    begin = contender["begin"]
+    began_before_release = published is not None and any(
+        p[0] >= begin and p[3] is not None and p[3] < published for p in probes
+    )
+    saw_published = published is not None and contender.get("versions", -1) >= published
+    return {
+        "started": True,
+        "success": contender.get("success", False),
+        "waited_through_publish": began_before_release and saw_published,
+        "began_after_ms": floor_ms(begin - origin),
+        "wait_ms": None if "acquired" not in contender else floor_ms(contender["acquired"] - begin),
+        "error": contender.get("error"),
+    }
+
+
+def r8_failures(name, publish, max_hold_ms):
+    """R8 gate (plan §14) for one publish: a bounded hold whose upper bound is within
+    `max_hold_ms`, and, when the contender ran, a contender that waited through the publish
+    and succeeded. Returns the failures as text."""
+    failures = []
+    hold = publish["lock"]["publish_hold"]
+    if not hold["bounded"]:
+        failures.append(f"{name}: hold not bounded ({hold['reason']})")
+    elif hold["hold_ms_upper"] > max_hold_ms:
+        failures.append(f"{name}: hold upper bound {hold['hold_ms_upper']} ms > {max_hold_ms}")
+    contender = publish["lock"].get("contender")
+    if contender is not None:
+        if not contender["success"]:
+            failures.append(f"{name}: contender did not succeed ({contender.get('error')})")
+        elif not contender["waited_through_publish"]:
+            failures.append(f"{name}: contender did not wait through the publish")
+    return failures
 
 
 def publish_case(binary, database, value, name, root, revision):
@@ -756,7 +872,7 @@ def run_case(binary, database, value, name, root, revision, contend_after=0.05):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
-    parser.add_argument("--entries", type=int, default=8192)
+    parser.add_argument("--entries", type=int, default=MAX_ENTRIES)
     parser.add_argument("--measure", action="store_true")
     parser.add_argument("--no-fanout", action="store_true")
     parser.add_argument(
@@ -769,6 +885,12 @@ def main():
         "--no-contender",
         action="store_true",
         help="probe without the contender: tighter lower bounds, no wait/success result",
+    )
+    parser.add_argument(
+        "--max-hold-ms",
+        type=float,
+        default=2000.0,
+        help="R8 gate: fail when a publish's hold upper bound exceeds this (plan §14)",
     )
     parser.add_argument("--fanout-only", action="store_true")
     parser.add_argument("--shapes", default=",".join(SHAPES))
@@ -854,7 +976,18 @@ def main():
         verified = json.loads(report["verify"].pop("stdout"))
         report["verify"]["status"] = verified["status"]
         report["verify"]["versions"] = verified["versions"]
+        failures = []
+        for name, case in report.items():
+            if isinstance(case, dict) and isinstance(case.get("publish"), dict):
+                failures += r8_failures(name, case["publish"], args.max_hold_ms)
+        report["r8_gate"] = {
+            "max_hold_ms": args.max_hold_ms,
+            "passed": not failures,
+            "failures": failures,
+        }
         print(json.dumps(report, indent=2))
+        if failures:
+            sys.exit(1)
 
 
 if __name__ == "__main__":

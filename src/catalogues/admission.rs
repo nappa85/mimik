@@ -14,15 +14,17 @@ use std::{
 /// Distinct `(source, page, unit)` references in one catalogue (D5). The reference cap
 /// below is lower, so it bounds distinct units first; this check stays as defence in depth.
 pub(super) const MAX_DISTINCT_UNITS: usize = 16_384;
-/// Unit references in one catalogue, counted with repetition (plan §12, §13): the seal
+/// Unit references in one catalogue, counted with repetition (plan §12-§14): the seal
 /// compares every reference row, so this cap bounds the publication's write-lock hold
-/// together with the entry and byte caps. 8,192 is 1 per entry at 8,192 entries. The worst
-/// measured case on the profiling host at this cap (8,192 entries of 100-scalar names of
-/// distinct tokens, every reference used, 4 MiB, updating the previous version) held the
-/// lock for about 1.76 s; at 12,288 it held 1.92 s and at 16,384 2.14 s, over the 2 s
-/// budget (plan §13). This is host-specific evidence, not a proven bound for every
+/// together with the entry and byte caps. 6,144 is 1 per entry at the 6,144-entry cap. The
+/// worst measured case on the profiling host at these caps (6,144 entries of 99-scalar names
+/// of 3-character tokens, every reference used, 4 MiB, updating the previous version) held
+/// the lock for at most 1.81 s (conservative upper bound over three runs, 1,804.0 ms); at
+/// 8,192 entries the 3-character-token and 64-scalar-key shapes exceeded the 2 s budget
+/// even with 4,096 references, and 6,144 entries with 8,192 references reached 1.99 s
+/// (plan §14). This is host-specific evidence, not a proven bound for every
 /// admitted shape.
-pub(super) const MAX_UNIT_REFERENCES: usize = 8_192;
+pub(super) const MAX_UNIT_REFERENCES: usize = 6_144;
 const _: () = assert!(MAX_UNIT_REFERENCES <= MAX_DISTINCT_UNITS);
 /// Total UTF-8 bytes of every entry's owner text (plan §9).
 pub(super) const MAX_OWNER_TEXT_TOTAL: usize = 1024 * 1024;
@@ -187,14 +189,19 @@ pub(super) fn validate(bytes: &[u8]) -> Result<Admitted, CatalogueError> {
 pub(super) const BLANK_LOOKING: [char; 5] =
     ['\u{2800}', '\u{3164}', '\u{115f}', '\u{1160}', '\u{ffa0}'];
 
-/// Required text: at least one scalar that is neither whitespace, blank-looking nor an
-/// invisible format character (Cf). Owner text keeps Cf for bidi prose, but not alone.
+/// Required text: at least one scalar that is neither whitespace, blank-looking, an
+/// invisible format character (Cf) nor a nonspacing mark (Mn: combining marks, variation
+/// selectors, which alone render as nothing or a dotted circle). Owner text keeps Cf for bidi
+/// prose and marks combine with a base, but neither alone (plan §13, §14).
 fn label(value: &str) -> bool {
     use unicode_general_category::{GeneralCategory, get_general_category};
     value.chars().any(|scalar| {
         !scalar.is_whitespace()
             && !BLANK_LOOKING.contains(&scalar)
-            && get_general_category(scalar) != GeneralCategory::Format
+            && !matches!(
+                get_general_category(scalar),
+                GeneralCategory::Format | GeneralCategory::NonspacingMark
+            )
     })
 }
 
@@ -320,6 +327,12 @@ fn properties(
             }
             (PropertyControl::Text, PropertyValue::Text(text)) if !visible(text) => {
                 return Err(invalid(path, FORMAT));
+            }
+            // Displayed like a name; the empty string is the explicit "no value".
+            (PropertyControl::Text, PropertyValue::Text(text))
+                if !text.is_empty() && !label(text) =>
+            {
+                return Err(invalid(path, "blank-text-property-value"));
             }
             (PropertyControl::Text, PropertyValue::Text(_))
             | (PropertyControl::Integer, PropertyValue::Integer(_))

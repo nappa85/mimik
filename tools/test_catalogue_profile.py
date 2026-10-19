@@ -1,6 +1,7 @@
 """The catalogue profile draft must sit at the plan's maxima without exceeding any limit."""
 
 import json
+import re
 import sqlite3
 import tempfile
 import threading
@@ -10,23 +11,59 @@ from pathlib import Path
 
 from catalogue_profile import (
     MAX_DRAFT_BYTES,
+    MAX_ENTRIES,
+    MAX_ID,
+    MAX_NAME,
+    MAX_NODES,
+    MAX_OWNER_TEXT,
+    MAX_TEXT_PROPERTY,
     MAX_UNIT_REFERENCES,
     OWNER_TOTAL,
+    RUST_LIMITS,
     ProbeError,
     Rng,
     declaration_heavy,
     draft,
     encoded,
     fanout,
+    fts3_heavy,
     fts_heavy,
+    long_keys,
     probe_publish,
-    publish_hold,
+    publish_span,
+    r8_failures,
+    span_ms,
 )
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def rust_limits():
+    """Every `const MAX_*: usize` of the catalogue decoder and admission, evaluated."""
+    found = {}
+    for name in ("decode.rs", "admission.rs"):
+        text = (ROOT / "src" / "catalogues" / name).read_text()
+        for const, expression in re.findall(r"const (MAX_\w+): usize = ([0-9_ *]+);", text):
+            value = 1
+            for factor in expression.split("*"):
+                value *= int(factor.strip().replace("_", ""))
+            found[const] = value
+    return found
+
+
+class RustLimitTests(unittest.TestCase):
+    def test_profiler_limits_match_the_rust_constants(self):
+        # A Rust-only cap change must fail here, not silently profile a non-worst shape.
+        rust = rust_limits()
+        self.assertGreaterEqual(len(rust), 15)
+        for name, value in RUST_LIMITS.items():
+            self.assertIn(name, rust)
+            self.assertEqual(value, rust[name], name)
 
 
 class DraftShapeTests(unittest.TestCase):
     def test_capacity_drafts_fit_every_limit_and_grow_append_only(self):
-        for capacity in (4096, 8192):
+        for capacity in (4096, MAX_ENTRIES):
             versions = [draft(capacity - 2, extra, capacity=capacity) for extra in (0, 1, 2)]
             last = versions[-1]
             self.assertEqual(len(last["entries"]), capacity)
@@ -65,9 +102,9 @@ class DraftShapeTests(unittest.TestCase):
             encoded(value)
 
     def test_fanout_sits_at_the_reference_property_and_byte_caps(self):
-        first, second = fanout(8192, 0), fanout(8192, 1)
+        first, second = fanout(MAX_ENTRIES, 0), fanout(MAX_ENTRIES, 1)
         for value in (first, second):
-            self.assertEqual(len(value["entries"]), 8192)
+            self.assertEqual(len(value["entries"]), MAX_ENTRIES)
             self.assertLessEqual(len(encoded(value)), MAX_DRAFT_BYTES)
             self.assertGreater(len(encoded(value)), MAX_DRAFT_BYTES - 64 * 1024)
             references = [
@@ -108,35 +145,67 @@ class WorstShapeTests(unittest.TestCase):
         data = encoded(value)
         self.assertLessEqual(len(data), MAX_DRAFT_BYTES)
         self.assertGreater(len(data), MAX_DRAFT_BYTES - 64 * 1024)
-        self.assertEqual(len(value["entries"]), 8192)
-        self.assertLessEqual(nodes(value), 524_288)
+        self.assertEqual(len(value["entries"]), MAX_ENTRIES)
+        self.assertLessEqual(nodes(value), MAX_NODES)
         references = sum(len(e["description"].get("units", [])) for e in value["entries"])
         self.assertLessEqual(references, MAX_UNIT_REFERENCES)
         owner = sum(len(e["description"].get("owner_text", "").encode()) for e in value["entries"])
         self.assertLessEqual(owner, OWNER_TOTAL)
+        keys = [entry["key"] for entry in value["entries"]]
+        self.assertEqual(len(keys), len(set(keys)))
         for entry in value["entries"]:
-            self.assertLessEqual(len(entry["name"]), 100)
+            self.assertLessEqual(len(entry["name"]), MAX_NAME)
+            self.assertLessEqual(len(entry["key"]), MAX_ID)
+            self.assertLessEqual(len(entry["description"].get("owner_text", "")), MAX_OWNER_TEXT)
+            for item in entry["properties"].values():
+                if isinstance(item, str):
+                    self.assertLessEqual(len(item), MAX_TEXT_PROPERTY)
         return references
 
     def test_every_shape_fits_at_4096_entries_too(self):
         # Fewer entries leave more bytes for text property values: they must stay ASCII so
         # the byte budget holds (a 4,096-entry run once overflowed 4 MiB).
-        for build in (fanout, fts_heavy, declaration_heavy):
+        for build in (fanout, fts_heavy, declaration_heavy, fts3_heavy, long_keys):
             data = encoded(build(4096, 0))
-            self.assertGreater(len(data), MAX_DRAFT_BYTES - 128 * 1024)
+            # The declaration-heavy shape has no text properties, so at 4,096 entries its
+            # owner text (1 MiB total) cannot take every spare byte.
+            self.assertGreater(len(data), MAX_DRAFT_BYTES - 256 * 1024)
 
     def test_fts_heavy_names_are_long_and_every_token_is_distinct(self):
-        first, second = fts_heavy(8192, 0), fts_heavy(8192, 1)
+        first, second = fts_heavy(MAX_ENTRIES, 0), fts_heavy(MAX_ENTRIES, 1)
         for value in (first, second):
             self.assertEqual(self.common(value), MAX_UNIT_REFERENCES)
             tokens = [token for e in value["entries"] for token in e["name"].split()]
             self.assertEqual(len(tokens), len(set(tokens)))
-            self.assertGreaterEqual(len(tokens), 8192 * 20)
+            self.assertGreaterEqual(len(tokens), MAX_ENTRIES * 20)
             self.assertTrue(all(len(e["name"]) >= 99 for e in value["entries"]))
         self.assertNotEqual(encoded(first), encoded(second))
 
+    def test_fts3_names_use_three_character_tokens_shared_a_few_times(self):
+        first, second = fts3_heavy(MAX_ENTRIES, 0), fts3_heavy(MAX_ENTRIES, 1)
+        for value in (first, second):
+            self.assertEqual(self.common(value), MAX_UNIT_REFERENCES)
+            tokens = [token for e in value["entries"] for token in e["name"].split()]
+            self.assertEqual(len(tokens), MAX_ENTRIES * 25)
+            self.assertTrue(all(len(token) == 3 for token in tokens))
+            self.assertEqual(len(set(tokens)), 36**3)
+            self.assertTrue(all(len(e["name"]) == 99 for e in value["entries"]))
+        self.assertNotEqual(encoded(first), encoded(second))
+
+    def test_long_keys_sit_at_the_id_cap_on_fts_heavy_names(self):
+        first, second = long_keys(MAX_ENTRIES, 0), long_keys(MAX_ENTRIES, 1)
+        for value in (first, second):
+            self.assertEqual(self.common(value), MAX_UNIT_REFERENCES)
+            self.assertTrue(all(len(e["key"]) == MAX_ID for e in value["entries"]))
+            self.assertTrue(all(len(e["name"]) >= 99 for e in value["entries"]))
+        self.assertEqual(
+            [(e["key"], e["type"]) for e in first["entries"]],
+            [(e["key"], e["type"]) for e in second["entries"]],
+        )
+        self.assertNotEqual(encoded(first), encoded(second))
+
     def test_declaration_heavy_declares_every_type_property_and_option(self):
-        first, second = declaration_heavy(8192, 0), declaration_heavy(8192, 1)
+        first, second = declaration_heavy(MAX_ENTRIES, 0), declaration_heavy(MAX_ENTRIES, 1)
         for value in (first, second):
             # At the 8,192 cap every reference fits beside the declarations.
             self.assertEqual(self.common(value), MAX_UNIT_REFERENCES)
@@ -154,105 +223,149 @@ class WorstShapeTests(unittest.TestCase):
         self.assertNotEqual(encoded(first), encoded(second))
 
 
-def observe(hold, schedule):
-    """Probes of a lock held over `hold` = (acquired, released): each `(start, executed)` is a
-    probe recorded at `start` whose BEGIN IMMEDIATE actually ran at `executed` (a thread
-    descheduled in between), completing just after."""
-    acquired, released = hold
+OLD, NEW = 4, 5  # catalogue versions before and after the publish
+
+
+def observe(schedule, publish, others=()):
+    """Probes of a lock held by the publish over `publish` = (acquired, released) and by
+    other transactions over `others` (the store-open lock, the contender), adding no version:
+    each `(start, executed)` is a probe recorded at `start` whose BEGIN IMMEDIATE and read
+    actually ran at `executed` (a thread descheduled in between), completing just after. Every
+    probe reads the version count (the publish's row is visible from its release)."""
+    holds = [publish, *others]
     return [
-        (start, executed + 1e-4, not acquired <= executed < released, None)
+        (
+            start,
+            executed + 1e-4,
+            not any(acquired <= executed < released for acquired, released in holds),
+            NEW if executed >= publish[1] else OLD,
+        )
         for start, executed in schedule
     ]
 
 
-def longest(runs):
-    return max(runs, key=lambda run: run["hold"][0])
-
-
-class LockProbeTests(unittest.TestCase):
-    def assert_brackets(self, runs, true_hold):
-        lower, upper = longest(runs)["hold"]
-        self.assertLessEqual(lower, true_hold + 1e-9)
-        self.assertIsNotNone(upper)
-        self.assertGreaterEqual(upper, true_hold - 1e-9)
+class PublishSpanTests(unittest.TestCase):
+    def assert_upper(self, probes, hold):
+        span = publish_span(probes, NEW)
+        self.assertTrue(span["bounded"], span)
+        self.assertGreaterEqual(span["upper"], hold[1] - hold[0] - 1e-9)
+        return span
 
     def test_delayed_probes_still_bracket_the_hold(self):
-        # Sol's scenario: the free probe after the hold was recorded before the release but
-        # ran after it; the first refused probe was recorded before the acquisition. Start
-        # times alone put the upper bound at 1.51 s for a 2 s hold.
+        # Sol round 2: the free probe after the hold was recorded before the release but ran
+        # after it; the first refused probe was recorded before the acquisition.
         probes = observe(
+            [(0.0, 0.0), (0.99, 0.995), (0.999, 1.4), (2.0, 2.0), (2.5, 3.2), (3.5, 3.5)],
             (1.0, 3.0),
-            [
-                (0.0, 0.0),
-                (0.99, 0.995),
-                (0.999, 1.4),
-                (2.0, 2.0),
-                (2.5, 3.2),
-                (3.5, 3.5),
-            ],
         )
-        self.assert_brackets(publish_hold(probes), 2.0)
+        span = self.assert_upper(probes, (1.0, 3.0))
+        self.assertLessEqual(span["lower"], 2.0)
 
-    def test_random_delays_always_bracket_the_hold(self):
+    def test_startup_contender_then_publish_with_missed_free_gaps(self):
+        # Sol round 3: the store-open lock [0.02, 0.08), then the contender [0.096, 0.1),
+        # then the publish [0.12, 2.12), with no free probe in either gap. Capping the
+        # release at the contender's acquisition (0.096) bounded a 2 s hold by 0.1 s.
+        probes = observe(
+            [(0.0, 0.0), (0.05, 0.05), (0.5, 0.5), (1.0, 1.0), (2.0, 2.0), (2.2, 2.2)],
+            (0.12, 2.12),
+            [(0.02, 0.08), (0.096, 0.1)],
+        )
+        self.assert_upper(probes, (0.12, 2.12))
+
+    def test_observed_startup_with_unobserved_publication(self):
+        # The store-open lock is seen; the poller is then descheduled across the whole
+        # publish. The startup run must not be reported as the publish's hold.
+        probes = observe(
+            [(0.0, 0.0), (0.05, 0.05), (0.1, 0.1), (0.11, 2.5), (2.6, 2.6)],
+            (0.12, 2.12),
+            [(0.02, 0.08)],
+        )
+        span = self.assert_upper(probes, (0.12, 2.12))
+        self.assertEqual(span["refused"], 0)
+        self.assertEqual(span["lower"], 0.0)
+
+    def test_random_schedules_always_bound_the_hold_from_above(self):
         rng = Rng(42)
-        checked = 0
-        for _ in range(300):
-            acquired = 1.0 + rng.below(1000) / 1000
+        bounded = 0
+        for trial in range(500):
+            startup = 0.5 + rng.below(500) / 1000
+            startup_end = startup + 0.03 + rng.below(20) / 1000
+            acquired = startup_end + rng.below(300) / 1000
             released = acquired + 0.05 + rng.below(3000) / 1000
+            others = [(startup, startup_end)]
+            if trial % 2:  # the contender, before or after the publish
+                at = acquired - 0.002 if trial % 4 == 1 else released
+                others.append((at - 0.001, at))
+                if trial % 4 == 3:
+                    others[-1] = (released, released + 0.002)
             schedule, at = [], 0.0
             while at < released + 0.5:
                 executed = at + rng.below(400) / 1000 * (rng.below(4) == 0)
                 schedule.append((at, executed))
                 at = executed + 1e-4 + rng.below(20) / 1000
-            runs = publish_hold(observe((acquired, released), schedule))
-            if any(acquired <= executed < released for _, executed in schedule):
-                checked += 1
-                self.assert_brackets(runs, released - acquired)
-            else:  # no probe ran inside the hold: nothing is attributed to it
-                self.assertEqual(runs, [])
-        self.assertGreater(checked, 250)
+            probes = observe(schedule, (acquired, released), others)
+            span = publish_span(probes, NEW)
+            if not span["bounded"]:
+                # Only when no free probe ran after the publish released.
+                self.assertFalse(any(p[2] and p[3] == NEW for p in probes))
+                continue
+            self.assertGreaterEqual(span["upper"], released - acquired - 1e-9)
+            bounded += 1
+        self.assertGreater(bounded, 450)
 
-    def test_probes_refused_by_the_contender_are_not_attributed(self):
-        # The publish holds [1, 3); the contender began waiting at 1.5, took the lock at 3.0
-        # (its BEGIN returned at 3.05) and held it to 3.3. The probe recorded at 3.04 ran at
-        # 3.25 and was refused by the contender, not the publish.
-        def executed_free(executed):
-            return not (1.0 <= executed < 3.3)
+    def test_an_unbounded_hold_is_reported_and_fails_the_gate(self):
+        # Space Bunny M1: no free probe after the release must never yield a null bound.
+        probes = observe([(0.0, 0.0), (0.5, 0.5), (1.5, 1.5), (2.0, 2.0)], (1.0, 9.0))
+        span = publish_span(probes, NEW)
+        self.assertFalse(span["bounded"])
+        self.assertIn("published version", span["reason"])
+        shown = span_ms(span, 0.0, False)
+        self.assertEqual(shown, {"bounded": False, "reason": span["reason"]})
+        failures = r8_failures("case", {"lock": {"publish_hold": shown}}, 2000.0)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("not bounded", failures[0])
+        # Nor without a free probe before it that read the old count.
+        probes = observe([(1.5, 1.5), (9.5, 9.5)], (1.0, 9.0))
+        self.assertFalse(publish_span(probes, NEW)["bounded"])
 
-        schedule = [
-            (0.0, 0.0),
-            (0.9, 0.9),
-            (1.0, 1.0),
-            (2.0, 2.0),
-            (3.04, 3.25),
-            (3.4, 3.4),
-        ]
-        probes = [(s, e + 1e-4, executed_free(e), None) for s, e in schedule]
-        runs = publish_hold(probes, contender=(1.5, 3.05))
-        self.assert_brackets(runs, 2.0)
+    def test_bounds_round_outward(self):
+        # Sol round 3: an exact 1,819.049 ms upper bound printed as 1,819.0 was below it.
+        span = {
+            "bounded": True,
+            "acquired": (10.00004, 10.00106),
+            "released": (11.81904, 11.819091),
+            "upper": 1.819049,
+            "lower": 1.81799,
+            "refused": 3,
+        }
+        shown = span_ms(span, 10.0, False)
+        self.assertEqual(shown["hold_ms_upper"], 1819.1)
+        self.assertEqual(shown["hold_ms_lower"], 1817.9)
+        self.assertEqual(shown["acquired_after_ms"], [0.0, 1.1])
+        self.assertEqual(shown["released_after_ms"], [1819.0, 1819.1])
+        self.assertIn("conservative", shown["bounds"])
+        self.assertIn("loose", span_ms(span, 10.0, True)["bounds"])
 
-    def test_uncommitted_reads_keep_the_lower_bound_tight_under_contention(self):
-        # As above, but each refused probe also read the version count: 4 before the publish
-        # committed, 5 after. The probe at 2.0 read 4, so the release came after its start
-        # although the contender was already waiting; the one the contender refused read 5.
-        schedule = [(0.0, 0.0), (0.9, 0.9), (1.0, 1.0), (2.0, 2.0), (3.04, 3.25), (3.4, 3.4)]
-        probes = [
-            (s, e + 1e-4, not (1.0 <= e < 3.3), None if not 1.0 <= e < 3.3 else 4 + (e >= 3.0))
-            for s, e in schedule
-        ]
-        lower, upper = longest(publish_hold(probes, (1.5, 3.05), published=5))["hold"]
-        self.assertAlmostEqual(lower, 2.0 - 1.0001)
-        self.assertAlmostEqual(upper, 3.05 - 0.9)
-        # Without the reads only the probes before the contender's wait count.
-        lower, _ = longest(publish_hold(probes, (1.5, 3.05)))["hold"]
-        self.assertEqual(lower, 0.0)
 
-    def test_a_hold_without_a_later_free_probe_has_no_upper_bound(self):
-        probes = observe((1.0, 9.0), [(0.0, 0.0), (0.5, 0.5), (1.5, 1.5), (2.0, 2.0)])
-        self.assertEqual(len(probes[0]), 4)
-        lower, upper = longest(publish_hold(probes))["hold"]
-        self.assertIsNone(upper)
-        self.assertLessEqual(lower, 8.0)
+class R8GateTests(unittest.TestCase):
+    def publish(self, upper, contender=None):
+        lock = {"publish_hold": {"bounded": True, "hold_ms_upper": upper}}
+        if contender is not None:
+            lock["contender"] = contender
+        return {"lock": lock}
+
+    def test_the_gate_fails_over_the_budget_and_on_a_failed_contender(self):
+        # Space Bunny N6: R8's criteria are checked, not read by eye.
+        self.assertEqual(r8_failures("a", self.publish(2000.0), 2000.0), [])
+        self.assertEqual(len(r8_failures("a", self.publish(2000.1), 2000.0)), 1)
+        good = {"success": True, "waited_through_publish": True}
+        self.assertEqual(r8_failures("a", self.publish(1.0, good), 2000.0), [])
+        for bad in (
+            {"success": False, "waited_through_publish": False, "error": "busy"},
+            {"success": True, "waited_through_publish": False},
+            {"started": False, "success": False, "waited_through_publish": False},
+        ):
+            self.assertEqual(len(r8_failures("a", self.publish(1.0, bad), 2000.0)), 1)
 
 
 class ProbeLifecycleTests(unittest.TestCase):
@@ -307,42 +420,51 @@ class ProbeLifecycleTests(unittest.TestCase):
         self.assertEqual(threading.active_count(), before)
 
     def test_a_real_hold_is_bracketed_and_the_contender_waits(self):
-        hold = {}
+        def run(contend_after):
+            hold = {}
 
-        def publish(_binary, database, _command):
-            db = sqlite3.connect(database, isolation_level=None)
-            hold["begin"] = time.perf_counter()
-            db.execute("BEGIN IMMEDIATE")
-            hold["acquired"] = time.perf_counter()
-            db.execute("INSERT INTO catalogue_versions VALUES(1)")
-            time.sleep(0.3)
-            hold["released"] = time.perf_counter()
-            db.execute("COMMIT")
-            hold["committed"] = time.perf_counter()
-            db.close()
-            time.sleep(0.1)
-            return {"success": True}
+            def publish(_binary, database, _command):
+                db = sqlite3.connect(database, isolation_level=None)
+                hold["begin"] = time.perf_counter()
+                db.execute("BEGIN IMMEDIATE")
+                hold["acquired"] = time.perf_counter()
+                db.execute("INSERT INTO catalogue_versions VALUES(1)")
+                time.sleep(0.3)
+                hold["released"] = time.perf_counter()
+                db.execute("COMMIT")
+                hold["committed"] = time.perf_counter()
+                db.close()
+                return {"success": True}
 
-        with tempfile.TemporaryDirectory() as directory:
-            database = Path(directory) / "db.sqlite3"
-            db = sqlite3.connect(database)
-            db.execute("CREATE TABLE profile_writes(id INTEGER PRIMARY KEY, at TEXT)")
-            db.execute("CREATE TABLE catalogue_versions(id INTEGER)")
-            db.close()
-            result = probe_publish(None, database, ["publish"], run=publish, ready_timeout=5.0)
-        lock = result["lock"]
-        lower, upper = (
-            lock["publish_hold"]["hold_ms_lower"],
-            lock["publish_hold"]["hold_ms_upper"],
+            with tempfile.TemporaryDirectory() as directory:
+                database = Path(directory) / "db.sqlite3"
+                db = sqlite3.connect(database)
+                db.execute("CREATE TABLE profile_writes(id INTEGER PRIMARY KEY, at TEXT)")
+                db.execute("CREATE TABLE catalogue_versions(id INTEGER)")
+                db.close()
+                result = probe_publish(
+                    None, database, ["publish"], contend_after, run=publish, ready_timeout=5.0
+                )
+            lock = result["lock"]
+            self.assertTrue(lock["publish_hold"]["bounded"])
+            # The true hold lies within the upper bound.
+            self.assertGreaterEqual(
+                lock["publish_hold"]["hold_ms_upper"], (hold["released"] - hold["acquired"]) * 1000
+            )
+            return lock, hold
+
+        lock, hold = run(None)
+        self.assertNotIn("contender", lock)
+        self.assertLessEqual(
+            lock["publish_hold"]["hold_ms_lower"], (hold["committed"] - hold["begin"]) * 1000
         )
-        # The true hold lies between these two spans.
-        self.assertLessEqual(lower, (hold["committed"] - hold["begin"]) * 1000)
-        self.assertGreaterEqual(upper, (hold["released"] - hold["acquired"]) * 1000)
-        # The uncommitted reads keep the lower bound informative although the contender
-        # began waiting 50 ms into the hold.
-        self.assertGreater(lower, 200.0)
+        self.assertGreater(lock["publish_hold"]["hold_ms_lower"], 200.0)
+        lock, _ = run(0.05)
+        self.assertIn("loose", lock["publish_hold"]["bounds"])
         self.assertLess(lock["contender"]["began_after_ms"], 200.0)
         self.assertTrue(lock["contender"]["success"])
+        self.assertTrue(lock["contender"]["waited_through_publish"])
+        self.assertEqual(r8_failures("real", {"lock": lock}, 2000.0), [])
 
 
 if __name__ == "__main__":

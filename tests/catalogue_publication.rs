@@ -1956,12 +1956,12 @@ async fn cli_reference_limit_rejection_is_redacted() {
     let _guard = TEST_LOCK.lock().await;
     let fixture = fixture().await;
     let mut value = fixture.catalogue();
-    // 513 entries of 16 distinct units each: 8,208 references, over the 8,192 cap (plan
-    // §13). Admission refuses the total before any source check.
+    // 385 entries of 16 distinct units each: 6,160 references, over the 6,144 cap (plan
+    // §14). Admission refuses the total before any source check.
     let units: Vec<Value> = (1..=16)
         .map(|unit| json!({"source_id": fixture.source, "page_id": fixture.page, "unit_id": unit}))
         .collect();
-    value["entries"] = (0..513)
+    value["entries"] = (0..385)
         .map(|entry| {
             json!({"key": format!("zqxkey-{entry}"), "type": "spell", "name": "Name zqxname",
                    "properties": {"zqxprop": "zqxvalue", "level": 1},

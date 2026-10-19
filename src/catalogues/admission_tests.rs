@@ -521,14 +521,14 @@ fn array_limits_accept_the_limit_and_reject_one_more() {
 }
 
 #[test]
-fn entry_count_accepts_8192_and_rejects_8193() {
+fn entry_count_accepts_6144_and_rejects_6145() {
     let entries = |count: usize| {
         (0..count)
             .map(|n| owner(&format!("e{n}"), "x"))
             .collect::<Vec<_>>()
     };
     let admitted = accepted(&with_array("/entries", entries(decode::MAX_ENTRIES)));
-    assert_eq!(admitted.counts.entries, 8_192);
+    assert_eq!(admitted.counts.entries, 6_144);
     rejected(&with_array("/entries", entries(decode::MAX_ENTRIES + 1)));
 }
 
@@ -555,11 +555,12 @@ fn owner_text_total_is_capped_at_one_mebibyte_of_utf8() {
 }
 
 #[test]
-fn distinct_units_are_capped_per_catalogue() {
-    // Every distinct unit is at least one reference, so the reference cap (8,192, plan §13)
-    // now bounds distinct units below the D5 cap of 16,384; the distinct check stays as
-    // defence in depth. All-distinct catalogues are accepted up to the reference cap, and
-    // one at the distinct cap trips the reference cap first.
+fn all_distinct_units_are_bounded_by_the_reference_cap() {
+    // Every distinct unit is at least one reference, so the reference cap (6,144, plan §14)
+    // bounds distinct units below the D5 cap of 16,384, which is unreachable (kept as defence
+    // in depth, `distinct-unit-limit` untested by construction). All-distinct catalogues are
+    // accepted up to the reference cap; past it, even at the distinct cap, the reference cap
+    // refuses first.
     let entries = |total: i64| {
         (0..(total + 15) / 16)
             .map(|entry| {
@@ -834,15 +835,15 @@ fn redaction_walks_the_envelope_structure() {
 
 #[test]
 fn total_unit_references_are_capped_per_catalogue() {
-    // 8,192 references (512 entries x 16) over 4,096 distinct units, each cited twice:
+    // 6,144 references (384 entries x 16) over 3,072 distinct units, each cited twice:
     // within the distinct cap, so only the total (counted with repetition) trips.
     let entries = |extra: usize| {
-        let mut entries: Vec<Value> = (0..512_i64)
+        let mut entries: Vec<Value> = (0..384_i64)
             .map(|entry| {
                 spell(
                     &format!("e{entry}"),
                     &(0..16_i64)
-                        .map(|k| json!({"source_id": 1, "page_id": 2, "unit_id": (entry * 16 + k) % 4_096 + 1}))
+                        .map(|k| json!({"source_id": 1, "page_id": 2, "unit_id": (entry * 16 + k) % 3_072 + 1}))
                         .collect::<Vec<_>>(),
                 )
             })
@@ -860,9 +861,9 @@ fn total_unit_references_are_capped_per_catalogue() {
     let at_cap = accepted(&entries(0));
     assert_eq!(
         (at_cap.counts.unit_references, at_cap.counts.distinct_units),
-        (admission::MAX_UNIT_REFERENCES, 4_096)
+        (admission::MAX_UNIT_REFERENCES, 3_072)
     );
-    assert_eq!(admission::MAX_UNIT_REFERENCES, 8_192);
+    assert_eq!(admission::MAX_UNIT_REFERENCES, 6_144);
     assert_eq!(rejected(&entries(1)), "unit-reference-limit");
 }
 
@@ -921,6 +922,66 @@ fn owner_text_of_only_invisible_characters_is_rejected() {
 }
 
 #[test]
+fn blank_text_property_values_are_rejected() {
+    // A text property value is displayed like a name: non-empty text made only of
+    // whitespace, blank-looking scalars or lone marks renders as nothing (plan §14). The
+    // empty string stays the explicit "no value" (the example's `old-glow` uses it).
+    let pointer = "/entries/0/properties/range";
+    for blank in [
+        "\u{2800}",
+        "   ",
+        " \u{3164}\u{ffa0} ",
+        "\u{034f}",
+        "\u{fe0f}",
+    ] {
+        let mut value = example();
+        *value.pointer_mut(pointer).unwrap() = blank.into();
+        assert_eq!(rejected(&value), "blank-text-property-value", "{blank:?}");
+    }
+    for shown in ["", "Near\u{2800}", "e\u{0301}", "\u{2764}\u{fe0f}"] {
+        let mut value = example();
+        *value.pointer_mut(pointer).unwrap() = shown.into();
+        accepted(&value);
+    }
+}
+
+#[test]
+fn text_of_only_nonspacing_marks_is_rejected() {
+    // Combining marks and variation selectors (Mn) alone render as nothing or as a dotted
+    // circle: required text needs a scalar beyond them (plan §14). With a base they stay.
+    for pointer in [
+        "/title",
+        "/entry_types/0/label",
+        "/entry_types/0/properties/0/label",
+        "/entry_types/0/properties/1/options/0/label",
+        "/entries/0/name",
+        "/entries/1/description/owner_text",
+    ] {
+        for blank in [
+            "\u{034f}",
+            "\u{fe0f}",
+            "\u{17b4}",
+            "\u{17b5}",
+            " \u{0301}\u{fe0e} ",
+        ] {
+            let mut value = example();
+            *value.pointer_mut(pointer).unwrap() = blank.into();
+            rejected(&value);
+        }
+        for shown in ["e\u{0301}", "Text\u{034f}more", "\u{2764}\u{fe0f}"] {
+            let mut value = example();
+            *value.pointer_mut(pointer).unwrap() = shown.into();
+            accepted(&value);
+        }
+    }
+    let mut value = example();
+    *value
+        .pointer_mut("/entries/1/description/owner_text")
+        .unwrap() = "\u{17b4}\u{200b}".into();
+    assert_eq!(rejected(&value), "description-needs-units-xor-owner-text");
+}
+
+#[test]
 fn admission_profile_one_is_pinned() {
     // `catalogue-admission-1` is stored with every published version and re-validates it
     // (plan §12, §13). Changing any limit, the blank-looking set or the schema below changes
@@ -954,7 +1015,7 @@ fn admission_profile_one_is_pinned() {
             8,
             32,
             64,
-            8_192,
+            6_144,
             32,
             16,
             128,
@@ -965,7 +1026,7 @@ fn admission_profile_one_is_pinned() {
             1_000,
             20_000,
             16_384,
-            8_192,
+            6_144,
             1024 * 1024,
         ]
     );
@@ -977,6 +1038,6 @@ fn admission_profile_one_is_pinned() {
         hex::encode(<sha2::Sha256 as sha2::Digest>::digest(include_bytes!(
             "../../schemas/catalogue-v1.json"
         ))),
-        "dd4fb9df27beb719b31954fbfc57b4ca0028a75a7be68ae720809763dded1c13"
+        "5c2b30ea1a7f7fe0c26bda4cbce889f6dd5c99a7e16abe0add73bd1e873d5cb7"
     );
 }

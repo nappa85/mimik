@@ -197,7 +197,7 @@ Rules:
 - **Citation:** source title, the current `printed_label` and the PDF page number, read live.
 
 **D5. Limits** (provisional; step 0 calibrates them before any schema or migration is
-frozen):
+frozen; the values in force are in §9 and §14: entries 6,144, owner text 1 MiB in total):
 
 | Resource | Limit |
 |---|---|
@@ -209,7 +209,8 @@ frozen):
 | Properties per type | 16 |
 | Options per enum | 128 |
 | Units per entry | 16 |
-| Distinct units per catalogue | 16,384 |
+| Unit references per catalogue (with repetition; added §12, set in §14) | 6,144 |
+| Distinct units per catalogue | 16,384 (unreachable below the reference cap; defence in depth) |
 | Name | 100 scalars |
 | `owner_text` | 20,000 scalars per entry, **total ≤ 2 MiB** per catalogue (so 4,096 × 20,000 can't be claimed) |
 | Linked catalogues per definition | 8 |
@@ -798,7 +799,7 @@ a `:` suffix; Save, Browse, Search and the existing ops refuse one.
 
 Calibration: [catalogue-calibration-2026-10-18.md](catalogue-calibration-2026-10-18.md).
 Every R8 criterion was met at both 4,096 and 8,192 entries with 8 linked catalogues.
-- **D5 entries become 8,192** (R11).
+- **D5 entries become 8,192** (R11); superseded by §14: **6,144**.
 - The owner-text total becomes **1 MiB** (at most 20,000 scalars per entry), so the canonical
   draft stays under 4 MiB.
 - Step 2 must re-measure the real CLI publish RSS and the separate-process contention, and
@@ -1377,3 +1378,178 @@ publication integration tests among them), 1 pre-existing ignored; `ruff check t
 untouched here.
 
 **Not yet done:** independent re-review of these fixes.
+
+## 14. Step 2 round-3 review fixes (2026-10-19)
+
+Re-review of `339b23c`: Sonnet MERGE-READY, Space Bunny (third chain) MERGE-READY, Sol FIX
+THEN MERGE. Adjudicated items (brief `cat-step2-fix3`) and what changed. Code:
+`src/catalogues/{admission,decode}.rs`, `schemas/catalogue-v1.json` (entries `maxItems`);
+tests `src/catalogues/admission_tests.rs`, `tests/catalogue_publication.rs`; profile
+`tools/catalogue_profile.py` and `tools/test_catalogue_profile.py` (prototype tier); operator
+docs [catalogue-publication.md](catalogue-publication.md). §13's measurements and caps are
+superseded by the ones below; the wording rule stays (**worst measured on this host**).
+
+**Must fix.**
+1. *Publication identity in the lock probe (Sol 1, Space Bunny M1/M2/N6).* §13 picked the
+   refusal run with the largest lower bound and capped its release at the contender's
+   acquisition. If the CLI's store-open lock launched the contender, the contender could
+   acquire *before* the publish, and a merged run was then capped far below the publish's
+   hold; an observed store-open run could also be reported when the publish itself went
+   unobserved. Replaced by `publish_span`, which identifies the publish by the version it adds
+   instead of by run shape: every probe, free or refused, reads `count(*)` of
+   `catalogue_versions`, and a free probe reads it while holding the write lock itself, so
+   - a free probe reading the old count took the lock before the publish acquired it;
+   - a free probe reading the new count took it after the publish released.
+   The hold therefore lies between the start of the **last free old-count probe** and the end
+   of the **first free new-count probe**; between them every probe is refused, so this is the
+   one run that contains the publish, chosen by construction. Its length is a **conservative
+   upper bound** whatever else ran inside (store-open lock, contender): they only widen it.
+   No contender cap is applied any more. The lower bound (refused probes inside the span) is
+   reported as indicative only. After the command the probe waits (≤ 5 s) for the closing
+   new-count probe; if either free probe is missing the hold is reported as
+   `bounded: false` with a reason, never as a null number. R8 hold evidence now comes from
+   `--no-contender` runs; runs with the contender report its result and bounds labelled
+   loose. The contender reads the version count inside its own transaction:
+   `waited_through_publish` is true when it began before the release (some probe starting
+   after its `BEGIN` still read the old count) and acquired after it (it read the new count).
+   **R8 gate:** `--max-hold-ms` (default 2,000) makes the profiler exit 1 when any publish's
+   upper bound exceeds it or is unbounded, or the contender did not start, fail, or not wait
+   through the publish (`r8_failures`, reported as `r8_gate` in the JSON).
+2. *Outward rounding (Sol 2).* `floor_ms` for lower bounds and earliest instants, `ceil_ms` for
+   upper bounds and latest instants (0.1 ms), probe window and gap maxima ceiled.
+3. *Comments and docs (Sol 3, Sonnet):* the `admission.rs` cap comment and
+   catalogue-publication.md quote the closing measurements below.
+4. *Profiler caps bound to Rust (Space Bunny M5).* `RUST_LIMITS` in the profiler names each
+   limit's Rust constant; `RustLimitTests` parses every `const MAX_*: usize` from
+   `src/catalogues/{decode,admission}.rs` and fails on any difference. The shapes and the
+   shape tests use these constants instead of literals (also N2: per-entry owner text, text
+   property, key and name caps are now asserted).
+5. *Text property values (Space Bunny M3).* A non-empty text property value must pass the
+   same `label` rule as names (`blank-text-property-value`): whitespace-only, U+2800-only and
+   similar values are refused. The empty string stays allowed as the explicit "no value"
+   (the schema example's `old-glow` entry uses it); recorded as a deliberate exception.
+6. *Lone marks (Sonnet).* `label` also excludes nonspacing marks (Mn: combining marks such as
+   U+0301 and U+034F, variation selectors U+FE0E/U+FE0F, U+17B4/U+17B5). Text of only
+   whitespace, Cf, Mn and blank-looking scalars is refused in names, labels, the title, owner
+   text and text property values; mixed with a base it stays allowed. Tightens
+   `catalogue-admission-1` in place under §13's premise (step 2 unmerged, nothing published
+   outside tests).
+7. *Naming and D5 (Space Bunny M4, M6).* `distinct_units_are_capped_per_catalogue` renamed
+   `all_distinct_units_are_bounded_by_the_reference_cap` (it checks that the reference cap
+   refuses first; `distinct-unit-limit` is unreachable). D5's table gains the
+   unit-reference row and the unreachable note, and points to §9/§14 for the values in force.
+8. *Two more shapes (Sonnet).* Both at the caps, just under 4 MiB, every reference used:
+   - **fts3** (`fts3_heavy`): 99-scalar names of 25 three-character ASCII tokens (each token
+     its own prefix-index entry), cycling all 46,656 base-36 tokens so each appears several
+     times;
+   - **keys** (`long_keys`): 64-scalar entry keys on the FTS-heavy names (keys are stored in
+     entry, unit, seal and name-index rows).
+   **Both exceeded 2 s at the §13 caps**, so the caps were lowered as the brief orders,
+   references first, then entries (conservative upper bounds, no contender, worst of the two
+   new shapes, ms; "fresh" = fan-out shapes only, a database without the calibrated
+   catalogue):
+
+   | Entries | References | Runs | fts3 v1 | fts3 v2 | keys v2 | Gate |
+   |---:|---:|---|---:|---:|---:|---|
+   | 8,192 | 8,192 | 1 full | 2,031.9 | 1,993.4 | 2,070.9 | fail |
+   | 8,192 | 6,144 | 1 fresh | 1,596.4 | 1,932.2 | 2,068.2 | fail |
+   | 8,192 | 4,096 | 1 fresh + 2 full | 1,452.4–2,024.1 | 1,791.1–1,845.8 | 1,793.1–1,933.6 | fail (1 of 3) |
+   | 6,144 | 8,192 | 2 full | 1,556.5–1,565.7 | 1,823.4–1,990.0 | 1,749.4–1,776.6 | pass, margin 0.01 s |
+   | 6,144 | 6,144 | 3 full (old binary) + 3 closing | 1,471.0–1,544.9 | 1,704.3–1,804.0 | 1,650.5–1,714.4 | pass |
+
+   The reference cap is a weak lever (Space Bunny's slope, below): at 8,192 entries even 4,096
+   references failed once. **Decision: entries 6,144 (`MAX_ENTRIES`, schema `maxItems`) and
+   unit references 6,144 (`MAX_UNIT_REFERENCES`, 1 per entry)**; 6,144 entries with 8,192
+   references came within 0.01 s of the budget. The calibrated shape now has 5,376
+   references at 6,144 entries. Pin and tests updated (pin red first, below).
+9. *Where the hold goes (Space Bunny).* From §13's cap-selection table the FTS-heavy update
+   at 8,192 entries is about **1.27 s + 35 µs per reference**, so references were never the
+   main cost. Fan-out v2 and FTS-heavy v2 differ only in names at equal bytes and
+   references, and FTS-heavy held about 0.5 s longer: roughly **0.5 s of the hold is FTS
+   re-tokenizing the previous version's names** when its rows are deleted. That is the next
+   lever: a contentless or `detail=column` name index, or no prefix index, as a measured
+   experiment before any cap is raised again. Alternatives for the user: §13's "6,144
+   entries with 16,384 references" is **no longer supported** (8,192 references at 6,144
+   entries already reached 1.99 s with fts3); the measured options are 6,144/6,144 (chosen)
+   or the index experiment to win back 8,192 entries.
+10. *Inert `# noqa: BLE001` removed (Space Bunny N8):* ruff selects `E4, E7, E9, F, I, B`, not
+    `BLE`.
+
+**Red → green.**
+
+| Test | Red | Green |
+|---|---|---|
+| `tools/test_catalogue_profile.py::PublishSpanTests::test_startup_contender_then_publish_with_missed_free_gaps` | §13 method (`339b23c` `publish_hold`, max-lower run): hold (1.95, **0.096**) s for a 2.0 s hold | pass |
+| `…::test_observed_startup_with_unobserved_publication` | §13 method: hold (0.0, **0.100**) s, the store-open run reported, for a 2.0 s hold | pass |
+| `…::test_an_unbounded_hold_is_reported_and_fails_the_gate` | §13 `run_ms`: `hold_ms_upper: null` with no failure | pass |
+| `…::test_bounds_round_outward` | §13 `run_ms`: upper 1,819.0 for 1,819.049 ms, lower 1,818.0 for 1,817.99 | pass |
+| `…::test_random_schedules_always_bound_the_hold_from_above` (500 trials with store-open lock and contender before or after the publish), `…::test_delayed_probes_still_bracket_the_hold` | ported to `publish_span` | pass |
+| `…::R8GateTests::test_the_gate_fails_over_the_budget_and_on_a_failed_contender` | new gate (`r8_failures` absent at `339b23c`: the module failed to import) | pass |
+| `…::ProbeLifecycleTests::test_a_real_hold_is_bracketed_and_the_contender_waits` | now runs without and with the contender; checks `waited_through_publish` | pass |
+| `…::RustLimitTests::test_profiler_limits_match_the_rust_constants` | absent `RUST_LIMITS` at `339b23c` (import error); mutations: Python reference cap 16,384 → `16384 != 8192`, Rust reference cap 12,288 → `8192 != 12288`; then Python caps at 6,144 before the Rust change → `6144 != 8192 : MAX_ENTRIES` | pass |
+| `…::WorstShapeTests` (fts3 and keys shapes within every limit) | new helper code | pass |
+| `src/catalogues/admission_tests.rs::blank_text_property_values_are_rejected` | accepted an invalid catalogue (U+2800-only value) | pass |
+| `…::text_of_only_nonspacing_marks_is_rejected` | accepted an invalid catalogue (lone U+034F) | pass |
+| `…::admission_profile_one_is_pinned` | written first with 6,144/6,144: left `[…, 8192, …, 8192, …]` | pass (schema hash updated) |
+| `…::entry_count_accepts_6144_and_rejects_6145`, `…::total_unit_references_are_capped_per_catalogue` (384 x 16 over 3,072 units), `tests/catalogue_publication.rs::cli_reference_limit_rejection_is_redacted` (385 x 16) | adapted to the new caps | pass |
+
+**Closing measurements** (`tools/catalogue_profile.py`, release build of this tree, container
+`mimik-ci:latest`, `--cpus 6`, Ryzen 5 1600 shared host, Monday 03:19–03:26; 6,144 entries,
+three runs without the contender and two with it, one without at 4,096; database on the
+container's overlay filesystem). Each command in a fresh wrapper process (peak RSS by
+`RUSAGE_CHILDREN`). "Upper, no contender" is the conservative R8 figure (largest over three
+runs, ceiled); "loose, contender" is the largest span with the contender inside. All five
+runs passed the R8 gate.
+
+| Case (N = 6,144) | Draft bytes | Refs | Publish wall ms | Upper, no contender | Loose, contender | Contender wait ms, result | Publish RSS KiB |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| v1 (6,142, new) | 2,186,462 | 5,374 | 658–669 | 497.9 | 483.1 | 530, waited ok | 81,432–83,528 |
+| v2 (6,143, update) | 2,186,651 | 5,375 | 737–775 | 585.0 | 577.6 | 530, waited ok | 81,896–83,704 |
+| v3 (6,144, update) | 2,186,843 | 5,376 | 905–932 | 764.3 | 752.6 | 730, waited ok | 81,680–82,384 |
+| fan-out v1 (new) | 4,157,306 | 6,144 | 1,179–1,262 | 957.6 | 892.5 | 931, waited ok | 121,980–122,924 |
+| fan-out v2 (update) | 4,157,307 | 6,144 | 1,266–1,308 | 1,003.8 | 992.1 | 931–1,030, waited ok | 122,500–122,624 |
+| FTS-heavy v1 (new) | 4,158,988 | 6,144 | 1,428–1,449 | 1,137.1 | 1,129.5 | 1,131, waited ok | 125,144–125,328 |
+| FTS-heavy v2 (update) | 4,158,989 | 6,144 | 1,690–1,795 | 1,480.9 | 1,407.0 | 1,431, waited ok | 125,172–125,468 |
+| declarations v1 (new) | 4,177,285 | 6,144 | 1,582–1,623 | 1,050.9 | 1,049.4 | 1,030–1,031, waited ok | 176,092–176,692 |
+| declarations v2 (update) | 4,177,285 | 6,144 | 1,618–1,668 | 1,111.3 | 1,095.9 | 1,130–1,131, waited ok | 176,612–177,080 |
+| fts3 v1 (new) | 4,158,989 | 6,144 | 1,780–1,846 | 1,538.2 | 1,520.8 | 1,531–1,532, waited ok | 124,916–125,404 |
+| **fts3 v2 (update)** | 4,158,990 | 6,144 | 2,024–2,125 | **1,804.0** | 1,775.2 | 1,732, waited ok | 124,736–125,308 |
+| keys v1 (new) | 4,165,131 | 6,144 | 1,591–1,667 | 1,378.8 | 1,315.9 | 1,331–1,332, waited ok | 125,168–125,292 |
+| keys v2 (update) | 4,165,132 | 6,144 | 1,956–2,010 | 1,714.4 | 1,715.6 | 1,632–1,732, waited ok | 124,884–125,236 |
+
+Indicative lower bounds (no contender) were within 1.6 ms of the upper bounds in every case.
+Other commands (five runs): import 195–644 ms, peak RSS ≤ 150,120 KiB; compare 191–629 ms,
+≤ 116,672 KiB; `show-catalogue-version` 232–247 ms (calibrated) to 570–612 ms
+(declarations), ≤ 120,608 KiB; `verify-catalogues` over 13 versions (6 catalogues)
+8,367–8,443 ms, ≤ 120,796 KiB, status ok; `rebuild-catalogue-index` 935–1,043 ms; baseline
+`list-rulesets` 41–47 ms, ≤ 17,508 KiB. Largest probe window 8.6 ms, largest gap between
+probes 2.8 ms. At 4,096 entries (one run, no contender): calibrated ≤ 400.7 ms; worst fts3 v2
+1,280.0 ms; publish RSS ≤ 165,988 KiB.
+
+**R8 at 6,144 entries, with the caps above:** worst measured hold on this host at most
+1,804.0 ms (conservative upper bound, fts3 update), ≤ 2 s with a margin of about 0.2 s; the
+concurrent server-pattern writer waited through the publish and succeeded in every case;
+peak CLI RSS about 173 MiB ≤ 256 MiB. The margin is about the run-to-run spread seen in
+this round (fts3 v2 1.70–1.80 s at the same caps): a slower disk or busier host could
+exceed 2 s (not the 5 s busy timeout). Next lever: the name index (item 9).
+
+**Limitations:** one host; three runs without the contender and two with it at 6,144, one
+at 4,096; the cap-selection rows are one to three runs each and the first rows ran on the
+binary before the cap change (identical publication code); overlay filesystem; units all
+unreviewed; the contender is the lock-level equivalent of a sheet save, not the HTTP route;
+five shapes were profiled — other admitted distributions were not (for example
+Space Bunny's N1, 52 owner texts at 20,000 scalars beside 6,092 unit-backed entries, and
+multilingual token alphabets), so these are the worst measured cases, not a proven worst
+case.
+
+**Author gate** (container, `--cpus 6`, Monday 03:28–03:40, final tree): `cargo fmt --check`
+clean (after `cargo fmt` of the new tests) and pedantic Clippy (`--all-targets
+--all-features -D warnings`) clean; `cargo test --locked --all-targets --all-features` all
+passed: 539 summed over 37 test binaries (343 library, 29 publication integration tests
+among them), 1 pre-existing ignored; `ruff check tools` and `ruff format --check tools`
+clean; tools unittest (discover in `tools/`) 745 run, 11 skipped, **1 error:
+`test_run_queue.ProcessLauncherTests.test_fake_runner_script`**, the known pre-existing
+error, untouched here — so the helper suite is not fully green.
+
+**Not yet done:** independent re-review of these fixes; the step-2 review record in
+`docs/reviews/`.

@@ -91,9 +91,13 @@ an original synthetic example.
   cite the same unit twice. Every cited source must be listed in `sources`.
 - Labels, names, the title and owner text may not be blank: at least one scalar must be
   neither whitespace, blank-looking (the Braille pattern blank U+2800 and the Hangul fillers
-  U+115F, U+1160, U+3164, U+FFA0, which render as nothing) nor an invisible format character
-  (Unicode category Cf). Mixed with visible text they stay allowed (Braille text needs U+2800;
-  owner text keeps Cf for bidi prose). Text is not normalised.
+  U+115F, U+1160, U+3164, U+FFA0, which render as nothing), an invisible format character
+  (Unicode category Cf) nor a nonspacing mark (Mn: combining marks such as U+0301 and U+034F,
+  variation selectors such as U+FE0F, and U+17B4/U+17B5, which alone render as nothing or as
+  a dotted circle). Mixed with visible text they stay allowed (Braille text needs U+2800;
+  owner text keeps Cf for bidi prose; marks combine with a base). Text is not normalised.
+- A text property value may be empty (the explicit "no value"); a non-empty one follows the
+  same rule (`blank-text-property-value`), so `"   "` or a lone U+2800 is refused.
 - Names, labels, the title and text property values may not contain control characters
   (`char::is_control`, C0 and C1), invisible format characters (Unicode category Cf: bidi
   overrides and isolates, zero-width characters, the byte-order mark, soft hyphen, tags) or
@@ -132,20 +136,22 @@ an original synthetic example.
 | Entry types | 1–32 |
 | Properties per type | 16 |
 | Options per enum | 128 |
-| Entries | 8,192 |
+| Entries | 6,144 |
 | Units per entry | 1–16 |
-| Unit references per catalogue (with repetition) | 8,192 (`unit-reference-limit`) |
-| Distinct units per catalogue | 16,384 (unreachable while references are capped at 8,192) |
+| Unit references per catalogue (with repetition) | 6,144 (`unit-reference-limit`) |
+| Distinct units per catalogue | 16,384 (unreachable while references are capped at 6,144) |
 | Names, labels, title | 100 scalars |
 | Text property value | 1,000 scalars |
 | `owner_text` | 20,000 scalars per entry, 1 MiB (UTF-8 bytes) in total |
 
-The reference cap bounds publication's write-lock hold together with the entry and byte caps
-(the seal compares every reference row; the bytes they free go to names and text). The worst
-measured case on the profiling host, 8,192 entries with 100-scalar names of distinct tokens
-updating the previous version at 4 MiB, held the lock for up to 1.84 s at this cap; at 12,288
-references it held 1.92 s and at 16,384 2.14 s, over the plan's 2 s budget (plan §13). This
-is host-specific evidence, not a bound proven for every admitted shape.
+The entry and reference caps bound publication's write-lock hold together with the byte cap
+(the seal compares every reference row; the name index re-tokenizes every name). The worst
+measured case on the profiling host, 6,144 entries with 99-scalar names of 3-character
+tokens updating the previous version at 4 MiB with every reference used, held the lock for
+at most 1.81 s (conservative upper bound, plan §14). At 8,192 entries that shape and one
+with 64-scalar keys exceeded the plan's 2 s budget even with the references lowered to
+4,096, and 6,144 entries with 8,192 references reached 1.99 s. This is host-specific
+evidence, not a bound proven for every admitted shape.
 
 The catalogue profile is separate from the definition decoder: `definitions::decode::MAX_NODES`
 (32,768), its 256 KiB input cap and the list form budget are unchanged, and a regression test
@@ -245,7 +251,7 @@ A concurrent publication of the same catalogue from another process waits for th
 Append-only (plan D3): a version may add entries and entry types, change names, properties,
 descriptions and owner text, and retire or un-retire entries. It may not drop an entry key or
 an entry type (even one with no entries), or change an entry's type. Retirement does not free
-capacity: a catalogue at 8,192 keys cannot take another entry.
+capacity: a catalogue at 6,144 keys cannot take another entry.
 
 Output (publish and show): `version_id`, `game_id`, `edition_id`, `catalogue_id`, `version`,
 `latest_version`, `content_hash`, `draft_id`, `draft_revision`, `created_at`,
@@ -317,7 +323,7 @@ errors and fail the command; any other SQLite failure is reported as a damaged i
 prints counts and a list of problems (`catalogue` and `version` numbers with a static code;
 `catalogue: 0` means the whole index or the whole schema) and exits non-zero when any problem
 exists. Cost grows with stored history (all versions, and the foreign-key scan of every
-catalogue table); at 5 versions of up to 8,192 entries it took about 2.5 s.
+catalogue table); at 13 versions (6 catalogues) of up to 6,144 entries it took about 8.4 s.
 
 **Operator note.** The application only ever writes a version and its seal in one
 transaction. A version inserted by hand without a seal (outside the application) blocks that
@@ -339,17 +345,20 @@ checks stdout and stderr of every command on success and on failure (stale ticke
 malformed ticket, actor or rationale, unknown draft or version, malformed ids, tampered
 versions and index).
 
-### Measured cost (release, real CLI, 8,192 entries)
+### Measured cost (release, real CLI, 6,144 entries)
 
-Plan §13 (supersedes §12 and §11's contention estimate). The write lock is bounded from below
-and above by a non-blocking probe started before the publish process, from each probe's start
-and completion time. On the profiling host publication holds it for about 0.73–1.01 s on the
-calibrated shape (2.6 MB, 7,168 references) and at most 1.84 s in the worst measured case
-(4 MiB, 8,192 references, 100-scalar names of distinct tokens, update); the
+Plan §14 (supersedes §11-§13). The write lock is bounded by a non-blocking probe started
+before the publish process: the hold lies between the last free probe that still read the
+old version count and the first that read the new one, a conservative upper bound whatever
+else ran in between. On the profiling host publication holds it for at most about 0.76 s on
+the calibrated shape (2.2 MB, 5,376 references) and at most 1.81 s in the worst measured case
+(4 MiB, 6,144 references, 99-scalar names of 3-character tokens, update); the
 declaration-heavy shape (32 types x 16 enum properties x 128 options) held it for at most
-1.38 s. Peak RSS at most about 182 MiB (publish of the declaration-heavy shape). These are the
-worst measured cases, not a proof that no admitted shape costs more. A concurrent writer
+1.12 s. Peak RSS at most about 173 MiB (publish of the declaration-heavy shape). These are the
+worst measured cases, not a proof that no admitted shape costs more. The profiler fails
+(`--max-hold-ms`, 2,000 by default) when a hold's upper bound exceeds the budget, cannot be
+bounded, or the contender does not wait through the publish and succeed. A concurrent writer
 using the server's pattern (`BEGIN IMMEDIATE`, 5 s busy timeout, one insert, commit: the
-lock-level equivalent of a sheet save) waits and succeeds in every case. The 5 s busy timeout (`src/store.rs`) is the real failure point: a
-publish holding the lock longer than that would make concurrent sheet saves fail with a
-storage error. Commit cost includes `fsync`, so it depends on the disk.
+lock-level equivalent of a sheet save) waits through the publish and succeeds in every case.
+The 5 s busy timeout (`src/store.rs`) is the real failure point: a publish holding the lock
+longer than that would make concurrent sheet saves fail with a storage error. Commit cost includes `fsync`, so it depends on the disk.
