@@ -7,7 +7,9 @@ use sha2::{Digest, Sha256};
 const FIXTURE: &str = include_str!("../../../schemas/formula-conformance-v1.json");
 /// Hash lock of the golden fixture. Changing it requires a reviewed profile decision: an
 /// outcome change under a `cel`/`antlr4rust` bump means `formula_profile` 2, not an edit here.
-const FIXTURE_SHA256: &str = "193d8b79c57858500ad6e8cac0358557f4cb80ddc8f4993539b0aa3d033afbaf";
+/// Until the first release profile 1 itself may still change (user decision D-Y; content
+/// revision 2, assisted sheet slice 1.4).
+const FIXTURE_SHA256: &str = "5af7ce8f1610ca4a41a2a8ecd6b0f387b60c0989a7ef8287f116d5c925cb6b40";
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -1235,7 +1237,7 @@ fn a_null_result_is_null_value_not_type_mismatch() {
         ),
         Err(Code::NullValue)
     );
-    // A nullable field keeps CEL's own null semantics; a copy of its null is unknown too.
+    // A nullable integer while null is unknown too (D-Z).
     assert_eq!(eval_one("luck", &basic_values()), Err(Code::NullValue));
     assert_eq!(
         super::convert::result(Some(&ValueType::Int), &Value::Null),
@@ -1249,8 +1251,8 @@ fn a_null_result_is_null_value_not_type_mismatch() {
 
 /// Slice 1.4 (Sonnet m9): in CEL `null == 0` is `false` without an error, so `==`, `!=`,
 /// a ternary or a short-circuit over an unknown could pass or fail a check instead of
-/// showing "not evaluated". A formula that reads an unknown non-nullable integer field or
-/// integer item property is therefore not run: it reports `null_value`, wherever the read
+/// showing "not evaluated". A formula that reads an unknown integer field (nullable or not,
+/// D-Z) or integer item property is therefore not run: it reports `null_value`, wherever the read
 /// sits. `has()` tests presence, not the value, so an unknown property is present.
 #[test]
 fn cel_forms_over_an_unknown_are_not_evaluated() {
@@ -1293,9 +1295,22 @@ fn cel_forms_over_an_unknown_are_not_evaluated() {
         ),
         vec![Outcome::Violated, Outcome::Pass, Outcome::Violated]
     );
-    // A nullable field keeps CEL semantics: authors test it with `== null`.
+    // D-Z: a nullable integer gets the same guard (`luck` is null in the basic values), so
+    // `== null` is no fallback for an unknown integer either.
+    let forms = ["luck != 0", "luck in [1, 2]", "luck == null"];
     assert_eq!(
-        constraint_outcomes(&["luck == null", "luck != 0"], &basic_values()),
-        vec![Outcome::Pass, Outcome::Pass]
+        constraint_outcomes(&forms, &basic_values()),
+        vec![not_evaluated; 3]
     );
+    assert_eq!(
+        eval_one("luck == 0 ? 10 : 20", &basic_values()),
+        Err(Code::NullValue)
+    );
+    let mut known = basic_values();
+    known["luck"] = json!(1);
+    assert_eq!(
+        constraint_outcomes(&forms, &known),
+        vec![Outcome::Pass, Outcome::Pass, Outcome::Violated]
+    );
+    assert_eq!(eval_one("luck == 0 ? 10 : 20", &known), Ok(Scalar::Int(20)));
 }

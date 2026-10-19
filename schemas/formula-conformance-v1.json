@@ -1,7 +1,7 @@
 {
  "version": 1,
  "profile": "cel-mimik-1",
- "note": "Golden, hash-locked conformance fixture for CEL profile mimik-1. Changing any outcome needs a reviewed profile decision; see docs/derived-formulas-plan.md.",
+ "note": "Golden, hash-locked conformance fixture for CEL profile mimik-1. Changing any outcome needs a reviewed profile decision; see docs/derived-formulas-plan.md. Content revision 2 (assisted sheet slice 1.4, user decision D-Y: profile cel-mimik-1 may change until the first release): unknown integers.",
  "declarations": {
   "basic": {
    "fields": [
@@ -927,7 +927,7 @@
    "type": "bool",
    "expr": "luck == null",
    "expect": {
-    "value": true
+    "error": "null_value"
    }
   },
   {
@@ -1708,7 +1708,37 @@
    "type": "bool",
    "expr": "luck != 0",
    "expect": {
+    "error": "null_value"
+   }
+  },
+  {
+   "id": "null-nullable-ternary",
+   "declarations": "basic",
+   "type": "int",
+   "expr": "luck == 0 ? 10 : 20",
+   "expect": {
+    "error": "null_value"
+   }
+  },
+  {
+   "id": "null-nullable-in",
+   "declarations": "basic",
+   "type": "bool",
+   "expr": "luck in [1, 2]",
+   "expect": {
+    "error": "null_value"
+   }
+  },
+  {
+   "id": "known-nullable-in",
+   "declarations": "basic",
+   "type": "bool",
+   "expr": "luck in [1, 2]",
+   "expect": {
     "value": true
+   },
+   "values": {
+    "luck": 1
    }
   },
   {

@@ -2997,6 +2997,7 @@ async fn worst_label_pages_with_every_unknown_are_within_the_unit_bound() {
     let erased = ("erased", "", Some(i64::MIN));
     let (html, units) = wide_list_page(None, erased, true).await;
     assert_eq!(html.matches("placeholder=\"?\"").count(), 31 * 256);
+    assert_eq!(html.matches("unknown-hint").count(), 31 * 256 + 1);
     assert_eq!(html.matches("form=\"assist-undo\"").count(), 32 * 256);
     within_unit_bound(&html, units, "every value erased, with Undo");
     let (html, units) = wide_list_page(None, erased, false).await;
@@ -3008,6 +3009,7 @@ async fn worst_label_pages_with_every_unknown_are_within_the_unit_bound() {
     within_unit_bound(&html, units, "every unknown with a long scribble");
     let (html, units) = wide_scalar_page(None, erased).await;
     assert_eq!(html.matches("placeholder=\"?\"").count(), 256);
+    assert_eq!(html.matches("unknown-hint").count(), 256 + 1);
     assert_eq!(html.matches("form=\"assist-undo\"").count(), 256);
     within_unit_bound(&html, units, "256 wide scalars erased, with Undo");
     let (html, units) = wide_scalar_page(None, ("unresolved", &raw, None)).await;

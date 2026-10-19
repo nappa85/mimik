@@ -816,6 +816,8 @@ def run_assist_browser(page, campaign, version):
     require(
         current_hp().input_value() == ""
         and current_hp().get_attribute("placeholder") == "?"
+        and current_hp().get_attribute("aria-describedby") == "unknown-hint"
+        and page.locator("#unknown-hint").text_content() == "Unknown value"
         and page.locator("#was-0").inner_text() == "Last change: was -15"
         and "1 not evaluated" in checks
         and "a value it uses is unknown (null)" in checks,

@@ -221,36 +221,43 @@ Arity and argument types are also checked statically.
 Item maps contain the host-managed `id` key plus the declared properties.
 Absent optional properties are absent keys; an integer property may hold `null`.
 
-**Profile note: unknown integers (assisted sheet slice 1.4).** The admitted subset
-is unchanged (`cel-mimik-1`; `vitality == null` is still rejected for a field that is
-not nullable), and so is every outcome over values a sheet could store before 1.4.
-What changed is the input contract and the outcome over `null`:
+Conversion happens **once per sheet evaluation**: one child scope holds all
+variables, and every derived field and constraint borrows it. Strings are shared
+`Arc`s rather than copied per formula. Derived results are added to the same scope
+in topological order.
 
-- `null` on a non-nullable integer field or an integer item property converts to
-  CEL `Null` instead of refusing the whole evaluation (`invalid_input`). Text, enum
-  and boolean values still refuse it.
+**Profile note: unknown integers (assisted sheet slice 1.4; user decisions D-Y and
+D-Z, 2026-10-19).** Profile `cel-mimik-1` may still change until the first release
+(D-Y); there is no profile bump and no legacy behaviour is kept. The admitted subset
+is unchanged (`vitality == null` is still rejected for a field that is not
+nullable). What changed is the input contract and the outcomes over `null`:
+
+- `null` on any integer field or integer item property converts to CEL `Null`
+  instead of refusing the whole evaluation (`invalid_input`). Text, enum and boolean
+  values still refuse it unless the field is nullable.
 - CEL evaluates `null == 0` to `false` and `null != 0` to `true` without an error,
-  so a check written with `==`, `!=`, a ternary or a short-circuit could pass or
-  fail on an unknown. A formula that **reads** an unknown non-nullable integer field,
-  or the value of an integer item property that is unknown in any item, therefore
-  does not run: it reports `null_value` ("a value it uses is unknown (null)"), and
-  its dependents `dependency_failed`. The read set is static (identifiers and item
-  property selections in the expression), so the rule holds on a branch that would
-  not be taken (`true || vitality == 0` is `null_value`). `has(item.p)` tests
-  presence, not the value: an unknown property is present.
-- A formula whose result is `null` (a copy of a nullable field while it is null)
-  reports `null_value`, not `type_mismatch`.
-- Nullable fields keep CEL's own null semantics (`luck == null` is true,
-  `luck != 0` is true while null): their authors chose an explicit unknown state
-  and test it with `== null`.
+  so a check written with `==`, `!=`, `in`, a ternary or a short-circuit could pass
+  or fail on an unknown. A formula that **reads** an unknown integer field
+  (nullable or not, D-Z), or the value of an integer item property that is unknown
+  in any item, therefore does not run: it reports `null_value` ("a value it uses is
+  unknown (null)"), and its dependents `dependency_failed`. The read set is static
+  (identifiers and item property selections in the expression), so the rule holds on
+  a branch that would not be taken (`true || vitality == 0` is `null_value`).
+  `has(item.p)` tests presence, not the value: an unknown property is present, so
+  `has()` is no proof that a value is known.
+- Outcomes that changed for values a sheet could already store before 1.4 (a null
+  nullable integer): `luck == null` and `luck != 0` were `true`, `luck == 0 ? 10 :
+  20` was `20`, and `luck in [1, 2]` was `false`; all are now `null_value`. A
+  formula whose result is `null` (a copy of a null nullable field, or a constraint
+  returning `Null`) was `type_mismatch` and is now `null_value`. Nullable text,
+  enum and boolean fields keep CEL's null semantics.
+- **Limitation:** a definition cannot give an unknown integer a fallback; `== null`
+  no longer works as one on integers. Later: let definitions choose a fallback for
+  unknown.
 
 The conformance fixture pins these outcomes (`unknown-*`, `field-null-*`,
-`item-null-*`, `null-copy-nullable`, `null-nullable-not-equals`, sheet
-`unknown-dependents`); its hash lock changed with them. Conversion happens
-**once per sheet evaluation**: one child scope holds all variables, and every
-derived field and constraint borrows it. Strings are shared `Arc`s rather than
-copied per formula. Derived results are added to the same scope in topological
-order.
+`item-null-*`, `null-*`, `known-nullable-in`, sheet `unknown-dependents`). Its
+note records content revision 2, and its hash lock changed with it.
 
 ## 5. Error-code vocabulary (mapped from CEL)
 
@@ -292,9 +299,12 @@ additively.
 constraints must carry a root `"formula_profile": 1`.
 
 - The marker is part of the hashed canonical bytes. It names the CEL profile
-  mimik-1 of section 3, including the custom catalogue and limits. Any later
-  change to admitted semantics needs `formula_profile: 2`; a pinned definition
-  is never reinterpreted.
+  mimik-1 of section 3, including the custom catalogue and limits. From the first
+  release on, any change to admitted semantics or outcomes needs
+  `formula_profile: 2`, and a pinned definition is never reinterpreted. Until
+  that release profile 1 may still change (user decision D-Y, 2026-10-19; first
+  used by assisted sheet slice 1.4 for unknown integers), with no bump and no
+  legacy behaviour kept.
 - Definitions without formulas omit all new members, so existing canonical bytes
   and hashes are byte-identical. The frozen vector `89861020…ad20` must stay
   green.

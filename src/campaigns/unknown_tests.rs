@@ -584,3 +584,108 @@ async fn unknowns_survive_freeze_and_history_uses_historical_values() {
     assert_eq!(load(&frozen), LOAD_UNKNOWN);
     assert!(!frozen.contains("form=\"assist-undo\""), "frozen: no Undo");
 }
+
+/// Review round 1 (Sol Minor 3): an unknown cell with a scribble, then a blank save, writes
+/// one data-unchanged revision whose `literal` note resolves the scribble, which disappears;
+/// a further blank save writes nothing.
+#[tokio::test]
+async fn a_blank_save_resolves_the_scribble_of_an_unknown_cell() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    created(&setup, &[]).await;
+    edit(&setup, 1, &[], &[row("r1-1", "1"), row("", "lots")]).await;
+    let (_, before) = saved(&setup, 1).await;
+    edit(&setup, 2, &[], &[row("r1-1", "1"), row("r2-1", "")]).await;
+    assert_eq!(saved(&setup, 1).await, (3, before), "data unchanged");
+    assert_eq!(
+        notes_at(&setup, 1, 3).await,
+        vec![note(
+            3,
+            "cell:equipment/r2-1/quantity",
+            "literal",
+            "",
+            Some(UNKNOWN),
+            UNKNOWN
+        )]
+    );
+    let html = page(&setup).await;
+    assert_eq!(value(&html, "row-4-1-1").as_deref(), Some(""));
+    assert_eq!(inner(&html, "#note-4-1-1"), None, "the scribble is gone");
+    assert_eq!(placeholder(&html, "row-4-1-1").as_deref(), Some("?"));
+    let (status, html) = setup
+        .post(
+            "/private-sheets/1",
+            form(3, &[], &[row("r1-1", "1"), row("r2-1", "")]),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(html.contains("No change"));
+    assert_eq!(history_len(&setup, 1).await, 3);
+}
+
+/// Review round 1 (Sol): a scribble on an unknown cell is escaped inside `<bdi>`, on the
+/// sheet and in history.
+#[tokio::test]
+async fn a_scribble_on_an_unknown_cell_renders_escaped_inside_bdi() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    created(&setup, &[]).await;
+    let scribble = "\u{5e9}\u{5dc}\u{5d5}\u{5e9} <b>x</b>";
+    edit(&setup, 1, &[], &[row("r1-1", "1"), row("", scribble)]).await;
+    let escaped = "\u{5e9}\u{5dc}\u{5d5}\u{5e9} &lt;b&gt;x&lt;/b&gt;";
+    let html = page(&setup).await;
+    assert_eq!(
+        inner(&html, "#note-4-1-1").as_deref(),
+        Some(unknown_scribble(escaped).as_str())
+    );
+    assert!(!html.contains("<b>x</b>"), "never raw markup");
+    let (_, history) = setup.get("/private-sheets/1/history/2").await;
+    let history = inner(&history, "#change-summary").unwrap();
+    assert!(
+        history.contains(&format!("‘<bdi>{escaped}</bdi>’ · new → unknown")),
+        "{history}"
+    );
+}
+
+/// The ids the control named `name` is described by.
+fn described(html: &str, name: &str) -> Vec<String> {
+    let page = scraper::Html::parse_document(html);
+    page.select(&scraper::Selector::parse(&format!("[name=\"{name}\"]")).unwrap())
+        .next()
+        .and_then(|element| element.value().attr("aria-describedby"))
+        .map(|ids| ids.split(' ').map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// Review round 1 (Sonnet Minor 5): an empty (unknown) integer control is described as
+/// "Unknown value" for assistive technology, not only by its `placeholder="?"`; a known
+/// control is not, and a described control keeps its other descriptions.
+#[tokio::test]
+async fn an_empty_integer_control_is_described_as_unknown() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    created(&setup, &[]).await;
+    edit(
+        &setup,
+        1,
+        &[("value-hp", "")],
+        &[row("r1-1", "1"), row("", "")],
+    )
+    .await;
+    let html = page(&setup).await;
+    assert_eq!(
+        text(&html, "#unknown-hint").as_deref(),
+        Some("Unknown value")
+    );
+    assert_eq!(described(&html, "value-hp"), vec!["unknown-hint"]);
+    assert_eq!(described(&html, "row-4-1-1"), vec!["unknown-hint"]);
+    assert!(described(&html, "value-max_hp").is_empty(), "known");
+    assert!(described(&html, "row-4-0-1").is_empty(), "known row cell");
+    // A scribbled unknown echoes its scribble: described by its note, not the hint.
+    edit(&setup, 2, &[], &[row("r1-1", "1"), row("r2-1", "lots")]).await;
+    let html = page(&setup).await;
+    assert_eq!(described(&html, "row-4-1-1"), vec!["note-4-1-1"]);
+}

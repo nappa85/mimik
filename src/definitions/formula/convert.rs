@@ -166,9 +166,10 @@ pub(super) fn inputs(lookup: &Lookup, values: &Json) -> Result<Vec<(String, Valu
 }
 
 /// What a formula may not read (assisted sheet slice 1.4): integer fields that are unknown
-/// (`null`) without being declared nullable, and `(list, property)` pairs with an unknown
-/// item value. A formula reading either reports `null_value` without running, because CEL
-/// would evaluate `null == 0` to `false` (and `!=` to `true`) instead of failing.
+/// (`null`), nullable or not (user decision D-Z), and `(list, property)` pairs with an
+/// unknown item value. A formula reading either reports `null_value` without running,
+/// because CEL would evaluate `null == 0` to `false` (and `!=` to `true`) instead of failing.
+/// Nullable text, enum and boolean fields keep CEL's null semantics.
 #[derive(Default)]
 pub(super) struct Unknowns {
     pub fields: BTreeSet<String>,
@@ -178,8 +179,8 @@ pub(super) struct Unknowns {
 /// The unknowns of input values that [`inputs`] accepted.
 pub(super) fn unknowns(lookup: &Lookup, values: &Json) -> Unknowns {
     let mut unknowns = Unknowns::default();
-    for (id, (_, nullable)) in lookup.scalars() {
-        if !nullable && values.get(id).is_some_and(Json::is_null) {
+    for (id, (ty, _)) in lookup.scalars() {
+        if *ty == ValueType::Int && values.get(id).is_some_and(Json::is_null) {
             unknowns.fields.insert(id.clone());
         }
     }

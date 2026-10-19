@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "schemas" / "formula-conformance-v1.json"
 # Must equal FIXTURE_SHA256 in src/definitions/formula/tests.rs (hash-locked golden fixture).
-FIXTURE_SHA256 = "193d8b79c57858500ad6e8cac0358557f4cb80ddc8f4993539b0aa3d033afbaf"
+FIXTURE_SHA256 = "5af7ce8f1610ca4a41a2a8ecd6b0f387b60c0989a7ef8287f116d5c925cb6b40"
 
 
 def binary() -> Path:

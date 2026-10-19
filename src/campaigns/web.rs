@@ -486,6 +486,8 @@ struct CellView {
     key: String,
     value: String,
     state: String,
+    /// An integer cell: empty, it is unknown (slice 1.4).
+    integer: bool,
     /// The cell's current change note, when it has something to show (slice 1.2).
     note: Option<NoteLine>,
     /// The switch offer and Undo from that note (slice 1.3).
@@ -573,9 +575,19 @@ impl Actions {
     }
 }
 
-/// The ids an input is described by: its note line and its switch offer.
-fn described_by(key: &str, note: Option<&NoteLine>, actions: Option<&Actions>) -> String {
+/// The ids an input is described by: its note line and its switch offer, or, for an empty
+/// integer control (an unknown value, slice 1.4), the page's one "Unknown value" hint, so the
+/// `placeholder="?"` is not its only cue.
+fn described_by(
+    key: &str,
+    note: Option<&NoteLine>,
+    actions: Option<&Actions>,
+    unknown: bool,
+) -> String {
     let mut ids = Vec::new();
+    if unknown {
+        ids.push("unknown-hint".to_owned());
+    }
     if note.is_some() {
         ids.push(format!("note-{key}"));
     }
@@ -688,7 +700,12 @@ impl NoteRow {
 
 impl CellView {
     fn described_by(&self) -> String {
-        described_by(&self.key, self.note.as_ref(), self.actions.as_ref())
+        described_by(
+            &self.key,
+            self.note.as_ref(),
+            self.actions.as_ref(),
+            self.integer && self.value.is_empty(),
+        )
     }
     fn valid_boolean(&self) -> bool {
         matches!(self.value.as_str(), "" | "true" | "false")
@@ -806,6 +823,9 @@ impl ListView {
                             key: format!("{f}-{r}-{p}"),
                             value,
                             state,
+                            integer: declared.get(p).is_some_and(|property| {
+                                property.control == crate::definitions::Control::Integer
+                            }),
                             note,
                             actions: None,
                         }
@@ -898,7 +918,12 @@ fn choices(options: Option<&Vec<crate::definitions::Choice>>) -> Vec<(String, St
 
 impl FieldView {
     fn described_by(&self) -> String {
-        described_by(&self.key, self.note.as_ref(), self.actions.as_ref())
+        described_by(
+            &self.key,
+            self.note.as_ref(),
+            self.actions.as_ref(),
+            self.control == "integer" && self.value.is_empty(),
+        )
     }
     fn value_excerpt(&self) -> String {
         excerpt(&self.value)
