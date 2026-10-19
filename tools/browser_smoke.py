@@ -700,7 +700,7 @@ def run_assist_browser(page, campaign, version):
         return page.locator('input[name="revision"]').input_value()
 
     def note():
-        notes = page.locator("#note-hp")
+        notes = page.locator("#note-0")
         return notes.inner_text().strip() if notes.count() else None
 
     page.goto(campaign + f"/sheets/new?version={version}")
@@ -740,7 +740,7 @@ def run_assist_browser(page, campaign, version):
     page.goto(assisted)
     require(
         note() == "kept 69 \u00b7 \u2018lots\u2019 not understood"
-        and page.locator("#note-hp bdi").inner_text() == "lots"
+        and page.locator("#note-0 bdi").inner_text() == "lots"
         and current_hp().input_value() == "lots",
         "The scribble lots did not keep 69 with its note",
     )
@@ -769,7 +769,7 @@ def run_assist_browser(page, campaign, version):
     hp.fill("-15")
     enter(hp)
     page.goto(assisted)
-    offer = page.locator("#offer-hp")
+    offer = page.locator("#offer-0")
     require(
         current_hp().input_value() == "-15"
         and "Did you mean 70 \u2212 15 = 55?" in offer.inner_text(),
@@ -781,21 +781,21 @@ def run_assist_browser(page, campaign, version):
         "Current HP lost its label name next to the switch and Undo buttons",
     )
     # D-X4: the offer is non-blocking; Hide removes it without script, a reload brings it back.
-    page.locator('label[for="dismiss-hp"]').click()
+    page.locator('label[for="dismiss-0"]').click()
     require(not offer.is_visible(), "Hide did not hide the switch offer")
     page.goto(assisted)
-    require(page.locator("#offer-hp").is_visible(), "The offer did not come back on reload")
+    require(page.locator("#offer-0").is_visible(), "The offer did not come back on reload")
     # The buttons are named by reference to the cell's label (aria-labelledby).
     press("Yes Current HP")
     page.goto(assisted)
     require(
         current_hp().input_value() == "55"
         and note() == "70 \u2212 15 = 55"
-        and page.locator("#offer-hp").count() == 0,
+        and page.locator("#offer-0").count() == 0,
         "The switch did not store 70 - 15 = 55",
     )
     require(
-        page.locator("#was-hp").inner_text() == "Last change: was -15",
+        page.locator("#was-0").inner_text() == "Last change: was -15",
         "Undo does not say what it restores",
     )
     press("Undo Current HP")

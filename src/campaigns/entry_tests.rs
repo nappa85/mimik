@@ -351,3 +351,39 @@ fn offers_spell_the_relative_reading() {
     assert_eq!(sum_text("+5-1").as_deref(), Some("5 \u{2212} 1"));
     assert_eq!(sum_text("-15"), None);
 }
+
+/// Slice 1.3 review round 2: a long expression is cut at a term boundary, never inside a
+/// number, with an explicit count of the terms left out; the shown terms fit
+/// `SHOWN_CHARS`. Short expressions are unchanged.
+#[test]
+fn long_expressions_are_cut_at_term_boundaries() {
+    use super::SHOWN_CHARS;
+    let raw = "-11".repeat(64);
+    // "−11" then " − 11" × 12 is 63 characters; a 13th would pass 64.
+    let note = format!(
+        "\u{2212}11{} \u{2026} (+51 more terms)",
+        " \u{2212} 11".repeat(12)
+    );
+    assert_eq!(sum_text(&raw).as_deref(), Some(note.as_str()));
+    let offer = format!("84{} \u{2026} (+52 more terms)", " \u{2212} 11".repeat(12));
+    assert_eq!(offer_text(84, &raw).as_deref(), Some(offer.as_str()));
+    // One term left out is singular.
+    // "1" then " + 1" × 15 is 61 characters: 16 terms fit, the 17th is left out.
+    let seventeen = format!("1{}", "+1".repeat(16));
+    assert_eq!(
+        sum_text(&seventeen).as_deref(),
+        Some(format!("1{} \u{2026} (+1 more term)", " + 1".repeat(15)).as_str())
+    );
+    // Wide terms: never a partial number, whatever the budget left.
+    let wide = format!("-{}", ["9223372036854775"; 11].join("-"));
+    let shown = offer_text(i64::MIN, &wide).unwrap();
+    let (terms, _) = shown.split_once(" \u{2026} ").unwrap();
+    assert!(terms.chars().count() <= SHOWN_CHARS, "{shown}");
+    for term in terms.split(" \u{2212} ").skip(1) {
+        assert_eq!(term, "9223372036854775", "{shown}");
+    }
+    // Within the budget nothing changes.
+    assert_eq!(sum_text("84 -15 +3").as_deref(), Some("84 \u{2212} 15 + 3"));
+    let fits = format!("1{}", "+1".repeat(15));
+    assert_eq!(sum_text(&fits), Some(format!("1{}", " + 1".repeat(15))));
+}

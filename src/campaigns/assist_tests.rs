@@ -102,7 +102,7 @@ fn dismissible(html: &str, key: &str) {
     assert!(html.contains(&format!("<label for=\"dismiss-{key}\">Hide</label>")));
 }
 
-const HP_SWITCH: &str = "switch-hp";
+const HP_SWITCH: &str = "switch-0";
 
 /// D-Q: "-15" on HP 84 stores −15 literally and offers "Did you mean 84 − 15 = 69?";
 /// "-1" on Armour 5 stores −1. Re-entering the literal is a no-op (D-U).
@@ -157,48 +157,40 @@ async fn sign_led_input_is_applied_literally_with_the_offer() {
     let html = page(&setup).await;
     assert_eq!(value(&html, "value-hp").as_deref(), Some("-15"));
     assert_eq!(
-        text(&html, "#offer-hp").as_deref(),
+        text(&html, "#offer-0").as_deref(),
         Some("Did you mean 84 \u{2212} 15 = 69? YesHide")
     );
     assert_eq!(
-        inner(&html, "#offer-hp bdi").as_deref(),
+        inner(&html, "#offer-0 bdi").as_deref(),
         Some("84 \u{2212} 15")
     );
-    assert!(html.contains("aria-describedby=\"offer-hp\""), "{html}");
+    assert!(html.contains("aria-describedby=\"offer-0\""), "{html}");
     // A sign-led sum is shown like a sum, and offered relative to the value before.
     assert_eq!(
-        inner(&html, "#note-max_hp").as_deref(),
+        inner(&html, "#note-1").as_deref(),
         Some("<bdi>\u{2212}5 + 3</bdi> = -2")
     );
-    assert!(html.contains("aria-describedby=\"note-max_hp offer-max_hp\""));
+    assert!(html.contains("aria-describedby=\"note-1 offer-1\""));
     assert_eq!(
         offered(&html),
         [
-            HP_SWITCH,
-            "undo-hp",
-            "switch-max_hp",
-            "undo-max_hp",
-            "switch-armour",
-            "undo-armour",
+            HP_SWITCH, "undo-0", "switch-1", "undo-1", "switch-2", "undo-2",
         ]
     );
     assert_eq!(
-        text(&html, "#offer-max_hp").as_deref(),
+        text(&html, "#offer-1").as_deref(),
         Some("Did you mean 84 \u{2212} 5 + 3 = 82? YesHide")
     );
     assert_eq!(
-        text(&html, "#offer-armour").as_deref(),
+        text(&html, "#offer-2").as_deref(),
         Some("Did you mean 5 \u{2212} 1 = 4? YesHide")
     );
     assert_eq!(
-        text(&html, "#was-hp").as_deref(),
+        text(&html, "#was-0").as_deref(),
         Some("Last change: was 84")
     );
-    assert_eq!(
-        text(&html, "#was-armour").as_deref(),
-        Some("Last change: was 5")
-    );
-    dismissible(&html, "hp");
+    assert_eq!(text(&html, "#was-2").as_deref(), Some("Last change: was 5"));
+    dismissible(&html, "0");
     // D-U wins: the same literal again writes nothing and keeps the same offer.
     let notes_before = notes(&setup, 1).await;
     let (status, again) = setup
@@ -244,12 +236,12 @@ async fn the_switch_writes_the_relative_reading_once() {
     );
     let html = page(&setup).await;
     assert_eq!(
-        inner(&html, "#note-hp").as_deref(),
+        inner(&html, "#note-0").as_deref(),
         Some("<bdi>84 \u{2212} 15</bdi> = 69")
     );
-    assert_eq!(offered(&html), ["undo-hp"]);
+    assert_eq!(offered(&html), ["undo-0"]);
     assert_eq!(
-        text(&html, "#was-hp").as_deref(),
+        text(&html, "#was-0").as_deref(),
         Some("Last change: was -15")
     );
     // Double submit: the note is no longer current, so nothing is written.
@@ -459,20 +451,17 @@ async fn no_offer_without_a_known_before_value_or_on_overflow() {
     let html = page(&setup).await;
     // Undo is offered (the values before are known); no switch anywhere: the new row has no
     // before value, Luck was unknown, b − 1 overflows for Armour, Max HP was 0.
-    assert_eq!(offered(&html), ["undo-max_hp", "undo-armour", "undo-luck"]);
+    assert_eq!(offered(&html), ["undo-1", "undo-2", "undo-3"]);
+    assert_eq!(text(&html, "#was-1").as_deref(), Some("Last change: was 0"));
     assert_eq!(
-        text(&html, "#was-max_hp").as_deref(),
-        Some("Last change: was 0")
-    );
-    assert_eq!(
-        text(&html, "#was-armour"),
+        text(&html, "#was-2"),
         Some(format!("Last change: was {min}"))
     );
     assert_eq!(
-        text(&html, "#was-luck").as_deref(),
+        text(&html, "#was-3").as_deref(),
         Some("Last change: was unknown")
     );
-    assert_eq!(inner(&html, "#offer-armour"), None);
+    assert_eq!(inner(&html, "#offer-2"), None);
     let forged = vec![
         ("csrf".to_owned(), "a".repeat(64)),
         ("base".to_owned(), "3".to_owned()),
@@ -514,25 +503,19 @@ async fn undo_restores_the_last_change_of_a_cell() {
     let html = page(&setup).await;
     assert_eq!(
         offered(&html),
-        [
-            "undo-hp",
-            "undo-armour",
-            "undo-stance",
-            "undo-inspired",
-            "undo-4-0-3"
-        ]
+        ["undo-0", "undo-2", "undo-6", "undo-7", "undo-4-0-3"]
     );
     for (id, was) in [
-        ("hp", "84"),
-        ("armour", "-1"),
-        ("stance", "guard"),
-        ("inspired", "false"),
+        ("0", "84"),
+        ("2", "-1"),
+        ("6", "guard"),
+        ("7", "false"),
         ("4-0-3", "not set"),
     ] {
         let shown = text(&html, &format!("#was-{id}"));
         assert_eq!(shown, Some(format!("Last change: was {was}")), "{id}");
     }
-    let undo_hp = action(&html, "undo-hp").unwrap();
+    let undo_hp = action(&html, "undo-0").unwrap();
     let mut revision = 2;
     for label in offered(&html) {
         let (status, answer) = click(&setup, &page(&setup).await, &label).await;
@@ -573,10 +556,10 @@ async fn undo_restores_the_last_change_of_a_cell() {
     // Undo of an Undo puts the change back.
     let html = page(&setup).await;
     assert_eq!(
-        text(&html, "#was-hp").as_deref(),
+        text(&html, "#was-0").as_deref(),
         Some("Last change: was 69")
     );
-    let (status, _) = click(&setup, &html, "undo-hp").await;
+    let (status, _) = click(&setup, &html, "undo-0").await;
     assert_eq!(status, StatusCode::SEE_OTHER);
     assert_eq!(saved(&setup, 1).await.1["hp"], json!(69));
     // Set → Not set is undone back to the value (present ↔ absent).
@@ -687,8 +670,8 @@ async fn undo_is_not_offered_where_nothing_can_be_undone() {
         StatusCode::SEE_OTHER
     );
     let html = body(get("/private-sheets/1").await).await;
-    assert_eq!(offered(&html), ["undo-hp"]);
-    let undo = action(&html, "undo-hp").unwrap();
+    assert_eq!(offered(&html), ["undo-0"]);
+    let undo = action(&html, "undo-0").unwrap();
     let history = body(get("/private-sheets/1/history/3").await).await;
     assert!(offered(&history).is_empty());
     assert!(!history.contains("/undo"), "{history}");
@@ -740,7 +723,7 @@ async fn an_erased_value_is_undoable() {
     edit(&setup, 2, &[], &rope).await;
     assert_eq!(notes_at(&setup, 1, 3).await[0].2, "erased");
     assert_eq!(saved(&setup, 1).await.1["luck"], Value::Null);
-    let (status, _) = click(&setup, &page(&setup).await, "undo-luck").await;
+    let (status, _) = click(&setup, &page(&setup).await, "undo-3").await;
     assert_eq!(status, StatusCode::SEE_OTHER);
     assert_eq!(saved(&setup, 1).await.1["luck"], json!(3));
 }
@@ -856,7 +839,7 @@ async fn the_binding_is_rechecked_inside_the_transaction() {
         super::super::snapshots::write(db, &master, live, "edit", Some(&pin))?;
         Ok(())
     }));
-    let (status, refused) = click(&setup, &html, "undo-max_hp").await;
+    let (status, refused) = click(&setup, &html, "undo-1").await;
     assert_eq!(status, StatusCode::CONFLICT, "{refused}");
     assert_eq!(saved(&setup, 1).await.0, 3, "nothing written");
     // Without interference both still work.
@@ -868,7 +851,7 @@ async fn the_binding_is_rechecked_inside_the_transaction() {
         ))
     });
     *super::super::notes::BEFORE_INSERT.lock().unwrap() = Some(fail);
-    let (status, _) = click(&setup, &html, "undo-max_hp").await;
+    let (status, _) = click(&setup, &html, "undo-1").await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(
         saved(&setup, 1).await.0,
@@ -903,8 +886,8 @@ async fn switch_and_undo_forms_stay_out_of_the_sheet_form() {
     let inside: Vec<_> = main.select(&buttons).collect();
     assert_eq!(inside.len(), 2, "switch and Undo inside the sheet markup");
     for (button, owner, labelled) in [
-        (inside[0], "assist-switch", "switch-hp label-hp"),
-        (inside[1], "assist-undo", "undo-hp label-hp"),
+        (inside[0], "assist-switch", "switch-0 label-0"),
+        (inside[1], "assist-undo", "undo-0 label-0"),
     ] {
         // The button carries the note key; its form has exactly csrf and base.
         assert_eq!(button.value().attr("form"), Some(owner));
@@ -923,7 +906,7 @@ async fn switch_and_undo_forms_stay_out_of_the_sheet_form() {
         let nested = scraper::Selector::parse(&format!("form form[id=\"{owner}\"]")).unwrap();
         assert!(document.select(&nested).next().is_none(), "not nested");
     }
-    assert_eq!(text(&html, "#label-hp").as_deref(), Some("Current HP"));
+    assert_eq!(text(&html, "#label-0").as_deref(), Some("Current HP"));
     // The sheet form re-posted unchanged is still a no-op save.
     let (status, again) = setup.post("/private-sheets/1", sheet).await;
     assert_eq!(status, StatusCode::OK);
@@ -1086,16 +1069,18 @@ async fn long_expressions_are_elided_on_the_sheet_and_kept_in_history() {
     let raw = "-11".repeat(64);
     edit(&setup, 1, &[("value-hp", &raw)], &[row("r1-1", "1")]).await;
     let html = page(&setup).await;
-    let note = inner(&html, "#note-hp bdi").unwrap();
-    let offer = inner(&html, "#offer-hp bdi").unwrap();
-    for shown in [&note, &offer] {
-        assert_eq!(shown.chars().count(), 65, "{shown}");
-        assert!(shown.ends_with('\u{2026}'), "{shown}");
-    }
-    assert!(note.starts_with("\u{2212}11 \u{2212} 11"), "{note}");
-    assert!(offer.starts_with("84 \u{2212} 11 \u{2212} 11"), "{offer}");
+    // Cut at a term boundary with the count of terms left out; the result stays in full.
+    let thirteen = format!("\u{2212}11{}", " \u{2212} 11".repeat(12));
+    assert_eq!(
+        inner(&html, "#note-0").unwrap(),
+        format!("<bdi>{thirteen} \u{2026} (+51 more terms)</bdi> = -704")
+    );
+    let offer = format!("84{} \u{2026} (+52 more terms)", " \u{2212} 11".repeat(12));
+    assert_eq!(inner(&html, "#offer-0 bdi").unwrap(), offer);
     assert!(
-        text(&html, "#offer-hp").unwrap().contains("= -620?"),
+        text(&html, "#offer-0")
+            .unwrap()
+            .contains(&format!("{offer} = -620?")),
         "{html}"
     );
     let (_, history) = setup.get("/private-sheets/1/history/2").await;

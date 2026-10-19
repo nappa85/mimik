@@ -7,10 +7,14 @@
 //! else is [`Unreadable`]. This parser is for user input only: protocol integers such as
 //! submitted revisions keep the strict [`super::values::integer`].
 
+use std::fmt::Write as _;
+
 /// The most characters an entry may have, whatever the form's `maxlength`.
 pub(crate) const MAX_CHARS: usize = 200;
 /// The most numbers one sum may have.
 pub(crate) const MAX_SCALARS: usize = 64;
+/// The most characters of terms a shown expression keeps before it is cut (slice 1.3).
+pub(crate) const SHOWN_CHARS: usize = 64;
 
 /// Why an entry could not be read as a number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,35 +98,46 @@ pub(crate) fn offer_text(base: i64, raw: &str) -> Option<String> {
     spelled(Some(base), raw)
 }
 
-/// The terms of a readable entry, optionally after `base`, with U+2212 for minus.
+/// The terms of a readable entry, optionally after `base`, with U+2212 for minus. Terms are
+/// kept while their text fits [`SHOWN_CHARS`]; the rest are counted, never cut inside a
+/// number: "84 − 11 − 11 … (+52 more terms)". The caller shows the result in full.
 fn spelled(base: Option<i64>, raw: &str) -> Option<String> {
-    let minus = |shown: &mut String, magnitude: &str| {
-        shown.push('\u{2212}');
-        shown.push_str(magnitude);
+    let signed = |negative: bool, digits: String| {
+        if negative {
+            format!("\u{2212}{digits}")
+        } else {
+            digits
+        }
     };
-    let mut shown = String::new();
+    let mut pieces = Vec::new();
     if let Some(base) = base {
-        let digits = base.unsigned_abs().to_string();
-        if base < 0 {
-            minus(&mut shown, &digits);
-        } else {
-            shown.push_str(&digits);
-        }
+        pieces.push(signed(base < 0, base.unsigned_abs().to_string()));
     }
-    for (index, (negative, run)) in terms(raw.trim_matches(is_space))
-        .ok()?
-        .into_iter()
-        .enumerate()
-    {
+    for (negative, run) in terms(raw.trim_matches(is_space)).ok()? {
         let magnitude = magnitude(run).ok()?.to_string();
-        if index > 0 || base.is_some() {
-            shown.push_str(if negative { " \u{2212} " } else { " + " });
-            shown.push_str(&magnitude);
-        } else if negative {
-            minus(&mut shown, &magnitude);
+        pieces.push(if pieces.is_empty() {
+            signed(negative, magnitude)
         } else {
-            shown.push_str(&magnitude);
+            format!("{} {magnitude}", if negative { " \u{2212}" } else { " +" })
+        });
+    }
+    let mut shown = String::new();
+    let mut chars = 0;
+    let mut kept = 0;
+    for piece in &pieces {
+        let width = piece.chars().count();
+        // The first piece (the value before, or the first term) is always shown.
+        if kept > 0 && chars + width > SHOWN_CHARS {
+            break;
         }
+        shown.push_str(piece);
+        chars += width;
+        kept += 1;
+    }
+    let left = pieces.len() - kept;
+    if left > 0 {
+        let noun = if left == 1 { "term" } else { "terms" };
+        let _ = write!(shown, " \u{2026} (+{left} more {noun})");
     }
     Some(shown)
 }

@@ -262,7 +262,7 @@ async fn sums_and_literals_are_noted_with_the_save_and_shown() {
     );
     let html = page(&setup).await;
     assert_eq!(
-        inner(&html, "#note-hp").as_deref(),
+        inner(&html, "#note-0").as_deref(),
         Some("<bdi>84 \u{2212} 15</bdi> = 69")
     );
     assert_eq!(
@@ -270,10 +270,10 @@ async fn sums_and_literals_are_noted_with_the_save_and_shown() {
         Some("<bdi>2 + 1</bdi> = 3")
     );
     assert_eq!(value(&html, "value-hp").as_deref(), Some("69"));
-    assert!(html.contains("aria-describedby=\"note-hp\""), "{html}");
+    assert!(html.contains("aria-describedby=\"note-0\""), "{html}");
     // A literal shows nothing on the sheet; history lists it.
-    assert_eq!(inner(&html, "#note-armour"), None);
-    assert_eq!(inner(&html, "#note-max_hp"), None);
+    assert_eq!(inner(&html, "#note-2"), None);
+    assert_eq!(inner(&html, "#note-1"), None);
 }
 
 #[tokio::test]
@@ -313,7 +313,7 @@ async fn an_unreadable_entry_keeps_a_known_value_with_a_scribble() {
     );
     let html = page(&setup).await;
     assert_eq!(
-        inner(&html, "#note-hp").as_deref(),
+        inner(&html, "#note-0").as_deref(),
         Some("kept 84 · ‘<bdi>lots</bdi>’ not understood")
     );
     assert_eq!(
@@ -388,7 +388,7 @@ async fn a_later_literal_replaces_a_scribble_as_the_current_note() {
     assert_eq!(current["field:hp"].revision, 3);
     assert_eq!(current["field:hp"].note.op, Op::Literal);
     let html = page(&setup).await;
-    assert_eq!(inner(&html, "#note-hp"), None);
+    assert_eq!(inner(&html, "#note-0"), None);
     assert_eq!(value(&html, "value-hp").as_deref(), Some("70"));
 }
 
@@ -424,7 +424,7 @@ async fn entering_the_kept_value_resolves_a_scribble() {
         )]
     );
     let html = page(&setup).await;
-    assert_eq!(inner(&html, "#note-hp"), None);
+    assert_eq!(inner(&html, "#note-0"), None);
     assert_eq!(value(&html, "value-hp").as_deref(), Some("84"));
     // Now entering 84 again is a no-op.
     let edit = form(3, &[("value-hp", "84")], &[row("r1-1", "1")]);
@@ -903,7 +903,7 @@ async fn scribbles_render_escaped_inside_bdi() {
     );
     let (_, html) = setup.get("/private-sheets/1").await;
     assert_eq!(
-        inner(&html, "#note-hp").as_deref(),
+        inner(&html, "#note-0").as_deref(),
         Some(
             "kept 84 · ‘<bdi>\u{5e9}\u{5dc}\u{5d5}\u{5e9} &lt;b&gt;x&lt;/b&gt;</bdi>’ not understood"
         )
@@ -988,7 +988,7 @@ async fn freeze_writes_no_note_and_notes_stay_readable() {
     assert_eq!(response.status(), StatusCode::OK);
     let html = body(response).await;
     assert_eq!(
-        inner(&html, "#note-hp").as_deref(),
+        inner(&html, "#note-0").as_deref(),
         Some("<bdi>84 \u{2212} 15</bdi> = 69")
     );
     // The frozen revision is live but not writable: no note can name it.

@@ -1683,3 +1683,21 @@ Monday 2026-10-19, weekday window: every build and test in `mimik-ci:latest` wit
 **Not run:** `lan_smoke.py` and the offline corresponding-source rebuild (not asked for this
 round; no build-input change beyond the crate's own sources), and a hand-driven demo session.
 **Not yet done:** re-review of the round-1 fixes.
+
+### 11.2 Review fixes (round 2)
+
+Review of `bbfb935`: Sol FIX THEN MERGE (one Major), Sonnet MERGE-READY with minors; the third
+chain was unavailable. Before starting, `git status` showed the worktree clean at `bbfb935`.
+The read-only Sonnet reviewer's attempted `git checkout --detach` had been denied by the
+permission layer and changed nothing.
+
+| Finding | Disposition | Test, red → green |
+|---|---|---|
+| Sol Major: scalar fields could break the D7 bound (a 64-character field ID repeated in about 16 DOM references per field, all inside one 2,048-byte unit) | Scalars now use their **field index** as the DOM suffix of their label, note and actions (`note-0`, `offer-0`, `was-0`, `switch-0`, `undo-0`, `label-0`, `dismiss-0`), as row cells already use `f-r-p`. The input keeps `id`/`name` `value-<id>`. No budget change. Fixed ids in tests and `browser_smoke.py` follow (`#note-hp` → `#note-0`) | `worst_label_scalar_page_with_every_switch_and_undo_is_within_the_unit_bound` (256 integer fields, 64-character IDs, labels of 100 `"`, the densest long sign-led sum, offer and Undo on each): red at 16:01, **720,924** bytes against **589,824**; green at 16:05, **492,970** |
+| Sol Major, list fixture | Strengthened: list and property IDs of 64 characters; the densest long sign-led entry (`-1` × 63 then a 19-digit term: 146 characters, 64 numbers, value −9,223,372,036,854,775,063) over `i64::MAX`; long sums with `i64::MIN` before; an enum column whose Undo shows a 64-character option ID; scribbles of 200 `"`. **Not covered by a test:** long host IDs. The writer only accepts `r<revision>-<k>`, so a test cannot fabricate a large revision. At most 18 more characters per ID, appearing 4 times per cell (hidden ID, row legend, both note keys), is under 0.6 MB on 8,192 cells, inside the measured headroom below | Green at 16:09: sign-led with enum column **17,211,774** / 20,520,960 (16%); sign-led on 32 integer columns **17,139,334** / 18,948,096 (9.5%); long sum **10,989,337** / 18,948,096; scribble **17,688,624** / 18,948,096 (**6.6%** headroom, the tightest; with Sonnet's estimate of 7.5% on the shorter IDs) |
+| Both, Minor: elision could cut inside a number ("84 − 15 + 3… = 3012") | Expressions are now cut at term boundaries (`entry::spelled`, `SHOWN_CHARS` = 64 characters of terms; the first piece is always shown), with an explicit count, "84 − 11 − 11 … (+52 more terms)", and the result is always in full. Scribble notes keep the 64-character excerpt: the cut is at a character boundary, so a grapheme cluster can be split. `unicode-segmentation` is not in the lock file; adding it for a cosmetic cut is recorded as a limitation rather than done | `entry::tests::long_expressions_are_cut_at_term_boundaries` (exact cut positions, the singular "term", wide terms never partial, short expressions unchanged) and the updated `long_expressions_are_elided_on_the_sheet_and_kept_in_history` (exact note and offer): both red at 15:59 against the character excerpt, green at 16:04. First green run had one test-design error (a 204-character input, over the 200 limit) |
+| Both, Minor: the note lookup in `ListView::new` still searched rows | It takes row `r`'s saved item by index, checked by ID, like the actions | Covered by the list and page tests |
+| Nit: doc comment line mid-paragraph on `Actions::of` | Fixed | — |
+| Recorded | A 409 for any non-empty host on a valid list and property does not prove the row ever existed. That is deliberate: it reveals nothing the page did not already show, and stale and forged requests write nothing alike | — |
+
+Not changed: `Cargo.lock`, so `cargo audit` and `cargo about` are not rerun this round.

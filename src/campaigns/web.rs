@@ -437,6 +437,9 @@ struct Version {
 
 struct FieldView {
     id: String,
+    /// The DOM id suffix of the field's note, label and actions: its index in the
+    /// definition, so a 64-character field ID is not repeated in every reference (D7).
+    key: String,
     label: String,
     help: String,
     control: String,
@@ -523,6 +526,7 @@ struct AssistForms {
 impl Actions {
     /// The offer and Undo of `address` from its current note, on a saved page the reader may
     /// edit; `None` when the note offers neither.
+    ///
     /// A row cell passes its known location (`located`), so rendering never searches rows.
     fn of(
         view: &SheetView,
@@ -546,7 +550,7 @@ impl Actions {
                 return None;
             };
             Some(Offer {
-                text: excerpt(&super::entry::offer_text(before, &stored.note.raw)?),
+                text: super::entry::offer_text(before, &stored.note.raw)?,
                 value: value.to_string(),
             })
         });
@@ -609,7 +613,7 @@ impl NoteLine {
             // A sign-led sum ("-5+3") is shown like a sum; a one-term literal shows nothing.
             super::notes::Op::Sum | super::notes::Op::SignLiteral => Some(Self {
                 kind: "sum",
-                text: excerpt(&super::entry::sum_text(&note.raw)?),
+                text: super::entry::sum_text(&note.raw)?,
                 value,
             }),
             // After a switch the cell shows the relative reading it applied: "84 − 15 = 69".
@@ -620,10 +624,7 @@ impl NoteLine {
                 let literal = super::entry::read(&note.raw).ok()?.value;
                 Some(Self {
                     kind: "sum",
-                    text: excerpt(&super::entry::offer_text(
-                        after.checked_sub(literal)?,
-                        &note.raw,
-                    )?),
+                    text: super::entry::offer_text(after.checked_sub(literal)?, &note.raw)?,
                     value,
                 })
             }
@@ -765,13 +766,15 @@ impl ListView {
             .collect();
         let declared = values::properties(field);
         // Notes are shown on a saved page only, never over a re-rendered draft.
-        let note = |id: &str, p: usize| {
+        // A saved page lists the saved rows in order: row `r` is saved item `r`, checked by
+        // its ID, so no row is searched for.
+        let note = |r: usize, id: &str, p: usize| {
             let (saved, current) = saved?;
             let property = declared.get(p)?;
             let item = saved
                 .as_array()?
-                .iter()
-                .find(|item| item["id"].as_str() == Some(id))?;
+                .get(r)
+                .filter(|item| item["id"].as_str() == Some(id))?;
             let stored = current.get(&super::notes::cell_address(&field.id, id, &property.id))?;
             NoteLine::of(stored, property.control, item.get(&property.id)?)
         };
@@ -787,7 +790,7 @@ impl ListView {
                     .zip(row.states)
                     .enumerate()
                     .map(|(p, (value, state))| {
-                        let note = note(&row.id, p);
+                        let note = note(r, &row.id, p);
                         let value = note
                             .as_ref()
                             .and_then(NoteLine::scribble)
@@ -889,7 +892,7 @@ fn choices(options: Option<&Vec<crate::definitions::Choice>>) -> Vec<(String, St
 
 impl FieldView {
     fn described_by(&self) -> String {
-        described_by(&self.id, self.note.as_ref(), self.actions.as_ref())
+        described_by(&self.key, self.note.as_ref(), self.actions.as_ref())
     }
     fn value_excerpt(&self) -> String {
         excerpt(&self.value)
@@ -1156,6 +1159,7 @@ fn groups(
                     .unwrap_or_else(|| if saved.is_null() { "unknown" } else { "known" }.into());
                 fields.push(FieldView {
                     id: id.clone(),
+                    key: f.to_string(),
                     label: field.label.clone(),
                     help: field.help.clone().unwrap_or_default(),
                     control: control_name(field.control).into(),
@@ -1183,12 +1187,12 @@ fn groups(
                         .unwrap_or_default(),
                     list,
                     actions: if raw.is_none() && field.formula.is_none() {
-                        let labelled = format!("label-{id}");
+                        let labelled = format!("label-{f}");
                         Actions::of(
                             view,
                             &super::notes::field_address(id),
                             None,
-                            (id.clone(), labelled),
+                            (f.to_string(), labelled),
                             forms,
                         )
                     } else {
