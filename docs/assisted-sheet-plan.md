@@ -1701,3 +1701,23 @@ permission layer and changed nothing.
 | Recorded | A 409 for any non-empty host on a valid list and property does not prove the row ever existed. That is deliberate: it reveals nothing the page did not already show, and stale and forged requests write nothing alike | — |
 
 Not changed: `Cargo.lock`, so `cargo audit` and `cargo about` are not rerun this round.
+
+**Gate on the round-2 candidate** (code commit `967e99c`; this record changes only docs).
+Monday 2026-10-19, weekday window, `mimik-ci:latest` with `--cpus 2`, `CARGO_BUILD_JOBS=2`,
+`--network none`; browser container with the CI flags. Times CEST.
+
+| Gate | Time | Cap | Result |
+|---|---|---|---|
+| `cargo fmt --check`, pedantic Clippy `-D warnings` | 16:10 | 2 | clean (an earlier run found `format_push_string` and `doc_markdown`, both fixed) |
+| `cargo test --locked --all-targets --all-features` | 16:10–16:19 | 2 | **642 passed**, 0 failed, 2 ignored, 37 result lines |
+| ruff check / format | 16:19 | 2 | clean |
+| examples; tools unittest | 16:19–16:24 | 2 | built; **OK**, 11 skipped |
+| actionlint | 16:24 | 2 | clean |
+| release build | 16:24–16:27 | 2 | 22,161,368 bytes |
+| `cargo package --locked --offline --allow-dirty`, `verify_source_package.py`, `cargo vendor --offline`, `package_release.py --revision 967e99c…` | 16:27 | 2 | packaged and verified; archives, source crate, dependency sources, `SHA256SUMS` |
+| Unpacked artifact: `sha256sum --check`, `smoke_release.py --auth --source-fixture` | 16:28 | 2 | three checksums OK; smoke passed |
+| `browser_smoke.py --auth` on the unpacked binary | 16:28–16:30 | 2 | every stage passed; the "Yes Max HP" negative copy failed at the assisted sheet (16:30–16:31) |
+
+**Not run:** `cargo audit`, `cargo about` (`Cargo.lock` unchanged since round 1, where both
+were clean), `lan_smoke.py`, the offline corresponding-source rebuild, a hand-driven demo
+session. **Not yet done:** re-review of the round-2 fixes.
