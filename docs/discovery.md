@@ -218,6 +218,13 @@ supersede earlier text wherever it still says otherwise:
   open up security issues".
 - "Don't call the current generic editor an official sheet."
 
+**Follow-up answers (same day).**
+- Capacity caps become **safety-only limits**: generous technical bounds that stop a runaway
+  script from exhausting memory or disk, set far above any real group's needs; no product-level
+  caps.
+- Manual page images may be shown to players next to a catalogue entry: **later**, after the
+  assisted-sheet POC.
+
 **Kept with a note.** The 20,000-character cut of catalogue descriptions: "We need to inquiry if
 that's a valid limit".
 
