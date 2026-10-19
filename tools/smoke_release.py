@@ -1120,6 +1120,21 @@ def publish_list_definition(binary, directory, fixture):
     return published["id"]
 
 
+def publish_assist_definition(binary, directory, fixture):
+    """Publishes the assisted-sheet demo definition (assisted sheet plan §5); returns its
+    version ID. The unknown-game ruleset and its source must already be registered."""
+    sources, mapping = unknown_source_mapping(directory, fixture)
+    definition = json.loads((fixture / "assist-definition.json").read_text())
+    definition["sources"] = sources
+    definition["fields"][0]["mapping"] = mapping
+    published = publish_definition(binary, directory, definition, "assist-definition.json")
+    require(
+        published["deterministic_rules"] == "formulas-advisory",
+        "Assist definition is not published as advisory",
+    )
+    return published["id"]
+
+
 def smoke_list_sheet(directory, cookie, campaign, html):
     """A list sheet: Add re-renders without writing, Save assigns r1-1, history summarises."""
     version = latest_version(directory, "list-sheet")

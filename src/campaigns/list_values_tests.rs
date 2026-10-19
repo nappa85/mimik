@@ -93,11 +93,17 @@ fn optional_state_is_explicit() {
 
 #[test]
 fn item_integers_exact_i64() {
-    for raw in ["01", "+1", "1.0", "", "9223372036854775808", " 1"] {
+    // Row integers are player entries (assisted sheet slice 1.1): zero padding, a plus sign,
+    // surrounding spaces and sums are read; anything else is still refused.
+    for raw in ["1.0", "", "9223372036854775808", "1 2", "84--15", "x"] {
         invalid(
             values(&form(&[("", "N", raw, None, "absent")]), &saved(), 1),
             raw,
         );
+    }
+    for (raw, want) in [("01", 1), ("+1", 1), (" 1", 1), ("2+1", 3), ("84 -15", 69)] {
+        let read = values(&form(&[("", "N", raw, None, "absent")]), &saved(), 1).unwrap();
+        assert_eq!(read["equipment"][0]["quantity"], want, "{raw:?}");
     }
     let edge = values(
         &form(&[("", "N", "-9223372036854775808", None, "absent")]),

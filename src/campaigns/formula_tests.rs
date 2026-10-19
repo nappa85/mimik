@@ -442,7 +442,7 @@ async fn history_recomputes_identically() {
     );
     assert_eq!(derived_text(&history, "pace"), "2");
     assert_eq!(derived_text(&current, "pace"), "-5");
-    assert!(history.contains("value-vitality\" value=\"4\" inputmode=\"numeric\" disabled"));
+    assert!(history.contains("value-vitality\" value=\"4\" disabled"));
 }
 
 #[tokio::test]

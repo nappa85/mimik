@@ -541,7 +541,10 @@ impl Op {
 fn scalar_value(control: Control, raw: &str) -> Result<Value, AppError> {
     Ok(match control {
         Control::Text | Control::Multiline | Control::Enumeration => Value::String(raw.into()),
-        Control::Integer => integer(raw)?.into(),
+        // Player input: a literal or a sum (assisted sheet slice 1.1); still 422 if unreadable.
+        Control::Integer => super::entry::number(raw)
+            .map_err(|unreadable| AppError::Invalid(unreadable.message()))?
+            .into(),
         Control::Boolean => match raw {
             "true" => true.into(),
             "false" => false.into(),

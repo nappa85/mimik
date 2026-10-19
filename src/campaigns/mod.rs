@@ -2,6 +2,7 @@
 mod catalogue;
 mod catalogue_web;
 mod domain;
+mod entry;
 mod formulas;
 mod history_diff;
 mod sheets;
