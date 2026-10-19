@@ -1862,3 +1862,39 @@ restoring its source afterwards (checked with `cmp`, all identical):
 | M7 no `placeholder="?"` on scalars | `blank_erases_and_undo_restores_the_number`, the null page worst case |
 | M8 `convert::inputs` refuses `null` on a non-nullable integer | 7 tests, including `unknown_integers_are_converted_and_other_formulas_compute` and both conformance tests |
 | M9 `convert::record` refuses `null` on an integer property | 7 tests, including `lots_in_a_new_row_is_unknown_with_its_scribble` |
+
+**Gate** (Monday 2026-10-19, inside the weekday window: every build and test in
+`mimik-ci:latest` with `--cpus 2`, `CARGO_BUILD_JOBS=2`, `--network none`, target volume
+`mimik-catalogue-target`, registry volume `mimik-cargo-cache`; the browser container with the
+CI flags and `--cpus=2`). Times are CEST. Code commit `8e761d5`; this record changes only docs.
+
+| Gate | Time | Cap | Result |
+|---|---|---|---|
+| `cargo fmt --check` | 17:24, 17:38 | 2 | the 17:24 run found one unformatted assert in `unknown_tests`; formatted, clean at 17:38 |
+| pedantic Clippy `-D warnings` | 17:23, 17:24, 17:38 | 2 | clean. The first run found `type_complexity` and `semicolon_if_nothing_returned` in a test table, rewritten |
+| `cargo test --locked --all-targets --all-features` | 17:24–17:34 | 2 | **655 passed**, 0 failed, 2 ignored (the existing ones), 37 result lines. Afterwards only formatting changed |
+| `ruff check tools`, `ruff format --check tools` | 17:24 | 2 | clean |
+| `formula_eval` and `source_fixture` examples | 17:38–17:39 | 2 | built; fixture written |
+| Tools unittest (`CI=1`, `MIMIK_FORMULA_EVAL`, main git dir mounted read-only) | 17:39–17:43 | 2 | **762 run, OK**, 11 skipped (includes the moved fixture lock in `test_formula_cli.py`) |
+| `actionlint .github/workflows/ci.yml` | 17:43 | 2 | clean |
+| `cargo build --release --locked` | 17:43–17:46 | 2 | 22,181,592 bytes (+20,224 over slice 1.3 round 2) |
+| `smoke_release.py --auth --source-fixture` (release binary) | 17:46–17:47 | 2 | passed |
+| `browser_smoke.py --auth` (`mimik-browser`, CI flags, worktree `tools/` on `/checks`) | 17:47–17:48 | 2 | every stage passed, the assisted stage (now with the erased and unknown checks) at both viewports |
+| Negative control: a copy of `tools/` expecting "? (known)" under the new row | 17:48–17:49 | 2 | failed with "The new row's unreadable Quantity is not unknown with its scribble", so the new checks run |
+
+**Not run** (`Cargo.lock` and migrations unchanged): `cargo audit`, `cargo about`,
+`cargo package` / `verify_source_package.py`, vendoring and `package_release.py`, the
+unpacked-artifact smoke (the smoke ran on the release binary instead), `lan_smoke.py`, the
+offline corresponding-source rebuild, the demo launcher and a hand-driven demo session in a
+real browser. **Not yet done:** the independent implementation review (Sol and Sonnet, plus
+the third chain), required before merge; it should look at U1 (fixture outcome change under
+the same profile ID) and U2 (the read-set guard) in particular.
+
+**Demo after 1.4** (same commands as §9). Clear Current HP and press Enter: the cell is empty
+with a "?" placeholder, "Last change: was 84 [Undo]" is offered, and the HP check reads "Not
+evaluated … a value it uses is unknown (null)"; Undo puts 84 back. Add an Equipment row,
+type "lots" as its Quantity and press Enter: the row is saved, the cell keeps "lots" and shows
+"? (unknown) · ‘lots’ not understood", and Load reads "Not computed: a value it uses is
+unknown (null)." Typing 2 there computes Load again and offers Undo back to unknown. Creating
+a sheet with "lots" in Current HP also works (unknown with the scribble); an empty Name or an
+unselected choice is still refused.
