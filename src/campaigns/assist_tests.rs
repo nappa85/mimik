@@ -94,6 +94,11 @@ fn dismissible(html: &str, key: &str) {
         .unwrap();
     assert_eq!(dismiss.value().attr("type"), Some("checkbox"));
     assert_eq!(dismiss.value().attr("name"), None);
+    // Named on its own: it keeps focus, and its name, once the offer is hidden.
+    assert_eq!(
+        dismiss.value().attr("aria-label"),
+        Some("Hide the suggestion")
+    );
     assert!(html.contains(&format!("<label for=\"dismiss-{key}\">Hide</label>")));
 }
 
@@ -345,9 +350,9 @@ fn forged() -> Vec<(&'static str, Pairs, StatusCode)> {
             StatusCode::BAD_REQUEST,
         ),
         (
-            "unknown row",
+            "row not on the sheet (stale, not malformed)",
             pairs("6", "1:cell:equipment/r9-9/quantity"),
-            StatusCode::BAD_REQUEST,
+            StatusCode::CONFLICT,
         ),
         (
             "metadata",
@@ -614,9 +619,10 @@ async fn switch_and_undo_work_on_list_cells() {
         .unwrap();
     assert_eq!(
         switch.value().attr("aria-labelledby"),
-        Some("switch-4-0-1 label-4-0-1 legend-4-0")
+        Some("switch-4-0-1 label-4-0-1 list-legend-4 legend-4-0")
     );
     assert_eq!(text(&html, "#label-4-0-1").as_deref(), Some("Quantity"));
+    assert_eq!(text(&html, "#list-legend-4").as_deref(), Some("Equipment"));
     assert!(
         text(&html, "#legend-4-0")
             .unwrap()
@@ -972,4 +978,126 @@ async fn foreign_origin_and_content_type_are_refused() {
         StatusCode::SEE_OTHER,
         "the same request from the page"
     );
+}
+
+/// The accessible name `aria-labelledby` gives the element with id `id`: the text of each
+/// referenced element, joined by spaces.
+fn labelled_name(html: &str, id: &str) -> String {
+    let page = scraper::Html::parse_document(html);
+    let by_id = |id: &str| {
+        page.select(&scraper::Selector::parse(&format!("[id=\"{id}\"]")).unwrap())
+            .next()
+            .map(|element| element.text().collect::<String>())
+            .unwrap_or_default()
+    };
+    let element = page
+        .select(&scraper::Selector::parse(&format!("[id=\"{id}\"]")).unwrap())
+        .next()
+        .unwrap();
+    element
+        .value()
+        .attr("aria-labelledby")
+        .unwrap()
+        .split(' ')
+        .map(by_id)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Review round 1 (Sonnet M1): a switch or Undo shown for a row that has since been removed
+/// is stale, not malformed: 409 with the generic "The cell", nothing written.
+#[tokio::test]
+async fn a_stale_action_on_a_removed_row_is_409() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    created(&setup, &[]).await;
+    edit(&setup, 1, &[], &[row("r1-1", "5")]).await;
+    edit(&setup, 2, &[], &[row("r1-1", "-2")]).await;
+    let shown = page(&setup).await;
+    edit(&setup, 3, &[], &[]).await;
+    for (id, refusal) in [
+        (
+            "switch-4-0-1",
+            "Not switched: The cell changed since, or it was already switched.",
+        ),
+        (
+            "undo-4-0-1",
+            "Nothing undone: The cell changed since, or this change was already undone.",
+        ),
+    ] {
+        let (status, html) = click(&setup, &shown, id).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{id}: {html}");
+        assert!(html.contains(refusal), "{id}: {html}");
+    }
+    assert_eq!(saved(&setup, 1).await.0, 4, "nothing written");
+}
+
+/// Review round 1 (Sol Minor 3): two lists with the same property name and the same first
+/// host ID give their row buttons distinct names, through the list legend.
+#[tokio::test]
+async fn row_actions_name_their_list() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let mut definition = assist();
+    let mut spares = definition["fields"][4].clone();
+    spares["id"] = json!("spares");
+    spares["label"] = json!("Spares");
+    definition["fields"].as_array_mut().unwrap().push(spares);
+    definition["groups"][1]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("spares"));
+    let setup = setup(&definition).await;
+    let spare = |quantity: &'static str, id: &'static str| {
+        [
+            ("id-6-0", id),
+            ("row-6-0-0", "Rope"),
+            ("row-6-0-1", quantity),
+            ("row-6-0-2", "1"),
+            ("row-6-0-3", ""),
+            ("set-6-0-3", "absent"),
+        ]
+    };
+    created(&setup, &spare("5", "")).await;
+    edit(&setup, 1, &spare("-2", "r1-1"), &[row("r1-1", "-2")]).await;
+    let html = page(&setup).await;
+    let equipment = labelled_name(&html, "switch-4-0-1");
+    let spares = labelled_name(&html, "switch-6-0-1");
+    assert!(
+        equipment.starts_with("Yes Quantity Equipment Row 1 of 1"),
+        "{equipment}"
+    );
+    assert!(
+        spares.starts_with("Yes Quantity Spares Row 1 of 1"),
+        "{spares}"
+    );
+    assert_ne!(equipment, spares);
+}
+
+/// Review round 1 (Sol Major): a long expression is elided under the cell and in the offer
+/// (the page stays within its markup bound); history keeps what was typed in full.
+#[tokio::test]
+async fn long_expressions_are_elided_on_the_sheet_and_kept_in_history() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    created(&setup, &[]).await;
+    let raw = "-11".repeat(64);
+    edit(&setup, 1, &[("value-hp", &raw)], &[row("r1-1", "1")]).await;
+    let html = page(&setup).await;
+    let note = inner(&html, "#note-hp bdi").unwrap();
+    let offer = inner(&html, "#offer-hp bdi").unwrap();
+    for shown in [&note, &offer] {
+        assert_eq!(shown.chars().count(), 65, "{shown}");
+        assert!(shown.ends_with('\u{2026}'), "{shown}");
+    }
+    assert!(note.starts_with("\u{2212}11 \u{2212} 11"), "{note}");
+    assert!(offer.starts_with("84 \u{2212} 11 \u{2212} 11"), "{offer}");
+    assert!(
+        text(&html, "#offer-hp").unwrap().contains("= -620?"),
+        "{html}"
+    );
+    let (_, history) = setup.get("/private-sheets/1/history/2").await;
+    assert!(history.contains(&raw), "history keeps the full entry");
 }

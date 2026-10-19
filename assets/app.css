@@ -75,4 +75,5 @@ article.panel { margin-bottom: 1rem; }
 .entry-actions label { display: inline-block; width: auto; margin: 0 0 0 .5rem; padding: .3rem; min-height: 24px; font-weight: 400; text-decoration: underline; cursor: pointer; }
 .offer-dismiss { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; opacity: 0; }
 .offer-dismiss:focus-visible + .offer-body label { outline: 2px solid #285d4c; }
-.offer-dismiss:checked, .offer-dismiss:checked + .offer-body { display: none; }
+.offer-dismiss:checked + .offer-body { display: none; }
+.offer-dismiss:checked:focus-visible { position: static; width: 24px; height: 24px; opacity: 1; display: inline-block; }

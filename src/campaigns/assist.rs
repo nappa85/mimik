@@ -38,15 +38,20 @@ fn in_scope(control: Control) -> bool {
     )
 }
 
-/// Locates a `field:<id>` or `cell:<list>/<host>/<property>` address among the editable
-/// in-scope cells of `data`: a non-derived integer, enum or boolean field, or such a
-/// property of a live row. Anything else (text, derived, unknown IDs or rows, metadata) is
-/// `None`.
-pub(crate) fn locate<'a>(
-    definition: &'a Definition,
-    data: &Value,
-    address: &str,
-) -> Option<Located<'a>> {
+/// What an address names in a pinned definition, before the live data is consulted.
+enum Target<'a, 's> {
+    Field(&'a Field),
+    Row {
+        list: &'a Field,
+        host: &'s str,
+        property: &'a ItemProperty,
+    },
+}
+
+/// Parses a `field:<id>` or `cell:<list>/<host>/<property>` address against the pin: a
+/// non-derived integer, enum or boolean field, or such a property of a list, with a
+/// non-empty host ID and the exact canonical spelling.
+fn target<'a, 's>(definition: &'a Definition, address: &'s str) -> Option<Target<'a, 's>> {
     let editable = |id: &str| {
         definition
             .fields
@@ -54,11 +59,9 @@ pub(crate) fn locate<'a>(
             .find(|field| field.id == id && field.formula.is_none())
     };
     if let Some(id) = address.strip_prefix("field:") {
-        let field = editable(id).filter(|field| in_scope(field.control))?;
-        return Some(Located {
-            label: field.label.clone(),
-            cell: Cell::Field(field),
-        });
+        return editable(id)
+            .filter(|field| in_scope(field.control))
+            .map(Target::Field);
     }
     let path = address.strip_prefix("cell:")?;
     let mut parts = path.splitn(3, '/');
@@ -68,21 +71,60 @@ pub(crate) fn locate<'a>(
         .iter()
         .find(|property| property.id == property_id && in_scope(property.control))?;
     // The address must be exactly the canonical one (no `/` smuggled into a part).
-    if super::notes::cell_address(list_id, host, property_id) != address {
+    if host.is_empty() || super::notes::cell_address(list_id, host, property_id) != address {
         return None;
     }
-    let index = data[&list.id]
-        .as_array()?
-        .iter()
-        .position(|item| item["id"].as_str() == Some(host))?;
-    Some(Located {
+    Some(Target::Row {
+        list,
+        host,
+        property,
+    })
+}
+
+/// Whether `address` names an in-scope cell of the pinned definition, whether or not its
+/// row is still on the sheet (a removed row's address is stale, not malformed).
+pub(crate) fn in_pin(definition: &Definition, address: &str) -> bool {
+    target(definition, address).is_some()
+}
+
+/// Locates an address among the editable in-scope cells of `data`: [`in_pin`], and for a
+/// row cell a live row with that host ID. Anything else (text, derived, unknown IDs or
+/// rows, metadata) is `None`.
+pub(crate) fn locate<'a>(
+    definition: &'a Definition,
+    data: &Value,
+    address: &str,
+) -> Option<Located<'a>> {
+    match target(definition, address)? {
+        Target::Field(field) => Some(Located {
+            label: field.label.clone(),
+            cell: Cell::Field(field),
+        }),
+        Target::Row {
+            list,
+            host,
+            property,
+        } => {
+            let index = data[&list.id]
+                .as_array()?
+                .iter()
+                .position(|item| item["id"].as_str() == Some(host))?;
+            Some(row(list, index, property))
+        }
+    }
+}
+
+/// The location of property `property` in row `index` of list `list`, when the caller
+/// already knows the row (rendering a saved list), without searching for it.
+pub(crate) fn row<'a>(list: &'a Field, index: usize, property: &'a ItemProperty) -> Located<'a> {
+    Located {
         label: format!("{}, row {} of {}", property.label, index + 1, list.label),
         cell: Cell::Row {
             list,
             index,
             property,
         },
-    })
+    }
 }
 
 /// The typed value at a located address: `Absent` for an optional property that is not set.

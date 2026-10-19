@@ -2702,15 +2702,16 @@ async fn worst_label_page_markup_is_within_the_unit_bound() {
     println!("worst-label view page: {} bytes, {units} units", html.len());
 }
 
-/// Slice 1.3: the switch and Undo markup keeps the per-unit page bound. The worst-label
-/// page above, with every one of its 8,192 integer cells carrying a current `sign_literal`
-/// note that offers both the switch and Undo (notes written 256 per revision, the table's
-/// limit), stays within `FIXED_PAGE_BYTES + units × UNIT_MARKUP_BYTES`: the buttons name
-/// their cell by reference, so no label is repeated.
-#[tokio::test]
-async fn worst_label_page_with_every_switch_and_undo_is_within_the_unit_bound() {
-    let _auth_lock = crate::auth::test_resource_lock().await;
-    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+/// The worst-label page (one list of 32 integer properties with labels of 100 `"`, 256
+/// rows) with every one of its 8,192 cells holding `value` and carrying a current note
+/// (`op`, `raw`, value before `before`), written 256 per revision (the table's limit).
+/// Returns the served page and its render units.
+async fn noted_worst_page(
+    op: &'static str,
+    raw: String,
+    before: i64,
+    value: i64,
+) -> (String, usize) {
     let definition = quoted_lists_definition(1, 32);
     let setup = list_setup(&definition).await;
     let field = definition["fields"][0].clone();
@@ -2725,7 +2726,7 @@ async fn worst_label_page_with_every_switch_and_undo_is_within_the_unit_bound() 
         .map(|k| {
             let mut item = json!({"id": format!("r1-{k}")});
             for p in &properties {
-                item[p] = 0.into();
+                item[p] = value.into();
             }
             item
         })
@@ -2736,6 +2737,8 @@ async fn worst_label_page_with_every_switch_and_undo_is_within_the_unit_bound() 
     write(&setup, 1, snapshot, "create").await.unwrap();
     let version = setup.version;
     let auth = setup.auth[1].clone();
+    let before = format!("{{\"int\":\"{before}\"}}");
+    let after = format!("{{\"int\":\"{value}\"}}");
     setup
         .store
         .run_campaign(auth.clone(), move |db| {
@@ -2750,8 +2753,8 @@ async fn worst_label_page_with_every_switch_and_undo_is_within_the_unit_bound() 
                     for p in &properties {
                         let address = format!("cell:{list}/r1-{}/{p}", row + 1);
                         tx.execute(
-                            "INSERT INTO private_sheet_notes(sheet_id,revision,address,op,raw,before,after) VALUES(1,?1,?2,'sign_literal','-0','{\"int\":\"5\"}','{\"int\":\"0\"}')",
-                            rusqlite::params![written.revision, address],
+                            "INSERT INTO private_sheet_notes(sheet_id,revision,address,op,raw,before,after) VALUES(1,?1,?2,?3,?4,?5,?6)",
+                            rusqlite::params![written.revision, address, op, raw, before, after],
                         )?;
                     }
                 }
@@ -2772,17 +2775,61 @@ async fn worst_label_page_with_every_switch_and_undo_is_within_the_unit_bound() 
     .unwrap();
     let units = render_units(&definition, &[256]);
     assert_eq!(units, 9_220);
-    assert_eq!(html.matches("form=\"assist-switch\"").count(), 8_192);
-    assert_eq!(html.matches("form=\"assist-undo\"").count(), 8_192);
+    (html, units)
+}
+
+fn within_unit_bound(html: &str, units: usize, label: &str) {
     assert!(
         html.len() <= FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES,
-        "{} bytes for {units} units",
+        "{label}: {} bytes for {units} units",
         html.len()
     );
     println!(
-        "worst-label page with every switch and Undo: {} bytes, {units} units",
+        "worst-label page with {label}: {} bytes, {units} units",
         html.len()
     );
+}
+
+/// Slice 1.3 (review round 1, Sol Major): the switch and Undo markup keeps the per-unit page
+/// bound in its worst case. Every cell holds the longest sign-led sum the parser reads with
+/// the widest terms that fit (`-11` × 64: 192 characters, 64 numbers), so it shows a sum
+/// note, a relative offer ("5 − 11 − … = −699") and Undo. Long expressions are shown
+/// elided; history keeps the full text.
+#[tokio::test]
+async fn worst_label_page_with_every_switch_and_undo_is_within_the_unit_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let raw = "-11".repeat(64);
+    assert_eq!(super::super::entry::number(&raw), Ok(-704));
+    let (html, units) = noted_worst_page("sign_literal", raw, 5, -704).await;
+    assert_eq!(html.matches("form=\"assist-switch\"").count(), 8_192);
+    assert_eq!(html.matches("form=\"assist-undo\"").count(), 8_192);
+    assert_eq!(html.matches("class=\"entry-note\"").count(), 8_192);
+    within_unit_bound(&html, units, "every long sign-led sum, switch and Undo");
+}
+
+/// The same for slice 1.2's plain sum note (`11+11…`, 64 numbers) with Undo on every cell.
+#[tokio::test]
+async fn worst_label_page_with_every_long_sum_is_within_the_unit_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let raw = format!("11{}", "+11".repeat(63));
+    assert_eq!(super::super::entry::number(&raw), Ok(704));
+    let (html, units) = noted_worst_page("sum", raw, 5, 704).await;
+    assert_eq!(html.matches("form=\"assist-undo\"").count(), 8_192);
+    assert_eq!(html.matches("class=\"entry-note\"").count(), 8_192);
+    within_unit_bound(&html, units, "every long sum and Undo");
+}
+
+/// The same for slice 1.2's scribble: 200 `"` (escaped five times wider) kept over every
+/// cell. The scribble is echoed in full once, in the cell's control; its note is elided.
+#[tokio::test]
+async fn worst_label_page_with_every_long_scribble_is_within_the_unit_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (html, units) = noted_worst_page("unresolved", "\"".repeat(200), 0, 0).await;
+    assert_eq!(html.matches("not understood").count(), 8_192);
+    within_unit_bound(&html, units, "every long scribble");
 }
 
 // ---- Step 8: the gate lift, the publication budget and end-to-end lists (plan D7) ----

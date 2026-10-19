@@ -523,9 +523,11 @@ struct AssistForms {
 impl Actions {
     /// The offer and Undo of `address` from its current note, on a saved page the reader may
     /// edit; `None` when the note offers neither.
+    /// A row cell passes its known location (`located`), so rendering never searches rows.
     fn of(
         view: &SheetView,
         address: &str,
+        located: Option<super::assist::Located<'_>>,
         (key, labelled): (String, String),
         forms: &mut AssistForms,
     ) -> Option<Self> {
@@ -534,14 +536,17 @@ impl Actions {
         }
         let pin = view.immutable.as_ref()?;
         let stored = view.notes.current.get(address)?;
-        let located = super::assist::locate(pin.definition(), &view.snapshot.data, address)?;
+        let located = match located {
+            Some(located) => located,
+            None => super::assist::locate(pin.definition(), &view.snapshot.data, address)?,
+        };
         let current = super::assist::value_at(&located, &view.snapshot.data);
         let offer = super::assist::switch_value(stored, current.as_ref()).and_then(|value| {
             let Some(super::notes::NoteValue::Int(before)) = stored.note.before else {
                 return None;
             };
             Some(Offer {
-                text: super::entry::offer_text(before, &stored.note.raw)?,
+                text: excerpt(&super::entry::offer_text(before, &stored.note.raw)?),
                 value: value.to_string(),
             })
         });
@@ -604,7 +609,7 @@ impl NoteLine {
             // A sign-led sum ("-5+3") is shown like a sum; a one-term literal shows nothing.
             super::notes::Op::Sum | super::notes::Op::SignLiteral => Some(Self {
                 kind: "sum",
-                text: super::entry::sum_text(&note.raw)?,
+                text: excerpt(&super::entry::sum_text(&note.raw)?),
                 value,
             }),
             // After a switch the cell shows the relative reading it applied: "84 − 15 = 69".
@@ -615,7 +620,10 @@ impl NoteLine {
                 let literal = super::entry::read(&note.raw).ok()?.value;
                 Some(Self {
                     kind: "sum",
-                    text: super::entry::offer_text(after.checked_sub(literal)?, &note.raw)?,
+                    text: excerpt(&super::entry::offer_text(
+                        after.checked_sub(literal)?,
+                        &note.raw,
+                    )?),
                     value,
                 })
             }
@@ -630,6 +638,16 @@ impl NoteLine {
     /// A scribble keeps the saved value; its control shows what the player wrote.
     fn scribble(&self) -> Option<&str> {
         (self.kind == "unresolved").then_some(self.text.as_str())
+    }
+    /// The text under the cell: long expressions and scribbles are elided to an excerpt
+    /// (the control echoes a scribble in full; history keeps every note's full text), so
+    /// a cell's markup stays bounded (plan D7, slice 1.3 review).
+    fn shown(&self) -> String {
+        if self.kind == "unresolved" {
+            excerpt(&self.text)
+        } else {
+            self.text.clone()
+        }
     }
 }
 
@@ -803,12 +821,28 @@ impl ListView {
         forms: &mut AssistForms,
     ) {
         let properties = values::properties(field);
+        let saved = &view.snapshot.data[&field.id];
         for row in &mut self.rows {
+            // A saved page lists the saved rows in order; skip anything else.
+            if saved[row.r]["id"].as_str() != Some(row.id.as_str()) {
+                continue;
+            }
             for cell in &mut row.cells {
                 let address =
                     super::notes::cell_address(&field.id, &row.id, &properties[cell.p].id);
-                let labelled = format!("label-{} legend-{}-{}", cell.key, self.f, row.r);
-                cell.actions = Actions::of(view, &address, (cell.key.clone(), labelled), forms);
+                // The cell label, the list legend and the row legend name the buttons.
+                let labelled = format!(
+                    "label-{} list-legend-{} legend-{}-{}",
+                    cell.key, self.f, self.f, row.r
+                );
+                let located = super::assist::row(field, row.r, &properties[cell.p]);
+                cell.actions = Actions::of(
+                    view,
+                    &address,
+                    Some(located),
+                    (cell.key.clone(), labelled),
+                    forms,
+                );
             }
         }
     }
@@ -1153,6 +1187,7 @@ fn groups(
                         Actions::of(
                             view,
                             &super::notes::field_address(id),
+                            None,
                             (id.clone(), labelled),
                             forms,
                         )

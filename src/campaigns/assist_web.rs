@@ -147,22 +147,28 @@ fn plan(
     if base < 1 || revision > base {
         return Err(Refusal::BadRequest);
     }
-    let located = assist::locate(pin.definition(), &view.snapshot.data, address)
-        .ok_or(Refusal::BadRequest)?;
+    // A cell the pin does not have is forged (400); a row cell whose row has gone since
+    // the page was shown is stale (409, with a generic label).
+    if !assist::in_pin(pin.definition(), address) {
+        return Err(Refusal::BadRequest);
+    }
+    let located = assist::locate(pin.definition(), &view.snapshot.data, address);
+    let label = located
+        .as_ref()
+        .map_or("The cell", |located| located.label.as_str());
     let stale = match action {
-        Action::Switch => format!(
-            "Not switched: {} changed since, or it was already switched.",
-            located.label
-        ),
-        Action::Undo => format!(
-            "Nothing undone: {} changed since, or this change was already undone.",
-            located.label
-        ),
+        Action::Switch => {
+            format!("Not switched: {label} changed since, or it was already switched.")
+        }
+        Action::Undo => {
+            format!("Nothing undone: {label} changed since, or this change was already undone.")
+        }
     };
     // A base above the live revision is forged or from a lost future: a conflict.
     if base > live {
         return Err(Refusal::Stale(stale));
     }
+    let located = located.ok_or_else(|| Refusal::Stale(stale.clone()))?;
     let current = assist::value_at(&located, &view.snapshot.data);
     let stored = view
         .notes

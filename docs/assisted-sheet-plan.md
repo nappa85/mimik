@@ -1641,3 +1641,22 @@ Equipment quantities, and Broken's Set/Not set. Undo of an Undo puts the change 
 click on an old Yes or Undo (another tab, or the Back button) says "Not switched…" or "Nothing
 undone…" and changes nothing. `-5+3` is stored as −2 and offers "84 − 5 + 3 = 82". History
 lists each switch and "undid revision N".
+
+### 11.1 Review fixes (round 1)
+
+Review of `9ff30d8`: Sol FIX THEN MERGE (one Major), Sonnet MERGE-READY with minors; the third
+chain was unavailable. Scratch reviews are summarised in the review record. Dispositions:
+
+| Finding | Disposition | Test, red → green |
+|---|---|---|
+| Sol Major: the worst-case page test used raw `-0`, so it never rendered a long sum note or a long offer | New `noted_worst_page` fixture (8,192 cells, labels of 100 `"`) with three worst cases: the longest sign-led sum with the widest terms (`-11` × 64, 192 characters, 64 numbers) carrying a sum note, a relative offer and Undo; slice 1.2's plain sum (`11+11…`, 64 numbers) with Undo; slice 1.2's scribble (200 `"`). The page bound is restored **by rendering, not by a new budget**: every expression shown under a cell or in an offer, and a scribble's note, is elided to the existing 64-character excerpt (`EXCERPT_CHARS`, D7 RE3-1) with "…". History keeps the full text, and a scribble is still echoed in full once, in its control. `FIXED_PAGE_BYTES` and `UNIT_MARKUP_BYTES` are unchanged | Red at 14:57 (`--cpus 2`): sign-led **20,973,171** bytes and scribble **23,078,941** bytes against the **18,948,096**-byte bound; plain sum 12,267,270 (within). Green at 14:58: 15,165,043 / 17,532,957 / 10,219,270. So slice 1.2 had the same gap, for scribbles rather than plain sums, and the same test now covers it. `long_expressions_are_elided_on_the_sheet_and_kept_in_history`: mutation "offer not elided" fails it |
+| Sonnet M1: a switch or Undo for a row removed since returned a bare 400 | `assist::in_pin` tells an address the pin has (stale when its row is gone: 409 "Not switched: The cell changed since…" / "Nothing undone: The cell…") from one it lacks (forged: 400). The `forged()` case "unknown row" is now 409 | `a_stale_action_on_a_removed_row_is_409`; mutation "missing row → 400" fails it and `malformed_and_forged_requests_write_nothing` |
+| Sol Minor 3: row-cell button names omitted the list | The list legend has `id="list-legend-<f>"`; row buttons are labelled by the cell label, the list legend and the row legend ("Yes Quantity Spares Row 1 of 1 · ID r1-1") | `row_actions_name_their_list` (two lists, same property, same host `r1-1`); mutation "no list legend" fails it and `switch_and_undo_work_on_list_cells` |
+| Sol Minor 2: rendering searched rows per cell, O(P × R²) | `ListView::offer` passes the known location (`assist::row(list, r, property)`) after checking that the rendered row is the saved row at that index; POST lookups keep `locate` | Covered by the existing list and page tests (no behaviour change) |
+| Sonnet M4: `label-{field.id}` vs `label-{f}-{r}-{p}` could collide | No change needed: definition admission requires every field ID to start with a lowercase ASCII letter (`definitions/admission.rs:96-113`), and row keys start with a digit, as do the `note-`, `offer-`, `legend-` and `list-legend-` ids | — (recorded) |
+| Sonnet M3: activating Hide dropped keyboard focus to the body | Fixed: the checked checkbox stays in place (visually hidden; shown again while focused), named "Hide the suggestion", so focus stays and Space brings the offer back | Covered by `sign_led_input_…` (name) and the browser stage (Hide hides the offer) |
+| Sonnet M2: a kept scribble becomes the current note and hides the previous Undo | Known behaviour, consistent with "the last change" (D-N): the scribble is the last thing written to the cell | — |
+| Sonnet M5: `target` on reverted notes is not constrained by the table | Known limitation inside L1 (unsealed notes): only the revision actor can insert notes, and nothing reads `target` for a decision (history display only) | — |
+| Sonnet M6: the offer lasts until the cell changes | Known behaviour (no dismissal records). Step 2c must not rely on the offer's lifetime or treat a shown offer as confirmation | — |
+
+Mutation runs 15:01–15:02 (`--cpus 2`), sources restored and checked with `cmp`.
