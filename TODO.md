@@ -6,13 +6,12 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Current work
 
-- **Assisted-sheet MVP, step 1** (`docs/assisted-sheet-plan.md`). Slices 1.1–1.5a are merged
-  into master. **Slice 1.5b** (per-cell list save, row actions, Remove + Undo; replaces the
-  interim per-list forms P1) is in progress on branch `assist-1.5b`.
+- **Assisted-sheet MVP, step 1** (`docs/assisted-sheet-plan.md`). Slices 1.1–1.5b are merged
+  into master. Next: slice 1.6 quick-add.
 
 ## Next steps
 
-1. 1.5b, then 1.6 quick-add, then 1.7 validity flag (RR-3); each slice gets an implementation
+1. 1.6 quick-add, then 1.7 validity flag (RR-3); each slice gets an implementation
    review.
 2. 2a JavaScript, including D-AA (save on leaving the field).
 3. 2b crate and runtime selection (STROT via pyo3 or a Rust port among the candidates, judged
@@ -39,6 +38,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Other next actions
 
+- Slice 1.5b leftovers (Sol round 2): duplicate `?focus=` parameters give 400 instead of
+  being ignored (`src/campaigns/web.rs` `SheetQuery`); add D7 page-bound fixtures for the
+  read-only full-list and orphaned-cell recovery blocks and assert their `readonly`.
 - Remove `--dev-owner-play` (AUTH-L10), with its own security review.
 - Replace capacity caps with safety-only limits (RR-L2).
 - Catalogues step 5 for the merged steps 1–3: local-data inventory entries, the D12 CI check
