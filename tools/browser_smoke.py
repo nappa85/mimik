@@ -736,6 +736,9 @@ def run_list_browser(page, campaign, version, submit):
     page.locator("#up-1-2").focus()
     request = press("Enter", 303)
     posted(request, "/lists/1/rows/2/up", ["csrf", "base"])
+    # The moved row's Move up keeps focus, so the next Enter moves it on (review round 1).
+    focused = active()
+    require(focused == "up-1-1", f"Move up did not focus the moved row's Move up ({focused!r})")
     require(
         page.locator("#row-1-1-0").input_value() == "Lamp"
         and page.locator("#row-1-2-0").input_value() == "Torch",

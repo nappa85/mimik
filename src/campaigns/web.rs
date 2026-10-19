@@ -90,6 +90,16 @@ pub(super) static REJECTED_EDITOR_KEPT_PERMIT: Mutex<Vec<bool>> = Mutex::new(Vec
 #[cfg(test)]
 pub(super) static AFTER_FAILED_SAVE: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
 
+/// A planned unit save signals the first sender, then waits for the receiver before it
+/// writes (tests only: a concurrent writer between planning and the writer).
+#[cfg(test)]
+pub(super) type PlanHook = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+#[cfg(test)]
+pub(super) static AFTER_UNIT_PLAN: Mutex<Option<PlanHook>> = Mutex::new(None);
+
 /// Body limit of the private sheet create and edit POSTs (plan D7): stored values are at
 /// most 1 MiB, URL encoding expands them at most 3×, and keys add at most 65,536 × 16 bytes.
 pub(super) const SHEET_POST_BYTES: usize = 5 * 1024 * 1024;
@@ -470,6 +480,27 @@ struct Version {
     version: i64,
 }
 
+/// A sheet view's optional focus after a row move (slice 1.5b review): `up-<f>-<r>` or
+/// `down-<f>-<r>`; anything else is ignored.
+#[derive(Deserialize, Default)]
+struct SheetQuery {
+    #[serde(default)]
+    focus: Option<String>,
+}
+
+impl SheetQuery {
+    fn focus(&self) -> Option<values::Focus> {
+        let (verb, rest) = self.focus.as_deref()?.split_once('-')?;
+        let (f, r) = rest.split_once('-')?;
+        let (f, r) = (values::index(f)?, values::index(r)?);
+        match verb {
+            "up" => Some(values::Focus::Up(f, r)),
+            "down" => Some(values::Focus::Down(f, r)),
+            _ => None,
+        }
+    }
+}
+
 struct FieldView {
     id: String,
     /// The DOM id suffix of the field's note, label and actions: its index in the
@@ -843,6 +874,22 @@ struct ListView {
     /// The new-row form's controls (slice 1.5b); `None` when the list is full or not a
     /// unit list.
     new_row: Option<Vec<CellView>>,
+    /// A refused draft that no control can take any more (review round 1): a cell whose row
+    /// was removed, or a new row refused because the list is full. Shown read-only, to copy.
+    kept: Option<Kept>,
+}
+
+/// A draft kept read-only on the page: why, then each property with its value.
+struct Kept {
+    message: &'static str,
+    entries: Vec<KeptEntry>,
+}
+
+struct KeptEntry {
+    label: String,
+    /// An optional property's Set or Not set.
+    state: Option<&'static str>,
+    value: String,
 }
 
 impl ListView {
@@ -928,6 +975,7 @@ impl ListView {
             units: false,
             removed: None,
             new_row: None,
+            kept: None,
         }
     }
     /// Adds the switch and Undo of each saved row cell (slice 1.3).
@@ -992,6 +1040,24 @@ impl ListView {
             cell.note = None;
             cell.actions = None;
             cell.autofocus = true;
+        } else if let Some((draft, p)) = draft.and_then(|draft| match draft.unit {
+            super::unit::Unit::Cell { f, p, .. } if f == self.f && draft.host.is_some() => {
+                Some((draft, p))
+            }
+            _ => None,
+        }) {
+            // Its row was removed: the draft is kept, never put into another row.
+            self.kept = Some(Kept {
+                message: "The row this entry was for has been removed, so it was not saved. \
+                          Your entry is kept below to copy into another row.",
+                entries: vec![KeptEntry {
+                    label: properties[p].label.clone(),
+                    state: properties[p]
+                        .optional
+                        .then(|| state_word(draft.null.as_deref())),
+                    value: draft.value.clone(),
+                }],
+            });
         }
         if let Some(pin) = &view.immutable
             && let Some(stored) = view.notes.rows.get(&field.id)
@@ -1004,12 +1070,30 @@ impl ListView {
                 forms.undo = true;
             }
         }
-        if self.full() {
-            return;
-        }
         let submitted = draft
             .filter(|draft| draft.unit == super::unit::Unit::NewRow(self.f))
             .and_then(|draft| draft.row.as_ref());
+        if self.full() {
+            // A new row refused because the list filled up: kept to copy, not addable.
+            if let Some(row) = submitted {
+                self.kept = Some(Kept {
+                    message: "This list is full (256 rows), so your new row was not added. \
+                              What you entered is kept below to copy; remove a row first.",
+                    entries: properties
+                        .iter()
+                        .enumerate()
+                        .map(|(p, property)| KeptEntry {
+                            label: property.label.clone(),
+                            state: property.optional.then(|| {
+                                state_word(row.get(&format!("set-{p}")).map(String::as_str))
+                            }),
+                            value: row.get(&format!("row-{p}")).cloned().unwrap_or_default(),
+                        })
+                        .collect(),
+                });
+            }
+            return;
+        }
         let pair = |key: String| submitted.and_then(|row| row.get(&key)).cloned();
         self.new_row = Some(
             properties
@@ -1050,6 +1134,15 @@ impl ListView {
             .options
             .iter()
             .any(|option| option.0 == cell.value)
+    }
+}
+
+/// How a kept optional property's Set/Not set state reads.
+fn state_word(state: Option<&str>) -> &'static str {
+    if state == Some("present") {
+        "Set"
+    } else {
+        "Not set"
     }
 }
 
@@ -1580,9 +1673,10 @@ async fn read_sheet(
     State(state): State<AuthState>,
     session: Session,
     Path(id): Path<i64>,
+    Query(query): Query<SheetQuery>,
     Extension(admission): Extension<RuntimeAdmission>,
 ) -> ResultResponse {
-    read_private(state, session, id, None, admission).await
+    read_private(state, session, (id, None), query.focus(), admission).await
 }
 async fn read_history(
     State(state): State<AuthState>,
@@ -1590,13 +1684,13 @@ async fn read_history(
     Path((id, revision)): Path<(i64, i64)>,
     Extension(admission): Extension<RuntimeAdmission>,
 ) -> ResultResponse {
-    read_private(state, session, id, Some(revision), admission).await
+    read_private(state, session, (id, Some(revision)), None, admission).await
 }
 async fn read_private(
     state: AuthState,
     session: Session,
-    id: i64,
-    history: Option<i64>,
+    (id, history): (i64, Option<i64>),
+    focus: Option<values::Focus>,
     admission: RuntimeAdmission,
 ) -> ResultResponse {
     let permit = admission.take()?;
@@ -1609,7 +1703,11 @@ async fn read_private(
     let csrf = auth::token(&session)
         .await?
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    rendered(view, permit, csrf, None, StatusCode::OK, Notice::default()).await
+    let notice = Notice {
+        focus,
+        ..Notice::default()
+    };
+    rendered(view, permit, csrf, None, StatusCode::OK, notice).await
 }
 
 const NATIVE_KEYS: &[&str] = &[

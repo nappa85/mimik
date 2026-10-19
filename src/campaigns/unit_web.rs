@@ -209,6 +209,14 @@ async fn save(
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    #[cfg(test)]
+    {
+        let hook = super::AFTER_UNIT_PLAN.lock().unwrap().take();
+        if let Some((planned, resume)) = hook {
+            let _ = planned.send(());
+            let _ = resume.await;
+        }
+    }
     finish(
         &state,
         auth,
@@ -303,14 +311,17 @@ async fn finish(
             .await;
         }
     }
-    let anchor = plan.anchor;
+    let location = match plan.focus {
+        Some(focus) => format!("?focus={focus}"),
+        None => format!("#{}", plan.anchor),
+    };
     match state
         .store()
         .private_save_keeping(auth.clone(), view, permit)
         .await
     {
         Ok((id, _permit)) => {
-            Ok(Redirect::to(&format!("/private-sheets/{id}#{anchor}")).into_response())
+            Ok(Redirect::to(&format!("/private-sheets/{id}{location}")).into_response())
         }
         Err((failure @ (AppError::Conflict | AppError::Invalid(_)), permit)) => {
             let (view, permit) = rejected_editor(state, auth, id, None, permit).await?;
@@ -359,6 +370,12 @@ async fn refused(
 ) -> super::ResultResponse {
     let revision = view.snapshot.revision;
     let message = match (draft.unit, reason) {
+        // The cell's row is gone (removed since the page, or before the write): its draft is
+        // kept read-only on the page (review round 1).
+        (Unit::Cell { f, .. }, None) if orphaned(&view, f, draft.host.as_deref()) => format!(
+            "{label} not saved: its row was removed since this page was loaded (now \
+             revision {revision}). Nothing was saved; your entry is kept below to copy."
+        ),
         (Unit::Row { action, .. }, reason) => {
             let verb = if action == RowAction::Remove {
                 "removed"
@@ -402,6 +419,14 @@ async fn refused(
     .await
 }
 
+/// Whether row `host` of list field `f` is gone from the page's live revision.
+fn orphaned(view: &SheetView, f: usize, host: Option<&str>) -> bool {
+    let (Some(pin), Some(host)) = (&view.immutable, host) else {
+        return false;
+    };
+    rows::host_index(pin, &view.snapshot, f, host).is_none()
+}
+
 /// Applies the unit form to `view` (the live sheet L read in this request). Order (plan §3a):
 /// a malformed or zero `base` is 400 and a `base` above L a conflict; then the value is read
 /// against L, so a no-op answers "No change" even from a stale page; then a unit whose
@@ -430,6 +455,7 @@ fn plan(
             planned: Planned::Conflict,
             anchor: anchor(unit),
             host,
+            focus: None,
         });
     };
     if matches!(unit, Unit::Name | Unit::Notes | Unit::Field(_)) {
@@ -438,6 +464,7 @@ fn plan(
             planned,
             anchor: anchor(unit),
             host: None,
+            focus: None,
         });
     }
     // List units (slice 1.5b) are planned on a copy: a refusal re-renders L unchanged.

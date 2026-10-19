@@ -434,10 +434,11 @@ async fn list_routes_refuse_what_they_do_not_name() {
         press(&setup, &page(&setup).await, "remove-4-1").await.0,
         StatusCode::SEE_OTHER
     );
-    // A removed row's cell.
+    // A removed row's cell is a conflict that keeps the draft (review round 1, Sonnet);
+    // see `a_cell_whose_row_was_removed_keeps_its_draft`.
     assert_eq!(
         enter(&setup, &old, "row-4-1-1", "5").await.0,
-        StatusCode::BAD_REQUEST
+        StatusCode::CONFLICT
     );
     let cell = |base: &str, value: &str| {
         vec![
@@ -1243,4 +1244,207 @@ async fn schema_20_upgrades_to_21_keeping_every_note() {
         .run(|db| Ok(db.execute("UPDATE private_sheet_notes SET raw='x'", [])?))
         .await;
     assert!(update.is_err());
+}
+
+// ---- Review round 1 ----
+
+/// The kept-draft block of list `f`: the text of its message, labels, states and values.
+fn kept(html: &str, f: usize) -> Option<String> {
+    text(html, &format!("#kept-{f}"))
+}
+
+/// Sol Major 1: a new row refused because the list filled up meanwhile (255 rows at load,
+/// another tab adds the 256th) keeps every submitted value and presence state on the 422
+/// page, read-only and copyable, with no form that could add it; nothing is written.
+#[tokio::test]
+async fn a_new_row_refused_by_a_full_list_keeps_every_value() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    let (status, html) = setup
+        .post(&create_path(&setup), form(0, &[], &many(255)))
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{html}");
+    let old = page(&setup).await;
+    let (action, other) = new_row(&page(&setup).await, 4, &[("row-0", "Other")]);
+    assert_eq!(setup.post(&action, other).await.0, StatusCode::SEE_OTHER);
+    let before = saved(&setup, 1).await;
+    let (_, mine) = new_row(
+        &old,
+        4,
+        &[
+            ("row-0", "Late \"lamp\" <b>"),
+            ("row-1", "7"),
+            ("row-2", "2+1"),
+            ("set-3", "present"),
+            ("row-3", "true"),
+        ],
+    );
+    let response = document_post(&setup, &action, mine).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html = body(response).await;
+    assert_eq!(saved(&setup, 1).await, before, "nothing written");
+    assert!(!html.contains("/lists/4/rows\""), "no form adds it");
+    let kept = kept(&html, 4).expect("the kept row");
+    for shown in [
+        "Late \"lamp\" <b>",
+        "7",
+        "2+1",
+        "Set",
+        "true",
+        "Item name",
+        "Broken",
+    ] {
+        assert!(kept.contains(shown), "{shown:?} in {kept:?}");
+    }
+    assert!(kept.contains("full"), "{kept}");
+    assert!(!html.contains("<b>"), "escaped");
+}
+
+/// Sonnet Minor (round 1): a cell save whose row was removed since its page was loaded is a
+/// 409 that shows the draft, read-only, under "its row was removed"; it is never put into
+/// the row now at the same index, and nothing is written.
+#[tokio::test]
+async fn a_cell_whose_row_was_removed_keeps_its_draft() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    three_rows(&setup).await;
+    let old = page(&setup).await;
+    assert_eq!(
+        press(&setup, &page(&setup).await, "remove-4-1").await.0,
+        StatusCode::SEE_OTHER
+    );
+    let before = saved(&setup, 1).await;
+    let (action, pairs) = unit_form(&old, "row-4-1-1", Some("9 \"x\""));
+    let response = document_post(&setup, &action, pairs).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let html = body(response).await;
+    assert_eq!(saved(&setup, 1).await, before, "nothing written");
+    assert!(html.contains("its row was removed"), "{html}");
+    let kept = kept(&html, 4).expect("the kept entry");
+    assert!(
+        kept.contains("9 \"x\"") && kept.contains("Quantity"),
+        "{kept}"
+    );
+    // Cup now sits at index 1: its Quantity is unchanged, not the draft.
+    assert_eq!(unit_form(&html, "row-4-1-1", None).1[2], pair("value", "3"));
+    assert!(
+        !html.contains("autofocus"),
+        "no row control takes the draft"
+    );
+}
+
+/// Sol Major 2: a cell whose row is removed between planning and the writer's IMMEDIATE
+/// transaction gets the writer's 409 with the same orphaned-draft recovery.
+#[tokio::test]
+async fn a_cell_whose_row_goes_before_the_write_keeps_its_draft() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    three_rows(&setup).await;
+    let html = page(&setup).await;
+    let (action, pairs) = unit_form(&html, "row-4-1-1", Some("9"));
+    let (planned, planned_rx) = tokio::sync::oneshot::channel();
+    let (resume, resume_rx) = tokio::sync::oneshot::channel();
+    *super::super::web::AFTER_UNIT_PLAN.lock().unwrap() = Some((planned, resume_rx));
+    let app = setup.app.clone();
+    let cookie = setup.auth[1].fixture_cookie();
+    let post = tokio::spawn(async move {
+        use tower::ServiceExt;
+        let request = axum::http::Request::builder()
+            .uri(&action)
+            .method("POST")
+            .header("host", "127.0.0.1:3000")
+            .header("origin", "http://127.0.0.1:3000")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("accept", "text/html")
+            .header("sec-fetch-mode", "navigate")
+            .header("sec-fetch-dest", "document")
+            .header("cookie", cookie)
+            .body(axum::body::Body::from(
+                serde_urlencoded::to_string(pairs).unwrap(),
+            ))
+            .unwrap();
+        app.oneshot(request).await.unwrap()
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(20), planned_rx)
+        .await
+        .expect("planned within 20 s")
+        .unwrap();
+    // Another writer removes Bow while the save is planned (outside the runtime permit).
+    let dummy = || async {
+        std::sync::Arc::new(tokio::sync::Semaphore::new(1))
+            .acquire_owned()
+            .await
+            .unwrap()
+    };
+    let (mut view, permit) = setup
+        .store
+        .private_read(setup.auth[1].clone(), 1, None, dummy().await)
+        .await
+        .unwrap();
+    view.snapshot.data["equipment"]
+        .as_array_mut()
+        .unwrap()
+        .remove(1);
+    setup
+        .store
+        .private_save(setup.auth[1].clone(), view, permit)
+        .await
+        .unwrap();
+    resume.send(()).unwrap();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(20), post)
+        .await
+        .expect("answered within 20 s")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let html = body(response).await;
+    assert!(html.contains("its row was removed"), "{html}");
+    assert!(kept(&html, 4).expect("the kept entry").contains('9'));
+    assert_eq!(unit_form(&html, "row-4-1-1", None).1[2], pair("value", "3"));
+    let ids: Vec<String> = rows(&setup).await.into_iter().map(|row| row.0).collect();
+    assert_eq!(ids, ["r1-1", "r1-3"], "only the other writer's removal");
+}
+
+/// Both reviewers (round 1): after a Move the page comes back with the moved row's Move
+/// button in the same direction focused, or the other direction's when it reached an edge
+/// (the full form's focus continuation): `?focus=` and one `autofocus`.
+#[tokio::test]
+async fn a_move_returns_to_the_moved_rows_move_button() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    three_rows(&setup).await;
+    for (button, focus) in [
+        ("up-4-2", "up-4-1"),
+        ("up-4-1", "down-4-0"),
+        ("down-4-0", "down-4-1"),
+        ("down-4-1", "up-4-2"),
+    ] {
+        let (action, pairs) = row_action(&page(&setup).await, button);
+        let response =
+            super::router_request(&setup.app, &setup.auth[1], &action, Some(pairs)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER, "{button}");
+        let location = response.headers()["location"].to_str().unwrap().to_owned();
+        assert_eq!(
+            location,
+            format!("/private-sheets/1?focus={focus}"),
+            "{button}"
+        );
+        let (status, html) = setup.get(&location).await;
+        assert_eq!(status, StatusCode::OK);
+        let page = scraper::Html::parse_document(&html);
+        let focused: Vec<_> = page
+            .select(&scraper::Selector::parse("[autofocus]").unwrap())
+            .filter_map(|element| element.value().attr("id"))
+            .collect();
+        assert_eq!(focused, [focus], "{button}");
+    }
+    // A malformed or unknown focus is ignored.
+    for query in ["?focus=x", "?focus=up-4-9", "?focus=up-04-1"] {
+        let (status, html) = setup.get(&format!("/private-sheets/1{query}")).await;
+        assert_eq!(status, StatusCode::OK, "{query}");
+        assert!(!html.contains("autofocus"), "{query}");
+    }
 }

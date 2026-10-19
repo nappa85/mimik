@@ -35,8 +35,12 @@ pub(crate) struct Plan {
     pub planned: Planned,
     /// The element a successful save scrolls back to.
     pub anchor: String,
-    /// The host ID of a cell's row, so a refused draft is shown in that row.
+    /// The host ID of a cell's row, so a refused draft is shown in that row (or, when the
+    /// row is gone, as an orphaned draft).
     pub host: Option<String>,
+    /// After a move, the Move button the page focuses (`?focus=`; an element fragment would
+    /// block `autofocus`).
+    pub focus: Option<String>,
 }
 
 impl Plan {
@@ -45,6 +49,7 @@ impl Plan {
             planned,
             anchor,
             host: None,
+            focus: None,
         }
     }
 }
@@ -64,6 +69,16 @@ pub(crate) fn host(
     (f, r): (usize, usize),
 ) -> Option<String> {
     host_at(&snapshot.data, &pin.definition().fields[f], r).map(str::to_owned)
+}
+
+/// The index of row `host` of list field `f` in `snapshot`.
+pub(crate) fn host_index(
+    pin: &ImmutablePin,
+    snapshot: &PrivateSnapshot,
+    f: usize,
+    host: &str,
+) -> Option<usize> {
+    index_of(&snapshot.data, &pin.definition().fields[f], host)
 }
 
 fn index_of(data: &Value, list: &Field, host: &str) -> Option<usize> {
@@ -104,7 +119,16 @@ pub(crate) fn cell(
     let host = host_at(&base.data, list, r)
         .ok_or(StatusCode::BAD_REQUEST)?
         .to_owned();
-    let index = index_of(&snapshot.data, list, &host).ok_or(StatusCode::BAD_REQUEST)?;
+    // A row removed since `base` takes no save; its draft is kept, never moved to the row now
+    // at that index (review round 1).
+    let Some(index) = index_of(&snapshot.data, list, &host) else {
+        return Ok(Plan {
+            planned: Planned::Conflict,
+            anchor: format!("list-legend-{f}"),
+            host: Some(host),
+            focus: None,
+        });
+    };
     let saved = &items(&snapshot.data, list)[index];
     let stale = items(&base.data, list)[r].get(&property.id) != saved.get(&property.id);
     let mut recorder = values::Recorder::new(current);
@@ -143,6 +167,7 @@ pub(crate) fn cell(
         planned,
         anchor: format!("label-{f}-{index}-{p}"),
         host: Some(host),
+        focus: None,
     })
 }
 
@@ -273,8 +298,21 @@ pub(crate) fn action(
     if let Err(failure) = pin.validate_values(&data) {
         return Ok(Plan::new(refusal(failure)?, anchor));
     }
+    // The moved row's Move button in the same direction, or at an edge the other one (the
+    // full form's focus continuation, plan D5).
+    let rows = items(&data, list).len();
+    let focus = match action {
+        RowAction::Remove => None,
+        RowAction::Up if r == 1 => Some(format!("down-{f}-0")),
+        RowAction::Up => Some(format!("up-{f}-{}", r - 1)),
+        RowAction::Down if r + 2 == rows => Some(format!("up-{f}-{}", r + 1)),
+        RowAction::Down => Some(format!("down-{f}-{}", r + 1)),
+    };
     snapshot.data = data;
-    Ok(Plan::new(planned, anchor))
+    Ok(Plan {
+        focus,
+        ..Plan::new(planned, anchor)
+    })
 }
 
 fn rows_of<'a>(data: &'a mut Value, list: &Field) -> Result<&'a mut Vec<Value>, StatusCode> {

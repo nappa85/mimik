@@ -81,3 +81,5 @@ article.panel { margin-bottom: 1rem; }
 .list-row > form { min-width: 0; margin: 0; }
 .list-field > .entry-undo { margin: .4rem 0; overflow-wrap: anywhere; }
 .list-field > .entry-undo button, .new-row button { margin: 0 0 0 .5rem; padding: .3rem .8rem; min-width: 24px; min-height: 24px; }
+.entry-kept { border-left: 4px solid #a6382e; padding: .5rem 1rem; margin: .6rem 0; overflow-wrap: anywhere; }
+.entry-kept textarea { width: 100%; }
