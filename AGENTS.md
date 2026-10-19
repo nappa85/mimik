@@ -1,6 +1,6 @@
 # Mimik project rules
 
-- Start each session with `TODO.md`. Update its checkboxes, blockers, verification results, and handoff as work progresses.
+- Start each session with `TODO.md`: current work, next steps and open blockers only. Keep it short; remove items once done.
 - Commit locally without asking (user decision 2026-10-16): local history can be rewritten. Pushing, or anything else that leaves the machine, still needs explicit approval.
 - **Machine schedule (user decision 2026-10-16):**
   - Monday to Friday, 09:00–18:00: no heavy operations (GPU inference, model loads, uncapped builds). Rust builds and tests are allowed during those hours, capped at 2 cores.
@@ -18,20 +18,27 @@
 - Run checks appropriate to changes. Distinguish unit/helper verification from live inference/provider or browser testing; never report unrun checks as passed.
 - Install new tools, prototype dependencies, and model runtimes in containers, not on the host. Keep build contexts allowlisted and never include secrets/manuals. Preserve the lightweight standalone Rust runtime.
 
+## Documentation (user decision 2026-10-19)
+
+- Docs describe the system as it is now: objective reference, not a log of actions. Git history is the log.
+- Layout: `docs/decisions.md` (decisions in force, one line each with date; superseded ones removed), `docs/limitations.md` (known limits and follow-ups), `docs/results.md` (experiment and benchmark conclusions still in use), reference docs per area, and at most one plan per active piece of work containing only the remaining steps.
+- When work lands, update the reference docs and delete the finished plan sections. No implementation logs, gate tables or red→green tables in docs; put them in commit messages.
+- Project rules are means to an end. If a promising library or approach conflicts with one, state the conflict and its cost and let the user decide; security and data rules are not negotiable.
+
 ## Independent adversarial review
 
 - Every plan must receive an independent adversarial review before execution, and every material implementation step/change set must receive one before being marked complete, except under the prototype tier below. Use a separate reviewer/subagent with a fresh context; self-review is supplemental, not independent review.
 - Review correctness, missing assumptions, failure modes, security, source/rule fidelity, deployability, suitable existing libraries, duplicate logic, maintainability, and production practices. Prefer a read-only reviewer; the implementer owns fixes.
-- Record the reviewed scope, findings, severity, disposition, regression checks, and verification in `docs/reviews/` and summarize blockers/handoff in `TODO.md`. Review findings are not proof of correctness.
+- Review outcomes are not kept as files (user decision 2026-10-19). Fixed findings live on as regression tests and code; the merge commit message states the reviewers, their verdicts and any Blocking/Major finding with its resolution. Unresolved findings go to `docs/limitations.md` or `TODO.md`. Review findings are not proof of correctness.
 - **Reviewer setup (user decision 2026-10-16):**
   - Main reviewers: OpenAI Sol (`openai/gpt-6.1-sol` via `tools/external_review.py --chain main`) and a fresh Sonnet subagent, run in parallel.
   - Third reviewer: the first that works of Space Bunny, DeepSeek v4.1 Flash, then Muse Spark (`--chain third`). If none works, proceed with the two main reviews and record that.
-  - Adjudicate Blocking findings against the code before acting on them; see `docs/reviewer-benchmark.md`.
+  - Adjudicate Blocking findings against the code before acting on them.
 - Resolve blocking findings before completion. If independence is unavailable or a blocker cannot be fixed, explicitly record it and keep the work blocked; do not call it production-ready or silently waive it. Review of review records themselves does not recurse.
 
 ### Prototype tier (user decision 2026-10-15)
 
-- Disposable experiments (benchmarks, evaluation scripts and prototypes under `tools/` or ignored `target/` paths that never ship in the Rust application or release artifacts) may use a lighter process: a self-check plus a short results note in `docs/` with exact scope, denominators and limitations.
+- Disposable experiments (benchmarks, evaluation scripts and prototypes under `tools/` or ignored `target/` paths that never ship in the Rust application or release artifacts) may use a lighter process: a self-check plus the conclusion, with exact scope, denominators and limitations, added to `docs/results.md`.
 - Independent review is still required before experiment results drive a product or architecture decision, and before any prototype code moves into the shipped application.
 - Security and data rules still apply in full: containers for new tools and runtimes, no secrets read back, manuals and corpora stay local, and checks are never reported as passed when not run. Shipped code keeps every gate.
 
