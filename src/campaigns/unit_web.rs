@@ -379,28 +379,28 @@ fn busy(id: i64, route: &Route, pairs: &Pairs, csrf: &str) -> super::ResultRespo
     })
 }
 
+/// Markup bytes charged per kept pair on the busy page (its hidden input's tags and
+/// attribute names), so the echo bound covers the page, not only the values.
+const BUSY_PAIR_MARKUP: usize = 48;
+
+/// Whether a busy page may keep `pairs`: their keys, values and per-pair markup total at
+/// most the re-render echo bound (plan D7, 1 MiB), so the page stays within that bound at the
+/// widest escape (5 bytes per byte) plus its fixed chrome (review round 2, Sonnet F3).
+fn keepable<'a>(pairs: impl Iterator<Item = (&'a str, &'a str)>) -> bool {
+    pairs
+        .map(|(key, value)| key.len() + value.len() + BUSY_PAIR_MARKUP)
+        .sum::<usize>()
+        <= super::ECHO_BYTES
+}
+
 /// The busy answer of the full-form and list-form save (review round 1, Sonnet M1): after
-/// the same bounded wait, the form is parsed (no permit is held; the auth layer bounds
-/// concurrent requests) and, for a session that passes CSRF, every submitted pair is kept as
-/// a hidden input of a form posting to the sheet again. A form larger than a re-render may
-/// echo (plan D7) is not kept, and the page says so.
-pub(super) async fn busy_form(
-    state: &AuthState,
-    session: &Session,
-    id: i64,
-    body: axum::body::Bytes,
-) -> super::ResultResponse {
-    let pairs = tokio::task::spawn_blocking(move || {
-        Pairs::parse_limited(&body, super::super::transport::SHEET_FORM_PAIRS)
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
-    auth::check_csrf(session, pairs.csrf()?).await?;
-    auth::request_auth(state, session).await?;
-    let csrf = auth::token(session)
-        .await?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    let dropped = pairs.iter().map(|(_, value)| value.len()).sum::<usize>() > super::ECHO_BYTES;
+/// the same bounded wait, every pair the caller submitted (parsed, CSRF and session checked
+/// before the wait, review round 2) is kept as a hidden input of a form posting to the sheet
+/// again. A form larger than the echo bound is not kept, and the page says so. It echoes
+/// only the caller's own submission: the sheet and the caller's rights on it are not read
+/// (that needs the permit).
+pub(super) fn busy_form(id: i64, pairs: &Pairs, csrf: &str) -> super::ResultResponse {
+    let dropped = !keepable(pairs.iter());
     let hidden = if dropped {
         Vec::new()
     } else {
@@ -409,7 +409,7 @@ pub(super) async fn busy_form(
     busy_page(&BusyTemplate {
         sheet: id,
         action: &format!("/private-sheets/{id}"),
-        csrf: &csrf,
+        csrf,
         unit: None,
         hidden,
         value: None,

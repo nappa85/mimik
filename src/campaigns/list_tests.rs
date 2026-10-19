@@ -3456,18 +3456,8 @@ async fn lantern_reach_list_sheet_end_to_end() {
     assert!(html.contains("Advisory checks: 0 violated"));
 }
 
-/// Plan §6 (report-only, with a bound): a slow 5 MiB upload by a signed-in principal never
-/// holds the runtime (JOBS) permit. Since slice 1.5a review round 1 the edit save takes the
-/// permit itself (the D-X3 wait), after its body is read, and the 5 s request timeout ends
-/// the upload first (was: taken before the body, held up to that timeout).
-#[tokio::test]
-async fn slow_5mib_upload_holds_the_runtime_permit_at_most_the_request_timeout() {
-    use tower::ServiceExt;
-    let _auth_lock = crate::auth::test_resource_lock().await;
-    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
-    let setup = list_setup(&list_definition()).await;
-    create_rows(&setup, 1).await;
-    // 5 MiB in 64 chunks, one every 100 ms: the body would take 6.4 s.
+/// A 5 MiB body trickled in 64 chunks, one every 100 ms (6.4 s in all), as a POST to `path`.
+fn trickled_post(setup: &Setup, path: &str) -> axum::http::Request<axum::body::Body> {
     let chunk = super::super::web::SHEET_POST_BYTES / 64;
     let chunks = futures_util::stream::unfold(0_usize, move |sent| async move {
         if sent == 64 {
@@ -3479,41 +3469,82 @@ async fn slow_5mib_upload_holds_the_runtime_permit_at_most_the_request_timeout()
             sent + 1,
         ))
     });
-    let request = axum::http::Request::builder()
-        .uri("/private-sheets/1")
+    axum::http::Request::builder()
+        .uri(path)
         .method("POST")
         .header("host", "127.0.0.1:3000")
         .header("cookie", setup.auth[1].fixture_cookie())
         .header("origin", "http://127.0.0.1:3000")
         .header("content-type", "application/x-www-form-urlencoded")
         .body(axum::body::Body::from_stream(chunks))
-        .unwrap();
-    let started = std::time::Instant::now();
-    let upload = tokio::spawn(setup.app.clone().oneshot(request));
-    let mut blocked = std::time::Duration::ZERO;
+        .unwrap()
+}
+
+/// Polls the runtime permit every 50 ms until `upload` ends (deadline 20 s): when it was
+/// last busy, and the response.
+async fn watch_permit(
+    upload: tokio::task::JoinHandle<Result<axum::response::Response, std::convert::Infallible>>,
+    started: std::time::Instant,
+) -> (Option<std::time::Duration>, axum::response::Response) {
+    let mut busy = None;
     while !upload.is_finished() {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        match crate::definitions::admit() {
-            Ok(permit) => drop(permit),
-            Err(_) => blocked = started.elapsed(),
-        }
         assert!(
             started.elapsed() < std::time::Duration::from_secs(20),
             "the upload never ended"
         );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        match crate::definitions::admit() {
+            Ok(permit) => drop(permit),
+            Err(_) => busy = Some(started.elapsed()),
+        }
     }
-    let response = upload.await.unwrap().unwrap();
+    (busy, upload.await.unwrap().unwrap())
+}
+
+/// Plan §6 (report-only, with a bound): a slow 5 MiB create upload holds the runtime (JOBS)
+/// permit, taken before the body, for at most the 5 s request timeout, then gets 408.
+#[tokio::test]
+async fn slow_create_upload_holds_the_runtime_permit_at_most_the_request_timeout() {
+    use tower::ServiceExt;
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    let request = trickled_post(&setup, &create_path(&setup));
+    let started = std::time::Instant::now();
+    let upload = tokio::spawn(setup.app.clone().oneshot(request));
+    let (busy, response) = watch_permit(upload, started).await;
     println!(
-        "slow 5 MiB upload: ended after {:?}, runtime permit last busy at {blocked:?}, response {}",
+        "slow 5 MiB create upload: permit last busy at {busy:?}, response {}",
+        response.status()
+    );
+    let busy = busy.expect("the create save holds the permit while it buffers");
+    assert!(busy <= std::time::Duration::from_millis(5_600), "{busy:?}");
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    // Released: a new request gets it at once.
+    drop(crate::definitions::admit().expect("released"));
+}
+
+/// Slice 1.5a review: the edit save buffers its body outside the runtime permit and takes the
+/// permit itself (the D-X3 wait), so a slow 5 MiB upload never holds it; the 5 s request
+/// timeout ends it with 408.
+#[tokio::test]
+async fn slow_edit_upload_never_holds_the_runtime_permit() {
+    use tower::ServiceExt;
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = list_setup(&list_definition()).await;
+    create_rows(&setup, 1).await;
+    let request = trickled_post(&setup, "/private-sheets/1");
+    let started = std::time::Instant::now();
+    let upload = tokio::spawn(setup.app.clone().oneshot(request));
+    let (busy, response) = watch_permit(upload, started).await;
+    println!(
+        "slow 5 MiB edit upload: ended after {:?}, permit last busy at {busy:?}, response {}",
         started.elapsed(),
         response.status()
     );
-    assert_eq!(
-        blocked,
-        std::time::Duration::ZERO,
-        "the permit was never held"
-    );
-    assert_eq!(response.status(), axum::http::StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(busy, None, "the permit was never held");
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
     assert!(started.elapsed() <= std::time::Duration::from_millis(5_600));
 }
 

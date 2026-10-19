@@ -382,8 +382,8 @@ editable; a per-property `editable: false` flag and an item catalogue are a late
   refuses anything else with 422, atomically. The create and edit POSTs accept bodies up to
   5 MiB; a logged-in principal (editor or not) can make the server buffer up to 5 MiB
   without a valid CSRF token for at most the 5 s request timeout, holding a request permit
-  and the runtime permit. The whole body must arrive within that 5 s, so a 5 MiB upload
-  needs about 8.4 Mbit/s. A re-render echoes the draft only when its decoded values total ≤
+  (and, on create, the runtime permit). The whole body must arrive within that 5 s, so a
+  5 MiB upload needs about 8.4 Mbit/s. A re-render echoes the draft only when its decoded values total ≤
   1 MiB (a larger draft could never be stored); otherwise it answers 422 with an alert:
   "Nothing was saved; copy large text before submitting." Each submitted string is echoed
   in full at most once (the submitted revision included); second visible contexts show a
@@ -415,10 +415,15 @@ editable; a per-property `editable: false` flag and an item catalogue are a late
     saved before this change may hold CR LF, and its next save rewrites it to LF as a new
     revision, while history keeps the earlier revision unchanged.
 - **Large bodies and permits.** The 5 MiB limit is enforced on the body itself, with or
-  without a `Content-Length`. The single runtime permit is taken before the body is read, so
-  buffering happens under it: at most one sheet POST (≤ 5 MiB) buffers at a time, and any
-  other runtime request answers 503 meanwhile. This is an accepted risk, alongside the 5 s
-  slow-upload hold.
+  without a `Content-Length`. On **create** the single runtime permit is taken before the
+  body is read, so buffering happens under it: at most one create POST (≤ 5 MiB) buffers at a
+  time, and any other runtime request answers 503 meanwhile; this is an accepted risk,
+  alongside the 5 s slow-upload hold. On **edit** (the full form and, since assisted sheet
+  slice 1.5a, the list forms) the body is buffered and parsed outside the permit; then CSRF
+  and the session are checked and the save waits up to 2 s for the permit (D-X3). So up to 8
+  edit bodies (the auth layer's request slots) of 5 MiB each, about 40 MiB raw, can be
+  buffered at once, and a slow edit upload never holds the permit. Unit saves (`meta/…`,
+  `fields/…`) take at most 256 KiB, buffered the same way.
 - **Lost re-render.** If edit rights are lost between a rejected save and its re-render, the
   answer is a plain 403 and the draft is not re-rendered; nothing is saved.
 - **Page-size bound.** It covers the editor chrome and controls, not the formula sections of

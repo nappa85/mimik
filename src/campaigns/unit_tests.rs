@@ -1257,3 +1257,72 @@ async fn save_buttons_are_named_by_their_unit() {
         .unwrap();
     assert_eq!(default.value().attr("id"), Some("save-0"));
 }
+
+// ---- Review round 2 ----
+
+/// Sol Minor 1 (round 2): the edit save parses and checks CSRF and the session before it
+/// waits for the permit, so a forged token is refused at once while the server is busy.
+#[tokio::test]
+async fn a_forged_edit_is_refused_at_once_while_busy() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    created(&setup, &[]).await;
+    let html = page(&setup).await;
+    let (action, mut pairs) = unit_form_list(&html, "row-4-0-1");
+    pairs[0].1 = "b".repeat(64);
+    let holder = hold(3);
+    let started = std::time::Instant::now();
+    let response = document_post(&setup, &action, pairs).await;
+    let elapsed = started.elapsed();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
+    holder.await.unwrap();
+}
+
+/// Sonnet F3 (round 2): the busy page's echo bound counts keys and per-pair markup too. A
+/// form of 24,000 unique 70-byte quote keys is not kept (the page says so and stays small);
+/// a form within the bound is kept, and the page stays within the fixed chrome plus five
+/// times the echo bound (plan D7).
+#[tokio::test]
+async fn the_busy_page_of_a_form_is_bounded() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    created(&setup, &[]).await;
+    let mut wide = vec![pair("csrf", &"a".repeat(64))];
+    wide.extend((0..24_000).map(|k| pair(&format!("{}{k:06}", "\"".repeat(64)), "")));
+    let holder = hold(3);
+    let response = document_post(&setup, "/private-sheets/1", wide).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let busy = body(response).await;
+    holder.await.unwrap();
+    assert!(
+        busy.contains("larger than this page can keep"),
+        "{}",
+        &busy[..2000]
+    );
+    assert!(busy.len() < 4096, "{} bytes", busy.len());
+    // Within the bound: one value of 1,000,000 quotes is kept, escaped once.
+    let quotes = "\"".repeat(1_000_000);
+    let kept = vec![
+        pair("csrf", &"a".repeat(64)),
+        pair("revision", "1"),
+        pair("notes", &quotes),
+    ];
+    let holder = hold(3);
+    let response = document_post(&setup, "/private-sheets/1", kept).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let busy = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    holder.await.unwrap();
+    assert!(busy.contains("Your changes are kept"));
+    assert_eq!(busy.matches(&"&#34;".repeat(1_000_000)).count(), 1);
+    let bound = super::list_tests::FIXED_PAGE_BYTES + 5 * super::super::web::ECHO_BYTES;
+    assert!(busy.len() <= bound, "{} > {bound}", busy.len());
+}

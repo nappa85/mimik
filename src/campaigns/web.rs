@@ -1529,18 +1529,36 @@ async fn create_sheet(
     save_private(state, session, id, Some(version.version), permit, body).await
 }
 /// The full-form and list-form save (slice 1.5a review, Sonnet M1): like a unit save it
+/// parses its body and checks CSRF and the session (review round 2, Sol Minor 1), then
 /// waits a short, bounded time for the runtime permit (D-X3), then answers the styled busy
-/// page that keeps every submitted pair.
+/// page that keeps every submitted pair. The body is buffered and parsed outside the permit;
+/// its size and pair count are capped (5 MiB, 65,536 pairs) and the auth layer admits at
+/// most 8 requests at once.
 async fn edit_sheet(
     State(state): State<AuthState>,
     session: Session,
     Path(id): Path<i64>,
     body: axum::body::Bytes,
 ) -> ResultResponse {
+    let pairs = parse_sheet_form(body).await?;
+    auth::check_csrf(&session, pairs.csrf()?).await?;
+    let auth = auth::request_auth(&state, &session).await?;
     let Some(permit) = crate::definitions::admit_within(unit_web::PERMIT_WAIT).await else {
-        return unit_web::busy_form(&state, &session, id, body).await;
+        let csrf = auth::token(&session)
+            .await?
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+        return unit_web::busy_form(id, &pairs, &csrf);
     };
-    save_private(state, session, id, None, permit, body).await
+    save_parsed(&state, &session, (id, None), (auth, permit), pairs).await
+}
+
+/// Parses a sheet POST body (up to 65,536 pairs) off the async workers.
+async fn parse_sheet_form(body: axum::body::Bytes) -> Result<super::transport::Pairs, StatusCode> {
+    tokio::task::spawn_blocking(move || {
+        super::transport::Pairs::parse_limited(&body, super::transport::SHEET_FORM_PAIRS)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
 }
 
 /// Closed-key admission of a sheet POST (plan D2). It is O(pairs) but may generate up to
@@ -1717,18 +1735,25 @@ async fn save_private(
     permit: OwnedSemaphorePermit,
     body: axum::body::Bytes,
 ) -> ResultResponse {
-    let (pairs, permit) = tokio::task::spawn_blocking(move || {
-        Ok::<_, StatusCode>((
-            super::transport::Pairs::parse_limited(&body, super::transport::SHEET_FORM_PAIRS)?,
-            permit,
-        ))
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+    // The create save holds the permit while it parses (it is taken before the body).
+    let pairs = parse_sheet_form(body).await?;
     // Precedence (plan D4): parse, then CSRF and authorization, then key admission, so a
     // bad key set never answers anything but 403 to a caller without a token or rights.
     auth::check_csrf(&session, pairs.csrf()?).await?;
     let auth = auth::request_auth(&state, &session).await?;
+    save_parsed(&state, &session, (id, version), (auth, permit), pairs).await
+}
+
+/// A sheet save after parsing, CSRF and session auth: rights, key admission, then the
+/// draft operation or the save.
+async fn save_parsed(
+    state: &AuthState,
+    session: &Session,
+    (id, version): (i64, Option<i64>),
+    (auth, permit): (auth::RequestAuth, OwnedSemaphorePermit),
+    pairs: super::transport::Pairs,
+) -> ResultResponse {
+    let (state, session) = (state.clone(), session.clone());
     let (view, permit) = load_editor(&state, auth.clone(), id, version, permit).await?;
     if !view.editable {
         return Err(StatusCode::FORBIDDEN);
