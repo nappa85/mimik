@@ -9,13 +9,15 @@ under a lock probe (`LockProbe`, `publish_span`) that bounds its write-lock hold
 last free probe that read the old version count and the first that read the new one, with a
 contender that writes like the server (BEGIN IMMEDIATE, 5 s busy timeout) while the publish
 holds the lock. R8 hold evidence comes from `--no-contender` runs (conservative upper bound);
-runs with the contender report its wait and success, and loose bounds. Cases: v1, v2 (update) and v3 of the calibrated shape, then five
+runs with the contender report its wait and success, and loose bounds. Cases: v1, v2
+(update) and v3 of the calibrated shape, then five
 shapes at the caps, each published and updated: maximum fan-out, FTS-heavy names (4- and
 3-character tokens), 64-scalar keys and declaration-heavy types (plan docs/catalogue-plan.md
 §12-§14). They are the worst measured cases on the profiling host, not a proof that no
-admitted shape costs more. The R8 gate (`--max-hold-ms`, 2,000 by default) exits 1 when a
-hold's upper bound exceeds it, cannot be bounded, or the contender did not wait through the
-publish and succeed.
+admitted shape costs more. The R8 gate (`--max-hold-ms`, finite and positive, 2,000 by
+default) exits 1 when no publication was gated, a hold's upper bound exceeds the budget or
+cannot be bounded, or the contender was requested and did not wait through a publish and
+succeed. A `--no-contender` run gates the hold only; R8 needs a passing run of each kind.
 """
 
 import argparse
@@ -72,6 +74,7 @@ MAX_ID = 64
 MAX_TEXT_PROPERTY = 1_000
 MAX_OWNER_TEXT = 20_000
 MAX_UNIT_REFERENCES = 6_144
+MAX_DISTINCT_UNITS = 16_384
 OWNER_TOTAL = 1024 * 1024
 RUST_LIMITS = {
     "MAX_BYTES": MAX_DRAFT_BYTES,
@@ -86,6 +89,7 @@ RUST_LIMITS = {
     "MAX_TEXT_PROPERTY": MAX_TEXT_PROPERTY,
     "MAX_OWNER_TEXT": MAX_OWNER_TEXT,
     "MAX_UNIT_REFERENCES": MAX_UNIT_REFERENCES,
+    "MAX_DISTINCT_UNITS": MAX_DISTINCT_UNITS,
     "MAX_OWNER_TEXT_TOTAL": OWNER_TOTAL,
 }
 FANOUT_HEADROOM = 16 * 1024
@@ -108,8 +112,8 @@ def words(rng, count):
 
 def draft(entries, extra=0, catalogue_id="spells", capacity=None):
     """A catalogue at the plan's maxima: 8 types, every 8th entry owner-written (owner text
-    sized so `capacity` entries hold 1 MiB in total), the others citing 1 unit (7,168
-    references at 8,192 entries, under the 8,192 cap; plan §13)."""
+    sized so `capacity` entries hold 1 MiB in total), the others citing 1 unit (5,376
+    references at 6,144 entries, under the 6,144 reference cap; plan §14)."""
     rng = Rng(1000)
     types = [
         {
@@ -308,8 +312,8 @@ def short_token(counter, letters="abcdefghijklmnopqrstuvwxyz0123456789"):
 
 def fts3_name(_rng, index):
     """A 99-scalar name of 25 three-character tokens (plan §14): every token is its own
-    3-character prefix, and the 204,800 tokens cycle through all 46,656, so each appears
-    four or five times (more postings per token than `fts_name`)."""
+    3-character prefix, and at 6,144 entries the 153,600 tokens cycle through all 46,656,
+    so each appears three or four times (more postings per token than `fts_name`)."""
     return " ".join(short_token((index * 25 + k) % 36**3) for k in range(25))[:MAX_NAME]
 
 
@@ -342,7 +346,8 @@ def declaration_heavy(
     """Declaration-heavy (plan §13): 32 types x 16 enum properties x 128 options (65,536
     declared choices, compact ids and labels), every entry holding 16 enum values, and the
     most references that fit 4 MiB beside them, up to `references` (a multiple of 16, found
-    by bisection; 9,056 fit, so at the 8,192 cap every reference is used)."""
+    by bisection; 9,056 fit at 8,192 entries, so at the 6,144 reference cap every
+    reference is used)."""
 
     def build(count):
         return capped(
@@ -566,11 +571,19 @@ def span_ms(span, origin, contender):
         "bounds": "loose: the contender may hold the lock inside the span"
         if contender
         else "conservative upper; lower indicative",
-        "acquired_after_ms": [
+        # The outer span (last free probe reading the old version count to the first reading
+        # the new one) contains the publish by construction. The endpoint intervals use the
+        # first and last refused probes, which may belong to the store-open lock or the
+        # contender, so they are indicative only (Sol round 4).
+        "span_after_ms": [
+            floor_ms(span["acquired"][0] - origin),
+            ceil_ms(span["released"][1] - origin),
+        ],
+        "indicative_acquired_after_ms": [
             floor_ms(span["acquired"][0] - origin),
             ceil_ms(span["acquired"][1] - origin),
         ],
-        "released_after_ms": [
+        "indicative_released_after_ms": [
             floor_ms(span["released"][0] - origin),
             ceil_ms(span["released"][1] - origin),
         ],
@@ -817,6 +830,45 @@ def r8_failures(name, publish, max_hold_ms):
     return failures
 
 
+def r8_gate(report, max_hold_ms, contender_expected):
+    """The report's R8 gate (plan §14), fail-closed: it fails when no publication was gated,
+    when the contender was requested but no publication observed it, or when any
+    publication fails `r8_failures`. Runs without the contender gate the hold only; R8's
+    "a concurrent save waits and succeeds" needs a passing run with the contender too."""
+    failures = []
+    publications = 0
+    contender_observed = False
+    for name, case in report.items():
+        if isinstance(case, dict) and isinstance(case.get("publish"), dict):
+            publications += 1
+            contender_observed |= case["publish"]["lock"].get("contender") is not None
+            failures += r8_failures(name, case["publish"], max_hold_ms)
+    if publications == 0:
+        failures.append("no publication was gated")
+    elif contender_expected and not contender_observed:
+        failures.append("the contender was requested but never observed")
+    return {
+        "max_hold_ms": max_hold_ms,
+        "publications": publications,
+        "contender_observed": contender_observed,
+        "scope": "hold and contender" if contender_expected else "hold only",
+        "passed": not failures,
+        "failures": failures,
+    }
+
+
+def hold_budget(text):
+    """`--max-hold-ms`: a finite, positive number of milliseconds (`hold > nan` is always
+    false, so a NaN budget would pass every hold)."""
+    try:
+        value = float(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from error
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError("the budget must be finite and positive")
+    return value
+
+
 def publish_case(binary, database, value, name, root, revision):
     """Import `value` over draft `revision` (0 creates it) and compare it; returns the rows,
     the draft id and the ticket."""
@@ -888,7 +940,7 @@ def main():
     )
     parser.add_argument(
         "--max-hold-ms",
-        type=float,
+        type=hold_budget,
         default=2000.0,
         help="R8 gate: fail when a publish's hold upper bound exceeds this (plan §14)",
     )
@@ -976,17 +1028,9 @@ def main():
         verified = json.loads(report["verify"].pop("stdout"))
         report["verify"]["status"] = verified["status"]
         report["verify"]["versions"] = verified["versions"]
-        failures = []
-        for name, case in report.items():
-            if isinstance(case, dict) and isinstance(case.get("publish"), dict):
-                failures += r8_failures(name, case["publish"], args.max_hold_ms)
-        report["r8_gate"] = {
-            "max_hold_ms": args.max_hold_ms,
-            "passed": not failures,
-            "failures": failures,
-        }
+        report["r8_gate"] = r8_gate(report, args.max_hold_ms, contend is not None)
         print(json.dumps(report, indent=2))
-        if failures:
+        if not report["r8_gate"]["passed"]:
             sys.exit(1)
 
 

@@ -19,10 +19,10 @@ pub(super) const MAX_DISTINCT_UNITS: usize = 16_384;
 /// together with the entry and byte caps. 6,144 is 1 per entry at the 6,144-entry cap. The
 /// worst measured case on the profiling host at these caps (6,144 entries of 99-scalar names
 /// of 3-character tokens, every reference used, 4 MiB, updating the previous version) held
-/// the lock for at most 1.81 s (conservative upper bound over three runs, 1,804.0 ms); at
-/// 8,192 entries the 3-character-token and 64-scalar-key shapes exceeded the 2 s budget
-/// even with 4,096 references, and 6,144 entries with 8,192 references reached 1.99 s
-/// (plan §14). This is host-specific evidence, not a proven bound for every
+/// the lock for at most 1.81 s (conservative upper bound over the closing runs, 1,804.0 ms).
+/// At 8,192 entries the 64-scalar-key shape exceeded the 2 s budget with 6,144 references
+/// and the 3-character-token shape still exceeded it once with 4,096; 6,144 entries with
+/// 8,192 references reached 1.99 s (plan §14). This is host-specific evidence, not a proven bound for every
 /// admitted shape.
 pub(super) const MAX_UNIT_REFERENCES: usize = 6_144;
 const _: () = assert!(MAX_UNIT_REFERENCES <= MAX_DISTINCT_UNITS);
@@ -193,7 +193,7 @@ pub(super) const BLANK_LOOKING: [char; 5] =
 /// invisible format character (Cf) nor a nonspacing mark (Mn: combining marks, variation
 /// selectors, which alone render as nothing or a dotted circle). Owner text keeps Cf for bidi
 /// prose and marks combine with a base, but neither alone (plan §13, §14).
-fn label(value: &str) -> bool {
+pub(super) fn label(value: &str) -> bool {
     use unicode_general_category::{GeneralCategory, get_general_category};
     value.chars().any(|scalar| {
         !scalar.is_whitespace()

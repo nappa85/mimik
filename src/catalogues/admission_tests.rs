@@ -1034,6 +1034,22 @@ fn admission_profile_one_is_pinned() {
         admission::BLANK_LOOKING,
         ['\u{2800}', '\u{3164}', '\u{115f}', '\u{1160}', '\u{ffa0}']
     );
+    // The required-text predicate is frozen too (Space Bunny round 3 N4, Sol round 4): a
+    // scalar that is not whitespace, blank-looking, Cf or Mn must be present.
+    for (text, admitted) in [
+        ("a", true),
+        ("e\u{0301}", true),
+        ("\u{2764}\u{fe0f}", true),
+        ("\u{2067}\u{646}\u{2069}", true),
+        ("\u{20e3}", true),
+        ("", false),
+        (" \t\n", false),
+        ("\u{2800}\u{3164}", false),
+        ("\u{200b}\u{2067}", false),
+        ("\u{034f}\u{fe0f}\u{17b4}\u{17b5}", false),
+    ] {
+        assert_eq!(admission::label(text), admitted, "{text:?}");
+    }
     assert_eq!(
         hex::encode(<sha2::Sha256 as sha2::Digest>::digest(include_bytes!(
             "../../schemas/catalogue-v1.json"

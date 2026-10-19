@@ -148,9 +148,10 @@ The entry and reference caps bound publication's write-lock hold together with t
 (the seal compares every reference row; the name index re-tokenizes every name). The worst
 measured case on the profiling host, 6,144 entries with 99-scalar names of 3-character
 tokens updating the previous version at 4 MiB with every reference used, held the lock for
-at most 1.81 s (conservative upper bound, plan §14). At 8,192 entries that shape and one
-with 64-scalar keys exceeded the plan's 2 s budget even with the references lowered to
-4,096, and 6,144 entries with 8,192 references reached 1.99 s. This is host-specific
+at most 1.81 s (conservative upper bound, plan §14). At 8,192 entries a shape with 64-scalar
+keys exceeded the plan's 2 s budget with 6,144 references, the 3-character-token shape still
+exceeded it in one of three runs with 4,096, and 6,144 entries with 8,192 references reached
+1.99 s. This is host-specific
 evidence, not a bound proven for every admitted shape.
 
 The catalogue profile is separate from the definition decoder: `definitions::decode::MAX_NODES`

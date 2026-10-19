@@ -1553,3 +1553,30 @@ error, untouched here — so the helper suite is not fully green.
 
 **Not yet done:** independent re-review of these fixes; the step-2 review record in
 `docs/reviews/`.
+
+## 15. Step 2 round-4 review fixes (2026-10-19)
+
+Round 4 reviewed `4a7c399`:
+- Sonnet: MERGE-READY.
+- Space Bunny: MERGE-READY.
+- Sol: FIX THEN MERGE. Its one Major is in the profiler's R8 gate, not the application.
+
+The record is `docs/reviews/2026-10-19-catalogue-step2.md`.
+
+| Item | Change | Red → green |
+|---|---|---|
+| Sol 1 (Major, tool): the gate passed with zero gated publications (`--fanout-only --no-fanout`) or a NaN/inf budget (`hold > nan` is always false) | `r8_gate()` fails when no publication was gated, or when the contender was requested but no publication observed it. It reports `publications`, `contender_observed` and `scope` (a `--no-contender` run gates the hold only; R8 needs a passing run of each kind). `hold_budget` is the `--max-hold-ms` type and rejects non-finite and ≤ 0 values | Red: the test module failed to import (`r8_gate`, `hold_budget` absent). On the old code, the inline gate passed with no publications and argparse's `float` accepted `nan`. Green: `test_the_gate_fails_closed_without_publications_or_contender_evidence`, `test_the_budget_must_be_finite_and_positive` |
+| Sol 2: the endpoint intervals can belong to the store-open lock or the contender | `span_after_ms`, the outer span, is the reported bound. The endpoint intervals become `indicative_acquired_after_ms` / `indicative_released_after_ms` | Red: `test_bounds_round_outward` asserted the new keys. Green |
+| Sol 3, Sonnet, Space Bunny M1: stale "8,192 cap" docstrings and a wrong token count. The comment and docs said the keys shape failed at 4,096 references, but it failed at 6,144 | Docstrings corrected. `admission.rs` and `catalogue-publication.md` now say: keys failed at 6,144 references; fts3 failed once in three runs at 4,096 | Prose only |
+| Space Bunny M2, Sonnet: `MAX_DISTINCT_UNITS` was hard-coded in Python; a `MAX_*` name defined in both Rust modules would silently overwrite | `MAX_DISTINCT_UNITS` added to `RUST_LIMITS` and used by the test. `rust_limits()` raises on a duplicate name | Guard: it passes on this tree |
+| Space Bunny N4: the profile-1 pin did not freeze the required-text predicate | `label` is now `pub(super)`. `admission_profile_one_is_pinned` asserts it on a frozen accept/reject table: Mn, Cf, blank-looking characters, Me (U+20E3 accepted) and isolated RTL | Guard |
+| Sol 4 (Minor): the real-lock profiler test records "released" before COMMIT | **Open, follow-up.** The gate's bound does not depend on it, because the closing free probe must take the write lock itself. A controlled commit-phase regression is listed in the review record | — |
+
+**Gate** (container, `--cpus 6`, Monday 03:53–04:03 and 04:04–04:09):
+- `cargo fmt --check`: clean.
+- Pedantic Clippy (`--all-targets --all-features -D warnings`): clean.
+- `cargo test --locked --all-targets --all-features`: 539 passed, 0 failed, 1 pre-existing ignored, over 37 binaries.
+- `ruff check tools` and `ruff format --check tools`: clean.
+- Tools unittest (`discover -s tools` from the root): 747 run, 11 skipped, **1 error, the known `test_run_queue.ProcessLauncherTests.test_fake_runner_script`**.
+
+There were no profiling reruns. No cap or shape changed, and the gate's bound computation (`publish_span`) is unchanged.

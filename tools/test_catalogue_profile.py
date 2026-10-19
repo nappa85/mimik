@@ -1,5 +1,6 @@
 """The catalogue profile draft must sit at the plan's maxima without exceeding any limit."""
 
+import argparse
 import json
 import re
 import sqlite3
@@ -10,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from catalogue_profile import (
+    MAX_DISTINCT_UNITS,
     MAX_DRAFT_BYTES,
     MAX_ENTRIES,
     MAX_ID,
@@ -28,10 +30,12 @@ from catalogue_profile import (
     fanout,
     fts3_heavy,
     fts_heavy,
+    hold_budget,
     long_keys,
     probe_publish,
     publish_span,
     r8_failures,
+    r8_gate,
     span_ms,
 )
 
@@ -47,6 +51,8 @@ def rust_limits():
             value = 1
             for factor in expression.split("*"):
                 value *= int(factor.strip().replace("_", ""))
+            if const in found:
+                raise AssertionError(f"{const} is defined in more than one catalogue module")
             found[const] = value
     return found
 
@@ -81,7 +87,7 @@ class DraftShapeTests(unittest.TestCase):
                 for entry in last["entries"]
                 for unit in entry["description"].get("units", [])
             }
-            self.assertLessEqual(len(units), 16_384)
+            self.assertLessEqual(len(units), MAX_DISTINCT_UNITS)
             references = sum(
                 len(entry["description"].get("units", [])) for entry in last["entries"]
             )
@@ -207,7 +213,7 @@ class WorstShapeTests(unittest.TestCase):
     def test_declaration_heavy_declares_every_type_property_and_option(self):
         first, second = declaration_heavy(MAX_ENTRIES, 0), declaration_heavy(MAX_ENTRIES, 1)
         for value in (first, second):
-            # At the 8,192 cap every reference fits beside the declarations.
+            # At the reference cap every reference fits beside the declarations.
             self.assertEqual(self.common(value), MAX_UNIT_REFERENCES)
             self.assertEqual(len(value["entry_types"]), 32)
             for declared in value["entry_types"]:
@@ -341,8 +347,12 @@ class PublishSpanTests(unittest.TestCase):
         shown = span_ms(span, 10.0, False)
         self.assertEqual(shown["hold_ms_upper"], 1819.1)
         self.assertEqual(shown["hold_ms_lower"], 1817.9)
-        self.assertEqual(shown["acquired_after_ms"], [0.0, 1.1])
-        self.assertEqual(shown["released_after_ms"], [1819.0, 1819.1])
+        # Refused probes are not attributed to the publish, so its endpoints are indicative;
+        # the outer span (last old-count free probe to first new-count one) is the bound.
+        self.assertNotIn("acquired_after_ms", shown)
+        self.assertEqual(shown["indicative_acquired_after_ms"], [0.0, 1.1])
+        self.assertEqual(shown["indicative_released_after_ms"], [1819.0, 1819.1])
+        self.assertEqual(shown["span_after_ms"], [0.0, 1819.1])
         self.assertIn("conservative", shown["bounds"])
         self.assertIn("loose", span_ms(span, 10.0, True)["bounds"])
 
@@ -366,6 +376,30 @@ class R8GateTests(unittest.TestCase):
             {"started": False, "success": False, "waited_through_publish": False},
         ):
             self.assertEqual(len(r8_failures("a", self.publish(1.0, bad), 2000.0)), 1)
+
+    def test_the_gate_fails_closed_without_publications_or_contender_evidence(self):
+        # Sol round 4: zero gated publications must not pass, nor a run whose contender was
+        # requested but never observed.
+        good = {"success": True, "waited_through_publish": True}
+        self.assertFalse(r8_gate({}, 2000.0, contender_expected=False)["passed"])
+        self.assertFalse(r8_gate({"rebuild": {}}, 2000.0, contender_expected=True)["passed"])
+        no_contender = {"v1": {"publish": self.publish(1.0)}}
+        gate = r8_gate(no_contender, 2000.0, contender_expected=False)
+        self.assertTrue(gate["passed"])
+        self.assertEqual(gate["publications"], 1)
+        self.assertFalse(gate["contender_observed"])
+        self.assertFalse(r8_gate(no_contender, 2000.0, contender_expected=True)["passed"])
+        observed = {"v1": {"publish": self.publish(1.0, good)}}
+        gate = r8_gate(observed, 2000.0, contender_expected=True)
+        self.assertTrue(gate["passed"])
+        self.assertTrue(gate["contender_observed"])
+
+    def test_the_budget_must_be_finite_and_positive(self):
+        # Sol round 4: `hold > nan` is always false, so a NaN budget passed every hold.
+        self.assertEqual(hold_budget("2000"), 2000.0)
+        for bad in ("nan", "inf", "-inf", "0", "-1", "x"):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                hold_budget(bad)
 
 
 class ProbeLifecycleTests(unittest.TestCase):
