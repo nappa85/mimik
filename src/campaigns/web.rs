@@ -90,6 +90,16 @@ pub(super) static REJECTED_EDITOR_KEPT_PERMIT: Mutex<Vec<bool>> = Mutex::new(Vec
 #[cfg(test)]
 pub(super) static AFTER_FAILED_SAVE: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
 
+/// A planned unit save signals the first sender, then waits for the receiver before it
+/// writes (tests only: a concurrent writer between planning and the writer).
+#[cfg(test)]
+pub(super) type PlanHook = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+#[cfg(test)]
+pub(super) static AFTER_UNIT_PLAN: Mutex<Option<PlanHook>> = Mutex::new(None);
+
 /// Body limit of the private sheet create and edit POSTs (plan D7): stored values are at
 /// most 1 MiB, URL encoding expands them at most 3×, and keys add at most 65,536 × 16 bytes.
 pub(super) const SHEET_POST_BYTES: usize = 5 * 1024 * 1024;
@@ -151,13 +161,28 @@ pub(crate) fn routes() -> Router<AuthState> {
         )
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn(runtime));
-    // Per-field saves (slice 1.5a) take the runtime permit themselves, with a bounded wait
-    // (D-X3), so they are outside the `runtime` layer.
+    // Per-field and per-cell saves (slices 1.5a, 1.5b) take the runtime permit themselves,
+    // with a bounded wait (D-X3), so they are outside the `runtime` layer.
     let units = Router::new()
         .route("/private-sheets/{id}/meta/{which}", post(unit_web::meta))
         .route("/private-sheets/{id}/fields/{field}", post(unit_web::field))
+        .route(
+            "/private-sheets/{id}/cells/{f}/{r}/{p}",
+            post(unit_web::cell),
+        )
         .layer(DefaultBodyLimit::max(unit_web::UNIT_POST_BYTES))
         .route_layer(middleware::from_fn(signed_in))
+        // A new row may carry every property of a row, as the full form may.
+        .route(
+            "/private-sheets/{id}/lists/{f}/rows",
+            sheet_post(unit_web::new_row),
+        )
+        .route(
+            "/private-sheets/{id}/lists/{f}/rows/{r}/{action}",
+            post(unit_web::row)
+                .layer(DefaultBodyLimit::max(unit_web::ROW_POST_BYTES))
+                .route_layer(middleware::from_fn(signed_in)),
+        )
         // The full-form and list-form save waits the same way (review round 1, Sonnet M1).
         .route("/private-sheets/{id}", sheet_post(edit_sheet));
     Router::new()
@@ -455,6 +480,27 @@ struct Version {
     version: i64,
 }
 
+/// A sheet view's optional focus after a row move (slice 1.5b review): `up-<f>-<r>` or
+/// `down-<f>-<r>`; anything else is ignored.
+#[derive(Deserialize, Default)]
+struct SheetQuery {
+    #[serde(default)]
+    focus: Option<String>,
+}
+
+impl SheetQuery {
+    fn focus(&self) -> Option<values::Focus> {
+        let (verb, rest) = self.focus.as_deref()?.split_once('-')?;
+        let (f, r) = rest.split_once('-')?;
+        let (f, r) = (values::index(f)?, values::index(r)?);
+        match verb {
+            "up" => Some(values::Focus::Up(f, r)),
+            "down" => Some(values::Focus::Down(f, r)),
+            _ => None,
+        }
+    }
+}
+
 struct FieldView {
     id: String,
     /// The DOM id suffix of the field's note, label and actions: its index in the
@@ -529,6 +575,13 @@ struct CellView {
     note: Option<NoteLine>,
     /// The switch offer and Undo from that note (slice 1.3).
     actions: Option<Actions>,
+    /// The name of the value control in its own form (slice 1.5b): `value` in a cell's
+    /// form, `row-<p>` in the new-row form.
+    name: String,
+    /// The value control of a refused cell save's or new row's draft gets `autofocus`, or
+    /// for a new row whose first property is optional, its Set/Not set select (slice 1.5b).
+    autofocus: bool,
+    focus_set: bool,
 }
 
 /// What a saved, editable page offers under a cell from its current note (slice 1.3): the
@@ -555,22 +608,25 @@ struct Offer {
     value: String,
 }
 
-/// Which of the page's two action forms (switch, Undo) any cell uses.
+/// Which of the page's shared action forms any cell or row uses: switch, Undo, and the row
+/// actions (slice 1.5b).
 #[derive(Default)]
 struct AssistForms {
     switch: bool,
     undo: bool,
+    rows: bool,
 }
 
 impl Actions {
     /// The offer and Undo of `address` from its current note, on a saved page the reader may
     /// edit; `None` when the note offers neither.
     ///
-    /// A row cell passes its known location (`located`), so rendering never searches rows.
+    /// A row cell passes its known location and indices (`located`), so rendering never
+    /// searches rows, and its buttons submit the short indexed note key (slice 1.5b, D7).
     fn of(
         view: &SheetView,
         address: &str,
-        located: Option<super::assist::Located<'_>>,
+        located: Option<(super::assist::Located<'_>, (usize, usize, usize))>,
         (key, labelled): (String, String),
         forms: &mut AssistForms,
     ) -> Option<Self> {
@@ -579,9 +635,12 @@ impl Actions {
         }
         let pin = view.immutable.as_ref()?;
         let stored = view.notes.current.get(address)?;
-        let located = match located {
-            Some(located) => located,
-            None => super::assist::locate(pin.definition(), &view.snapshot.data, address)?,
+        let (located, indices) = match located {
+            Some((located, indices)) => (located, Some(indices)),
+            None => (
+                super::assist::locate(pin.definition(), &view.snapshot.data, address)?,
+                None,
+            ),
         };
         let current = super::assist::value_at(&located, &view.snapshot.data);
         let offer = super::assist::switch_value(stored, current.as_ref()).and_then(|value| {
@@ -605,7 +664,10 @@ impl Actions {
         (offer.is_some() || undo.is_some()).then(|| Self {
             key,
             labelled,
-            note: super::assist::key(stored),
+            note: indices.map_or_else(
+                || super::assist::key(stored),
+                |indices| super::assist::indexed_key(stored.revision, indices),
+            ),
             offer,
             undo,
         })
@@ -795,14 +857,39 @@ impl RowView {
 /// A list field: its index `f` in the definition (the form key prefix), properties and rows.
 struct ListView {
     f: usize,
-    /// The sheet revision its list form carries (slice 1.5a): a list draft's submitted
-    /// revision, so a stale draft still conflicts, else the saved revision. Each submitted
-    /// revision is echoed once (plan D7).
+    /// The sheet revision its controls were read at: a list draft's submitted revision, so a
+    /// stale draft still conflicts, else the saved revision. Echoed once per form (plan D7).
     revision: String,
     properties: Vec<PropertyView>,
     rows: Vec<RowView>,
     /// The Add button gets `autofocus` (after Remove).
     focus_add: bool,
+    /// A saved list on a page with a form per unit (slice 1.5b): each cell is its own form
+    /// (`cells/{f}/{r}/{p}`), each row has Remove, Move up and Move down (page-level shared
+    /// form), and a new-row form ends the list. Otherwise the rows belong to the full form.
+    units: bool,
+    /// The list's latest row removal, while its row is still away: "Row removed · Undo"
+    /// (D-V), with the note key the Undo button submits.
+    removed: Option<String>,
+    /// The new-row form's controls (slice 1.5b); `None` when the list is full or not a
+    /// unit list.
+    new_row: Option<Vec<CellView>>,
+    /// A refused draft that no control can take any more (review round 1): a cell whose row
+    /// was removed, or a new row refused because the list is full. Shown read-only, to copy.
+    kept: Option<Kept>,
+}
+
+/// A draft kept read-only on the page: why, then each property with its value.
+struct Kept {
+    message: &'static str,
+    entries: Vec<KeptEntry>,
+}
+
+struct KeptEntry {
+    label: String,
+    /// An optional property's Set or Not set.
+    state: Option<&'static str>,
+    value: String,
 }
 
 impl ListView {
@@ -869,6 +956,9 @@ impl ListView {
                             }),
                             note,
                             actions: None,
+                            name: "value".into(),
+                            autofocus: false,
+                            focus_set: false,
                         }
                     })
                     .collect(),
@@ -882,6 +972,10 @@ impl ListView {
             properties,
             rows,
             focus_add: focus == Some(values::Focus::Add(f)),
+            units: false,
+            removed: None,
+            new_row: None,
+            kept: None,
         }
     }
     /// Adds the switch and Undo of each saved row cell (slice 1.3).
@@ -910,12 +1004,119 @@ impl ListView {
                 cell.actions = Actions::of(
                     view,
                     &address,
-                    Some(located),
+                    Some((located, (self.f, row.r, cell.p))),
                     (cell.key.clone(), labelled),
                     forms,
                 );
             }
         }
+    }
+    /// A saved list on a page with a form per unit (slice 1.5b): a refused cell save's draft
+    /// in its row (found by host ID), "Row removed · Undo" for the list's latest removal while
+    /// its row is away (D-V), and the new-row form (with a refused new row's draft).
+    fn units(
+        &mut self,
+        view: &SheetView,
+        field: &crate::definitions::Field,
+        draft: Option<&unit_web::UnitDraft>,
+        forms: &mut AssistForms,
+    ) {
+        let properties = values::properties(field);
+        self.units = true;
+        forms.rows |= !self.rows.is_empty();
+        if let Some((draft, p)) = draft.and_then(|draft| match draft.unit {
+            super::unit::Unit::Cell { f, p, .. } if f == self.f => Some((draft, p)),
+            _ => None,
+        }) && let Some(cell) = self
+            .rows
+            .iter_mut()
+            .find(|row| draft.host.as_deref() == Some(row.id.as_str()))
+            .and_then(|row| row.cells.get_mut(p))
+        {
+            cell.value.clone_from(&draft.value);
+            if properties[p].optional {
+                cell.state = draft.null.clone().unwrap_or_default();
+            }
+            cell.note = None;
+            cell.actions = None;
+            cell.autofocus = true;
+        } else if let Some((draft, p)) = draft.and_then(|draft| match draft.unit {
+            super::unit::Unit::Cell { f, p, .. } if f == self.f && draft.host.is_some() => {
+                Some((draft, p))
+            }
+            _ => None,
+        }) {
+            // Its row was removed: the draft is kept, never put into another row.
+            self.kept = Some(Kept {
+                message: "The row this entry was for has been removed, so it was not saved. \
+                          Your entry is kept below to copy into another row.",
+                entries: vec![KeptEntry {
+                    label: properties[p].label.clone(),
+                    state: properties[p]
+                        .optional
+                        .then(|| state_word(draft.null.as_deref())),
+                    value: draft.value.clone(),
+                }],
+            });
+        }
+        if let Some(pin) = &view.immutable
+            && let Some(stored) = view.notes.rows.get(&field.id)
+        {
+            let current =
+                super::assist::locate(pin.definition(), &view.snapshot.data, &stored.note.address)
+                    .and_then(|located| super::assist::value_at(&located, &view.snapshot.data));
+            if super::assist::removal_undoable(stored, current.as_ref()) {
+                self.removed = Some(super::assist::key(stored));
+                forms.undo = true;
+            }
+        }
+        let submitted = draft
+            .filter(|draft| draft.unit == super::unit::Unit::NewRow(self.f))
+            .and_then(|draft| draft.row.as_ref());
+        if self.full() {
+            // A new row refused because the list filled up: kept to copy, not addable.
+            if let Some(row) = submitted {
+                self.kept = Some(Kept {
+                    message: "This list is full (256 rows), so your new row was not added. \
+                              What you entered is kept below to copy; remove a row first.",
+                    entries: properties
+                        .iter()
+                        .enumerate()
+                        .map(|(p, property)| KeptEntry {
+                            label: property.label.clone(),
+                            state: property.optional.then(|| {
+                                state_word(row.get(&format!("set-{p}")).map(String::as_str))
+                            }),
+                            value: row.get(&format!("row-{p}")).cloned().unwrap_or_default(),
+                        })
+                        .collect(),
+                });
+            }
+            return;
+        }
+        let pair = |key: String| submitted.and_then(|row| row.get(&key)).cloned();
+        self.new_row = Some(
+            properties
+                .iter()
+                .enumerate()
+                .map(|(p, property)| CellView {
+                    p,
+                    key: format!("new-{}-{p}", self.f),
+                    value: pair(format!("row-{p}")).unwrap_or_default(),
+                    state: if property.optional {
+                        pair(format!("set-{p}")).unwrap_or_else(|| "absent".into())
+                    } else {
+                        String::new()
+                    },
+                    integer: property.control == crate::definitions::Control::Integer,
+                    note: None,
+                    actions: None,
+                    name: format!("row-{p}"),
+                    autofocus: submitted.is_some() && p == 0 && !property.optional,
+                    focus_set: submitted.is_some() && p == 0 && property.optional,
+                })
+                .collect(),
+        );
     }
     /// The last row: its Move down button is disabled.
     fn last(&self, row: &RowView) -> bool {
@@ -933,6 +1134,15 @@ impl ListView {
             .options
             .iter()
             .any(|option| option.0 == cell.value)
+    }
+}
+
+/// How a kept optional property's Set/Not set state reads.
+fn state_word(state: Option<&str>) -> &'static str {
+    if state == Some("present") {
+        "Set"
+    } else {
+        "Not set"
     }
 }
 
@@ -1138,13 +1348,9 @@ fn render_private(
             })
         })
     };
-    // A full-form draft (a refused full-form POST) is re-rendered in the full form it came
-    // from; a list form's draft keeps the unit page.
-    let units = !create
-        && !native
-        && view.editable
-        && view.immutable.is_some()
-        && raw.is_none_or(|raw| list_scope(raw).is_some());
+    // A full-form draft (a refused full-form POST, or a slice-1.5a list form's from a page
+    // loaded before slice 1.5b) is re-rendered in the full form, which can save it.
+    let units = !create && !native && view.editable && view.immutable.is_some() && raw.is_none();
     let mut assist_forms = AssistForms::default();
     let unit_draft = notice.draft.as_ref();
     let groups = groups(
@@ -1246,12 +1452,16 @@ fn shown_meta<'a>(
 }
 
 /// The list view of list field `f`: a list draft (a full-form draft, or a list form's for this
-/// list) or the saved rows with their notes, switch and Undo.
+/// list) or the saved rows with their notes, switch and Undo, and on a page with a form per
+/// unit their cell forms, row actions and new-row form (slice 1.5b).
 fn list_view(
     view: &SheetView,
     (f, field): (usize, &crate::definitions::Field),
-    raw: Option<&BTreeMap<String, String>>,
-    focus: Option<values::Focus>,
+    (raw, unit_draft): (
+        Option<&BTreeMap<String, String>>,
+        Option<&unit_web::UnitDraft>,
+    ),
+    (focus, units): (Option<values::Focus>, bool),
     forms: &mut AssistForms,
 ) -> ListView {
     let saved = &view.snapshot.data[&field.id];
@@ -1269,6 +1479,9 @@ fn list_view(
     // Switch and Undo on a saved list only, never over a re-rendered draft.
     if list_raw.is_none() {
         list.offer(view, field, forms);
+        if units {
+            list.units(view, field, unit_draft, forms);
+        }
     }
     list
 }
@@ -1300,7 +1513,7 @@ fn groups(
                     .ok_or(AppError::Invalid("Invalid pinned group."))?;
                 let saved = &view.snapshot.data[id];
                 let list = (field.control == crate::definitions::Control::List)
-                    .then(|| list_view(view, (f, field), raw, focus, forms));
+                    .then(|| list_view(view, (f, field), (raw, draft), (focus, units), forms));
                 let unit_draft = draft.filter(|draft| draft.unit == super::unit::Unit::Field(f));
                 let raw_value = raw.and_then(|r| r.get(&format!("value-{id}")));
                 let drafted = unit_draft.is_some() || raw_value.is_some();
@@ -1460,9 +1673,10 @@ async fn read_sheet(
     State(state): State<AuthState>,
     session: Session,
     Path(id): Path<i64>,
+    Query(query): Query<SheetQuery>,
     Extension(admission): Extension<RuntimeAdmission>,
 ) -> ResultResponse {
-    read_private(state, session, id, None, admission).await
+    read_private(state, session, (id, None), query.focus(), admission).await
 }
 async fn read_history(
     State(state): State<AuthState>,
@@ -1470,13 +1684,13 @@ async fn read_history(
     Path((id, revision)): Path<(i64, i64)>,
     Extension(admission): Extension<RuntimeAdmission>,
 ) -> ResultResponse {
-    read_private(state, session, id, Some(revision), admission).await
+    read_private(state, session, (id, Some(revision)), None, admission).await
 }
 async fn read_private(
     state: AuthState,
     session: Session,
-    id: i64,
-    history: Option<i64>,
+    (id, history): (i64, Option<i64>),
+    focus: Option<values::Focus>,
     admission: RuntimeAdmission,
 ) -> ResultResponse {
     let permit = admission.take()?;
@@ -1489,7 +1703,11 @@ async fn read_private(
     let csrf = auth::token(&session)
         .await?
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    rendered(view, permit, csrf, None, StatusCode::OK, Notice::default()).await
+    let notice = Notice {
+        focus,
+        ..Notice::default()
+    };
+    rendered(view, permit, csrf, None, StatusCode::OK, notice).await
 }
 
 const NATIVE_KEYS: &[&str] = &[

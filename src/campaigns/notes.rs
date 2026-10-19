@@ -20,8 +20,8 @@ pub(crate) const MAX_NOTES: usize = 256;
 pub(crate) const MAX_VALUE_BYTES: usize = 80;
 
 /// How a note's value was read. Slice 1.2 writes `Literal`, `Sum` and `Unresolved`; slice
-/// 1.3 adds `SignLiteral` (D-Q), `Switched` and `Reverted` (Undo); the others are reserved by
-/// the table for later slices (1.4 erase, step 2c confirmation).
+/// 1.3 adds `SignLiteral` (D-Q), `Switched` and `Reverted` (Undo); slice 1.4 `Erased`; a row
+/// removal (slice 1.5b) is a `Literal` row note. `Confirmed` is reserved for step 2c.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Op {
     Literal,
@@ -175,6 +175,8 @@ pub(crate) struct Notes {
     /// Notes a switch or Undo is bound to (slice 1.3): inside the save's transaction each must
     /// still be the current note of its address, with the live value equal to its `after`.
     pub bound: Vec<Stored>,
+    /// The latest row note of each list on a current page, by list ID (slice 1.5b).
+    pub rows: BTreeMap<String, Stored>,
 }
 
 /// The typed address of a scalar field (plan §3a, Sol rev-2 M1).
@@ -188,6 +190,34 @@ pub(crate) fn cell_address(list: &str, host: &str, property: &str) -> String {
         "cell:{}",
         super::history_diff::address(list, host, Some(property))
     )
+}
+
+/// The typed address of a whole list row (slice 1.5b, D-V): a removal's note lives here. The
+/// data part is `history_diff::address` without a property.
+pub(crate) fn row_address(list: &str, host: &str) -> String {
+    format!("row:{}", super::history_diff::address(list, host, None))
+}
+
+/// The latest row note (a removal, or the Undo that restored it) of each list in `lists`,
+/// keyed by list ID: what a sheet page offers as "Row removed · Undo" (one per list, D-N).
+/// One range probe of the current-note index per list; it reads that list's row notes,
+/// whose number grows with its removals only.
+pub(crate) fn latest_rows(
+    db: &Connection,
+    sheet_id: i64,
+    lists: &[&str],
+) -> Result<BTreeMap<String, Stored>, AppError> {
+    let mut latest = BTreeMap::new();
+    let mut query = db.prepare_cached("SELECT revision,address,op,raw,before,after,target FROM private_sheet_notes WHERE sheet_id=?1 AND address>=?2 AND address<?3 ORDER BY revision DESC LIMIT 1")?;
+    for list in lists {
+        // Every `row:<list>/…` address sorts in [`row:<list>/`, `row:<list>0`): '0' follows '/'.
+        let (from, to) = (format!("row:{list}/"), format!("row:{list}0"));
+        let mut rows = query.query_map(params![sheet_id, from, to], stored)?;
+        if let Some(stored) = rows.next().transpose()?.flatten() {
+            latest.insert((*list).to_owned(), stored);
+        }
+    }
+    Ok(latest)
 }
 
 /// The in-scope (integer, enum, boolean) addresses of a stored runtime snapshot.

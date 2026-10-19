@@ -680,8 +680,16 @@ async fn stored_valid_sheet_with_refused_input_shows_unavailable() {
         .private_save(setup.auth[1].clone(), view, permit)
         .await
         .unwrap();
-    let (status, html) = setup.get("/private-sheets/1").await;
-    assert_eq!(status, StatusCode::OK);
+    // With a form per cell (slice 1.5b) this 8,192-cell page is above `body`'s 4 MiB cap.
+    let response = router_request(&setup.app, &setup.auth[1], "/private-sheets/1", None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 32 * 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
     let results = section(&html, "formula-results");
     assert!(results.contains(
         "Derived values unavailable: the saved values exceed the formula input size limit."
@@ -819,9 +827,12 @@ fn disabled(element: scraper::ElementRef<'_>) -> bool {
 /// clicked: every enabled named control in tree order with its current value (a select's
 /// selected option, or its first one), plus exactly the clicked submitter; other buttons
 /// and disabled controls are left out.
+///
+/// A saved editable page has a form per unit and per cell (slices 1.5a, 1.5b) and no full
+/// form: what it submits is then the equivalent legacy full form ([`legacy_form`]), plus the
+/// submitter's pair, as a page loaded before those slices would post.
 pub(super) fn submitted_by(html: &str, submitter: Option<(&str, &str)>) -> Vec<(String, String)> {
     let document = scraper::Html::parse_document(html);
-    // A clicked submitter submits its own form (a saved page has a form per list, 1.5a).
     let form = submitter
         .and_then(|(name, value)| {
             let button = scraper::Selector::parse(&format!(
@@ -835,19 +846,46 @@ pub(super) fn submitted_by(html: &str, submitter: Option<(&str, &str)>) -> Vec<(
                 .filter_map(scraper::ElementRef::wrap)
                 .find(|element| element.value().name() == "form")
         })
-        .or_else(|| sheet_form(&document))
-        .expect("a form");
-    form_pairs(form, submitter)
+        .or_else(|| sheet_form(&document));
+    if let Some(form) = form {
+        form_pairs(form, submitter)
+    } else {
+        let mut form = legacy_form(html);
+        form.extend(submitter.map(|(name, value)| (name.to_owned(), value.to_owned())));
+        form
+    }
 }
 
 /// Every value the page shows in a form control, under its full-form key: a unit form's
-/// `value` (slice 1.5a) as `name`, `notes`, `value-<id>` (and `null` as `null-<id>`), list
-/// forms' controls under their own names.
+/// `value` (slice 1.5a) as `name`, `notes`, `value-<id>` (and `null` as `null-<id>`), a cell
+/// form's (slice 1.5b, `cells/<f>/<r>/<p>`) as `row-<f>-<r>-<p>` (and `set` as
+/// `set-<f>-<r>-<p>`), with each saved row's `id-<f>-<r>` from its legend; list forms'
+/// controls under their own names. New-row forms are left out.
 pub(super) fn page_values(html: &str) -> Vec<(String, String)> {
     let document = scraper::Html::parse_document(html);
     let mut values = Vec::new();
     for form in document.select(&scraper::Selector::parse("form").unwrap()) {
         let action = form.value().attr("action").unwrap_or_default();
+        if action.contains("/lists/") {
+            continue;
+        }
+        let cell = action
+            .rsplit_once("/cells/")
+            .map(|(_, cell)| cell.replace('/', "-"));
+        if let Some(cell) = &cell
+            && cell.ends_with("-0")
+        {
+            // A row's first cell: the row's host ID, as the full form's hidden `id-<f>-<r>`.
+            let row = cell.rsplit_once('-').unwrap().0;
+            let legend = document
+                .select(&scraper::Selector::parse(&format!("#row-{row} > legend")).unwrap())
+                .next()
+                .expect("a row legend")
+                .text()
+                .collect::<String>();
+            let id = legend.rsplit_once("ID ").expect("a row ID").1;
+            values.push((format!("id-{row}"), id.to_owned()));
+        }
         let unit = action
             .rsplit_once("/meta/")
             .map(|(_, which)| (which.to_owned(), None))
@@ -855,11 +893,15 @@ pub(super) fn page_values(html: &str) -> Vec<(String, String)> {
                 action
                     .rsplit_once("/fields/")
                     .map(|(_, id)| (format!("value-{id}"), Some(format!("null-{id}"))))
+            })
+            .or_else(|| {
+                cell.as_ref()
+                    .map(|cell| (format!("row-{cell}"), Some(format!("set-{cell}"))))
             });
         for (key, value) in form_pairs(form, None) {
             let key = match (&unit, key.as_str()) {
                 (Some((value_key, _)), "value") => value_key.clone(),
-                (Some((_, Some(null_key))), "null") => null_key.clone(),
+                (Some((_, Some(null_key))), "null" | "set") => null_key.clone(),
                 _ => key,
             };
             values.push((key, value));
@@ -869,15 +911,28 @@ pub(super) fn page_values(html: &str) -> Vec<(String, String)> {
 }
 
 /// A CSS selector for the control a full form names `name`; on a saved page (slice 1.5a)
-/// `value-<id>` is the `value` of the field's own form and `null-<id>` its `null`.
+/// `value-<id>` is the `value` of the field's own form and `null-<id>` its `null`, and
+/// (slice 1.5b) `row-<f>-<r>-<p>` the `value` of that cell's form and `set-<f>-<r>-<p>` its
+/// `set`.
 pub(super) fn named(name: &str) -> String {
     let unit = name
         .strip_prefix("value-")
-        .map(|id| (id, "value"))
-        .or_else(|| name.strip_prefix("null-").map(|id| (id, "null")));
+        .map(|id| (format!("/fields/{id}"), "value"))
+        .or_else(|| {
+            name.strip_prefix("null-")
+                .map(|id| (format!("/fields/{id}"), "null"))
+        })
+        .or_else(|| {
+            name.strip_prefix("row-")
+                .map(|cell| (format!("/cells/{}", cell.replace('-', "/")), "value"))
+        })
+        .or_else(|| {
+            name.strip_prefix("set-")
+                .map(|cell| (format!("/cells/{}", cell.replace('-', "/")), "set"))
+        });
     match unit {
-        Some((id, key)) => {
-            format!("[name=\"{name}\"], form[action$=\"/fields/{id}\"] [name=\"{key}\"]")
+        Some((action, key)) => {
+            format!("[name=\"{name}\"], form[action$=\"{action}\"] [name=\"{key}\"]")
         }
         None => format!("[name=\"{name}\"]"),
     }
@@ -973,16 +1028,22 @@ fn form_pairs(
     pairs
 }
 
-/// The sheet form: the first form carrying the sheet `revision`, the full form or, on a
-/// saved editable page (slice 1.5a), the first list's form (the units' own forms carry
-/// `base` instead); else the first form.
+/// The sheet form: the first form carrying the sheet `revision` (the full form, or a busy
+/// page's kept form); `None` on a saved editable page, whose unit and cell forms carry
+/// `base` instead (slices 1.5a, 1.5b); else the first form.
 fn sheet_form(document: &scraper::Html) -> Option<scraper::ElementRef<'_>> {
     let revision = scraper::Selector::parse("input[name=revision]").unwrap();
+    let base = scraper::Selector::parse("input[name=base]").unwrap();
     let forms = scraper::Selector::parse("form").unwrap();
     document
         .select(&forms)
         .find(|form| form.select(&revision).next().is_some())
-        .or_else(|| document.select(&forms).next())
+        .or_else(|| {
+            document
+                .select(&forms)
+                .next()
+                .filter(|_| document.select(&base).next().is_none())
+        })
 }
 
 /// The first submit button in tree order whose form owner is the sheet form: what Enter in
@@ -1005,9 +1066,12 @@ pub(super) fn default_submitter(html: &str) -> Option<(String, String)> {
     })
 }
 
-/// What a browser submits when the default (first) submitter is used.
+/// What a browser submits when the default (first) submitter is used; on a saved editable
+/// page (no full form, slices 1.5a and 1.5b) its legacy full form.
 pub(super) fn submitted(html: &str) -> Vec<(String, String)> {
-    let default = default_submitter(html).expect("a submit button");
+    let Some(default) = default_submitter(html) else {
+        return legacy_form(html);
+    };
     // An unnamed submitter adds no pair.
     let named = (!default.0.is_empty()).then_some((default.0.as_str(), default.1.as_str()));
     submitted_by(html, named)

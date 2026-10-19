@@ -575,7 +575,10 @@ def run_formula_browser(page, campaign, version, submit):
 
 
 def run_list_browser(page, campaign, version, submit):
-    """Published list sheet (M4): draft ops by pointer and keyboard, focus, IDs, summary."""
+    """Published list sheet: draft ops by pointer and keyboard on the create page (M4); once
+    saved (assisted sheet slice 1.5b), Enter in a row cell saves that cell alone, the
+    new-row form adds a row, Move works without script, Remove shows "Row removed · Undo"
+    and Undo restores the row; change summary and read-only history."""
 
     def active():
         # Autofocus runs at the next rendering opportunity, after DOMContentLoaded.
@@ -593,14 +596,30 @@ def run_list_browser(page, campaign, version, submit):
             with page.expect_navigation(wait_until="domcontentloaded"):
                 page.keyboard.press(key)
         require(response.value.status == status, f"List keyboard op status differs ({key})")
+        return response.value.request
 
     def button(name):
         return page.get_by_role("button", name=name, exact=True)
 
+    def posted(request, path, keys):
+        sent = sorted(key for key, _ in parse_qsl(request.post_data or "", keep_blank_values=True))
+        require(
+            urlsplit(request.url).path.endswith(path) and sent == sorted(keys),
+            f"List save posted {sent} to {request.url}, not {keys} to {path}",
+        )
+
+    def click(name, path, keys, status=303):
+        with page.expect_response(lambda response: response.request.method == "POST") as response:
+            with page.expect_navigation(wait_until="domcontentloaded"):
+                button(name).click()
+        require(response.value.status == status, f"List button {name} status differs")
+        posted(response.value.request, path, keys)
+
     page.goto(campaign + f"/sheets/new?version={version}")
     require(page.locator("script").count() == 0, "List sheet page carries a script")
     require("No rows yet." in page.locator("#list-1").inner_text(), "Empty list note missing")
-    # Add on the empty create page, before Name is filled (formnovalidate).
+    # Draft operations on the create page (the full form): Add before Name is filled
+    # (formnovalidate), focus, moves by keyboard, edge buttons, Remove.
     submit(page, button("Add Equipment row"), 200)
     focused = active()
     require(focused == "row-1-0-0", f"Add did not focus the new row's first control ({focused!r})")
@@ -614,45 +633,6 @@ def run_list_browser(page, campaign, version, submit):
     page.locator('input[name="row-1-0-2"]').fill("2")
     page.locator('input[name="row-1-0-3"]').fill("3")
     page.locator('select[name="row-1-0-4"]').select_option("false")
-    # Enter in a text field uses the first submitter: the top Save.
-    page.locator('input[name="row-1-0-0"]').focus()
-    with page.expect_request(lambda request: request.method == "POST") as request:
-        press("Enter", 303)
-    require(
-        ("op", "save") in parse_qsl(request.value.post_data or "", keep_blank_values=True),
-        "Enter did not save through the op=save button",
-    )
-    list_sheet = page.url
-    require(
-        page.locator('input[name="id-1-0"]').input_value() == "r1-1"
-        and "ID r1-1" in page.locator("#row-1-0 legend").inner_text(),
-        "Saved row did not get the host ID r1-1",
-    )
-    load = page.locator("dl.derived", has=page.locator("#label-load")).locator("dd")
-    require(load.inner_text() == "6", "List-derived load missing after save")
-    # Saved, General notes save on their own (slice 1.5a) and each list keeps its draft
-    # operations in its own list form, whose first button is its Save.
-    page.locator("#meta-notes").fill("\nsheet notes")
-    unit_save(
-        page,
-        page.get_by_role("button", name="Save General notes", exact=True),
-        key=None,
-        path="/meta/notes",
-    )
-
-    require(
-        page.get_by_role("button", name="Save list Equipment", exact=True).count() == 1,
-        "Save list is not named with its list",
-    )
-
-    def save_list(f, status=303):
-        submit(
-            page,
-            page.locator(f"#save-list-{f}"),
-            status,
-        )
-
-    # Add a second row, then move it up and back down by keyboard.
     submit(page, button("Add Equipment row"), 200)
     page.locator('input[name="row-1-1-0"]').fill("Torch")
     page.locator('input[name="row-1-1-2"]').fill("1")
@@ -662,14 +642,6 @@ def run_list_browser(page, campaign, version, submit):
     # <textarea>; the template emits a sacrificial one).
     page.locator('select[name="set-1-0-5"]').select_option("present")
     page.locator('textarea[name="row-1-0-5"]').fill("\n\nkept note")
-
-    def newlines_kept(context):
-        require(
-            page.locator('textarea[name="row-1-0-5"]').input_value() == "\n\nkept note"
-            and page.locator("#meta-notes").input_value() == "\nsheet notes",
-            f"Leading newlines lost after {context}",
-        )
-
     page.locator('textarea[name="row-1-1-5"]').focus()
     page.keyboard.press("Tab")
     require(active() == "up-1-1", "Tab did not reach Move row 2 up")
@@ -684,64 +656,150 @@ def run_list_browser(page, campaign, version, submit):
         "Edge move buttons are not disabled",
     )
     press("Space")
-    newlines_kept("draft operations")
     require(active() == "up-1-1", "Move down to the end did not focus its Move up")
     require(
         page.locator('input[name="row-1-1-0"]').input_value() == "Torch"
-        and page.locator('input[name="id-1-0"]').input_value() == "r1-1",
-        "Move down did not carry the row and its ID",
+        and page.locator('textarea[name="row-1-0-5"]').input_value() == "\n\nkept note",
+        "Move down did not carry the row and its note",
     )
-    # An op keeps an invalid row value; Remove focuses Add.
-    page.locator('input[name="row-1-1-2"]').fill("not a number")
     submit(page, button("Add Equipment row"), 200)
-    require(
-        page.locator('input[name="row-1-1-2"]').input_value() == "not a number",
-        "A draft op lost an invalid row value",
-    )
-    save_list(1, 422)
-    newlines_kept("a rejected save")
-    require(
-        page.locator('input[name="row-1-1-2"]').input_value() == "not a number",
-        "A rejected save lost the draft",
-    )
     submit(page, button("Remove row 3 of Equipment"), 200)
     require(active() == "add-1", "Remove did not focus the Add button")
-    # 390 px: a 3,000-character note and the 32-property row with its buttons.
-    page.locator('input[name="row-1-1-2"]').fill("4")
-    page.locator('select[name="set-1-1-5"]').select_option("present")
-    page.locator('textarea[name="row-1-1-5"]').fill("long note " * 300)
-    # Save the Equipment list: load 2*3 + 4*1 = 10 passes (revision 3, the Torch is r3-1).
-    save_list(1)
-    require(load.inner_text() == "10", "Load not recomputed after the moves")
-    submit(page, button("Add Traits row"), 200)
-    no_overflow(page, "list sheet with a 32-property row and a 3,000-character note")
+    # Enter in a text field uses the first submitter: the top Save.
+    page.locator('input[name="row-1-0-0"]').focus()
+    with page.expect_request(lambda request: request.method == "POST") as request:
+        press("Enter", 303)
+    require(
+        ("op", "save") in parse_qsl(request.value.post_data or "", keep_blank_values=True),
+        "Enter did not save through the op=save button",
+    )
+    list_sheet = page.url
+    require(
+        "ID r1-1" in page.locator("#row-1-0 legend").inner_text()
+        and "ID r1-2" in page.locator("#row-1-1 legend").inner_text(),
+        "Saved rows did not get the host IDs r1-1 and r1-2",
+    )
+    load = page.locator("dl.derived", has=page.locator("#label-load")).locator("dd")
+    require(load.inner_text() == "7", "List-derived load missing after save")
+    require(
+        page.get_by_role("button", name="Save list Equipment").count() == 0
+        and page.get_by_role("button", name="Add Equipment row").count() == 0,
+        "A saved list still has its list form",
+    )
+    # Slice 1.5b: Enter in row 2's Quantity saves that cell alone (csrf, base, value).
+    quantity = page.locator("#row-1-1-2")
+    quantity.fill("4")
+    with page.expect_request(lambda request: request.method == "POST") as request:
+        with page.expect_navigation(wait_until="domcontentloaded"):
+            quantity.press("Enter")
+    posted(request.value, "/cells/1/1/2", ["csrf", "base", "value"])
+    require(
+        load.inner_text() == "10" and page.locator("#row-1-0-2").input_value() == "2",
+        "The Quantity cell did not save alone",
+    )
+    require(
+        page.locator("#row-1-0-5").input_value() == "\n\nkept note",
+        "Leading newlines lost after a save",
+    )
+    # A multiline cell saves with its Save button, named by its cell and row: a leading
+    # newline and 3,000 characters.
+    long_note = "\n" + "long note " * 300
+    page.locator("#set-1-1-5").select_option("present")
+    page.locator("#row-1-1-5").fill(long_note)
+    click("Save Item note Equipment Row 2", "/cells/1/1/5", ["csrf", "base", "set", "value"])
+    require(
+        page.locator("#row-1-1-5").input_value() == long_note,
+        "The multiline cell did not save with its button",
+    )
+    no_overflow(page, "list sheet with a 3,000-character note")
+    # The new-row form: Enter in its first control adds the row (lists/1/rows).
+    page.locator("#row-new-1-0").fill("Lamp")
+    page.locator("#row-new-1-2").fill("1")
+    page.locator("#row-new-1-3").fill("0")
+    page.locator("#row-new-1-4").select_option("false")
+    with page.expect_request(lambda request: request.method == "POST") as request:
+        with page.expect_navigation(wait_until="domcontentloaded"):
+            page.locator("#row-new-1-0").press("Enter")
+    posted(
+        request.value,
+        "/lists/1/rows",
+        ["csrf", "base", "row-0", "set-1", "row-1", "row-2", "row-3", "row-4", "set-5", "row-5"],
+    )
+    require(
+        page.locator("#row-1-2-0").input_value() == "Lamp"
+        and "ID r4-1" in page.locator("#row-1-2 legend").inner_text()
+        and load.inner_text() == "10",
+        "The new row was not added with the host ID r4-1",
+    )
+    no_overflow(page, "list sheet with cell forms, row actions and a new-row form")
+    # Move without script, by keyboard: Lamp up to row 2 (csrf and base only).
+    page.locator("#up-1-2").focus()
+    request = press("Enter", 303)
+    posted(request, "/lists/1/rows/2/up", ["csrf", "base"])
+    # The moved row's Move up keeps focus, so the next Enter moves it on (review round 1).
+    focused = active()
+    require(focused == "up-1-1", f"Move up did not focus the moved row's Move up ({focused!r})")
+    require(
+        page.locator("#row-1-1-0").input_value() == "Lamp"
+        and page.locator("#row-1-2-0").input_value() == "Torch",
+        "Move up did not reorder the saved rows",
+    )
+    require(
+        page.locator("#up-1-0").is_disabled() and page.locator("#down-1-2").is_disabled(),
+        "Saved edge move buttons are not disabled",
+    )
+    # Remove happens at once, with "Row removed · Undo" right after (D-V); Undo restores it.
+    click("Remove Row 2 Equipment", "/lists/1/rows/1/remove", ["csrf", "base"])
+    removed = page.locator("#removed-1")
+    require(
+        removed.inner_text().strip() == "Row removed · Undo"
+        and page.locator("#row-1-2").count() == 0,
+        "Remove did not remove the row with Undo offered",
+    )
+    no_overflow(page, "list sheet after Remove")
+    click("Undo Row removed Equipment", "/undo", ["csrf", "base", "note"])
+    require(
+        page.locator("#row-1-1-0").input_value() == "Lamp"
+        and page.locator("#removed-1").count() == 0
+        and "ID r7-1" in page.locator("#row-1-1 legend").inner_text(),
+        "Undo did not restore the removed row with a new host ID",
+    )
+    # 390 px: the 32-property Traits row through its new-row form.
     for p in range(32):
-        control = page.locator(f'[name="row-2-0-{p}"]')
+        control = page.locator(f"#row-new-2-{p}")
         tag = control.evaluate("element => element.tagName")
         if tag == "SELECT":
             control.select_option(index=1)
         else:
             control.fill("1" if p % 5 == 1 else "trait")
-    save_list(2)
+    no_overflow(page, "list sheet with a 32-property new row")
+    click(
+        "Add row Traits",
+        "/lists/2/rows",
+        ["csrf", "base"] + [f"row-{p}" for p in range(32)] + [f"set-{p}" for p in range(0, 32, 3)],
+    )
     require(
-        page.locator('input[name="row-2-0-1"]').input_value() == "1" and load.inner_text() == "10",
-        "The Traits list did not save on its own",
+        page.locator("#row-2-0-1").input_value() == "1" and load.inner_text() == "10",
+        "The Traits row was not added on its own",
     )
     page.reload()
-    newlines_kept("a saved reload")
-    # Then a violation (revision 5).
-    page.locator('input[name="row-1-1-2"]').fill("9")
-    save_list(1)
+    require(
+        page.locator("#row-1-0-5").input_value() == "\n\nkept note",
+        "Leading newlines lost after a reload",
+    )
+    # Then a violation through a cell (revision 9).
+    page.locator("#row-1-2-2").fill("9")
+    with page.expect_navigation(wait_until="domcontentloaded"):
+        page.locator("#row-1-2-2").press("Enter")
     require(
         "Load is at most 10." in page.locator("#advisory-checks").inner_text(),
         "List advisory violation not shown",
     )
-    newlines_kept("a second save")
-    page.goto(list_sheet + "/history/5")
+    page.goto(list_sheet + "/history/9")
     summary = page.locator("section#change-summary")
     require(
-        summary.get_by_role("heading", name="Changes in revision 5").count() == 1
-        and "equipment/r3-1/quantity" in summary.inner_text(),
+        summary.get_by_role("heading", name="Changes in revision 9").count() == 1
+        and "equipment/r1-2/quantity" in summary.inner_text(),
         "History change summary missing",
     )
     require(
@@ -931,17 +989,17 @@ def run_assist_browser(page, campaign, version):
         "Luck did not save on its own with its button",
     )
     no_overflow(page, "assisted sheet unit forms")
-    # "lots" in a new row's Quantity keeps the row: unknown, with the scribble (D-M).
-    press("Add Equipment row", status=200)
-    page.locator('input[name="row-4-0-0"]').fill("Torch")
-    page.locator('input[name="row-4-0-2"]').fill("1")
-    quantity = page.locator('input[name="row-4-0-1"]')
+    # "lots" in a new row's Quantity keeps the row: unknown, with the scribble (D-M). The
+    # row comes from the list's new-row form (slice 1.5b).
+    page.locator("#row-new-4-0").fill("Torch")
+    page.locator("#row-new-4-2").fill("1")
+    quantity = page.locator("#row-new-4-1")
     quantity.fill("lots")
     enter(quantity)
     page.goto(assisted)
     row_note = page.locator("#note-4-0-1")
     require(
-        page.locator('input[name="row-4-0-1"]').input_value() == "lots"
+        page.locator("#row-4-0-1").input_value() == "lots"
         and row_note.count() == 1
         and row_note.inner_text().strip() == "? (unknown) \u00b7 \u2018lots\u2019 not understood"
         and page.locator("#note-4-0-1 bdi").inner_text() == "lots",

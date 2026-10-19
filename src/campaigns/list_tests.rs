@@ -817,7 +817,9 @@ async fn list_rows_render_as_labelled_fieldsets_unique_ids() {
         .text()
         .collect();
     assert_eq!(legend, "Equipment");
-    let rows: Vec<_> = lists[0].select(&selector("fieldset.list-row")).collect();
+    let rows: Vec<_> = lists[0]
+        .select(&selector("fieldset.list-row[id^=\"row-\"]"))
+        .collect();
     assert_eq!(rows.len(), 3);
     let row_legend: String = rows[1]
         .select(&selector("legend"))
@@ -841,9 +843,19 @@ async fn list_rows_render_as_labelled_fieldsets_unique_ids() {
             "label for {id}"
         );
     }
-    // Optional properties carry an explicit Set/Not set state; required ones do not.
-    assert!(html.contains("name=\"set-1-1-2\""));
-    assert!(!html.contains("name=\"set-1-1-0\""));
+    // Optional properties carry an explicit Set/Not set state; required ones do not (each in
+    // its cell's form, slice 1.5b, and in the new-row form).
+    assert_eq!(
+        page.select(&selector("form[action$=\"/cells/1/1/2\"] select[name=set]"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        page.select(&selector("form[action$=\"/cells/1/1/0\"] [name=set]"))
+            .count(),
+        0
+    );
+    assert!(html.contains("name=\"set-2\"") && !html.contains("name=\"set-0\""));
     let empty = list_setup(&list_definition()).await;
     let (_, create_page) = empty
         .get(&format!(
@@ -969,22 +981,25 @@ async fn first_submitter_in_tree_order_is_op_save_before_groups() {
     );
     assert_eq!(full.last().map(String::as_str), Some("button:op=save"));
     let (_, html) = setup.get("/private-sheets/1").await;
-    for f in [1, 2] {
-        let list = order(&html, &format!("form:has(#list-{f})"));
-        assert_eq!(
-            list.first().map(String::as_str),
-            Some("button:op=save"),
-            "{list:?}"
-        );
-        assert_eq!(
-            list.iter().filter(|item| *item == "button:op=save").count(),
-            1
-        );
+    // Saved (slice 1.5b): every row cell is its own form whose one own button, its Save,
+    // is its default; the row actions belong to the page's shared form and sit in no other
+    // form, so Enter in a cell never removes or moves a row; the new-row form has one Add.
+    let page = scraper::Html::parse_document(&html);
+    let cells: Vec<_> = page
+        .select(&selector("form[action*=\"/cells/\"]"))
+        .collect();
+    assert_eq!(cells.len(), 2 * 5 + 1, "equipment and tag cells");
+    for form in cells.iter().chain(
+        page.select(&selector("form.new-row"))
+            .collect::<Vec<_>>()
+            .iter(),
+    ) {
+        let buttons: Vec<_> = form.select(&selector("button:not([form])")).collect();
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].value().attr("name"), None);
     }
-    assert_eq!(
-        super::formula_tests::default_submitter(&html),
-        Some(("op".into(), "save".into()))
-    );
+    assert_eq!(page.select(&selector("form button[formaction]")).count(), 0);
+    assert_eq!(super::formula_tests::default_submitter(&html), None);
     assert!(!html.contains("Save full private sheet"));
     // Scalar sheets: every unit form has its single, unnamed Save.
     let scalar = setup_scalar().await;
@@ -1185,7 +1200,15 @@ async fn add_rerenders_200_no_store_without_writing() {
     let rows = rows_of(&page);
     assert_eq!(rows.len(), 4);
     assert_eq!(rows[3], (String::new(), String::new()), "an empty new row");
-    assert!(page.contains("Row 4 of 4 · New row · ID assigned on save"));
+    assert_eq!(
+        scraper::Html::parse_document(&page)
+            .select(&selector("#row-1-3 > legend"))
+            .next()
+            .unwrap()
+            .text()
+            .collect::<String>(),
+        "Row 4 of 4 · New row · ID assigned on save"
+    );
     let form = submitted_by(&page, None);
     assert_eq!(
         get(&form, "set-1-3-2"),
@@ -1397,13 +1420,10 @@ async fn add_at_256_is_422_with_message() {
     let setup = list_setup(&list_definition()).await;
     create_rows(&setup, 256).await;
     let html = sheet_page(&setup).await;
-    let page = scraper::Html::parse_document(&html);
-    let add = page.select(&selector("button#add-1")).next().unwrap();
-    assert!(add.value().attr("disabled").is_some());
-    assert_eq!(
-        add.text().collect::<String>(),
-        "Add Equipment row (limit reached: 256 rows)"
-    );
+    // A full saved list has no new-row form (slice 1.5b); the legacy full form's Add, below,
+    // is disabled.
+    assert!(html.contains("This list holds 256 rows, the most a list can hold."));
+    assert!(!html.contains("id=\"add-1\""));
     let response = super::router_request(
         &setup.app,
         &setup.auth[1],
@@ -1420,6 +1440,13 @@ async fn add_at_256_is_422_with_message() {
         status_text(&page)
     );
     assert_eq!(rows_of(&page).len(), 256, "the draft is re-rendered");
+    let parsed = scraper::Html::parse_document(&page);
+    let add = parsed.select(&selector("button#add-1")).next().unwrap();
+    assert!(add.value().attr("disabled").is_some());
+    assert_eq!(
+        add.text().collect::<String>(),
+        "Add Equipment row (limit reached: 256 rows)"
+    );
 }
 
 #[tokio::test]
@@ -1609,7 +1636,13 @@ async fn op_buttons_have_formnovalidate_and_no_fragment() {
     let setup = list_setup(&list_definition()).await;
     let (_, create_page) = setup.get(&create_path(&setup)).await;
     abc(&setup).await;
-    let html = sheet_page(&setup).await;
+    let saved = sheet_page(&setup).await;
+    // A saved page has no draft operations (slice 1.5b: cell forms and row actions); a
+    // legacy full form's draft re-renders in the full form with them.
+    assert!(!saved.contains("name=\"op\""));
+    let (_, html) = setup
+        .post("/private-sheets/1", clicked(&saved, "add-1"))
+        .await;
     for (page, action) in [
         (&html, "/private-sheets/1".to_owned()),
         (&create_page, create_path(&setup)),
@@ -1625,7 +1658,7 @@ async fn op_buttons_have_formnovalidate_and_no_fragment() {
             assert!(value.attr("formnovalidate").is_some(), "{op}");
             assert_eq!(value.attr("formaction"), None, "{op}");
         }
-        // The full form, or each list form of a saved page (slice 1.5a), posts to the page.
+        // The full form posts to the page.
         let form = parsed
             .select(&selector("form:has(button[name=op])"))
             .next()
@@ -1675,7 +1708,12 @@ async fn op_button_names_and_status_messages() {
     let setup = list_setup(&list_definition()).await;
     abc(&setup).await;
     let html = sheet_page(&setup).await;
-    let parsed = scraper::Html::parse_document(&html);
+    // The op buttons of the legacy full form, as its draft re-render shows them (a saved
+    // page has row actions instead, slice 1.5b).
+    let (_, full) = setup
+        .post("/private-sheets/1", clicked(&html, "up-1-2"))
+        .await;
+    let parsed = scraper::Html::parse_document(&full);
     let text = |id: &str| -> String {
         parsed
             .select(&selector(&format!("button#{id}")))
@@ -2367,8 +2405,9 @@ async fn list_payloads_escaped_in_context() {
         .text()
         .collect();
     assert_eq!(textarea, story, "history textarea");
-    // Ops post to the generated same-origin form action; no button overrides it.
-    let parsed = scraper::Html::parse_document(&view);
+    // Ops post to the generated same-origin form action; no button overrides it. A saved
+    // page's row actions (slice 1.5b) override it with generated same-origin paths only.
+    let parsed = scraper::Html::parse_document(&op);
     assert_eq!(parsed.select(&selector("button[formaction]")).count(), 0);
     assert_eq!(
         parsed
@@ -2378,6 +2417,19 @@ async fn list_payloads_escaped_in_context() {
             .value()
             .attr("action"),
         Some("/private-sheets/1")
+    );
+    let parsed = scraper::Html::parse_document(&view);
+    let actions: Vec<_> = parsed
+        .select(&selector("button[formaction]"))
+        .map(|button| button.value().attr("formaction").unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            "/private-sheets/1/lists/1/rows/0/up",
+            "/private-sheets/1/lists/1/rows/0/down",
+            "/private-sheets/1/lists/1/rows/0/remove"
+        ]
     );
 }
 
@@ -2742,12 +2794,7 @@ type SeedNote = (String, &'static str, String, String, String);
 
 /// Creates sheet 1 with `data` as a retained (pre-M4) sheet, so list rows may carry any
 /// valid 64-character ID, then writes `notes` 256 per revision (the table's limit) on
-/// data-unchanged revisions, and returns the served sheet page.
-async fn noted_page(definition: &Value, data: Value, notes: Vec<SeedNote>) -> String {
-    noted_setup(definition, data, notes).await.1
-}
-
-/// `noted_page`, with its setup.
+/// data-unchanged revisions; returns the setup and the served sheet page.
 async fn noted_setup(definition: &Value, data: Value, notes: Vec<SeedNote>) -> (Setup, String) {
     let setup = list_setup(definition).await;
     legacy_create(&setup, 1, data).await;
@@ -2865,6 +2912,19 @@ async fn wide_list_page(
     note: (&'static str, &str, Option<i64>),
     enum_notes: bool,
 ) -> (String, usize) {
+    let (_, html, units) = wide_list_setup(256, value, note, (enum_notes, false)).await;
+    (html, units)
+}
+
+/// `wide_list_page` with `rows` rows (fewer than 256 leave room for the new-row form, slice
+/// 1.5b) and, with `removed`, the list's latest row note a removal of a 64-character host ID
+/// still away, so the page shows "Row removed · Undo".
+async fn wide_list_setup(
+    rows: usize,
+    value: Option<i64>,
+    note: (&'static str, &str, Option<i64>),
+    (enum_notes, removed): (bool, bool),
+) -> (Setup, String, usize) {
     let definition = wide_list_definition(enum_notes);
     let field = &definition["fields"][0];
     let list = field["id"].as_str().unwrap().to_owned();
@@ -2875,7 +2935,16 @@ async fn wide_list_page(
         .map(|p| (p["id"].as_str().unwrap().to_owned(), p["control"] == "enum"))
         .collect();
     let mut notes = Vec::new();
-    let items: Vec<Value> = (1..=256)
+    if removed {
+        notes.push((
+            format!("row:{list}/{}", "z".repeat(64)),
+            "literal",
+            String::new(),
+            r#"{"row":"present"}"#.to_owned(),
+            r#"{"row":"absent"}"#.to_owned(),
+        ));
+    }
+    let items: Vec<Value> = (1..=rows)
         .map(|k| {
             // The longest row ID a retained row may carry: 64 characters.
             let host = format!("i{k:03}-{}", "x".repeat(59));
@@ -2898,8 +2967,8 @@ async fn wide_list_page(
             item
         })
         .collect();
-    let html = noted_page(&definition, json!({list: items}), notes).await;
-    (html, render_units(&definition, &[256]))
+    let (setup, html) = noted_setup(&definition, json!({list: items}), notes).await;
+    (setup, html, render_units(&definition, &[rows]))
 }
 
 /// Slice 1.3 (review rounds 1 and 2, Sol Major): the switch, Undo and note markup keeps the
@@ -3108,6 +3177,170 @@ async fn worst_label_pages_with_every_unknown_are_within_the_unit_bound() {
         units,
         "256 wide scalars unknown with a long scribble",
     );
+}
+
+/// Slice 1.5b: a saved list renders a form per cell (`csrf`, `base`, a Save named by its
+/// cell and row), three row actions per row on the page's shared form, "Row removed · Undo"
+/// and, below 256 rows, the new-row form. The tightest list page (32 sign-led columns with
+/// switch and Undo) stays within the per-unit bound at 256 rows, and at 255 rows with the
+/// new-row form and a removal's Undo (64-character IDs and labels of 100 `"`).
+#[tokio::test]
+async fn worst_label_list_pages_with_every_cell_form_and_row_action_are_within_the_unit_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (raw, before, value) = densest_sign_led();
+    let note = ("sign_literal", raw.as_str(), Some(before));
+    let (_, html, units) = wide_list_setup(256, Some(value), note, (false, true)).await;
+    assert_eq!(
+        html.matches("action=\"/private-sheets/1/cells/").count(),
+        32 * 256
+    );
+    assert_eq!(html.matches("form=\"row-actions\"").count(), 3 * 256);
+    assert_eq!(html.matches("form=\"assist-switch\"").count(), 32 * 256);
+    assert_eq!(
+        html.matches("id=\"undo-row-0\"").count(),
+        1,
+        "Row removed · Undo"
+    );
+    assert!(html.contains("This list holds 256 rows, the most a list can hold."));
+    within_unit_bound(
+        &html,
+        units,
+        "256 rows: cell forms, row actions, switch and Undo",
+    );
+    let (_, html, units) = wide_list_setup(255, Some(value), note, (false, true)).await;
+    assert_eq!(units, 4 + 255 * 36);
+    assert_eq!(
+        html.matches("action=\"/private-sheets/1/cells/").count(),
+        32 * 255
+    );
+    assert_eq!(html.matches("class=\"new-row\"").count(), 1);
+    assert_eq!(html.matches("id=\"undo-row-0\"").count(), 1);
+    within_unit_bound(
+        &html,
+        units,
+        "255 rows: cell forms, row actions, new-row form, switch and Undo",
+    );
+    // Every unknown under a long scribble, the scribble case with the least slack.
+    let scribble = "\"".repeat(200);
+    let (_, html, units) =
+        wide_list_setup(255, None, ("unresolved", &scribble, None), (false, true)).await;
+    assert_eq!(html.matches("? (unknown) · ").count(), 32 * 255);
+    within_unit_bound(
+        &html,
+        units,
+        "255 rows of unknown scribbles with cell forms",
+    );
+    let (_, html, units) = wide_list_setup(
+        256,
+        Some(i64::MIN),
+        ("unresolved", &scribble, Some(i64::MIN)),
+        (false, true),
+    )
+    .await;
+    within_unit_bound(&html, units, "256 rows of kept scribbles with cell forms");
+}
+
+/// A refused cell save on the tightest list page echoes its draft once, within the per-unit
+/// bound plus the echo term (plan D7), like a refused field save (slice 1.5a, Sonnet m6).
+#[tokio::test]
+async fn a_refused_cell_draft_re_render_is_within_the_bound_plus_its_echo() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (raw, before, value) = densest_sign_led();
+    let (setup, view, units) = wide_list_setup(
+        256,
+        Some(value),
+        ("sign_literal", &raw, Some(before)),
+        (false, true),
+    )
+    .await;
+    let quotes = "\"".repeat(87_000);
+    let form = vec![
+        pair("csrf", "a".repeat(64)),
+        pair("base", "999"),
+        pair("value", quotes.as_str()),
+    ];
+    let (status, html) = big_post(
+        &setup,
+        "/private-sheets/1/cells/0/255/31",
+        serde_urlencoded::to_string(form).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        html.matches(&"&#34;".repeat(87_000)).count(),
+        1,
+        "echoed once"
+    );
+    let echo = 5 * quotes.len();
+    let bound = FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES + echo;
+    assert!(html.len() <= bound, "{} > {bound}", html.len());
+    // Only the draft and the status naming the cell (its property and list labels, at most
+    // 100 characters each, escaped up to 6 bytes) are added.
+    let status = 2 * 100 * 6 + 256;
+    assert!(
+        html.len() <= view.len() + echo + status,
+        "{} > {} + {echo} + {status}",
+        html.len(),
+        view.len()
+    );
+    println!(
+        "refused 87,000-quote cell draft on the widest list page: {} bytes (bound {bound})",
+        html.len()
+    );
+}
+
+/// A refused new row echoes its draft once; a new row whose values exceed the echo bound
+/// (1 MiB, never storable) is not echoed (plan D7).
+#[tokio::test]
+async fn a_refused_new_row_draft_is_bounded() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (raw, before, value) = densest_sign_led();
+    let (setup, view, units) = wide_list_setup(
+        255,
+        Some(value),
+        ("sign_literal", &raw, Some(before)),
+        (false, false),
+    )
+    .await;
+    let quotes = "\"".repeat(30_000);
+    let mut form = vec![pair("csrf", "a".repeat(64)), pair("base", "999")];
+    form.extend((0..32).map(|p| pair(format!("row-{p}"), quotes.as_str())));
+    let (status, html) = big_post(
+        &setup,
+        "/private-sheets/1/lists/0/rows",
+        serde_urlencoded::to_string(&form).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "base above L");
+    assert_eq!(
+        html.matches(&"&#34;".repeat(30_000)).count(),
+        32,
+        "echoed once each"
+    );
+    let echo = 5 * 32 * quotes.len();
+    assert!(html.len() <= FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES + echo);
+    assert!(html.len() <= view.len() + echo, "only the draft is added");
+    // Over the echo bound: refused, not echoed.
+    let quotes = "\"".repeat(40_000);
+    let mut form = vec![pair("csrf", "a".repeat(64)), pair("base", "999")];
+    form.extend((0..32).map(|p| pair(format!("row-{p}"), quotes.as_str())));
+    let (status, html) = big_post(
+        &setup,
+        "/private-sheets/1/lists/0/rows",
+        serde_urlencoded::to_string(&form).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(!html.contains(&"&#34;".repeat(40_000)), "not echoed");
+    assert!(
+        html.contains("larger than the 1 MiB sheet limit"),
+        "{}",
+        &html[..2000]
+    );
+    assert!(html.len() <= view.len() + 4096);
 }
 
 // ---- Step 8: the gate lift, the publication budget and end-to-end lists (plan D7) ----

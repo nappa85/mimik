@@ -609,7 +609,7 @@ fn scalar_value(control: Control, raw: &str) -> Result<Value, AppError> {
 
 /// What a cell held before this save (plan §3a, slice 1.2).
 #[derive(Clone, Copy)]
-enum Prior<'a> {
+pub(crate) enum Prior<'a> {
     /// No earlier value: create, or a new row.
     New,
     /// An optional property of a saved row that was not set.
@@ -618,7 +618,15 @@ enum Prior<'a> {
     Saved(&'a Value),
 }
 
-impl Prior<'_> {
+impl<'a> Prior<'a> {
+    /// What property `property` of a saved row item (`None`: a new row) held.
+    pub(crate) fn of_item(item: Option<&'a Value>, property: &str) -> Self {
+        match item {
+            None => Self::New,
+            Some(item) => item.get(property).map_or(Self::Absent, Self::Saved),
+        }
+    }
+
     fn note_value(self, control: Control) -> Option<NoteValue> {
         match self {
             Self::New => None,
@@ -819,35 +827,68 @@ pub(crate) fn reconcile(
         if !seen.insert(id.clone()) {
             return Err(AppError::Invalid("List row IDs must be unique."));
         }
-        let mut item = serde_json::Map::new();
-        item.insert("id".into(), Value::String(id.clone()));
-        for (p, property) in properties(field).iter().enumerate() {
-            let address = super::notes::cell_address(&field.id, &id, &property.id);
-            let prior = match saved_item {
-                None => Prior::New,
-                Some(saved) => saved.get(&property.id).map_or(Prior::Absent, Prior::Saved),
-            };
-            if property.optional {
-                match row.states.get(p).map(String::as_str) {
-                    Some("present") => {}
-                    Some("absent") => {
-                        recorder.state(address, property.control, prior, NoteValue::Absent);
-                        continue;
-                    }
-                    _ => {
-                        return Err(AppError::Invalid(
-                            "Select Set or Not set for every optional row property.",
-                        ));
-                    }
-                }
-            }
-            let raw = row.values.get(p).map_or("", String::as_str);
-            let value = recorder.cell(address, property.control, raw, prior)?;
-            item.insert(property.id.clone(), value);
-        }
-        items.push(Value::Object(item));
+        items.push(row_item(field, &id, row, saved_item, recorder)?);
     }
     Ok(Value::Array(items))
+}
+
+/// The stored item `id` of one list row draft, against the saved item it edits (`None`: a
+/// new row). Shared by the full form, the per-cell save and the new-row form (slice 1.5b).
+pub(crate) fn row_item(
+    field: &Field,
+    id: &str,
+    row: &DraftRow,
+    saved: Option<&Value>,
+    recorder: &mut Recorder<'_>,
+) -> Result<Value, AppError> {
+    let mut item = serde_json::Map::new();
+    item.insert("id".into(), Value::String(id.into()));
+    for (p, property) in properties(field).iter().enumerate() {
+        let value = row_cell(
+            (
+                super::notes::cell_address(&field.id, id, &property.id),
+                property,
+            ),
+            (
+                row.values.get(p).map_or("", String::as_str),
+                row.states.get(p).map_or("", String::as_str),
+            ),
+            Prior::of_item(saved, &property.id),
+            recorder,
+        )?;
+        if let Some(value) = value {
+            item.insert(property.id.clone(), value);
+        }
+    }
+    Ok(Value::Object(item))
+}
+
+/// One property of a list row: its submitted text `raw` and, for an optional property, its
+/// Set/Not set `state`, read against what it held (`prior`); its change note, if any, goes to
+/// `recorder`. `None` when an optional property is Not set.
+pub(crate) fn row_cell(
+    (address, property): (String, &crate::definitions::ItemProperty),
+    (raw, state): (&str, &str),
+    prior: Prior<'_>,
+    recorder: &mut Recorder<'_>,
+) -> Result<Option<Value>, AppError> {
+    if property.optional {
+        match state {
+            "present" => {}
+            "absent" => {
+                recorder.state(address, property.control, prior, NoteValue::Absent);
+                return Ok(None);
+            }
+            _ => {
+                return Err(AppError::Invalid(
+                    "Select Set or Not set for every optional row property.",
+                ));
+            }
+        }
+    }
+    recorder
+        .cell(address, property.control, raw, prior)
+        .map(Some)
 }
 
 /// The values of an admitted runtime form and their change notes (slice 1.2). `saved` and

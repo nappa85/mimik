@@ -9,7 +9,7 @@ full-form POST pages without scripts; only the `--no-auth` prototype's native ed
 |---|---|
 | Number grammar | `src/campaigns/entry.rs` |
 | Reading cells, recording notes | `src/campaigns/values.rs` (`Recorder`, `scalar`, `reconcile`) |
-| Note values, ops, addresses, storage | `src/campaigns/notes.rs`, `migrations/020_sheet_notes.sql` |
+| Note values, ops, addresses, storage | `src/campaigns/notes.rs`, `migrations/020_sheet_notes.sql`, `021_row_notes.sql`; list units `src/campaigns/rows.rs` |
 | Switch and Undo | `src/campaigns/assist.rs`, `src/campaigns/assist_web.rs` |
 | Per-unit save | `src/campaigns/unit.rs`, `src/campaigns/unit_web.rs` |
 | Writer, rechecks | `src/campaigns/sheets.rs` (`private_save_keeping`, `private_unchanged`, `private_read_base`) |
@@ -55,25 +55,29 @@ piece and the result are always shown in full.
 
 Table `private_sheet_notes(sheet_id, revision, address, op, raw, before, after, bundle,
 target)`, primary key `(sheet_id, revision, address)`, foreign key to the history row, index
-`(sheet_id, address, revision)` for the current note (migration 020, `SCHEMA_VERSION` 20).
+`(sheet_id, address, revision)` for the current note (migration 020, rebuilt by migration
+021 to admit row addresses; `SCHEMA_VERSION` 21).
 
 - **Scope:** integer, enum and boolean cells only. Text, multiline, Name and General notes get
   no notes; history holds every revision of them.
-- **Addresses:** `field:<id>` and `cell:<list>/<host-id>/<property>` (the data part is
-  `history_diff::address`). The table also admits `meta:…`, which nothing writes yet. CHECK:
-  7–256 bytes, no NUL, one of the three prefixes.
+- **Addresses:** `field:<id>`, `cell:<list>/<host-id>/<property>` and `row:<list>/<host-id>`
+  (a removed row; the data part is `history_diff::address`). The table also admits `meta:…`,
+  which nothing writes yet. CHECK: 6–256 bytes, no NUL, one of the four prefixes, each with a
+  non-empty rest.
 - **Ops:** `literal`, `sum`, `sign_literal`, `switched`, `unresolved`, `erased`, `reverted`
   are written; `confirmed` is reserved for model proposals. `bundle` is reserved; `target` is
   the revision an Undo reverted.
 - **Typed values** (`NoteValue`), canonical JSON ≤ 80 bytes (`MAX_VALUE_BYTES`):
   `{"absent":true}` (optional property not set, distinct from unknown), `{"unknown":true}`,
   `{"int":"-15"}` (decimal string), `{"enum":"<id>"}`, `{"bool":true}`, `{"row":"present"|
-  "absent"}` (reserved for row removal). The decoder accepts only canonical text. `raw` is
+  "absent"}` (a row's removal and its Undo). The decoder accepts only canonical text. `raw` is
   what was typed: ≤ 200 characters, ≤ 800 bytes, no NUL.
 - **When a note is written** (`Recorder`): every value change of a saved in-scope cell;
   Known ↔ Unknown and Set ↔ Not set as `literal` with empty `raw`; an `unresolved` scribble;
   an `erased` blank. New cells (create, new row) get a note only for an interpreted sum or an
-  unreadable entry. The current note of an address is its latest note.
+  unreadable entry; a new-row form writes at most one per property (`MAX_ROW_NOTES`, 32).
+  Removing a row writes one `literal` row note (`row present` → `row absent`). The current
+  note of an address is its latest note.
 - **Scribbles:** an unreadable entry keeps the saved value (number or unknown); in a new row,
   a newly present property or on create the cell becomes unknown. The `unresolved` note holds
   the text. The control echoes the scribble in full, so re-posting the page is a no-op; the
@@ -85,7 +89,8 @@ target)`, primary key `(sheet_id, revision, address)`, foreign key to the histor
   run under the request auth of that revision's actor (`campaign_request_auth`); at most 256
   notes per revision (`MAX_NOTES`; a save above it is 422). Notes are not sealed (L1).
 - **Reading:** `notes::current` does one indexed probe per address (`CROSS JOIN` over
-  `json_each`, so the planner keeps that loop order).
+  `json_each`, so the planner keeps that loop order). `notes::latest_rows` reads, per list,
+  the range of its `row:` addresses on the same index and keeps the latest note.
 - **Display:** a sum or switched cell shows "84 − 15 = 69"; a scribble "kept 84 · ‘lots’ not
   understood" or "? (unknown) · ‘lots’ not understood", quoted to `SCRIBBLE_EXCERPT_CHARS`
   (32) characters (other excerpts: `EXCERPT_CHARS`, 64). Raw text is escaped inside `<bdi>`;
@@ -116,9 +121,18 @@ On a saved page the reader may edit, the current note of a cell may offer:
   values show their option IDs. When the note's `before` is `{"absent":true}` (an optional
   property that was not set), Undo makes the property absent again, not `null`
   (`assist.rs`, `NoteValue::Absent`).
+- **Row removed · Undo** (D-V): a list whose latest row note is a removal whose row is still
+  away shows "Row removed · Undo" (one per list; "Undo Row removed Equipment"). Undo reads
+  the row from the revision before the removal (read with L), re-inserts it at its old index
+  clamped to the current length with the new host ID `r<L+1>-1` (removed IDs never return),
+  and writes `reverted` with `target`. A full list (256 rows) refuses it with a 422 message;
+  the route accepts only the list's latest row note. The restored row is a new row: its cells
+  have no Undo until edited again; the Undo itself is not undoable (Remove removes the row).
 
 Routes `POST /private-sheets/{id}/switch` and `/undo` take an 8 KiB body
-(`ASSIST_POST_BYTES`) with exactly `csrf`, `base`, `note` (`<revision>:<address>`), posted by
+(`ASSIST_POST_BYTES`) with exactly `csrf`, `base`, `note` (`<revision>:<address>`, or for a
+row cell `<revision>:<f>.<r>.<p>` with the row index read at `base`, which keeps each
+button's markup short), posted by
 the page's hidden forms `assist-switch` and `assist-undo`; each button sits by its cell, joins
 its form through `form` and is named by `aria-labelledby` (button, cell label, list and row
 legends). They take the `JOBS` permit at once (plain 503 when busy). Order: parse, CSRF,
@@ -161,12 +175,25 @@ use the field index (`v0`, `label-0`, `note-0`); metadata uses `meta-name`, `met
 |---|---|---|
 | Name, General notes | `POST /private-sheets/{id}/meta/{name\|notes}` | `csrf`, `base`, `value` |
 | Scalar field | `POST /private-sheets/{id}/fields/{field_id}` | `csrf`, `base`, `value`, plus `null` if nullable |
-| A list (interim, P1) | `POST /private-sheets/{id}` | `csrf`, `revision`, `list` (field index), `op`, that list's rows only |
+| Saved-row cell | `POST /private-sheets/{id}/cells/{f}/{r}/{p}` | `csrf`, `base`, `value`, plus `set` if optional |
+| New row | `POST /private-sheets/{id}/lists/{f}/rows` | `csrf`, `base`, `row-<p>` per property, `set-<p>` per optional property |
+| Remove, Move up, Move down | `POST /private-sheets/{id}/lists/{f}/rows/{r}/{remove\|up\|down}` | `csrf`, `base` |
 
-Unit routes (`UNIT_POST_BYTES` 256 KiB body, a principal required before the body is read):
-parse (400), CSRF and request auth (403), the bounded permit wait, read and edit rights (403;
-an unsupported pin is read-only, so 403), then 400 for a native pin, an ID outside the slug
-grammar, not in the pin, derived or a list, or a key set that is not exact.
+List routes name the list field, the row and the property by canonical index; the row index
+is read at `base` and mapped to its host ID there, so a row moved since is still found. Each
+row cell is its own form (DOM ids `row-<f>-<r>-<p>`, `label-…`, `save-…`; Save named "Save
+Quantity Equipment Row 1"); each row's Move up, Move down and Remove are buttons of one
+page-level form (`form="row-actions"`, `formaction`), never inside a cell form, so Enter in a
+cell cannot trigger them ("Remove Row 2 Equipment"); the first row's Move up and the last
+row's Move down are disabled. A "New row" form ends the list (one Add button, "Add row
+Equipment"), replaced by "This list holds 256 rows" when full.
+
+Unit routes (`UNIT_POST_BYTES` 256 KiB body for metadata, fields and cells; 5 MiB like the
+full form for a new row; 8 KiB for a row action; a principal required before the body is
+read): parse (400), CSRF and request auth (403), the bounded permit wait, read and edit rights
+(403; an unsupported pin is read-only, so 403), then 400 for a native pin, an ID outside the
+slug grammar, not in the pin, derived or a list, a list index outside the grammar or not a
+list of the pin, a row missing at `base`, a forged edge move, or a key set that is not exact.
 
 **Value-based conflicts:** the live revision L and revision `base` are read in one
 transaction. A malformed or zero `base` is 400. A `base` above L is 409. Otherwise the value
@@ -177,20 +204,31 @@ The patch is applied to L; the writer rechecks rights, the active state and that
 live. A 409 or 422 re-renders the live page with the draft in the unit's control (focused),
 its note and actions hidden, and every unit's `base` at L, so a second Enter is a conscious
 overwrite. Success is a 303 to `/private-sheets/{id}#label-<f>` (`#meta-name-label`,
-`#meta-notes-label`).
+`#meta-notes-label`, `#label-<f>-<r>-<p>`).
 
-A list form keeps Add, Remove, Move and "Save list" (its first button); the server keeps every
-other value as saved, refuses an `op` or row of another list (400), and keeps whole-sheet 409
-and D-U. Create, native, read-only, frozen and history pages and the re-render of a refused
-full-form POST keep the one full form (`value-<id>` names); the full-form edit POST is still
-accepted, with whole-sheet 409.
+List units protect, between `base` and L: a cell its value (a cell whose row is gone from L is
+a 409 that shows the draft read-only under "its row was removed", never in the row now at
+that index; the same when the row goes before the writer's transaction); a new row nothing
+(append only; values over `ECHO_BYTES` are 422 and not echoed; a list that filled up keeps the
+refused row read-only to copy); Remove the row's existence and every value (an edited row is
+409, a row already gone "No change"); Move the order of host IDs (409). A new row gets
+`r<L+1>-1` and a blank number is unknown. Remove redirects to `#removed-<f>`; a Move to
+`?focus=<up|down>-<f>-<r>`, which autofocuses the moved row's Move button in the same
+direction, or the other one at an edge.
 
-**Busy server (D-X3):** after parsing, CSRF and session checks, unit saves and the full-form
-or list-form edit wait up to `PERMIT_WAIT` (2 s) for the `JOBS` permit
+Create, native, read-only, frozen and history pages and the re-render of a refused full-form
+POST keep the one full form (`value-<id>`, `row-<f>-<r>-<p>` names, with draft Add, Remove and
+Move); the full-form edit POST is still accepted, with whole-sheet 409, and so is a slice-1.5a
+list form (`csrf`, `revision`, `list`, `op`, that list's rows) from a page loaded before
+per-cell save; its draft operations re-render in the full form.
+
+**Busy server (D-X3):** after parsing, CSRF and session checks, unit and list-unit saves and
+the full-form or list-form edit wait up to `PERMIT_WAIT` (2 s) for the `JOBS` permit
 (`definitions::admit_within`); reads, create, switch and Undo do not wait. Without the permit
 the answer is a styled 503 with `Retry-After: 1` and a form that posts the request again:
-a unit entry in a "Your entry" control (named by field ID, "Name" or "General notes"), or a
-full or list form's pairs as hidden inputs when keys, values and 48 bytes per pair total
+a unit or cell entry in a "Your entry" control (named by field ID, "Name", "General notes" or
+the cell's indices), a row action's retry button ("Remove row 2 again"), or a full, list or
+new-row form's pairs as hidden inputs when keys, values and 48 bytes per pair total
 ≤ `ECHO_BYTES` (1 MiB; else the page says they were too large to keep). Nothing is read or
 written. The `SheetBusy` marker keeps the auth layer's generic error page from replacing it.
 
@@ -201,9 +239,10 @@ Rendered sheet pages stay within `FIXED_PAGE_BYTES` (64 KiB) + render units ×
 (test constants in `src/campaigns/list_tests.rs`; units from `values::form_budget`, at most
 `RENDER_UNITS` = 32,768); definition text adds at most 2,621,440 bytes (D7). Assisted markup
 fits by elision, not a larger budget: term-boundary cuts, 32-character scribble quotes,
-`aria-labelledby` names, field-index DOM ids. The worst-case fixtures there assert it; the
-tightest is 256 scalars with 64-character IDs, labels of 100 `"` and a
-200-`"` scribble on each: 571,581 of 589,824 bytes (3.1% headroom). Rerun those fixtures
+`aria-labelledby` names, index DOM ids, index list routes and note keys, one shared
+row-action form. The worst-case fixtures there assert it; the tightest is a list of 256 rows ×
+32 integer properties with 64-character IDs, labels of 100 `"` and a 200-`"` scribble kept
+on each cell, every cell its own form: about 2.6% headroom (ASSIST-L2). Rerun those fixtures
 whenever per-cell markup grows.
 
 ## Adaptive sheet presentation
@@ -219,10 +258,12 @@ pixel-identical pages. Data is canonical and versioned, never mapped to PDF coor
   collapsed "How this is computed"; they and the advisory checks are computed from the saved
   snapshot and change on save and reload, never while typing.
 - Lists: a fieldset of row fieldsets ("Row 2 of 5 · ID r1-2"), every control labelled, an
-  explicit Set/Not set select for optional properties, per-row buttons named with the row and
-  list ("Move row 2 of Equipment up", "Remove row 2 of Equipment") and "Add Equipment row"
-  (disabled at 256 rows), which re-render the draft until Save or Save list. Targets are at
-  least 24 × 24 CSS px; rows stack without tables at 390 px. History shows rows read-only.
+  explicit Set/Not set select for optional properties. On a saved sheet each cell, the new
+  row and each row action save at once (see Saving a saved sheet); on the create page and in a
+  full-form re-render the per-row buttons ("Move row 2 of Equipment up", "Remove row 2 of
+  Equipment") and "Add Equipment row" (disabled at 256 rows) re-render the draft until Save.
+  Targets are at least 24 × 24 CSS px; rows stack without tables at 390 px. History shows
+  rows read-only.
 - The native MÖRK BORG layout follows the owner-supplied blank sheet (htmx only in the
   `--no-auth` prototype's editor)
   (kept locally; exact edition and fidelity unverified). Logos, art and fonts keep their rights.

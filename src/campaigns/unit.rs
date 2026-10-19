@@ -1,15 +1,19 @@
-//! Per-field save units (assisted sheet slice 1.5a, plan §3a "Per-cell save", D-C): the
-//! sheet's Name and General notes (`meta/name`, `meta/notes`) and each non-derived scalar
-//! field (`fields/{field_id}`) save on their own, each from its own form.
+//! Per-field and per-cell save units (assisted sheet slices 1.5a and 1.5b, plan §3a
+//! "Per-cell save", D-C, D-S): the sheet's Name and General notes (`meta/name`,
+//! `meta/notes`), each non-derived scalar field (`fields/{field_id}`), and for each list a
+//! saved row's cell (`cells/{f}/{r}/{p}`), the new-row form (`lists/{f}/rows`) and a row's
+//! Remove, Move up and Move down (`lists/{f}/rows/{r}/{remove|up|down}`), each saved on its
+//! own from its own form.
 //!
 //! A unit form carries `base`, the revision its displayed value was read at. A save is a
 //! conflict only when the unit's **protected value** differs between `base` and the live
 //! revision (values, not intervening history: an A → B → A change is no conflict). The patch
-//! is always applied to the live snapshot. List rows and cells are units of slice 1.5b.
+//! is always applied to the live snapshot. List units name a row by its index at `base` and
+//! are planned in `super::rows`.
 use super::{snapshots::PrivateSnapshot, values};
 use crate::{
     AppError,
-    definitions::{Control, Definition},
+    definitions::{Control, Definition, Field},
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
@@ -21,6 +25,51 @@ pub(crate) enum Unit {
     Notes,
     /// A scalar field: its index in the pinned definition.
     Field(usize),
+    /// Property `p` of row `r` (its index at the form's `base`) of list field `f`.
+    Cell {
+        f: usize,
+        r: usize,
+        p: usize,
+    },
+    /// The new-row form of list field `f`.
+    NewRow(usize),
+    /// A row action on row `r` (at `base`) of list field `f`.
+    Row {
+        f: usize,
+        r: usize,
+        action: RowAction,
+    },
+}
+
+/// What a row action does (D-S, D-V).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowAction {
+    Remove,
+    Up,
+    Down,
+}
+
+impl RowAction {
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "remove" => Some(Self::Remove),
+            "up" => Some(Self::Up),
+            "down" => Some(Self::Down),
+            _ => None,
+        }
+    }
+}
+
+/// The outcome of a planned unit save.
+pub(crate) enum Planned {
+    /// The patched snapshot (and its notes) is ready for the writer.
+    Write,
+    /// The submission equals the saved value (D-U), or the row is already removed.
+    Unchanged,
+    /// The unit changed between `base` and L, or `base` is above L.
+    Conflict,
+    /// The value was refused (422).
+    Invalid(&'static str),
 }
 
 /// What a conflict compares: the unit's value in one snapshot.
@@ -33,6 +82,14 @@ pub(crate) enum Protected<'a> {
 
 /// The admitted keys of a unit form; a nullable field adds its Known/Unknown `null`.
 const KEYS: [&str; 3] = ["csrf", "base", "value"];
+
+/// List field `f` of the pin, when it is a list and not derived.
+fn list(definition: &Definition, f: usize) -> Option<&Field> {
+    definition
+        .fields
+        .get(f)
+        .filter(|field| field.control == Control::List && field.formula.is_none())
+}
 
 impl Unit {
     /// The unit a `meta/{which}` route names.
@@ -59,27 +116,69 @@ impl Unit {
         (field.formula.is_none() && field.control != Control::List).then_some(Self::Field(f))
     }
 
-    /// The label shown in messages.
-    pub(crate) fn label(self, definition: &Definition) -> &str {
+    /// The unit a `cells/{f}/{r}/{p}` route names: canonical indices, `f` a list of the pin
+    /// that is not derived, `p` one of its properties. The row is looked up at `base`.
+    pub(crate) fn cell(definition: &Definition, (f, r, p): (&str, &str, &str)) -> Option<Self> {
+        let (f, r, p) = (values::index(f)?, values::index(r)?, values::index(p)?);
+        (p < values::properties(list(definition, f)?).len()).then_some(Self::Cell { f, r, p })
+    }
+
+    /// The unit a `lists/{f}/rows` route names.
+    pub(crate) fn new_row(definition: &Definition, f: &str) -> Option<Self> {
+        let f = values::index(f)?;
+        list(definition, f).map(|_| Self::NewRow(f))
+    }
+
+    /// The unit a `lists/{f}/rows/{r}/{remove|up|down}` route names.
+    pub(crate) fn row(definition: &Definition, (f, r, action): (&str, &str, &str)) -> Option<Self> {
+        let (f, r) = (values::index(f)?, values::index(r)?);
+        let action = RowAction::parse(action)?;
+        list(definition, f).map(|_| Self::Row { f, r, action })
+    }
+
+    /// The label shown in messages ("Current HP", "Quantity, row 2 of Equipment").
+    pub(crate) fn label(self, definition: &Definition) -> String {
+        let field = |f: usize| &definition.fields[f];
         match self {
-            Self::Name => "Name",
-            Self::Notes => "General notes",
-            Self::Field(f) => &definition.fields[f].label,
+            Self::Name => "Name".into(),
+            Self::Notes => "General notes".into(),
+            Self::Field(f) => field(f).label.clone(),
+            Self::Cell { f, r, p } => {
+                super::assist::row(field(f), r, &values::properties(field(f))[p]).label
+            }
+            Self::NewRow(f) => format!("The new {} row", field(f).label),
+            Self::Row { f, r, .. } => format!("Row {} of {}", r + 1, field(f).label),
         }
     }
 
     /// The exact key set of the unit's form.
-    pub(crate) fn keys(self, definition: &Definition) -> HashSet<&'static str> {
-        let mut keys: HashSet<&'static str> = KEYS.into_iter().collect();
-        if let Self::Field(f) = self
-            && definition.fields[f].nullable
-        {
-            keys.insert("null");
+    pub(crate) fn keys(self, definition: &Definition) -> HashSet<String> {
+        let mut keys: HashSet<String> = match self {
+            Self::NewRow(_) | Self::Row { .. } => ["csrf", "base"].map(String::from).into(),
+            _ => KEYS.map(String::from).into(),
+        };
+        match self {
+            Self::Field(f) if definition.fields[f].nullable => {
+                keys.insert("null".into());
+            }
+            Self::Cell { f, p, .. } if values::properties(&definition.fields[f])[p].optional => {
+                keys.insert("set".into());
+            }
+            Self::NewRow(f) => {
+                for (p, property) in values::properties(&definition.fields[f]).iter().enumerate() {
+                    keys.insert(format!("row-{p}"));
+                    if property.optional {
+                        keys.insert(format!("set-{p}"));
+                    }
+                }
+            }
+            _ => {}
         }
         keys
     }
 
-    /// The unit's protected value in `snapshot` (plan §3a, the conflict table).
+    /// The protected value of a metadata or scalar unit in `snapshot` (plan §3a, the
+    /// conflict table); list units compare rows in `super::rows`.
     pub(crate) fn protected<'a>(
         self,
         definition: &Definition,
@@ -89,13 +188,15 @@ impl Unit {
             Self::Name => Protected::Text(&snapshot.name),
             Self::Notes => Protected::Text(&snapshot.notes),
             Self::Field(f) => Protected::Value(snapshot.data.get(&definition.fields[f].id)),
+            Self::Cell { .. } | Self::NewRow(_) | Self::Row { .. } => Protected::Value(None),
         }
     }
 
-    /// Applies the admitted unit form to the live `snapshot`: its new value and, for a number,
-    /// enum or yes/no field, its change note (into `pending`). Returns whether anything
-    /// changes; a submission equal to the saved value that records no note is a no-op (D-U).
-    /// Values are read exactly as the full form reads them (`values::scalar`, `name_notes`).
+    /// Applies the admitted form of a metadata or scalar unit to the live `snapshot`: its
+    /// new value and, for a number, enum or yes/no field, its change note (into `pending`).
+    /// Returns whether anything changes; a submission equal to the saved value that records
+    /// no note is a no-op (D-U). Values are read exactly as the full form reads them
+    /// (`values::scalar`, `name_notes`). List units are planned in `super::rows`.
     pub(crate) fn apply(
         self,
         pin: &crate::definitions::private_pin::ImmutablePin,
@@ -140,6 +241,9 @@ impl Unit {
                 snapshot.data = data;
                 *pending = recorder.notes;
                 Ok(changed)
+            }
+            Self::Cell { .. } | Self::NewRow(_) | Self::Row { .. } => {
+                Err(AppError::Invalid("List units are planned by row."))
             }
         }
     }

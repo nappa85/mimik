@@ -191,8 +191,9 @@ As built, with the details in decisions D1–D11 (`campaigns/values.rs`, `transp
   `op`, at most 65,536 pairs (`SHEET_FORM_PAIRS`); host IDs `r<N>-<k>` enforced by the writer
   (`snapshots::host_item_ids`). Body and echo limits: `docs/campaigns.md`; per-unit routes:
   `docs/assisted-entry.md`.
-- On the create page and the interim list forms (P1) until 1.5b, Add, Remove, Move up and Move
-  down re-render an unsaved draft (200, never written, never evaluated); Save persists (D5).
+- On the create page and in the full form, Add, Remove, Move up and Move down re-render an
+  unsaved draft (200, never written, never evaluated); Save persists (D5). A saved sheet saves
+  each cell, new row and row action at once (`docs/assisted-entry.md`).
 - Publication refuses a definition whose worst-case form exceeds 32,768 render units
   (`values::RENDER_UNITS`) → `list-form-exceeds-limit` (D7; headroom in
   `docs/assisted-entry.md`).

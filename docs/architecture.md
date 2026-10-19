@@ -76,7 +76,7 @@ Origin against the configured authority, and sets `Cache-Control: no-store`,
 One SQLite database, default `data/mimik.sqlite3` (`--database`, `MIMIK_DATABASE`). rusqlite
 0.37 with bundled SQLite (FTS5 included). Migrations are embedded (`src/store.rs`, `MIGRATIONS`)
 and applied in one `IMMEDIATE` transaction; `PRAGMA user_version` holds the schema version
-(`SCHEMA_VERSION = 20`). A database from a newer schema is refused. There are no down
+(`SCHEMA_VERSION = 21`). A database from a newer schema is refused. There are no down
 migrations.
 
 | Migration | Holds |
@@ -92,6 +92,7 @@ migrations.
 | 018 | Formula profile 1 (version bump only, no table change) |
 | 019 | Catalogues: drafts, versions, entry types, entries, unit references, seals (trigger-bound to the hashed content), name FTS index |
 | 020 | Private sheet change notes (assisted entry) |
+| 021 | Change notes rebuilt to admit row addresses (`row:<list>/<host>`) and 6-byte `meta:` addresses |
 
 ## Areas
 

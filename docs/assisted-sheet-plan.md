@@ -9,16 +9,16 @@ Decision IDs (D-…, U…, P…) are defined in `docs/decisions.md`. What is bui
 notes and scribbles, switch and Undo, unknown values, per-field save, the busy page, the page
 bound) is described in `docs/assisted-entry.md`; this plan only adds to it.
 
-Remaining, in order: **1.5b** per-cell list save, **1.6** quick-add, **1.7** validity flag,
+Remaining, in order: **1.6** quick-add, **1.7** validity flag,
 **2a** JavaScript,
 **2b** crate and runtime selection (prototype tier, may run in parallel), **2c**
 interpretation, **3** bundles and reminders, **4** suggestions and "Which Sword?", **5** docs
 and gate.
 
 Every step: its own branch; failing-first tests with the red run recorded; independent
-implementation review before merge; built and tested on 2 cores on weekdays. 1.5b and 1.6
-keep the demo (`tools/assist_demo.py`) usable. Any step that adds per-cell markup reruns the
-worst-case page fixtures in `src/campaigns/list_tests.rs` (tightest headroom today 3.1%) and
+implementation review before merge; built and tested on 2 cores on weekdays. 1.6 keeps
+the demo (`tools/assist_demo.py`) usable. Any step that adds per-cell markup reruns the
+worst-case page fixtures in `src/campaigns/list_tests.rs` (tightest headroom today 2.6%) and
 never enlarges the budget.
 
 **POC cuts** (no security or integrity risk): player `*` and `/`; interpreting text, enum or
@@ -30,50 +30,6 @@ hosted providers, GPU, models above about 4B.
 
 ## 1. Design for the remaining steps
 
-### 1.1 Row units (1.5b)
-
-Replace the interim list forms (P1) with per-cell and per-row routes. Same contract as the
-1.5a unit routes: exact keys, typed addresses, `base` in `1..=L` (malformed 400, above L 409),
-value-based conflicts on two snapshots, patch applied to L, stale no-op "No change", 409
-re-render with the draft and `base` = L, D-X3 wait and busy page, native and unsupported pins
-refused.
-
-| Unit | Route | Keys | Protected value |
-|---|---|---|---|
-| Saved-row cell | `cells/{list}/{host}/{property}` | `csrf`, `base`, `value`, plus `set` if optional | the cell's value and the row's existence |
-| New row (Add +) | `lists/{list}/rows` | `csrf`, `base`, `row-{p}` and `set-{p}` for that one row | none (append only) |
-| Quick-add (1.6) | `lists/{list}/quick` | `csrf`, `base`, `text` | none (append only) |
-| Remove, Move up, Move down | `lists/{list}/rows/{host}/{remove\|up\|down}` | `csrf`, `base` | Remove: the row's existence and all its values; Move: the list's order of host IDs |
-
-- Routes refuse with 400, before any write: derived fields, IDs not in the pin, IDs outside the
-  slug grammar.
-- Host-ID checks, in this order, for both cell and row-action routes (decided 2026-10-19,
-  coordinator default): (1) `base` malformed → 400; (2) `base` above L → 409; (3) the host ID
-  is not in the base snapshot → 400 (forged or unknown row); (4) the host ID is in the base
-  snapshot but not in L (removed since) → 409 conflict with re-render, as switch and Undo
-  already do; (5) the value-based conflict check and the no-op check, as in 1.5a.
-- A forged edge move (Move up on the first row, Move down on the last) → 400.
-- Row actions are separate forms, so Enter can never trigger Remove or Move. Remove and Move
-  write at once (D-V). Move has no Undo; the reverse move is one click.
-- **Remove** writes one row note `{"row":"present"}` → `{"row":"absent"}` and the page shows
-  "Row removed · Undo". **Undo of Remove** reads the row from the revision before the removal
-  through the validated history reader, requires that no row with that host ID exists, and
-  re-inserts it at its old index clamped to the current length with a new host ID `r<L+1>-1`
-  (removed IDs never return), writing a `reverted` note. A full list (256 rows) refuses it
-  with a message. The re-added row is new: its cells have no Undo until edited again.
-  `assist::undoable` excludes row notes today; 1.5b adds the row path.
-- **Undo of an optional property** whose before value is `{"absent":true}` makes that property
-  absent again (not `null`, not empty).
-- **New row form:** one row's controls; Enter saves the row. A required enum or boolean must
-  be chosen; required numbers may be blank (unknown). Host IDs are allocated in the
-  transaction (`r<rev>-k`) and returned in the response. At most one note per integer, enum or
-  boolean property (≤ 32). Add stops at 256 rows (the list cap) with a message; nothing is
-  written.
-- The create page keeps the one full form with its draft operations. The legacy full-form
-  edit POST stays accepted with whole-sheet 409.
-- Migration 020's address CHECK refuses one-character `meta:` suffixes; no route writes
-  `meta:` notes. If any step starts writing them, it adds a migration fixing the CHECK first.
-
 ### 1.2 Quick-add (1.6)
 
 - A list may declare `"quick_add": {"name": <text property>, "quantity": <integer
@@ -82,6 +38,8 @@ refused.
   has a required text or multiline property other than the mapped name (decided 2026-10-19,
   coordinator default: no quick-add line is shown for such lists; regression case required),
   or when it names a property of the wrong type.
+- Route `lists/{f}/quick` (the list by index, as the other list routes) with exactly `csrf`,
+  `base` and `text`; it protects nothing (append only), like the new-row form.
 - Deterministic parse of `text` (≤ 200 characters): `^(\d{1,6})\s+(.+)$` → quantity and name;
   `^(.+?)\s*[x×]\s*(\d{1,6})$` → name and quantity; otherwise the whole text is the name with
   quantity 1; an empty name → "Nothing to add".
@@ -248,28 +206,6 @@ has no egress; no redirects or proxies; no prompts or player text in logs; no se
 
 ## 2. Steps
 
-### 1.5b Per-cell save: lists, new row, row actions
-
-Scope: §1.1. Visible: Enter in a row's Quantity saves that cell; Remove → "Row removed · Undo".
-Tests:
-- Enter in the first, middle and last row saves only that cell and never adds, moves or
-  removes a row; two cells of different rows saved from one page both succeed;
-- a stale cell → 409; a stale Remove after another tab edited that row → 409; a stale Move
-  after a reorder, add or remove → 409; a removed row's cell → refused;
-- Undo of Remove re-inserts the row with a new host ID at the clamped index; Undo of Remove on
-  a full list (256) → refused with a message;
-- a new row with a required enum unset → refused; with a blank number → unknown; the new-row
-  form writes ≤ 32 notes;
-- the two-tab sequence (as in `two_tabs_without_script_keep_each_units_base`,
-  `src/campaigns/unit_tests.rs`: tab A has a dirty cell, tab B saves that cell, tab A saves
-  another cell, then tab A's dirty cell → 409 with the draft kept) with a dirty row cell;
-  page-bound fixtures rerun;
-- host checks in the §1.1 order: a host not in the base snapshot → 400; a host in the base but
-  removed since → 409; for cells and for each row action;
-- Add on a 256-row list → refused with a message, nothing written; a forged edge move → 400;
-  Undo of an optional property with before `{"absent":true}` → the property is absent;
-- Chromium no-JS run at 1280 and 390.
-
 ### 1.6 Quick-add
 
 Scope: §1.2 (schema member, admission refusals, parse, route). Visible: "3 torches" + Enter
@@ -365,7 +301,7 @@ dangling key shows no link; p95 measured.
 
 ### 5 Docs, release scope, gate
 
-- Update `docs/assisted-entry.md`, `release-scope.md` (schema 20, one script on sheet pages under
+- Update `docs/assisted-entry.md`, `release-scope.md` (schema 21, one script on sheet pages under
   a strict CSP, the local model as confirm-only), the runtime definition contract (`quick_add` and
   `catalogue` members), publication and dependency docs; replace the statements this work
   reverses: catalogue Q4 (not in the catalogue is a warning, "Which Sword?" remembered), the

@@ -462,6 +462,9 @@ impl Store {
                 }else{
                     let addresses=super::notes::addresses(pin.definition(),&view.snapshot.data);
                     view.notes.current=super::notes::current(&tx,view.snapshot.sheet_id,&addresses)?;
+                    // The latest row note of each list: a removal offers Undo (slice 1.5b).
+                    let lists:Vec<&str>=pin.definition().fields.iter().filter(|field|field.control==crate::definitions::Control::List&&field.formula.is_none()).map(|field|field.id.as_str()).collect();
+                    view.notes.rows=super::notes::latest_rows(&tx,view.snapshot.sheet_id,&lists)?;
                 }
             }
             // Current pages only: the routes read through the sheet's current revision, so a

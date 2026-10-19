@@ -1,6 +1,6 @@
 //! Slice 1.1 connected saves (assisted sheet plan §5): lenient number entry through the real
 //! router on the existing full-form save, with native sheets kept strict.
-use super::formula_tests::{Setup, setup, submitted};
+use super::formula_tests::{Setup, setup};
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 
@@ -136,9 +136,10 @@ async fn list_row_sum_saves_its_result() {
 }
 
 /// B1 regression (plan §8): re-posting the rendered forms keeps saved negatives, because a
-/// sign-led input is literal (D-Q). Covers a scalar and a list-row integer. Since slice
-/// 1.5a each unit and each list posts its own form: Armour's form and the list form,
-/// re-posted unchanged, write nothing (D-U); General notes then save on their own.
+/// sign-led input is literal (D-Q). Covers a scalar and a list-row integer. Since slices
+/// 1.5a and 1.5b each unit and each row cell posts its own form: Armour's form and the
+/// Weight cell's, re-posted unchanged, write nothing (D-U); General notes then save on
+/// their own.
 #[tokio::test]
 async fn canonical_negatives_survive_a_re_post() {
     let _auth_lock = crate::auth::test_resource_lock().await;
@@ -157,13 +158,15 @@ async fn canonical_negatives_survive_a_re_post() {
         let (status, html) = setup.post(&action, armour).await;
         assert_eq!(status, StatusCode::OK);
         assert!(html.contains("No change"), "{html}");
-        let rendered = submitted(&page);
-        assert!(rendered.contains(&pair("row-4-0-2", "-3")), "{rendered:?}");
+        let (action, weight) = super::unit_tests::unit_form(&page, "row-4-0-2", None);
+        assert!(weight.contains(&pair("value", "-3")), "{weight:?}");
+        let (status, html) = setup.post(&action, weight).await;
         assert_eq!(
-            setup.post("/private-sheets/1", rendered).await.0,
+            status,
             StatusCode::OK,
-            "the unchanged list form writes nothing"
+            "the unchanged cell form writes nothing"
         );
+        assert!(html.contains("No change"), "{html}");
         let (action, mut notes) = super::unit_tests::unit_form(&page, "meta-notes", None);
         for (key, value) in &mut notes {
             if key == "value" {
@@ -303,7 +306,8 @@ async fn runtime_integer_inputs_have_no_numeric_inputmode() {
             assert_eq!(input(&html, name), None, "{path} {name}");
         }
         if path == "/private-sheets/1" {
-            for name in ["row-4-0-1", "row-4-0-2"] {
+            // Row cells in their own forms (slice 1.5b), by DOM id.
+            for name in ["#row-4-0-1", "#row-4-0-2", "#row-new-4-1", "#row-new-4-2"] {
                 assert_eq!(input(&html, name), None, "{path} {name}");
             }
         }

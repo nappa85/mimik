@@ -117,7 +117,7 @@ Enforced in both Rust and SQL triggers (migration 012), as of now:
 | Ruleset selector | first 50 registered pairs |
 | Body: campaign forms | 8 KiB |
 | Body: sheet create/full save | 5 MiB (`SHEET_POST_BYTES`); draft echo up to 1 MiB |
-| Body: per-field save | 256 KiB; Undo/switch 8 KiB; other sheet routes 1 MiB |
+| Body: per-field and per-cell save | 256 KiB; new row 5 MiB; row action, Undo/switch 8 KiB; other sheet routes 1 MiB |
 | Request time | 5 s (whole request, including departure freezes) |
 
 Definition-side bounds (256 fields, 32 groups, text 8,000 and multiline 20,000
