@@ -11,14 +11,19 @@ use std::{
     sync::LazyLock,
 };
 
-/// Distinct `(source, page, unit)` references in one catalogue (D5).
+/// Distinct `(source, page, unit)` references in one catalogue (D5). The reference cap
+/// below is lower, so it bounds distinct units first; this check stays as defence in depth.
 pub(super) const MAX_DISTINCT_UNITS: usize = 16_384;
-/// Unit references in one catalogue, counted with repetition (plan §12): the seal compares
-/// every reference row, so this cap bounds the publication's write-lock hold together with
-/// the entry and byte caps. 24,576 is 3 per entry at 8,192 entries; the profiled worst shape
-/// at this cap (every reference used, 16 properties per type, 4 MiB) holds the lock for about
-/// 1.7 s on update, where 32,768 reached 2.0-2.1 s, over the 2 s budget (plan §12).
-pub(super) const MAX_UNIT_REFERENCES: usize = 24_576;
+/// Unit references in one catalogue, counted with repetition (plan §12, §13): the seal
+/// compares every reference row, so this cap bounds the publication's write-lock hold
+/// together with the entry and byte caps. 8,192 is 1 per entry at 8,192 entries. The worst
+/// measured case on the profiling host at this cap (8,192 entries of 100-scalar names of
+/// distinct tokens, every reference used, 4 MiB, updating the previous version) held the
+/// lock for about 1.76 s; at 12,288 it held 1.92 s and at 16,384 2.14 s, over the 2 s
+/// budget (plan §13). This is host-specific evidence, not a proven bound for every
+/// admitted shape.
+pub(super) const MAX_UNIT_REFERENCES: usize = 8_192;
+const _: () = assert!(MAX_UNIT_REFERENCES <= MAX_DISTINCT_UNITS);
 /// Total UTF-8 bytes of every entry's owner text (plan §9).
 pub(super) const MAX_OWNER_TEXT_TOTAL: usize = 1024 * 1024;
 /// The admission rules a version was published under (plan §12). Tightening any rule means a
@@ -179,13 +184,18 @@ pub(super) fn validate(bytes: &[u8]) -> Result<Admitted, CatalogueError> {
 
 /// Scalars that render as nothing although they are not whitespace: the Braille pattern
 /// blank and the Hangul fillers. Alone (or with whitespace) they make text look empty.
-const BLANK_LOOKING: [char; 5] = ['\u{2800}', '\u{3164}', '\u{115f}', '\u{1160}', '\u{ffa0}'];
+pub(super) const BLANK_LOOKING: [char; 5] =
+    ['\u{2800}', '\u{3164}', '\u{115f}', '\u{1160}', '\u{ffa0}'];
 
-/// Required text: at least one scalar that is neither whitespace nor blank-looking.
+/// Required text: at least one scalar that is neither whitespace, blank-looking nor an
+/// invisible format character (Cf). Owner text keeps Cf for bidi prose, but not alone.
 fn label(value: &str) -> bool {
-    value
-        .chars()
-        .any(|scalar| !scalar.is_whitespace() && !BLANK_LOOKING.contains(&scalar))
+    use unicode_general_category::{GeneralCategory, get_general_category};
+    value.chars().any(|scalar| {
+        !scalar.is_whitespace()
+            && !BLANK_LOOKING.contains(&scalar)
+            && get_general_category(scalar) != GeneralCategory::Format
+    })
 }
 
 /// Names, labels, the title and text property values: no control characters at all.

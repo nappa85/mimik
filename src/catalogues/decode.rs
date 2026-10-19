@@ -18,9 +18,9 @@ pub(crate) const MAX_NODES: usize = 524_288;
 pub(crate) const MAX_DEPTH: usize = 8;
 /// Members per object; the schema closes every object with at most 8 declared members, and
 /// entry `properties` hold at most 16 declared ids.
-const MAX_KEYS: usize = 32;
+pub(super) const MAX_KEYS: usize = 32;
 /// Key length in scalars (ids are at most 64 bytes).
-const MAX_KEY: usize = 64;
+pub(super) const MAX_KEY: usize = 64;
 
 pub(crate) const MAX_ENTRIES: usize = 8_192;
 pub(crate) const MAX_TYPES: usize = 32;

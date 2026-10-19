@@ -90,9 +90,10 @@ an original synthetic example.
 - A description is either 1–16 unit references or `owner_text` (non-blank). An entry may not
   cite the same unit twice. Every cited source must be listed in `sources`.
 - Labels, names, the title and owner text may not be blank: at least one scalar must be
-  neither whitespace nor blank-looking (the Braille pattern blank U+2800 and the Hangul fillers
-  U+115F, U+1160, U+3164, U+FFA0, which render as nothing). Mixed with visible text they stay
-  allowed (Braille text needs U+2800). Text is not normalised.
+  neither whitespace, blank-looking (the Braille pattern blank U+2800 and the Hangul fillers
+  U+115F, U+1160, U+3164, U+FFA0, which render as nothing) nor an invisible format character
+  (Unicode category Cf). Mixed with visible text they stay allowed (Braille text needs U+2800;
+  owner text keeps Cf for bidi prose). Text is not normalised.
 - Names, labels, the title and text property values may not contain control characters
   (`char::is_control`, C0 and C1), invisible format characters (Unicode category Cf: bidi
   overrides and isolates, zero-width characters, the byte-order mark, soft hyphen, tags) or
@@ -133,15 +134,18 @@ an original synthetic example.
 | Options per enum | 128 |
 | Entries | 8,192 |
 | Units per entry | 1–16 |
-| Unit references per catalogue (with repetition) | 24,576 (`unit-reference-limit`) |
-| Distinct units per catalogue | 16,384 |
+| Unit references per catalogue (with repetition) | 8,192 (`unit-reference-limit`) |
+| Distinct units per catalogue | 16,384 (unreachable while references are capped at 8,192) |
 | Names, labels, title | 100 scalars |
 | Text property value | 1,000 scalars |
 | `owner_text` | 20,000 scalars per entry, 1 MiB (UTF-8 bytes) in total |
 
-The reference cap bounds publication's write-lock hold (the seal compares every reference
-row): at 32,768 the worst admitted shape held the lock for about 2.0–2.1 s on update, over
-the plan's 2 s budget; at 24,576 it holds it for about 1.85 s (plan §12).
+The reference cap bounds publication's write-lock hold together with the entry and byte caps
+(the seal compares every reference row; the bytes they free go to names and text). The worst
+measured case on the profiling host, 8,192 entries with 100-scalar names of distinct tokens
+updating the previous version at 4 MiB, held the lock for up to 1.84 s at this cap; at 12,288
+references it held 1.92 s and at 16,384 2.14 s, over the plan's 2 s budget (plan §13). This
+is host-specific evidence, not a bound proven for every admitted shape.
 
 The catalogue profile is separate from the definition decoder: `definitions::decode::MAX_NODES`
 (32,768), its 256 KiB input cap and the list form budget are unchanged, and a regression test
@@ -337,12 +341,15 @@ versions and index).
 
 ### Measured cost (release, real CLI, 8,192 entries)
 
-Plan §12 (supersedes §11's contention estimate). The write lock is measured with both
-endpoints by a non-blocking probe started before the publish process. Publication holds it for
-about 1.2–1.6 s on the calibrated shape (3.2 MB, 21,504 references) and about 1.74–1.84 s on
-the worst admitted shape (4 MiB, 24,576 references, 16 properties per type, update); peak RSS
-at most about 142 MiB. A concurrent writer using the server's pattern (`BEGIN IMMEDIATE`, 5 s
-busy timeout, one insert, commit: the lock-level equivalent of a sheet save) waits and
-succeeds in every case. The 5 s busy timeout (`src/store.rs`) is the real failure point: a
+Plan §13 (supersedes §12 and §11's contention estimate). The write lock is bounded from below
+and above by a non-blocking probe started before the publish process, from each probe's start
+and completion time. On the profiling host publication holds it for about 0.73–1.01 s on the
+calibrated shape (2.6 MB, 7,168 references) and at most 1.84 s in the worst measured case
+(4 MiB, 8,192 references, 100-scalar names of distinct tokens, update); the
+declaration-heavy shape (32 types x 16 enum properties x 128 options) held it for at most
+1.38 s. Peak RSS at most about 182 MiB (publish of the declaration-heavy shape). These are the
+worst measured cases, not a proof that no admitted shape costs more. A concurrent writer
+using the server's pattern (`BEGIN IMMEDIATE`, 5 s busy timeout, one insert, commit: the
+lock-level equivalent of a sheet save) waits and succeeds in every case. The 5 s busy timeout (`src/store.rs`) is the real failure point: a
 publish holding the lock longer than that would make concurrent sheet saves fail with a
 storage error. Commit cost includes `fsync`, so it depends on the disk.

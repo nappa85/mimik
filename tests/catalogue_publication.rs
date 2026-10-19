@@ -1877,3 +1877,98 @@ async fn a_failed_replacement_publication_keeps_the_previous_index_rows() {
         "ok"
     );
 }
+
+#[tokio::test]
+async fn reverse_key_order_entries_with_unsorted_references_publish_show_and_verify() {
+    let _guard = TEST_LOCK.lock().await;
+    let fixture = fixture().await;
+    let (source_b, page_b, unit_b) = second_source(&fixture).await;
+    assert!(unit_b > fixture.unit);
+    let low =
+        json!({"source_id": fixture.source, "page_id": fixture.page, "unit_id": fixture.unit});
+    let high = json!({"source_id": source_b, "page_id": page_b, "unit_id": unit_b});
+    let mut value = rich(&fixture);
+    value["sources"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"source_id": source_b, "pdf_sha256": fixture.pdf_hash}));
+    // Unit-backed entries in reverse lexical key order, each citing the higher unit id first;
+    // an owner-written entry between them.
+    let spell = |key: &str, description: Value| {
+        json!({"key": key, "type": "spell", "name": "Name zqxname",
+               "properties": {"zqxprop": "zqxvalue", "level": 1}, "description": description})
+    };
+    value["entries"] = json!([
+        spell("zqxkey-zulu", json!({"units": [high, low]})),
+        spell("zqxkey-mike", json!({"owner_text": "zqxowner text"})),
+        spell("zqxkey-alpha", json!({"units": [high, low]})),
+    ]);
+    let first = fixture.publish(&value).await.unwrap();
+    let rows: Vec<(String, i64, i64)> = fixture
+        .db()
+        .prepare("SELECT key,ordinal,unit_id FROM catalogue_entry_units WHERE version_id=?1 ORDER BY key,ordinal")
+        .unwrap()
+        .query_map([first.version.version_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let (low_id, high_id) = (fixture.unit, unit_b);
+    assert_eq!(
+        rows,
+        [
+            ("zqxkey-alpha".into(), 0, high_id),
+            ("zqxkey-alpha".into(), 1, low_id),
+            ("zqxkey-zulu".into(), 0, high_id),
+            ("zqxkey-zulu".into(), 1, low_id),
+        ]
+    );
+    let shown = output_json(&show_spells(&fixture));
+    assert_eq!(
+        (&shown["version"], &shown["content_hash"]),
+        (&json!(1), &json!(first.version.content_hash))
+    );
+    // An update that only reorders one entry's references.
+    value["entries"][2]["description"]["units"] = json!([low, high]);
+    let id = fixture.draft(&value).await;
+    let compared = fixture.compare(id).await;
+    assert_eq!(compared.changes.description_references_changed, 1);
+    let second = fixture
+        .store
+        .publish_catalogue(id, request(&compared.comparison_hash))
+        .await
+        .unwrap();
+    let shown = output_json(&show_spells(&fixture));
+    assert_eq!(
+        (&shown["version"], &shown["content_hash"]),
+        (&json!(2), &json!(second.version.content_hash))
+    );
+    let verified = output_json(&fixture.cli(&["verify-catalogues"]));
+    assert_eq!(
+        verified,
+        json!({"catalogues": 1, "versions": 2, "index_rows": 3, "problems": [], "status": "ok"})
+    );
+}
+
+#[tokio::test]
+async fn cli_reference_limit_rejection_is_redacted() {
+    let _guard = TEST_LOCK.lock().await;
+    let fixture = fixture().await;
+    let mut value = fixture.catalogue();
+    // 513 entries of 16 distinct units each: 8,208 references, over the 8,192 cap (plan
+    // §13). Admission refuses the total before any source check.
+    let units: Vec<Value> = (1..=16)
+        .map(|unit| json!({"source_id": fixture.source, "page_id": fixture.page, "unit_id": unit}))
+        .collect();
+    value["entries"] = (0..513)
+        .map(|entry| {
+            json!({"key": format!("zqxkey-{entry}"), "type": "spell", "name": "Name zqxname",
+                   "properties": {"zqxprop": "zqxvalue", "level": 1},
+                   "description": {"units": units}})
+        })
+        .collect();
+    let file = fixture.write("spells.json", &serde_json::to_vec(&value).unwrap());
+    failed(&fixture.import(&file, 0), "unit-reference-limit");
+    assert_eq!(fixture.drafts(), 0);
+}

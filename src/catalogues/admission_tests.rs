@@ -556,12 +556,15 @@ fn owner_text_total_is_capped_at_one_mebibyte_of_utf8() {
 
 #[test]
 fn distinct_units_are_capped_per_catalogue() {
-    let limit = i64::try_from(MAX_DISTINCT_UNITS).unwrap();
-    let entries = |extra: i64| {
-        (0..(limit + extra + 15) / 16)
+    // Every distinct unit is at least one reference, so the reference cap (8,192, plan §13)
+    // now bounds distinct units below the D5 cap of 16,384; the distinct check stays as
+    // defence in depth. All-distinct catalogues are accepted up to the reference cap, and
+    // one at the distinct cap trips the reference cap first.
+    let entries = |total: i64| {
+        (0..(total + 15) / 16)
             .map(|entry| {
                 let first = entry * 16 + 1;
-                let last = (first + 15).min(limit + extra);
+                let last = (first + 15).min(total);
                 spell(
                     &format!("e{entry}"),
                     &(first..=last)
@@ -571,16 +574,20 @@ fn distinct_units_are_capped_per_catalogue() {
             })
             .collect::<Vec<_>>()
     };
+    let references = i64::try_from(admission::MAX_UNIT_REFERENCES).unwrap();
     assert_eq!(
-        accepted(&with_array("/entries", entries(0)))
+        accepted(&with_array("/entries", entries(references)))
             .counts
             .distinct_units,
-        MAX_DISTINCT_UNITS
+        admission::MAX_UNIT_REFERENCES
     );
-    assert_eq!(
-        rejected(&with_array("/entries", entries(1))),
-        "distinct-unit-limit"
-    );
+    let limit = i64::try_from(MAX_DISTINCT_UNITS).unwrap();
+    for total in [references + 1, limit, limit + 1] {
+        assert_eq!(
+            rejected(&with_array("/entries", entries(total))),
+            "unit-reference-limit"
+        );
+    }
 }
 
 /// A decodable document of exactly `nodes` decoder nodes: the root, the `entries` array,
@@ -827,15 +834,15 @@ fn redaction_walks_the_envelope_structure() {
 
 #[test]
 fn total_unit_references_are_capped_per_catalogue() {
-    // 24,576 references (1,536 entries x 16) over the 16,384 distinct units: within the
-    // distinct cap, so only the total trips.
+    // 8,192 references (512 entries x 16) over 4,096 distinct units, each cited twice:
+    // within the distinct cap, so only the total (counted with repetition) trips.
     let entries = |extra: usize| {
-        let mut entries: Vec<Value> = (0..1_536_i64)
+        let mut entries: Vec<Value> = (0..512_i64)
             .map(|entry| {
                 spell(
                     &format!("e{entry}"),
                     &(0..16_i64)
-                        .map(|k| json!({"source_id": 1, "page_id": 2, "unit_id": (entry * 16 + k) % 16_384 + 1}))
+                        .map(|k| json!({"source_id": 1, "page_id": 2, "unit_id": (entry * 16 + k) % 4_096 + 1}))
                         .collect::<Vec<_>>(),
                 )
             })
@@ -853,9 +860,9 @@ fn total_unit_references_are_capped_per_catalogue() {
     let at_cap = accepted(&entries(0));
     assert_eq!(
         (at_cap.counts.unit_references, at_cap.counts.distinct_units),
-        (admission::MAX_UNIT_REFERENCES, 16_384)
+        (admission::MAX_UNIT_REFERENCES, 4_096)
     );
-    assert_eq!(admission::MAX_UNIT_REFERENCES, 24_576);
+    assert_eq!(admission::MAX_UNIT_REFERENCES, 8_192);
     assert_eq!(rejected(&entries(1)), "unit-reference-limit");
 }
 
@@ -879,4 +886,97 @@ fn blank_looking_names_labels_and_text_are_rejected() {
             accepted(&value);
         }
     }
+}
+
+#[test]
+fn owner_text_of_only_invisible_characters_is_rejected() {
+    // Owner text keeps format characters (Cf) for bidi prose, but text made only of them,
+    // whitespace and the blank-looking scalars renders as nothing.
+    let pointer = "/entries/1/description/owner_text";
+    for blank in [
+        "\u{200b}",
+        "\u{200e}\u{200f}",
+        " \u{feff}\n\t\u{2800} ",
+        "\u{2066}\u{2069}",
+        "\u{00ad}\u{3164}",
+        "\u{061c}\u{2060}",
+    ] {
+        let mut value = example();
+        *value.pointer_mut(pointer).unwrap() = blank.into();
+        assert_eq!(
+            rejected(&value),
+            "description-needs-units-xor-owner-text",
+            "{blank:?}"
+        );
+    }
+    for visible in [
+        "Text\u{200e}more",
+        "\u{2067}\u{646}\u{635}\u{2069} text",
+        "\u{200b}x",
+    ] {
+        let mut value = example();
+        *value.pointer_mut(pointer).unwrap() = visible.into();
+        accepted(&value);
+    }
+}
+
+#[test]
+fn admission_profile_one_is_pinned() {
+    // `catalogue-admission-1` is stored with every published version and re-validates it
+    // (plan §12, §13). Changing any limit, the blank-looking set or the schema below changes
+    // what profile 1 admits: that needs a new profile id with its own validator (and a CHECK
+    // widened by migration), never an edit of these values.
+    assert_eq!(admission::ADMISSION_PROFILE, "catalogue-admission-1");
+    assert_eq!(
+        [
+            decode::MAX_BYTES,
+            decode::MAX_NODES,
+            decode::MAX_DEPTH,
+            decode::MAX_KEYS,
+            decode::MAX_KEY,
+            decode::MAX_ENTRIES,
+            decode::MAX_TYPES,
+            decode::MAX_PROPERTIES,
+            decode::MAX_OPTIONS,
+            decode::MAX_UNITS,
+            decode::MAX_SOURCES,
+            decode::MAX_NAME,
+            decode::MAX_ID,
+            decode::MAX_TEXT_PROPERTY,
+            decode::MAX_OWNER_TEXT,
+            MAX_DISTINCT_UNITS,
+            admission::MAX_UNIT_REFERENCES,
+            MAX_OWNER_TEXT_TOTAL,
+        ],
+        [
+            4 * 1024 * 1024,
+            524_288,
+            8,
+            32,
+            64,
+            8_192,
+            32,
+            16,
+            128,
+            16,
+            32,
+            100,
+            64,
+            1_000,
+            20_000,
+            16_384,
+            8_192,
+            1024 * 1024,
+        ]
+    );
+    assert_eq!(
+        admission::BLANK_LOOKING,
+        ['\u{2800}', '\u{3164}', '\u{115f}', '\u{1160}', '\u{ffa0}']
+    );
+    assert_eq!(
+        hex::encode(<sha2::Sha256 as sha2::Digest>::digest(include_bytes!(
+            "../../schemas/catalogue-v1.json"
+        ))),
+        "dd4fb9df27beb719b31954fbfc57b4ca0028a75a7be68ae720809763dded1c13"
+    );
 }

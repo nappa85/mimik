@@ -53,7 +53,8 @@ No model is involved anywhere in this plan.
   - `decode::parse` uses `Seed` with per-member `limits()`: the default is an array of 256 and
     a string of 5,000 (`decode.rs:21-37`). `parse_sheet` shares `Seed`, but sheet `data` has its
     own 20,000-scalar string branch (`decode.rs:116-129`).
-  - Nodes are capped by `MAX_NODES` = 32,768 (`decode.rs:9`). The same constant is the list
+  - Nodes are capped by `definitions::decode::MAX_NODES` = 32,768 (`decode.rs:9`; the
+    catalogue decode profile has its own `MAX_NODES`, 524,288, §13). The same constant is the list
     form-budget node bound (`values.rs:196`).
   - Raw input is capped at 256 KiB for definitions and 1 MiB for sheets (`decode.rs:173-177`).
   - Serde may allocate an escaped string before the visitor checks its length, so the raw cap
@@ -1045,6 +1046,10 @@ plan review asked).
 
 ## 12. Step 2 review fixes (2026-10-19)
 
+*Superseded in part by §13: the reference cap is now 8,192, the lock-probe bounds below
+under-state the uncertainty (start times only), and every "worst" below means the worst
+measured case on this host, not the worst admitted shape.*
+
 Review of `aa23ace`: Sol FIX THEN MERGE, Sonnet FIX THEN MERGE, third chain unavailable.
 Adjudicated items and what changed (code: `src/catalogues/{admission,publication}.rs`,
 `migrations/019_catalogues.sql` edited in place since it is unmerged; tests
@@ -1060,7 +1065,7 @@ Adjudicated items and what changed (code: `src/catalogues/{admission,publication
 2. *R8 lock-hold evidence (both F1).*
    - (a) New admission cap: **24,576 unit references per catalogue**, counted with repetition
      (`unit-reference-limit`, `admission::MAX_UNIT_REFERENCES`), tested at the cap and cap + 1.
-     The brief proposed 32,768; measured below, the worst admitted shape at 32,768 held the
+     The brief proposed 32,768; measured below, the worst measured case at 32,768 held the
      lock for 1.99–2.07 s on update (over 2 s in the full run), so the cap was lowered to
      24,576 (3 per entry at 8,192 entries). The entry cap stays 8,192.
    - (b) `tools/catalogue_profile.py` now measures the hold with both endpoints: a poller
@@ -1206,5 +1211,169 @@ tests among them), 1 pre-existing ignored; `ruff check tools` and `ruff format -
 clean; tools unittest 730 run, 11 skipped, **1 error:
 `test_run_queue.ProcessLauncherTests.test_fake_runner_script`**, the known pre-existing error
 (identical on `548cc84` and `aa23ace`), untouched here.
+
+**Not yet done:** independent re-review of these fixes.
+
+## 13. Step 2 round-2 review fixes (2026-10-19)
+
+Re-review of `cb9ddb8`: Sol FIX THEN MERGE, Sonnet FIX THEN MERGE, third chain unavailable.
+Adjudicated items (brief `cat-step2-fix2`) and what changed. Code:
+`src/catalogues/{admission,decode}.rs`; tests `src/catalogues/admission_tests.rs`,
+`tests/catalogue_publication.rs`; profile `tools/catalogue_profile.py` and
+`tools/test_catalogue_profile.py` (prototype tier); operator docs
+[catalogue-publication.md](catalogue-publication.md). Wording rule from this round: every
+"worst" figure is the **worst measured case on this host**, not the worst admitted shape;
+§12's figures are superseded by the ones below.
+
+**Must fix.**
+1. *Probe bounds (Sol 1).* §12's probe stamped each observation with the time taken before
+   `BEGIN IMMEDIATE`, so a probe descheduled across the release could make the "upper" bound
+   shorter than the hold, and one descheduled across the acquisition, or refused by the
+   contender, could make the "lower" bound longer. Each probe now records its start and its
+   completion; its lock attempt happened at an unknown instant of that window
+   (`publish_hold`, documented in the code). For a refusal run `first..last` between free
+   probes `before` and `after`:
+   - acquisition in `(before.start, first.end]`, release in `[last.start, after.end)`;
+   - **hold ≥ `last.start − first.end`** (0 if negative) and **≤ `after.end − before.start`**.
+   The contender can hold the lock only after its `BEGIN` is issued, so a refused probe ending
+   after that may be the contender's and is not attributed; and since it acquires only after
+   the publish releases, the time its `BEGIN` returned also caps the release. Excluding those
+   probes left the lower bound at about 50 ms (the contender starts 50 ms into the hold), so
+   each refused probe also reads `count(*)` of `catalogue_versions`: a read that does not yet
+   see the new version ran before the commit, hence before the release, contender or not.
+   Reads are refused while the publish holds `EXCLUSIVE` (rollback journal, after a cache
+   spill), so with the contender the lower bound stays loose (83–177 ms below). Each case
+   therefore runs twice: **with the contender** (its wait and success, upper bound) and
+   **without** (`--no-contender`, both bounds within about 1.5 ms).
+2. *Worst-case shapes (Sol 2, Sonnet A).* Two shapes added beside the fan-out, each published
+   (`_v1`) and updated (`_v2`, one property changed, replacing that catalogue's index rows), at
+   8,192 entries and just under 4 MiB:
+   - **FTS-heavy** (`fts_heavy`): 99-scalar names of 20 four-character ASCII tokens, every
+     token used once in the catalogue (163,840 distinct tokens, spread 3-character prefixes;
+     ASCII because the index folds diacritics), every reference used, owner text squeezed to
+     80 KB;
+   - **declaration-heavy** (`declaration_heavy`): 32 types x 16 enum properties x 128 options
+     (65,536 declared choices, shortest ids and labels), every entry holding 16 enum values,
+     and the most references that fit (9,056 at the old cap; all 8,192 now).
+   At the 24,576 cap the FTS-heavy update held the lock for **2,353–2,354 ms** (no contender),
+   over the 2 s budget. Caps lowered as the brief orders, references first, measured without
+   the contender:
+
+   | References (entries 8,192) | fts v1 hold ms | fts v2 hold ms | fan-out v2 hold ms |
+   |---:|---:|---:|---:|
+   | 24,576 | 1,985–1,987 | 2,353–2,354 | 1,795–1,797 |
+   | 16,384 | 1,773–1,775 | 2,143–2,144 | 1,481–1,483 |
+   | 12,288 | 1,613–1,615 | 1,922–1,923 | 1,327–1,329 |
+   | 8,192 | 1,434–1,436 | 1,759–1,760 | 1,220–1,221 |
+
+   Full runs except 12,288 (fan-out shapes only, a fresh database without the calibrated
+   catalogue, so somewhat faster), one run each, before the ASCII filler fix (item 3).
+
+   **Decision: `MAX_UNIT_REFERENCES` = 8,192** (1 per entry at 8,192 entries); the entry
+   cap stays 8,192. 12,288 fits on paper but by 0.08 s, inside the run-to-run spread seen here
+   (up to 0.2 s). Recorded alternative for the user: entries 6,144 with references 16,384
+   (fts v2 1,791–1,793 ms, one run). The distinct-unit cap (16,384, D5) is now unreachable and
+   kept as defence in depth (`const` assertion that the reference cap does not exceed it).
+   The calibrated shape now cites 1 unit per unit-backed entry (7,168 references at 8,192).
+3. *Profiler hardening (Sol 3).* `LockProbe`: the poller keeps any failure and hands it to the
+   main thread; startup waits at most `ready_timeout` (10 s) for 20 free probes; the publish
+   runs in `try`/`finally` with stop and join; only `SQLITE_BUSY`/`SQLITE_LOCKED` count as
+   contention, any other error fails the measurement (`ProbeError`), in the poller and the
+   contender alike. Also: the text-property filler is ASCII, so the byte budget is exact (a
+   4,096-entry run overflowed 4 MiB with multibyte filler).
+4. *Blank-looking owner text (Sonnet B).* Required text now needs a scalar that is neither
+   whitespace, blank-looking nor Cf. Owner text of only Cf (ZWSP, LRM/RLM, BOM, isolates,
+   soft hyphen, ALM, word joiner), whitespace and blank-looking scalars is refused
+   (`description-needs-units-xor-owner-text`); Cf mixed with visible text stays allowed.
+   Names, labels and the title already refused every Cf. This tightens
+   `catalogue-admission-1` in place: nothing has been published under it outside tests
+   (step 2 is unmerged), so no new profile id is needed yet; from merge on, the pin below
+   applies.
+5. *Comments and docs aligned (Sonnet D):* `admission.rs` cap comment and
+   catalogue-publication.md now quote §13's measurements and the host-specific wording.
+6. *Profile 1 pinned (Sonnet note):* `admission_profile_one_is_pinned` asserts every decode
+   and admission limit, the blank-looking set and the SHA-256 of `schemas/catalogue-v1.json`,
+   with the rule that changing any of them needs a new profile id.
+7. *Ordering regression (Sol):* two unit-backed entries in reverse lexical key order, each
+   citing the higher unit id first, with an owner-written entry between; publish, CLI show and
+   verify agree, stored unit rows keep author ordinals, and an update that only reorders one
+   entry's references counts one `description_references_changed` and verifies.
+
+**Optional items taken:** CLI-level redaction test for `unit-reference-limit` (8,208
+references; nothing saved). Plan line 56 was correct (it describes the definition decoder's
+`MAX_NODES`, 32,768); reworded to name it and point to the catalogue profile's 524,288. Not
+taken: a test for `name-index-integrity-check-failed` on a real corrupted FTS table.
+
+**Red → green.**
+
+| Test | Red | Green |
+|---|---|---|
+| `tools/test_catalogue_profile.py::LockProbeTests::test_delayed_probes_still_bracket_the_hold` | old start-time method behind the new signature: upper 1.51 s for a 2.0 s hold | pass |
+| `…::test_probes_refused_by_the_contender_are_not_attributed` | old method: lower 2.04 s for a 2.0 s hold | pass |
+| `…::test_random_delays_always_bracket_the_hold` | old method: error (nothing attributed in a trial; the test now also checks that an unobserved hold yields no run) | pass |
+| `…::test_uncommitted_reads_keep_the_lower_bound_tight_under_contention`, `…::test_a_hold_without_a_later_free_probe_has_no_upper_bound` | new with the version-read refinement / guard | pass |
+| `…::ProbeLifecycleTests` (4: unopenable and non-database files raise promptly without running the command; a never-free lock times out; a failing command stops the poller; a real 0.3 s hold is bracketed and the contender waits) | old `probe_publish` on an unopenable database hung (killed by `timeout 15`, exit 124) | pass |
+| `…::WorstShapeTests::test_every_shape_fits_at_4096_entries_too` | the 4,096-entry profile run failed: draft 4,205,971 bytes | pass |
+| `…::WorstShapeTests` (fts and declaration shapes within every limit, decoder nodes ≤ 524,288) | new helper code | pass |
+| `src/catalogues/admission_tests.rs::owner_text_of_only_invisible_characters_is_rejected` | accepted an invalid catalogue (ZWSP-only owner text) | pass |
+| `…::admission_profile_one_is_pinned` | reference cap 24,576, expected 8,192 (written first) | pass |
+| `…::total_unit_references_are_capped_per_catalogue` (now 512 x 16 over 4,096 distinct units) | at cap counted (8,192, 4,096), cap was 24,576 | pass |
+| `…::distinct_units_are_capped_per_catalogue` | adapted: the distinct cap is unreachable at the new reference cap; all-distinct accepted up to 8,192, then `unit-reference-limit` | pass |
+| `tests/catalogue_publication.rs::reverse_key_order_entries_with_unsorted_references_publish_show_and_verify` | passed on `cb9ddb8` (fixed in round 1); mutation red: Rust unit-row sort removed → `projection-mismatch` | pass |
+| `…::cli_reference_limit_rejection_is_redacted` | guard (behaviour existed) | pass |
+
+**Measurements** (`tools/catalogue_profile.py`, release build of this tree, container
+`mimik-ci:latest`, `--cpus 6`, Ryzen 5 1600 shared host, Monday 02:20–02:25; at 8,192 entries
+two runs with the contender and two without, at 4,096 one of each; database on the
+container's overlay filesystem). Each command in a fresh wrapper process (peak RSS by
+`RUSAGE_CHILDREN`). Hold bounds in ms: "no contender" = lower–upper over both runs (each run's
+bounds differ by about 1.5 ms); "contender" = lowest lower and highest upper over both runs.
+Contender waits are coarse (SQLite's busy handler sleeps up to 100 ms between retries).
+
+| Case (N = 8,192) | Draft bytes | Refs | Publish wall ms | Hold, no contender | Hold, contender | Contender wait ms, result | Publish RSS KiB |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| v1 (8,190, new) | 2,567,041 | 7,166 | 919–944 | 734–739 | 83–738 | 730, ok | 94,676–96,432 |
+| v2 (8,191, update) | 2,567,229 | 7,167 | 1,181–1,205 | 987–996 | 172–1,013 | 1,030–1,031, ok | 94,700–95,204 |
+| v3 (8,192, update) | 2,567,417 | 7,168 | 960–985 | 779–781 | 176–782 | 730–731, ok | 94,536–96,996 |
+| fan-out v1 (new) | 4,170,091 | 8,192 | 1,485–1,504 | 1,145–1,148 | 104–1,147 | 1,130–1,131, ok | 131,504–132,112 |
+| fan-out v2 (update) | 4,170,092 | 8,192 | 1,578–1,631 | 1,228–1,271 | 138–1,258 | 1,231, ok | 131,620–132,300 |
+| FTS-heavy v1 (new) | 4,170,806 | 8,192 | 1,742–1,765 | 1,416–1,423 | 104–1,412 | 1,431, ok | 132,084–132,288 |
+| **FTS-heavy v2 (update)** | 4,170,807 | 8,192 | 2,139–2,164 | **1,797–1,819** | 136–**1,836** | 1,832–1,833, ok | 131,684–132,208 |
+| declarations v1 (new) | 4,177,663 | 8,192 | 1,644–1,693 | 1,009–1,017 | 115–1,003 | 1,031, ok | 185,504–186,300 |
+| declarations v2 (update) | 4,177,663 | 8,192 | 1,982–2,057 | 1,342–1,351 | 154–1,378 | 1,331, ok | 185,796–186,124 |
+
+Other commands at 8,192 (four runs): import 232–757 ms, peak RSS ≤
+160,296 KiB (declarations); compare 233–742 ms, ≤ 127,320 KiB; `show-catalogue-version`
+270–287 ms (calibrated) to 674–692 ms (declarations), ≤ 132,180 KiB; `verify-catalogues`
+over 9 versions (4 catalogues) 7,487–7,635 ms, ≤ 133,092 KiB, status ok (one short read
+transaction per version, §12); `rebuild-catalogue-index` 611–648 ms; baseline `list-rulesets`
+40–46 ms, ≤ 17,208 KiB. Largest probe window 12.9 ms, largest gap between probes 2.4 ms; the
+store-open lock of each CLI process (33–42 ms) is a separate run, not attributed.
+
+At 4,096 entries (one run each way): calibrated holds 324–401 ms; fan-out 858–929; FTS-heavy
+v1 1,000–1,008, v2 1,207–1,212; declarations 920–971; publish RSS ≤ 169,360 KiB.
+
+**R8 at 8,192 entries, with the caps above:** worst measured hold on this host 1,797–1,819 ms
+without the contender and at most 1,836 ms with it (FTS-heavy update), ≤ 2 s with a margin of
+about 0.16 s; a concurrent server-pattern writer waits and succeeds in every case; peak CLI
+RSS about 182 MiB ≤ 256 MiB. The margin is as thin as §12's: a slower disk or busier host
+could exceed 2 s (not the 5 s busy timeout at these sizes). If measurements on the target
+hardware exceed 2 s, the next steps are the entry cap (6,144 with 16,384 references measured
+1.79 s here) or the name index's cost on update (deleting a version's rows re-tokenizes every
+old name; a contentless or `detail=column` index, or no prefix index, are untested options).
+
+**Limitations:** one host; two runs per mode at 8,192, one at 4,096; overlay filesystem; units
+all unreviewed; the contender is the lock-level equivalent of a sheet save, not the HTTP
+route; three shapes were profiled, chosen to stress names/FTS, declarations and references
+— other admitted distributions were not, so these are the worst measured cases, not a proven
+worst case.
+
+**Author gate** (container, `--cpus 6`, Monday 02:38–02:49, final tree): `cargo fmt --check`
+and pedantic Clippy (`--all-targets --all-features -D warnings`) clean; `cargo test --locked
+--all-targets --all-features` all passed: 537 summed over the test binaries (341 library, 29
+publication integration tests among them), 1 pre-existing ignored; `ruff check tools` and
+`ruff format --check tools` clean; tools unittest 740 run, 11 skipped, **1 error:
+`test_run_queue.ProcessLauncherTests.test_fake_runner_script`**, the known pre-existing error,
+untouched here.
 
 **Not yet done:** independent re-review of these fixes.
