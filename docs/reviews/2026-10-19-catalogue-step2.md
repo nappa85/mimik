@@ -25,6 +25,7 @@
 | 3 | `339b23c` | FIX THEN MERGE | MERGE-READY | Space Bunny: MERGE-READY |
 | 4 | `4a7c399` | FIX THEN MERGE (profiler gate only) | MERGE-READY | Space Bunny: MERGE-READY |
 | 5 | `5d3c538` | MERGE-READY | FIX THEN MERGE (profiler coverage, TODO merge conflict) | Space Bunny: MERGE-READY |
+| 6 | `fe93021` | MERGE-READY | MERGE-READY | Space Bunny: MERGE-READY |
 
 - No reviewer reported a Blocking finding in any round.
 - **Seal SQL:** every reviewer found it sound. Sonnet ran tamper sequences against a scratch
@@ -59,6 +60,7 @@
 | 19 | 5 | Space Bunny F7 | Minor | Migration 019 still bounded entry ordinals at 8,191 after the entry cap fell to 6,144 | Fixed: 6,143. `migration_ordinal_bounds_follow_the_caps` ties the type, entry and unit ordinal CHECKs to the Rust caps (red on the old migration, then green) |
 | 20 | 5 | Space Bunny F5, F8, F9; Sonnet 3 | Minor | Fix commit not named; `RUST_LIMITS` comment overstated; operator docs missed the new gate conditions; review record row 12 overstated "fails closed" | Fixed in docs and comments |
 | 21 | 5 | Sonnet 1 | Major (mechanical) | Merging into master conflicts in `TODO.md` (master `e6ecc30` edits the same lines) | Resolved at merge time, keeping the branch's step-1/2 entries |
+| 22 | 6 | Sol, Space Bunny | Minor | `shape_list` dropped empty components; a coverage dict without `calibrated` counted as calibrated; the ordinal pin matches bounds by value, not table | The first two are fixed before the merge, each with a failing-first test (plan §16, round 6). The third is a follow-up |
 
 **Accepted author decisions:**
 - identical content that cites a now-rejected unit is refused with `rejected-units`

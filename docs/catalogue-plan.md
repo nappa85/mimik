@@ -1592,7 +1592,7 @@ No Blocking findings. The record is `docs/reviews/2026-10-19-catalogue-step2.md`
 
 | Item | Change | Red → green |
 |---|---|---|
-| Sonnet 1, Space Bunny F1: the gate passed reduced runs (`--entries 64`, `--references 0`, `--shapes fanout`, `--fanout-only`) | `r8_gate` records `coverage` (entries, references, shapes, calibrated) and `at_caps`, and fails unless the run is complete at the Rust caps. `--allow-partial` is for cap-selection runs and is never R8 evidence. `--shapes` is validated by `shape_list`, so an empty or unknown shape is refused | Red: `test_the_gate_requires_a_complete_run_at_the_caps` (`r8_gate` had no `coverage`). Green |
+| Sonnet 1, Space Bunny F1: the gate passed reduced runs (`--entries 64`, `--references 0`, `--shapes fanout`, `--fanout-only`) | `r8_gate` records `coverage` (entries, references, shapes, calibrated) and `at_caps`, and fails unless the run is complete at the Rust caps. `--allow-partial` is for cap-selection runs and is never R8 evidence. `--shapes` is validated by `shape_list`, so an empty or unknown shape is refused (empty components too, after round 6) | Red: `test_the_gate_requires_a_complete_run_at_the_caps` (`r8_gate` had no `coverage`). Green |
 | Space Bunny F2: the contender was checked once per run, not per publication | `r8_failures(..., contender_expected)` fails a publication that has no contender when one was requested | Red: `test_a_requested_contender_is_required_on_every_publication`. Green |
 | Space Bunny F7: migration 019 bounded entry ordinals at 8,191 | Changed to 6,143. `migration_ordinal_bounds_follow_the_caps` ties the three ordinal CHECKs (types, entries, units) to the Rust caps | Red on the old migration (`left: 0, right: 1`). Green |
 | Space Bunny F5, F8, F9; Sonnet 3 | The record names `5d3c538` and gains the round-5 rows. The 3,000-trial simulation is attributed to Sonnet's own scratch run. The `RUST_LIMITS` comment is corrected. The operator docs describe every gate condition and the hold-only scope | Prose only |
@@ -1606,3 +1606,15 @@ There were no profiling reruns: caps, shapes and `publish_span` are unchanged. T
 - `cargo test --locked --all-targets --all-features`: 540 passed, 0 failed, 1 pre-existing ignored, over 37 binaries.
 - `ruff check tools` and `ruff format --check tools`: clean.
 - Tools unittest: 749 run, 11 skipped, **1 error, the known `test_fake_runner_script`**.
+
+**Round 6** (`fe93021`): Sol, Sonnet and Space Bunny all **MERGE-READY**, with no Blocking
+or Major findings. Before the merge, the cheap Minors they named were folded in:
+- `shape_list` refuses empty components (`fanout,,fts`).
+- Coverage needs an explicit `calibrated: True`, so a missing key no longer counts as calibrated.
+
+Both have failing-first tests (`test_shape_lists_refuse_empty_and_unknown_components`,
+`test_coverage_without_an_explicit_calibrated_flag_is_partial`).
+
+Left as noted follow-ups: the ordinal pin test matches bounds by value rather than by table,
+and the coverage reported in the gate comes from the CLI arguments, not from the cases
+actually run.

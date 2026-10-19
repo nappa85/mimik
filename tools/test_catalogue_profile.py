@@ -37,6 +37,7 @@ from catalogue_profile import (
     publish_span,
     r8_failures,
     r8_gate,
+    shape_list,
     span_ms,
 )
 
@@ -385,7 +386,12 @@ class R8GateTests(unittest.TestCase):
         self.assertFalse(r8_gate({}, 2000.0, contender_expected=False)["passed"])
         self.assertFalse(r8_gate({"rebuild": {}}, 2000.0, contender_expected=True)["passed"])
         no_contender = {"v1": {"publish": self.publish(1.0)}}
-        full = {"entries": MAX_ENTRIES, "references": MAX_UNIT_REFERENCES, "shapes": list(SHAPES)}
+        full = {
+            "entries": MAX_ENTRIES,
+            "references": MAX_UNIT_REFERENCES,
+            "shapes": list(SHAPES),
+            "calibrated": True,
+        }
         gate = r8_gate(no_contender, 2000.0, False, coverage=full)
         self.assertTrue(gate["passed"])
         self.assertEqual(gate["publications"], 1)
@@ -399,7 +405,12 @@ class R8GateTests(unittest.TestCase):
     def test_the_gate_requires_a_complete_run_at_the_caps(self):
         # Sonnet and Space Bunny round 5: a reduced profile (fewer entries or references, a
         # subset of shapes, no calibrated cases) must not pass as R8 evidence.
-        full = {"entries": MAX_ENTRIES, "references": MAX_UNIT_REFERENCES, "shapes": list(SHAPES)}
+        full = {
+            "entries": MAX_ENTRIES,
+            "references": MAX_UNIT_REFERENCES,
+            "shapes": list(SHAPES),
+            "calibrated": True,
+        }
         cases = {"v1": {"publish": self.publish(1.0)}}
         self.assertTrue(r8_gate(cases, 2000.0, False, coverage=full)["passed"])
         for partial in (
@@ -422,6 +433,19 @@ class R8GateTests(unittest.TestCase):
         }
         self.assertFalse(r8_gate(mixed, 2000.0, contender_expected=True)["passed"])
         self.assertEqual(len(r8_failures("b", self.publish(1.0), 2000.0, True)), 1)
+
+    def test_shape_lists_refuse_empty_and_unknown_components(self):
+        # Sol and Space Bunny round 6: `fanout,,fts` must not pass silently.
+        self.assertEqual(shape_list("fanout"), ["fanout"])
+        for bad in ("", ",", "fanout,,fts", "fanout,", "nope"):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                shape_list(bad)
+
+    def test_coverage_without_an_explicit_calibrated_flag_is_partial(self):
+        # Sol round 6: a missing `calibrated` key must not count as calibrated.
+        cases = {"v1": {"publish": self.publish(1.0)}}
+        loose = {"entries": MAX_ENTRIES, "references": MAX_UNIT_REFERENCES, "shapes": list(SHAPES)}
+        self.assertFalse(r8_gate(cases, 2000.0, False, coverage=loose)["at_caps"])
 
     def test_the_budget_must_be_finite_and_positive(self):
         # Sol round 4: `hold > nan` is always false, so a NaN budget passed every hold.

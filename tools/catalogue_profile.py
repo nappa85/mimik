@@ -849,7 +849,7 @@ def r8_gate(report, max_hold_ms, contender_expected, coverage=None, allow_partia
         coverage.get("entries") == MAX_ENTRIES
         and coverage.get("references") == MAX_UNIT_REFERENCES
         and sorted(coverage.get("shapes", ())) == sorted(SHAPES)
-        and coverage.get("calibrated", True)
+        and coverage.get("calibrated") is True
     )
     publications = 0
     contender_observed = False
@@ -878,10 +878,10 @@ def r8_gate(report, max_hold_ms, contender_expected, coverage=None, allow_partia
 
 
 def shape_list(text):
-    """`--shapes`: a comma-separated, non-empty list of known shapes."""
-    shapes = [shape for shape in text.split(",") if shape]
+    """`--shapes`: a comma-separated list of known shapes, with no empty component."""
+    shapes = text.split(",")
     unknown = [shape for shape in shapes if shape not in SHAPES]
-    if not shapes or unknown:
+    if unknown:
         raise argparse.ArgumentTypeError(f"choose from {', '.join(SHAPES)}")
     return shapes
 
