@@ -1660,3 +1660,26 @@ chain was unavailable. Scratch reviews are summarised in the review record. Disp
 | Sonnet M6: the offer lasts until the cell changes | Known behaviour (no dismissal records). Step 2c must not rely on the offer's lifetime or treat a shown offer as confirmation | — |
 
 Mutation runs 15:01–15:02 (`--cpus 2`), sources restored and checked with `cmp`.
+
+**Gate on the round-1 candidate** (code commit `f50d5ab`; this record changes only docs).
+Monday 2026-10-19, weekday window: every build and test in `mimik-ci:latest` with `--cpus 2`,
+`CARGO_BUILD_JOBS=2`, `--network none`; browser container with the CI flags. Times CEST.
+
+| Gate | Time | Cap | Result |
+|---|---|---|---|
+| `cargo fmt --check`, pedantic Clippy `-D warnings` | 15:03 | 2 | clean |
+| `cargo test --locked --all-targets --all-features` | 15:03–15:12 | 2 | **640 passed**, 0 failed, 2 ignored, 37 result lines |
+| `ruff check tools`, `ruff format --check tools` | 15:12 | 2 | clean |
+| `formula_eval`, `source_fixture` examples; tools unittest (`CI=1`, main git dir read-only) | 15:12–15:16 | 2 | built; **OK**, 11 skipped |
+| `actionlint` | 15:16 | 2 | clean |
+| `cargo audit --no-fetch --deny warnings` (the existing advisory DB copy in the registry volume, 1,338 advisories) | 15:17 | 2 | clean, no vulnerability; `Cargo.lock` unchanged |
+| `cargo about generate --locked --fail about.hbs` | 15:17 | 2 | passed (497,325 bytes, unchanged) |
+| `cargo build --release --locked` | 15:17–15:20 | 2 | 22,138,680 bytes |
+| `cargo package --locked --allow-dirty` | 15:20–15:44 | 2 | hung retrying `index.crates.io` under `--network none` (stopped); rerun with `--offline` (the registry cache is complete): packaged, verify build passed (15:49) |
+| `verify_source_package.py`; `cargo vendor --locked --offline`; `package_release.py --revision f50d5ab…` | 15:49 | 2 | allowlist verified; archives, source crate, dependency sources, `SHA256SUMS` |
+| Unpacked artifact: `sha256sum --check`, unpack, `smoke_release.py --auth --source-fixture` | 15:50 | 2 | three checksums OK; smoke passed |
+| `browser_smoke.py --auth` on the unpacked binary | 15:50–15:52 | 2 | every stage passed, the assisted stage at both viewports; the "Yes Max HP" negative copy failed at the assisted sheet (15:52–15:53) |
+
+**Not run:** `lan_smoke.py` and the offline corresponding-source rebuild (not asked for this
+round; no build-input change beyond the crate's own sources), and a hand-driven demo session.
+**Not yet done:** re-review of the round-1 fixes.
