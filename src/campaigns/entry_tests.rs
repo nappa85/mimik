@@ -106,6 +106,19 @@ fn every_term_is_checked() {
     assert_eq!(number(&"9".repeat(39)), Err(Unreadable::Range));
 }
 
+/// Sol review Minor 1: the accumulation is checked, not wrapping. With A = 38 nines,
+/// `A+A-A-A` is 0 in exact arithmetic, but A + A already exceeds `i128::MAX`, so the second
+/// term's addition is refused; a wrapping sum would come back to 0 and accept it.
+#[test]
+fn accumulation_overflow_is_not_cancelled_by_later_terms() {
+    let a = "9".repeat(38);
+    let cancelling = format!("{a}+{a}-{a}-{a}");
+    assert!(cancelling.len() <= MAX_CHARS);
+    assert_eq!(number(&cancelling), Err(Unreadable::Range));
+    // The same terms in an order that never leaves i128 cancel exactly.
+    assert_eq!(number(&format!("{a}-{a}+{a}-{a}")), Ok(0));
+}
+
 #[test]
 fn unreadable_shapes() {
     refused(

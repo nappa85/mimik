@@ -4,6 +4,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import assist_demo
 
@@ -24,6 +25,60 @@ class FreshDirectoryTests(unittest.TestCase):
                 assist_demo.fresh_directory(used)
             with self.assertRaises(AssertionError):
                 assist_demo.fresh_directory(used / "smoke.sqlite3")
+
+    def test_data_directory_is_private(self):
+        with tempfile.TemporaryDirectory() as temp:
+            created = assist_demo.fresh_directory(Path(temp) / "data")
+            self.assertEqual(stat.S_IMODE(created.stat().st_mode), 0o700)
+            empty = Path(temp) / "empty"
+            empty.mkdir(mode=0o755)
+            assist_demo.fresh_directory(empty)
+            self.assertEqual(stat.S_IMODE(empty.stat().st_mode), 0o700)
+
+
+class AccountInputTests(unittest.TestCase):
+    """Password and invitation files exist only while the CLI reads them."""
+
+    def run_accounts(self, fail_at=None):
+        calls = []
+
+        def cli(binary, directory, *arguments, secrets=None):
+            private = directory / "account-inputs"
+            calls.append(arguments[0])
+            self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o700)
+            for flag in ("--password-file", "--token-file"):
+                if flag in arguments:
+                    path = Path(arguments[arguments.index(flag) + 1])
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            if "--token-output" in arguments:
+                assist_demo.write_private(
+                    Path(arguments[arguments.index("--token-output") + 1]), b"t" * 64
+                )
+            if arguments[0] == fail_at:
+                raise AssertionError("synthetic CLI failure")
+            return b"{}"
+
+        with tempfile.TemporaryDirectory() as temp:
+            directory = assist_demo.fresh_directory(Path(temp) / "data")
+            with patch.object(assist_demo, "registry_cli", cli):
+                try:
+                    assist_demo.create_accounts(
+                        Path("mimik"), directory, assist_demo.demo_passwords()
+                    )
+                except AssertionError:
+                    pass
+            remaining = sorted(path.name for path in directory.iterdir())
+        return calls, remaining
+
+    def test_inputs_removed_after_setup(self):
+        calls, remaining = self.run_accounts()
+        self.assertEqual(calls, ["bootstrap-owner", "invite-account", "enroll-account"])
+        self.assertEqual(remaining, [])
+
+    def test_inputs_removed_after_a_failure(self):
+        calls, remaining = self.run_accounts(fail_at="invite-account")
+        self.assertEqual(calls, ["bootstrap-owner", "invite-account"])
+        self.assertEqual(remaining, [])
 
 
 class PrivateFileTests(unittest.TestCase):

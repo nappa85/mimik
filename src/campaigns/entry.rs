@@ -24,7 +24,9 @@ pub(crate) enum Unreadable {
     Syntax,
     /// More than [`MAX_SCALARS`] numbers.
     TooManyScalars,
-    /// A term or the result is outside the signed 64-bit range.
+    /// A term, or the running sum after a term, overflows `i128`, or the final result is
+    /// outside `i64`. A single term or the running sum may exceed `i64` when the final
+    /// result fits.
     Range,
 }
 

@@ -10,6 +10,7 @@ manuals, no real accounts, no secrets from the environment.
 import argparse
 import os
 import secrets
+import shutil
 import stat
 import sys
 from pathlib import Path
@@ -40,11 +41,14 @@ ROWS = (("Rope", "1", "1"), ("Torch", "3", "1"))
 
 
 def fresh_directory(path):
-    """Create `path`, or accept it only when it is an empty directory (never reuse data)."""
+    """Create `path` with mode 0700, or accept it only when it is an empty directory (never
+    reuse data). The database and server log stay readable by the current user only."""
     if path.exists():
         require(path.is_dir() and not any(path.iterdir()), f"{path} is not an empty directory")
     else:
-        path.mkdir(parents=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.mkdir(mode=0o700)
+    path.chmod(0o700)
     return path.resolve(strict=True)
 
 
@@ -62,8 +66,18 @@ def demo_passwords():
 
 
 def create_accounts(binary, directory, passwords):
+    """Bootstraps the Owner and enrolls the player. The password files and the invitation
+    token exist only while the CLI reads them: the launcher prints the passwords, so nothing
+    needs them afterwards, and they are removed even when a step fails."""
     private = directory / "account-inputs"
     private.mkdir(mode=0o700)
+    try:
+        enroll(binary, directory, private, passwords)
+    finally:
+        shutil.rmtree(private)
+
+
+def enroll(binary, directory, private, passwords):
     files = {}
     for login, password in passwords.items():
         files[login] = private / f"{login}.password"

@@ -1311,3 +1311,40 @@ on every save. `lots` is still refused with the draft kept (unknown values arriv
 Ctrl-C stops the server. Port 3000 must be free. `--exit-after-setup` builds the data and
 stops without serving. On weekdays 09:00–18:00 the two cargo commands may run instead in
 `mimik-ci` with `--cpus 2 -e CARGO_BUILD_JOBS=2` and the worktree mounted on `/workspace`.
+
+### 9.1 Review fixes (round 1)
+
+Review of `813a9d9`: Sonnet MERGE-READY; Sol FIX THEN MERGE (no functional defect); the third
+chain was unavailable. Dispositions:
+
+| Finding | Disposition | Test, red → green |
+|---|---|---|
+| Sol Minor 1: show the accumulation is checked, not wrapping | Added `entry::tests::accumulation_overflow_is_not_cancelled_by_later_terms`: with A = 38 nines, `A+A-A-A` (exactly 0) is `Range` at the second term; `A-A+A-A` is `Ok(0)` | Under a wrapping mutation (`wrapping_add`/`wrapping_sub` in `number`) only this test failed (11:27, `--cpus 2`); the existing three-38-digit case still passed, because its wrapped result is outside i64 anyway. Restored source (checked with `cmp`): 12/12 pass |
+| Sol Minor 2: `Range` doc | Now: a term, or the running sum after a term, overflows i128, or the final result is outside i64; a term or the running sum may exceed i64 when the result fits | doc only |
+| Sonnet Minor: demo data directory and account inputs | `fresh_directory` creates the data directory with mode 0700 (and sets 0700 on an accepted empty one). Password files and the invitation token live in `account-inputs` (0700, files 0600) only while the CLI reads them; `create_accounts` removes the directory in a `finally`, so also after a failed step. They are not needed later, because the launcher prints the generated passwords | `test_data_directory_is_private`, `test_inputs_removed_after_setup`, `test_inputs_removed_after_a_failure`: red first (mode 493 ≠ 448; `account-inputs` left behind), then green |
+| Sol Major: required release gates | Run against the candidate, below. `cargo audit` found **RUSTSEC-2026-0373** in `ammonia 4.2.3` (case-sensitive CSS `url(` matching when filtering style properties). Fixed by `ammonia 4.2.4` (lockfile only, same dependency set; one networked `cargo fetch` in `mimik-ci` from an allowlisted copy, checksum verified by `--locked`) | Not reproducible in Mimik: the source sanitizer allows no `style` attribute. Guard test `sources::sanitizer_tests::style_attributes_never_survive_in_any_case` passes on 4.2.3 and 4.2.4 (11:29–11:30); recorded in `dependency-decisions.md` with the proptest selection |
+
+**Gate on the candidate** (code commit `3aca432`; this record is folded into the same
+commit afterwards and changes only docs and TODO). Monday 2026-10-19, weekday window: every
+build and test in a container with `--cpus 2` and `CARGO_BUILD_JOBS=2`. Times are CEST
+(container logs are UTC).
+
+| Gate | Time | Cap | Result |
+|---|---|---|---|
+| `cargo fmt --check`, pedantic Clippy `-D warnings` (crate re-checked after a touch) | 12:00 | 2 | clean |
+| `ruff check tools`, `ruff format --check tools` | 12:00 | 2 | clean |
+| `cargo test --locked --all-targets --all-features` | 11:32–11:40 | 2 | **587 passed**, 0 failed, 2 ignored, 37 result lines |
+| `formula_eval` example, `source_fixture` example | 11:40–11:41 | 2 | built; fixture includes `assist-definition.json` |
+| Tools unittest (`CI=1`, `MIMIK_FORMULA_EVAL`, registry cache and git dir mounted) | 11:41–11:45 | 2 | OK, 11 skipped |
+| `actionlint .github/workflows/ci.yml` | 11:45 | 2 | clean |
+| `cargo audit --deny warnings` (advisory DB fetched in the container from `github.com/RustSec/advisory-db`, tip `999ec89`, 2026-10-17; then `--no-fetch`) | 11:28 / 11:30 | 2 | 1 vulnerability (above), then **clean** after the fix |
+| `cargo about generate --locked --fail about.hbs` | 11:45–11:46 | 2 | passed (notices 497,325 bytes) |
+| `cargo build --release --locked` | 11:46–11:48 | 2 | built (21,929,144 bytes) |
+| `cargo package --locked --allow-dirty` (verify build) and `verify_source_package.py` | 11:48–11:49 | 2 | passed; "Corresponding-source member allowlist verified" |
+| `cargo vendor --locked target/vendor`, `package_release.py --version 0.1.0 --revision 3aca432…` | 11:49–11:50 | 2 | archives, source crate, dependency sources and `SHA256SUMS` created |
+| Unpacked artifact: `sha256sum --check`, unpack, `smoke_release.py --auth --source-fixture` on the unpacked binary | 11:50–11:51 | 2 | all three checksums OK; smoke passed |
+| Offline corresponding-source rebuild (unpacked source crate plus dependency sources, empty `CARGO_HOME`, `--network=none`, `cargo build --release --offline --locked`) | 11:51–11:56 | 2 | built. Not byte-identical to the shipped binary (the build path differs); CI does not claim reproducibility |
+| `browser_smoke.py --auth` in `mimik-browser` (CI flags) on the unpacked binary | 11:56–11:57 | 2 | every stage passed, the assisted stage at both viewports |
+| `lan_smoke.py` (internal Docker networks, separate Chromium client, HTTPS proxy, QR decode) on the unpacked binary and source | 11:57–12:00 | 2 | passed; no containers or networks left. The script's client and server runs set `--cpus=2`; its denier and offline QR-decoder runs do not, so a local `docker` shim on `PATH` added `--cpus=2 -e CARGO_BUILD_JOBS=2` to any `docker run` without `--cpus` (machine schedule). No physical-phone or router test is claimed |
+
+Nothing in the list was skipped.
