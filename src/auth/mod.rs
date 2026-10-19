@@ -259,6 +259,7 @@ async fn boundary(request: Request, next: Next) -> Response {
             && !trusted_editor
             && !trusted_credential
             && !crate::campaigns::web::catalogue_notice(&response)
+            && !crate::campaigns::web::sheet_busy(&response)
             && !materials::trusted(&response)
             && !errors::trusted(&response)
         {

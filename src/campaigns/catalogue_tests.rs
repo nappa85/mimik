@@ -1698,6 +1698,61 @@ async fn a_consistently_rewritten_unsupported_pin_is_refused_by_the_route() {
     }
 }
 
+/// Slice 1.5a review (Sol Minor 2): an unsupported pin is read-only, so its unit routes
+/// answer 403 (no edit rights) before any key or route check, and nothing is written.
+#[tokio::test]
+async fn unit_routes_refuse_an_unsupported_pin_as_read_only() {
+    use tower::ServiceExt;
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let world = world().await;
+    rewrite_pin_consistently(&world.store).await;
+    let revision = || async {
+        world
+            .store
+            .run(|db| {
+                Ok(
+                    db.query_row("SELECT revision FROM private_sheets WHERE id=1", [], |r| {
+                        r.get::<_, i64>(0)
+                    })?,
+                )
+            })
+            .await
+            .unwrap()
+    };
+    let before = revision().await;
+    for path in [
+        "/private-sheets/1/meta/name",
+        "/private-sheets/1/meta/notes",
+        "/private-sheets/1/fields/missing",
+    ] {
+        let body = serde_urlencoded::to_string([
+            ("csrf", "a".repeat(64)),
+            ("base", before.to_string()),
+            ("value", "Renamed".to_owned()),
+        ])
+        .unwrap();
+        let response = world
+            .app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(path)
+                    .method("POST")
+                    .header("host", "127.0.0.1:3000")
+                    .header("origin", "http://127.0.0.1:3000")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", world.auth[2].fixture_cookie())
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+    assert_eq!(revision().await, before, "nothing written");
+}
+
 #[tokio::test]
 async fn index_identity_damage_never_renders_the_query_problem_form() {
     let _auth_lock = crate::auth::test_resource_lock().await;

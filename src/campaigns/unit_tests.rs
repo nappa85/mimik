@@ -241,8 +241,10 @@ async fn enter_in_hp_saves_hp_alone() {
         unit_form(&html, "meta-notes", None).0,
         "/private-sheets/1/meta/notes"
     );
-    // The Save buttons are described by their unit's label.
-    assert!(html.contains("<button aria-describedby=\"label-0\">Save</button>"));
+    // The Save buttons are named with their unit's label ("Save Current HP").
+    assert!(
+        html.contains("<button id=\"save-0\" aria-labelledby=\"save-0 label-0\">Save</button>")
+    );
     // The select units and the yes/no unit save with their button.
     assert_eq!(
         enter(&setup, &html, "v7", "true").await.0,
@@ -1036,4 +1038,222 @@ async fn a_list_form_cannot_reach_another_list() {
         StatusCode::BAD_REQUEST
     );
     assert_eq!(sheet(&setup).await.0, 1, "nothing written");
+}
+
+// ---- Review round 1 ----
+
+/// A POST as a browser navigation sends it: `Accept: text/html` and document fetch
+/// metadata, so the auth layer's document presentation applies to error pages.
+async fn document_post(setup: &Setup, path: &str, pairs: Pairs) -> axum::response::Response {
+    use tower::ServiceExt;
+    let request = axum::http::Request::builder()
+        .uri(path)
+        .method("POST")
+        .header("host", "127.0.0.1:3000")
+        .header("origin", "http://127.0.0.1:3000")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("accept", "text/html")
+        .header("sec-fetch-mode", "navigate")
+        .header("sec-fetch-dest", "document")
+        .header("cookie", setup.auth[1].fixture_cookie())
+        .body(axum::body::Body::from(
+            serde_urlencoded::to_string(pairs).unwrap(),
+        ))
+        .unwrap();
+    setup.app.clone().oneshot(request).await.unwrap()
+}
+
+/// Holds the runtime permit for `seconds`, as another request would.
+fn hold(seconds: u64) -> tokio::task::JoinHandle<()> {
+    let permit = crate::definitions::admit().unwrap();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+        drop(permit);
+    })
+}
+
+/// Sol Major 1: the busy page reaches a real browser. A document navigation used to get the
+/// auth layer's generic busy document, which drops the entry; the styled page is exempt.
+/// It names the unit and keeps the escaped entry, the action, `base` and `null`, a
+/// multiline entry in a textarea, and posting it again succeeds once the permit is free.
+#[tokio::test]
+async fn the_busy_page_survives_a_browser_navigation() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    created(&setup, &[]).await;
+    let holder = hold(3);
+    let response = document_post(
+        &setup,
+        "/private-sheets/1/fields/luck",
+        unit("1", "5 + <b>1</b>", &[("null", "known")]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()["retry-after"], "1");
+    let busy = body(response).await;
+    assert!(busy.contains("Server busy: nothing was saved."), "{busy}");
+    assert!(busy.contains("Your entry for the field luck"), "{busy}");
+    assert!(
+        busy.contains("value=\"5 + &#60;b&#62;1&#60;/b&#62;\""),
+        "{busy}"
+    );
+    let (action, pairs) = unit_form(&busy, "busy-value", Some("5"));
+    assert_eq!(action, "/private-sheets/1/fields/luck");
+    assert_eq!(
+        pairs,
+        vec![
+            pair("csrf", &"a".repeat(64)),
+            pair("base", "1"),
+            pair("null", "known"),
+            pair("value", "5"),
+        ]
+    );
+    holder.await.unwrap();
+    let response = document_post(&setup, &action, pairs).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(sheet(&setup).await.3["luck"], json!(5));
+    // A multiline General notes entry, kept in a textarea and named.
+    let holder = hold(3);
+    let response = document_post(
+        &setup,
+        "/private-sheets/1/meta/notes",
+        unit("2", "two\n<i>lines</i>", &[]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let busy = body(response).await;
+    assert!(busy.contains("Your entry for General notes"), "{busy}");
+    assert!(
+        busy.contains(
+            "<textarea id=\"busy-value\" name=\"value\" rows=\"6\" autofocus>\ntwo\n&#60;i&#62;lines&#60;/i&#62;</textarea>"
+        ),
+        "{busy}"
+    );
+    holder.await.unwrap();
+    let (action, pairs) = unit_form(&busy, "busy-value", None);
+    assert_eq!(action, "/private-sheets/1/meta/notes");
+    assert_eq!(
+        document_post(&setup, &action, pairs).await.status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(sheet(&setup).await.2, "two\n<i>lines</i>");
+}
+
+/// The other answers that keep the draft reach a browser too: the 409 and 422 re-renders
+/// (the trusted editor page) and the stale "No change" (200).
+#[tokio::test]
+async fn refused_unit_saves_keep_their_draft_in_a_browser() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    created(&setup, &[]).await;
+    let response = document_post(&setup, "/private-sheets/1/fields/hp", unit("9", "60", &[])).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let html = body(response).await;
+    assert!(html.contains("Current HP not saved"), "{html}");
+    assert_eq!(shown(&html, "v0"), "60");
+    let response = document_post(
+        &setup,
+        "/private-sheets/1/fields/hp",
+        unit("1", "6\u{7}", &[]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html = body(response).await;
+    assert!(html.contains("Current HP not saved"), "{html}");
+    let response = document_post(&setup, "/private-sheets/1/fields/hp", unit("1", "84", &[])).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body(response).await.contains("No change"));
+}
+
+/// Sonnet M1: a list form (the full-form route) waits for the permit like a unit save. Held
+/// for 1 s, the save succeeds; held for 3 s, the styled busy page keeps every submitted
+/// pair and posting it again saves the list.
+#[tokio::test]
+async fn a_list_form_save_waits_briefly_for_the_permit() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    created(&setup, &[]).await;
+    let html = page(&setup).await;
+    let (action, mut pairs) = unit_form_list(&html, "row-4-0-1");
+    pairs
+        .iter_mut()
+        .find(|(key, _)| key == "row-4-0-1")
+        .unwrap()
+        .1 = "2".into();
+    let holder = hold(1);
+    let response = document_post(&setup, &action, pairs.clone()).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    holder.await.unwrap();
+    assert_eq!(sheet(&setup).await.3["equipment"][0]["quantity"], json!(2));
+    let html = page(&setup).await;
+    let (action, mut pairs) = unit_form_list(&html, "row-4-0-1");
+    pairs
+        .iter_mut()
+        .find(|(key, _)| key == "row-4-0-0")
+        .unwrap()
+        .1 = "Rope \"long\"\nend".into();
+    let holder = hold(3);
+    let response = document_post(&setup, &action, pairs.clone()).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()["retry-after"], "1");
+    let busy = body(response).await;
+    assert!(busy.contains("Server busy: nothing was saved."), "{busy}");
+    assert!(busy.contains("Your changes are kept"), "{busy}");
+    let (again_action, again) = super::formula_tests::form_submission(&busy);
+    assert_eq!(again_action, "/private-sheets/1");
+    let mut sent = pairs.clone();
+    sent.sort();
+    let mut kept = again.clone();
+    kept.sort();
+    assert_eq!(kept, sent, "every pair kept");
+    holder.await.unwrap();
+    assert_eq!(sheet(&setup).await.0, 2, "nothing written");
+    assert_eq!(
+        document_post(&setup, &again_action, again).await.status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        sheet(&setup).await.3["equipment"][0]["name"],
+        json!("Rope \"long\"\nend")
+    );
+}
+
+/// Sonnet m2: every Save button has a real accessible name, its own text and its unit's
+/// label ("Save Current HP"), through `aria-labelledby`; so do Save list and the metadata.
+#[tokio::test]
+async fn save_buttons_are_named_by_their_unit() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    created(&setup, &[]).await;
+    let html = page(&setup).await;
+    for (button, labelled) in [
+        ("save-0", "save-0 label-0"),
+        ("save-3", "save-3 label-3"),
+        ("save-meta-name", "save-meta-name meta-name-label"),
+        ("save-meta-notes", "save-meta-notes meta-notes-label"),
+        ("save-list-4", "save-list-4 list-legend-4"),
+    ] {
+        let page = scraper::Html::parse_document(&html);
+        let element = page
+            .select(&scraper::Selector::parse(&format!("button#{button}")).unwrap())
+            .next()
+            .unwrap_or_else(|| panic!("{button}"));
+        assert_eq!(element.value().attr("aria-labelledby"), Some(labelled));
+        assert_eq!(element.value().attr("aria-describedby"), None);
+    }
+    // Sonnet m4: Enter in HP activates HP's own Save, its form's default submitter.
+    let page = scraper::Html::parse_document(&html);
+    let form = page
+        .select(&scraper::Selector::parse("form[action$=\"/fields/hp\"]").unwrap())
+        .next()
+        .unwrap();
+    let default = form
+        .select(&scraper::Selector::parse("button:not([form])").unwrap())
+        .next()
+        .unwrap();
+    assert_eq!(default.value().attr("id"), Some("save-0"));
 }

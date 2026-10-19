@@ -905,6 +905,19 @@ pub(super) fn legacy_form(html: &str) -> Vec<(String, String)> {
     form
 }
 
+/// The first form of a page and what it submits with its first (default) button.
+pub(super) fn form_submission(html: &str) -> (String, Vec<(String, String)>) {
+    let document = scraper::Html::parse_document(html);
+    let form = document
+        .select(&scraper::Selector::parse("form").unwrap())
+        .next()
+        .expect("a form");
+    (
+        form.value().attr("action").unwrap_or_default().to_owned(),
+        form_pairs(form, None),
+    )
+}
+
 /// What a browser submits for `form` when `submitter` (its name and value) is clicked.
 fn form_pairs(
     form: scraper::ElementRef<'_>,

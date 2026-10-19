@@ -2744,6 +2744,11 @@ type SeedNote = (String, &'static str, String, String, String);
 /// valid 64-character ID, then writes `notes` 256 per revision (the table's limit) on
 /// data-unchanged revisions, and returns the served sheet page.
 async fn noted_page(definition: &Value, data: Value, notes: Vec<SeedNote>) -> String {
+    noted_setup(definition, data, notes).await.1
+}
+
+/// `noted_page`, with its setup.
+async fn noted_setup(definition: &Value, data: Value, notes: Vec<SeedNote>) -> (Setup, String) {
     let setup = list_setup(definition).await;
     legacy_create(&setup, 1, data).await;
     let version = setup.version;
@@ -2772,13 +2777,14 @@ async fn noted_page(definition: &Value, data: Value, notes: Vec<SeedNote>) -> St
         .unwrap();
     let response =
         super::router_request(&setup.app, &setup.auth[1], "/private-sheets/1", None).await;
-    String::from_utf8(
+    let html = String::from_utf8(
         axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
             .await
             .unwrap()
             .to_vec(),
     )
-    .unwrap()
+    .unwrap();
+    (setup, html)
 }
 
 fn within_unit_bound(html: &str, units: usize, label: &str) {
@@ -2953,6 +2959,15 @@ async fn wide_scalar_page(
     value: Option<i64>,
     note: (&'static str, &str, Option<i64>),
 ) -> (String, usize) {
+    let (_, html, units) = wide_scalar_setup(value, note).await;
+    (html, units)
+}
+
+/// `wide_scalar_page`, with its setup.
+async fn wide_scalar_setup(
+    value: Option<i64>,
+    note: (&'static str, &str, Option<i64>),
+) -> (Setup, String, usize) {
     let label = "\"".repeat(100);
     let ids: Vec<String> = (0..256)
         .map(|f| format!("f{f:03}_{}", "x".repeat(59)))
@@ -2984,10 +2999,49 @@ async fn wide_scalar_page(
             typed(value),
         ));
     }
-    let html = noted_page(&definition, Value::Object(data), notes).await;
+    let (setup, html) = noted_setup(&definition, Value::Object(data), notes).await;
     let units = render_units(&definition, &[]);
     assert_eq!(units, 256);
-    (html, units)
+    (setup, html, units)
+}
+
+/// Sonnet m6 (slice 1.5a review): a refused unit save echoes its draft once. On the tightest
+/// page (256 wide scalars with a long scribble), a conflict over the largest admitted body
+/// (256 KiB; a quote is three bytes URL-encoded and five escaped) stays within the per-unit
+/// bound plus the echo term of a re-render (plan D7: each echoed byte once, at most 5×).
+#[tokio::test]
+async fn a_refused_unit_draft_re_render_is_within_the_bound_plus_its_echo() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let raw = "\"".repeat(200);
+    let (setup, view, units) =
+        wide_scalar_setup(Some(i64::MIN), ("unresolved", &raw, Some(i64::MIN))).await;
+    let quotes = "\"".repeat(87_000);
+    let form = vec![
+        pair("csrf", "a".repeat(64)),
+        pair("base", "999"),
+        pair("value", quotes.as_str()),
+    ];
+    let (status, html) = big_post(
+        &setup,
+        &format!("/private-sheets/1/fields/f000_{}", "x".repeat(59)),
+        serde_urlencoded::to_string(form).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        html.matches(&"&#34;".repeat(87_000)).count(),
+        1,
+        "echoed once"
+    );
+    let echo = 5 * quotes.len();
+    let bound = FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES + echo;
+    assert!(html.len() <= bound, "{} > {bound}", html.len());
+    assert!(html.len() <= view.len() + echo, "only the draft is added");
+    println!(
+        "refused 87,000-quote unit draft on the wide scalar page: {} bytes (bound {bound})",
+        html.len()
+    );
 }
 
 /// Review round 2 (Sol Major): scalar fields, each showing the densest long sign-led sum,
@@ -3402,8 +3456,10 @@ async fn lantern_reach_list_sheet_end_to_end() {
     assert!(html.contains("Advisory checks: 0 violated"));
 }
 
-/// Plan §6 (report-only, with a bound): a slow 5 MiB upload by a signed-in principal holds the
-/// runtime (JOBS) permit, taken before the body, for at most the 5 s request timeout.
+/// Plan §6 (report-only, with a bound): a slow 5 MiB upload by a signed-in principal never
+/// holds the runtime (JOBS) permit. Since slice 1.5a review round 1 the edit save takes the
+/// permit itself (the D-X3 wait), after its body is read, and the 5 s request timeout ends
+/// the upload first (was: taken before the body, held up to that timeout).
 #[tokio::test]
 async fn slow_5mib_upload_holds_the_runtime_permit_at_most_the_request_timeout() {
     use tower::ServiceExt;
@@ -3434,27 +3490,31 @@ async fn slow_5mib_upload_holds_the_runtime_permit_at_most_the_request_timeout()
         .unwrap();
     let started = std::time::Instant::now();
     let upload = tokio::spawn(setup.app.clone().oneshot(request));
-    let mut blocked = false;
-    let held = loop {
+    let mut blocked = std::time::Duration::ZERO;
+    while !upload.is_finished() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        match crate::definitions::admit().ok() {
-            Some(permit) if blocked => {
-                drop(permit);
-                break started.elapsed();
-            }
-            Some(permit) => drop(permit),
-            None if started.elapsed() > std::time::Duration::from_secs(20) => {
-                panic!("the runtime permit was never released")
-            }
-            None => blocked = true,
+        match crate::definitions::admit() {
+            Ok(permit) => drop(permit),
+            Err(_) => blocked = started.elapsed(),
         }
-    };
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "the upload never ended"
+        );
+    }
     let response = upload.await.unwrap().unwrap();
     println!(
-        "slow 5 MiB upload: runtime permit held {held:?}, response {}",
+        "slow 5 MiB upload: ended after {:?}, runtime permit last busy at {blocked:?}, response {}",
+        started.elapsed(),
         response.status()
     );
-    assert!(held <= std::time::Duration::from_millis(5_600), "{held:?}");
+    assert_eq!(
+        blocked,
+        std::time::Duration::ZERO,
+        "the permit was never held"
+    );
+    assert_eq!(response.status(), axum::http::StatusCode::REQUEST_TIMEOUT);
+    assert!(started.elapsed() <= std::time::Duration::from_millis(5_600));
 }
 
 // ---- Implementation-review fixes (2026-10-17) ----

@@ -3,9 +3,9 @@
 //! `csrf`, `base` and `value` (plus `null` for a nullable field).
 //!
 //! Precedence as for sheet saves: parse, CSRF and request auth, then (D-X3) a bounded wait for
-//! the `JOBS` permit, the read and edit rights (403), then key admission and the route checks
-//! (400: a malformed or zero `base`, a native or unsupported pin, an ID outside the slug
-//! grammar, not in the pin, derived or a list). The value is read against the live revision
+//! the `JOBS` permit, the read and edit rights (403; an unsupported pin is read-only, so it
+//! is 403 too), then key admission and the route checks (400: a malformed or zero `base`, a
+//! native pin, an ID outside the slug grammar, not in the pin, derived or a list). The value is read against the live revision
 //! L: a submission equal to the saved value is "No change" (D-U), even from a stale page;
 //! otherwise a `base` above L, or a unit whose value differs between `base` and L, is a
 //! conflict (409) that re-renders the page with the draft and every `base` at L. The write
@@ -106,7 +106,8 @@ async fn save(
     if !view.editable {
         return Err(StatusCode::FORBIDDEN);
     }
-    // Native and unsupported pins keep the full form (Sonnet m1).
+    // Native pins keep the full form (Sonnet m1); an unsupported pin never gets here, it is
+    // read-only (403 above).
     let pin = view.immutable.as_ref().ok_or(StatusCode::BAD_REQUEST)?;
     let unit = match &route {
         Route::Meta(which) => Unit::meta(which),
@@ -337,29 +338,90 @@ struct BusyTemplate<'a> {
     sheet: i64,
     action: &'a str,
     csrf: &'a str,
-    base: &'a str,
-    value: &'a str,
-    null: Option<&'a str>,
+    /// What the kept entry is for: "the field hp", "Name", "General notes"; `None` for a
+    /// full or list form.
+    unit: Option<String>,
+    /// The submitted pairs other than `csrf` and the visible entry, kept as hidden inputs.
+    hidden: Vec<(&'a str, &'a str)>,
+    /// A unit's entry, shown in a control (a textarea when it holds a line break).
+    value: Option<&'a str>,
     multiline: bool,
+    /// The submitted form was larger than a re-render may echo (plan D7), so it was not kept.
+    dropped: bool,
 }
 
 /// The styled busy answer (D-X3, Sonnet rev-3 M3): 503 with `Retry-After: 1`, the player's
 /// submitted value kept in a form that posts the same unit again, so nothing typed is lost.
-/// Nothing was read or written. A route that names no echoable unit is 400.
+/// Nothing was read or written. A route that names no echoable unit is 400. Without the
+/// permit the pin is not read, so the page names the field by its ID and offers the entry
+/// as text, whatever the field's control (review round 1, Sonnet m3).
 fn busy(id: i64, route: &Route, pairs: &Pairs, csrf: &str) -> super::ResultResponse {
     let path = route.path().ok_or(StatusCode::BAD_REQUEST)?;
+    let unit = match route {
+        Route::Meta(which) if which == "name" => "Name".to_owned(),
+        Route::Meta(_) => "General notes".to_owned(),
+        Route::Field(field) => format!("the field {field}"),
+    };
     let value = pairs.value("value").unwrap_or_default();
-    let html = BusyTemplate {
+    let hidden = ["base", "null"]
+        .into_iter()
+        .filter_map(|key| pairs.value(key).map(|value| (key, value)))
+        .collect();
+    busy_page(&BusyTemplate {
         sheet: id,
         action: &format!("/private-sheets/{id}/{path}"),
         csrf,
-        base: pairs.value("base").unwrap_or_default(),
-        value,
-        null: pairs.value("null"),
+        unit: Some(unit),
+        hidden,
+        value: Some(value),
         multiline: value.contains('\n'),
-    }
-    .render()
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        dropped: false,
+    })
+}
+
+/// The busy answer of the full-form and list-form save (review round 1, Sonnet M1): after
+/// the same bounded wait, the form is parsed (no permit is held; the auth layer bounds
+/// concurrent requests) and, for a session that passes CSRF, every submitted pair is kept as
+/// a hidden input of a form posting to the sheet again. A form larger than a re-render may
+/// echo (plan D7) is not kept, and the page says so.
+pub(super) async fn busy_form(
+    state: &AuthState,
+    session: &Session,
+    id: i64,
+    body: axum::body::Bytes,
+) -> super::ResultResponse {
+    let pairs = tokio::task::spawn_blocking(move || {
+        Pairs::parse_limited(&body, super::super::transport::SHEET_FORM_PAIRS)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+    auth::check_csrf(session, pairs.csrf()?).await?;
+    auth::request_auth(state, session).await?;
+    let csrf = auth::token(session)
+        .await?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let dropped = pairs.iter().map(|(_, value)| value.len()).sum::<usize>() > super::ECHO_BYTES;
+    let hidden = if dropped {
+        Vec::new()
+    } else {
+        pairs.iter().filter(|(key, _)| *key != "csrf").collect()
+    };
+    busy_page(&BusyTemplate {
+        sheet: id,
+        action: &format!("/private-sheets/{id}"),
+        csrf: &csrf,
+        unit: None,
+        hidden,
+        value: None,
+        multiline: false,
+        dropped,
+    })
+}
+
+fn busy_page(template: &BusyTemplate<'_>) -> super::ResultResponse {
+    let html = template
+        .render()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut response = (
         StatusCode::SERVICE_UNAVAILABLE,
         [(axum::http::header::RETRY_AFTER, "1")],

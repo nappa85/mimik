@@ -530,7 +530,7 @@ def run_formula_browser(page, campaign, version, submit):
     story.fill("first line\nsecond line")
     unit_save(
         page,
-        page.locator('form[action$="/fields/story"]').get_by_role("button", name="Save"),
+        page.get_by_role("button", name="Save Story", exact=True),
         key=None,
         path="/fields/story",
     )
@@ -542,7 +542,10 @@ def run_formula_browser(page, campaign, version, submit):
     hit_points = page.locator('form[action$="/fields/hit-points"]')
     hit_points.locator('select[name="null"]').select_option("unknown")
     unit_save(
-        page, hit_points.get_by_role("button", name="Save"), key=None, path="/fields/hit-points"
+        page,
+        page.get_by_role("button", name="Save Hit points", exact=True),
+        key=None,
+        path="/fields/hit-points",
     )
     require(
         page.locator('form[action$="/fields/hit-points"] select[name="null"]').input_value()
@@ -632,15 +635,20 @@ def run_list_browser(page, campaign, version, submit):
     page.locator("#meta-notes").fill("\nsheet notes")
     unit_save(
         page,
-        page.locator('form[action$="/meta/notes"]').get_by_role("button", name="Save"),
+        page.get_by_role("button", name="Save General notes", exact=True),
         key=None,
         path="/meta/notes",
+    )
+
+    require(
+        page.get_by_role("button", name="Save list Equipment", exact=True).count() == 1,
+        "Save list is not named with its list",
     )
 
     def save_list(f, status=303):
         submit(
             page,
-            page.locator(f"form:has(#list-{f})").get_by_role("button", name="Save list"),
+            page.locator(f"#save-list-{f}"),
             status,
         )
 
@@ -912,7 +920,12 @@ def run_assist_browser(page, campaign, version):
     luck = page.locator('form[action$="/fields/luck"]')
     luck.locator('select[name="null"]').select_option("known")
     page.locator("#v3").fill("3")
-    unit_save(page, luck.get_by_role("button", name="Save"), key=None, path="/fields/luck")
+    unit_save(
+        page,
+        page.get_by_role("button", name="Save Luck", exact=True),
+        key=None,
+        path="/fields/luck",
+    )
     require(
         page.locator("#v3").input_value() == "3" and current_hp().input_value() == "-15",
         "Luck did not save on its own with its button",

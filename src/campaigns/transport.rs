@@ -88,6 +88,12 @@ impl Pairs {
             .find(|(k, _)| k == key)
             .map(|(_, value)| value.as_str())
     }
+    /// Every pair, in submitted order (the echo of a busy answer).
+    pub(super) fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
     pub(super) fn keys(&self) -> impl Iterator<Item = &str> + Clone {
         self.0.iter().map(|(key, _)| key.as_str())
     }

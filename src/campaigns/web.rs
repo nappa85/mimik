@@ -131,10 +131,7 @@ pub(crate) fn routes() -> Router<AuthState> {
             "/campaigns/{id}/sheets/new",
             get(new_sheet).merge(sheet_post(create_sheet)),
         )
-        .route(
-            "/private-sheets/{id}",
-            get(read_sheet).merge(sheet_post(edit_sheet)),
-        )
+        .route("/private-sheets/{id}", get(read_sheet))
         .route("/private-sheets/{id}/history/{revision}", get(read_history))
         .route(
             "/private-sheets/{id}/switch",
@@ -160,7 +157,9 @@ pub(crate) fn routes() -> Router<AuthState> {
         .route("/private-sheets/{id}/meta/{which}", post(unit_web::meta))
         .route("/private-sheets/{id}/fields/{field}", post(unit_web::field))
         .layer(DefaultBodyLimit::max(unit_web::UNIT_POST_BYTES))
-        .route_layer(middleware::from_fn(signed_in));
+        .route_layer(middleware::from_fn(signed_in))
+        // The full-form and list-form save waits the same way (review round 1, Sonnet M1).
+        .route("/private-sheets/{id}", sheet_post(edit_sheet));
     Router::new()
         .route("/campaigns", get(index).post(create))
         .route("/campaigns/{id}", get(detail))
@@ -1526,16 +1525,22 @@ async fn create_sheet(
     Extension(admission): Extension<RuntimeAdmission>,
     body: axum::body::Bytes,
 ) -> ResultResponse {
-    save_private(state, session, id, Some(version.version), admission, body).await
+    let permit = admission.take()?;
+    save_private(state, session, id, Some(version.version), permit, body).await
 }
+/// The full-form and list-form save (slice 1.5a review, Sonnet M1): like a unit save it
+/// waits a short, bounded time for the runtime permit (D-X3), then answers the styled busy
+/// page that keeps every submitted pair.
 async fn edit_sheet(
     State(state): State<AuthState>,
     session: Session,
     Path(id): Path<i64>,
-    Extension(admission): Extension<RuntimeAdmission>,
     body: axum::body::Bytes,
 ) -> ResultResponse {
-    save_private(state, session, id, None, admission, body).await
+    let Some(permit) = crate::definitions::admit_within(unit_web::PERMIT_WAIT).await else {
+        return unit_web::busy_form(&state, &session, id, body).await;
+    };
+    save_private(state, session, id, None, permit, body).await
 }
 
 /// Closed-key admission of a sheet POST (plan D2). It is O(pairs) but may generate up to
@@ -1709,10 +1714,9 @@ async fn save_private(
     session: Session,
     id: i64,
     version: Option<i64>,
-    admission: RuntimeAdmission,
+    permit: OwnedSemaphorePermit,
     body: axum::body::Bytes,
 ) -> ResultResponse {
-    let permit = admission.take()?;
     let (pairs, permit) = tokio::task::spawn_blocking(move || {
         Ok::<_, StatusCode>((
             super::transport::Pairs::parse_limited(&body, super::transport::SHEET_FORM_PAIRS)?,
