@@ -1303,6 +1303,17 @@ async fn the_busy_page_of_a_form_is_bounded() {
         &busy[..2000]
     );
     assert!(busy.len() < 4096, "{} bytes", busy.len());
+    // Many short pairs: 180,000 bytes of keys, within the bound alone, but their markup takes
+    // the page over it, so the per-pair charge drops the draft (review round 3, Sol).
+    let mut short = vec![pair("csrf", &"a".repeat(64))];
+    short.extend((0..30_000).map(|k| pair(&format!("k{k:05}"), "")));
+    let holder = hold(3);
+    let response = document_post(&setup, "/private-sheets/1", short).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let busy = body(response).await;
+    holder.await.unwrap();
+    assert!(busy.contains("larger than this page can keep"));
+    assert!(busy.len() < 4096, "{} bytes", busy.len());
     // Within the bound: one value of 1,000,000 quotes is kept, escaped once.
     let quotes = "\"".repeat(1_000_000);
     let kept = vec![

@@ -422,7 +422,9 @@ editable; a per-property `editable: false` flag and an item catalogue are a late
   slice 1.5a, the list forms) the body is buffered and parsed outside the permit; then CSRF
   and the session are checked and the save waits up to 2 s for the permit (D-X3). So up to 8
   edit bodies (the auth layer's request slots) of 5 MiB each, about 40 MiB raw, can be
-  buffered at once, and a slow edit upload never holds the permit. Unit saves (`meta/…`,
+  buffered at once; with each one's decoded pairs (up to about 5 MiB more, 65,536 pairs at
+  most) and a busy page of at most 5 MiB plus its chrome, the worst case is a few times that,
+  still bounded, and a slow edit upload never holds the permit. Unit saves (`meta/…`,
   `fields/…`) take at most 256 KiB, buffered the same way.
 - **Lost re-render.** If edit rights are lost between a rejected save and its re-render, the
   answer is a plain 403 and the draft is not re-rendered; nothing is saved.
