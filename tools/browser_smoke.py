@@ -671,11 +671,12 @@ def run_list_browser(page, campaign, version, submit):
 
 
 def run_assist_browser(page, campaign, version):
-    """Assisted sheet slices 1.1 and 1.2: a sum typed into Current HP saves its result and
+    """Assisted sheet slices 1.1 to 1.3: a sum typed into Current HP saves its result and
     shows "84 − 15 = 69" next to the cell, a saved negative survives the re-post, an
     unreadable entry keeps the value with its scribble (inside `<bdi>`), an unchanged save
-    writes nothing, and integer inputs keep the plain keyboard (no `inputmode`, which on
-    phones hides minus and space)."""
+    writes nothing (same revision), integer inputs keep the plain keyboard (no `inputmode`,
+    which on phones hides minus and space), and "-15" is applied literally with the
+    "Did you mean" switch, which can be hidden, applied and undone."""
 
     def enter(field, status=303):
         with page.expect_response(lambda response: response.request.method == "POST") as response:
@@ -683,8 +684,23 @@ def run_assist_browser(page, campaign, version):
                 field.press("Enter")
         require(response.value.status == status, "Assisted sheet Enter status differs")
 
+    def press(name, status=303):
+        button = page.get_by_role("button", name=name, exact=True)
+        with page.expect_response(lambda response: response.request.method == "POST") as response:
+            with page.expect_navigation(wait_until="domcontentloaded"):
+                button.click()
+        require(response.value.status == status, f"Assisted sheet button {name} status differs")
+
+    def current_hp():
+        # By id after the first save: the switch and Undo buttons name themselves with the
+        # cell's label (aria-labelledby), which get_by_label also matches.
+        return page.locator("#value-hp")
+
+    def revision():
+        return page.locator('input[name="revision"]').input_value()
+
     def note():
-        notes = page.locator("#note-hp")
+        notes = page.locator("#note-0")
         return notes.inner_text().strip() if notes.count() else None
 
     page.goto(campaign + f"/sheets/new?version={version}")
@@ -701,13 +717,13 @@ def run_assist_browser(page, campaign, version):
             page.locator(f'input[name="{name}"]').get_attribute("inputmode") is None,
             f"Runtime integer input {name} restricts the phone keyboard",
         )
-    hp = page.get_by_label("Current HP", exact=True)
+    hp = current_hp()
     hp.fill("")
     hp.press_sequentially("84 -15")
     enter(hp)
     page.goto(assisted)
     require(
-        page.get_by_label("Current HP", exact=True).input_value() == "69"
+        current_hp().input_value() == "69"
         and page.locator('input[name="value-armour"]').input_value() == "-1",
         "The typed sum 84 -15 did not save 69, or the saved negative changed",
     )
@@ -718,33 +734,77 @@ def run_assist_browser(page, campaign, version):
     require(note() == "84 \u2212 15 = 69", "The sum note 84 − 15 = 69 is not shown")
     no_overflow(page, "assisted sheet after a typed sum")
     # Slice 1.2: an unreadable entry keeps the saved value and shows the scribble.
-    hp = page.get_by_label("Current HP", exact=True)
+    hp = current_hp()
     hp.fill("lots")
     enter(hp)
     page.goto(assisted)
     require(
         note() == "kept 69 \u00b7 \u2018lots\u2019 not understood"
-        and page.locator("#note-hp bdi").inner_text() == "lots"
-        and page.get_by_label("Current HP", exact=True).input_value() == "lots",
+        and page.locator("#note-0 bdi").inner_text() == "lots"
+        and current_hp().input_value() == "lots",
         "The scribble lots did not keep 69 with its note",
     )
     no_overflow(page, "assisted sheet with a scribble")
-    # Pressing Enter on the unchanged page writes nothing (D-U).
-    hp = page.get_by_label("Current HP", exact=True)
+    # Pressing Enter on the unchanged page writes nothing (D-U): the revision stays.
+    unchanged = revision()
+    hp = current_hp()
     enter(hp, status=200)
     require(
         "No change" in page.locator('[role="status"]').inner_text(),
         "An unchanged assisted save did not say No change",
     )
+    page.goto(assisted)
+    require(revision() == unchanged, "An unchanged assisted save wrote a revision")
     # A later number replaces the scribble.
-    hp = page.get_by_label("Current HP", exact=True)
+    hp = current_hp()
     hp.fill("70")
     enter(hp)
     page.goto(assisted)
     require(
-        note() is None and page.get_by_label("Current HP", exact=True).input_value() == "70",
+        note() is None and current_hp().input_value() == "70",
         "A new number did not replace the scribble",
     )
+    # Slice 1.3: "-15" is applied literally (D-Q) and the switch is offered.
+    hp = current_hp()
+    hp.fill("-15")
+    enter(hp)
+    page.goto(assisted)
+    offer = page.locator("#offer-0")
+    require(
+        current_hp().input_value() == "-15"
+        and "Did you mean 70 \u2212 15 = 55?" in offer.inner_text(),
+        "The sign-led entry -15 was not applied literally with the switch offered",
+    )
+    no_overflow(page, "assisted sheet with a switch offer")
+    require(
+        page.get_by_role("textbox", name="Current HP", exact=True).count() == 1,
+        "Current HP lost its label name next to the switch and Undo buttons",
+    )
+    # D-X4: the offer is non-blocking; Hide removes it without script, a reload brings it back.
+    page.locator('label[for="dismiss-0"]').click()
+    require(not offer.is_visible(), "Hide did not hide the switch offer")
+    page.goto(assisted)
+    require(page.locator("#offer-0").is_visible(), "The offer did not come back on reload")
+    # The buttons are named by reference to the cell's label (aria-labelledby).
+    press("Yes Current HP")
+    page.goto(assisted)
+    require(
+        current_hp().input_value() == "55"
+        and note() == "70 \u2212 15 = 55"
+        and page.locator("#offer-0").count() == 0,
+        "The switch did not store 70 - 15 = 55",
+    )
+    require(
+        page.locator("#was-0").inner_text() == "Last change: was -15",
+        "Undo does not say what it restores",
+    )
+    press("Undo Current HP")
+    page.goto(assisted)
+    require(
+        current_hp().input_value() == "-15",
+        "Undo did not restore -15",
+    )
+    no_overflow(page, "assisted sheet after Undo")
 
 
 def run_workspace_browser(

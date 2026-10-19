@@ -19,9 +19,9 @@ pub(crate) const MAX_NOTES: usize = 256;
 /// The most bytes of a canonical typed note value.
 pub(crate) const MAX_VALUE_BYTES: usize = 80;
 
-/// How a note's value was read. Slice 1.2 writes `Literal`, `Sum` and `Unresolved`; the
-/// others are reserved by the table for later slices (1.3 switch and Undo, 1.4 erase,
-/// step 2c confirmation).
+/// How a note's value was read. Slice 1.2 writes `Literal`, `Sum` and `Unresolved`; slice
+/// 1.3 adds `SignLiteral` (D-Q), `Switched` and `Reverted` (Undo); the others are reserved by
+/// the table for later slices (1.4 erase, step 2c confirmation).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Op {
     Literal,
@@ -147,7 +147,7 @@ impl NoteValue {
 }
 
 /// One change note. `before` is `None` when there was no earlier value: on create and in a
-/// new row.
+/// new row. `target` is the revision whose note an Undo reverted (`reverted` notes only).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Note {
     pub address: String,
@@ -155,6 +155,7 @@ pub(crate) struct Note {
     pub raw: String,
     pub before: Option<NoteValue>,
     pub after: NoteValue,
+    pub target: Option<i64>,
 }
 
 /// A note as read back, with the revision it belongs to.
@@ -171,6 +172,9 @@ pub(crate) struct Notes {
     pub current: BTreeMap<String, Stored>,
     pub revision: Vec<Stored>,
     pub pending: Vec<Note>,
+    /// Notes a switch or Undo is bound to (slice 1.3): inside the save's transaction each must
+    /// still be the current note of its address, with the live value equal to its `after`.
+    pub bound: Vec<Stored>,
 }
 
 /// The typed address of a scalar field (plan §3a, Sol rev-2 M1).
@@ -236,7 +240,7 @@ pub(crate) fn insert(
     if notes.len() > MAX_NOTES {
         return Err(too_many());
     }
-    let mut statement = db.prepare_cached("INSERT INTO private_sheet_notes(sheet_id,revision,address,op,raw,before,after) VALUES(?1,?2,?3,?4,?5,?6,?7)")?;
+    let mut statement = db.prepare_cached("INSERT INTO private_sheet_notes(sheet_id,revision,address,op,raw,before,after,target) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)")?;
     for note in notes {
         let before = note.before.as_ref().map(NoteValue::encode).transpose()?;
         statement.execute(params![
@@ -247,6 +251,7 @@ pub(crate) fn insert(
             note.raw,
             before,
             note.after.encode()?,
+            note.target,
         ])?;
     }
     Ok(())
@@ -265,6 +270,7 @@ fn stored(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<Stored>> {
     let raw: String = row.get(3)?;
     let before: Option<String> = row.get(4)?;
     let after: String = row.get(5)?;
+    let target: Option<i64> = row.get(6)?;
     // A malformed row (only possible by writing the database directly, L1) is skipped.
     let note = (|| {
         Some(Note {
@@ -276,6 +282,7 @@ fn stored(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<Stored>> {
                 None => None,
             },
             after: NoteValue::decode(&after)?,
+            target,
         })
     })();
     Ok(note.map(|note| Stored { revision, note }))
@@ -292,7 +299,11 @@ pub(crate) fn current(
         return Ok(current);
     }
     let list = serde_json::to_string(addresses)?;
-    let mut query = db.prepare("SELECT n.revision,n.address,n.op,n.raw,n.before,n.after FROM json_each(?2) a JOIN private_sheet_notes n ON n.sheet_id=?1 AND n.address=a.value AND n.revision=(SELECT max(m.revision) FROM private_sheet_notes m WHERE m.sheet_id=?1 AND m.address=a.value)")?;
+    // CROSS JOIN fixes the loop order (SQLite never reorders it): one indexed probe per
+    // address. A plain JOIN let the planner scan every note of the sheet and probe the
+    // address list for each, O(notes × addresses) (slice 1.3 regression test
+    // `worst_label_page_with_every_switch_and_undo_is_within_the_unit_bound`).
+    let mut query = db.prepare("SELECT n.revision,n.address,n.op,n.raw,n.before,n.after,n.target FROM json_each(?2) a CROSS JOIN private_sheet_notes n ON n.sheet_id=?1 AND n.address=a.value AND n.revision=(SELECT max(m.revision) FROM private_sheet_notes m WHERE m.sheet_id=?1 AND m.address=a.value)")?;
     for row in query.query_map(params![sheet_id, list], stored)? {
         if let Some(stored) = row? {
             current.insert(stored.note.address.clone(), stored);
@@ -307,7 +318,7 @@ pub(crate) fn of_revision(
     sheet_id: i64,
     revision: i64,
 ) -> Result<Vec<Stored>, AppError> {
-    let mut query = db.prepare("SELECT revision,address,op,raw,before,after FROM private_sheet_notes WHERE sheet_id=?1 AND revision=?2 ORDER BY address LIMIT 257")?;
+    let mut query = db.prepare("SELECT revision,address,op,raw,before,after,target FROM private_sheet_notes WHERE sheet_id=?1 AND revision=?2 ORDER BY address LIMIT 257")?;
     let rows = query
         .query_map(params![sheet_id, revision], stored)?
         .collect::<Result<Vec<_>, _>>()?;

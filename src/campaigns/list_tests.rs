@@ -2702,6 +2702,273 @@ async fn worst_label_page_markup_is_within_the_unit_bound() {
     println!("worst-label view page: {} bytes, {units} units", html.len());
 }
 
+/// One stored note: address, op, raw, typed before and after (canonical JSON).
+type SeedNote = (String, &'static str, String, String, String);
+
+/// Creates sheet 1 with `data` as a retained (pre-M4) sheet, so list rows may carry any
+/// valid 64-character ID, then writes `notes` 256 per revision (the table's limit) on
+/// data-unchanged revisions, and returns the served sheet page.
+async fn noted_page(definition: &Value, data: Value, notes: Vec<SeedNote>) -> String {
+    let setup = list_setup(definition).await;
+    legacy_create(&setup, 1, data).await;
+    let version = setup.version;
+    let auth = setup.auth[1].clone();
+    setup
+        .store
+        .run_campaign(auth.clone(), move |db| {
+            for batch in notes.chunks(256) {
+                let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let pin = crate::definitions::private_pin::validate(
+                    crate::definitions::private_pin::load(&tx, version)?,
+                )?;
+                let live = super::super::snapshots::load(&tx, 1)?;
+                let written = super::super::snapshots::write(&tx, &auth, live, "edit", Some(&pin))?;
+                for (address, op, raw, before, after) in batch {
+                    tx.execute(
+                        "INSERT INTO private_sheet_notes(sheet_id,revision,address,op,raw,before,after) VALUES(1,?1,?2,?3,?4,?5,?6)",
+                        rusqlite::params![written.revision, address, op, raw, before, after],
+                    )?;
+                }
+                tx.commit()?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let response =
+        super::router_request(&setup.app, &setup.auth[1], "/private-sheets/1", None).await;
+    String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap()
+}
+
+fn within_unit_bound(html: &str, units: usize, label: &str) {
+    assert!(
+        html.len() <= FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES,
+        "{label}: {} bytes for {units} units",
+        html.len()
+    );
+    println!(
+        "worst-label page with {label}: {} bytes, {units} units (bound {})",
+        html.len(),
+        FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES
+    );
+}
+
+fn int(value: i64) -> String {
+    format!("{{\"int\":\"{value}\"}}")
+}
+
+/// One list with a 64-character ID and 32 properties with 64-character IDs and labels of
+/// 100 `"`: all integers, or 31 integers and an enum (`with_enum`) whose options are a
+/// 64-character ID and `b`.
+fn wide_list_definition(with_enum: bool) -> Value {
+    let label = "\"".repeat(100);
+    let integers = if with_enum { 31 } else { 32 };
+    let mut properties: Vec<Value> = (0..integers)
+        .map(|p| {
+            property(
+                &format!("p{p:02}_{}", "b".repeat(60)),
+                &label,
+                "integer",
+                false,
+            )
+        })
+        .collect();
+    if with_enum {
+        let mut choice = property(&format!("p31_{}", "b".repeat(60)), &label, "enum", false);
+        choice["options"] =
+            json!([{"id": "o".repeat(64), "label": label}, {"id": "b", "label": label}]);
+        properties.push(choice);
+    }
+    let fields = vec![list(&format!("l0_{}", "a".repeat(61)), &label, properties)];
+    let ids: Vec<Value> = fields.iter().map(|field| field["id"].clone()).collect();
+    json!({
+        "contract_version": 1, "game_id": "synthetic-game", "edition_id": "first",
+        "definition_id": "wide-lists", "title": "Wide lists",
+        "sources": [{"source_id": 1, "pdf_sha256": "0".repeat(64), "roles": ["sheet"]}],
+        "fields": fields, "formula_profile": 1,
+        "groups": [{"id": "main", "label": "Main", "fields": ids, "column_hint": "main"}],
+    })
+}
+
+/// The densest long sign-led sum: 63 one-digit terms (each shown as " − 1", 3 of its 6 bytes
+/// a minus sign) and a 19-digit last term, 146 characters, 64 numbers; its value is
+/// −9,223,372,036,854,775,063. Over `i64::MAX` before, the switch offers 744.
+fn densest_sign_led() -> (String, i64, i64) {
+    let raw = format!("{}-9223372036854775000", "-1".repeat(63));
+    let value = super::super::entry::number(&raw).unwrap();
+    assert_eq!(value, -9_223_372_036_854_775_063);
+    (raw, i64::MAX, value)
+}
+
+/// The wide list with 256 rows: every integer cell holds `value` with the note `note` (op,
+/// raw, before); with `enum_notes` the list has its enum column, every enum cell holding `b`
+/// and noted as changed from the 64-character option.
+async fn wide_list_page(
+    value: i64,
+    note: (&'static str, &str, i64),
+    enum_notes: bool,
+) -> (String, usize) {
+    let definition = wide_list_definition(enum_notes);
+    let field = &definition["fields"][0];
+    let list = field["id"].as_str().unwrap().to_owned();
+    let properties: Vec<(String, bool)> = field["items"]["properties"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| (p["id"].as_str().unwrap().to_owned(), p["control"] == "enum"))
+        .collect();
+    let mut notes = Vec::new();
+    let items: Vec<Value> = (1..=256)
+        .map(|k| {
+            // The longest row ID a retained row may carry: 64 characters.
+            let host = format!("i{k:03}-{}", "x".repeat(59));
+            let mut item = json!({"id": host});
+            for (p, choice) in &properties {
+                let address = format!("cell:{list}/{host}/{p}");
+                if *choice {
+                    item[p] = json!("b");
+                    if enum_notes {
+                        let before = format!("{{\"enum\":\"{}\"}}", "o".repeat(64));
+                        let after = "{\"enum\":\"b\"}".to_owned();
+                        notes.push((address, "literal", String::new(), before, after));
+                    }
+                } else {
+                    item[p] = value.into();
+                    let (op, raw, before) = note;
+                    notes.push((address, op, raw.to_owned(), int(before), int(value)));
+                }
+            }
+            item
+        })
+        .collect();
+    let html = noted_page(&definition, json!({list: items}), notes).await;
+    (html, render_units(&definition, &[256]))
+}
+
+/// Slice 1.3 (review rounds 1 and 2, Sol Major): the switch, Undo and note markup keeps the
+/// per-unit page bound in its worst case. 64-character list and property IDs, labels of 100
+/// `"`, 256 rows; every integer cell shows the densest long sign-led sum (cut at a term
+/// boundary), a relative offer and Undo with a 19-digit value before; every enum cell offers
+/// Undo back to a 64-character option ID.
+#[tokio::test]
+async fn worst_label_page_with_every_switch_and_undo_is_within_the_unit_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (raw, before, value) = densest_sign_led();
+    let (html, units) = wide_list_page(value, ("sign_literal", &raw, before), true).await;
+    assert_eq!(html.matches("form=\"assist-switch\"").count(), 31 * 256);
+    assert_eq!(html.matches("form=\"assist-undo\"").count(), 32 * 256);
+    assert_eq!(html.matches("class=\"entry-note\"").count(), 31 * 256);
+    within_unit_bound(&html, units, "every long sign-led sum, switch and Undo");
+    // Without the enum column (fewer units, so a tighter bound): every cell sign-led.
+    let (html, units) = wide_list_page(value, ("sign_literal", &raw, before), false).await;
+    assert_eq!(units, 9_220);
+    assert_eq!(html.matches("form=\"assist-switch\"").count(), 32 * 256);
+    within_unit_bound(&html, units, "32 sign-led columns, switch and Undo");
+}
+
+/// The same for slice 1.2's plain sum note (`11+11…`, 64 numbers) with Undo on every cell.
+#[tokio::test]
+async fn worst_label_page_with_every_long_sum_is_within_the_unit_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let raw = format!("1{}", "+1".repeat(63));
+    let (html, units) = wide_list_page(64, ("sum", &raw, i64::MIN), false).await;
+    assert_eq!(units, 9_220);
+    assert_eq!(html.matches("form=\"assist-undo\"").count(), 32 * 256);
+    assert_eq!(html.matches("class=\"entry-note\"").count(), 32 * 256);
+    within_unit_bound(&html, units, "every long sum and Undo");
+}
+
+/// The same for slice 1.2's scribble: 200 `"` (escaped five times wider) kept over every
+/// integer cell. The scribble is echoed in full once, in the cell's control; its note is cut.
+#[tokio::test]
+async fn worst_label_page_with_every_long_scribble_is_within_the_unit_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let raw = "\"".repeat(200);
+    let (html, units) = wide_list_page(i64::MIN, ("unresolved", &raw, i64::MIN), false).await;
+    assert_eq!(units, 9_220);
+    assert_eq!(html.matches("not understood").count(), 32 * 256);
+    within_unit_bound(&html, units, "every long scribble");
+}
+
+/// 256 integer scalar fields with 64-character IDs and labels of 100 `"` (each charged one
+/// unit), every one holding `value` with the note (op, raw, before).
+async fn wide_scalar_page(value: i64, note: (&'static str, &str, i64)) -> (String, usize) {
+    let label = "\"".repeat(100);
+    let ids: Vec<String> = (0..256)
+        .map(|f| format!("f{f:03}_{}", "x".repeat(59)))
+        .collect();
+    let fields: Vec<Value> = ids
+        .iter()
+        .map(|id| {
+            json!({"id": id, "label": label, "control": "integer", "nullable": false,
+                   "mapping": mapped()})
+        })
+        .collect();
+    let definition = json!({
+        "contract_version": 1, "game_id": "synthetic-game", "edition_id": "first",
+        "definition_id": "wide-scalars", "title": "Wide scalars",
+        "sources": [{"source_id": 1, "pdf_sha256": "0".repeat(64), "roles": ["sheet"]}],
+        "fields": fields,
+        "groups": [{"id": "main", "label": "Main", "fields": ids, "column_hint": "main"}],
+    });
+    let (op, raw, before) = note;
+    let mut data = serde_json::Map::new();
+    let mut notes = Vec::new();
+    for id in &ids {
+        data.insert(id.clone(), value.into());
+        notes.push((
+            format!("field:{id}"),
+            op,
+            raw.to_owned(),
+            int(before),
+            int(value),
+        ));
+    }
+    let html = noted_page(&definition, Value::Object(data), notes).await;
+    let units = render_units(&definition, &[]);
+    assert_eq!(units, 256);
+    (html, units)
+}
+
+/// Review round 2 (Sol Major): scalar fields, each showing the densest long sign-led sum,
+/// the offer and Undo.
+#[tokio::test]
+async fn worst_label_scalar_page_with_every_switch_and_undo_is_within_the_unit_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (raw, before, value) = densest_sign_led();
+    let (html, units) = wide_scalar_page(value, ("sign_literal", &raw, before)).await;
+    assert_eq!(html.matches("form=\"assist-switch\"").count(), 256);
+    assert_eq!(html.matches("form=\"assist-undo\"").count(), 256);
+    within_unit_bound(&html, units, "256 wide scalars with switch and Undo");
+}
+
+/// Review round 3 (Sonnet): scalar fields, each with a 200-`"` scribble kept over an
+/// `i64::MIN` value; the scribble is echoed in full in the input.
+#[tokio::test]
+async fn worst_label_scalar_page_with_every_long_scribble_is_within_the_unit_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let raw = "\"".repeat(200);
+    let (html, units) = wide_scalar_page(i64::MIN, ("unresolved", &raw, i64::MIN)).await;
+    assert_eq!(html.matches("not understood").count(), 256);
+    assert_eq!(
+        html.matches(&"&#34;".repeat(200)).count(),
+        256,
+        "echoed in full"
+    );
+    within_unit_bound(&html, units, "256 wide scalars with a long scribble");
+}
+
 // ---- Step 8: the gate lift, the publication budget and end-to-end lists (plan D7) ----
 
 /// List `l` of the budget fixture: 32 properties, of which `BUDGET_OPTIONAL[l]` leading ones
@@ -3421,6 +3688,64 @@ async fn browser_crlf_submission_is_stored_as_lf() {
         StatusCode::SEE_OTHER
     );
     assert_eq!(reopen(&setup, 1).await.notes, "\n".repeat(20_000));
+}
+
+/// Slice-1.2 review row 4: since an unchanged browser Save writes nothing (D-U), pin LF
+/// normalisation on a changed save. The browser sends every textarea with CR LF and one
+/// multiline cell edited: the edit is stored with LF and the untouched text is stored
+/// byte-identical (red when the transport keeps CR).
+#[tokio::test]
+async fn browser_crlf_edit_is_stored_with_lf() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let mut definition = hostile_definition();
+    definition["fields"].as_array_mut().unwrap().push(
+        json!({"id": "essay", "label": "Essay", "control": "multiline",
+                     "nullable": false, "mapping": mapped()}),
+    );
+    definition["groups"][0]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push("essay".into());
+    let setup = list_setup(&definition).await;
+    let mut snapshot = blank(&setup, 1).await;
+    snapshot.sheet_id = 1;
+    snapshot.notes = "\nnotes\nsecond line".into();
+    snapshot.data = json!({"label": "x", "essay": "\n\nscalar\nmore",
+                           "gear": [{"id": "r1-1", "name": "n", "story": "\nrow\nend"}]});
+    let created = write(&setup, 1, snapshot, "create").await.unwrap();
+    let textareas = ["notes", "value-essay", "row-1-0-1"];
+    let mut browser: Vec<(String, String)> = submitted(&sheet_page(&setup).await)
+        .into_iter()
+        .map(|(key, value)| {
+            let value = if textareas.contains(&key.as_str()) {
+                value.replace('\n', "\r\n")
+            } else {
+                value
+            };
+            (key, value)
+        })
+        .collect();
+    set(&mut browser, "value-essay", "\r\nedited\r\nessay\r\n");
+    assert!(
+        serde_urlencoded::to_string(&browser)
+            .unwrap()
+            .contains("%0D%0A")
+    );
+    assert_eq!(
+        setup.post("/private-sheets/1", browser).await.0,
+        StatusCode::SEE_OTHER
+    );
+    let saved = reopen(&setup, 1).await;
+    assert_eq!(saved.revision, 2);
+    assert_eq!(saved.data["essay"], "\nedited\nessay\n");
+    assert_eq!(saved.notes, created.notes, "untouched notes stored with LF");
+    assert_eq!(
+        saved.data["gear"], created.data["gear"],
+        "untouched row text stored with LF"
+    );
+    let stored = serde_json::to_string(&(&saved.data, &saved.notes)).unwrap();
+    assert!(!stored.contains("\\r"), "{stored}");
 }
 
 /// Last review (F8): a draft operation re-renders the normalised draft; no CR reaches the page.

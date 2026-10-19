@@ -109,6 +109,9 @@ where
         .route_layer(middleware::from_fn(signed_in))
 }
 
+#[path = "assist_web.rs"]
+mod assist_web;
+
 pub(crate) fn routes() -> Router<AuthState> {
     let sheets = Router::new()
         .route(
@@ -120,6 +123,14 @@ pub(crate) fn routes() -> Router<AuthState> {
             get(read_sheet).merge(sheet_post(edit_sheet)),
         )
         .route("/private-sheets/{id}/history/{revision}", get(read_history))
+        .route(
+            "/private-sheets/{id}/switch",
+            post(assist_web::switch).layer(DefaultBodyLimit::max(assist_web::ASSIST_POST_BYTES)),
+        )
+        .route(
+            "/private-sheets/{id}/undo",
+            post(assist_web::undo).layer(DefaultBodyLimit::max(assist_web::ASSIST_POST_BYTES)),
+        )
         .route(
             "/private-sheets/{id}/catalogue/{catalogue}",
             get(super::catalogue_web::browse),
@@ -426,6 +437,9 @@ struct Version {
 
 struct FieldView {
     id: String,
+    /// The DOM id suffix of the field's note, label and actions: its index in the
+    /// definition, so a 64-character field ID is not repeated in every reference (D7).
+    key: String,
     label: String,
     help: String,
     control: String,
@@ -443,6 +457,8 @@ struct FieldView {
     list: Option<ListView>,
     /// The field's current change note, when it has something to show (slice 1.2).
     note: Option<NoteLine>,
+    /// The switch offer and Undo from that note (slice 1.3).
+    actions: Option<Actions>,
 }
 
 /// At most this many characters of a value shown in a second, visible context (plan D7
@@ -466,10 +482,107 @@ struct PropertyView {
 
 struct CellView {
     p: usize,
+    /// The DOM id suffix `<f>-<r>-<p>`.
+    key: String,
     value: String,
     state: String,
     /// The cell's current change note, when it has something to show (slice 1.2).
     note: Option<NoteLine>,
+    /// The switch offer and Undo from that note (slice 1.3).
+    actions: Option<Actions>,
+}
+
+/// What a saved, editable page offers under a cell from its current note (slice 1.3): the
+/// D-Q switch ("Did you mean 84 − 15 = 69? Yes") and Undo of the cell's last change (D-N).
+/// Each button belongs to one of the page's two small forms (`form` attribute) and submits
+/// the note key as its own `note` pair, never the sheet form, so Enter in the sheet still
+/// saves it. The buttons name their cell through `aria-labelledby`, so a cell's label is
+/// never repeated and the page markup per cell stays bounded (plan D7).
+struct Actions {
+    /// The DOM id suffix of the cell (`hp`, `4-0-1`).
+    key: String,
+    /// The ids naming the cell: its label, and for a row cell the row legend.
+    labelled: String,
+    /// The note key, `<revision>:<address>`.
+    note: String,
+    offer: Option<Offer>,
+    /// The value Undo restores, when Undo is offered.
+    undo: Option<String>,
+}
+
+struct Offer {
+    /// The relative reading ("84 − 15"), shown inside `<bdi>`.
+    text: String,
+    value: String,
+}
+
+/// Which of the page's two action forms (switch, Undo) any cell uses.
+#[derive(Default)]
+struct AssistForms {
+    switch: bool,
+    undo: bool,
+}
+
+impl Actions {
+    /// The offer and Undo of `address` from its current note, on a saved page the reader may
+    /// edit; `None` when the note offers neither.
+    ///
+    /// A row cell passes its known location (`located`), so rendering never searches rows.
+    fn of(
+        view: &SheetView,
+        address: &str,
+        located: Option<super::assist::Located<'_>>,
+        (key, labelled): (String, String),
+        forms: &mut AssistForms,
+    ) -> Option<Self> {
+        if !view.editable || view.snapshot.sheet_id == 0 {
+            return None;
+        }
+        let pin = view.immutable.as_ref()?;
+        let stored = view.notes.current.get(address)?;
+        let located = match located {
+            Some(located) => located,
+            None => super::assist::locate(pin.definition(), &view.snapshot.data, address)?,
+        };
+        let current = super::assist::value_at(&located, &view.snapshot.data);
+        let offer = super::assist::switch_value(stored, current.as_ref()).and_then(|value| {
+            let Some(super::notes::NoteValue::Int(before)) = stored.note.before else {
+                return None;
+            };
+            Some(Offer {
+                text: super::entry::offer_text(before, &stored.note.raw)?,
+                value: value.to_string(),
+            })
+        });
+        let undo = super::assist::undoable(stored, current.as_ref()).then(|| {
+            stored
+                .note
+                .before
+                .as_ref()
+                .map_or_else(String::new, super::notes::NoteValue::text)
+        });
+        forms.switch |= offer.is_some();
+        forms.undo |= undo.is_some();
+        (offer.is_some() || undo.is_some()).then(|| Self {
+            key,
+            labelled,
+            note: super::assist::key(stored),
+            offer,
+            undo,
+        })
+    }
+}
+
+/// The ids an input is described by: its note line and its switch offer.
+fn described_by(key: &str, note: Option<&NoteLine>, actions: Option<&Actions>) -> String {
+    let mut ids = Vec::new();
+    if note.is_some() {
+        ids.push(format!("note-{key}"));
+    }
+    if actions.is_some_and(|actions| actions.offer.is_some()) {
+        ids.push(format!("offer-{key}"));
+    }
+    ids.join(" ")
 }
 
 /// What a sheet page shows next to a cell from its current change note (assisted sheet
@@ -497,11 +610,24 @@ impl NoteLine {
         }
         let value = note.after.text();
         match note.op {
-            super::notes::Op::Sum => Some(Self {
+            // A sign-led sum ("-5+3") is shown like a sum; a one-term literal shows nothing.
+            super::notes::Op::Sum | super::notes::Op::SignLiteral => Some(Self {
                 kind: "sum",
                 text: super::entry::sum_text(&note.raw)?,
                 value,
             }),
+            // After a switch the cell shows the relative reading it applied: "84 − 15 = 69".
+            super::notes::Op::Switched => {
+                let super::notes::NoteValue::Int(after) = note.after else {
+                    return None;
+                };
+                let literal = super::entry::read(&note.raw).ok()?.value;
+                Some(Self {
+                    kind: "sum",
+                    text: super::entry::offer_text(after.checked_sub(literal)?, &note.raw)?,
+                    value,
+                })
+            }
             super::notes::Op::Unresolved => Some(Self {
                 kind: "unresolved",
                 text: note.raw.clone(),
@@ -514,6 +640,16 @@ impl NoteLine {
     fn scribble(&self) -> Option<&str> {
         (self.kind == "unresolved").then_some(self.text.as_str())
     }
+    /// The text under the cell: long expressions and scribbles are elided to an excerpt
+    /// (the control echoes a scribble in full; history keeps every note's full text), so
+    /// a cell's markup stays bounded (plan D7, slice 1.3 review).
+    fn shown(&self) -> String {
+        if self.kind == "unresolved" {
+            excerpt(&self.text)
+        } else {
+            self.text.clone()
+        }
+    }
 }
 
 /// One note of a history revision (D-E: the custodian and Masters see raw text).
@@ -523,6 +659,8 @@ struct NoteRow {
     raw: String,
     before: String,
     after: String,
+    /// The revision an Undo reverted.
+    target: Option<i64>,
 }
 
 impl NoteRow {
@@ -537,11 +675,15 @@ impl NoteRow {
                 .as_ref()
                 .map_or_else(|| "new".into(), super::notes::NoteValue::text),
             after: note.after.text(),
+            target: note.target,
         }
     }
 }
 
 impl CellView {
+    fn described_by(&self) -> String {
+        described_by(&self.key, self.note.as_ref(), self.actions.as_ref())
+    }
     fn valid_boolean(&self) -> bool {
         matches!(self.value.as_str(), "" | "true" | "false")
     }
@@ -624,13 +766,15 @@ impl ListView {
             .collect();
         let declared = values::properties(field);
         // Notes are shown on a saved page only, never over a re-rendered draft.
-        let note = |id: &str, p: usize| {
+        // A saved page lists the saved rows in order: row `r` is saved item `r`, checked by
+        // its ID, so no row is searched for.
+        let note = |r: usize, id: &str, p: usize| {
             let (saved, current) = saved?;
             let property = declared.get(p)?;
             let item = saved
                 .as_array()?
-                .iter()
-                .find(|item| item["id"].as_str() == Some(id))?;
+                .get(r)
+                .filter(|item| item["id"].as_str() == Some(id))?;
             let stored = current.get(&super::notes::cell_address(&field.id, id, &property.id))?;
             NoteLine::of(stored, property.control, item.get(&property.id)?)
         };
@@ -646,16 +790,18 @@ impl ListView {
                     .zip(row.states)
                     .enumerate()
                     .map(|(p, (value, state))| {
-                        let note = note(&row.id, p);
+                        let note = note(r, &row.id, p);
                         let value = note
                             .as_ref()
                             .and_then(NoteLine::scribble)
                             .map_or(value, str::to_owned);
                         CellView {
                             p,
+                            key: format!("{f}-{r}-{p}"),
                             value,
                             state,
                             note,
+                            actions: None,
                         }
                     })
                     .collect(),
@@ -668,6 +814,39 @@ impl ListView {
             properties,
             rows,
             focus_add: focus == Some(values::Focus::Add(f)),
+        }
+    }
+    /// Adds the switch and Undo of each saved row cell (slice 1.3).
+    fn offer(
+        &mut self,
+        view: &SheetView,
+        field: &crate::definitions::Field,
+        forms: &mut AssistForms,
+    ) {
+        let properties = values::properties(field);
+        let saved = &view.snapshot.data[&field.id];
+        for row in &mut self.rows {
+            // A saved page lists the saved rows in order; skip anything else.
+            if saved[row.r]["id"].as_str() != Some(row.id.as_str()) {
+                continue;
+            }
+            for cell in &mut row.cells {
+                let address =
+                    super::notes::cell_address(&field.id, &row.id, &properties[cell.p].id);
+                // The cell label, the list legend and the row legend name the buttons.
+                let labelled = format!(
+                    "label-{} list-legend-{} legend-{}-{}",
+                    cell.key, self.f, self.f, row.r
+                );
+                let located = super::assist::row(field, row.r, &properties[cell.p]);
+                cell.actions = Actions::of(
+                    view,
+                    &address,
+                    Some(located),
+                    (cell.key.clone(), labelled),
+                    forms,
+                );
+            }
         }
     }
     /// The last row: its Move down button is disabled.
@@ -712,6 +891,9 @@ fn choices(options: Option<&Vec<crate::definitions::Choice>>) -> Vec<(String, St
 }
 
 impl FieldView {
+    fn described_by(&self) -> String {
+        described_by(&self.key, self.note.as_ref(), self.actions.as_ref())
+    }
     fn value_excerpt(&self) -> String {
         excerpt(&self.value)
     }
@@ -758,6 +940,8 @@ struct PrivateTemplate<'a> {
     formulas: Option<FormulaView>,
     /// A history page's change notes, with raw text (D-E).
     revision_notes: Vec<NoteRow>,
+    /// The switch and Undo forms this page needs (slice 1.3), outside the sheet form.
+    assist_forms: AssistForms,
 }
 
 /// How a runtime sheet shows its derived values.
@@ -845,7 +1029,14 @@ fn render_private(
             })
         })
     };
-    let groups = groups(view, raw, formulas.as_ref(), notice.focus)?;
+    let mut assist_forms = AssistForms::default();
+    let groups = groups(
+        view,
+        raw,
+        formulas.as_ref(),
+        notice.focus,
+        &mut assist_forms,
+    )?;
     let name = raw
         .and_then(|r| r.get("name"))
         .map_or(view.snapshot.name.as_str(), String::as_str);
@@ -904,6 +1095,7 @@ fn render_private(
         },
         formulas,
         revision_notes: view.notes.revision.iter().map(NoteRow::of).collect(),
+        assist_forms,
     }
     .render()
     .map_err(|_| AppError::Template)
@@ -914,6 +1106,7 @@ fn groups(
     raw: Option<&BTreeMap<String, String>>,
     formulas: Option<&FormulaView>,
     focus: Option<values::Focus>,
+    forms: &mut AssistForms,
 ) -> Result<Vec<GroupView>, AppError> {
     let mut groups = Vec::new();
     if let Some(pin) = &view.immutable {
@@ -934,7 +1127,12 @@ fn groups(
                         |raw| values::ListDraft::submitted(f, field, raw),
                     );
                     let notes = raw.is_none().then_some((saved, &view.notes.current));
-                    ListView::new(f, field, draft, focus, notes)
+                    let mut list = ListView::new(f, field, draft, focus, notes);
+                    // Switch and Undo on a saved page only, never over a re-rendered draft.
+                    if raw.is_none() {
+                        list.offer(view, field, forms);
+                    }
+                    list
                 });
                 let note = view
                     .notes
@@ -961,6 +1159,7 @@ fn groups(
                     .unwrap_or_else(|| if saved.is_null() { "unknown" } else { "known" }.into());
                 fields.push(FieldView {
                     id: id.clone(),
+                    key: f.to_string(),
                     label: field.label.clone(),
                     help: field.help.clone().unwrap_or_default(),
                     control: control_name(field.control).into(),
@@ -987,6 +1186,18 @@ fn groups(
                         .map(|formula| super::formulas::rule_list(&formula.rule_ids))
                         .unwrap_or_default(),
                     list,
+                    actions: if raw.is_none() && field.formula.is_none() {
+                        let labelled = format!("label-{f}");
+                        Actions::of(
+                            view,
+                            &super::notes::field_address(id),
+                            None,
+                            (f.to_string(), labelled),
+                            forms,
+                        )
+                    } else {
+                        None
+                    },
                     note,
                 });
             }

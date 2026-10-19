@@ -20,6 +20,8 @@ use tower_sessions::{
 };
 #[path = "administration_tests.rs"]
 mod administration_tests;
+#[path = "assist_tests.rs"]
+mod assist_tests;
 #[path = "catalogue_tests.rs"]
 mod catalogue_tests;
 #[path = "entry_save_tests.rs"]

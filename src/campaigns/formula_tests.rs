@@ -818,7 +818,8 @@ pub(super) fn submitted_by(html: &str, submitter: Option<(&str, &str)>) -> Vec<(
         let Some(name) = element.attr("name") else {
             continue;
         };
-        if disabled(control) {
+        // A control with a `form` attribute belongs to that other form.
+        if disabled(control) || element.attr("form").is_some() {
             continue;
         }
         let kind = element.attr("type").unwrap_or_default();
@@ -858,14 +859,17 @@ pub(super) fn submitted_by(html: &str, submitter: Option<(&str, &str)>) -> Vec<(
     pairs
 }
 
-/// The first submit button in tree order: what Enter in a text field activates.
+/// The first submit button in tree order whose form owner is the sheet form: what Enter in
+/// a text field activates. A button with a `form` attribute (a slice-1.3 switch or Undo)
+/// belongs to its own form, so it is never the sheet's default.
 pub(super) fn default_submitter(html: &str) -> Option<(String, String)> {
     let document = scraper::Html::parse_document(html);
     let selector = scraper::Selector::parse("form button, form input[type=submit]").unwrap();
     document.select(&selector).find_map(|button| {
         let element = button.value();
-        let submit =
-            element.name() == "input" || element.attr("type").is_none_or(|kind| kind == "submit");
+        let submit = element.attr("form").is_none()
+            && (element.name() == "input"
+                || element.attr("type").is_none_or(|kind| kind == "submit"));
         submit.then(|| {
             (
                 element.attr("name").unwrap_or_default().to_owned(),

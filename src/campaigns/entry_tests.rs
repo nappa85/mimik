@@ -1,6 +1,6 @@
 //! Slice 1.1 grammar table and property tests for `entry::number` (assisted sheet plan
 //! §3a, §5 slice 1.1).
-use super::{MAX_CHARS, MAX_SCALARS, Reading, Unreadable, number, read, sum_text};
+use super::{MAX_CHARS, MAX_SCALARS, Reading, Unreadable, number, offer_text, read, sum_text};
 use proptest::prelude::*;
 
 fn ok(cases: &[(&str, i64)]) {
@@ -146,12 +146,12 @@ fn unreadable_shapes() {
             "2*3",
             "6/2",
             "(5)",
-            "-5+3",
-            "-9223372036854775808-1",
-            "+5-1",
+            "-5+-3",
+            "- 5+3",
+            "-5 3",
+            "1\u{a0}2",
+            "5\u{2009}-1",
             "--5",
-            "5\u{a0}-1",
-            "\u{a0}5",
         ],
         Unreadable::Syntax,
     );
@@ -249,16 +249,17 @@ proptest! {
 /// normalised.
 #[test]
 fn readings_tell_sums_from_literals() {
-    for (raw, value, sum) in [
-        ("84", 84, false),
-        ("-15", -15, false),
-        ("+3", 3, false),
-        ("0007", 7, false),
-        ("84 -15", 69, true),
-        ("84-15+3", 72, true),
-        ("\t1 + 1\t", 2, true),
+    for (raw, value, sum, signed) in [
+        ("84", 84, false, false),
+        ("-15", -15, false, true),
+        ("+3", 3, false, true),
+        ("0007", 7, false, false),
+        ("84 -15", 69, true, false),
+        ("84-15+3", 72, true, false),
+        ("\t1 + 1\t", 2, true, false),
+        ("-5+3", -2, true, true),
     ] {
-        assert_eq!(read(raw), Ok(Reading { value, sum }), "{raw:?}");
+        assert_eq!(read(raw), Ok(Reading { value, sum, signed }), "{raw:?}");
     }
     assert_eq!(read("lots"), Err(Unreadable::Syntax));
     assert_eq!(sum_text("84 -15").as_deref(), Some("84 \u{2212} 15"));
@@ -281,4 +282,108 @@ fn only_unreadable_text_keeps_a_known_value() {
     for kind in [Unreadable::Blank, Unreadable::TooLong, Unreadable::Control] {
         assert!(!kind.keeps_value(), "{kind:?}");
     }
+}
+
+/// Slice 1.3, decision on slice-1.1 note V3: a sign-led entry with more terms ("-5+3") is a
+/// sign-led sum. D-Q applies it literally (its own value, −2), and the switch offers it
+/// relative to the saved value ("84 − 5 + 3 = 82"). The sign must still touch its digits.
+#[test]
+fn sign_led_sums_are_applied_literally() {
+    ok(&[
+        ("-5+3", -2),
+        ("+5-1", 4),
+        ("\u{2212}5 \u{2212} 3", -8),
+        ("-5 + 3 - 1", -3),
+        ("+0-0", 0),
+        ("-9223372036854775807-1", i64::MIN),
+    ]);
+    refused(
+        &["-9223372036854775808-1", "+9223372036854775807+1"],
+        Unreadable::Range,
+    );
+    refused(
+        &["-5+-3", "- 5+3", "-5 3", "--5+1", "-5+"],
+        Unreadable::Syntax,
+    );
+    // The 64-number cap counts the first signed term.
+    let sixty_five = format!("-1{}", "+1".repeat(MAX_SCALARS));
+    assert_eq!(number(&sixty_five), Err(Unreadable::TooManyScalars));
+    let sixty_four = format!("-1{}", "+1".repeat(MAX_SCALARS - 1));
+    assert_eq!(number(&sixty_four), Ok(62));
+}
+
+/// Slice 1.3, decision on the slice-1.1 review (row 5): a no-break space (U+00A0, and the
+/// narrow U+202F that some keyboards and pasted text use) counts as a space: it is trimmed
+/// and may separate terms. Other Unicode spaces stay unreadable.
+#[test]
+fn no_break_spaces_count_as_spaces() {
+    ok(&[
+        ("\u{a0}5", 5),
+        ("5\u{a0}", 5),
+        ("5\u{a0}-1", 4),
+        ("84\u{a0}-\u{a0}15", 69),
+        ("84\u{202f}-15", 69),
+        ("\u{a0}\t-15\u{a0}", -15),
+    ]);
+    refused(&["\u{a0}", "\u{202f}\u{a0}\t"], Unreadable::Blank);
+    refused(&["1\u{a0}2", "-\u{a0}5", "5\u{2003}-1"], Unreadable::Syntax);
+}
+
+/// Slice 1.3: the switch text of a sign-led entry over a saved value, and sums shown with a
+/// sign-led first term.
+#[test]
+fn offers_spell_the_relative_reading() {
+    assert_eq!(offer_text(84, "-15").as_deref(), Some("84 \u{2212} 15"));
+    assert_eq!(offer_text(84, "+3").as_deref(), Some("84 + 3"));
+    assert_eq!(
+        offer_text(84, " -5+03 ").as_deref(),
+        Some("84 \u{2212} 5 + 3")
+    );
+    assert_eq!(
+        offer_text(-1, "-1").as_deref(),
+        Some("\u{2212}1 \u{2212} 1")
+    );
+    assert_eq!(offer_text(0, "\u{2212}7").as_deref(), Some("0 \u{2212} 7"));
+    for raw in ["84", "84 -15", "lots", "", "- 5"] {
+        assert_eq!(offer_text(84, raw), None, "{raw:?}");
+    }
+    assert_eq!(sum_text("-5+3").as_deref(), Some("\u{2212}5 + 3"));
+    assert_eq!(sum_text("+5-1").as_deref(), Some("5 \u{2212} 1"));
+    assert_eq!(sum_text("-15"), None);
+}
+
+/// Slice 1.3 review round 2: a long expression is cut at a term boundary, never inside a
+/// number, with an explicit count of the terms left out; the shown terms fit
+/// `SHOWN_CHARS`. Short expressions are unchanged.
+#[test]
+fn long_expressions_are_cut_at_term_boundaries() {
+    use super::SHOWN_CHARS;
+    let raw = "-11".repeat(64);
+    // "−11" then " − 11" × 12 is 63 characters; a 13th would pass 64.
+    let note = format!(
+        "\u{2212}11{} \u{2026} (+51 more terms)",
+        " \u{2212} 11".repeat(12)
+    );
+    assert_eq!(sum_text(&raw).as_deref(), Some(note.as_str()));
+    let offer = format!("84{} \u{2026} (+52 more terms)", " \u{2212} 11".repeat(12));
+    assert_eq!(offer_text(84, &raw).as_deref(), Some(offer.as_str()));
+    // One term left out is singular.
+    // "1" then " + 1" × 15 is 61 characters: 16 terms fit, the 17th is left out.
+    let seventeen = format!("1{}", "+1".repeat(16));
+    assert_eq!(
+        sum_text(&seventeen).as_deref(),
+        Some(format!("1{} \u{2026} (+1 more term)", " + 1".repeat(15)).as_str())
+    );
+    // Wide terms: never a partial number, whatever the budget left.
+    let wide = format!("-{}", ["9223372036854775"; 11].join("-"));
+    let shown = offer_text(i64::MIN, &wide).unwrap();
+    let (terms, _) = shown.split_once(" \u{2026} ").unwrap();
+    assert!(terms.chars().count() <= SHOWN_CHARS, "{shown}");
+    for term in terms.split(" \u{2212} ").skip(1) {
+        assert_eq!(term, "9223372036854775", "{shown}");
+    }
+    // Within the budget nothing changes.
+    assert_eq!(sum_text("84 -15 +3").as_deref(), Some("84 \u{2212} 15 + 3"));
+    let fits = format!("1{}", "+1".repeat(15));
+    assert_eq!(sum_text(&fits), Some(format!("1{}", " + 1".repeat(15))));
 }

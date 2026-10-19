@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 /// The demo definition (`assist-definition.json`), with a mapped source as publication needs.
-fn assist() -> Value {
+pub(super) fn assist() -> Value {
     let mut definition = crate::definitions::source_fixture::assist_definition();
     definition["sources"] =
         json!([{"source_id": 1, "pdf_sha256": "0".repeat(64), "roles": ["sheet"]}]);
@@ -23,7 +23,7 @@ fn long_id() -> String {
 }
 
 /// The assist definition plus an enum (`stance`, field 6) and a boolean (`inspired`, 7).
-fn choices() -> Value {
+pub(super) fn choices() -> Value {
     let mut definition = assist();
     let unresolved = json!({"state": "unresolved", "reason": "Synthetic fixture"});
     let fields = definition["fields"].as_array_mut().unwrap();
@@ -43,22 +43,22 @@ fn choices() -> Value {
     definition
 }
 
-fn pair(key: &str, value: &str) -> (String, String) {
+pub(super) fn pair(key: &str, value: &str) -> (String, String) {
     (key.into(), value.into())
 }
 
 /// One `equipment` row (list field 4): host ID, name, quantity, weight, and the optional
 /// `broken` (property 3) value and Set state.
 #[derive(Clone, Copy)]
-struct Row<'a> {
-    id: &'a str,
-    name: &'a str,
-    quantity: &'a str,
-    broken: &'a str,
-    set: &'a str,
+pub(super) struct Row<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub quantity: &'a str,
+    pub broken: &'a str,
+    pub set: &'a str,
 }
 
-fn row<'a>(id: &'a str, quantity: &'a str) -> Row<'a> {
+pub(super) fn row<'a>(id: &'a str, quantity: &'a str) -> Row<'a> {
     Row {
         id,
         name: "Rope",
@@ -70,7 +70,11 @@ fn row<'a>(id: &'a str, quantity: &'a str) -> Row<'a> {
 
 /// A full assisted-sheet form: HP 84, Max HP 84, Armour −1, Luck unknown, overridden (or
 /// extended) by `changes`.
-fn form(revision: i64, changes: &[(&str, &str)], rows: &[Row<'_>]) -> Vec<(String, String)> {
+pub(super) fn form(
+    revision: i64,
+    changes: &[(&str, &str)],
+    rows: &[Row<'_>],
+) -> Vec<(String, String)> {
     let mut form = vec![
         pair("csrf", &"a".repeat(64)),
         pair("revision", &revision.to_string()),
@@ -101,7 +105,7 @@ fn form(revision: i64, changes: &[(&str, &str)], rows: &[Row<'_>]) -> Vec<(Strin
     form
 }
 
-fn create_path(setup: &Setup) -> String {
+pub(super) fn create_path(setup: &Setup) -> String {
     format!(
         "/campaigns/{}/sheets/new?version={}",
         setup.campaign, setup.version
@@ -109,14 +113,14 @@ fn create_path(setup: &Setup) -> String {
 }
 
 /// Sheet 1 at revision 1 (one Rope row, quantity 1), created through the router.
-async fn created(setup: &Setup, extra: &[(&str, &str)]) {
+pub(super) async fn created(setup: &Setup, extra: &[(&str, &str)]) {
     let create = form(0, extra, &[row("", "1")]);
     let (status, html) = setup.post(&create_path(setup), create).await;
     assert_eq!(status, StatusCode::SEE_OTHER, "create: {html}");
 }
 
 /// The saved revision and data of sheet `id`, read as the Master (account 2).
-async fn saved(setup: &Setup, id: i64) -> (i64, Value) {
+pub(super) async fn saved(setup: &Setup, id: i64) -> (i64, Value) {
     let (view, permit) = setup
         .store
         .private_read(
@@ -131,7 +135,7 @@ async fn saved(setup: &Setup, id: i64) -> (i64, Value) {
     (view.snapshot.revision, view.snapshot.data)
 }
 
-async fn history_len(setup: &Setup, id: i64) -> usize {
+pub(super) async fn history_len(setup: &Setup, id: i64) -> usize {
     setup
         .store
         .private_history(setup.auth[1].clone(), id, 0)
@@ -140,10 +144,10 @@ async fn history_len(setup: &Setup, id: i64) -> usize {
         .len()
 }
 
-type NoteRow = (i64, String, String, String, Option<String>, String);
+pub(super) type NoteRow = (i64, String, String, String, Option<String>, String);
 
 /// Every stored note of sheet `id`, as raw columns.
-async fn notes(setup: &Setup, id: i64) -> Vec<NoteRow> {
+pub(super) async fn notes(setup: &Setup, id: i64) -> Vec<NoteRow> {
     setup
         .store
         .run(move |db| {
@@ -159,7 +163,7 @@ async fn notes(setup: &Setup, id: i64) -> Vec<NoteRow> {
         .unwrap()
 }
 
-async fn notes_at(setup: &Setup, id: i64, revision: i64) -> Vec<NoteRow> {
+pub(super) async fn notes_at(setup: &Setup, id: i64, revision: i64) -> Vec<NoteRow> {
     notes(setup, id)
         .await
         .into_iter()
@@ -167,7 +171,7 @@ async fn notes_at(setup: &Setup, id: i64, revision: i64) -> Vec<NoteRow> {
         .collect()
 }
 
-fn note(
+pub(super) fn note(
     revision: i64,
     address: &str,
     op: &str,
@@ -186,7 +190,7 @@ fn note(
 }
 
 /// The inner HTML of the first element matching `selector`.
-fn inner(html: &str, selector: &str) -> Option<String> {
+pub(super) fn inner(html: &str, selector: &str) -> Option<String> {
     let page = scraper::Html::parse_document(html);
     page.select(&scraper::Selector::parse(selector).unwrap())
         .next()
@@ -194,14 +198,14 @@ fn inner(html: &str, selector: &str) -> Option<String> {
 }
 
 /// The `value` of the control named `name`.
-fn value(html: &str, name: &str) -> Option<String> {
+pub(super) fn value(html: &str, name: &str) -> Option<String> {
     let page = scraper::Html::parse_document(html);
     page.select(&scraper::Selector::parse(&format!("[name=\"{name}\"]")).unwrap())
         .next()
         .and_then(|element| element.value().attr("value").map(str::to_owned))
 }
 
-async fn page(setup: &Setup) -> String {
+pub(super) async fn page(setup: &Setup) -> String {
     let (status, html) = setup.get("/private-sheets/1").await;
     assert_eq!(status, StatusCode::OK);
     html
@@ -225,8 +229,8 @@ async fn sums_and_literals_are_noted_with_the_save_and_shown() {
         StatusCode::SEE_OTHER
     );
     assert_eq!(saved(&setup, 1).await.1["hp"], json!(69));
-    // Only the changed cells get notes; a sign-led input is a literal (D-Q; the "Did you
-    // mean" switch is slice 1.3).
+    // Only the changed cells get notes; a sign-led input is applied literally and noted as
+    // `sign_literal` (D-Q; slice 1.3 offers the "Did you mean" switch from it).
     assert_eq!(
         notes_at(&setup, 1, 2).await,
         vec![
@@ -241,7 +245,7 @@ async fn sums_and_literals_are_noted_with_the_save_and_shown() {
             note(
                 2,
                 "field:armour",
-                "literal",
+                "sign_literal",
                 "-3",
                 Some(r#"{"int":"-1"}"#),
                 r#"{"int":"-3"}"#
@@ -258,7 +262,7 @@ async fn sums_and_literals_are_noted_with_the_save_and_shown() {
     );
     let html = page(&setup).await;
     assert_eq!(
-        inner(&html, "#note-hp").as_deref(),
+        inner(&html, "#note-0").as_deref(),
         Some("<bdi>84 \u{2212} 15</bdi> = 69")
     );
     assert_eq!(
@@ -266,10 +270,10 @@ async fn sums_and_literals_are_noted_with_the_save_and_shown() {
         Some("<bdi>2 + 1</bdi> = 3")
     );
     assert_eq!(value(&html, "value-hp").as_deref(), Some("69"));
-    assert!(html.contains("aria-describedby=\"note-hp\""), "{html}");
+    assert!(html.contains("aria-describedby=\"note-0\""), "{html}");
     // A literal shows nothing on the sheet; history lists it.
-    assert_eq!(inner(&html, "#note-armour"), None);
-    assert_eq!(inner(&html, "#note-max_hp"), None);
+    assert_eq!(inner(&html, "#note-2"), None);
+    assert_eq!(inner(&html, "#note-1"), None);
 }
 
 #[tokio::test]
@@ -309,7 +313,7 @@ async fn an_unreadable_entry_keeps_a_known_value_with_a_scribble() {
     );
     let html = page(&setup).await;
     assert_eq!(
-        inner(&html, "#note-hp").as_deref(),
+        inner(&html, "#note-0").as_deref(),
         Some("kept 84 · ‘<bdi>lots</bdi>’ not understood")
     );
     assert_eq!(
@@ -384,7 +388,7 @@ async fn a_later_literal_replaces_a_scribble_as_the_current_note() {
     assert_eq!(current["field:hp"].revision, 3);
     assert_eq!(current["field:hp"].note.op, Op::Literal);
     let html = page(&setup).await;
-    assert_eq!(inner(&html, "#note-hp"), None);
+    assert_eq!(inner(&html, "#note-0"), None);
     assert_eq!(value(&html, "value-hp").as_deref(), Some("70"));
 }
 
@@ -420,7 +424,7 @@ async fn entering_the_kept_value_resolves_a_scribble() {
         )]
     );
     let html = page(&setup).await;
-    assert_eq!(inner(&html, "#note-hp"), None);
+    assert_eq!(inner(&html, "#note-0"), None);
     assert_eq!(value(&html, "value-hp").as_deref(), Some("84"));
     // Now entering 84 again is a no-op.
     let edit = form(3, &[("value-hp", "84")], &[row("r1-1", "1")]);
@@ -632,6 +636,7 @@ async fn enum_boolean_and_unknown_notes_read_back_exactly() {
         raw: raw.into(),
         before: Some(before),
         after,
+        target: None,
     };
     assert_eq!(
         read.into_iter()
@@ -730,8 +735,86 @@ async fn a_no_op_with_revoked_rights_is_403() {
     assert_eq!(history_len(&setup, 1).await, 1);
 }
 
+/// Slice-1.2 review row 2: a no-op still rechecks the submitting session inside the
+/// transaction. The player's session ends after the page was loaded and checked: 403, never
+/// "No change" (red when the session rechecks in `private_unchanged` are removed).
+#[tokio::test]
+async fn a_no_op_after_the_session_ended_is_403() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    let player = player_sheet(&setup).await;
+    let unchanged = form(1, &[], &[row("r1-1", "1")]);
+    let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = ran.clone();
+    *super::super::sheets::BEFORE_UNCHANGED_RECHECK
+        .lock()
+        .unwrap() = Some(Box::new(move |db| {
+        seen.store(true, std::sync::atomic::Ordering::SeqCst);
+        let ended = db.execute(
+            "UPDATE auth_sessions SET state='revoked',payload=NULL WHERE account_id=3",
+            [],
+        )?;
+        if ended == 0 {
+            return Err(AppError::Invalid("The player has no session to end."));
+        }
+        Ok(())
+    }));
+    let response =
+        super::router_request(&setup.app, &player, "/private-sheets/1", Some(unchanged)).await;
+    assert!(
+        ran.load(std::sync::atomic::Ordering::SeqCst),
+        "the recheck ran"
+    );
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(!body(response).await.contains("No change"));
+    assert_eq!(history_len(&setup, 1).await, 1);
+}
+
+/// Slice-1.2 review row 2: another save lands between the page check and the no-op's
+/// recheck. The stale page gets 409 with its draft, never "No change" (red when the
+/// revision check in `private_unchanged` is removed).
+#[tokio::test]
+async fn a_no_op_over_an_intervening_revision_is_409() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    created(&setup, &[]).await;
+    let master = setup.auth[1].clone();
+    let version = setup.version;
+    *super::super::sheets::BEFORE_UNCHANGED_RECHECK
+        .lock()
+        .unwrap() = Some(Box::new(move |db| {
+        let pin = crate::definitions::private_pin::validate(
+            crate::definitions::private_pin::load(db, version)?,
+        )?;
+        let mut live = super::super::snapshots::load(db, 1)?;
+        live.notes = "Saved in another tab".into();
+        super::super::snapshots::write(db, &master, live, "edit", Some(&pin))?;
+        Ok(())
+    }));
+    let unchanged = form(1, &[], &[row("r1-1", "1")]);
+    let (status, html) = setup.post("/private-sheets/1", unchanged).await;
+    assert!(
+        super::super::sheets::BEFORE_UNCHANGED_RECHECK
+            .lock()
+            .unwrap()
+            .is_none(),
+        "the recheck ran"
+    );
+    assert_eq!(status, StatusCode::CONFLICT, "{html}");
+    assert!(!html.contains("No change:"), "{html}");
+    assert!(html.contains("No changes saved"), "{html}");
+    assert_eq!(
+        value(&html, "revision").as_deref(),
+        Some("1"),
+        "the draft is kept"
+    );
+    assert_eq!(history_len(&setup, 1).await, 1, "nothing written");
+}
+
 /// Account 3 joins the campaign as a player and creates sheet 1; returns its auth.
-async fn player_sheet(setup: &Setup) -> crate::auth::RequestAuth {
+pub(super) async fn player_sheet(setup: &Setup) -> crate::auth::RequestAuth {
     setup
         .store
         .request_join(setup.auth[2].clone(), setup.campaign)
@@ -820,7 +903,7 @@ async fn scribbles_render_escaped_inside_bdi() {
     );
     let (_, html) = setup.get("/private-sheets/1").await;
     assert_eq!(
-        inner(&html, "#note-hp").as_deref(),
+        inner(&html, "#note-0").as_deref(),
         Some(
             "kept 84 · ‘<bdi>\u{5e9}\u{5dc}\u{5d5}\u{5e9} &lt;b&gt;x&lt;/b&gt;</bdi>’ not understood"
         )
@@ -905,7 +988,7 @@ async fn freeze_writes_no_note_and_notes_stay_readable() {
     assert_eq!(response.status(), StatusCode::OK);
     let html = body(response).await;
     assert_eq!(
-        inner(&html, "#note-hp").as_deref(),
+        inner(&html, "#note-0").as_deref(),
         Some("<bdi>84 \u{2212} 15</bdi> = 69")
     );
     // The frozen revision is live but not writable: no note can name it.

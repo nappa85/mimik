@@ -299,6 +299,22 @@ length, the schema (8,000 / 20,000) plus `maxlength`; stored bytes, `snapshots::
   explanations are bounded by the definition's 256 KiB content cap (each rendered at most
   twice, escaped at ≤ 5 bytes per character), and each derived value by its field's text
   limit (20,000 characters). The tests that assert the bound use formula-free fixtures.
+  **Definition text (amended 2026-10-19, assisted sheet slice 1.3 review round 3).** Labels
+  are at most 100 characters (`schemas/definition-v1.json`) and are charged inside their
+  units: one unit is a control, option or row element *with its label*. A scalar's label is
+  rendered once, a list's label once in its legend plus three times per row in the Move up,
+  Move down and Remove buttons (row elements) and once in Add, and a property label once per
+  row cell (twice when optional, with Set / Not set). The worst-label tests calibrate these with
+  labels of 100 `"`. **Field help** (at most 2,000 characters, rendered once per field) and
+  **group labels** (rendered once each) are not charged to any unit. Like expressions and
+  messages, they are definition text bounded by the 256 KiB content cap: every character
+  costs at least one byte of the definition and renders as at most 5 bytes. All
+  definition-sourced text together (help and group labels once, expressions and messages at
+  most twice) therefore adds at most 2 × 5 × 262,144 = **2,621,440 bytes** (2.5 MiB) to a page.
+  This is outside `FIXED_PAGE_BYTES` + units × `UNIT_MARKUP_BYTES`, and outside the
+  `5 × ECHO_BYTES` re-render term. Example: 64 integer scalars, each with 1,000 `"` of help,
+  render 320,000 bytes of help, from 128,000 bytes of definition JSON (`\"` is 2 bytes). No
+  test fixture that asserts the unit bound carries help.
 
 **D8. History: ID-labelled rows and a read-only change summary (user decision Q4).**
 - **Rows.** `/history/N` shows each row as a read-only fieldset, legend "Row 2 · ID r1-2",
