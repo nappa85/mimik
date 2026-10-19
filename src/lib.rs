@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod auth;
 pub mod campaigns;
+pub mod catalogues;
 pub mod definitions;
 mod form_text;
 pub mod games;

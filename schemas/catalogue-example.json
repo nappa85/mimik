@@ -1,0 +1,18 @@
+{"contract_version":1,"game_id":"synthetic-game","edition_id":"first","catalogue_id":"spells","title":"Synthetic spells",
+ "sources":[{"source_id":3,"pdf_sha256":"3333333333333333333333333333333333333333333333333333333333333333"},
+            {"source_id":1,"pdf_sha256":"1111111111111111111111111111111111111111111111111111111111111111"}],
+ "entry_types":[{"id":"spell","label":"Spell","properties":[
+     {"id":"level","label":"Level","control":"integer"},
+     {"id":"school","label":"School","control":"enum","options":[{"id":"light","label":"Light"},{"id":"dusk","label":"Dusk"}]},
+     {"id":"ritual","label":"Ritual","control":"boolean"},
+     {"id":"range","label":"Range","control":"text"}]},
+   {"id":"charm","label":"Charm","properties":[]}],
+ "entries":[
+   {"key":"lantern-flare","type":"spell","name":"Lantern Flare",
+    "properties":{"school":"light","range":"Near","ritual":false,"level":1},
+    "description":{"units":[{"source_id":3,"page_id":41,"unit_id":977},{"source_id":1,"page_id":2,"unit_id":5}]}},
+   {"key":"house-charm","type":"charm","name":"House Charm","properties":{},"retired":false,
+    "description":{"owner_text":"A small synthetic charm written for this fixture."}},
+   {"key":"old-glow","type":"spell","name":"Old Glow","retired":true,
+    "properties":{"level":0,"school":"dusk","ritual":true,"range":""},
+    "description":{"units":[{"source_id":1,"page_id":2,"unit_id":5}]}}]}

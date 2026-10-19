@@ -1587,6 +1587,7 @@ dependencies = [
  "tokio",
  "tower",
  "tower-sessions",
+ "unicode-general-category",
  "url",
  "zeroize",
 ]
