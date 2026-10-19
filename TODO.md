@@ -1,6 +1,6 @@
 # Mimik — persistent work tracker
 
-Last updated: 2026-10-16.
+Last updated: 2026-10-19.
 
 ## Resume here
 
@@ -23,7 +23,7 @@ Last updated: 2026-10-16.
     - [x] Verification review of the round-4 fixes (`5d3c538`): Sol and Space Bunny MERGE-READY, Sonnet FIX THEN MERGE. Round-5 fixes (plan §16): the R8 gate requires a complete run at the caps (`--allow-partial` for cap selection), the contender on every publication, and validated `--shapes`; migration 019's entry ordinal bound is 6,143, tied to the caps by a test. Gate: 540 Rust tests, tools 749 with the known `test_fake_runner_script` error.
     - [x] Round-6 verification review (`fe93021`): Sol, Sonnet and Space Bunny MERGE-READY. Two cheap Minors folded in before the merge (empty `--shapes` components, explicit `calibrated`).
     - [x] Merged `catalogue` (steps 1+2) into master; gate on the merge result recorded in plan §16.
-    - [ ] Step 3: the `catalogues` definition link, three-site checks, pin-confined entry/browse routes. Carry: owner text rendered in an isolated bidi context with a browser test; real-lock profiler commit-phase regression (review row 16); ordinal pin by table (row 22).
+    - [x] Step 3: the `catalogues` definition link, three-site checks, pin-confined entry/browse routes. **Merged 2026-10-19** (plan §17–§18; review record `docs/reviews/2026-10-19-catalogue-step3.md`: three rounds, final Sol and Sonnet MERGE-READY, Space Bunny MERGE-READY in round 2, no Blocking). Member and checks at save, publication and readiness; browse and entry routes through a sheet (uniform 403 refusal, live badges incl. "Description unavailable", citations, 20,000-character cut, quoted name search under the time budget, `(name, key)` cursor); owner/unit text and labels bidi-isolated with a Chromium check at both viewports; ordinal pin by table (row 22). Gate: 566 Rust tests, tools 751 with the known `test_fake_runner_script` error, browser and process smoke passed. Open: profiler commit-phase regression (step-2 row 16); worst badge-probe browse page 0.42 s (above the 250 ms target, cheaper probe follow-up); direct interruption tests for types/cursor/badge probe; real-route p95 not measured; decisions for the user to confirm (403 vs 404, stale wiring keeps catalogues readable, retired entries listed).
 - [x] **M4 plain list editing MERGED** (`758ccf4`). Four review rounds with Sol, Sonnet and Space Bunny; the closing round was MERGE from all three. Follow-ups are listed in `docs/reviews/2026-10-17-derived-formulas-m4-impl.md`, "Closing review" section (decoder CRLF tests, LF-guarantee wording).
 - **Held-out ledger policy (main session, 2026-10-17):** held-out ledgers contain per-case gold; they are read only through `tool_loop_benchmark.py --summarize`'s aggregate output. Agents and the main session never open, read or print held-out ledger rows, never pass `--allow-heldout-gold-replay`, and never read the frozen case file (details: `docs/tool-loop-heldout-v3-freeze.md`).
 - **Plans and decisions (2026-10-16, evening):**

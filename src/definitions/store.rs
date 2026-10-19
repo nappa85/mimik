@@ -65,6 +65,7 @@ pub(super) fn references(db: &Connection, data: &Admitted) -> Result<(), Definit
             ));
         }
     }
+    linked_catalogues(db, data)?;
     // One shared walk over field wiring and formula/constraint evidence.
     for dependency in super::formula_admission::dependencies(definition) {
         let region = dependency.region;
@@ -79,6 +80,42 @@ pub(super) fn references(db: &Connection, data: &Admitted) -> Result<(), Definit
         }
     }
     Ok(())
+}
+
+/// Catalogue plan D8/R27: every linked catalogue has a sealed version of the definition's own
+/// pair. Existence only: content is verified at publication and by `verify-catalogues` (R5),
+/// and catalogue state never enters the wiring snapshot or its hash (R10). Append-only
+/// publication keeps the check true once it passes (D3).
+fn linked_catalogues(db: &Connection, data: &Admitted) -> Result<(), DefinitionError> {
+    let definition = &data.definition;
+    for (index, link) in definition.catalogues.iter().enumerate() {
+        if crate::catalogues::read::latest_sealed(
+            db,
+            &definition.game_id,
+            &definition.edition_id,
+            &link.id,
+        )?
+        .is_none()
+        {
+            return Err(ValidationReport::one(
+                &format!("/catalogues/{index}"),
+                "linked-catalogue-not-published",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether every linked catalogue still has a sealed version (the readiness site, D8).
+pub(super) fn linked_catalogues_available(
+    db: &Connection,
+    data: &Admitted,
+) -> Result<bool, DefinitionError> {
+    match linked_catalogues(db, data) {
+        Ok(()) => Ok(true),
+        Err(DefinitionError::Invalid(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 fn save(

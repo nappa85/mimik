@@ -1,12 +1,14 @@
 //! Read-only game catalogues (plan `docs/catalogue-plan.md`). Step 1: the strict envelope,
 //! its canonical identity and revisioned drafts. Step 2: comparison, publication of immutable
 //! sealed versions with projections and a name index, integrity check and index repair.
+//! Step 3: the read-only lookups behind the sheet's catalogue routes (`read`).
 //!
 //! Redaction (plan D6): no error, diagnostic or summary carries entry names, keys, property
 //! ids or values, owner text or unit text. Diagnostics are static codes with index-only paths.
 mod admission;
 pub(crate) mod decode;
 mod publication;
+pub(crate) mod read;
 mod store;
 
 pub use decode::MAX_BYTES;

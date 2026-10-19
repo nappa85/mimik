@@ -236,6 +236,17 @@ fn domain(definition: &Definition) -> Result<Option<super::formula::Compiled>, D
         ));
     }
     mappings(definition)?;
+    let mut linked = BTreeSet::new();
+    if definition
+        .catalogues
+        .iter()
+        .any(|link| !crate::registry::valid_id(&link.id) || !linked.insert(link.id.as_str()))
+    {
+        return Err(ValidationReport::one(
+            "/catalogues",
+            "invalid-or-duplicate-catalogue-link",
+        ));
+    }
     super::formula_admission::check(definition)
 }
 

@@ -1,4 +1,6 @@
 //! Campaign grants and private sheets are distinct from the public prototype.
+mod catalogue;
+mod catalogue_web;
 mod domain;
 mod formulas;
 mod history_diff;

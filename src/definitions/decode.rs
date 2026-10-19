@@ -32,6 +32,8 @@ fn limits(key: &str) -> (usize, usize) {
         "rule_ids" => (16, 64),
         "expr" => (256, 1024),
         "message" => (256, 500),
+        // Linked catalogues (catalogue plan D8): at most 8 links.
+        "catalogues" => (8, 64),
         _ => (256, 5000),
     }
 }

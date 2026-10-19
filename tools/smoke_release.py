@@ -981,6 +981,96 @@ def publish_definition(binary, directory, definition, name):
     )
 
 
+CATALOGUE_RLO = "\u202e"
+
+
+def synthetic_catalogue(sources, mapping):
+    """A linked catalogue of original synthetic text: one entry citing the synthetic unit and
+    one owner-written entry whose text holds a line break and an unterminated right-to-left
+    override, right-to-left type and property labels, and a long unbroken property value
+    (catalogue plan §3 step 3)."""
+    return {
+        "contract_version": 1,
+        "game_id": "synthetic-game",
+        "edition_id": "first",
+        "catalogue_id": "spells",
+        "title": "Synthetic spells",
+        "sources": [
+            {"source_id": source["source_id"], "pdf_sha256": source["pdf_sha256"]}
+            for source in sources
+        ],
+        "entry_types": [
+            {
+                "id": "spell",
+                # Right-to-left labels (Unicode Cf such as RLO is refused in labels).
+                "label": "Spell \u05db\u05d9\u05e9\u05d5\u05e3",
+                "properties": [
+                    {"id": "level", "label": "\u05e8\u05de\u05d4 level", "control": "integer"},
+                    {"id": "note", "label": "Note", "control": "text"},
+                ],
+            }
+        ],
+        "entries": [
+            {
+                "key": "lantern-flare",
+                "type": "spell",
+                "name": "Lantern Flare",
+                "properties": {"level": 1, "note": ""},
+                "description": {"units": mapping["regions"][:1]},
+            },
+            {
+                "key": "ward-ink",
+                "type": "spell",
+                "name": "Ward Ink",
+                # One long unbroken value: the 390 px view must wrap it.
+                "properties": {"level": 2, "note": "w" * 400},
+                "description": {
+                    "owner_text": "Ward ink protects a page.\nIts margin note reads "
+                    + CATALOGUE_RLO
+                    + "reversed tail"
+                },
+            },
+        ],
+    }
+
+
+def publish_catalogue(binary, directory, catalogue, name):
+    """Import, compare and publish a catalogue draft through the real CLI."""
+    path = directory / name
+    path.write_text(json.dumps(catalogue))
+    draft = json.loads(
+        registry_cli(
+            binary,
+            directory,
+            "import-catalogue-draft",
+            "--file",
+            str(path),
+            "--expected-revision",
+            "0",
+        )
+    )
+    comparison = json.loads(
+        registry_cli(binary, directory, "compare-catalogue", "--id", str(draft["id"]))
+    )
+    require(comparison["publishable"], "Synthetic catalogue is not publishable")
+    published = json.loads(
+        registry_cli(
+            binary,
+            directory,
+            "publish-catalogue",
+            "--id",
+            str(draft["id"]),
+            "--comparison-hash",
+            comparison["comparison_hash"],
+            "--actor",
+            "Synthetic fixture operator",
+            "--rationale",
+            "Synthetic catalogue for the sheet routes",
+        )
+    )
+    require(published["published"], "Synthetic catalogue was not published")
+
+
 def version_link(html, campaign, version_id):
     """The create link of exactly `version_id`, never chosen by its position on the page."""
     link = f"{campaign}/sheets/new?version={version_id}"
@@ -1084,9 +1174,14 @@ def prepare_workspace_materials(binary, directory, fixture):
     )
     prepare_unknown_registry_source(binary, directory, fixture)
     sources, mapping = unknown_source_mapping(directory, fixture)
+    publish_catalogue(
+        binary, directory, synthetic_catalogue(sources, mapping), "synthetic-catalogue.json"
+    )
     definition = json.loads((fixture / "definition.json").read_text())
     definition["sources"] = sources
     definition["fields"][0]["mapping"] = mapping
+    # The generic definition links the catalogue, so its sheets reach the catalogue routes.
+    definition["catalogues"] = [{"id": "spells"}]
     generic = publish_definition(
         binary, directory, definition, "synthetic-workspace-definition.json"
     )

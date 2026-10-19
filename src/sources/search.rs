@@ -123,13 +123,13 @@ pub(crate) fn fts_query(input: &str) -> Result<String, AppError> {
 }
 
 /// Byte-guarded text read (as in materials): NULL means oversized or wrong type.
-fn guarded(column: &str, limit: usize) -> String {
+pub(crate) fn guarded(column: &str, limit: usize) -> String {
     format!(
         "CASE WHEN typeof({column})='text' AND length(CAST({column} AS BLOB))<={limit} THEN {column} END"
     )
 }
 
-fn read_guarded(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<String> {
+pub(crate) fn read_guarded(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<String> {
     row.get::<_, Option<String>>(index)?.ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
             index,
@@ -172,10 +172,10 @@ pub(crate) fn match_sql(registered: bool) -> String {
 }
 
 /// Clears the progress handler however the guarded statement ends.
-struct Budget<'a>(&'a Connection);
+pub(crate) struct Budget<'a>(&'a Connection);
 
 impl<'a> Budget<'a> {
-    fn start(db: &'a Connection, budget: Duration) -> Self {
+    pub(crate) fn start(db: &'a Connection, budget: Duration) -> Self {
         let deadline = Instant::now() + budget;
         db.progress_handler(BUDGET_CHECK_OPS, Some(move || Instant::now() >= deadline));
         Self(db)
@@ -188,7 +188,7 @@ impl Drop for Budget<'_> {
     }
 }
 
-fn interrupted(error: rusqlite::Error) -> AppError {
+pub(crate) fn interrupted(error: rusqlite::Error) -> AppError {
     if error.sqlite_error_code() == Some(ErrorCode::OperationInterrupted) {
         AppError::Invalid("Query too broad for the lookup time budget; add more specific words.")
     } else {

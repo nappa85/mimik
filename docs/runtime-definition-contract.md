@@ -241,6 +241,30 @@ hashed bytes, contract version and hash algorithm; maintain regression vectors.
 This is a Mimik content encoding, not an invented claim of general JSON/JCS
 canonicalization. Approval-event identity is separate from definition content.
 
+### Linked catalogues
+
+Catalogue plan §3 step 3 (D3, D8, R10, R27). An optional top-level `catalogues` member links
+read-only catalogues of the definition's own game and edition: 1–8 objects `{"id": …}`, each
+id a registry slug, no duplicates, closed objects. Author order is kept and is part of the
+identity (it is the sheet's display order). The member is the last one and is omitted when
+absent, so definitions without it keep their canonical bytes and frozen hash vectors.
+
+A link names no version. Readers use the catalogue's latest sealed version; append-only
+publication keeps every key and entry type of earlier versions, so a link that was valid
+stays valid. The link is checked at three sites: draft save, the publication comparison and
+its approval transaction, and the readiness check (a linked catalogue without a sealed
+version makes the wiring stale, so new sheets cannot be created; existing sheets stay
+readable). The checks verify existence only: catalogue state never enters the wiring
+snapshot, its hash or the approval envelope, and publishing a catalogue version never makes
+a definition approval stale.
+
+**Reproducibility contract.** Stored values, definition pins and formula results stay exactly
+reproducible. Catalogue entry names, properties, descriptions, badges and citations are
+current reference aids, shown from the latest catalogue version and the current source
+review and labelled "current text"; a historical revision shows today's catalogue text.
+Sheets cannot store catalogue keys until the `catalogue_ref` control lands (plan step 4).
+Reading routes and badges: [catalogue-publication.md](catalogue-publication.md#reading-through-a-sheet).
+
 ## 5. Canonical values and writes (R4)
 
 Characters pin game/edition/definition/version/hash and immutable schema. Generic
