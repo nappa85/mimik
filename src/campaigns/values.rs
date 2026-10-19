@@ -599,8 +599,9 @@ impl<'a> Recorder<'a> {
     }
 
     /// Records a value: a note when a saved cell changed, when it accepts the kept value of a
-    /// scribble (a data-unchanged revision, plan §3a), or when a new cell (create, a new
-    /// row) got an interpreted number (a sum). Text cells record nothing.
+    /// scribble (a data-unchanged revision with a `literal` note, plan §3a), or when a new
+    /// cell (create, a new row) got an interpreted number (a sum of two or more numbers).
+    /// Text cells record nothing.
     fn record(
         &mut self,
         address: String,
@@ -612,10 +613,14 @@ impl<'a> Recorder<'a> {
     ) {
         let Some(after) = after else { return };
         let before = prior.note_value(control);
-        if before.is_none() && op != NoteOp::Sum {
+        let interpreted = op == NoteOp::Sum
+            || (op == NoteOp::SignLiteral && super::entry::read(raw).is_ok_and(|r| r.sum));
+        if before.is_none() && !interpreted {
             return;
         }
         let changed = before.as_ref() != Some(&after);
+        // Accepting a scribble's kept value is a literal whatever its sign (no switch).
+        let op = if changed { op } else { NoteOp::Literal };
         if changed || self.scribbled(&address, &after).is_some() {
             self.notes.push(Note {
                 address,
@@ -623,6 +628,7 @@ impl<'a> Recorder<'a> {
                 raw: raw.into(),
                 before,
                 after,
+                target: None,
             });
         }
     }
@@ -645,7 +651,10 @@ impl<'a> Recorder<'a> {
         }
         match super::entry::read(raw) {
             Ok(reading) => {
-                let op = if reading.sum {
+                // D-Q: a sign-led entry is applied literally; the sheet offers the switch.
+                let op = if reading.signed {
+                    NoteOp::SignLiteral
+                } else if reading.sum {
                     NoteOp::Sum
                 } else {
                     NoteOp::Literal
@@ -679,6 +688,7 @@ impl<'a> Recorder<'a> {
                         raw: raw.into(),
                         before: Some(after.clone()),
                         after,
+                        target: None,
                     });
                 }
                 Ok(kept.into())

@@ -2702,6 +2702,89 @@ async fn worst_label_page_markup_is_within_the_unit_bound() {
     println!("worst-label view page: {} bytes, {units} units", html.len());
 }
 
+/// Slice 1.3: the switch and Undo markup keeps the per-unit page bound. The worst-label
+/// page above, with every one of its 8,192 integer cells carrying a current `sign_literal`
+/// note that offers both the switch and Undo (notes written 256 per revision, the table's
+/// limit), stays within `FIXED_PAGE_BYTES + units × UNIT_MARKUP_BYTES`: the buttons name
+/// their cell by reference, so no label is repeated.
+#[tokio::test]
+async fn worst_label_page_with_every_switch_and_undo_is_within_the_unit_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let definition = quoted_lists_definition(1, 32);
+    let setup = list_setup(&definition).await;
+    let field = definition["fields"][0].clone();
+    let list = field["id"].as_str().unwrap().to_owned();
+    let properties: Vec<String> = field["items"]["properties"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap().to_owned())
+        .collect();
+    let items: Vec<Value> = (1..=256)
+        .map(|k| {
+            let mut item = json!({"id": format!("r1-{k}")});
+            for p in &properties {
+                item[p] = 0.into();
+            }
+            item
+        })
+        .collect();
+    let mut snapshot = blank(&setup, 1).await;
+    snapshot.sheet_id = 1;
+    snapshot.data = json!({list.clone(): items});
+    write(&setup, 1, snapshot, "create").await.unwrap();
+    let version = setup.version;
+    let auth = setup.auth[1].clone();
+    setup
+        .store
+        .run_campaign(auth.clone(), move |db| {
+            for batch in 0..32_usize {
+                let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let pin = crate::definitions::private_pin::validate(
+                    crate::definitions::private_pin::load(&tx, version)?,
+                )?;
+                let live = super::super::snapshots::load(&tx, 1)?;
+                let written = super::super::snapshots::write(&tx, &auth, live, "edit", Some(&pin))?;
+                for row in batch * 8..batch * 8 + 8 {
+                    for p in &properties {
+                        let address = format!("cell:{list}/r1-{}/{p}", row + 1);
+                        tx.execute(
+                            "INSERT INTO private_sheet_notes(sheet_id,revision,address,op,raw,before,after) VALUES(1,?1,?2,'sign_literal','-0','{\"int\":\"5\"}','{\"int\":\"0\"}')",
+                            rusqlite::params![written.revision, address],
+                        )?;
+                    }
+                }
+                tx.commit()?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let response =
+        super::router_request(&setup.app, &setup.auth[1], "/private-sheets/1", None).await;
+    let html = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let units = render_units(&definition, &[256]);
+    assert_eq!(units, 9_220);
+    assert_eq!(html.matches("form=\"assist-switch\"").count(), 8_192);
+    assert_eq!(html.matches("form=\"assist-undo\"").count(), 8_192);
+    assert!(
+        html.len() <= FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES,
+        "{} bytes for {units} units",
+        html.len()
+    );
+    println!(
+        "worst-label page with every switch and Undo: {} bytes, {units} units",
+        html.len()
+    );
+}
+
 // ---- Step 8: the gate lift, the publication budget and end-to-end lists (plan D7) ----
 
 /// List `l` of the budget fixture: 32 properties, of which `BUDGET_OPTIONAL[l]` leading ones
@@ -3421,6 +3504,64 @@ async fn browser_crlf_submission_is_stored_as_lf() {
         StatusCode::SEE_OTHER
     );
     assert_eq!(reopen(&setup, 1).await.notes, "\n".repeat(20_000));
+}
+
+/// Slice-1.2 review row 4: since an unchanged browser Save writes nothing (D-U), pin LF
+/// normalisation on a changed save. The browser sends every textarea with CR LF and one
+/// multiline cell edited: the edit is stored with LF and the untouched text is stored
+/// byte-identical (red when the transport keeps CR).
+#[tokio::test]
+async fn browser_crlf_edit_is_stored_with_lf() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let mut definition = hostile_definition();
+    definition["fields"].as_array_mut().unwrap().push(
+        json!({"id": "essay", "label": "Essay", "control": "multiline",
+                     "nullable": false, "mapping": mapped()}),
+    );
+    definition["groups"][0]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push("essay".into());
+    let setup = list_setup(&definition).await;
+    let mut snapshot = blank(&setup, 1).await;
+    snapshot.sheet_id = 1;
+    snapshot.notes = "\nnotes\nsecond line".into();
+    snapshot.data = json!({"label": "x", "essay": "\n\nscalar\nmore",
+                           "gear": [{"id": "r1-1", "name": "n", "story": "\nrow\nend"}]});
+    let created = write(&setup, 1, snapshot, "create").await.unwrap();
+    let textareas = ["notes", "value-essay", "row-1-0-1"];
+    let mut browser: Vec<(String, String)> = submitted(&sheet_page(&setup).await)
+        .into_iter()
+        .map(|(key, value)| {
+            let value = if textareas.contains(&key.as_str()) {
+                value.replace('\n', "\r\n")
+            } else {
+                value
+            };
+            (key, value)
+        })
+        .collect();
+    set(&mut browser, "value-essay", "\r\nedited\r\nessay\r\n");
+    assert!(
+        serde_urlencoded::to_string(&browser)
+            .unwrap()
+            .contains("%0D%0A")
+    );
+    assert_eq!(
+        setup.post("/private-sheets/1", browser).await.0,
+        StatusCode::SEE_OTHER
+    );
+    let saved = reopen(&setup, 1).await;
+    assert_eq!(saved.revision, 2);
+    assert_eq!(saved.data["essay"], "\nedited\nessay\n");
+    assert_eq!(saved.notes, created.notes, "untouched notes stored with LF");
+    assert_eq!(
+        saved.data["gear"], created.data["gear"],
+        "untouched row text stored with LF"
+    );
+    let stored = serde_json::to_string(&(&saved.data, &saved.notes)).unwrap();
+    assert!(!stored.contains("\\r"), "{stored}");
 }
 
 /// Last review (F8): a draft operation re-renders the normalised draft; no CR reaches the page.

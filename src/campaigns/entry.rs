@@ -1,10 +1,11 @@
 //! Lenient number entry on runtime sheets (assisted sheet plan §3a, slice 1.1).
 //!
 //! The player types into an integer cell what they would write on paper: a literal
-//! ("-15", "+3", "0007") or an absolute sum ("84 -15", "84-15+3"). A sign-led input is
-//! always the literal value (decision D-Q). Anything else is [`Unreadable`]. This parser
-//! is for user input only: protocol integers such as submitted revisions keep the strict
-//! [`super::values::integer`].
+//! ("-15", "+3", "0007") or an absolute sum ("84 -15", "84-15+3"). A sign-led input
+//! ("-15", or "-5+3" since slice 1.3) is always applied as its own value (decision D-Q);
+//! the sheet then offers the relative reading ("Did you mean 84 − 15 = 69?"). Anything
+//! else is [`Unreadable`]. This parser is for user input only: protocol integers such as
+//! submitted revisions keep the strict [`super::values::integer`].
 
 /// The most characters an entry may have, whatever the form's `maxlength`.
 pub(crate) const MAX_CHARS: usize = 200;
@@ -14,7 +15,7 @@ pub(crate) const MAX_SCALARS: usize = 64;
 /// Why an entry could not be read as a number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Unreadable {
-    /// Empty, or spaces and tabs only (an unknown value from slice 1.4 on).
+    /// Empty, or spaces only (an unknown value from slice 1.4 on).
     Blank,
     /// More than [`MAX_CHARS`] characters.
     TooLong,
@@ -50,6 +51,8 @@ pub(crate) struct Reading {
     pub value: i64,
     /// Two or more terms ("84 -15"); a literal ("84", "-15", "+3") is not a sum.
     pub sum: bool,
+    /// Sign-led ("-15", "+3", "-5+3"): applied literally, with the switch offered (D-Q).
+    pub signed: bool,
 }
 
 impl Unreadable {
@@ -67,23 +70,59 @@ pub(crate) fn read(raw: &str) -> Result<Reading, Unreadable> {
     Ok(Reading {
         value,
         sum: terms > 1,
+        signed: strip_sign(raw.trim_matches(is_space)).is_some(),
     })
 }
 
-/// The sum an entry spelled, normalised for display ("84 -15" → "84 − 15"), or `None` when
-/// the entry is not a readable sum. Magnitudes lose leading zeros; minus is U+2212.
+/// The sum an entry spelled, normalised for display ("84 -15" → "84 − 15", "-5+3" →
+/// "−5 + 3"), or `None` when the entry is not a readable sum. Magnitudes lose leading zeros;
+/// minus is U+2212.
 pub(crate) fn sum_text(raw: &str) -> Option<String> {
     if !read(raw).is_ok_and(|reading| reading.sum) {
         return None;
     }
-    let text = raw.trim_matches(is_space);
+    spelled(None, raw)
+}
+
+/// The relative reading of a sign-led entry over the saved value `base`, as the D-Q switch
+/// offers it ("-15" over 84 → "84 − 15"), or `None` when the entry is not a readable
+/// sign-led entry. The caller computes the value with checked arithmetic.
+pub(crate) fn offer_text(base: i64, raw: &str) -> Option<String> {
+    if !read(raw).is_ok_and(|reading| reading.signed) {
+        return None;
+    }
+    spelled(Some(base), raw)
+}
+
+/// The terms of a readable entry, optionally after `base`, with U+2212 for minus.
+fn spelled(base: Option<i64>, raw: &str) -> Option<String> {
+    let minus = |shown: &mut String, magnitude: &str| {
+        shown.push('\u{2212}');
+        shown.push_str(magnitude);
+    };
     let mut shown = String::new();
-    for (index, (negative, run)) in terms(text).ok()?.into_iter().enumerate() {
-        let magnitude = magnitude(run).ok()?;
-        if index > 0 {
-            shown.push_str(if negative { " \u{2212} " } else { " + " });
+    if let Some(base) = base {
+        let digits = base.unsigned_abs().to_string();
+        if base < 0 {
+            minus(&mut shown, &digits);
+        } else {
+            shown.push_str(&digits);
         }
-        shown.push_str(&magnitude.to_string());
+    }
+    for (index, (negative, run)) in terms(raw.trim_matches(is_space))
+        .ok()?
+        .into_iter()
+        .enumerate()
+    {
+        let magnitude = magnitude(run).ok()?.to_string();
+        if index > 0 || base.is_some() {
+            shown.push_str(if negative { " \u{2212} " } else { " + " });
+            shown.push_str(&magnitude);
+        } else if negative {
+            minus(&mut shown, &magnitude);
+        } else {
+            shown.push_str(&magnitude);
+        }
     }
     Some(shown)
 }
@@ -91,14 +130,17 @@ pub(crate) fn sum_text(raw: &str) -> Option<String> {
 /// Reads a player's number entry: a literal or an absolute sum (plan §3a grammar).
 ///
 /// ```text
-/// int     = DIGIT+                     ; ASCII only; leading zeros allowed
-/// sign    = "+" | "-" | "−"            ; U+2212 accepted
-/// literal = [sign] int                 ; a sign must touch its digits
-/// sum     = int 1*( ws* sign ws* int ) ; unsigned first term; ws = space or tab
+/// int     = DIGIT+                       ; ASCII only; leading zeros allowed
+/// sign    = "+" | "-" | "−"              ; U+2212 accepted
+/// term    = ws* sign ws* int
+/// entry   = [sign] int *term             ; a leading sign must touch its digits
+/// ws      = space | tab | U+00A0 | U+202F
 /// ```
 ///
-/// Leading and trailing spaces and tabs are trimmed. Terms are added left to right in
-/// `i128`, each checked as it is parsed and added; the result must fit `i64`.
+/// An entry with a leading sign ("-15", "+3", "-5+3") is sign-led: D-Q applies its own
+/// value. One without is a literal ("84") or an absolute sum ("84 -15"). Leading and
+/// trailing `ws` are trimmed. Terms are added left to right in `i128`, each checked as it
+/// is parsed and added; the result must fit `i64`.
 pub(crate) fn number(raw: &str) -> Result<i64, Unreadable> {
     evaluate(raw).map(|(value, _)| value)
 }
@@ -132,21 +174,16 @@ fn evaluate(raw: &str) -> Result<(i64, usize), Unreadable> {
         .map_err(|_| Unreadable::Range)
 }
 
-/// Splits trimmed, non-empty text into signed digit runs: one literal, or a sum.
+/// Splits trimmed, non-empty text into signed digit runs: a literal, a sum, or a sign-led
+/// entry of one or more terms.
 fn terms(text: &str) -> Result<Vec<(bool, &str)>, Unreadable> {
-    // A sign-led input is a literal: the sign must touch the digits and nothing may follow.
-    if let Some((negative, after)) = strip_sign(text) {
-        let (run, tail) = split_digits(after);
-        if run.is_empty() || !tail.is_empty() {
-            return Err(Unreadable::Syntax);
-        }
-        return Ok(vec![(negative, run)]);
-    }
-    let (run, mut rest) = split_digits(text);
+    // A leading sign must touch the digits ("- 5" is unreadable).
+    let (negative, first) = strip_sign(text).unwrap_or((false, text));
+    let (run, mut rest) = split_digits(first);
     if run.is_empty() {
         return Err(Unreadable::Syntax);
     }
-    let mut terms = vec![(false, run)];
+    let mut terms = vec![(negative, run)];
     loop {
         rest = rest.trim_start_matches(is_space);
         if rest.is_empty() {
@@ -165,8 +202,10 @@ fn terms(text: &str) -> Result<Vec<(bool, &str)>, Unreadable> {
     }
 }
 
+/// Space, tab, and the no-break spaces U+00A0 and U+202F that phone keyboards and pasted
+/// text bring (slice 1.3).
 fn is_space(c: char) -> bool {
-    matches!(c, ' ' | '\t')
+    matches!(c, ' ' | '\t' | '\u{a0}' | '\u{202f}')
 }
 
 /// A leading sign and the text after it; `true` is minus.

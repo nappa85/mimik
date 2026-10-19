@@ -69,3 +69,10 @@ article.panel { margin-bottom: 1rem; }
 .row-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1rem; }
 .row-actions button { margin: 0; min-width: 24px; min-height: 24px; }
 .entry-note { margin: .2rem 0 .6rem; font-size: .9rem; overflow-wrap: anywhere; }
+.entry-actions { margin: .2rem 0 .6rem; font-size: .9rem; }
+.entry-actions p { margin: .2rem 0; overflow-wrap: anywhere; }
+.entry-actions button { margin: 0 0 0 .5rem; padding: .3rem .8rem; min-width: 24px; min-height: 24px; }
+.entry-actions label { display: inline-block; width: auto; margin: 0 0 0 .5rem; padding: .3rem; min-height: 24px; font-weight: 400; text-decoration: underline; cursor: pointer; }
+.offer-dismiss { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; opacity: 0; }
+.offer-dismiss:focus-visible + .offer-body label { outline: 2px solid #285d4c; }
+.offer-dismiss:checked, .offer-dismiss:checked + .offer-body { display: none; }

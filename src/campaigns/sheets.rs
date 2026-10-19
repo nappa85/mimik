@@ -81,6 +81,11 @@ pub(super) static AFTER_PRIVATE_VALIDATION: std::sync::Mutex<
 
 #[cfg(test)]
 pub(super) type RecheckHook = Box<dyn FnOnce(&rusqlite::Connection) -> Result<(), AppError> + Send>;
+/// Runs once inside a save's `IMMEDIATE` transaction, before the rechecks (tests only).
+#[cfg(test)]
+pub(super) static BEFORE_SAVE_RECHECK: std::sync::Mutex<Option<RecheckHook>> =
+    std::sync::Mutex::new(None);
+
 /// Runs once inside a no-op save's recheck transaction, before the rechecks (tests only).
 #[cfg(test)]
 pub(super) static BEFORE_UNCHANGED_RECHECK: std::sync::Mutex<Option<RecheckHook>> =
@@ -105,6 +110,27 @@ pub(super) fn match_pin(snapshot: &PrivateSnapshot, pin: &ImmutablePin) -> Resul
         }
         _ => Err(AppError::Invalid("Runtime interpretation pin mismatch.")),
     }
+}
+
+/// A switch or Undo is bound to the note the page showed (slice 1.3): inside the save's
+/// transaction each bound note must still be the current note of its address, and the live
+/// value there must still be the note's `after`. Otherwise nothing is written (409).
+fn bound_notes_hold(
+    tx: &rusqlite::Connection,
+    live: &PrivateSnapshot,
+    view: &SheetView,
+) -> Result<(), AppError> {
+    for bound in &view.notes.bound {
+        let address = &bound.note.address;
+        let pin = view.immutable.as_ref().ok_or(AppError::Conflict)?;
+        let current = super::notes::current(tx, live.sheet_id, std::slice::from_ref(address))?;
+        let value = super::assist::locate(pin.definition(), &live.data, address)
+            .and_then(|located| super::assist::value_at(&located, &live.data));
+        if current.get(address) != Some(bound) || value.as_ref() != Some(&bound.note.after) {
+            return Err(AppError::Conflict);
+        }
+    }
+    Ok(())
 }
 
 impl Store {
@@ -283,12 +309,16 @@ impl Store {
     ) -> Result<(i64, OwnedSemaphorePermit), (AppError, Option<OwnedSemaphorePermit>)> {
         let outcome = self.run_campaign(auth.clone(),move |db|{
             let result=(||{
-            let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;auth.recheck(&tx)?;
+            let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            #[cfg(test)]
+            if let Some(hook)=BEFORE_SAVE_RECHECK.lock().unwrap().take(){hook(&tx)?;}
+            auth.recheck(&tx)?;
             let create=view.snapshot.sheet_id==0;
             if create {snapshots::authorize_edit(&tx,&auth,&view.snapshot)?;}else{
                 let old=snapshots::load(&tx,view.snapshot.sheet_id)?;
                 snapshots::authorize_edit(&tx,&auth,&old)?;
                 if old.revision!=view.snapshot.revision{return Err(AppError::Conflict);}
+                bound_notes_hold(&tx,&old,&view)?;
             }
             if let Some(pin)=&view.immutable{
                 match_pin(&view.snapshot,pin)?;pin.unchanged(&tx)?;

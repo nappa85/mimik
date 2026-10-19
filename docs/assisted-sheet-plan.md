@@ -731,7 +731,9 @@ python3 tools/assist_demo.py target/debug/mimik --fixture target/assist-demo/fix
 Each slice states what the demo can do at that point. After 1.1 it is still the full-page
 form with one Save, and unreadable input is still refused. After 1.2 a sum shows "84 − 15 =
 69" under the cell, unreadable text over a known number keeps it with a scribble, an
-unchanged Save writes nothing, and history lists the notes (§10).
+unchanged Save writes nothing, and history lists the notes (§10). After 1.3 "-15" stores
+−15 and offers "Did you mean 84 − 15 = 69? [Yes] Hide"; Yes stores 69, and every changed
+number, choice or yes/no cell offers Undo of its last change (§11).
 
 ### Step 1: seven slices (no JavaScript, no model)
 
@@ -1497,3 +1499,145 @@ crate's own sources; CI runs it), a serving demo session in a real browser by ha
 done:** the independent implementation review (Sol and Sonnet, plus the third chain),
 required before merge. `release-scope.md` is not updated for schema 20 (as for schema 19 and
 slice 1.1, the assisted sheet's release scope is step 5).
+
+## 11. Slice 1.3 implementation notes
+
+Branch `assist-1.3` (from master `9d29dfe`, which merged slices 1.1 and 1.2). Built the slice-1.3
+scope of §5 ("Switch and Undo") and the slice-1.2 review follow-ups (review record rows 1, 2
+and 4). Nothing from later slices: no `null` for non-nullable integers and no `erased` writer
+(1.4), no per-cell forms or `meta:` addresses (1.5a), no row Remove + Undo (D-V, 1.5b), no
+bundles, no JavaScript. No migration (020 already admits `sign_literal`, `switched`,
+`reverted` and `target`) and no dependency change.
+
+**What was built.**
+- **D-Q literals:** a sign-led entry writes a `sign_literal` note (`values::Recorder`); the
+  value is applied literally as before. Accepting a scribble's kept value stays a `literal`
+  note, whatever its sign (§3a), so it never offers a switch.
+- **`campaigns::assist`** (pure): `locate` and `value_at` read one typed address of a stored
+  snapshot (a non-derived integer, enum or boolean field, or such a property of a live row;
+  `Absent` for an optional property not set); `set` writes a typed value back (a number,
+  unknown, an enum ID, a boolean, or removal of an optional property); `parse_key` reads the
+  note key `<revision>:<address>`; `switch_value` is b + n in checked `i64` for a current
+  `sign_literal` note over a known number whose raw text spells the cell's value; `undoable`
+  is §3f's rule (ops `literal`, `sum`, `sign_literal`, `switched`, `confirmed`, `reverted`,
+  `erased`; a recorded value before that differs from the value after; the cell still holds
+  the value after; row notes excluded).
+- **Routes** `POST /private-sheets/{id}/switch` and `/undo` (`campaigns/assist_web.rs`), in the
+  runtime router (the `JOBS` permit), with an 8 KiB body limit, under the auth layer's origin
+  and content-type checks. Precedence as for sheet saves: parse, CSRF, request auth, rights
+  (403, frozen and read-only included), then exact keys `csrf`, `base`, `note` (400), the
+  note key and the address (400), then the binding (409). The write goes through
+  `private_save_keeping`, which now also rechecks **bound notes** inside its `IMMEDIATE`
+  transaction: each must still be the current note of its address, with the live value equal
+  to its `after` (`sheets::bound_notes_hold`), after the existing auth, rights, active-state,
+  revision and pin rechecks. Success is PRG (303). A switch writes `switched` (raw = what was
+  typed, before = the literal, after = b + n); Undo writes `reverted` (before = the undone
+  `after`, after = its `before`, `target` = the undone revision).
+- **Display** (`templates/private_entry_actions.html`): under a cell whose current note offers
+  them, "Did you mean <bdi>84 − 15</bdi> = 69? [Yes] Hide" and "Last change: was 84 [Undo]". The
+  input is `aria-describedby` its note and offer. A switched cell shows "84 − 15 = 69"; a
+  sign-led sum shows like a sum ("−5 + 3 = −2"). History lists "undid revision N".
+- **Follow-ups:** `browser_smoke.py` compares the revision before and after the unchanged
+  Enter (row 1); `notes_tests::a_no_op_after_the_session_ended_is_403` and
+  `a_no_op_over_an_intervening_revision_is_409` (row 2, hook-driven); 
+  `list_tests::browser_crlf_edit_is_stored_with_lf` (row 4).
+- **Defect found and fixed:** `notes::current` (slice 1.2) joined `json_each` and the note
+  table with a plain `JOIN`; SQLite's planner made the note table the outer loop, O(notes ×
+  addresses). A sheet whose 8,192 cells all have notes took 22 s to read (debug build) and
+  every page request timed out. A `CROSS JOIN` fixes the loop order (one indexed probe per
+  address): 0.38 s.
+- **Browser:** the assisted stage types `-15` over 70, checks the literal and the offer
+  "Did you mean 70 − 15 = 55?", hides it with Hide (no script), checks it is back after a
+  reload, clicks Yes (55, "70 − 15 = 55", no offer), then Undo (−15), at both viewports.
+
+**Decisions asked for by the main session.**
+- **Note V3 (`-5+3`)**: a sign-led entry with more terms is a **sign-led sum**, applied
+  literally as its own value (−2) with a `sign_literal` note, shown like a sum and offered
+  relative to the value before ("Did you mean 84 − 5 + 3 = 82?"). D-Q says sign-led input is
+  literal and multi-term input is computed directly; this reading satisfies both, and the
+  owner's rules review ("number fields accept anything; warn and offer a solution") rules out
+  keeping it unreadable. The leading sign must still touch its digits ("- 5+3" stays
+  unreadable). `-9223372036854775808-1` is now `Range` (was `Syntax`; V2).
+- **NBSP:** U+00A0 and U+202F (narrow no-break space, used by some keyboards and pasted text)
+  count as spaces: trimmed, and allowed between terms. Other Unicode spaces (U+2003, U+2009)
+  stay unreadable, as do full-width digits. Slice-1.1 review row 5 is closed by this.
+
+**Deviations from the plan (code reality wins, intent kept).**
+
+| # | Plan said | Done | Why |
+|---|---|---|---|
+| S1 | Switch posts `note` and `base`; Undo posts `csrf` and `note` | Both post exactly `csrf`, `base`, `note`. `base` must be canonical and ≥ 1 (400), the note's revision ≤ `base` (400: it cannot have been shown), `base` above the live revision 409 | One shape for both routes; `base` binds the request to the page that showed the note. The binding itself is the note (current, value = `after`), not the page revision, so an unrelated save in another tab leaves the offer valid (§3a's value rule, not a whole-sheet 409) |
+| S2 | "a small form posting `/switch`" next to the cell | Two page-level forms (`assist-switch`, `assist-undo`, hidden inputs `csrf` and `base`) after the sheet form; each button sits next to its cell, belongs to its form through the `form` attribute, and carries `name="note" value="<revision>:<address>"`. Buttons are named by `aria-labelledby` (button, cell label, row legend), not by repeated label text | Forms cannot nest inside the sheet form. One form per action plus repeated labels (up to 100 quote characters, 500 bytes escaped) broke the per-unit page bound of D7; the regression test with an offer and Undo on every one of 8,192 cells measures about 0.9 KB per cell, 13.0 MB against the 18.9 MB bound. Enter in the sheet still saves it: only buttons owned by the sheet form are its default |
+| S3 | D-X4 "a client-side dismiss hides it" | A visually hidden, unnamed checkbox with a visible "Hide" label; CSS (`:checked`) hides the offer. No script, never submitted, no dismissal record (cut from the POC), so the offer is back on reload while its note is current | Works without JavaScript under any CSP; dismissal records are §1 "Cut" |
+| S4 | No offer without a known before-value or on overflow | Also none when b = 0 (b + n = n: nothing to switch) and none when the raw text does not spell the note's value (a forged note, L1) | Nothing to offer in either case |
+| S5 | Undo eligible when `before` is recorded | Also requires `before` ≠ `after` | The data-unchanged `literal` note that accepts a scribble would otherwise offer an Undo that changes nothing |
+| S6 | "a double submit → 'already undone'"; refusals keep drafts | 409 with the saved sheet re-read and "Not switched: Current HP changed since, or it was already switched." / "Nothing undone: Current HP changed since, or this change was already undone." Nothing is written | The switch and Undo forms carry no draft. As with every no-JS PRG (§3a), text typed elsewhere in the sheet form without Enter is not carried by a click on Yes or Undo; the sheet form's own refusals keep their drafts as before |
+| S7 | — | A write refused as `Invalid` inside the transaction (for example a failed note insert) answers 422 with the saved sheet | Same classes as sheet saves |
+| S8 | — | Undo shows enum option IDs, as history does ("was guard") | Labels are slice-1.5a work with the per-field forms |
+| S9 | — | `notes_tests::sums_and_literals_are_noted_with_the_save_and_shown` expects `sign_literal` for Armour "-3" | The 1.3 spec change that N4 anticipated, not a weakened check |
+| S10 | — | Test helpers `default_submitter` and `submitted_by` honour the `form` attribute; `notes_tests` helpers are `pub(super)` for `assist_tests`; new test hook `sheets::BEFORE_SAVE_RECHECK` | HTML form-owner semantics; reuse instead of copies |
+| S11 | Erased Undo "(in 1.4)" | `erased` is in the eligible set now; its test forges the op with the insert hook on a Known → Unknown change | Nothing writes `erased` before 1.4 |
+| S12 | — | The bound-note recheck also compares the live value with `after`; no mutation can make that half red on its own, because the same-revision check already implies it | Recorded as defence in depth |
+
+**Red → green.** Red run at 13:36 (`--cpus 2`) against stubs: `assist::{locate, value_at,
+set, parse_key, switch_value, undoable}` returned nothing, `entry::offer_text` returned
+`None`, `Reading::signed` was always false; the routes and templates were real.
+
+| Test | Red | Green |
+|---|---|---|
+| `entry::tests::sign_led_sums_are_applied_literally`, `no_break_spaces_count_as_spaces`, `offers_spell_the_relative_reading`, `readings_tell_sums_from_literals` (updated) | FAILED (stub, old grammar) | pass |
+| `assist::tests::*` (4) | FAILED (stubs) | pass; mutation "wrapping add" fails `the_switch_adds_the_literal_to_the_value_before` |
+| `assist_tests::sign_led_input_is_applied_literally_with_the_offer`, `the_switch_writes_the_relative_reading_once`, `the_switch_is_bound_to_the_displayed_note`, `no_offer_without_a_known_before_value_or_on_overflow`, `undo_restores_the_last_change_of_a_cell`, `switch_and_undo_work_on_list_cells`, `undo_is_not_offered_where_nothing_can_be_undone`, `an_erased_value_is_undoable`, `rights_are_rechecked_inside_the_transaction`, `switch_and_undo_forms_stay_out_of_the_sheet_form` | FAILED (11 tests then; one was split later) | pass; mutation "wrapping add" also fails `no_offer_…` |
+| `assist_tests::the_binding_is_rechecked_inside_the_transaction` | FAILED | pass; mutation "no `bound_notes_hold`" fails it |
+| `assist_tests::malformed_and_forged_requests_write_nothing` | (split from `the_switch_is_bound_…`, which was red) | pass |
+| `notes_tests::a_no_op_after_the_session_ended_is_403` (row 2) | pass (guard) | pass; mutation "no session rechecks in `private_unchanged`" fails it |
+| `notes_tests::a_no_op_over_an_intervening_revision_is_409` (row 2) | FAILED on a test-design error ("No change" matched "No changes saved") | pass; mutation "no revision check in `private_unchanged`" fails it |
+| `list_tests::browser_crlf_edit_is_stored_with_lf` (row 4) | pass (guard) | pass; mutation "CR kept" (`newlines_to_lf` a no-op) fails it |
+| `assist_tests::foreign_origin_and_content_type_are_refused` | written after the routes (guard of the existing auth-layer checks) | pass: foreign Origin 403, `text/plain` and multipart 415, nothing written |
+| `list_tests::worst_label_page_with_every_switch_and_undo_is_within_the_unit_bound` | FAILED at 14:12: "Request timed out" (the `notes::current` defect; 22 s read) | pass after the `CROSS JOIN` fix (14:16) |
+
+First green run (13:38): four failures, three test-design errors (an edit that also changed
+HP, a reader that was the disabled Master, a rolled-back-note check that looked at the whole
+revision) and S9. The five mutation runs (13:40–13:42, `--cpus 2`) restored the sources
+afterwards (checked with `cmp`).
+
+The browser stage locates Current HP by `#value-hp` after the first save: Playwright's
+`get_by_label` also matches elements that name themselves through `aria-labelledby`, so the
+label now matches the input and its buttons. The stage instead checks that exactly one
+textbox is named "Current HP", and clicks "Yes Current HP" and "Undo Current HP" by
+accessible name. That is also what assistive technology hears (S2).
+
+**Gate** (Monday 2026-10-19, inside the weekday window: every build and test in
+`mimik-ci:latest` with `--cpus 2`, `CARGO_BUILD_JOBS=2`, `--network none`, target volume
+`mimik-catalogue-target`, registry volume `mimik-cargo-cache`; the browser container with the
+CI flags and `--cpus=2`). Times are CEST.
+
+| Gate | Time | Cap | Result |
+|---|---|---|---|
+| `cargo fmt --check` | 14:26, 14:41 | 2 | the 14:26 run found one unformatted assert in the last-added test; formatted, clean at 14:41 |
+| pedantic Clippy `-D warnings` | 14:26, again 14:41 after formatting | 2 | clean. Earlier runs found `similar_names`, `dead_code` (the `Located::control` field) and `too_many_lines` ×3, all fixed by renaming, removal and splitting |
+| `cargo test --locked --all-targets --all-features` | 14:26–14:33 | 2 | **635 passed**, 0 failed, 2 ignored (the existing ones), 37 result lines. After formatting, `assist_tests` again: 13 passed (14:41) |
+| `ruff check tools`, `ruff format --check tools` (worktree root) | 14:33, again 14:46 after the last browser edit | 2 | clean |
+| `formula_eval` and `source_fixture` examples | 14:33 | 2 | built; fixture written |
+| Tools unittest (`CI=1`, `MIMIK_FORMULA_EVAL`, main git dir mounted read-only) | 14:34–14:38 | 2 | **762 run, OK**, 11 skipped. `browser_smoke.py` changed afterwards (14:45, locators only) and has no unit tests; ruff is clean on it |
+| `actionlint .github/workflows/ci.yml` | 14:38 | 2 | clean |
+| `cargo build --release --locked` | 14:38–14:41 | 2 | built; 22,141,944 bytes (+113,376 over slice 1.2) |
+| `smoke_release.py --auth --source-fixture` (release binary) | 14:42 | 2 | passed |
+| `browser_smoke.py --auth` (`mimik-browser`, CI flags, worktree `tools/` on `/checks`) | 14:46–14:47 | 2 | every stage passed, the assisted stage at both viewports. A copy that clicks "Yes Max HP" instead failed at the assisted sheet (14:47–14:48), so the new checks run. An earlier run (14:43) failed on the `get_by_label` ambiguity above |
+| Demo launcher `--exit-after-setup` (release binary of 14:01, same tree minus tests and markup) | 14:05 | 2 | sheet created; stopped cleanly |
+
+**Not run** (no migration and no dependency change; `Cargo.lock` is unchanged): `cargo audit`,
+`cargo about`, `cargo package` / `verify_source_package.py`, vendoring and
+`package_release.py`, the unpacked-artifact smoke, `lan_smoke.py`, the offline
+corresponding-source rebuild, and a hand-driven demo session in a real browser. **Not yet
+done:** the independent implementation review (Sol and Sonnet, plus the third chain),
+required before merge.
+
+**Demo after 1.3** (same commands as §9). In Current HP (84), `-15` + Enter stores −15 and
+shows "Did you mean 84 − 15 = 69? [Yes] Hide" under the cell, with "Last change: was 84
+[Undo]". Hide dismisses the offer until the next reload. Yes stores 69, shows "84 − 15 = 69"
+and offers Undo (back to −15). Undo works on any changed number, Luck's Known/Unknown,
+Equipment quantities, and Broken's Set/Not set. Undo of an Undo puts the change back. A second
+click on an old Yes or Undo (another tab, or the Back button) says "Not switched…" or "Nothing
+undone…" and changes nothing. `-5+3` is stored as −2 and offers "84 − 5 + 3 = 82". History
+lists each switch and "undid revision N".
