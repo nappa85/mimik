@@ -14,7 +14,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 1. 1.6 quick-add, then 1.7 validity flag (RR-3); each slice gets an implementation
    review.
 2. 2a JavaScript, including D-AA (save on leaving the field).
-3. 2b crate and runtime selection (STROT via pyo3 or a Rust port among the candidates, judged
+3. Before 2b starts: a short independent confirm of the round-3 plan fixes (`5b1bf23`; Sol
+   unavailable and the third chain returned no review for round 3). Then 2b crate and runtime selection (STROT via pyo3 or a Rust port among the candidates, judged
    on results).
 4. 2c interpretation, 3 bundles and reminders, 4 suggestions, 5 docs and gate (includes the
    `docs/release-scope.md` update for schema 20 and the assisted scope).
