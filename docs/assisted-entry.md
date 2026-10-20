@@ -354,7 +354,8 @@ change" and refusals), built by the same view model as the page:
 Every integer, count and revision is a string, so 9007199254740993 survives. `action` is the
 unit's route at this revision (a cell's row index can change; `null` when its row is gone); a
 refusal names only `address`, `action` and `current` (the saved value as the page reads it: an
-excerpt in quotes, "? (unknown)", "not set" or the value a scribble kept). The status codes
+excerpt in quotes, "(empty)" for empty text, "? (unknown)", "not set" or the value a scribble
+kept). The status codes
 are 200 (saved, "No change"), 409 and 422.
 
 **Module behaviour:**
@@ -371,7 +372,7 @@ are 200 (saved, "No change"), 409 and 422.
   their own projection revision and change only for an answer at least as new.
 - A refusal keeps the draft without the unit's note, switch or Undo, shows the answer's
   message and the saved value in a `role="alert"` paragraph under the cell, moves that unit's
-  `base` to L and drops a save queued before it; after a conflict leaving the field sends
+  `base` to L; after a conflict it drops a save queued before it and leaving the field sends
   nothing until Enter or Save (ASSIST-23). An answer without a route makes a cell copy-only
   (ASSIST-26). A non-JSON or malformed answer (busy 503, 403, a network failure, a save that
   hangs 30 s) shows a generic alert and keeps the draft; no save stays pending.

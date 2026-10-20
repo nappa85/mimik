@@ -115,10 +115,11 @@ function saveButton(form) {
   return form.querySelector('button:not([form])');
 }
 
+/** Shows `text` in the unit's alert, which describes its control; returns the alert's id. */
 function setAlert(unit, text) {
   let alert = unit.form.querySelector('.entry-alert');
   if (!alert) {
-    alert = element('p', { class: 'entry-alert', role: 'alert' });
+    alert = element('p', { class: 'entry-alert', role: 'alert', id: `alert-${unit.control.id}` });
     const button = saveButton(unit.form);
     if (button) {
       button.after(alert);
@@ -127,6 +128,11 @@ function setAlert(unit, text) {
     }
   }
   alert.textContent = text;
+  const ids = (unit.control.getAttribute('aria-describedby') || '').split(' ').filter(Boolean);
+  if (!ids.includes(alert.id)) {
+    unit.control.setAttribute('aria-describedby', [...ids, alert.id].join(' '));
+  }
+  return alert.id;
 }
 
 function clearAlert(unit) {
@@ -447,7 +453,7 @@ const record = (value) => value !== null && typeof value === 'object' && !Array.
 const STATUSES = new Set(['saved', 'unchanged', 'conflict', 'invalid']);
 
 function validUnit(unit, refused) {
-  if (!record(unit) || !(unit.action === undefined || textOrNull(unit.action))) {
+  if (!record(unit) || !textOrNull(unit.action)) {
     return false;
   }
   if (refused || unit.action === null) {
@@ -516,9 +522,14 @@ function valid(answer) {
  * to copy and can no longer be posted, so a newer base is never paired with an old row
  * index (which would name another row). */
 function orphan(unit, message) {
+  // A queued save is dropped by `send`, which also releases its count in `pending`.
   unit.orphan = true;
-  unit.queued = null;
-  unit.control.setAttribute('readonly', '');
+  if (unit.control instanceof HTMLSelectElement) {
+    // A select ignores `readonly`: disabled, it keeps showing the chosen option.
+    unit.control.disabled = true;
+  } else {
+    unit.control.setAttribute('readonly', '');
+  }
   if (unit.state) {
     unit.state.disabled = true;
   }
@@ -528,11 +539,13 @@ function orphan(unit, message) {
   }
   clearActions(unit);
   unit.form.querySelector('.entry-note')?.remove();
+  describe(unit, []);
   setAlert(unit, message);
 }
 
-/** Applies an answer; returns whether the save was refused (or its unit orphaned), so
- * a save queued before the player saw that is dropped. */
+/** Applies an answer; returns whether a save queued meanwhile is dropped: after a
+ * conflict or an orphaned unit (the player must see that first), not after a refused
+ * value (the queued entry is a later one and goes). */
 function settle(unit, flight, answer, status, submitter) {
   if (flight.seq < unit.applied) {
     return false;
@@ -542,6 +555,11 @@ function settle(unit, flight, answer, status, submitter) {
   const focusBack = pressed && document.activeElement === pressed;
   if (!valid(answer)) {
     setAlert(unit, failure(status));
+    // A conflict whose body is unreadable is still a conflict: hold and drop the queue.
+    if (status === 409) {
+      unit.hold = true;
+      return true;
+    }
     return false;
   }
   const revision = BigInt(answer.revision);
@@ -588,6 +606,7 @@ function settle(unit, flight, answer, status, submitter) {
     unit.form.querySelector('.entry-note')?.remove();
     clearActions(unit);
     describe(unit, []);
+    clearAlert(unit);
     const shown = typeof answer.unit.current === 'string' ? ` Saved value now: ${answer.unit.current}.` : '';
     setAlert(unit, `${answer.message}${shown}`);
     if (focusBack || document.activeElement === document.body) {
@@ -595,7 +614,7 @@ function settle(unit, flight, answer, status, submitter) {
     }
   }
   project(answer, revision);
-  return refused;
+  return answer.status === 'conflict';
 }
 
 async function send(unit, key, submitter) {
@@ -638,9 +657,9 @@ async function send(unit, key, submitter) {
   }
   unit.flight = null;
   unit.form.removeAttribute('aria-busy');
-  let refused = false;
+  let drop = false;
   try {
-    refused = settle(unit, flight, answer, status, submitter);
+    drop = settle(unit, flight, answer, status, submitter);
   } catch {
     setAlert(unit, failure(0));
   } finally {
@@ -651,10 +670,10 @@ async function send(unit, key, submitter) {
       pending -= 1;
     }
     try {
-      // A save queued before a refusal was shown is dropped: the player sees the refusal
-      // first, then saves again.
-      if (queued && !refused) {
-        request(unit, queued.explicit, null);
+      // A save queued before a conflict was shown is dropped: the player sees the
+      // conflict first, then saves again (ASSIST-23).
+      if (queued && !drop) {
+        request(unit, queued.explicit, queued.submitter);
       }
     } finally {
       settled();
@@ -678,8 +697,9 @@ function request(unit, explicit, submitter) {
     }
     if (unit.queued) {
       unit.queued.explicit ||= explicit;
+      unit.queued.submitter ||= submitter;
     } else {
-      unit.queued = { explicit };
+      unit.queued = { explicit, submitter };
       pending += 1;
     }
     return;
@@ -753,9 +773,9 @@ function enhance(form) {
 /** Says why a deferred button press was not sent. */
 function dropped(intent) {
   if (intent.label === 'Undo') {
-    announce('Not undone: your entry was saved first and replaced the change this Undo would revert. Use its new Undo if you still want it.');
+    announce('Not undone: this field\u2019s save answered while the Undo waited, so this Undo no longer applies. Check the field and use its Undo again if it still offers one.');
   } else if (intent.label === 'Yes') {
-    announce('Not switched: your entry was saved first and replaced the reading this suggestion was for.');
+    announce('Not switched: this field\u2019s save answered while the suggestion waited, so it no longer applies. Check the field first.');
   } else {
     announce(`Not sent: the page changed while your entry was saved. Press ${intent.label} again if you still want it.`);
   }
@@ -786,12 +806,15 @@ function resume(form, submitter, intent) {
     dropped(intent || { label: 'the button' });
     return;
   }
+  // The submit event, when it fires, fires inside requestSubmit; a form that fails its
+  // constraints fires none (the browser shows why), so the mark never outlives the call.
   released.add(owner);
   try {
     owner.requestSubmit(target);
   } catch {
-    released.delete(owner);
     dropped(intent || { label: 'the button' });
+  } finally {
+    released.delete(owner);
   }
 }
 

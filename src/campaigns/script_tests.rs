@@ -736,3 +736,46 @@ async fn an_orphaned_cell_answer_names_no_route() {
     assert_eq!(revision, 2);
     assert_eq!(data["equipment"][0]["weight"], json!(1));
 }
+
+/// The saved value a refusal shows reads as the page does: empty text, an unknown number,
+/// a property not set, and the value a scribble kept.
+#[tokio::test]
+async fn a_refusal_shows_the_saved_value_as_the_page_reads_it() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    created(&setup, &[]).await;
+    // A scribble keeps 84 (revision 2).
+    let response = post_json(
+        &setup,
+        "/private-sheets/1/fields/hp",
+        &unit("1", "lots", &[]),
+    )
+    .await;
+    assert_eq!(json_body(response).await["revision"], "2");
+    // Each refusal is a `base` above L (409).
+    for (path, extra, current) in [
+        ("/private-sheets/1/meta/notes", &[][..], "(empty)"),
+        (
+            "/private-sheets/1/fields/luck",
+            &[("null", "known")][..],
+            "? (unknown)",
+        ),
+        (
+            "/private-sheets/1/cells/4/0/3",
+            &[("set", "present")][..],
+            "not set",
+        ),
+        ("/private-sheets/1/fields/hp", &[][..], "84"),
+        (
+            "/private-sheets/1/fields/armour",
+            &[][..],
+            "\u{201c}-1\u{201d}",
+        ),
+    ] {
+        let response = post_json(&setup, path, &unit("9", "true", extra)).await;
+        assert_json_headers(&response, StatusCode::CONFLICT);
+        let answer = json_body(response).await;
+        assert_eq!(answer["unit"]["current"], current, "{path}");
+    }
+}

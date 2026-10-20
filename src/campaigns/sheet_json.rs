@@ -45,7 +45,8 @@ impl Outcome {
             Self::Invalid => "invalid",
         }
     }
-    /// A refused save names its unit but not its value: the draft stays in the control.
+    /// A refused save names its unit, its route and the saved value (`current`), never the
+    /// control text: the draft stays in the control.
     fn refused(self) -> bool {
         matches!(self, Self::Conflict | Self::Invalid)
     }
@@ -96,7 +97,7 @@ fn projection(
     if outcome.refused()
         && let Some(members) = answer.as_object_mut()
     {
-        let current = current(members);
+        let current = current(members, integer(view, unit));
         members.retain(|key, _| key == "address" || key == "action");
         members.insert("current".into(), current.map_or(Value::Null, Value::String));
     }
@@ -206,7 +207,7 @@ fn unit_json<'a>(
 /// The saved value a refusal shows next to the kept draft, as the page would read it: an
 /// excerpt of the text, "? (unknown)", "not set", or the value a scribble kept; `None`
 /// when the unit has no value at that revision (its row is gone).
-fn current(unit: &serde_json::Map<String, Value>) -> Option<String> {
+fn current(unit: &serde_json::Map<String, Value>, integer: bool) -> Option<String> {
     let value = unit.get("value")?.as_str()?;
     let note = unit.get("note").filter(|note| note["kind"] == "unresolved");
     Some(match (unit.get("state").and_then(Value::as_str), note) {
@@ -214,9 +215,24 @@ fn current(unit: &serde_json::Map<String, Value>) -> Option<String> {
         (Some("absent"), _) => "not set".into(),
         (_, Some(note)) if note["unknown"] == true => "? (unknown)".into(),
         (_, Some(note)) => note["value"].as_str().unwrap_or_default().to_owned(),
-        _ if value.is_empty() => "? (unknown or empty)".into(),
+        _ if value.is_empty() && integer => "? (unknown)".into(),
+        _ if value.is_empty() => "(empty)".into(),
         _ => format!("\u{201c}{}\u{201d}", super::excerpt(value)),
     })
+}
+
+/// Whether the unit is an integer control: empty, it is unknown rather than empty.
+fn integer(view: &SheetView, unit: Unit) -> bool {
+    let Some(pin) = view.immutable.as_ref() else {
+        return false;
+    };
+    let fields = &pin.definition().fields;
+    let control = match unit {
+        Unit::Field(f) => fields[f].control,
+        Unit::Cell { f, p, .. } => super::values::properties(&fields[f])[p].control,
+        _ => return false,
+    };
+    control == crate::definitions::Control::Integer
 }
 
 /// Adds a shown unit's control text, state, note and actions.

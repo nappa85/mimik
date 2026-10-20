@@ -1254,6 +1254,32 @@ def run_assist_js_browser(page, campaign, version):
         page.evaluate("document.activeElement.id") == "v2",
         "Clicking Save did not return focus to the cell",
     )
+    # A Save clicked while an earlier save is on its way is queued with its button, so its
+    # answer returns focus to the cell too.
+    queue = []
+    page.route("**/fields/armour", lambda route: queue.append(route))
+
+    def wait_queue(count):
+        for _ in range(100):
+            if len(queue) >= count:
+                return
+            page.wait_for_timeout(50)
+        raise AssertionError(f"Armour save {count} was not sent")
+
+    armour_field.fill("-3")
+    armour_field.press("Tab")
+    wait_queue(1)
+    armour_field.fill("-4")
+    page.get_by_role("button", name="Save Armour modifier", exact=True).click()
+    queue[0].continue_()
+    wait_queue(2)
+    queue[1].continue_()
+    settled(page)
+    page.unroute("**/fields/armour")
+    require(
+        page.evaluate("document.activeElement.id") == "v2" and armour_field.input_value() == "-4",
+        "A queued Save did not return focus to the cell",
+    )
 
     # The switch offer and Undo come with the answer and post through their own forms.
     hp.fill("-15")
@@ -1574,6 +1600,27 @@ def run_assist_js_browser(page, campaign, version):
     armour.fill("7")
     saved_by(page, lambda: armour.press("Tab"), "/fields/armour")
     require(armour.input_value() == "7", "A corrected entry after a 422 was not saved")
+    # A 409 whose body cannot be read is still a conflict: leaving the field sends nothing.
+    page.route(
+        "**/fields/armour",
+        lambda route: route.fulfill(status=409, content_type="application/json", body="{"),
+    )
+    armour.fill("11")
+    saved_by_any = count_posts("/fields/armour")
+    armour.press("Enter")
+    page.wait_for_timeout(500)
+    page.unroute("**/fields/armour")
+    armour.fill("12")
+    armour.press("Tab")
+    page.wait_for_timeout(500)
+    require(
+        count_posts("/fields/armour") == saved_by_any + 1
+        and "Not saved" in page.locator('form[action$="/fields/armour"] .entry-alert').inner_text(),
+        "A 409 with an unreadable body did not hold the field",
+    )
+    saved_by(page, lambda: (armour.focus(), armour.press("Enter")), "/fields/armour")
+    armour.fill("7")
+    saved_by(page, lambda: armour.press("Enter"), "/fields/armour")
 
     # Undo clicked while that field's save is on its way: the save replaces the change it
     # would undo, so nothing is undone (never another note's Undo), and the page says so.
@@ -1611,7 +1658,7 @@ def run_assist_js_browser(page, campaign, version):
     page.unroute("**/fields/hp")
     ready(page)
     require(
-        page.locator("#v0").input_value() == "92" and page.locator("#v2").input_value() == "2",
+        page.locator("#v0").input_value() == "92" and page.locator("#v2").input_value() == "12",
         "The Armour Undo clicked during the HP save did not apply after it",
     )
 
@@ -1642,33 +1689,73 @@ def run_assist_js_browser(page, campaign, version):
 
     # An orphaned cell: another tab removes the row; the refused entry stays to copy and
     # can no longer be posted (never to the row now at that index).
+    # A yes/no cell of that row is saved meanwhile: its selects become unchangeable too,
+    # still showing the entry.
+    held = []
+    page.route("**/cells/4/0/3", lambda route: held.append(route))
+    broken = page.locator("#row-4-0-3")
+    broken.select_option("true")
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(50)
     other = context.new_page()
     other.goto(sheet)
     ready(other)
     with other.expect_navigation(wait_until="domcontentloaded"):
         other.get_by_role("button", name="Remove Row 1 Equipment", exact=True).click()
     other.close()
+    held[0].continue_()
+    settled(page)
+    page.unroute("**/cells/4/0/3")
+    require(
+        broken.is_disabled()
+        and broken.input_value() == "true"
+        and page.locator("#set-4-0-3").is_disabled()
+        and "row was removed"
+        in page.locator('form[action$="/cells/4/0/3"] .entry-alert').inner_text(),
+        "An orphaned yes/no cell stayed changeable or lost its entry",
+    )
     orphan = page.locator("#row-4-0-2")
+    # Enter, then a second Enter queued while the first is on its way: the 409 without a
+    # route drops the queued one and leaves no save pending, so a page post still goes.
+    queue = []
+    page.route("**/cells/4/0/2", lambda route: queue.append(route))
     orphan.fill("9")
-    saved_by(page, lambda: orphan.press("Enter"), "/cells/4/0/2", status=409)
+    orphan.press("Enter")
+    for _ in range(100):
+        if queue:
+            break
+        page.wait_for_timeout(50)
+    orphan.fill("10")
+    orphan.press("Enter")
     sent = count_posts("/cells/4/0/2")
+    queue[0].continue_()
+    settled(page)
+    page.wait_for_timeout(300)
+    page.unroute("**/cells/4/0/2")
     orphan.press("Enter")
     page.wait_for_timeout(500)
     require(
         count_posts("/cells/4/0/2") == sent
-        and orphan.input_value() == "9"
+        and orphan.input_value() == "10"
         and orphan.get_attribute("readonly") is not None
+        and orphan.get_attribute("aria-describedby") == "alert-row-4-0-2"
         and page.locator('form[action$="/cells/4/0/2"] button:not([form])').is_disabled()
         and "row was removed"
         in page.locator('form[action$="/cells/4/0/2"] .entry-alert').inner_text(),
         "An orphaned cell entry could still be posted, or was not kept to copy",
     )
-    page.reload()
+    line = page.get_by_role("textbox", name="Quick add Equipment", exact=True)
+    line.fill("1 cup")
+    with page.expect_navigation(wait_until="domcontentloaded", timeout=5_000):
+        line.press("Enter")
     ready(page)
     require(
         page.locator("#row-4-0-0").input_value() == "lamp"
-        and page.locator("#row-4-0-2").input_value() == "",
-        "The orphaned entry was written to another row",
+        and page.locator("#row-4-0-2").input_value() == ""
+        and page.locator("#row-4-1-0").input_value() == "cup",
+        "The orphaned entry was written to another row, or a page post waited forever",
     )
 
     # The row removed between the write and its live read: the answer has no route; the
