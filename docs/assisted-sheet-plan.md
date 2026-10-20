@@ -83,85 +83,123 @@ hosted providers, GPU, models above about 4B.
 
 ### 1.4 Interpretation service (2b, 2c)
 
-- **Shape:** an `Interpreter` trait, a `StubInterpreter` and a crate adapter. Assistant off is
-  the default and the app stays fully usable with it off. The model never blocks a save: a
-  job runs after the save commits and a newer edit of the same cell supersedes it.
-- **Resolution ladder (2026-10-20):** a phrase goes to the model only when cheaper steps
-  fail: the deterministic parser (slice 1.2), then an exact catalogue or enum match, then a
-  fuzzy match through a maintained crate (chosen in 2b), then the model. Each step that
-  answers is recorded as the source of the proposal.
-- **Request builder:** a typed `Request` (phrase, target, context items) rendered by one
-  function within a token budget; the instructions and schema form a fixed prefix so
-  llama-server can reuse its prompt cache. Context cutting follows the order under Context.
-- **Optional read-only tools** (judged in 2b against plain context packing): `read_field` and
-  `search_catalogue`, at most 3 calls per job, no write tool. Kept only if the screen shows a
-  gain within the 30 s run deadline.
-- **Citations:** each option names the phrase span it uses and the field or entry IDs it
-  refers to; the validator drops an option whose span is not in the phrase or whose IDs do
-  not exist. Values pass `values::scalar` admission like any typed value.
-- **Model swap and escalation:** models sit behind the same trait. Escalation on low
-  confidence or a failed validation goes only to another local model within the CPU cap
-  (about 4B); hosted or frontier models are a non-goal (no player text leaves the machine).
-  A per-job escalation budget, the deadlines below and a circuit breaker (after repeated
-  failures the assistant reports itself unavailable for a cool-down) bound it; the fallback
-  is always the scribble with no proposal.
-- **Traces and replay (2c):** an opt-in local table `interpretation_traces` (request, raw
-  answer, validator verdicts, latency, model and prompt hash), never exported, deleted with
-  the sheet, capped per account; a tool replays recorded traces against another model or
-  prompt offline and scores them. Confirmed or corrected traces feed the known-answer set
-  (see 2c).
-- **Crate selection (D-H):** an established Rust provider library (`genai` or `rig-core`),
-  checked against an axum stub for: loopback HTTP; structured-output pass-through; no
-  redirects, proxy or hosted fallback; a bounded body; a timeout and cancellation that closes
-  the connection; licence and footprint; maintenance. If none can send the schema or grammar:
-  stop and ask.
-- **Candidates are judged on results, not on project rules** (user, 2026-10-19). Besides
-  genai or rig over a local model, screen strot-ai/Project-STROT (MIT, Python: compile-time
-  LLM synthesis, deterministic per-record decisions with calibrated confidence), called from
-  Rust through pyo3 or ported to Rust. If a winner conflicts with a rule (D-H, Rust-only
-  runtime, the lightweight standalone binary), the results note states the conflict and its
-  cost and the user decides whether to bend the rule.
-- **Runtime:** llama-server on an `--internal` network plus a pinned forwarder bound only to
-  `127.0.0.1:8091` with a fixed upstream (never a general proxy); `--cpus 2 --threads 2`,
-  memory, swap and PID limits; the model hash-checked before mounting. Model screen:
-  `qwen3-4b-2507` and `granite42-3b`, fallback `minicpm5-2b`, on the pinned llama.cpp image
-  with the hardened runner flags of `tools/run_tool_loop_benchmark.sh`.
-- **Endpoint:** an IP literal, `127.0.0.1` or `::1`; host names refused.
-- **Context (D-F, D-J):** phrase and target first; then other stored integer and enum fields
-  in definition order until 4 KiB (derived fields excluded from context and from `@`
-  references); catalogue entry text last (step 3), cut first when space runs out. Every
-  dynamic string is untrusted data.
-- **Output:** a strict JSON schema whose expression field has a `pattern`; terms are literals
-  or `@field` references; operators `+ − × ÷` and parentheses; `÷` is rounded at once with
-  `floor` or `ceil`, or must be exact (`none`); every literal must appear in the phrase or
-  equal the target's value (the only exception is the step-3 catalogue provenance extension,
-  §1.5); the display shows base, expression and effect, labelled "the
-  assistant's reading". `max_tokens` 128, measured in 2b, raised to 256 if bundles truncate.
-- **Jobs:** one worker; a queue of 4 in total and 1 per account (counting running work);
-  supersession checked before the capacity refusal; 60 s queue and 30 s run deadlines; at most
-  64 records, at most 6 non-terminal (queue, running, reminder), so terminal eviction always
-  makes room; 128-bit IDs; poll and apply recheck rights; the `JOBS` permit is not held during
-  the model call. A reminder job (step 3) uses its own low-priority slot bound to the account
-  and does not take the per-account cap.
+POC boundary (2026-10-20, after the plan review of the harness design): one local model, one
+bounded request per job, current unresolved integer scribbles only, strict validation, origin
+binding, poll and apply, the confirmable UI. Deferred to §4 Later: model escalation, model
+tools, confidence gating, persistent traces and a known-answer set grown from them, and
+catalogue, enum or fuzzy matching before the model (that matcher arrives with step 4, one
+implementation for both).
+
+- **Shape:** an `Interpreter` trait, a `StubInterpreter` and a crate adapter; further models
+  can sit behind the same trait later. Assistant off is the default; when off there is no
+  client, no job route and no "Thinking…", and the app is fully usable. The model never blocks
+  a save: a job starts only after the save commits.
+- **Input:** only a scribble that number entry (`entry::read`, see `docs/assisted-entry.md`)
+  could not read, i.e. the target's current `unresolved` note. The phrase is read server-side
+  from that note, never sent by the client. A parsed entry is never offered again, and a
+  sign-led entry keeps its switch offer (D-Q).
+- **Origin binding:** a job is bound to (sheet, target address, host ID for row cells, the
+  origin note's revision). Any committed save of that target through any route (unit, legacy
+  full form, switch, Undo, apply) makes the origin non-current: the job is cancelled if still
+  running, its options are dropped, and apply refuses it, even when the stored value is
+  unchanged (scribble A → scribble B, or scribble → typed value). A job request for an older
+  note never supersedes a newer one.
+- **Request builder:** one function renders a typed `Request` (phrase, target, context items).
+  The instructions and schema are a fixed prefix, byte-identical across requests (tested), so
+  llama-server can reuse its prompt cache; the dynamic part is at most 4 KiB, measured in
+  bytes after escaping, with whole context items dropped from the end, never cut. Every
+  dynamic string goes inside a fixed data envelope that the instructions declare to be data,
+  never instructions.
+- **Context (D-F, D-J):** phrase and target first; then other stored integer and enum fields in
+  definition order; derived, text, multiline, notes and list cells are excluded from context
+  and from `@` references; catalogue entry text comes in step 3 and is dropped first.
+- **Output contract:** JSON, checked by llama-server's schema grammar and again in Rust
+  (`jsonschema`, then typed Serde decoding, then domain checks), with explicit limits: at most
+  3 options, each an expression of at most 8 terms and nesting depth 3 and an explanation of at
+  most 120 characters, or an `ambiguous` reply listing at most 3 readings. Operators are ASCII
+  `+ - * /` with usual precedence, unary minus only on literals, parentheses; a division
+  carries a rounding mode (`floor`, `ceil` or `exact`, where `exact` drops the option on a
+  remainder). Terms are integer literals or `@field` references to supplied context fields.
+  Rust evaluates with checked `i128` arithmetic and range-checks the result to `i64` as
+  `entry.rs` does; overflow, division by zero, a reference to an unknown value (D-Z), to a field
+  not supplied, or to an excluded type drops the option. Literal provenance: each literal must
+  equal a whole number token of the phrase as tokenised by `entry::read` (so `5` does not come
+  from `15`; U+2212, NBSP and U+202F normalised as in ASSIST-1), or the target's current value
+  (the only exception is the step-3 catalogue provenance extension, §1.5). The result then
+  passes the integer field's own admission, without the scribble fallback. The display shows
+  the current value, the expression rendered with `− × ÷`, and the effect, labelled "the
+  assistant's reading". `max_tokens` is set from the 2b measurement of this schema (start 128).
+- **Confidence:** if the runtime returns token log-probabilities they are recorded on the job
+  record for evaluation only; nothing is gated or hidden on them in 2c.
+- **Crate selection (D-H):** an established Rust provider library (`genai`, `rig-core` or
+  `async-openai` with a custom base URL), checked against an axum stub for: structured-output
+  pass-through; the client policy below; a bounded body; a timeout and cancellation that
+  closes the connection; licence; binary-size delta with TLS features off; maintenance. If none
+  can send the schema or grammar: stop and ask.
+- **Candidates are judged on results, not on project rules** (user, 2026-10-19). Besides a
+  Rust crate over a local model, 2b screens strot-ai/Project-STROT (MIT, Python) on the same
+  pre-registered criteria, called through pyo3 or ported. If a winner conflicts with a rule
+  (D-H, Rust-only runtime, the lightweight standalone binary), the results note states the
+  conflict and its cost and the user decides whether to bend the rule.
+- **Client policy:** one client built by the host for the one configured endpoint: no
+  redirects, proxies disabled whatever the environment says (`HTTP_PROXY`, `ALL_PROXY`), no TLS
+  features, and before every request the URL host must parse as an IP literal equal to
+  `127.0.0.1` or `::1`, with no userinfo or zone ID (`localhost`, `127.1` and
+  `::ffff:127.0.0.1` refused). The model name is configuration, never model output. Loopback is
+  only the destination rule; the no-egress property comes from the runtime topology.
+- **Runtime:** one llama-server on an `--internal` network plus a pinned forwarder bound only
+  to `127.0.0.1:8091` with a fixed upstream (never a general proxy); `--cpus 2 --threads 2`,
+  `--parallel 1`, prompt cache on, thinking off, a fixed sampler, memory, swap and PID limits;
+  the model hash-checked before mounting and preloaded at start (no load inside a job). Model
+  screen: `qwen3-4b-2507` and `granite42-3b`, fallback `minicpm5-2b`, on the pinned llama.cpp
+  image with the hardened runner flags of `tools/run_tool_loop_benchmark.sh`. Granite and
+  MiniCPM were dropped as tool-loop models (TL-SCREEN), which is a different task; this screen
+  is one structured answer per request.
+- **Jobs:** one worker; one monotonic budget per job from enqueue, covering queueing,
+  rendering, the model call and validation: queue wait plus run deadline, both set from the 2b
+  p95 and maximum latency (run deadline at most 60 s), with queue depth chosen so that
+  depth × run deadline fits the queue wait. One job per account (counting running work);
+  supersession is checked before the capacity refusal and cancels the running request (the
+  connection is closed and the slot freed before the capacity check), and a late answer from a
+  cancelled job is discarded. At most 64 job records in all, 128-bit IDs; an evicted or expired
+  job answers "ask again". Options expire 10 minutes after the job finishes. Poll and apply
+  recheck rights; the `JOBS` permit is not held during the model call. A reminder job (step 3)
+  takes its own low-priority slot on the same worker, after interpretations, one per account.
+- **Circuit breaker:** one per configured endpoint, in memory (reset on restart). It counts
+  only transport errors, HTTP 5xx and run-deadline expiry; schema or validation drops,
+  supersession and cancellation never count. Three consecutive counted failures open it for 2
+  minutes; then one half-open probe job decides (success closes, failure reopens). While open
+  no request is sent, the job answers "the assistant is unavailable right now", and number
+  entry, notes and Undo work as usual. Implemented with a maintained crate if one fits
+  (`failsafe` is checked in 2b), otherwise a small state machine with an injectable clock.
+- **Routes:** `POST /private-sheets/{id}/interpretations` (exactly `csrf`, `base`, `address`)
+  starts a job for the target's current unresolved note: 202 with the job ID; 409 if that note
+  is no longer current; 429 when capacity refuses; 503 when the breaker is open. `GET
+  …/interpretations/{job}` polls (the module polls at 500 ms, backing off to 2 s, and stops on
+  unload, supersession or a terminal state). Another account's or sheet's job is not found.
+  Apply: `POST /private-sheets/{id}/proposals/{job}/{n}` (exactly `csrf`), taking the
+  definitions permit with the D-X3 bounded wait like the other sheet writes.
 - **Flow (JS):** a cell save records `unresolved` and the module starts a job; "Thinking…" in
-  `role="status"`; then 1–3 options with base, expression and effect, or the choices of an
-  `ambiguous` reply; **Use** posts the apply route; ignoring them leaves the scribble. The
-  apply route must not rely on how long a switch offer stays on screen or treat a shown offer
-  as confirmation.
-- **Proposal freshness (D-P):** when a job finishes, Rust validates each option and stores its
-  bound read/write set: every write target (address, value at the job's base revision, host
-  ID for row cells), every `@` reference (address and value), the displayed effect (before →
-  after per target), and for reminders and bundles the supplied context (each list-row name
-  sent, its remembered key, the catalogue version and entry key of any entry text, every enum
-  value). Bundle targets must be distinct; a duplicate drops the option. The guarantee covers
-  exactly this set, not the model's relevance judgement.
-- **Apply:** `POST /private-sheets/{id}/proposals/{job}/{n}` (`csrf`), in one `IMMEDIATE`
-  transaction: recheck rights and the active state; check the job binding and that it is not
-  already applied (single use, marked consumed only after commit); require every bound
-  address to hold its bound value and every bound row to exist; re-evaluate and require the
-  effect to equal the displayed one; write with `confirmed` notes sharing a `bundle` number.
-  Any mismatch or expiry: "Something this proposal used has changed: ask again", nothing
-  written, never a literal fallback. An unrelated field change does not invalidate it.
+  `role="status"`; then the options or the readings of an `ambiguous` reply; **Use** posts the
+  apply route; ignoring them leaves the scribble. The apply route must not rely on how long an
+  offer stays on screen or treat a shown offer as confirmation.
+- **Proposal freshness (D-P):** when a job finishes, Rust validates each option and stores it
+  with a content hash and its bound read/write set: the origin binding above, every write
+  target (address, value at the job's base revision, host ID for row cells), every `@`
+  reference (address and value), the displayed effect (before → after per target), and for
+  reminders and bundles the supplied context (each list-row name sent, its remembered key, the
+  catalogue version and entry key of any entry text, every enum value). Bundle targets must be
+  distinct; a duplicate drops the option. The guarantee covers exactly this set, not the
+  model's relevance judgement.
+- **Apply:** in one `IMMEDIATE` transaction: recheck rights and the active state; check the job
+  binding, the option's content hash, its expiry and that the job is not already applied
+  (options are alternatives: applying one consumes the job, marked only after commit); require
+  the origin note to be current, every bound address to hold its bound value and every bound
+  row to exist; re-evaluate and require the effect to equal the displayed one; write with
+  `confirmed` notes sharing a bundle number scoped to the sheet and job. Any mismatch or
+  expiry: "Something this proposal used has changed: ask again", nothing written, never a
+  literal fallback. An unrelated field change does not invalidate it. Undo of an applied
+  proposal works like any Undo (`reverted` note).
 
 ### 1.5 Bundles and reminders (3)
 
@@ -223,11 +261,11 @@ Every warning is non-blocking and tied to its control with `aria-describedby`.
 
 ### 1.8 Security summary
 
-Model output passes the schema, the grammar, literal provenance, Rust evaluation and
-read/write-set freshness, and is rendered escaped inside `<bdi>`. Rights are rechecked on every
+Model output passes the schema, the grammar, Rust schema and domain checks, literal
+provenance, checked Rust evaluation, origin binding and read/write-set freshness, and is rendered escaped inside `<bdi>`. Rights are rechecked on every
 request and inside every write transaction. Limits: raw ≤ 200, notes ≤ 256 per revision,
-prompt ≤ 4 KiB, the job and record caps, the suggest bounds. Loopback IP only; the model server
-has no egress; no redirects or proxies; no prompts or player text in logs; no secrets.
+dynamic prompt ≤ 4 KiB, the job budgets and record caps, the breaker, the suggest bounds. Loopback IP only; the model server
+has no egress; the client follows no redirects and ignores proxy settings; no prompts or player text in logs; no secrets.
 
 ## 2. Steps
 
@@ -273,43 +311,60 @@ Scope: §1.3 without the combobox. Tests:
 
 ### 2b Crate and runtime selection (prototype tier; may run in parallel)
 
-Scope: §1.4 crate items and the D-H stop; the topology with egress tests from inside the model
-container and from the forwarder (which must not proxy anywhere but its upstream); a latency
-and schema screen (§3) with output tokens measured; the STROT candidate judged on the same
-results; the fuzzy-match crate for the ladder; tools versus plain context packing; the
-escalation pair (a smaller and a larger local model) and its confidence threshold. Output: a
-results note, independently reviewed before it picks the crate, model or approach.
+Scope: §1.4 crate items, client policy and the D-H stop; the topology with egress tests from
+inside the model container and from the forwarder (which must not proxy anywhere but its
+upstream); the client-policy probes (`HTTP_PROXY` and `ALL_PROXY` set, a 302, `localhost`,
+`127.1`, `::ffff:127.0.0.1`); a latency and schema screen (§3) of the 2c output schema with
+output tokens, p50, p95, maximum and time to first token measured, cold start measured
+separately; the STROT arm on the same criteria; `failsafe` for the breaker. Criteria are
+written down before the runs: for the crate, schema or grammar pass-through, client policy,
+bounded body, cancellation, licence, binary-size delta, maintenance; for the model, p95 and
+maximum latency at 2 threads against the run deadline, schema-valid rate, output tokens, and
+per-class results (no pass bar, D-D). Output: a results note with the chosen deadlines,
+queue depth and `max_tokens`, independently reviewed before it picks the crate, model or
+approach; rejected candidates recorded.
 
 ### 2c Interpretation
 
-Scope: trait, stub, adapter; IP-literal loopback config; worker, queue and records; poll; the
-apply route with read/write-set binding; the UI. Tests:
-- schema-invalid, grammar-invalid, literal provenance (`84 + 915` dropped), a text field
-  referenced, `÷` on negatives, division by zero;
-- queue: the 5th job and the account's 2nd → 429; supersession before capacity; cancellation
-  (the fake server sees the disconnect); the 60 s and 30 s deadlines; 64 records; at most 6
-  non-terminal records under reminder creation, supersession and cancellation;
-- freshness: a referenced field changes while the target does not → refused; a referenced row
-  disappears → refused; effect mismatch → refused; a second apply, including two concurrent
-  applies (exactly one writes, consumed set only after commit) → refused; another sheet's or
-  account's job or an invalid option index → refused; an unrelated field change → still
-  applied; an expired job → no write and no literal;
-- another account's job or revoked rights → not found or 403; `JOBS` free during the model
-  call; a host name or non-loopback endpoint refused; assistant off is honest everywhere; no
-  player text in logs;
-- ladder: a phrase the parser or an exact match resolves never reaches the model (the fake
-  server sees no request); the recorded source of each proposal;
-- citations: a span not in the phrase or an unknown field or entry ID drops the option;
-- escalation: within its budget, never to a non-loopback endpoint; the circuit breaker opens
-  after repeated failures, the page says the assistant is unavailable, and it closes after
-  the cool-down;
-- traces: off by default; when on, rows carry no data from other sheets, are deleted with the
-  sheet and respect the per-account cap; the replay tool reproduces a recorded verdict;
+Scope: trait, stub, adapter; the client policy; worker, budgets, records and breaker; the job,
+poll and apply routes with origin and read/write-set binding; the UI. Tests (stub or fake
+server unless stated):
+- output: schema-invalid, grammar-invalid and truncated JSON; more than 3 options, 9 terms or
+  depth 4; literal provenance (`84 + 915` dropped; `5` from "heal 15" dropped; U+2212, NBSP);
+  references to a derived, text, multiline, notes or list-cell field, to an unsupplied field
+  and to an unknown value; `/` with each rounding mode on negatives; `exact` with a remainder;
+  division by zero; `i64` boundary and intermediate overflow;
+- input: a parsed entry and a sign-led entry never start a job; the phrase comes from the
+  stored note, not the request; the fixed prefix is byte-identical across requests; the
+  dynamic part stays within 4 KiB and drops whole items; excluded field types never appear in
+  the request;
+- injection: a phrase containing "ignore previous instructions" yields at most an option,
+  never a write without Use; a context value with instructions stays inside the data envelope;
+- origin: scribble A → scribble B with the same stored value; scribble → typed value; a save
+  through the legacy full form; reversed job-start requests; another edit after the job
+  finished; a late answer after cancellation — none may revive or apply the old proposal;
+- budgets: the account's second job → 429; supersession before capacity; cancellation (the
+  fake server sees the disconnect and the slot is free); queue wait and run deadline expiry;
+  64 records and the evicted-job answer; option expiry at 10 minutes;
+- breaker (injectable clock): three transport failures open it, two do not; 100 dropped or
+  nonsense answers never open it; supersession and cancellation never count; one half-open
+  probe while others are refused; probe success closes, failure reopens; while open, number
+  entry, notes and Undo work and the poll says the assistant is unavailable;
+- client: a host name, `localhost`, `127.1`, `::ffff:127.0.0.1`, userinfo or a zone ID refused;
+  `HTTP_PROXY` set and a 302 from the fake server never reach anything but the endpoint;
+- apply: a referenced field changes while the target does not → refused; a referenced row
+  disappears → refused; effect mismatch → refused; content-hash mismatch → refused; a second
+  apply, including two concurrent applies (exactly one writes, consumed only after commit) →
+  refused; another sheet's or account's job or an invalid option index → refused; an unrelated
+  field change → still applied; an expired job → no write and no literal; Undo of an applied
+  proposal; apply after rights are revoked or the sheet is frozen → 403 and no write;
+- assistant off: no client, no job route (404), no "Thinking…"; no player text in logs or in
+  4xx bodies other than the player's own echoed draft;
 - one live smoke, reported as live inference.
 
-Confidence gating (2026-10-19, from Project-STROT): below a calibrated threshold an option is
-shown only as a warning. A known-answer set, grown from confirmed traces, must pass on every
-model or prompt change; it is also the way back to the waived quality bar (D-D).
+Evaluation set: hand-written and independently labelled cases in `tools/assist_eval.py`
+(§3), kept local and out of source packages; it is a regression set, not the EVAL-1 held-out
+set, and does not close D-D.
 
 ### 3 Bundles and reminders
 
@@ -360,7 +415,9 @@ dangling key shows no link; p95 measured.
   exact scope, denominators and limitations; reviewed; no pass bar, D-D): p50/p95 latency at 2
   threads, schema-valid rate, output tokens; per class, correct within the first 3 and
   false-confident. Fast-path inputs never reach the model; results are per class, not general
-  accuracy.
+  accuracy. `tools/assist_eval.py` is new in 2b; its cases are synthetic and independently
+  labelled. Extra classes for 2c: valid divisions, overflow, unknown target, provenance
+  failure, multi-option; injection rows expect an option at most, never a write.
 
   | Class | n |
   |---|---|
@@ -379,7 +436,21 @@ dangling key shows no link; p95 measured.
 Risks: latency at 2 threads is unmeasured; model quality is unknown and the bar is waived (the
 display and confirmation are the safeguard); reminder prompts carry catalogue text (contained,
 not prevented); a crate gap would stop 2c (D-H); one revision per Enter makes history long
-(no-ops write nothing, no cap; D-U); the forwarder is a new pinned image.
+(no-ops write nothing, no cap; D-U); the forwarder is a new pinned image; CPU latency may
+exceed 30 s (one CPU-only 4B case took 72.64 s, `docs/results.md`), which is why the budgets
+come from the 2b measurement; HTTP client defaults (proxies, redirects) could send player
+text off the machine, hence the client policy and its tests.
+
+Later (interpretation, deferred by the 2026-10-20 plan review): escalation to a second
+local model (needs a second pinned endpoint, a thread budget totalling 2, preloading and a
+single job deadline); model tools such as `read_field` and `search_catalogue` (need
+host-bound capabilities, the Context field policy, results in the bound read set, and an A/B
+against plain context); confidence gating (needs a defined signal and calibration on a
+held-out set of at least 100); opt-in interpretation traces with offline replay (need
+owner-only access, byte caps, retention, purge and deletion on every path; replay means
+re-validating a recorded answer, while re-running a model is scored against independently
+labelled answers; a confirmed proposal is feedback awaiting adjudication, never automatic
+gold).
 
 Later: sealing and verifying notes (before release, L1); a per-account write-rate limit or
 storage guard (before release, D-U); player `*` and `/`; text, enum and boolean
