@@ -881,6 +881,8 @@ def run_assist_browser(page, campaign, version):
         "0 violated, 0 not evaluated" in page.locator("#advisory-checks").inner_text(),
         "Assisted sheet advisory check differs",
     )
+    # Slice 1.7 (RR-3): every check passed, so no validity flag.
+    require(page.locator("#validity").count() == 0, "A passing assisted sheet is flagged")
     require(note() == "84 \u2212 15 = 69", "The sum note 84 − 15 = 69 is not shown")
     no_overflow(page, "assisted sheet after a typed sum")
     # Slice 1.2: an unreadable entry keeps the saved value and shows the scribble.
@@ -971,6 +973,17 @@ def run_assist_browser(page, campaign, version):
         and "a value it uses is unknown (null)" in checks,
         "The blanked Current HP is not unknown with Undo",
     )
+    # Slice 1.7 (RR-3): the check that reads the unknown HP was not evaluated, so the header
+    # says "Not validated" in text (not colour alone), and the value can still be saved.
+    flag = page.locator("#validity")
+    require(
+        flag.is_visible()
+        and flag.locator("strong").inner_text() == "Not validated"
+        and "1 check not evaluated" in flag.inner_text()
+        and "never blocks saving" in flag.inner_text(),
+        "The validity flag is missing for a check that was not evaluated",
+    )
+    no_overflow(page, "assisted sheet with the validity flag")
     no_overflow(page, "assisted sheet with an erased value")
     press("Undo Current HP")
     page.goto(assisted)

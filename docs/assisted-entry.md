@@ -15,6 +15,7 @@ full-form POST pages without scripts; only the `--no-auth` prototype's native ed
 | Quick add | `src/campaigns/quick.rs` (reading), `rows.rs` (`quick_add`), `definitions/formula_admission.rs` (admission) |
 | Writer, rechecks | `src/campaigns/sheets.rs` (`private_save_keeping`, `private_unchanged`, `private_read_base`) |
 | Rendering | `src/campaigns/web.rs`, `templates/private_*.html`, `assets/app.css` |
+| Validity flag | `src/campaigns/formulas.rs` (`Validity`, `Doubt`), `templates/private_sheet.html` |
 | Unknowns in formulas | `src/definitions/formula/convert.rs` |
 | Demo | `tools/assist_demo.py`, `assist_definition()` in `tests/support/source_fixture.rs` |
 
@@ -289,6 +290,28 @@ widest list (255 and 256 rows, and a refused entry kept from a full list), a new
 read-only from a full list (the tightest re-render, about 2.0% within its bound plus echo)
 and an orphaned cell's kept draft, each asserting its `readonly` textareas. Rerun those fixtures whenever per-cell markup grows.
 
+## Validity flag
+
+RR-3 with ASSIST-4 and ASSIST-17 to ASSIST-20. The header of a saved sheet shows
+`Not validated (saved revision N): <reasons>. This flag never blocks saving.` (`#validity`,
+plain text with a link to the section that explains it) unless every declared check of a
+covered pin passed. Reasons, in this order, separated by semicolons:
+
+- "its definition declares no checks": a supported runtime pin that is formula-free or has
+  no constraints;
+- "N checks violated";
+- "N checks not evaluated": an unknown input (D-Z) or an evaluation error;
+- "N derived values not computed";
+- "derived values and checks unavailable": the engine refused the saved values as input;
+- "no rule checks cover its interpretation pin": native MÖRK BORG and unsupported pins.
+
+It is computed on view from the evaluation the page already does of the saved revision
+(`Validity::of`), never stored and never computed from a draft: the create page shows none,
+and a refused draft's re-render shows the saved revision's flag. Each history revision page
+(`/history/<n>`) shows its own; the history list evaluates nothing (RR-L1). Saving, values and
+controls are unaffected. One header paragraph per page, inside the fixed page budget; it needs
+no script and wraps at 390 px.
+
 ## Adaptive sheet presentation
 
 Official sheets are recreated in HTML/CSS for structural fidelity with adaptive sizing, not
@@ -332,4 +355,4 @@ python3 tools/assist_demo.py target/release/mimik --fixture target/demo-source -
 (`tests/support/source_fixture.rs`, `assist_definition`): integers Current HP, Max HP,
 Armour modifier and nullable Luck; an Equipment list (Item name, Quantity, Weight, optional
 Broken boolean) with a quick-add line (name and quantity; try "3 torches"); derived Load = `sum(equipment.map(i, i.quantity * i.weight))`; the check
-`hp <= max_hp`.
+`hp <= max_hp`: set Current HP above Max HP, or blank it, and the header says "Not validated".

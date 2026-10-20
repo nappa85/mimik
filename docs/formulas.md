@@ -172,6 +172,9 @@ never values.
   `Unknown`. Library-only (no route or CLI op); each side is subject to the deadline.
 - **Write-only pins** (`private_pin::validate_for_write`, used when freezing up to 32 sheets)
   drop the compiled formulas; evaluating one fails closed as `internal_error`.
+- **Validity flag** (RR-3): the same evaluation sets the header's "Not validated" flag when a
+  check is violated or not evaluated, a derived value is not computed, the input is
+  unavailable, or no check covers the pin (`docs/assisted-entry.md`, Validity flag).
 - **Native MÖRK BORG sheets** and unsupported pins never call the formula layer.
 - `examples/formula_eval.rs` is a JSON-lines development CLI over the same engine (used by the
   Python tool-loop benchmark).

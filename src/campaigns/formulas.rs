@@ -152,6 +152,107 @@ impl FormulaView {
     }
 }
 
+/// One reason a saved revision is "Not validated" (RR-3, ASSIST-4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Doubt {
+    /// Checks that ran and failed.
+    Violated(usize),
+    /// Checks that did not run: an unknown input (D-Z) or an evaluation error.
+    NotEvaluated(usize),
+    /// Derived values that could not be computed.
+    NotComputed(usize),
+    /// The engine refused the saved values as input, so nothing was evaluated.
+    Unavailable,
+    /// A supported runtime definition that declares no checks.
+    NoChecks,
+    /// A native or unsupported pin: no definition checks apply to it.
+    NoCoverage,
+}
+
+impl Doubt {
+    pub(super) fn text(self) -> String {
+        let count = |count: usize, one: &str, many: &str| {
+            format!("{count} {}", if count == 1 { one } else { many })
+        };
+        match self {
+            Self::Violated(n) => count(n, "check violated", "checks violated"),
+            Self::NotEvaluated(n) => count(n, "check not evaluated", "checks not evaluated"),
+            Self::NotComputed(n) => count(
+                n,
+                "derived value not computed",
+                "derived values not computed",
+            ),
+            Self::Unavailable => "derived values and checks unavailable".into(),
+            Self::NoChecks => "its definition declares no checks".into(),
+            Self::NoCoverage => "no rule checks cover its interpretation pin".into(),
+        }
+    }
+}
+
+/// The validity flag of one saved revision (RR-3, ASSIST-4): computed on view from the saved
+/// revision's evaluation, like derived values, and never stored. It never blocks a save and
+/// never hides or changes a value. No doubts means every declared check passed.
+pub(super) struct Validity {
+    pub doubts: Vec<Doubt>,
+    /// The page section that explains the doubts, when the page has one.
+    pub anchor: Option<&'static str>,
+}
+
+impl Validity {
+    /// `formulas` is the saved revision's evaluation (`None` when the pin has no formula
+    /// layer); `runtime` says whether the pin is a supported runtime definition.
+    pub(super) fn of(formulas: Option<&FormulaView>, runtime: bool) -> Self {
+        let Some(formulas) = formulas else {
+            return Self {
+                doubts: vec![if runtime {
+                    Doubt::NoChecks
+                } else {
+                    Doubt::NoCoverage
+                }],
+                anchor: None,
+            };
+        };
+        if formulas.unavailable.is_some() {
+            return Self {
+                doubts: vec![Doubt::Unavailable],
+                anchor: Some("formula-results"),
+            };
+        }
+        let not_computed = formulas
+            .derived
+            .iter()
+            .filter(|item| !item.view.is_value())
+            .count();
+        let doubts = [
+            (formulas.checks.is_empty(), Doubt::NoChecks),
+            (formulas.violated > 0, Doubt::Violated(formulas.violated)),
+            (
+                formulas.not_evaluated > 0,
+                Doubt::NotEvaluated(formulas.not_evaluated),
+            ),
+            (not_computed > 0, Doubt::NotComputed(not_computed)),
+        ]
+        .into_iter()
+        .filter_map(|(doubt, reason)| doubt.then_some(reason))
+        .collect();
+        Self {
+            doubts,
+            anchor: Some("advisory-checks"),
+        }
+    }
+    pub(super) fn validated(&self) -> bool {
+        self.doubts.is_empty()
+    }
+    /// The doubts in words, separated by semicolons.
+    pub(super) fn summary(&self) -> String {
+        self.doubts
+            .iter()
+            .map(|doubt| doubt.text())
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
 pub(super) fn rule_list(ids: &[String]) -> String {
     if ids.is_empty() {
         "none cited".into()
@@ -540,6 +641,81 @@ mod tests {
         assert!(!second.is_value());
         assert_eq!(view.not_evaluated, 1);
         assert_eq!(view.passed, 1);
+    }
+
+    #[test]
+    fn validity_flags_every_doubt_and_passes_only_full_coverage() {
+        let pass = view(&json!({"label": "x", "vitality": 4, "luck": 2}));
+        let validity = Validity::of(Some(&pass), true);
+        assert!(validity.validated());
+        assert!(validity.doubts.is_empty());
+        let violated = Validity::of(
+            Some(&view(&json!({"label": "x", "vitality": 11, "luck": 2}))),
+            true,
+        );
+        assert_eq!(violated.doubts, [Doubt::Violated(1)]);
+        assert_eq!(violated.anchor, Some("advisory-checks"));
+        assert_eq!(violated.summary(), "1 check violated");
+        let unknown = Validity::of(
+            Some(&view(&json!({"label": "x", "vitality": 11, "luck": null}))),
+            true,
+        );
+        assert_eq!(
+            unknown.doubts,
+            [
+                Doubt::Violated(1),
+                Doubt::NotEvaluated(1),
+                Doubt::NotComputed(3)
+            ]
+        );
+        assert_eq!(
+            unknown.summary(),
+            "1 check violated; 1 check not evaluated; 3 derived values not computed"
+        );
+        assert!(!unknown.validated());
+    }
+
+    #[test]
+    fn validity_flags_errors_unavailable_input_and_missing_coverage() {
+        let pin = pin();
+        let mut evaluation = pin
+            .evaluate(&json!({"label": "x", "vitality": 4, "luck": 2}))
+            .unwrap()
+            .unwrap();
+        evaluation.constraints[1].1 = Outcome::Error(Code::DivisionByZero);
+        let errored = present(&pin, Ok(&evaluation));
+        assert_eq!(
+            Validity::of(Some(&errored), true).doubts,
+            [Doubt::NotEvaluated(1)]
+        );
+        let error = InputError {
+            code: Code::InputTooLarge,
+            path: "/label".into(),
+        };
+        let refused = Validity::of(Some(&present(&pin, Err(&error))), true);
+        assert_eq!(refused.doubts, [Doubt::Unavailable]);
+        assert_eq!(refused.anchor, Some("formula-results"));
+        let mut definition = definition();
+        definition["constraints"] = json!([]);
+        let pin = crate::definitions::private_pin::for_tests(&definition);
+        let evaluation = pin
+            .evaluate(&json!({"label": "x", "vitality": 4, "luck": 2}))
+            .unwrap()
+            .unwrap();
+        let unchecked = Validity::of(Some(&present(&pin, Ok(&evaluation))), true);
+        assert_eq!(unchecked.doubts, [Doubt::NoChecks]);
+        assert_eq!(unchecked.anchor, Some("advisory-checks"));
+        let formula_free = Validity::of(None, true);
+        assert_eq!(formula_free.doubts, [Doubt::NoChecks]);
+        assert_eq!(formula_free.anchor, None);
+        let native = Validity::of(None, false);
+        assert_eq!(native.doubts, [Doubt::NoCoverage]);
+        assert_eq!(
+            native.summary(),
+            "no rule checks cover its interpretation pin"
+        );
+        assert_eq!(Doubt::Violated(2).text(), "2 checks violated");
+        assert_eq!(Doubt::NotComputed(1).text(), "1 derived value not computed");
     }
 
     #[test]

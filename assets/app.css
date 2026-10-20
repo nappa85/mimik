@@ -25,6 +25,7 @@ small { display: block; color: #555e57; margin-top: .3rem; }
 .characters li { padding: 1rem 0; border-bottom: 1px solid #dedfd4; }
 .characters a { font-weight: 700; }
 .badge { display: inline-block; padding: .3rem .7rem; background: #f7ead1; border-radius: 6px; }
+.validity { padding: .5rem .8rem; background: #f7ead1; border-left: 4px solid #8a5a12; border-radius: 6px; }
 footer { color: #555e57; font-size: .85rem; }
 .htmx-indicator { opacity: 0; }
 .htmx-request .htmx-indicator { opacity: 1; }

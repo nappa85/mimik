@@ -23,7 +23,9 @@ same private network. No Node.js, Python, GPU, API key or internet access is nee
     row action saves on its own; Remove is followed by "Row removed · Undo"), and a
     quick-add line ("3 torches") on lists whose definition declares one;
   - native sheets for the Italian 2025 MÖRK BORG core rules, once that exact source is
-    registered.
+    registered;
+  - on both, a "Not validated" flag in the header of any saved revision whose checks did not
+    all pass or that no checks cover (it never blocks a save).
 - **Owner materials.** The Owner registers games and editions at `/admin/rulesets`, and reviews
   imported source pages against the original page images at `/admin/materials`. Source import,
   definition publication and catalogue publication use the command line.
