@@ -10,8 +10,7 @@ notes and scribbles, switch and Undo, unknown values, per-field save, the busy p
 bound, quick-add, the validity flag, the sheet module with save on leaving a field) is described
 in `docs/assisted-entry.md`; this plan only adds to it.
 
-Remaining, in order:
-**2b** crate and runtime selection (prototype tier, may run in parallel), **2c**
+Remaining, in order (2b measured; its choices await independent review): **2c**
 interpretation, **3** bundles and reminders, **4** suggestions and "Which Sword?", **5** docs
 and gate.
 
@@ -102,38 +101,43 @@ implementation for both).
   schema are frozen before the 2b screen. The result then
   passes the integer field's own admission, without the scribble fallback. The display shows
   the current value, the expression rendered with `− × ÷`, and the effect, labelled "the
-  assistant's reading". `max_tokens` is set from the 2b measurement of this schema (start 128).
+  assistant's reading". `max_tokens` 192, from the 2b measurement of this schema (pending
+  review; `docs/results.md`, assisted interpretation).
 - **Confidence:** if the runtime returns token log-probabilities they are recorded on the job
   record for evaluation only; nothing is gated or hidden on them in 2c.
-- **Crate selection (D-H):** an established Rust provider library (`genai`, `rig-core` or
-  `async-openai` with a custom base URL), checked against an axum stub for: structured-output
-  pass-through; the client policy below; a bounded body; a timeout and cancellation that
-  closes the connection; licence; binary-size delta with TLS features off; maintenance. If none
-  can send the schema or grammar: stop and ask.
-- **Candidates are judged on results, not on project rules** (user, 2026-10-19). Besides a
-  Rust crate over a local model, 2b screens strot-ai/Project-STROT (MIT, Python) on the same
-  pre-registered criteria, called through pyo3 or ported. If a winner conflicts with a rule
-  (D-H, Rust-only runtime, the lightweight standalone binary), the results note states the
-  conflict and its cost and the user decides whether to bend the rule.
+- **Crate (D-H, proposal pending review):** `rig-core` =0.44.0 (0.45 needs Rust 1.97.1),
+  default features off plus `reqwest`, no TLS, on the OpenAI chat route with the llama.cpp
+  dialect; the schema goes in `additional_params` as `response_format` (sent byte-exact; the
+  native `output_schema` path rewrites `oneOf` to `anyOf`). The body bound is a small Mimik
+  transport implementing rig's `HttpClientExt` over the host-built `reqwest` client (plain and
+  streaming bodies refused past the bound); no crate offers one. `genai` was rejected (no body
+  hook), `async-openai` measured for comparison only (built-in retries; not named by D-H).
+- **STROT** (judged on results, user 2026-10-19): rejected in 2b. Its runtime (Julia-1 over
+  Rust-generated candidates) was fast but got 2 of 50 cases right with 42 false-confident.
 - **Client policy:** one client built by the host for the one configured endpoint: no
   redirects, proxies disabled whatever the environment says (`HTTP_PROXY`, `ALL_PROXY`), no TLS
-  features, and before every request the URL host must parse as an IP literal equal to
-  `127.0.0.1` or `::1`, with no userinfo or zone ID (`localhost`, `127.1` and
-  `::ffff:127.0.0.1` refused). The model name is configuration, never model output. Loopback is
-  only the destination rule; the no-egress property comes from the runtime topology.
-- **Runtime:** one llama-server on an `--internal` network plus a pinned forwarder bound only
-  to `127.0.0.1:8091` with a fixed upstream (never a general proxy); `--cpus 2 --threads 2`,
-  `--parallel 1`, prompt cache on, thinking off, a fixed sampler, memory, swap and PID limits;
-  the model hash-checked before mounting and preloaded at start (no load inside a job). Model
-  screen: `qwen3-4b-2507` and `granite42-3b`, fallback `minicpm5-2b`, on the pinned llama.cpp
-  image with the hardened runner flags of `tools/run_tool_loop_benchmark.sh`. Granite and
-  MiniCPM were dropped as tool-loop models (TL-SCREEN), which is a different task; this screen
-  is one structured answer per request.
+  features, no decompression (`no_gzip`, since the feature can be unified in), no retries,
+  and before every request the URL host must be an IP literal equal to `127.0.0.1` or `::1`,
+  with no userinfo or zone ID (`localhost`, `127.1` and `::ffff:127.0.0.1` refused), checked on
+  the raw authority string as well as the parsed URL (the WHATWG parser turns `127.1` into
+  `127.0.0.1`). The model name is configuration, never model output. Loopback is only the
+  destination rule; the no-egress property comes from the runtime topology.
+- **Runtime:** one llama-server on an `--internal` network created with
+  `com.docker.network.bridge.inhibit_ipv4=true` (a plain internal network still reaches host
+  services through its gateway, measured in 2b), plus the forwarder
+  `alpine/socat@sha256:22d77becaeeea8ef56b8c4bb2312323acafe85354be6a85714ff5050e3537842`
+  (`TCP-LISTEN:8091,fork` to `server:8080`) on that network and a bridge with IP masquerading
+  off, published only on `127.0.0.1:8091`; `--cpus 2 --threads 2 --threads-batch 2`,
+  `--parallel 1`, prompt cache on, `--reasoning off`, greedy sampler, memory, swap and PID
+  limits; the model hash-checked before mounting and preloaded at start (no load inside a job;
+  the first request after a start fills the prompt cache: 137 s for Granite). Model (proposal
+  pending review): `granite42-3b`; `qwen3-4b-2507` exceeded the 60 s p95 and `minicpm5-2b` had
+  18 of 50 false-confident.
 - **Jobs:** one worker; one monotonic budget per job from enqueue, covering queueing,
-  rendering, the model call and validation: queue wait plus run deadline, both set from the 2b
-  p95 and maximum latency (run deadline at most 60 s; if the measured p95 exceeds 60 s, stop
-  and ask: a smaller model, a higher cap, or the feature stays off), with queue depth chosen so that
-  depth × run deadline fits the queue wait. One job per account (counting running work): a start on another sheet while the
+  rendering, the model call and validation: queue wait plus run deadline. From 2b (pending
+  review): run deadline 60 s, queue depth 1, queue wait 60 s. Open user decision: at 2 threads
+  a dynamic part near the 4 KiB bound needs 111 to 136 s with Granite, so the bound, the 60 s
+  cap or the output length must change (`docs/results.md`). One job per account (counting running work): a start on another sheet while the
   account has a live job is 429 (origin revisions are per sheet and cannot be compared);
   admission (breaker and capacity) is computed as if the superseded job were already gone, so a
   refused start cancels nothing (Routes); an admitted start cancels the superseded request (the
@@ -153,8 +157,9 @@ implementation for both).
   probe; while the probe is in flight other starts answer 503 like an open breaker). While open
   no request is sent: a start answers 503 and a job already queued answers on poll, both with
   "the assistant is unavailable right now"; number
-  entry, notes and Undo work as usual. Implemented with a maintained crate if one fits
-  (`failsafe` is checked in 2b), otherwise a small state machine with an injectable clock.
+  entry, notes and Undo work as usual. A small state machine with an injectable clock:
+  `failsafe` 1.3.0 was rejected in 2b (it admits every half-open caller and records a
+  non-counted error as a success).
 - **Routes:** `POST /private-sheets/{id}/interpretations` (exactly `csrf` and `note`, the
   note key already used by switch and Undo and present in the saved page's markup) starts a
   job for that note. A key is resolved against the snapshot at its own revision: a typed key
@@ -277,102 +282,6 @@ has no egress; the client follows no redirects and ignores proxy settings; no pr
 
 ## 2. Steps
 
-### 2b Crate and runtime selection (prototype tier; may run in parallel)
-
-Scope: §1.4 crate items, client policy and the D-H stop; the topology with egress tests from
-inside the model container and from the forwarder (which must not proxy anywhere but its
-upstream); the client-policy probes (`HTTP_PROXY` and `ALL_PROXY` set, a 302, `localhost`,
-`127.1`, `::ffff:127.0.0.1`); a latency and schema screen (§3) of the 2c output schema with
-output tokens, p50, p95, maximum and time to first token measured, cold start measured
-separately; the STROT arm on the same criteria; `failsafe` for the breaker. Criteria are
-written down before the runs: for the crate, schema or grammar pass-through, client policy,
-bounded body, cancellation, licence, binary-size delta, maintenance; for the model, p95 and
-maximum latency at 2 threads against the run deadline, schema-valid rate, output tokens, and
-per-class results (no pass bar, D-D). Output: a results note with the chosen deadlines,
-queue depth and `max_tokens`, independently reviewed before it picks the crate, model or
-approach; rejected candidates recorded.
-
-**Pre-registered 2b criteria (frozen 2026-10-20, before any probe or screen run).** The output
-schema, request builder, lexer and scoring are `tools/assist_eval.py` (`SCHEMA`,
-`build_request`, `phrase_numbers`, `validate_reply`, `score`); the cases are
-`tools/assist-eval/cases.json` (50 synthetic cases in the six §3 classes for 2c; the step-3
-reminder class is not part of 2b). Their sha256 are recorded in every ledger header.
-
-- *Crates:* `genai` 0.7.0, `rig-core` 0.44.0 (0.45.0 needs Rust 1.97.1, above the pinned
-  1.95.0) and `async-openai` 0.42.2, each with default features off and no TLS, in a throwaway
-  probe crate built in `mimik-ci` (not in the application). Probes run against an axum stub on
-  loopback in a `--network none` container, plus one live request per eligible crate to
-  llama-server through the forwarder.
-  - C1 schema or grammar pass-through: the stub receives `SCHEMA` JSON-equal in
-    `response_format.json_schema.schema` (or llama.cpp's `json_schema` field), through the
-    crate's structured-output API or a raw extra-body path; any rewrite by the crate is
-    recorded; live, llama-server returns a schema-valid reply through the crate.
-  - C2 client policy: the crate accepts a host-built `reqwest` client or transport (no proxy,
-    no redirects, no decompression); with `HTTP_PROXY`, `ALL_PROXY` and their lowercase forms
-    set to a trap listener, the trap sees 0 connections; a 302 to a second trap gives an error
-    and 0 connections there. The crate's default client is probed too (informative). The
-    destination guard is ours and crate-independent: `127.0.0.1` and `::1` literals accepted;
-    `localhost`, `127.1`, `::ffff:127.0.0.1`, userinfo, a zone ID and host names refused, checked
-    on the raw string as well as the parsed URL.
-  - C3 bounded body: a 2xx body over 1 MiB fails without buffering much more than the bound,
-    through a hook the crate offers (custom transport, middleware service or stream); the
-    default path's behaviour is recorded.
-  - C4 cancellation: dropping the call (a 1 s `tokio` timeout) while the stub holds the reply
-    closes the connection; the stub sees end-of-stream within 1 s, for a plain and a streaming
-    call.
-  - C5 licence: every new crate in the probe's dependency tree has a licence in `about.toml`'s
-    accepted list. C6 size: release-binary size (thin LTO, stripped) of the probe minus a
-    baseline probe with the same axum, tokio and TLS-free `reqwest`, plus the count of new
-    crates. C7 maintenance: last release, releases in the last 6 months, MSRV against 1.95.
-  - Eligible: C1, C2, C4 pass and C5 has nothing unaccepted; C3 passes or has a stated
-    mitigation. Among eligible crates: smallest size delta, then maintenance. D-H allows
-    `genai` or `rig-core`; `async-openai` is measured for comparison. If neither `genai` nor
-    `rig-core` is eligible, stop and ask.
-- *`failsafe` 1.3.0:* F1 our code decides what counts as a failure (neutral outcomes possible);
-  F2 3 consecutive failures open it, a constant 2-minute backoff; F3 exactly one half-open
-  probe in flight; F4 an injectable clock for tests; F5 a dropped (cancelled) call is not a
-  failure and frees the probe. Adopt only if F1 to F5 hold; otherwise the small state machine.
-- *Topology:* llama-server on a `docker network create --internal` network, no published
-  port; a forwarder from a digest-pinned image on that network and on a second bridge with IP
-  masquerading off, published only on `127.0.0.1:8091` with the fixed upstream `server:8080`.
-  Egress probes, all expected to fail: from inside the model container to a public IP, to a
-  public host name and to a host-side listener; from inside the forwarder to a public IP.
-  Through the forwarder, an absolute-form `GET http://example.com/` and a `CONNECT` must be
-  answered by llama-server itself; `8091` must not be reachable on a non-loopback host address.
-- *Model screen:* `qwen3-4b-2507` and `granite42-3b`, and the fallback `minicpm5-2b`, on the
-  pinned llama.cpp b11610 image, hash-checked, with the registry's hardened server vector
-  plus: `--cpus 2 --cpuset-cpus 0,1` (physical cores 0 and 1; their SMT siblings 6 and 7 left
-  idle, the harness on 7), `--threads 2 --threads-batch 2`, `-ngl 0`, ctx 8192, `--parallel 1`,
-  prompt cache on, `--reasoning off`; memory and swap 6 GiB, PID limit 256. Sampler:
-  temperature 0, top-k 1, seed 0; `max_tokens` 384 as a measurement cap; streamed. Two passes
-  over the 50 cases in file order (per-class results from pass 1, latency over both, pass
-  agreement reported), then 4 stress requests with a dynamic part near 4 KiB. Cold start
-  measured separately, 3 container starts per model: start to `/health`, and the first request
-  with an empty prompt cache. Metrics: schema-valid rate, truncations, output tokens
-  (`predicted_n`) p50/p95/max, end-to-end latency and time to first token p50/p95/max, and per
-  class (pass 1) correct within the shown options, false-confident, top-1 and `ambiguous`
-  counts, dropped options by reason. No pass bar (D-D).
-- *Derived numbers* (chosen model, warm): if p95 > 60 s, stop and ask. Run deadline
-  R = min(60, round up to 5 s of max(1.5 × p95, warm maximum, stress maximum)). Queue depth
-  D = max(1, min(4, floor((120 − R) / R))), queue wait Q = D × R, so Q + R ≤ 120 s.
-  `max_tokens` = max(128, round up to 32 of 1.25 × the largest `predicted_n` of a schema-valid,
-  untruncated reply, both passes and stress), at most 384; any truncation at 384 is reported.
-- *Proposed model* (pending review): among models with p95 ≤ 60 s, fewest false-confident over
-  the 50 pass-1 cases, then most correct, then lower p95; the fallback only if no primary
-  qualifies.
-- *STROT arm:* the runtime of strot-ai 0.11.1 (`LocalEncoderStrategy`) with Julia-1
-  (`SupersonicLabs/Julia-1` at `a85b1273…`, weights sha256 `df853bf7…`), torch at 2 threads on
-  CPUs 0 and 1, `--network none`. Candidates come from `strot_candidates` plus a "none" option
-  (in the product they would be generated by Rust); the shown option is the winner when it is
-  not "none" and its probability is at least 0.40 (STROT's threshold). Same per-class metrics
-  and latency (two passes; load time as cold start); diagnostics: top-3 correct (never shown)
-  and generator coverage. Output tokens and schema validity do not apply (a choice by
-  construction). STROT's compile step is not used: it needs an LLM at build time and
-  synthesizes dataset code, while the options here are generated per request.
-- *Known bias:* the author wrote the cases, labels and the candidate generator, so generator
-  coverage is optimistic; labels were also given blind by a separate labeller (recorded in the
-  case file).
-
 ### 2c Interpretation
 
 Scope: trait, stub, adapter; the client policy; worker, budgets, records and breaker; the job,
@@ -420,8 +329,13 @@ server unless stated):
   options dropped resets the count and closes a half-open breaker; a cancelled probe clears the
   probe flag and leaves it half-open; a queue-wait expiry does not count; mixed sequences (failure, success, failure) do not open it; while open, number
   entry, notes and Undo work and the poll says the assistant is unavailable;
-- client: a host name, `localhost`, `127.1`, `::ffff:127.0.0.1`, userinfo or a zone ID refused;
-  `HTTP_PROXY` set and a 302 from the fake server never reach anything but the endpoint;
+- client: a host name, `localhost`, `127.1`, `0x7f.1`, `2130706433`, `::ffff:127.0.0.1`,
+  userinfo or a zone ID refused; `HTTP_PROXY` and `ALL_PROXY` set and a 302 from the fake server
+  never reach anything but the endpoint; one request per call on a 500 or 429; a gzip-encoded
+  reply is not decoded; a body over the bound is refused, plain and streaming, without
+  buffering it; the schema arrives byte-exact in `response_format`;
+- topology (live, reported separately): no egress from the model container to a public
+  address, a public name or any host address;
 - apply: a referenced field changes while the target does not → refused; a referenced row
   disappears → refused; effect mismatch → refused; content-hash mismatch → refused; a second
   apply, including two concurrent applies (exactly one writes, consumed only after commit) →
@@ -511,13 +425,14 @@ dangling key shows no link; p95 measured.
 
 ## 4. Risks and later
 
-Risks: latency at 2 threads is unmeasured; model quality is unknown and the bar is waived (the
+Risks: latency at 2 threads is tight (Granite p95 41 s, a near-4 KiB request over 2 minutes);
+model quality is unknown and the bar is waived (the
 display and confirmation are the safeguard); reminder prompts carry catalogue text (contained,
-not prevented); a crate gap would stop 2c (D-H); one revision per Enter makes history long
-(no-ops write nothing, no cap; D-U); the forwarder is a new pinned image; CPU latency may
-exceed 30 s (one CPU-only 4B case took 72.64 s, `docs/results.md`), which is why the budgets
-come from the 2b measurement; HTTP client defaults (proxies, redirects) could send player
-text off the machine, hence the client policy and its tests.
+not prevented); one revision per Enter makes history long (no-ops write nothing, no cap;
+D-U); the forwarder is a new pinned image that can reach host addresses (it only ever connects
+to its upstream); `rig-core` is pre-1.0 with frequent breaking releases (pinned); HTTP client
+defaults (proxies, redirects, retries) could send player text off the machine or repeat it,
+hence the client policy and its tests.
 
 Later (interpretation, deferred by the 2026-10-20 plan review): escalation to a second
 local model (needs a second pinned endpoint, a thread budget totalling 2, preloading and a

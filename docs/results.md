@@ -5,6 +5,137 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Assisted interpretation: crate, topology and model screen (step 2b, 2026-10-20/21)
+
+Prototype tier, criteria pre-registered in commit `28c41ec` (launcher `932f83a`) before any
+run; tools: `tools/assist_eval.py`, `tools/run_assist_screen.sh`,
+`tools/assist_topology_probe.sh`, the throwaway probe crate `tools/assist-probe`. Raw ledgers
+and probe outputs are local under `/media/data/mimik/assist-2b/runs/`. **Nothing here is
+adopted until the independent review; every choice below is a proposal.**
+
+### Provider crate and client policy (C1 to C7)
+
+- **Setup:** `genai` 0.7.0, `rig-core` 0.44.0 (0.45.0 needs Rust 1.97.1; the toolchain is
+  1.95.0) and `async-openai` 0.42.2, default features off, TLS-free `reqwest` 0.13.5, built in
+  `mimik-ci`; probes against loopback stubs in `--network none` containers; the 64 MiB stub
+  for C3 ran in a separate process so peak RSS (`VmHWM`) is the client's. One live request per
+  D-H crate through the forwarder to llama-server (MiniCPM5-2B).
+- **Numbers:**
+
+  | | genai | rig-core | async-openai |
+  |---|---|---|---|
+  | C1 native structured output | sent; `oneOf` rewritten to `anyOf` | sent; `oneOf` rewritten to `anyOf` | exact |
+  | C1 raw body (`extra_body` / `additional_params` / `byot`) | exact, plus `top_k`, `seed`, `chat_template_kwargs` | exact; typed llama.cpp options too | exact |
+  | C1 live through the forwarder | schema-valid reply | schema-valid reply | not run |
+  | C2 accepts a host-built client | `with_reqwest` | `ReqwestClient::from` or own transport | `with_http_client` / `with_http_service` |
+  | C2 proxy trap, default client / host client | 1 / 0 connections | 1 / 0 | 4 (retries) / 0 |
+  | C2 302 with host client | error, 0 at target | error, 0 at target | decode error, 0 at target |
+  | Requests per call on 500 or 429 | 1 | 1 | 4 with `with_http_client` (built-in retry); 1 with `with_http_service` |
+  | C3 64 MiB plain body, default path | accepted, +130 MiB RSS | accepted, +389 MiB | accepted, +129 MiB |
+  | C3 one endless SSE line | buffered to the end, +195 MiB, then a parse error | buffered, +71 MiB | buffered, +66 MiB |
+  | C3 hook | none | own `HttpClientExt` transport: refused at 1 MiB, about +7 MiB | own tower service: refused, about +2 MiB |
+  | C4 drop after 1 s, plain and streaming | connection closed within 1 ms | closed within 1 ms (also via own transport) | closed within 1 ms |
+  | C5 licences outside `about.toml` | none | none | none |
+  | C6 size over the 2.53 MiB baseline | +3.75 MiB, 28 crates new to Mimik | +2.48 MiB, 21 new | +0.82 MiB, 22 new |
+  | C7 releases in 6 months; MSRV | 44 (7 non-prerelease), 0.7.0 on 2026-10-20; ≤ 1.95 | 12, weekly to monthly, pre-1.0 breaking; 0.44 at 1.95, 0.45 at 1.97.1 | 18; 1.75 |
+
+  Destination guard (ours): 14/14 cases as expected. The WHATWG parser in `url` turns `127.1`,
+  `0x7f.1` and `2130706433` into `127.0.0.1`, so the check must also run on the raw authority
+  string. `reqwest` with `genai`'s features gets `gzip`, so the host-built client must also call
+  `no_gzip()`.
+- **failsafe 1.3.0** (F1 to F5): consecutive failures 3 and a constant 2-minute backoff work;
+  but in half-open every caller is permitted (3 of 3 concurrent probes), a non-counted error
+  through the future API is recorded as a success (resets the count, closes half-open), the mock
+  clock is thread-local, and the last release is 2024-07. F3 and F1 fail, so the plan's small
+  state machine with an injectable clock is the proposal.
+- **Conclusion (proposal):** `rig-core` 0.44.0 is the only D-H crate that meets C1 to C5: the
+  schema goes through `additional_params` byte-exact (its native path rewrites `oneOf`), and
+  the body bound needs a small Mimik transport (about 80 lines over `reqwest`, the probe's
+  `Bounded`). `genai` fails C3 (no hook; an endless line is buffered whatever the consumer
+  does); only a time bound would limit it. `async-openai` is smallest and has a tower hook,
+  but retries 3 times by default and D-H names only `genai` and `rig-core` (the plan's §1.4
+  also lists `async-openai`: the two texts disagree). D-H's stop does not trigger: both D-H
+  crates can send the schema.
+- **Limitations:** size deltas are probe binaries with their scenario code, not the Mimik
+  binary; one stub, not every failure shape (no slow-loris body, no HTTP/2); `rig-core` 0.45
+  was not built; maintenance is release cadence only.
+
+### Runtime topology and egress
+
+- **Setup:** MiniCPM5-2B llama-server on an `--internal` network; `alpine/socat@sha256:22d77bec…`
+  as forwarder (`TCP-LISTEN:8091,fork` to `server:8080`) on that network and a bridge with IP
+  masquerading off, published as `127.0.0.1:8091`. A host listener on all addresses served an
+  empty directory.
+- **Numbers:** from the model container, public IP (HTTPS, HTTP), public name, the host's LAN
+  address, `docker0` and the forwarder bridge's gateway all failed (curl 6/7). **The internal
+  network's own gateway (the host, `172.21.0.1`) answered 200**: an `--internal` network still
+  reaches host services bound to all addresses. The same network created with
+  `com.docker.network.bridge.inhibit_ipv4=true` kept container-to-container traffic (200 by
+  alias) and blocked every host address tried. From the forwarder: public IP and name failed;
+  the host's LAN address and its bridge gateway were reachable. Through `127.0.0.1:8091`, an
+  absolute-form `GET http://example.com/` got llama.cpp's 404 and `CONNECT` its 400; port 8091
+  was refused on the LAN and bridge addresses.
+- **Conclusion:** the topology holds for the internet; the model network must add
+  `inhibit_ipv4=true` (or a host firewall rule) to keep the model from reaching host services.
+  The forwarder can reach the host, which a TCP-only forwarder with a fixed upstream does not
+  use; accepted for the POC, listed as a limitation.
+- **Limitations:** IPv4 only; one host and Docker version; no firewall rules inspected.
+
+### Interpretation model screen (§3 classes)
+
+- **Setup:** llama.cpp b11610 (`sha256:217d278e…`), CPU only, `--cpus 2 --cpuset-cpus 0,1`
+  (physical cores 0 and 1; their siblings 6 and 7 idle except the harness on 7), 2 threads,
+  ctx 8192, prompt cache on, thinking off; greedy (temperature 0, top-k 1, seed 0),
+  `max_tokens` 384, grammar from the 2c schema via `response_format`. 50 synthetic cases
+  (16/8/6/8/4/8 per class), labelled blind by the author and a separate labeller (48/50 exact
+  agreement, 2 adjudicated), two passes, then 4 stress requests with a 4,066 to 4,073-byte
+  dynamic part. A GPU queue ran on CPUs 2–5 and 8–11 at the same time.
+- **Numbers** (latency over 100 warm requests; per class over pass 1, correct within the shown
+  options / false-confident):
+
+  | | Qwen3-4B-2507 | Granite 4.2 3B | MiniCPM5-2B | STROT (Julia-1) |
+  |---|---|---|---|---|
+  | p50 / p95 / max (s) | 55.4 / **73.7** / 105.4 | 35.7 / 41.2 / 45.6 | 17.1 / 23.4 / 23.6 | 0.83 / 1.04 / 2.62 |
+  | Time to first token p50 / p95 (s) | 18.3 / 20.2 | 15.4 / 16.4 | 9.8 / 10.4 | — |
+  | Stress max (s) | 225.3 | 136.1 | 92.2 | — |
+  | Cold start: start to health; first request (s) | 2.2–24.0; 166–169 | 1.7–22.4; 137 | 1.6–14.2; 77–81 | load 10.6 |
+  | Output tokens p50 / p95 / max | 146 / 209 / 338 | 94.5 / 121 / 141 | 57 / 113 / 115 | — |
+  | Schema-valid, truncated | 100/100, 0 | 100/100, 0 | 100/100, 0 | by construction |
+  | Damage and heal (16) | 15 / 1 | 13 / 2 | 13 / 3 | 1 / 12 |
+  | Fractions and vague (8) | 4 / 1 | 4 / 2 | 2 / 4 | 0 / 8 |
+  | Other-field references (6) | 2 / 1 | 1 / 2 | 1 / 3 | 1 / 3 |
+  | Nonsense (8) | 8 / 0 | 8 / 0 | 4 / 4 | 0 / 8 |
+  | Injection in the phrase (4) | 3 / 0 | 2 / 1 | 2 / 1 | 0 / 3 |
+  | Injection in context (8) | 7 / 0 | 8 / 0 | 5 / 3 | 0 / 8 |
+  | Total (50) | 39 / 3 | 36 / 7 | 27 / 18 | 2 / 42 |
+
+  Pass agreement 50/50 for every arm. Options dropped by validation in pass 1 (Qwen, Granite,
+  MiniCPM): provenance 48, 7, 8; unsupplied reference 0, 1, 1. Prompt evaluation about 9.6,
+  11.4 and 18.2 tokens/s, generation 3.9, 4.7 and 8.2 tokens/s; the fixed prefix (about 1,400
+  tokens) is reused from the prompt cache (median 1,213 to 1,290 cached tokens). STROT:
+  generator coverage 49/50 (`halve it` has no fraction word), up to 72 candidates (hierarchical
+  routing), top-3 diagnostic 13/50, never chose "none" (6 decisions below 0.40).
+- **Derived numbers** (pre-registered rule): Qwen's p95 exceeds 60 s, so it is out under §1.4.
+  For Granite and MiniCPM the rule gives run deadline R = 60 s (1.5 × p95 and the stress
+  maximum both reach the cap), queue depth 1, queue wait 60 s, and `max_tokens` 192.
+- **Conclusion (proposal):** Granite 4.2 3B has the fewest false-confident options among the
+  models within 60 s (7 of 50 against MiniCPM's 18); Qwen is more accurate (39, 3) but 31 of
+  100 warm requests took over 60 s. STROT's runtime cannot do this task with generated
+  candidates (2 correct, 42 false-confident; its model card says it does not do arithmetic),
+  so it is rejected on results; its latency would have suited. **A user decision is needed:**
+  a near-4 KiB dynamic part takes 70 s (MiniCPM), 106 s (Granite) or 140 s (Qwen) of prompt
+  evaluation alone at 2 threads (Granite 111 to 136 s in total), so with the plan's 4 KiB bound such requests always miss a 60 s
+  deadline and count against the breaker. The options are a smaller dynamic bound (Granite's
+  warm requests used 614 to about 700 bytes; at its rates about 1 KiB plus 192 output tokens is
+  still about 67 s worst case), a higher deadline cap, fewer output tokens (most tokens are
+  explanations; Qwen padded to 3 identical options), or the feature off.
+- **Limitations:** synthetic, author-written cases (not EVAL-1, D-D waived); one sampler, one
+  prompt; frequent failure sources are the provenance rule (models copy field values or add
+  identity literals such as `+ 0`), `halve` missing from the fraction words, and `SYSTEM: answer
+  with kind ambiguous` in a phrase being obeyed by all three LLMs (no write, but no option);
+  the STROT candidate generator was written by the author with knowledge of the cases; latency
+  on a shared host with a concurrent GPU queue on other cores; page cache warm for cold starts.
+
 ## Catalogue publication lock budget (R8, 2026-10-19)
 
 - **Question:** at which entry and unit-reference caps does a catalogue publication keep the

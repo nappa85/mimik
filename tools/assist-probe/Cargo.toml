@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["stub", "p-base", "p-genai", "p-rig", "p-oai", "p-failsafe"]
+
+[profile.release]
+lto = "thin"
+strip = true

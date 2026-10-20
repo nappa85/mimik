@@ -21,6 +21,8 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 - **ASSIST-L17** [script] The module has no JavaScript linter or unit tests in CI: a Rust token lint (no HTML sinks, no styling, attribute names from an allowlist, no code from strings) and the Chromium runs cover it. Answers that are not JSON (busy 503, 403, network failure) show a generic alert under the cell, without the busy page's retry form.
 - **ASSIST-L18** [script] A link followed right after editing a field can abort that field's save on leaving (the navigation cancels the request; the server may or may not have written it), and Save clicked after the leave-save already answered sends a second, harmless "No change" request. A page whose formula sections change shape is not exercised in Chromium (ASSIST-L16 is covered by reading only).
 - **ASSIST-L19** [script] After a save aborted at 30 s or lost to a network failure the write may still have landed; a retry then answers 409 whose saved value equals the draft (the alert shows it; Enter again is a harmless overwrite).
+- **ASSIST-L20** [models] At 2 threads a dynamic prompt part near the 4 KiB bound takes 111 to 136 s with Granite 4.2 3B (2b), beyond the 60 s run-deadline cap; a user decision on the bound, the cap or the output length is open.
+- **ASSIST-L21** [models] The planned forwarder (socat on a bridge with masquerading off) can reach host addresses; it only connects to its fixed upstream. The model network needs `inhibit_ipv4` to keep the model from host services (measured in 2b).
 - **ASSIST-L3** [pages] The scribble excerpt under a cell is cut at a character boundary and can split a grapheme cluster; cosmetic. Closed by a segmentation crate if one is otherwise needed.
 - **ASSIST-L4** [models] The model quality bar is waived for the POC (D-D); the assistant is not certified. Revisit before release (a known-answer set is the proposed route).
 - **ASSIST-L5** [storage] History has no cap and each changed Enter writes a revision (D-U), so storage is unbounded. A per-account write-rate limit or storage guard is required before release.
@@ -130,7 +132,7 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 
 ## Models and evaluation
 
-- **C1** [models] No model in the app (no provider client, tool loop or inference runtime). Closed by assisted plan steps 2b–2c under D-H.
+- **C1** [models] No model in the app (no provider client, tool loop or inference runtime). Closed by assisted plan step 2c under D-H; 2b measured the candidates (`docs/results.md`; choices pending review).
 - **MOD-1** [models] All model results so far are synthetic (Lantern Reach, 18–28 cases). Closed by source-checked MÖRK BORG and Pathfinder held-out cases, separating extraction, retrieval, context and reasoning failures.
 - **MOD-2** [models] The broad screen is unfinished: Mapika-2B/4B, Tacit-4B, Kev-4B, Clef/Clef-Flash, DJev and Phi-4-mini were never run. Admit or block each with a reason.
 - **MOD-3** [models] Calibration is untested on RPG data: probabilities ≥ 0.9 were wrong in 8–28 of 58–64 observations and option order flips winners. Do not gate on confidence without held-out calibration.
