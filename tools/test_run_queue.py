@@ -946,6 +946,7 @@ class RunnerEnvTests(Harness):
         self.assertEqual(env["TZ"], ":/etc/localtime")
         self.assertEqual((env["HOME"], env["MIMIK_MODEL_ROOT"]), ("/home/test", str(self.models)))
         self.assertEqual((env["CTX"], env["MAX_TURNS"], env["QUIET"]), ("24576", "12", "1"))
+        self.assertNotIn("CPUSET", env)  # not set here: no pinning is invented
         self.assertEqual(env["PREFLIGHT_CASE"], "dev-001")
         self.assertEqual(env["CASES_FILE"], str(SUBSET))
         self.assertTrue(env["HASH_CACHE"].endswith("hash-cache.txt"))
@@ -953,6 +954,14 @@ class RunnerEnvTests(Harness):
         self.assertEqual(recorded, {"CTX": "24576", "MAX_TURNS": "12"})
         for line in self.console:
             self.assertNotIn("dev-0", line)
+
+    def test_inherited_cpuset_reaches_the_runner(self):
+        """Before: CPUSET was dropped by the allowlist, so the runner could not pin."""
+        self.env["CPUSET"] = "2-5,8-11"
+        manifest = self.make(queue_doc([arm("a")]), at(2026, 10, SAT, 10, 0)).run()
+        self.assertEqual(manifest["arms"][0]["state"], "complete")
+        _, env = self.launcher.launches[0]
+        self.assertEqual(env["CPUSET"], "2-5,8-11")
 
     def test_queue_file_validation(self):
         bad = {
