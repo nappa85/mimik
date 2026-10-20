@@ -107,7 +107,8 @@ implementation for both).
   running, its options are dropped, and apply refuses it, even when the stored value is
   unchanged (scribble A → scribble B, or scribble → typed value). A job request for an older
   note never supersedes a newer one. A newer job of the same account, for any target,
-  supersedes its running or queued job (the latest edit wins).
+  supersedes its running or queued job (the latest edit wins, by origin revision, which is a
+  sheet-wide counter, not by request arrival).
 - **Request builder:** one function renders a typed `Request` (phrase, target, context items).
   The instructions and schema are a fixed prefix, byte-identical across requests (tested), so
   llama-server can reuse its prompt cache; the dynamic part is at most 4 KiB, measured in
@@ -132,15 +133,18 @@ implementation for both).
   not supplied, or to an excluded type drops the option. Literal provenance: the magnitude of
   each literal must equal a number found in the phrase by the phrase-number lexer, or the
   target's current value, or (only when the phrase contains a fraction or percent word from a
-  fixed list: EN half, third, quarter, percent, `%`; IT metà, mezzo, terzo, quarto, percento,
-  per cento) one of 2, 3, 4 and 100 (the only other exception is the step-3 catalogue
+  fixed list, matched as whole words after case folding and diacritic folding: EN half,
+  third, quarter, percent, `%`; IT metà (also `meta`), mezzo, mezza, terzo, terza, quarto,
+  quarta, percento, per cento) one of 2, 3, 4 and 100 (the only other exception is the step-3 catalogue
   provenance extension, §1.5). The **phrase-number lexer** is new code with its own tests,
   separate from `entry::read` (which parses whole entries only) and not changing number-entry
-  admission: after NFKC (full-width digits become ASCII), a number is a maximal run of ASCII
-  digits whose neighbours are not letters, digits, or a `.` or `,` followed by a digit, and
-  that is not followed by `e`/`E` and a digit; so `heal 15` and `15%` give 15, `take −15
+  admission: only decimal digits (Unicode `Nd`, such as full-width digits) are folded to ASCII
+  digits, never superscripts or circled digits (no general NFKC); a number is a maximal run of
+  ASCII digits that has no letter on either side, is not adjacent on either side to a `.` or
+  `,` touching another digit, and is not followed by `e`/`E` and a digit; so `heal 15` and `15%` give 15, `take −15
   damage` gives 15 (signs are not part of the token; U+2212, NBSP and U+202F are separators
-  as in ASSIST-1), while `1.5`, `1,000`, `1e2`, `3d6` and `15hp` give nothing. A leading zero
+  as in ASSIST-1), `5.` at the end of a sentence gives 5, while `1.5`, `x.5`, `1,000`, `1e2`,
+  `3d6`, `15hp` and `15²` give nothing. A leading zero
   (`007`) gives nothing; a run longer than 18 digits gives nothing. This rule and the output
   schema are frozen before the 2b screen. The result then
   passes the integer field's own admission, without the scribble fallback. The display shows
@@ -187,20 +191,29 @@ implementation for both).
   only transport errors, HTTP 4xx and 5xx, a response over the body bound, and run-deadline
   expiry. A completed, bounded HTTP 2xx exchange is a success whatever its content (an answer
   whose options are all dropped still resets the count and closes a half-open breaker);
-  supersession and cancellation are neutral. Three consecutive counted failures open it for 2
+  supersession, cancellation and queue-wait expiry (the model was never called) are
+  neutral. Three consecutive counted failures open it for 2
   minutes; then one half-open probe job decides (success closes, failure reopens; a cancelled
-  probe leaves it half-open and the next job becomes the probe). While open
+  probe clears the in-flight probe flag, leaves it half-open, and the next job becomes the
+  probe). While open
   no request is sent, the job answers "the assistant is unavailable right now", and number
   entry, notes and Undo work as usual. Implemented with a maintained crate if one fits
   (`failsafe` is checked in 2b), otherwise a small state machine with an injectable clock.
 - **Routes:** `POST /private-sheets/{id}/interpretations` (exactly `csrf` and `note`, the
-  `<revision>:<address>` note key already used by switch and Undo and present in the saved
-  page's markup) starts a job for that note. Order as for the other sheet routes: session and
-  CSRF, rights (403), keys and malformed values (400), then, before any cancellation or
-  capacity handling, the note must be the target's current note and `unresolved` (409
-  otherwise; unrelated later revisions are fine), then supersession, then capacity (429), then
-  the breaker (503). The check and the enqueue happen under one lock against concurrent saves.
-  A repeated request for the origin of an existing live job returns that job. 202 with the job
+  note key already used by switch and Undo and present in the saved page's markup) starts a
+  job for that note. A key is resolved against the snapshot at its own revision: a typed key
+  directly, an indexed row-cell key (`<revision>:<f>.<r>.<p>`) by mapping the row index to its
+  host ID at that revision, giving the typed address with host ID. Order as for the other
+  sheet routes: session and CSRF, rights (403), keys and malformed values (400); then, before
+  any cancellation or capacity handling, the typed address's current note must be that
+  revision's `unresolved` note (409 otherwise; unrelated later revisions are fine, a row moved
+  since is found by host ID, a removed row is 409); then a repeat for the origin of an existing
+  job that is live or finished with unexpired options returns that job; then a start whose
+  origin revision is lower than that of the account's live job on the sheet is 409; then the
+  breaker (503) and capacity (429), computed as if the superseded job were already gone, so a
+  refused start never cancels anything; then supersession and enqueue. The in-memory job-table
+  lock covers this check-then-enqueue and the post-commit cancellation hook of every save; it
+  is never held across a database wait, the permit wait or the model call. 202 with the job
   ID. `GET
   …/interpretations/{job}` polls (the module polls at 500 ms, backing off to 2 s, and stops on
   unload, supersession or a terminal state); an evicted or expired job answers "ask again".
@@ -357,16 +370,17 @@ approach; rejected candidates recorded.
 Scope: trait, stub, adapter; the client policy; worker, budgets, records and breaker; the job,
 poll and apply routes with origin and read/write-set binding; the UI. Tests (stub or fake
 server unless stated):
-- output: schema-invalid, grammar-invalid and truncated JSON; more than 3 options, 9 terms or
-  depth 4; literal provenance (`84 + 915` dropped; `5` from "heal 15" dropped; U+2212, NBSP);
+- output: schema-invalid, grammar-invalid and truncated JSON; more than 3 options; a tree deeper
+  than 3 below the root (which is also what refuses a ninth leaf); literal provenance (`84 + 915` dropped; `5` from "heal 15" dropped; U+2212, NBSP);
   references to a derived, text, multiline, notes or list-cell field, to an unsupplied field
   and to an unknown value; `/` with each rounding mode on negatives; `exact` with a remainder;
   division by zero; `i64` boundary and intermediate overflow; a non-tree or string expression;
   `ambiguous` with more than 3 readings or a reading over 120 characters dropped, readings
   escaped and never applicable;
-- lexer: `heal 15`, `take −15 damage`, `15%`, `1.5`, `1,000`, `1e2`, `3d6`, `15hp`, `007`,
-  full-width digits, 19 digits; "half of 84" admits 2, "metà" admits 2, a phrase without a
-  fraction word does not;
+- lexer: `heal 15`, `take −15 damage`, `15%`, `1.5`, `x.5`, `5.`, `1,000`, `1e2`, `3d6`,
+  `15hp`, `15²`, `①`, `007`, full-width digits, 19 digits; "half of 84" admits 2, "metà" and
+  "meta" admit 2, "halfway" and "quarterly" do not, a phrase without a fraction word does
+  not;
 - input: a parsed entry and a sign-led entry never start a job; the phrase comes from the
   stored note, not the request; the fixed prefix is byte-identical across requests; the
   dynamic part stays within 4 KiB and drops whole items; excluded field types never appear in
@@ -377,16 +391,21 @@ server unless stated):
   through the legacy full form; reversed job-start requests; another edit after the job
   finished; a late answer after cancellation — none may revive or apply the old proposal; a
   delayed start for scribble A neither cancels nor restarts B's job (409); a repeated start for
-  the same origin returns the same job; a job for another target of the same account
-  supersedes the first;
-- budgets: the account's second job → 429; supersession before capacity; cancellation (the
+  the same origin (a double click) returns the same job and cancels nothing; a job for another
+  target of the same account supersedes the first; reversed starts across two targets (B's
+  start first, then A's older one) → A is 409 and B keeps running; an indexed row-cell key
+  after the row was moved resolves to the same host, after it was removed → 409; a save racing
+  a start leaves either the job cancelled or the start refused, never a live job for a stale
+  note;
+- budgets: a queue full of other accounts' jobs → 429, and the refused start cancels nothing;
+  a breaker refusal cancels nothing; supersession before capacity; cancellation (the
   fake server sees the disconnect and the slot is free); queue wait and run deadline expiry;
   64 records and the evicted-job answer; option expiry at 10 minutes;
 - breaker (injectable clock): three transport failures open it, two do not; 100 dropped or
   nonsense answers never open it; supersession and cancellation never count; one half-open
   probe while others are refused; probe success closes, failure reopens; a 2xx with all
-  options dropped resets the count and closes a half-open breaker; a cancelled probe leaves it
-  half-open; mixed sequences (failure, success, failure) do not open it; while open, number
+  options dropped resets the count and closes a half-open breaker; a cancelled probe clears the
+  probe flag and leaves it half-open; a queue-wait expiry does not count; mixed sequences (failure, success, failure) do not open it; while open, number
   entry, notes and Undo work and the poll says the assistant is unavailable;
 - client: a host name, `localhost`, `127.1`, `::ffff:127.0.0.1`, userinfo or a zone ID refused;
   `HTTP_PROXY` set and a 302 from the fake server never reach anything but the endpoint;
