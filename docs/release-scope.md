@@ -85,7 +85,8 @@ succeeded for the same revision:
   catalogues, assisted entry, rejections, restart and persistence, with synthetic inputs; then
   an offline rebuild of the corresponding source with no dependency cache;
 - **browser-smoke:** the same binary in offline Chromium at 1280×720 and 390×844: forms,
-  long text, overflow and reflow, sharing, source review and sheet editing;
+  long text, overflow and reflow, sharing, source review and sheet editing, runtime sheets
+  with and without JavaScript (the sheet module under its strict CSP);
 - **lan-smoke:** the same binary on isolated networks with separate clients, a denied subnet
   and an HTTPS reverse proxy, including Secure cookies and rendered QR codes.
 

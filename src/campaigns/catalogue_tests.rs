@@ -451,7 +451,12 @@ async fn sheet_links_its_catalogues_and_routes_follow_the_sheet_read_matrix() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(!create.contains("catalogues-heading") && !create.contains("/catalogue/"));
-    assert!(!sheet.contains("<script"), "sheet pages load no script");
+    assert!(
+        !sheet
+            .replace(super::script_tests::MODULE_TAG, "")
+            .contains("<script"),
+        "sheet pages load only the sheet module"
+    );
     let reader = |auth: usize| (world.app.clone(), world.auth[auth].clone());
     // Custodian (3) and Master (2) read; another player (4), an outsider (5) and the
     // production Owner (1) receive the uniform catalogue refusal.

@@ -190,6 +190,10 @@ fn router_with_sessions(
         .merge(crate::campaigns::web::routes())
         .route("/assets/app.css", get(crate::web::css_asset))
         .route("/assets/logo.png", get(crate::web::logo_asset))
+        .route(
+            "/assets/sheet-assist.js",
+            get(crate::campaigns::web::script_asset),
+        )
         .fallback(|| async { StatusCode::FORBIDDEN })
         .with_state(state)
         .layer(DefaultBodyLimit::max(8192))
@@ -437,9 +441,20 @@ fn normalize(mut response: Response) -> Response {
         header::X_CONTENT_TYPE_OPTIONS,
         "nosniff".parse().expect("static header"),
     );
+    // Sheet pages and their JSON answers (step 2a) get the strict policy; an error page
+    // rebuilt above, or from outer middleware, lost the marker and keeps the default one.
+    let policy = if response
+        .extensions()
+        .get::<crate::campaigns::web::SheetPage>()
+        .is_some()
+    {
+        crate::campaigns::web::SHEET_CSP
+    } else {
+        "frame-ancestors 'none'"
+    };
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
-        "frame-ancestors 'none'".parse().expect("static header"),
+        policy.parse().expect("static header"),
     );
     response.headers_mut().insert(
         header::X_FRAME_OPTIONS,

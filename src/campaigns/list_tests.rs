@@ -2321,7 +2321,13 @@ fn hostile_definition() -> Value {
 /// No injected element, and every payload reads back verbatim from its own context.
 fn assert_inert(html: &str, context: &str, values: &[(&str, &str)]) {
     let page = scraper::Html::parse_document(html);
-    for tag in ["script", "b", "i", "u"] {
+    // The sheet module is the one script a saved, editable page loads (step 2a).
+    for tag in [
+        r#"script:not([src="/assets/sheet-assist.js"])"#,
+        "b",
+        "i",
+        "u",
+    ] {
         assert_eq!(
             page.select(&selector(tag)).count(),
             0,
@@ -2391,7 +2397,13 @@ async fn list_payloads_escaped_in_context() {
     edit(&setup, &second, changed).await.unwrap();
     let history = history_page(&setup, 3).await;
     let page = scraper::Html::parse_document(&history);
-    for tag in ["script", "b", "i", "u"] {
+    // The sheet module is the one script a saved, editable page loads (step 2a).
+    for tag in [
+        r#"script:not([src="/assets/sheet-assist.js"])"#,
+        "b",
+        "i",
+        "u",
+    ] {
         assert_eq!(page.select(&selector(tag)).count(), 0, "history: <{tag}>");
     }
     assert_eq!(

@@ -275,10 +275,13 @@ async fn formula_sheet_view_shows_derived_values_and_advisory_checks() {
     assert!(checks.contains("Lucky must be positive."));
     assert!(
         html.contains(
-            "<a href=\"#advisory-checks\">Advisory checks: 0 violated, 0 not evaluated</a>"
+            "<a id=\"checks-link\" href=\"#advisory-checks\">Advisory checks: 0 violated, 0 not evaluated</a>"
         )
     );
-    assert!(section(&html, "formula-results").contains("Computed from saved revision 1"));
+    assert!(
+        section(&html, "formula-results")
+            .contains("Computed from saved revision <span id=\"derived-revision\">1</span>")
+    );
     assert!(html.contains(
         "<summary>How this is computed</summary><pre class=\"evidence-text\">\n6 - vitality</pre>"
     ));
@@ -503,7 +506,12 @@ async fn formula_text_is_escaped() {
         ("history", &history),
         ("violated", &violated),
     ] {
-        assert!(!html.contains("<script"), "{context}: raw script tag");
+        assert!(
+            !html
+                .replace(super::script_tests::MODULE_TAG, "")
+                .contains("<script"),
+            "{context}: raw script tag"
+        );
         assert!(!html.contains("<b>"), "{context}: raw option label markup");
         assert_escaped(html, "<script>Label", context);
         assert_escaped(html, "<script>alert(1)</script>", context);

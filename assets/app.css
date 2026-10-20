@@ -85,3 +85,4 @@ article.panel { margin-bottom: 1rem; }
 .entry-kept { border-left: 4px solid #a6382e; padding: .5rem 1rem; margin: .6rem 0; overflow-wrap: anywhere; }
 .entry-kept textarea { width: 100%; }
 .quick-add { margin: .8rem 0; min-width: 0; }
+.sheet-fieldset { min-width: 0; }

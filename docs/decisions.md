@@ -82,6 +82,11 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 - **ASSIST-18** (2026-10-20, coordinator default) A derived value that could not be computed also flags the revision ("N derived values not computed"); unknown inputs and evaluation errors both count as "not evaluated", with the code in the checks section.
 - **ASSIST-19** (2026-10-20, coordinator default) "Each history revision" is each revision page (`/history/<n>`), flagged from the one evaluation that page already does; the history list evaluates nothing (RR-L1).
 - **ASSIST-20** (2026-10-20, coordinator default) The create page shows no flag (nothing is saved yet); a refused draft's re-render shows the saved revision's flag, never one of the draft.
+- **ASSIST-21** (2026-10-20, coordinator default) A JSON save answer carries the validity flag of the revision it describes, from the same evaluation as its derived values and checks; the module adds, rewrites or removes `#validity` only from an answer at least as new as the derived values and checks shown, so the flag never contradicts them.
+- **ASSIST-22** (2026-10-20) The module asks for JSON with exactly one `Accept: application/json` header on the Name, General notes, field and cell routes; the answer describes the live revision (200 for saved and "No change", 409 and 422 for refusals) and every integer, count and revision in it is a string. Any other request gets the PRG page; new row, quick-add, row actions, switch and Undo stay PRG.
+- **ASSIST-23** (2026-10-20, coordinator default) After a refused save with JavaScript (409, 422) the draft stays in its control and that unit's `base` moves to L; leaving the field no longer sends it, only Enter or Save does, so a conflict is overwritten consciously, as without JavaScript.
+- **ASSIST-24** (2026-10-20, coordinator default) The switch and Undo of a unit saved with JavaScript post through hidden forms of their own carrying the answer's revision; a page post (switch, Undo, row action, quick-add, new row) waits until every save in flight or queued has its answer.
+- **ASSIST-25** (2026-10-20, coordinator default) A "No change" answer leaves the controls as typed (they equal the saved value); only a saved answer replaces the control text, and only when the player has not typed since the request.
 
 ## Formulas and sheet values
 
