@@ -23,9 +23,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Blockers
 
-- **GPU out of service** (cooling fault, 2026-10-16): re-paste it, then rerun the 20 s
-  diagnostic (aim for a junction 15–25 °C above the edge). Until then model runs are CPU-only
-  (`device: cpu`, no `/dev/dri`).
+- None.
 
 ## Pending user questions
 
@@ -40,6 +38,12 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Other next actions
 
+- **GPU back in service (2026-10-20, after the re-paste):** at 143 W for 5 min with the fan
+  on manual 255 and a room fan, the junction plateaus at 77–79 °C (max 83), edge 57 °C, gap
+  about 21 °C. On automatic fan it reaches 85 °C in 22 s, so GPU runs need the manual fan
+  after every reboot (the queue refuses otherwise). Switch the model tooling back from the
+  CPU-only default (`tools/model_registry.py`, `tools/run_tool_loop_benchmark.sh`
+  `DEVICE=cpu`). Diagnostic: `LIMIT=90 DUR=300 target/agent-tools/gpu_diag.sh`.
 - 2a module test gaps from the last review (Minor): no browser case for the `requestSubmit`
   constraint failure, the `dropped()` wording, or the queue drop after an unreadable 409 /
   kept after a 422; `sheet_json::integer` indexes fields directly. No JS linter in CI
