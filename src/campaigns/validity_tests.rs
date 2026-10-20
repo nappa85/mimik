@@ -2,17 +2,49 @@
 //! sheet header when a check is violated, not evaluated or in error, or when no checks cover
 //! its pin. Computed on view from the saved revision, never stored; it never blocks a save
 //! and never hides or changes a value.
-use super::formula_tests::{Setup, form, formula_definition, setup};
+use super::cell_tests::{document_post, hold};
+use super::formula_tests::{Setup, body, form, formula_definition, setup};
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 
-const FLAG: &str = "<strong>Not validated</strong>";
+const FLAG: &str = "Not validated";
 
 /// The flag paragraph, or `None` when the page shows no flag.
 fn flag(html: &str) -> Option<&str> {
     let start = html.find("<p id=\"validity\"")?;
     let end = start + html[start..].find("</p>").unwrap();
     Some(&html[start..end])
+}
+
+/// The flag's text without its tags, or `None` when the page shows no flag.
+fn words(html: &str) -> Option<String> {
+    let shown = flag(html)?;
+    let mut text = String::new();
+    let mut tag = false;
+    for c in shown.chars() {
+        match c {
+            '<' => tag = true,
+            '>' => tag = false,
+            _ if !tag => text.push(c),
+            _ => {}
+        }
+    }
+    Some(text)
+}
+
+/// A unit form as posted by hand (`csrf`, `base`, `value`, plus `extra`).
+fn unit(base: &str, value: &str, extra: &[(&str, &str)]) -> Vec<(String, String)> {
+    let mut pairs = vec![
+        ("csrf".to_owned(), "a".repeat(64)),
+        ("base".to_owned(), base.to_owned()),
+        ("value".to_owned(), value.to_owned()),
+    ];
+    pairs.extend(
+        extra
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+    );
+    pairs
 }
 
 async fn saved(setup: &Setup) -> (i64, Value) {
@@ -61,10 +93,13 @@ async fn violated_check_flags_and_a_flagged_sheet_still_saves() {
     let (_, html) = setup.get("/private-sheets/1").await;
     let shown = flag(&html).expect("a violated check flags the sheet");
     assert!(
-        shown.contains(&format!("{FLAG} (saved revision 2): 1 check violated.")),
+        words(&html)
+            .unwrap()
+            .starts_with(&format!("{FLAG} (saved revision 2): 1 check violated.")),
         "{shown}"
     );
-    assert!(shown.contains("<a href=\"#advisory-checks\">Why it is not validated</a>"));
+    assert!(shown.contains("<strong>Not validated</strong>"), "in words");
+    assert!(shown.contains("<a href=\"#advisory-checks\">1 check violated</a>"));
     assert!(shown.contains("This flag never blocks saving."));
     // In the header: before any form, so it reads first without script or styles.
     assert!(html.find("id=\"validity\"").unwrap() < html.find("<form").unwrap());
@@ -88,7 +123,7 @@ async fn violated_check_flags_and_a_flagged_sheet_still_saves() {
     assert_eq!((revision, data["vitality"].clone()), (3, json!(12)));
     let (_, html) = setup.get("/private-sheets/1").await;
     assert!(
-        flag(&html)
+        words(&html)
             .unwrap()
             .contains("(saved revision 3): 1 check violated.")
     );
@@ -111,12 +146,16 @@ async fn unknown_input_flags_the_check_not_evaluated() {
     assert_eq!(status, StatusCode::SEE_OTHER);
     let (_, html) = setup.get("/private-sheets/1").await;
     let shown = flag(&html).expect("an unknown input flags the sheet");
-    assert!(
-        shown.contains(&format!(
-            "{FLAG} (saved revision 1): 1 check not evaluated; 2 derived values not computed."
-        )),
-        "{shown}"
+    assert_eq!(
+        words(&html).unwrap(),
+        format!(
+            "{FLAG} (saved revision 1): 1 check not evaluated; 2 derived values not computed. \
+             This flag never blocks saving."
+        ),
     );
+    // Each reason links to the section that explains it.
+    assert!(shown.contains("<a href=\"#advisory-checks\">1 check not evaluated</a>"));
+    assert!(shown.contains("<a href=\"#formula-results\">2 derived values not computed</a>"));
 }
 
 #[tokio::test]
@@ -141,12 +180,10 @@ async fn evaluation_error_flags_the_sheet() {
     assert_eq!(status, StatusCode::SEE_OTHER);
     let (_, html) = setup.get("/private-sheets/1").await;
     assert!(html.contains("<code>division_by_zero</code>"));
-    let shown = flag(&html).expect("an evaluation error flags the sheet");
-    assert!(
-        shown.contains(&format!(
-            "{FLAG} (saved revision 2): 1 check not evaluated."
-        )),
-        "{shown}"
+    assert!(flag(&html).is_some(), "an evaluation error flags the sheet");
+    assert_eq!(
+        words(&html).unwrap(),
+        format!("{FLAG} (saved revision 2): 1 check not evaluated. This flag never blocks saving.")
     );
 }
 
@@ -173,7 +210,10 @@ async fn pins_without_checks_flag_the_sheet() {
     formula_free["fields"] = fields.into();
     formula_free["groups"][0]["fields"] = ids.into();
     for (definition, anchor) in [
-        (derived_only, Some("<a href=\"#advisory-checks\">")),
+        (
+            derived_only,
+            Some("<a href=\"#advisory-checks\">its definition declares no checks</a>"),
+        ),
         (formula_free, None),
     ] {
         let setup = setup(&definition).await;
@@ -182,7 +222,7 @@ async fn pins_without_checks_flag_the_sheet() {
         assert_eq!(status, StatusCode::OK);
         let shown = flag(&html).expect("no checks: coverage unavailable");
         assert!(
-            shown.contains(&format!(
+            words(&html).unwrap().starts_with(&format!(
                 "{FLAG} (saved revision 1): its definition declares no checks."
             )),
             "{shown}"
@@ -215,7 +255,7 @@ async fn history_shows_the_flag_per_revision() {
             .await;
         assert_eq!(status, StatusCode::OK);
         match expected {
-            Some(text) => assert!(flag(&html).unwrap().contains(text), "revision {revision}"),
+            Some(text) => assert!(words(&html).unwrap().contains(text), "revision {revision}"),
             None => assert_eq!(flag(&html), None, "revision {revision}"),
         }
     }
@@ -251,8 +291,117 @@ async fn refused_draft_shows_the_saved_revision_flag_and_create_shows_none() {
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(
-        flag(&html)
+        words(&html)
             .unwrap()
             .contains("(saved revision 2): 1 check violated.")
     );
+    // A stale full-form save (409) re-renders a passing draft beside the saved flag.
+    let (status, html) = setup
+        .post("/private-sheets/1", form(1, "4", Some("2")))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(html.contains("value=\"4\""), "the draft is kept");
+    assert!(
+        words(&html)
+            .unwrap()
+            .contains("(saved revision 2): 1 check violated."),
+        "the 409 flag is the saved revision's"
+    );
+    // A refused unit save (422) of a passing value, the same.
+    let (status, html) = setup
+        .post(
+            "/private-sheets/1/fields/vitality",
+            unit("2", &"4".repeat(201), &[]),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(html.contains(&"4".repeat(201)), "the unit draft is kept");
+    assert!(
+        words(&html)
+            .unwrap()
+            .contains("(saved revision 2): 1 check violated."),
+        "the unit 422 flag is the saved revision's"
+    );
+}
+
+/// Sol review: every check passes but an unrelated derived value fails (`10 / vitality`
+/// with vitality 0). The flag names only that reason and links to the derived values
+/// section, which says where each failure is explained.
+#[tokio::test]
+async fn a_failed_derived_value_alone_flags_and_its_link_explains_it() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let mut definition = formula_definition();
+    definition["fields"].as_array_mut().unwrap().push(json!({
+        "id": "ratio", "label": "Ratio", "control": "integer", "nullable": false,
+        "mapping": {"state": "mapped", "regions": [{"source_id": 1, "page_id": 1, "unit_id": 1}]},
+        "formula": {"expr": "10 / vitality", "rule_ids": [],
+                    "evidence": {"state": "unresolved", "reason": "Synthetic"}}}));
+    definition["groups"][0]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push("ratio".into());
+    let setup = setup(&definition).await;
+    setup.create().await;
+    let (_, html) = setup.get("/private-sheets/1").await;
+    assert_eq!(
+        flag(&html),
+        None,
+        "vitality 4: everything computed and passed"
+    );
+    let (status, _) = setup
+        .post("/private-sheets/1", form(1, "0", Some("2")))
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let (_, html) = setup.get("/private-sheets/1").await;
+    assert!(html.contains("0 violated, 0 not evaluated, 2 passed."));
+    assert_eq!(
+        words(&html).unwrap(),
+        format!(
+            "{FLAG} (saved revision 2): 1 derived value not computed. This flag never blocks saving."
+        )
+    );
+    let shown = flag(&html).unwrap();
+    assert!(
+        shown.contains("<a href=\"#formula-results\">1 derived value not computed</a>"),
+        "{shown}"
+    );
+    // The destination explains it: it names the failed value and links to its reason.
+    let start = html.find("id=\"formula-results\"").unwrap();
+    let results = &html[start..start + html[start..].find("</section>").unwrap()];
+    assert!(
+        results.contains(
+            "1 derived value not computed: each shows \u{201c}Not computed\u{201d} and its \
+             reason next to its field, starting with <a href=\"#label-ratio\">Ratio</a>."
+        ),
+        "{results}"
+    );
+    assert!(html.contains("<dt id=\"label-ratio\">"));
+    assert!(html.contains("<code>division_by_zero</code>"));
+}
+
+/// The busy page (503) renders no sheet and so no validity flag.
+#[tokio::test]
+async fn the_busy_page_shows_no_validity_flag() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&formula_definition()).await;
+    setup.create().await;
+    let (status, _) = setup
+        .post("/private-sheets/1", form(1, "11", Some("2")))
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let holder = hold(3);
+    let response = document_post(
+        &setup,
+        "/private-sheets/1/fields/vitality",
+        unit("2", "12", &[]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let busy = body(response).await;
+    assert!(busy.contains("Server busy: nothing was saved."), "{busy}");
+    assert_eq!(flag(&busy), None);
+    assert!(!busy.contains("Not validated"));
+    holder.await.unwrap();
 }

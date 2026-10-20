@@ -294,8 +294,10 @@ and an orphaned cell's kept draft, each asserting its `readonly` textareas. Reru
 
 RR-3 with ASSIST-4 and ASSIST-17 to ASSIST-20. The header of a saved sheet shows
 `Not validated (saved revision N): <reasons>. This flag never blocks saving.` (`#validity`,
-plain text with a link to the section that explains it) unless every declared check of a
-covered pin passed. Reasons, in this order, separated by semicolons:
+plain text; each reason links to the section that explains it: checks to "Advisory checks",
+derived values and refused input to "Derived values") unless every declared check of a
+covered pin passed. When derived values were not computed, "Derived values" names the count
+and links to the first one, whose own block gives its reason. Reasons, in this order, separated by semicolons:
 
 - "its definition declares no checks": a supported runtime pin that is formula-free or has
   no constraints;
