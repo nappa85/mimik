@@ -84,7 +84,32 @@ hosted providers, GPU, models above about 4B.
 ### 1.4 Interpretation service (2b, 2c)
 
 - **Shape:** an `Interpreter` trait, a `StubInterpreter` and a crate adapter. Assistant off is
-  the default and the app stays fully usable with it off.
+  the default and the app stays fully usable with it off. The model never blocks a save: a
+  job runs after the save commits and a newer edit of the same cell supersedes it.
+- **Resolution ladder (2026-10-20):** a phrase goes to the model only when cheaper steps
+  fail: the deterministic parser (slice 1.2), then an exact catalogue or enum match, then a
+  fuzzy match through a maintained crate (chosen in 2b), then the model. Each step that
+  answers is recorded as the source of the proposal.
+- **Request builder:** a typed `Request` (phrase, target, context items) rendered by one
+  function within a token budget; the instructions and schema form a fixed prefix so
+  llama-server can reuse its prompt cache. Context cutting follows the order under Context.
+- **Optional read-only tools** (judged in 2b against plain context packing): `read_field` and
+  `search_catalogue`, at most 3 calls per job, no write tool. Kept only if the screen shows a
+  gain within the 30 s run deadline.
+- **Citations:** each option names the phrase span it uses and the field or entry IDs it
+  refers to; the validator drops an option whose span is not in the phrase or whose IDs do
+  not exist. Values pass `values::scalar` admission like any typed value.
+- **Model swap and escalation:** models sit behind the same trait. Escalation on low
+  confidence or a failed validation goes only to another local model within the CPU cap
+  (about 4B); hosted or frontier models are a non-goal (no player text leaves the machine).
+  A per-job escalation budget, the deadlines below and a circuit breaker (after repeated
+  failures the assistant reports itself unavailable for a cool-down) bound it; the fallback
+  is always the scribble with no proposal.
+- **Traces and replay (2c):** an opt-in local table `interpretation_traces` (request, raw
+  answer, validator verdicts, latency, model and prompt hash), never exported, deleted with
+  the sheet, capped per account; a tool replays recorded traces against another model or
+  prompt offline and scores them. Confirmed or corrected traces feed the known-answer set
+  (see 2c).
 - **Crate selection (D-H):** an established Rust provider library (`genai` or `rig-core`),
   checked against an axum stub for: loopback HTTP; structured-output pass-through; no
   redirects, proxy or hosted fallback; a bounded body; a timeout and cancellation that closes
@@ -251,8 +276,9 @@ Scope: §1.3 without the combobox. Tests:
 Scope: §1.4 crate items and the D-H stop; the topology with egress tests from inside the model
 container and from the forwarder (which must not proxy anywhere but its upstream); a latency
 and schema screen (§3) with output tokens measured; the STROT candidate judged on the same
-results. Output: a results note, independently reviewed before it picks the crate, model or
-approach.
+results; the fuzzy-match crate for the ladder; tools versus plain context packing; the
+escalation pair (a smaller and a larger local model) and its confidence threshold. Output: a
+results note, independently reviewed before it picks the crate, model or approach.
 
 ### 2c Interpretation
 
@@ -271,11 +297,19 @@ apply route with read/write-set binding; the UI. Tests:
 - another account's job or revoked rights → not found or 403; `JOBS` free during the model
   call; a host name or non-loopback endpoint refused; assistant off is honest everywhere; no
   player text in logs;
+- ladder: a phrase the parser or an exact match resolves never reaches the model (the fake
+  server sees no request); the recorded source of each proposal;
+- citations: a span not in the phrase or an unknown field or entry ID drops the option;
+- escalation: within its budget, never to a non-loopback endpoint; the circuit breaker opens
+  after repeated failures, the page says the assistant is unavailable, and it closes after
+  the cool-down;
+- traces: off by default; when on, rows carry no data from other sheets, are deleted with the
+  sheet and respect the per-account cap; the replay tool reproduces a recorded verdict;
 - one live smoke, reported as live inference.
 
-Idea to evaluate here (2026-10-19, from Project-STROT): gate suggestions on calibrated
-confidence (a warning only below the threshold) and keep a known-answer set every model or
-prompt change must pass; the set doubles as the way back to the waived quality bar (D-D).
+Confidence gating (2026-10-19, from Project-STROT): below a calibrated threshold an option is
+shown only as a warning. A known-answer set, grown from confirmed traces, must pass on every
+model or prompt change; it is also the way back to the waived quality bar (D-D).
 
 ### 3 Bundles and reminders
 
