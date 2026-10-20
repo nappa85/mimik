@@ -6,17 +6,17 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Current work
 
-- **Assisted-sheet MVP, step 1** (`docs/assisted-sheet-plan.md`). Slices 1.1–1.7 are merged
-  into master. Next: slice 2a JavaScript.
+- **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Step 1 (slices 1.1–1.7) and step
+  2a (sheet module, strict CSP, D-AA) are merged into master. Next: 2b.
 
 ## Next steps
 
-1. 2a JavaScript, including D-AA (save on leaving the field); each slice gets an
-   implementation review.
-2. Before 2b starts: a short independent confirm of the round-3 plan fixes (`5b1bf23`; Sol
-   unavailable and the third chain returned no review for round 3). Then 2b crate and runtime selection (STROT via pyo3 or a Rust port among the candidates, judged
-   on results).
-3. 2c interpretation, 3 bundles and reminders, 4 suggestions, 5 docs and gate (includes the
+1. Before 2b starts: a short independent confirm of the round-3 plan fixes (`5b1bf23`).
+   Started 2026-10-20 (Sol, Sonnet, third chain); if no verdict is recorded here, rerun it
+   (prompt: "confirm each round-3 finding in the 5b1bf23 commit message is resolved in
+   §1.4"). Then 2b crate and runtime selection (STROT via pyo3 or a Rust port among the
+   candidates, judged on results).
+2. 2c interpretation, 3 bundles and reminders, 4 suggestions, 5 docs and gate (includes the
    `docs/release-scope.md` update for schema 20 and the assisted scope).
 
 ## Blockers
@@ -38,6 +38,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Other next actions
 
+- 2a module test gaps from the last review (Minor): no browser case for the `requestSubmit`
+  constraint failure, the `dropped()` wording, or the queue drop after an unreadable 409 /
+  kept after a 422; `sheet_json::integer` indexes fields directly. No JS linter in CI
+  (ASSIST-L17).
 - Kept entries lose control characters in single-line inputs (ASSIST-L13): cell inputs, and
   a lone CR in a refused quick-add entry (switch to a textarea on any control character but
   tab).
