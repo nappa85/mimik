@@ -292,6 +292,87 @@ per-class results (no pass bar, D-D). Output: a results note with the chosen dea
 queue depth and `max_tokens`, independently reviewed before it picks the crate, model or
 approach; rejected candidates recorded.
 
+**Pre-registered 2b criteria (frozen 2026-10-20, before any probe or screen run).** The output
+schema, request builder, lexer and scoring are `tools/assist_eval.py` (`SCHEMA`,
+`build_request`, `phrase_numbers`, `validate_reply`, `score`); the cases are
+`tools/assist-eval/cases.json` (50 synthetic cases in the six §3 classes for 2c; the step-3
+reminder class is not part of 2b). Their sha256 are recorded in every ledger header.
+
+- *Crates:* `genai` 0.7.0, `rig-core` 0.44.0 (0.45.0 needs Rust 1.97.1, above the pinned
+  1.95.0) and `async-openai` 0.42.2, each with default features off and no TLS, in a throwaway
+  probe crate built in `mimik-ci` (not in the application). Probes run against an axum stub on
+  loopback in a `--network none` container, plus one live request per eligible crate to
+  llama-server through the forwarder.
+  - C1 schema or grammar pass-through: the stub receives `SCHEMA` JSON-equal in
+    `response_format.json_schema.schema` (or llama.cpp's `json_schema` field), through the
+    crate's structured-output API or a raw extra-body path; any rewrite by the crate is
+    recorded; live, llama-server returns a schema-valid reply through the crate.
+  - C2 client policy: the crate accepts a host-built `reqwest` client or transport (no proxy,
+    no redirects, no decompression); with `HTTP_PROXY`, `ALL_PROXY` and their lowercase forms
+    set to a trap listener, the trap sees 0 connections; a 302 to a second trap gives an error
+    and 0 connections there. The crate's default client is probed too (informative). The
+    destination guard is ours and crate-independent: `127.0.0.1` and `::1` literals accepted;
+    `localhost`, `127.1`, `::ffff:127.0.0.1`, userinfo, a zone ID and host names refused, checked
+    on the raw string as well as the parsed URL.
+  - C3 bounded body: a 2xx body over 1 MiB fails without buffering much more than the bound,
+    through a hook the crate offers (custom transport, middleware service or stream); the
+    default path's behaviour is recorded.
+  - C4 cancellation: dropping the call (a 1 s `tokio` timeout) while the stub holds the reply
+    closes the connection; the stub sees end-of-stream within 1 s, for a plain and a streaming
+    call.
+  - C5 licence: every new crate in the probe's dependency tree has a licence in `about.toml`'s
+    accepted list. C6 size: release-binary size (thin LTO, stripped) of the probe minus a
+    baseline probe with the same axum, tokio and TLS-free `reqwest`, plus the count of new
+    crates. C7 maintenance: last release, releases in the last 6 months, MSRV against 1.95.
+  - Eligible: C1, C2, C4 pass and C5 has nothing unaccepted; C3 passes or has a stated
+    mitigation. Among eligible crates: smallest size delta, then maintenance. D-H allows
+    `genai` or `rig-core`; `async-openai` is measured for comparison. If neither `genai` nor
+    `rig-core` is eligible, stop and ask.
+- *`failsafe` 1.3.0:* F1 our code decides what counts as a failure (neutral outcomes possible);
+  F2 3 consecutive failures open it, a constant 2-minute backoff; F3 exactly one half-open
+  probe in flight; F4 an injectable clock for tests; F5 a dropped (cancelled) call is not a
+  failure and frees the probe. Adopt only if F1 to F5 hold; otherwise the small state machine.
+- *Topology:* llama-server on a `docker network create --internal` network, no published
+  port; a forwarder from a digest-pinned image on that network and on a second bridge with IP
+  masquerading off, published only on `127.0.0.1:8091` with the fixed upstream `server:8080`.
+  Egress probes, all expected to fail: from inside the model container to a public IP, to a
+  public host name and to a host-side listener; from inside the forwarder to a public IP.
+  Through the forwarder, an absolute-form `GET http://example.com/` and a `CONNECT` must be
+  answered by llama-server itself; `8091` must not be reachable on a non-loopback host address.
+- *Model screen:* `qwen3-4b-2507` and `granite42-3b`, and the fallback `minicpm5-2b`, on the
+  pinned llama.cpp b11610 image, hash-checked, with the registry's hardened server vector
+  plus: `--cpus 2 --cpuset-cpus 0,1` (physical cores 0 and 1; their SMT siblings 6 and 7 left
+  idle, the harness on 7), `--threads 2 --threads-batch 2`, `-ngl 0`, ctx 8192, `--parallel 1`,
+  prompt cache on, `--reasoning off`; memory and swap 6 GiB, PID limit 256. Sampler:
+  temperature 0, top-k 1, seed 0; `max_tokens` 384 as a measurement cap; streamed. Two passes
+  over the 50 cases in file order (per-class results from pass 1, latency over both, pass
+  agreement reported), then 4 stress requests with a dynamic part near 4 KiB. Cold start
+  measured separately, 3 container starts per model: start to `/health`, and the first request
+  with an empty prompt cache. Metrics: schema-valid rate, truncations, output tokens
+  (`predicted_n`) p50/p95/max, end-to-end latency and time to first token p50/p95/max, and per
+  class (pass 1) correct within the shown options, false-confident, top-1 and `ambiguous`
+  counts, dropped options by reason. No pass bar (D-D).
+- *Derived numbers* (chosen model, warm): if p95 > 60 s, stop and ask. Run deadline
+  R = min(60, round up to 5 s of max(1.5 × p95, warm maximum, stress maximum)). Queue depth
+  D = max(1, min(4, floor((120 − R) / R))), queue wait Q = D × R, so Q + R ≤ 120 s.
+  `max_tokens` = max(128, round up to 32 of 1.25 × the largest `predicted_n` of a schema-valid,
+  untruncated reply, both passes and stress), at most 384; any truncation at 384 is reported.
+- *Proposed model* (pending review): among models with p95 ≤ 60 s, fewest false-confident over
+  the 50 pass-1 cases, then most correct, then lower p95; the fallback only if no primary
+  qualifies.
+- *STROT arm:* the runtime of strot-ai 0.11.1 (`LocalEncoderStrategy`) with Julia-1
+  (`SupersonicLabs/Julia-1` at `a85b1273…`, weights sha256 `df853bf7…`), torch at 2 threads on
+  CPUs 0 and 1, `--network none`. Candidates come from `strot_candidates` plus a "none" option
+  (in the product they would be generated by Rust); the shown option is the winner when it is
+  not "none" and its probability is at least 0.40 (STROT's threshold). Same per-class metrics
+  and latency (two passes; load time as cold start); diagnostics: top-3 correct (never shown)
+  and generator coverage. Output tokens and schema validity do not apply (a choice by
+  construction). STROT's compile step is not used: it needs an LLM at build time and
+  synthesizes dataset code, while the options here are generated per request.
+- *Known bias:* the author wrote the cases, labels and the candidate generator, so generator
+  coverage is optimistic; labels were also given blind by a separate labeller (recorded in the
+  case file).
+
 ### 2c Interpretation
 
 Scope: trait, stub, adapter; the client policy; worker, budgets, records and breaker; the job,
