@@ -74,6 +74,17 @@ options?}` with a scalar control (no nested list). Each stored record also has a
 `id`. Item integers are i64 or `null`; no other property holds `null`. Row IDs, addressing and
 the list form are described in [formulas.md](formulas.md#lists-and-plain-list-editing).
 
+**Quick add.** `items` may also declare `quick_add: {name, quantity?}`, the IDs of a `text`
+property (the typed name; not multiline) and of an `integer` property (the typed count) of the
+same list. It is omitted when absent (and `quantity` when unmapped; neither may be `null`),
+so lists without it keep their canonical bytes and hash. Admission (`formula_admission`)
+refuses it, at `/fields/{i}/items/quick_add`, when `name` is not a text property
+(`quick-add-name-not-text-property`), `quantity` not an integer property
+(`quick-add-quantity-not-integer-property`), or the list has a required enum or boolean
+(`quick-add-required-choice-property`) or a required text or multiline property other than
+`name` (`quick-add-required-text-property`): a quick-add row can leave only integers unknown.
+The line itself is described in [assisted-entry.md](assisted-entry.md#quick-add).
+
 **Formulas and constraints.** A field with `formula: {expr, rule_ids, evidence}` is derived:
 computed on saved-sheet views and history views (including the GET that follows a save) from
 stored values and the immutable pin, never stored or submitted; a successful save POST

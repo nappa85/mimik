@@ -7,16 +7,15 @@ legality stays advisory and Rust does all arithmetic.
 
 Decision IDs (D-…, U…, P…) are defined in `docs/decisions.md`. What is built (number entry,
 notes and scribbles, switch and Undo, unknown values, per-field save, the busy page, the page
-bound) is described in `docs/assisted-entry.md`; this plan only adds to it.
+bound, quick-add) is described in `docs/assisted-entry.md`; this plan only adds to it.
 
-Remaining, in order: **1.6** quick-add, **1.7** validity flag,
-**2a** JavaScript,
+Remaining, in order: **1.7** validity flag, **2a** JavaScript,
 **2b** crate and runtime selection (prototype tier, may run in parallel), **2c**
 interpretation, **3** bundles and reminders, **4** suggestions and "Which Sword?", **5** docs
 and gate.
 
 Every step: its own branch; failing-first tests with the red run recorded; independent
-implementation review before merge; built and tested on 2 cores on weekdays. 1.6 keeps
+implementation review before merge; built and tested on 2 cores on weekdays. Each step keeps
 the demo (`tools/assist_demo.py`) usable. Any step that adds per-cell markup reruns the
 worst-case page fixtures in `src/campaigns/list_tests.rs` (tightest headroom today 2.6%) and
 never enlarges the budget.
@@ -29,23 +28,6 @@ automatic application of model output, chat, manual RAG, `catalogue_ref` members
 hosted providers, GPU, models above about 4B.
 
 ## 1. Design for the remaining steps
-
-### 1.2 Quick-add (1.6)
-
-- A list may declare `"quick_add": {"name": <text property>, "quantity": <integer
-  property>?}`; omitted when absent, so existing definition hashes are unchanged.
-- Admission refuses it when the list has a required enum or boolean property, when the list
-  has a required text or multiline property other than the mapped name (decided 2026-10-19,
-  coordinator default: no quick-add line is shown for such lists; regression case required),
-  or when it names a property of the wrong type.
-- Route `lists/{f}/quick` (the list by index, as the other list routes) with exactly `csrf`,
-  `base` and `text`; it protects nothing (append only), like the new-row form.
-- Deterministic parse of `text` (≤ 200 characters): `^(\d{1,6})\s+(.+)$` → quantity and name;
-  `^(.+?)\s*[x×]\s*(\d{1,6})$` → name and quantity; otherwise the whole text is the name with
-  quantity 1; an empty name → "Nothing to add".
-- The mapped name and quantity are always filled, even when they are optional properties.
-  Other required numbers are `null` (unknown); every other optional property is absent. One
-  revision, no note.
 
 ### 1.3 JavaScript (2a)
 
@@ -206,16 +188,6 @@ has no egress; no redirects or proxies; no prompts or player text in logs; no se
 
 ## 2. Steps
 
-### 1.6 Quick-add
-
-Scope: §1.2 (schema member, admission refusals, parse, route). Visible: "3 torches" + Enter
-adds Torches ×3; "healing potion x2" adds the potion ×2. The demo definition gains
-`quick_add`. Tests: both patterns, a plain name (→ 1), an empty name, a 7-digit count
-(treated as part of the name), 200 characters; a required enum in the list → admission
-refusal; a required text or multiline property other than the mapped name → admission refusal
-and no quick-add line; an optional mapped name or quantity is still filled; unknown values for other required numbers; no notes written; old definition hashes
-unchanged.
-
 ### 1.7 Validity flag (RR-3)
 
 Scope (decided 2026-10-19, coordinator default): the sheet shows **"Not validated"** whenever
@@ -302,8 +274,8 @@ dangling key shows no link; p95 measured.
 ### 5 Docs, release scope, gate
 
 - Update `docs/assisted-entry.md`, `release-scope.md` (schema 21, one script on sheet pages under
-  a strict CSP, the local model as confirm-only), the runtime definition contract (`quick_add` and
-  `catalogue` members), publication and dependency docs; replace the statements this work
+  a strict CSP, the local model as confirm-only), the runtime definition contract (the
+  `catalogue` member), publication and dependency docs; replace the statements this work
   reverses: catalogue Q4 (not in the catalogue is a warning, "Which Sword?" remembered), the
   D9/R9 writer membership check (not built; the key is advisory), "no script on sheet pages" (other
   pages already serve `account-sharing.js` and `source-regions.js`),

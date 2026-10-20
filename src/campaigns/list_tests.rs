@@ -2925,14 +2925,43 @@ async fn wide_list_setup(
     note: (&'static str, &str, Option<i64>),
     (enum_notes, removed): (bool, bool),
 ) -> (Setup, String, usize) {
-    let definition = wide_list_definition(enum_notes);
+    wide_setup(wide_list_definition(enum_notes), rows, value, note, removed).await
+}
+
+/// The wide list with 32 properties of 64-character IDs: property 0 a text name and 1 its
+/// quantity, mapped to the list's quick-add line (slice 1.6), the rest integers.
+fn wide_quick_definition() -> Value {
+    let mut definition = wide_list_definition(false);
+    let items = &mut definition["fields"][0]["items"];
+    items["properties"][0]["control"] = "text".into();
+    let name = items["properties"][0]["id"].clone();
+    let quantity = items["properties"][1]["id"].clone();
+    items["quick_add"] = json!({"name": name, "quantity": quantity});
+    definition
+}
+
+/// `wide_list_setup` for any wide `definition`: every integer cell holds `value` with the
+/// note `note`, every enum cell `b` noted as changed from the 64-character option, every
+/// text cell is empty (text has no notes).
+async fn wide_setup(
+    definition: Value,
+    rows: usize,
+    value: Option<i64>,
+    note: (&'static str, &str, Option<i64>),
+    removed: bool,
+) -> (Setup, String, usize) {
     let field = &definition["fields"][0];
     let list = field["id"].as_str().unwrap().to_owned();
-    let properties: Vec<(String, bool)> = field["items"]["properties"]
+    let properties: Vec<(String, String)> = field["items"]["properties"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|p| (p["id"].as_str().unwrap().to_owned(), p["control"] == "enum"))
+        .map(|p| {
+            (
+                p["id"].as_str().unwrap().to_owned(),
+                p["control"].as_str().unwrap().to_owned(),
+            )
+        })
         .collect();
     let mut notes = Vec::new();
     if removed {
@@ -2949,15 +2978,15 @@ async fn wide_list_setup(
             // The longest row ID a retained row may carry: 64 characters.
             let host = format!("i{k:03}-{}", "x".repeat(59));
             let mut item = json!({"id": host});
-            for (p, choice) in &properties {
+            for (p, control) in &properties {
                 let address = format!("cell:{list}/{host}/{p}");
-                if *choice {
+                if control == "text" {
+                    item[p] = json!("");
+                } else if control == "enum" {
                     item[p] = json!("b");
-                    if enum_notes {
-                        let before = format!("{{\"enum\":\"{}\"}}", "o".repeat(64));
-                        let after = "{\"enum\":\"b\"}".to_owned();
-                        notes.push((address, "literal", String::new(), before, after));
-                    }
+                    let before = format!("{{\"enum\":\"{}\"}}", "o".repeat(64));
+                    let after = "{\"enum\":\"b\"}".to_owned();
+                    notes.push((address, "literal", String::new(), before, after));
                 } else {
                     item[p] = stored(value);
                     let (op, raw, before) = note;
@@ -3341,6 +3370,185 @@ async fn a_refused_new_row_draft_is_bounded() {
         &html[..2000]
     );
     assert!(html.len() <= view.len() + 4096);
+}
+
+/// The `base` every unit form of a saved page carries (its revision).
+fn page_base(html: &str) -> String {
+    let start = html.find("name=\"base\" value=\"").unwrap() + "name=\"base\" value=\"".len();
+    html[start..].split('"').next().unwrap().to_owned()
+}
+
+/// The readonly textareas of list `f`'s kept block.
+fn kept_textareas(html: &str, f: usize) -> (usize, usize) {
+    let page = scraper::Html::parse_document(html);
+    let all: Vec<_> = page
+        .select(&selector(&format!("#kept-{f} textarea")))
+        .collect();
+    let readonly = all
+        .iter()
+        .filter(|textarea| textarea.value().attr("readonly").is_some())
+        .count();
+    (all.len(), readonly)
+}
+
+/// Markup a kept block adds around its echoed values: the message and, per entry, its label
+/// twice (term and `aria-label`, 100 `"` escaped five times wider) and the tags.
+const KEPT_CHROME: usize = 1024;
+const KEPT_ENTRY: usize = 2 * 100 * 5 + 160;
+
+/// Slice 1.6: the quick-add line (one per list, below the rows) on the tightest list page
+/// (255 rows of 64-character IDs and labels of 100 `"`, 31 sign-led integer columns with
+/// switch and Undo, the new-row form and "Row removed · Undo") stays within the per-unit
+/// bound; at 256 rows the line is gone, and a late entry refused by the full list is kept
+/// read-only within the bound plus its echo.
+#[tokio::test]
+async fn worst_label_list_page_with_the_quick_add_line_is_within_the_unit_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (raw, before, value) = densest_sign_led();
+    let note = ("sign_literal", raw.as_str(), Some(before));
+    let (_, html, units) = wide_setup(wide_quick_definition(), 255, Some(value), note, true).await;
+    assert_eq!(units, 4 + 255 * 36);
+    assert_eq!(
+        html.matches("action=\"/private-sheets/1/lists/0/quick\"")
+            .count(),
+        1
+    );
+    assert_eq!(html.matches("class=\"new-row\"").count(), 1);
+    assert_eq!(html.matches("form=\"assist-switch\"").count(), 31 * 255);
+    within_unit_bound(&html, units, "255 rows with the quick-add line");
+    let (setup, view, units) =
+        wide_setup(wide_quick_definition(), 256, Some(value), note, true).await;
+    assert!(!view.contains("/quick\""), "no quick-add line at 256 rows");
+    within_unit_bound(&view, units, "256 rows of a quick-add list");
+    let quotes = "\"".repeat(200);
+    let form = vec![
+        pair("csrf", "a".repeat(64)),
+        pair("base", page_base(&view)),
+        pair("text", quotes.as_str()),
+    ];
+    let (status, html) = big_post(
+        &setup,
+        "/private-sheets/1/lists/0/quick",
+        serde_urlencoded::to_string(form).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(kept_textareas(&html, 0), (1, 1), "kept read-only");
+    assert_eq!(html.matches(&"&#34;".repeat(200)).count(), 1, "echoed once");
+    let echo = 5 * quotes.len();
+    let bound = FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES + echo;
+    assert!(html.len() <= bound, "{} > {bound}", html.len());
+    assert!(html.len() <= view.len() + echo + KEPT_CHROME + KEPT_ENTRY);
+    println!(
+        "refused quick-add on the full widest list page: {} bytes (bound {bound})",
+        html.len()
+    );
+}
+
+/// Slice 1.5b leftover (Sol round 2): a new row refused because the list is full is kept
+/// read-only, every value echoed once, within the bound plus its echo on the tightest page.
+#[tokio::test]
+async fn a_new_row_kept_from_a_full_list_is_read_only_and_bounded() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (raw, before, value) = densest_sign_led();
+    let (setup, view, units) = wide_list_setup(
+        256,
+        Some(value),
+        ("sign_literal", &raw, Some(before)),
+        (false, true),
+    )
+    .await;
+    let quotes = "\"".repeat(30_000);
+    let mut form = vec![pair("csrf", "a".repeat(64)), pair("base", page_base(&view))];
+    form.extend((0..32).map(|p| pair(format!("row-{p}"), quotes.as_str())));
+    let (status, html) = big_post(
+        &setup,
+        "/private-sheets/1/lists/0/rows",
+        serde_urlencoded::to_string(&form).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(kept_textareas(&html, 0), (32, 32), "kept read-only");
+    assert_eq!(
+        html.matches(&"&#34;".repeat(30_000)).count(),
+        32,
+        "echoed once each"
+    );
+    let echo = 5 * 32 * quotes.len();
+    let bound = FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES + echo;
+    assert!(html.len() <= bound, "{} > {bound}", html.len());
+    assert!(html.len() <= view.len() + echo + KEPT_CHROME + 32 * KEPT_ENTRY);
+    println!(
+        "new row kept from the full widest list page: {} bytes (bound {bound})",
+        html.len()
+    );
+}
+
+/// Slice 1.5b leftover (Sol round 2): a cell whose row was removed since its page is kept
+/// read-only, its draft echoed once, within the bound plus its echo on the tightest page.
+#[tokio::test]
+async fn an_orphaned_cell_draft_is_read_only_and_bounded() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (raw, before, value) = densest_sign_led();
+    let (setup, old, _) = wide_list_setup(
+        256,
+        Some(value),
+        ("sign_literal", &raw, Some(before)),
+        (false, true),
+    )
+    .await;
+    let base = page_base(&old);
+    let remove = vec![pair("csrf", "a".repeat(64)), pair("base", base.clone())];
+    let (status, _) = big_post(
+        &setup,
+        "/private-sheets/1/lists/0/rows/255/remove",
+        serde_urlencoded::to_string(remove).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let response =
+        super::router_request(&setup.app, &setup.auth[1], "/private-sheets/1", None).await;
+    let view = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let units = render_units(&wide_list_definition(false), &[255]);
+    let quotes = "\"".repeat(87_000);
+    let form = vec![
+        pair("csrf", "a".repeat(64)),
+        pair("base", base),
+        pair("value", quotes.as_str()),
+    ];
+    let (status, html) = big_post(
+        &setup,
+        "/private-sheets/1/cells/0/255/31",
+        serde_urlencoded::to_string(form).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(html.contains("its row was removed"));
+    assert_eq!(kept_textareas(&html, 0), (1, 1), "kept read-only");
+    assert_eq!(
+        html.matches(&"&#34;".repeat(87_000)).count(),
+        1,
+        "echoed once"
+    );
+    let echo = 5 * quotes.len();
+    let bound = FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES + echo;
+    assert!(html.len() <= bound, "{} > {bound}", html.len());
+    // The status names the cell (its property and list labels, escaped up to 6 bytes).
+    let status = 2 * 100 * 6 + 256;
+    assert!(html.len() <= view.len() + echo + status + KEPT_CHROME + KEPT_ENTRY);
+    println!(
+        "orphaned cell draft on the widest list page: {} bytes (bound {bound})",
+        html.len()
+    );
 }
 
 // ---- Step 8: the gate lift, the publication budget and end-to-end lists (plan D7) ----

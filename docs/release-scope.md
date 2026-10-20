@@ -20,7 +20,8 @@ same private network. No Node.js, Python, GPU, API key or internet access is nee
     values and checks (never blocking a save, never a legality ruling), read-only catalogue
     browsing through the sheet, number cells that accept sums such as `84 -15`, change notes
     with Undo, unknown values and per-field and per-cell saving (each list cell, new row and
-    row action saves on its own; Remove is followed by "Row removed · Undo");
+    row action saves on its own; Remove is followed by "Row removed · Undo"), and a
+    quick-add line ("3 torches") on lists whose definition declares one;
   - native sheets for the Italian 2025 MÖRK BORG core rules, once that exact source is
     registered.
 - **Owner materials.** The Owner registers games and editions at `/admin/rulesets`, and reviews

@@ -7,6 +7,7 @@ mod entry;
 mod formulas;
 mod history_diff;
 mod notes;
+mod quick;
 mod rows;
 mod sheets;
 mod snapshots;

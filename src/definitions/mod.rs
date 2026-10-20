@@ -16,6 +16,8 @@ pub(crate) mod formula_pack_tests;
 pub(crate) mod private_pin;
 mod publication;
 #[cfg(test)]
+mod quick_add_tests;
+#[cfg(test)]
 pub(crate) use publication::tests::fixture as source_fixture;
 mod store;
 pub use publication::{ApprovalRequest, Comparison, PublishedDefinition, WiringStatus};
@@ -200,6 +202,22 @@ pub struct Field {
 #[serde(deny_unknown_fields)]
 pub struct Items {
     pub properties: Vec<ItemProperty>,
+    /// The quick-add line (assisted sheet slice 1.6, ASSIST-3): which text property takes the
+    /// typed name and which integer property, if any, the typed count. Omitted when absent,
+    /// so the canonical bytes and hashes of lists without it are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quick_add: Option<QuickAdd>,
+}
+
+/// A list's quick-add mapping ("3 torches", "healing potion x2"): property IDs of the same
+/// list. Admission checks that `name` is a text property and `quantity` an integer one, and
+/// that every other required property can be left unknown (an integer).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuickAdd {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -2,9 +2,10 @@
 
 Builds a fresh local data directory from the synthetic source fixture, publishes the
 `assist-sheet` definition, creates a demo Owner and player with generated dummy local
-passwords, creates a campaign and a sheet (HP 84, Max HP 84, Armour -1), then serves the
-loopback auth mode on http://127.0.0.1:3000 until interrupted. Synthetic data only: no
-manuals, no real accounts, no secrets from the environment.
+passwords, creates a campaign and a sheet (HP 84, Max HP 84, Armour -1; Equipment has a
+quick-add line), then serves the loopback auth mode on http://127.0.0.1:3000 until
+interrupted. Synthetic data only: no manuals, no real accounts, no secrets from the
+environment.
 """
 
 import argparse
@@ -174,7 +175,13 @@ def create_sheet(password, version):
         parser = FormFields()
         parser.feed(response[2])
         form = dict(parser.forms[action])
-    return workspace_submit(cookie, action, sheet_form(form))
+    sheet = workspace_submit(cookie, action, sheet_form(form)).split("#")[0]
+    html = auth_request(sheet, cookie=cookie)[2]
+    require(
+        f'action="{sheet}/lists/{EQUIPMENT}/quick"' in html,
+        "The demo sheet has no quick-add line on Equipment",
+    )
+    return sheet
 
 
 def main(argv=None):
@@ -209,6 +216,7 @@ def main(argv=None):
         print(f"  Player:  {PLAYER} / {passwords[PLAYER].decode()}")
         print(f"  Owner:   {OWNER} / {passwords[OWNER].decode()} (administration only)")
         print(f"  Data:    {directory} (server log: {directory / 'server.log'})")
+        print("  Try:     type '3 torches' in Equipment's Quick add line and press Enter")
         if args.exit_after_setup:
             print("Setup complete; stopping (--exit-after-setup).")
             return

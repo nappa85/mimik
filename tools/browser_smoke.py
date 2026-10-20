@@ -817,8 +817,9 @@ def run_assist_browser(page, campaign, version):
     writes nothing (same revision), integer inputs keep the plain keyboard (no `inputmode`,
     which on phones hides minus and space), "-15" is applied literally with the
     "Did you mean" switch, which can be hidden, applied and undone, a blanked number is
-    unknown ("?") with Undo, and "lots" in a new row's Quantity keeps the row as unknown
-    with its scribble while Load says it is not computed."""
+    unknown ("?") with Undo, "lots" in a new row's Quantity keeps the row as unknown
+    with its scribble while Load says it is not computed, and (slice 1.6) "3 torches" and
+    "healing potion x2" in the quick-add line each add a row."""
 
     def enter(field, status=303):
         with page.expect_response(lambda response: response.request.method == "POST") as response:
@@ -1011,6 +1012,33 @@ def run_assist_browser(page, campaign, version):
         "Load does not say a value it uses is unknown",
     )
     no_overflow(page, "assisted sheet with an unknown row value")
+    # Slice 1.6: "3 torches" + Enter in Equipment's quick-add line adds torches x3 (the
+    # weight unknown) and comes back with the line focused; "healing potion x2" adds two.
+    for typed, r, name, quantity in (
+        ("3 torches", 1, "torches", "3"),
+        ("healing potion x2", 2, "healing potion", "2"),
+    ):
+        line = page.get_by_role("textbox", name="Quick add Equipment", exact=True)
+        line.fill(typed)
+        enter(line)
+        require(
+            page.url.endswith("?focus=quick-4")
+            and page.evaluate("document.activeElement.id") == "quick-4"
+            and page.locator("#quick-4").input_value() == "",
+            f"The quick-add line is not focused and empty after {typed!r}",
+        )
+        require(
+            page.locator(f"#row-4-{r}-0").input_value() == name
+            and page.locator(f"#row-4-{r}-1").input_value() == quantity
+            and page.locator(f"#row-4-{r}-2").input_value() == ""
+            and page.locator(f"#note-4-{r}-1").count() == 0,
+            f"Quick add {typed!r} did not add {name} x{quantity} with an unknown weight",
+        )
+    require(
+        page.get_by_role("button", name="Add Equipment", exact=True).count() == 1,
+        "The quick-add button is not named Add Equipment",
+    )
+    no_overflow(page, "assisted sheet after a quick-add")
 
 
 def run_workspace_browser(

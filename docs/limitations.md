@@ -14,6 +14,7 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 - **L-U4** [formulas] A definition cannot give an unknown integer a fallback; `== null` is none (D-Z). Closed by letting definitions choose a fallback for unknown values.
 - **ASSIST-L2** [pages] Page-size headroom is thin: tightest worst case 18,446,459 of 18,948,096 bytes (2.6%: a list of 256 rows × 32 integers with 64-character IDs, labels of 100 `"`, a kept 200-`"` scribble on every cell, each cell its own form); 256 wide scalars with long scribbles 3.1%. Rerun the worst-case fixtures in `src/campaigns/list_tests.rs` whenever per-cell markup grows.
 - **ASSIST-L11** [pages] Each list's "Row removed · Undo" reads that list's row notes on every page view (`notes::latest_rows`, one index range per list), so its cost grows with the list's removal history. Closed by an index or table keyed by list if it shows up in profiles.
+- **ASSIST-L12** [entry] Quick-add counts are digits only: a count written as a word ("three torches", "tre torce") stays in the name with a count of 1; there is no Undo of the added row (POC cut: Undo of creation; Remove removes it).
 - **ASSIST-L3** [pages] The scribble excerpt under a cell is cut at a character boundary and can split a grapheme cluster; cosmetic. Closed by a segmentation crate if one is otherwise needed.
 - **ASSIST-L4** [models] The model quality bar is waived for the POC (D-D); the assistant is not certified. Revisit before release (a known-answer set is the proposed route).
 - **ASSIST-L5** [storage] History has no cap and each changed Enter writes a revision (D-U), so storage is unbounded. A per-account write-rate limit or storage guard is required before release.
@@ -40,7 +41,7 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 
 ## Runtime definitions, registry and publication
 
-- **DEF-L1** [definitions] Controls are text, multiline, integer, boolean, enum and flat lists only: no decimals or nested groups and lists. Each extension needs a reviewed contract change (the assisted-sheet plan proposes `quick_add`).
+- **DEF-L1** [definitions] Controls are text, multiline, integer, boolean, enum and flat lists only: no decimals or nested groups and lists. Each extension needs a reviewed contract change (`items.quick_add` is the latest, ASSIST-13).
 - **DEF-L2** [definitions] No cross-version migration of saved values; a sheet stays on its pinned version. Closed by a reviewed explicit migration operation.
 - **DEF-L3** [definitions] Admission cost was measured only on small samples without sources (worst about 54 ms, 17,688 KiB RSS); 32-source, 1,024-reference bounds are uncertified. Closed by a worst-case profile.
 - **DEF-L4** [definitions] Rule legality is advisory only: no minima, maxima, prerequisites or transitions are enforced, and final-state constraints cannot check transitions. Closed by the definition-language work (DL-L1).

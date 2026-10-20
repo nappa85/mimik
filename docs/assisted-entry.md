@@ -12,6 +12,7 @@ full-form POST pages without scripts; only the `--no-auth` prototype's native ed
 | Note values, ops, addresses, storage | `src/campaigns/notes.rs`, `migrations/020_sheet_notes.sql`, `021_row_notes.sql`; list units `src/campaigns/rows.rs` |
 | Switch and Undo | `src/campaigns/assist.rs`, `src/campaigns/assist_web.rs` |
 | Per-unit save | `src/campaigns/unit.rs`, `src/campaigns/unit_web.rs` |
+| Quick add | `src/campaigns/quick.rs` (reading), `rows.rs` (`quick_add`), `definitions/formula_admission.rs` (admission) |
 | Writer, rechecks | `src/campaigns/sheets.rs` (`private_save_keeping`, `private_unchanged`, `private_read_base`) |
 | Rendering | `src/campaigns/web.rs`, `templates/private_*.html`, `assets/app.css` |
 | Unknowns in formulas | `src/definitions/formula/convert.rs` |
@@ -75,7 +76,8 @@ target)`, primary key `(sheet_id, revision, address)`, foreign key to the histor
 - **When a note is written** (`Recorder`): every value change of a saved in-scope cell;
   Known ↔ Unknown and Set ↔ Not set as `literal` with empty `raw`; an `unresolved` scribble;
   an `erased` blank. New cells (create, new row) get a note only for an interpreted sum or an
-  unreadable entry; a new-row form writes at most one per property (`MAX_ROW_NOTES`, 32).
+  unreadable entry; a new-row form writes at most one per property (`MAX_ROW_NOTES`, 32); a
+  quick-add row writes none.
   Removing a row writes one `literal` row note (`row present` → `row absent`). The current
   note of an address is its latest note.
 - **Scribbles:** an unreadable entry keeps the saved value (number or unknown); in a new row,
@@ -178,6 +180,7 @@ use the field index (`v0`, `label-0`, `note-0`); metadata uses `meta-name`, `met
 | Saved-row cell | `POST /private-sheets/{id}/cells/{f}/{r}/{p}` | `csrf`, `base`, `value`, plus `set` if optional |
 | New row | `POST /private-sheets/{id}/lists/{f}/rows` | `csrf`, `base`, `row-<p>` per property, `set-<p>` per optional property |
 | Remove, Move up, Move down | `POST /private-sheets/{id}/lists/{f}/rows/{r}/{remove\|up\|down}` | `csrf`, `base` |
+| Quick add | `POST /private-sheets/{id}/lists/{f}/quick` | `csrf`, `base`, `text` |
 
 List routes name the list field, the row and the property by canonical index; the row index
 is read at `base` and mapped to its host ID there, so a row moved since is still found. Each
@@ -189,11 +192,12 @@ row's Move down are disabled. A "New row" form ends the list (one Add button, "A
 Equipment"), replaced by "This list holds 256 rows" when full.
 
 Unit routes (`UNIT_POST_BYTES` 256 KiB body for metadata, fields and cells; 5 MiB like the
-full form for a new row; 8 KiB for a row action; a principal required before the body is
-read): parse (400), CSRF and request auth (403), the bounded permit wait, read and edit rights
+full form for a new row; 8 KiB for a row action and a quick-add line; a principal required
+before the body is read): parse (400), CSRF and request auth (403), the bounded permit wait, read and edit rights
 (403; an unsupported pin is read-only, so 403), then 400 for a native pin, an ID outside the
 slug grammar, not in the pin, derived or a list, a list index outside the grammar or not a
-list of the pin, a row missing at `base`, a forged edge move, or a key set that is not exact.
+list of the pin, a row missing at `base`, a forged edge move, a quick-add on a list without
+the line, or a key set that is not exact.
 
 **Value-based conflicts:** the live revision L and revision `base` are read in one
 transaction. A malformed or zero `base` is 400. A `base` above L is 409. Otherwise the value
@@ -214,7 +218,9 @@ refused row read-only to copy); Remove the row's existence and every value (an e
 409, a row already gone "No change"); Move the order of host IDs (409). A new row gets
 `r<L+1>-1` and a blank number is unknown. Remove redirects to `#removed-<f>`; a Move to
 `?focus=<up|down>-<f>-<r>`, which autofocuses the moved row's Move button in the same
-direction, or the other one at an edge.
+direction, or the other one at an edge. A quick-add redirects to `?focus=quick-<f>`. The
+sheet view reads `focus` from the raw query: a repeated `focus`, an unknown value or any
+other parameter is ignored, never refused.
 
 Create, native, read-only, frozen and history pages and the re-render of a refused full-form
 POST keep the one full form (`value-<id>`, `row-<f>-<r>-<p>` names, with draft Add, Remove and
@@ -227,10 +233,41 @@ the full-form or list-form edit wait up to `PERMIT_WAIT` (2 s) for the `JOBS` pe
 (`definitions::admit_within`); reads, create, switch and Undo do not wait. Without the permit
 the answer is a styled 503 with `Retry-After: 1` and a form that posts the request again:
 a unit or cell entry in a "Your entry" control (named by field ID, "Name", "General notes" or
-the cell's indices), a row action's retry button ("Remove row 2 again"), or a full, list or
+the cell's indices, or a quick-add line's `text`, "the quick-add line of list field 4"), a
+row action's retry button ("Remove row 2 again"), or a full, list or
 new-row form's pairs as hidden inputs when keys, values and 48 bytes per pair total
 ≤ `ECHO_BYTES` (1 MiB; else the page says they were too large to keep). Nothing is read or
 written. The `SheetBusy` marker keeps the auth layer's generic error page from replacing it.
+
+## Quick add
+
+A list whose definition declares `items.quick_add` (`{"name": <text property>,
+"quantity": <integer property>?}`, runtime definition contract) gets a quick-add line on a
+saved page the reader may edit, between its rows and its new-row form: a form with hidden
+`csrf` and `base`, the input `quick-<f>` named `text` ("Quick add Equipment" through
+`aria-labelledby`, described by the example hint `quick-hint-<f>`) and one Add button ("Add
+Equipment"). A full list (256 rows) shows no line; create, native, read-only, frozen and
+history pages have none.
+
+**Reading** (`quick::read`, fixed rules, no model): over `MAX_CHARS` (200) characters or a
+control character other than tab is 422 with the entry kept in the line (focused); after
+trimming, a blank line is 200 "Nothing to add" and writes nothing. With a mapped quantity:
+`^([0-9]{1,6})\s+(.+)$` is count and name ("3 torches", "007 bolts" = 7), else
+`^(.+?)\s*[x×]\s*([0-9]{1,6})$` is name and count ("healing potion x2", "lamp oil ×3");
+otherwise the whole line is the name with count 1 ("1234567 torches", "torch x1234567",
+"2x4 plank", "Rope X2", non-ASCII digits). `\s` is Unicode white space. Without a mapped
+quantity the whole line is the name, so a typed count is never lost. The name is stored as
+typed (trimmed), never recased or matched against a catalogue.
+
+**Row:** appended to L with the host ID `r<L+1>-1`, like the new-row form (append only, never
+stale; a `base` above L is 409 with the entry kept). The mapped name and count are always
+set, even when they are optional properties; every other required property is an integer
+(admission refuses anything else) and is unknown (`null`); every other optional property is
+not set. One revision, no note. A full list is 422 before the line is read, and the entry is
+kept read-only to copy (`kept-<f>`) with no form that could add it. Success is a 303 to
+`?focus=quick-<f>`, which focuses the empty line for the next item. Order and rechecks are
+those of the other unit routes (parse, CSRF, request auth, the D-X3 wait, rights 403, then
+400 for routes and keys, then the writer's `IMMEDIATE` rechecks).
 
 ## Page-size bound
 
@@ -240,10 +277,12 @@ Rendered sheet pages stay within `FIXED_PAGE_BYTES` (64 KiB) + render units ×
 `RENDER_UNITS` = 32,768); definition text adds at most 2,621,440 bytes (D7). Assisted markup
 fits by elision, not a larger budget: term-boundary cuts, 32-character scribble quotes,
 `aria-labelledby` names, index DOM ids, index list routes and note keys, one shared
-row-action form. The worst-case fixtures there assert it; the tightest is a list of 256 rows ×
+row-action form, one quick-add line per list (charged to the list's own units). The worst-case fixtures there assert it; the tightest is a list of 256 rows ×
 32 integer properties with 64-character IDs, labels of 100 `"` and a 200-`"` scribble kept
-on each cell, every cell its own form: about 2.6% headroom (ASSIST-L2). Rerun those fixtures
-whenever per-cell markup grows.
+on each cell, every cell its own form: about 2.6% headroom (ASSIST-L2). Fixtures also cover
+the quick-add line on the widest list (255 and 256 rows, and a refused entry kept from a full
+list), a new row kept read-only from a full list and an orphaned cell's kept draft, each
+asserting its `readonly` textareas. Rerun those fixtures whenever per-cell markup grows.
 
 ## Adaptive sheet presentation
 
@@ -259,7 +298,7 @@ pixel-identical pages. Data is canonical and versioned, never mapped to PDF coor
   snapshot and change on save and reload, never while typing.
 - Lists: a fieldset of row fieldsets ("Row 2 of 5 · ID r1-2"), every control labelled, an
   explicit Set/Not set select for optional properties. On a saved sheet each cell, the new
-  row and each row action save at once (see Saving a saved sheet); on the create page and in a
+  row, the quick-add line and each row action save at once (see Saving a saved sheet); on the create page and in a
   full-form re-render the per-row buttons ("Move row 2 of Equipment up", "Remove row 2 of
   Equipment") and "Add Equipment row" (disabled at 256 rows) re-render the draft until Save.
   Targets are at least 24 × 24 CSS px; rows stack without tables at 390 px. History shows
@@ -287,5 +326,5 @@ python3 tools/assist_demo.py target/release/mimik --fixture target/demo-source -
 `--exit-after-setup` stops once the sheet exists. The definition
 (`tests/support/source_fixture.rs`, `assist_definition`): integers Current HP, Max HP,
 Armour modifier and nullable Luck; an Equipment list (Item name, Quantity, Weight, optional
-Broken boolean); derived Load = `sum(equipment.map(i, i.quantity * i.weight))`; the check
+Broken boolean) with a quick-add line (name and quantity; try "3 torches"); derived Load = `sum(equipment.map(i, i.quantity * i.weight))`; the check
 `hp <= max_hp`.
