@@ -9,6 +9,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Step 1 (slices 1.1–1.7) and step
   2a (sheet module, strict CSP, D-AA) are merged into master. Next: 2b.
 
+- **Resume after a reboot:** master is the state (nothing pending on branches; the
+  `assist-2a` worktree at `/home/marco/Progetti/mimik-wt/catalogue` is merged). The CI helper
+  is `target/agent-tools/ci.sh` (`CPUS=2 sh target/agent-tools/ci.sh <cmd>`, image mimik-ci,
+  volumes mimik-cargo-cache and mimik-catalogue-target).
+
 ## Next steps
 
 1. 2b crate and runtime selection (STROT via pyo3 or a Rust port among the candidates,
