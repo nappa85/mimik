@@ -217,6 +217,7 @@ def main(argv=None):
         print(f"  Owner:   {OWNER} / {passwords[OWNER].decode()} (administration only)")
         print(f"  Data:    {directory} (server log: {directory / 'server.log'})")
         print("  Try:     type '3 torches' in Equipment's Quick add line and press Enter")
+        print("           or set Current HP above Max HP: the header says 'Not validated'")
         if args.exit_after_setup:
             print("Setup complete; stopping (--exit-after-setup).")
             return

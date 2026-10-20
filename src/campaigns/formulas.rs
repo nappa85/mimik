@@ -144,11 +144,137 @@ impl FormulaView {
         checks.sort_by_key(|check| check.status != CheckStatus::Violated);
         checks
     }
+    /// Derived values that could not be computed, as the flag counts them, and the first.
+    pub(super) fn not_computed(&self) -> Option<(String, &DerivedItem)> {
+        let mut failed = self.derived.iter().filter(|item| !item.view.is_value());
+        let first = failed.next()?;
+        Some((Doubt::NotComputed(1 + failed.count()).text(), first))
+    }
     pub(super) fn passes(&self) -> Vec<&CheckView> {
         self.checks
             .iter()
             .filter(|check| check.status == CheckStatus::Pass)
             .collect()
+    }
+}
+
+/// One reason a saved revision is "Not validated" (RR-3, ASSIST-4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Doubt {
+    /// Checks that ran and failed.
+    Violated(usize),
+    /// Checks that did not run: an unknown input (D-Z) or an evaluation error.
+    NotEvaluated(usize),
+    /// Derived values that could not be computed.
+    NotComputed(usize),
+    /// The engine refused the saved values as input, so nothing was evaluated.
+    Unavailable,
+    /// A supported runtime definition that declares no checks.
+    NoChecks,
+    /// A native or unsupported pin: no definition checks apply to it.
+    NoCoverage,
+}
+
+impl Doubt {
+    pub(super) fn text(self) -> String {
+        let count = |count: usize, one: &str, many: &str| {
+            format!("{count} {}", if count == 1 { one } else { many })
+        };
+        match self {
+            Self::Violated(n) => count(n, "check violated", "checks violated"),
+            Self::NotEvaluated(n) => count(n, "check not evaluated", "checks not evaluated"),
+            Self::NotComputed(n) => count(
+                n,
+                "derived value not computed",
+                "derived values not computed",
+            ),
+            Self::Unavailable => "derived values and checks unavailable".into(),
+            Self::NoChecks => "its definition declares no checks".into(),
+            Self::NoCoverage => "no rule checks cover its interpretation pin".into(),
+        }
+    }
+    /// The page section that explains this reason; `sections` says whether the page has the
+    /// derived-values and checks sections.
+    pub(super) fn anchor(self, sections: bool) -> Option<&'static str> {
+        if !sections {
+            return None;
+        }
+        Some(match self {
+            Self::NotComputed(_) | Self::Unavailable => "formula-results",
+            _ => "advisory-checks",
+        })
+    }
+}
+
+/// The validity flag of one saved revision (RR-3, ASSIST-4): computed on view from the saved
+/// revision's evaluation, like derived values, and never stored. It never blocks a save and
+/// never hides or changes a value. No doubts means every declared check passed.
+pub(super) struct Validity {
+    pub doubts: Vec<Doubt>,
+    /// Whether the page has the derived-values and checks sections the reasons link to.
+    pub sections: bool,
+}
+
+impl Validity {
+    /// `formulas` is the saved revision's evaluation (`None` when the pin has no formula
+    /// layer); `runtime` says whether the pin is a supported runtime definition.
+    pub(super) fn of(formulas: Option<&FormulaView>, runtime: bool) -> Self {
+        let Some(formulas) = formulas else {
+            return Self {
+                doubts: vec![if runtime {
+                    Doubt::NoChecks
+                } else {
+                    Doubt::NoCoverage
+                }],
+                sections: false,
+            };
+        };
+        if formulas.unavailable.is_some() {
+            return Self {
+                doubts: vec![Doubt::Unavailable],
+                sections: true,
+            };
+        }
+        let not_computed = formulas
+            .derived
+            .iter()
+            .filter(|item| !item.view.is_value())
+            .count();
+        let doubts = [
+            (formulas.checks.is_empty(), Doubt::NoChecks),
+            (formulas.violated > 0, Doubt::Violated(formulas.violated)),
+            (
+                formulas.not_evaluated > 0,
+                Doubt::NotEvaluated(formulas.not_evaluated),
+            ),
+            (not_computed > 0, Doubt::NotComputed(not_computed)),
+        ]
+        .into_iter()
+        .filter_map(|(doubt, reason)| doubt.then_some(reason))
+        .collect();
+        Self {
+            doubts,
+            sections: true,
+        }
+    }
+    pub(super) fn validated(&self) -> bool {
+        self.doubts.is_empty()
+    }
+    /// Each reason in words with the section that explains it.
+    pub(super) fn links(&self) -> Vec<(String, Option<&'static str>)> {
+        self.doubts
+            .iter()
+            .map(|doubt| (doubt.text(), doubt.anchor(self.sections)))
+            .collect()
+    }
+    /// The doubts in words, separated by semicolons.
+    #[cfg(test)]
+    pub(super) fn summary(&self) -> String {
+        self.doubts
+            .iter()
+            .map(|doubt| doubt.text())
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 }
 
@@ -196,47 +322,58 @@ fn explanation(code: Code, definition: &Definition, dependency: Option<&str>) ->
     }
 }
 
+/// The view of an evaluation whose input was refused: nothing is computed.
+fn refused(definition: &Definition, error: &InputError) -> FormulaView {
+    FormulaView {
+        derived: definition
+            .fields
+            .iter()
+            .filter(|field| field.formula.is_some())
+            .map(|field| DerivedItem {
+                id: field.id.clone(),
+                label: field.label.clone(),
+                view: DerivedView::Error {
+                    code: error.code,
+                    message: "derived values are unavailable for this sheet".into(),
+                },
+            })
+            .collect(),
+        checks: Vec::new(),
+        passed: 0,
+        violated: 0,
+        not_evaluated: 0,
+        unavailable: Some(Unavailable {
+            code: error.code.as_str(),
+            message: message(error.code),
+        }),
+    }
+}
+
 /// Presents one evaluation of stored data, or the refusal of its input.
 pub(super) fn present(pin: &ImmutablePin, result: Result<&Evaluation, &InputError>) -> FormulaView {
     let definition = pin.definition();
     let evaluation = match result {
         Ok(evaluation) => evaluation,
-        Err(error) => {
-            return FormulaView {
-                derived: definition
-                    .fields
-                    .iter()
-                    .filter(|field| field.formula.is_some())
-                    .map(|field| DerivedItem {
-                        id: field.id.clone(),
-                        label: field.label.clone(),
-                        view: DerivedView::Error {
-                            code: error.code,
-                            message: "derived values are unavailable for this sheet".into(),
-                        },
-                    })
-                    .collect(),
-                checks: Vec::new(),
-                passed: 0,
-                violated: 0,
-                not_evaluated: 0,
-                unavailable: Some(Unavailable {
-                    code: error.code.as_str(),
-                    message: message(error.code),
-                }),
-            };
-        }
+        Err(error) => return refused(definition, error),
     };
     let failed = |kind, id: &str| {
         pin.formulas()
             .and_then(|compiled| compiled.failed_dependency(evaluation, kind, id))
     };
+    // A declared formula with no evaluation entry breaks an engine or pin invariant: it
+    // fails closed as `internal_error` (shown, counted, flagged), never dropped.
+    let missing_value = Err(Code::InternalError);
+    let missing_check = Outcome::Error(Code::InternalError);
     let derived = definition
         .fields
         .iter()
         .filter(|field| field.formula.is_some())
-        .filter_map(|field| {
-            let (_, result) = evaluation.derived.iter().find(|(id, _)| id == &field.id)?;
+        .map(|field| {
+            let result = evaluation
+                .derived
+                .iter()
+                .find(|(id, _)| id == &field.id)
+                .map_or(&missing_value, |(_, result)| result);
             let view = match result {
                 Ok(value) => DerivedView::Value(display(definition, &field.id, value)),
                 Err(code) => DerivedView::Error {
@@ -248,21 +385,22 @@ pub(super) fn present(pin: &ImmutablePin, result: Result<&Evaluation, &InputErro
                     ),
                 },
             };
-            Some(DerivedItem {
+            DerivedItem {
                 id: field.id.clone(),
                 label: label(definition, &field.id).to_owned(),
                 view,
-            })
+            }
         })
         .collect();
     let checks: Vec<CheckView> = definition
         .constraints
         .iter()
-        .filter_map(|constraint| {
-            let (_, outcome) = evaluation
+        .map(|constraint| {
+            let outcome = evaluation
                 .constraints
                 .iter()
-                .find(|(id, _)| id == &constraint.id)?;
+                .find(|(id, _)| id == &constraint.id)
+                .map_or(&missing_check, |(_, outcome)| outcome);
             let (status, code, explanation) = match outcome {
                 Outcome::Pass => (CheckStatus::Pass, "", String::new()),
                 Outcome::Violated => (CheckStatus::Violated, "", String::new()),
@@ -276,7 +414,7 @@ pub(super) fn present(pin: &ImmutablePin, result: Result<&Evaluation, &InputErro
                     ),
                 ),
             };
-            Some(CheckView {
+            CheckView {
                 id: constraint.id.clone(),
                 message: constraint.message.clone(),
                 rule_ids: rule_list(&constraint.rule_ids),
@@ -284,7 +422,7 @@ pub(super) fn present(pin: &ImmutablePin, result: Result<&Evaluation, &InputErro
                 status,
                 code,
                 explanation,
-            })
+            }
         })
         .collect();
     let count = |status| checks.iter().filter(|check| check.status == status).count();
@@ -540,6 +678,144 @@ mod tests {
         assert!(!second.is_value());
         assert_eq!(view.not_evaluated, 1);
         assert_eq!(view.passed, 1);
+    }
+
+    #[test]
+    fn validity_flags_every_doubt_and_passes_only_full_coverage() {
+        let pass = view(&json!({"label": "x", "vitality": 4, "luck": 2}));
+        let validity = Validity::of(Some(&pass), true);
+        assert!(validity.validated());
+        assert!(validity.doubts.is_empty());
+        let violated = Validity::of(
+            Some(&view(&json!({"label": "x", "vitality": 11, "luck": 2}))),
+            true,
+        );
+        assert_eq!(violated.doubts, [Doubt::Violated(1)]);
+        assert_eq!(
+            violated.links(),
+            [("1 check violated".to_owned(), Some("advisory-checks"))]
+        );
+        assert_eq!(violated.summary(), "1 check violated");
+        let unknown = Validity::of(
+            Some(&view(&json!({"label": "x", "vitality": 11, "luck": null}))),
+            true,
+        );
+        assert_eq!(
+            unknown.doubts,
+            [
+                Doubt::Violated(1),
+                Doubt::NotEvaluated(1),
+                Doubt::NotComputed(3)
+            ]
+        );
+        assert_eq!(
+            unknown.summary(),
+            "1 check violated; 1 check not evaluated; 3 derived values not computed"
+        );
+        assert!(!unknown.validated());
+        // Each reason links to the section that explains it (Sol review).
+        let anchors: Vec<_> = unknown
+            .links()
+            .into_iter()
+            .map(|(_, anchor)| anchor)
+            .collect();
+        assert_eq!(
+            anchors,
+            [
+                Some("advisory-checks"),
+                Some("advisory-checks"),
+                Some("formula-results")
+            ]
+        );
+        let (count, first) = view(&json!({"label": "x", "vitality": 11, "luck": null}))
+            .not_computed()
+            .map(|(count, first)| (count, first.id.clone()))
+            .unwrap();
+        assert_eq!(
+            (count.as_str(), first.as_str()),
+            ("3 derived values not computed", "lucky")
+        );
+        assert!(pass.not_computed().is_none());
+    }
+
+    #[test]
+    fn validity_flags_errors_unavailable_input_and_missing_coverage() {
+        let pin = pin();
+        let mut evaluation = pin
+            .evaluate(&json!({"label": "x", "vitality": 4, "luck": 2}))
+            .unwrap()
+            .unwrap();
+        evaluation.constraints[1].1 = Outcome::Error(Code::DivisionByZero);
+        let errored = present(&pin, Ok(&evaluation));
+        assert_eq!(
+            Validity::of(Some(&errored), true).doubts,
+            [Doubt::NotEvaluated(1)]
+        );
+        let error = InputError {
+            code: Code::InputTooLarge,
+            path: "/label".into(),
+        };
+        let refused = Validity::of(Some(&present(&pin, Err(&error))), true);
+        assert_eq!(refused.doubts, [Doubt::Unavailable]);
+        assert_eq!(
+            refused.links(),
+            [(
+                "derived values and checks unavailable".to_owned(),
+                Some("formula-results")
+            )]
+        );
+        let mut definition = definition();
+        definition["constraints"] = json!([]);
+        let pin = crate::definitions::private_pin::for_tests(&definition);
+        let evaluation = pin
+            .evaluate(&json!({"label": "x", "vitality": 4, "luck": 2}))
+            .unwrap()
+            .unwrap();
+        let unchecked = Validity::of(Some(&present(&pin, Ok(&evaluation))), true);
+        assert_eq!(unchecked.doubts, [Doubt::NoChecks]);
+        assert_eq!(unchecked.links()[0].1, Some("advisory-checks"));
+        let formula_free = Validity::of(None, true);
+        assert_eq!(formula_free.doubts, [Doubt::NoChecks]);
+        assert_eq!(formula_free.links()[0].1, None);
+        assert_eq!(Validity::of(None, false).links()[0].1, None);
+        let native = Validity::of(None, false);
+        assert_eq!(native.doubts, [Doubt::NoCoverage]);
+        assert_eq!(
+            native.summary(),
+            "no rule checks cover its interpretation pin"
+        );
+        assert_eq!(Doubt::Violated(2).text(), "2 checks violated");
+        assert_eq!(Doubt::NotComputed(1).text(), "1 derived value not computed");
+    }
+
+    /// Third review: a declared formula with no evaluation entry (a broken engine or pin
+    /// invariant) fails closed as `internal_error`: shown, counted and flagged, never
+    /// dropped, so the sheet cannot look validated.
+    #[test]
+    fn a_formula_missing_from_the_evaluation_fails_closed() {
+        let pin = pin();
+        let mut evaluation = pin
+            .evaluate(&json!({"label": "x", "vitality": 4, "luck": 2}))
+            .unwrap()
+            .unwrap();
+        let missing_check = evaluation.constraints.remove(1).0;
+        let missing_value = evaluation.derived.remove(0).0;
+        let view = present(&pin, Ok(&evaluation));
+        assert_eq!(view.checks.len(), 2, "every declared check is presented");
+        assert_eq!((view.passed, view.violated, view.not_evaluated), (1, 0, 1));
+        let check = view
+            .checks
+            .iter()
+            .find(|check| check.id == missing_check)
+            .unwrap();
+        assert_eq!(check.status, CheckStatus::NotEvaluated);
+        assert_eq!(check.code, "internal_error");
+        assert_eq!(view.derived.len(), 7, "every declared derived value");
+        assert_eq!(view.value(&missing_value).unwrap().code(), "internal_error");
+        assert_eq!(
+            Validity::of(Some(&view), true).doubts,
+            [Doubt::NotEvaluated(1), Doubt::NotComputed(1)]
+        );
     }
 
     #[test]

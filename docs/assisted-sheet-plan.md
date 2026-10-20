@@ -7,9 +7,9 @@ legality stays advisory and Rust does all arithmetic.
 
 Decision IDs (D-…, U…, P…) are defined in `docs/decisions.md`. What is built (number entry,
 notes and scribbles, switch and Undo, unknown values, per-field save, the busy page, the page
-bound, quick-add) is described in `docs/assisted-entry.md`; this plan only adds to it.
+bound, quick-add, the validity flag) is described in `docs/assisted-entry.md`; this plan only adds to it.
 
-Remaining, in order: **1.7** validity flag, **2a** JavaScript,
+Remaining, in order: **2a** JavaScript,
 **2b** crate and runtime selection (prototype tier, may run in parallel), **2c**
 interpretation, **3** bundles and reminders, **4** suggestions and "Which Sword?", **5** docs
 and gate.
@@ -291,17 +291,6 @@ dynamic prompt ≤ 4 KiB, the job budgets and record caps, the breaker, the sugg
 has no egress; the client follows no redirects and ignores proxy settings; no prompts or player text in logs; no secrets.
 
 ## 2. Steps
-
-### 1.7 Validity flag (RR-3)
-
-Scope (decided 2026-10-19, coordinator default): the sheet shows **"Not validated"** whenever
-any check is violated, not evaluated or in error, or when rule coverage is unavailable for the
-pin; otherwise it shows nothing extra. Saving is always allowed; the flag never blocks, hides
-or changes a value. It is computed on view from the saved revision (like derived values), not
-stored. Shown in the sheet header and on each history revision. Tests: one violated check →
-flag; a not-evaluated check (unknown input) → flag; an evaluation error → flag; a pin without
-rule coverage → flag; all checks passed with coverage → no flag; a save of a flagged sheet
-succeeds; history shows the flag per revision; no-JS and 390 px layouts.
 
 ### 2a JavaScript foundation
 

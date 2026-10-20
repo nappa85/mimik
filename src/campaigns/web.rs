@@ -1297,6 +1297,8 @@ struct PrivateTemplate<'a> {
     mode: FormulaMode,
     /// Evaluation of the saved snapshot; never of an unsaved draft.
     formulas: Option<FormulaView>,
+    /// The saved revision's validity flag (RR-3); `None` on the create page.
+    validity: Option<super::formulas::Validity>,
     /// A history page's change notes, with raw text (D-E).
     revision_notes: Vec<NoteRow>,
     /// The switch and Undo forms this page needs (slice 1.3), outside the sheet form.
@@ -1477,6 +1479,9 @@ fn render_private(
                 .any(|field| field.control == crate::definitions::Control::List)
         }),
         mode: FormulaMode::of(view, create, raw.is_some()),
+        // Of the saved revision, from the same evaluation; never of a draft (RR-3).
+        validity: (!create)
+            .then(|| super::formulas::Validity::of(formulas.as_ref(), view.immutable.is_some())),
         formulas,
         revision_notes: view.notes.revision.iter().map(NoteRow::of).collect(),
         assist_forms,
