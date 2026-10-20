@@ -57,7 +57,7 @@ implementation for both).
   unchanged (scribble A → scribble B, or scribble → typed value). A job request for an older
   note never supersedes a newer one. A newer job of the same account, for any target
   on the same sheet, supersedes its running or queued job (the latest edit wins, by origin revision, which is a
-  sheet-wide counter, not by request arrival).
+  sheet-wide counter, not by request arrival; equal revisions on two targets by arrival).
 - **Request builder:** one function renders a typed `Request` (phrase, target, context items).
   The instructions and schema are a fixed prefix, byte-identical across requests (tested), so
   llama-server can reuse its prompt cache; the dynamic part is at most 4 KiB, measured in
@@ -91,7 +91,10 @@ implementation for both).
   digits, never superscripts or circled digits (no general NFKC); a number is a maximal run of
   ASCII digits whose neighbour on each side is neither a letter nor any other Unicode number
   character (`N*`, such as `²` or `①`), that is not preceded by `.` or `,` at all, is not
-  followed by a `.` or `,` that touches a digit, and is not followed by `e`/`E` and a digit; so `heal 15` and `15%` give 15, `take −15
+  followed by a `.` or `,` that touches a digit (letters and `N*` are tested on the original
+  characters, before folding); the separators `.` and `,` include U+066B, U+066C, U+FF0C and
+  U+FF0E, and two runs joined by a single NBSP, U+202F or apostrophe (`1 500`, `1'500`) both
+  give nothing; so `heal 15` and `15%` give 15, `take −15
   damage` gives 15 (signs are not part of the token; U+2212, NBSP and U+202F are separators
   as in ASSIST-1), `5.` at the end of a sentence gives 5, while `1.5`, `x.5`, `1,000`, `1e2`,
   `3d6`, `15hp` and `15²` give nothing. A leading zero
@@ -147,7 +150,7 @@ implementation for both).
   neutral. Three consecutive counted failures open it for 2
   minutes; then one half-open probe job decides (success closes, failure reopens; a cancelled
   probe clears the in-flight probe flag, leaves it half-open, and the next job becomes the
-  probe). While open
+  probe; while the probe is in flight other starts answer 503 like an open breaker). While open
   no request is sent: a start answers 503 and a job already queued answers on poll, both with
   "the assistant is unavailable right now"; number
   entry, notes and Undo work as usual. Implemented with a maintained crate if one fits
@@ -167,13 +170,17 @@ implementation for both).
   is 409 (an equal revision on another target, as from one full-form save, supersedes: the
   later arrival wins); then the
   breaker (503) and capacity (429), computed as if the superseded job were already gone, so a
-  refused start never cancels anything; then supersession and enqueue. The in-memory job-table
+  refused start never cancels anything (a live job of the account on another sheet is never
+  superseded and gives 429); then supersession and enqueue. The in-memory job-table
   lock covers this check-then-enqueue and the post-commit cancellation hook of every save; it
   is never held across a database wait, the permit wait or the model call. The current-note
   check reads the database before the lock, so under the lock the start also compares its
-  origin with an in-memory per-sheet map of the latest note-write revision per target, which
-  each save's post-commit hook updates under the same lock: a write newer than the origin
-  gives 409. 202 with the job
+  origin with an in-memory per-sheet map of the latest note-write revision per target (row
+  cells keyed by host ID), which every note writer's post-commit hook (saves, Undo, switch,
+  row removal) updates and uses to cancel stale jobs in one critical section of the same lock:
+  a write newer than the origin gives 409. Entries are dropped once older than the longest
+  start (a size-bounded sweep) and with their sheet or row; the map and the job table are
+  per process and empty after a restart, when the database check alone suffices. 202 with the job
   ID. `GET
   …/interpretations/{job}` polls (the module polls at 500 ms, backing off to 2 s, and stops on
   unload, supersession or a terminal state); an evicted or expired job answers "ask again".
@@ -298,7 +305,9 @@ server unless stated):
   `ambiguous` with more than 3 readings or a reading over 120 characters dropped, readings
   escaped and never applicable;
 - lexer: `heal 15`, `take −15 damage`, `15%`, `1.5`, `x.5`, `5.`, `1,000`, `1e2`, `3d6`,
-  `15hp`, `15²`, `①`, `007`, full-width digits, 19 digits; "half of 84" admits 2, "metà" and
+  `15hp`, `15²`, `①`, `007`, full-width digits, 19 digits, `1٫5`, `1．5`, `1，000`,
+  `1 500` (NBSP and U+202F), `1'500`, `15,` then a space (15), `(15)` (15), `15/20` (15 and
+  20); `heal,15` and `1,2,3` give nothing (accepted false rejects, erring towards no option); "half of 84" admits 2, "metà" and
   "meta" admit 2, "halfway" and "quarterly" do not, a phrase without a fraction word does
   not;
 - input: a parsed entry and a sign-led entry never start a job; the phrase comes from the
