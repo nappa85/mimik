@@ -653,7 +653,7 @@ def _validator():
 def run_llm(args):
     data = load_cases(args.cases)
     sheet = data["sheet"]
-    cases = data["cases"]
+    cases = [c for c in data["cases"] if not args.only or c["id"] in args.only]
     validator = _validator()
     header = {
         "event": "header",
@@ -939,6 +939,7 @@ def main(argv=None):
     llm.add_argument("--max-tokens", type=int, default=384)
     llm.add_argument("--passes", type=int, default=2)
     llm.add_argument("--stress", type=int, default=0)
+    llm.add_argument("--only", action="append", help="case id (repeatable)")
     llm.add_argument("--request-timeout", type=float, default=600)
     llm.add_argument("--deadline-epoch", type=float, required=True)
     strot = sub.add_parser("run-strot")
