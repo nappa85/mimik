@@ -2318,10 +2318,28 @@ fn hostile_definition() -> Value {
     })
 }
 
+/// The only script is at most the one sheet module tag (step 2a): `type="module"`, its
+/// `src`, no other attribute and no body; nothing injected beside it.
+fn assert_module_only(page: &scraper::Html, context: &str) {
+    let scripts: Vec<_> = page.select(&selector("script")).collect();
+    assert!(scripts.len() <= 1, "{context}: {} scripts", scripts.len());
+    if let Some(script) = scripts.first() {
+        let mut attributes: Vec<_> = script.value().attrs().collect();
+        attributes.sort_unstable();
+        assert_eq!(
+            attributes,
+            vec![("src", "/assets/sheet-assist.js"), ("type", "module")],
+            "{context}: script attributes"
+        );
+        assert_eq!(script.inner_html(), "", "{context}: script body");
+    }
+}
+
 /// No injected element, and every payload reads back verbatim from its own context.
 fn assert_inert(html: &str, context: &str, values: &[(&str, &str)]) {
     let page = scraper::Html::parse_document(html);
-    for tag in ["script", "b", "i", "u"] {
+    assert_module_only(&page, context);
+    for tag in ["b", "i", "u"] {
         assert_eq!(
             page.select(&selector(tag)).count(),
             0,
@@ -2391,7 +2409,8 @@ async fn list_payloads_escaped_in_context() {
     edit(&setup, &second, changed).await.unwrap();
     let history = history_page(&setup, 3).await;
     let page = scraper::Html::parse_document(&history);
-    for tag in ["script", "b", "i", "u"] {
+    assert_module_only(&page, "history");
+    for tag in ["b", "i", "u"] {
         assert_eq!(page.select(&selector(tag)).count(), 0, "history: <{tag}>");
     }
     assert_eq!(

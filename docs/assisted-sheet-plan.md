@@ -7,9 +7,10 @@ legality stays advisory and Rust does all arithmetic.
 
 Decision IDs (D-…, U…, P…) are defined in `docs/decisions.md`. What is built (number entry,
 notes and scribbles, switch and Undo, unknown values, per-field save, the busy page, the page
-bound, quick-add, the validity flag) is described in `docs/assisted-entry.md`; this plan only adds to it.
+bound, quick-add, the validity flag, the sheet module with save on leaving a field) is described
+in `docs/assisted-entry.md`; this plan only adds to it.
 
-Remaining, in order: **2a** JavaScript,
+Remaining, in order:
 **2b** crate and runtime selection (prototype tier, may run in parallel), **2c**
 interpretation, **3** bundles and reminders, **4** suggestions and "Which Sword?", **5** docs
 and gate.
@@ -28,40 +29,6 @@ automatic application of model output, chat, manual RAG, `catalogue_ref` members
 hosted providers, GPU, models above about 4B.
 
 ## 1. Design for the remaining steps
-
-### 1.3 JavaScript (2a)
-
-- One module, `assets/sheet-assist.js`, loaded with `<script type="module">` on sheet pages.
-  Without it every save, Undo, switch, quick-add and row action keeps working through PRG
-  (D-G).
-- **CSP:** a `SheetPage` response extension applied in `normalize` gives `default-src
-  'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none';
-  form-action 'self'; frame-ancestors 'none'; require-trusted-types-for 'script';
-  trusted-types 'none'`. The inline `style="min-width:0"` in `private_sheet.html` moves to
-  `app.css`; the module uses classes, never `setAttribute('style')` or `innerHTML`. Error pages
-  from outer middleware (timeout, 503) keep the default header; document that.
-- **Asset route:** the auth router serves only `app.css` and `logo.png` today; add the module.
-- **Transport:** requests are `URLSearchParams` bodies (`post_origin` refuses multipart with
-  415); responses are JSON; integers and revisions are strings, recursively (list values,
-  note values, revisions).
-- **Save response:** `{revision, unit: {address, value, note?}, derived: [{id, text}],
-  checks: {violated, not_evaluated, passed, items: [{id, status, message}]}}`, computed from
-  the new revision. The module updates the saved unit, the derived texts and the checks
-  section only; no other input and no other unit's `base` moves.
-- **Per-unit state:** after a save the module updates `base` only for the saved unit, and
-  only when the response revision is newer. Requests per unit are serialised (one in flight,
-  the latest queued); a late response for an older request is ignored. A draft generation
-  counter per unit increments on `input`; a response always updates the unit's acknowledged
-  value and `base`, but replaces the control's text only if the draft is still the submitted
-  generation. Derived values and checks have their own projection revision and update only
-  from a response at least as new.
-- **Save on leaving the field (D-AA):** a changed field also saves on blur/change through the
-  same per-unit route as Enter; an unchanged field (equal to its last save or offer) sends
-  nothing; leaving a field while its previous save is in flight queues one save of the latest
-  value. `change` saves selects and checkboxes. Enter still saves; without JavaScript Enter
-  remains the only way.
-- Accessibility: live region, real buttons, focus returning to the cell, 24 × 24 px targets,
-  390 px layout.
 
 ### 1.4 Interpretation service (2b, 2c)
 
@@ -292,25 +259,6 @@ has no egress; the client follows no redirects and ignores proxy settings; no pr
 
 ## 2. Steps
 
-### 2a JavaScript foundation
-
-Scope: §1.3 without the combobox. Tests:
-- D-AA: Tab out of a changed HP saves once; Tab out of an unchanged HP sends no request;
-  Enter followed by blur saves once; the no-JS run still saves only on Enter;
-- final headers on 200, 409 and 422; the final CSP after `normalize` on the new routes and
-  their refusals; other routes unchanged;
-- a multipart body still gets 415 and the module sends URL-encoded;
-- 9007199254740993 round-trips; integers are strings recursively;
-- the two-tab sequence with JS: a saved HP response leaves the dirty Armour `base` alone, and Armour → 409;
-- draft generations: a delayed HP response after the player typed 60 without submitting keeps
-  the 60 and updates the base; repeated with a queued second save;
-- projection ordering: HP (revision 11) and Equipment (12) responses arrive reversed; both
-  units acknowledge, Load and the checks show revision 12;
-- a save that changes `load` and `hp <= max_hp` updates both read-only regions without
-  touching other inputs;
-- no CSP violations; a lint test over the module refuses `innerHTML` and style attributes;
-- the inline style moved to `app.css`; the no-JS browser run still green.
-
 ### 2b Crate and runtime selection (prototype tier; may run in parallel)
 
 Scope: §1.4 crate items, client policy and the D-H stop; the topology with egress tests from
@@ -416,12 +364,11 @@ dangling key shows no link; p95 measured.
 
 ### 5 Docs, release scope, gate
 
-- Update `docs/assisted-entry.md`, `release-scope.md` (schema 21, one script on sheet pages under
-  a strict CSP, the local model as confirm-only), the runtime definition contract (the
+- Update `docs/assisted-entry.md`, `release-scope.md` (schema 21, the sheet module under its strict
+  CSP, the local model as confirm-only), the runtime definition contract (the
   `catalogue` member), publication and dependency docs; replace the statements this work
   reverses: catalogue Q4 (not in the catalogue is a warning, "Which Sword?" remembered), the
-  D9/R9 writer membership check (not built; the key is advisory), "no script on sheet pages" (other
-  pages already serve `account-sharing.js` and `source-regions.js`),
+  D9/R9 writer membership check (not built; the key is advisory),
   "no model proposes", the accuracy bar (waived, D-D), and "the LLM does not judge at play
   time" (narrow confirmable proposals and reminders).
 - `cargo about`, audit, packaging, and the unpacked smoke with the assistant off and once with

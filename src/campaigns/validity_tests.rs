@@ -104,8 +104,10 @@ async fn violated_check_flags_and_a_flagged_sheet_still_saves() {
     // In the header: before any form, so it reads first without script or styles.
     assert!(html.find("id=\"validity\"").unwrap() < html.find("<form").unwrap());
     assert!(
-        !html.contains("<script"),
-        "the sheet page works without script"
+        !html
+            .replace(super::script_tests::MODULE_TAG, "")
+            .contains("<script"),
+        "the sheet page loads only the sheet module, and the flag needs none"
     );
     // The flag hides and changes nothing: the violating value is shown and kept.
     assert!(html.contains("value=\"11\""));

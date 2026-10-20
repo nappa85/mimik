@@ -42,6 +42,8 @@ mod notes_tests;
 mod quick_tests;
 #[path = "registry_tests.rs"]
 mod registry_tests;
+#[path = "script_tests.rs"]
+mod script_tests;
 #[path = "unit_tests.rs"]
 mod unit_tests;
 #[path = "unknown_tests.rs"]
@@ -766,7 +768,7 @@ async fn assert_native_page_has_no_formula_markers(app: &axum::Router, auth: &Re
     ] {
         assert!(!native_html.contains(marker), "native page shows {marker}");
     }
-    assert!(native_html.contains("fieldset style=\"min-width:0\" >"));
+    assert!(native_html.contains("<fieldset class=\"sheet-fieldset\">"));
     // No definition checks cover a native pin: never shown as validated (RR-3, ASSIST-4).
     assert!(native_html.contains(
         "<p id=\"validity\" class=\"validity\"><strong>Not validated</strong> (saved revision 1): no rule checks cover its interpretation pin. This flag never blocks saving.</p>"

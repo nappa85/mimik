@@ -19,7 +19,9 @@
 //! with the draft (an orphaned cell's read-only) and every `base` at L. The write
 //! goes through the sheet writer, which rechecks rights, the active state and that L is
 //! still live inside its `IMMEDIATE` transaction.
-use super::{AppError, AuthState, Notice, Redirect, StatusCode, error, rejected_editor, rendered};
+use super::{
+    AppError, AuthState, Notice, Redirect, StatusCode, error, rejected_editor, rendered, sheet_json,
+};
 use crate::{
     auth,
     campaigns::{
@@ -33,6 +35,7 @@ use crate::{
 use askama::Template;
 use axum::{
     extract::{Path, State},
+    http::HeaderMap,
     response::{Html, IntoResponse},
 };
 use std::collections::BTreeMap;
@@ -98,27 +101,33 @@ pub(super) async fn meta(
     State(state): State<AuthState>,
     session: Session,
     Path((id, which)): Path<(i64, String)>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> super::ResultResponse {
-    save(state, session, id, Route::Meta(which), &body).await
+    let json = sheet_json::wanted(&headers);
+    save(state, session, (id, json), Route::Meta(which), &body).await
 }
 
 pub(super) async fn field(
     State(state): State<AuthState>,
     session: Session,
     Path((id, field)): Path<(i64, String)>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> super::ResultResponse {
-    save(state, session, id, Route::Field(field), &body).await
+    let json = sheet_json::wanted(&headers);
+    save(state, session, (id, json), Route::Field(field), &body).await
 }
 
 pub(super) async fn cell(
     State(state): State<AuthState>,
     session: Session,
     Path((id, f, r, p)): Path<(i64, String, String, String)>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> super::ResultResponse {
-    save(state, session, id, Route::Cell(f, r, p), &body).await
+    let json = sheet_json::wanted(&headers);
+    save(state, session, (id, json), Route::Cell(f, r, p), &body).await
 }
 
 pub(super) async fn new_row(
@@ -127,7 +136,7 @@ pub(super) async fn new_row(
     Path((id, f)): Path<(i64, String)>,
     body: axum::body::Bytes,
 ) -> super::ResultResponse {
-    save(state, session, id, Route::NewRow(f), &body).await
+    save(state, session, (id, false), Route::NewRow(f), &body).await
 }
 
 pub(super) async fn row(
@@ -136,7 +145,7 @@ pub(super) async fn row(
     Path((id, f, r, action)): Path<(i64, String, String, String)>,
     body: axum::body::Bytes,
 ) -> super::ResultResponse {
-    save(state, session, id, Route::Row(f, r, action), &body).await
+    save(state, session, (id, false), Route::Row(f, r, action), &body).await
 }
 
 pub(super) async fn quick(
@@ -145,7 +154,7 @@ pub(super) async fn quick(
     Path((id, f)): Path<(i64, String)>,
     body: axum::body::Bytes,
 ) -> super::ResultResponse {
-    save(state, session, id, Route::Quick(f), &body).await
+    save(state, session, (id, false), Route::Quick(f), &body).await
 }
 
 /// Body limit of a row action and a quick-add line: short pairs (a 200-character line is at
@@ -182,10 +191,11 @@ impl UnitDraft {
     }
 }
 
+/// A unit save; `json` asks for the module's JSON answer (step 2a) instead of the page.
 async fn save(
     state: AuthState,
     session: Session,
-    id: i64,
+    (id, json): (i64, bool),
     route: Route,
     body: &[u8],
 ) -> super::ResultResponse {
@@ -254,7 +264,7 @@ async fn save(
     finish(
         &state,
         auth,
-        (id, csrf),
+        (id, csrf, json),
         (view, permit),
         (unit, &form),
         planned?,
@@ -263,11 +273,12 @@ async fn save(
 }
 
 /// Answers a planned unit save: writes it (303 to the unit), or says "No change", or
-/// re-renders the live page with the draft (409, 422).
+/// re-renders the live page with the draft (409, 422). With `json` each answer is the
+/// module's JSON projection of the live revision instead (200 for saved and unchanged).
 async fn finish(
     state: &AuthState,
     auth: auth::RequestAuth,
-    (id, csrf): (i64, String),
+    (id, csrf, json): (i64, String, bool),
     (view, permit): (SheetView, tokio::sync::OwnedSemaphorePermit),
     (unit, form): (Unit, &BTreeMap<String, String>),
     plan: Plan,
@@ -281,38 +292,7 @@ async fn finish(
     match plan.planned {
         Planned::Write => {}
         Planned::Unchanged => {
-            return match state
-                .store()
-                .private_unchanged(auth.clone(), view.snapshot.sheet_id, view.snapshot.revision)
-                .await
-            {
-                Ok(()) => {
-                    rendered(
-                        view,
-                        permit,
-                        csrf,
-                        None,
-                        StatusCode::OK,
-                        Notice::status(unchanged(unit, &label)),
-                    )
-                    .await
-                }
-                Err(AppError::Conflict) => {
-                    let (view, permit) =
-                        rejected_editor(state, auth, id, None, Some(permit)).await?;
-                    refused(
-                        view,
-                        permit,
-                        csrf,
-                        draft,
-                        StatusCode::CONFLICT,
-                        &label,
-                        None,
-                    )
-                    .await
-                }
-                Err(failure) => Err(error(failure)),
-            };
+            return no_change(state, auth, (id, csrf, json), (view, permit), draft, &label).await;
         }
         Planned::Conflict => {
             return refused(
@@ -321,8 +301,7 @@ async fn finish(
                 csrf,
                 draft,
                 StatusCode::CONFLICT,
-                &label,
-                None,
+                (&label, None, json),
             )
             .await;
         }
@@ -333,8 +312,7 @@ async fn finish(
                 csrf,
                 draft,
                 StatusCode::UNPROCESSABLE_ENTITY,
-                &label,
-                Some(reason),
+                (&label, Some(reason), json),
             )
             .await;
         }
@@ -348,6 +326,9 @@ async fn finish(
         .private_save_keeping(auth.clone(), view, permit)
         .await
     {
+        Ok((id, permit)) if json => {
+            saved(state, auth, (id, permit), unit, draft.host, &label).await
+        }
         Ok((id, _permit)) => {
             Ok(Redirect::to(&format!("/private-sheets/{id}{location}")).into_response())
         }
@@ -358,10 +339,88 @@ async fn finish(
                 AppError::Invalid(reason) => Some(reason),
                 _ => None,
             };
-            refused(view, permit, csrf, draft, status, &label, reason).await
+            refused(view, permit, csrf, draft, status, (&label, reason, json)).await
         }
         Err((failure, _)) => Err(error(failure)),
     }
+}
+
+/// Answers a save equal to the saved value (D-U): "No change" after the writer's rechecks,
+/// or a conflict when the page's revision is gone meanwhile.
+async fn no_change(
+    state: &AuthState,
+    auth: auth::RequestAuth,
+    (id, csrf, json): (i64, String, bool),
+    (view, permit): (SheetView, tokio::sync::OwnedSemaphorePermit),
+    draft: UnitDraft,
+    label: &str,
+) -> super::ResultResponse {
+    let unit = draft.unit;
+    match state
+        .store()
+        .private_unchanged(auth.clone(), view.snapshot.sheet_id, view.snapshot.revision)
+        .await
+    {
+        Ok(()) if json => {
+            sheet_json::answer(
+                view,
+                permit,
+                (unit, draft.host),
+                (sheet_json::Outcome::Unchanged, unchanged(unit, label)),
+                StatusCode::OK,
+            )
+            .await
+        }
+        Ok(()) => {
+            rendered(
+                view,
+                permit,
+                csrf,
+                None,
+                StatusCode::OK,
+                Notice::status(unchanged(unit, label)),
+            )
+            .await
+        }
+        Err(AppError::Conflict) => {
+            let (view, permit) = rejected_editor(state, auth, id, None, Some(permit)).await?;
+            refused(
+                view,
+                permit,
+                csrf,
+                draft,
+                StatusCode::CONFLICT,
+                (label, None, json),
+            )
+            .await
+        }
+        Err(failure) => Err(error(failure)),
+    }
+}
+
+/// The JSON answer of a written save: the live revision, read after the write (normally the
+/// one just written).
+async fn saved(
+    state: &AuthState,
+    auth: auth::RequestAuth,
+    (id, permit): (i64, tokio::sync::OwnedSemaphorePermit),
+    unit: Unit,
+    host: Option<String>,
+    label: &str,
+) -> super::ResultResponse {
+    let (view, permit) = state
+        .store()
+        .private_read(auth, id, None, permit)
+        .await
+        .map_err(error)?;
+    sheet_json::answer(
+        view,
+        permit,
+        (unit, host),
+        (sheet_json::Outcome::Saved, format!("{label} saved.")),
+        StatusCode::OK,
+    )
+    .await
 }
 
 /// The element a successful metadata or field save scrolls back to: its label.
@@ -391,23 +450,27 @@ fn unchanged(unit: Unit, label: &str) -> String {
 }
 
 /// Re-renders the live page with the refused unit's draft (409 or 422). Every unit form
-/// carries `base` = L, so pressing Enter again is a conscious overwrite.
+/// carries `base` = L, so pressing Enter again is a conscious overwrite. With `json` the
+/// answer is the JSON projection of L naming the unit; the module keeps the draft in its
+/// control and moves only that unit's `base` to L.
 async fn refused(
     view: SheetView,
     permit: tokio::sync::OwnedSemaphorePermit,
     csrf: String,
     draft: UnitDraft,
     status: StatusCode,
-    label: &str,
-    reason: Option<&'static str>,
+    (label, reason, json): (&str, Option<&'static str>, bool),
 ) -> super::ResultResponse {
     let revision = view.snapshot.revision;
+    // Where the refused entry is: on the re-rendered page, below the message; with the
+    // module, still in its own control.
+    let kept = if json { "in its field" } else { "below" };
     let message = match (draft.unit, reason) {
         // The cell's row is gone (removed since the page, or before the write): its draft is
         // kept read-only on the page (review round 1).
         (Unit::Cell { f, .. }, None) if orphaned(&view, f, draft.host.as_deref()) => format!(
             "{label} not saved: its row was removed since this page was loaded (now \
-             revision {revision}). Nothing was saved; your entry is kept below to copy."
+             revision {revision}). Nothing was saved; your entry is kept {kept} to copy."
         ),
         (Unit::Row { action, .. }, reason) => {
             let verb = if action == RowAction::Remove {
@@ -437,13 +500,28 @@ async fn refused(
             "{label} was not added: the sheet changed while it was saved (now revision \
              {revision}). Your row is kept below; press Enter again to add it."
         ),
-        (_, Some(reason)) => format!("{label} not saved: {reason} Your entry is kept below."),
+        (_, Some(reason)) => format!("{label} not saved: {reason} Your entry is kept {kept}."),
         (_, None) => format!(
             "{label} not saved: it changed since this page was loaded (now revision \
-             {revision}). Your entry is kept below; press Enter again to save it over the \
+             {revision}). Your entry is kept {kept}; press Enter again to save it over the \
              current value."
         ),
     };
+    if json {
+        let outcome = if status == StatusCode::CONFLICT {
+            sheet_json::Outcome::Conflict
+        } else {
+            sheet_json::Outcome::Invalid
+        };
+        return sheet_json::answer(
+            view,
+            permit,
+            (draft.unit, draft.host),
+            (outcome, message),
+            status,
+        )
+        .await;
+    }
     rendered(
         view,
         permit,

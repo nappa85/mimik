@@ -13,7 +13,8 @@ yet.
   is on the server; forms work as native HTML forms.
 - **Browser scripts:** bundled in the binary from `assets/` and served locally:
   `account-sharing.js` (copy link, QR, local dates; account and history pages),
-  `source-regions.js` (material review). htmx 2.0.8 and response-targets 2.0.4 are served only
+  `source-regions.js` (material review), `sheet-assist.js` (saved runtime sheet pages, under
+  their strict CSP; `docs/assisted-entry.md`). htmx 2.0.8 and response-targets 2.0.4 are served only
   by the unauthenticated prototype (`src/web.rs`). The authenticated router serves no htmx
   (`src/auth/mod.rs`, fallback 403). Provenance and licences: `assets/README.md`.
 - **CLI:** clap 4 (`src/main.rs`, `src/account_cli.rs`). Without a subcommand the binary

@@ -16,6 +16,7 @@ full-form POST pages without scripts; only the `--no-auth` prototype's native ed
 | Writer, rechecks | `src/campaigns/sheets.rs` (`private_save_keeping`, `private_unchanged`, `private_read_base`) |
 | Rendering | `src/campaigns/web.rs`, `templates/private_*.html`, `assets/app.css` |
 | Validity flag | `src/campaigns/formulas.rs` (`Validity`, `Doubt`), `templates/private_sheet.html` |
+| Sheet module, JSON answer, CSP | `assets/sheet-assist.js`, `src/campaigns/sheet_json.rs`, `SheetPage` in `src/campaigns/web.rs`, `normalize` in `src/auth/mod.rs` |
 | Unknowns in formulas | `src/definitions/formula/convert.rs` |
 | Demo | `tools/assist_demo.py`, `assist_definition()` in `tests/support/source_fixture.rs` |
 
@@ -312,7 +313,77 @@ It is computed on view from the evaluation the page already does of the saved re
 and a refused draft's re-render shows the saved revision's flag. Each history revision page
 (`/history/<n>`) shows its own; the history list evaluates nothing (RR-L1). Saving, values and
 controls are unaffected. One header paragraph per page, inside the fixed page budget; it needs
-no script and wraps at 390 px.
+no script and wraps at 390 px. With the sheet module a save's answer carries the flag of the
+revision it describes and the module replaces the paragraph from it (ASSIST-21).
+
+## Script on sheet pages
+
+Step 2a, D-G, D-AA, ASSIST-21 to ASSIST-25. A saved runtime page the reader may edit loads one
+module, `<script type="module" src="/assets/sheet-assist.js">` (served by the auth router,
+embedded in the binary); create, native, read-only, frozen and history pages and full-form
+re-renders load none. Without it every save, Undo, switch, quick-add and row action works
+through PRG as above.
+
+**CSP:** every private sheet page (view, create, history revision, 409 and 422 re-renders)
+and every sheet JSON answer carries the `SheetPage` extension, and `normalize` gives it
+`default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none';
+form-action 'self'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types
+'none'`. Every other answer keeps `frame-ancestors 'none'`: redirects, the busy page, refusals
+(400, 403, 415) and any error page rebuilt by `normalize` or by outer middleware (timeout,
+503), which drop the extension. The module builds DOM with `createElement` and `textContent`
+only, with attribute names from an allowlist; a Rust test refuses HTML sinks, any mention of
+`style`, dynamic attribute names outside that allowlist and code from strings in its source.
+
+**JSON answer** (`sheet_json.rs`, ASSIST-22): the module posts the unit form's pairs as a
+URL-encoded body (`post_origin` still refuses anything else with 415) with exactly one
+`Accept: application/json` header, to the Name, General notes, field and cell routes only.
+The route order, rechecks and refusals are those of the PRG path; instead of the 303 or the
+re-rendered page the answer is JSON of the live revision read after the write (or L for "No
+change" and refusals), built by the same view model as the page:
+
+```text
+{status: saved | unchanged | conflict | invalid, message, revision,
+ unit: {address, action, value, state, note: {kind, shown, value, unknown} | null,
+        actions: {note, offer: {text, value} | null, undo} | null},
+ derived: [{id, text, code}], not_computed: {text, id, label} | null,
+ checks: {violated, not_evaluated, passed, items: [{id, status, word, message, code,
+          explanation, expr, rule_ids}]} | null,
+ unavailable: {code, message} | null, validity: {validated, reasons: [{text, anchor}]}}
+```
+
+Every integer, count and revision is a string, so 9007199254740993 survives. `action` is the
+unit's route at this revision (a cell's row index can change; `null` when its row is gone); a
+refusal names only `address`, `action` and `current` (the saved value as the page reads it: an
+excerpt in quotes, "(empty)" for empty text, "? (unknown)", "not set" or the value a scribble
+kept). The status codes
+are 200 (saved, "No change"), 409 and 422.
+
+**Module behaviour:**
+- Enter or Save always sends; leaving a changed text control (`focusout`) or changing a
+  select (`change`) sends only when the entry differs from the one in flight, the value the
+  server acknowledged and the control text it acknowledged (D-AA), so Tab out of an unchanged
+  field and Enter followed by Tab send once, and retyping a saved "84 -15" sends again.
+- Per unit one request is in flight; a later save waits, and only the latest entry is sent
+  after the answer, with the new `base`. A draft generation counter increments on `input`; a
+  saved answer replaces the control's text, note, switch offer and Undo only if the player has
+  not typed since the request, but always records the acknowledged value. `base` (and the
+  form's route) moves only for the saved unit and only to a newer revision.
+- Derived values, the checks section, the "Advisory checks" link and the validity flag have
+  their own projection revision and change only for an answer at least as new.
+- A refusal keeps the draft without the unit's note, switch or Undo, shows the answer's
+  message and the saved value in a `role="alert"` paragraph under the cell, moves that unit's
+  `base` to L; after a conflict it drops a save queued before it and leaving the field sends
+  nothing until Enter or Save (ASSIST-23). An answer without a route makes a cell copy-only
+  (ASSIST-26). A non-JSON or malformed answer (busy 503, 403, a network failure, a save that
+  hangs 30 s) shows a generic alert and keeps the draft; no save stays pending.
+- A save's switch and Undo post through hidden forms of their own at the answer's revision;
+  any page post waits until every save in flight or queued has its answer, then goes only if
+  its button still stands for the same action on the same note (ASSIST-24).
+- Accessibility: the page's `role="status"` paragraph announces each save; focus stays in the
+  cell after Enter and returns to it after Save; buttons the module adds use the page's
+  classes (24 × 24 px targets) and the 390 px layout.
+
+What it does not refresh is listed in ASSIST-L15 and ASSIST-L16.
 
 ## Adaptive sheet presentation
 
@@ -322,10 +393,11 @@ pixel-identical pages. Data is canonical and versioned, never mapped to PDF coor
   to one column on narrow screens. Content grows vertically and is never clipped; textareas
   use `field-sizing: content` where supported. Rule explanations sit by their fields or in
   collapsed disclosures.
-- Runtime sheets save with POST/redirect/GET and load no script (one inline `style` remains on
-  the full form's fieldset). Derived values are read-only text with a "Computed" label and a
-  collapsed "How this is computed"; they and the advisory checks are computed from the saved
-  snapshot and change on save and reload, never while typing.
+- Runtime sheets save with POST/redirect/GET; a saved page the reader may edit also loads the
+  sheet module (see Script on sheet pages). Sheet pages have no inline style. Derived values
+  are read-only text with a "Computed" label and a collapsed "How this is computed"; they and
+  the advisory checks are computed from the saved snapshot and change on save (with the
+  module, from the save's answer) and reload, never while typing.
 - Lists: a fieldset of row fieldsets ("Row 2 of 5 · ID r1-2"), every control labelled, an
   explicit Set/Not set select for optional properties. On a saved sheet each cell, the new
   row, the quick-add line and each row action save at once (see Saving a saved sheet); on the create page and in a

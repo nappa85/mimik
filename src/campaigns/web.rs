@@ -57,6 +57,28 @@ async fn runtime(mut request: Request, next: Next) -> Response {
 #[derive(Clone)]
 pub(crate) struct PrivateTrustedEditor;
 
+/// Marks a sheet page or a sheet JSON answer (step 2a): `normalize` gives it [`SHEET_CSP`].
+#[derive(Clone)]
+pub(crate) struct SheetPage;
+
+/// The policy of sheet pages: scripts and styles from this origin only, no inline style or
+/// script, no plugins, no base or frame tricks, and Trusted Types with no policy, so no
+/// string ever becomes markup or code.
+pub(crate) const SHEET_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; \
+    object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; \
+    require-trusted-types-for 'script'; trusted-types 'none'";
+
+/// The sheet module (`assets/sheet-assist.js`, step 2a).
+pub(crate) async fn script_asset() -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/javascript; charset=utf-8",
+        )],
+        include_str!("../../assets/sheet-assist.js"),
+    )
+}
+
 /// Marks a unit save's styled busy page (503, D-X3): the auth layer keeps its body, which
 /// holds the player's entry.
 #[derive(Clone)]
@@ -132,6 +154,8 @@ where
 
 #[path = "assist_web.rs"]
 mod assist_web;
+#[path = "sheet_json.rs"]
+mod sheet_json;
 #[path = "unit_web.rs"]
 mod unit_web;
 
@@ -1408,24 +1432,7 @@ fn render_private(
         crate::mork_form::SheetDraft::from_sheet(&view.snapshot.name, &sheet)
     };
     let create = view.snapshot.sheet_id == 0;
-    // Evaluated once per response, of the saved snapshot only: never on create (`{}` is not
-    // valid input) and never of a rejected draft.
-    let formulas = if create {
-        None
-    } else {
-        view.immutable.as_ref().and_then(|pin| {
-            pin.evaluate(&view.snapshot.data).map(|result| {
-                if let Ok(evaluation) = &result {
-                    super::formulas::log_failures(
-                        view.snapshot.sheet_id,
-                        pin.raw.version,
-                        evaluation,
-                    );
-                }
-                super::formulas::present(pin, result.as_ref())
-            })
-        })
-    };
+    let formulas = evaluated(view);
     // A full-form draft (a refused full-form POST, or a slice-1.5a list form's from a page
     // loaded before slice 1.5b) is re-rendered in the full form, which can save it.
     let units = !create && !native && view.editable && view.immutable.is_some() && raw.is_none();
@@ -1494,6 +1501,22 @@ fn render_private(
     }
     .render()
     .map_err(|_| AppError::Template)
+}
+
+/// The evaluation of the saved snapshot, once per response: never on create (`{}` is not
+/// valid input) and never of a rejected draft; `None` without a formula layer.
+fn evaluated(view: &SheetView) -> Option<FormulaView> {
+    if view.snapshot.sheet_id == 0 {
+        return None;
+    }
+    view.immutable.as_ref().and_then(|pin| {
+        pin.evaluate(&view.snapshot.data).map(|result| {
+            if let Ok(evaluation) = &result {
+                super::formulas::log_failures(view.snapshot.sheet_id, pin.raw.version, evaluation);
+            }
+            super::formulas::present(pin, result.as_ref())
+        })
+    })
 }
 
 /// The DOM id of a scalar field's control and the names of its value and Known/Unknown
@@ -1727,6 +1750,7 @@ async fn rendered(
     ) {
         response.extensions_mut().insert(PrivateTrustedEditor);
     }
+    response.extensions_mut().insert(SheetPage);
     Ok(response)
 }
 
