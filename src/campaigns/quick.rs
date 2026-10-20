@@ -11,9 +11,10 @@ pub(crate) const MAX_CHARS: usize = 200;
 static LEADING: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^([0-9]{1,6})\s+(.+)$").expect("static quick-add leading-count pattern")
 });
-/// A trailing count: the name, `x` or `×`, then 1–6 ASCII digits.
+/// A trailing count: the name, white space, `x` or `×`, then 1–6 ASCII digits. The white
+/// space keeps words ending in `x` whole ("Box 2", "Hex 5"; review round 1).
 static TRAILING: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(.+?)\s*[x×]\s*([0-9]{1,6})$").expect("static quick-add trailing-count pattern")
+    Regex::new(r"^(.+?)\s+[x×]\s*([0-9]{1,6})$").expect("static quick-add trailing-count pattern")
 });
 
 /// What a quick-add line adds.
@@ -27,7 +28,7 @@ pub(crate) struct Item<'a> {
 /// Reads `text` (the line as posted): over [`MAX_CHARS`] characters or with a control
 /// character other than tab it is refused with the reason; a blank line is `None` ("Nothing
 /// to add"). With `counted` (the list maps a quantity) a leading count and a space, or a
-/// trailing `x`/`×` and count, is the count and the rest the name; otherwise, and always
+/// space, `x`/`×` and a trailing count, is the count and the rest the name; otherwise, and always
 /// without `counted`, the whole trimmed line is the name, so a typed count is never lost.
 pub(crate) fn read(text: &str, counted: bool) -> Result<Option<Item<'_>>, &'static str> {
     if text.chars().nth(MAX_CHARS).is_some() {

@@ -245,17 +245,21 @@ A list whose definition declares `items.quick_add` (`{"name": <text property>,
 "quantity": <integer property>?}`, runtime definition contract) gets a quick-add line on a
 saved page the reader may edit, between its rows and its new-row form: a form with hidden
 `csrf` and `base`, the input `quick-<f>` named `text` ("Quick add Equipment" through
-`aria-labelledby`, described by the example hint `quick-hint-<f>`) and one Add button ("Add
-Equipment"). A full list (256 rows) shows no line; create, native, read-only, frozen and
+`aria-labelledby`, described by the hint `quick-hint-<f>`: "A count and a name, like “3
+torches” or “healing potion x2”", or "A name, added as one new row" when no quantity is
+mapped) and one Add button ("Add Equipment"). A full list (256 rows) shows no line; create, native, read-only, frozen and
 history pages have none.
 
 **Reading** (`quick::read`, fixed rules, no model): over `MAX_CHARS` (200) characters or a
-control character other than tab is 422 with the entry kept in the line (focused); after
+control character other than tab is 422 with the entry kept in the line (focused; an entry
+holding a line break is shown in a textarea, here and on the busy page, so a retry posts
+it unaltered); after
 trimming, a blank line is 200 "Nothing to add" and writes nothing. With a mapped quantity:
 `^([0-9]{1,6})\s+(.+)$` is count and name ("3 torches", "007 bolts" = 7), else
-`^(.+?)\s*[x×]\s*([0-9]{1,6})$` is name and count ("healing potion x2", "lamp oil ×3");
-otherwise the whole line is the name with count 1 ("1234567 torches", "torch x1234567",
-"2x4 plank", "Rope X2", non-ASCII digits). `\s` is Unicode white space. Without a mapped
+`^(.+?)\s+[x×]\s*([0-9]{1,6})$` is name and count ("healing potion x2", "potion x 2",
+"lamp oil ×3"); otherwise the whole line is the name with count 1 ("1234567 torches",
+"torch x1234567", "potionx2", "Box 2", "Hex 5", "2x4 plank", "Rope X2", non-ASCII digits):
+the white space before `x` keeps words ending in x whole. `\s` is Unicode white space. Without a mapped
 quantity the whole line is the name, so a typed count is never lost. The name is stored as
 typed (trimmed), never recased or matched against a catalogue.
 
@@ -279,10 +283,11 @@ fits by elision, not a larger budget: term-boundary cuts, 32-character scribble 
 `aria-labelledby` names, index DOM ids, index list routes and note keys, one shared
 row-action form, one quick-add line per list (charged to the list's own units). The worst-case fixtures there assert it; the tightest is a list of 256 rows ×
 32 integer properties with 64-character IDs, labels of 100 `"` and a 200-`"` scribble kept
-on each cell, every cell its own form: about 2.6% headroom (ASSIST-L2). Fixtures also cover
-the quick-add line on the widest list (255 and 256 rows, and a refused entry kept from a full
-list), a new row kept read-only from a full list and an orphaned cell's kept draft, each
-asserting its `readonly` textareas. Rerun those fixtures whenever per-cell markup grows.
+on each cell, every cell its own form: about 2.6% headroom (ASSIST-L2). Fixtures also cover,
+with both the densest sign-led notes and kept 200-`"` scribbles, the quick-add line on the
+widest list (255 and 256 rows, and a refused entry kept from a full list), a new row kept
+read-only from a full list (the tightest re-render, about 2.0% within its bound plus echo)
+and an orphaned cell's kept draft, each asserting its `readonly` textareas. Rerun those fixtures whenever per-cell markup grows.
 
 ## Adaptive sheet presentation
 

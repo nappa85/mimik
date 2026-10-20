@@ -907,11 +907,21 @@ struct ListView {
     kept: Option<Kept>,
 }
 
-/// A list's quick-add line: its text (a refused entry's draft, else empty) and whether it
-/// takes `autofocus`.
+/// A list's quick-add line: its text (a refused entry's draft, else empty), whether it
+/// takes `autofocus`, and whether the list maps a count (the hint promises only what is
+/// read).
 struct QuickLine {
     value: String,
     autofocus: bool,
+    counted: bool,
+}
+
+impl QuickLine {
+    /// A refused entry with a line break is shown in a textarea, which keeps the break (an
+    /// `<input>` would strip it and a retry would post altered text; review round 1).
+    fn multiline(&self) -> bool {
+        self.value.contains('\n')
+    }
 }
 
 /// A draft kept read-only on the page: why, then each property with its value.
@@ -1172,14 +1182,15 @@ impl ListView {
                     }],
                 });
             }
-        } else if field
+        } else if let Some(mapping) = field
             .items
             .as_ref()
-            .is_some_and(|items| items.quick_add.is_some())
+            .and_then(|items| items.quick_add.as_ref())
         {
             self.quick = Some(QuickLine {
                 value: quick.map(|quick| quick.value.clone()).unwrap_or_default(),
                 autofocus: quick.is_some() || self.focus_quick,
+                counted: mapping.quantity.is_some(),
             });
         }
     }

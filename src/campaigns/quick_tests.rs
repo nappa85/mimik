@@ -129,8 +129,8 @@ async fn three_torches_and_healing_potion_x2_each_add_one_row() {
     assert_eq!(notes_at(&setup, 1, 3).await, vec![]);
 }
 
-/// The fixed reading of the line: a leading count of 1–6 ASCII digits and a space, or a
-/// trailing `x` or `×` and 1–6 digits; anything else is all name with a count of 1. The
+/// The fixed reading of the line: a leading count of 1–6 ASCII digits and a space, or white
+/// space, a trailing `x` or `×` and 1–6 digits (so "Box 2" and "Hex 5" are never split); anything else is all name with a count of 1. The
 /// name is kept as typed (trimmed); a blank line is "Nothing to add" and writes nothing.
 #[tokio::test]
 async fn the_line_is_read_by_a_fixed_rule() {
@@ -138,12 +138,18 @@ async fn the_line_is_read_by_a_fixed_rule() {
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let setup = setup(&quick_assist(None)).await;
     three_rows(&setup).await;
-    let cases: [(&str, &str, i64); 17] = [
+    let cases: [(&str, &str, i64); 23] = [
         ("rope", "rope", 1),
         ("  12   arrows  ", "arrows", 12),
         ("007 bolts", "bolts", 7),
         ("lamp oil ×3", "lamp oil", 3),
-        ("lamp oilx3", "lamp oil", 3),
+        ("lamp oilx3", "lamp oilx3", 1),
+        ("potion x 2", "potion", 2),
+        ("potion ×2", "potion", 2),
+        ("potionx2", "potionx2", 1),
+        ("Box 2", "Box 2", 1),
+        ("Hex 5", "Hex 5", 1),
+        ("box x2", "box", 2),
         ("box x 4", "box", 4),
         ("3 arrows x2", "arrows x2", 3),
         ("999999 pebbles", "pebbles", 999_999),
@@ -279,6 +285,127 @@ async fn without_a_mapped_quantity_the_count_stays_in_the_name() {
         equipment(&saved(&setup, 1).await.1)[3],
         json!({"id": "r2-1", "name": "3 torches", "quantity": null, "weight": null})
     );
+    // Review round 1 (Sol Minor 3): the hint promises no count it would not read.
+    let hint = super::assist_tests::text(&page(&setup).await, "#quick-hint-4").unwrap();
+    assert!(
+        !hint.contains("3 torches") && !hint.contains("x2"),
+        "{hint}"
+    );
+    assert!(hint.contains("name"), "{hint}");
+}
+
+/// Review round 1 (Sol Minor 1): an entry with a line break (refused: a control character)
+/// is kept in a textarea, on the refusal page and on the busy page, so a browser keeps the
+/// break and a retry posts exactly what was typed (an `<input>` would strip it).
+#[tokio::test]
+async fn an_entry_with_a_line_break_is_kept_in_a_textarea() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&quick_assist(None)).await;
+    three_rows(&setup).await;
+    let typed = "3 torches\nand rope";
+    let response = add(&setup, &page(&setup).await, typed).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html = body(response).await;
+    let control = |html: &str, id: &str| {
+        let page = scraper::Html::parse_document(html);
+        page.select(&scraper::Selector::parse(&format!("[id=\"{id}\"]")).unwrap())
+            .next()
+            .map(|element| {
+                (
+                    element.value().name().to_owned(),
+                    element.text().collect::<String>(),
+                    element.value().attr("name").map(str::to_owned),
+                )
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        control(&html, "quick-4"),
+        ("textarea".into(), typed.into(), Some("text".into()))
+    );
+    assert_eq!(autofocused(&html), ["quick-4"]);
+    let (_, retry) = unit_form(&html, "quick-4", None);
+    assert_eq!(retry[2], pair("text", typed), "a retry posts the break");
+    let (action, pairs) = quick(&page(&setup).await, 4, typed);
+    let holder = hold(3);
+    let response = document_post(&setup, &action, pairs).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let busy = body(response).await;
+    assert_eq!(
+        control(&busy, "busy-value"),
+        ("textarea".into(), typed.into(), Some("text".into()))
+    );
+    holder.await.unwrap();
+}
+
+/// Review round 1 (Sol coverage): another writer fills the 256th row between planning and
+/// the writer's IMMEDIATE transaction; the line is refused with the entry kept, and the list
+/// never holds 257 rows.
+#[tokio::test]
+async fn a_list_filled_before_the_write_keeps_the_entry() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&quick_assist(None)).await;
+    let (status, html) = setup
+        .post(&create_path(&setup), form(0, &[], &many(255)))
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{html}");
+    let (action, pairs) = quick(&page(&setup).await, 4, "3 torches");
+    let (planned, planned_rx) = tokio::sync::oneshot::channel();
+    let (resume, resume_rx) = tokio::sync::oneshot::channel();
+    *super::super::web::AFTER_UNIT_PLAN.lock().unwrap() = Some((planned, resume_rx));
+    let app = setup.app.clone();
+    let cookie = setup.auth[1].clone();
+    let post =
+        tokio::spawn(
+            async move { super::router_request(&app, &cookie, &action, Some(pairs)).await },
+        );
+    tokio::time::timeout(std::time::Duration::from_secs(20), planned_rx)
+        .await
+        .expect("planned within 20 s")
+        .unwrap();
+    // Another writer adds the 256th row while the line is planned (outside the permit).
+    let dummy = std::sync::Arc::new(tokio::sync::Semaphore::new(1))
+        .acquire_owned()
+        .await
+        .unwrap();
+    let (mut view, permit) = setup
+        .store
+        .private_read(setup.auth[1].clone(), 1, None, dummy)
+        .await
+        .unwrap();
+    view.snapshot.data["equipment"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "r2-1", "name": "other", "quantity": 1, "weight": 1}));
+    setup
+        .store
+        .private_save(setup.auth[1].clone(), view, permit)
+        .await
+        .unwrap();
+    resume.send(()).unwrap();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(20), post)
+        .await
+        .expect("answered within 20 s")
+        .unwrap();
+    let status = response.status();
+    assert!(
+        matches!(
+            status,
+            StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY
+        ),
+        "{status}"
+    );
+    let html = body(response).await;
+    let kept = kept(&html, 4).expect("the kept entry");
+    assert!(
+        kept.contains("3 torches") && kept.contains("full"),
+        "{kept}"
+    );
+    let data = saved(&setup, 1).await.1;
+    assert_eq!(equipment(&data).len(), 256, "never 257 rows");
+    assert_eq!(equipment(&data)[255]["name"], json!("other"));
 }
 
 /// A list without the member shows no quick-add line and its route is 400; the route names

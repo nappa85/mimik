@@ -3396,159 +3396,184 @@ fn kept_textareas(html: &str, f: usize) -> (usize, usize) {
 const KEPT_CHROME: usize = 1024;
 const KEPT_ENTRY: usize = 2 * 100 * 5 + 160;
 
-/// Slice 1.6: the quick-add line (one per list, below the rows) on the tightest list page
-/// (255 rows of 64-character IDs and labels of 100 `"`, 31 sign-led integer columns with
-/// switch and Undo, the new-row form and "Row removed · Undo") stays within the per-unit
+/// The two densest cell notes of the wide list (review round 1, Sol Minor 2): the long
+/// sign-led sum with switch and Undo, and a 200-`"` scribble kept over `i64::MIN` (the
+/// tighter page). Each is (label, cell value, (op, raw, value before)).
+type DenseNote = (
+    &'static str,
+    Option<i64>,
+    (&'static str, String, Option<i64>),
+);
+
+fn dense_notes() -> Vec<DenseNote> {
+    let (raw, before, value) = densest_sign_led();
+    vec![
+        ("sign-led", Some(value), ("sign_literal", raw, Some(before))),
+        (
+            "kept scribbles",
+            Some(i64::MIN),
+            ("unresolved", "\"".repeat(200), Some(i64::MIN)),
+        ),
+    ]
+}
+
+/// Slice 1.6: the quick-add line (one per list, below the rows) on the tightest list pages
+/// (255 rows of 64-character IDs and labels of 100 `"`, 31 integer columns each with the
+/// densest notes, the new-row form and "Row removed · Undo") stays within the per-unit
 /// bound; at 256 rows the line is gone, and a late entry refused by the full list is kept
 /// read-only within the bound plus its echo.
 #[tokio::test]
 async fn worst_label_list_page_with_the_quick_add_line_is_within_the_unit_bound() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
-    let (raw, before, value) = densest_sign_led();
-    let note = ("sign_literal", raw.as_str(), Some(before));
-    let (_, html, units) = wide_setup(wide_quick_definition(), 255, Some(value), note, true).await;
-    assert_eq!(units, 4 + 255 * 36);
-    assert_eq!(
-        html.matches("action=\"/private-sheets/1/lists/0/quick\"")
-            .count(),
-        1
-    );
-    assert_eq!(html.matches("class=\"new-row\"").count(), 1);
-    assert_eq!(html.matches("form=\"assist-switch\"").count(), 31 * 255);
-    within_unit_bound(&html, units, "255 rows with the quick-add line");
-    let (setup, view, units) =
-        wide_setup(wide_quick_definition(), 256, Some(value), note, true).await;
-    assert!(!view.contains("/quick\""), "no quick-add line at 256 rows");
-    within_unit_bound(&view, units, "256 rows of a quick-add list");
-    let quotes = "\"".repeat(200);
-    let form = vec![
-        pair("csrf", "a".repeat(64)),
-        pair("base", page_base(&view)),
-        pair("text", quotes.as_str()),
-    ];
-    let (status, html) = big_post(
-        &setup,
-        "/private-sheets/1/lists/0/quick",
-        serde_urlencoded::to_string(form).unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(kept_textareas(&html, 0), (1, 1), "kept read-only");
-    assert_eq!(html.matches(&"&#34;".repeat(200)).count(), 1, "echoed once");
-    let echo = 5 * quotes.len();
-    let bound = FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES + echo;
-    assert!(html.len() <= bound, "{} > {bound}", html.len());
-    assert!(html.len() <= view.len() + echo + KEPT_CHROME + KEPT_ENTRY);
-    println!(
-        "refused quick-add on the full widest list page: {} bytes (bound {bound})",
-        html.len()
-    );
+    for (label, value, (op, raw, before)) in dense_notes() {
+        let note = (op, raw.as_str(), before);
+        let (_, html, units) = wide_setup(wide_quick_definition(), 255, value, note, true).await;
+        assert_eq!(units, 4 + 255 * 36);
+        assert_eq!(
+            html.matches("action=\"/private-sheets/1/lists/0/quick\"")
+                .count(),
+            1
+        );
+        assert_eq!(html.matches("class=\"new-row\"").count(), 1);
+        let noted = if op == "unresolved" {
+            html.matches("not understood").count()
+        } else {
+            html.matches("form=\"assist-switch\"").count()
+        };
+        assert_eq!(noted, 31 * 255, "{label}");
+        within_unit_bound(
+            &html,
+            units,
+            &format!("255 rows with the quick-add line, {label}"),
+        );
+        let (setup, view, units) =
+            wide_setup(wide_quick_definition(), 256, value, note, true).await;
+        assert!(!view.contains("/quick\""), "no quick-add line at 256 rows");
+        within_unit_bound(
+            &view,
+            units,
+            &format!("256 rows of a quick-add list, {label}"),
+        );
+        let quotes = "\"".repeat(200);
+        let form = vec![
+            pair("csrf", "a".repeat(64)),
+            pair("base", page_base(&view)),
+            pair("text", quotes.as_str()),
+        ];
+        let (status, html) = big_post(
+            &setup,
+            "/private-sheets/1/lists/0/quick",
+            serde_urlencoded::to_string(form).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(kept_textareas(&html, 0), (1, 1), "kept read-only");
+        let echo = 5 * quotes.len();
+        let bound = FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES + echo;
+        assert!(html.len() <= bound, "{label}: {} > {bound}", html.len());
+        assert!(html.len() <= view.len() + echo + KEPT_CHROME + KEPT_ENTRY);
+        println!(
+            "refused quick-add on the full widest list page, {label}: {} bytes (bound {bound})",
+            html.len()
+        );
+    }
 }
 
 /// Slice 1.5b leftover (Sol round 2): a new row refused because the list is full is kept
-/// read-only, every value echoed once, within the bound plus its echo on the tightest page.
+/// read-only, every value echoed once, within the bound plus its echo on the tightest pages.
 #[tokio::test]
 async fn a_new_row_kept_from_a_full_list_is_read_only_and_bounded() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
-    let (raw, before, value) = densest_sign_led();
-    let (setup, view, units) = wide_list_setup(
-        256,
-        Some(value),
-        ("sign_literal", &raw, Some(before)),
-        (false, true),
-    )
-    .await;
-    let quotes = "\"".repeat(30_000);
-    let mut form = vec![pair("csrf", "a".repeat(64)), pair("base", page_base(&view))];
-    form.extend((0..32).map(|p| pair(format!("row-{p}"), quotes.as_str())));
-    let (status, html) = big_post(
-        &setup,
-        "/private-sheets/1/lists/0/rows",
-        serde_urlencoded::to_string(&form).unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(kept_textareas(&html, 0), (32, 32), "kept read-only");
-    assert_eq!(
-        html.matches(&"&#34;".repeat(30_000)).count(),
-        32,
-        "echoed once each"
-    );
-    let echo = 5 * 32 * quotes.len();
-    let bound = FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES + echo;
-    assert!(html.len() <= bound, "{} > {bound}", html.len());
-    assert!(html.len() <= view.len() + echo + KEPT_CHROME + 32 * KEPT_ENTRY);
-    println!(
-        "new row kept from the full widest list page: {} bytes (bound {bound})",
-        html.len()
-    );
+    for (label, value, (op, raw, before)) in dense_notes() {
+        let (setup, view, units) =
+            wide_list_setup(256, value, (op, &raw, before), (false, true)).await;
+        let quotes = "\"".repeat(30_000);
+        let mut form = vec![pair("csrf", "a".repeat(64)), pair("base", page_base(&view))];
+        form.extend((0..32).map(|p| pair(format!("row-{p}"), quotes.as_str())));
+        let (status, html) = big_post(
+            &setup,
+            "/private-sheets/1/lists/0/rows",
+            serde_urlencoded::to_string(&form).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(kept_textareas(&html, 0), (32, 32), "kept read-only");
+        assert_eq!(
+            html.matches(&"&#34;".repeat(30_000)).count(),
+            32,
+            "echoed once each"
+        );
+        let echo = 5 * 32 * quotes.len();
+        let bound = FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES + echo;
+        assert!(html.len() <= bound, "{label}: {} > {bound}", html.len());
+        assert!(html.len() <= view.len() + echo + KEPT_CHROME + 32 * KEPT_ENTRY);
+        println!(
+            "new row kept from the full widest list page, {label}: {} bytes (bound {bound})",
+            html.len()
+        );
+    }
 }
 
 /// Slice 1.5b leftover (Sol round 2): a cell whose row was removed since its page is kept
-/// read-only, its draft echoed once, within the bound plus its echo on the tightest page.
+/// read-only, its draft echoed once, within the bound plus its echo on the tightest pages.
 #[tokio::test]
 async fn an_orphaned_cell_draft_is_read_only_and_bounded() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
-    let (raw, before, value) = densest_sign_led();
-    let (setup, old, _) = wide_list_setup(
-        256,
-        Some(value),
-        ("sign_literal", &raw, Some(before)),
-        (false, true),
-    )
-    .await;
-    let base = page_base(&old);
-    let remove = vec![pair("csrf", "a".repeat(64)), pair("base", base.clone())];
-    let (status, _) = big_post(
-        &setup,
-        "/private-sheets/1/lists/0/rows/255/remove",
-        serde_urlencoded::to_string(remove).unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::SEE_OTHER);
-    let response =
-        super::router_request(&setup.app, &setup.auth[1], "/private-sheets/1", None).await;
-    let view = String::from_utf8(
-        axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
-            .await
-            .unwrap()
-            .to_vec(),
-    )
-    .unwrap();
-    let units = render_units(&wide_list_definition(false), &[255]);
-    let quotes = "\"".repeat(87_000);
-    let form = vec![
-        pair("csrf", "a".repeat(64)),
-        pair("base", base),
-        pair("value", quotes.as_str()),
-    ];
-    let (status, html) = big_post(
-        &setup,
-        "/private-sheets/1/cells/0/255/31",
-        serde_urlencoded::to_string(form).unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert!(html.contains("its row was removed"));
-    assert_eq!(kept_textareas(&html, 0), (1, 1), "kept read-only");
-    assert_eq!(
-        html.matches(&"&#34;".repeat(87_000)).count(),
-        1,
-        "echoed once"
-    );
-    let echo = 5 * quotes.len();
-    let bound = FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES + echo;
-    assert!(html.len() <= bound, "{} > {bound}", html.len());
-    // The status names the cell (its property and list labels, escaped up to 6 bytes).
-    let status = 2 * 100 * 6 + 256;
-    assert!(html.len() <= view.len() + echo + status + KEPT_CHROME + KEPT_ENTRY);
-    println!(
-        "orphaned cell draft on the widest list page: {} bytes (bound {bound})",
-        html.len()
-    );
+    for (label, value, (op, raw, before)) in dense_notes() {
+        let (setup, old, _) = wide_list_setup(256, value, (op, &raw, before), (false, true)).await;
+        let base = page_base(&old);
+        let remove = vec![pair("csrf", "a".repeat(64)), pair("base", base.clone())];
+        let (status, _) = big_post(
+            &setup,
+            "/private-sheets/1/lists/0/rows/255/remove",
+            serde_urlencoded::to_string(remove).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        let response =
+            super::router_request(&setup.app, &setup.auth[1], "/private-sheets/1", None).await;
+        let view = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let units = render_units(&wide_list_definition(false), &[255]);
+        let quotes = "\"".repeat(87_000);
+        let form = vec![
+            pair("csrf", "a".repeat(64)),
+            pair("base", base),
+            pair("value", quotes.as_str()),
+        ];
+        let (status, html) = big_post(
+            &setup,
+            "/private-sheets/1/cells/0/255/31",
+            serde_urlencoded::to_string(form).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(html.contains("its row was removed"));
+        assert_eq!(kept_textareas(&html, 0), (1, 1), "kept read-only");
+        assert_eq!(
+            html.matches(&"&#34;".repeat(87_000)).count(),
+            1,
+            "echoed once"
+        );
+        let echo = 5 * quotes.len();
+        let bound = FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES + echo;
+        assert!(html.len() <= bound, "{label}: {} > {bound}", html.len());
+        // The status names the cell (its property and list labels, escaped up to 6 bytes).
+        let status = 2 * 100 * 6 + 256;
+        assert!(html.len() <= view.len() + echo + status + KEPT_CHROME + KEPT_ENTRY);
+        println!(
+            "orphaned cell draft on the widest list page, {label}: {} bytes (bound {bound})",
+            html.len()
+        );
+    }
 }
 
 // ---- Step 8: the gate lift, the publication budget and end-to-end lists (plan D7) ----

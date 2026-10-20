@@ -642,7 +642,8 @@ fn busy(id: i64, route: &Route, pairs: &Pairs, csrf: &str) -> super::ResultRespo
                     .collect(),
                 value: Some(value),
                 name: "text",
-                multiline: false,
+                // A line break (refused at once) survives a retry only in a textarea.
+                multiline: value.contains('\n'),
                 dropped: false,
             });
         }
