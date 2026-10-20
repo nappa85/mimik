@@ -17,7 +17,7 @@ and gate.
 Every step: its own branch; failing-first tests with the red run recorded; independent
 implementation review before merge; built and tested on 2 cores on weekdays. Each step keeps
 the demo (`tools/assist_demo.py`) usable. Any step that adds per-cell markup reruns the
-worst-case page fixtures in `src/campaigns/list_tests.rs` (tightest headroom today 2.6%) and
+worst-case page fixtures in `src/campaigns/list_tests.rs` (tightest headroom today 2.0%, a new row kept read-only from a full list) and
 never enlarges the budget.
 
 **POC cuts** (no security or integrity risk): player `*` and `/`; interpreting text, enum or
