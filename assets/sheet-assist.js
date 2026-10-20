@@ -24,9 +24,19 @@ let waiters = [];
 const released = new WeakSet();
 const waiting = new WeakSet();
 
+/** The only attribute names `element` sets: no inline styling, no event handler, no URL that
+ * loads anything. */
+const ATTRIBUTES = new Set([
+  'action', 'aria-describedby', 'aria-label', 'aria-labelledby', 'class', 'for', 'form',
+  'hidden', 'href', 'id', 'method', 'name', 'role', 'type', 'value',
+]);
+
 function element(tag, attributes, ...children) {
   const node = document.createElement(tag);
   for (const [name, value] of Object.entries(attributes || {})) {
+    if (!ATTRIBUTES.has(name)) {
+      throw new TypeError(`attribute ${name} is not allowed`);
+    }
     node.setAttribute(name, value);
   }
   for (const child of children) {
@@ -109,7 +119,12 @@ function setAlert(unit, text) {
   let alert = unit.form.querySelector('.entry-alert');
   if (!alert) {
     alert = element('p', { class: 'entry-alert', role: 'alert' });
-    saveButton(unit.form).after(alert);
+    const button = saveButton(unit.form);
+    if (button) {
+      button.after(alert);
+    } else {
+      unit.form.append(alert);
+    }
   }
   alert.textContent = text;
 }
@@ -182,9 +197,19 @@ function actionForm(unit, verb, key, revision) {
   return id;
 }
 
+/** Removes the unit's note, switch offer and Undo, with the hidden forms they post. */
+function clearActions(unit) {
+  unit.form.querySelector('.entry-actions')?.remove();
+  const shown = names(unit);
+  if (shown) {
+    document.getElementById(`assist-switch-${shown.key}`)?.remove();
+    document.getElementById(`assist-undo-${shown.key}`)?.remove();
+  }
+}
+
 function showActions(unit, actions, revision, at) {
   const shown = names(unit);
-  unit.form.querySelector('.entry-actions')?.remove();
+  clearActions(unit);
   if (!shown || !actions || (!actions.offer && actions.undo === null)) {
     return [];
   }
@@ -382,7 +407,8 @@ function project(answer, revision) {
   showValidity(answer.validity, answer.revision);
   const section = document.getElementById('advisory-checks');
   const results = document.getElementById('formula-results');
-  const shaped = answer.unavailable === null && (answer.checks === null) === (section === null);
+  // The page's own shape: a checks section exactly when the evaluation was available.
+  const shaped = (answer.checks === null) === (section === null);
   document.getElementById('projection-stale')?.remove();
   if (!shaped) {
     // The sections on the page no longer fit (the engine now refuses, or accepts, the
@@ -415,59 +441,161 @@ function failure(status) {
   return `Not saved${code}. Your entry is kept in its field; press Enter or Save to try again, or reload the page.`;
 }
 
-function valid(answer) {
+const text = (value) => typeof value === 'string';
+const textOrNull = (value) => value === null || text(value);
+const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const STATUSES = new Set(['saved', 'unchanged', 'conflict', 'invalid']);
+
+function validUnit(unit, refused) {
+  if (!record(unit) || !(unit.action === undefined || textOrNull(unit.action))) {
+    return false;
+  }
+  if (refused || unit.action === null) {
+    return unit.current === undefined || textOrNull(unit.current);
+  }
+  const note = unit.note;
+  const actions = unit.actions;
   return (
-    answer !== null &&
-    typeof answer === 'object' &&
-    typeof answer.revision === 'string' &&
-    DIGITS.test(answer.revision) &&
-    typeof answer.message === 'string' &&
-    answer.unit !== null &&
-    typeof answer.unit === 'object' &&
-    Array.isArray(answer.derived) &&
-    answer.validity !== null &&
-    typeof answer.validity === 'object'
+    text(unit.value) &&
+    textOrNull(unit.state) &&
+    (note === null ||
+      (record(note) && text(note.kind) && text(note.shown) && text(note.value))) &&
+    (actions === null ||
+      (record(actions) &&
+        text(actions.note) &&
+        textOrNull(actions.undo) &&
+        (actions.offer === null ||
+          (record(actions.offer) && text(actions.offer.text) && text(actions.offer.value)))))
   );
 }
 
+function validChecks(checks) {
+  return (
+    checks === null ||
+    (record(checks) &&
+      DIGITS.test(checks.violated) &&
+      DIGITS.test(checks.not_evaluated) &&
+      DIGITS.test(checks.passed) &&
+      Array.isArray(checks.items) &&
+      checks.items.every(
+        (item) =>
+          record(item) &&
+          [item.id, item.status, item.word, item.message, item.expr, item.rule_ids].every(text) &&
+          textOrNull(item.code) &&
+          textOrNull(item.explanation),
+      ))
+  );
+}
+
+/** The answer has the shape the module draws from; anything else is a failure. */
+function valid(answer) {
+  if (!record(answer) || !STATUSES.has(answer.status)) {
+    return false;
+  }
+  const refused = answer.status === 'conflict' || answer.status === 'invalid';
+  const missing = answer.not_computed;
+  const validity = answer.validity;
+  return (
+    text(answer.revision) &&
+    DIGITS.test(answer.revision) &&
+    text(answer.message) &&
+    validUnit(answer.unit, refused) &&
+    Array.isArray(answer.derived) &&
+    answer.derived.every((item) => record(item) && text(item.id) && text(item.text) && textOrNull(item.code)) &&
+    (missing === null || (record(missing) && text(missing.text) && text(missing.id) && text(missing.label))) &&
+    validChecks(answer.checks) &&
+    (answer.unavailable === null || record(answer.unavailable)) &&
+    record(validity) &&
+    typeof validity.validated === 'boolean' &&
+    Array.isArray(validity.reasons) &&
+    validity.reasons.every((reason) => record(reason) && text(reason.text) && textOrNull(reason.anchor))
+  );
+}
+
+/** The unit has no route at the answer's revision (its row was removed): the entry stays
+ * to copy and can no longer be posted, so a newer base is never paired with an old row
+ * index (which would name another row). */
+function orphan(unit, message) {
+  unit.orphan = true;
+  unit.queued = null;
+  unit.control.setAttribute('readonly', '');
+  if (unit.state) {
+    unit.state.disabled = true;
+  }
+  const button = saveButton(unit.form);
+  if (button) {
+    button.disabled = true;
+  }
+  clearActions(unit);
+  unit.form.querySelector('.entry-note')?.remove();
+  setAlert(unit, message);
+}
+
+/** Applies an answer; returns whether the save was refused (or its unit orphaned), so
+ * a save queued before the player saw that is dropped. */
 function settle(unit, flight, answer, status, submitter) {
   if (flight.seq < unit.applied) {
-    return;
+    return false;
   }
   unit.applied = flight.seq;
-  const focusBack = submitter && document.activeElement === submitter;
+  const pressed = flight.submitter || submitter;
+  const focusBack = pressed && document.activeElement === pressed;
   if (!valid(answer)) {
     setAlert(unit, failure(status));
-    return;
+    return false;
   }
   const revision = BigInt(answer.revision);
+  const refused = answer.status === 'conflict' || answer.status === 'invalid';
+  const route =
+    typeof answer.unit.action === 'string' && UNIT_PATH.test(answer.unit.action)
+      ? answer.unit.action
+      : null;
+  if (route === null) {
+    orphan(
+      unit,
+      refused
+        ? answer.message
+        : 'Saved, but its row was removed since; this entry is kept here to copy and can no longer be saved from this page. Reload the page to see the list.',
+    );
+    project(answer, revision);
+    return true;
+  }
   if (revision > unit.base) {
     unit.base = revision;
     unit.form.elements.namedItem('base').value = answer.revision;
-    if (typeof answer.unit.action === 'string' && UNIT_PATH.test(answer.unit.action)) {
-      unit.form.setAttribute('action', answer.unit.action);
-    }
+    unit.form.setAttribute('action', route);
   }
-  if (answer.status === 'saved' || answer.status === 'unchanged') {
+  if (!refused) {
     clearAlert(unit);
     unit.hold = false;
+    // What the server now holds and what the control shows are both unchanged; the raw
+    // last request no longer is, so retyping "84 -15" after it was saved as 69 sends it
+    // again, as Enter would.
     const current = unit.gen === flight.gen;
     showUnit(unit, answer.unit, answer.revision, current && answer.status === 'saved');
-    unit.ack = current ? entryKey(unit.form) : answerKey(unit, answer.unit);
+    unit.sent = answerKey(unit, answer.unit);
+    unit.ack = current ? entryKey(unit.form) : unit.sent;
     announce(answer.message);
     if (focusBack) {
       unit.control.focus();
     }
   } else {
-    // Refused (409 or 422): the draft stays in its control; only Enter or Save sends it
-    // again, so a conflict is overwritten consciously, never by leaving the field.
-    unit.hold = true;
-    setAlert(unit, answer.message);
+    // The draft stays in its control. After a conflict only Enter or Save sends it again,
+    // so it is overwritten consciously, never by leaving the field (ASSIST-23); after a
+    // refused value a corrected entry saves as usual.
+    unit.hold = answer.status === 'conflict';
+    // As on the re-rendered page, a drafted unit shows no note, switch or Undo.
+    unit.form.querySelector('.entry-note')?.remove();
+    clearActions(unit);
+    describe(unit, []);
+    const shown = typeof answer.unit.current === 'string' ? ` Saved value now: ${answer.unit.current}.` : '';
+    setAlert(unit, `${answer.message}${shown}`);
     if (focusBack || document.activeElement === document.body) {
       unit.control.focus();
     }
   }
   project(answer, revision);
+  return refused;
 }
 
 async function send(unit, key, submitter) {
@@ -477,15 +605,20 @@ async function send(unit, key, submitter) {
   }
   body.set('base', unit.base.toString());
   unit.seq += 1;
-  const flight = { key, gen: unit.gen, seq: unit.seq };
+  const flight = { key, gen: unit.gen, seq: unit.seq, submitter };
   unit.flight = flight;
   unit.sent = key;
   pending += 1;
   unit.form.setAttribute('aria-busy', 'true');
   let answer = null;
   let status = 0;
+  // A save that hangs counts as a network failure after 30 s, so page posts never wait
+  // for it forever.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
   try {
     const response = await fetch(unit.form.action, {
+      signal: controller.signal,
       method: 'POST',
       body,
       headers: { Accept: JSON_TYPE },
@@ -500,26 +633,47 @@ async function send(unit, key, submitter) {
     }
   } catch {
     answer = null;
+  } finally {
+    clearTimeout(timer);
   }
   unit.flight = null;
   unit.form.removeAttribute('aria-busy');
-  settle(unit, flight, answer, status, submitter);
-  pending -= 1;
-  const queued = unit.queued;
-  if (queued) {
-    unit.queued = null;
+  let refused = false;
+  try {
+    refused = settle(unit, flight, answer, status, submitter);
+  } catch {
+    setAlert(unit, failure(0));
+  } finally {
     pending -= 1;
-    request(unit, queued.explicit, null);
+    const queued = unit.queued;
+    unit.queued = null;
+    if (queued) {
+      pending -= 1;
+    }
+    try {
+      // A save queued before a refusal was shown is dropped: the player sees the refusal
+      // first, then saves again.
+      if (queued && !refused) {
+        request(unit, queued.explicit, null);
+      }
+    } finally {
+      settled();
+    }
   }
-  settled();
 }
 
 /** Saves the unit: always on Enter or Save (`explicit`); on leaving or changing a control
  * only when the entry differs from the last one sent and the last one acknowledged. */
 function request(unit, explicit, submitter) {
+  if (unit.orphan) {
+    return;
+  }
   const key = entryKey(unit.form);
   if (unit.flight) {
     if (key === unit.flight.key) {
+      // The same entry is on its way (left, then Save): its answer returns focus to the
+      // cell for this press.
+      unit.flight.submitter ||= submitter;
       return;
     }
     if (unit.queued) {
@@ -565,6 +719,7 @@ function enhance(form) {
     seq: 0,
     applied: 0,
     hold: false,
+    orphan: false,
   };
   units.set(form, unit);
   if (projection === null || unit.base > projection) {
@@ -595,6 +750,51 @@ function enhance(form) {
   });
 }
 
+/** Says why a deferred button press was not sent. */
+function dropped(intent) {
+  if (intent.label === 'Undo') {
+    announce('Not undone: your entry was saved first and replaced the change this Undo would revert. Use its new Undo if you still want it.');
+  } else if (intent.label === 'Yes') {
+    announce('Not switched: your entry was saved first and replaced the reading this suggestion was for.');
+  } else {
+    announce(`Not sent: the page changed while your entry was saved. Press ${intent.label} again if you still want it.`);
+  }
+}
+
+/** Sends a page post deferred while saves were pending. Its button may have been rebuilt
+ * by a save's answer: the press applies to the rebuilt button only if it is the same
+ * action on the same note (never another note's Undo); otherwise nothing is sent. */
+function resume(form, submitter, intent) {
+  let target = submitter;
+  if (intent && !(submitter.isConnected && submitter.form === form && submitter.value === intent.value)) {
+    const rebuilt = intent.id ? document.getElementById(intent.id) : null;
+    target =
+      rebuilt instanceof HTMLButtonElement &&
+      rebuilt.isConnected &&
+      rebuilt.form &&
+      rebuilt.name === intent.name &&
+      rebuilt.value === intent.value
+        ? rebuilt
+        : null;
+    if (!target) {
+      dropped(intent);
+      return;
+    }
+  }
+  const owner = target ? target.form : form;
+  if (!owner || !owner.isConnected) {
+    dropped(intent || { label: 'the button' });
+    return;
+  }
+  released.add(owner);
+  try {
+    owner.requestSubmit(target);
+  } catch {
+    released.delete(owner);
+    dropped(intent || { label: 'the button' });
+  }
+}
+
 // Any other form (switch, Undo, row actions, quick add, new row) still posts and reloads the
 // page: it waits until every save in flight or queued has its answer, so leaving a field
 // for one of its buttons never loses the entry.
@@ -615,12 +815,24 @@ document.addEventListener('submit', (event) => {
     return;
   }
   waiting.add(form);
-  const submitter = event.submitter && event.submitter.form === form ? event.submitter : null;
-  whenIdle().then(() => {
-    waiting.delete(form);
-    released.add(form);
-    form.requestSubmit(submitter);
-  });
+  const submitter =
+    event.submitter instanceof HTMLButtonElement && event.submitter.form === form
+      ? event.submitter
+      : null;
+  const intent = submitter && {
+    id: submitter.id,
+    name: submitter.name,
+    value: submitter.value,
+    label: submitter.textContent.trim(),
+  };
+  whenIdle()
+    .then(() => {
+      waiting.delete(form);
+      resume(form, submitter, intent);
+    })
+    .catch(() => {
+      waiting.delete(form);
+    });
 });
 
 for (const form of document.forms) {

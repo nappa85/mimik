@@ -331,7 +331,8 @@ form-action 'self'; frame-ancestors 'none'; require-trusted-types-for 'script'; 
 'none'`. Every other answer keeps `frame-ancestors 'none'`: redirects, the busy page, refusals
 (400, 403, 415) and any error page rebuilt by `normalize` or by outer middleware (timeout,
 503), which drop the extension. The module builds DOM with `createElement` and `textContent`
-only; a Rust test refuses HTML sinks, style attributes and code from strings in its source.
+only, with attribute names from an allowlist; a Rust test refuses HTML sinks, any mention of
+`style`, dynamic attribute names outside that allowlist and code from strings in its source.
 
 **JSON answer** (`sheet_json.rs`, ASSIST-22): the module posts the unit form's pairs as a
 URL-encoded body (`post_origin` still refuses anything else with 415) with exactly one
@@ -351,13 +352,16 @@ change" and refusals), built by the same view model as the page:
 ```
 
 Every integer, count and revision is a string, so 9007199254740993 survives. `action` is the
-unit's route at this revision (a cell's row index can change); a refusal names only
-`address` and `action`. The status codes are 200 (saved, "No change"), 409 and 422.
+unit's route at this revision (a cell's row index can change; `null` when its row is gone); a
+refusal names only `address`, `action` and `current` (the saved value as the page reads it: an
+excerpt in quotes, "? (unknown)", "not set" or the value a scribble kept). The status codes
+are 200 (saved, "No change"), 409 and 422.
 
 **Module behaviour:**
 - Enter or Save always sends; leaving a changed text control (`focusout`) or changing a
-  select (`change`) sends only when the entry differs from the last one sent and the last one
-  acknowledged (D-AA), so Tab out of an unchanged field and Enter followed by Tab send once.
+  select (`change`) sends only when the entry differs from the one in flight, the value the
+  server acknowledged and the control text it acknowledged (D-AA), so Tab out of an unchanged
+  field and Enter followed by Tab send once, and retyping a saved "84 -15" sends again.
 - Per unit one request is in flight; a later save waits, and only the latest entry is sent
   after the answer, with the new `base`. A draft generation counter increments on `input`; a
   saved answer replaces the control's text, note, switch offer and Undo only if the player has
@@ -365,12 +369,15 @@ unit's route at this revision (a cell's row index can change); a refusal names o
   form's route) moves only for the saved unit and only to a newer revision.
 - Derived values, the checks section, the "Advisory checks" link and the validity flag have
   their own projection revision and change only for an answer at least as new.
-- A refusal keeps the draft, shows the answer's message in a `role="alert"` paragraph under
-  the cell and moves that unit's `base` to L; leaving the field then sends nothing until
-  Enter or Save (ASSIST-23). A non-JSON answer (busy 503, 403, a network failure) shows a
-  generic alert and keeps the draft.
+- A refusal keeps the draft without the unit's note, switch or Undo, shows the answer's
+  message and the saved value in a `role="alert"` paragraph under the cell, moves that unit's
+  `base` to L and drops a save queued before it; after a conflict leaving the field sends
+  nothing until Enter or Save (ASSIST-23). An answer without a route makes a cell copy-only
+  (ASSIST-26). A non-JSON or malformed answer (busy 503, 403, a network failure, a save that
+  hangs 30 s) shows a generic alert and keeps the draft; no save stays pending.
 - A save's switch and Undo post through hidden forms of their own at the answer's revision;
-  any page post waits until every save in flight or queued has its answer (ASSIST-24).
+  any page post waits until every save in flight or queued has its answer, then goes only if
+  its button still stands for the same action on the same note (ASSIST-24).
 - Accessibility: the page's `role="status"` paragraph announces each save; focus stays in the
   cell after Enter and returns to it after Save; buttons the module adds use the page's
   classes (24 × 24 px targets) and the 390 px layout.

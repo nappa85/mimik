@@ -377,6 +377,8 @@ async fn json_refusals_keep_the_draft_and_the_strict_headers() {
         "{answer}"
     );
     assert_eq!(answer["checks"]["passed"], "1");
+    // The refusal shows the saved value next to the kept draft.
+    assert_eq!(answer["unit"]["current"], "\u{201c}84\u{201d}");
     // A control character is 422.
     let response = post_json(
         &setup,
@@ -626,6 +628,29 @@ fn the_module_uses_no_html_sinks_or_style_attributes() {
         assert!(!source.contains(forbidden), "the module uses {forbidden}");
     }
     assert!(!source.contains("<script"));
+    // No styling at all: no `style` key passed to `element`, no `style` attribute or
+    // property by any spelling.
+    let words = regex::Regex::new(r"\bstyle\b").unwrap();
+    assert!(!words.is_match(&source), "the module names style");
+    // Attribute names are literals, except in `element`, which only sets names from its
+    // allowlist; the allowlist holds no event handler, style or loading attribute.
+    let dynamic = regex::Regex::new(r#"setAttribute\(\s*[^'"\s]"#).unwrap();
+    assert_eq!(
+        dynamic.find_iter(&source).count(),
+        1,
+        "one dynamic setAttribute"
+    );
+    assert!(source.contains("if (!ATTRIBUTES.has(name)) {"));
+    let start = source.find("const ATTRIBUTES = new Set([").unwrap();
+    let list = &source[start..start + source[start..].find("]);").unwrap()];
+    for name in list.split('\'').skip(1).step_by(2) {
+        assert!(
+            !name.starts_with("on")
+                && !["src", "srcdoc", "data", "formaction", "style"].contains(&name),
+            "the allowlist holds {name}"
+        );
+    }
+    assert!(!source.contains("formAction") && !source.contains(".src ="));
 }
 
 /// Only exactly one `Accept: application/json` header asks for the JSON answer; anything
@@ -666,4 +691,48 @@ async fn only_an_exact_json_accept_header_gets_json() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::SEE_OTHER, "{accept:?}");
     }
+}
+
+/// A cell whose row was removed since its page: the 409 answer names no route, so the
+/// module can never post the entry to the row now at that index.
+#[tokio::test]
+async fn an_orphaned_cell_answer_names_no_route() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let setup = setup(&assist()).await;
+    super::cell_tests::three_rows(&setup).await;
+    let response = send(
+        &setup,
+        "/private-sheets/1/lists/4/rows/0/remove",
+        &vec![
+            ("csrf".to_owned(), "a".repeat(64)),
+            ("base".to_owned(), "1".to_owned()),
+        ],
+        false,
+        "application/x-www-form-urlencoded",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let response = post_json(
+        &setup,
+        "/private-sheets/1/cells/4/0/2",
+        &unit("1", "9", &[]),
+    )
+    .await;
+    assert_json_headers(&response, StatusCode::CONFLICT);
+    let answer = json_body(response).await;
+    assert_eq!(answer["unit"]["address"], "cell:equipment/r1-1/weight");
+    assert_eq!(answer["unit"]["action"], Value::Null);
+    assert_eq!(answer["unit"]["current"], Value::Null);
+    assert!(
+        answer["message"]
+            .as_str()
+            .unwrap()
+            .contains("its row was removed"),
+        "{answer}"
+    );
+    // Nothing was written to the row now at index 0 (Bow).
+    let (revision, data) = saved(&setup, 1).await;
+    assert_eq!(revision, 2);
+    assert_eq!(data["equipment"][0]["weight"], json!(1));
 }

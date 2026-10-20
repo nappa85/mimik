@@ -96,7 +96,9 @@ fn projection(
     if outcome.refused()
         && let Some(members) = answer.as_object_mut()
     {
+        let current = current(members);
         members.retain(|key, _| key == "address" || key == "action");
+        members.insert("current".into(), current.map_or(Value::Null, Value::String));
     }
     let validity = Validity::of(formulas.as_ref(), view.immutable.is_some());
     Ok(json!({
@@ -199,6 +201,22 @@ fn unit_json<'a>(
         }
         Unit::NewRow(_) | Unit::QuickAdd(_) | Unit::Row { .. } => Value::Null,
     }
+}
+
+/// The saved value a refusal shows next to the kept draft, as the page would read it: an
+/// excerpt of the text, "? (unknown)", "not set", or the value a scribble kept; `None`
+/// when the unit has no value at that revision (its row is gone).
+fn current(unit: &serde_json::Map<String, Value>) -> Option<String> {
+    let value = unit.get("value")?.as_str()?;
+    let note = unit.get("note").filter(|note| note["kind"] == "unresolved");
+    Some(match (unit.get("state").and_then(Value::as_str), note) {
+        (Some("unknown"), _) => "? (unknown)".into(),
+        (Some("absent"), _) => "not set".into(),
+        (_, Some(note)) if note["unknown"] == true => "? (unknown)".into(),
+        (_, Some(note)) => note["value"].as_str().unwrap_or_default().to_owned(),
+        _ if value.is_empty() => "? (unknown or empty)".into(),
+        _ => format!("\u{201c}{}\u{201d}", super::excerpt(value)),
+    })
 }
 
 /// Adds a shown unit's control text, state, note and actions.

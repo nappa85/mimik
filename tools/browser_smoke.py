@@ -1226,6 +1226,11 @@ def run_assist_js_browser(page, campaign, version):
         page.locator('main [role="status"]').inner_text() == "Current HP saved.",
         "The live region did not announce the save",
     )
+    # Retyping the saved sum is compared with the acknowledged 69, not the raw last
+    # request, so leaving the field sends it again (as Enter would).
+    hp.fill("84 -15")
+    saved_by(page, lambda: hp.press("Tab"), "/fields/hp")
+    hp.fill("69")
     # Tab out of an unchanged HP sends nothing.
     quiet(lambda: (hp.focus(), hp.press("Tab")), "Leaving an unchanged HP")
     # Enter followed by leaving the field saves once; focus stays in the cell.
@@ -1236,6 +1241,19 @@ def run_assist_js_browser(page, campaign, version):
         "Enter moved the focus out of the cell",
     )
     quiet(lambda: hp.press("Tab"), "Leaving HP after Enter")
+    # Save clicked right after typing: the save starts on leaving the field, and its answer
+    # returns focus to the cell.
+    armour_field = page.locator("#v2")
+    armour_field.fill("-2")
+    saved_by(
+        page,
+        lambda: page.get_by_role("button", name="Save Armour modifier", exact=True).click(),
+        "/fields/armour",
+    )
+    require(
+        page.evaluate("document.activeElement.id") == "v2",
+        "Clicking Save did not return focus to the cell",
+    )
 
     # The switch offer and Undo come with the answer and post through their own forms.
     hp.fill("-15")
@@ -1467,6 +1485,15 @@ def run_assist_js_browser(page, campaign, version):
         page.wait_for_timeout(50)
     require(len(routes) == 2, "The HP and weight saves were not both sent")
     first = routes["hp"].fetch()
+    # Between the two, another tab raises Max HP: the HP answer (n) has the check violated,
+    # the weight answer (n + 2) has it passed.
+    other = context.new_page()
+    other.goto(sheet)
+    ready(other)
+    other_max = other.locator("#v1")
+    other_max.fill("100")
+    saved_by(other, lambda: other_max.press("Tab"), "/fields/max_hp")
+    other.close()
     last = routes["weight"].fetch()
     routes["weight"].fulfill(response=last)
     until(page, "!document.querySelector('form[action$=\"/cells/4/0/2\"][aria-busy]')")
@@ -1476,12 +1503,17 @@ def run_assist_js_browser(page, campaign, version):
     page.unroute("**/fields/hp")
     page.unroute("**/cells/4/0/2")
     require(
-        base(page, "/fields/hp") == newest - 1
+        base(page, "/fields/hp") == newest - 2
         and hp.input_value() == "90"
         and weight.input_value() == "4"
         and load.inner_text() == "8"
         and page.locator("#derived-revision").inner_text() == str(newest)
-        and f"(saved revision {newest})" in page.locator("#validity").inner_text(),
+        and page.locator("#validity").count() == 0
+        and page.locator("#checks-counts").inner_text() == "0 violated, 0 not evaluated, 1 passed."
+        and page.locator("#checks-link").inner_text()
+        == "Advisory checks: 0 violated, 0 not evaluated"
+        and page.locator("#advisory-checks > ul > li").count() == 0
+        and page.locator("#advisory-checks > details li strong").text_content() == "Pass",
         "A late HP answer moved Load, the checks or the flag back",
     )
     no_overflow(page, "JavaScript sheet after reordered answers")
@@ -1493,6 +1525,173 @@ def run_assist_js_browser(page, campaign, version):
         and page.locator("#row-4-0-2").input_value() == "4",
         "The reordered saves were not both stored",
     )
+    csp_clean(page, consoles, errors)
+
+    def count_posts(action):
+        return len([request for request in posts if urlsplit(request.url).path.endswith(action)])
+
+    # Review round 1. A save queued with Enter before a conflict was shown is dropped: only
+    # a new Enter overwrites. The refusal shows the saved value.
+    other = context.new_page()
+    other.goto(sheet)
+    ready(other)
+    other_armour = other.locator("#v2")
+    other_armour.fill("8")
+    saved_by(other, lambda: other_armour.press("Tab"), "/fields/armour")
+    other.close()
+    held = []
+    page.route("**/fields/armour", lambda route: held.append(route))
+    armour.fill("1")
+    armour.press("Enter")
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(50)
+    armour.fill("2")
+    armour.press("Enter")
+    sent = count_posts("/fields/armour")
+    held[0].continue_()
+    settled(page)
+    page.wait_for_timeout(600)
+    for late in held[1:]:
+        late.abort()
+    page.unroute("**/fields/armour")
+    alert = page.locator('form[action$="/fields/armour"] .entry-alert')
+    require(
+        count_posts("/fields/armour") == sent
+        and armour.input_value() == "2"
+        and "Saved value now: \u201c8\u201d" in alert.inner_text()
+        and page.locator('form[action$="/fields/armour"] .entry-actions').count() == 0
+        and page.locator('form[action$="/fields/armour"] .entry-note').count() == 0,
+        "An Enter queued before the conflict overwrote it, or the alert hid the saved value",
+    )
+    saved_by(page, lambda: (armour.focus(), armour.press("Enter")), "/fields/armour")
+    # After a 422 (no conflict) a corrected entry saves when the field is left.
+    armour.evaluate(
+        "(field) => { field.value = '6\\u0007'; field.dispatchEvent(new Event('input', {bubbles: true})); }"
+    )
+    saved_by(page, lambda: (armour.focus(), armour.press("Enter")), "/fields/armour", status=422)
+    armour.fill("7")
+    saved_by(page, lambda: armour.press("Tab"), "/fields/armour")
+    require(armour.input_value() == "7", "A corrected entry after a 422 was not saved")
+
+    # Undo clicked while that field's save is on its way: the save replaces the change it
+    # would undo, so nothing is undone (never another note's Undo), and the page says so.
+    held = []
+    page.route("**/fields/hp", lambda route: held.append(route))
+    hp.fill("91")
+    moved = len(navigations)
+    page.get_by_role("button", name="Undo Current HP", exact=True).click()
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(50)
+    held[0].continue_()
+    settled(page)
+    page.wait_for_timeout(800)
+    page.unroute("**/fields/hp")
+    require(
+        len(navigations) == moved
+        and hp.input_value() == "91"
+        and "Not undone" in page.locator('main [role="status"]').inner_text()
+        and not errors,
+        f"An Undo clicked during its field's save was retargeted or failed: {errors}",
+    )
+    # Undo of another field clicked while a save is on its way still applies after it.
+    held = []
+    page.route("**/fields/hp", lambda route: held.append(route))
+    hp.fill("92")
+    page.get_by_role("button", name="Undo Armour modifier", exact=True).click()
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(50)
+    with page.expect_navigation(wait_until="domcontentloaded"):
+        held[0].continue_()
+    page.unroute("**/fields/hp")
+    ready(page)
+    require(
+        page.locator("#v0").input_value() == "92" and page.locator("#v2").input_value() == "2",
+        "The Armour Undo clicked during the HP save did not apply after it",
+    )
+
+    # A malformed answer leaves no save pending: a page post still goes.
+    page.route(
+        "**/fields/max_hp",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body='{"status":"saved","revision":"9999","message":"x","unit":{},'
+            '"derived":[{}],"validity":{}}',
+        ),
+    )
+    max_hp = page.locator("#v1")
+    max_hp.fill("101")
+    max_hp.press("Tab")
+    page.wait_for_timeout(500)
+    page.unroute("**/fields/max_hp")
+    require(
+        "Not saved" in page.locator('form[action$="/fields/max_hp"] .entry-alert').inner_text(),
+        "A malformed answer was not reported",
+    )
+    line = page.get_by_role("textbox", name="Quick add Equipment", exact=True)
+    line.fill("1 lamp")
+    with page.expect_navigation(wait_until="domcontentloaded", timeout=5_000):
+        line.press("Enter")
+    ready(page)
+
+    # An orphaned cell: another tab removes the row; the refused entry stays to copy and
+    # can no longer be posted (never to the row now at that index).
+    other = context.new_page()
+    other.goto(sheet)
+    ready(other)
+    with other.expect_navigation(wait_until="domcontentloaded"):
+        other.get_by_role("button", name="Remove Row 1 Equipment", exact=True).click()
+    other.close()
+    orphan = page.locator("#row-4-0-2")
+    orphan.fill("9")
+    saved_by(page, lambda: orphan.press("Enter"), "/cells/4/0/2", status=409)
+    sent = count_posts("/cells/4/0/2")
+    orphan.press("Enter")
+    page.wait_for_timeout(500)
+    require(
+        count_posts("/cells/4/0/2") == sent
+        and orphan.input_value() == "9"
+        and orphan.get_attribute("readonly") is not None
+        and page.locator('form[action$="/cells/4/0/2"] button:not([form])').is_disabled()
+        and "row was removed"
+        in page.locator('form[action$="/cells/4/0/2"] .entry-alert').inner_text(),
+        "An orphaned cell entry could still be posted, or was not kept to copy",
+    )
+    page.reload()
+    ready(page)
+    require(
+        page.locator("#row-4-0-0").input_value() == "lamp"
+        and page.locator("#row-4-0-2").input_value() == "",
+        "The orphaned entry was written to another row",
+    )
+
+    # The row removed between the write and its live read: the answer has no route; the
+    # cell becomes copy-only too.
+    def no_route(route):
+        response = route.fetch()
+        answer = response.json()
+        answer["unit"]["action"] = None
+        route.fulfill(response=response, json=answer)
+
+    page.route("**/cells/4/0/1", no_route)
+    quantity = page.locator("#row-4-0-1")
+    quantity.fill("3")
+    saved_by(page, lambda: quantity.press("Tab"), "/cells/4/0/1")
+    page.unroute("**/cells/4/0/1")
+    sent = count_posts("/cells/4/0/1")
+    quantity.press("Enter")
+    page.wait_for_timeout(500)
+    require(
+        count_posts("/cells/4/0/1") == sent and quantity.get_attribute("readonly") is not None,
+        "A cell whose row left its route could still be posted",
+    )
+    no_overflow(page, "JavaScript sheet with an orphaned cell")
     csp_clean(page, consoles, errors)
 
 
