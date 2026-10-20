@@ -55,8 +55,8 @@ implementation for both).
   writes nothing and changes nothing): the job is cancelled if still
   running, its options are dropped, and apply refuses it, even when the stored value is
   unchanged (scribble A → scribble B, or scribble → typed value). A job request for an older
-  note never supersedes a newer one. A newer job of the same account, for any target,
-  supersedes its running or queued job (the latest edit wins, by origin revision, which is a
+  note never supersedes a newer one. A newer job of the same account, for any target
+  on the same sheet, supersedes its running or queued job (the latest edit wins, by origin revision, which is a
   sheet-wide counter, not by request arrival).
 - **Request builder:** one function renders a typed `Request` (phrase, target, context items).
   The instructions and schema are a fixed prefix, byte-identical across requests (tested), so
@@ -130,7 +130,8 @@ implementation for both).
   rendering, the model call and validation: queue wait plus run deadline, both set from the 2b
   p95 and maximum latency (run deadline at most 60 s; if the measured p95 exceeds 60 s, stop
   and ask: a smaller model, a higher cap, or the feature stays off), with queue depth chosen so that
-  depth × run deadline fits the queue wait. One job per account (counting running work);
+  depth × run deadline fits the queue wait. One job per account (counting running work): a start on another sheet while the
+  account has a live job is 429 (origin revisions are per sheet and cannot be compared);
   admission (breaker and capacity) is computed as if the superseded job were already gone, so a
   refused start cancels nothing (Routes); an admitted start cancels the superseded request (the
   connection is closed and its slot freed before the new job is enqueued), and a late answer
@@ -220,8 +221,8 @@ implementation for both).
   option, a number may also come from the text of the catalogue entry the reminder cites, and
   only if it appears literally in that entry's text. The cited entry is bound by catalogue
   version and entry key (part of the D-P read set). The option is displayed with its source
-  ("from Shield: …"). Every other number must pass the step-2c rule (in the phrase, or equal
-  to the target's value); outside reminders the step-2c rule stays strict.
+  ("from Shield: …"). Every other number must pass the step-2c rule (in the phrase, equal to
+  the target's value, or a 2, 3, 4 or 100 admitted by a fraction or percent word); outside reminders the step-2c rule stays strict.
 - **Catalogue member:** an optional `"catalogue": {"id": <link>, "entry_type": <id>?, "key":
   <property>}` on a text item property. `key` names a declared optional text property of the
   same list holding the remembered entry key (D-R); it is rendered as the link, never a
@@ -320,7 +321,7 @@ server unless stated):
   a breaker refusal cancels nothing; a start that supersedes the account's running job is
   admitted with the queue otherwise full (counted as if the old job were gone); a note written
   between the start's database check and its enqueue → 409; two targets written in one
-  revision → the later start supersedes; cancellation (the
+  revision → the later start supersedes; a start on a second sheet while the account has a live job → 429; cancellation (the
   fake server sees the disconnect and the slot is free); queue wait and run deadline expiry;
   64 records and the evicted-job answer; option expiry at 10 minutes;
 - breaker (injectable clock): three transport failures open it, two do not; 100 dropped or
@@ -365,7 +366,8 @@ the prompt; text and multiline never in the prompt (asserted on the stub request
 cut to 2,000; injection in entry text → at most a fully shown option; provenance extension: a
 number in the cited entry's text → allowed and shown "from <entry>: …"; a number injected
 into the entry text of a different (uncited) entry → option dropped; a number in no source
-(neither the phrase, the target's value nor the cited entry text) → option dropped.
+(neither the phrase, the target's value, a fraction or percent word nor the cited entry text)
+→ option dropped.
 
 ### 4 Suggestions and "Which Sword?"
 

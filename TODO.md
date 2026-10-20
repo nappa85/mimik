@@ -11,11 +11,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
-1. Before 2b starts: a short independent confirm of the round-3 plan fixes (`5b1bf23`).
-   Started 2026-10-20 (Sol, Sonnet, third chain); if no verdict is recorded here, rerun it
-   (prompt: "confirm each round-3 finding in the 5b1bf23 commit message is resolved in
-   §1.4"). Then 2b crate and runtime selection (STROT via pyo3 or a Rust port among the
-   candidates, judged on results).
+1. 2b crate and runtime selection (STROT via pyo3 or a Rust port among the candidates,
+   judged on results). The interpretation-plan confirm (2026-10-20: Sol, Sonnet, DeepSeek
+   all FIX FIRST; fixed in `c811437` and the follow-up commit) needs a short independent
+   check of those edits before 2c is built.
 2. 2c interpretation, 3 bundles and reminders, 4 suggestions, 5 docs and gate (includes the
    `docs/release-scope.md` update for schema 20 and the assisted scope).
 
