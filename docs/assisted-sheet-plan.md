@@ -89,8 +89,9 @@ implementation for both).
   separate from `entry::read` (which parses whole entries only) and not changing number-entry
   admission: only decimal digits (Unicode `Nd`, such as full-width digits) are folded to ASCII
   digits, never superscripts or circled digits (no general NFKC); a number is a maximal run of
-  ASCII digits that has no letter on either side, is not adjacent on either side to a `.` or
-  `,` touching another digit, and is not followed by `e`/`E` and a digit; so `heal 15` and `15%` give 15, `take −15
+  ASCII digits whose neighbour on each side is neither a letter nor any other Unicode number
+  character (`N*`, such as `²` or `①`), that is not preceded by `.` or `,` at all, is not
+  followed by a `.` or `,` that touches a digit, and is not followed by `e`/`E` and a digit; so `heal 15` and `15%` give 15, `take −15
   damage` gives 15 (signs are not part of the token; U+2212, NBSP and U+202F are separators
   as in ASSIST-1), `5.` at the end of a sentence gives 5, while `1.5`, `x.5`, `1,000`, `1e2`,
   `3d6`, `15hp` and `15²` give nothing. A leading zero
@@ -130,9 +131,10 @@ implementation for both).
   p95 and maximum latency (run deadline at most 60 s; if the measured p95 exceeds 60 s, stop
   and ask: a smaller model, a higher cap, or the feature stays off), with queue depth chosen so that
   depth × run deadline fits the queue wait. One job per account (counting running work);
-  supersession is checked before the capacity refusal and cancels the running request (the
-  connection is closed and the slot freed before the capacity check), and a late answer from a
-  cancelled job is discarded. At most 64 job records in all, 128-bit IDs; an evicted or expired
+  admission (breaker and capacity) is computed as if the superseded job were already gone, so a
+  refused start cancels nothing (Routes); an admitted start cancels the superseded request (the
+  connection is closed and its slot freed before the new job is enqueued), and a late answer
+  from a cancelled job is discarded. At most 64 job records in all, 128-bit IDs; an evicted or expired
   job answers "ask again". Options expire 10 minutes after the job finishes. Poll and apply
   recheck rights; the `JOBS` permit is not held during the model call. A reminder job (step 3)
   takes its own low-priority slot on the same worker, after interpretations, one per account.
@@ -145,7 +147,8 @@ implementation for both).
   minutes; then one half-open probe job decides (success closes, failure reopens; a cancelled
   probe clears the in-flight probe flag, leaves it half-open, and the next job becomes the
   probe). While open
-  no request is sent, the job answers "the assistant is unavailable right now", and number
+  no request is sent: a start answers 503 and a job already queued answers on poll, both with
+  "the assistant is unavailable right now"; number
   entry, notes and Undo work as usual. Implemented with a maintained crate if one fits
   (`failsafe` is checked in 2b), otherwise a small state machine with an injectable clock.
 - **Routes:** `POST /private-sheets/{id}/interpretations` (exactly `csrf` and `note`, the
@@ -157,12 +160,19 @@ implementation for both).
   any cancellation or capacity handling, the typed address's current note must be that
   revision's `unresolved` note (409 otherwise; unrelated later revisions are fine, a row moved
   since is found by host ID, a removed row is 409); then a repeat for the origin of an existing
-  job that is live or finished with unexpired options returns that job; then a start whose
-  origin revision is lower than that of the account's live job on the sheet is 409; then the
+  job that is live or finished with unexpired, unapplied options returns that job (a finished
+  job without options, or with expired ones, does not count: the start goes on as a new job);
+  then a start whose origin revision is lower than that of the account's live job on the sheet
+  is 409 (an equal revision on another target, as from one full-form save, supersedes: the
+  later arrival wins); then the
   breaker (503) and capacity (429), computed as if the superseded job were already gone, so a
   refused start never cancels anything; then supersession and enqueue. The in-memory job-table
   lock covers this check-then-enqueue and the post-commit cancellation hook of every save; it
-  is never held across a database wait, the permit wait or the model call. 202 with the job
+  is never held across a database wait, the permit wait or the model call. The current-note
+  check reads the database before the lock, so under the lock the start also compares its
+  origin with an in-memory per-sheet map of the latest note-write revision per target, which
+  each save's post-commit hook updates under the same lock: a write newer than the origin
+  gives 409. 202 with the job
   ID. `GET
   …/interpretations/{job}` polls (the module polls at 500 ms, backing off to 2 s, and stops on
   unload, supersession or a terminal state); an evicted or expired job answers "ask again".
@@ -307,7 +317,10 @@ server unless stated):
   a start leaves either the job cancelled or the start refused, never a live job for a stale
   note;
 - budgets: a queue full of other accounts' jobs → 429, and the refused start cancels nothing;
-  a breaker refusal cancels nothing; supersession before capacity; cancellation (the
+  a breaker refusal cancels nothing; a start that supersedes the account's running job is
+  admitted with the queue otherwise full (counted as if the old job were gone); a note written
+  between the start's database check and its enqueue → 409; two targets written in one
+  revision → the later start supersedes; cancellation (the
   fake server sees the disconnect and the slot is free); queue wait and run deadline expiry;
   64 records and the evicted-job answer; option expiry at 10 minutes;
 - breaker (injectable clock): three transport failures open it, two do not; 100 dropped or
