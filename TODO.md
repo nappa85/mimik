@@ -12,9 +12,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 ## Next steps
 
 1. 2b crate and runtime selection (STROT via pyo3 or a Rust port among the candidates,
-   judged on results). The interpretation-plan confirm (2026-10-20: Sol, Sonnet, DeepSeek
-   all FIX FIRST; fixed in `c811437` and the follow-up commit) needs a short independent
-   check of those edits before 2c is built.
+   judged on results). The interpretation plan is confirmed (2026-10-20).
 2. 2c interpretation, 3 bundles and reminders, 4 suggestions, 5 docs and gate (includes the
    `docs/release-scope.md` update for schema 20 and the assisted scope).
 
