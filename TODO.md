@@ -6,12 +6,12 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Current work
 
-- **Assisted-sheet MVP, step 1** (`docs/assisted-sheet-plan.md`). Slices 1.1–1.5b are merged
-  into master. Next: slice 1.6 quick-add.
+- **Assisted-sheet MVP, step 1** (`docs/assisted-sheet-plan.md`). Slices 1.1–1.6 are merged
+  into master. Next: slice 1.7 validity flag.
 
 ## Next steps
 
-1. 1.6 quick-add, then 1.7 validity flag (RR-3); each slice gets an implementation
+1. 1.7 validity flag (RR-3); each slice gets an implementation
    review.
 2. 2a JavaScript, including D-AA (save on leaving the field).
 3. Before 2b starts: a short independent confirm of the round-3 plan fixes (`5b1bf23`; Sol
@@ -39,9 +39,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Other next actions
 
-- Slice 1.5b leftovers (Sol round 2): duplicate `?focus=` parameters give 400 instead of
-  being ignored (`src/campaigns/web.rs` `SheetQuery`); add D7 page-bound fixtures for the
-  read-only full-list and orphaned-cell recovery blocks and assert their `readonly`.
+- Kept entries lose control characters in single-line inputs (ASSIST-L13): cell inputs, and
+  a lone CR in a refused quick-add entry (switch to a textarea on any control character but
+  tab).
 - Remove `--dev-owner-play` (AUTH-L10), with its own security review.
 - Replace capacity caps with safety-only limits (RR-L2).
 - Catalogues step 5 for the merged steps 1–3: local-data inventory entries, the D12 CI check
