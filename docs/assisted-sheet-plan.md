@@ -85,7 +85,9 @@ hosted providers, GPU, models above about 4B.
 
 POC boundary (2026-10-20, after the plan review of the harness design): one local model, one
 bounded request per job, current unresolved integer scribbles only, strict validation, origin
-binding, poll and apply, the confirmable UI. Deferred to §4 Later: model escalation, model
+binding, poll and apply, the confirmable UI. Plan review round 2 (2026-10-20) fixed the
+expression form, the phrase-number lexer, the start route's note key, `ambiguous` replies and
+the breaker outcomes. Deferred to §4 Later: model escalation, model
 tools, confidence gating, persistent traces and a known-answer set grown from them, and
 catalogue, enum or fuzzy matching before the model (that matcher arrives with step 4, one
 implementation for both).
@@ -99,11 +101,13 @@ implementation for both).
   from that note, never sent by the client. A parsed entry is never offered again, and a
   sign-led entry keeps its switch offer (D-Q).
 - **Origin binding:** a job is bound to (sheet, target address, host ID for row cells, the
-  origin note's revision). Any committed save of that target through any route (unit, legacy
-  full form, switch, Undo, apply) makes the origin non-current: the job is cancelled if still
+  origin note's revision). Any revision that writes a note for that target through any route
+  (unit, legacy full form, switch, Undo, apply) makes the origin non-current (a no-op save
+  writes nothing and changes nothing): the job is cancelled if still
   running, its options are dropped, and apply refuses it, even when the stored value is
   unchanged (scribble A → scribble B, or scribble → typed value). A job request for an older
-  note never supersedes a newer one.
+  note never supersedes a newer one. A newer job of the same account, for any target,
+  supersedes its running or queued job (the latest edit wins).
 - **Request builder:** one function renders a typed `Request` (phrase, target, context items).
   The instructions and schema are a fixed prefix, byte-identical across requests (tested), so
   llama-server can reuse its prompt cache; the dynamic part is at most 4 KiB, measured in
@@ -115,17 +119,30 @@ implementation for both).
   and from `@` references; catalogue entry text comes in step 3 and is dropped first.
 - **Output contract:** JSON, checked by llama-server's schema grammar and again in Rust
   (`jsonschema`, then typed Serde decoding, then domain checks), with explicit limits: at most
-  3 options, each an expression of at most 8 terms and nesting depth 3 and an explanation of at
-  most 120 characters, or an `ambiguous` reply listing at most 3 readings. Operators are ASCII
-  `+ - * /` with usual precedence, unary minus only on literals, parentheses; a division
-  carries a rounding mode (`floor`, `ceil` or `exact`, where `exact` drops the option on a
-  remainder). Terms are integer literals or `@field` references to supplied context fields.
+  3 options, each an expression and an explanation of at most 120 characters, or an
+  `ambiguous` reply listing at most 3 readings. A reading is display-only text of at most 120
+  characters, rendered escaped inside `<bdi>`, with no Use button; an `ambiguous` reply never
+  writes. The expression is a JSON tree, not a string: a node is `{"lit": n}`, `{"ref":
+  "<field id>"}` or `{"op": "add" | "sub" | "mul" | "div", "l": node, "r": node}`, and a
+  `div` node also carries `"round": "floor" | "ceil" | "exact"` (`exact` drops the option on a
+  remainder); depth at most 3 below the root, so at most 8 leaves. A negative `lit` is allowed;
+  its magnitude is what provenance checks. References name supplied context fields only.
   Rust evaluates with checked `i128` arithmetic and range-checks the result to `i64` as
   `entry.rs` does; overflow, division by zero, a reference to an unknown value (D-Z), to a field
-  not supplied, or to an excluded type drops the option. Literal provenance: each literal must
-  equal a whole number token of the phrase as tokenised by `entry::read` (so `5` does not come
-  from `15`; U+2212, NBSP and U+202F normalised as in ASSIST-1), or the target's current value
-  (the only exception is the step-3 catalogue provenance extension, §1.5). The result then
+  not supplied, or to an excluded type drops the option. Literal provenance: the magnitude of
+  each literal must equal a number found in the phrase by the phrase-number lexer, or the
+  target's current value, or (only when the phrase contains a fraction or percent word from a
+  fixed list: EN half, third, quarter, percent, `%`; IT metà, mezzo, terzo, quarto, percento,
+  per cento) one of 2, 3, 4 and 100 (the only other exception is the step-3 catalogue
+  provenance extension, §1.5). The **phrase-number lexer** is new code with its own tests,
+  separate from `entry::read` (which parses whole entries only) and not changing number-entry
+  admission: after NFKC (full-width digits become ASCII), a number is a maximal run of ASCII
+  digits whose neighbours are not letters, digits, or a `.` or `,` followed by a digit, and
+  that is not followed by `e`/`E` and a digit; so `heal 15` and `15%` give 15, `take −15
+  damage` gives 15 (signs are not part of the token; U+2212, NBSP and U+202F are separators
+  as in ASSIST-1), while `1.5`, `1,000`, `1e2`, `3d6` and `15hp` give nothing. A leading zero
+  (`007`) gives nothing; a run longer than 18 digits gives nothing. This rule and the output
+  schema are frozen before the 2b screen. The result then
   passes the integer field's own admission, without the scribble fallback. The display shows
   the current value, the expression rendered with `− × ÷`, and the effect, labelled "the
   assistant's reading". `max_tokens` is set from the 2b measurement of this schema (start 128).
@@ -157,7 +174,8 @@ implementation for both).
   is one structured answer per request.
 - **Jobs:** one worker; one monotonic budget per job from enqueue, covering queueing,
   rendering, the model call and validation: queue wait plus run deadline, both set from the 2b
-  p95 and maximum latency (run deadline at most 60 s), with queue depth chosen so that
+  p95 and maximum latency (run deadline at most 60 s; if the measured p95 exceeds 60 s, stop
+  and ask: a smaller model, a higher cap, or the feature stays off), with queue depth chosen so that
   depth × run deadline fits the queue wait. One job per account (counting running work);
   supersession is checked before the capacity refusal and cancels the running request (the
   connection is closed and the slot freed before the capacity check), and a late answer from a
@@ -166,17 +184,27 @@ implementation for both).
   recheck rights; the `JOBS` permit is not held during the model call. A reminder job (step 3)
   takes its own low-priority slot on the same worker, after interpretations, one per account.
 - **Circuit breaker:** one per configured endpoint, in memory (reset on restart). It counts
-  only transport errors, HTTP 5xx and run-deadline expiry; schema or validation drops,
-  supersession and cancellation never count. Three consecutive counted failures open it for 2
-  minutes; then one half-open probe job decides (success closes, failure reopens). While open
+  only transport errors, HTTP 4xx and 5xx, a response over the body bound, and run-deadline
+  expiry. A completed, bounded HTTP 2xx exchange is a success whatever its content (an answer
+  whose options are all dropped still resets the count and closes a half-open breaker);
+  supersession and cancellation are neutral. Three consecutive counted failures open it for 2
+  minutes; then one half-open probe job decides (success closes, failure reopens; a cancelled
+  probe leaves it half-open and the next job becomes the probe). While open
   no request is sent, the job answers "the assistant is unavailable right now", and number
   entry, notes and Undo work as usual. Implemented with a maintained crate if one fits
   (`failsafe` is checked in 2b), otherwise a small state machine with an injectable clock.
-- **Routes:** `POST /private-sheets/{id}/interpretations` (exactly `csrf`, `base`, `address`)
-  starts a job for the target's current unresolved note: 202 with the job ID; 409 if that note
-  is no longer current; 429 when capacity refuses; 503 when the breaker is open. `GET
+- **Routes:** `POST /private-sheets/{id}/interpretations` (exactly `csrf` and `note`, the
+  `<revision>:<address>` note key already used by switch and Undo and present in the saved
+  page's markup) starts a job for that note. Order as for the other sheet routes: session and
+  CSRF, rights (403), keys and malformed values (400), then, before any cancellation or
+  capacity handling, the note must be the target's current note and `unresolved` (409
+  otherwise; unrelated later revisions are fine), then supersession, then capacity (429), then
+  the breaker (503). The check and the enqueue happen under one lock against concurrent saves.
+  A repeated request for the origin of an existing live job returns that job. 202 with the job
+  ID. `GET
   …/interpretations/{job}` polls (the module polls at 500 ms, backing off to 2 s, and stops on
-  unload, supersession or a terminal state). Another account's or sheet's job is not found.
+  unload, supersession or a terminal state); an evicted or expired job answers "ask again".
+  Another account's or sheet's job is not found, on poll as on apply.
   Apply: `POST /private-sheets/{id}/proposals/{job}/{n}` (exactly `csrf`), taking the
   definitions permit with the D-X3 bounded wait like the other sheet writes.
 - **Flow (JS):** a cell save records `unresolved` and the module starts a job; "Thinking…" in
@@ -333,7 +361,12 @@ server unless stated):
   depth 4; literal provenance (`84 + 915` dropped; `5` from "heal 15" dropped; U+2212, NBSP);
   references to a derived, text, multiline, notes or list-cell field, to an unsupplied field
   and to an unknown value; `/` with each rounding mode on negatives; `exact` with a remainder;
-  division by zero; `i64` boundary and intermediate overflow;
+  division by zero; `i64` boundary and intermediate overflow; a non-tree or string expression;
+  `ambiguous` with more than 3 readings or a reading over 120 characters dropped, readings
+  escaped and never applicable;
+- lexer: `heal 15`, `take −15 damage`, `15%`, `1.5`, `1,000`, `1e2`, `3d6`, `15hp`, `007`,
+  full-width digits, 19 digits; "half of 84" admits 2, "metà" admits 2, a phrase without a
+  fraction word does not;
 - input: a parsed entry and a sign-led entry never start a job; the phrase comes from the
   stored note, not the request; the fixed prefix is byte-identical across requests; the
   dynamic part stays within 4 KiB and drops whole items; excluded field types never appear in
@@ -342,13 +375,18 @@ server unless stated):
   never a write without Use; a context value with instructions stays inside the data envelope;
 - origin: scribble A → scribble B with the same stored value; scribble → typed value; a save
   through the legacy full form; reversed job-start requests; another edit after the job
-  finished; a late answer after cancellation — none may revive or apply the old proposal;
+  finished; a late answer after cancellation — none may revive or apply the old proposal; a
+  delayed start for scribble A neither cancels nor restarts B's job (409); a repeated start for
+  the same origin returns the same job; a job for another target of the same account
+  supersedes the first;
 - budgets: the account's second job → 429; supersession before capacity; cancellation (the
   fake server sees the disconnect and the slot is free); queue wait and run deadline expiry;
   64 records and the evicted-job answer; option expiry at 10 minutes;
 - breaker (injectable clock): three transport failures open it, two do not; 100 dropped or
   nonsense answers never open it; supersession and cancellation never count; one half-open
-  probe while others are refused; probe success closes, failure reopens; while open, number
+  probe while others are refused; probe success closes, failure reopens; a 2xx with all
+  options dropped resets the count and closes a half-open breaker; a cancelled probe leaves it
+  half-open; mixed sequences (failure, success, failure) do not open it; while open, number
   entry, notes and Undo work and the poll says the assistant is unavailable;
 - client: a host name, `localhost`, `127.1`, `::ffff:127.0.0.1`, userinfo or a zone ID refused;
   `HTTP_PROXY` set and a 302 from the fake server never reach anything but the endpoint;
@@ -358,6 +396,14 @@ server unless stated):
   refused; another sheet's or account's job or an invalid option index → refused; an unrelated
   field change → still applied; an expired job → no write and no literal; Undo of an applied
   proposal; apply after rights are revoked or the sheet is frozen → 403 and no write;
+- routes (connected router): missing or wrong CSRF, extra or duplicate keys, body limit,
+  malformed `note`; apply accepts exactly `csrf`; session or rights revoked between lookup and
+  answer; apply checks CSRF and session before its D-X3 wait, answers the styled busy 503 and
+  succeeds on retry; poll of another account's or sheet's job → not found; "ask again" on poll
+  and on apply;
+- browser (JS, 1280 and 390): unresolved save → "Thinking…" → option with current value,
+  expression and effect → Use → value and `confirmed` note → Undo; an `ambiguous` reply shows
+  readings without Use; supersession while polling; an escaped explanation;
 - assistant off: no client, no job route (404), no "Thinking…"; no player text in logs or in
   4xx bodies other than the player's own echoed draft;
 - one live smoke, reported as live inference.
