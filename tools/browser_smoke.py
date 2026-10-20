@@ -817,8 +817,9 @@ def run_assist_browser(page, campaign, version):
     writes nothing (same revision), integer inputs keep the plain keyboard (no `inputmode`,
     which on phones hides minus and space), "-15" is applied literally with the
     "Did you mean" switch, which can be hidden, applied and undone, a blanked number is
-    unknown ("?") with Undo, and "lots" in a new row's Quantity keeps the row as unknown
-    with its scribble while Load says it is not computed."""
+    unknown ("?") with Undo, "lots" in a new row's Quantity keeps the row as unknown
+    with its scribble while Load says it is not computed, and (slice 1.6) "3 torches" and
+    "healing potion x2" in the quick-add line each add a row."""
 
     def enter(field, status=303):
         with page.expect_response(lambda response: response.request.method == "POST") as response:
@@ -1011,6 +1012,70 @@ def run_assist_browser(page, campaign, version):
         "Load does not say a value it uses is unknown",
     )
     no_overflow(page, "assisted sheet with an unknown row value")
+
+    # Slice 1.6: "3 torches" + Enter in Equipment's quick-add line adds torches x3 (the
+    # weight unknown) and comes back with the line focused; "healing potion x2" adds two.
+    def focused():
+        # Autofocus runs at the next rendering opportunity, after DOMContentLoaded.
+        try:
+            page.wait_for_function(
+                "document.activeElement && document.activeElement !== document.body",
+                timeout=3_000,
+            )
+        except Exception:  # noqa: BLE001 - report what has focus instead
+            pass
+        return page.evaluate("document.activeElement ? document.activeElement.id : ''")
+
+    for typed, r, name, quantity in (
+        ("3 torches", 1, "torches", "3"),
+        ("healing potion x2", 2, "healing potion", "2"),
+    ):
+        line = page.get_by_role("textbox", name="Quick add Equipment", exact=True)
+        line.fill(typed)
+        enter(line)
+        require(
+            page.url.endswith("?focus=quick-4")
+            and focused() == "quick-4"
+            and page.locator("#quick-4").input_value() == "",
+            f"The quick-add line is not focused and empty after {typed!r}",
+        )
+        require(
+            page.locator(f"#row-4-{r}-0").input_value() == name
+            and page.locator(f"#row-4-{r}-1").input_value() == quantity
+            and page.locator(f"#row-4-{r}-2").input_value() == ""
+            and page.locator(f"#note-4-{r}-1").count() == 0,
+            f"Quick add {typed!r} did not add {name} x{quantity} with an unknown weight",
+        )
+    require(
+        page.get_by_role("button", name="Add Equipment", exact=True).count() == 1,
+        "The quick-add button is not named Add Equipment",
+    )
+    no_overflow(page, "assisted sheet after a quick-add")
+    # Review round 1: a refused entry with a line break comes back in a textarea, so the
+    # control really holds the break and a retry posts what was typed (an input strips it).
+    typed = "3 torches\nand rope"
+    with page.expect_response(lambda response: response.request.method == "POST") as response:
+        with page.expect_navigation(wait_until="domcontentloaded"):
+            page.evaluate(
+                """(typed) => {
+                    const form = document.querySelector('form.quick-add');
+                    const area = document.createElement('textarea');
+                    area.name = 'text';
+                    area.value = typed;
+                    form.querySelector('#quick-4').replaceWith(area);
+                    form.requestSubmit();
+                }""",
+                typed,
+            )
+    kept = page.locator("#quick-4")
+    require(
+        response.value.status == 422
+        and kept.evaluate("element => element.tagName") == "TEXTAREA"
+        and kept.input_value() == typed
+        and focused() == "quick-4",
+        "A refused quick-add entry with a line break was not kept with its break",
+    )
+    no_overflow(page, "assisted sheet with a refused multi-line quick-add entry")
 
 
 def run_workspace_browser(

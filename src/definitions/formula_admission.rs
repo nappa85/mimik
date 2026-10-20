@@ -77,6 +77,47 @@ fn items(index: usize, field: &Field) -> Result<(), DefinitionError> {
             (_, None) => {}
         }
     }
+    match field
+        .items
+        .as_ref()
+        .and_then(|items| items.quick_add.as_ref())
+    {
+        Some(quick) => quick_add(&format!("{path}/quick_add"), field, quick),
+        None => Ok(()),
+    }
+}
+
+/// A list's quick-add line (assisted sheet slice 1.6, ASSIST-3) fills only the mapped name
+/// (a text property) and count (an integer property); every other required property is left
+/// unknown, which only an integer can be. So a required enum, yes/no, text or multiline
+/// property other than the name refuses the member (no quick-add line for such a list).
+fn quick_add(path: &str, field: &Field, quick: &super::QuickAdd) -> Result<(), DefinitionError> {
+    let properties = field.items.iter().flat_map(|items| &items.properties);
+    let control = |id: &str| {
+        properties
+            .clone()
+            .find(|property| property.id == id)
+            .map(|property| property.control)
+    };
+    if control(&quick.name) != Some(Control::Text) {
+        return Err(report(path, "quick-add-name-not-text-property"));
+    }
+    if let Some(quantity) = &quick.quantity
+        && control(quantity) != Some(Control::Integer)
+    {
+        return Err(report(path, "quick-add-quantity-not-integer-property"));
+    }
+    for property in properties.filter(|property| !property.optional && property.id != quick.name) {
+        match property.control {
+            Control::Enumeration | Control::Boolean => {
+                return Err(report(path, "quick-add-required-choice-property"));
+            }
+            Control::Text | Control::Multiline => {
+                return Err(report(path, "quick-add-required-text-property"));
+            }
+            Control::Integer | Control::List => {}
+        }
+    }
     Ok(())
 }
 

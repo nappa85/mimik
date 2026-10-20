@@ -16,7 +16,7 @@ fn pair(key: &str, value: &str) -> (String, String) {
     (key.into(), value.into())
 }
 
-fn item<'a>(id: &'a str, name: &'a str, quantity: &'a str) -> Row<'a> {
+pub(super) fn item<'a>(id: &'a str, name: &'a str, quantity: &'a str) -> Row<'a> {
     Row {
         id,
         name,
@@ -27,7 +27,7 @@ fn item<'a>(id: &'a str, name: &'a str, quantity: &'a str) -> Row<'a> {
 }
 
 /// Sheet 1 at revision 1 with the rows Axe (1), Bow (2) and Cup (3): `r1-1`, `r1-2`, `r1-3`.
-async fn three_rows(setup: &Setup) {
+pub(super) async fn three_rows(setup: &Setup) {
     let rows = [
         item("", "Axe", "1"),
         item("", "Bow", "2"),
@@ -37,14 +37,14 @@ async fn three_rows(setup: &Setup) {
     assert_eq!(status, StatusCode::SEE_OTHER, "{html}");
 }
 
-async fn page(setup: &Setup) -> String {
+pub(super) async fn page(setup: &Setup) -> String {
     let (status, html) = setup.get("/private-sheets/1").await;
     assert_eq!(status, StatusCode::OK, "{html}");
     html
 }
 
 /// The rows of the saved Equipment list as (ID, name, quantity).
-async fn rows(setup: &Setup) -> Vec<(String, String, Value)> {
+pub(super) async fn rows(setup: &Setup) -> Vec<(String, String, Value)> {
     saved(setup, 1).await.1["equipment"]
         .as_array()
         .unwrap()
@@ -71,7 +71,7 @@ async fn enter(setup: &Setup, html: &str, id: &str, typed: &str) -> (StatusCode,
 
 /// A row action button (`remove-4-1`, `up-4-2`): it belongs to the page's shared row-action
 /// form (`form`), which posts its `csrf` and `base` to the button's `formaction`.
-fn row_action(html: &str, id: &str) -> (String, Pairs) {
+pub(super) fn row_action(html: &str, id: &str) -> (String, Pairs) {
     let page = scraper::Html::parse_document(html);
     let button = page
         .select(&scraper::Selector::parse(&format!("button[id=\"{id}\"]")).unwrap())
@@ -100,14 +100,14 @@ fn row_action(html: &str, id: &str) -> (String, Pairs) {
     (button.value().attr("formaction").unwrap().to_owned(), pairs)
 }
 
-async fn press(setup: &Setup, html: &str, id: &str) -> (StatusCode, String) {
+pub(super) async fn press(setup: &Setup, html: &str, id: &str) -> (StatusCode, String) {
     let (action, pairs) = row_action(html, id);
     setup.post(&action, pairs).await
 }
 
 /// The new-row form of list `f`: its action and what Enter in its first control submits,
 /// with `typed` values put into its `row-<p>` / `set-<p>` controls.
-fn new_row(html: &str, f: usize, typed: &[(&str, &str)]) -> (String, Pairs) {
+pub(super) fn new_row(html: &str, f: usize, typed: &[(&str, &str)]) -> (String, Pairs) {
     let page = scraper::Html::parse_document(html);
     let form = page
         .select(&scraper::Selector::parse(&format!("form[action$=\"/lists/{f}/rows\"]")).unwrap())
@@ -150,7 +150,7 @@ fn text(html: &str, selector: &str) -> Option<String> {
 }
 
 /// The accessible name `aria-labelledby` gives the button `id`: the texts of its ids.
-fn name(html: &str, id: &str) -> String {
+pub(super) fn name(html: &str, id: &str) -> String {
     let page = scraper::Html::parse_document(html);
     let button = page
         .select(&scraper::Selector::parse(&format!("button[id=\"{id}\"]")).unwrap())
@@ -635,7 +635,7 @@ async fn undo_of_remove_clamps_the_old_index() {
 }
 
 /// The legacy full form of `rows` saved rows (create), for lists of any length.
-fn many(rows: usize) -> Vec<Row<'static>> {
+pub(super) fn many(rows: usize) -> Vec<Row<'static>> {
     (0..rows).map(|_| item("", "Item", "1")).collect()
 }
 
@@ -683,7 +683,7 @@ async fn undo_of_remove_into_a_full_list_is_refused_with_a_message() {
 
 /// A list with a required enum and yes/no, an optional yes/no and a number, as the new-row
 /// tests need.
-fn gear() -> Value {
+pub(super) fn gear() -> Value {
     let unresolved = json!({"state": "unresolved", "reason": "Synthetic fixture"});
     let property = |id: &str, label: &str, control: &str, optional: bool| json!({"id": id, "label": label, "control": control, "optional": optional});
     let mut kind = property("kind", "Kind", "enum", false);
@@ -709,7 +709,7 @@ fn gear() -> Value {
     })
 }
 
-async fn gear_sheet(setup: &Setup) {
+pub(super) async fn gear_sheet(setup: &Setup) {
     let create = vec![
         pair("csrf", &"a".repeat(64)),
         pair("revision", "0"),
@@ -891,7 +891,11 @@ async fn list_buttons_are_named_by_their_cell_and_row() {
 }
 
 /// A POST as a browser navigation sends it: `Accept: text/html` and document fetch metadata.
-async fn document_post(setup: &Setup, path: &str, pairs: Pairs) -> axum::response::Response {
+pub(super) async fn document_post(
+    setup: &Setup,
+    path: &str,
+    pairs: Pairs,
+) -> axum::response::Response {
     use tower::ServiceExt;
     let request = axum::http::Request::builder()
         .uri(path)
@@ -911,7 +915,7 @@ async fn document_post(setup: &Setup, path: &str, pairs: Pairs) -> axum::respons
 }
 
 /// Holds the runtime permit for `seconds`, as another request would.
-fn hold(seconds: u64) -> tokio::task::JoinHandle<()> {
+pub(super) fn hold(seconds: u64) -> tokio::task::JoinHandle<()> {
     let permit = crate::definitions::admit().unwrap();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
@@ -1249,7 +1253,7 @@ async fn schema_20_upgrades_to_21_keeping_every_note() {
 // ---- Review round 1 ----
 
 /// The kept-draft block of list `f`: the text of its message, labels, states and values.
-fn kept(html: &str, f: usize) -> Option<String> {
+pub(super) fn kept(html: &str, f: usize) -> Option<String> {
     text(html, &format!("#kept-{f}"))
 }
 

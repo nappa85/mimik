@@ -469,6 +469,8 @@ pub(crate) enum Focus {
     Up(usize, usize),
     /// Row `r`'s Move down button.
     Down(usize, usize),
+    /// The quick-add line of list `f` (slice 1.6).
+    Quick(usize),
 }
 
 impl Op {

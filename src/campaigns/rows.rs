@@ -1,6 +1,6 @@
-//! List units (assisted sheet slice 1.5b; `docs/assisted-entry.md`, D-C, D-S, D-V): a saved
-//! row's cell, the new-row form, and Remove, Move up and Move down of one row, each saved on
-//! its own.
+//! List units (assisted sheet slices 1.5b and 1.6; `docs/assisted-entry.md`, D-C, D-S, D-V):
+//! a saved row's cell, the new-row form, the quick-add line, and Remove, Move up and Move
+//! down of one row, each saved on its own.
 //!
 //! A page names a row by its index at the revision it was read at (its `base`), so the
 //! routes stay short (plan D7). Every plan first maps that index to the row's host ID in
@@ -10,7 +10,8 @@
 //! - the new-row form protects nothing (it only appends);
 //! - Remove protects the row's existence and every property value (a removed row is "No
 //!   change"; an edited one a conflict);
-//! - Move protects the list's order of host IDs.
+//! - Move protects the list's order of host IDs;
+//! - the quick-add line (slice 1.6), like the new-row form, protects nothing.
 //!
 //! Values are read exactly as the full form reads them (`values::row_cell`, `row_item`).
 use super::{
@@ -253,6 +254,74 @@ pub(crate) fn new_row(
         Err(failure) => refusal(failure)?,
     };
     Ok(Plan::new(planned, anchor))
+}
+
+/// The quick-add line of list field `f` (slice 1.6, ASSIST-3): `text` read by
+/// `quick::read` and appended to L as one row with the host ID `r<L+1>-1`, like the new-row
+/// form (append only, never stale). The mapped name and count are always filled, even when
+/// optional; every other required property is an integer (admission) and unknown; every
+/// other optional property is not set. No note. A blank line is "Nothing to add"; a full
+/// list is refused before the line is read.
+pub(crate) fn quick_add(
+    pin: &ImmutablePin,
+    snapshot: &mut PrivateSnapshot,
+    f: usize,
+    text: &str,
+) -> Result<Plan, StatusCode> {
+    let list = &pin.definition().fields[f];
+    let quick = list
+        .items
+        .as_ref()
+        .and_then(|items| items.quick_add.as_ref())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let rows = items(&snapshot.data, list).len();
+    let anchor = format!("quick-{f}");
+    if rows >= crate::definitions::formula::MAX_LIST_ITEMS {
+        return Ok(Plan::new(
+            Planned::Invalid("This list already holds 256 rows, the most a list can hold."),
+            anchor,
+        ));
+    }
+    let item = match super::quick::read(text, quick.quantity.is_some()) {
+        Ok(Some(item)) => item,
+        Ok(None) => return Ok(Plan::new(Planned::Unchanged, anchor)),
+        Err(reason) => return Ok(Plan::new(Planned::Invalid(reason), anchor)),
+    };
+    let Some(next) = snapshot.revision.checked_add(1) else {
+        return Ok(Plan::new(
+            Planned::Invalid("Sheet revision exhausted."),
+            anchor,
+        ));
+    };
+    let mut row = serde_json::Map::new();
+    row.insert("id".into(), Value::String(format!("r{next}-1")));
+    for property in values::properties(list) {
+        let value = if property.id == quick.name {
+            Value::String(item.name.to_owned())
+        } else if Some(&property.id) == quick.quantity.as_ref() {
+            item.quantity.map_or(Value::Null, Value::from)
+        } else if property.optional {
+            continue;
+        } else {
+            // Admission leaves only integers here: unknown (D-M).
+            Value::Null
+        };
+        row.insert(property.id.clone(), value);
+    }
+    let mut data = snapshot.data.clone();
+    rows_of(&mut data, list)?.push(Value::Object(row));
+    let planned = match pin.validate_values(&data) {
+        Ok(()) => {
+            snapshot.data = data;
+            Planned::Write
+        }
+        Err(failure) => refusal(failure)?,
+    };
+    Ok(Plan {
+        // The line again, focused, for the next item.
+        focus: matches!(planned, Planned::Write).then(|| format!("quick-{f}")),
+        ..Plan::new(planned, anchor)
+    })
 }
 
 /// Remove, Move up or Move down of row `r` (at `base`) of list field `f`, applied to L.

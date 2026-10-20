@@ -38,6 +38,8 @@ mod list_values_tests;
 mod material_tests;
 #[path = "notes_tests.rs"]
 mod notes_tests;
+#[path = "quick_tests.rs"]
+mod quick_tests;
 #[path = "registry_tests.rs"]
 mod registry_tests;
 #[path = "unit_tests.rs"]

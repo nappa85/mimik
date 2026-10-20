@@ -183,6 +183,13 @@ pub(crate) fn routes() -> Router<AuthState> {
                 .layer(DefaultBodyLimit::max(unit_web::ROW_POST_BYTES))
                 .route_layer(middleware::from_fn(signed_in)),
         )
+        // The quick-add line (slice 1.6): three short pairs.
+        .route(
+            "/private-sheets/{id}/lists/{f}/quick",
+            post(unit_web::quick)
+                .layer(DefaultBodyLimit::max(unit_web::ROW_POST_BYTES))
+                .route_layer(middleware::from_fn(signed_in)),
+        )
         // The full-form and list-form save waits the same way (review round 1, Sonnet M1).
         .route("/private-sheets/{id}", sheet_post(edit_sheet));
     Router::new()
@@ -480,17 +487,33 @@ struct Version {
     version: i64,
 }
 
-/// A sheet view's optional focus after a row move (slice 1.5b review): `up-<f>-<r>` or
-/// `down-<f>-<r>`; anything else is ignored.
-#[derive(Deserialize, Default)]
-struct SheetQuery {
-    #[serde(default)]
-    focus: Option<String>,
+/// A sheet view's optional focus after a row move (slice 1.5b review), `up-<f>-<r>` or
+/// `down-<f>-<r>`, or after a quick-add (slice 1.6), `quick-<f>`. Read from the raw query:
+/// anything else, including a repeated `focus` and any other parameter, is ignored, never
+/// refused (a focus is a convenience).
+struct SheetQuery(Option<String>);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for SheetQuery {
+    type Rejection = std::convert::Infallible;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let query = parts.uri.query().unwrap_or_default();
+        let mut focus = form_urlencoded::parse(query.as_bytes())
+            .filter(|(key, _)| key == "focus")
+            .map(|(_, value)| value.into_owned());
+        let first = focus.next();
+        Ok(Self(first.filter(|_| focus.next().is_none())))
+    }
 }
 
 impl SheetQuery {
     fn focus(&self) -> Option<values::Focus> {
-        let (verb, rest) = self.focus.as_deref()?.split_once('-')?;
+        let (verb, rest) = self.0.as_deref()?.split_once('-')?;
+        if verb == "quick" {
+            return values::index(rest).map(values::Focus::Quick);
+        }
         let (f, r) = rest.split_once('-')?;
         let (f, r) = (values::index(f)?, values::index(r)?);
         match verb {
@@ -874,9 +897,31 @@ struct ListView {
     /// The new-row form's controls (slice 1.5b); `None` when the list is full or not a
     /// unit list.
     new_row: Option<Vec<CellView>>,
+    /// After a quick-add the line gets `autofocus` (`?focus=quick-<f>`, slice 1.6).
+    focus_quick: bool,
+    /// The quick-add line (slice 1.6), when the definition declares one; `None` when the
+    /// list is full or not a unit list.
+    quick: Option<QuickLine>,
     /// A refused draft that no control can take any more (review round 1): a cell whose row
     /// was removed, or a new row refused because the list is full. Shown read-only, to copy.
     kept: Option<Kept>,
+}
+
+/// A list's quick-add line: its text (a refused entry's draft, else empty), whether it
+/// takes `autofocus`, and whether the list maps a count (the hint promises only what is
+/// read).
+struct QuickLine {
+    value: String,
+    autofocus: bool,
+    counted: bool,
+}
+
+impl QuickLine {
+    /// A refused entry with a line break is shown in a textarea, which keeps the break (an
+    /// `<input>` would strip it and a retry would post altered text; review round 1).
+    fn multiline(&self) -> bool {
+        self.value.contains('\n')
+    }
 }
 
 /// A draft kept read-only on the page: why, then each property with its value.
@@ -975,6 +1020,8 @@ impl ListView {
             units: false,
             removed: None,
             new_row: None,
+            focus_quick: focus == Some(values::Focus::Quick(f)),
+            quick: None,
             kept: None,
         }
     }
@@ -1073,6 +1120,7 @@ impl ListView {
         let submitted = draft
             .filter(|draft| draft.unit == super::unit::Unit::NewRow(self.f))
             .and_then(|draft| draft.row.as_ref());
+        self.quick(field, draft);
         if self.full() {
             // A new row refused because the list filled up: kept to copy, not addable.
             if let Some(row) = submitted {
@@ -1117,6 +1165,34 @@ impl ListView {
                 })
                 .collect(),
         );
+    }
+    /// The quick-add line of a list that declares one (slice 1.6), with a refused entry's
+    /// draft, focused; at 256 rows no line, and a refused entry is kept read-only to copy.
+    fn quick(&mut self, field: &crate::definitions::Field, draft: Option<&unit_web::UnitDraft>) {
+        let quick = draft.filter(|draft| draft.unit == super::unit::Unit::QuickAdd(self.f));
+        if self.full() {
+            if let Some(quick) = quick {
+                self.kept = Some(Kept {
+                    message: "This list is full (256 rows), so your quick-add entry was not \
+                              added. It is kept below to copy; remove a row first.",
+                    entries: vec![KeptEntry {
+                        label: "Quick add".into(),
+                        state: None,
+                        value: quick.value.clone(),
+                    }],
+                });
+            }
+        } else if let Some(mapping) = field
+            .items
+            .as_ref()
+            .and_then(|items| items.quick_add.as_ref())
+        {
+            self.quick = Some(QuickLine {
+                value: quick.map(|quick| quick.value.clone()).unwrap_or_default(),
+                autofocus: quick.is_some() || self.focus_quick,
+                counted: mapping.quantity.is_some(),
+            });
+        }
     }
     /// The last row: its Move down button is disabled.
     fn last(&self, row: &RowView) -> bool {
@@ -1673,7 +1749,7 @@ async fn read_sheet(
     State(state): State<AuthState>,
     session: Session,
     Path(id): Path<i64>,
-    Query(query): Query<SheetQuery>,
+    query: SheetQuery,
     Extension(admission): Extension<RuntimeAdmission>,
 ) -> ResultResponse {
     read_private(state, session, (id, None), query.focus(), admission).await

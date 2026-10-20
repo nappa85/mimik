@@ -68,7 +68,14 @@
     },
     "items": {
       "type": "object", "additionalProperties": false, "required": ["properties"],
-      "properties": {"properties": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/item_property"}}}
+      "properties": {
+        "properties": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/item_property"}},
+        "quick_add": {"$ref": "#/$defs/quick_add"}
+      }
+    },
+    "quick_add": {
+      "type": "object", "additionalProperties": false, "required": ["name"],
+      "properties": {"name": {"$ref": "#/$defs/id"}, "quantity": {"$ref": "#/$defs/id"}}
     },
     "item_property": {
       "type": "object", "additionalProperties": false, "required": ["id", "label", "control", "optional"],

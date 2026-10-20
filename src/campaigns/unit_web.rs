@@ -3,8 +3,9 @@
 //! `/fields/{field_id}`, each with exactly `csrf`, `base` and `value` (plus `null` for a
 //! nullable field); `/cells/{f}/{r}/{p}` with `csrf`, `base` and `value` (plus `set` for an
 //! optional property); `/lists/{f}/rows` with `csrf`, `base` and that row's `row-<p>` (and
-//! `set-<p>`); and `/lists/{f}/rows/{r}/{remove|up|down}` with `csrf` and `base`. List
-//! routes name a list, a row (its index at `base`) and a property by index (`super::rows`).
+//! `set-<p>`); `/lists/{f}/rows/{r}/{remove|up|down}` with `csrf` and `base`; and (slice
+//! 1.6) `/lists/{f}/quick` with `csrf`, `base` and `text`. List routes name a list, a row
+//! (its index at `base`) and a property by index (`super::rows`).
 //!
 //! Precedence as for sheet saves: parse, CSRF and request auth, then (D-X3) a bounded wait for
 //! the `JOBS` permit, the read and edit rights (403; an unsupported pin is read-only, so it
@@ -56,6 +57,8 @@ enum Route {
     NewRow(String),
     /// `lists/{f}/rows/{r}/{action}`.
     Row(String, String, String),
+    /// `lists/{f}/quick` (slice 1.6).
+    Quick(String),
 }
 
 impl Route {
@@ -72,6 +75,7 @@ impl Route {
                 (index(f) && index(r) && index(p)).then(|| format!("cells/{f}/{r}/{p}"))
             }
             Self::NewRow(f) => index(f).then(|| format!("lists/{f}/rows")),
+            Self::Quick(f) => index(f).then(|| format!("lists/{f}/quick")),
             Self::Row(f, r, action) => (index(f) && index(r) && RowAction::parse(action).is_some())
                 .then(|| format!("lists/{f}/rows/{r}/{action}")),
         }
@@ -84,6 +88,7 @@ impl Route {
             Self::Field(field) => Unit::field(definition, field),
             Self::Cell(f, r, p) => Unit::cell(definition, (f, r, p)),
             Self::NewRow(f) => Unit::new_row(definition, f),
+            Self::Quick(f) => Unit::quick_add(definition, f),
             Self::Row(f, r, action) => Unit::row(definition, (f, r, action)),
         }
     }
@@ -134,7 +139,17 @@ pub(super) async fn row(
     save(state, session, id, Route::Row(f, r, action), &body).await
 }
 
-/// Body limit of a row action: two short pairs.
+pub(super) async fn quick(
+    State(state): State<AuthState>,
+    session: Session,
+    Path((id, f)): Path<(i64, String)>,
+    body: axum::body::Bytes,
+) -> super::ResultResponse {
+    save(state, session, id, Route::Quick(f), &body).await
+}
+
+/// Body limit of a row action and a quick-add line: short pairs (a 200-character line is at
+/// most 2,400 bytes URL-encoded).
 pub(super) const ROW_POST_BYTES: usize = 8192;
 
 /// A unit draft to show again after a refused save (slice 1.5a): the unit's submitted value
@@ -147,6 +162,24 @@ pub(super) struct UnitDraft {
     pub null: Option<String>,
     pub host: Option<String>,
     pub row: Option<BTreeMap<String, String>>,
+}
+
+impl UnitDraft {
+    /// The draft of `unit`'s admitted `form`: its `value` (a quick-add line's `text`), its
+    /// Known/Unknown or Set/Not set state, the cell's row `host`, and a new row's pairs.
+    fn of(unit: Unit, form: &BTreeMap<String, String>, host: Option<String>) -> Self {
+        Self {
+            unit,
+            value: form
+                .get("value")
+                .or_else(|| form.get("text"))
+                .cloned()
+                .unwrap_or_default(),
+            null: form.get("null").or_else(|| form.get("set")).cloned(),
+            host,
+            row: matches!(unit, Unit::NewRow(_)).then(|| form.clone()),
+        }
+    }
 }
 
 async fn save(
@@ -239,13 +272,7 @@ async fn finish(
     (unit, form): (Unit, &BTreeMap<String, String>),
     plan: Plan,
 ) -> super::ResultResponse {
-    let draft = UnitDraft {
-        unit,
-        value: form.get("value").cloned().unwrap_or_default(),
-        null: form.get("null").or_else(|| form.get("set")).cloned(),
-        host: plan.host,
-        row: matches!(unit, Unit::NewRow(_)).then(|| form.clone()),
-    };
+    let draft = UnitDraft::of(unit, form, plan.host);
     let label = view
         .immutable
         .as_ref()
@@ -343,7 +370,7 @@ fn anchor(unit: Unit) -> String {
         Unit::Name => "meta-name-label".into(),
         Unit::Notes => "meta-notes-label".into(),
         Unit::Field(f) => format!("label-{f}"),
-        Unit::Cell { .. } | Unit::NewRow(_) | Unit::Row { .. } => String::new(),
+        Unit::Cell { .. } | Unit::NewRow(_) | Unit::QuickAdd(_) | Unit::Row { .. } => String::new(),
     }
 }
 
@@ -354,6 +381,11 @@ fn unchanged(unit: Unit, label: &str) -> String {
             action: RowAction::Remove,
             ..
         } => format!("No change: {label} was already removed, so nothing was saved."),
+        Unit::QuickAdd(_) => {
+            format!(
+                "Nothing to add: the quick-add line of {label} was empty, so nothing was saved."
+            )
+        }
         _ => format!("No change: {label} already holds this value, so nothing was saved."),
     }
 }
@@ -391,6 +423,13 @@ async fn refused(
                 ),
             }
         }
+        (Unit::QuickAdd(_), Some(reason)) => {
+            format!("Nothing was added to {label}: {reason} Your entry is kept below.")
+        }
+        (Unit::QuickAdd(_), None) => format!(
+            "Nothing was added to {label}: the sheet changed while it was saved (now revision \
+             {revision}). Your entry is kept below; press Enter again to add it."
+        ),
         (Unit::NewRow(_), Some(reason)) => {
             format!("{label} was not added: {reason} Your row is kept below.")
         }
@@ -481,6 +520,7 @@ fn plan(
             &mut pending,
         )?,
         Unit::NewRow(f) => rows::new_row(pin, &mut patched, f, (form, current), &mut pending)?,
+        Unit::QuickAdd(f) => rows::quick_add(pin, &mut patched, f, &form["text"])?,
         Unit::Row { f, r, action } => {
             rows::action(pin, (&mut patched, base), (f, r, action), &mut pending)?
         }
@@ -534,8 +574,10 @@ struct BusyTemplate<'a> {
     retry: Option<String>,
     /// The submitted pairs other than `csrf` and the visible entry, kept as hidden inputs.
     hidden: Vec<(&'a str, &'a str)>,
-    /// A unit's entry, shown in a control (a textarea when it holds a line break).
+    /// A unit's entry, shown in a control (a textarea when it holds a line break), and the
+    /// control's name (`value`, or a quick-add line's `text`).
     value: Option<&'a str>,
+    name: &'a str,
     multiline: bool,
     /// The submitted form was larger than a re-render may echo (plan D7), so it was not kept.
     dropped: bool,
@@ -579,7 +621,29 @@ fn busy(id: i64, route: &Route, pairs: &Pairs, csrf: &str) -> super::ResultRespo
                     .into_iter()
                     .collect(),
                 value: None,
+                name: "value",
                 multiline: false,
+                dropped: false,
+            });
+        }
+        // Slice 1.6: the line is kept in a control named `text`, with its `base`.
+        Route::Quick(f) => {
+            let value = pairs.value("text").unwrap_or_default();
+            return busy_page(&BusyTemplate {
+                sheet: id,
+                action: &action,
+                csrf,
+                unit: Some(format!("the quick-add line of list field {f}")),
+                retry: None,
+                hidden: pairs
+                    .value("base")
+                    .map(|base| ("base", base))
+                    .into_iter()
+                    .collect(),
+                value: Some(value),
+                name: "text",
+                // A line break (refused at once) survives a retry only in a textarea.
+                multiline: value.contains('\n'),
                 dropped: false,
             });
         }
@@ -597,6 +661,7 @@ fn busy(id: i64, route: &Route, pairs: &Pairs, csrf: &str) -> super::ResultRespo
         retry: None,
         hidden,
         value: Some(value),
+        name: "value",
         multiline: value.contains('\n'),
         dropped: false,
     })
@@ -648,6 +713,7 @@ fn busy_pairs(id: i64, action: &str, pairs: &Pairs, csrf: &str) -> super::Result
         retry: None,
         hidden,
         value: None,
+        name: "value",
         multiline: false,
         dropped,
     })

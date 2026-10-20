@@ -171,7 +171,8 @@ pub fn list_definition() -> serde_json::Value {
 
 /// The assisted-sheet demo definition (assisted sheet plan §5 Demo): Current and Max HP, an
 /// Armour modifier, a nullable Luck, an equipment list (name, quantity, weight, optional
-/// broken), a derived `load` and the advisory check `hp <= max_hp`. Built on the pattern of
+/// broken) with a quick-add line (name and quantity, slice 1.6), a derived `load` and the
+/// advisory check `hp <= max_hp`. Built on the pattern of
 /// [`list_definition`]; later slices add their members to it.
 #[must_use]
 pub fn assist_definition() -> serde_json::Value {
@@ -193,7 +194,8 @@ pub fn assist_definition() -> serde_json::Value {
         field("armour", "Armour modifier", false),
         field("luck", "Luck", true),
         json!({"id": "equipment", "label": "Equipment", "control": "list", "nullable": false,
-               "mapping": unresolved, "items": {"properties": equipment}}),
+               "mapping": unresolved, "items": {"properties": equipment,
+               "quick_add": {"name": "name", "quantity": "quantity"}}}),
         json!({"id": "load", "label": "Load", "control": "integer", "nullable": false,
                "mapping": unresolved,
                "formula": {"expr": "sum(equipment.map(i, i.quantity * i.weight))",

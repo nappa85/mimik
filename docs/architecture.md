@@ -63,7 +63,7 @@ Origin against the configured authority, and sets `Cache-Control: no-store`,
 | `network.rs` | LAN/loopback selection, peer admission, canonical external URL |
 | `auth/` | Sign-in, sessions, request admission, security headers, error pages; Owner pages `/admin` (accounts), `/admin/materials` (source review), `/admin/rulesets` (registry) |
 | `accounts/` | Accounts, Owner binding, invitations, resets, disable, epochs; Argon2 hashing; protected credential files; browser transport |
-| `campaigns/` | Campaigns, membership and requests (`domain.rs`); private sheets (`sheets.rs`, `snapshots.rs` is the sole writer); value admission (`values.rs`, `transport.rs`); routes (`web.rs`); advisory formulas view (`formulas.rs`); history change summary (`history_diff.rs`); catalogue reading through a sheet (`catalogue.rs`, `catalogue_web.rs`); assisted entry: lenient numbers (`entry.rs`), change notes (`notes.rs`), switch and Undo (`assist.rs`, `assist_web.rs`), per-field save (`unit.rs`, `unit_web.rs`) |
+| `campaigns/` | Campaigns, membership and requests (`domain.rs`); private sheets (`sheets.rs`, `snapshots.rs` is the sole writer); value admission (`values.rs`, `transport.rs`); routes (`web.rs`); advisory formulas view (`formulas.rs`); history change summary (`history_diff.rs`); catalogue reading through a sheet (`catalogue.rs`, `catalogue_web.rs`); assisted entry: lenient numbers (`entry.rs`), change notes (`notes.rs`), switch and Undo (`assist.rs`, `assist_web.rs`), per-field save (`unit.rs`, `unit_web.rs`, list units `rows.rs`), quick-add reading (`quick.rs`) |
 | `definitions/` | Declarative game definitions: strict decode, JSON Schema admission, revisioned drafts, immutable publication and withdrawal, private pins; CEL formula engine (`formula/`) and its admission |
 | `catalogues/` | Read-only game catalogues: decode, admission, drafts, sealed publication with projections and name index, read-only lookups |
 | `sources/` | Prepared-source import, page/unit review evidence, FTS5 lexical search, region previews, Owner material operations, prototype source routes |
@@ -101,7 +101,7 @@ migrations.
 - **Game definitions:** [runtime-definition-contract.md](runtime-definition-contract.md).
 - **Derived values and checks (CEL `cel-mimik-1`):** [formulas.md](formulas.md).
 - **Catalogues:** [catalogues.md](catalogues.md).
-- **Assisted entry (sums, notes, switch, Undo, unknown values, per-field save):**
+- **Assisted entry (sums, notes, switch, Undo, unknown values, per-field save, quick-add):**
   [assisted-entry.md](assisted-entry.md); remaining steps in
   [assisted-sheet-plan.md](assisted-sheet-plan.md).
 - **Sources, review and retrieval:** [sources-and-retrieval.md](sources-and-retrieval.md).

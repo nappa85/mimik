@@ -3,7 +3,7 @@
 //! `meta/notes`), each non-derived scalar field (`fields/{field_id}`), and for each list a
 //! saved row's cell (`cells/{f}/{r}/{p}`), the new-row form (`lists/{f}/rows`) and a row's
 //! Remove, Move up and Move down (`lists/{f}/rows/{r}/{remove|up|down}`), each saved on its
-//! own from its own form.
+//! own from its own form; and (slice 1.6) a list's quick-add line (`lists/{f}/quick`).
 //!
 //! A unit form carries `base`, the revision its displayed value was read at. A save is a
 //! conflict only when the unit's **protected value** differs between `base` and the live
@@ -33,6 +33,8 @@ pub(crate) enum Unit {
     },
     /// The new-row form of list field `f`.
     NewRow(usize),
+    /// The quick-add line of list field `f` (slice 1.6).
+    QuickAdd(usize),
     /// A row action on row `r` (at `base`) of list field `f`.
     Row {
         f: usize,
@@ -129,6 +131,18 @@ impl Unit {
         list(definition, f).map(|_| Self::NewRow(f))
     }
 
+    /// The unit a `lists/{f}/quick` route names: a list of the pin, not derived, whose
+    /// definition declares a quick-add line.
+    pub(crate) fn quick_add(definition: &Definition, f: &str) -> Option<Self> {
+        let f = values::index(f)?;
+        list(definition, f)?
+            .items
+            .as_ref()?
+            .quick_add
+            .as_ref()
+            .map(|_| Self::QuickAdd(f))
+    }
+
     /// The unit a `lists/{f}/rows/{r}/{remove|up|down}` route names.
     pub(crate) fn row(definition: &Definition, (f, r, action): (&str, &str, &str)) -> Option<Self> {
         let (f, r) = (values::index(f)?, values::index(r)?);
@@ -142,7 +156,7 @@ impl Unit {
         match self {
             Self::Name => "Name".into(),
             Self::Notes => "General notes".into(),
-            Self::Field(f) => field(f).label.clone(),
+            Self::Field(f) | Self::QuickAdd(f) => field(f).label.clone(),
             Self::Cell { f, r, p } => {
                 super::assist::row(field(f), r, &values::properties(field(f))[p]).label
             }
@@ -155,6 +169,7 @@ impl Unit {
     pub(crate) fn keys(self, definition: &Definition) -> HashSet<String> {
         let mut keys: HashSet<String> = match self {
             Self::NewRow(_) | Self::Row { .. } => ["csrf", "base"].map(String::from).into(),
+            Self::QuickAdd(_) => ["csrf", "base", "text"].map(String::from).into(),
             _ => KEYS.map(String::from).into(),
         };
         match self {
@@ -188,7 +203,9 @@ impl Unit {
             Self::Name => Protected::Text(&snapshot.name),
             Self::Notes => Protected::Text(&snapshot.notes),
             Self::Field(f) => Protected::Value(snapshot.data.get(&definition.fields[f].id)),
-            Self::Cell { .. } | Self::NewRow(_) | Self::Row { .. } => Protected::Value(None),
+            Self::Cell { .. } | Self::NewRow(_) | Self::QuickAdd(_) | Self::Row { .. } => {
+                Protected::Value(None)
+            }
         }
     }
 
@@ -242,7 +259,7 @@ impl Unit {
                 *pending = recorder.notes;
                 Ok(changed)
             }
-            Self::Cell { .. } | Self::NewRow(_) | Self::Row { .. } => {
+            Self::Cell { .. } | Self::NewRow(_) | Self::QuickAdd(_) | Self::Row { .. } => {
                 Err(AppError::Invalid("List units are planned by row."))
             }
         }
