@@ -41,6 +41,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Other next actions
 
+- Per-platform model isolation (ASSIST-27): the no-egress topology is Linux containers. On
+  macOS (Metal needs a native llama-server, Docker has no GPU) and Windows (GPU access from
+  Docker is limited) it needs its own design, e.g. a network-denied sandbox or a firewall
+  rule, plus a test there. Not verifiable on this host; Linux first.
 - **GPU back in service (2026-10-20, after the re-paste):** at 143 W for 5 min with the fan
   on manual 255 and a room fan, the junction plateaus at 77–79 °C (max 83), edge 57 °C, gap
   about 21 °C. On automatic fan it reaches 85 °C in 22 s, so GPU runs need the manual fan
