@@ -41,11 +41,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Other next actions
 
-- Production model isolation without containers (ASSIST-29): pending the user's choice between
-  A (official llama-server child process on a random loopback port with a per-launch token,
-  Landlock on Linux, a sandbox profile on macOS) and B (own sidecar linking llama.cpp over pipes,
-  no network at all; replaces the 2b HTTP client, conflicts with D-H). Not verifiable on macOS or
-  Windows from this host.
+- Production model runtime (ASSIST-29, ASSIST-30): official llama-server child process on a
+  random loopback port with a per-launch token, Landlock on Linux, sandbox profile on macOS;
+  goes into the plan update with 2c/2d. Not verifiable on macOS or Windows from this host.
 - **GPU back in service (2026-10-20, after the re-paste):** at 143 W for 5 min with the fan
   on manual 255 and a room fan, the junction plateaus at 77–79 °C (max 83), edge 57 °C, gap
   about 21 °C. On automatic fan it reaches 85 °C in 22 s, so GPU runs need the manual fan
