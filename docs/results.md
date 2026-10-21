@@ -208,7 +208,10 @@ decides.**
   stops model fetching and is hygiene, not confinement) and is unmeasured. The GPU path is unmeasured for the 2b
   schema (no GPU runs on weekdays 09:00 to 18:00; a separate measurement can run at night), and
   the priming measurement is what sets the budgets per machine within fixed caps.
-- **Decision needed: the CPU-path budget** (one decision, ASSIST-L20). At 2 threads, Granite's
+- **CPU-path budget, decided (ASSIST-31):** on a machine without a usable GPU only the fields
+  related to the note are sent, the dynamic part is at most 1 KiB, and the run deadline may
+  reach 90 s; the GPU path keeps 60 s and 4 KiB. The analysis that led to it:
+- **CPU-path budget analysis** (ASSIST-L20). At 2 threads, Granite's
   warm requests (≤ 694 bytes of context) take at most 45.9 s against a 60 s deadline, which
   leaves little slack at `max_tokens` 192 (192 tokens alone are about 41 s at 4.7 tokens/s). A
   near-4 KiB dynamic part takes 111 to 136 s, so with the plan's 4 KiB bound such requests
@@ -231,6 +234,24 @@ decides.**
   each model's first warm request (dh-01) reused the cold request's identical prompt; the page
   cache was warm for cold starts. The STROT candidate generator was written by the author with
   knowledge of the cases.
+- **GPU path (2026-10-21, self-checked, Vulkan on the RX 6650 XT, fan manual 255, same 50 cases
+  × 2 passes + 4 stress, `max_tokens` 384 as the measurement cap, priming after every start,
+  `tools/run_assist_screen.sh` with `DEVICE=gpu`; run data under
+  `/media/data/mimik/assist-2b/runs/gpu-20261021`):**
+
+  | Model | p50 / p95 / max (s) | Stress max (s) | Schema-valid | Pass 1 correct / false-confident / silent |
+  |---|---|---|---|---|
+  | Qwen3-4B-2507 | 2.73 / 3.63 / 5.94 | 7.6 | 100/100 | 39 / 5 / 6 |
+  | Granite 4.2 3B | 1.23 / 1.44 / 2.09 | 2.2 | 100/100 | 37 / 9 / 4 |
+  | MiniCPM5-2B | 0.60 / 0.98 / 1.13 | 1.9 | 100/100 | 26 / 19 / 5 |
+
+  Priming took about 1.3 s (1,460 tokens at about 1,100 tokens/s) against about 117 s on 2 CPU
+  threads; Granite generates about 80 tokens/s. Every model, stress requests included, is far
+  inside 60 s on this GPU, so Qwen3-4B fits the GPU path. The answers differ from the CPU runs
+  at temperature 0 (Granite 37/9 against 36/7 on CPU, Qwen 39/5 against 39/3): the backend
+  changes the numerics, so quality numbers are per backend and the n = 50 differences are noise
+  at this size. Peak junction 76 °C, no thermal stop. One GPU; other GPUs and the Metal path are
+  unmeasured.
 
 ## Catalogue publication lock budget (R8, 2026-10-19)
 
