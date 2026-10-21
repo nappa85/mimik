@@ -574,6 +574,32 @@ def strot_candidates(request):
     return out
 
 
+# ---- label feasibility
+
+
+def _combine(left, right):
+    out = set()
+    for a in left:
+        for b in right:
+            out.update((a + b, a - b, a * b))
+            if b:
+                out.update((a // b, -((-a) // b)))
+    return {v for v in out if I64[0] <= v <= I64[1]}
+
+
+def reachable_values(request, refs=()):
+    """Values an accepted reply could produce: allowed literals (either sign), the target's
+    value, and the named reference fields, combined with the four operators (floor and ceil
+    division) to depth 2, plus depth-2 results combined once more with a leaf (a subset of
+    depth 3). Used to check that a label is winnable under the frozen rules."""
+    leaves = {sign * n for n in allowed_literals(request) for sign in (1, -1)}
+    leaves.add(request["target_value"])
+    leaves.update(request["supplied"][ref] for ref in refs)
+    level1 = _combine(leaves, leaves) | leaves
+    level2 = _combine(level1, level1) | level1
+    return level2 | _combine(level2, leaves) | _combine(leaves, level2)
+
+
 # ---- cases and labels
 
 
@@ -861,6 +887,10 @@ def _latency(rows, key):
     }
 
 
+# Reachable only through a contrived tree (see test_assist_eval.test_provenance_loophole).
+EXCLUDED_PRACTICAL = frozenset({"fv-02"})
+
+
 def summarize_ledger(path):
     lines = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
     header, rows = lines[0], lines[1:]
@@ -919,18 +949,37 @@ def summarize_ledger(path):
     classes = {}
     for r in first:
         c = classes.setdefault(
-            r["class"], {"n": 0, "correct": 0, "false_confident": 0, "top1": 0, "ambiguous": 0}
+            r["class"],
+            {
+                "n": 0,
+                "correct": 0,
+                "false_confident": 0,
+                "silent_miss": 0,
+                "top1": 0,
+                "ambiguous": 0,
+                "duplicate_values": 0,
+            },
         )
         c["n"] += 1
         c["correct"] += r["score"]["correct"]
         c["false_confident"] += r["score"]["false_confident"]
         c["top1"] += r["score"]["top1_correct"]
         c["ambiguous"] += (r.get("validated") or {}).get("kind") == "ambiguous"
+        c["silent_miss"] += not r["score"]["correct"] and not r["score"]["false_confident"]
+        c["duplicate_values"] += len(r["shown"]) != len(set(r["shown"]))
     out["classes_pass1"] = classes
-    out["totals_pass1"] = {
-        key: sum(c[key] for c in classes.values())
-        for key in ("n", "correct", "false_confident", "top1", "ambiguous")
+    keys = ("n", "correct", "false_confident", "silent_miss", "top1", "ambiguous")
+    out["totals_pass1"] = {key: sum(c[key] for c in classes.values()) for key in keys}
+    rest = [r for r in first if r["case"] not in EXCLUDED_PRACTICAL]
+    out["totals_pass1_excluding"] = {
+        "excluded": sorted(EXCLUDED_PRACTICAL),
+        "n": len(rest),
+        "correct": sum(r["score"]["correct"] for r in rest),
+        "false_confident": sum(r["score"]["false_confident"] for r in rest),
     }
+    dyn = [r["dynamic_bytes"] for r in completed if "dynamic_bytes" in r]
+    if dyn:
+        out["warm_dynamic_bytes_max"] = max(dyn)
     return out
 
 

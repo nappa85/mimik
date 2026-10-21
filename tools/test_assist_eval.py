@@ -234,6 +234,51 @@ class Strot(unittest.TestCase):
         self.assertIn(10, values)
 
 
+# Reference fields a correct reply needs (the phrase names them); every other case may use only
+# literals and the target's own value.
+INTENDED_REFS = {
+    "rf-01": ["toughness"],
+    "rf-02": ["strength"],
+    "rf-03": ["max_hp"],
+    "rf-04": ["agility"],
+    "rf-05": ["toughness"],
+    "rf-06": ["omens"],
+}
+# Cases whose labels no valid reply can reach under the frozen 2c rules, kept on purpose
+# (none today). fv-02 ("halve it") is reachable only through a contrived tree that builds the
+# divisor 2 from the target's own value, hp / ((hp + hp) / hp): see test_provenance_loophole.
+INFEASIBLE_BY_DESIGN = {}
+
+
+class Feasibility(unittest.TestCase):
+    def test_every_label_is_reachable_unless_marked(self):
+        data = ae.load_cases()
+        for case in data["cases"]:
+            if case["expect"].get("none"):
+                continue
+            request = ae.build_request(case, data["sheet"])
+            values = ae.reachable_values(request, INTENDED_REFS.get(case["id"], ()))
+            feasible = any(v in values for v in case["expect"]["values"])
+            with self.subTest(case=case["id"]):
+                self.assertEqual(feasible, case["id"] not in INFEASIBLE_BY_DESIGN)
+
+    def test_reachability_examples(self):
+        self.assertIn(12, ae.reachable_values(request("took 4 twice")))  # 20 - (4 + 4)
+        self.assertIn(10, ae.reachable_values(request("lost half")))
+
+    def test_provenance_loophole(self):
+        # Literal provenance checks literals only: constants built from the target's value
+        # pass. "halve it" admits no 2, yet hp / ((hp + hp) / hp) halves (a 2c design issue).
+        tree = op(
+            "div",
+            ref("hp"),
+            op("div", op("add", ref("hp"), ref("hp")), ref("hp"), "floor"),
+            "floor",
+        )
+        v = ae.validate_reply(reply(tree), request("halve it"))
+        self.assertEqual(ae.shown_values(v), [10])
+
+
 class Files(unittest.TestCase):
     def test_cases_are_labelled_and_fit(self):
         data = ae.load_cases()
@@ -258,6 +303,8 @@ class Files(unittest.TestCase):
                 "ttft_seconds": 1.0,
                 "timings": {"predicted_n": 30},
                 "content": "{}",
+                "shown": [],
+                "dynamic_bytes": 600,
                 "validated": {"schema_valid": True, "kind": "options", "options": []},
                 "score": {"correct": False, "false_confident": False, "top1_correct": False},
             },
