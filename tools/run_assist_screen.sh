@@ -11,6 +11,10 @@
 #   MAX_TOKENS (384), VARIANT (exploratory prompt variant, empty = pre-registered prefix),
 #   PRIME (0): 1 sends the priming request (full fixed prefix, max_tokens 1) after every start,
 #   before any case, and records it as prime-<n>.jsonl.
+#   DEVICE (cpu): gpu passes /dev/dri to the server and offloads all layers (Vulkan). A GPU run
+#   requires the fan in manual mode at pwm1 >= 230 and runs a thermal guard that removes the
+#   containers and stops the run at junction >= 90 C, edge >= 80 C, or the fan leaving
+#   manual-high; the weekday 09:00-18:00 window is the caller's DEADLINE_EPOCH to set.
 # The model network is internal with inhibit_ipv4 (no address on the host side); an existing
 # network without both is refused.
 # Small CPU models at 2 cores are allowed at any hour (AGENTS.md), so no weekday window applies.
@@ -24,6 +28,8 @@ DEADLINE_EPOCH=${DEADLINE_EPOCH:-$(( $(date +%s) + 36000 ))}
 MAX_TOKENS=${MAX_TOKENS:-384}
 VARIANT=${VARIANT:-}
 PRIME=${PRIME:-0}
+DEVICE=${DEVICE:-cpu}
+[ "$DEVICE" = cpu ] || [ "$DEVICE" = gpu ] || { echo "DEVICE must be cpu or gpu"; exit 2; }
 EXTRA=()
 [ -n "$VARIANT" ] && EXTRA=(--variant "$VARIANT")
 CHECK_IMAGE=sha256:9578747a34f5e02cb7561c8e2a8903b75100b96ce1b0587d5fa4b687be0d3a9f
@@ -36,6 +42,32 @@ mkdir -p "$OUT"
 log() { echo "$(date '+%F %T') $*" | tee -a "$OUT/run.log"; }
 cleanup() { docker rm -f "$SRV" "$HARNESS" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
+GPU_RUN=()
+if [ "$DEVICE" = gpu ]; then
+  HW=$(dirname "$(grep -l amdgpu /sys/class/hwmon/hwmon*/name)")
+  fan_ok() { [ "$(cat "$HW/pwm1_enable")" = 1 ] && [ "$(cat "$HW/pwm1")" -ge 230 ]; }
+  fan_ok || { log "GPU fan not manual at pwm1 >= 230; refusing"; exit 3; }
+  GPU_RUN=(--device /dev/dri/renderD128 --device /dev/dri/card0
+    --group-add "$(stat -c %g /dev/dri/renderD128)" --group-add "$(stat -c %g /dev/dri/card0)")
+  STOP="$OUT/thermal-stop"; rm -f "$STOP"
+  ( while :; do
+      j=$(( $(cat "$HW/temp2_input" 2>/dev/null || echo 999000) / 1000 ))
+      e=$(( $(cat "$HW/temp1_input" 2>/dev/null || echo 999000) / 1000 ))
+      reason=""
+      [ "$j" -ge 90 ] && reason="junction ${j} C"
+      [ "$e" -ge 80 ] && reason="${reason:+$reason; }edge ${e} C"
+      fan_ok || reason="${reason:+$reason; }fan left manual-high"
+      if [ -n "$reason" ]; then
+        echo "$(date '+%F %T') thermal stop: $reason" | tee -a "$OUT/run.log" > "$STOP"
+        docker rm -f "$SRV" "$HARNESS" >/dev/null 2>&1; exit 0
+      fi
+      echo "$(date '+%F %T') edge=$e junction=$j" >> "$OUT/temps.log"
+      sleep 2
+    done ) &
+  GUARD=$!
+  trap 'kill "$GUARD" 2>/dev/null; cleanup' EXIT
+fi
+stopped() { [ -n "${STOP:-}" ] && [ -e "$STOP" ]; }
 if ! docker network inspect "$NET" >/dev/null 2>&1; then
   docker network create --internal -o com.docker.network.bridge.inhibit_ipv4=true \
     --label "$LABEL" "$NET" >/dev/null
@@ -53,7 +85,7 @@ start_server() {  # start_server <model-file>; echoes seconds to /health
     --network-alias server --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges \
     --read-only --tmpfs /tmp --memory 6g --memory-swap 6g --cpus 2 --cpuset-cpus "$CPUS" \
     --pids-limit 256 --mount type=bind,src="$model",dst=/models/model.gguf,readonly \
-    "$IMAGE" "${ARGS[@]}" >/dev/null
+    "${GPU_RUN[@]}" "$IMAGE" "${ARGS[@]}" >/dev/null
   for _ in $(seq 1 1800); do
     if docker exec "$SRV" curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1; then
       now=$(date +%s.%N); python3 -c "print(round($now - $t0, 3))"; return 0
@@ -91,13 +123,14 @@ harness() {  # harness <ledger name> <args...>
 
 for key in "$@"; do
   [ "$(date +%s)" -lt "$DEADLINE_EPOCH" ] || { log "deadline reached before $key"; exit 0; }
+  stopped && { log "thermal stop before $key"; exit 4; }
   model=$(realpath -e "/media/data/mimik/models/$(reg "$key" "['path']")")
   SHA=$(reg "$key" "['sha256']"); LABEL_M=$(reg "$key" "['label']")
   IMAGE=$(reg "$key" "['server_image']")
   mapfile -t ARGS < <(cd "$ROOT/tools" && python3 -c "
 import model_registry as m
 d = m.load(); e = m.model(d, '$key')
-for a in m.server_args(e, 8192, device='cpu', threads=2): print(a)
+for a in m.server_args(e, 8192, device='$DEVICE', threads=2): print(a)
 print('--threads-batch'); print('2'); print('--reasoning'); print('off')")
   log "$key: hashing $model"
   actual=$(docker run --rm --network none --user 1000:1000 --cap-drop ALL --read-only --memory 256m \
@@ -116,10 +149,12 @@ print('--threads-batch'); print('2'); print('--reasoning'); print('off')")
     harness "$key/cold-$i.jsonl" --passes 1 --only dh-01 || log "$key: cold request $i failed"
     if [ "$i" -lt 3 ]; then docker rm -f "$SRV" >/dev/null; fi
   done
+  stopped && { log "thermal stop during $key cold starts"; exit 4; }
   log "$key: warm screen"
   harness "$key/screen.jsonl" --passes 2 --stress 4 || log "$key: harness exit $?"
   docker logs "$SRV" > "$OUT/$key/server.log" 2>&1 || true
   docker rm -f "$SRV" >/dev/null
+  stopped && { log "thermal stop during $key"; exit 4; }
   log "$key: done"
 done
 log "all done"
