@@ -67,6 +67,39 @@ Outer elapsed-deadline controller for GGUF transfers.
   size / (0.6 × measured throughput), with a 900 s default per candidate.
 - **Not tested:** the live deadline-stop path.
 
+## Assisted interpretation screen (step 2b)
+
+- **`tools/assist_eval.py`** (stdlib plus optional `jsonschema`; unit tests in
+  `tools/test_assist_eval.py`): the 2c output schema (`SCHEMA`), request builder (fixed prefix,
+  JSON data envelope with `<`, `>` and `&` escaped, dynamic part ≤ 4 KiB dropping whole context
+  items from the end), phrase-number lexer and fraction words, reply validation and checked
+  evaluation, scoring (correct within the shown options, false-confident, top-1), the STROT
+  candidate generator, `reachable_values` (label feasibility under the frozen rules), and the
+  subcommands `run-llm` (streamed llama-server requests; ledger opened exclusively; eval, case
+  and prefix sha256 in the header; `--variant` selects an exploratory prompt variant, recorded
+  with its prefix hash), `prime` (the priming request: full fixed prefix, `max_tokens` 1),
+  `run-strot` (inside the STROT image), `summarize` (also silent misses, duplicate values and
+  totals excluding fv-02) and `check-cases`.
+- **Cases:** `tools/assist-eval/cases.json`, 50 synthetic cases in six classes with blind
+  labels and the labelling record; not in source packages.
+- **`tools/run_assist_screen.sh <out> <model-key>...`:** hash check, 3 cold starts, the warm
+  screen (2 passes, 4 stress requests); server on an internal network with `inhibit_ipv4`
+  (an existing network without it is refused), pinned to `CPUS` (default 0,1) with 2 threads,
+  harness on `HARNESS_CPU` (7); `DEADLINE_EPOCH` stops new requests; `MAX_TOKENS`, `VARIANT`,
+  and `PRIME=1` (priming after every start). Run it from a frozen copy (`git archive`) so edits
+  cannot change a running screen.
+- **`tools/assist_topology_probe.sh <out> <model-key> [probe-volume]`:** the forwarder
+  topology (same fail-closed network), TCP, DNS, one-way UDP and IPv6 egress probes from both
+  containers, requests through the forwarder, priming, and one live request per D-H crate.
+- **`tools/assist-probe/`:** the throwaway probe crate (its own workspace, not part of the
+  application or its packages): loopback stubs, the destination guard, the host-built client,
+  one probe per crate (`p-genai`, `p-rig`, `p-oai`), a baseline (`p-base`, which also serves the
+  C3 stub as a separate process) and `p-failsafe`. `schema.json` is `assist_eval.SCHEMA` as
+  JSON. Built in `mimik-ci` after a networked `cargo fetch`, run with `--network none`.
+- **STROT image:** built locally from `python@sha256:a6e34c59…` with torch 2.14.1+cpu,
+  transformers 5.0.0, strot-ai 0.11.1 and Julia-1's own package; weights mounted read-only from
+  `/media/data/mimik/models/julia-1` (manifest `mimik-verified.json`).
+
 ## External review wrapper: `tools/external_review.py`
 
 Implements the reviewer setup defined in `AGENTS.md`.
