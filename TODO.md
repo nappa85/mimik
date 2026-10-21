@@ -16,12 +16,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
-1. **User decision pending:** the CPU-path budget for large-context requests (ASSIST-L20):
-   A (CPU-only: relevant fields only, ≤ 1 KiB, run deadline up to 90 s; GPU path 60 s and
-   4 KiB) or B (60 s everywhere; large-context requests fail on CPU-only machines). Step 2b is
-   merged (rig-core, Granite 4.2 3B default, failsafe and the tested STROT rejected).
-   Optional tonight or at the weekend: GPU-path measurement of the 2b schema (fan manual).
-2. Plan update (reviewed before 2c): GPU-first with CPU fallback and
+1. GPU-path measurement of the 2b schema (needs the fan manual at 255). Step 2b is merged
+   (rig-core, Granite 4.2 3B default; CPU-path budget decided, ASSIST-31).
+2. Plan update (reviewed before 2c): ASSIST-31 budgets, GPU-first with CPU fallback and
    budgets from the priming measurement (ASSIST-27); a new step 2d, the owner model setting
    with background Hugging Face downloads (ASSIST-28); 2c reads the model from that setting.
 3. 2c interpretation, 2d model setting, 3 bundles and reminders, 4 suggestions, 5 docs and gate (includes the
