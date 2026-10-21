@@ -110,10 +110,12 @@ implementation for both).
   dialect; the schema goes in `additional_params` as `response_format` (sent byte-exact; the
   native `output_schema` path rewrites `oneOf` to `anyOf`). The body bound is a small Mimik
   transport implementing rig's `HttpClientExt` over the host-built `reqwest` client (plain and
-  streaming bodies refused past the bound); no crate offers one. `genai` was rejected (no body
-  hook), `async-openai` measured for comparison only (built-in retries; not named by D-H).
-- **STROT** (judged on results, user 2026-10-19): rejected in 2b. Its runtime (Julia-1 over
-  Rust-generated candidates) was fast but got 2 of 50 cases right with 42 false-confident.
+  streaming bodies refused past the bound); no D-H crate offers one. `genai` was rejected (no
+  body hook).
+- **STROT** (judged on results, user 2026-10-19): the tested configuration (Julia-1 through
+  strot-ai choosing among 16 to 71 generated arithmetic-string candidates plus "none",
+  threshold 0.40, one selection) is rejected (2 of 50 correct, 42 false-confident); a design
+  with a few semantic labels was not tested.
 - **Client policy:** one client built by the host for the one configured endpoint: no
   redirects, proxies disabled whatever the environment says (`HTTP_PROXY`, `ALL_PROXY`), no TLS
   features, no decompression (`no_gzip`, since the feature can be unified in), no retries,
@@ -122,22 +124,35 @@ implementation for both).
   the raw authority string as well as the parsed URL (the WHATWG parser turns `127.1` into
   `127.0.0.1`). The model name is configuration, never model output. Loopback is only the
   destination rule; the no-egress property comes from the runtime topology.
-- **Runtime:** one llama-server on an `--internal` network created with
+- **Runtime** (the 2b dev and benchmark topology; production is a native llama-server child on
+  loopback with a random port and a per-launch token under ASSIST-27 to ASSIST-30 on master, so
+  the network confinement below does not carry over): one llama-server on an `--internal`
+  network created with
   `com.docker.network.bridge.inhibit_ipv4=true` (a plain internal network still reaches host
   services through its gateway, measured in 2b), plus the forwarder
   `alpine/socat@sha256:22d77becaeeea8ef56b8c4bb2312323acafe85354be6a85714ff5050e3537842`
   (`TCP-LISTEN:8091,fork` to `server:8080`) on that network and a bridge with IP masquerading
   off, published only on `127.0.0.1:8091`; `--cpus 2 --threads 2 --threads-batch 2`,
   `--parallel 1`, prompt cache on, `--reasoning off`, greedy sampler, memory, swap and PID
-  limits; the model hash-checked before mounting and preloaded at start (no load inside a job;
-  the first request after a start fills the prompt cache: 137 s for Granite). Model (proposal
-  pending review): `granite42-3b`; `qwen3-4b-2507` exceeded the 60 s p95 and `minicpm5-2b` had
-  18 of 50 false-confident.
+  limits; the model hash-checked before mounting and preloaded at start (no load inside a job).
+  Model (proposal pending review): `granite42-3b`; `qwen3-4b-2507` exceeded the 60 s p95 and
+  `minicpm5-2b` had 18 of 50 false-confident.
+- **Priming:** the server starts with `--no-warmup` and an empty prompt cache, and the first
+  request evaluates the whole fixed prefix (about 1,460 tokens: 117 s for Granite at 2
+  threads), which always misses the run deadline. So after `/health` answers, the host sends
+  one priming request through the same client and policy: the fixed prefix with a minimal data
+  envelope and `max_tokens` 1. It is not a job, is never counted by the breaker, and has its own
+  budget of 300 s. Until it completes the assistant is "starting": a start answers 503 ("the
+  assistant is starting"), queues nothing, and number entry, notes and Undo work as usual. On
+  failure or expiry the host retries after 2 minutes, at most 3 times, then the assistant stays
+  unavailable until restart (logged without prompt text). A transport error followed by a
+  `/health` that shows a restarted server (a different start time in `/props`) re-primes
+  before jobs are admitted again.
 - **Jobs:** one worker; one monotonic budget per job from enqueue, covering queueing,
   rendering, the model call and validation: queue wait plus run deadline. From 2b (pending
-  review): run deadline 60 s, queue depth 1, queue wait 60 s. Open user decision: at 2 threads
-  a dynamic part near the 4 KiB bound needs 111 to 136 s with Granite, so the bound, the 60 s
-  cap or the output length must change (`docs/results.md`). One job per account (counting running work): a start on another sheet while the
+  review, CPU path): run deadline 60 s, queue depth 1, queue wait 60 s, `max_tokens` 192.
+  Open user decision on the CPU-path budget (`docs/results.md`, ASSIST-L20): a dynamic part near the
+  4 KiB bound needs 111 to 136 s with Granite at 2 threads. One job per account (counting running work): a start on another sheet while the
   account has a live job is 429 (origin revisions are per sheet and cannot be compared);
   admission (breaker and capacity) is computed as if the superseded job were already gone, so a
   refused start cancels nothing (Routes); an admitted start cancels the superseded request (the
@@ -158,8 +173,10 @@ implementation for both).
   no request is sent: a start answers 503 and a job already queued answers on poll, both with
   "the assistant is unavailable right now"; number
   entry, notes and Undo work as usual. A small state machine with an injectable clock:
-  `failsafe` 1.3.0 was rejected in 2b (it admits every half-open caller and records a
-  non-counted error as a success).
+  `failsafe` 1.3.0 as tested in 2b allows multiple outstanding half-open admissions and its
+  future API records a non-counted error as a success; its manual API could express neutral
+  outcomes but has no probe flag, its mock clock is thread-local and its last release was
+  2024-07. The priming request is outside the breaker.
 - **Routes:** `POST /private-sheets/{id}/interpretations` (exactly `csrf` and `note`, the
   note key already used by switch and Undo and present in the saved page's markup) starts a
   job for that note. A key is resolved against the snapshot at its own revision: a typed key
@@ -323,6 +340,9 @@ server unless stated):
   revision → the later start supersedes; a start on a second sheet while the account has a live job → 429; cancellation (the
   fake server sees the disconnect and the slot is free); queue wait and run deadline expiry;
   64 records and the evicted-job answer; option expiry at 10 minutes;
+- priming (fake server): a start before priming completes answers 503 "starting" and queues
+  nothing; a priming failure or expiry never counts toward the breaker and is retried at most 3
+  times; a server restart re-primes before admitting jobs;
 - breaker (injectable clock): three transport failures open it, two do not; 100 dropped or
   nonsense answers never open it; supersession and cancellation never count; one half-open
   probe while others are refused; probe success closes, failure reopens; a 2xx with all
@@ -410,6 +430,9 @@ dangling key shows no link; p95 measured.
   accuracy. `tools/assist_eval.py` is new in 2b; its cases are synthetic and independently
   labelled. Extra classes for 2c: valid divisions, overflow, unknown target, provenance
   failure, multi-option; injection rows expect an option at most, never a write.
+
+  The 2b screen used the six interpretation classes (50 cases); the reminder class (8) belongs
+  to step 3, so the table totals 58.
 
   | Class | n |
   |---|---|

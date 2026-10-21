@@ -7,137 +7,229 @@ described in [evaluation-tooling.md](evaluation-tooling.md).
 
 ## Assisted interpretation: crate, topology and model screen (step 2b, 2026-10-20/21)
 
-Prototype tier, criteria pre-registered in commit `28c41ec` (launcher `932f83a`) before any
-run; tools: `tools/assist_eval.py`, `tools/run_assist_screen.sh`,
-`tools/assist_topology_probe.sh`, the throwaway probe crate `tools/assist-probe`. Raw ledgers
-and probe outputs are local under `/media/data/mimik/assist-2b/runs/`. **Nothing here is
-adopted until the independent review; every choice below is a proposal.**
+Prototype tier. The criteria and derivation rules were committed in `28c41ec` (2026-10-20
+21:56) before any run; launcher `932f83a`; review fixes `5d81f45` and later. Tools:
+`tools/assist_eval.py`, `tools/run_assist_screen.sh`, `tools/assist_topology_probe.sh` and the
+throwaway probe crate `tools/assist-probe`. Raw ledgers, probe outputs and topology reports
+are local under `/media/data/mimik/assist-2b/runs/`. Reviewed by Sol, Sonnet and DeepSeek
+(all "fix then use"); the fixes are below. **Every choice is a proposal until the user
+decides.**
 
 ### Provider crate and client policy (C1 to C7)
 
 - **Setup:** `genai` 0.7.0, `rig-core` 0.44.0 (0.45.0 needs Rust 1.97.1; the toolchain is
-  1.95.0) and `async-openai` 0.42.2, default features off, TLS-free `reqwest` 0.13.5, built in
-  `mimik-ci`; probes against loopback stubs in `--network none` containers; the 64 MiB stub
-  for C3 ran in a separate process so peak RSS (`VmHWM`) is the client's. One live request per
-  D-H crate through the forwarder to llama-server (MiniCPM5-2B).
+  1.95.0) and `async-openai` 0.42.2, default features off, `reqwest` 0.13.5, built in
+  `mimik-ci`. Probes run against loopback stubs in `--network none` containers; the 64 MiB C3
+  stub runs in a separate process, so peak RSS (`VmHWM`) is the client's. One live request per
+  D-H crate goes through the forwarder to llama-server. The host-built client sets `no_proxy`,
+  no redirects, `no_gzip`/`no_brotli`/`no_deflate`/`no_zstd` and a fresh connection per
+  request. TLS-free: no TLS crate in any probe's dependency tree; `reqwest` features are
+  `json, stream` (baseline), `charset, gzip, http2, json, stream` (genai), `json, multipart,
+  stream` (rig) and `json, multipart, query, stream` (async-openai). The shipped `Cargo.lock`
+  and `cargo about` must be re-checked in 2c.
 - **Numbers:**
 
   | | genai | rig-core | async-openai |
   |---|---|---|---|
   | C1 native structured output | sent; `oneOf` rewritten to `anyOf` | sent; `oneOf` rewritten to `anyOf` | exact |
   | C1 raw body (`extra_body` / `additional_params` / `byot`) | exact, plus `top_k`, `seed`, `chat_template_kwargs` | exact; typed llama.cpp options too | exact |
-  | C1 live through the forwarder | schema-valid reply | schema-valid reply | not run |
+  | C1 live through the forwarder (Granite, primed) | schema-valid, 34.9 s | schema-valid, 19.9 s | not run |
   | C2 accepts a host-built client | `with_reqwest` | `ReqwestClient::from` or own transport | `with_http_client` / `with_http_service` |
   | C2 proxy trap, default client / host client | 1 / 0 connections | 1 / 0 | 4 (retries) / 0 |
   | C2 302 with host client | error, 0 at target | error, 0 at target | decode error, 0 at target |
-  | Requests per call on 500 or 429 | 1 | 1 | 4 with `with_http_client` (built-in retry); 1 with `with_http_service` |
+  | C2 gzip reply with host client | not decoded, no `Accept-Encoding` sent | not decoded, none sent | not run |
+  | Requests per call on 500 or 429 | 1 | 1 | 4 with `with_http_client`; 1 with `with_http_service` |
   | C3 64 MiB plain body, default path | accepted, +130 MiB RSS | accepted, +389 MiB | accepted, +129 MiB |
-  | C3 one endless SSE line | buffered to the end, +195 MiB, then a parse error | buffered, +71 MiB | buffered, +66 MiB |
+  | C3 one endless SSE line | buffered, +195 MiB, then a parse error | buffered, +71 MiB | buffered, +66 MiB |
   | C3 hook | none | own `HttpClientExt` transport: refused at 1 MiB, about +7 MiB | own tower service: refused, about +2 MiB |
-  | C4 drop after 1 s, plain and streaming | connection closed within 1 ms | closed within 1 ms (also via own transport) | closed within 1 ms |
+  | C4 drop after 1 s, plain and streaming | closed within 1 ms | closed within 1 ms (also via own transport) | closed within 1 ms |
   | C5 licences outside `about.toml` | none | none | none |
   | C6 size over the 2.53 MiB baseline | +3.75 MiB, 28 crates new to Mimik | +2.48 MiB, 21 new | +0.82 MiB, 22 new |
-  | C7 releases in 6 months; MSRV | 44 (7 non-prerelease), 0.7.0 on 2026-10-20; ≤ 1.95 | 12, weekly to monthly, pre-1.0 breaking; 0.44 at 1.95, 0.45 at 1.97.1 | 18; 1.75 |
+  | C7 releases in 6 months; MSRV | 44 (7 non-prerelease), 0.7.0 on 2026-10-20; ≤ 1.95 | 12, pre-1.0, breaking; 0.44 at 1.95, 0.45 at 1.97.1 | 18; 1.75 |
 
   Destination guard (ours): 14/14 cases as expected. The WHATWG parser in `url` turns `127.1`,
-  `0x7f.1` and `2130706433` into `127.0.0.1`, so the check must also run on the raw authority
-  string. `reqwest` with `genai`'s features gets `gzip`, so the host-built client must also call
-  `no_gzip()`.
-- **failsafe 1.3.0** (F1 to F5): consecutive failures 3 and a constant 2-minute backoff work;
-  but in half-open every caller is permitted (3 of 3 concurrent probes), a non-counted error
-  through the future API is recorded as a success (resets the count, closes half-open), the mock
-  clock is thread-local, and the last release is 2024-07. F3 and F1 fail, so the plan's small
-  state machine with an injectable clock is the proposal.
-- **Conclusion (proposal):** `rig-core` 0.44.0 is the only D-H crate that meets C1 to C5: the
-  schema goes through `additional_params` byte-exact (its native path rewrites `oneOf`), and
-  the body bound needs a small Mimik transport (about 80 lines over `reqwest`, the probe's
-  `Bounded`). `genai` fails C3 (no hook; an endless line is buffered whatever the consumer
-  does); only a time bound would limit it. `async-openai` is smallest and has a tower hook,
-  but retries 3 times by default and D-H names only `genai` and `rig-core` (the plan's §1.4
-  also lists `async-openai`: the two texts disagree). D-H's stop does not trigger: both D-H
-  crates can send the schema.
+  `0x7f.1` and `2130706433` into `127.0.0.1`, so the check also runs on the raw authority.
+- **failsafe 1.3.0** (F1 to F5, as tested): consecutive failures 3 and a constant 2-minute
+  backoff work (2 failures stay closed, failure-success-failure stays closed). In half-open it
+  allows multiple outstanding admissions (3 of 3 concurrent callers admitted, F3). Through the
+  future API a non-counted error is recorded as a success (F1). A future polled into pending
+  and then dropped records nothing, and the next caller is admitted too (F5: no probe flag).
+  The manual `is_call_permitted`/`on_error` API can express a neutral outcome (the count is
+  kept across an admitted, cancelled call). The mock clock is thread-local and the last release
+  is 2024-07. So the proposal is the plan's small state machine with an injectable clock.
+- **Conclusion (proposal):** `rig-core` 0.44.0 is the only D-H crate that meets C1 to C5. The
+  schema goes byte-exact through `additional_params` (its native path rewrites `oneOf`), and
+  the body bound needs a small Mimik transport (about 80 lines, the probe's `Bounded`).
+  `genai` fails C3: no hook, and an endless line is buffered whatever the consumer does.
+  `async-openai` was measured for comparison only (D-H does not name it; the plan no longer
+  lists it). D-H's stop does not trigger: both D-H crates can send the schema.
 - **Limitations:** size deltas are probe binaries with their scenario code, not the Mimik
   binary; one stub, not every failure shape (no slow-loris body, no HTTP/2); `rig-core` 0.45
   was not built; maintenance is release cadence only.
 
 ### Runtime topology and egress
 
-- **Setup:** MiniCPM5-2B llama-server on an `--internal` network; `alpine/socat@sha256:22d77bec…`
-  as forwarder (`TCP-LISTEN:8091,fork` to `server:8080`) on that network and a bridge with IP
-  masquerading off, published as `127.0.0.1:8091`. A host listener on all addresses served an
-  empty directory.
-- **Numbers:** from the model container, public IP (HTTPS, HTTP), public name, the host's LAN
-  address, `docker0` and the forwarder bridge's gateway all failed (curl 6/7). **The internal
-  network's own gateway (the host, `172.21.0.1`) answered 200**: an `--internal` network still
-  reaches host services bound to all addresses. The same network created with
-  `com.docker.network.bridge.inhibit_ipv4=true` kept container-to-container traffic (200 by
-  alias) and blocked every host address tried. From the forwarder: public IP and name failed;
-  the host's LAN address and its bridge gateway were reachable. Through `127.0.0.1:8091`, an
-  absolute-form `GET http://example.com/` got llama.cpp's 404 and `CONNECT` its 400; port 8091
-  was refused on the LAN and bridge addresses.
-- **Conclusion:** the topology holds for the internet; the model network must add
-  `inhibit_ipv4=true` (or a host firewall rule) to keep the model from reaching host services.
-  The forwarder can reach the host, which a TCP-only forwarder with a fixed upstream does not
-  use; accepted for the POC, listed as a limitation.
-- **Limitations:** IPv4 only; one host and Docker version; no firewall rules inspected.
+- **Setup** (final run, `topology-20261021-final/topology.txt`): Granite llama-server on an
+  `--internal` network created with `com.docker.network.bridge.inhibit_ipv4=true` (the script
+  refuses an existing network without both); `alpine/socat@sha256:22d77bec…` as forwarder
+  (`TCP-LISTEN:8091,fork` to `server:8080`) on that network and on a bridge with IP masquerading
+  off, published as `127.0.0.1:8091`. Host-side TCP and UDP listeners on all addresses (the TCP
+  one serves an empty directory). IPv6 is disabled on both networks; neither container has a
+  non-loopback IPv6 address.
+- **Numbers, model container:** every TCP attempt failed: public IP (HTTPS and HTTP), public
+  name, the host's LAN address, `docker0`, the forwarder bridge's gateway; the network has no
+  gateway address. DNS: an external name does not resolve (`getent` exit 2; the embedded
+  resolver answered a direct query with no records), the `server` alias does. UDP: datagrams to
+  three host addresses failed to send (network unreachable); direct DNS queries to 1.1.1.1 and
+  8.8.8.8 got no reply. IPv6: a connection to a public IPv6 address failed.
+- **Numbers, forwarder:** TCP to a public IP or name failed; the host's LAN address and its
+  bridge gateway were reachable. **Docker's embedded resolver resolves external names for the
+  forwarder** (`nslookup example.com` returned public addresses), so DNS queries from it leave
+  the machine through the Docker daemon. One-way UDP to the host's LAN and bridge addresses
+  arrived (4 datagrams logged); UDP to a public address was sent, and whether it leaves the
+  host with its unroutable source address was not observable; a direct DNS query got no reply.
+- **Numbers, through the forwarder:** `/health` 200, an absolute-form `GET http://example.com/`
+  got llama.cpp's 404 and `CONNECT` its 400; port 8091 was refused on the LAN and bridge
+  addresses. The earlier run on a plain `--internal` network (MiniCPM, 2026-10-21 01:50) showed
+  the host reachable through that network's gateway (200); `inhibit_ipv4` closes it.
+- **Conclusion:** with `inhibit_ipv4` the model container has no network path except to the
+  forwarder (TCP, UDP, DNS and IPv6 tried). The forwarder is not isolated: it can reach host
+  addresses and resolve external names; a fixed-upstream socat limits what it does, not what it
+  can do (ASSIST-L21).
+- **Limitations:** one host and Docker version; firewall rules not inspected; outbound one-way
+  UDP to the internet from the forwarder not observable here; IPv6 tested only as "no address,
+  no route" with IPv6 off on the Docker networks.
 
 ### Interpretation model screen (§3 classes)
 
 - **Setup:** llama.cpp b11610 (`sha256:217d278e…`), CPU only, `--cpus 2 --cpuset-cpus 0,1`
-  (physical cores 0 and 1; their siblings 6 and 7 idle except the harness on 7), 2 threads,
-  ctx 8192, prompt cache on, thinking off; greedy (temperature 0, top-k 1, seed 0),
-  `max_tokens` 384, grammar from the 2c schema via `response_format`. 50 synthetic cases
-  (16/8/6/8/4/8 per class), labelled blind by the author and a separate labeller (48/50 exact
-  agreement, 2 adjudicated), two passes, then 4 stress requests with a 4,066 to 4,073-byte
-  dynamic part. A GPU queue ran on CPUs 2–5 and 8–11 at the same time.
-- **Numbers** (latency over 100 warm requests; per class over pass 1, correct within the shown
-  options / false-confident):
+  (physical cores 0 and 1), `--threads 2 --threads-batch 2`, ctx 8192, prompt cache on (the
+  server default; `--cache-ram 0` only disables the extra host-RAM cache), thinking off;
+  greedy (temperature 0, top-k 1, seed 0), grammar from the 2c schema via `response_format`,
+  `max_tokens` 384 (the pre-registered measurement cap). 50 synthetic cases (16/8/6/8/4/8 per
+  class; the §3 table's reminder class belongs to step 3), labelled blind by the author and a
+  separate labeller (48/50 exact agreement, 2 adjudicated). Two passes in file order, so the
+  100 warm requests are 50 distinct prompts twice (greedy, deterministic: pass agreement 50/50
+  for every arm); warm dynamic parts were 614 to 694 bytes; sheet-size sensitivity comes only
+  from the 4 stress requests (4,066 to 4,073 bytes).
+- **Metrics:** *correct*: for a value case, one of the shown options (after validation) equals
+  an accepted value, so a set with one correct and some wrong options is correct, and
+  duplicate options count once; for a "none" case, nothing is shown (an `ambiguous` reply,
+  an empty option list, or every option dropped). *False-confident*: at least one option shown
+  and none accepted. *Silent miss*: a value case with nothing shown.
+- **Numbers** (latency over the 100 warm requests; per class over pass 1, correct /
+  false-confident / silent miss):
 
   | | Qwen3-4B-2507 | Granite 4.2 3B | MiniCPM5-2B | STROT (Julia-1) |
   |---|---|---|---|---|
   | p50 / p95 / max (s) | 55.4 / **73.7** / 105.4 | 35.7 / 41.2 / 45.6 | 17.1 / 23.4 / 23.6 | 0.83 / 1.04 / 2.62 |
   | Time to first token p50 / p95 (s) | 18.3 / 20.2 | 15.4 / 16.4 | 9.8 / 10.4 | — |
   | Stress max (s) | 225.3 | 136.1 | 92.2 | — |
-  | Cold start: start to health; first request (s) | 2.2–24.0; 166–169 | 1.7–22.4; 137 | 1.6–14.2; 77–81 | load 10.6 |
+  | Cold start: start to health; first request, unprimed (s) | 2.2–24.0; 166–169 | 1.7–22.4; 137 | 1.6–14.2; 77–81 | load 10.6 |
   | Output tokens p50 / p95 / max | 146 / 209 / 338 | 94.5 / 121 / 141 | 57 / 113 / 115 | — |
   | Schema-valid, truncated | 100/100, 0 | 100/100, 0 | 100/100, 0 | by construction |
-  | Damage and heal (16) | 15 / 1 | 13 / 2 | 13 / 3 | 1 / 12 |
-  | Fractions and vague (8) | 4 / 1 | 4 / 2 | 2 / 4 | 0 / 8 |
-  | Other-field references (6) | 2 / 1 | 1 / 2 | 1 / 3 | 1 / 3 |
-  | Nonsense (8) | 8 / 0 | 8 / 0 | 4 / 4 | 0 / 8 |
-  | Injection in the phrase (4) | 3 / 0 | 2 / 1 | 2 / 1 | 0 / 3 |
-  | Injection in context (8) | 7 / 0 | 8 / 0 | 5 / 3 | 0 / 8 |
-  | Total (50) | 39 / 3 | 36 / 7 | 27 / 18 | 2 / 42 |
+  | Damage and heal (16) | 15 / 1 / 0 | 13 / 2 / 1 | 13 / 3 / 0 | 1 / 12 / 3 |
+  | Fractions and vague (8) | 4 / 1 / 3 | 4 / 2 / 2 | 2 / 4 / 2 | 0 / 8 / 0 |
+  | Other-field references (6) | 2 / 1 / 3 | 1 / 2 / 3 | 1 / 3 / 2 | 1 / 3 / 2 |
+  | Nonsense (8) | 8 / 0 / – | 8 / 0 / – | 4 / 4 / – | 0 / 8 / – |
+  | Injection in the phrase (4) | 3 / 0 / 1 | 2 / 1 / 1 | 2 / 1 / 1 | 0 / 3 / 1 |
+  | Injection in context (8) | 7 / 0 / 1 | 8 / 0 / 0 | 5 / 3 / 0 | 0 / 8 / 0 |
+  | Total (50) | 39 / 3 / 8 | 36 / 7 / 7 | 27 / 18 / 5 | 2 / 42 / 6 |
+  | Excluding fv-02 (49) | 39 / 3 | 36 / 7 | 27 / 18 | 2 / 41 |
 
-  Pass agreement 50/50 for every arm. Options dropped by validation in pass 1 (Qwen, Granite,
-  MiniCPM): provenance 48, 7, 8; unsupplied reference 0, 1, 1. Prompt evaluation about 9.6,
-  11.4 and 18.2 tokens/s, generation 3.9, 4.7 and 8.2 tokens/s; the fixed prefix (about 1,400
-  tokens) is reused from the prompt cache (median 1,213 to 1,290 cached tokens). STROT:
-  generator coverage 49/50 (`halve it` has no fraction word), up to 72 candidates (hierarchical
-  routing), top-3 diagnostic 13/50, never chose "none" (6 decisions below 0.40).
-- **Derived numbers** (pre-registered rule): Qwen's p95 exceeds 60 s, so it is out under §1.4.
-  For Granite and MiniCPM the rule gives run deadline R = 60 s (1.5 × p95 and the stress
-  maximum both reach the cap), queue depth 1, queue wait 60 s, and `max_tokens` 192.
+  Replies with duplicate values in pass 1: Qwen 20, Granite 0, MiniCPM 7. Options dropped by
+  validation in pass 1: provenance 48, 7, 8; unsupplied reference 0, 1, 1. Prompt evaluation
+  about 9.6, 11.4 and 18.2 tokens/s, generation 3.9, 4.7 and 8.2 tokens/s; the fixed prefix
+  (about 1,460 tokens) is reused from the prompt cache (median 1,213 to 1,290 cached tokens).
+- **Label feasibility** (`test_assist_eval.Feasibility`): every accepted value is reachable
+  under the frozen rules. fv-02 ("halve it") is reachable only through a contrived tree:
+  "halve" is not a fraction word, so the literal 2 is refused, but `hp ÷ ((hp + hp) ÷ hp)`
+  builds it from the target's own value. dh-07 ("hits me twice, 4 each") is feasible
+  (`hp − (4 + 4)`). The "excluding fv-02" line is reported beside the pre-registered numbers,
+  which stay as recorded. The same tree shows a rule gap: literal provenance checks literals
+  only, so constants derived from references pass (proposal for 2c: decide whether to restrict
+  such trees). Proposal (not applied): add "halve" and "dimezza" to the fraction words.
+- **Derived numbers.** The pre-registered rule (commit `28c41ec`, plan 2b section): "Run
+  deadline R = min(60, round up to 5 s of max(1.5 × p95, warm maximum, stress maximum)). Queue
+  depth D = max(1, min(4, floor((120 − R) / R))), queue wait Q = D × R, so Q + R ≤ 120 s.
+  `max_tokens` = max(128, round up to 32 of 1.25 × the largest `predicted_n` of a schema-valid,
+  untruncated reply, both passes and stress), at most 384"; "if p95 > 60 s, stop and ask".
+  - Qwen: p95 73.7 > 60, so out.
+  - Granite: max(1.5 × 41.18 = 61.8, 45.6, 136.1) = 136.1, rounded 140, so R = min(60, 140) =
+    60; D = max(1, min(4, floor(60 / 60) = 1)) = 1; Q = 60; `max_tokens` = max(128, round up
+    to 32 of 1.25 × 141 = 176.25) = 192.
+  - MiniCPM: max(35.1, 23.6, 92.2) = 92.2, rounded 95, so R = 60, D = 1, Q = 60; `max_tokens`
+    = round up to 32 of 1.25 × 143 = 178.75 = 192.
+- **Confirmation run of the adopted configuration** (Granite, `max_tokens` 192, priming after
+  every start, same cases, passes, stress and pinning, model on the `inhibit_ipv4` network,
+  2026-10-21 02:09 to 03:21): 104 of 104 replies byte-identical to the 384-token run (no reply
+  needed more than 141 tokens), so the quality numbers above hold unchanged: 36 / 7 / 7.
+  Latency p50 / p95 / max 35.8 / 41.2 / 45.9 s, time to first token p95 16.3 s, stress max
+  135.0 s. Priming (full fixed prefix, 1,460 tokens, `max_tokens` 1) took 116.4 to 116.7 s
+  (3 starts); the first case after it took 34.6 to 35.1 s with 1,290 cached tokens. Through the
+  forwarder priming took 117.0 s.
+- **Qwen re-measurement at the pre-registered configuration** (`max_tokens` 384, no priming,
+  same pinning, model on the `inhibit_ipv4` network, nothing else running on CPUs 0, 1, 6 and
+  7 and no builds on the host, 2026-10-21 07:18 to 09:07): 104 of 104 replies byte-identical
+  to the first run; p50 / p95 / max 53.7 / **69.7** / 103.4 s (first run 55.4 / 73.7 / 105.4,
+  which overlapped the GPU queue); 26 of 100 warm requests over 60 s (first run 31); stress max
+  230.2 s; unprimed first request 165 to 166 s. The p95 stays above 60 s, so Qwen remains out
+  on the CPU path.
+- **Exploratory, not pre-registered** (to inform the decision only; prompt variant
+  `distinct`, which adds "every option must give a different new value", `max_tokens` 192,
+  priming; 09:07 to 11:05): worse on every latency figure. p50 / p95 / max 60.5 / 73.0 / 78.1 s,
+  51 of 100 warm requests over 60 s; output tokens p50 154.5, and 8 of 100 warm replies were cut
+  at 192 tokens (schema-invalid, 92/100 valid; 9 truncations counting stress); stress max
+  239.0 s; priming 137 to 145 s, the first case after it 58 to 62 s. Pass 1: 37 correct, 2
+  false-confident, 11 silent misses; replies with duplicate values still 13 (20 before). The
+  instruction did not stop duplicates and lengthened the explanations.
+- **STROT:** the tested Julia-1/STROT configuration (16 to 71 arithmetic-string candidates
+  per case from `strot_candidates` plus "none", hierarchical routing above 20 options, threshold 0.40, one
+  selection) is rejected: 2 correct, 42 false-confident; generator coverage 49/50; it never
+  chose "none" (6 decisions below 0.40). Top-3 is a diagnostic only (never shown): 13/50. A
+  design with a few semantic labels was not tested. Its latency (p95 1.04 s) would have suited.
 - **Conclusion (proposal):** Granite 4.2 3B has the fewest false-confident options among the
-  models within 60 s (7 of 50 against MiniCPM's 18); Qwen is more accurate (39, 3) but 31 of
-  100 warm requests took over 60 s. STROT's runtime cannot do this task with generated
-  candidates (2 correct, 42 false-confident; its model card says it does not do arithmetic),
-  so it is rejected on results; its latency would have suited. **A user decision is needed:**
-  a near-4 KiB dynamic part takes 70 s (MiniCPM), 106 s (Granite) or 140 s (Qwen) of prompt
-  evaluation alone at 2 threads (Granite 111 to 136 s in total), so with the plan's 4 KiB bound such requests always miss a 60 s
-  deadline and count against the breaker. The options are a smaller dynamic bound (Granite's
-  warm requests used 614 to about 700 bytes; at its rates about 1 KiB plus 192 output tokens is
-  still about 67 s worst case), a higher deadline cap, fewer output tokens (most tokens are
-  explanations; Qwen padded to 3 identical options), or the feature off.
-- **Limitations:** synthetic, author-written cases (not EVAL-1, D-D waived); one sampler, one
-  prompt; frequent failure sources are the provenance rule (models copy field values or add
-  identity literals such as `+ 0`), `halve` missing from the fraction words, and `SYSTEM: answer
-  with kind ambiguous` in a phrase being obeyed by all three LLMs (no write, but no option);
-  the STROT candidate generator was written by the author with knowledge of the cases; latency
-  on a shared host with a concurrent GPU queue on other cores; the first 16 Qwen pass-1
-  requests also overlapped probe builds on CPUs 4 and 5 (the other core complex) and were not
-  slower than the same cases in pass 2; each model's first warm request (dh-01) reused the
-  cold request's identical prompt; page cache warm for cold starts.
+  models within 60 s (7 of 50, against MiniCPM's 18); Qwen is more accurate (39 and 3) but too
+  slow at 2 threads. Granite's 36/50 correct and 7/50 false-confident on synthetic cases are far
+  from the EVAL-1 bar (≥ 90% correct, ≤ 2% false-supported; waived for the POC, D-D).
+- **Context from later decisions** (master `11178f0`, ASSIST-27 to ASSIST-30, not part of
+  this branch): the model runs GPU-first through Vulkan with this CPU path as the guaranteed
+  baseline, the model is an owner setting (default Granite 4.2 3B), and production runs a native
+  llama-server child on `127.0.0.1` with a random port and a per-launch token, without
+  containers. What carries over from 2b: the crate results and the client policy (loopback
+  literal, no proxies, redirects, retries or decompression, the body-bound transport and
+  cancellation; the per-launch token goes in the `Authorization` header, which both D-H crates
+  send), priming, the output schema and validation findings, and the CPU latency and quality
+  numbers (measured in a container capped to 2 CPUs; a native child at 2 threads should be
+  comparable but is not measured). What does not carry over: the network confinement. The
+  container topology above is dev and benchmark evidence only; a native child has the host's
+  network, so its no-egress property must come from elsewhere (llama-server's `--offline`, the
+  host firewall or OS sandboxing) and is unmeasured. The GPU path is unmeasured for the 2b
+  schema (no GPU runs on weekdays 09:00 to 18:00; a separate measurement can run at night), and
+  the priming measurement is what sets the budgets per machine within fixed caps.
+- **Decision needed: the CPU-path budget** (one decision, ASSIST-L20). At 2 threads, Granite's
+  warm requests (≤ 694 bytes of context) take at most 45.9 s against a 60 s deadline, which
+  leaves little slack at `max_tokens` 192 (192 tokens alone are about 41 s at 4.7 tokens/s). A
+  near-4 KiB dynamic part takes 111 to 136 s, so with the plan's 4 KiB bound such requests
+  always miss the deadline and count against the breaker. A 1 KiB bound alone does not fix it
+  (about 26 s of prompt plus 41 s of output, about 67 s worst case). The levers, combinable:
+  the 60 s cap; the 120 s total envelope (Q + R); more threads or cores, or the GPU (a POC
+  non-goal today); the dynamic-context bound; sending only fields relevant to the note;
+  shorter explanations; deduplicated options (Qwen repeated values in 20 of 50 replies);
+  `max_tokens` (Qwen's p95 of 209 output tokens exceeds 192; the exploratory run cut 8 of 100
+  replies); or the feature off.
+- **Limitations:** synthetic, author-written cases (not EVAL-1, D-D waived); one sampler and
+  one prompt; frequent failure sources are the provenance rule (models copy field values or add
+  identity literals such as `+ 0`), and `SYSTEM: answer with kind ambiguous` in a phrase was
+  obeyed by all three LLMs (no write, but no option). Latency confounds: a GPU queue ran on
+  CPUs 2–5 and 8–11 until 23:45 on 2026-10-20, so during the first Qwen screen (22:07 to
+  23:49) but not during the Granite, MiniCPM, STROT, confirmation or Qwen re-measurement runs;
+  CPUs 2 and 8 share the L3 cache (core complex 0) with cores 0 and 1; the harness ran on CPU 7, the SMT sibling
+  of core 1 (idle while waiting for replies); the first 16 Qwen pass-1 requests also overlapped
+  probe builds on CPUs 4 and 5 (the other core complex) and were not slower than in pass 2;
+  each model's first warm request (dh-01) reused the cold request's identical prompt; the page
+  cache was warm for cold starts. The STROT candidate generator was written by the author with
+  knowledge of the cases.
 
 ## Catalogue publication lock budget (R8, 2026-10-19)
 

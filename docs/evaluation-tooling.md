@@ -74,17 +74,23 @@ Outer elapsed-deadline controller for GGUF transfers.
   JSON data envelope with `<`, `>` and `&` escaped, dynamic part ≤ 4 KiB dropping whole context
   items from the end), phrase-number lexer and fraction words, reply validation and checked
   evaluation, scoring (correct within the shown options, false-confident, top-1), the STROT
-  candidate generator, and the subcommands `run-llm` (streamed llama-server requests; ledger
-  opened exclusively; eval, case and prefix sha256 in the header), `run-strot` (inside the
-  STROT image), `summarize` and `check-cases`.
+  candidate generator, `reachable_values` (label feasibility under the frozen rules), and the
+  subcommands `run-llm` (streamed llama-server requests; ledger opened exclusively; eval, case
+  and prefix sha256 in the header; `--variant` selects an exploratory prompt variant, recorded
+  with its prefix hash), `prime` (the priming request: full fixed prefix, `max_tokens` 1),
+  `run-strot` (inside the STROT image), `summarize` (also silent misses, duplicate values and
+  totals excluding fv-02) and `check-cases`.
 - **Cases:** `tools/assist-eval/cases.json`, 50 synthetic cases in six classes with blind
   labels and the labelling record; not in source packages.
 - **`tools/run_assist_screen.sh <out> <model-key>...`:** hash check, 3 cold starts, the warm
-  screen (2 passes, 4 stress requests); server on an internal network pinned to `CPUS` (default
-  0,1) with 2 threads, harness on `HARNESS_CPU` (7); `DEADLINE_EPOCH` stops new requests. Run
-  it from a frozen copy (`git archive`) so edits cannot change a running screen.
+  screen (2 passes, 4 stress requests); server on an internal network with `inhibit_ipv4`
+  (an existing network without it is refused), pinned to `CPUS` (default 0,1) with 2 threads,
+  harness on `HARNESS_CPU` (7); `DEADLINE_EPOCH` stops new requests; `MAX_TOKENS`, `VARIANT`,
+  and `PRIME=1` (priming after every start). Run it from a frozen copy (`git archive`) so edits
+  cannot change a running screen.
 - **`tools/assist_topology_probe.sh <out> <model-key> [probe-volume]`:** the forwarder
-  topology, egress probes and one live request per D-H crate probe.
+  topology (same fail-closed network), TCP, DNS, one-way UDP and IPv6 egress probes from both
+  containers, requests through the forwarder, priming, and one live request per D-H crate.
 - **`tools/assist-probe/`:** the throwaway probe crate (its own workspace, not part of the
   application or its packages): loopback stubs, the destination guard, the host-built client,
   one probe per crate (`p-genai`, `p-rig`, `p-oai`), a baseline (`p-base`, which also serves the
