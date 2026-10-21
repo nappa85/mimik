@@ -18,7 +18,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 1. 2b crate and runtime selection (STROT via pyo3 or a Rust port among the candidates,
    judged on results). The interpretation plan is confirmed (2026-10-20).
-2. 2c interpretation, 3 bundles and reminders, 4 suggestions, 5 docs and gate (includes the
+2. Plan update after the 2b merge (reviewed before 2c): GPU-first with CPU fallback and
+   budgets from the priming measurement (ASSIST-27); a new step 2d, the owner model setting
+   with background Hugging Face downloads (ASSIST-28); 2c reads the model from that setting.
+3. 2c interpretation, 2d model setting, 3 bundles and reminders, 4 suggestions, 5 docs and gate (includes the
    `docs/release-scope.md` update for schema 20 and the assisted scope).
 
 ## Blockers
