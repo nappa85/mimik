@@ -142,7 +142,8 @@ implementation for both).
   threads), which always misses the run deadline. So after `/health` answers, the host sends
   one priming request through the same client and policy: the fixed prefix with a minimal data
   envelope and `max_tokens` 1. It is not a job, is never counted by the breaker, and has its own
-  budget of 300 s. Until it completes the assistant is "starting": a start answers 503 ("the
+  budget, at most 300 s (at 2 CPU threads the 1,460-token prefix took about 117 s; the
+  measured priming time also sets the job budgets, ASSIST-27). Until it completes the assistant is "starting": a start answers 503 ("the
   assistant is starting"), queues nothing, and number entry, notes and Undo work as usual. On
   failure or expiry the host retries after 2 minutes, at most 3 times, then the assistant stays
   unavailable until restart (logged without prompt text). A transport error followed by a

@@ -198,13 +198,14 @@ decides.**
   llama-server child on `127.0.0.1` with a random port and a per-launch token, without
   containers. What carries over from 2b: the crate results and the client policy (loopback
   literal, no proxies, redirects, retries or decompression, the body-bound transport and
-  cancellation; the per-launch token goes in the `Authorization` header, which both D-H crates
-  send), priming, the output schema and validation findings, and the CPU latency and quality
+  cancellation; the per-launch token is expected to go in the `Authorization` header, which both D-H
+  crates send; llama-server `--api-key` auth was not exercised), priming, the output schema and validation findings, and the CPU latency and quality
   numbers (measured in a container capped to 2 CPUs; a native child at 2 threads should be
   comparable but is not measured). What does not carry over: the network confinement. The
   container topology above is dev and benchmark evidence only; a native child has the host's
-  network, so its no-egress property must come from elsewhere (llama-server's `--offline`, the
-  host firewall or OS sandboxing) and is unmeasured. The GPU path is unmeasured for the 2b
+  network, so its no-egress property must come from the OS hardening of ASSIST-30 (Landlock network
+  rules on Linux, a network-denying sandbox profile on macOS; llama-server's `--offline` only
+  stops model fetching and is hygiene, not confinement) and is unmeasured. The GPU path is unmeasured for the 2b
   schema (no GPU runs on weekdays 09:00 to 18:00; a separate measurement can run at night), and
   the priming measurement is what sets the budgets per machine within fixed caps.
 - **Decision needed: the CPU-path budget** (one decision, ASSIST-L20). At 2 threads, Granite's
