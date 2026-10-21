@@ -25,6 +25,7 @@ pub enum Mode {
     Big(usize),
     BigSse(usize),
     Status(u16),
+    Gzip,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +103,11 @@ async fn handle(
         )
             .into_response(),
         Mode::Big(n) => axum::Json(completion(&"x".repeat(n))).into_response(),
+        Mode::Gzip => (
+            [(header::CONTENT_TYPE, "application/json"), (header::CONTENT_ENCODING, "gzip")],
+            gzip_stored(completion(REPLY).to_string().as_bytes()),
+        )
+            .into_response(),
         Mode::Status(code) => (
             StatusCode::from_u16(code).unwrap(),
             [(header::CONTENT_TYPE, "application/json")],
@@ -128,6 +134,29 @@ async fn handle(
                 .unwrap()
         }
     }
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &b in data {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 { (crc >> 1) ^ 0xedb8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+/// A valid gzip member using one stored (uncompressed) deflate block (data < 64 KiB).
+pub fn gzip_stored(data: &[u8]) -> Vec<u8> {
+    let len = u16::try_from(data.len()).unwrap();
+    let mut out = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 255, 1];
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&(!len).to_le_bytes());
+    out.extend_from_slice(data);
+    out.extend_from_slice(&crc32(data).to_le_bytes());
+    out.extend_from_slice(&u32::try_from(data.len()).unwrap().to_le_bytes());
+    out
 }
 
 /// The C3 stub in its own process: Big on 127.0.0.1:18081, BigSse on 127.0.0.1:18082.
@@ -338,11 +367,16 @@ pub fn set_proxy_env(trap: SocketAddr) {
     }
 }
 
-/// The host-built client of §1.4: no proxies, no redirects, no decompression (no features),
-/// no TLS (no features), a fresh connection per request.
+/// The host-built client of §1.4: no proxies, no redirects, no decompression (`no_gzip` and
+/// friends: a dependency such as genai can unify the `gzip` feature in), no TLS (no TLS
+/// feature in the probe's tree), a fresh connection per request.
 pub fn policy_client() -> reqwest::Client {
     reqwest::Client::builder()
         .no_proxy()
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
         .redirect(reqwest::redirect::Policy::none())
         .pool_max_idle_per_host(0)
         .connect_timeout(Duration::from_secs(2))

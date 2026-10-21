@@ -234,6 +234,12 @@ async fn main() {
             let c = client(h, mode);
             out.insert(name.into(), cancellation(closed, stream_text(&c, raw())).await);
         }
+        stub.set(Mode::Gzip);
+        let gb = call(&client(addr, "bounded"), raw()).await;
+        let ae = stub.last().unwrap().headers.iter().find(|(k, _)| k == "accept-encoding").map(|(_, v)| v.clone());
+        stub.set(Mode::Json);
+        out.insert("c2_gzip".into(), json!({"bounded_decoded": gb.as_deref() == Ok(REPLY),
+            "bounded_error": gb.err(), "accept_encoding": ae}));
         out.insert("c2_retry_500_policy".into(), attempts_on_status(&stub, 500, || call(&p, raw())).await);
         out.insert("c2_retry_429_policy".into(), attempts_on_status(&stub, 429, || call(&p, raw())).await);
     } else {

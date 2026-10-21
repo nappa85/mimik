@@ -182,6 +182,21 @@ SYSTEM_PREFIX = (
     + json.dumps(SCHEMA, separators=(",", ":"), sort_keys=True)
 )
 
+# Exploratory prompt variants (not pre-registered; recorded in the ledger header).
+VARIANTS = {
+    "distinct": "\nEvery option must give a different new value; offer fewer options rather than "
+    "repeating one.\n",
+}
+
+
+def system_prefix(variant=None):
+    if variant is None:
+        return SYSTEM_PREFIX
+    return INSTRUCTIONS + VARIANTS[variant] + SYSTEM_PREFIX[len(INSTRUCTIONS) :]
+
+
+PRIME_CASE = {"id": "prime", "target": "hp", "phrase": "prime"}
+
 # ---- phrase-number lexer (§1.4)
 
 SEPARATORS = frozenset(".,٫٬，．")
@@ -310,7 +325,7 @@ def _envelope(payload):
     return "<data>\n" + text + "\n</data>"
 
 
-def build_request(case, sheet):
+def build_request(case, sheet, variant=None):
     """Returns (system, user, supplied) where supplied maps field id -> value for refs."""
     fields = case_sheet(case, sheet)
     by_id = {f["id"]: f for f in fields}
@@ -337,7 +352,7 @@ def build_request(case, sheet):
     )
     excluded = {item["id"] for item in payload["context"] if item["type"] != "integer"}
     return {
-        "system": SYSTEM_PREFIX,
+        "system": system_prefix(variant),
         "user": _envelope(payload),
         "supplied": supplied,
         "excluded": sorted(excluded),
@@ -662,6 +677,8 @@ def run_llm(args):
         "model_sha256": args.model_sha256,
         "server_args": args.server_args,
         "max_tokens": args.max_tokens,
+        "variant": args.variant,
+        "variant_prefix_sha256": hashlib.sha256(system_prefix(args.variant).encode()).hexdigest(),
         "passes": args.passes,
         "jsonschema": validator is not None,
         "started_unix": time.time(),
@@ -678,7 +695,7 @@ def run_llm(args):
                 row = {"event": "not_run", "case": case["id"], "pass": pass_no}
                 ledger.write(json.dumps(row) + "\n")
                 continue
-            request = build_request(case, data["sheet"] if pass_no else case["sheet"])
+            request = build_request(case, data["sheet"] if pass_no else case["sheet"], args.variant)
             row = {
                 "event": "case",
                 "case": case["id"],
@@ -917,6 +934,27 @@ def summarize_ledger(path):
     return out
 
 
+def prime(args):
+    """One request carrying the full fixed prefix (fills the prompt cache), max_tokens 1.
+
+    Not a job and not scored; the product sends it at start, before admitting jobs.
+    """
+    data = load_cases(args.cases)
+    request = build_request(PRIME_CASE, data["sheet"], args.variant)
+    body = chat_body(request, 1)
+    started = time.time()
+    row = {"event": "prime", "started_unix": started, "variant": args.variant}
+    try:
+        content, timings, _, finish, ttft, total = stream_chat(args.endpoint, body, args.timeout)
+        row.update(status="completed", timings=timings, total_seconds=total, finish_reason=finish)
+    except (OSError, ValueError, urllib.error.URLError) as error:
+        row.update(status="failed", error=type(error).__name__ + ": " + str(error)[:200])
+    with open(args.output, "x") as ledger:
+        ledger.write(json.dumps(row) + "\n")
+    print(json.dumps({k: row.get(k) for k in ("status", "total_seconds", "error")}), flush=True)
+    return 0 if row["status"] == "completed" else 1
+
+
 def check_cases(args):
     data = load_cases(args.cases)
     for case in data["cases"]:
@@ -951,6 +989,13 @@ def main(argv=None):
     strot.add_argument("--threshold", type=float, default=0.40)
     summary = sub.add_parser("summarize")
     summary.add_argument("ledgers", nargs="+", type=Path)
+    llm.add_argument("--variant", choices=sorted(VARIANTS), default=None)
+    primer = sub.add_parser("prime")
+    primer.add_argument("--endpoint", required=True)
+    primer.add_argument("--output", type=Path, required=True)
+    primer.add_argument("--cases", type=Path, default=CASES_PATH)
+    primer.add_argument("--timeout", type=float, default=600)
+    primer.add_argument("--variant", choices=sorted(VARIANTS), default=None)
     check = sub.add_parser("check-cases")
     check.add_argument("--cases", type=Path, default=CASES_PATH)
     args = parser.parse_args(argv)
@@ -958,6 +1003,8 @@ def main(argv=None):
         run_llm(args)
     elif args.command == "run-strot":
         run_strot(args)
+    elif args.command == "prime":
+        return prime(args)
     elif args.command == "summarize":
         print(json.dumps([summarize_ledger(p) for p in args.ledgers], indent=2))
     else:

@@ -2,7 +2,7 @@
 use std::time::Duration;
 
 use failsafe::futures::CircuitBreaker as FutureBreaker;
-use failsafe::{CircuitBreaker, Config, FailurePredicate, backoff, clock, failure_policy};
+use failsafe::{Config, FailurePredicate, backoff, clock, failure_policy};
 use serde_json::json;
 
 fn breaker() -> failsafe::StateMachine<failure_policy::ConsecutiveFailures<backoff::Constant>, ()> {
@@ -62,11 +62,24 @@ fn main() {
         h.on_error();
         h.on_error();
         time.advance(Duration::from_secs(121));
+        let mut polled_pending = false;
         {
-            let fut = FutureBreaker::call_with(&h, OnlyTransport, futures_pending());
+            let mut fut = Box::pin(FutureBreaker::call_with(&h, OnlyTransport, futures_pending()));
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(waker);
+            // Poll once: this is where the breaker admits the call (is_call_permitted).
+            polled_pending = fut.as_mut().poll(&mut cx).is_pending() || polled_pending;
             drop(fut);
         }
+        // Still half-open with nothing recorded: the next caller is admitted too.
         let after_drop_permitted = h.is_call_permitted();
+        // Manual API: neutral outcomes are possible by recording neither success nor error.
+        let n = breaker();
+        n.on_error();
+        n.on_error();
+        let _ = n.is_call_permitted(); // a call admitted, then cancelled: record nothing
+        n.on_error();
+        let manual_neutral_keeps_count = !n.is_call_permitted();
         let _ = r;
         json!({
             "f2_closed_after_two_failures": closed_after_two,
@@ -76,7 +89,9 @@ fn main() {
             "f3_half_open_permits": [first, second, third],
             "f3_single_probe": first && !second && !third,
             "f1_neutral_error_via_future_counts_as_success": neutral_reset_count,
+            "f5_polled_into_pending_before_drop": polled_pending,
             "f5_dropped_future_permitted_after": after_drop_permitted,
+            "f1_manual_api_neutral_keeps_count": manual_neutral_keeps_count,
             "f4_mock_clock": "failsafe::clock::freeze (thread-local)",
         })
     });

@@ -8,6 +8,11 @@
 # on the third server. llama-server runs on an internal network with no published port, CPU
 # only, pinned to CPUS (default 0,1) with 2 threads; the harness runs on HARNESS_CPU (7).
 # Environment: DEADLINE_EPOCH (default now + 10 h): no request starts after it.
+#   MAX_TOKENS (384), VARIANT (exploratory prompt variant, empty = pre-registered prefix),
+#   PRIME (0): 1 sends the priming request (full fixed prefix, max_tokens 1) after every start,
+#   before any case, and records it as prime-<n>.jsonl.
+# The model network is internal with inhibit_ipv4 (no address on the host side); an existing
+# network without both is refused.
 # Small CPU models at 2 cores are allowed at any hour (AGENTS.md), so no weekday window applies.
 set -euo pipefail
 export TZ=:/etc/localtime
@@ -16,6 +21,11 @@ OUT=$1; shift
 CPUS=${CPUS:-0,1}
 HARNESS_CPU=${HARNESS_CPU:-7}
 DEADLINE_EPOCH=${DEADLINE_EPOCH:-$(( $(date +%s) + 36000 ))}
+MAX_TOKENS=${MAX_TOKENS:-384}
+VARIANT=${VARIANT:-}
+PRIME=${PRIME:-0}
+EXTRA=()
+[ -n "$VARIANT" ] && EXTRA=(--variant "$VARIANT")
 CHECK_IMAGE=sha256:9578747a34f5e02cb7561c8e2a8903b75100b96ce1b0587d5fa4b687be0d3a9f
 HARNESS_IMAGE=sha256:8477ff915533b4a21a9727d2804acd06bae15b93e95d60627f8e127cd7025a7d
 NET=mimik-assist2b-net
@@ -27,9 +37,11 @@ log() { echo "$(date '+%F %T') $*" | tee -a "$OUT/run.log"; }
 cleanup() { docker rm -f "$SRV" "$HARNESS" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 if ! docker network inspect "$NET" >/dev/null 2>&1; then
-  docker network create --internal --label "$LABEL" "$NET" >/dev/null
+  docker network create --internal -o com.docker.network.bridge.inhibit_ipv4=true \
+    --label "$LABEL" "$NET" >/dev/null
 fi
-[ "$(docker network inspect -f '{{.Internal}}' "$NET")" = true ] || { log "network not internal"; exit 2; }
+net_state=$(docker network inspect -f '{{.Internal}} {{index .Options "com.docker.network.bridge.inhibit_ipv4"}}' "$NET")
+[ "$net_state" = "true true" ] || { log "network $NET is not internal with inhibit_ipv4 ($net_state)"; exit 2; }
 
 reg() { python3 "$ROOT/tools/model_registry.py" get "$1" | python3 -c "import json,sys;print(json.load(sys.stdin)$2)"; }
 
@@ -52,6 +64,16 @@ start_server() {  # start_server <model-file>; echoes seconds to /health
   log "health timeout"; return 1
 }
 
+prime() {  # prime <ledger name>: the priming request, not a case
+  docker rm -f "$HARNESS" >/dev/null 2>&1 || true
+  docker run --rm --init --pull never --name "$HARNESS" --label "$LABEL" --network "$NET" \
+    --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
+    --memory 1g --cpus 1 --cpuset-cpus "$HARNESS_CPU" --pids-limit 64 \
+    --mount type=bind,src="$ROOT/tools",dst=/tools,readonly --mount type=bind,src="$OUT",dst=/out \
+    "$HARNESS_IMAGE" python3 /tools/assist_eval.py prime --endpoint http://server:8080/v1/chat/completions \
+    --output "/out/$1" "${EXTRA[@]}" >> "$OUT/harness.log" 2>&1
+}
+
 harness() {  # harness <ledger name> <args...>
   local name=$1; shift
   docker rm -f "$HARNESS" >/dev/null 2>&1 || true
@@ -63,7 +85,8 @@ harness() {  # harness <ledger name> <args...>
     --mount type=bind,src="$OUT",dst=/out \
     "$HARNESS_IMAGE" python3 /tools/assist_eval.py run-llm --endpoint http://server:8080/v1/chat/completions \
     --model-label "$LABEL_M" --model-sha256 "$SHA" --server-args "${ARGS[*]}" \
-    --deadline-epoch "$DEADLINE_EPOCH" --output "/out/$name" "$@" >> "$OUT/harness.log" 2>&1
+    --deadline-epoch "$DEADLINE_EPOCH" --max-tokens "$MAX_TOKENS" --output "/out/$name" \
+    "${EXTRA[@]}" "$@" >> "$OUT/harness.log" 2>&1
 }
 
 for key in "$@"; do
@@ -86,6 +109,10 @@ print('--threads-batch'); print('2'); print('--reasoning'); print('off')")
     health=$(start_server "$model") || { log "$key: cold start $i failed"; continue 2; }
     log "$key: cold start $i health_seconds=$health"
     echo "{\"key\": \"$key\", \"cold_start\": $i, \"health_seconds\": $health}" >> "$OUT/$key/cold.jsonl"
+    if [ "$PRIME" = 1 ]; then
+      prime "$key/prime-$i.jsonl" || { log "$key: priming $i failed"; continue 2; }
+      log "$key: primed $i"
+    fi
     harness "$key/cold-$i.jsonl" --passes 1 --only dh-01 || log "$key: cold request $i failed"
     if [ "$i" -lt 3 ]; then docker rm -f "$SRV" >/dev/null; fi
   done

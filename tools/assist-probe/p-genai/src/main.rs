@@ -168,6 +168,18 @@ async fn main() {
     out.insert("c4_stream".into(), cancellation(closed, fut).await);
 
     let ro = raw_options();
+    stub.set(Mode::Gzip);
+    let gp = c.exec_chat(target(addr), request(), Some(&ro)).await;
+    let gp_ae = stub.last().unwrap().headers.iter().find(|(k, _)| k == "accept-encoding").map(|(_, v)| v.clone());
+    let gd = client(false).exec_chat(target(addr), request(), Some(&ro)).await;
+    let gd_ae = stub.last().unwrap().headers.iter().find(|(k, _)| k == "accept-encoding").map(|(_, v)| v.clone());
+    stub.set(Mode::Json);
+    out.insert("c2_gzip".into(), json!({
+        "policy_decoded": gp.as_ref().map(|r| r.first_text() == Some(REPLY)).unwrap_or(false),
+        "policy_error": gp.err().map(|e| e.to_string().chars().take(120).collect::<String>()),
+        "policy_accept_encoding": gp_ae,
+        "default_decoded": gd.as_ref().map(|r| r.first_text() == Some(REPLY)).unwrap_or(false),
+        "default_accept_encoding": gd_ae}));
     out.insert("c2_retry_500".into(), attempts_on_status(&stub, 500, || c.exec_chat(target(addr), request(), Some(&ro))).await);
     out.insert("c2_retry_429".into(), attempts_on_status(&stub, 429, || c.exec_chat(target(addr), request(), Some(&ro))).await);
     out.insert("guard".into(), guard_report());
