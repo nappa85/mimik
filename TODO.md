@@ -71,6 +71,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - Harness v3: re-review the pre-registered scoring variants S1–S4/lenient, the selection
   script and the manifest gate, then build them (`docs/evaluation-tooling.md`). H3 live smoke
   (needs inference).
-- After the GPU repair: G0 load test of the 35B, S40 screens of the 8B dense candidates, then
-  the v3 dev arms and the held-out verdict run. Before any thinking arm, verify thinking
+- GPU screens run 2026-10-20 night (frozen copy `mimik-wt/run-82a1ca56112b`, branch
+  `gpu-runs` adds `CPUSET` pinning, self-checked): G0 picked `n_cpu_moe` 40; dev S40 correct
+  35B 22/40, Granite 8B 14/40, Ministral 8B 13/40, Llama 8B 6/40. Needs an independent results
+  review (and a review of the `gpu-runs` change) before it drives decisions. Then the v3 dev arms and the held-out verdict run. Before any thinking arm, verify thinking
   support of Gemma 4 E4B, Ministral 3 8B and Llama 3.1 8B against their templates.
