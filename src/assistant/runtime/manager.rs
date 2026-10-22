@@ -620,6 +620,33 @@ impl Manager {
     }
 }
 
+/// `/health` within [`HEALTH_WITHIN`]; a refused endpoint fails at once.
+async fn healthy(child: &Arc<dyn Child>) -> Result<(), Attempt> {
+    let server = child.server();
+    let answered = tokio::time::timeout(HEALTH_WITHIN, async {
+        loop {
+            match server.health().await {
+                Health::Ready => {
+                    child.answered_health();
+                    return Ok(());
+                }
+                Health::Refused(why) => return Err(why),
+                Health::Loading | Health::NotListening | Health::Failed => {
+                    tokio::time::sleep(HEALTH_POLL).await;
+                }
+            }
+        }
+    })
+    .await;
+    match answered {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(why)) => Err(Attempt::Failed(Fail::Other(why))),
+        Err(_) => Err(Attempt::Failed(Fail::Other(
+            "the model server did not answer /health within 60 s".into(),
+        ))),
+    }
+}
+
 /// `/health`, priming and calibration within their limits.
 async fn measure(
     child: &Arc<dyn Child>,
@@ -635,30 +662,7 @@ async fn measure(
     let server = child.server();
     let began = Instant::now();
     phase("loading the model");
-    let healthy = tokio::time::timeout(HEALTH_WITHIN, async {
-        loop {
-            match server.health().await {
-                Health::Ready => {
-                    child.answered_health();
-                    return Ok(());
-                }
-                Health::Refused(why) => return Err(why),
-                Health::Loading | Health::NotListening | Health::Failed => {
-                    tokio::time::sleep(HEALTH_POLL).await;
-                }
-            }
-        }
-    })
-    .await;
-    match healthy {
-        Ok(Ok(())) => {}
-        Ok(Err(why)) => return Err(Attempt::Failed(Fail::Other(why))),
-        Err(_) => {
-            return Err(Attempt::Failed(Fail::Other(
-                "the model server did not answer /health within 60 s".into(),
-            )));
-        }
-    }
+    healthy(child).await?;
     log(&format!(
         "health after {:.1} s",
         began.elapsed().as_secs_f64()
