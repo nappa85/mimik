@@ -388,6 +388,11 @@ impl Assistant {
         }
     }
 
+    /// The breaker's state, for the assistant page.
+    pub(crate) fn breaker_state(&self) -> String {
+        self.breaker().describe(Instant::now().into_std())
+    }
+
     /// Where expiries and completed exchanges are reported (the runtime manager).
     pub(crate) fn subscribe(&self, sender: tokio::sync::mpsc::UnboundedSender<Signal>) {
         *self

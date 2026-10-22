@@ -55,6 +55,8 @@ pub(crate) trait Child: Send + Sync {
     async fn exited(&self) -> Fail;
     /// Stops it (SIGTERM, SIGKILL after 5 s) and resolves once it is gone; idempotent.
     async fn stop(&self);
+    /// `/health` answered: the TCP levels delete the token file now.
+    fn answered_health(&self) {}
     /// What the page should say about this child's confinement (for example "temporary
     /// space unbounded").
     fn notes(&self) -> Vec<String> {
@@ -178,6 +180,47 @@ pub(crate) struct Config {
     pub max_tokens: u32,
 }
 
+/// One line on standard error per transition: states, levels, reasons and measurements,
+/// never prompt text, URLs with tokens or the token.
+fn log(line: &str) {
+    eprintln!("assistant: {line}");
+}
+
+/// The measurement as one log line.
+fn measured(calibration: &Calibration, budgets: Option<&Budgets>) -> String {
+    let samples: Vec<String> = calibration
+        .samples
+        .iter()
+        .map(|s| {
+            format!(
+                "W {:.0} ms, prompt {} tokens in {:.0} ms, cached {}, generated {} in {:.0} ms, filler {} tokens",
+                s.wall_ms, s.prompt_n, s.prompt_ms, s.cached_n, s.predicted_n, s.predicted_ms, s.filler_tokens
+            )
+        })
+        .collect();
+    let budgets = budgets.map_or_else(
+        || "no budgets".to_owned(),
+        |b| {
+            format!(
+                "B {} bytes, N(B) {} tokens, R {} s, D {}, Q {} s, busy after expiry {} s",
+                b.bounds.bytes,
+                b.bounds.tokens,
+                b.run.as_secs(),
+                b.depth,
+                b.queue_wait.as_secs(),
+                b.busy_after_expiry.as_secs()
+            )
+        },
+    );
+    format!(
+        "priming {} prefix tokens; samples [{}]; density {:.2} and {:.2} bytes per token; {budgets}",
+        calibration.prefix_tokens,
+        samples.join("; "),
+        calibration.density[0],
+        calibration.density[1]
+    )
+}
+
 /// Starts the manager task for `assistant`.
 pub(crate) fn spawn(
     assistant: Arc<Assistant>,
@@ -266,6 +309,7 @@ impl Manager {
     }
 
     fn unavailable(&self, why: String) {
+        log(&format!("unavailable: {why}"));
         self.assistant.event(RuntimeEvent::GenerationEnded {
             generation: self.generation,
             reason: EndReason::Unavailable(why.clone()),
@@ -301,7 +345,10 @@ impl Manager {
             for (level, result) in probed {
                 match result {
                     Ok(()) => levels.push(level),
-                    Err(why) => self.update(|status| status.skipped.push((level, why))),
+                    Err(why) => {
+                        log(&format!("level {} probe failed: {why}", level.number()));
+                        self.update(|status| status.skipped.push((level, why)));
+                    }
                 }
             }
             let mut index = 0;
@@ -325,6 +372,10 @@ impl Manager {
                 };
                 self.generation += 1;
                 let generation = self.generation;
+                log(&format!(
+                    "starting: generation {generation}, level {}",
+                    level.number()
+                ));
                 self.assistant
                     .event(RuntimeEvent::GenerationStarted { generation });
                 self.update(|status| {
@@ -357,6 +408,7 @@ impl Manager {
                         }
                     }
                     Attempt::Failed(Fail::Sandbox(why)) => {
+                        log(&format!("level {} skipped: {why}", level.number()));
                         self.ended(generation, EndReason::Exited);
                         self.update(|status| status.skipped.push((level, why)));
                         index += 1;
@@ -407,6 +459,7 @@ impl Manager {
     }
 
     fn failed(&mut self, why: String) {
+        log(&format!("attempt failed (counted): {why}"));
         self.failures += 1;
         let failures = self.failures;
         self.update(|status| {
@@ -472,6 +525,11 @@ impl Manager {
             budgets,
             interpreter,
         });
+        let level = self.status().level.map_or(0, Level::number);
+        log(&format!(
+            "ready: generation {generation}, level {level}; {}",
+            measured(&calibration, Some(&budgets))
+        ));
         self.update(|status| {
             status.state = State::Ready;
             status.calibration = Some(calibration);
@@ -541,7 +599,10 @@ async fn measure(
     let healthy = tokio::time::timeout(HEALTH_WITHIN, async {
         loop {
             match server.health().await {
-                Health::Ready => return Ok(()),
+                Health::Ready => {
+                    child.answered_health();
+                    return Ok(());
+                }
                 Health::Refused(why) => return Err(why),
                 Health::Loading | Health::NotListening | Health::Failed => {
                     tokio::time::sleep(HEALTH_POLL).await;
@@ -597,6 +658,7 @@ async fn measure(
             let why = format!(
                 "too slow on this machine: about {needed_s} s needed, the cap is {cap_s} s"
             );
+            log(&format!("measured: {}", measured(&calibration, None)));
             let calibration = calibration.clone();
             status
                 .lock()

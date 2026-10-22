@@ -170,43 +170,54 @@ pub(crate) fn sweep_generations(run: BorrowedFd<'_>) {
         if name == "." || name == ".." || name == PIDFILE {
             continue;
         }
-        if name.bytes().all(|b| b.is_ascii_digit()) {
+        if name.bytes().all(|b| b.is_ascii_digit()) || name.starts_with("probe") {
             remove_generation(run, &name);
         }
     }
 }
 
-/// Creates `run/<generation>/` with mode 0700, opens it without following links and checks
+/// Creates `run/<name>/` with mode 0700, opens it without following links and checks
 /// it is a 0700 directory of Mimik's user. A directory already there refuses the start.
-pub(crate) fn create_generation(run: BorrowedFd<'_>, generation: u64) -> Result<OwnedFd, Refusal> {
-    let name = generation.to_string();
-    rustix::fs::mkdirat(run, &name, Mode::from_raw_mode(0o700)).map_err(|error| match error {
-        rustix::io::Errno::EXIST => Refusal::Extra(format!("run/{name}")),
+pub(crate) fn create_generation(run: BorrowedFd<'_>, name: &str) -> Result<OwnedFd, Refusal> {
+    rustix::fs::mkdirat(run, name, Mode::from_raw_mode(0o700)).map_err(|error| match error {
+        rustix::io::Errno::EXIST => Refusal::Exists(format!("run/{name}")),
         _ => Refusal::Io(format!("run/{name}")),
     })?;
-    files::open_dir_beneath(run, &name, Owners::Mine, true)
+    files::open_dir_beneath(run, name, Owners::Mine, true)
 }
 
-/// Removes a generation's directory: its entries (not descending into directories), then
-/// the directory.
+/// Removes a generation's directory and everything in it (the level-3 private home may
+/// hold what the server wrote), never following a link: entries are unlinked, directories
+/// emptied the same way, at most 8 levels deep.
 pub(crate) fn remove_generation(run: BorrowedFd<'_>, name: &str) {
-    if let Ok(dir) = rustix::fs::openat2(
-        run,
+    empty(run, name, 8);
+    let _ = rustix::fs::unlinkat(run, name, AtFlags::REMOVEDIR)
+        .or_else(|_| rustix::fs::unlinkat(run, name, AtFlags::empty()));
+}
+
+fn empty(parent: BorrowedFd<'_>, name: &str, depth: usize) {
+    let Ok(dir) = rustix::fs::openat2(
+        parent,
         name,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
-    ) && let Ok(listing) = rustix::fs::Dir::read_from(&dir)
-    {
-        for entry in listing.flatten() {
-            let inner = entry.file_name().to_string_lossy().into_owned();
-            if inner != "." && inner != ".." {
-                let _ = rustix::fs::unlinkat(&dir, &*inner, AtFlags::empty());
-            }
+    ) else {
+        return;
+    };
+    let Ok(listing) = rustix::fs::Dir::read_from(&dir) else {
+        return;
+    };
+    for entry in listing.flatten() {
+        let inner = entry.file_name().to_string_lossy().into_owned();
+        if inner == "." || inner == ".." {
+            continue;
+        }
+        if rustix::fs::unlinkat(&dir, &*inner, AtFlags::empty()).is_err() && depth > 0 {
+            empty(dir.as_fd(), &inner, depth - 1);
+            let _ = rustix::fs::unlinkat(&dir, &*inner, AtFlags::REMOVEDIR);
         }
     }
-    let _ = rustix::fs::unlinkat(run, name, AtFlags::REMOVEDIR)
-        .or_else(|_| rustix::fs::unlinkat(run, name, AtFlags::empty()));
 }
 
 /// A generation's directory, removed when dropped.
@@ -218,13 +229,18 @@ pub(crate) struct Generation {
 }
 
 impl Generation {
-    pub(crate) fn create(run: &OwnedFd, generation: u64) -> Result<Self, Refusal> {
-        let fd = create_generation(run.as_fd(), generation)?;
+    /// `run/<name>/`: a generation's number, or `probe-<level>` for a start-time probe.
+    pub(crate) fn create(run: &OwnedFd, name: &str) -> Result<Self, Refusal> {
+        let fd = create_generation(run.as_fd(), name)?;
         Ok(Self {
             fd,
             run: run.try_clone().map_err(|_| Refusal::Io("run".into()))?,
-            name: generation.to_string(),
+            name: name.to_owned(),
         })
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
     }
 }
 

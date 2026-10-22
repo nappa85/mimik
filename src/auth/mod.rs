@@ -1,5 +1,6 @@
 //! Trusted-LAN/proxy authentication boundary and request-scoped campaign admissions.
 mod administration;
+mod assistant;
 mod errors;
 mod materials;
 mod persistence;
@@ -190,6 +191,7 @@ fn router_with_sessions(
         .route("/auth/logout", post(logout))
         .route("/auth/session", get(status))
         .merge(administration::routes())
+        .merge(assistant::routes())
         .merge(materials::routes())
         .merge(rulesets::routes())
         .merge(crate::campaigns::web::routes(
@@ -668,7 +670,7 @@ impl AuthState {
         self.options
             .assistant
             .as_ref()
-            .map(|handle| Arc::clone(&handle.0))
+            .map(|handle| Arc::clone(&handle.assistant))
     }
 }
 /// Whether the session carries a principal binding at all (cookie-backed session data only;

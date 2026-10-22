@@ -193,6 +193,8 @@ pub(crate) struct Profile {
     pub runtime: Vec<(RawFd, String)>,
     /// Further read-only binds by descriptor (the probe's own executable).
     pub extra: Vec<(RawFd, String)>,
+    /// Variables beside the minimal environment (only the tests' helper variable).
+    pub env: Vec<(String, String)>,
     /// The command and its arguments.
     pub command: Vec<String>,
 }
@@ -254,6 +256,9 @@ impl Profile {
         .into_iter()
         .map(OsString::from)
         .collect();
+        for (name, value) in &self.env {
+            args.extend(["--setenv".into(), name.into(), value.into()]);
+        }
         args.extend(system_libraries());
         args.extend(["--dev", "/dev", "--proc", "/proc"].map(OsString::from));
         for (bytes, dest) in [(TMP_BYTES, "/tmp"), (SHM_BYTES, "/dev/shm")] {

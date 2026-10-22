@@ -12,8 +12,10 @@ pub(crate) mod calibration;
 pub(crate) mod drain;
 pub(crate) mod endpoint;
 pub(crate) mod files;
+pub(crate) mod launch;
 pub(crate) mod manager;
 pub(crate) mod manifest;
+pub(crate) mod probe;
 pub(crate) mod rundir;
 pub(crate) mod runner;
 pub(crate) mod seccomp;
@@ -21,6 +23,7 @@ pub(crate) mod server;
 pub(crate) mod token;
 #[cfg(test)]
 pub(crate) mod test_helper;
+pub(crate) mod threads;
 
 /// Which build runs, and so which budgets' caps apply (ASSIST-27, ASSIST-31).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

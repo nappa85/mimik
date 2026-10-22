@@ -1,0 +1,28 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Assistant · Mimik</title><link rel="stylesheet" href="/assets/app.css"></head><body><main>
+<nav><a href="/admin">Owner administration</a> · <a href="/admin/assistant">Assistant</a></nav>
+<h1>Interpretation assistant</h1>
+<p>The assistant reads a scribble a number field could not take and offers a reading to confirm; it never writes on its own. It runs a pinned llama.cpp model server as Mimik's child, on this machine only.</p>
+{% if !notice.is_empty() %}<p class="panel" role="status">{{ notice }}</p>{% endif %}
+{% if let Some(view) = view %}
+<section class="panel"><h2>State</h2>
+<p><strong>{{ view.state }}</strong>{% if !view.reason.is_empty() %}: {{ view.reason }}{% endif %}</p>
+<p>Path: {{ view.path }} · Generation {{ view.generation }} · Failures counted: {{ view.failures }} of 4{% if !view.last_failure.is_empty() %} · Last: {{ view.last_failure }}{% endif %}</p>
+<p>Circuit breaker: {{ view.breaker }}</p>
+<form method="post" action="/admin/assistant/restart"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Restart</button></form>
+<p>Restart stops the model server, starts it again from the highest confinement level, measures it again and resets the breaker and the failure count. Number entry, notes and Undo work meanwhile.</p></section>
+<section class="panel"><h2>Confinement</h2>
+{% if let Some(level) = view.level %}<p><strong>Level {{ level.number }}: {{ level.name }}</strong> — {{ level.text }}</p>{% else %}<p>No level is active.</p>{% endif %}
+{% for note in view.notes %}<p>{{ note }}</p>{% endfor %}
+{% if !view.skipped.is_empty() %}<h3>Levels not used</h3><ul>{% for skipped in view.skipped %}<li>Level {{ skipped.0 }}: {{ skipped.1 }}</li>{% endfor %}</ul>{% endif %}</section>
+<section class="panel"><h2>Budgets</h2>
+{% if let Some(budgets) = view.budgets %}<p>Request bound B {{ budgets.bytes }} bytes and N(B) {{ budgets.tokens }} tokens · run deadline R {{ budgets.run }} s · queue D {{ budgets.depth }}, wait Q {{ budgets.queue_wait }} s · after a deadline cancel the next job waits {{ budgets.busy }} s.</p>
+{% else %}<p>No budgets: the assistant takes no jobs until it is measured.</p>{% endif %}</section>
+<section class="panel"><h2>Measurements</h2>
+{% if let Some(calibration) = view.calibration %}<p>Priming: {{ calibration.prefix }} prompt tokens (the fixed prefix). Filler density: {{ calibration.density }} bytes per token.</p>
+<table><thead><tr><th>Sample</th><th>Wall time</th><th>Prompt tokens</th><th>Prompt time</th><th>Cached</th><th>Generated</th><th>Generation time</th><th>Filler tokens</th></tr></thead><tbody>
+{% for sample in calibration.samples %}<tr><td>{{ loop.index }}</td><td>{{ sample.wall }}</td><td>{{ sample.prompt_n }}</td><td>{{ sample.prompt }}</td><td>{{ sample.cached }}</td><td>{{ sample.predicted_n }}</td><td>{{ sample.predicted }}</td><td>{{ sample.filler }}</td></tr>{% endfor %}
+</tbody></table>{% else %}<p>Not measured yet.</p>{% endif %}</section>
+{% else %}
+<section class="panel"><h2>State</h2><p><strong>Off</strong>: Mimik was started without <code>--assistant</code>. No model server runs, nothing is listed or probed.</p></section>
+{% endif %}
+</main></body></html>

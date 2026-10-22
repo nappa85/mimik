@@ -131,6 +131,7 @@ fn profile(size: bool) -> Profile {
         model_fd: 8,
         runtime: vec![(9, "llama-server".into()), (10, "libllama.so.0".into())],
         extra: Vec::new(),
+        env: Vec::new(),
         command: vec!["/opt/llama/llama-server".into(), "--offline".into()],
     }
 }

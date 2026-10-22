@@ -523,7 +523,7 @@ async fn an_expired_proposal_writes_nothing_and_no_literal() {
     let key = scribble(setup, "took 15 damage").await;
     let (action, _) = first_option(setup, &key).await;
     let job = crate::assistant::jobs::JobId::parse(action.split('/').nth(4).unwrap()).unwrap();
-    assisted.handle.0.expire_for_tests(job);
+    assisted.handle.assistant.expire_for_tests(job);
     let (status, refused) = apply(setup, &action, &[]).await;
     assert_eq!(status, StatusCode::CONFLICT, "{refused}");
     assert_eq!(saved(setup, 1).await.1["hp"], 84);

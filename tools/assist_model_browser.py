@@ -72,6 +72,7 @@ def text_of(content):
 class FakeModel(BaseHTTPRequestHandler):
     token = ""
     requests = []
+    primed = None
 
     def log_message(self, *args):
         pass
@@ -112,6 +113,29 @@ class FakeModel(BaseHTTPRequestHandler):
             self.send_json(404, {})
             return
         user = text_of(body["messages"][1]["content"])
+        if body.get("stream") is not True:
+            # Priming and calibration (step 2c-2a): non-streamed, with llama.cpp's timings;
+            # the fixed prefix counts as cached after the first request.
+            system = text_of(body["messages"][0]["content"])
+            prefix = len(system) // 3
+            cached = FakeModel.primed == system
+            FakeModel.primed = system
+            generated = body["max_tokens"] if body.get("ignore_eos") else 1
+            prompt = len(user) // 3 + 20 + (0 if cached else prefix)
+            self.send_json(
+                200,
+                {
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "x"}}],
+                    "timings": {
+                        "cache_n": prefix if cached else 0,
+                        "prompt_n": prompt,
+                        "prompt_ms": prompt * 0.2,
+                        "predicted_n": generated,
+                        "predicted_ms": generated * 0.5,
+                    },
+                },
+            )
+            return
         envelope = json.loads(user[len("<data>\n") : -len("\n</data>")])
         note = envelope["note"]
         FakeModel.requests.append(note)

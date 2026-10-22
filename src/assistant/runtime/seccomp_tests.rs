@@ -435,3 +435,4 @@ fn exec_is_allowed_once_on_the_runtime_descriptor_and_never_again() {
     assert_eq!(after["raise"], eperm());
     assert_eq!(after["execveat_again"], json!(libc::EBADF));
 }
+

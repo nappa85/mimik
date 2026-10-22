@@ -36,6 +36,8 @@ pub(crate) enum Refusal {
     Changed(String),
     /// A file the manifest does not name, or one it names is missing.
     Extra(String),
+    /// Something already exists where a fresh directory must be made.
+    Exists(String),
     Io(String),
 }
 
@@ -51,6 +53,7 @@ impl std::fmt::Display for Refusal {
             Self::Mode(name) => write!(f, "{name} must have mode 0700"),
             Self::Changed(name) => write!(f, "{name} differs from the pinned file"),
             Self::Extra(name) => write!(f, "{name} is not part of the pinned build"),
+            Self::Exists(name) => write!(f, "{name} already exists"),
             Self::Io(name) => write!(f, "{name} cannot be read"),
         }
     }

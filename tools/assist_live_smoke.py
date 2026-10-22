@@ -1,5 +1,6 @@
 """Live smoke of the interpretation assistant against a hand-started llama-server (step
-2c-1, ASSIST-40; prototype tooling, reported as live inference).
+2c-1) or the runtime's own child (step 2c-2a) (ASSIST-40; prototype tooling, reported as
+live inference).
 
 Builds the demo sheet with a development (dev-endpoint) build whose assistant points at the
 server, then through the sheet's own JSON routes: a scribble starts a job, the reply is read
@@ -7,9 +8,12 @@ and Use applies the first option (or the run reports none); a second job, whose 
 prefix tokens the caller reads from the server log; a job superseded mid-generation, then
 one that must finish within its usual time. Synthetic phrases only. Prints one JSON object.
 
-Run where 127.0.0.1:<port> reaches the server (the screen's container network namespace):
+Against a hand-started server (a development build; 127.0.0.1:<port> must reach it):
   python3 tools/assist_live_smoke.py <dev mimik> --fixture <dir> --endpoint http://127.0.0.1:8080 \
       --token-file <file> --data <new dir>
+Against the runtime (step 2c-2a: Mimik starts the pinned llama-server itself):
+  python3 tools/assist_live_smoke.py <mimik> --fixture <dir> --models-dir <dir> \
+      --runtime <llama dir> [--threads N] --data <new dir>
 """
 
 import argparse
@@ -84,16 +88,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("binary", type=Path)
     parser.add_argument("--fixture", type=Path, required=True)
-    parser.add_argument("--endpoint", required=True)
-    parser.add_argument("--token-file", type=Path, required=True)
+    parser.add_argument("--endpoint", help="a hand-started server (development build)")
+    parser.add_argument("--token-file", type=Path)
+    parser.add_argument("--models-dir", type=Path, help="the runtime's models folder")
+    parser.add_argument("--runtime", type=Path, help="the runtime's llama.cpp folder")
+    parser.add_argument("--threads", type=int, help="--assistant-threads")
     parser.add_argument("--data", type=Path, required=True)
-    parser.add_argument(
-        "--deadline",
-        type=int,
-        default=None,
-        help="--assistant-dev-deadline for an unprimed server (its first request evaluates "
-        "the whole fixed prefix)",
-    )
     args = parser.parse_args(argv)
     binary = args.binary.resolve(strict=True)
     fixture = args.fixture.resolve(strict=True)
@@ -102,18 +102,23 @@ def main(argv=None):
     create_accounts(binary, directory, passwords)
     prepare_unknown_registry_source(binary, directory, fixture)
     version = publish_assist_definition(binary, directory, fixture)
-    extra = (
-        "--assistant",
-        "--assistant-dev-endpoint",
-        args.endpoint,
-        "--assistant-dev-token-file",
-        str(args.token_file.resolve(strict=True)),
-        *(
-            ("--assistant-dev-deadline", str(args.deadline), "--assistant-dev-queue-wait", "600")
-            if args.deadline
-            else ()
-        ),
-    )
+    if args.endpoint:
+        extra = (
+            "--assistant",
+            "--assistant-dev-endpoint",
+            args.endpoint,
+            "--assistant-dev-token-file",
+            str(args.token_file.resolve(strict=True)),
+        )
+    else:
+        extra = (
+            "--assistant",
+            "--models-dir",
+            str(args.models_dir.resolve(strict=True)),
+            "--assistant-runtime",
+            str(args.runtime.resolve(strict=True)),
+            *(("--assistant-threads", str(args.threads)) if args.threads else ()),
+        )
     process, log = start(binary, directory, auth=True, extra=extra)
     out = {}
     try:
@@ -122,9 +127,22 @@ def main(argv=None):
         cookie = auth_login(
             auth_cookie(response), auth_fields(response, "/auth/login"), PLAYER, passwords[PLAYER]
         )
-        # 1. One smoke: a scribble, a job, its options, Use.
+        # 0. Until the runtime is primed and calibrated, a start answers 503 "starting".
+        began = time.monotonic()
         csrf, key = scribble(cookie, sheet, "took 15 damage")
-        answer, seconds = wait(cookie, start_job(cookie, sheet, csrf, key))
+        while True:
+            status, _, body = post_json(
+                f"{sheet}/interpretations", cookie, {"csrf": csrf, "note": key}
+            )
+            if status in (200, 202):
+                first_poll = json.loads(body)["poll"]
+                break
+            require(status == 503, f"start answered {status}: {body[:200]}")
+            require(time.monotonic() - began < 1800, "the assistant never became ready")
+            time.sleep(2)
+        out["ready_after_seconds"] = round(time.monotonic() - began, 1)
+        # 1. One smoke: a scribble, a job, its options, Use.
+        answer, seconds = wait(cookie, first_poll)
         out["first"] = {"seconds": round(seconds, 2), "state": answer["state"]}
         if answer["state"] == "options":
             out["first"]["options"] = [

@@ -1,13 +1,4 @@
 pub mod accounts;
-// Without the development endpoint (every release build) nothing constructs the assistant
-// until the 2c-2 runtime manager does; `--assistant` is refused at start.
-#[cfg_attr(
-    not(any(test, feature = "dev-endpoint")),
-    expect(
-        dead_code,
-        reason = "constructed by the 2c-2 runtime manager; refused before"
-    )
-)]
 pub mod assistant;
 pub mod auth;
 pub mod campaigns;

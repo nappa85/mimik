@@ -26,7 +26,7 @@ pub(crate) struct Llama {
 }
 
 /// One official release asset and the files Mimik runs from it.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Build {
     /// `cpu` (and `vulkan` from 2c-2b).
     pub path: String,
@@ -37,7 +37,7 @@ pub(crate) struct Build {
     pub files: Vec<File>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct File {
     pub name: String,
     pub sha256: String,

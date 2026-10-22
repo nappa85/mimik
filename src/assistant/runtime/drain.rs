@@ -22,10 +22,17 @@ pub(crate) enum Output {
     ModelLoadError,
     /// A backend or device could not be initialised.
     DeviceError,
+    /// bubblewrap's own error (`bwrap: …`): the sandbox could not be set up.
+    SandboxError,
+    /// The server could not bind its socket or port.
+    BindError,
 }
 
-static PATTERNS: LazyLock<[regex::Regex; 5]> = LazyLock::new(|| {
+static PATTERNS: LazyLock<[regex::Regex; 7]> = LazyLock::new(|| {
     [
+        regex::Regex::new(r"^bwrap: ").expect("pattern"),
+        regex::Regex::new(r"(?i)(couldn't bind|could not bind|failed to bind|address already in use)")
+            .expect("pattern"),
         regex::Regex::new(r"llama_server: listening on ").expect("pattern"),
         regex::Regex::new(r"\bbuild[: ]+(\d{1,9})\b").expect("pattern"),
         regex::Regex::new(r"offloaded (\d{1,6})/(\d{1,6}) layers to GPU").expect("pattern"),
@@ -40,7 +47,13 @@ static PATTERNS: LazyLock<[regex::Regex; 5]> = LazyLock::new(|| {
 
 /// The event one line signals, if any.
 pub(crate) fn classify(line: &str) -> Option<Output> {
-    let [listening, build, offloaded, model, device] = &*PATTERNS;
+    let [sandbox, bind, listening, build, offloaded, model, device] = &*PATTERNS;
+    if sandbox.is_match(line) {
+        return Some(Output::SandboxError);
+    }
+    if bind.is_match(line) {
+        return Some(Output::BindError);
+    }
     if listening.is_match(line) {
         return Some(Output::Listening);
     }
@@ -62,6 +75,10 @@ pub(crate) fn classify(line: &str) -> Option<Output> {
         .map(Output::Build)
 }
 
+/// Live tests read the child's lines here (the marker check); nothing else ever does.
+#[cfg(test)]
+pub(crate) static TAP: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
 /// Reads `reader` to its end, cutting lines at [`LINE_BOUND`], and calls `event` for each
 /// line that signals something. Memory stays bounded whatever the child writes.
 pub(crate) fn drain(mut reader: impl Read, mut event: impl FnMut(Output)) {
@@ -69,6 +86,10 @@ pub(crate) fn drain(mut reader: impl Read, mut event: impl FnMut(Output)) {
     let mut skipping = false;
     let mut chunk = [0_u8; 8192];
     let finish = |line: &mut Vec<u8>, event: &mut dyn FnMut(Output)| {
+        #[cfg(test)]
+        if let Some(tap) = TAP.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut() {
+            tap.push(String::from_utf8_lossy(line).into_owned());
+        }
         if let Some(found) = classify(&String::from_utf8_lossy(line)) {
             event(found);
         }
@@ -138,6 +159,19 @@ mod tests {
         );
         assert_eq!(
             classify("0.03.067.149 I slot print_timing: id  0 | task 0 | prompt eval time"),
+            None
+        );
+        assert_eq!(
+            classify("bwrap: Can't find source path /nonexistent: No such file or directory"),
+            Some(Output::SandboxError)
+        );
+        assert_eq!(
+            classify("srv    init: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 9"),
+            Some(Output::BindError)
+        );
+        // The CPU build's note on the CPU path is not a device error.
+        assert_eq!(
+            classify("warning: no usable GPU found, --gpu-layers option will be ignored"),
             None
         );
     }

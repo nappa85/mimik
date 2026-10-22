@@ -9,13 +9,39 @@ permissions:
   contents: read
 
 jobs:
+  # The pinned llama.cpp build (ASSIST-33, ASSIST-42): release assets, the test model and the
+  # source archive, every hash checked against schemas/llama-runtime-v1.json.
+  llama-fetch:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build isolated check environment
+        run: docker build -f containers/ci.Dockerfile -t mimik-ci .
+      - name: Fetch and verify the pinned runtime, test model and source
+        run: |
+          docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" -w /workspace \
+            mimik-ci python tools/llama_runtime.py fetch --out target/llama-fetch
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: llama-fetch
+          path: target/llama-fetch/
+          if-no-files-found: error
+
   checks:
+    needs: llama-fetch
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: llama-fetch
+          path: target/llama-fetch
       - name: Build isolated check environment
         run: docker build -f containers/ci.Dockerfile -t mimik-ci .
       - name: Lints, regressions, security, licensing and release inside container
@@ -41,7 +67,11 @@ jobs:
               cargo package --locked --allow-dirty
               python tools/verify_source_package.py target/package/mimik-0.1.0.crate
               cargo vendor --locked target/vendor > target/vendor-config.toml
+              python tools/llama_runtime.py verify --dir target/llama-fetch/llama --models target/llama-fetch/models
               python tools/package_release.py --version 0.1.0 --revision "$REVISION"
+              cargo test --locked --all-features --lib --no-run --message-format=json > target/test-build.json
+              mkdir -p target/confinement
+              python -c "import json,shutil; e=[m[\"executable\"] for m in map(json.loads, open(\"target/test-build.json\")) if m.get(\"reason\")==\"compiler-artifact\" and m[\"target\"][\"name\"]==\"mimik\" and m[\"target\"][\"kind\"]==[\"lib\"] and m[\"profile\"][\"test\"]]; assert len(e)==1, e; shutil.copy2(e[0], \"target/confinement/confinement-tests\")"
               cargo build --locked --features dev-endpoint --bin mimik --target-dir target/dev-endpoint
             '
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -50,7 +80,15 @@ jobs:
           path: |
             target/dist/*.tar.gz
             target/dist/*-source.crate
+            target/dist/*-source.tar.gz
             target/dist/SHA256SUMS
+          if-no-files-found: error
+      # The lib test binary with the confinement and live tests (built in the Ubuntu 22.04
+      # image, so it also runs on 24.04); it reads nothing from the source tree.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: confinement-tests
+          path: target/confinement/confinement-tests
           if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -172,20 +210,105 @@ jobs:
       - name: Unpacked separate-client LAN and HTTPS proxy acceptance
         run: python3 tools/lan_smoke.py --binary release/mimik-0.1.0-linux-x86_64/mimik --source-root release/lan-source/mimik-0.1.0 --source-fixture smoke-source
 
+  # The pinned llama-server under the real profiles, from the unpacked release, as host steps
+  # (Docker's seccomp profile refuses the namespaces bwrap needs). No Rust toolchain.
+  llama-runtime:
+    needs: [llama-fetch, checks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: linux-release
+          path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: llama-fetch
+          path: fetched
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: confinement-tests
+          path: target
+      - name: Verify and unpack the release, reapply the manifest's modes
+        run: |
+          (cd release && sha256sum --check SHA256SUMS)
+          mkdir -p target/rel target/models target/scratch
+          tar -xzf release/mimik-0.1.0-linux-x86_64.tar.gz -C target/rel --strip-components=1
+          cp fetched/models/* target/models/
+          python3 tools/llama_runtime.py verify --dir target/rel/llama --models target/models
+          chmod 0755 target/rel/mimik target/confinement-tests
+      - name: Install bubblewrap (a pinned upstream release if the package lacks an option)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          bwrap --version
+          missing=""
+          for option in --unshare-all --die-with-parent --new-session --clearenv --setenv --cap-drop --ro-bind --bind-fd --ro-bind-fd --ro-bind-data --perms --dev --proc --tmpfs --dir --symlink --remount-ro --seccomp --json-status-fd --chdir --size; do
+            bwrap --help 2>&1 | grep -q -- "$option " || missing="$missing $option"
+          done
+          if [ -n "$missing" ]; then
+            echo "bubblewrap lacks:$missing; building the pinned upstream 0.13.0"
+            sudo apt-get install -y meson ninja-build libcap-dev pkg-config
+            curl -fsSL -o bwrap.tar.xz https://github.com/containers/bubblewrap/releases/download/v0.13.0/bubblewrap-0.13.0.tar.xz
+            echo "4734237473c0e5d695e4e9034a34e43b2dbf5164655bd13fa59ae376b2b7a765  bwrap.tar.xz" | sha256sum --check
+            tar -xJf bwrap.tar.xz
+            (cd bubblewrap-0.13.0 && meson setup build --prefix=/usr -Dman=disabled -Dtests=false && ninja -C build && sudo ninja -C build install)
+            bwrap --version
+          fi
+      - name: Allow unprivileged user namespaces for this job only
+        run: |
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          else
+            echo "kernel.apparmor_restrict_unprivileged_userns is absent"
+          fi
+          cat /sys/kernel/security/lsm || true
+      - name: Flag check of the pinned llama-server
+        run: |
+          server=target/rel/llama/cpu/llama-server
+          expected=$(python3 -c "import json; print(json.load(open('schemas/llama-runtime-v1.json'))['llama_cpp']['version_line'])")
+          "$server" --version 2>&1 | grep -qF "$expected"
+          help=$("$server" --help 2>&1)
+          for flag in --model --alias --host --port --api-key-file --offline --no-webui --no-slots --no-mmproj --jinja --n-gpu-layers --fit --threads --threads-batch --ctx-size --parallel --no-warmup --cache-ram --reasoning --ignore-eos --device --list-devices; do
+            grep -qF -- "$flag" <<<"$help" || { echo "llama-server lacks $flag"; exit 1; }
+          done
+      - name: Start-time probe (exits 0 only at level 1)
+        run: |
+          target/rel/mimik assistant-runner --probe --runtime target/rel/llama \
+            --models-dir target/models --model local:stories260K.gguf \
+            --model-sha256 270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d \
+            --data-dir target/probe-data
+      - name: Confinement, endpoint and live tests against the unpacked runtime
+        env:
+          MIMIK_LIVE_RUNTIME: ${{ github.workspace }}/target/rel/llama
+          MIMIK_LIVE_MODELS: ${{ github.workspace }}/target/models
+          MIMIK_LIVE_SCRATCH: ${{ github.workspace }}/target/scratch
+        run: |
+          target/confinement-tests --include-ignored --test-threads=2 \
+            assistant::runtime::seccomp:: assistant::runtime::endpoint:: \
+            assistant::runtime::runner:: assistant::runtime::launch::live_tests::
+
   deployable:
     name: deployable
     if: ${{ always() }}
-    needs: [checks, artifact-smoke, browser-smoke, lan-smoke]
+    needs: [llama-fetch, checks, artifact-smoke, browser-smoke, lan-smoke, llama-runtime]
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
       - name: Fail closed on any failed, cancelled, or skipped prerequisite
         env:
+          FETCH: ${{ needs.llama-fetch.result }}
+          RUNTIME: ${{ needs.llama-runtime.result }}
           CHECKS: ${{ needs.checks.result }}
           SMOKE: ${{ needs.artifact-smoke.result }}
           BROWSER: ${{ needs.browser-smoke.result }}
           LAN: ${{ needs.lan-smoke.result }}
         run: |
+          test "$FETCH" = success
+          test "$RUNTIME" = success
           test "$CHECKS" = success
           test "$SMOKE" = success
           test "$BROWSER" = success

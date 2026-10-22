@@ -23,7 +23,16 @@ fn a_second_holder_cannot_take_the_pidfile() {
     let first = Pidfile::acquire(run.as_fd()).unwrap().unwrap();
     assert_eq!(Pidfile::acquire(run.as_fd()).unwrap().unwrap_err(), Busy);
     drop(first);
-    assert!(Pidfile::acquire(run.as_fd()).unwrap().is_ok());
+    // A concurrent test's fork may hold the descriptor until its exec closes it.
+    let mut again = false;
+    for _ in 0..100 {
+        if Pidfile::acquire(run.as_fd()).unwrap().is_ok() {
+            again = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(again);
 }
 
 #[test]
@@ -86,23 +95,28 @@ fn a_leftover_is_killed_only_when_pid_start_time_and_path_match() {
 #[test]
 fn generation_directories_are_fresh_private_and_removed() {
     let (dir, run) = data();
-    let generation = Generation::create(&run, 1).unwrap();
+    let generation = Generation::create(&run, "1").unwrap();
     let path = dir.path().join("run/1");
     assert_eq!(
         std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o700
     );
     std::fs::write(path.join("written-by-the-server"), b"x").unwrap();
+    std::fs::create_dir_all(path.join("home/.cache/deeper")).unwrap();
+    std::fs::write(path.join("home/.cache/deeper/file"), b"x").unwrap();
+    std::os::unix::fs::symlink(dir.path(), path.join("home/link-out")).unwrap();
     drop(generation);
+    // The link was removed, not followed.
+    assert!(dir.path().join("run").exists());
     assert!(!path.exists());
 
     // Already there (any kind): refused.
     std::fs::create_dir(dir.path().join("run/2")).unwrap();
-    assert!(Generation::create(&run, 2).is_err());
+    assert!(Generation::create(&run, "2").is_err());
     std::os::unix::fs::symlink(dir.path(), dir.path().join("run/3")).unwrap();
-    assert!(Generation::create(&run, 3).is_err());
+    assert!(Generation::create(&run, "3").is_err());
     std::fs::write(dir.path().join("run/4"), b"").unwrap();
-    assert!(Generation::create(&run, 4).is_err());
+    assert!(Generation::create(&run, "4").is_err());
 
     // The sweep at start removes them, unlinking the link (not its target), and keeps the
     // pidfile.
@@ -116,5 +130,5 @@ fn generation_directories_are_fresh_private_and_removed() {
     }
     assert!(dir.path().exists());
     assert!(dir.path().join("run").join(PIDFILE).exists());
-    assert!(Generation::create(&run, 2).is_ok());
+    assert!(Generation::create(&run, "2").is_ok());
 }
