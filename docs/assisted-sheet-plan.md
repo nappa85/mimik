@@ -562,7 +562,11 @@ natively for these tests (ASSIST-40).
   targeting that number are refused if needed. If 2c-2's live check shows this cannot be made
   sound, lifetime containment on levels 2 and 3 is best effort (the pidfile sweep at the next
   start) and the page says so (ASSIST-L27). `pidfd_open`, `pidfd_getfd`, `process_madvise`
-  and `kcmp` are refused (they would let the server reach Mimik's descriptors); `io_uring_setup`,
+  and `kcmp` are refused (they would let the server reach Mimik's descriptors). TCP Fast Open
+  is refused on every level: `sendto` whose flags carry `MSG_FASTOPEN`, `sendmsg` and
+  `sendmmsg` whose flags carry it, and `setsockopt(TCP_FASTOPEN_CONNECT)` return `EPERM`, since
+  Landlock's connect rule is defined on `connect()` and a fast-open send on an unconnected
+  TCP socket must not be a way around it; `io_uring_setup`,
   `io_uring_enter`, `io_uring_register`, `ptrace`, `process_vm_readv`/`writev`, `bpf`,
   `perf_event_open`, `keyctl`, `add_key`, `request_key`, `mount`, `umount2`, `pivot_root`,
   `unshare`, `setns`, module and `kexec` calls are refused. Seccomp sees no `connect()`
@@ -1180,7 +1184,9 @@ night or at a weekend):
   thread → exec → SIGKILL of Mimik → nothing survives (or, if 2c-2 finds this unsound, the
   pidfile sweep removes it at the next start and the page says lifetime containment is best
   effort); a ptrace-accessible cooperative helper holding a forbidden descriptor → the child's
-  `pidfd_open` and `pidfd_getfd` are refused, also with Yama scope 0;
+  `pidfd_open` and `pidfd_getfd` are refused, also with Yama scope 0; a `sendto`, `sendmsg`
+  or `sendmmsg` with `MSG_FASTOPEN` to a host listener and `setsockopt(TCP_FASTOPEN_CONNECT)`
+  → `EPERM` on every level, and the listener sees no connection;
 - endpoint: level 1 (live): the peer of llama-server's socket has the reaper as parent and the
   reported `pid-namespace`, and is accepted; a peer with Mimik's UID that is not in that
   namespace (a helper listening on a socket swapped into the directory) → nothing sent; a
