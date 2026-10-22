@@ -171,7 +171,7 @@ async fn actual_old_json_loads_with_defaults_and_round_trips_without_losing_stat
     let store = Store::open(&path).unwrap();
     let (_, sheet, saved) = store.mork_borg_sheet(created.id).await.unwrap();
     assert!(saved);
-    assert!(sheet.description.is_empty());
+    assert_eq!(sheet.description, "");
     assert_eq!(sheet.campaign_miseries, None);
     assert_eq!(sheet.hp, 1);
     store.save_mork_borg_sheet(created.id, sheet).await.unwrap();
@@ -336,7 +336,7 @@ async fn ordinary_transport_rejections_do_not_promise_an_undelivered_draft() {
                     .to_vec(),
             )
             .unwrap();
-            assert!(!text.is_empty());
+            assert_ne!(text, "");
             assert!(!text.contains("displayed draft was kept"));
             let after = store.mork_borg_sheet(created.id).await.unwrap();
             assert_eq!(after.0.input.name, before.0.input.name);

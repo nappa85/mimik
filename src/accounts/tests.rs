@@ -32,7 +32,7 @@ async fn readiness(listener: &UnixListener, timeout: Duration) -> std::io::Resul
                 Err(error) => return Err(error),
             }
         }
-        if ready != [b'R'] {
+        if ready != *b"R" {
             return Err(std::io::Error::other("invalid child readiness"));
         }
         let socket = socket.into_std()?;
@@ -949,8 +949,8 @@ async fn run_process_race(
     for socket in &mut connections {
         let mut outcome = [0];
         socket.read_exact(&mut outcome).unwrap();
-        assert!(outcome == [b'W'] || outcome == [b'L']);
-        winners += usize::from(outcome == [b'W']);
+        assert!(outcome == *b"W" || outcome == *b"L");
+        winners += usize::from(outcome == *b"W");
     }
     children.finish();
     assert_eq!(

@@ -1,4 +1,4 @@
-//! rig-core 0.44.0 probe: C1 schema pass-through, C2 client policy, C3 body bound, C4 cancellation.
+//! rig-core 0.45.0 probe: C1 schema pass-through, C2 client policy, C3 body bound, C4 cancellation.
 use std::net::SocketAddr;
 
 use bytes::Bytes;

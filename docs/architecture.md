@@ -130,7 +130,7 @@ migrations.
 - **Containers (`containers/`):** every tool runs in a pinned container, never on the host
   (one exception: the pinned official llama-server build may run natively on the dev host for
   runtime-manager tests, ASSIST-40).
-  `ci.Dockerfile` (Ubuntu 22.04, Rust 1.95.0, rustfmt, Clippy, actionlint 1.7.7, uv with Python
+  `ci.Dockerfile` (Ubuntu 22.04, Rust 1.99.1, rustfmt, Clippy, actionlint 1.7.7, uv with Python
   3.12.12, Ruff, cargo-audit 0.22.2, cargo-about 0.9.2), `browser.Dockerfile` (Playwright 1.56
   Chromium), `extraction.Dockerfile` (Marker, CPU), `decision-benchmark.Dockerfile` and
   `model-screen.Dockerfile` (local model evaluation).

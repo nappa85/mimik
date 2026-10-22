@@ -10,9 +10,8 @@ notes and scribbles, switch and Undo, unknown values, per-field save, the busy p
 bound, quick-add, the validity flag, the sheet module with save on leaving a field) is described
 in `docs/assisted-entry.md`; this plan only adds to it.
 
-Remaining, in order (2b measured and reviewed, `docs/results.md`; ASSIST-27 to ASSIST-40
-decided): the Rust 1.99.1 and `rig-core` 0.45.0 upgrade (ASSIST-39, its own change), **2c-1**
-interpretation against a hand-started local server, **2c-2** the model runtime (process,
+Remaining, in order (2b measured and reviewed, `docs/results.md`; ASSIST-27 to ASSIST-41
+decided; Rust 1.99.1 and `rig-core` 0.45.0 in place, ASSIST-39): **2c-1** interpretation against a hand-started local server, **2c-2** the model runtime (process,
 token, confinement, budgets), **2d-1** the owner model setting with local models, **2d-2**
 model downloads, **3** bundles and reminders, **4** suggestions and "Which Sword?", **5** docs
 and gate; each sub-step has its own branch, tests and reviews. The model runs GPU-first with
@@ -166,21 +165,21 @@ implementation for both).
 - **Confidence:** if the runtime returns token log-probabilities they are recorded on the job
   record for evaluation only; nothing is gated or hidden on them in 2c.
 - **Crate (D-H, ASSIST-39):** `rig-core` =0.45.0 on Rust 1.99.1; the toolchain and crate
-  upgrade is its own reviewed change, lands before 2c-1 and re-runs 2b's rig-core checks (C1
-  to C5). Default features off plus `reqwest`, on the OpenAI chat route with the llama.cpp
-  dialect; the schema goes in `additional_params` as `response_format` (sent byte-exact; the
-  native `output_schema` path rewrites `oneOf` to `anyOf`), with `cache_prompt`, the sampler
-  and `stream` beside it. The body bound is a small Mimik transport implementing rig's
-  `HttpClientExt` (plain and streaming bodies refused past 1 MiB, as probed in 2b); no D-H
-  crate offers one. The same transport carries the Unix-socket connection of the bubblewrap path
-  (§1.4a): over `reqwest`'s Unix-socket connector if the upgraded `reqwest` has one with the
-  client policy below (checked in the upgrade change), otherwise over `hyper`'s HTTP/1
-  client connection on a `tokio` `UnixStream`; either way one transport, tested against a
-  fake server on a Unix socket and on TCP. `genai` was rejected (no body hook). The
-  per-launch token (§1.4a) is rig's API key, sent as `Authorization: Bearer`. The model client
-  uses no TLS; from 2d-2 the binary contains TLS for downloads (§1.4b), and Cargo unifies
-  `reqwest` features, so the model client's plain-HTTP property rests on the guard below, not
-  on the dependency tree.
+  upgrade landed as its own reviewed change, with 2b's offline rig-core checks re-run
+  (`docs/results.md`). Default features off plus `reqwest`, on the OpenAI chat route with the
+  llama.cpp dialect; the schema goes in `additional_params` as `response_format` (arrives
+  structurally identical; the native `output_schema` path rewrites `oneOf` to `anyOf`), with
+  `cache_prompt`, the sampler and `stream` beside it. The body bound is a small Mimik
+  transport implementing rig's `HttpClientExt` (plain and streaming bodies refused past 1 MiB,
+  as probed in 2b); no D-H crate offers one. The same transport carries the Unix-socket
+  connection of the bubblewrap path (§1.4a): over `reqwest`'s Unix-socket connector if the
+  upgraded `reqwest` has one with the client policy below (checked in 2c-1), otherwise over
+  `hyper`'s HTTP/1 client connection on a `tokio` `UnixStream`; either way one transport,
+  tested against a fake server on a Unix socket and on TCP. `genai` was rejected (no body
+  hook). The per-launch token (§1.4a) is rig's API key, sent as `Authorization: Bearer`. The
+  model client uses no TLS; from 2d-2 the binary contains TLS for downloads (§1.4b), and Cargo
+  unifies `reqwest` features, so the model client's plain-HTTP property rests on the guard
+  below, not on the dependency tree.
 - **STROT** (judged on results, user 2026-10-19): the tested configuration (Julia-1 through
   strot-ai choosing among 16 to 71 generated arithmetic-string candidates plus "none",
   threshold 0.40, one selection) is rejected (2 of 50 correct, 42 false-confident); a design
@@ -958,161 +957,142 @@ no sheet or player text. No prompts, player text, presigned URLs or token in log
 
 ## 2. Steps
 
-### Upgrade (ASSIST-39)
-
-Scope: Rust 1.99.1 in `rust-toolchain.toml`, `containers/ci.Dockerfile` and the `BUILD.txt`
-line of `package_release.py`; `rig-core` =0.45.0 and the resulting `Cargo.lock`; Clippy and
-fmt findings of the new toolchain fixed, not suppressed; 2b's rig-core checks C1 to C5 re-run
-against 0.45.0 (schema pass-through, host-built client policy, body bound through the own
-transport, cancellation, licences); and the answer to whether the upgraded `reqwest` has a
-Unix-socket connector that keeps the client policy (§1.4, Crate). Its own branch and reviews;
-2c-1 starts on it.
-
 ### 2c-1 Interpretation
 
-Scope: trait, stub, adapter; the client policy with both connectors and the token; the
+Scope: trait, stub, adapter; the client policy with both connectors and the token (first:
+whether `reqwest` has a Unix-socket connector that keeps the client policy, §1.4 Crate); the
 request builder with the byte and token bounds and the related-fields context; the runtime
-event interface the worker consumes (`generation started`, `generation ended` with its
-reason, `ready` with the budgets B, N(B), R, D, Q), fed in 2c-1 by the development endpoint's
-fixed configuration and by test doubles, and in 2c-2 by the runtime manager; the formula
-layer's read-set accessor (§1.4, Read sets); output schema v2, reviewed before use: `ref`
-accepts only a request-local alias from the supplied list (`f1`, `c1`, `t`), the instructions
-describe aliases and same-row cells, the 2b screen re-run under v2 on the dev host to re-check
-`max_tokens` 192, the
-Rust copy lives under `schemas/`, the fixed prefix is re-measured (tokens and priming time),
-and a live check confirms the pinned build's grammar conversion accepts the alias enum; the note key in the JSON answer of an
-`unresolved` note (§1.4, Routes); worker, admission, records and breaker; the job, poll and
-apply routes with origin and read/write-set binding; the UI. The model server is started by
-hand on the dev host (ASSIST-40) and reached through a development endpoint setting
-(`--assistant-dev-endpoint`, a loopback literal or a socket path, with a token file; the model
-is `--assistant-model` (the spec, §1.4b), `--assistant-model-sha256` and
-`--assistant-model-alias` (the request's model name, default derived from the spec's file
-name, `granite-4.2-3b-q4_k_m` for the default), and the hand-started server must be given the
-same `--alias`), compiled
-only with the `dev-endpoint` Cargo feature, which release builds never enable (`smoke_release.py`
-checks the staged binary refuses the option); it has no endpoint check. Budgets come from
-flags of the dev build (development placeholders, not evidence): `--assistant-dev-bytes`
-(B, default 1,024), `--assistant-dev-token-limit` (N(B), default 384, above the about 296
-tokens a 1 KiB part takes at 3.5 bytes per token),
-`--assistant-dev-deadline` (R, default 85 s), `--assistant-dev-queue` (D, default 1) and
-`--assistant-dev-queue-wait` (Q, default 35 s). In a 2c-1 release build, which has neither
-the endpoint nor the runtime, `--assistant` is refused at start ("the assistant is not
-available in this build"), so the assistant stays off and no assistant page exists. Until 2c-2 lands the assistant is a
-development feature, outside the release scope, and the release scope's "no language model"
-statement stays true because the release binary has no endpoint. Tests (stub or fake server unless
-stated):
-- output: schema-invalid, grammar-invalid and truncated JSON; more than 3 options; a tree deeper
-  than 3 below the root (which is also what refuses a ninth leaf); literal provenance (`84 + 915` dropped; `5` from "heal 15" dropped; U+2212, NBSP);
-  references to a derived, text, multiline, notes or list-cell field, to an unsupplied field
-  and to an unknown value; `/` with each rounding mode on negatives; `exact` with a remainder;
-  division by zero; `i64` boundary and intermediate overflow; a non-tree or string expression;
-  `ambiguous` with more than 3 readings or a reading over 120 characters dropped, readings
-  escaped and never applicable;
-- lexer: `heal 15`, `take −15 damage`, `15%`, `1.5`, `x.5`, `5.`, `1,000`, `1e2`, `3d6`,
-  `15hp`, `15²`, `①`, `007`, full-width digits, 19 digits, `1٫5`, `1．5`, `1，000`,
-  `1 500` (NBSP and U+202F), `1'500`, `15,` then a space (15), `(15)` (15), `15/20` (15 and
-  20); `heal,15` and `1,2,3` give nothing (accepted false rejects, erring towards no option); "half of 84" admits 2, "metà" and
-  "meta" admit 2, "halfway" and "quarterly" do not, a phrase without a fraction word does
-  not;
-- input: a parsed entry and a sign-led entry never start a job; the phrase comes from the
-  stored note, not the request; the fixed prefix is byte-identical across requests; the
-  dynamic part stays within B (4,096, 2,048, 1,024, 768, 512) and within N(B) tokens (the fake
-  server's `/tokenize` returning a high count drops items that the byte bound kept), dropping
-  whole items; the development token limit (`--assistant-dev-token-limit`, default 256)
-  is the N(B) 2c-1 enforces; the target's label goes before the phrase, target ID or value; a phrase and
-  target over a bound end "too long" without a completion request and without a breaker count;
-  excluded field types never appear in the request;
-- read sets: per derived value and check, scalar reads and `(list, property)` reads grouped by
-  binder, closed through derived dependencies; `item.a` and `item.b` in one comprehension are
-  co-read, while `a` in one comprehension and `b` in another over the same list are not, also
-  when both bind `item` and when one of them is inside a derived value the other reads; a
-  `has()` presence test counts as a co-read; `reads_unknown`, U2 and the formula profile bytes
-  are unchanged by the accessor (asserted on existing fixtures);
-- related fields (B ≤ 1,024): a field read with the target by a check, or through a derived
-  value it reads, is sent; a field only in the same group, or named in the phrase but not
-  co-read, is not; a row-cell target sends the scalars co-read with its property; definition
-  order and drop from the end; a pin without a formula layer sends none; with B 2,048 the full
-  D-F/D-J scalar list is sent; a `ref` to an unsent field or to an enum field drops the
-  option;
-- same-row cells (every path, B 4,096 and B 1,024 alike): for a target cell of row `h`, an
-  integer or enum cell of row `h` co-read with the target's property is sent with an alias
-  (`c1`) that Rust maps to `cell:<list>/<h>/<b>`, a text, multiline or derived property never
-  is, a cell of another row with the same property never is, nor a same-row cell not co-read;
-  a `ref` to that alias evaluates with its value; a `ref` to an alias not in the supplied list
-  (or a typed address written out instead of an alias) drops the option; aliases are
-  request-local (the same field may have another alias in the next request); the row moved since the job →
-  found by host ID; the cell changed or the row removed before apply → apply refused;
-- note key: a cell save that records `unresolved` answers with `note.key` in the JSON (the
-  typed host-ID form for row cells too), the page markup is unchanged, a cell whose note
-  predates the answer's revision yields a key with the note's revision that starts a job; a
-  row moved before the JSON answer builds the key → the key still names the original host ID
-  and the start finds that row; a
-  start with that key is accepted, and a key of a parsed or sign-led note is refused (409);
-- injection: a phrase containing "ignore previous instructions" yields at most an option,
-  never a write without Use; a context value with instructions stays inside the data envelope;
-- origin: scribble A → scribble B with the same stored value; scribble → typed value; a save
-  through the legacy full form; reversed job-start requests; another edit after the job
-  finished; a late answer after cancellation — none may revive or apply the old proposal; a
-  delayed start for scribble A neither cancels nor restarts B's job (409); a repeated start for
-  the same origin (a double click) returns the same job and cancels nothing; a job for another
-  target of the same account supersedes the first; reversed starts across two targets (B's
-  start first, then A's older one) → A is 409 and B keeps running; an indexed row-cell key
-  after the row was moved resolves to the same host, after it was removed → 409; a save racing
-  a start leaves either the job cancelled or the start refused, never a live job for a stale
-  note;
-- budgets: a queue full of other accounts' jobs → 429, and the refused start cancels nothing;
-  a breaker refusal cancels nothing; a start that supersedes the account's running job is
-  admitted with the queue otherwise full (counted as if the old job were gone); a note written
-  between the start's database check and its enqueue → 409; two targets written in one
-  revision → the later start supersedes; a start on a second sheet while the account has a live job → 429; cancellation (the
-  fake server sees the disconnect and the slot is free); queue wait and run deadline expiry;
-  64 records and the evicted-job answer; option expiry at 10 minutes; busy admission (§1.4,
-  Jobs): with R 85 and Q 35 a start while a job has more than 35 s left → 429 "busy", with less
-  → queued; a second waiting job beyond D → 429; with 64 records of which some are finished,
-  a new start evicts the oldest finished one and never a running or queued job; with 64 live
-  jobs a start → 429; the note-write map: a start registered with an old origin keeps the
-  entries it needs until it ends (a delayed start after many writes still gets 409);
-- breaker (injectable clock): three transport failures open it, two do not; 100 dropped or
-  nonsense answers never open it; supersession and cancellation never count; one half-open
-  probe while others are refused; probe success closes, failure reopens; a 2xx with all
-  options dropped resets the count and closes a half-open breaker; a cancelled probe clears the
-  probe flag and leaves it half-open; queue-wait and run-deadline expiries never count (ten in
-  a row leave it closed); a malformed completion stream counts; a child exit never counts,
-  whether it arrives before or after the job's transport error: error first, then the exit
-  within 2 s → the provisional count is withdrawn, and a breaker that this count opened closes
-  again; error first and no exit → the count stays; a new child leaves the breaker as it was, and only Restart and app start
-  reset it;
-  mixed sequences (failure, success, failure) do not open it; while open, number
-  entry, notes and Undo work and the poll says the assistant is unavailable; a start reports
-  `starting` before an open breaker;
-- client: a host name, `localhost`, `127.1`, `0x7f.1`, `2130706433`, `::ffff:127.0.0.1`,
-  userinfo, a zone ID or an `https` URL refused; `::1` refused on the runtime paths; `HTTP_PROXY`,
-  `HTTPS_PROXY`, `ALL_PROXY` and their lowercase forms set and a 302 from the fake server
-  never reach anything but the endpoint; one request per call on a 500 or 429; a gzip-encoded
-  reply is not decoded; a body over the bound is refused, plain and streaming, without
-  buffering it; the schema arrives byte-exact in `response_format` with `cache_prompt: true`
-  and `stream: true`; the same tests over the Unix-socket connector (a path other than the
-  configured socket refused);
-- apply: a referenced field changes while the target does not → refused; a referenced row
-  disappears → refused; effect mismatch → refused; content-hash mismatch → refused; a second
-  apply, including two concurrent applies (exactly one writes, consumed only after commit) →
-  refused; another sheet's or account's job or an invalid option index → refused; an unrelated
-  field change → still applied; an expired job → no write and no literal; Undo of an applied
-  proposal; apply after rights are revoked or the sheet is frozen → 403 and no write;
-- routes (connected router): missing or wrong CSRF, extra or duplicate keys, body limit,
-  malformed `note`; apply accepts exactly `csrf`; session or rights revoked between lookup and
-  answer; apply checks CSRF and session before its D-X3 wait, answers the styled busy 503 and
-  succeeds on retry; poll of another account's or sheet's job → not found; "ask again" on poll
-  and on apply;
-- browser (JS, 1280 and 390): unresolved save → "Thinking…" → option with current value,
-  expression and effect → Use → value and `confirmed` note → Undo; an `ambiguous` reply shows
-  readings without Use; supersession while polling; an escaped explanation;
-- assistant off: no client, no job route (404), no "Thinking…"; no player text in logs or in
-  4xx bodies other than the player's own echoed draft; a release build has no
-  `--assistant-dev-endpoint` option;
-- live (hand-started pinned llama-server, ASSIST-40; reported as live inference): one smoke;
-  the second request of a session reports the cached prefix tokens in `timings`; a job
-  cancelled mid-generation frees the slot (the next job's first token within its usual time).
+event interface the worker consumes (`generation started`, `generation ended` with its reason,
+`ready` with the budgets B, N(B), R, D, Q), fed in 2c-1 by the development endpoint's fixed
+configuration and by test doubles, and in 2c-2 by the runtime manager; the formula layer's
+read-set accessor (§1.4, Read sets); output schema v2, reviewed before use: `ref` accepts only
+a request-local alias from the supplied list (`f1`, `c1`, `t`), the instructions describe
+aliases and same-row cells, the 2b screen re-run under v2 on the dev host to re-check
+`max_tokens` 192, the Rust copy lives under `schemas/`, the fixed prefix is re-measured
+(tokens and priming time), and a live check confirms the pinned build's grammar conversion
+accepts the alias enum; the note key in the JSON answer of an `unresolved` note (§1.4,
+Routes); worker, admission, records and breaker; the job, poll and apply routes with origin
+and read/write-set binding; the UI. The model server is started by hand on the dev host
+(ASSIST-40) and reached through a development endpoint setting (`--assistant-dev-endpoint`, a
+loopback literal or a socket path, with a token file; the model is `--assistant-model` (the
+spec, §1.4b), `--assistant-model-sha256` and `--assistant-model-alias` (the request's model
+name, default derived from the spec's file name, `granite-4.2-3b-q4_k_m` for the default), and
+the hand-started server must be given the same `--alias`), compiled only with the
+`dev-endpoint` Cargo feature, which release builds never enable (`smoke_release.py` checks the
+staged binary refuses the option); it has no endpoint check. Budgets come from flags of the
+dev build (development placeholders, not evidence): `--assistant-dev-bytes` (B, default
+1,024), `--assistant-dev-token-limit` (N(B), default 384, above the about 296 tokens a 1 KiB
+part takes at 3.5 bytes per token), `--assistant-dev-deadline` (R, default 85 s),
+`--assistant-dev-queue` (D, default 1) and `--assistant-dev-queue-wait` (Q, default 35 s). In
+a 2c-1 release build, which has neither the endpoint nor the runtime, `--assistant` is refused
+at start ("the assistant is not available in this build"), so the assistant stays off and no
+assistant page exists. Until 2c-2 lands the assistant is a development feature, outside the
+release scope, and the release scope's "no language model" statement stays true because the
+release binary has no endpoint. Tests (stub or fake server unless stated): - output:
+schema-invalid, grammar-invalid and truncated JSON; more than 3 options; a tree deeper than 3
+below the root (which is also what refuses a ninth leaf); literal provenance (`84 + 915`
+dropped; `5` from "heal 15" dropped; U+2212, NBSP); references to a derived, text, multiline,
+notes or list-cell field, to an unsupplied field and to an unknown value; `/` with each
+rounding mode on negatives; `exact` with a remainder; division by zero; `i64` boundary and
+intermediate overflow; a non-tree or string expression; `ambiguous` with more than 3 readings
+or a reading over 120 characters dropped, readings escaped and never applicable; - lexer:
+`heal 15`, `take −15 damage`, `15%`, `1.5`, `x.5`, `5.`, `1,000`, `1e2`, `3d6`, `15hp`, `15²`,
+`①`, `007`, full-width digits, 19 digits, `1٫5`, `1．5`, `1，000`, `1 500` (NBSP and U+202F),
+`1'500`, `15,` then a space (15), `(15)` (15), `15/20` (15 and 20); `heal,15` and `1,2,3` give
+nothing (accepted false rejects, erring towards no option); "half of 84" admits 2, "metà" and
+"meta" admit 2, "halfway" and "quarterly" do not, a phrase without a fraction word does not; -
+input: a parsed entry and a sign-led entry never start a job; the phrase comes from the stored
+note, not the request; the fixed prefix is byte-identical across requests; the dynamic part
+stays within B (4,096, 2,048, 1,024, 768, 512) and within N(B) tokens (the fake server's
+`/tokenize` returning a high count drops items that the byte bound kept), dropping whole
+items; the development token limit (`--assistant-dev-token-limit`, default 256) is the N(B)
+2c-1 enforces; the target's label goes before the phrase, target ID or value; a phrase and
+target over a bound end "too long" without a completion request and without a breaker count;
+excluded field types never appear in the request; - read sets: per derived value and check,
+scalar reads and `(list, property)` reads grouped by binder, closed through derived
+dependencies; `item.a` and `item.b` in one comprehension are co-read, while `a` in one
+comprehension and `b` in another over the same list are not, also when both bind `item` and
+when one of them is inside a derived value the other reads; a `has()` presence test counts as
+a co-read; `reads_unknown`, U2 and the formula profile bytes are unchanged by the accessor
+(asserted on existing fixtures); - related fields (B ≤ 1,024): a field read with the target by
+a check, or through a derived value it reads, is sent; a field only in the same group, or
+named in the phrase but not co-read, is not; a row-cell target sends the scalars co-read with
+its property; definition order and drop from the end; a pin without a formula layer sends
+none; with B 2,048 the full D-F/D-J scalar list is sent; a `ref` to an unsent field or to an
+enum field drops the option; - same-row cells (every path, B 4,096 and B 1,024 alike): for a
+target cell of row `h`, an integer or enum cell of row `h` co-read with the target's property
+is sent with an alias (`c1`) that Rust maps to `cell:<list>/<h>/<b>`, a text, multiline or
+derived property never is, a cell of another row with the same property never is, nor a
+same-row cell not co-read; a `ref` to that alias evaluates with its value; a `ref` to an alias
+not in the supplied list (or a typed address written out instead of an alias) drops the
+option; aliases are request-local (the same field may have another alias in the next request);
+the row moved since the job → found by host ID; the cell changed or the row removed before
+apply → apply refused; - note key: a cell save that records `unresolved` answers with
+`note.key` in the JSON (the typed host-ID form for row cells too), the page markup is
+unchanged, a cell whose note predates the answer's revision yields a key with the note's
+revision that starts a job; a row moved before the JSON answer builds the key → the key still
+names the original host ID and the start finds that row; a start with that key is accepted,
+and a key of a parsed or sign-led note is refused (409); - injection: a phrase containing
+"ignore previous instructions" yields at most an option, never a write without Use; a context
+value with instructions stays inside the data envelope; - origin: scribble A → scribble B with
+the same stored value; scribble → typed value; a save through the legacy full form; reversed
+job-start requests; another edit after the job finished; a late answer after cancellation —
+none may revive or apply the old proposal; a delayed start for scribble A neither cancels nor
+restarts B's job (409); a repeated start for the same origin (a double click) returns the same
+job and cancels nothing; a job for another target of the same account supersedes the first;
+reversed starts across two targets (B's start first, then A's older one) → A is 409 and B
+keeps running; an indexed row-cell key after the row was moved resolves to the same host,
+after it was removed → 409; a save racing a start leaves either the job cancelled or the start
+refused, never a live job for a stale note; - budgets: a queue full of other accounts' jobs →
+429, and the refused start cancels nothing; a breaker refusal cancels nothing; a start that
+supersedes the account's running job is admitted with the queue otherwise full (counted as if
+the old job were gone); a note written between the start's database check and its enqueue →
+409; two targets written in one revision → the later start supersedes; a start on a second
+sheet while the account has a live job → 429; cancellation (the fake server sees the
+disconnect and the slot is free); queue wait and run deadline expiry; 64 records and the
+evicted-job answer; option expiry at 10 minutes; busy admission (§1.4, Jobs): with R 85 and Q
+35 a start while a job has more than 35 s left → 429 "busy", with less → queued; a second
+waiting job beyond D → 429; with 64 records of which some are finished, a new start evicts the
+oldest finished one and never a running or queued job; with 64 live jobs a start → 429; the
+note-write map: a start registered with an old origin keeps the entries it needs until it ends
+(a delayed start after many writes still gets 409); - breaker (injectable clock): three
+transport failures open it, two do not; 100 dropped or nonsense answers never open it;
+supersession and cancellation never count; one half-open probe while others are refused; probe
+success closes, failure reopens; a 2xx with all options dropped resets the count and closes a
+half-open breaker; a cancelled probe clears the probe flag and leaves it half-open; queue-wait
+and run-deadline expiries never count (ten in a row leave it closed); a malformed completion
+stream counts; a child exit never counts, whether it arrives before or after the job's
+transport error: error first, then the exit within 2 s → the provisional count is withdrawn,
+and a breaker that this count opened closes again; error first and no exit → the count stays;
+a new child leaves the breaker as it was, and only Restart and app start reset it; mixed
+sequences (failure, success, failure) do not open it; while open, number entry, notes and Undo
+work and the poll says the assistant is unavailable; a start reports `starting` before an open
+breaker; - client: a host name, `localhost`, `127.1`, `0x7f.1`, `2130706433`,
+`::ffff:127.0.0.1`, userinfo, a zone ID or an `https` URL refused; `::1` refused on the
+runtime paths; `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and their lowercase forms set and a
+302 from the fake server never reach anything but the endpoint; one request per call on a 500
+or 429; a gzip-encoded reply is not decoded; a body over the bound is refused, plain and
+streaming, without buffering it; the schema arrives byte-exact in `response_format` with
+`cache_prompt: true` and `stream: true`; the same tests over the Unix-socket connector (a path
+other than the configured socket refused); - apply: a referenced field changes while the
+target does not → refused; a referenced row disappears → refused; effect mismatch → refused;
+content-hash mismatch → refused; a second apply, including two concurrent applies (exactly one
+writes, consumed only after commit) → refused; another sheet's or account's job or an invalid
+option index → refused; an unrelated field change → still applied; an expired job → no write
+and no literal; Undo of an applied proposal; apply after rights are revoked or the sheet is
+frozen → 403 and no write; - routes (connected router): missing or wrong CSRF, extra or
+duplicate keys, body limit, malformed `note`; apply accepts exactly `csrf`; session or rights
+revoked between lookup and answer; apply checks CSRF and session before its D-X3 wait, answers
+the styled busy 503 and succeeds on retry; poll of another account's or sheet's job → not
+found; "ask again" on poll and on apply; - browser (JS, 1280 and 390): unresolved save →
+"Thinking…" → option with current value, expression and effect → Use → value and `confirmed`
+note → Undo; an `ambiguous` reply shows readings without Use; supersession while polling; an
+escaped explanation; - assistant off: no client, no job route (404), no "Thinking…"; no player
+text in logs or in 4xx bodies other than the player's own echoed draft; a release build has no
+`--assistant-dev-endpoint` option; - live (hand-started pinned llama-server, ASSIST-40;
+reported as live inference): one smoke; the second request of a session reports the cached
+prefix tokens in `timings`; a job cancelled mid-generation frees the slot (the next job's
+first token within its usual time).
 
 
 Evaluation set: hand-written and independently labelled cases in `tools/assist_eval.py`

@@ -532,7 +532,8 @@ async fn text_edits_write_no_note_and_presence_is_noted() {
             StatusCode::SEE_OTHER
         );
         revision += 1;
-        assert!(notes_at(&setup, 1, revision).await.is_empty());
+        let notes = notes_at(&setup, 1, revision).await;
+        assert!(notes.is_empty(), "{notes:?}");
     }
     let mut all: Vec<(&str, &str)> = choice.to_vec();
     all.extend([("name", "Renamed"), ("notes", "General notes")]);

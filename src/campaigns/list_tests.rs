@@ -1651,7 +1651,7 @@ async fn op_buttons_have_formnovalidate_and_no_fragment() {
         let ops: Vec<_> = parsed
             .select(&selector("button[name=op]:not([value=save])"))
             .collect();
-        assert!(!ops.is_empty());
+        assert!(!ops.is_empty(), "no row-move buttons on {action}");
         for button in ops {
             let value = button.value();
             let op = value.attr("value").unwrap();
@@ -2010,7 +2010,7 @@ async fn change_summary_unavailable_for_native_unsupported_and_invalid_previous(
     })
     .await;
     let html = history_page(&setup, 2).await;
-    assert!(summary_lines(&html).is_empty());
+    assert_eq!(summary_lines(&html), Vec::<String>::new());
     assert!(
         summary_section(&html)
             .unwrap()

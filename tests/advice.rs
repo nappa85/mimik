@@ -137,8 +137,8 @@ fn confirmed_power_blockers_take_precedence_over_disorientation_unknowns() {
             let advice = evaluate(&Sheet::default(), true, &context).unwrap();
             let power = &advice.hints[2];
             assert_eq!(power.status, "blocked standard path");
-            assert!(!power.blockers.is_empty());
-            assert!(!power.unknowns.is_empty());
+            assert_ne!(power.blockers, Vec::<String>::new());
+            assert_ne!(power.unknowns, Vec::<String>::new());
             assert_eq!(power.target, None);
             assert_eq!(power.modifier, None);
         }

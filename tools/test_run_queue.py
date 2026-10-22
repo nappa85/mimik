@@ -389,13 +389,14 @@ class Harness(unittest.TestCase):
 
 
 class WindowTests(unittest.TestCase):
-    """Run in the host's zone (Europe/Rome), whatever TZ the test process has: the window
+    """Run in the host's zone (Europe/Rome as a POSIX rule, so containers without tzdata
+    agree), whatever TZ the test process has: the window
     expectations are wall-clock local times, and the daylight-saving change on 2026-10-25
     makes that weekend's window an hour longer."""
 
     def setUp(self):
         self._tz = os.environ.get("TZ")
-        os.environ["TZ"] = "Europe/Rome"
+        os.environ["TZ"] = "CET-1CEST,M3.5.0,M10.5.0/3"  # Europe/Rome, no tzdata needed
         time.tzset()
 
     def tearDown(self):

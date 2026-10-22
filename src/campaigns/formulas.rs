@@ -685,7 +685,7 @@ mod tests {
         let pass = view(&json!({"label": "x", "vitality": 4, "luck": 2}));
         let validity = Validity::of(Some(&pass), true);
         assert!(validity.validated());
-        assert!(validity.doubts.is_empty());
+        assert!(validity.doubts.is_empty(), "{:?}", validity.doubts);
         let violated = Validity::of(
             Some(&view(&json!({"label": "x", "vitality": 11, "luck": 2}))),
             true,

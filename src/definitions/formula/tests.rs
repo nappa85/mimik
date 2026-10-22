@@ -1085,18 +1085,22 @@ fn preview_reports_new_and_resolved_violations() {
         vec!["b-positive"],
         "error -> violated"
     );
-    assert!(from_error.new_violations().is_empty());
-    assert!(from_error.resolved_violations().is_empty());
+    assert_eq!(from_error.new_violations(), Vec::<&str>::new());
+    assert_eq!(from_error.resolved_violations(), Vec::<&str>::new());
     let pass_from_error = preview(&compiled, &basic_values(), &passing).unwrap();
     assert_eq!(
         pass_from_error.unknown(),
         vec!["b-positive"],
         "error -> pass"
     );
-    assert!(pass_from_error.resolved_violations().is_empty());
+    assert_eq!(pass_from_error.resolved_violations(), Vec::<&str>::new());
     // Error -> error, even with a different code, is never a violation.
     let unchanged = preview(&compiled, &basic_values(), &basic_values()).unwrap();
-    assert!(unchanged.constraints.is_empty());
+    assert!(
+        unchanged.constraints.is_empty(),
+        "{:?}",
+        unchanged.constraints
+    );
 }
 
 #[test]

@@ -676,7 +676,7 @@ async fn undo_is_not_offered_where_nothing_can_be_undone() {
     assert_eq!(offered(&html), ["undo-0"]);
     let undo = action(&html, "undo-0").unwrap();
     let history = body(get("/private-sheets/1/history/3").await).await;
-    assert!(offered(&history).is_empty());
+    assert_eq!(offered(&history), Vec::<String>::new());
     assert!(!history.contains("/undo"), "{history}");
     // Frozen on departure: no Undo, and a forged one is 403 with nothing written.
     let campaign = setup.campaign;
