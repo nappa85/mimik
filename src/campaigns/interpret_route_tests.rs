@@ -779,3 +779,68 @@ async fn apply_checks_csrf_and_session_before_its_permit_wait() {
     );
     drop(held);
 }
+
+#[tokio::test]
+async fn a_save_whose_caller_is_cancelled_after_the_commit_still_makes_old_jobs_stale() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let assisted = assisted(&[HEAL]).await;
+    let setup = &assisted.setup;
+    let key = scribble(setup, "took 15 damage").await;
+    let (action, done) = first_option(setup, &key).await;
+    let poll = format!(
+        "/private-sheets/1/interpretations/{}",
+        action.split('/').nth(4).unwrap()
+    );
+    drop(done);
+    // The save pauses inside its transaction; its caller is aborted there, then it commits.
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel::<()>();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let hook: super::super::notes::InsertHook = Box::new(move |_| {
+        reached_tx.send(()).unwrap();
+        go_rx.recv().unwrap();
+        Ok(())
+    });
+    *super::super::notes::BEFORE_INSERT.lock().unwrap() = Some(hook);
+    let base = saved(setup, 1).await.0.to_string();
+    let app = setup.app.clone();
+    let cookie = setup.auth[1].fixture_cookie();
+    let caller = tokio::spawn(async move {
+        use tower::ServiceExt;
+        let request = axum::http::Request::builder()
+            .uri("/private-sheets/1/fields/hp")
+            .method("POST")
+            .header("host", "127.0.0.1:3000")
+            .header("origin", "http://127.0.0.1:3000")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", cookie)
+            .body(axum::body::Body::from(
+                serde_urlencoded::to_string(pairs(&[
+                    ("csrf", &csrf()),
+                    ("base", &base),
+                    ("value", "50"),
+                ]))
+                .unwrap(),
+            ))
+            .unwrap();
+        app.oneshot(request).await
+    });
+    tokio::task::spawn_blocking(move || reached_rx.recv().unwrap())
+        .await
+        .unwrap();
+    caller.abort();
+    let _ = caller.await;
+    go_tx.send(()).unwrap();
+    // The commit lands (HP 50) and the job's options go stale.
+    // The aborted request's blocking task holds the permit until it has committed.
+    for _ in 0..500 {
+        if crate::definitions::admit().is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(saved(setup, 1).await.1["hp"], 50);
+    let (_, answer, _) = send(setup, "GET", &poll, None, true).await;
+    assert_eq!(answer["state"], "stale", "{answer}");
+    assert_eq!(apply(setup, &action, &[]).await.0, StatusCode::CONFLICT);
+}

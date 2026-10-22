@@ -342,7 +342,11 @@ impl Store {
         mut view: SheetView,
         permit: OwnedSemaphorePermit,
     ) -> Result<(i64, OwnedSemaphorePermit), (AppError, Option<OwnedSemaphorePermit>)> {
-        let outcome = self.run_campaign(auth.clone(),move |db|{
+        // The post-commit note hook is owned by the committing task (it runs after the commit
+        // even when this caller is cancelled), outside the database mutex (plan §1.4, "Routes").
+        let committed = self.clone();
+        let request = auth.clone();
+        let outcome = self.run_after(move |db| crate::auth::with_domain_request(request, || {
             let result=(||{
             let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             #[cfg(test)]
@@ -379,13 +383,13 @@ impl Store {
             tx.commit()?;Ok((result.sheet_id,result.revision,noted))
             })();
             Ok((result,permit))
+        }), move |(result, _)| {
+            if let Ok((id, revision, noted)) = result {
+                committed.notes_committed(*id, *revision, noted);
+            }
         }).await;
         match outcome {
-            Ok((Ok((id, revision, noted)), permit)) => {
-                // After the commit, outside the database mutex (plan §1.4, "Routes").
-                self.notes_committed(id, revision, &noted);
-                Ok((id, permit))
-            }
+            Ok((Ok((id, _, _)), permit)) => Ok((id, permit)),
             Ok((Err(error), permit)) => Err((error, Some(permit))),
             Err(error) => Err((error, None)),
         }

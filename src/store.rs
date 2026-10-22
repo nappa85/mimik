@@ -142,6 +142,34 @@ impl Store {
         .map_err(|_| AppError::Worker)?
     }
 
+    /// [`Self::run`], then `after` on the operation's success inside the same blocking task
+    /// once the database mutex is released: it runs whether or not the caller is still
+    /// waiting (a cancelled request still committed), and never under the mutex.
+    pub(crate) async fn run_after<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut Connection) -> Result<T, AppError> + Send + 'static,
+        after: impl FnOnce(&T) + Send + 'static,
+    ) -> Result<T, AppError> {
+        let permit = AUTH_WORKERS
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AppError::AuthStorageBusy)?;
+        let connection = self.0.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let result = {
+                let mut guard = connection.lock().map_err(|_| AppError::Worker)?;
+                operation(&mut guard)
+            };
+            if let Ok(value) = &result {
+                after(value);
+            }
+            result
+        })
+        .await
+        .map_err(|_| AppError::Worker)?
+    }
+
     pub(crate) async fn run_bounded_auth<T: Send + 'static>(
         &self,
         operation: impl FnOnce(&mut Connection) -> Result<T, AppError> + Send + 'static,
