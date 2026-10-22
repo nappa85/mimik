@@ -19,7 +19,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 1. Step 2b is merged (rig-core, Granite 4.2 3B CPU default; CPU-path budget ASSIST-31). The
    GPU-path measurement is in `docs/results.md` (all three models under 8 s; Qwen3-4B fits the
    GPU path), self-checked: review it with the plan update.
-2. Plan update (reviewed before 2c): ASSIST-31 budgets, GPU-first with CPU fallback and
+2. Plan update (reviewed before 2c; the plan-2c revision's confirm review runs Sol and
+   Sonnet plus every opencode free model, with a findings-quality benchmark for the user): ASSIST-31 budgets, GPU-first with CPU fallback and
    budgets from the priming measurement (ASSIST-27); a new step 2d, the owner model setting
    with background Hugging Face downloads (ASSIST-28); 2c reads the model from that setting.
 3. 2c interpretation, 2d model setting, 3 bundles and reminders, 4 suggestions, 5 docs and gate (includes the
