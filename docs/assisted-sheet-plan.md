@@ -80,7 +80,7 @@ implementation for both).
   declare to be data, never instructions.
 - **Context (D-F, D-J):** phrase and target first; then other stored integer and enum fields in
   definition order; derived, text, multiline, notes and list cells are excluded from context
-  and from `@` references (the one exception: same-row cells under the related-fields rule
+  and from references (`ref`) (the one exception: same-row cells under the related-fields rule
   below); catalogue entry text comes in step 3 and is dropped first.
 - **Related fields (ASSIST-31, ASSIST-37), for interpretation jobs:** the formula layer gives
   each derived value and each check a read set (below). (1) On every path, a row-cell target
@@ -223,7 +223,9 @@ implementation for both).
   a stream that is not a well-formed completion) while the child is alive. A child exit is a
   runtime event, never a breaker event: it ends the generation's jobs neutrally and feeds the
   restart and failure counter of §1.4a, whichever order the exit and the job's transport error
-  arrive in. A completed,
+  arrive in: a counted transport failure is provisional while its generation is alive and is
+  withdrawn if that generation's exit arrives within 2 s; a breaker opened only by withdrawn
+  counts closes again. A completed,
   bounded HTTP 2xx exchange is a success whatever its content (an answer whose options are all
   dropped still resets the count and closes a half-open breaker); supersession, cancellation,
   queue-wait expiry (the model was never called) and run-deadline expiry are neutral: deadline
@@ -247,8 +249,10 @@ implementation for both).
   none: the page carries keys only for switch offers and Undo, and the JSON answer has
   `"actions": null` (`Actions::of`, `sheet_json.rs`). 2c-1 adds `key` to the JSON answer's
   `note` object whenever the note is `unresolved`, additively (existing ASSIST-22 clients
-  ignore it), built from the stored note with `assist::key` or `assist::indexed_key` so it
-  carries the note's own revision, not the answer's, and with no page markup (the assistant needs
+  ignore it), built from the stored note with `assist::key` for scalars and row cells alike
+  (row cells in the typed host-ID form `cell:<list>/<host>/<property>`, never the indexed
+  form, which would mix the note's revision with the answer's row positions), so it carries
+  the note's own revision and stable address, and with no page markup (the assistant needs
   JavaScript, D-G); the module starts the job with it. A key is resolved against the snapshot at its own revision: a typed key
   directly, an indexed row-cell key (`<revision>:<f>.<r>.<p>`) by mapping the row index to its
   host ID at that revision, giving the typed address with host ID. Order as for the other
@@ -287,8 +291,8 @@ implementation for both).
   offer stays on screen or treat a shown offer as confirmation.
 - **Proposal freshness (D-P):** when a job finishes, Rust validates each option and stores it
   with a content hash and its bound read/write set: the origin binding above, every write
-  target (address, value at the job's base revision, host ID for row cells), every `@`
-  reference (address and value), the displayed effect (before → after per target), and for
+  target (address, value at the job's base revision, host ID for row cells), every reference
+  (`ref`: address and value), the displayed effect (before → after per target), and for
   reminders and bundles the supplied context (each list-row name sent, its remembered key, the
   catalogue version and entry key of any entry text, every enum value). Bundle targets must be
   distinct; a duplicate drops the option. The guarantee covers exactly this set, not the
@@ -330,7 +334,7 @@ natively for these tests (ASSIST-40).
   retry does not re-read a 2 GiB file; that descriptor stays open and is what the child loads: level 1 binds it read-only (`--ro-bind-fd`); levels 2 and 3 pass it inherited, as
   `--model /proc/self/fd/<n>` (a live check confirms that the pinned server's open and `mmap`
   accept that path). Runtime files are hashed the same way; level 1 binds them by descriptor
-  and level 2 executes the verified llama-server descriptor (`execveat`). So a path swap
+  and levels 2 and 3 execute the verified llama-server descriptor (`execveat`). So a path swap
   between check and load is impossible on every level. Threat boundary: a process running as
   Mimik's user could still rewrite an inode in place; that is outside the boundary (it could
   rewrite Mimik itself). Windows reparse points and path rules come with the Windows runtime.
@@ -359,47 +363,65 @@ natively for these tests (ASSIST-40).
   llama.cpp build number in `BUILD.txt`, and `THIRD-PARTY-NOTICES.md` entries for llama.cpp
   and ggml (MIT) and for every other file shipped from the asset, by its own licence. REL-2
   requires corresponding source for every shipped binary, so the release also carries the
-  pinned llama.cpp source: the release's source asset if the tag publishes one, otherwise a
-  `git archive` of the pinned commit, its SHA-256 recorded in the manifest either way, listed
+  pinned llama.cpp source: always a `git archive` of the pinned commit (GitHub's generated
+  tag tarballs are not byte-stable), its SHA-256 recorded in the manifest, listed
   in `SOURCE.txt` and `SHA256SUMS`. The `dev-endpoint` feature is absent from the release
   binary because the staged binary comes from `cargo build --release --locked` without
   features (tests build with `--all-features`); `smoke_release.py` in `artifact-smoke` checks
-  the staged binary: `--assistant-dev-endpoint` is refused as an unknown option.
+  the staged binary: it contains no `assistant-dev-endpoint` string, and the option is
+  refused as unknown.
+- **Test model (CI only, never shipped):** Hugging Face `ggml-org/models-moved` at revision
+  `499bc8821c6b12b4e53c5bffcb21ec206f212d81`, file `tinyllamas/stories260K.gguf`, 1,185,376
+  bytes, LFS SHA-256 `270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d`. That
+  repository states no licence; its upstream, `karpathy/tinyllamas` at revision
+  `0bd21da7698eaf29a0d7de3992de8a46ef624add`, is MIT. Both are recorded in the workflow and the
+  manifest's test section. Only `llama-fetch` downloads it.
 - **CI workflow (2c-2 deliverables, `.github/workflows/ci.yml`):**
   - a new required job `llama-fetch` (in the `mimik-ci` container like `checks`): fetches the
-    pinned assets and the source archive, verifies their hashes, unpacks the assets, and
-    uploads the verified `llama/` files and the source archive as an artifact;
+    pinned assets, builds the source archive with `git archive` of the pinned commit, fetches
+    the test model, verifies every hash, unpacks the assets (with `unzip`, installed in the
+    image, under `target/`), and uploads the verified `llama/` files, the source archive and
+    the test model as artifacts;
   - `checks` gains `needs: llama-fetch`, downloads that artifact before packaging, packages
-    only it (since `upload-artifact` drops file modes, packaging re-hashes every file against
-    the manifest and reapplies the manifest's modes), and uploads two more artifacts: the
-    release `mimik` binary it built and the confinement test binary (the seccomp, peer,
-    endpoint and adversarial-helper tests);
+    only it (since `upload-artifact` drops file modes, every job that unpacks re-hashes each
+    file against the manifest and reapplies the manifest's modes), and uploads the
+    `linux-release` tarball with its `SHA256SUMS` (as today) and the confinement test binary,
+    located with `cargo test --no-run --message-format=json` (built in the Ubuntu 22.04 image,
+    so it also runs on 24.04);
   - a new required job `llama-runtime` with `needs: [llama-fetch, checks]` (so there is no
     cycle: `checks` never waits for `llama-runtime`), on a runner pinned by label
-    (`ubuntu-24.04`), with `timeout-minutes` set, as host steps, not inside the `mimik-ci`
+    (`ubuntu-24.04`), with `timeout-minutes: 30`, as host steps, not inside the `mimik-ci`
     container (Docker's default seccomp profile refuses the namespace flags `bwrap
-    --unshare-all` needs). It uses no Rust toolchain: it downloads the two prebuilt binaries
-    and the verified `llama/` files. It installs `bubblewrap` from the 24.04 package and records
-    its version; if that package lacks any option the probe needs, the job instead builds a
-    pinned, hash-verified upstream bubblewrap release (version and hash in the workflow) and
-    uses that. It installs `libvulkan1` with Mesa's lavapipe (so the Vulkan build's `--help`
-    and `--list-devices` run without a GPU); lifts `kernel.apparmor_restrict_unprivileged_userns`
-    with `sudo sysctl` for the job's duration only (and says so in its log); then runs the flag
-    check, the preflight probe for both builds (including the level-1 process-shape assertion,
-    below) and the confinement test binary against the pinned asset. It must reach level 1;
-    anything lower fails the job;
+    --unshare-all` needs). It uses no Rust toolchain. It verifies the `linux-release` tarball
+    against `SHA256SUMS`, unpacks it under `target/`, reapplies the manifest's modes, and runs
+    everything from that unpacked release. It installs `bubblewrap` from the 24.04 package and
+    records its version; if that package lacks any option the probe needs, the job builds a
+    pinned upstream bubblewrap release (tarball SHA-256 and the meson and ninja build
+    dependencies pinned in the workflow) and installs it to `/usr/bin` with `sudo`, so the
+    fixed-path rule holds and no release-capable override exists. It installs `libvulkan1`
+    with Mesa's lavapipe; if `kernel.apparmor_restrict_unprivileged_userns` exists it logs its
+    value and lifts it with `sudo sysctl` for the job's duration only (an absent key is logged
+    and skipped). It then runs:
+    - the flag check;
+    - the start-time probe `mimik assistant-runner --probe` (below) for the CPU build, and for
+      the GPU build in the feature-enabled test build with its test-only switch that accepts
+      a software renderer (release builds never accept lavapipe); it must reach level 1, and
+      anything lower fails the job;
+    - the real CPU-build llama-server under the level-1 profile with the test model: `/health`
+      without a token, token refusal and acceptance over the Unix socket, `--model
+      /proc/self/fd/<n>` from the verified descriptor, one completion, the peer-shape
+      assertion, and cancellation mid-generation;
+    - the confinement test binary (seccomp, endpoint and adversarial-helper tests) against
+      the unpacked release's runtime;
   - `deployable` requires `llama-fetch`, `checks` and `llama-runtime` with the existing jobs;
     every new action is pinned by commit SHA like the existing ones;
-  - two executable checks of the assistant, kept apart: the unpacked shipped artifact runs its
-    production runtime path with the real bundled runtime (no model: start to the "no model"
-    state, the preflight and the level report; with a pinned tiny model if one is adopted
-    later, an end-to-end start); and stub-transport integration coverage runs in a test build
-    with the `dev-endpoint` feature, labelled as such and never called verification of the
-    shipped binary. The tiny model (a GGUF of at most 100 MB under Apache-2.0 or MIT) is an
-    optional later addition that needs its own pinned entry (revision, SHA-256, licence)
-    before use; it would be downloaded only in this job and never shipped;
-  - Landlock-only tests that need a kernel the runner lacks are a listed host or VM
-    measurement, recorded in the release scope and in `docs/limitations.md`.
+  - stub-transport integration coverage runs in a test build with the `dev-endpoint` feature,
+    labelled as such and never called verification of the shipped binary;
+  - not CI-covered, and said so: the live GPU checks, mid-prompt cancellation timing and the
+    per-request `ignore_eos` with the real default model are dev-host measurements, repeated at
+    every pin change and recorded in `docs/results.md`; Landlock-only tests that need a kernel
+    the runner lacks are a host or VM measurement, recorded in the release scope and in
+    `docs/limitations.md` (ASSIST-L24).
 - **Runner:** Mimik spawns `mimik assistant-runner` (a hidden subcommand) from one dedicated,
   long-lived thread (the parent-death signal follows the spawning thread). The runner sets
   `PR_SET_PDEATHSIG` (SIGKILL), then checks that its parent is still the Mimik PID it was given
@@ -409,7 +431,8 @@ natively for these tests (ASSIST-40).
   `LANG`, `HOME` pointing at an empty private directory, the token variable when that channel
   is used); keeps only the descriptors it was handed (Rust opens everything close-on-exec; the
   hand-over descriptors are listed by number); then executes the confinement level's command
-  in place (`execve`, so the parent-death signal stays set). On levels 2 and 3 the runner sets
+  in place (`execve` of bwrap on level 1, `execveat` of the verified llama-server descriptor on
+  levels 2 and 3; either way the parent-death signal stays set). On levels 2 and 3 the runner sets
   `PR_SET_PDEATHSIG` and `PR_SET_NO_NEW_PRIVS` before it installs the seccomp filter, and the
   filter refuses any later `prctl(PR_SET_PDEATHSIG)` and `prctl(PR_SET_NO_NEW_PRIVS)` call,
   so a compromised server cannot clear the signal; level 1 keeps bubblewrap's own setup
@@ -453,15 +476,20 @@ natively for these tests (ASSIST-40).
      `/proc/self/fd/<n>` open is checked against the file it resolves to). The ruleset:
      - network (ABI 4 or later): no TCP connect; TCP bind on the chosen port only;
      - read: the models folder (the model's resolved file lies in it), the system library
-       directories, `/etc/ld.so.cache`, the Vulkan loader and driver files, the read-only
-       `/sys` parts the driver enumerates, `/proc/self`;
+       directories, `/etc/ld.so.cache`, the Vulkan ICD manifests (`/usr/share/vulkan`,
+       `/etc/vulkan`), the read-only `/sys` parts the driver enumerates,
+       `/sys/devices/system/cpu`, `/proc/self`, `/proc/cpuinfo`, `/proc/meminfo`;
      - read and execute: the runtime directory (llama-server `dlopen`s its ggml backend
        libraries from its own directory, found through `/proc/self/exe`), the library
-       directories and the ELF interpreter;
-     - read and write: the selected render node (GPU path, plus `IOCTL_DEV` on it from ABI 5),
-       `/dev/shm`, and a private temporary directory;
+       directories, the Vulkan driver libraries and the ELF interpreter;
+     - read and write: `/dev/null`, `/dev/zero` and `/dev/urandom` (read for the last), the
+       selected render node (GPU path, plus `IOCTL_DEV` on it from ABI 5) and the card node
+       only if the driver needs it, `/dev/shm`, and a private temporary directory;
      - scoping (ABI 6 or later): abstract Unix sockets and signals;
      - nothing else.
+
+     Level 2 is verified only by the VM measurement of ASSIST-L24 until a host with Landlock
+     exists; the list is completed there.
 
      The shown
      state comes from the crate's `RestrictionStatus`, never from the requested rules.
@@ -477,10 +505,13 @@ natively for these tests (ASSIST-40).
   The assistant runs at every level (hardening is "where available", ASSIST-30); the page
   shows the level next to the assistant state and next to the 2d "Try" button (a downloaded
   GGUF is untrusted input to llama-server, contained only by this).
-- **Seccomp (every level):** built with `seccompiler`; default action allow with the listed
-  refusals returning `EPERM` (`ENOSYS` for `clone3`); the filter first checks the architecture
-  (`AUDIT_ARCH_X86_64`, anything else killed) and refuses x32 syscall numbers, so no compat
-  entry point bypasses it; `AF_NETLINK`, `AF_PACKET` and every family not named below are
+- **Seccomp (every level):** the crate is chosen by a 2c-2 fit check (`seccompiler` against
+  `libseccomp`): it must express an architecture check as the first rule and a raw x32 range
+  refusal (`nr & 0x40000000`), which a default-allow filter needs so x32 calls cannot bypass
+  the `clone` rule; if `seccompiler` cannot, the filter's first instructions are hand-written
+  BPF or `libseccomp` is used. Default action allow with the listed refusals returning `EPERM`
+  (`ENOSYS` for `clone3`); the filter first checks the architecture (`AUDIT_ARCH_X86_64`,
+  anything else killed), then refuses every x32 syscall number; `AF_NETLINK`, `AF_PACKET` and every family not named below are
   refused. `socket()` is allowed only for
   `AF_INET` or `AF_INET6` with `SOCK_STREAM` and protocol 0 or `IPPROTO_TCP`, and for
   `AF_UNIX` with `SOCK_STREAM` (the listening socket; flags `SOCK_CLOEXEC` and
@@ -494,21 +525,25 @@ natively for these tests (ASSIST-40).
   `io_uring_enter`, `io_uring_register`, `ptrace`, `process_vm_readv`/`writev`, `bpf`,
   `perf_event_open`, `keyctl`, `add_key`, `request_key`, `mount`, `umount2`, `pivot_root`,
   `unshare`, `setns`, module and `kexec` calls are refused. Seccomp sees no `connect()`
-  address, so it is never described as network confinement. The live GPU test runs once with
-  the filter's log flag (`SECCOMP_FILTER_FLAG_LOG`) and reads the kernel log for refused calls
-  the Vulkan driver attempted; any that the GPU path needs are decided before 2c-2 completes.
+  address, so it is never described as network confinement. Refused-call discovery on the
+  dev host uses `strace` in a container on the GPU path (no dependency on the kernel log or
+  root); calls the Vulkan driver needs are decided before 2c-2 completes.
+  `SECCOMP_FILTER_FLAG_LOG` is optional.
 - **Preflight** (every start, before level 1): bwrap present at a fixed path, not set-ID; its
   support for every option used above is probed (no remembered minimum version: bubblewrap
   0.13.0 on the dev host has `--unshare-all`, `--clearenv`, `--bind-fd`/`--ro-bind-fd`,
   `--bind-data`/`--ro-bind-data`, `--perms`, `--seccomp` and `--die-with-parent`, checked
   2026-10-22); every option the profile uses is probed, including `--json-status-fd`,
   `--dev-bind`, `--tmpfs` with `--size`, `--proc`, `--new-session` and `--cap-drop`; then a
-  real probe run of the full level profile with the same binds, descriptors, seccomp program
-  and token channel as a real start, executing a probe mode of the pinned llama-server setup
-  that exercises each resource once: open the model through its descriptor path, bind the
-  socket path in its directory (level 1) or the port (levels 2 and 3), read the token
-  channel, and on the GPU path enumerate the device; on level 1 it also asserts the process
-  shape of the endpoint check (below). It runs once for the CPU build and once for the GPU build (a
+  real probe run, `mimik assistant-runner --probe`: the Mimik binary re-executed under the
+  full level profile (the same binds, descriptors, seccomp program and token channel as a real
+  start, plus Mimik's own libraries bound) exercising each resource once: open the model
+  through its descriptor path (including `--ro-bind-fd` of a regular-file descriptor), bind
+  the socket path in its directory (level 1) or the port (levels 2 and 3), read the token
+  channel, and on the GPU path open the render node and enumerate the device; on level 1 it
+  also asserts the process shape of the endpoint check (below). It does not prove
+  llama-server's own system calls; the real server start does (CI with the test model, the dev
+  host with the real model). It runs once for the CPU build and once for the GPU build (a
   level may work for one and not the other; each path uses the highest level its own build
   passed). A failure names its cause where it can be told: bwrap
   missing, set-ID or lacking an option (named), user namespaces disabled
@@ -568,22 +603,27 @@ natively for these tests (ASSIST-40).
   process start time, binary path) is held under an exclusive `flock`, so a second Mimik on
   the same data directory cannot run the assistant; at start a leftover is killed only when
   PID, start time and path all match. On shutdown Mimik stops the child as above.
-- **Device (ASSIST-27, HW-1):** the GPU is chosen per render node, not by host enumeration
-  name, since enumeration names (`Vulkan0`, `Vulkan1`) change with the set of visible devices.
-  At each start the GPU build's `--list-devices` (30 s timeout; output format pinned by a test
+- **Device (ASSIST-27, HW-1):** software ICDs (`llvmpipe`, `lavapipe`, `SwiftShader`, by
+  description and driver) are excluded first, before any count of devices. Enumeration names
+  (`Vulkan0`, `Vulkan1`) change with the set of visible devices, so the name passed to
+  `--device` always comes from the listing in the same confinement the server runs in. Level 1:
+  at each start the GPU build's `--list-devices` (30 s timeout; output format pinned by a test
   against the pinned build) runs inside the level-1 profile once per render node with only that
-  node bound, so each sandboxed list shows exactly one GPU; that in-sandbox name is what the
-  real start passes to `--device`. The node's PCI address (sysfs) is its stable identity across
-  restarts and distinguishes two identical cards. `auto` (default) skips nodes whose device
-  description names a software renderer (`llvmpipe`, `lavapipe`, `SwiftShader`); among the
-  rest it ranks devices with dedicated memory before integrated ones (an integrated GPU reports
-  shared system memory and could otherwise win), then by reported memory, ties by PCI address;
-  `--assistant-device cpu` forces the CPU and a PCI address selects that device. Levels 2 and
-  3 run the same per-node listing with the node's access granted alone. The real start checks
-  that the sandboxed list still shows one GPU with the recorded description. The GPU path
-  loads every layer on the GPU: the child's offload line must show N = M, otherwise it is a
-  GPU failure. A Vulkan build that cannot start (for example no Vulkan loader) is a GPU
-  failure. The CPU path uses the CPU build.
+  node bound; after excluding software ICDs each list shows exactly one hardware GPU, and that
+  in-sandbox name is what the real start passes. Levels 2 and 3 cannot isolate nodes (level 3
+  does not restrict device opens at all): the GPU is used there only if exactly one hardware
+  GPU is visible, otherwise the CPU path is used with a page note (multi-GPU without
+  bubblewrap is a limitation, ASSIST-L25). The node's PCI address (sysfs) is its stable
+  identity across restarts and distinguishes two identical cards. Ranking (`auto`, level 1):
+  a device counts as dedicated when sysfs shows `mem_info_vram_total` above 0 (amdgpu) or its
+  PCI class and `boot_vga` mark a discrete card where available; dedicated devices rank before
+  the others, then by reported memory, ties by PCI address; where sysfs says nothing, no
+  ranking claim is made beyond memory. `--assistant-device cpu` forces the CPU and a PCI
+  address selects that device. The real start checks that the sandboxed list still shows one
+  hardware GPU with the recorded description. The GPU path loads every layer on the GPU: the
+  child's offload line must show N = M, otherwise it is a GPU failure. A Vulkan build that
+  cannot start (for example no Vulkan loader) is a GPU failure. The CPU path uses the CPU
+  build.
 - **Transitions** (attempt = spawn, endpoint check, `/health` within 60 s, priming within
   300 s, calibration within twice the path's run-deadline cap; owner actions are owner-only
   and CSRF-checked):
@@ -883,7 +923,10 @@ request builder with the byte and token bounds and the related-fields context; t
 event interface the worker consumes (`generation started`, `generation ended` with its
 reason, `ready` with the budgets B, N(B), R, D, Q), fed in 2c-1 by the development endpoint's
 fixed configuration and by test doubles, and in 2c-2 by the runtime manager; the formula
-layer's read-set accessor (§1.4, Read sets); the note key in the JSON answer of an
+layer's read-set accessor (§1.4, Read sets); output schema v2, reviewed before use: `ref`
+accepts a field ID or the cell-address pattern, the instructions describe same-row cells, the
+Rust copy lives under `schemas/`, the fixed prefix is re-measured (tokens and priming time),
+and a live check confirms the pinned build's grammar conversion accepts the pattern; the note key in the JSON answer of an
 `unresolved` note (§1.4, Routes); worker, admission, records and breaker; the job, poll and
 apply routes with origin and read/write-set binding; the UI. The model server is started by
 hand on the dev host (ASSIST-40) and reached through a development endpoint setting
@@ -892,8 +935,12 @@ request's model name is the alias from `--assistant-model`, default `granite-4.2
 which the hand-started server must be given with `--alias`), compiled
 only with the `dev-endpoint` Cargo feature, which release builds never enable (`smoke_release.py`
 checks the staged binary refuses the option); it has no endpoint check. Budgets come from
-configuration (development placeholders, not evidence: B 1,024, N(B) 256 tokens through
-`--assistant-dev-token-limit`, R 85, D 1, Q 35). Until 2c-2 lands the assistant is a
+flags of the dev build (development placeholders, not evidence): `--assistant-dev-bytes`
+(B, default 1,024), `--assistant-dev-token-limit` (N(B), default 256),
+`--assistant-dev-deadline` (R, default 85 s), `--assistant-dev-queue` (D, default 1) and
+`--assistant-dev-queue-wait` (Q, default 35 s). In a 2c-1 release build, which has neither
+the endpoint nor the runtime, `--assistant` is refused at start ("the assistant is not
+available in this build"), so the assistant stays off and no assistant page exists. Until 2c-2 lands the assistant is a
 development feature, outside the release scope, and the release scope's "no language model"
 statement stays true because the release binary has no endpoint. Tests (stub or fake server unless
 stated):
@@ -938,9 +985,10 @@ stated):
   or a property of row `h` that was not sent drops the option; the row moved since the job →
   found by host ID; the cell changed or the row removed before apply → apply refused;
 - note key: a cell save that records `unresolved` answers with `note.key` in the JSON (the
-  typed form for scalars, the indexed form for row cells), the page markup is unchanged, a
-  cell whose note predates the answer's revision yields a key with the note's revision that
-  starts a job, a
+  typed host-ID form for row cells too), the page markup is unchanged, a cell whose note
+  predates the answer's revision yields a key with the note's revision that starts a job; a
+  row moved before the JSON answer builds the key → the key still names the original host ID
+  and the start finds that row; a
   start with that key is accepted, and a key of a parsed or sign-led note is refused (409);
 - injection: a phrase containing "ignore previous instructions" yields at most an option,
   never a write without Use; a context value with instructions stays inside the data envelope;
@@ -972,8 +1020,9 @@ stated):
   options dropped resets the count and closes a half-open breaker; a cancelled probe clears the
   probe flag and leaves it half-open; queue-wait and run-deadline expiries never count (ten in
   a row leave it closed); a malformed completion stream counts; a child exit never counts,
-  whether it arrives before or after the job's transport error (that error is then dropped as
-  part of the exit); a new child leaves the breaker as it was, and only Restart and app start
+  whether it arrives before or after the job's transport error: error first, then the exit
+  within 2 s → the provisional count is withdrawn, and a breaker that this count opened closes
+  again; error first and no exit → the count stays; a new child leaves the breaker as it was, and only Restart and app start
   reset it;
   mixed sequences (failure, success, failure) do not open it; while open, number
   entry, notes and Undo work and the poll says the assistant is unavailable; a start reports
@@ -1088,9 +1137,11 @@ night or at a weekend):
 - generations and transitions (fake runner, injectable clock), one test per table row: GPU
   failure at each phase → CPU at once, not counted, the next child started only after the old
   one is gone (bwrap's `exit-code` and the reaper's pidfd); GPU budgets that do not derive →
-  CPU path, the page saying why; a CPU attempt failing before `/health` at level 1 → level 2
-  at once, the skip recorded, and at level 2 → level 3; a model-load error, a hash mismatch or
-  an exit after exec → same level, retry path; a lower level goes back up only on Restart or
+  CPU path, the page saying why; a CPU attempt with a sandbox-setup failure at level 1 (a
+  bwrap setup error, a status-descriptor failure before exec, the level's probe failing) →
+  level 2 at once, the skip recorded, and the same at level 2 → level 3; a model-load error
+  before the first successful `/health`, a hash mismatch or an exit after exec → same level,
+  retry path; a lower level goes back up only on Restart or
   app start; a queue with a running and a waiting
   job at a generation change → both end "the assistant restarted: ask again", the breaker
   unchanged; CPU failures
@@ -1100,17 +1151,24 @@ night or at a weekend):
   nothing; Restart resets the failure count and the breaker, a new child alone does not; a second Mimik on the same data
   directory cannot take the pidfile lock; a leftover child matching PID, start time and path
   is killed, a reused PID is left alone; shutdown → the tree is gone within 5 s;
-- device and fallback: per-node sandboxed listings (format pinned from the real build) with
-  only `llvmpipe` → CPU; a host where the selected card is `Vulkan1` but its sandboxed list
-  names it `Vulkan0` → `--device Vulkan0` is passed; two identical cards (same description)
-  → told apart and remembered by PCI address; two discrete GPUs → the one with more memory; an
-  integrated GPU reporting more shared memory than a discrete one → the discrete one; no
-  `--device` on the CPU path; a mismatch at the real start → GPU failure; an offload line with
-  N < M → GPU failure; a level that passes for the CPU build but not the GPU build → each path
-  at its own level; a model larger than `MemAvailable` minus 1 GiB → refused with the reason;
-  `--assistant-device cpu` never lists devices; live: Vulkan on the RX 6650 XT reaches `ready`
-  with GPU budgets (with the seccomp log flag once), and killing the child mid-job ends on the
+- device and fallback: per-node sandboxed listings (format pinned from the real build): one
+  hardware GPU plus lavapipe → the hardware GPU, lavapipe excluded before the count; only
+  `llvmpipe` → CPU; a host where the selected card is `Vulkan1` but its sandboxed list names it
+  `Vulkan0` → `--device Vulkan0`; enumeration order changing between discovery and launch → the
+  launch name still comes from the in-sandbox listing; two identical cards at level 1 → told
+  apart and remembered by PCI address; two identical cards at level 3 → CPU path with the page
+  note; dedicated before integrated only when sysfs says so; no `--device` on the CPU path; a
+  mismatch at the real start → GPU failure; an offload line with N < M → GPU failure; a level
+  that passes for the CPU build but not the GPU build → each path at its own level; a model
+  larger than `MemAvailable` minus 1 GiB → refused with the reason; `--assistant-device cpu`
+  never lists devices; live (dev host): Vulkan on the RX 6650 XT reaches `ready` with GPU
+  budgets, refused calls checked with `strace` once, and killing the child mid-job ends on the
   CPU path with CPU budgets and the page saying why;
+- probe: `mimik assistant-runner --probe` at each level opens the model through its
+  descriptor (a regular-file `--ro-bind-fd` at level 1), binds the socket or port, reads the
+  token channel and, on the GPU path, opens the render node; a removed bind, a missing token
+  channel or a refused open fails the probe with that cause; the release build refuses the
+  software-renderer switch;
 - priming and calibration (fake server): a start before they complete answers 503 "starting"
   and queues nothing; they never count toward the breaker; a sample with a missing, zero or
   non-finite timing, `predicted_n` different from `max_tokens`, a negative tail or cached
@@ -1134,7 +1192,8 @@ night or at a weekend):
   over the Unix socket at level 1; `/health` without a token; the per-request `ignore_eos`;
   the `/proc/self/fd` model path; cancellation mid-generation and mid-prompt (the superseding
   job's first token);
-- measurement step (to `docs/results.md`, before 2c-2 is marked complete): the first native
+- measurement step (to `docs/results.md`, before 2c-2 is marked complete; 2c-2's CPU-baseline
+  claim also waits for the user's answer to §5, while 2c-1 does not): the first native
   calibration on this host on both paths (start to `ready`, priming, the two samples, the
   filler's density, the derived B, R, D and Q), which sets the expected CPU outcome; grammar
   against no-grammar per-token generation time, which settles the calibration form; a job's
