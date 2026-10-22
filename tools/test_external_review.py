@@ -227,6 +227,26 @@ class FreeTierTests(unittest.TestCase):
         self.assertTrue(external_review.limited_today(first))
         self.assertFalse(external_review.limited_today(second))
 
+    def test_a_failed_run_with_logged_stream_errors_marks_the_model_limited(self):
+        """2026-10-22: MiniMax failed with three 'stream error' log lines, no limit wording."""
+        first, second, _ = external_review.THIRD_REVIEWER_CHAIN
+
+        def fake_run(command, cwd, total, idle):
+            model = command[command.index("-m") + 1]
+            return (1, "Error") if model == first else (0, "ok\nVerdict: READY")
+
+        errors = ['level=ERROR message="stream error" modelID=minimax-m3.1-flash-free'] * 3
+        with (
+            mock.patch.object(external_review, "preflight", lambda model, snap: True),
+            mock.patch.object(external_review, "run_with_idle_timeout", fake_run),
+            mock.patch.object(external_review, "opencode_errors", lambda model, since: errors),
+        ):
+            model, _ = external_review.review_with_fallback(
+                external_review.THIRD_REVIEWER_CHAIN, Path("/snap"), "p", 10, 10
+            )
+        self.assertEqual(model, second)
+        self.assertTrue(external_review.limited_today(first))
+
     def test_free_runs_are_serialised_by_a_lock(self):
         held = external_review.free_model_lock("opencode/x-free")
         with held:

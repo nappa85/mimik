@@ -253,9 +253,9 @@ def review_with_fallback(models, snap, prompt, total, idle):
             errors = opencode_errors(model, since)
             for line in errors:
                 print(f"{model}: opencode log: {line}", file=sys.stderr)
-            if is_free(model) and (
-                state == "stalled" or any(UNAVAILABLE.search(line) for line in errors)
-            ):
+            # Free tiers rarely say "limit": a stall or any logged stream error on a failed run
+            # is treated as one, so the chain stops spending runs on that model today.
+            if is_free(model) and (state == "stalled" or errors):
                 state = f"{state}, likely a free-tier limit"
                 mark_limited(model, state)
         attempts.append(f"{model}: {state} (exit {code})")
