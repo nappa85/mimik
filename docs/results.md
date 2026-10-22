@@ -192,22 +192,15 @@ decides.**
   models within 60 s (7 of 50, against MiniCPM's 18); Qwen is more accurate (39 and 3) but too
   slow at 2 threads. Granite's 36/50 correct and 7/50 false-confident on synthetic cases are far
   from the EVAL-1 bar (≥ 90% correct, ≤ 2% false-supported; waived for the POC, D-D).
-- **Context from later decisions** (master `11178f0`, ASSIST-27 to ASSIST-30, not part of
-  this branch): the model runs GPU-first through Vulkan with this CPU path as the guaranteed
-  baseline, the model is an owner setting (default Granite 4.2 3B), and production runs a native
-  llama-server child on `127.0.0.1` with a random port and a per-launch token, without
-  containers. What carries over from 2b: the crate results and the client policy (loopback
-  literal, no proxies, redirects, retries or decompression, the body-bound transport and
-  cancellation; the per-launch token is expected to go in the `Authorization` header, which both D-H
-  crates send; llama-server `--api-key` auth was not exercised), priming, the output schema and validation findings, and the CPU latency and quality
-  numbers (measured in a container capped to 2 CPUs; a native child at 2 threads should be
-  comparable but is not measured). What does not carry over: the network confinement. The
-  container topology above is dev and benchmark evidence only; a native child has the host's
-  network, so its no-egress property must come from the OS hardening of ASSIST-30 (Landlock network
-  rules on Linux, a network-denying sandbox profile on macOS; llama-server's `--offline` only
-  stops model fetching and is hygiene, not confinement) and is unmeasured. The GPU path is unmeasured for the 2b
-  schema (no GPU runs on weekdays 09:00 to 18:00; a separate measurement can run at night), and
-  the priming measurement is what sets the budgets per machine within fixed caps.
+- **What carries over to production** (ASSIST-27 to ASSIST-40): the crate results and the
+  client policy (no proxies, redirects, retries or decompression, the body-bound transport and
+  cancellation; `rig-core` is re-checked at 0.45.0 by its own upgrade change, ASSIST-39),
+  priming, the output schema and validation findings, and the CPU latency and quality numbers
+  (measured in a container capped to 2 CPUs; a native child at 2 threads is not measured).
+  Not exercised in 2b: llama-server `--api-key` auth and the Unix-socket transport. Not
+  carried over: the network confinement; the container topology is dev and benchmark
+  evidence only, and production confinement comes from bubblewrap, Landlock with seccomp or
+  nothing (ASSIST-34), unmeasured until 2c-2. The GPU path is measured below.
 - **CPU-path budget, decided (ASSIST-31):** on a machine without a usable GPU only the fields
   related to the note are sent, the dynamic part is at most 1 KiB, and the run deadline may
   reach 90 s; the GPU path keeps 60 s and 4 KiB. The analysis that led to it:
@@ -217,8 +210,8 @@ decides.**
   near-4 KiB dynamic part takes 111 to 136 s, so with the plan's 4 KiB bound such requests
   always miss the deadline and count against the breaker. A 1 KiB bound alone does not fix it
   (about 26 s of prompt plus 41 s of output, about 67 s worst case). The levers, combinable:
-  the 60 s cap; the 120 s total envelope (Q + R); more threads or cores, or the GPU (a POC
-  non-goal today); the dynamic-context bound; sending only fields relevant to the note;
+  the 60 s cap; the 120 s total envelope (Q + R); more threads or cores, or the GPU
+  (ASSIST-27); the dynamic-context bound; sending only fields relevant to the note;
   shorter explanations; deduplicated options (Qwen repeated values in 20 of 50 replies);
   `max_tokens` (Qwen's p95 of 209 output tokens exceeds 192; the exploratory run cut 8 of 100
   replies); or the feature off.

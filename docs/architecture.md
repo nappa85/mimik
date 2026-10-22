@@ -4,7 +4,8 @@ Mimik is a sheet-first tabletop RPG companion for players at a physical table. I
 standalone Rust binary (`mimik`, AGPL-3.0-only) that serves server-rendered HTML to browsers on
 the local network and stores everything in one SQLite file. No Node.js, Python, GPU, model
 runtime or internet access is needed at run time. No model is integrated into the application
-yet.
+yet; the planned optional assistant runs a bundled, pinned official llama.cpp server as a
+confined child process, never a container (`assisted-sheet-plan.md`, §1.4a).
 
 ## Runtime
 
@@ -126,7 +127,9 @@ migrations.
   `sheet-harness-demo/` and `tool-loop-demo/`.
 - **Schemas (`schemas/`):** definition and catalogue JSON Schemas and examples, the
   SHA-256-locked formula conformance fixture, and `source-kinds.json` shared by Rust and Python.
-- **Containers (`containers/`):** every tool runs in a pinned container, never on the host.
+- **Containers (`containers/`):** every tool runs in a pinned container, never on the host
+  (one exception: the pinned official llama-server build may run natively on the dev host for
+  runtime-manager tests, ASSIST-40).
   `ci.Dockerfile` (Ubuntu 22.04, Rust 1.95.0, rustfmt, Clippy, actionlint 1.7.7, uv with Python
   3.12.12, Ruff, cargo-audit 0.22.2, cargo-about 0.9.2), `browser.Dockerfile` (Playwright 1.56
   Chromium), `extraction.Dockerfile` (Marker, CPU), `decision-benchmark.Dockerfile` and
