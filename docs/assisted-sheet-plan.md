@@ -16,7 +16,8 @@ interpretation against a hand-started local server, **2c-2** the model runtime (
 token, confinement, budgets), **2d-1** the owner model setting with local models, **2d-2**
 model downloads, **3** bundles and reminders, **4** suggestions and "Which Sword?", **5** docs
 and gate; each sub-step has its own branch, tests and reviews. The model runs GPU-first with
-the CPU as the guaranteed baseline (ASSIST-27), as an official `llama-server` build that Mimik
+the CPU as the intended baseline (ASSIST-27; whether the default model meets the CPU caps is
+open, §5), as an official `llama-server` build that Mimik
 starts as a child and confines with bubblewrap where it can, never a container in production
 (ASSIST-29, ASSIST-30, ASSIST-34); budgets come from a measurement at each start within fixed
 caps (ASSIST-31, ASSIST-32). Linux x86_64 is the platform built and verified now.
@@ -89,9 +90,10 @@ implementation for both).
   other rows, and text, multiline or derived properties, are never sent. Such a cell is a
   context item addressed by its typed address `cell:<list>/<h>/<property>` (the row's stable
   host ID and the property ID, as the switch and Undo keys and the orphan rules address cells,
-  ASSIST-7, ASSIST-12), and a `ref` names that exact address; Rust maps it to the row by host
-  ID, binds it in the read set (address, host ID, value), and drops the option if the row or
-  the cell is not the one supplied. (2) Whenever B ≤ 1,024 bytes (always on the CPU path; on
+  ASSIST-7, ASSIST-12); in the request it carries a short request-local alias like every
+  context item (below), and Rust maps the alias back to the row by host ID, binds it in the
+  read set (address, host ID, value), and drops the option if the row or the cell is not the
+  one supplied. (2) Whenever B ≤ 1,024 bytes (always on the CPU path; on
   the GPU path only if the measurement lowers B to 1,024), the scalar context is only the
   stored integer and enum fields that some read set contains together with the target (for a
   row-cell target, together with `p`); fields the phrase names or that share the target's
@@ -119,13 +121,15 @@ implementation for both).
   `ambiguous` reply listing at most 3 readings. A reading is display-only text of at most 120
   characters, rendered escaped inside `<bdi>`, with no Use button; an `ambiguous` reply never
   writes. The expression is a JSON tree, not a string: a node is `{"lit": n}`, `{"ref":
-  "<field id>" | "cell:<list>/<host>/<property>"}` (the second form only for a supplied
-  same-row cell) or `{"op": "add" | "sub" | "mul" | "div", "l": node, "r": node}`, and a
+  "<alias>"}` (an alias from the supplied list, below) or `{"op": "add" | "sub" | "mul" | "div", "l": node, "r": node}`, and a
   `div` node also carries `"round": "floor" | "ceil" | "exact"` (`exact` drops the option on a
   remainder); depth at most 3 below the root, so at most 8 leaves. A negative `lit` is allowed;
-  its magnitude is what provenance checks. References name supplied integer fields or
-  supplied same-row integer cells only: an enum field or cell is context for reading, and a
-  `ref` to it drops the option.
+  its magnitude is what provenance checks. Every context item carries a short request-local
+  alias (`f1`, `f2`… for fields, `c1`, `c2`… for same-row cells, plus `t` for the target),
+  which Rust maps to its typed address (`field:<id>` or `cell:<list>/<host>/<property>`); a
+  `ref` takes only an alias from the supplied list (output schema v2), so references stay
+  short. References name supplied integer items only: an enum field or cell is context for
+  reading, and a `ref` to it, or to an alias not supplied, drops the option.
   Rust evaluates with checked `i128` arithmetic and range-checks the result to `i64` as
   `entry.rs` does; overflow, division by zero, a reference to an unknown value (D-Z), to a field
   not supplied, or to an excluded type drops the option. Literal provenance: the magnitude of
@@ -153,7 +157,9 @@ implementation for both).
   the current value, the expression rendered with `− × ÷`, and the effect, labelled "the
   assistant's reading". The fraction words and the literal-provenance rule stay as frozen for
   2b (ASSIST-38); constants derived from references, such as `hp ÷ ((hp + hp) ÷ hp)`, pass it
-  (ASSIST-L22). `max_tokens` belongs to the model file: 192 for the Granite 4.2 3B file whose SHA-256
+  (ASSIST-L22). Schema v2 changes the request and the replies, so the 2b `max_tokens`
+  evidence is re-checked in 2c-1 before 192 is relied on: the 2b screen is re-run under v2 on
+  the dev host (CPU, 2 cores, the 50 cases) and the reply lengths compared. `max_tokens` belongs to the model file: 192 for the Granite 4.2 3B file whose SHA-256
   is the compiled-in `e0406663…` (the 2b rule over the 104 replies of the 2b screen,
   `docs/results.md`); any other file, whatever its name, gets the 2d trial's rule (§1.4b),
   never below 256.
@@ -218,7 +224,9 @@ implementation for both).
   assistant restarted: ask again", neutral for the breaker. Options expire 10 minutes after the job finishes. Poll and apply
   recheck rights; the `JOBS` permit is not held during the model call. A reminder job (step 3)
   takes its own low-priority slot on the same worker, after interpretations, one per account.
-- **Circuit breaker:** one per configured endpoint, in memory (reset on restart). It counts
+- **Circuit breaker:** one per endpoint configuration (the managed runtime, or the
+  development endpoint), never keyed by the per-generation socket path or port, in memory
+  (reset on app restart). It counts
   only transport errors and invalid replies (HTTP 4xx and 5xx, a response over the body bound,
   a stream that is not a well-formed completion) while the child is alive. A child exit is a
   runtime event, never a breaker event: it ends the generation's jobs neutrally and feeds the
@@ -314,7 +322,9 @@ Linux x86_64 is the only platform built and verified in 2c-2; macOS (Metal) and 
 Production never needs a container (ASSIST-29); on the dev host the pinned official build runs
 natively for these tests (ASSIST-40).
 
-- **Pinned build (ASSIST-33):** a manifest compiled into Mimik pins one llama.cpp build (b11610
+- **Pinned build (ASSIST-33):** a manifest, the data file `schemas/llama-runtime-v1.json`
+  embedded into Mimik with `include_str!` (a test asserts the embedded copy equals the file),
+  also read by `llama-fetch` and by packaging, so CI and the binary verify the same set, pins one llama.cpp build (b11610
   as in 2b unless the 2c-2 review picks a newer one) for Linux x86_64: the official GitHub
   release assets for the Vulkan and the CPU build, each asset's SHA-256, and the path and
   SHA-256 of every file Mimik runs from them. Before 2c-2 depends on them, the manifest entry
@@ -334,8 +344,11 @@ natively for these tests (ASSIST-40).
   retry does not re-read a 2 GiB file; that descriptor stays open and is what the child loads: level 1 binds it read-only (`--ro-bind-fd`); levels 2 and 3 pass it inherited, as
   `--model /proc/self/fd/<n>` (a live check confirms that the pinned server's open and `mmap`
   accept that path). Runtime files are hashed the same way; level 1 binds them by descriptor
-  and levels 2 and 3 execute the verified llama-server descriptor (`execveat`). So a path swap
-  between check and load is impossible on every level. Threat boundary: a process running as
+  and levels 2 and 3 execute the verified llama-server descriptor (`execveat`). So the model and
+  the executable cannot be swapped between check and load on any level; on levels 2 and 3 the
+  shared libraries are still loaded by path, so the runtime directory and every ancestor
+  directory must not be writable by group or others (checked at start), and the library
+  guarantee there is the same-user boundary below. Threat boundary: a process running as
   Mimik's user could still rewrite an inode in place; that is outside the boundary (it could
   rewrite Mimik itself). Windows reparse points and path rules come with the Windows runtime.
 - **Flag vector:** the 2b vector (`tools/model_registry.py` `server_args` plus the screen's
@@ -363,9 +376,11 @@ natively for these tests (ASSIST-40).
   llama.cpp build number in `BUILD.txt`, and `THIRD-PARTY-NOTICES.md` entries for llama.cpp
   and ggml (MIT) and for every other file shipped from the asset, by its own licence. REL-2
   requires corresponding source for every shipped binary, so the release also carries the
-  pinned llama.cpp source: always a `git archive` of the pinned commit (GitHub's generated
-  tag tarballs are not byte-stable), its SHA-256 recorded in the manifest, listed
-  in `SOURCE.txt` and `SHA256SUMS`. The `dev-endpoint` feature is absent from the release
+  pinned llama.cpp source: always a `git archive --format=tar` of the pinned commit from a
+  shallow clone at that commit (GitHub's generated tag tarballs are not byte-stable), its tar
+  SHA-256 recorded in the manifest and compressed afterwards with a pinned `gzip -n` for
+  shipping (the tar hash is what is verified), staged at the release root, never inside
+  `llama/`, listed in `SOURCE.txt` and `SHA256SUMS`. The `dev-endpoint` feature is absent from the release
   binary because the staged binary comes from `cargo build --release --locked` without
   features (tests build with `--all-features`); `smoke_release.py` in `artifact-smoke` checks
   the staged binary: it contains no `assistant-dev-endpoint` string, and the option is
@@ -377,7 +392,8 @@ natively for these tests (ASSIST-40).
   `0bd21da7698eaf29a0d7de3992de8a46ef624add`, is MIT. Both are recorded in the workflow and the
   manifest's test section. Only `llama-fetch` downloads it.
 - **CI workflow (2c-2 deliverables, `.github/workflows/ci.yml`):**
-  - a new required job `llama-fetch` (in the `mimik-ci` container like `checks`): fetches the
+  - a new required job `llama-fetch` (in the `mimik-ci` container like `checks`, with
+    `timeout-minutes: 15`): fetches the
     pinned assets, builds the source archive with `git archive` of the pinned commit, fetches
     the test model, verifies every hash, unpacks the assets (with `unzip`, installed in the
     image, under `target/`), and uploads the verified `llama/` files, the source archive and
@@ -386,8 +402,9 @@ natively for these tests (ASSIST-40).
     only it (since `upload-artifact` drops file modes, every job that unpacks re-hashes each
     file against the manifest and reapplies the manifest's modes), and uploads the
     `linux-release` tarball with its `SHA256SUMS` (as today) and the confinement test binary,
-    located with `cargo test --no-run --message-format=json` (built in the Ubuntu 22.04 image,
-    so it also runs on 24.04);
+    built with the workflow's own flags (`cargo test --locked --all-features --no-run
+    --message-format=json`) and located from that output (built in the Ubuntu 22.04 image, so
+    it also runs on 24.04);
   - a new required job `llama-runtime` with `needs: [llama-fetch, checks]` (so there is no
     cycle: `checks` never waits for `llama-runtime`), on a runner pinned by label
     (`ubuntu-24.04`), with `timeout-minutes: 30`, as host steps, not inside the `mimik-ci`
@@ -403,21 +420,33 @@ natively for these tests (ASSIST-40).
     value and lifts it with `sudo sysctl` for the job's duration only (an absent key is logged
     and skipped). It then runs:
     - the flag check;
-    - the start-time probe `mimik assistant-runner --probe` (below) for the CPU build, and for
-      the GPU build in the feature-enabled test build with its test-only switch that accepts
-      a software renderer (release builds never accept lavapipe); it must reach level 1, and
-      anything lower fails the job;
-    - the real CPU-build llama-server under the level-1 profile with the test model: `/health`
-      without a token, token refusal and acceptance over the Unix socket, `--model
-      /proc/self/fd/<n>` from the verified descriptor, one completion, the peer-shape
-      assertion, and cancellation mid-generation;
+    - the start-time probe for the CPU build only, as `target/rel/mimik assistant-runner
+      --probe --runtime target/rel/llama --models-dir target/models --model
+      local:stories260K.gguf --model-sha256 270cba1b…`, which prints one JSON line (level
+      reached, per-resource results, process shape) and exits 0 only at level 1; anything
+      lower fails the job (CI covers the CPU build only; the GPU path is a dev-host
+      measurement, and release builds never accept software renderers);
+    - the real CPU-build llama-server under the level-1 profile with the test model, started
+      by the confinement test binary through the runner with the same arguments: `/health`
+      without a token, token refusal and acceptance over the Unix socket in
+      `target/data/run/<generation>/`, the model bound from the verified descriptor
+      (`--ro-bind-fd`), one completion, the peer-shape assertion, and cancellation
+      mid-generation. The test model's `n_ctx_train` is recorded with its pin, and the CI run
+      uses a `--ctx-size` and a short prompt that fit it (the fixed prefix is not sent); its
+      first run is itself a live check of the model's behaviour under `--jinja` and that
+      context;
     - the confinement test binary (seccomp, endpoint and adversarial-helper tests) against
-      the unpacked release's runtime;
+      the unpacked release's runtime; the adversarial helper is that same binary re-executed
+      with a helper flag; the binary reads nothing from the source tree (fixtures embedded);
+      it is run as `target/confinement-tests --exact` with the confinement test filter. If the
+      runner's kernel offers Landlock ABI 4 or later (probed and logged), the level-2 tests
+      run there too; otherwise they stay the VM measurement;
   - `deployable` requires `llama-fetch`, `checks` and `llama-runtime` with the existing jobs;
     every new action is pinned by commit SHA like the existing ones;
   - stub-transport integration coverage runs in a test build with the `dev-endpoint` feature,
     labelled as such and never called verification of the shipped binary;
-  - not CI-covered, and said so: the live GPU checks, mid-prompt cancellation timing and the
+  - not CI-covered, and said so: the GPU path (probe, device listing, live GPU checks),
+    mid-prompt cancellation timing and the
     per-request `ignore_eos` with the real default model are dev-host measurements, repeated at
     every pin change and recorded in `docs/results.md`; Landlock-only tests that need a kernel
     the runner lacks are a host or VM measurement, recorded in the release scope and in
@@ -459,9 +488,12 @@ natively for these tests (ASSIST-40).
      on both paths (CPU and GPU reach `ready`) and listed in the reference doc; nothing outside
      it is visible. The child has only its own loopback interface, so it listens on a Unix
      socket at `/run/llama/llama.sock` inside the sandbox, a bind of a per-generation
-     directory on the host (mode 0700, owned by Mimik's user, under `$XDG_RUNTIME_DIR/mimik/`
-     or else a 0700 `mimik-<uid>` directory in the system temporary directory; removed when the
-     generation stops). Mimik connects through `/proc/self/fd/<dir fd>/llama.sock`, so the
+     directory in Mimik's own data directory (`<data dir>/run/<generation>/`), created with
+     `mkdir` mode 0700 and opened with `O_NOFOLLOW | O_DIRECTORY`, then `fstat` must show a
+     directory owned by Mimik's user with mode 0700, or the start is refused; removed when the
+     generation stops. Only the socket is expected there, but a compromised server can write
+     files into it, each bounded by `RLIMIT_FSIZE` but not in number, so exhaustion would hit
+     Mimik's data disk, not the user's session (ASSIST-L26). Mimik connects through `/proc/self/fd/<dir fd>/llama.sock`, so the
      host path's length never meets the 108-byte `sun_path` limit. A pathname socket is found
      by the inode its path resolves to, not by the `sun_path` string it was bound with, so the
      host-side path through the directory descriptor reaches the socket the child bound as
@@ -505,11 +537,12 @@ natively for these tests (ASSIST-40).
   The assistant runs at every level (hardening is "where available", ASSIST-30); the page
   shows the level next to the assistant state and next to the 2d "Try" button (a downloaded
   GGUF is untrusted input to llama-server, contained only by this).
-- **Seccomp (every level):** the crate is chosen by a 2c-2 fit check (`seccompiler` against
-  `libseccomp`): it must express an architecture check as the first rule and a raw x32 range
-  refusal (`nr & 0x40000000`), which a default-allow filter needs so x32 calls cannot bypass
-  the `clone` rule; if `seccompiler` cannot, the filter's first instructions are hand-written
-  BPF or `libseccomp` is used. Default action allow with the listed refusals returning `EPERM`
+- **Seccomp (every level):** pure Rust only, adding no runtime shared-library dependency to
+  the shipped binary: `seccompiler` (pure Rust, it does not link `libseccomp`) or hand-written
+  BPF; `libseccomp` is not an option. A 2c-2 fit check confirms `seccompiler` can express an
+  architecture check as the first rule and a raw x32 range refusal (`nr & 0x40000000`), which
+  a default-allow filter needs so x32 calls cannot bypass the `clone` rule; otherwise those
+  first instructions are hand-written BPF. Default action allow with the listed refusals returning `EPERM`
   (`ENOSYS` for `clone3`); the filter first checks the architecture (`AUDIT_ARCH_X86_64`,
   anything else killed), then refuses every x32 syscall number; `AF_NETLINK`, `AF_PACKET` and every family not named below are
   refused. `socket()` is allowed only for
@@ -521,7 +554,15 @@ natively for these tests (ASSIST-40).
   or `clone3`, so the `clone` flag rule and the `clone3` refusal are what operate; `clone3`'s
   flags cannot be inspected; glibc then falls back to `clone` for threads), so the server cannot start other processes: process-tree
   containment on levels 2 and 3, where the parent-death signal covers only the direct child
-  (an `exec` without a fork only replaces the server in place); `io_uring_setup`,
+  (an `exec` without a fork only replaces the server in place). Exec after start is restricted
+  too, because a non-leader thread that calls `exec` becomes the process leader without the
+  parent-death setting (it is per task): `execve` is refused, and `execveat` is allowed only on
+  the verified runtime descriptor's number with `AT_EMPTY_PATH`, that descriptor being
+  `O_CLOEXEC` so it is gone after the first exec; `dup2`, `dup3` and `fcntl(F_DUPFD*)`
+  targeting that number are refused if needed. If 2c-2's live check shows this cannot be made
+  sound, lifetime containment on levels 2 and 3 is best effort (the pidfile sweep at the next
+  start) and the page says so (ASSIST-L27). `pidfd_open`, `pidfd_getfd`, `process_madvise`
+  and `kcmp` are refused (they would let the server reach Mimik's descriptors); `io_uring_setup`,
   `io_uring_enter`, `io_uring_register`, `ptrace`, `process_vm_readv`/`writev`, `bpf`,
   `perf_event_open`, `keyctl`, `add_key`, `request_key`, `mount`, `umount2`, `pivot_root`,
   `unshare`, `setns`, module and `kexec` calls are refused. Seccomp sees no `connect()`
@@ -576,9 +617,10 @@ natively for these tests (ASSIST-40).
   inner one small); where `ns/pid` is not readable (it needs ptrace-read access, which a
   non-dumpable process denies), the `NSpid` and `PPid` tests decide. Mimik holds a pidfd on
   `child-pid` so its PID cannot be reused during the generation. A UID-only match is never
-  accepted. Levels 2 and 3: before and after `connect()`, the `LISTEN` entry for
+  accepted. Levels 2 and 3: before and after `connect()`, every `LISTEN` entry for
   `127.0.0.1:<port>` in `/proc/net/tcp` (`procfs` crate) must have its socket inode open in
-  the current child's `/proc/<pid>/fd`. While the child holds that listener no other process
+  the current child's `/proc/<pid>/fd` (with `SO_REUSEPORT` several listeners can share a
+  port, so one foreign entry fails the attempt). While the child holds that listener no other process
   can listen on the port, so the connection reaches it; the accepted socket is not required
   (it enters the child's table only on `accept()`). No `LISTEN` entry yet means "not ready"
   (retried until the `/health` timeout); an entry owned by any other process fails the attempt
@@ -610,9 +652,13 @@ natively for these tests (ASSIST-40).
   at each start the GPU build's `--list-devices` (30 s timeout; output format pinned by a test
   against the pinned build) runs inside the level-1 profile once per render node with only that
   node bound; after excluding software ICDs each list shows exactly one hardware GPU, and that
-  in-sandbox name is what the real start passes. Levels 2 and 3 cannot isolate nodes (level 3
+  in-sandbox name is what the real start passes. Whether binding one node really isolates
+  enumeration is a 2c-2 live measurement: Mesa enumerates through sysfs and libdrm, so if the
+  ICD still lists other cards, the level-1 profile also binds only the matching
+  `/sys/class/drm` entries, or selects by PCI address inside the sandbox. Levels 2 and 3 cannot isolate nodes (level 3
   does not restrict device opens at all): the GPU is used there only if exactly one hardware
-  GPU is visible, otherwise the CPU path is used with a page note (multi-GPU without
+  GPU is visible, counted from sysfs (`/sys/class/drm/renderD*` with their PCI devices), not
+  from `--list-devices`, otherwise the CPU path is used with a page note (multi-GPU without
   bubblewrap is a limitation, ASSIST-L25). The node's PCI address (sysfs) is its stable
   identity across restarts and distinguishes two identical cards. Ranking (`auto`, level 1):
   a device counts as dedicated when sysfs shows `mem_info_vram_total` above 0 (amdgpu) or its
@@ -712,10 +758,11 @@ natively for these tests (ASSIST-40).
 
 ### 1.4b Owner model setting (2d-1, 2d-2; ASSIST-28, ASSIST-35, ASSIST-36)
 
-- **Before 2d:** 2c reads the model from configuration (`--assistant-model`, default
-  `local:granite-4.2-3b-Q4_K_M.gguf` with its SHA-256 `e0406663…` compiled in, which equals
-  the Hub's LFS SHA-256 of that file at revision `c40945d…`; another `local:` file needs
-  `--assistant-model-sha256`), so 2c does not depend on 2d. The file is placed in the models
+- **Before 2d:** 2c reads the model from configuration: `--assistant-model` (the spec,
+  default `local:granite-4.2-3b-Q4_K_M.gguf` with its SHA-256 `e0406663…` compiled in, which
+  equals the Hub's LFS SHA-256 of that file at revision `c40945d…`), `--assistant-model-sha256`
+  (required for any other `local:` file) and `--assistant-model-alias` (the `--alias` the
+  runtime gives the server and the request's model name, default derived from the spec), so 2c does not depend on 2d. The file is placed in the models
   folder by hand. From 2d-2 the default is the `hf:` spec below; a file already present with
   that hash is used without a download.
 - **Page:** `/admin/assistant` (owner only; built in 2c-2 with the state, path, confinement
@@ -924,19 +971,24 @@ event interface the worker consumes (`generation started`, `generation ended` wi
 reason, `ready` with the budgets B, N(B), R, D, Q), fed in 2c-1 by the development endpoint's
 fixed configuration and by test doubles, and in 2c-2 by the runtime manager; the formula
 layer's read-set accessor (§1.4, Read sets); output schema v2, reviewed before use: `ref`
-accepts a field ID or the cell-address pattern, the instructions describe same-row cells, the
+accepts only a request-local alias from the supplied list (`f1`, `c1`, `t`), the instructions
+describe aliases and same-row cells, the 2b screen re-run under v2 on the dev host to re-check
+`max_tokens` 192, the
 Rust copy lives under `schemas/`, the fixed prefix is re-measured (tokens and priming time),
-and a live check confirms the pinned build's grammar conversion accepts the pattern; the note key in the JSON answer of an
+and a live check confirms the pinned build's grammar conversion accepts the alias enum; the note key in the JSON answer of an
 `unresolved` note (§1.4, Routes); worker, admission, records and breaker; the job, poll and
 apply routes with origin and read/write-set binding; the UI. The model server is started by
 hand on the dev host (ASSIST-40) and reached through a development endpoint setting
-(`--assistant-dev-endpoint`, a loopback literal or a socket path, with a token file; the
-request's model name is the alias from `--assistant-model`, default `granite-4.2-3b-q4_k_m`,
-which the hand-started server must be given with `--alias`), compiled
+(`--assistant-dev-endpoint`, a loopback literal or a socket path, with a token file; the model
+is `--assistant-model` (the spec, §1.4b), `--assistant-model-sha256` and
+`--assistant-model-alias` (the request's model name, default derived from the spec's file
+name, `granite-4.2-3b-q4_k_m` for the default), and the hand-started server must be given the
+same `--alias`), compiled
 only with the `dev-endpoint` Cargo feature, which release builds never enable (`smoke_release.py`
 checks the staged binary refuses the option); it has no endpoint check. Budgets come from
 flags of the dev build (development placeholders, not evidence): `--assistant-dev-bytes`
-(B, default 1,024), `--assistant-dev-token-limit` (N(B), default 256),
+(B, default 1,024), `--assistant-dev-token-limit` (N(B), default 384, above the about 296
+tokens a 1 KiB part takes at 3.5 bytes per token),
 `--assistant-dev-deadline` (R, default 85 s), `--assistant-dev-queue` (D, default 1) and
 `--assistant-dev-queue-wait` (Q, default 35 s). In a 2c-1 release build, which has neither
 the endpoint nor the runtime, `--assistant` is refused at start ("the assistant is not
@@ -978,11 +1030,12 @@ stated):
   D-F/D-J scalar list is sent; a `ref` to an unsent field or to an enum field drops the
   option;
 - same-row cells (every path, B 4,096 and B 1,024 alike): for a target cell of row `h`, an
-  integer or enum cell of row `h` co-read with the target's property is sent as
-  `cell:<list>/<h>/<b>`, a text, multiline or derived property never is, a cell of another
-  row with the same property never is, nor a same-row cell not co-read; a
-  `ref` to that exact address evaluates with its value; a `ref` naming another row's host ID
-  or a property of row `h` that was not sent drops the option; the row moved since the job →
+  integer or enum cell of row `h` co-read with the target's property is sent with an alias
+  (`c1`) that Rust maps to `cell:<list>/<h>/<b>`, a text, multiline or derived property never
+  is, a cell of another row with the same property never is, nor a same-row cell not co-read;
+  a `ref` to that alias evaluates with its value; a `ref` to an alias not in the supplied list
+  (or a typed address written out instead of an alias) drops the option; aliases are
+  request-local (the same field may have another alias in the next request); the row moved since the job →
   found by host ID; the cell changed or the row removed before apply → apply refused;
 - note key: a cell save that records `unresolved` answers with `note.key` in the JSON (the
   typed host-ID form for row cells too), the page markup is unchanged, a cell whose note
@@ -1119,10 +1172,20 @@ night or at a weekend):
   `/v1/chat/completions` → 401, the right one is served, `/health` answers without it; the
   token is in no command line (`/proc/<pid>/cmdline`), no log line and no file after
   `/health` (TCP levels); a fake build without a safe channel → the assistant does not start;
+- socket directory: a pre-created `<data dir>/run/<generation>/` that is a symbolic link, owned
+  by another user or of another mode → the start is refused; files written into it by a helper
+  are each bounded by `RLIMIT_FSIZE`;
+- exec and descriptors (levels 2 and 3, adversarial helper): a thread that calls `execve` →
+  refused; `execveat` on any descriptor but the runtime one, or on a duplicate of it → refused;
+  thread → exec → SIGKILL of Mimik → nothing survives (or, if 2c-2 finds this unsound, the
+  pidfile sweep removes it at the next start and the page says lifetime containment is best
+  effort); a ptrace-accessible cooperative helper holding a forbidden descriptor → the child's
+  `pidfd_open` and `pidfd_getfd` are refused, also with Yama scope 0;
 - endpoint: level 1 (live): the peer of llama-server's socket has the reaper as parent and the
   reported `pid-namespace`, and is accepted; a peer with Mimik's UID that is not in that
   namespace (a helper listening on a socket swapped into the directory) → nothing sent; a
-  UID-only match is never accepted; levels 2 and 3: a squatter listening on the port → its
+  UID-only match is never accepted; levels 2 and 3: a second `SO_REUSEPORT` listener on the
+  child's port → nothing sent; a squatter listening on the port → its
   `LISTEN` inode is not the child's → nothing sent; a child that accepts late (after a delay)
   is still accepted; a child that exits between the check and the request → the connection
   fails, nothing sent to anyone else; a child that never prints its listening line but listens
@@ -1167,8 +1230,8 @@ night or at a weekend):
 - probe: `mimik assistant-runner --probe` at each level opens the model through its
   descriptor (a regular-file `--ro-bind-fd` at level 1), binds the socket or port, reads the
   token channel and, on the GPU path, opens the render node; a removed bind, a missing token
-  channel or a refused open fails the probe with that cause; the release build refuses the
-  software-renderer switch;
+  channel or a refused open fails the probe with that cause; the probe's JSON line and exit
+  status match its level; no build accepts a software renderer;
 - priming and calibration (fake server): a start before they complete answers 503 "starting"
   and queues nothing; they never count toward the breaker; a sample with a missing, zero or
   non-finite timing, `predicted_n` different from `max_tokens`, a negative tail or cached
