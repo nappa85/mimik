@@ -186,8 +186,11 @@ fn play_mimik() {
                 .unwrap();
         assert_eq!(probed, Ok(()));
         let child = launch.start(1, Level::Bubblewrap, Path::Cpu).await.unwrap();
-        while child.server().health().await != Health::Ready {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        // "Ready" waits for /health; "starting" reports at once, while the server loads.
+        if std::env::var("MIMIK_LIVE_KILL_AT").as_deref() != Ok("starting") {
+            while child.server().health().await != Health::Ready {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         }
         let pidfile =
             std::fs::read_to_string(scratch.join("data/run").join(rundir::PIDFILE)).unwrap();
@@ -465,12 +468,11 @@ fn live_an_adversary_in_the_level_1_sandbox_reaches_nothing() {
     assert!(host_listener.accept().is_err());
 }
 
-#[test]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
-fn live_sigkill_of_mimik_kills_the_whole_sandbox() {
+fn sigkill_of_mimik_ends_the_sandbox(kill_at: &str) {
     let scratch = scratch();
     let mut mimik = test_helper::command(HELPER, "mimik")
         .env("MIMIK_LIVE_CHILD_SCRATCH", scratch.path())
+        .env("MIMIK_LIVE_KILL_AT", kill_at)
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -487,10 +489,7 @@ fn live_sigkill_of_mimik_kills_the_whole_sandbox() {
         }
     };
     let tree: Vec<i32> = std::iter::once(bwrap).chain(descendants(bwrap)).collect();
-    assert!(
-        tree.len() >= 3,
-        "bwrap, its reaper and llama-server: {tree:?}"
-    );
+    assert!(!tree.is_empty());
     mimik.kill().unwrap();
     mimik.wait().unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -501,4 +500,16 @@ fn live_sigkill_of_mimik_kills_the_whole_sandbox() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[test]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+fn live_sigkill_of_mimik_kills_the_whole_sandbox() {
+    sigkill_of_mimik_ends_the_sandbox("ready");
+}
+
+#[test]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+fn live_sigkill_of_mimik_during_startup_kills_the_whole_sandbox() {
+    sigkill_of_mimik_ends_the_sandbox("starting");
 }

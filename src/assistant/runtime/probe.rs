@@ -91,7 +91,11 @@ fn answer(accept: impl Fn() -> std::io::Result<Box<dyn Peer>>) {
 
 /// The probe inside its level. Returns the exit code.
 pub(crate) fn inner(args: &[String]) -> i32 {
-    let mut out = std::io::stdout().lock();
+    inner_to(args, &mut std::io::stdout().lock())
+}
+
+/// [`inner`], reporting to `out`.
+fn inner_to(args: &[String], out: &mut dyn Write) -> i32 {
     let pid = std::process::id();
     match args {
         [level] if level == "1" => {
@@ -111,7 +115,7 @@ pub(crate) fn inner(args: &[String]) -> i32 {
                     "socket": verdict(&bound), "pid": pid})
             );
             let _ = out.flush();
-            if let Ok(listener) = listener {
+            if ok && let Ok(listener) = listener {
                 let _ = listener.set_nonblocking(true);
                 answer(|| {
                     listener
@@ -138,7 +142,7 @@ pub(crate) fn inner(args: &[String]) -> i32 {
                     "port": verdict(&bound), "pid": pid})
             );
             let _ = out.flush();
-            if let Ok(listener) = listener {
+            if ok && let Ok(listener) = listener {
                 let _ = listener.set_nonblocking(true);
                 answer(|| {
                     listener
@@ -276,5 +280,54 @@ pub fn main(args: &[String]) -> i32 {
         [flag, rest @ ..] if flag == "--probe-inner" => inner(rest),
         [flag, rest @ ..] if flag == "--probe" => cli_probe(rest),
         _ => 2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outside_its_level_the_probe_names_every_missing_resource_and_fails() {
+        // No sandbox here: no /models/model.gguf, no /run/token, no /run/llama.
+        let mut out = Vec::new();
+        assert_eq!(inner_to(&["1".into()], &mut out), 1);
+        let report: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(report["ok"], json!(false));
+        assert!(
+            report["model"]
+                .as_str()
+                .unwrap()
+                .starts_with("the model cannot be opened")
+        );
+        assert!(
+            report["token"]
+                .as_str()
+                .unwrap()
+                .starts_with("the token cannot be read")
+        );
+        assert!(
+            report["socket"]
+                .as_str()
+                .unwrap()
+                .starts_with("the socket cannot be bound")
+        );
+        let mut out = Vec::new();
+        assert_eq!(
+            inner_to(
+                &["3".into(), "0".into(), "/nonexistent/token".into()],
+                &mut out
+            ),
+            1
+        );
+        let report: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(report["ok"], json!(false));
+        assert!(
+            report["token"]
+                .as_str()
+                .unwrap()
+                .starts_with("the token cannot be read")
+        );
+        assert_eq!(inner(&["2".into()]), 2);
     }
 }
