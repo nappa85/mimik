@@ -100,6 +100,17 @@ class FakeModel(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def do_POST(self):  # noqa: N802 (http.server API)
+        if self.path == "/stall-json":
+            # A JSON answer whose body never finishes (the browser check's stalled Use).
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "100000")
+            self.end_headers()
+            self.wfile.write(b'{"status": "saved", ')
+            self.wfile.flush()
+            time.sleep(90)
+            return
         if not self.authorized():
             self.send_json(401, {"error": "token"})
             return
@@ -258,6 +269,55 @@ def scenario(page, sheet):
     no_overflow(page, "assistant after supersession")
 
 
+def stalled_use(page, sheet, stall_url):
+    """Use whose answer never comes (stall_url None: the request is held unanswered; else it
+    is sent to a server whose JSON body never finishes): past the 30 s bound the module
+    gives up, the newer draft queued meanwhile is saved and a page post waiting for the
+    saves is released."""
+    page.clock.install()
+    page.goto(sheet)
+    until(page, "document.documentElement.dataset.sheetAssist === 'ready'", "the module")
+    hp = page.locator("#v0")
+    hp.fill("took 15 damage first")
+    hp.press("Enter")
+    until(page, "!!document.querySelector('#assist-0 .assist-use')", "the option")
+    held = []
+    if stall_url is None:
+        page.route("**/proposals/**", lambda route: held.append(route))
+    else:
+        page.route(
+            "**/proposals/**",
+            lambda route: (held.append(route), route.continue_(url=stall_url)),
+        )
+    page.locator("#assist-0 .assist-use").click()
+    until_python(page, lambda: bool(held), "the apply request")
+    # A newer draft (queued behind Use) and a page post (waiting for every save).
+    hp.fill("70")
+    hp.press("Enter")
+    quick = page.locator("#quick-4")
+    rows = page.locator('fieldset[id^="row-fieldset-4-"], fieldset.row').count()
+    quick.fill("1 lantern")
+    page.wait_for_timeout(300)
+    with page.expect_navigation(wait_until="domcontentloaded", timeout=20000):
+        quick.press("Enter")
+        page.wait_for_timeout(300)
+        page.clock.fast_forward(31000)
+    page.unroute("**/proposals/**")
+    until(page, "document.documentElement.dataset.sheetAssist === 'ready'", "the module")
+    require(
+        page.locator("#v0").input_value() == "70", "The draft queued behind a stalled Use was lost"
+    )
+    require(
+        "lantern" in page.content(), "The page post waiting behind a stalled Use was not released"
+    )
+    del rows
+    # Back to a known value for the next stage.
+    hp = page.locator("#v0")
+    hp.fill("84")
+    hp.press("Enter")
+    until(page, "!document.querySelector('form[aria-busy]')", "the save")
+
+
 def main(argv=None):
     from playwright.sync_api import sync_playwright
 
@@ -305,6 +365,11 @@ def main(argv=None):
                             [{"name": name, "value": value, "url": "http://127.0.0.1:3000"}]
                         )
                         scenario(context.new_page(), f"http://127.0.0.1:3000{sheet}")
+                        for stall in (
+                            None,
+                            f"http://127.0.0.1:{server.server_address[1]}/stall-json",
+                        ):
+                            stalled_use(context.new_page(), f"http://127.0.0.1:3000{sheet}", stall)
                         context.close()
                 finally:
                     browser.close()

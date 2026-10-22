@@ -635,14 +635,18 @@ async function send(unit, key, submitter) {
   unit.sent = key;
   pending += 1;
   unit.form.setAttribute('aria-busy', 'true');
-  let answer = null;
-  let status = 0;
-  // A save that hangs counts as a network failure after 30 s, so page posts never wait
-  // for it forever.
+  const { status, answer } = await bounded(unit.form.action, body);
+  land(unit, () => settle(unit, flight, answer, status, submitter));
+}
+
+/** A POST asking for JSON, bounded: one that hangs, before its headers or inside its body,
+ * counts as a network failure after 30 s, so a unit's flight, and page posts waiting for it,
+ * never wait forever. Never throws. */
+async function bounded(path, body) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30000);
   try {
-    const response = await fetch(unit.form.action, {
+    const response = await fetch(path, {
       signal: controller.signal,
       method: 'POST',
       body,
@@ -651,21 +655,24 @@ async function send(unit, key, submitter) {
       redirect: 'manual',
       cache: 'no-store',
     });
-    status = response.status;
     const type = (response.headers.get('Content-Type') || '').split(';')[0].trim();
-    if (type === JSON_TYPE) {
-      answer = await response.json();
-    }
+    return { status: response.status, answer: type === JSON_TYPE ? await response.json() : null };
   } catch {
-    answer = null;
+    return { status: 0, answer: null };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Ends a unit's flight (a save or a Use): `draw` shows the answer and says whether a save
+ * queued meanwhile is dropped (after a conflict or an orphaned unit, ASSIST-23); otherwise it
+ * is sent. The pending count is released whatever happens. */
+function land(unit, draw) {
   unit.flight = null;
   unit.form.removeAttribute('aria-busy');
   let drop = false;
   try {
-    drop = settle(unit, flight, answer, status, submitter);
+    drop = draw();
   } catch {
     setAlert(unit, failure(0));
   } finally {
@@ -771,18 +778,8 @@ function csrfOf(unit) {
   return csrf instanceof HTMLInputElement ? csrf.value : '';
 }
 
-async function postForm(path, pairs) {
-  const body = new URLSearchParams(pairs);
-  const response = await fetch(path, {
-    method: 'POST',
-    body,
-    headers: { Accept: JSON_TYPE },
-    credentials: 'same-origin',
-    redirect: 'manual',
-    cache: 'no-store',
-  });
-  const type = (response.headers.get('Content-Type') || '').split(';')[0].trim();
-  return { status: response.status, answer: type === JSON_TYPE ? await response.json() : null };
+function postForm(path, pairs) {
+  return bounded(path, new URLSearchParams(pairs));
 }
 
 /** Starts a job for a saved scribble and polls it. */
@@ -912,19 +909,13 @@ async function applyOption(unit, token, action, button) {
   unit.flight = flight;
   pending += 1;
   unit.form.setAttribute('aria-busy', 'true');
-  let result;
-  try {
-    result = await postForm(action, [['csrf', csrfOf(unit)]]);
-  } catch {
-    result = { status: 0, answer: null };
-  }
-  unit.flight = null;
-  unit.form.removeAttribute('aria-busy');
-  try {
+  const result = await postForm(action, [['csrf', csrfOf(unit)]]);
+  land(unit, () => {
     if (result.status === 200 && valid(result.answer)) {
       stopAssist(unit);
-      settle(unit, flight, result.answer, 200, null);
-    } else if (token === unit.assist) {
+      return settle(unit, flight, result.answer, 200, null);
+    }
+    if (token === unit.assist) {
       assistText(
         unit,
         record(result.answer) && text(result.answer.message)
@@ -932,23 +923,8 @@ async function applyOption(unit, token, action, button) {
           : 'Not used: the server did not answer; try again.',
       );
     }
-  } catch {
-    setAlert(unit, failure(0));
-  } finally {
-    pending -= 1;
-    const queued = unit.queued;
-    unit.queued = null;
-    if (queued) {
-      pending -= 1;
-    }
-    try {
-      if (queued) {
-        request(unit, queued.explicit, queued.submitter);
-      }
-    } finally {
-      settled();
-    }
-  }
+    return false;
+  });
 }
 
 function enhance(form) {

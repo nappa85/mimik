@@ -461,12 +461,16 @@ impl Assistant {
                     _ => now,
                 })
                 .map(|(index, _)| index);
-            match oldest {
-                Some(index) => {
-                    table.jobs.remove(index);
-                }
-                None => return Err(Refusal::Busy),
-            }
+            // `None` is not reached: `admissible` refused 64 live jobs (the superseded one
+            // excepted, and it has just ended, so it is evictable). Defensively, a ticket the
+            // breaker may have made the probe gets its neutral outcome, so no probe stays
+            // reserved for a job that was never created.
+            let Some(index) = oldest else {
+                self.breaker()
+                    .record(ticket, breaker::Outcome::Neutral, now.into_std());
+                return Err(Refusal::Busy);
+            };
+            table.jobs.remove(index);
         }
         let id = JobId::random();
         table.jobs.push(Job {
