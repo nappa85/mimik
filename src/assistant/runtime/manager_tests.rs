@@ -1,0 +1,571 @@
+//! The transitions table, one test per row, with a fake launcher, fake children and Tokio's
+//! paused clock.
+use super::super::server::Timings;
+use super::*;
+use crate::assistant::interpreter::stub::StubInterpreter;
+use crate::assistant::interpreter::{Failure, Interpreter};
+use crate::assistant::jobs::RuntimeState;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use tokio::sync::watch;
+
+/// How a fake server answers.
+#[derive(Clone)]
+struct Behaviour {
+    /// `/health` answers before it is ready.
+    loading: usize,
+    prime_fails: bool,
+    /// Per-token prompt and generation seconds of the samples.
+    p: f64,
+    g: f64,
+    /// Holds priming until a permit is added.
+    gate: Option<Arc<tokio::sync::Semaphore>>,
+}
+
+impl Default for Behaviour {
+    fn default() -> Self {
+        Self {
+            loading: 2,
+            prime_fails: false,
+            p: 0.001,
+            g: 0.01,
+            gate: None,
+        }
+    }
+}
+
+struct FakeServer {
+    behaviour: Behaviour,
+    health_calls: AtomicUsize,
+    primed: Arc<AtomicUsize>,
+    interpreter: Arc<StubInterpreter>,
+}
+
+#[async_trait]
+impl Server for FakeServer {
+    async fn health(&self) -> Health {
+        if self.health_calls.fetch_add(1, Ordering::SeqCst) < self.behaviour.loading {
+            Health::Loading
+        } else {
+            Health::Ready
+        }
+    }
+
+    async fn tokens(&self, text: &str) -> Result<usize, Failure> {
+        Ok(text.len().div_ceil(3))
+    }
+
+    async fn plain(&self, user: &str, max_tokens: u32, _: bool) -> Result<Timings, Failure> {
+        if max_tokens == 1 {
+            if let Some(gate) = &self.behaviour.gate {
+                gate.acquire().await.unwrap().forget();
+            }
+            if self.behaviour.prime_fails {
+                return Err(Failure::Status(500));
+            }
+            self.primed.fetch_add(1, Ordering::SeqCst);
+            return Ok(Timings {
+                prompt_n: Some(1460.0),
+                prompt_ms: Some(1460.0),
+                cache_n: Some(0.0),
+                predicted_n: Some(1.0),
+                predicted_ms: Some(1.0),
+            });
+        }
+        let n = f64::from(u32::try_from(user.len().div_ceil(3)).unwrap());
+        let prompt_n = 200.0 + n;
+        let predicted = f64::from(max_tokens);
+        let prompt_ms = self.behaviour.p * prompt_n * 1000.0;
+        let predicted_ms = self.behaviour.g * predicted * 1000.0;
+        tokio::time::sleep(Duration::from_secs_f64((prompt_ms + predicted_ms) / 1000.0)).await;
+        Ok(Timings {
+            prompt_n: Some(prompt_n),
+            prompt_ms: Some(prompt_ms),
+            cache_n: Some(1290.0),
+            predicted_n: Some(predicted),
+            predicted_ms: Some(predicted_ms),
+        })
+    }
+
+    fn interpreter(&self) -> Arc<dyn Interpreter> {
+        Arc::clone(&self.interpreter) as Arc<dyn Interpreter>
+    }
+}
+
+struct FakeChild {
+    server: Arc<FakeServer>,
+    exit: watch::Sender<Option<Fail>>,
+    stopped: AtomicBool,
+    alive: Arc<AtomicUsize>,
+    stops: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Child for FakeChild {
+    fn server(&self) -> Arc<dyn Server> {
+        Arc::clone(&self.server) as Arc<dyn Server>
+    }
+
+    async fn exited(&self) -> Fail {
+        let mut exit = self.exit.subscribe();
+        loop {
+            if let Some(fail) = exit.borrow_and_update().clone() {
+                return fail;
+            }
+            if exit.changed().await.is_err() {
+                return std::future::pending().await;
+            }
+        }
+    }
+
+    async fn stop(&self) {
+        if !self.stopped.swap(true, Ordering::SeqCst) {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            self.gone();
+        }
+    }
+}
+
+impl FakeChild {
+    fn gone(&self) {
+        let already = self.exit.borrow().is_some();
+        if !already {
+            self.alive.fetch_sub(1, Ordering::SeqCst);
+            let _ = self.exit.send(Some(Fail::Other("exited".into())));
+        }
+    }
+
+    /// The child exits by itself.
+    fn crash(&self) {
+        self.gone();
+    }
+}
+
+#[derive(Clone)]
+enum Start {
+    Ok(Behaviour),
+    Sandbox(&'static str),
+    Other(&'static str),
+}
+
+#[derive(Default)]
+struct FakeLauncher {
+    preflight: Mutex<Option<String>>,
+    probe: Mutex<Option<Vec<(Level, Result<(), String>)>>>,
+    script: Mutex<VecDeque<Start>>,
+    starts: Mutex<Vec<(u64, Level, Instant)>>,
+    children: Mutex<Vec<Arc<FakeChild>>>,
+    alive: Arc<AtomicUsize>,
+    stops: Arc<AtomicUsize>,
+    primed: Arc<AtomicUsize>,
+    coexisted: AtomicBool,
+}
+
+#[async_trait]
+impl Launcher for FakeLauncher {
+    async fn preflight(&self, _: Path) -> Result<(), String> {
+        match self.preflight.lock().unwrap().clone() {
+            Some(why) => Err(why),
+            None => Ok(()),
+        }
+    }
+
+    async fn probe(&self, _: Path) -> Vec<(Level, Result<(), String>)> {
+        self.probe.lock().unwrap().clone().unwrap_or_else(|| {
+            vec![
+                (Level::Bubblewrap, Ok(())),
+                (Level::Landlock, Err("not built".into())),
+                (Level::Unconfined, Ok(())),
+            ]
+        })
+    }
+
+    async fn start(&self, generation: u64, level: Level, _: Path) -> Result<Arc<dyn Child>, Fail> {
+        self.starts
+            .lock()
+            .unwrap()
+            .push((generation, level, Instant::now()));
+        if self.alive.load(Ordering::SeqCst) != 0 {
+            self.coexisted.store(true, Ordering::SeqCst);
+        }
+        let script = self
+            .script
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(Start::Ok(Behaviour::default()));
+        let behaviour = match script {
+            Start::Ok(behaviour) => behaviour,
+            Start::Sandbox(why) => return Err(Fail::Sandbox(why.into())),
+            Start::Other(why) => return Err(Fail::Other(why.into())),
+        };
+        self.alive.fetch_add(1, Ordering::SeqCst);
+        let child = Arc::new(FakeChild {
+            server: Arc::new(FakeServer {
+                behaviour,
+                health_calls: AtomicUsize::new(0),
+                primed: Arc::clone(&self.primed),
+                interpreter: Arc::new(StubInterpreter::default()),
+            }),
+            exit: watch::channel(None).0,
+            stopped: AtomicBool::new(false),
+            alive: Arc::clone(&self.alive),
+            stops: Arc::clone(&self.stops),
+        });
+        self.children.lock().unwrap().push(Arc::clone(&child));
+        Ok(child as Arc<dyn Child>)
+    }
+}
+
+impl FakeLauncher {
+    fn scripted(script: impl IntoIterator<Item = Start>) -> Arc<Self> {
+        Arc::new(Self {
+            script: Mutex::new(script.into_iter().collect()),
+            ..Self::default()
+        })
+    }
+
+    fn levels(&self) -> Vec<Level> {
+        self.starts.lock().unwrap().iter().map(|(_, l, _)| *l).collect()
+    }
+
+    fn child(&self, n: usize) -> Arc<FakeChild> {
+        Arc::clone(&self.children.lock().unwrap()[n])
+    }
+}
+
+const CONFIG: Config = Config {
+    path: Path::Cpu,
+    max_tokens: 352,
+};
+
+fn manager(launcher: &Arc<FakeLauncher>) -> (Arc<Assistant>, Handle) {
+    let assistant = Assistant::new();
+    let handle = spawn(
+        Arc::clone(&assistant),
+        Arc::clone(launcher) as Arc<dyn Launcher>,
+        CONFIG,
+    );
+    (assistant, handle)
+}
+
+/// Lets the paused clock run until `done` holds (at most `limit` of virtual time).
+async fn until(limit: Duration, mut done: impl FnMut() -> bool) {
+    let end = Instant::now() + limit;
+    while !done() {
+        assert!(Instant::now() < end, "not reached within {limit:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn ready(assistant: &Arc<Assistant>) {
+    let assistant = Arc::clone(assistant);
+    until(Duration::from_secs(600), move || {
+        assistant.state() == RuntimeState::Ready
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_start_reaches_ready_after_health_priming_and_calibration() {
+    let launcher = FakeLauncher::scripted([]);
+    let (assistant, handle) = manager(&launcher);
+    ready(&assistant).await;
+    let status = handle.status();
+    assert_eq!(status.state, State::Ready);
+    assert_eq!(status.level, Some(Level::Bubblewrap));
+    assert_eq!(status.generation, 1);
+    assert_eq!(
+        status.skipped,
+        vec![(Level::Landlock, "not built".to_owned())]
+    );
+    let budgets = status.budgets.unwrap();
+    assert_eq!(budgets.bounds.bytes, 1024);
+    assert_eq!(budgets.run, Duration::from_secs(15));
+    assert_eq!(assistant.budgets(), Some(budgets));
+    assert!(status.calibration.is_some());
+    assert_eq!(launcher.primed.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn before_priming_and_calibration_complete_a_job_start_answers_starting() {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let launcher = FakeLauncher::scripted([Start::Ok(Behaviour {
+        gate: Some(Arc::clone(&gate)),
+        ..Behaviour::default()
+    })]);
+    let (assistant, handle) = manager(&launcher);
+    let status = handle.clone();
+    until(Duration::from_secs(60), move || {
+        status.status().state == State::Starting("priming")
+    })
+    .await;
+    assert_eq!(assistant.state(), RuntimeState::Starting);
+    gate.add_permits(1);
+    ready(&assistant).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sandbox_failure_moves_to_the_next_probed_level_at_once_not_counted() {
+    let launcher = FakeLauncher::scripted([Start::Sandbox("bwrap: setup failed")]);
+    let (assistant, handle) = manager(&launcher);
+    ready(&assistant).await;
+    assert_eq!(launcher.levels(), [Level::Bubblewrap, Level::Unconfined]);
+    let starts = launcher.starts.lock().unwrap().clone();
+    // At once: no retry wait.
+    assert!(starts[1].2 - starts[0].2 < Duration::from_secs(1));
+    let status = handle.status();
+    assert_eq!(status.failures, 0);
+    assert_eq!(status.level, Some(Level::Unconfined));
+    assert!(status.skipped.contains(&(Level::Bubblewrap, "bwrap: setup failed".into())));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_level_that_fails_its_probe_is_never_started() {
+    let launcher = FakeLauncher::scripted([]);
+    *launcher.probe.lock().unwrap() = Some(vec![
+        (Level::Bubblewrap, Err("user namespaces are disabled".into())),
+        (Level::Unconfined, Ok(())),
+    ]);
+    let (assistant, handle) = manager(&launcher);
+    ready(&assistant).await;
+    assert_eq!(launcher.levels(), [Level::Unconfined]);
+    assert_eq!(
+        handle.status().skipped,
+        vec![(Level::Bubblewrap, "user namespaces are disabled".to_owned())]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn other_failures_retry_after_two_minutes_and_four_make_the_assistant_unavailable() {
+    let launcher = FakeLauncher::scripted([
+        Start::Other("model load failed"),
+        Start::Other("hash mismatch"),
+        Start::Other("exited after exec"),
+        Start::Other("model load failed"),
+    ]);
+    let (assistant, handle) = manager(&launcher);
+    let probe = handle.clone();
+    until(Duration::from_secs(900), move || {
+        matches!(probe.status().state, State::Unavailable(_))
+    })
+    .await;
+    let starts = launcher.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 4);
+    for pair in starts.windows(2) {
+        let gap = pair[1].2 - pair[0].2;
+        assert!(gap >= RETRY_AFTER && gap < RETRY_AFTER + Duration::from_secs(1), "{gap:?}");
+        // The level is kept.
+        assert_eq!(pair[1].1, Level::Bubblewrap);
+    }
+    let status = handle.status();
+    assert_eq!(status.failures, 4);
+    assert!(matches!(&status.state, State::Unavailable(why) if why.contains("model load failed")));
+    assert!(matches!(assistant.state(), RuntimeState::Unavailable(_)));
+    // No fifth attempt without Restart.
+    tokio::time::sleep(Duration::from_secs(3600)).await;
+    assert_eq!(launcher.starts.lock().unwrap().len(), 4);
+    // Priming and calibration failures never touch the breaker.
+    assert!(assistant.breaker_closed());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_priming_failure_is_a_counted_attempt_failure_outside_the_breaker() {
+    let launcher = FakeLauncher::scripted([Start::Ok(Behaviour {
+        prime_fails: true,
+        ..Behaviour::default()
+    })]);
+    let (assistant, handle) = manager(&launcher);
+    ready(&assistant).await;
+    assert_eq!(launcher.starts.lock().unwrap().len(), 2);
+    assert_eq!(handle.status().failures, 1);
+    assert!(assistant.breaker_closed());
+    // The failed child was stopped before the next one started.
+    assert!(!launcher.coexisted.load(Ordering::SeqCst));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_child_exit_while_ready_restarts_at_once_and_counts_only_within_ten_minutes() {
+    let launcher = FakeLauncher::scripted([]);
+    let (assistant, handle) = manager(&launcher);
+    ready(&assistant).await;
+    launcher.child(0).crash();
+    let probe = Arc::clone(&launcher);
+    until(Duration::from_secs(5), move || probe.starts.lock().unwrap().len() == 2).await;
+    ready(&assistant).await;
+    assert_eq!(handle.status().failures, 1);
+    assert_eq!(handle.status().generation, 2);
+    // The restarted child re-primed before admitting jobs.
+    assert_eq!(launcher.primed.load(Ordering::SeqCst), 2);
+    // After ten ready minutes the count is back to 0, and a later exit does not count.
+    tokio::time::sleep(READY_WINDOW + Duration::from_secs(1)).await;
+    assert_eq!(handle.status().failures, 0);
+    launcher.child(1).crash();
+    let probe = Arc::clone(&launcher);
+    until(Duration::from_secs(5), move || probe.starts.lock().unwrap().len() == 3).await;
+    ready(&assistant).await;
+    assert_eq!(handle.status().failures, 0);
+    assert!(!launcher.coexisted.load(Ordering::SeqCst));
+}
+
+#[tokio::test(start_paused = true)]
+async fn two_consecutive_expiries_stop_the_child_as_hung_and_restart() {
+    let launcher = FakeLauncher::scripted([]);
+    let (assistant, handle) = manager(&launcher);
+    ready(&assistant).await;
+    // An expiry, a completed exchange, an expiry: not two in a row.
+    assistant.signal_for_tests(Signal::Expired { generation: 1 });
+    assistant.signal_for_tests(Signal::Completed { generation: 1 });
+    assistant.signal_for_tests(Signal::Expired { generation: 1 });
+    // A stale generation's expiry is ignored.
+    assistant.signal_for_tests(Signal::Expired { generation: 0 });
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(launcher.starts.lock().unwrap().len(), 1);
+    assistant.signal_for_tests(Signal::Expired { generation: 1 });
+    let probe = Arc::clone(&launcher);
+    until(Duration::from_secs(5), move || probe.starts.lock().unwrap().len() == 2).await;
+    assert_eq!(launcher.stops.load(Ordering::SeqCst), 1);
+    ready(&assistant).await;
+    let status = handle.status();
+    assert_eq!(status.failures, 1);
+    assert!(status.last_failure.unwrap().contains("hung"));
+    // Re-measured.
+    assert_eq!(launcher.primed.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn too_slow_is_unavailable_with_the_numbers_and_no_retry() {
+    // Each sample completes (about 76 s, both within the 180 s calibration limit), but
+    // even B 512 needs 1.25 × 74 s, over the 90 s cap.
+    let slow = Behaviour {
+        p: 0.01,
+        g: 0.2,
+        ..Behaviour::default()
+    };
+    let launcher = FakeLauncher::scripted([Start::Ok(slow)]);
+    let (assistant, handle) = manager(&launcher);
+    let probe = handle.clone();
+    until(Duration::from_secs(900), move || {
+        matches!(probe.status().state, State::Unavailable(_))
+    })
+    .await;
+    let status = handle.status();
+    assert!(
+        matches!(&status.state, State::Unavailable(why) if why.starts_with("too slow on this machine: about ") && why.ends_with("the cap is 90 s")),
+        "{:?}",
+        status.state
+    );
+    assert!(status.calibration.is_some());
+    tokio::time::sleep(Duration::from_secs(3600)).await;
+    assert_eq!(launcher.starts.lock().unwrap().len(), 1);
+    assert_eq!(launcher.alive.load(Ordering::SeqCst), 0);
+    assert!(matches!(assistant.state(), RuntimeState::Unavailable(_)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn restart_resets_count_and_breaker_and_returns_to_level_1() {
+    let launcher = FakeLauncher::scripted([
+        Start::Sandbox("bwrap: setup failed"),
+        Start::Ok(Behaviour::default()),
+    ]);
+    let (assistant, handle) = manager(&launcher);
+    ready(&assistant).await;
+    assert_eq!(handle.status().level, Some(Level::Unconfined));
+    launcher.child(0).crash();
+    let probe = Arc::clone(&launcher);
+    until(Duration::from_secs(5), move || probe.starts.lock().unwrap().len() == 3).await;
+    ready(&assistant).await;
+    // A lower level stays down until Restart; the exit counted.
+    assert_eq!(handle.status().level, Some(Level::Unconfined));
+    assert_eq!(handle.status().failures, 1);
+    assert_eq!(handle.restart(), Restart::Accepted);
+    // A second press while the transition runs is no second transition.
+    assert_eq!(handle.restart(), Restart::AlreadyRunning);
+    let probe = Arc::clone(&launcher);
+    until(Duration::from_secs(5), move || probe.starts.lock().unwrap().len() == 4).await;
+    ready(&assistant).await;
+    let status = handle.status();
+    assert_eq!(status.level, Some(Level::Bubblewrap));
+    assert_eq!(status.failures, 0);
+    assert!(!status.restarting);
+    assert_eq!(launcher.starts.lock().unwrap().len(), 4);
+    assert!(!launcher.coexisted.load(Ordering::SeqCst));
+    assert!(assistant.breaker_closed());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_generation_change_ends_running_and_queued_jobs_as_restarted() {
+    use crate::assistant::contract::{EnvelopeTarget, TARGET_ALIAS};
+    use crate::assistant::jobs::{Answer, Origin, Poll};
+    use crate::assistant::request::Draft;
+    let launcher = FakeLauncher::scripted([]);
+    let (assistant, _handle) = manager(&launcher);
+    tokio::spawn(Arc::clone(&assistant).work());
+    ready(&assistant).await;
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let stub = Arc::clone(&launcher.child(0).server.interpreter);
+    *stub.gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let draft = || Draft {
+        phrase: "heal 1".into(),
+        target: EnvelopeTarget {
+            alias: TARGET_ALIAS,
+            id: "hp".into(),
+            label: None,
+            value: Some(3),
+        },
+        target_address: "field:hp".into(),
+        items: Vec::new(),
+    };
+    let start = |account: i64, sheet: i64| {
+        let registration = assistant.register(sheet, 5);
+        assistant.start(
+            &registration,
+            account,
+            Origin {
+                sheet,
+                target: "field:hp".into(),
+                revision: 5,
+            },
+            draft(),
+        )
+    };
+    let (running, _) = start(1, 1).unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let waiting = start(2, 2);
+    launcher.child(0).crash();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(assistant.poll(1, 1, running), Poll::Done(Answer::Restarted));
+    if let Ok((waiting, _)) = waiting {
+        assert_eq!(assistant.poll(2, 2, waiting), Poll::Done(Answer::Restarted));
+    }
+    assert!(assistant.breaker_closed());
+    gate.add_permits(4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_preflight_refusal_keeps_the_assistant_unavailable_with_its_reason() {
+    let launcher = FakeLauncher::scripted([]);
+    *launcher.preflight.lock().unwrap() =
+        Some("another Mimik uses this data directory's assistant".into());
+    let (assistant, handle) = manager(&launcher);
+    let probe = handle.clone();
+    until(Duration::from_secs(5), move || {
+        matches!(probe.status().state, State::Unavailable(_))
+    })
+    .await;
+    assert!(launcher.starts.lock().unwrap().is_empty());
+    assert_eq!(
+        assistant.state(),
+        RuntimeState::Unavailable("another Mimik uses this data directory's assistant".into())
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_stops_the_child() {
+    let launcher = FakeLauncher::scripted([]);
+    let (assistant, handle) = manager(&launcher);
+    ready(&assistant).await;
+    handle.shutdown().await;
+    assert_eq!(launcher.alive.load(Ordering::SeqCst), 0);
+    assert_eq!(launcher.stops.load(Ordering::SeqCst), 1);
+}

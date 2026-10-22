@@ -772,6 +772,12 @@ impl Assistant {
         self.table().jobs.len()
     }
 
+    /// Sends a signal as the worker would (manager tests).
+    #[cfg(test)]
+    pub(crate) fn signal_for_tests(&self, signal: Signal) {
+        self.signal(signal);
+    }
+
     #[cfg(test)]
     pub(crate) fn breaker_closed(&self) -> bool {
         self.breaker().is_closed()

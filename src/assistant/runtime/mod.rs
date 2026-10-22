@@ -12,6 +12,7 @@ pub(crate) mod calibration;
 pub(crate) mod drain;
 pub(crate) mod endpoint;
 pub(crate) mod files;
+pub(crate) mod manager;
 pub(crate) mod manifest;
 pub(crate) mod rundir;
 pub(crate) mod runner;
