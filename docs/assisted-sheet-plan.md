@@ -16,8 +16,8 @@ interpretation against a hand-started local server, **2c-2** the model runtime (
 token, confinement, budgets), **2d-1** the owner model setting with local models, **2d-2**
 model downloads, **3** bundles and reminders, **4** suggestions and "Which Sword?", **5** docs
 and gate; each sub-step has its own branch, tests and reviews. The model runs GPU-first with
-the CPU as the intended baseline (ASSIST-27; whether the default model meets the CPU caps is
-open, §5), as an official `llama-server` build that Mimik
+the CPU as the intended baseline (ASSIST-27; whether the default model meets the CPU caps at
+the ASSIST-41 thread default is set by the native calibration), as an official `llama-server` build that Mimik
 starts as a child and confines with bubblewrap where it can, never a container in production
 (ASSIST-29, ASSIST-30, ASSIST-34); budgets come from a measurement at each start within fixed
 caps (ASSIST-31, ASSIST-32). Linux x86_64 is the platform built and verified now.
@@ -356,8 +356,8 @@ natively for these tests (ASSIST-40).
   descriptor path>`, `--alias <label>`, `--host <transport>` (the socket path or
   `127.0.0.1`), `--port <p>` (TCP levels only), `--offline --no-webui --no-slots --no-mmproj
   --jinja`, on the GPU path `--n-gpu-layers 99 --device <name>` (the selected device, below),
-  on the CPU path `--n-gpu-layers 0`, `--fit off`, `--threads 2 --threads-batch 2`
-  (configurable, 2 as measured), `--ctx-size 8192 --parallel 1 --no-warmup --cache-ram 0
+  on the CPU path `--n-gpu-layers 0`, `--fit off`, `--threads <n> --threads-batch <n>`
+  (ASSIST-41: default the physical cores minus one, at least 1, configurable; 2b measured 2), `--ctx-size 8192 --parallel 1 --no-warmup --cache-ram 0
   --reasoning off`, and the token (below). Measurement-relevant (a change needs a new
   measurement before it ships): `--jinja`, `--n-gpu-layers`, `--fit`, threads, `--ctx-size`,
   `--parallel`, `--cache-ram`, `--reasoning`, plus the per-request `cache_prompt: true`,
@@ -757,8 +757,9 @@ natively for these tests (ASSIST-40).
 
   With t at the 75 % bound, or with `max_tokens` 256 or more (any model but the default
   Granite file), nothing fits, so the CPU baseline of ASSIST-27 is not assured with the
-  default model at 2 threads (§5, open question). In 2c-2 these are formula fixtures, not
-  evidence.
+  default model at 2 threads; ASSIST-41 raises the default to the physical cores minus one,
+  and the native calibration at that setting decides. In 2c-2 these are formula fixtures,
+  not evidence.
 
 ### 1.4b Owner model setting (2d-1, 2d-2; ASSIST-28, ASSIST-35, ASSIST-36)
 
@@ -1262,8 +1263,8 @@ night or at a weekend):
   the `/proc/self/fd` model path; cancellation mid-generation and mid-prompt (the superseding
   job's first token);
 - measurement step (to `docs/results.md`, before 2c-2 is marked complete; 2c-2's CPU-baseline
-  claim also waits for the user's answer to §5, while 2c-1 does not): the first native
-  calibration on this host on both paths (start to `ready`, priming, the two samples, the
+  claim rests on it, while 2c-1 does not): the first native calibration on this host on both
+  paths, the CPU path at the ASSIST-41 default and at 2 threads (start to `ready`, priming, the two samples, the
   filler's density, the derived B, R, D and Q), which sets the expected CPU outcome; grammar
   against no-grammar per-token generation time, which settles the calibration form; a job's
   real prompt tokens against N(B); the unpacked official CPU asset starting on the documented
@@ -1381,7 +1382,8 @@ dangling key shows no link; p95 measured.
   combobox keyboard and IME, no overflow.
 - Model runtime (host measurements, reported separately from unit, fake-server and CI
   evidence, never part of the CI gate except the `llama-runtime` job): on this host the CPU
-  path at 2 threads and the GPU path (Vulkan, RX 6650 XT, night or weekend), each from a native
+  path at 2 threads and at the ASSIST-41 default (5 of 6 physical cores; evening or weekend)
+  and the GPU path (Vulkan, RX 6650 XT, night or weekend), each from a native
   child under bubblewrap: start to `ready`, priming and calibration samples, derived budgets,
   token refusal, cancellation, the GPU → CPU fallback, shutdown and orphan cleanup, the
   confinement tests with the adversarial helper. Landlock on a VM whose kernel has ABI 4 or
@@ -1465,11 +1467,6 @@ choosing a fallback for unknown (L-U4).
 
 ## 5. Open questions for the user
 
-- **CPU baseline with the default model (ASSIST-27, ASSIST-31, ASSIST-32):** the §1.4a
-  illustration from the 2b container figures suggests that Granite 4.2 3B at 2 CPU threads
-  fits at best a 512-byte dynamic part within the 90 s cap, and nothing if the uncached prefix
-  tail is near its bound; any model with `max_tokens` 256 or more fits nothing. If the first
-  native calibration confirms it, the CPU path is off on such machines. Options: allow more
-  threads on CPU-only machines (outside the weekday 2-core rule, which governs this dev host),
-  a smaller default model on the CPU path, or accept the assistant being off there. The
-  decision wording of ASSIST-31 and ASSIST-32 is unchanged until the user decides.
+- None. The CPU-baseline question is settled by ASSIST-41 (threads default to the physical
+  cores minus one, and the native calibration at that default decides the CPU budgets); if
+  the measurement still fits nothing, it comes back to the user.

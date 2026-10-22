@@ -8,6 +8,9 @@ has edit/write/bash/web tools denied, so it can only read the snapshot.
 """
 
 import argparse
+import contextlib
+import datetime as dt
+import fcntl
 import json
 import os
 import re
@@ -19,14 +22,13 @@ import tempfile
 import time
 from pathlib import Path
 
-DEFAULT_MODEL = "opencode/muse-spark-1.3-contributor-free"
 # User decision 2026-10-16: Sol and a Sonnet subagent are the main reviewers. The third
 # reviewer is the first of these that works; if none works, the review proceeds with two.
 SOL_MODEL = "openai/gpt-6.1-sol"
 THIRD_REVIEWER_CHAIN = (
     "opencode/minimax-m3.1-flash-free",
     "opencode/deepseek-v4.1-flash-free",
-    "opencode/muse-spark-1.3-contributor-free",
+    "opencode/beam-free",
 )
 CHAINS = {"main": (SOL_MODEL,), "third": THIRD_REVIEWER_CHAIN}
 EXCLUDES = (
@@ -149,12 +151,76 @@ def preflight(model, cwd, timeout=45, attempts=3, base_delay=10):
 
 
 VERDICT = re.compile(r"verdict", re.IGNORECASE)
+# Free models have daily token limits and are throttled when several run at once; a throttled
+# run often opens a stream that never returns a byte instead of failing (2026-10-22).
+STATE_DIR = Path.home() / ".cache" / "mimik-review"
+OPENCODE_LOG = Path.home() / ".local" / "share" / "opencode" / "log" / "opencode.log"
+LOG_TIME = re.compile(r"^timestamp=(\S+?)(?:\.\d+)?Z\b")
+
+
+def is_free(model):
+    return model.startswith("opencode/")
+
+
+@contextlib.contextmanager
+def free_model_lock(model):
+    """Hold one machine-wide lock while a free model runs, so free runs never overlap."""
+    if not is_free(model):
+        yield None
+        return
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    fd = os.open(STATE_DIR / "free.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _today():
+    return dt.datetime.now(dt.UTC).date().isoformat()
+
+
+def _ledger():
+    try:
+        return json.loads((STATE_DIR / "limits.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def limited_today(model):
+    return _ledger().get(model, {}).get("date") == _today()
+
+
+def mark_limited(model, reason):
+    """Skip `model` for the rest of the UTC day (free limits reset daily)."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    ledger = _ledger()
+    ledger[model] = {"date": _today(), "reason": reason}
+    (STATE_DIR / "limits.json").write_text(json.dumps(ledger, indent=2))
+
+
+def opencode_errors(model, since):
+    """ERROR lines opencode logged for `model` at or after `since` (ISO UTC, no zone)."""
+    name = model.split("/", 1)[-1]
+    try:
+        lines = OPENCODE_LOG.read_text(errors="replace").splitlines()[-20000:]
+    except OSError:
+        return []
+    found = []
+    for line in lines:
+        match = LOG_TIME.match(line)
+        if match and match.group(1) >= since and "level=ERROR" in line and name in line:
+            found.append(line[:300])
+    return found[-5:]
 
 
 def classify(returncode, output):
     """`unavailable` (failed or quota text), `incomplete` (exited 0 without a verdict: a tool
     trace or an unfinished summary), or `ok`. Every review brief asks for a verdict."""
     text = output.strip()
+    if returncode == 124 and text.endswith("[killed: idle timeout]"):
+        return "stalled"
     if returncode != 0 or not text or UNAVAILABLE.search(text[-2000:]) and len(text) < 4000:
         return "unavailable"
     if not VERDICT.search(text):
@@ -167,16 +233,31 @@ def review_with_fallback(models, snap, prompt, total, idle):
     (None, log) when every model is unavailable."""
     attempts = []
     for model in models:
-        if not preflight(model, snap):
-            attempts.append(f"{model}: preflight failed")
-            print(f"{model}: preflight failed; trying the next model.", file=sys.stderr)
+        if is_free(model) and limited_today(model):
+            attempts.append(f"{model}: skipped (limited earlier today)")
+            print(f"{model}: limited earlier today; trying the next model.", file=sys.stderr)
             continue
-        code, output = run_with_idle_timeout(
-            opencode_command(model, snap, prompt), snap, total, idle
-        )
+        with free_model_lock(model):
+            since = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%S")
+            if not preflight(model, snap):
+                attempts.append(f"{model}: preflight failed")
+                print(f"{model}: preflight failed; trying the next model.", file=sys.stderr)
+                continue
+            code, output = run_with_idle_timeout(
+                opencode_command(model, snap, prompt), snap, total, idle
+            )
         state = classify(code, output)
         if state == "ok":
             return model, output
+        if state in {"stalled", "unavailable"}:
+            errors = opencode_errors(model, since)
+            for line in errors:
+                print(f"{model}: opencode log: {line}", file=sys.stderr)
+            if is_free(model) and (
+                state == "stalled" or any(UNAVAILABLE.search(line) for line in errors)
+            ):
+                state = f"{state}, likely a free-tier limit"
+                mark_limited(model, state)
         attempts.append(f"{model}: {state} (exit {code})")
         if state == "incomplete":
             print(f"{model}: output ended with:\n{output.strip()[-1500:]}", file=sys.stderr)
@@ -196,7 +277,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--idle-timeout", type=int, default=120)
     args = parser.parse_args()
-    models = args.model or CHAINS.get(args.chain) or (DEFAULT_MODEL,)
+    models = args.model or CHAINS.get(args.chain) or THIRD_REVIEWER_CHAIN
     if not args.prompt_file.is_file() or not (args.source / "AGENTS.md").is_file():
         print("Prompt file or Mimik source missing", file=sys.stderr)
         return 2

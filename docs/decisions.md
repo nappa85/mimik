@@ -102,6 +102,7 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 - **ASSIST-38** (2026-10-22, user) Fraction words keep the 2b rule (any fraction word admits 2, 3, 4 and 100) until languages are handled generally; the derived-constant check is not adopted, and the provenance loophole it targeted is a known limit.
 - **ASSIST-39** (2026-10-22, user) Mimik uses the latest stable Rust (1.99.1 now) and rig-core 0.45.0; the upgrade is its own reviewed change and re-runs 2b's rig-core checks.
 - **ASSIST-40** (2026-10-22, user) The dev host may run the pinned official llama-server natively for the runtime-manager tests; installing additional software still goes through containers.
+- **ASSIST-41** (2026-10-22, user) On the CPU path the model server uses the physical cores minus one (at least 1) by default, configurable; the budgets come from the calibration at that setting. The weekday 2-core rule governs the dev host only.
 
 ## Formulas and sheet values
 

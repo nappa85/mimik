@@ -64,6 +64,17 @@ class ReviewerAgentTests(unittest.TestCase):
 
 
 class FallbackTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for name, value in (
+            ("STATE_DIR", Path(tmp.name)),
+            ("OPENCODE_LOG", Path(tmp.name) / "none.log"),
+        ):
+            patcher = mock.patch.object(external_review, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def run_chain(self, working):
         """`working` is the set of models whose preflight and review succeed."""
         calls = []
@@ -86,13 +97,13 @@ class FallbackTests(unittest.TestCase):
             )
         return result, calls
 
-    def test_third_reviewer_order_is_minimax_deepseek_muse(self):
+    def test_third_reviewer_order_is_minimax_deepseek_beam(self):
         self.assertEqual(
             external_review.THIRD_REVIEWER_CHAIN,
             (
                 "opencode/minimax-m3.1-flash-free",
                 "opencode/deepseek-v4.1-flash-free",
-                "opencode/muse-spark-1.3-contributor-free",
+                "opencode/beam-free",
             ),
         )
         self.assertEqual(external_review.CHAINS["main"], ("openai/gpt-6.1-sol",))
@@ -103,7 +114,7 @@ class FallbackTests(unittest.TestCase):
         self.assertEqual(model, bunny)
         self.assertNotIn(("preflight", deepseek), calls)
 
-    def test_falls_through_to_muse(self):
+    def test_falls_through_to_the_last_model(self):
         bunny, deepseek, muse = external_review.THIRD_REVIEWER_CHAIN
         (model, output), calls = self.run_chain({muse})
         self.assertEqual(model, muse)
@@ -141,6 +152,91 @@ class FallbackTests(unittest.TestCase):
         (model, log), _ = self.run_chain(set())
         self.assertIsNone(model)
         self.assertEqual(log.count("preflight failed"), 3)
+
+
+class FreeTierTests(unittest.TestCase):
+    """Free models have daily limits and are throttled when run in parallel (2026-10-22: GLM,
+    Nemotron Super VL and MiMo opened a stream that never returned a byte)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = mock.patch.object(external_review, "STATE_DIR", Path(self.tmp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_idle_kill_is_a_stall_not_a_plain_failure(self):
+        self.assertEqual(
+            external_review.classify(124, "\u2192 Read a\n[killed: idle timeout]"), "stalled"
+        )
+        self.assertEqual(
+            external_review.classify(124, "partial\n[killed: total timeout]"), "unavailable"
+        )
+
+    def test_limit_error_in_the_opencode_log_is_a_quota_failure(self):
+        log = Path(self.tmp.name) / "opencode.log"
+        log.write_text(
+            "timestamp=2026-10-22T06:00:00.000Z level=ERROR modelID=x-free "
+            'error="AI_APICallError: Rate limit exceeded for today"\n'
+            "timestamp=2026-10-22T07:00:00.000Z level=ERROR modelID=x-free "
+            'error="AI_APICallError: 429 Too Many Requests"\n'
+        )
+        with mock.patch.object(external_review, "OPENCODE_LOG", log):
+            lines = external_review.opencode_errors("x-free", "2026-10-22T06:30:00")
+        self.assertEqual(len(lines), 1)
+        self.assertIn("429", lines[0])
+        self.assertTrue(external_review.UNAVAILABLE.search(lines[0]))
+
+    def test_a_limited_model_is_skipped_for_the_rest_of_the_day(self):
+        first, second, _ = external_review.THIRD_REVIEWER_CHAIN
+        external_review.mark_limited(first, "stalled")
+        tried = []
+
+        def fake_run(command, cwd, total, idle):
+            model = command[command.index("-m") + 1]
+            tried.append(model)
+            return 0, "ok\nVerdict: READY"
+
+        with (
+            mock.patch.object(external_review, "preflight", lambda model, snap: True),
+            mock.patch.object(external_review, "run_with_idle_timeout", fake_run),
+        ):
+            model, _ = external_review.review_with_fallback(
+                external_review.THIRD_REVIEWER_CHAIN, Path("/snap"), "p", 10, 10
+            )
+        self.assertEqual(model, second)
+        self.assertEqual(tried, [second])
+
+    def test_a_stalled_run_marks_the_model_limited(self):
+        first, second, _ = external_review.THIRD_REVIEWER_CHAIN
+
+        def fake_run(command, cwd, total, idle):
+            model = command[command.index("-m") + 1]
+            if model == first:
+                return 124, "\u2192 Read a\n[killed: idle timeout]"
+            return 0, "ok\nVerdict: READY"
+
+        with (
+            mock.patch.object(external_review, "preflight", lambda model, snap: True),
+            mock.patch.object(external_review, "run_with_idle_timeout", fake_run),
+            mock.patch.object(external_review, "opencode_errors", lambda model, since: []),
+        ):
+            external_review.review_with_fallback(
+                external_review.THIRD_REVIEWER_CHAIN, Path("/snap"), "p", 10, 10
+            )
+        self.assertTrue(external_review.limited_today(first))
+        self.assertFalse(external_review.limited_today(second))
+
+    def test_free_runs_are_serialised_by_a_lock(self):
+        held = external_review.free_model_lock("opencode/x-free")
+        with held:
+            other = os.open(Path(self.tmp.name) / "free.lock", os.O_RDWR)
+            import fcntl
+
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.close(other)
+        self.assertIsNone(external_review.free_model_lock("openai/gpt-6.1-sol").__enter__())
 
 
 if __name__ == "__main__":

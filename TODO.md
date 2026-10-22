@@ -32,9 +32,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Pending user questions
 
-- CPU-only machines (plan §5): model threads default (recommended: all physical cores but one,
-  measured at each start), a smaller CPU model, or the assistant off there.
-- Third-reviewer chain after benchmark 2 (recommended: MiniMax → DeepSeek → Beam, 1,200 s).
 - Does the correct-password login rejection seen on 2026-10-14 still happen? Diagnose or close.
 - Remaining LAN and multi-device scope to support.
 - M4 default Q5 (drafts over 1 MiB are not echoed back), applied without an answer: confirm or

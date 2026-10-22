@@ -106,14 +106,21 @@ Implements the reviewer setup defined in `AGENTS.md`.
 
 - **Chains:** `--chain main` is `openai/gpt-6.1-sol`. `--chain third` tries
   `opencode/minimax-m3.1-flash-free`, then `opencode/deepseek-v4.1-flash-free`, then
-  `opencode/muse-spark-1.3-contributor-free`. Without `--chain` or `--model` it uses Muse
-  Spark.
+  `opencode/beam-free` (reviewer benchmark 2). Without `--chain` or `--model` it uses the
+  third chain.
+- **Free-tier limits:** free models (`opencode/*`) have daily token limits and are throttled
+  when several run at once. Free runs take a machine-wide lock
+  (`~/.cache/mimik-review/free.lock`), so they never overlap, also across processes. A run
+  killed by the idle timeout is `stalled`; after a stall, or an opencode log error matching a
+  limit (`~/.local/share/opencode/log/opencode.log`, printed with the run's log lines), the
+  model is recorded in `~/.cache/mimik-review/limits.json` and skipped until the next UTC day.
 - **Snapshot:** excludes `.env*`, `data`, `target`, `.git`, `.venv*`, caches, `*.sqlite3*`,
   `*.pdf` and `*.gguf`.
 - **Read-only reviewer:** the opencode `reviewer` agent has write, edit, bash, web, task and
   skill denied, plus `external_directory: deny`.
 - **Timeouts:** a 45 s preflight ("PONG", up to 3 attempts with backoff), then 1,800 s total
-  and 120 s idle. `--diff` adds `REVIEW_DIFF.patch` and `REVIEW_STATUS.txt`.
+  and 120 s idle by default; reviews pass `--timeout 2400 --idle-timeout 900`, because
+  MiniMax and DeepSeek take 16–18 minutes. `--diff` adds `REVIEW_DIFF.patch` and `REVIEW_STATUS.txt`.
 - **Exit codes:** 0 a review was written; 3 every model was unavailable (including a run that
   exits 0 without a verdict: a tool trace or an unfinished summary); 2 usage error.
 
