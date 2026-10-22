@@ -6,25 +6,24 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Current work
 
-- **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a and 2b and the plan for
-  2c-1, 2c-2, 2d-1 and 2d-2 are merged into master. In progress: the ASSIST-39 upgrade (Rust
-  1.99.1, rig-core 0.45.0, askama without `config`, DEP-16) on branch `rust-1.99`
-  (`mimik-wt/rust-1.99`), gate passed, Sol and Sonnet READY, third review running.
+- **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, the plan for 2c/2d
+  and the Rust 1.99.1 / rig-core 0.45.0 upgrade are merged into master. In progress: **2c-1**
+  (interpretation against a hand-started server, dev-only) on branch `assist-2c1` in
+  `mimik-wt/catalogue`.
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
-  target/agent-tools/ci.sh <cmd>`, image mimik-ci, volumes mimik-cargo-cache and
-  mimik-catalogue-target). `mimik-ci:latest` is now the 1.99.1 image; master still pins 1.95.0
-  until `rust-1.99` merges, so use `mimik-ci:1.95.0` for master until then.
+  target/agent-tools/ci.sh <cmd>`, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
+  mimik-catalogue-target). Free-model reviews: never in parallel (`tools/external_review.py`
+  locks and skips limited models, `~/.cache/mimik-review/limits.json`).
 
 ## Next steps
 
-1. Merge `rust-1.99`; sweep the Docker build cache; delete `mimik-ci:1.95.0`.
-2. 2c-1 interpretation against a hand-started server (dev-only), then 2c-2 runtime manager,
-   2d-1 owner model setting, 2d-2 downloads, 3 bundles and reminders, 4 suggestions, 5 docs
-   and gate (includes the `docs/release-scope.md` update for schema 22 and the assisted
-   scope).
-3. Owed measurements: the rig-core 0.45.0 live request; the native CPU calibration (2c-2);
-   GPU-path checks at each llama.cpp pin change; the Qwen3.5-9B rev3 S40 re-run.
+1. 2c-1, then 2c-2 runtime manager, 2d-1 owner model setting, 2d-2 downloads, 3 bundles and
+   reminders, 4 suggestions, 5 docs and gate (includes the `docs/release-scope.md` update for
+   schema 22 and the assisted scope).
+2. Owed measurements: the rig-core 0.45.0 live request; the native CPU calibration at the
+   ASSIST-41 default and at 2 threads (2c-2); GPU-path checks at each llama.cpp pin change;
+   the Qwen3.5-9B rev3 S40 re-run.
 
 ## Blockers
 
