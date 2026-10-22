@@ -318,7 +318,7 @@ class Files(unittest.TestCase):
         self.assertEqual(out["schema_valid"], "1/1")
 
 
-V2_PREFIX_SHA256 = "14a3a86a777908a5b68ffbaccaaeb06132b6e3e1127cc2c975445441dbc9612f"
+V2_PREFIX_SHA256 = "bca07a06be15ab62ca855ca017493deba10bb9db3f35e266a6bd9fe8fcd3e4c7"
 
 
 class ContractV2(unittest.TestCase):
@@ -376,12 +376,14 @@ class ContractV2(unittest.TestCase):
             "target": "hp",
             "phrase": "x",
             "cells": [
-                {"id": "weight", "label": "Weight", "type": "integer", "value": 3},
                 {"id": "note", "label": "Note", "type": "text", "value": "n"},
+                {"id": "weight", "label": "Weight", "type": "integer", "value": 3},
             ],
         }
         req = ae._build_request_v2(case, SHEET)
+        # An excluded cell before an eligible one takes no alias (Sol R2).
         self.assertEqual(req["supplied"]["c1"], 3)
+        self.assertNotIn("c2", req["supplied"])
         self.assertNotIn('"note","label"', req["user"])
         bare = ae._build_request_v2(
             case,

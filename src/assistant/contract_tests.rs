@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 /// The reviewed fixed prefix. Any change to the instructions, the separator or the schema
 /// changes this hash and needs its own review (plan §1.4: schema v2 is reviewed before use),
 /// a new prefix measurement and the same hash in `tools/test_assist_eval.py`.
-const PREFIX_SHA256: &str = "14a3a86a777908a5b68ffbaccaaeb06132b6e3e1127cc2c975445441dbc9612f";
+const PREFIX_SHA256: &str = "bca07a06be15ab62ca855ca017493deba10bb9db3f35e266a6bd9fe8fcd3e4c7";
 
 fn validator() -> jsonschema::Validator {
     jsonschema::draft202012::options()

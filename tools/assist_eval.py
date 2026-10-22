@@ -428,6 +428,8 @@ def _build_request_v2(case, sheet, limit=DYNAMIC_LIMIT):
         }
         for n, f in enumerate(others, start=1)
     ]
+    # Excluded types are filtered before aliases are assigned, as in Rust.
+    cells = [cell for cell in case.get("cells", []) if cell["type"] in ("integer", "enum")]
     context += [
         {
             "alias": f"c{n}",
@@ -436,8 +438,7 @@ def _build_request_v2(case, sheet, limit=DYNAMIC_LIMIT):
             "type": cell["type"],
             "value": cell["value"],
         }
-        for n, cell in enumerate(case.get("cells", []), start=1)
-        if cell["type"] in ("integer", "enum")
+        for n, cell in enumerate(cells, start=1)
     ]
     payload = {
         "note": case["phrase"],

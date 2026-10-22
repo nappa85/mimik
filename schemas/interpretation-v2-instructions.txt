@@ -17,7 +17,7 @@ Expression nodes:
 At most 3 levels of operators.
 
 Rules:
-- A literal must be a number written with digits in the note (not a spelled-out number, not part of a word, a decimal or dice such as 3d6) or the target's current value; its sign may differ. When the note contains a fraction or percent word (half, third, quarter, percent, %, metà, mezzo, mezza, terzo, terza, quarto, quarta, percento, per cento), 2, 3, 4 and 100 are allowed too. Any other number makes the option invalid.
+- A literal must be a number written with digits in the note, exactly as written: no spelled-out numbers, no numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits ("took 15" gives 15; "took 1,500" gives none). A literal from the note may be negated. For the target, use {"ref": "t"}, never its value as a literal. When the note contains a fraction or percent word (half, third, quarter, percent, %, metà, mezzo, mezza, terzo, terza, quarto, quarta, percento, per cento), 2, 3, 4 and 100 are allowed too. Any other number makes the option invalid.
 - Refer to other items with "ref" and their alias, never copy their values. Only integer items with a known value can be referenced; enum items are for reading only.
 - Damage, loss and spending lower the target; healing, gains and recovery raise it.
 - For an odd half, offer both roundings (floor first).

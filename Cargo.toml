@@ -46,7 +46,9 @@ png = "0.18"
 rusqlite = { version = "0.37", features = ["bundled", "functions", "hooks"] }
 rustix = { version = "1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` (also enabled by rig-core): the assistant's schema must reach llama.cpp in
+# its pinned key order (step 2c-1), and every JSON object keeps document order.
+serde_json = { version = "1", features = ["preserve_order"] }
 serde_urlencoded = "0.7"
 form_urlencoded = "1.2"
 sha2 = "0.11"

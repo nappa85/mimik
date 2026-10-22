@@ -970,7 +970,10 @@ read-set accessor (§1.4, Read sets); output schema v2, reviewed before use: `re
 request-local alias from a fixed superset (`t`, `f1`…`f64`, `c1`…`c31`; Rust drops an alias
 not supplied), the instructions describe
 aliases and same-row cells, the 2b screen re-run under v2 on the dev host to re-check
-`max_tokens` 192, the Rust copy lives under `schemas/`, the fixed prefix is re-measured
+`max_tokens` 192 (switch rule: if more than 2 distinct cases of the 50, in any pass, lose at
+least one option to an unsupplied or enum-item alias, `response_format` switches to a
+per-request narrowed alias enum, a pure subset of the pinned one and tested, while the
+prefix keeps the fixed schema), the Rust copy lives under `schemas/`, the fixed prefix is re-measured
 (tokens and priming time), and a live check confirms the pinned build's grammar conversion
 accepts the alias enum; the note key in the JSON answer of an `unresolved` note (§1.4,
 Routes); worker, admission, records and breaker; the job, poll and apply routes with origin
