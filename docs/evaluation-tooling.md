@@ -114,7 +114,8 @@ Implements the reviewer setup defined in `AGENTS.md`.
   skill denied, plus `external_directory: deny`.
 - **Timeouts:** a 45 s preflight ("PONG", up to 3 attempts with backoff), then 1,800 s total
   and 120 s idle. `--diff` adds `REVIEW_DIFF.patch` and `REVIEW_STATUS.txt`.
-- **Exit codes:** 0 a review was written; 3 every model was unavailable; 2 usage error.
+- **Exit codes:** 0 a review was written; 3 every model was unavailable (including a run that
+  exits 0 without a verdict: a tool trace or an unfinished summary); 2 usage error.
 
 ## Tool-loop pack and harness
 

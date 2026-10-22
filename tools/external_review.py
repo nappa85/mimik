@@ -1,7 +1,8 @@
 """Run a read-only review through opencode on a sanitized snapshot, with fallback signalling.
 
 Exit codes: 0 review written (the first output line names the model used); 3 every model
-in the fallback order was unavailable (quota, auth, timeout, empty output); 2 usage errors.
+in the fallback order was unavailable (quota, auth, timeout, empty output, or no verdict:
+a tool trace or an unfinished summary); 2 usage errors.
 The snapshot excludes secrets, user data, build output and caches. The opencode agent
 has edit/write/bash/web tools denied, so it can only read the snapshot.
 """
@@ -147,10 +148,17 @@ def preflight(model, cwd, timeout=45, attempts=3, base_delay=10):
     return False
 
 
+VERDICT = re.compile(r"verdict", re.IGNORECASE)
+
+
 def classify(returncode, output):
+    """`unavailable` (failed or quota text), `incomplete` (exited 0 without a verdict: a tool
+    trace or an unfinished summary), or `ok`. Every review brief asks for a verdict."""
     text = output.strip()
     if returncode != 0 or not text or UNAVAILABLE.search(text[-2000:]) and len(text) < 4000:
         return "unavailable"
+    if not VERDICT.search(text):
+        return "incomplete"
     return "ok"
 
 
@@ -166,10 +174,13 @@ def review_with_fallback(models, snap, prompt, total, idle):
         code, output = run_with_idle_timeout(
             opencode_command(model, snap, prompt), snap, total, idle
         )
-        if classify(code, output) == "ok":
+        state = classify(code, output)
+        if state == "ok":
             return model, output
-        attempts.append(f"{model}: unavailable (exit {code})")
-        print(f"{model}: unavailable (exit {code}); trying the next model.", file=sys.stderr)
+        attempts.append(f"{model}: {state} (exit {code})")
+        if state == "incomplete":
+            print(f"{model}: output ended with:\n{output.strip()[-1500:]}", file=sys.stderr)
+        print(f"{model}: {state} (exit {code}); trying the next model.", file=sys.stderr)
     return None, "\n".join(attempts)
 
 
