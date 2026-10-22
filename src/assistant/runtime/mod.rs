@@ -8,6 +8,7 @@
 //! the level.
 pub(crate) mod budgets;
 pub(crate) mod bwrap;
+pub(crate) mod calibration;
 pub(crate) mod drain;
 pub(crate) mod endpoint;
 pub(crate) mod files;
@@ -15,6 +16,7 @@ pub(crate) mod manifest;
 pub(crate) mod rundir;
 pub(crate) mod runner;
 pub(crate) mod seccomp;
+pub(crate) mod server;
 pub(crate) mod token;
 #[cfg(test)]
 pub(crate) mod test_helper;
