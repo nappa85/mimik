@@ -150,7 +150,7 @@ Runs on every push, pull request and manual dispatch, on `ubuntu-22.04`, with re
 contents permission and pinned actions.
 
 1. **checks** (in the `mimik-ci` container): `cargo fmt --check`; `cargo clippy --locked
-   --all-targets --all-features -- -D warnings`; `ruff check tools` and `ruff format --check
+   --all-targets --all-features -- -D warnings` and the same with default features; `ruff check tools` and `ruff format --check
    tools`; `cargo test --locked --all-targets --all-features`; build the `formula_eval`
    example; generate the synthetic source fixture; `python -m unittest discover -s tools`;
    `actionlint`; `cargo audit --deny warnings`; `cargo about generate --locked --fail`

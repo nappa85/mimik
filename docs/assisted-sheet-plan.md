@@ -7,11 +7,13 @@ legality stays advisory and Rust does all arithmetic.
 
 Decision IDs (D-…, U…, P…) are defined in `docs/decisions.md`. What is built (number entry,
 notes and scribbles, switch and Undo, unknown values, per-field save, the busy page, the page
-bound, quick-add, the validity flag, the sheet module with save on leaving a field) is described
+bound, quick-add, the validity flag, the sheet module with save on leaving a field, the
+interpretation assistant of development builds) is described
 in `docs/assisted-entry.md`; this plan only adds to it.
 
 Remaining, in order (2b measured and reviewed, `docs/results.md`; ASSIST-27 to ASSIST-41
-decided; Rust 1.99.1 and `rig-core` 0.45.0 in place, ASSIST-39): **2c-1** interpretation against a hand-started local server, **2c-2** the model runtime (process,
+decided; Rust 1.99.1 and `rig-core` 0.45.0 in place, ASSIST-39; 2c-1, interpretation against a
+hand-started local server, built, `docs/assisted-entry.md`): **2c-2** the model runtime (process,
 token, confinement, budgets), **2d-1** the owner model setting with local models, **2d-2**
 model downloads, **3** bundles and reminders, **4** suggestions and "Which Sword?", **5** docs
 and gate; each sub-step has its own branch, tests and reviews. The model runs GPU-first with
@@ -40,281 +42,36 @@ repositories, split (multi-file) GGUF models.
 
 ## 1. Design for the remaining steps
 
-### 1.4 Interpretation service (2c-1)
+### 1.4 Interpretation service
 
-POC boundary: one local model, one bounded request per job, current unresolved integer
-scribbles only, strict validation, origin binding, poll and apply, the confirmable UI.
-Deferred to §4 Later: model escalation, model
-tools, confidence gating, persistent traces and a known-answer set grown from them, and
-catalogue, enum or fuzzy matching before the model (that matcher arrives with step 4, one
-implementation for both).
+Built in 2c-1 and described in `docs/assisted-entry.md` ("Interpretation assistant"): the
+`Interpreter` trait, stub and `rig-core` adapter over the bounded transport, schema v2 and the
+fixed prefix, the phrase-number lexer, reply validation, the request bounds and related-fields
+context with formula read sets, the runtime event interface, jobs, admission, the note-write
+map, the breaker, the start, poll and apply routes, the note key, and the module's flow. Later
+steps add:
 
-- **Shape:** an `Interpreter` trait, a `StubInterpreter` and a crate adapter; further models
-  can sit behind the same trait later. Assistant off is the default (`--assistant` turns it
-  on); when off there is no client, no child process, no job route and no "Thinking…", and the
-  app is fully usable. The model never blocks
-  a save: a job starts only after the save commits.
-- **Input:** only a scribble that number entry (`entry::read`, see `docs/assisted-entry.md`)
-  could not read, i.e. the target's current `unresolved` note. The phrase is read server-side
-  from that note, never sent by the client. A parsed entry is never offered again, and a
-  sign-led entry keeps its switch offer (D-Q).
-- **Origin binding:** a job is bound to (sheet, target address, host ID for row cells, the
-  origin note's revision). Any revision that writes a note for that target through any route
-  (unit, legacy full form, switch, Undo, apply) makes the origin non-current (a no-op save
-  writes nothing and changes nothing): the job is cancelled if still
-  running, its options are dropped, and apply refuses it, even when the stored value is
-  unchanged (scribble A → scribble B, or scribble → typed value). A job request for an older
-  note never supersedes a newer one. A newer job of the same account, for any target
-  on the same sheet, supersedes its running or queued job (the latest edit wins, by origin revision, which is a
-  sheet-wide counter, not by request arrival; equal revisions on two targets by arrival).
-- **Request builder:** one function renders a typed `Request` (phrase, target, context items).
-  The instructions and schema are a fixed prefix, byte-identical across requests (tested), and
-  every request sets `cache_prompt: true` and `stream: true` as in 2b, so llama-server reuses
-  the cached prefix and notices a closed connection between tokens. The dynamic part is at most
-  the bound B set at start (§1.4a: at most 4 KiB on the GPU path, 1 KiB on the CPU path),
-  measured in bytes after escaping, and at most N(B) tokens, counted with llama-server's
-  `/tokenize` on the rendered dynamic part; whole context items are dropped from the end until
-  both hold, never cut. The phrase, the target's ID and its value are never dropped; the
-  target's label is dropped only once no context item is left; if they still exceed a bound the job ends "too long
-  for the assistant on this machine" (no completion request, neutral for the breaker). Every dynamic string goes inside a fixed data envelope that the instructions
-  declare to be data, never instructions.
-- **Context (D-F, D-J):** phrase and target first; then other stored integer and enum fields in
-  definition order; derived, text, multiline, notes and list cells are excluded from context
-  and from references (`ref`) (the one exception: same-row cells under the related-fields rule
-  below); catalogue entry text comes in step 3 and is dropped first.
-- **Related fields (ASSIST-31, ASSIST-37), for interpretation jobs:** the formula layer gives
-  each derived value and each check a read set (below). (1) On every path, a row-cell target
-  (list property `p` of the row with host ID `h`) also sends the integer and enum cells of row
-  `h` only whose properties a read set reads together with `p` in the same iteration; cells of
-  other rows, and text, multiline or derived properties, are never sent. Such a cell is a
-  context item addressed by its typed address `cell:<list>/<h>/<property>` (the row's stable
-  host ID and the property ID, as the switch and Undo keys and the orphan rules address cells,
-  ASSIST-7, ASSIST-12); in the request it carries a short request-local alias like every
-  context item (below), and Rust maps the alias back to the row by host ID, binds it in the
-  read set (address, host ID, value), and drops the option if the row or the cell is not the
-  one supplied. (2) Whenever B ≤ 1,024 bytes (always on the CPU path; on
-  the GPU path only if the measurement lowers B to 1,024), the scalar context is only the
-  stored integer and enum fields that some read set contains together with the target (for a
-  row-cell target, together with `p`); fields the phrase names or that share the target's
-  group are not added. With B above 1,024 the scalar context is the D-F/D-J list above.
-  Related items go in definition order (scalars, then the row's cells in property order),
-  count towards B, and are dropped from the end as above; pins without a formula layer send
-  no related items. Candidates come only from the snapshot the job is bound to, which the
-  account may read; relatedness never widens what is read. Reminder jobs (step 3) have their
-  own context (§1.5).
-- **Read sets (a 2c-1 deliverable):** today `Formula` keeps its reads, item reads and
-  dependencies private and flat (`src/definitions/formula/mod.rs`, `profile.rs`), with no
-  iteration identity. 2c-1 adds a public accessor on `Compiled` giving, per derived value and
-  per check, its scalar reads and its `(list, property)` reads grouped by comprehension binder,
-  with the transitive closure through derived dependencies. It is a structure separate from
-  `reads` and `item_reads`, which keep driving `reads_unknown` and the U2 unknown guard, so
-  U2, the formula profile bytes and the definition hash are untouched (D-Y); unlike
-  `item_reads` it counts `has()` presence tests. A binder is identified by a per-comprehension
-  ID, not by its variable name (sibling comprehensions both bind `item`), and the closure
-  merges read sets without merging binder IDs: a derived value iterating with one binder and
-  a dependent iterating with another stay two iterations. "The same iteration" means the
-  same binder ID; two separate iterations over one list are not co-reads (tested).
-- **Output contract:** JSON, checked by llama-server's schema grammar and again in Rust
-  (`jsonschema`, then typed Serde decoding, then domain checks), with explicit limits: at most
-  3 options, each an expression and an explanation of at most 120 characters, or an
-  `ambiguous` reply listing at most 3 readings. A reading is display-only text of at most 120
-  characters, rendered escaped inside `<bdi>`, with no Use button; an `ambiguous` reply never
-  writes. The expression is a JSON tree, not a string: a node is `{"lit": n}`, `{"ref":
-  "<alias>"}` (an alias from the supplied list, below) or `{"op": "add" | "sub" | "mul" | "div", "l": node, "r": node}`, and a
-  `div` node also carries `"round": "floor" | "ceil" | "exact"` (`exact` drops the option on a
-  remainder); depth at most 3 below the root, so at most 8 leaves. A negative `lit` is allowed;
-  its magnitude is what provenance checks. Every context item carries a short request-local
-  alias (`f1`, `f2`… for fields, `c1`, `c2`… for same-row cells, plus `t` for the target),
-  which Rust maps to its typed address (`field:<id>` or `cell:<list>/<host>/<property>`); a
-  `ref` takes an alias (output schema v2), so references stay short; the schema's alias
-  enum is a fixed superset (`t`, `f1`…`f64`, `c1`…`c31`), byte-identical across requests,
-  and Rust drops a `ref` to an alias the request did not supply. References name supplied integer items only: an enum field or cell is context for
-  reading, and a `ref` to it, or to an alias not supplied, drops the option.
-  Rust evaluates with checked `i128` arithmetic and range-checks the result to `i64` as
-  `entry.rs` does; overflow, division by zero, a reference to an unknown value (D-Z), to a field
-  not supplied, or to an excluded type drops the option. Literal provenance: the magnitude of
-  each literal must equal a number found in the phrase by the phrase-number lexer, or the
-  target's current value, or (only when the phrase contains a fraction or percent word from a
-  fixed list, matched as whole words after case folding and diacritic folding: EN half,
-  third, quarter, percent, `%`; IT metà (also `meta`), mezzo, mezza, terzo, terza, quarto,
-  quarta, percento, per cento) one of 2, 3, 4 and 100 (the only other exception is the step-3 catalogue
-  provenance extension, §1.5). The **phrase-number lexer** is new code with its own tests,
-  separate from `entry::read` (which parses whole entries only) and not changing number-entry
-  admission: only decimal digits (Unicode `Nd`, such as full-width digits) are folded to ASCII
-  digits, never superscripts or circled digits (no general NFKC); a number is a maximal run of
-  ASCII digits whose neighbour on each side is neither a letter nor any other Unicode number
-  character (`N*`, such as `²` or `①`), that is not preceded by `.` or `,` at all, is not
-  followed by a `.` or `,` that touches a digit (letters and `N*` are tested on the original
-  characters, before folding); the separators `.` and `,` include U+066B, U+066C, U+FF0C and
-  U+FF0E, and two runs joined by a single NBSP, U+202F or apostrophe (`1 500`, `1'500`) both
-  give nothing; so `heal 15` and `15%` give 15, `take −15
-  damage` gives 15 (signs are not part of the token; U+2212, NBSP and U+202F are separators
-  as in ASSIST-1), `5.` at the end of a sentence gives 5, while `1.5`, `x.5`, `1,000`, `1e2`,
-  `3d6`, `15hp` and `15²` give nothing. A leading zero
-  (`007`) gives nothing; a run longer than 18 digits gives nothing. This rule and the output
-  schema are frozen before the 2b screen. The result then
-  passes the integer field's own admission, without the scribble fallback. The display shows
-  the current value, the expression rendered with `− × ÷`, and the effect, labelled "the
-  assistant's reading". The fraction words and the literal-provenance rule stay as frozen for
-  2b (ASSIST-38); constants derived from references, such as `hp ÷ ((hp + hp) ÷ hp)`, pass it
-  (ASSIST-L22). Schema v2 changes the request and the replies, so the 2b `max_tokens`
-  evidence was re-checked in 2c-1: the 2b screen re-run under v2 on the dev host (CPU, 2
-  cores, the 50 cases). `max_tokens` belongs to the model file: 384 for the Granite 4.2 3B file
-  whose SHA-256 is the compiled-in `e0406663…` (the 2b rule over the 104 replies of that v2
-  re-run: largest `predicted_n` 282, 1.25 × 282 = 352.5, rounded up to a multiple of 32 and
-  capped at 384; `docs/results.md`); any other file, whatever its name, gets the 2d trial's rule (§1.4b),
-  never below 256.
-- **Confidence:** if the runtime returns token log-probabilities they are recorded on the job
-  record for evaluation only; nothing is gated or hidden on them in 2c.
-- **Crate (D-H, ASSIST-39):** `rig-core` =0.45.0 on Rust 1.99.1; the toolchain and crate
-  upgrade landed as its own reviewed change, with 2b's offline rig-core checks re-run
-  (`docs/results.md`). Default features off plus `reqwest`, on the OpenAI chat route with the
-  llama.cpp dialect; the schema goes in `additional_params` as `response_format` (arrives
-  structurally identical; the native `output_schema` path rewrites `oneOf` to `anyOf`), with
-  `cache_prompt`, the sampler and `stream` beside it. The body bound is a small Mimik
-  transport implementing rig's `HttpClientExt` (plain and streaming bodies refused past 1 MiB,
-  as probed in 2b); no D-H crate offers one. The same transport carries the Unix-socket
-  connection of the bubblewrap path (§1.4a): over `reqwest`'s Unix-socket connector if the
-  upgraded `reqwest` has one with the client policy below (checked in 2c-1), otherwise over
-  `hyper`'s HTTP/1 client connection on a `tokio` `UnixStream`; either way one transport,
-  tested against a fake server on a Unix socket and on TCP. `genai` was rejected (no body
-  hook). The per-launch token (§1.4a) is rig's API key, sent as `Authorization: Bearer`. The
-  model client uses no TLS; from 2d-2 the binary contains TLS for downloads (§1.4b), and Cargo
-  unifies `reqwest` features, so the model client's plain-HTTP property rests on the guard
-  below, not on the dependency tree.
-- **STROT** (judged on results, user 2026-10-19): the tested configuration (Julia-1 through
-  strot-ai choosing among 16 to 71 generated arithmetic-string candidates plus "none",
-  threshold 0.40, one selection) is rejected (2 of 50 correct, 42 false-confident); a design
-  with a few semantic labels was not tested.
-- **Client policy:** one client built by the host for the current child only: no redirects,
-  proxies disabled whatever the environment says (`no_proxy()` on the client, so `HTTP_PROXY`,
-  `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and their lowercase forms are all ignored), plain HTTP only
-  (an `https` URL is refused), no decompression (`no_gzip`, since the feature can be unified
-  in), no retries. On the bubblewrap path the destination is the current generation's socket
-  path (§1.4a) and nothing else; on the TCP paths, before every request the URL host must be
-  an IP literal equal to `127.0.0.1` (the runtime binds only that, and the endpoint check reads
-  only `/proc/net/tcp`; `::1` is accepted only by the 2c-1 development endpoint, which is
-  dev-only and has no ownership check),
-  with no userinfo or zone ID (`localhost`, `127.1` and `::ffff:127.0.0.1` refused), checked on
-  the raw authority string as well as the parsed URL (the WHATWG parser turns `127.1` into
-  `127.0.0.1`), and the port is the current child's. Every connection is checked to reach the
-  current child before its first byte (§1.4a, "Endpoint"); the token goes only there. The model name is configuration, never model
-  output. Loopback is only the destination rule; the no-egress property comes from the OS
-  hardening of the child (§1.4a), at the level the page states.
-- **Runtime:** a `llama-server` child managed by Mimik (§1.4a, 2c-2); in 2c-1 a server started
-  by hand on the dev host, reached through the development endpoint (2c-1), which exists only
-  in builds with the `dev-endpoint` Cargo feature (never in release builds) and has no
-  endpoint check. The 2b container topology (internal Docker network with
-  `inhibit_ipv4` and a socat forwarder) is development and benchmark evidence only
-  (`docs/results.md`) and is not shipped. Model: configuration in 2c, the owner setting from
-  2d (§1.4b); default Granite 4.2 3B (ASSIST-28).
-- **Jobs:** one worker; one monotonic budget per job from enqueue, covering queueing,
-  rendering, the model call and validation: queue wait Q plus run deadline R, with R, D, Q, B
-  and N(B) derived at each start (§1.4a). D is the number of jobs that may wait (the running
-  job is not counted). A start is admitted only if its worst-case wait fits Q: the running
-  job's remaining run deadline plus R for each job already waiting; otherwise it answers 429
-  "the assistant is busy, try again shortly", which cancels nothing (ASSIST-32). One job per account (counting running work): a start on another sheet while the
-  account has a live job is 429 (origin revisions are per sheet and cannot be compared);
-  admission (breaker and capacity) is computed as if the superseded job were already gone, so a
-  refused start cancels nothing (Routes); an admitted start cancels the superseded request (the
-  connection is closed and its slot freed before the new job is enqueued), and a late answer
-  from a cancelled job is discarded. At most 64 job records in all, 128-bit IDs; eviction
-  takes the oldest finished record and never a running or queued job (with 64 live jobs a start
-  answers 429 busy); an evicted or expired job answers "ask again". When the child changes
-  generation (restart, GPU → CPU fallback, a trial), every queued and running job ends with "the
-  assistant restarted: ask again", neutral for the breaker. Options expire 10 minutes after the job finishes. Poll and apply
-  recheck rights; the `JOBS` permit is not held during the model call. A reminder job (step 3)
-  takes its own low-priority slot on the same worker, after interpretations, one per account.
-- **Circuit breaker:** one per endpoint configuration (the managed runtime, or the
-  development endpoint), never keyed by the per-generation socket path or port, in memory
-  (reset on app restart). It counts
-  only transport errors and invalid replies (HTTP 4xx and 5xx, a response over the body bound,
-  a stream that is not a well-formed completion) while the child is alive. A child exit is a
-  runtime event, never a breaker event: it ends the generation's jobs neutrally and feeds the
-  restart and failure counter of §1.4a, whichever order the exit and the job's transport error
-  arrive in: a counted transport failure is provisional while its generation is alive and is
-  withdrawn if that generation's exit arrives within 2 s; a breaker opened only by withdrawn
-  counts closes again. A completed,
-  bounded HTTP 2xx exchange is a success whatever its content (an answer whose options are all
-  dropped still resets the count and closes a half-open breaker); supersession, cancellation,
-  queue-wait expiry (the model was never called) and run-deadline expiry are neutral: deadline
-  expiries drive only the restart-and-re-measure rule of §1.4a. Three consecutive counted failures open it for 2
-  minutes; then one half-open probe job decides (success closes, failure reopens; a cancelled
-  probe clears the in-flight probe flag, leaves it half-open, and the next job becomes the
-  probe; while the probe is in flight other starts answer 503 like an open breaker). While open
-  no request is sent: a start answers 503 and a job already queued answers on poll, both with
-  "the assistant is unavailable right now"; number
-  entry, notes and Undo work as usual. A small state machine with an injectable clock:
-  `failsafe` 1.3.0 as tested in 2b allows multiple outstanding half-open admissions and its
-  future API records a non-counted error as a success; its manual API could express neutral
-  outcomes but has no probe flag, its mock clock is thread-local and its last release was
-  2024-07. Priming, calibration and the 2d trial are outside the breaker. Precedence: a start
-  or poll first reports the runtime state (`starting`, `unavailable` with its reason, §1.4a),
-  then the open breaker; the assistant page shows both. A new child does not reset the
-  breaker; only the owner's Restart and the app's start do.
-- **Routes:** `POST /private-sheets/{id}/interpretations` (exactly `csrf` and `note`) starts a
-  job for that note. The note key has the form switch and Undo use (`<revision>:<address>`,
-  the indexed `<revision>:<f>.<r>.<p>` for row cells), but today an `unresolved` note has
-  none: the page carries keys only for switch offers and Undo, and the JSON answer has
-  `"actions": null` (`Actions::of`, `sheet_json.rs`). 2c-1 adds `key` to the JSON answer's
-  `note` object whenever the note is `unresolved`, additively (existing ASSIST-22 clients
-  ignore it), built from the stored note with `assist::key` for scalars and row cells alike
-  (row cells in the typed host-ID form `cell:<list>/<host>/<property>`, never the indexed
-  form, which would mix the note's revision with the answer's row positions), so it carries
-  the note's own revision and stable address, and with no page markup (the assistant needs
-  JavaScript, D-G); the module starts the job with it. A key is resolved against the snapshot at its own revision: a typed key
-  directly, an indexed row-cell key (`<revision>:<f>.<r>.<p>`) by mapping the row index to its
-  host ID at that revision, giving the typed address with host ID. Order as for the other
-  sheet routes: session and CSRF, rights (403), keys and malformed values (400); then, before
-  any cancellation or capacity handling, the typed address's current note must be that
-  revision's `unresolved` note (409 otherwise; unrelated later revisions are fine, a row moved
-  since is found by host ID, a removed row is 409); then a repeat for the origin of an existing
-  job that is live or finished with unexpired, unapplied options returns that job (a finished
-  job without options, or with expired ones, does not count: the start goes on as a new job);
-  then a start whose origin revision is lower than that of the account's live job on the sheet
-  is 409 (an equal revision on another target, as from one full-form save, supersedes: the
-  later arrival wins); then the
-  breaker (503) and capacity (429), computed as if the superseded job were already gone, so a
-  refused start never cancels anything (a live job of the account on another sheet is never
-  superseded and gives 429); then supersession and enqueue. The in-memory job-table
-  lock covers this check-then-enqueue and the post-commit cancellation hook of every save; it
-  is never held across a database wait, the permit wait or the model call. The current-note
-  check reads the database before the lock, so under the lock the start also compares its
-  origin with an in-memory per-sheet map of the latest note-write revision per target (row
-  cells keyed by host ID), which every note writer's post-commit hook (saves, Undo, switch,
-  row removal) updates and uses to cancel stale jobs in one critical section of the same lock:
-  a write newer than the origin gives 409. A start registers its origin revision in the map's
-  sheet entry before its database check; an entry for a target is dropped only when its
-  revision is below the smallest origin revision registered or live on that sheet, and with its
-  sheet or row; the map and the job table are
-  per process and empty after a restart, when the database check alone suffices. 202 with the job
-  ID. `GET
-  …/interpretations/{job}` polls (the module polls at 500 ms, backing off to 2 s, and stops on
-  unload, supersession or a terminal state); an evicted or expired job answers "ask again".
-  Another account's or sheet's job is not found, on poll as on apply.
-  Apply: `POST /private-sheets/{id}/proposals/{job}/{n}` (exactly `csrf`), taking the `JOBS`
-  permit with the D-X3 bounded wait like the other sheet writes.
-- **Flow (JS):** a cell save records `unresolved` and the module starts a job; "Thinking…" in
-  `role="status"`; then the options or the readings of an `ambiguous` reply; **Use** posts the
-  apply route; ignoring them leaves the scribble. The apply route must not rely on how long an
-  offer stays on screen or treat a shown offer as confirmation.
-- **Proposal freshness (D-P):** when a job finishes, Rust validates each option and stores it
-  with a content hash and its bound read/write set: the origin binding above, every write
-  target (address, value at the job's base revision, host ID for row cells), every reference
-  (`ref`: address and value), the displayed effect (before → after per target), and for
-  reminders and bundles the supplied context (each list-row name sent, its remembered key, the
-  catalogue version and entry key of any entry text, every enum value). Bundle targets must be
-  distinct; a duplicate drops the option. The guarantee covers exactly this set, not the
-  model's relevance judgement.
-- **Apply:** in one `IMMEDIATE` transaction: recheck rights and the active state; check the job
-  binding, the option's content hash, its expiry and that the job is not already applied
-  (options are alternatives: applying one consumes the job, marked only after commit); require
-  the origin note to be current, every bound address to hold its bound value and every bound
-  row to exist; re-evaluate and require the effect to equal the displayed one; write with
-  `confirmed` notes sharing a bundle number scoped to the sheet and job. Any mismatch or
-  expiry: "Something this proposal used has changed: ask again", nothing written, never a
-  literal fallback. An unrelated field change does not invalidate it. Undo of an applied
-  proposal works like any Undo (`reverted` note).
+- **2c-2:** the runtime paths of the client policy: on the bubblewrap path the destination is
+  the current generation's socket path and nothing else; on the TCP paths the URL host must be
+  the IP literal `127.0.0.1` (`::1` stays accepted only by the development endpoint) and the
+  port the current child's; every connection is checked to reach the current child before its
+  first byte (§1.4a, "Endpoint"; `reqwest`'s Unix-socket connector has no per-connection hook
+  besides `connector_layer`, so the check's placement is a 2c-2 design point), and the token
+  goes only there. The runtime manager feeds the event interface (generation started, ended
+  with its reason, ready with B, N(B), R, D, Q); a child exit is never a breaker event. The
+  owner's assistant page shows the runtime state and the breaker; priming, calibration and the
+  2d trial are outside the breaker; only Restart and the app's start reset it.
+- **2d:** any model file but the default Granite one gets the 2d trial's `max_tokens` rule
+  (§1.4b), never below 256 (until then 256; the default Granite file has 352). From 2d-2 the binary contains TLS for downloads and
+  Cargo unifies `reqwest` features, so the model client's plain-HTTP property rests on its URL
+  guard, not on the dependency tree.
+- **3:** catalogue entry text joins the context and is dropped first; reminder jobs have their
+  own context (§1.5) and a low-priority slot on the same worker, after interpretations, one per
+  account; the catalogue provenance extension (§1.5); bundles in the proposal freshness binding
+  (each list-row name sent, its remembered key, the catalogue version and entry key of any entry
+  text, every enum value; distinct targets, a duplicate drops the option) and in apply.
+- **Not built:** token log-probabilities, if the runtime returns them, are not recorded on the
+  job record (evaluation only; nothing is gated on them).
 
 ### 1.4a Model runtime, device and budgets (2c-2; ASSIST-27, ASSIST-29 to ASSIST-34, ASSIST-40)
 
@@ -732,8 +489,8 @@ natively for these tests (ASSIST-40).
   largest candidate with R(B) = max(15, round up to 5 s of 1.25 × T(B)) within the path's
   limits: GPU R ≤ 60 s; CPU R ≤ 90 s. Queue: GPU D = max(1, min(4, floor((120 − R) / R))) and
   Q = D × R (the 2b rule; Q + R ≤ 120 holds since R ≤ 60); CPU D = 1 and Q = 120 − R, so Q +
-  R ≤ 120 s, and the admission rule (§1.4, Jobs) refuses as busy a start that cannot begin in
-  time. Every request also obeys N(B) tokens (§1.4), so its prompt is no longer than the
+  R ≤ 120 s, and the admission rule (`docs/assisted-entry.md`, "Interpretation assistant", Jobs) refuses as busy a start that cannot begin in
+  time. Every request also obeys N(B) tokens (`docs/assisted-entry.md`), so its prompt is no longer than the
   calibration's; the hard run deadline holds when the estimate is wrong, and two consecutive
   expiries restart and re-measure (the transitions above). On the GPU path, no fitting
   candidate is a GPU failure (CPU fallback). On the CPU path, if 1,024 does not fit, 768 and
@@ -757,7 +514,7 @@ natively for these tests (ASSIST-40).
   | 512 | about 148 | about 70 to 77 s | about 88 to 96 s | only at the low end (R 90, D 1, Q 30) |
 
   The table uses 2b's 192 tokens; under schema v2 the default Granite file has `max_tokens`
-  384 (about 82 s of generation at 2 threads). With t at the 75 % bound, or with `max_tokens`
+  352 (about 75 s of generation at 2 threads). With t at the 75 % bound, or with `max_tokens`
   256 or more (every model now, the default Granite file included), nothing fits, so the CPU baseline of ASSIST-27 is not assured with the
   default model at 2 threads; ASSIST-41 raises the default to the physical cores minus one,
   and the native calibration at that setting decides. In 2c-2 these are formula fixtures,
@@ -842,7 +599,7 @@ natively for these tests (ASSIST-40).
   `max_tokens` 384 (the measurement cap): every reply must be schema-valid and untruncated;
   (2) sets the model's `max_tokens` = min(384, max(256, round up to 32 of 1.25 × the largest
   `predicted_n`)) (five phrases cannot measure a tail, hence the 256 floor; the default
-  Granite file, identified by its compiled-in SHA-256, keeps 384 from its 104-reply v2 screen); (3) runs the calibration of §1.4a with that `max_tokens` and
+  Granite file, identified by its compiled-in SHA-256, keeps 352 from its 104-reply screen of the adopted prefix); (3) runs the calibration of §1.4a with that `max_tokens` and
   derives the budgets. It passes when (1) and (3) succeed. Bounds: each phrase has twice the
   path's run-deadline cap (180 s on the CPU path, 120 s on the GPU path), the whole trial
   30 minutes on the CPU path and 20 on the GPU path (priming and calibration included; each
@@ -959,153 +716,6 @@ enumerated list of Hugging Face hosts, bounded, licence-confirmed and hash-verif
 no sheet or player text. No prompts, player text, presigned URLs or token in logs; no secrets.
 
 ## 2. Steps
-
-### 2c-1 Interpretation
-
-Scope: trait, stub, adapter; the client policy with both connectors and the token (first:
-whether `reqwest` has a Unix-socket connector that keeps the client policy, §1.4 Crate); the
-request builder with the byte and token bounds and the related-fields context; the runtime
-event interface the worker consumes (`generation started`, `generation ended` with its reason,
-`ready` with the budgets B, N(B), R, D, Q), fed in 2c-1 by the development endpoint's fixed
-configuration and by test doubles, and in 2c-2 by the runtime manager; the formula layer's
-read-set accessor (§1.4, Read sets); output schema v2, reviewed before use: `ref` takes a
-request-local alias from a fixed superset (`t`, `f1`…`f64`, `c1`…`c31`; Rust drops an alias
-not supplied), the instructions describe
-aliases and same-row cells, the 2b screen re-run under v2 on the dev host to re-check
-`max_tokens` 192 (switch rule: if more than 2 distinct cases of the 50, in any pass, lose at
-least one option to an unsupplied or enum-item alias, `response_format` switches to a
-per-request narrowed alias enum, a pure subset of the pinned one and tested, while the
-prefix keeps the fixed schema), the Rust copy lives under `schemas/`, the fixed prefix is re-measured
-(tokens and priming time), and a live check confirms the pinned build's grammar conversion
-accepts the alias enum; the note key in the JSON answer of an `unresolved` note (§1.4,
-Routes); worker, admission, records and breaker; the job, poll and apply routes with origin
-and read/write-set binding; the UI. The model server is started by hand on the dev host
-(ASSIST-40) and reached through a development endpoint setting (`--assistant-dev-endpoint`, a
-loopback literal or a socket path, with a token file; the model is `--assistant-model` (the
-spec, §1.4b), `--assistant-model-sha256` and `--assistant-model-alias` (the request's model
-name, default derived from the spec's file name, `granite-4.2-3b-q4_k_m` for the default), and
-the hand-started server must be given the same `--alias`), compiled only with the
-`dev-endpoint` Cargo feature, which release builds never enable (`smoke_release.py` checks the
-staged binary refuses the option); it has no endpoint check. Budgets come from flags of the
-dev build (development placeholders, not evidence): `--assistant-dev-bytes` (B, default
-1,024), `--assistant-dev-token-limit` (N(B), default 384, above the about 296 tokens a 1 KiB
-part takes at 3.5 bytes per token), `--assistant-dev-deadline` (R, default 85 s),
-`--assistant-dev-queue` (D, default 1) and `--assistant-dev-queue-wait` (Q, default 35 s). In
-a 2c-1 release build, which has neither the endpoint nor the runtime, `--assistant` is refused
-at start ("the assistant is not available in this build"), so the assistant stays off and no
-assistant page exists. Until 2c-2 lands the assistant is a development feature, outside the
-release scope, and the release scope's "no language model" statement stays true because the
-release binary has no endpoint. Tests (stub or fake server unless stated): - output:
-schema-invalid, grammar-invalid and truncated JSON; more than 3 options; a tree deeper than 3
-below the root (which is also what refuses a ninth leaf); literal provenance (`84 + 915`
-dropped; `5` from "heal 15" dropped; U+2212, NBSP); references to a derived, text, multiline,
-notes or list-cell field, to an unsupplied field and to an unknown value; `/` with each
-rounding mode on negatives; `exact` with a remainder; division by zero; `i64` boundary and
-intermediate overflow; a non-tree or string expression; `ambiguous` with more than 3 readings
-or a reading over 120 characters dropped, readings escaped and never applicable; - lexer:
-`heal 15`, `take −15 damage`, `15%`, `1.5`, `x.5`, `5.`, `1,000`, `1e2`, `3d6`, `15hp`, `15²`,
-`①`, `007`, full-width digits, 19 digits, `1٫5`, `1．5`, `1，000`, `1 500` (NBSP and U+202F),
-`1'500`, `15,` then a space (15), `(15)` (15), `15/20` (15 and 20); `heal,15` and `1,2,3` give
-nothing (accepted false rejects, erring towards no option); "half of 84" admits 2, "metà" and
-"meta" admit 2, "halfway" and "quarterly" do not, a phrase without a fraction word does not; -
-input: a parsed entry and a sign-led entry never start a job; the phrase comes from the stored
-note, not the request; the fixed prefix is byte-identical across requests; the dynamic part
-stays within B (4,096, 2,048, 1,024, 768, 512) and within N(B) tokens (the fake server's
-`/tokenize` returning a high count drops items that the byte bound kept), dropping whole
-items; the development token limit (`--assistant-dev-token-limit`, default 256) is the N(B)
-2c-1 enforces; the target's label is dropped after the last context item and never the phrase, target ID or value; a phrase and
-target over a bound end "too long" without a completion request and without a breaker count;
-excluded field types never appear in the request; - read sets: per derived value and check,
-scalar reads and `(list, property)` reads grouped by binder, closed through derived
-dependencies; `item.a` and `item.b` in one comprehension are co-read, while `a` in one
-comprehension and `b` in another over the same list are not, also when both bind `item` and
-when one of them is inside a derived value the other reads; a `has()` presence test counts as
-a co-read; `reads_unknown`, U2 and the formula profile bytes are unchanged by the accessor
-(asserted on existing fixtures); - related fields (B ≤ 1,024): a field read with the target by
-a check, or through a derived value it reads, is sent; a field only in the same group, or
-named in the phrase but not co-read, is not; a row-cell target sends the scalars co-read with
-its property; definition order and drop from the end; a pin without a formula layer sends
-none; with B 2,048 the full D-F/D-J scalar list is sent; a `ref` to an unsent field or to an
-enum field drops the option; - same-row cells (every path, B 4,096 and B 1,024 alike): for a
-target cell of row `h`, an integer or enum cell of row `h` co-read with the target's property
-is sent with an alias (`c1`) that Rust maps to `cell:<list>/<h>/<b>`, a text, multiline or
-derived property never is, a cell of another row with the same property never is, nor a
-same-row cell not co-read; a `ref` to that alias evaluates with its value; a `ref` to an alias
-not in the supplied list (or a typed address written out instead of an alias) drops the
-option; aliases are request-local (the same field may have another alias in the next request);
-the row moved since the job → found by host ID; the cell changed or the row removed before
-apply → apply refused; - note key: a cell save that records `unresolved` answers with
-`note.key` in the JSON (the typed host-ID form for row cells too), the page markup is
-unchanged, a cell whose note predates the answer's revision yields a key with the note's
-revision that starts a job; a row moved before the JSON answer builds the key → the key still
-names the original host ID and the start finds that row; a start with that key is accepted,
-and a key of a parsed or sign-led note is refused (409); - injection: a phrase containing
-"ignore previous instructions" yields at most an option, never a write without Use; a context
-value with instructions stays inside the data envelope; - origin: scribble A → scribble B with
-the same stored value; scribble → typed value; a save through the legacy full form; reversed
-job-start requests; another edit after the job finished; a late answer after cancellation —
-none may revive or apply the old proposal; a delayed start for scribble A neither cancels nor
-restarts B's job (409); a repeated start for the same origin (a double click) returns the same
-job and cancels nothing; a job for another target of the same account supersedes the first;
-reversed starts across two targets (B's start first, then A's older one) → A is 409 and B
-keeps running; an indexed row-cell key after the row was moved resolves to the same host,
-after it was removed → 409; a save racing a start leaves either the job cancelled or the start
-refused, never a live job for a stale note; - budgets: a queue full of other accounts' jobs →
-429, and the refused start cancels nothing; a breaker refusal cancels nothing; a start that
-supersedes the account's running job is admitted with the queue otherwise full (counted as if
-the old job were gone); a note written between the start's database check and its enqueue →
-409; two targets written in one revision → the later start supersedes; a start on a second
-sheet while the account has a live job → 429; cancellation (the fake server sees the
-disconnect and the slot is free); queue wait and run deadline expiry; 64 records and the
-evicted-job answer; option expiry at 10 minutes; busy admission (§1.4, Jobs): with R 85 and Q
-35 a start while a job has more than 35 s left → 429 "busy", with less → queued; a second
-waiting job beyond D → 429; with 64 records of which some are finished, a new start evicts the
-oldest finished one and never a running or queued job; with 64 live jobs a start → 429; the
-note-write map: a start registered with an old origin keeps the entries it needs until it ends
-(a delayed start after many writes still gets 409); - breaker (injectable clock): three
-transport failures open it, two do not; 100 dropped or nonsense answers never open it;
-supersession and cancellation never count; one half-open probe while others are refused; probe
-success closes, failure reopens; a 2xx with all options dropped resets the count and closes a
-half-open breaker; a cancelled probe clears the probe flag and leaves it half-open; queue-wait
-and run-deadline expiries never count (ten in a row leave it closed); a malformed completion
-stream counts; a child exit never counts, whether it arrives before or after the job's
-transport error: error first, then the exit within 2 s → the provisional count is withdrawn,
-and a breaker that this count opened closes again; error first and no exit → the count stays;
-a new child leaves the breaker as it was, and only Restart and app start reset it; mixed
-sequences (failure, success, failure) do not open it; while open, number entry, notes and Undo
-work and the poll says the assistant is unavailable; a start reports `starting` before an open
-breaker; - client: a host name, `localhost`, `127.1`, `0x7f.1`, `2130706433`,
-`::ffff:127.0.0.1`, userinfo, a zone ID or an `https` URL refused; `::1` refused on the
-runtime paths; `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and their lowercase forms set and a
-302 from the fake server never reach anything but the endpoint; one request per call on a 500
-or 429; a gzip-encoded reply is not decoded; a body over the bound is refused, plain and
-streaming, without buffering it; the schema arrives byte-exact in `response_format` with
-`cache_prompt: true` and `stream: true`; the same tests over the Unix-socket connector (a path
-other than the configured socket refused); - apply: a referenced field changes while the
-target does not → refused; a referenced row disappears → refused; effect mismatch → refused;
-content-hash mismatch → refused; a second apply, including two concurrent applies (exactly one
-writes, consumed only after commit) → refused; another sheet's or account's job or an invalid
-option index → refused; an unrelated field change → still applied; an expired job → no write
-and no literal; Undo of an applied proposal; apply after rights are revoked or the sheet is
-frozen → 403 and no write; - routes (connected router): missing or wrong CSRF, extra or
-duplicate keys, body limit, malformed `note`; apply accepts exactly `csrf`; session or rights
-revoked between lookup and answer; apply checks CSRF and session before its D-X3 wait, answers
-the styled busy 503 and succeeds on retry; poll of another account's or sheet's job → not
-found; "ask again" on poll and on apply; - browser (JS, 1280 and 390): unresolved save →
-"Thinking…" → option with current value, expression and effect → Use → value and `confirmed`
-note → Undo; an `ambiguous` reply shows readings without Use; supersession while polling; an
-escaped explanation; - assistant off: no client, no job route (404), no "Thinking…"; no player
-text in logs or in 4xx bodies other than the player's own echoed draft; a release build has no
-`--assistant-dev-endpoint` option; - live (hand-started pinned llama-server, ASSIST-40;
-reported as live inference): one smoke; the second request of a session reports the cached
-prefix tokens in `timings`; a job cancelled mid-generation frees the slot (the next job's
-first token within its usual time).
-
-
-Evaluation set: hand-written and independently labelled cases in `tools/assist_eval.py`
-(§3), kept local and out of source packages; it is a regression set, not the EVAL-1 held-out
-set, and does not close D-D.
-
 
 ### 2c-2 Model runtime
 
@@ -1273,7 +883,7 @@ Tests:
   calibration uses that `max_tokens`; a model too slow for the caps → fails with the numbers;
   a pass shows device, times, speeds, `max_tokens`, B, R, D and Q; players see "starting"
   meanwhile; Switch, Keep and Switch back each restart and re-prime; the default Granite file
-  (by hash) keeps 384, and a different file with the same name does not; a phrase past its
+  (by hash) keeps 352, and a different file with the same name does not; a phrase past its
   deadline, the whole trial past its bound, and the owner's Cancel each stop the candidate and
   restore the previous model; Switch with a stale trial ID (another hash, an older trial or an
   older generation) → refused;

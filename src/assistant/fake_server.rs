@@ -36,6 +36,12 @@ pub(crate) enum Reply {
     Gzip,
     /// Data that is not an SSE completion.
     Nonsense,
+    /// An empty body.
+    Empty,
+    /// Only SSE comment lines.
+    CommentsOnly,
+    /// Content chunks, then the stream ends without a finish or `[DONE]`.
+    Premature,
     /// Waits this long before every chunk of the content.
     Slow(Duration, String),
 }
@@ -200,6 +206,17 @@ async fn completions(
             ],
             // A gzip member header and garbage: decoding it would fail loudly either way.
             Bytes::from_static(b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03data"),
+        )
+            .into_response(),
+        Reply::Empty => ([(header::CONTENT_TYPE, "text/event-stream")], "").into_response(),
+        Reply::CommentsOnly => (
+            [(header::CONTENT_TYPE, "text/event-stream")],
+            ": keep-alive\n\n: keep-alive\n\n",
+        )
+            .into_response(),
+        Reply::Premature => (
+            [(header::CONTENT_TYPE, "text/event-stream")],
+            chunk(r#"{"kind":"options","#),
         )
             .into_response(),
         Reply::Nonsense => (

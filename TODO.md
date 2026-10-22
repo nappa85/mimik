@@ -9,8 +9,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, the plan for 2c/2d
   and the Rust 1.99.1 / rig-core 0.45.0 upgrade are merged into master. **2c-1** (interpretation
   against a hand-started server, dev-only) is implemented on branch `assist-2c1` in
-  `mimik-wt/catalogue`; open: the prefix choice (v2, v2-short or v2-ex, `docs/results.md`), the
-  implementation reviews, then removal of the 2c-1 plan section and the merge.
+  `mimik-wt/catalogue`, reviewed (Sol, Sonnet: fix first, no blocking; fixes applied; third
+  chain unavailable); prefix v2-short adopted; awaiting the merge.
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
   target/agent-tools/ci.sh <cmd>`, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
@@ -19,10 +19,15 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
-1. 2c-1, then 2c-2 runtime manager, 2d-1 owner model setting, 2d-2 downloads, 3 bundles and
+1. Merge 2c-1, then 2c-2 runtime manager, 2d-1 owner model setting, 2d-2 downloads, 3 bundles and
    reminders, 4 suggestions, 5 docs and gate (includes the `docs/release-scope.md` update for
    schema 22 and the assisted scope).
-2. Owed measurements: the native CPU calibration at the
+2. Before 2d-1 chooses the default model (ASSIST-L32), a field-reference experiment, decision
+   rule written down before running: base the adopted v2 prefix (v2-short), plus one arm that
+   adds only the compact-output sentence; about 30 fresh field-reference cases written without
+   reusing screen cases; real 1 KiB related-context requests rendered by the Rust builder; an
+   idle host at the ASSIST-41 thread count; pass 1 only.
+3. Owed measurements: the native CPU calibration at the
    ASSIST-41 default and at 2 threads (2c-2); GPU-path checks at each llama.cpp pin change;
    the Qwen3.5-9B rev3 S40 re-run.
 

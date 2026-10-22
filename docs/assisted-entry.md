@@ -419,10 +419,10 @@ check) and `--assistant-dev-token-file` (the server's API key, one line, sent as
 `Authorization: Bearer`); `--assistant-model` (`local:<name>.gguf`, default
 `local:granite-4.2-3b-Q4_K_M.gguf`), `--assistant-model-sha256` (required for any other file)
 and `--assistant-model-alias` (the request's model name, which the server must be given as
-`--alias`; default the file name without `.gguf`, lower case). `max_tokens` is 384 for the file
-whose SHA-256 is the compiled-in `e0406663…` (the 2b rule over the v2 re-run of the 2b screen:
-largest `predicted_n` 282, × 1.25, rounded up to a multiple of 32, capped at 384) and 256 for
-any other. Development budgets
+`--alias`; default the file name without `.gguf`, lower case). `max_tokens` is 352 for the file
+whose SHA-256 is the compiled-in `e0406663…` (the 2b rule over the 2c-1 screen of the adopted
+prefix: largest `predicted_n` 263, × 1.25, rounded up to a multiple of 32, capped at 384) and
+256 for any other. Development budgets
 (placeholders, not evidence): `--assistant-dev-bytes` (B, default 1,024, at most 4,096),
 `--assistant-dev-token-limit` (N(B), default 384), `--assistant-dev-deadline` (R, 85 s),
 `--assistant-dev-queue` (D, 1), `--assistant-dev-queue-wait` (Q, 35 s). They arrive as one
@@ -430,7 +430,9 @@ generation's `ready` event; the same event interface (generation started, ended 
 reason, ready with B, N(B), R, D, Q) is what the 2c-2 runtime manager feeds.
 
 **Request.** System message: the fixed prefix, the instructions, `\nJSON schema of the
-reply:\n` and the schema's pinned text, byte-identical across requests (SHA-256 pinned in Rust
+reply:\n` and the schema's compact text with the alias enum replaced by a description ("an
+alias from the data: t, f<n> or c<n>"; `response_format`, which the grammar enforces, carries
+the full pinned schema), byte-identical across requests (SHA-256 pinned in Rust
 and `tools/test_assist_eval.py`), so llama-server reuses it from its prompt cache. User
 message: the data envelope, `<data>\n{"note", "target": {alias "t", id, label?, value},
 "context": [{alias, id, label, type, value}]}\n</data>` with `<`, `>` and `&` escaped. Body
@@ -443,7 +445,9 @@ from the request.
   1,024 only the fields some read set contains with the target (for a row cell, with its
   property), none without a formula layer; for a row-cell target, on every path, the integer
   and enum cells of that row read in the same iteration as its property (a binder per
-  comprehension; two iterations over a list are not co-reads; `has()` counts). Never derived,
+  comprehension, shared by a filter and the comprehension it feeds, as in
+  `gear.filter(i, …).map(j, …)`; two unchained iterations over a list are not co-reads;
+  `has()` counts). Never derived,
   text, multiline, boolean, notes or other rows' cells; an optional cell not set is not sent.
 - **Aliases:** `t`, `f1`…`f64` (fields), `c1`…`c31` (cells of the target's row). The schema's
   alias enum is this fixed superset; a request supplies some of them and Rust drops a
@@ -479,7 +483,7 @@ waiting, the running job's remaining run deadline plus R per waiting job within 
 64 live jobs), all computed as if the superseded job were gone, so a refused start cancels
 nothing; then the account's earlier job is superseded (its request dropped, which closes the
 connection) and the new one queued. Every save that writes notes calls the post-commit hook
-(`Store::notes_committed`): jobs whose origin it makes non-current end ("changed since: ask
+(`Store::notes_committed`, run by the committing task once the database mutex is released, also when the request was cancelled after the commit): jobs whose origin it makes non-current end ("changed since: ask
 again") or lose their options; a `row:` note covers its row's cells. A job past its queue wait
 or its run deadline ends "ask again"; a generation change ends every queued and running job
 ("the assistant restarted"). At most 64 records: a start evicts the oldest finished one, never
@@ -532,7 +536,7 @@ cell's `role="status"` box (`assist-<key>`, described by the cell); it polls at 
 off to 2 s; a newer save of the cell supersedes it. Options show "Now <value>:", the
 expression in `<bdi>`, "= <value>" and the explanation in `<bdi>`, with a Use button named
 "Use <expression> = <value>"; readings show in `<bdi>` without Use; other answers show their
-message. Use posts the apply route and draws the answer like a save. Everything is
+message. Use posts the apply route as the cell's flight, like a save (a draft typed meanwhile is kept, a save asked for meanwhile waits), and draws the answer like a save. Everything is
 `textContent`.
 
 ## Adaptive sheet presentation

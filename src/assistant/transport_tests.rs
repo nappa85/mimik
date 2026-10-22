@@ -48,7 +48,7 @@ fn interpreter(endpoint: Endpoint) -> RigInterpreter {
 fn completion() -> Completion {
     Completion {
         dynamic: "<data>\n{}\n</data>".into(),
-        max_tokens: 384,
+        max_tokens: 352,
     }
 }
 
@@ -78,7 +78,7 @@ async fn a_completion_carries_the_prefix_schema_and_token() {
     assert_eq!(body["top_k"], 1);
     assert_eq!(body["seed"], 0);
     assert_eq!(body["temperature"], 0.0);
-    assert_eq!(body["max_tokens"], 384);
+    assert_eq!(body["max_tokens"], 352);
     assert_eq!(body["model"], "granite-test");
     assert_eq!(body["response_format"]["type"], "json_schema");
     assert_eq!(
@@ -182,15 +182,21 @@ async fn a_plain_body_over_the_bound_is_refused_without_buffering() {
 }
 
 #[tokio::test]
-async fn a_malformed_stream_is_a_failure() {
+async fn a_stream_that_is_not_a_well_formed_completion_is_a_transport_failure() {
     let (client, shared) = tcp_interpreter().await;
-    shared.push(Reply::Nonsense);
-    let result = client.complete(&completion()).await;
-    // Either no well-formed completion or an empty one; never a reply with content.
-    assert!(
-        result.as_ref().map_or(true, |done| done.text.is_empty()),
-        "{result:?}"
-    );
+    for reply in [
+        Reply::Nonsense,
+        Reply::Empty,
+        Reply::CommentsOnly,
+        Reply::Premature,
+    ] {
+        shared.push(reply.clone());
+        assert_eq!(
+            client.complete(&completion()).await,
+            Err(Failure::Transport),
+            "{reply:?}"
+        );
+    }
 }
 
 #[tokio::test]

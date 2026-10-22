@@ -16,7 +16,7 @@ fn budgets() -> Budgets {
         run: Duration::from_secs(85),
         depth: 1,
         queue_wait: Duration::from_secs(35),
-        max_tokens: 384,
+        max_tokens: 352,
     }
 }
 
@@ -109,7 +109,7 @@ async fn a_job_runs_and_offers_its_option() {
     assert_eq!(assistant.poll(1, 2, id), Poll::Missing);
     assert!(assistant.proposal(2, 1, id, 0).is_none());
     assert!(assistant.proposal(1, 2, id, 0).is_none());
-    assert_eq!(stub.requests.lock().unwrap()[0].max_tokens, 384);
+    assert_eq!(stub.requests.lock().unwrap()[0].max_tokens, 352);
 }
 
 #[tokio::test]
@@ -578,7 +578,7 @@ fn ready_with(interpreter: Arc<dyn Interpreter>) -> Arc<Assistant> {
 }
 
 #[tokio::test]
-async fn a_changed_proposal_fails_its_content_hash() {
+async fn the_content_hash_detects_a_stored_proposal_that_no_longer_matches() {
     let stub = Arc::new(StubInterpreter::answering([Ok(HEAL.to_owned())]));
     let assistant = ready(stub, budgets());
     let (job, _) = start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();

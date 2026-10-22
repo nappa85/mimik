@@ -874,6 +874,13 @@ fn proposal(run: &Run, n: usize, candidate: Candidate) -> Proposal {
 
 /// Whether `proposal`, option `n` of job `id` bound to `origin`, still has the content
 /// hash it was stored with (the apply's check).
+///
+/// It guards the apply against a stored proposal that no longer matches what was shown:
+/// another index, job or origin, a changed value, value before, expression, explanation or
+/// reference. It does not guard against changes on the sheet (the apply's live rechecks of
+/// the origin note, the target and every reference do), against a client (the apply route
+/// takes only `csrf`, never proposal content), or against the model's judgement of
+/// relevance.
 pub(crate) fn verify(id: JobId, n: usize, origin: &Origin, proposal: &Proposal) -> bool {
     content_hash(id, n, origin, proposal.before, &proposal.candidate) == proposal.hash
 }
