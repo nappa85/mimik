@@ -209,8 +209,11 @@ implementation for both).
   recheck rights; the `JOBS` permit is not held during the model call. A reminder job (step 3)
   takes its own low-priority slot on the same worker, after interpretations, one per account.
 - **Circuit breaker:** one per configured endpoint, in memory (reset on restart). It counts
-  only transport errors, a child exit during the job, and invalid replies (HTTP 4xx and 5xx, a
-  response over the body bound, a stream that is not a well-formed completion). A completed,
+  only transport errors and invalid replies (HTTP 4xx and 5xx, a response over the body bound,
+  a stream that is not a well-formed completion) while the child is alive. A child exit is a
+  runtime event, never a breaker event: it ends the generation's jobs neutrally and feeds the
+  restart and failure counter of §1.4a, whichever order the exit and the job's transport error
+  arrive in. A completed,
   bounded HTTP 2xx exchange is a success whatever its content (an answer whose options are all
   dropped still resets the count and closes a half-open breaker); supersession, cancellation,
   queue-wait expiry (the model was never called) and run-deadline expiry are neutral: deadline
@@ -226,8 +229,8 @@ implementation for both).
   outcomes but has no probe flag, its mock clock is thread-local and its last release was
   2024-07. Priming, calibration and the 2d trial are outside the breaker. Precedence: a start
   or poll first reports the runtime state (`starting`, `unavailable` with its reason, §1.4a),
-  then the open breaker; the assistant page shows both; Restart and a new child reset the
-  breaker.
+  then the open breaker; the assistant page shows both. A new child does not reset the
+  breaker; only the owner's Restart and the app's start do.
 - **Routes:** `POST /private-sheets/{id}/interpretations` (exactly `csrf` and `note`) starts a
   job for that note. The note key has the form switch and Undo use (`<revision>:<address>`,
   the indexed `<revision>:<f>.<r>.<p>` for row cells), but today an `unresolved` note has
@@ -310,8 +313,9 @@ natively for these tests (ASSIST-40).
   models folder's descriptor with `openat2` (`RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`,
   `RESOLVE_NO_MAGICLINKS`) and `O_NOFOLLOW | O_NONBLOCK` (a FIFO cannot block), then `fstat`:
   a regular file owned by Mimik's user, not writable by group or others. Its SHA-256 is
-  computed from that descriptor before every load, and that descriptor is what the child
-  loads: level 1 binds it read-only (`--ro-bind-fd`); levels 2 and 3 pass it inherited, as
+  computed from that descriptor before the first load and again whenever its `fstat` identity
+  (device, inode, size, modification and change times) differs from the last hashed one, so a
+  retry does not re-read a 2 GiB file; that descriptor stays open and is what the child loads: level 1 binds it read-only (`--ro-bind-fd`); levels 2 and 3 pass it inherited, as
   `--model /proc/self/fd/<n>` (a live check confirms that the pinned server's open and `mmap`
   accept that path). Runtime files are hashed the same way; level 1 binds them by descriptor
   and level 2 executes the verified llama-server descriptor (`execveat`). So a path swap
@@ -343,32 +347,52 @@ natively for these tests (ASSIST-40).
   llama.cpp build number in `BUILD.txt`, and `THIRD-PARTY-NOTICES.md` entries for llama.cpp
   and ggml (MIT) and for every other file shipped from the asset, by its own licence. REL-2
   requires corresponding source for every shipped binary, so the release also carries the
-  pinned llama.cpp tag's source archive (hash-pinned in the manifest), listed in `SOURCE.txt`
-  and `SHA256SUMS`. A new required CI job, `llama-runtime`, runs as host steps on the GitHub
-  runner, not inside the `mimik-ci` container (Docker's default seccomp profile refuses the
-  namespace flags `bwrap --unshare-all` needs): it installs `bubblewrap` from the runner's
-  distribution package, fetches the pinned asset and source archive, verifies both hashes,
-  unpacks the asset, runs the flag check and the preflight probe, and uploads the verified
-  `llama/` files and source archive as a job artifact. The packaging job `needs:` it and
-  packages only that artifact. The job reports "runner cannot probe" (bubblewrap or user
-  namespaces unavailable on the runner, so the job fails as not runnable) separately from
-  "probe failed" (the profile is wrong); both fail closed, and `deployable` requires the job.
-  The level the probe reaches is whatever the runner supports; no bubblewrap version floor is
-  assumed beyond the options the probe needs. If a GGUF of at most 100 MB under Apache-2.0 or
-  MIT exists, the job also downloads it (pinned by revision and SHA-256, licence recorded;
-  never shipped) and runs an end-to-end start at the probed level: token refusal and
-  acceptance, the transport, `/health`, one completion. Otherwise the job runs the start,
-  token and socket checks against the stub path (the fake runner), and the release scope says
-  the real transport is verified only on the host.
+  pinned llama.cpp source: the release's source asset if the tag publishes one, otherwise a
+  `git archive` of the pinned commit, its SHA-256 recorded in the manifest either way, listed
+  in `SOURCE.txt` and `SHA256SUMS`. The packaging check and `smoke_release.py` assert on the
+  shipped binary that `--assistant-dev-endpoint` does not exist (not only through `cargo
+  test`).
+- **CI workflow (2c-2 deliverables, `.github/workflows/ci.yml`):**
+  - a new required job `llama-runtime` on a runner pinned by label (`ubuntu-24.04`), as host
+    steps, not inside the `mimik-ci` container (Docker's default seccomp profile refuses the
+    namespace flags `bwrap --unshare-all` needs). It installs `bubblewrap` from the 24.04
+    package and `libvulkan1` with Mesa's lavapipe (so the Vulkan build's `--help` and
+    `--list-devices` run without a GPU); lifts `kernel.apparmor_restrict_unprivileged_userns`
+    with `sudo sysctl` for the job's duration only (and says so in its log); fetches the
+    pinned assets and the source archive and verifies their hashes; unpacks the assets; runs
+    the flag check, the preflight probe for both builds, and the confinement test binary built
+    in `checks` (the seccomp, peer, endpoint and adversarial-helper tests, against the pinned
+    asset). It must reach level 1; anything lower fails the job. It uploads the verified
+    `llama/` files and source archive as an artifact;
+  - `checks` gains `needs: llama-runtime` and packages only that artifact; since
+    `upload-artifact` drops file modes, packaging re-hashes every file against the manifest
+    and reapplies the manifest's modes;
+  - `deployable` adds `llama-runtime` to the jobs it requires; every new action is pinned by
+    commit SHA like the existing ones;
+  - two executable checks of the assistant, kept apart: the unpacked shipped artifact runs its
+    production runtime path with the real bundled runtime (no model: start to the "no model"
+    state, the preflight and the level report; with a pinned tiny model if one is adopted
+    later, an end-to-end start); and stub-transport integration coverage runs in a test build
+    with the `dev-endpoint` feature, labelled as such and never called verification of the
+    shipped binary. The tiny model (a GGUF of at most 100 MB under Apache-2.0 or MIT) is an
+    optional later addition that needs its own pinned entry (revision, SHA-256, licence)
+    before use; it would be downloaded only in this job and never shipped;
+  - Landlock-only tests that need a kernel the runner lacks are a listed host or VM
+    measurement, recorded in the release scope and in `docs/limitations.md`.
 - **Runner:** Mimik spawns `mimik assistant-runner` (a hidden subcommand) from one dedicated,
   long-lived thread (the parent-death signal follows the spawning thread). The runner sets
   `PR_SET_PDEATHSIG` (SIGKILL), then checks that its parent is still the Mimik PID it was given
   and exits otherwise (the race before the signal is set); sets `RLIMIT_CORE` to 0 and
-  `RLIMIT_FSIZE` to 64 MiB; clears its environment except a fixed minimal set (`PATH`,
+  `RLIMIT_FSIZE` to 64 MiB (a write past it raises `SIGXFSZ`, left at its default action, so
+  the server is killed and the exit is handled as a child exit); clears its environment except a fixed minimal set (`PATH`,
   `LANG`, `HOME` pointing at an empty private directory, the token variable when that channel
   is used); keeps only the descriptors it was handed (Rust opens everything close-on-exec; the
   hand-over descriptors are listed by number); then executes the confinement level's command
-  in place (`execve`, so the parent-death signal stays set). The preflight refuses a `bwrap`
+  in place (`execve`, so the parent-death signal stays set). On levels 2 and 3 the runner sets
+  `PR_SET_PDEATHSIG` and `PR_SET_NO_NEW_PRIVS` before it installs the seccomp filter, and the
+  filter refuses any later `prctl(PR_SET_PDEATHSIG)` and `prctl(PR_SET_NO_NEW_PRIVS)` call,
+  so a compromised server cannot clear the signal; level 1 keeps bubblewrap's own setup
+  sequence (its `--die-with-parent` and the PID namespace contain the tree). The preflight refuses a `bwrap`
   that is set-user-ID or set-group-ID (that exec would clear the signal, and it is not the
   unprivileged setup this design assumes).
 - **Confinement levels (ASSIST-34), tried in order; the active level and the reason for each
@@ -400,7 +424,11 @@ natively for these tests (ASSIST-40).
      and `firma-run` is not a dependency.
   2. **Landlock with seccomp** (TCP on `127.0.0.1`, random port): the runner applies Landlock
      through the `landlock` crate (network rules: no TCP connect, TCP bind on the chosen port
-     only; filesystem rules: read on the same allowlist, read-write on the render node,
+     only; filesystem rules: read on the same allowlist, including the model's resolved file
+     (opening `/proc/self/fd/<n>` is checked against the file it resolves to), execute on the
+     library directories, the ELF interpreter and the runtime directory (llama-server
+     `dlopen`s its ggml backend libraries from its own directory, found through
+     `/proc/self/exe`), read-write on the render node, plus `IOCTL_DEV` on it from ABI 5,
      `/dev/shm` and a private temporary directory; abstract Unix sockets scoped from ABI 6),
      then the seccomp filter, then executes the verified llama-server descriptor. The shown
      state comes from the crate's `RestrictionStatus`, never from the requested rules.
@@ -414,7 +442,11 @@ natively for these tests (ASSIST-40).
   The assistant runs at every level (hardening is "where available", ASSIST-30); the page
   shows the level next to the assistant state and next to the 2d "Try" button (a downloaded
   GGUF is untrusted input to llama-server, contained only by this).
-- **Seccomp (every level):** built with `seccompiler`. `socket()` is allowed only for
+- **Seccomp (every level):** built with `seccompiler`; default action allow with the listed
+  refusals returning `EPERM` (`ENOSYS` for `clone3`); the filter first checks the architecture
+  (`AUDIT_ARCH_X86_64`, anything else killed) and refuses x32 syscall numbers, so no compat
+  entry point bypasses it; `AF_NETLINK`, `AF_PACKET` and every family not named below are
+  refused. `socket()` is allowed only for
   `AF_INET` or `AF_INET6` with `SOCK_STREAM` and protocol 0 or `IPPROTO_TCP`, and for
   `AF_UNIX` with `SOCK_STREAM` (the listening socket; flags `SOCK_CLOEXEC` and
   `SOCK_NONBLOCK` masked); `socketpair()` is refused unless the pinned server needs it (then
@@ -426,18 +458,25 @@ natively for these tests (ASSIST-40).
   `io_uring_enter`, `io_uring_register`, `ptrace`, `process_vm_readv`/`writev`, `bpf`,
   `perf_event_open`, `keyctl`, `add_key`, `request_key`, `mount`, `umount2`, `pivot_root`,
   `unshare`, `setns`, module and `kexec` calls are refused. Seccomp sees no `connect()`
-  address, so it is never described as network confinement.
+  address, so it is never described as network confinement. The live GPU test runs once with
+  the filter's log flag (`SECCOMP_FILTER_FLAG_LOG`) and reads the kernel log for refused calls
+  the Vulkan driver attempted; any that the GPU path needs are decided before 2c-2 completes.
 - **Preflight** (every start, before level 1): bwrap present at a fixed path, not set-ID; its
   support for every option used above is probed (no remembered minimum version: bubblewrap
   0.13.0 on the dev host has `--unshare-all`, `--clearenv`, `--bind-fd`/`--ro-bind-fd`,
   `--bind-data`/`--ro-bind-data`, `--perms`, `--seccomp` and `--die-with-parent`, checked
   2026-10-22); then a real probe run of the full level-1 profile executing the pinned
-  llama-server's `--version` inside it. A failure names its cause where it can be told: bwrap
+  llama-server's `--version` inside it, once for the CPU build and once for the GPU build (a
+  level may work for one and not the other; each path uses the highest level its own build
+  passed). A failure names its cause where it can be told: bwrap
   missing, set-ID or lacking an option (named), user namespaces disabled
   (`user.max_user_namespaces`, `kernel.unprivileged_userns_clone`), the Ubuntu AppArmor
   restriction on unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns`),
   or the probe's own error. Then level 2 is probed the same way, then level 3. A level that
-  passes the probe can still fail at the real start; the transitions below then move down.
+  passes the probe can still fail at the real start; the transitions below then move down
+  only for sandbox-attributable failures. Memory: the child has no memory cap (`RLIMIT_AS` is
+  unusable with GPU drivers' address-space mappings, ASSIST-L23); the preflight refuses a model
+  file larger than `MemAvailable` minus 1 GiB ("not enough memory for this model").
 - **Token:** 32 bytes from the OS random source, base64url, new for every launch, held in
   memory. Channels, in order: level 1, `--ro-bind-data` from a pipe to a file inside the
   sandbox read with `--api-key-file`; levels 2 and 3, `--api-key-file` on a 0600 file in a
@@ -450,9 +489,12 @@ natively for these tests (ASSIST-40).
 - **Endpoint check, per connection, before its first byte:** level 1: `SO_PEERCRED` on the
   connected Unix socket must give Mimik's UID and a PID whose parent is the `child-pid` that
   bwrap reported for this generation (its PID-1 reaper; checked on this host: with
-  `--unshare-all` the reported `child-pid` is the reaper, and the command is its child) and
-  whose `/proc/<pid>/ns/pid` is the reported `pid-namespace`; a UID-only match is never
-  accepted. Levels 2 and 3: before and after `connect()`, the `LISTEN` entry for
+  `--unshare-all` the reported `child-pid` is the reaper, and the command is its child),
+  read from `/proc/<pid>/status` (`PPid`, and `NSpid` showing the process inside a nested
+  namespace), with `/proc/<pid>/ns/pid` compared to the reported `pid-namespace` as a
+  cross-check where it is readable (it needs ptrace-read access, which a non-dumpable process
+  denies); Mimik holds a pidfd on the reaper so its PID cannot be reused during the
+  generation. A UID-only match is never accepted. Levels 2 and 3: before and after `connect()`, the `LISTEN` entry for
   `127.0.0.1:<port>` in `/proc/net/tcp` (`procfs` crate) must have its socket inode open in
   the current child's `/proc/<pid>/fd`. While the child holds that listener no other process
   can listen on the port, so the connection reaches it; the accepted socket is not required
@@ -477,20 +519,22 @@ natively for these tests (ASSIST-40).
   process start time, binary path) is held under an exclusive `flock`, so a second Mimik on
   the same data directory cannot run the assistant; at start a leftover is killed only when
   PID, start time and path all match. On shutdown Mimik stops the child as above.
-- **Device (ASSIST-27, HW-1):** at each start the GPU build's `--list-devices` (30 s timeout;
-  output format pinned by a test against the pinned build) gives each device's name (what
-  `--device` takes) and description. `auto` (default) skips devices whose description names a
-  software renderer (`llvmpipe`, `lavapipe`, `SwiftShader`); among the rest it ranks devices
-  with dedicated memory before integrated ones (an integrated GPU reports shared system memory
-  and could otherwise win), then by reported memory, ties in list order; `--assistant-device
-  cpu` forces the CPU and a device name selects that device. The device is passed as
-  `--device <name>`. For level 1 it is mapped to its render node by probe: `--list-devices`
-  runs inside the level-1 profile once per render node with only that node bound, and the
-  node whose sandboxed list shows exactly the selected device (same name and description) is
-  the one bound; the real start then checks that the sandboxed list still shows that device.
-  The GPU path loads every layer on the GPU: the child's offload line must show N = M,
-  otherwise it is a GPU failure. A Vulkan build that cannot start (for example no Vulkan
-  loader) is a GPU failure. The CPU path uses the CPU build.
+- **Device (ASSIST-27, HW-1):** the GPU is chosen per render node, not by host enumeration
+  name, since enumeration names (`Vulkan0`, `Vulkan1`) change with the set of visible devices.
+  At each start the GPU build's `--list-devices` (30 s timeout; output format pinned by a test
+  against the pinned build) runs inside the level-1 profile once per render node with only that
+  node bound, so each sandboxed list shows exactly one GPU; that in-sandbox name is what the
+  real start passes to `--device`. The node's PCI address (sysfs) is its stable identity across
+  restarts and distinguishes two identical cards. `auto` (default) skips nodes whose device
+  description names a software renderer (`llvmpipe`, `lavapipe`, `SwiftShader`); among the
+  rest it ranks devices with dedicated memory before integrated ones (an integrated GPU reports
+  shared system memory and could otherwise win), then by reported memory, ties by PCI address;
+  `--assistant-device cpu` forces the CPU and a PCI address selects that device. Levels 2 and
+  3 run the same per-node listing with the node's access granted alone. The real start checks
+  that the sandboxed list still shows one GPU with the recorded description. The GPU path
+  loads every layer on the GPU: the child's offload line must show N = M, otherwise it is a
+  GPU failure. A Vulkan build that cannot start (for example no Vulkan loader) is a GPU
+  failure. The CPU path uses the CPU build.
 - **Transitions** (attempt = spawn, endpoint check, `/health` within 60 s, priming within
   300 s, calibration within twice the path's run-deadline cap; owner actions are owner-only
   and CSRF-checked):
@@ -498,14 +542,14 @@ natively for these tests (ASSIST-40).
   | Event | Action | Failure count |
   |---|---|---|
   | Attempt fails on the GPU path (budgets that do not derive included), or the GPU child exits, or is stopped as hung | stop and wait until gone, start on the CPU path at the same level at once, showing the reason; CPU until Mimik restarts or the owner presses "Try the GPU again" | not counted |
-  | Attempt on the CPU path fails before `/health` answers at level 1 or 2 | next attempt at once on the next level that passed its probe; the skipped level and its reason are recorded and shown | not counted |
-  | Attempt fails on the CPU path, otherwise | retry after 2 minutes | +1 |
+  | Attempt on the CPU path fails with a sandbox-attributable failure at level 1 or 2 (a bwrap or Landlock setup error, a status-descriptor failure before exec, the level's preflight failing) | next attempt at once on the next level that passed its probe; the skipped level and its reason are recorded and shown | not counted |
+  | Attempt fails on the CPU path, otherwise (model-load errors, hash mismatches, exits after exec keep the level) | retry after 2 minutes | +1 |
   | Child exits while ready (CPU path) | restart now | +1 only within 10 minutes of `ready` |
   | Two consecutive run-deadline expiries with no completed exchange between | stop as hung, wait until gone, restart, re-measure (whatever `/health` says); expiries never count toward the breaker | as a child exit |
   | Failure count reaches 4 (the first attempt plus 3 retries) | `unavailable` until Mimik restarts or the owner presses "Restart" | — |
   | Budgets do not derive on the CPU path ("too slow") | `unavailable` with the numbers; no retry; "Restart" measures again | — |
   | `ready` for 10 minutes | failure count back to 0 | reset |
-  | Owner presses "Restart" | stop, wait until gone, new attempt from level 1; breaker reset | reset |
+  | Owner presses "Restart" (or Mimik starts) | stop, wait until gone, new attempt from level 1, the only way back up from a lower level; breaker reset | reset |
 
   While `starting` or `unavailable`, a job start answers 503 with the state, queues nothing,
   and number entry, notes and Undo work as usual. Logs carry states, levels and reasons, never
@@ -528,8 +572,9 @@ natively for these tests (ASSIST-40).
   `max_tokens` tokens. From each sample: wall time W, `timings.prompt_n`, `prompt_ms` and the
   cached prompt tokens (the evaluated prompt tokens include any uncached tail of the fixed
   prefix and the envelope and template tokens around the filler), `predicted_n` and
-  `predicted_ms`; and from `/tokenize`, the filler's token count N_cal. All must be present,
-  finite and positive, `predicted_n` must equal `max_tokens`, the tail t = `prompt_n` − N_cal
+  `predicted_ms`; and from `/tokenize`, each filler's token count N₁ and N₂ (equal byte
+  lengths do not give equal token counts). All must be present,
+  finite and positive, `predicted_n` must equal `max_tokens`, each tail tᵢ = `prompt_n` − Nᵢ
   must not be negative, and the cached tokens must be at least 75 % of the fixed prefix's
   tokens measured by priming (2b saw 83 to 88 %), or the attempt fails (a timing criterion,
   not a content one). Both are outside the breaker. The grammar question is settled once, in
@@ -540,9 +585,10 @@ natively for these tests (ASSIST-40).
 - **Budgets (ASSIST-31, ASSIST-32; recomputed at every start, a latency estimate within hard
   caps, not a worst-case bound):** per sample i: per-token prompt time pᵢ = `prompt_ms` /
   `prompt_n`, per-token generation time gᵢ = `predicted_ms` / `predicted_n`, overhead oᵢ =
-  max(0, W − `prompt_ms` − `predicted_ms`), tail tᵢ. For a candidate bound B, N(B) =
-  floor(N_cal × B / cap), Tᵢ(B) = oᵢ + pᵢ × (tᵢ + N(B)) + gᵢ × `max_tokens`, and T(B) =
-  max(T₁(B), T₂(B)). Candidates: GPU 4,096, 2,048, 1,024; CPU 1,024, 768, 512. B is the
+  max(0, W − `prompt_ms` − `predicted_ms`), tail tᵢ. The shared request limit uses the
+  smaller count, N_cal = min(N₁, N₂) (conservative: a request may not exceed the leaner
+  filler's density). For a candidate bound B, N(B) = floor(N_cal × B / cap), Tᵢ(B) = oᵢ + pᵢ ×
+  (tᵢ + N(B)) + gᵢ × `max_tokens` with the same N(B) in both, and T(B) = max(T₁(B), T₂(B)). Candidates: GPU 4,096, 2,048, 1,024; CPU 1,024, 768, 512. B is the
   largest candidate with R(B) = max(15, round up to 5 s of 1.25 × T(B)) within the path's
   limits: GPU R ≤ 60 s; CPU R ≤ 90 s. Queue: GPU D = max(1, min(4, floor((120 − R) / R))) and
   Q = D × R (the 2b rule; Q + R ≤ 120 holds since R ≤ 60); CPU D = 1 and Q = 120 − R, so Q +
@@ -642,7 +688,9 @@ natively for these tests (ASSIST-40).
   Granite file, identified by its compiled-in SHA-256, keeps 192 from its 104-reply screen); (3) runs the calibration of §1.4a with that `max_tokens` and
   derives the budgets. It passes when (1) and (3) succeed. Bounds: each phrase has twice the
   path's run-deadline cap (180 s on the CPU path, 120 s on the GPU path), the whole trial
-  30 minutes on the CPU path and 10 on the GPU path (priming and calibration included); the
+  30 minutes on the CPU path and 20 on the GPU path (priming and calibration included; each
+  covers the worst case of priming 300 s, five phrases at their deadline and two calibration
+  samples at twice the cap); the
   owner can Cancel at any time. Expiry, Cancel or failure stop the candidate and restore the
   previous model automatically. Results are bound to a trial ID (the candidate's hash and the
   generation it ran in), and "Switch" accepts only the latest finished trial's ID for that
@@ -768,7 +816,10 @@ Unix-socket connector that keeps the client policy (§1.4, Crate). Its own branc
 ### 2c-1 Interpretation
 
 Scope: trait, stub, adapter; the client policy with both connectors and the token; the
-request builder with the byte and token bounds and the related-fields context; the formula
+request builder with the byte and token bounds and the related-fields context; the runtime
+event interface the worker consumes (`generation started`, `generation ended` with its
+reason, `ready` with the budgets B, N(B), R, D, Q), fed in 2c-1 by the development endpoint's
+fixed configuration and by test doubles, and in 2c-2 by the runtime manager; the formula
 layer's read-set accessor (§1.4, Read sets); the note key in the JSON answer of an
 `unresolved` note (§1.4, Routes); worker, admission, records and breaker; the job, poll and
 apply routes with origin and read/write-set binding; the UI. The model server is started by
@@ -776,7 +827,8 @@ hand on the dev host (ASSIST-40) and reached through a development endpoint sett
 (`--assistant-dev-endpoint`, a loopback literal or a socket path, with a token file), compiled
 only with the `dev-endpoint` Cargo feature, which release builds never enable (the release
 build and the packaging check assert its absence); it has no endpoint check. Budgets come from
-configuration (development defaults B 1,024, R 85, D 1, Q 35). Until 2c-2 lands the assistant
+configuration (development defaults B 1,024, N(B) 256 tokens through
+`--assistant-dev-token-limit`, R 85, D 1, Q 35). Until 2c-2 lands the assistant
 is a development feature, outside the release scope. Tests (stub or fake server unless
 stated):
 - output: schema-invalid, grammar-invalid and truncated JSON; more than 3 options; a tree deeper
@@ -796,7 +848,8 @@ stated):
   stored note, not the request; the fixed prefix is byte-identical across requests; the
   dynamic part stays within B (4,096, 2,048, 1,024, 768, 512) and within N(B) tokens (the fake
   server's `/tokenize` returning a high count drops items that the byte bound kept), dropping
-  whole items; the target's label goes before the phrase, target ID or value; a phrase and
+  whole items; the development token limit (`--assistant-dev-token-limit`, default 256)
+  is the N(B) 2c-1 enforces; the target's label goes before the phrase, target ID or value; a phrase and
   target over a bound end "too long" without a completion request and without a breaker count;
   excluded field types never appear in the request;
 - read sets: per derived value and check, scalar reads and `(list, property)` reads grouped by
@@ -848,7 +901,10 @@ stated):
   probe while others are refused; probe success closes, failure reopens; a 2xx with all
   options dropped resets the count and closes a half-open breaker; a cancelled probe clears the
   probe flag and leaves it half-open; queue-wait and run-deadline expiries never count (ten in
-  a row leave it closed); a child exit during a job and a malformed completion stream count;
+  a row leave it closed); a malformed completion stream counts; a child exit never counts,
+  whether it arrives before or after the job's transport error (that error is then dropped as
+  part of the exit); a new child leaves the breaker as it was, and only Restart and app start
+  reset it;
   mixed sequences (failure, success, failure) do not open it; while open, number
   entry, notes and Undo work and the poll says the assistant is unavailable; a start reports
   `starting` before an open breaker;
@@ -898,15 +954,20 @@ night or at a weekend):
 - manifest and packaging: an extra, missing or changed runtime file → no child, unavailable
   with the reason; a group-writable runtime file → refused; a development override
   (`--assistant-runtime <dir>`) with other files → refused; `package_release.py` stages
-  exactly the manifest's files and refuses others; the CI runtime check fails closed when the
-  asset cannot be fetched or its hash differs;
+  exactly the manifest's files and refuses others, and after the artifact hand-off re-hashes
+  them and reapplies the manifest's modes; the `llama-runtime` job fails closed when the asset
+  cannot be fetched, its hash differs, or the probe reaches less than level 1; the shipped
+  binary has no `--assistant-dev-endpoint` (asserted by the packaging check and
+  `smoke_release.py`);
 - flags (CI, pinned build): `--version` reports the pinned build; `--help` lists every flag of
   the vector; live: `/health` without a token, the per-request `ignore_eos` and the
   device-list and offload-line formats behave as §1.4a assumes, or the step stops for a
   decision;
 - runner: the child's environment holds only the allowed names (`/proc/<pid>/environ`); no
   inherited descriptor beyond the listed ones (`/proc/<pid>/fd`); `RLIMIT_CORE` 0 and
-  `RLIMIT_FSIZE` 64 MiB (a write past it fails); a set-ID `bwrap` → refused by the preflight;
+  `RLIMIT_FSIZE` 64 MiB (a write past it kills the child with `SIGXFSZ`, handled as a child
+  exit); a helper that calls `prctl(PR_SET_PDEATHSIG, 0)` on levels 2 and 3 is refused, and
+  SIGKILL of Mimik still kills it; a set-ID `bwrap` → refused by the preflight;
   a runner
   whose parent died before the parent-death signal was set exits (parent PID mismatch); live:
   SIGKILL of Mimik during startup and while ready kills the whole tree;
@@ -915,7 +976,9 @@ night or at a weekend):
   public address, cannot send UDP, cannot reach a host abstract or pathname Unix socket (an
   adversarial helper binary in place of llama-server, run with the same profile), cannot see
   host paths outside the allowlist, cannot create a UDP, raw or `io_uring` instance, cannot
-  fork or start another process, and cannot fill `/tmp` or `/dev/shm` beyond their sizes;
+  fork or start another process; with the probed `--size` it cannot fill `/tmp` or
+  `/dev/shm` beyond their sizes in many small files, and without it only the per-file limit
+  holds and the page states "temporary space unbounded";
   Mimik reaches it only through the socket, connecting through the directory descriptor (a
   socket directory whose host path is longer than 108 bytes still works); the socket
   directory is removed when the generation stops; preflight causes: bwrap absent, user namespaces
@@ -955,28 +1018,34 @@ night or at a weekend):
   failure at each phase → CPU at once, not counted, the next child started only after the old
   one is gone (bwrap's `exit-code` and the reaper's pidfd); GPU budgets that do not derive →
   CPU path, the page saying why; a CPU attempt failing before `/health` at level 1 → level 2
-  at once, the skip recorded, and at level 2 → level 3; a queue with a running and a waiting
+  at once, the skip recorded, and at level 2 → level 3; a model-load error, a hash mismatch or
+  an exit after exec → same level, retry path; a lower level goes back up only on Restart or
+  app start; a queue with a running and a waiting
   job at a generation change → both end "the assistant restarted: ask again", the breaker
   unchanged; CPU failures
   retried after 2 minutes, four failures → unavailable; a second exit within 10 minutes counts,
   after 10 ready minutes it does not; two consecutive deadline expiries while `/health`
   answers 200 → stopped as hung and restarted; a late exit event of an old generation changes
-  nothing; Restart resets the failure count and the breaker; a second Mimik on the same data
+  nothing; Restart resets the failure count and the breaker, a new child alone does not; a second Mimik on the same data
   directory cannot take the pidfile lock; a leftover child matching PID, start time and path
   is killed, a reused PID is left alone; shutdown → the tree is gone within 5 s;
-- device and fallback: `--list-devices` output (format pinned from the real build) with only
-  `llvmpipe` → CPU; two discrete GPUs → the one with more memory; an integrated GPU reporting
-  more shared memory than a discrete one → the discrete one; the emitted arguments contain
-  `--device <name>` on the GPU path and none on the CPU path; the render node bound at level 1
-  is the one whose sandboxed list shows the selected device, and a mismatch at the real start
-  is a GPU failure; an offload line with N < M → GPU failure; `--assistant-device cpu` never lists devices; live: Vulkan on the RX 6650 XT
-  reaches `ready` with GPU budgets, and killing the child mid-job ends on the CPU path with
-  CPU budgets and the page saying why;
+- device and fallback: per-node sandboxed listings (format pinned from the real build) with
+  only `llvmpipe` → CPU; a host where the selected card is `Vulkan1` but its sandboxed list
+  names it `Vulkan0` → `--device Vulkan0` is passed; two identical cards (same description)
+  → told apart and remembered by PCI address; two discrete GPUs → the one with more memory; an
+  integrated GPU reporting more shared memory than a discrete one → the discrete one; no
+  `--device` on the CPU path; a mismatch at the real start → GPU failure; an offload line with
+  N < M → GPU failure; a level that passes for the CPU build but not the GPU build → each path
+  at its own level; a model larger than `MemAvailable` minus 1 GiB → refused with the reason;
+  `--assistant-device cpu` never lists devices; live: Vulkan on the RX 6650 XT reaches `ready`
+  with GPU budgets (with the seccomp log flag once), and killing the child mid-job ends on the
+  CPU path with CPU budgets and the page saying why;
 - priming and calibration (fake server): a start before they complete answers 503 "starting"
   and queues nothing; they never count toward the breaker; a sample with a missing, zero or
   non-finite timing, `predicted_n` different from `max_tokens`, a negative tail or cached
   tokens below 75 % of the prefix fails the attempt; the two samples differ from their first
-  dynamic byte; T(B) is the larger of the two samples' estimates for each candidate (a sample
+  dynamic byte; fillers of equal bytes but unequal token counts → N_cal is the smaller and the
+  same N(B) enters both estimates; T(B) is the larger of the two samples' estimates for each candidate (a sample
   slower in prompt but faster in generation changes the choice for a small B);
   a restarted child re-primes and re-calibrates before admitting jobs; neither carries sheet
   text;
@@ -1098,7 +1167,8 @@ dangling key shows no link; p95 measured.
   "no model proposes", the accuracy bar (waived, D-D), and "the LLM does not judge at play
   time" (narrow confirmable proposals and reminders).
 - `cargo about`, audit, packaging (the runtime files verified against the manifest), and the
-  unpacked smoke with the assistant off and once with the stub endpoint.
+  unpacked smoke with the assistant off and once on the production runtime path (§1.4a, CI
+  workflow); stub-endpoint coverage stays in the feature-enabled test build.
 - Assistant scope stated as "local endpoint, POC quality, not certified (D-D)", with L1 and the
   other open limitations listed.
 
@@ -1124,7 +1194,7 @@ dangling key shows no link; p95 measured.
   false-confident. Fast-path inputs never reach the model; results are per class, not general
   accuracy. `tools/assist_eval.py` is new in 2b; its cases are synthetic and independently
   labelled. Extra classes for 2c: valid divisions, overflow, unknown target, provenance
-  failure, multi-option, related-field selection at 1 KiB; injection rows expect an option at
+  failure, multi-option, related-field selection at 1 KiB, same-row cell references; injection rows expect an option at
   most, never a write. Quality numbers are per backend (CPU and GPU answers differ at
   temperature 0, `docs/results.md`).
 
