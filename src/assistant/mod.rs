@@ -10,6 +10,7 @@ pub(crate) mod jobs;
 pub(crate) mod lexer;
 pub(crate) mod output;
 pub(crate) mod request;
+pub(crate) mod runtime;
 pub(crate) mod transport;
 
 use std::sync::Arc;
