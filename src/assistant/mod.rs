@@ -2,3 +2,5 @@
 //!
 //! Off by default: without `--assistant` there is no client, no worker and no job route.
 pub(crate) mod contract;
+pub(crate) mod lexer;
+pub(crate) mod output;

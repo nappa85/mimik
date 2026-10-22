@@ -1,4 +1,11 @@
 pub mod accounts;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "step 2c-1 in progress: wired to the routes later in this branch"
+    )
+)]
 mod assistant;
 pub mod auth;
 pub mod campaigns;

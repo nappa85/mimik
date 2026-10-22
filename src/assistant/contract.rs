@@ -14,7 +14,8 @@ use std::sync::LazyLock;
 /// newline. It is what `response_format` carries and what the prefix quotes.
 pub(crate) const SCHEMA_TEXT: &str = include_str!("../../schemas/interpretation-v2.json");
 /// The instructions, ending with a newline.
-pub(crate) const INSTRUCTIONS: &str = include_str!("../../schemas/interpretation-v2-instructions.txt");
+pub(crate) const INSTRUCTIONS: &str =
+    include_str!("../../schemas/interpretation-v2-instructions.txt");
 /// The schema's `title`, also the `json_schema.name` of `response_format`.
 pub(crate) const SCHEMA_NAME: &str = "mimik_interpretation_v2";
 /// Between the instructions and the schema in the fixed prefix.
@@ -53,7 +54,9 @@ pub(crate) static FIXED_PREFIX: LazyLock<String> = LazyLock::new(|| {
 
 /// The alias of the `n`-th supplied field (1-based), or `None` past the enum.
 pub(crate) fn field_alias(n: usize) -> Option<String> {
-    (1..=MAX_FIELD_ALIASES).contains(&n).then(|| format!("f{n}"))
+    (1..=MAX_FIELD_ALIASES)
+        .contains(&n)
+        .then(|| format!("f{n}"))
 }
 
 /// The alias of the `n`-th supplied same-row cell (1-based), or `None` past the enum.
