@@ -489,7 +489,7 @@ fn sigkill_of_mimik_ends_the_sandbox(kill_at: &str) {
         }
     };
     let tree: Vec<i32> = std::iter::once(bwrap).chain(descendants(bwrap)).collect();
-    assert!(!tree.is_empty());
+    assert_ne!(tree, Vec::<i32>::new());
     mimik.kill().unwrap();
     mimik.wait().unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
