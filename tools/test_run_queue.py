@@ -389,6 +389,22 @@ class Harness(unittest.TestCase):
 
 
 class WindowTests(unittest.TestCase):
+    """Run in the host's zone (Europe/Rome), whatever TZ the test process has: the window
+    expectations are wall-clock local times, and the daylight-saving change on 2026-10-25
+    makes that weekend's window an hour longer."""
+
+    def setUp(self):
+        self._tz = os.environ.get("TZ")
+        os.environ["TZ"] = "Europe/Rome"
+        time.tzset()
+
+    def tearDown(self):
+        if self._tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = self._tz
+        time.tzset()
+
     def test_heavy_allowed(self):
         self.assertTrue(rq.heavy_allowed(at(2026, 10, WED, 8, 59)))
         self.assertFalse(rq.heavy_allowed(at(2026, 10, WED, 9, 0)))
@@ -404,7 +420,16 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(rq.window_end(at(2026, 10, FRI, 20, 0)), at(2026, 10, MON, 9, 0))
         self.assertEqual(rq.window_end(at(2026, 10, SAT, 9, 30)), at(2026, 10, MON, 9, 0))
         self.assertEqual(rq.next_window_start(at(2026, 10, THU, 10, 0)), at(2026, 10, THU, 18, 0))
-        self.assertEqual(rq.longest_window_seconds(at(2026, 10, WED, 10, 0)), 63 * 3600)
+        # Eight windows from Wed 7 October end with the weekend of 16-19 October: 63 h.
+        self.assertEqual(rq.longest_window_seconds(at(2026, 10, 7, 10, 0)), 63 * 3600)
+
+    def test_daylight_saving_weekend_is_one_hour_longer(self):
+        # From Wed 14 October the scan reaches Fri 23 18:00 to Mon 26 09:00, across the
+        # change to winter time on Sunday 25: 64 elapsed hours.
+        self.assertEqual(rq.longest_window_seconds(at(2026, 10, WED, 10, 0)), 64 * 3600)
+        self.assertEqual(
+            rq.window_end(at(2026, 10, 23, 18, 0)) - at(2026, 10, 23, 18, 0), 64 * 3600
+        )
 
 
 class ScheduleOverrideTests(unittest.TestCase):
@@ -946,6 +971,7 @@ class RunnerEnvTests(Harness):
         self.assertEqual(env["TZ"], ":/etc/localtime")
         self.assertEqual((env["HOME"], env["MIMIK_MODEL_ROOT"]), ("/home/test", str(self.models)))
         self.assertEqual((env["CTX"], env["MAX_TURNS"], env["QUIET"]), ("24576", "12", "1"))
+        self.assertNotIn("CPUSET", env)  # not set here: no pinning is invented
         self.assertEqual(env["PREFLIGHT_CASE"], "dev-001")
         self.assertEqual(env["CASES_FILE"], str(SUBSET))
         self.assertTrue(env["HASH_CACHE"].endswith("hash-cache.txt"))
@@ -953,6 +979,14 @@ class RunnerEnvTests(Harness):
         self.assertEqual(recorded, {"CTX": "24576", "MAX_TURNS": "12"})
         for line in self.console:
             self.assertNotIn("dev-0", line)
+
+    def test_inherited_cpuset_reaches_the_runner(self):
+        """Before: CPUSET was dropped by the allowlist, so the runner could not pin."""
+        self.env["CPUSET"] = "2-5,8-11"
+        manifest = self.make(queue_doc([arm("a")]), at(2026, 10, SAT, 10, 0)).run()
+        self.assertEqual(manifest["arms"][0]["state"], "complete")
+        _, env = self.launcher.launches[0]
+        self.assertEqual(env["CPUSET"], "2-5,8-11")
 
     def test_queue_file_validation(self):
         bad = {

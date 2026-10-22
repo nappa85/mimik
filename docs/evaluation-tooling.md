@@ -186,6 +186,14 @@ before each step and every 15 s; no episode starts within 900 s of the cutoff.
 precondition; the server container still gets `--cpus 6`. GPU arms need the fan in manual mode
 at pwm ≥ 230 (exit 14 otherwise).
 
+### CPU pinning
+
+`CPUSET` (a cpuset list such as `2-5,8-11`) adds `--cpuset-cpus` to every container the
+runner starts (hash checks, server, harness) and is recorded in `provenance.txt`; llama.cpp
+`--threads` above its CPU count is refused (exit 2). The queue inherits `CPUSET` from its
+environment, so `CPUSET=... tools/launch_frozen_queue.sh ...` pins a whole session. Unset
+means no pinning. The router runner ignores it.
+
 ### Queue: `tools/run_queue.py run QUEUE.json` (also `check`, `window-check`)
 
 Queue files are in `tools/queues/`. Arms run in order through the runner (or the router runner
