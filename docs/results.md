@@ -74,7 +74,7 @@ decides.**
   2c).
 - **Conclusion (proposal):** `rig-core` (0.44.0 measured, 0.45.0 re-checked) is the only D-H
   crate that meets C1 to C5. The
-  schema goes byte-exact through `additional_params` (its native path rewrites `oneOf`), and
+  schema arrives structurally identical (compared as parsed JSON) through `additional_params` (its native path rewrites `oneOf`), and
   the body bound needs a small Mimik transport (about 80 lines, the probe's `Bounded`).
   `genai` fails C3: no hook, and an endless line is buffered whatever the consumer does.
   `async-openai` was measured for comparison only (D-H does not name it; the plan no longer
