@@ -153,6 +153,7 @@ impl AssistantHandle {
                 depth: config.queue,
                 queue_wait: config.queue_wait,
                 max_tokens,
+                busy_after_expiry: Duration::ZERO,
             },
             interpreter: Arc::new(interpreter),
         });

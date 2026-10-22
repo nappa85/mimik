@@ -230,6 +230,7 @@ pub(crate) fn derive(measured: &Measured) -> Result<Derived, NoBudgets> {
                 depth: usize::try_from(depth).unwrap_or(1),
                 queue_wait: Duration::from_secs(queue),
                 max_tokens: measured.max_tokens,
+                busy_after_expiry: Duration::from_secs_f64(prompt_s.ceil()),
             },
             estimate_s,
             prompt_s,

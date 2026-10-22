@@ -17,6 +17,7 @@ fn budgets() -> Budgets {
         depth: 1,
         queue_wait: Duration::from_secs(35),
         max_tokens: 352,
+        busy_after_expiry: Duration::ZERO,
     }
 }
 
@@ -735,4 +736,55 @@ async fn a_row_removal_between_the_database_check_and_the_enqueue_refuses_a_cell
             )
             .is_ok()
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_deadline_expiry_keeps_the_server_busy_for_its_prompt_term() {
+    // ASSIST-L31: a request cancelled at its deadline may still be in prompt evaluation; the
+    // next job waits that long, and admission counts it.
+    let (stub, gate) = gated(3);
+    let mut busy = budgets();
+    busy.queue_wait = Duration::from_secs(120);
+    busy.busy_after_expiry = Duration::from_secs(30);
+    let assistant = ready(stub, busy);
+    let (first, _) = start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
+    settle().await;
+    let (second, _) = start(&assistant, 2, origin(2, "field:hp", 5)).unwrap();
+    tokio::time::advance(Duration::from_secs(86)).await;
+    settle().await;
+    assert_eq!(assistant.poll(1, 1, first), Poll::Done(Answer::AskAgain));
+    // The server is presumed busy for 30 s after the expiry.
+    tokio::time::advance(Duration::from_secs(10)).await;
+    settle().await;
+    assert_eq!(assistant.poll(2, 2, second), Poll::Queued);
+    // A start now must wait the busy rest (about 19 s) plus the second job's R (85 s) plus
+    // its own: within Q = 120 s only without the busy term, so it is refused.
+    let refused = start(&assistant, 3, origin(3, "field:hp", 5));
+    assert_eq!(refused, Err(Refusal::Busy));
+    tokio::time::advance(Duration::from_secs(21)).await;
+    settle().await;
+    assert_eq!(assistant.poll(2, 2, second), Poll::Running);
+    gate.add_permits(3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn expiries_and_completed_exchanges_are_signalled_to_the_runtime() {
+    let stub = Arc::new(StubInterpreter::answering([Ok(HEAL.to_owned())]));
+    let gate = Arc::new(Semaphore::new(0));
+    *stub.gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let assistant = ready(stub, budgets());
+    let (sender, mut signals) = tokio::sync::mpsc::unbounded_channel();
+    assistant.subscribe(sender);
+    let (_first, _) = start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
+    settle().await;
+    tokio::time::advance(Duration::from_secs(86)).await;
+    settle().await;
+    assert_eq!(signals.try_recv(), Ok(Signal::Expired { generation: 1 }));
+    gate.add_permits(1);
+    let (_second, _) = start(&assistant, 1, origin(1, "field:hp", 6)).unwrap();
+    for _ in 0..20 {
+        settle().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+    }
+    assert_eq!(signals.try_recv(), Ok(Signal::Completed { generation: 1 }));
 }

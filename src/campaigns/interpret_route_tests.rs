@@ -26,6 +26,7 @@ fn budgets() -> Budgets {
         depth: 1,
         queue_wait: Duration::from_secs(35),
         max_tokens: 352,
+        busy_after_expiry: Duration::ZERO,
     }
 }
 
