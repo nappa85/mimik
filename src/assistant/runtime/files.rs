@@ -72,8 +72,14 @@ impl Identity {
             device: stat.st_dev,
             inode: stat.st_ino,
             size: u64::try_from(stat.st_size).unwrap_or(0),
-            mtime: (stat.st_mtime, i64::try_from(stat.st_mtime_nsec).unwrap_or(0)),
-            ctime: (stat.st_ctime, i64::try_from(stat.st_ctime_nsec).unwrap_or(0)),
+            mtime: (
+                stat.st_mtime,
+                i64::try_from(stat.st_mtime_nsec).unwrap_or(0),
+            ),
+            ctime: (
+                stat.st_ctime,
+                i64::try_from(stat.st_ctime_nsec).unwrap_or(0),
+            ),
         }
     }
 }
@@ -306,8 +312,8 @@ pub(crate) fn runtime(
 ) -> Result<Vec<Verified>, Refusal> {
     let dir = open_dir_beneath(runtime, &build.directory, Owners::MineOrRoot, false)?;
     let mut present = std::collections::BTreeSet::new();
-    let listing = rustix::fs::Dir::read_from(&dir)
-        .map_err(|error| io_refusal(&build.directory, error))?;
+    let listing =
+        rustix::fs::Dir::read_from(&dir).map_err(|error| io_refusal(&build.directory, error))?;
     for entry in listing {
         let entry = entry.map_err(|error| io_refusal(&build.directory, error))?;
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -338,7 +344,8 @@ pub(crate) fn runtime(
 /// Whether `path` and every ancestor directory are not writable by group or others (levels
 /// 2 and 3 load shared libraries by path from the runtime directory).
 pub(crate) fn ancestors_safe(path: &Path) -> Result<(), Refusal> {
-    let absolute = std::path::absolute(path).map_err(|_| Refusal::Io(path.display().to_string()))?;
+    let absolute =
+        std::path::absolute(path).map_err(|_| Refusal::Io(path.display().to_string()))?;
     for ancestor in absolute.ancestors() {
         let stat = rustix::fs::stat(ancestor)
             .map_err(|error| io_refusal(&ancestor.display().to_string(), error))?;

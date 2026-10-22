@@ -59,14 +59,32 @@ fn links_directories_fifos_and_writable_files_are_refused() {
     let x = sha(b"x");
     let refused = |name: &str| model(fd.as_fd(), name, &x, &cache).unwrap_err();
     assert_eq!(refused("link.gguf"), Refusal::Link("link.gguf".into()));
-    assert_eq!(refused("via/inner.gguf"), Refusal::Link("via/inner.gguf".into()));
-    assert_eq!(refused("../escape.gguf"), Refusal::Link("../escape.gguf".into()));
-    assert_eq!(refused("folder.gguf"), Refusal::NotRegular("folder.gguf".into()));
+    assert_eq!(
+        refused("via/inner.gguf"),
+        Refusal::Link("via/inner.gguf".into())
+    );
+    assert_eq!(
+        refused("../escape.gguf"),
+        Refusal::Link("../escape.gguf".into())
+    );
+    assert_eq!(
+        refused("folder.gguf"),
+        Refusal::NotRegular("folder.gguf".into())
+    );
     // The FIFO does not block the open.
-    assert_eq!(refused("fifo.gguf"), Refusal::NotRegular("fifo.gguf".into()));
+    assert_eq!(
+        refused("fifo.gguf"),
+        Refusal::NotRegular("fifo.gguf".into())
+    );
     assert_eq!(refused("open.gguf"), Refusal::Writable("open.gguf".into()));
-    assert_eq!(refused("group.gguf"), Refusal::Writable("group.gguf".into()));
-    assert_eq!(refused("absent.gguf"), Refusal::Missing("absent.gguf".into()));
+    assert_eq!(
+        refused("group.gguf"),
+        Refusal::Writable("group.gguf".into())
+    );
+    assert_eq!(
+        refused("absent.gguf"),
+        Refusal::Missing("absent.gguf".into())
+    );
     // A real file in a real subfolder is fine.
     assert!(model(fd.as_fd(), "real/inner.gguf", &x, &cache).is_ok());
 }
@@ -97,12 +115,21 @@ fn a_hash_is_reused_while_the_identity_is_unchanged() {
     let (a, stat) = open_file(fd.as_fd(), "a", Owners::Mine).unwrap();
     let identity = Identity::of(&stat);
     let (b, _) = open_file(fd.as_fd(), "b", Owners::Mine).unwrap();
-    assert_eq!(hex::encode(cache.hash("k", a.as_fd(), identity).unwrap()), sha(b"first"));
+    assert_eq!(
+        hex::encode(cache.hash("k", a.as_fd(), identity).unwrap()),
+        sha(b"first")
+    );
     // Same identity: not re-read (the other descriptor's content is never looked at).
-    assert_eq!(hex::encode(cache.hash("k", b.as_fd(), identity).unwrap()), sha(b"first"));
+    assert_eq!(
+        hex::encode(cache.hash("k", b.as_fd(), identity).unwrap()),
+        sha(b"first")
+    );
     let mut changed = identity;
     changed.size += 1;
-    assert_eq!(hex::encode(cache.hash("k", b.as_fd(), changed).unwrap()), sha(b"second"));
+    assert_eq!(
+        hex::encode(cache.hash("k", b.as_fd(), changed).unwrap()),
+        sha(b"second")
+    );
 }
 
 #[test]
@@ -199,16 +226,22 @@ fn the_runtime_holds_exactly_the_pinned_files() {
     let (dir, fd) = runtime_dir(FILES);
     std::fs::remove_file(dir.path().join("cpu/libllama.so.0")).unwrap();
     std::fs::write(dir.path().join("real"), b"lib").unwrap();
-    std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("cpu/libllama.so.0"))
-        .unwrap();
+    std::os::unix::fs::symlink(
+        dir.path().join("real"),
+        dir.path().join("cpu/libllama.so.0"),
+    )
+    .unwrap();
     assert_eq!(
         runtime(fd.as_fd(), &build(FILES), &cache).unwrap_err(),
         Refusal::Link("libllama.so.0".into())
     );
 
     let (dir, fd) = runtime_dir(FILES);
-    std::fs::set_permissions(dir.path().join("cpu"), std::fs::Permissions::from_mode(0o777))
-        .unwrap();
+    std::fs::set_permissions(
+        dir.path().join("cpu"),
+        std::fs::Permissions::from_mode(0o777),
+    )
+    .unwrap();
     assert_eq!(
         runtime(fd.as_fd(), &build(FILES), &cache).unwrap_err(),
         Refusal::Writable("cpu".into())

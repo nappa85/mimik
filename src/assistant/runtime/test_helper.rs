@@ -16,7 +16,13 @@ pub(crate) fn mode() -> Option<String> {
 pub(crate) fn command(test: &str, mode: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().expect("the test binary"));
     command
-        .args([test, "--exact", "--nocapture", "--test-threads=1", "--include-ignored"])
+        .args([
+            test,
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+            "--include-ignored",
+        ])
         .env(VARIABLE, mode);
     command
 }

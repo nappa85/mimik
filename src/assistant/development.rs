@@ -6,7 +6,7 @@ use super::AssistantHandle;
 use super::interpreter::RigInterpreter;
 use super::jobs::{Assistant, Budgets, RuntimeEvent};
 use super::request::Bounds;
-use super::transport::{self, Endpoint};
+use super::transport::{self, Bounded, Endpoint};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -137,8 +137,8 @@ impl AssistantHandle {
         if token.is_empty() || token.chars().any(char::is_control) {
             return Err("the token file must hold one non-empty line".into());
         }
-        let interpreter = RigInterpreter::new(endpoint(&config.endpoint)?, token, alias)
-            .map_err(|_| "the model client cannot be built".to_owned())?;
+        let interpreter =
+            RigInterpreter::new(Bounded::direct(endpoint(&config.endpoint)?), token, alias);
         let assistant = Assistant::new();
         assistant.reset_breaker();
         assistant.event(RuntimeEvent::GenerationStarted { generation: 1 });

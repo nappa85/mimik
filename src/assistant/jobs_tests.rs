@@ -530,11 +530,10 @@ async fn cancelling_a_running_job_closes_its_connection() {
     shared.push(Reply::Slow(Duration::from_millis(300), HEAL.into()));
     shared.push(Reply::Content(HEAL.into()));
     let interpreter = RigInterpreter::new(
-        Endpoint::Tcp(transport::tcp(&url, false).unwrap()),
+        transport::Bounded::direct(Endpoint::Tcp(transport::tcp(&url, false).unwrap())),
         "dummy-token-not-a-secret".into(),
         "test".into(),
-    )
-    .unwrap();
+    );
     let assistant = ready_with(Arc::new(interpreter));
     let (first, _) = start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
     for _ in 0..100 {

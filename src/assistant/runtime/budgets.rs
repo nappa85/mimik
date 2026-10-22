@@ -121,7 +121,9 @@ fn rates(sample: &Sample, max_tokens: u32, prefix_tokens: f64) -> Result<Rates, 
         sample.filler_tokens,
     ];
     if !fields.into_iter().all(positive) {
-        return Err(NoBudgets::Invalid("a calibration timing is missing, zero or not finite"));
+        return Err(NoBudgets::Invalid(
+            "a calibration timing is missing, zero or not finite",
+        ));
     }
     if (sample.predicted_n - f64::from(max_tokens)).abs() > f64::EPSILON {
         return Err(NoBudgets::Invalid(
@@ -130,7 +132,9 @@ fn rates(sample: &Sample, max_tokens: u32, prefix_tokens: f64) -> Result<Rates, 
     }
     let t = sample.prompt_n - sample.filler_tokens;
     if t < 0.0 {
-        return Err(NoBudgets::Invalid("a calibration sample's prompt tail is negative"));
+        return Err(NoBudgets::Invalid(
+            "a calibration sample's prompt tail is negative",
+        ));
     }
     if !positive(prefix_tokens) || sample.cached_n < MIN_CACHED * prefix_tokens {
         return Err(NoBudgets::Invalid(
@@ -173,8 +177,16 @@ fn run_deadline(estimate_s: f64) -> u64 {
 pub(crate) fn derive(measured: &Measured) -> Result<Derived, NoBudgets> {
     let path = measured.path;
     let rates = [
-        rates(&measured.samples[0], measured.max_tokens, measured.prefix_tokens)?,
-        rates(&measured.samples[1], measured.max_tokens, measured.prefix_tokens)?,
+        rates(
+            &measured.samples[0],
+            measured.max_tokens,
+            measured.prefix_tokens,
+        )?,
+        rates(
+            &measured.samples[1],
+            measured.max_tokens,
+            measured.prefix_tokens,
+        )?,
     ];
     let n_cal = measured.samples[0]
         .filler_tokens

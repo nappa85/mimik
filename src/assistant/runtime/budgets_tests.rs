@@ -48,7 +48,12 @@ fn budgets(derived: &Derived) -> (usize, usize, u64, usize, u64) {
 
 #[test]
 fn container_figures_with_the_low_tail_fit_only_512() {
-    let derived = derive(&measured(Path::Cpu, 192, [container(170.0), container(170.0)])).unwrap();
+    let derived = derive(&measured(
+        Path::Cpu,
+        192,
+        [container(170.0), container(170.0)],
+    ))
+    .unwrap();
     assert_eq!(budgets(&derived), (512, 146, 90, 1, 30));
     // T = 1 + 0.088 × (170 + 146) + 0.213 × 192.
     assert!((derived.estimate_s - 69.704).abs() < 1e-9);
@@ -113,7 +118,11 @@ fn unequal_filler_token_counts_use_the_smaller_in_both_estimates() {
     let t_a = 1.0 + 0.088 * (170.0 + 140.0) + 0.213 * 192.0;
     let t_b = 1.0 + 0.088 * (170.0 + 140.0) + 0.213 * 1.01 * 192.0;
     assert!(t_b > t_a);
-    assert!((derived.estimate_s - t_b).abs() < 1e-9, "{}", derived.estimate_s);
+    assert!(
+        (derived.estimate_s - t_b).abs() < 1e-9,
+        "{}",
+        derived.estimate_s
+    );
 }
 
 #[test]

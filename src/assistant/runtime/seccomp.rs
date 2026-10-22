@@ -90,7 +90,12 @@ fn prefix() -> Vec<sock_filter> {
         stmt(BPF_LD_W_ABS, NR_OFFSET),
         jump(BPF_JGE_K, X32_SYSCALL_BIT, 0, 1),
         stmt(BPF_RET_K, SECCOMP_RET_ERRNO | EPERM),
-        jump(BPF_JEQ_K, u32::try_from(libc::SYS_clone3).unwrap_or(435), 0, 1),
+        jump(
+            BPF_JEQ_K,
+            u32::try_from(libc::SYS_clone3).unwrap_or(435),
+            0,
+            1,
+        ),
         stmt(BPF_RET_K, SECCOMP_RET_ERRNO | ENOSYS),
     ]
 }
@@ -177,15 +182,27 @@ fn refusals(profile: Profile) -> BTreeMap<i64, Vec<SeccompRule>> {
     // TCP Fast Open: a send on an unconnected socket must not be a way around connect().
     map.insert(
         libc::SYS_sendto,
-        vec![rule(vec![cond(3, Op::MaskedEq(MSG_FASTOPEN), MSG_FASTOPEN)])],
+        vec![rule(vec![cond(
+            3,
+            Op::MaskedEq(MSG_FASTOPEN),
+            MSG_FASTOPEN,
+        )])],
     );
     map.insert(
         libc::SYS_sendmsg,
-        vec![rule(vec![cond(2, Op::MaskedEq(MSG_FASTOPEN), MSG_FASTOPEN)])],
+        vec![rule(vec![cond(
+            2,
+            Op::MaskedEq(MSG_FASTOPEN),
+            MSG_FASTOPEN,
+        )])],
     );
     map.insert(
         libc::SYS_sendmmsg,
-        vec![rule(vec![cond(3, Op::MaskedEq(MSG_FASTOPEN), MSG_FASTOPEN)])],
+        vec![rule(vec![cond(
+            3,
+            Op::MaskedEq(MSG_FASTOPEN),
+            MSG_FASTOPEN,
+        )])],
     );
     map.insert(
         libc::SYS_setsockopt,

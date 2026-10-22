@@ -30,7 +30,10 @@ fn raw(number: i64, args: [i64; 5]) -> i64 {
 }
 
 fn socket(domain: i32, kind: i32, protocol: i32) -> i64 {
-    let fd = raw(libc::SYS_socket, [domain.into(), kind.into(), protocol.into(), 0, 0]);
+    let fd = raw(
+        libc::SYS_socket,
+        [domain.into(), kind.into(), protocol.into(), 0, 0],
+    );
     let error = errno(fd);
     if fd >= 0 {
         // SAFETY: closing a descriptor this call just created.
@@ -67,7 +70,10 @@ fn probes() -> Value {
         },
         sin_zero: [0; 8],
     };
-    let tcp = raw(libc::SYS_socket, [libc::AF_INET.into(), libc::SOCK_STREAM.into(), 0, 0, 0]);
+    let tcp = raw(
+        libc::SYS_socket,
+        [libc::AF_INET.into(), libc::SOCK_STREAM.into(), 0, 0, 0],
+    );
     let fast_open = errno(raw(
         libc::SYS_sendto,
         [
@@ -202,7 +208,13 @@ fn exec_descriptor() -> i32 {
     .unwrap();
     // SAFETY: `dup3` onto a number this helper does not use; the result is kept open on
     // purpose (it is the runtime descriptor) and never closed by Rust.
-    let fd = unsafe { libc::dup3(std::os::fd::AsRawFd::as_raw_fd(&exe), EXEC_FD, libc::O_CLOEXEC) };
+    let fd = unsafe {
+        libc::dup3(
+            std::os::fd::AsRawFd::as_raw_fd(&exe),
+            EXEC_FD,
+            libc::O_CLOEXEC,
+        )
+    };
     assert_eq!(fd, EXEC_FD);
     fd
 }
@@ -254,8 +266,8 @@ fn helper() {
                 c"--test-threads=1".as_ptr(),
                 std::ptr::null(),
             ];
-            let variable = std::ffi::CString::new(format!("{}=after-exec", test_helper::VARIABLE))
-                .unwrap();
+            let variable =
+                std::ffi::CString::new(format!("{}=after-exec", test_helper::VARIABLE)).unwrap();
             let envp = [variable.as_ptr(), std::ptr::null()];
             let result = raw(
                 libc::SYS_execveat,
@@ -399,7 +411,12 @@ fn exec_is_allowed_once_on_the_runtime_descriptor_and_never_again() {
         .filter_map(|line| line.find("HELPER ").map(|at| &line[at + 7..]))
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(reports.len(), 2, "{stdout} {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        reports.len(),
+        2,
+        "{stdout} {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let before = &reports[0];
     for refused in [
         "execve",
