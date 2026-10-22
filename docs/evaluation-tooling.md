@@ -105,7 +105,7 @@ Outer elapsed-deadline controller for GGUF transfers.
 Implements the reviewer setup defined in `AGENTS.md`.
 
 - **Chains:** `--chain main` is `openai/gpt-6.1-sol`. `--chain third` tries
-  `opencode/space-bunny-free`, then `opencode/deepseek-v4.1-flash-free`, then
+  `opencode/minimax-m3.1-flash-free`, then `opencode/deepseek-v4.1-flash-free`, then
   `opencode/muse-spark-1.3-contributor-free`. Without `--chain` or `--model` it uses Muse
   Spark.
 - **Snapshot:** excludes `.env*`, `data`, `target`, `.git`, `.venv*`, caches, `*.sqlite3*`,

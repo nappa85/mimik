@@ -16,7 +16,7 @@
 - Preserve layout-aware extraction tables/regions/metadata and compare used evidence against original PDF images. API review is supplemental; no automatic approval from model confidence or remembered rules.
 - Manuals, extracted corpora, rendered source pages, databases, and secrets remain local and outside source releases. Do not print/read back .env contents or credentials; test with dummy secrets. Respect user-owned files.
 - Run checks appropriate to changes. Distinguish unit/helper verification from live inference/provider or browser testing; never report unrun checks as passed.
-- Install new tools, prototype dependencies, and model runtimes in containers, not on the host. Keep build contexts allowlisted and never include secrets/manuals. Preserve the lightweight standalone Rust runtime.
+- Install new tools, prototype dependencies, and model runtimes in containers, not on the host (exception, ASSIST-40: the pinned official llama-server may run natively for the runtime-manager tests). Keep build contexts allowlisted and never include secrets/manuals. Preserve the lightweight standalone Rust runtime.
 
 ## Documentation (user decision 2026-10-19)
 
@@ -32,7 +32,7 @@
 - Review outcomes are not kept as files (user decision 2026-10-19). Fixed findings live on as regression tests and code; the merge commit message states the reviewers, their verdicts and any Blocking/Major finding with its resolution. Unresolved findings go to `docs/limitations.md` or `TODO.md`. Review findings are not proof of correctness.
 - **Reviewer setup (user decision 2026-10-16):**
   - Main reviewers: OpenAI Sol (`openai/gpt-6.1-sol` via `tools/external_review.py --chain main`) and a fresh Sonnet subagent, run in parallel.
-  - Third reviewer: the first that works of Space Bunny, DeepSeek v4.1 Flash, then Muse Spark (`--chain third`). If none works, proceed with the two main reviews and record that.
+  - Third reviewer: the first that works of MiniMax M3.1 Flash (formerly Space Bunny), DeepSeek v4.1 Flash, then Muse Spark (`--chain third`). If none works, proceed with the two main reviews and record that.
   - Adjudicate Blocking findings against the code before acting on them.
 - Resolve blocking findings before completion. If independence is unavailable or a blocker cannot be fixed, explicitly record it and keep the work blocked; do not call it production-ready or silently waive it. Review of review records themselves does not recurse.
 

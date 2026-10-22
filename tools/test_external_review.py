@@ -86,11 +86,11 @@ class FallbackTests(unittest.TestCase):
             )
         return result, calls
 
-    def test_third_reviewer_order_is_bunny_deepseek_muse(self):
+    def test_third_reviewer_order_is_minimax_deepseek_muse(self):
         self.assertEqual(
             external_review.THIRD_REVIEWER_CHAIN,
             (
-                "opencode/space-bunny-free",
+                "opencode/minimax-m3.1-flash-free",
                 "opencode/deepseek-v4.1-flash-free",
                 "opencode/muse-spark-1.3-contributor-free",
             ),
