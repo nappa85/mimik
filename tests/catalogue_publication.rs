@@ -169,13 +169,17 @@ fn error_text(result: rusqlite::Result<usize>) -> String {
         .to_string()
 }
 
+/// The member names of a JSON object, sorted: what is printed matters, not the order
+/// (`serde_json` keeps document order, DEP-18).
 fn keys(value: &Value) -> Vec<&str> {
-    value
+    let mut keys: Vec<&str> = value
         .as_object()
         .unwrap()
         .keys()
         .map(String::as_str)
-        .collect()
+        .collect();
+    keys.sort_unstable();
+    keys
 }
 
 // ---------------------------------------------------------------------------------------
