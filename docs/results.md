@@ -549,6 +549,42 @@ decides.**
   zero at-risk. The 175 records are now development data. Independently reviewed with
   recomputation.
 
+## Reviewer benchmark 2: plan-2c confirm review (2026-10-22)
+
+- **Question:** which of the current opencode free models give accurate independent plan
+  reviews, next to Sol and Sonnet, and which should form the third-reviewer chain?
+- **Setup:** one task, the plan-2c confirm review (`docs/assisted-sheet-plan.md` at 2826f7c),
+  same brief and sanitized snapshot for all; Sol and the 10 free models listed by
+  `opencode models opencode` via `tools/external_review.py` (2,400 s total, 600 s idle), in
+  parallel; Sonnet as a fresh read-only subagent. A separate fresh agent verified every
+  finding against the plan, the code, `bwrap --help`, the pinned llama-server `--help` and
+  public release notes, and classified it valid, partly valid (counted 0.5), invalid or harmful.
+- **Numbers:**
+
+  | Reviewer | Time | Findings | Valid | Partly | Invalid | Harmful | Precision | Unique valid |
+  |---|---|---|---|---|---|---|---|---|
+  | Sol | 296 s | 11 | 11 | 0 | 0 | 0 | 1.00 | 3 |
+  | Sonnet | about 330 s | 16 | 13 | 3 | 0 | 0 | 0.91 | 4 |
+  | MiniMax M3.1 Flash | 1,075 s | 24 | 12 | 8 | 4 | 0 | 0.67 | 4 |
+  | DeepSeek v4.1 Flash | 990 s | 19 | 12 | 4 | 3 | 0 | 0.74 | 3 |
+  | Beam | 127 s | 14 | 4 | 3 | 7 | 0 | 0.39 | 0 |
+  | Nemotron 3 Ultra | 251 s | 19 | 0 | 2 | 16 | 1 | 0.05 | 0 |
+  | Nemotron 3.5 Lightning | 511 s | 14 | 0 | 0 | 14 | 0 | 0.00 | 0 |
+
+  No review: GLM 5.3 Flash and Nemotron 3.5 Super VL exited 0 with only a tool trace;
+  DeepSeek's output was an unfinished summary without a verdict (its findings are scored
+  above); LongCat 2.5 preview (server error), Flint 40B (unavailable) and MiMo v2.6 Flash
+  (timeout) did not run. 36 distinct valid or partly valid findings in all; no reviewer
+  claimed a justified Blocking (Nemotron Ultra claimed five).
+- **Conclusion:** Sol and Sonnet remain the most accurate and complement each other (7 unique
+  catches between them). MiniMax and DeepSeek are the useful free models: broad, with unique
+  valid catches, but slow (16–18 minutes) and with lower precision. Beam is fast but mostly
+  wrong on severity; both Nemotrons produced confident, invented or misread findings, and
+  Nemotron Ultra one harmful proposal (a configurable download host list, against ASSIST-35).
+- **Limitations:** one task, one run per model, one adjudicator; Sonnet's figures are from its
+  condensed list. Durations depend on the free tier's load. A run without a verdict now counts
+  as unavailable in `tools/external_review.py`, so it falls through to the next model.
+
 ## Reviewer benchmark (2026-10-16, concluded)
 
 - **Question:** which models give accurate independent reviews of Mimik plans and results?

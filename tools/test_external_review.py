@@ -75,7 +75,7 @@ class FallbackTests(unittest.TestCase):
         def fake_run(command, cwd, total, idle):
             model = command[command.index("-m") + 1]
             calls.append(("review", model))
-            return 0, f"review by {model}"
+            return 0, f"review by {model}\n\nVerdict: FIX FIRST"
 
         with (
             mock.patch.object(external_review, "preflight", fake_preflight),
@@ -111,6 +111,31 @@ class FallbackTests(unittest.TestCase):
             [c for c in calls if c[0] == "preflight"],
             [("preflight", bunny), ("preflight", deepseek), ("preflight", muse)],
         )
+
+    def test_tool_trace_without_a_verdict_falls_through(self):
+        """Regression (2026-10-22): GLM 5.3 Flash and Nemotron 3.5 Super VL exited 0 with only a
+        tool trace, and DeepSeek with an unfinished summary; each was taken as a review."""
+        first, second, _ = external_review.THIRD_REVIEWER_CHAIN
+
+        def fake_run(command, cwd, total, idle):
+            model = command[command.index("-m") + 1]
+            if model == first:
+                return 0, "\u2192 Read docs/plan.md\n\u2192 Read docs/decisions.md\n" * 40
+            return 0, f"findings by {model}\n\n**Verdict: READY**"
+
+        with (
+            mock.patch.object(external_review, "preflight", lambda model, snap: True),
+            mock.patch.object(external_review, "run_with_idle_timeout", fake_run),
+        ):
+            model, _ = external_review.review_with_fallback(
+                external_review.THIRD_REVIEWER_CHAIN, Path("/snap"), "p", 10, 10
+            )
+        self.assertEqual(model, second)
+
+    def test_classify_requires_a_verdict(self):
+        self.assertEqual(external_review.classify(0, "x" * 5000), "incomplete")
+        self.assertEqual(external_review.classify(0, "notes\n## Verdict\nGO"), "ok")
+        self.assertEqual(external_review.classify(0, "Final verdict: FIX FIRST"), "ok")
 
     def test_no_model_available_returns_none(self):
         (model, log), _ = self.run_chain(set())
