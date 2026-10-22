@@ -18,7 +18,7 @@ full-form POST pages without scripts; only the `--no-auth` prototype's native ed
 | Validity flag | `src/campaigns/formulas.rs` (`Validity`, `Doubt`), `templates/private_sheet.html` |
 | Sheet module, JSON answer, CSP | `assets/sheet-assist.js`, `src/campaigns/sheet_json.rs`, `SheetPage` in `src/campaigns/web.rs`, `normalize` in `src/auth/mod.rs` |
 | Unknowns in formulas | `src/definitions/formula/convert.rs` |
-| Interpretation assistant | see "Interpretation assistant (development builds)" |
+| Interpretation assistant | see "Interpretation assistant" and [model-runtime.md](model-runtime.md) |
 | Demo | `tools/assist_demo.py`, `assist_definition()` in `tests/support/source_fixture.rs` |
 
 ## Number entry
@@ -388,16 +388,15 @@ are 200 (saved, "No change"), 409 and 422.
 
 What it does not refresh is listed in ASSIST-L15 and ASSIST-L16.
 
-## Interpretation assistant (development builds)
+## Interpretation assistant
 
-Step 2c-1 (D-D, D-F, D-H, D-J, D-P, ASSIST-27 to ASSIST-41). The assistant reads a scribble a
-number field could not take (its current `unresolved` note) and offers a confirmable reading;
-it never writes on its own. It is off by default. In this release it exists only in builds with
-the `dev-endpoint` Cargo feature (never a release build), talking to a llama-server started by
-hand; a release build refuses `--assistant` at start ("The assistant is not available in this
-build.") and contains no development endpoint (`smoke_release.py` checks both). Without it there
-is no client, no worker and no job route (the three paths answer 404), and the sheet works as
-above.
+Steps 2c-1 and 2c-2a (D-D, D-F, D-H, D-J, D-P, ASSIST-27 to ASSIST-42). The assistant reads a
+scribble a number field could not take (its current `unresolved` note) and offers a
+confirmable reading; it never writes on its own. It is off by default. With `--assistant`,
+Mimik starts the pinned official llama-server as its confined child, checks every connection
+to it and primes and calibrates it before it takes jobs ([model-runtime.md](model-runtime.md)).
+Without it there is no client, no worker, no child and no job route (the three paths answer
+404), and the sheet works as above.
 
 | Concern | Code |
 |---|---|
@@ -408,26 +407,26 @@ above.
 | Client and transport | `src/assistant/interpreter.rs`, `src/assistant/transport.rs` |
 | Jobs, admission, runtime events | `src/assistant/jobs.rs` |
 | Circuit breaker | `src/assistant/breaker.rs` |
-| Development endpoint and flags | `src/assistant/development.rs`, `src/main.rs` |
+| Model spec and flags | `src/assistant/model.rs`, `src/main.rs` |
+| Model runtime | `src/assistant/runtime/` ([model-runtime.md](model-runtime.md)) |
+| Development endpoint (tests) | `src/assistant/development.rs` |
 | Context of a job | `src/campaigns/interpret.rs`, read sets in `src/definitions/formula/mod.rs` (`Compiled::read_sets`) |
 | Routes and apply | `src/campaigns/interpret_web.rs` |
 | Module flow | `assets/sheet-assist.js` (assistant part) |
 
-**Flags (development builds):** `--assistant` with `--assistant-dev-endpoint`
-(`http://127.0.0.1:<port>`, `http://[::1]:<port>` or an absolute Unix socket path; no endpoint
-check) and `--assistant-dev-token-file` (the server's API key, one line, sent as
-`Authorization: Bearer`); `--assistant-model` (`local:<name>.gguf`, default
+**Flags:** `--assistant`; `--assistant-model` (`local:<name>.gguf`, default
 `local:granite-4.2-3b-Q4_K_M.gguf`), `--assistant-model-sha256` (required for any other file)
-and `--assistant-model-alias` (the request's model name, which the server must be given as
-`--alias`; default the file name without `.gguf`, lower case). `max_tokens` is 352 for the file
-whose SHA-256 is the compiled-in `e0406663…` (the 2b rule over the 2c-1 screen of the adopted
-prefix: largest `predicted_n` 263, × 1.25, rounded up to a multiple of 32, capped at 384) and
-256 for any other. Development budgets
-(placeholders, not evidence): `--assistant-dev-bytes` (B, default 1,024, at most 4,096),
-`--assistant-dev-token-limit` (N(B), default 384), `--assistant-dev-deadline` (R, 85 s),
-`--assistant-dev-queue` (D, 1), `--assistant-dev-queue-wait` (Q, 35 s). They arrive as one
-generation's `ready` event; the same event interface (generation started, ended with its
-reason, ready with B, N(B), R, D, Q) is what the 2c-2 runtime manager feeds.
+and `--assistant-model-alias` (the request's model name and the server's `--alias`; default
+the file name without `.gguf`, lower case); the runtime's `--models-dir`,
+`--assistant-runtime` and `--assistant-threads` ([model-runtime.md](model-runtime.md),
+"Options"). `max_tokens` is 352 for the file whose SHA-256 is the compiled-in `e0406663…`
+(the 2b rule over the 2c-1 screen of the adopted prefix: largest `predicted_n` 263, × 1.25,
+rounded up to a multiple of 32, capped at 384) and 256 for any other. The budgets (B, N(B), R,
+D, Q) come from each generation's calibration and arrive in its `ready` event (generation
+started, ended with its reason, ready with the budgets). Builds with the `dev-endpoint`
+feature (never a release; `smoke_release.py` checks the release binary has none) also take
+`--assistant-dev-endpoint` and `--assistant-dev-token-file`, a hand-started server for tests,
+calibrated the same way.
 
 **Request.** System message: the fixed prefix, the instructions, `\nJSON schema of the
 reply:\n` and the schema's compact text with the alias enum replaced by a description ("an
@@ -500,13 +499,14 @@ whose generation exits within 2 s is withdrawn, and a breaker it opened goes bac
 and the app's start reset it. While open, a start answers 503 and a queued job ends
 "unavailable"; entry, notes and Undo are unaffected.
 
-**Client policy.** One `reqwest` client per endpoint: proxies off whatever the environment says
-(`no_proxy`), no redirects, no retries, no decompression, HTTP/1 only, no connection reuse,
-plain HTTP only. A TCP endpoint must be `http://127.0.0.1:<port>` (or `[::1]` for the
+**Client policy.** One HTTP/1 exchange per connection over a stream Mimik opened and, for the
+runtime's child, checked before its first byte (`hyper`'s client connection: no proxy
+whatever the environment says, no redirects, no retries, no decompression, no reuse), plain
+HTTP only. A TCP endpoint must be `http://127.0.0.1:<port>` (or `[::1]` for the
 development endpoint), checked on the raw authority and on the parsed URL (`localhost`,
 `127.1`, `0x7f.1`, `2130706433`, `::ffff:127.0.0.1`, userinfo, zone IDs, `https` refused); a
-request for any other destination is refused before it is sent. The Unix-socket endpoint uses
-`reqwest`'s own connector, so the same policy applies and nothing but that socket is reached.
+request for any other destination is refused before it is sent. The runtime's connectors reach
+only the current generation's socket or port (the endpoint check, [model-runtime.md](model-runtime.md)).
 Bodies are refused past 1 MiB, plain and streamed, as they arrive. Nothing is logged: no
 prompt, phrase, reply or token.
 

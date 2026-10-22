@@ -32,8 +32,15 @@ same private network. No Node.js, Python, GPU, API key or internet access is nee
 - **Unauthenticated prototype.** `--no-auth` serves the old single-user editor on
   `127.0.0.1` only. It is not protected by accounts and does not see private campaign data.
 
-No language model is part of this release. Nothing proposes or applies sheet changes for the
-player.
+No language model file is part of this release. The archive carries the pinned official
+llama.cpp CPU build (`llama/`, b11609, MIT; its source archive accompanies the release) for the
+optional interpretation assistant, which is off unless started with `--assistant` and proposes
+readings the player must confirm; it never applies sheet changes on its own. Its scope is
+Linux `x86_64` on the CPU: the model server runs confined by bubblewrap where unprivileged user
+namespaces work (verified on the CI runner, Ubuntu 24.04, and the dev host), otherwise
+unconfined but for seccomp (shown at `/admin/assistant`). The Landlock level and the GPU path
+are not built; the documented minimum host for the bundled build (Ubuntu 22.04 `x86_64`) is not
+yet verified on a VM.
 
 ## Run
 
@@ -62,6 +69,13 @@ Options:
   under the working directory.
 - `./mimik --help` lists the operator subcommands (accounts, registry, sources, definitions,
   catalogues).
+- `--assistant`: the interpretation assistant. Put the model file in `data/models/` (mode
+  0700; the default is `granite-4.2-3b-Q4_K_M.gguf`, SHA-256 `e0406663…`; another file needs
+  `--assistant-model local:<name>.gguf --assistant-model-sha256 <hex>`). Mimik runs the
+  bundled `llama/` build itself and measures it before the assistant takes jobs; on a slow
+  machine it stays off and says why. `./mimik assistant-runner --probe --runtime llama
+  --models-dir data/models --model local:<name>.gguf` reports the confinement level this
+  machine reaches.
 
 Ctrl+C stops the server. Stop it before copying the database file as a backup. Back up before
 upgrading: a newer binary migrates the database in place, and older binaries then refuse it.
@@ -76,10 +90,13 @@ PDFs.
 The CI workflow ends in one status, **`deployable`**, which passes only when every job below
 succeeded for the same revision:
 
+- **llama-fetch:** the pinned llama.cpp release asset, the test model and the llama.cpp source,
+  every size and hash checked against the manifest;
 - **checks:** formatting, Clippy with all and pedantic lints denied, all Rust tests
   (`--locked --all-targets --all-features`), Ruff and the Python helper tests, workflow lint,
   `cargo audit --deny warnings`, third-party licence notices, release build, source-package
-  member allowlist, vendored dependency sources and these archives with checksums;
+  member allowlist, vendored dependency sources and these archives with checksums (`llama/`
+holding exactly the pinned files);
 - **artifact-smoke:** the unpacked binary from these archives, run from an isolated directory:
   startup, assets, accounts, campaigns, native and runtime sheets, formulas, list editing,
   catalogues, assisted entry, rejections, restart and persistence, with synthetic inputs; then
@@ -88,14 +105,19 @@ succeeded for the same revision:
   long text, overflow and reflow, sharing, source review and sheet editing, runtime sheets
   with and without JavaScript (the sheet module under its strict CSP);
 - **lan-smoke:** the same binary on isolated networks with separate clients, a denied subnet
-  and an HTTPS reverse proxy, including Secure cookies and rendered QR codes.
+  and an HTTPS reverse proxy, including Secure cookies and rendered QR codes;
+- **llama-runtime:** on Ubuntu 24.04 from the unpacked archive: the bundled llama-server's
+  version and flags, the start-time probe reaching bubblewrap, and the confinement tests
+  (seccomp, endpoint check, runner, and the server under the real profiles with the test
+  model: token refusal, socket and peer checks, an adversary in the sandbox reaching nothing,
+  SIGKILL of Mimik ending the sandbox).
 
 **Green means** these checks passed for this revision and these exact archives. It does not mean
 a finished RPG companion.
 
 **Not certified:** physical phone or router setups; Windows, macOS or other CPU architectures;
-browsers other than Chromium; public internet exposure; path-prefix proxying; model inference or
-API providers; PDF extraction or OCR; accuracy of any real manual's extraction; fidelity to
+browsers other than Chromium; public internet exposure; path-prefix proxying; the quality or
+speed of any model's interpretations, inference on a GPU, the Landlock level, API providers; PDF extraction or OCR; accuracy of any real manual's extraction; fidelity to
 official sheet layouts; any game's rules legality; tamper evidence of change notes (they are
 not sealed or verified); protection against unbounded growth (no per-account write-rate limit
 or storage guard for sheet history and notes).

@@ -5,6 +5,28 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Model runtime: first native start (step 2c-2a, 2026-10-22)
+
+Live run of the shipped code path (`tools/assist_live_smoke.py` in runtime mode, a debug
+build, `--assistant-threads 5`), raw log under `/media/data/mimik/assist-2c2/live/`
+(`smoke-t5-20261022-2229/server.log`). **Not the owed idle calibration:** a system update was
+compiling on the same host throughout (load average 6 to 8 on 12 hardware threads), so the
+rates below are pessimistic and no CPU-baseline conclusion is drawn from them.
+
+- **Path:** the probe passed level 1; the pinned b11609 CPU build ran under bubblewrap on the
+  Unix socket, every connection passed the endpoint check, priming and both samples completed
+  (level 3's probe failed in this run on a race in the probe itself, since fixed and covered
+  by `the_probe_passes_at_level_3_and_names_level_1s_cause`).
+- **Numbers** (Granite 4.2 3B `Q4_K_M`, `max_tokens` 352): priming 1,806 prompt tokens. Sample 1:
+  W 91.3 s, 316 prompt tokens in 18.7 s (59 ms each), 1,766 cached, 352 generated in 72.5 s
+  (206 ms each), filler 309 tokens. Sample 2: W 83.5 s, 317 in 18.8 s, 1,766 cached, 352 in
+  64.8 s (184 ms each), filler 310 tokens. Filler density 3.31 and 3.30 bytes per token; tail
+  7 tokens.
+- **Derived:** no candidate fits: at B 512 (N 154) T = 82.0 s, 1.25 × T rounds to 105 s
+  against the 90 s cap, so the assistant became "too slow on this machine: about 105 s
+  needed, the cap is 90 s". Generation (352 × about 0.2 s) is about 88 % of T; the prompt
+  term is small because the 75 %-cached prefix leaves a 7-token tail.
+
 ## Assisted interpretation: schema v2 re-run of the 2b screen (step 2c-1, 2026-10-22)
 
 Prototype tier (`tools/assist_eval.py --contract`, `tools/run_assist_screen.sh`,

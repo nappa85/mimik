@@ -11,9 +11,10 @@ bound, quick-add, the validity flag, the sheet module with save on leaving a fie
 interpretation assistant of development builds) is described
 in `docs/assisted-entry.md`; this plan only adds to it.
 
-Remaining, in order (2b measured and reviewed, `docs/results.md`; ASSIST-27 to ASSIST-41
+Remaining, in order (2b measured and reviewed, `docs/results.md`; ASSIST-27 to ASSIST-42
 decided; Rust 1.99.1 and `rig-core` 0.45.0 in place, ASSIST-39; 2c-1, interpretation against a
-hand-started local server, built, `docs/assisted-entry.md`): **2c-2** the model runtime (process,
+hand-started local server, built, `docs/assisted-entry.md`; 2c-2a, the CPU runtime, built,
+`docs/model-runtime.md`): **2c-2** the model runtime (process,
 token, confinement, budgets), **2d-1** the owner model setting with local models, **2d-2**
 model downloads, **3** bundles and reminders, **4** suggestions and "Which Sword?", **5** docs
 and gate; each sub-step has its own branch, tests and reviews. The model runs GPU-first with
@@ -74,6 +75,11 @@ steps add:
   job record (evaluation only; nothing is gated on them).
 
 ### 1.4a Model runtime, device and budgets (2c-2; ASSIST-27, ASSIST-29 to ASSIST-34, ASSIST-40)
+
+Built for the CPU path at levels 1 and 3 (step 2c-2a): [model-runtime.md](model-runtime.md) is
+the reference and wins where it differs from this design. What follows stays the design for
+2c-2b (the GPU path, the device choice and fallback, level 2) and is kept whole as their
+context.
 
 Linux x86_64 is the only platform built and verified in 2c-2; macOS (Metal) and Windows
 (Vulkan) runtime code is deferred with no platform designed out (ASSIST-34, §4 Later).
@@ -319,9 +325,7 @@ natively for these tests (ASSIST-40).
   parent-death setting (it is per task): `execve` is refused, and `execveat` is allowed only on
   the verified runtime descriptor's number with `AT_EMPTY_PATH`, that descriptor being
   `O_CLOEXEC` so it is gone after the first exec; `dup2`, `dup3` and `fcntl(F_DUPFD*)`
-  targeting that number are refused if needed. If 2c-2's live check shows this cannot be made
-  sound, lifetime containment on levels 2 and 3 is best effort (the pidfile sweep at the next
-  start) and the page says so (ASSIST-L27). `pidfd_open`, `pidfd_getfd`, `process_madvise`
+  targeting that number are refused if needed. 2c-2a made it sound: the descriptor is 1023 and `RLIMIT_NOFILE` is 1023, so no later descriptor can take the number ([model-runtime.md](model-runtime.md)). `pidfd_open`, `pidfd_getfd`, `process_madvise`
   and `kcmp` are refused (they would let the server reach Mimik's descriptors). TCP Fast Open
   is refused on every level: `sendto` whose flags carry `MSG_FASTOPEN`, `sendmsg` and
   `sendmmsg` whose flags carry it, and `setsockopt(TCP_FASTOPEN_CONNECT)` return `EPERM`, since
@@ -727,139 +731,25 @@ Split (user, 2026-10-22) into **2c-2a** (the CPU path at confinement levels 1 an
 
 #### 2c-2a CPU path, bubblewrap and unconfined
 
-Scope: §1.4a on Linux x86_64 for the CPU build: manifest, packaging and the CI runtime check,
-runner, confinement levels 1 and 3, preflight, token, endpoint check, output drain,
-generations and the CPU transitions, priming, calibration and budgets (the GPU formula
-included, as fixtures); the owner's assistant page (state, path, level, measurements, budgets,
-"Restart"); it closes ASSIST-L30 and ASSIST-L31.
-The development endpoint of 2c-1 stays for tests only. Tests (fake runner binary or fake server
-unless stated; live means the pinned official build on this host, reported separately; GPU at
-night or at a weekend):
-- manifest and packaging: an extra, missing or changed runtime file → no child, unavailable
-  with the reason; a group-writable runtime file → refused; a development override
-  (`--assistant-runtime <dir>`) with other files → refused; `package_release.py` stages
-  exactly the manifest's files and refuses others, and after the artifact hand-off re-hashes
-  them and reapplies the manifest's modes; the `llama-runtime` job fails closed when the asset
-  cannot be fetched, its hash differs, or the probe reaches less than level 1; the shipped
-  binary has no `--assistant-dev-endpoint` (asserted by the packaging check and
-  `smoke_release.py`);
-- flags (CI, pinned build): `--version` reports the pinned build; `--help` lists every flag of
-  the vector; live: `/health` without a token, the per-request `ignore_eos` behave as §1.4a assumes (the device-list and
-  offload-line formats are 2c-2b's), or the step stops for a
-  decision;
-- runner: the child's environment holds only the allowed names (`/proc/<pid>/environ`); no
-  inherited descriptor beyond the listed ones (`/proc/<pid>/fd`); `RLIMIT_CORE` 0 and
-  `RLIMIT_FSIZE` 64 MiB (a write past it kills the child with `SIGXFSZ`, handled as a child
-  exit); a helper that calls `prctl(PR_SET_PDEATHSIG, 0)` on level 3 is refused, and
-  SIGKILL of Mimik still kills it; a set-ID `bwrap` → refused by the preflight;
-  a runner
-  whose parent died before the parent-death signal was set exits (parent PID mismatch); live:
-  SIGKILL of Mimik during startup and while ready kills the whole tree;
-- bubblewrap level (live on this host, where user namespaces work): the CPU path reaches
-  `ready`; inside, the child cannot connect over TCP to a host listener, a LAN address or a
-  public address, cannot send UDP, cannot reach a host abstract or pathname Unix socket (an
-  adversarial helper binary in place of llama-server, run with the same profile), cannot see
-  host paths outside the allowlist, cannot create a UDP, raw or `io_uring` instance, cannot
-  fork or start another process; with the probed `--size` it cannot fill `/tmp` or
-  `/dev/shm` beyond their sizes in many small files, and without it only the per-file limit
-  holds and the page states "temporary space unbounded";
-  Mimik reaches it only through the socket, connecting through the directory descriptor (a
-  socket directory whose host path is longer than 108 bytes still works); the socket
-  directory is removed when the generation stops; preflight causes: bwrap absent, user namespaces
-  disabled, a probe failure (each reported by name and falling to the next level); the
-  AppArmor restriction is reported by name on an Ubuntu VM;
-- level 3 (on this host): the adversarial helper cannot fork, `vfork` or `clone` a process
-  (`clone3` → `ENOSYS`) while threads still start, so no descendant outlives a SIGKILL of the
-  child; seccomp refusals as above;
-- token: the fake server sees `Authorization: Bearer <token>` on priming, calibration and
-  every job, and a new token after a restart; live: no token and a wrong token on
-  `/v1/chat/completions` → 401, the right one is served, `/health` answers without it; the
-  token is in no command line (`/proc/<pid>/cmdline`), no log line and no file after
-  `/health` (TCP levels); a fake build without a safe channel → the assistant does not start;
-- socket directory: a pre-created `<data dir>/run/<generation>/` that is a symbolic link, owned
-  by another user or of another mode → the start is refused; files written into it by a helper
-  are each bounded by `RLIMIT_FSIZE`;
-- exec and descriptors (level 3, adversarial helper): a thread that calls `execve` →
-  refused; `execveat` on any descriptor but the runtime one, or on a duplicate of it → refused;
-  thread → exec → SIGKILL of Mimik → nothing survives (or, if 2c-2 finds this unsound, the
-  pidfile sweep removes it at the next start and the page says lifetime containment is best
-  effort); a ptrace-accessible cooperative helper holding a forbidden descriptor → the child's
-  `pidfd_open` and `pidfd_getfd` are refused, also with Yama scope 0; a `sendto`, `sendmsg`
-  or `sendmmsg` with `MSG_FASTOPEN` to a host listener and `setsockopt(TCP_FASTOPEN_CONNECT)`
-  → `EPERM` on every level, and the listener sees no connection;
-- endpoint: level 1 (live): the peer of llama-server's socket has the reaper as parent and the
-  reported `pid-namespace`, and is accepted; a peer with Mimik's UID that is not in that
-  namespace (a helper listening on a socket swapped into the directory) → nothing sent; a
-  UID-only match is never accepted; level 3: a second `SO_REUSEPORT` listener on the
-  child's port → nothing sent; a squatter listening on the port → its
-  `LISTEN` inode is not the child's → nothing sent; a child that accepts late (after a delay)
-  is still accepted; a child that exits between the check and the request → the connection
-  fails, nothing sent to anyone else; a child that never prints its listening line but listens
-  → reached; a port taken before the child binds → a new port, at most 3;
-- model and runtime files, levels 1 and 3: a model larger than `MemAvailable` minus 1 GiB →
-  refused with the reason; a symbolic link, a link in a parent position, a
-  directory, a FIFO (no block) and a file writable by others in the models folder → refused;
-  a model swapped for another file after the hash and before the load → the hashed inode is
-  loaded, at level 1 through `--ro-bind-fd` and at level 3 through `/proc/self/fd`
-  (live: the pinned server loads from that path);
-- output: a child writing endless lines and a line of 1 MiB → bounded memory, nothing in
-  Mimik's log; live: a job with a marker phrase → the marker in neither stream;
-- generations and transitions (fake runner, injectable clock), one test per CPU table row: the next child started only after the old one is gone (bwrap's
-  `exit-code` and the reaper's pidfd); a CPU attempt with a sandbox-setup failure at level 1 (a
-  bwrap setup error, a status-descriptor failure before exec, the level's probe failing) →
-  the next level that passed its probe (level 3 in 2c-2a) at once, the skip recorded; a model-load error
-  before the first successful `/health`, a hash mismatch or an exit after exec → same level,
-  retry path; a lower level goes back up only on Restart or
-  app start; a queue with a running and a waiting
-  job at a generation change → both end "the assistant restarted: ask again", the breaker
-  unchanged; CPU failures
-  retried after 2 minutes, four failures → unavailable; a second exit within 10 minutes counts,
-  after 10 ready minutes it does not; two consecutive deadline expiries while `/health`
-  answers 200 → stopped as hung and restarted; a late exit event of an old generation changes
-  nothing; Restart resets the failure count and the breaker, a new child alone does not; a second Mimik on the same data
-  directory cannot take the pidfile lock; a leftover child matching PID, start time and path
-  is killed, a reused PID is left alone; shutdown → the tree is gone within 5 s;
-- probe: `mimik assistant-runner --probe` at each level opens the model through its
-  descriptor (a regular-file `--ro-bind-fd` at level 1), binds the socket or port, reads the
-  token channel ; a removed bind, a missing token
-  channel or a refused open fails the probe with that cause; the probe's JSON line and exit
-  status match its level;
-- priming and calibration (fake server): a start before they complete answers 503 "starting"
-  and queues nothing; they never count toward the breaker; a sample with a missing, zero or
-  non-finite timing, `predicted_n` different from `max_tokens`, a negative tail or cached
-  tokens below 75 % of the prefix fails the attempt; the two samples differ from their first
-  dynamic byte; fillers of equal bytes but unequal token counts → N_cal is the smaller and the
-  same N(B) enters both estimates; T(B) is the larger of the two samples' estimates for each candidate (a sample
-  slower in prompt but faster in generation changes the choice for a small B);
-  a restarted child re-primes and re-calibrates before admitting jobs; neither carries sheet
-  text;
-- budgets (unit; formula fixtures, not evidence): the 2b container figures with t 170 → B 512,
-  R 90, D 1, Q 30, and with t 365 → unavailable "too slow"; the 2b GPU figures → B 4,096, R 15, D 4, Q 60; a GPU measurement that fits only
-  2,048 or 1,024 picks it, and one that fits none → no GPU budgets (the GPU failure is 2c-2b's); a CPU
-  measurement that fits only 768 or 512 picks it, and one that fits none → unavailable "too
-  slow" with the numbers while number entry, notes and Undo work; R never below 15 or above
-  the path's cap; CPU Q + R never above 120;
-- assistant off: no child process, no device listing, no preflight; the page says "off";
-- rights (connected router): "Restart" → 403 for a non-owner, CSRF
-  checked, a second press while a transition runs → no second transition, a session revoked
-  meanwhile → refused;
-- live checks (stop for a decision on a mismatch): llama-server serving and checking the token
-  over the Unix socket at level 1; `/health` without a token; the per-request `ignore_eos`;
-  the `/proc/self/fd` model path; cancellation mid-generation and mid-prompt (the superseding
-  job's first token);
-- measurement step (to `docs/results.md`, before 2c-2 is marked complete; 2c-2's CPU-baseline
-  claim rests on it, while 2c-1 does not): the first native calibration on this host on the CPU
-  path, at the ASSIST-41 default and at 2 threads (start to `ready`, priming, the two samples, the
-  filler's density, the derived B, R, D and Q), which sets the expected CPU outcome; grammar
-  against no-grammar per-token generation time on the CPU path, which settles the calibration
-  form there; a job's
-  real prompt tokens against N(B); the unpacked official CPU asset starting on the documented
-  minimum host (a VM), as the guaranteed baseline.
+Built (branch `assist-2c2`; reference [model-runtime.md](model-runtime.md)). Remaining before
+it is marked complete:
+
+- the idle native calibration on this host, CPU path, at the ASSIST-41 default (5 threads) and
+  at 2 threads: start to `ready`, priming, the two samples, the filler density, the derived B,
+  R, D and Q, to `docs/results.md` (the first native run was under concurrent load); it sets
+  the expected CPU outcome and comes back to the user if nothing fits;
+- grammar against no-grammar per-token generation time on the CPU path, which settles the
+  calibration form; a job's real prompt tokens against N(B);
+- cancellation with the real model: a superseding job's first token after cancelling a job
+  mid-generation and mid-prompt (a 1 KiB prompt);
+- the official CPU asset on the documented minimum host (an Ubuntu 22.04 VM) and the AppArmor
+  preflight on an Ubuntu VM;
+- the `llama-runtime` CI job's first run (it needs a push).
 
 #### 2c-2b GPU path and Landlock
 
 Scope: §1.4a's device choice, the GPU build and the GPU → CPU fallback, "Try the GPU again" on
-the assistant page, and confinement level 2 (Landlock with seccomp). Tests, as in 2c-2a:
+the assistant page, and confinement level 2 (Landlock with seccomp). Tests:
 - device and fallback: per-node sandboxed listings (format pinned from the real build): one
   hardware GPU plus lavapipe → the hardware GPU, lavapipe excluded before the count; only
   `llvmpipe` → CPU; a host where the selected card is `Vulkan1` but its sandboxed list names it

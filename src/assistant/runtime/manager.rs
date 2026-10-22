@@ -633,6 +633,7 @@ async fn measure(
             .state = State::Starting(phase);
     };
     let server = child.server();
+    let began = Instant::now();
     phase("loading the model");
     let healthy = tokio::time::timeout(HEALTH_WITHIN, async {
         loop {
@@ -658,7 +659,9 @@ async fn measure(
             )));
         }
     }
+    log(&format!("health after {:.1} s", began.elapsed().as_secs_f64()));
     phase("priming");
+    let priming = Instant::now();
     let prefix =
         match tokio::time::timeout(PRIMING_WITHIN, calibration::prime(server.as_ref())).await {
             Ok(Ok(prefix)) => prefix,
@@ -669,6 +672,10 @@ async fn measure(
                 )));
             }
         };
+    log(&format!(
+        "primed in {:.1} s ({prefix} prompt tokens)",
+        priming.elapsed().as_secs_f64()
+    ));
     phase("calibrating");
     let within = Duration::from_secs(2 * config.path.run_cap());
     let calibration = match tokio::time::timeout(

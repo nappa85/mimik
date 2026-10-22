@@ -371,7 +371,7 @@ impl Real {
         let pid = i32::try_from(child.id()).unwrap_or(0);
         let runner = Watched::open(pid).map_err(|_| Fail::Other("no pidfd".into()))?;
         if let Some(entry) = Entry::of(
-            0,
+            name.parse().unwrap_or(0),
             pid,
             vec![
                 bwrap.path.display().to_string(),
@@ -508,7 +508,7 @@ impl Real {
                     .to_string(),
             );
         }
-        if let Some(entry) = Entry::of(0, pid, executables) {
+        if let Some(entry) = Entry::of(name.parse().unwrap_or(0), pid, executables) {
             self.record(&entry);
         }
         let connector: Arc<dyn Connect> = Arc::new(Loopback {
@@ -621,6 +621,9 @@ pub(crate) struct RealChild {
     /// The checked connector (live tests reach the server through it with other tokens).
     #[cfg(test)]
     connector: Arc<dyn Connect>,
+    /// The token (live tests send short requests without the fixed prefix).
+    #[cfg(test)]
+    token: String,
     exit: watch::Receiver<Option<Exit>>,
     pid: i32,
     /// Output events so far (sandbox and bind errors decide the failure kind).
@@ -811,6 +814,8 @@ impl Real {
             server,
             #[cfg(test)]
             connector,
+            #[cfg(test)]
+            token: token.expose().to_owned(),
             exit,
             pid,
             seen,
@@ -1091,6 +1096,10 @@ impl RealChild {
 
     pub(crate) fn pid(&self) -> i32 {
         self.pid
+    }
+
+    pub(crate) fn token(&self) -> &str {
+        &self.token
     }
 }
 

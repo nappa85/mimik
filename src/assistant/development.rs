@@ -1,9 +1,9 @@
 //! The 2c-1 development endpoint (assisted sheet plan §2 "2c-1", ASSIST-40), kept for tests
 //! only: a llama-server started by hand on the dev host (or a fake), reached at a loopback IP
 //! literal or a Unix socket path with a token file. Since 2c-2a it is primed and calibrated
-//! by the runtime manager like a real child, so its budgets are measured, never placeholders
-//! (ASSIST-L30). Compiled only with the `dev-endpoint` feature, which release builds never
-//! enable; it has no endpoint check, and the page says so.
+//! by the runtime manager like a real child, so its budgets are measured, never placeholders.
+//! Compiled only with the `dev-endpoint` feature, which release builds never enable; it has no
+//! endpoint check, and the page says so.
 use super::AssistantHandle;
 use super::model::{default_alias, max_tokens};
 use super::runtime::manager::{self, Child, Fail, Launcher};

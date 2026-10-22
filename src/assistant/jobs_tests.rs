@@ -740,7 +740,7 @@ async fn a_row_removal_between_the_database_check_and_the_enqueue_refuses_a_cell
 
 #[tokio::test(start_paused = true)]
 async fn a_deadline_expiry_keeps_the_server_busy_for_its_prompt_term() {
-    // ASSIST-L31: a request cancelled at its deadline may still be in prompt evaluation; the
+    // The 2c-1 cascade: a request cancelled at its deadline may still be in prompt evaluation; the
     // next job waits that long, and admission counts it.
     let (stub, gate) = gated(3);
     let mut busy = budgets();

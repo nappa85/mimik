@@ -110,7 +110,12 @@ async fn assisted() -> Assisted {
 #[tokio::test]
 async fn restart_is_owner_only_and_csrf_checked() {
     let _lock = crate::auth::test_resource_lock().await;
-    let Assisted { app, auth, .. } = assisted().await;
+    let Assisted {
+        _dir: _keep,
+        app,
+        auth,
+        ..
+    } = assisted().await;
     let page = body(router_request(&app, &auth[0], "/admin/assistant", None).await).await;
     assert!(page.contains("<strong>Starting</strong>"), "{page}");
     assert!(page.contains("llama.cpp b11609"), "{page}");
@@ -148,12 +153,12 @@ async fn restart_is_owner_only_and_csrf_checked() {
 async fn a_second_restart_while_one_runs_starts_nothing_and_a_revoked_session_is_refused() {
     let _lock = crate::auth::test_resource_lock().await;
     let Assisted {
+        _dir: _keep,
         store,
         auth,
         app,
         gate,
         preflights,
-        ..
     } = assisted().await;
     let csrf = "a".repeat(64);
     // The first preflight is still waiting; a Restart is accepted once, the second press

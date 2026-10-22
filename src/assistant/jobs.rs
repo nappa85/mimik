@@ -35,7 +35,7 @@ pub(crate) struct Budgets {
     pub max_tokens: u32,
     /// How long the server may still be evaluating a request cancelled at its run deadline
     /// (the calibrated prompt term at B): the next job waits that long, and admission counts
-    /// it (ASSIST-L31).
+    /// it.
     pub busy_after_expiry: Duration,
 }
 

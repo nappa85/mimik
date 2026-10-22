@@ -317,14 +317,14 @@ async fn live_level_1_serves_over_the_checked_socket_with_the_token_only() {
     .await;
     assert_eq!(status, 401);
     let server = child.server();
-    // The right token through the server API: the per-request ignore_eos generates exactly
-    // max_tokens.
+    // The right token: the per-request ignore_eos generates exactly max_tokens (the test
+    // model's context holds no fixed prefix, so the request is a short one of its own).
     let marker = "zebra-marker-7f3a";
-    let timings = server
-        .plain(&format!("Once upon a {marker}"), 16, true)
-        .await
-        .unwrap();
-    assert_eq!(timings.predicted_n, Some(16.0));
+    let mut request = short_request(16);
+    request["messages"][0]["content"] = json!(format!("Once upon a {marker}"));
+    let (status, answer) = raw(real, "/v1/chat/completions", Some(child.token()), &request).await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["timings"]["predicted_n"], json!(16));
     assert!(server.tokens("hello there").await.unwrap() > 0);
     // The token is in no command line of the sandbox's processes.
     let pidfile =
@@ -368,8 +368,10 @@ async fn live_level_3_loads_the_model_through_proc_self_fd() {
     assert!(!scratch.path().join("data/run/1").join(token::FILE).exists());
     let (status, _) = raw(real, "/v1/chat/completions", None, &short_request(8)).await;
     assert_eq!(status, 401);
-    let timings = child.server().plain("Once upon", 8, true).await.unwrap();
-    assert_eq!(timings.predicted_n, Some(8.0));
+    let (status, answer) =
+        raw(real, "/v1/chat/completions", Some(child.token()), &short_request(8)).await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["timings"]["predicted_n"], json!(8));
     child.stop().await;
 }
 

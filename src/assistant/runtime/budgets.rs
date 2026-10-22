@@ -95,7 +95,7 @@ pub(crate) struct Derived {
     /// T(B) in seconds for the chosen B.
     pub estimate_s: f64,
     /// The prompt term of the slower sample at the chosen B, in seconds: how long a request
-    /// cancelled during its prompt evaluation may keep the server busy (ASSIST-L31).
+    /// cancelled during its prompt evaluation may keep the server busy.
     pub prompt_s: f64,
 }
 

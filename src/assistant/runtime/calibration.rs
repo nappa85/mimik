@@ -1,7 +1,7 @@
 //! Priming and calibration (assisted sheet plan §1.4a, "Priming and calibration"): after
 //! `/health`, priming sends the fixed prefix with a minimal data envelope and `max_tokens` 1,
 //! which fills the prompt cache (priming is the readiness gate: no job is admitted before
-//! the prefix is cached, ASSIST-L31); then two calibration samples, fixed synthetic jobs
+//! the prefix is cached); then two calibration samples, fixed synthetic jobs
 //! shipped with Mimik (no sheet or player text), each with a dynamic part of exactly the
 //! path's byte cap built from filler shaped like real context items, `max_tokens` the
 //! model's, `ignore_eos` and no schema, so each generates exactly `max_tokens` tokens. The

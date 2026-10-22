@@ -68,7 +68,11 @@ def synthetic():
 def tree(root):
     cpu = Path(root) / "llama" / "cpu"
     cpu.mkdir(parents=True)
-    for name, content in [("llama-server", SERVER), ("libllama.so.0", LIBRARY), ("LICENSE", LICENSE)]:
+    for name, content in [
+        ("llama-server", SERVER),
+        ("libllama.so.0", LIBRARY),
+        ("LICENSE", LICENSE),
+    ]:
         (cpu / name).write_bytes(content)
         os.chmod(cpu / name, 0o600)
     return Path(root) / "llama"
