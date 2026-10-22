@@ -32,6 +32,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    (2c-2a); the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks at each
    llama.cpp pin change; the Qwen3.5-9B rev3 S40 re-run.
 
+- `browser_smoke.py`'s "A 409 with an unreadable body did not hold the field" check fails
+  on the dev host for master's release binary as well as `assist-2c2`'s (2026-10-23, Chromium
+  container at 2 CPUs on a loaded host); find whether it is timing (its 500 ms waits) before CI
+  relies on it.
+
 ## Blockers
 
 - None.

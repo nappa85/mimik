@@ -26,6 +26,14 @@ rates below are pessimistic and no CPU-baseline conclusion is drawn from them.
   against the 90 s cap, so the assistant became "too slow on this machine: about 105 s
   needed, the cap is 90 s". Generation (352 × about 0.2 s) is about 88 % of T; the prompt
   term is small because the 75 %-cached prefix leaves a 7-token tail.
+- **Second run** (same load, the measurement tool `tools/assist_runtime_measure.py calibrate`,
+  `functional-calibrate-t5-loaded.log`): the probes took 82 s before the first start (hashing
+  the 2.2 GB model on the data disk), `/health` 3 s after the spawn, priming 108 s and 102 s;
+  the first calibration exceeded its 180 s limit (a counted attempt failure, retried after 2
+  minutes), the second measured 63 and 64 s for 352 generated tokens (180 and 183 ms each) and
+  20 to 21 s for 316 prompt tokens, and was again too slow. Under load the two samples sit at
+  the 180 s limit: on a machine where each sample takes more than about 90 s nothing can fit
+  anyway (R at B 512 is then above 90 s), so the limit only decides how that is reported.
 
 ## Assisted interpretation: schema v2 re-run of the 2b screen (step 2c-1, 2026-10-22)
 
