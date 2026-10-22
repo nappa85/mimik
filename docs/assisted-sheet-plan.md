@@ -415,10 +415,10 @@ natively for these tests (ASSIST-40).
     records its version; if that package lacks any option the probe needs, the job builds a
     pinned upstream bubblewrap release (tarball SHA-256 and the meson and ninja build
     dependencies pinned in the workflow) and installs it to `/usr/bin` with `sudo`, so the
-    fixed-path rule holds and no release-capable override exists. It installs `libvulkan1`
-    with Mesa's lavapipe; if `kernel.apparmor_restrict_unprivileged_userns` exists it logs its
-    value and lifts it with `sudo sysctl` for the job's duration only (an absent key is logged
-    and skipped). It then runs:
+    fixed-path rule holds and no release-capable override exists. If
+    `kernel.apparmor_restrict_unprivileged_userns` exists it logs its value and lifts it with
+    `sudo sysctl` for the job's duration only (an absent key is logged and skipped). It then
+    runs:
     - the flag check;
     - the start-time probe for the CPU build only, as `target/rel/mimik assistant-runner
       --probe --runtime target/rel/llama --models-dir target/models --model
