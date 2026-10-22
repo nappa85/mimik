@@ -7,10 +7,13 @@
 //! and level 2 (Landlock) are step 2c-2b; the machinery here already carries the path and
 //! the level.
 pub(crate) mod budgets;
+pub(crate) mod drain;
 pub(crate) mod endpoint;
 pub(crate) mod files;
 pub(crate) mod manifest;
+pub(crate) mod rundir;
 pub(crate) mod seccomp;
+pub(crate) mod token;
 #[cfg(test)]
 pub(crate) mod test_helper;
 

@@ -40,6 +40,8 @@ html2text = "0.17"
 mime = "0.3"
 regex = "1"
 hex = "0.4"
+# The model server's per-launch token (base64url); already in the tree through tower-sessions.
+base64 = "0.22"
 jsonschema = { version = "=0.58.6", default-features = false }
 lopdf = { version = "0.45", default-features = false }
 png = "0.18"
