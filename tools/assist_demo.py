@@ -184,11 +184,35 @@ def create_sheet(password, version):
     return sheet
 
 
+def assistant_args(args):
+    """The server flags of the development assistant, or none."""
+    if args.assistant_endpoint is None:
+        return ()
+    require(args.assistant_token_file is not None, "--assistant-endpoint needs a token file")
+    return (
+        "--assistant",
+        "--assistant-dev-endpoint",
+        args.assistant_endpoint,
+        "--assistant-dev-token-file",
+        str(args.assistant_token_file.resolve(strict=True)),
+    )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path, help="A built mimik binary")
     parser.add_argument("--fixture", type=Path, required=True, help="source_fixture output")
     parser.add_argument("--data", type=Path, required=True, help="New, empty data directory")
+    parser.add_argument(
+        "--assistant-endpoint",
+        help="Development builds only (dev-endpoint feature): a hand-started llama-server "
+        "(http://127.0.0.1:<port> or a socket path) for the interpretation assistant",
+    )
+    parser.add_argument(
+        "--assistant-token-file",
+        type=Path,
+        help="The file holding that server's API key (required with --assistant-endpoint)",
+    )
     parser.add_argument(
         "--exit-after-setup",
         action="store_true",
@@ -208,7 +232,7 @@ def main(argv=None):
     create_accounts(binary, directory, passwords)
     prepare_unknown_registry_source(binary, directory, fixture)
     version = publish_assist_definition(binary, directory, fixture)
-    process, log = start(binary, directory, auth=True)
+    process, log = start(binary, directory, auth=True, extra=assistant_args(args))
     try:
         sheet = create_sheet(passwords[PLAYER], version)
         print("Assisted sheet demo (synthetic data, dummy local passwords):")

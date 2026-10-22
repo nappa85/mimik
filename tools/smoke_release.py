@@ -1894,7 +1894,7 @@ def smoke_owner_development(binary, directory, passwords):
     )
 
 
-def start(binary, directory, *, auth=False, development_owner_play=False):
+def start(binary, directory, *, auth=False, development_owner_play=False, extra=()):
     # A fresh working directory proves embedded assets/templates are sufficient.
     log = open(directory / "server.log", "a", encoding="utf-8")
     process = subprocess.Popen(
@@ -1902,6 +1902,7 @@ def start(binary, directory, *, auth=False, development_owner_play=False):
             str(binary),
             *(["--loopback"] if auth else ["--no-auth"]),
             *(["--dev-owner-play"] if development_owner_play else []),
+            *extra,
         ],
         cwd=directory,
         env=smoke_environment(directory),
@@ -1937,6 +1938,43 @@ def stop(process, log):
         require(process.returncode == 0, "Server shutdown failed")
     finally:
         log.close()
+
+
+def smoke_no_assistant(binary, directory):
+    """A release build has no development endpoint and no assistant (step 2c-1): the
+    option's name is not in the binary, it is refused as unknown, and `--assistant` is
+    refused at start, before any database is opened."""
+    require(
+        b"assistant-dev-endpoint" not in binary.read_bytes(),
+        "The release binary contains the development endpoint",
+    )
+    unknown = subprocess.run(
+        [str(binary), "--assistant-dev-endpoint", "http://127.0.0.1:9"],
+        cwd=directory,
+        env=smoke_environment(directory),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    require(
+        unknown.returncode == 2 and "unexpected argument" in unknown.stderr,
+        "The release binary accepts --assistant-dev-endpoint",
+    )
+    database = directory / "assistant-refused.sqlite3"
+    refused = subprocess.run(
+        [str(binary), "--loopback", "--assistant", "--database", str(database)],
+        cwd=directory,
+        env=smoke_environment(directory),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    require(
+        refused.returncode != 0
+        and "The assistant is not available in this build." in refused.stderr
+        and not database.exists(),
+        "The release binary does not refuse --assistant",
+    )
 
 
 def main():
@@ -1995,6 +2033,7 @@ def main():
                 capture_output=True,
                 timeout=30,
             )
+        smoke_no_assistant(binary, directory)
         account_snapshot, account_passwords = smoke_accounts(binary, directory)
         process, log = start(binary, directory)
         try:
