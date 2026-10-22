@@ -6,11 +6,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Current work
 
-- **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, the plan for 2c/2d
-  and the Rust 1.99.1 / rig-core 0.45.0 upgrade are merged into master. **2c-1** (interpretation
-  against a hand-started server, dev-only) is implemented on branch `assist-2c1` in
-  `mimik-wt/catalogue`, reviewed (Sol, Sonnet: fix first, no blocking; fixes applied; third
-  chain unavailable); prefix v2-short adopted; awaiting the merge.
+- **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1 (interpretation
+  against a hand-started server, dev-only) and the Rust 1.99.1 / rig-core 0.45.0 upgrade are
+  merged into master. Next: **2c-2** runtime manager.
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
   target/agent-tools/ci.sh <cmd>`, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
@@ -19,7 +17,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
-1. Merge 2c-1, then 2c-2 runtime manager, 2d-1 owner model setting, 2d-2 downloads, 3 bundles and
+1. 2c-2 runtime manager, 2d-1 owner model setting, 2d-2 downloads, 3 bundles and
    reminders, 4 suggestions, 5 docs and gate (includes the `docs/release-scope.md` update for
    schema 22 and the assisted scope).
 2. Before 2d-1 chooses the default model (ASSIST-L32), a field-reference experiment, decision
