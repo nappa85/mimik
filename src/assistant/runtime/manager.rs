@@ -659,13 +659,21 @@ async fn measure(
             )));
         }
     }
-    log(&format!("health after {:.1} s", began.elapsed().as_secs_f64()));
+    log(&format!(
+        "health after {:.1} s",
+        began.elapsed().as_secs_f64()
+    ));
     phase("priming");
     let priming = Instant::now();
     let prefix =
         match tokio::time::timeout(PRIMING_WITHIN, calibration::prime(server.as_ref())).await {
             Ok(Ok(prefix)) => prefix,
-            Ok(Err(_)) => return Err(Attempt::Failed(Fail::Other("priming failed".into()))),
+            Ok(Err(interrupted)) => {
+                return Err(Attempt::Failed(Fail::Other(format!(
+                    "priming failed ({})",
+                    interrupted.describe()
+                ))));
+            }
             Err(_) => {
                 return Err(Attempt::Failed(Fail::Other(
                     "priming did not finish within 300 s".into(),
@@ -685,7 +693,12 @@ async fn measure(
     .await
     {
         Ok(Ok(calibration)) => calibration,
-        Ok(Err(_)) => return Err(Attempt::Failed(Fail::Other("calibration failed".into()))),
+        Ok(Err(interrupted)) => {
+            return Err(Attempt::Failed(Fail::Other(format!(
+                "calibration failed ({})",
+                interrupted.describe()
+            ))));
+        }
         Err(_) => {
             return Err(Attempt::Failed(Fail::Other(format!(
                 "calibration did not finish within {} s",

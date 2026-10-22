@@ -100,6 +100,21 @@ pub(crate) enum Interrupted {
     Tokenize(Failure),
 }
 
+impl Interrupted {
+    /// The failed exchange as the page names it (a status or "no well-formed answer").
+    pub(crate) fn describe(self) -> String {
+        let (what, failure) = match self {
+            Self::Priming(failure) => ("the priming request", failure),
+            Self::Sample(failure) => ("a calibration sample", failure),
+            Self::Tokenize(failure) => ("/tokenize", failure),
+        };
+        match failure {
+            Failure::Status(status) => format!("{what} answered HTTP {status}"),
+            Failure::Transport => format!("{what} got no well-formed answer"),
+        }
+    }
+}
+
 /// Primes the cache: the readiness gate. Returns priming's prompt tokens.
 ///
 /// # Errors

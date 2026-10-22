@@ -396,6 +396,10 @@ async fn a_priming_failure_is_a_counted_attempt_failure_outside_the_breaker() {
     ready(&assistant).await;
     assert_eq!(launcher.starts.lock().unwrap().len(), 2);
     assert_eq!(handle.status().failures, 1);
+    assert_eq!(
+        handle.status().last_failure.as_deref(),
+        Some("priming failed (the priming request answered HTTP 500)")
+    );
     assert!(assistant.breaker_closed());
     // The failed child was stopped before the next one started.
     assert!(!launcher.coexisted.load(Ordering::SeqCst));

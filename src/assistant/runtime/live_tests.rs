@@ -368,8 +368,13 @@ async fn live_level_3_loads_the_model_through_proc_self_fd() {
     assert!(!scratch.path().join("data/run/1").join(token::FILE).exists());
     let (status, _) = raw(real, "/v1/chat/completions", None, &short_request(8)).await;
     assert_eq!(status, 401);
-    let (status, answer) =
-        raw(real, "/v1/chat/completions", Some(child.token()), &short_request(8)).await;
+    let (status, answer) = raw(
+        real,
+        "/v1/chat/completions",
+        Some(child.token()),
+        &short_request(8),
+    )
+    .await;
     assert_eq!(status, 200, "{answer}");
     assert_eq!(answer["timings"]["predicted_n"], json!(8));
     child.stop().await;

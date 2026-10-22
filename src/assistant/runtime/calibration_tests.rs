@@ -105,6 +105,14 @@ async fn priming_sends_the_minimal_envelope_with_one_token() {
         prime(&failing).await,
         Err(Interrupted::Priming(Failure::Status(500)))
     );
+    assert_eq!(
+        Interrupted::Priming(Failure::Status(500)).describe(),
+        "the priming request answered HTTP 500"
+    );
+    assert_eq!(
+        Interrupted::Sample(Failure::Transport).describe(),
+        "a calibration sample got no well-formed answer"
+    );
 }
 
 #[tokio::test]

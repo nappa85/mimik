@@ -69,6 +69,8 @@ def calibrate(args):
         str(args.runtime.resolve(strict=True)),
         "--assistant-threads",
         str(args.threads),
+        *(("--assistant-model", f"local:{args.model}") if args.model else ()),
+        *(("--assistant-model-sha256", args.sha256) if args.sha256 else ()),
     ]
     began = time.monotonic()
     process = subprocess.Popen(
@@ -376,6 +378,8 @@ def main(argv=None):
     cal.add_argument("--threads", type=int, required=True)
     cal.add_argument("--data", type=Path, required=True)
     cal.add_argument("--limit", type=int, default=1800)
+    cal.add_argument("--model", help="a model file other than the default Granite one")
+    cal.add_argument("--sha256", help="its SHA-256 (required with --model)")
     srv = commands.add_parser("server")
     srv.add_argument("--models-dir", type=Path, required=True)
     srv.add_argument("--runtime", type=Path, required=True)
