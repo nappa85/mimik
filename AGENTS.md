@@ -32,7 +32,7 @@
 - Review outcomes are not kept as files (user decision 2026-10-19). Fixed findings live on as regression tests and code; the merge commit message states the reviewers, their verdicts and any Blocking/Major finding with its resolution. Unresolved findings go to `docs/limitations.md` or `TODO.md`. Review findings are not proof of correctness.
 - **Reviewer setup (user decision 2026-10-16):**
   - Main reviewers: OpenAI Sol (`openai/gpt-6.1-sol` via `tools/external_review.py --chain main`) and a fresh Sonnet subagent, run in parallel.
-  - Third reviewer: the first that works of Space Bunny, DeepSeek v4.1 Flash, then Muse Spark (`--chain third`). If none works, proceed with the two main reviews and record that.
+  - Third reviewer: the first that works of MiniMax M3.1 Flash (formerly Space Bunny), DeepSeek v4.1 Flash, then Muse Spark (`--chain third`). If none works, proceed with the two main reviews and record that.
   - Adjudicate Blocking findings against the code before acting on them.
 - Resolve blocking findings before completion. If independence is unavailable or a blocker cannot be fixed, explicitly record it and keep the work blocked; do not call it production-ready or silently waive it. Review of review records themselves does not recurse.
 

@@ -23,7 +23,7 @@ DEFAULT_MODEL = "opencode/muse-spark-1.3-contributor-free"
 # reviewer is the first of these that works; if none works, the review proceeds with two.
 SOL_MODEL = "openai/gpt-6.1-sol"
 THIRD_REVIEWER_CHAIN = (
-    "opencode/space-bunny-free",
+    "opencode/minimax-m3.1-flash-free",
     "opencode/deepseek-v4.1-flash-free",
     "opencode/muse-spark-1.3-contributor-free",
 )
