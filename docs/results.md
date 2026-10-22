@@ -18,8 +18,8 @@ decides.**
 ### Provider crate and client policy (C1 to C7)
 
 - **Setup:** `genai` 0.7.0, `rig-core` 0.44.0 and `async-openai` 0.42.2, default features
-  off, `reqwest` 0.13.5, built in `mimik-ci` with Rust 1.95.0. `rig-core` is now 0.45.0 (see
-  the re-check below). Probes run against loopback stubs in `--network none` containers; the
+  off, `reqwest` 0.13.5, measured in `mimik-ci` with Rust 1.95.0; the table holds those
+  figures. `rig-core` 0.45.0 on Rust 1.99.1, the version in use, was re-checked offline (below). Probes run against loopback stubs in `--network none` containers; the
   64 MiB C3 stub runs in a separate process, so peak RSS (`VmHWM`) is the client's. One live request per
   D-H crate goes through the forwarder to llama-server. The host-built client sets `no_proxy`,
   no redirects, `no_gzip`/`no_brotli`/`no_deflate`/`no_zstd` and a fresh connection per
@@ -29,7 +29,7 @@ decides.**
   and `cargo about` must be re-checked in 2c.
 - **Numbers:**
 
-  | | genai | rig-core | async-openai |
+  | | genai | rig-core (0.44.0) | async-openai |
   |---|---|---|---|
   | C1 native structured output | sent; `oneOf` rewritten to `anyOf` | sent; `oneOf` rewritten to `anyOf` | exact |
   | C1 raw body (`extra_body` / `additional_params` / `byot`) | exact, plus `top_k`, `seed`, `chat_template_kwargs` | exact; typed llama.cpp options too | exact |
@@ -57,21 +57,22 @@ decides.**
   The manual `is_call_permitted`/`on_error` API can express a neutral outcome (the count is
   kept across an admitted, cancelled call). The mock clock is thread-local and the last release
   is 2024-07. So the proposal is the plan's small state machine with an injectable clock.
-- **rig-core 0.45.0 re-check** (Rust 1.99.1, `mimik-ci:1.99.1`, `--network none`; outputs
-  in `probes/v4-rig045/`): the probe builds against 0.45.0 (with `rig-http` and
-  `rig-reqwest` 0.45.0) without source changes. Every offline C1, C2, C3 and C4 result in the
-  table is unchanged: the native path sends the same rewritten schema byte for byte, the
-  `additional_params` schema is exact, proxy trap 1 / 0, 302 and gzip as before, one request
-  on 500 and 429, the own transport refuses the 64 MiB body at about +6.4 MiB (default path
-  +325 MiB, endless SSE line +72 MiB), and drops close within 1 ms. `reqwest` features stay
-  `json, multipart, stream`, with no TLS crate in the tree; all licences are within
-  `about.toml`. The changelog's named breaking changes are in the harness, agent, catalog,
-  document and observe APIs; two broad API-review entries (#2845, #2848) are not itemised,
-  and the APIs the probe uses (`http_client`, `OpenAIConfig`, `CompletionRequest` builders,
-  `LlamaCppOptions`) compile unchanged. `rig-reqwest`'s `rustls` feature (a default, kept
-  off) now also adds a bundled-roots TLS fallback. Not re-run on 0.45.0: the live request
-  through the forwarder (C1 live) and the C5 check against the shipped `Cargo.lock` (due in
-  2c).
+- **rig-core 0.45.0 re-check** (Rust 1.99.1, `mimik-ci:1.99.1`, `--network none`; outputs in
+  `/media/data/mimik/assist-2b/runs/probes/v4-rig045/`): the probe builds against 0.45.0 (with
+  `rig-http` and `rig-reqwest` 0.45.0) without source changes. Every offline C1, C2, C3 and C4
+  outcome is the same as in the table, with different RSS figures: the native path sends the
+  same rewritten schema (compared as parsed JSON), the `additional_params` schema arrives
+  structurally identical, proxy trap 1 / 0, 302 and gzip as before, one request on 500 and
+  429, the own transport refuses the 64 MiB body at about +6.4 MiB (default path +325 MiB,
+  endless SSE line +72 MiB), and drops close within 1 ms. `reqwest` features stay `json,
+  multipart, stream`, with no TLS crate in the probe's selected dependency tree (`cargo tree`;
+  the lockfile lists optional ones); all licences are within `about.toml`. The changelog's
+  named breaking changes are in the harness, agent, catalog, document and observe APIs; two
+  broad API-review entries (#2845, #2848) are not itemised, and the APIs the probe uses
+  (`http_client`, `OpenAIConfig`, `CompletionRequest` builders, `LlamaCppOptions`) compile
+  unchanged. `rig-reqwest`'s `rustls` feature (a default, kept off) now also adds a
+  bundled-roots TLS fallback. Not re-run on 0.45.0: the live request through the forwarder (C1
+  live) and the C5 check against the shipped `Cargo.lock` (due in 2c).
 - **Conclusion (proposal):** `rig-core` (0.44.0 measured, 0.45.0 re-checked) is the only D-H
   crate that meets C1 to C5. The schema arrives structurally identical (compared as parsed
   JSON) through `additional_params` (its native path rewrites `oneOf`), and the body bound

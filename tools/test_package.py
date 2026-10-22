@@ -4,10 +4,24 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import package_release
 from verify_source_package import REQUIRED, verify_members
 
 
 class PackageTests(unittest.TestCase):
+    def test_release_notes_state_the_pinned_toolchain(self):
+        """Review of the 1.99.1 upgrade: BUILD.txt and SOURCE.txt repeated the Rust version as
+        literals, so a later bump could leave the source offer naming another toolchain."""
+        project = Path(__file__).resolve().parents[1]
+        pinned = (project / "rust-toolchain.toml").read_text(encoding="utf-8")
+        self.assertEqual(
+            package_release.toolchain(project / "rust-toolchain.toml"),
+            pinned.split('channel = "', 1)[1].split('"', 1)[0],
+        )
+        script = (project / "tools" / "package_release.py").read_text(encoding="utf-8")
+        self.assertNotIn("Rust: 1.", script)
+        self.assertNotIn("(Rust 1.", script)
+
     def test_hierarchy_and_screen_regressions_are_required_source_members(self):
         members = [f"mimik/{name}" for name in REQUIRED]
         for name in (

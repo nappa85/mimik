@@ -9,6 +9,11 @@ import tomllib
 from pathlib import Path
 
 
+def toolchain(path=Path("rust-toolchain.toml")):
+    """The pinned Rust channel; BUILD.txt and SOURCE.txt state it, so it is read, not repeated."""
+    return tomllib.loads(path.read_text(encoding="utf-8"))["toolchain"]["channel"]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True)
@@ -42,7 +47,8 @@ def main():
     ]:
         shutil.copy2(original, stage / filename)
     (stage / "BUILD.txt").write_text(
-        f"Version: {args.version}\nRevision: {args.revision}\nRust: 1.99.1\n", encoding="utf-8"
+        f"Version: {args.version}\nRevision: {args.revision}\nRust: {toolchain()}\n",
+        encoding="utf-8",
     )
     (stage / "SQLITE-NOTICE.txt").write_text(
         "SQLite is bundled via libsqlite3-sys. SQLite is in the public domain.\nhttps://www.sqlite.org/copyright.html\n",
@@ -61,7 +67,7 @@ def main():
         entry.mode = 0o644
         tar.addfile(entry, io.BytesIO(config_bytes))
     (stage / "SOURCE.txt").write_text(
-        f"Corresponding source: accompanying {source_name} and {dependency_name}\nRevision: {args.revision}\nUnpack the .crate, then unpack dependency sources into that package root.\nBuild: cargo build --release --offline --locked (Rust 1.99.1).\n",
+        f"Corresponding source: accompanying {source_name} and {dependency_name}\nRevision: {args.revision}\nUnpack the .crate, then unpack dependency sources into that package root.\nBuild: cargo build --release --offline --locked (Rust {toolchain()}).\n",
         encoding="utf-8",
     )
     archive = args.output / f"{name}.tar.gz"
