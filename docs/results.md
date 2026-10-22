@@ -433,8 +433,9 @@ decides.**
 - **Setup:** harness v3, C0 settings (thinking off, temperature 0.1, 8 turns, max_tokens
   4096, ctx 24576), dev subset `dev-screen-40` (40 cases, 16 at-risk), seed 17, pre-rev3 pack,
   frozen commit `b085aa4`, **CPU only** (6 threads). The 9B and 4B references ran on the GPU
-  earlier, so the device differs. The 8B dense candidates (Granite 4.2 8B, Llama 3.1 8B,
-  Ministral 3 8B) were not screened (too slow on CPU).
+  earlier, so the device differs, and their harness hash differs from the CPU rows'. Gemma is
+  Q4_0, the others Q4_K_M. The 8B dense candidates were screened on the GPU on pack rev3 (next
+  section); these rows are pre-rev3 and not comparable to it.
 - **Numbers** (all of 40; at-risk false support of 16 where recorded):
 
   | Model | Correct | False support | At-risk FS |
@@ -447,12 +448,67 @@ decides.**
   | MiniCPM5-2B | 10 | 4 | 1/16 |
   | LFM2.5-8B-A1B | 8 | 9 | — |
 
-- **Conclusion:** none beats the 9B; all are dropped as standalone candidates. Proposals are
+  Turn-limit timeouts (counted as incorrect): MiniCPM5-2B 21 of 40 (so its low false support
+  is mostly non-attempt), Granite 4.2 3B 4 plus 1 error episode, Gemma 3. Paired exact tests
+  against the 9B (9B-only / candidate-only cases): Gemma 12 / 6, p = 0.24; LFM2.5-2.6B
+  p = 0.10; Granite 3B p = 0.012; Qwen3-4B p = 0.019.
+
+- **Conclusion:** none scores above the 9B; only Granite 3B and the 4B are significantly below
+  it, and Gemma (19) versus the 9B (25) is not distinguishable at n = 40. All are dropped as
+  standalone candidates. Proposals are
   comparatively good (Gemma changes_exact 11/15) while outcome decisions are poor (Gemma
   answer 1/9), which motivated the decision-router screen.
-- **Limitations:** unreviewed self-analysis; one seed, 40 cases; CPU versus GPU references;
-  the 4B reference figures were reported, not re-verified. CPU speed: about 122 s per episode
-  (LFM2.5-8B-A1B preflight).
+- **Limitations:** one seed, 40 cases; CPU versus GPU references; numbers re-verified from the
+  ledgers by an independent results review (2026-10-22), including the 4B reference (14/40,
+  17/40 false support). CPU speed: 125–255 s median per episode.
+
+## Tool-loop candidates: GPU S40 screen (2026-10-20)
+
+- **Question:** which 8 GB-GPU-runnable open model is the best tool-loop candidate on the rev3
+  dev subset, and which `--n-cpu-moe` should Qwen3.6-35B-A3B use on the RX 6650 XT?
+- **Setup:** harness v3, C0 settings (thinking off, temperature 0.1, top_p 0.95, 8 turns,
+  max_tokens 4096, ctx 24576), dev subset `dev-screen-40` (40 cases, 16 at-risk), seed 17,
+  pack rev3 (`cases-dev` c10113c2), frozen commit `82a1ca5`, llama.cpp b11610, GPU, Q4_K_M.
+  The 35B ran with f16 KV cache and no flash attention, the three 8B models with q8_0 KV and
+  flash attention. G0 (rule frozen 2026-10-16 in `tools/queues/g0-qwen36-35b-a3b.json`): one
+  3-case smoke per `--n-cpu-moe` in 40/36/32/28/24, picking the lowest server s/token with
+  VRAM at most 7.5 GB and no swap growth. Case ids prefixed `ho-` in the dev subset are dev
+  cases under the old numbering, not held-out cases.
+- **G0 numbers** (VRAM is whole-card use; the baseline was about 0.58 GB):
+
+  | n_cpu_moe | s/token | VRAM max | Qualified |
+  |---|---|---|---|
+  | 40 | 0.076 | 3.5 GB | yes |
+  | 36 | 0.085 | 5.3 GB | yes |
+  | 32 | 0.080 | 7.1 GB | yes |
+  | 28 | 0.114 | 8.5 GB | no (VRAM) |
+
+  24 was skipped (G0 closes at the first failure).
+- **S40 numbers** (of 40; at-risk = 16 cases whose expected outcome is not a proposal or an
+  answer; wrong proposal counts the 15 expected-proposal cases):
+
+  | Model | Correct (Wilson 95%) | Outcome correct | False support | At-risk FS | Wrong proposal | Turn-limit | Median s |
+  |---|---|---|---|---|---|---|---|
+  | Qwen3.6-35B-A3B (moe40) | 22 (0.40–0.69) | 24 | 12 | 10/16 | 1/15 | 0 | 42.8 |
+  | Granite 4.2 8B | 14 (0.22–0.50) | 19 | 18 | 13/16 | 2/15 | 3 | 13.8 |
+  | Ministral 3 8B | 13 (0.20–0.48) | 25 | 22 | 10/16 | 6/15 | 0 | 7.4 |
+  | Llama 3.1 8B | 6 (0.07–0.29) | 6 | 0 | 0/16 | 0/15 | 2 | 6.8 |
+
+  All arms: 40 of 40 episodes, 0 errors, no truncation, no thermal stop (peak junction 76–80 °C).
+- **Conclusion:** `--n-cpu-moe 40` is the G0 choice by the pre-registered rule; decoding was
+  not faster with more experts on the GPU, and 40, 36 and 32 differ within noise. The 35B
+  scores highest on correct (22), but its false support (12/40, 10/16 at-risk) is not low, and
+  only its difference to Llama survives correction for the six comparisons (paired exact
+  p = 0.001; versus Granite p = 0.08 and Ministral p = 0.05 uncorrected; Granite versus
+  Ministral p = 1.0). Ministral decides the outcome kind about as well as the 35B (25 versus 24)
+  but its proposals are often wrong. Llama's zero false support means it never proposes or
+  answers (55 malformed tool calls; tool support unverified in the registry), not safety. No
+  ranking among the upper three is established, and no 35B-versus-9B conclusion is possible.
+- **Limitations:** one seed, 40 cases; the 9B (25/40) and CPU references used the pre-rev3
+  pack and an older harness, so a 35B-versus-9B comparison needs the 9B re-run on rev3 S40.
+  The 35B differs from the 8B models in KV quantisation and flash attention. G0 measured
+  decode speed on 3 smoke cases only. Turn-limit episodes count as incorrect. Numbers verified
+  by an independent results review (2026-10-22).
 
 ## Decision router SYS-R: raw-readout routers on dev (2026-10-17/18)
 
