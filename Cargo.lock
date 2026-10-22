@@ -1700,11 +1700,16 @@ dependencies = [
  "hex",
  "html2text",
  "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "if-addrs",
  "jsonschema",
+ "libc",
  "lopdf",
  "mime",
  "png",
+ "procfs",
  "proptest",
  "qrcode",
  "regex",
@@ -1714,6 +1719,7 @@ dependencies = [
  "rusqlite",
  "rustix",
  "scraper",
+ "seccompiler",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -2153,6 +2159,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "procfs"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25485360a54d6861439d60facef26de713b1e126bf015ec8f98239467a2b82f7"
+dependencies = [
+ "bitflags",
+ "procfs-core",
+ "rustix",
+]
+
+[[package]]
+name = "procfs-core"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6401bf7b6af22f78b563665d15a22e9aef27775b79b149a66ca022468a4e405"
+dependencies = [
+ "bitflags",
+ "hex",
+]
+
+[[package]]
 name = "proptest"
 version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2536,6 +2563,15 @@ dependencies = [
  "precomputed-hash",
  "selectors",
  "tendril",
+]
+
+[[package]]
+name = "seccompiler"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4ae55de56877481d112a559bbc12667635fdaf5e005712fd4e2b2fa50ffc884"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

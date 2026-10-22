@@ -103,6 +103,7 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 - **ASSIST-39** (2026-10-22, user) Mimik uses the latest stable Rust (1.99.1 now) and rig-core 0.45.0; the upgrade is its own reviewed change and re-runs 2b's rig-core checks.
 - **ASSIST-40** (2026-10-22, user) The dev host may run the pinned official llama-server natively for the runtime-manager tests; installing additional software still goes through containers.
 - **ASSIST-41** (2026-10-22, user) On the CPU path the model server uses the physical cores minus one (at least 1) by default, configurable; the budgets come from the calibration at that setting. The weekday 2-core rule governs the dev host only.
+- **ASSIST-42** (2026-10-22, user) The shipped llama.cpp pin is release b11609 (commit `fcac190`), whose official Linux x86_64 assets are gzip tarballs (`llama-b11609-bin-ubuntu-x64.tar.gz` SHA-256 `f95cbb27dd6e377f2ce30f5cfd7ec987af3259c025fc7c98fff62927a16ff528`, `llama-b11609-bin-ubuntu-vulkan-x64.tar.gz` SHA-256 `8aff188828de76492343e19905f72408c10f5b870a03592155b0e7dd19b76ed0`): b11610, measured in 2b and 2c-1 from its Docker image (`sha256:217d278e…`), has no GitHub release assets, and its only commit after b11609 (`091b6a7`) changes the SYCL build script and docs, so the CPU and Vulkan source is identical to the measured build.
 
 ## Formulas and sheet values
 
