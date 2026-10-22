@@ -13,6 +13,7 @@ Run inside the browser container (containers/browser.Dockerfile):
 """
 
 import argparse
+import http.client
 import json
 import secrets
 import sys
@@ -100,17 +101,6 @@ class FakeModel(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def do_POST(self):  # noqa: N802 (http.server API)
-        if self.path == "/stall-json":
-            # A JSON answer whose body never finishes (the browser check's stalled Use).
-            self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", "100000")
-            self.end_headers()
-            self.wfile.write(b'{"status": "saved", ')
-            self.wfile.flush()
-            time.sleep(90)
-            return
         if not self.authorized():
             self.send_json(401, {"error": "token"})
             return
@@ -149,6 +139,59 @@ class FakeModel(BaseHTTPRequestHandler):
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
         }
         self.wfile.write(f"data: {json.dumps(stop_chunk)}\n\ndata: [DONE]\n\n".encode())
+
+
+class StallingProxy(BaseHTTPRequestHandler):
+    """A same-origin front for Mimik (the page's CSP refuses any other origin): forwards
+    every request to 127.0.0.1:3000 with Host and Origin rewritten, except an apply POST,
+    which it answers with JSON headers and a body that never finishes."""
+
+    stall_hits = 0
+    upstream = 3000
+
+    def log_message(self, *args):
+        pass
+
+    def forward(self, method):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length) if length else None
+        if method == "POST" and "/proposals/" in self.path:
+            StallingProxy.stall_hits += 1
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "100000")
+            self.end_headers()
+            self.wfile.write(b'{"status": "saved", ')
+            self.wfile.flush()
+            time.sleep(90)
+            return
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "origin")}
+        headers["Host"] = f"127.0.0.1:{self.upstream}"
+        if self.headers.get("Origin"):
+            headers["Origin"] = f"http://127.0.0.1:{self.upstream}"
+        connection = http.client.HTTPConnection("127.0.0.1", self.upstream, timeout=60)
+        try:
+            connection.request(method, self.path, body, headers)
+            response = connection.getresponse()
+            data = response.read()
+            self.send_response(response.status)
+            for key, value in response.getheaders():
+                if key.lower() not in ("content-length", "transfer-encoding", "connection"):
+                    self.send_header(key, value)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        finally:
+            connection.close()
+
+    def do_GET(self):  # noqa: N802 (http.server API)
+        self.forward("GET")
+
+    def do_POST(self):  # noqa: N802 (http.server API)
+        try:
+            self.forward("POST")
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
 
 def until(page, expression, what):
@@ -270,10 +313,11 @@ def scenario(page, sheet):
 
 
 def stalled_use(page, sheet, stall_url):
-    """Use whose answer never comes (stall_url None: the request is held unanswered; else it
-    is sent to a server whose JSON body never finishes): past the 30 s bound the module
-    gives up, the newer draft queued meanwhile is saved and a page post waiting for the
-    saves is released."""
+    """Use whose answer never comes (stall_url None: the request is held unanswered at the
+    browser; otherwise the page is served through StallingProxy, whose apply answer is JSON
+    headers with a body that never finishes): past the 30 s bound the module gives up, the
+    newer draft queued meanwhile is saved and a page post waiting for the saves is
+    released."""
     page.clock.install()
     page.goto(sheet)
     until(page, "document.documentElement.dataset.sheetAssist === 'ready'", "the module")
@@ -282,27 +326,32 @@ def stalled_use(page, sheet, stall_url):
     hp.press("Enter")
     until(page, "!!document.querySelector('#assist-0 .assist-use')", "the option")
     held = []
+    hits = StallingProxy.stall_hits
     if stall_url is None:
         page.route("**/proposals/**", lambda route: held.append(route))
-    else:
-        page.route(
-            "**/proposals/**",
-            lambda route: (held.append(route), route.continue_(url=stall_url)),
-        )
     page.locator("#assist-0 .assist-use").click()
-    until_python(page, lambda: bool(held), "the apply request")
+    if stall_url is None:
+        until_python(page, lambda: bool(held), "the apply request")
+    else:
+        until_python(page, lambda: StallingProxy.stall_hits > hits, "the stalled apply")
     # A newer draft (queued behind Use) and a page post (waiting for every save).
     hp.fill("70")
     hp.press("Enter")
     quick = page.locator("#quick-4")
-    rows = page.locator('fieldset[id^="row-fieldset-4-"], fieldset.row').count()
     quick.fill("1 lantern")
     page.wait_for_timeout(300)
     with page.expect_navigation(wait_until="domcontentloaded", timeout=20000):
         quick.press("Enter")
         page.wait_for_timeout(300)
+        # The stall is real: Use is still in flight, and the stalled body was requested.
+        require(
+            page.locator("form[aria-busy]").count() >= 1, "Use was not in flight before the timeout"
+        )
+        if stall_url is not None:
+            require(StallingProxy.stall_hits > hits, "The stalled JSON body was never requested")
         page.clock.fast_forward(31000)
-    page.unroute("**/proposals/**")
+    if stall_url is None:
+        page.unroute("**/proposals/**")
     until(page, "document.documentElement.dataset.sheetAssist === 'ready'", "the module")
     require(
         page.locator("#v0").input_value() == "70", "The draft queued behind a stalled Use was lost"
@@ -310,7 +359,6 @@ def stalled_use(page, sheet, stall_url):
     require(
         "lantern" in page.content(), "The page post waiting behind a stalled Use was not released"
     )
-    del rows
     # Back to a known value for the next stage.
     hp = page.locator("#v0")
     hp.fill("84")
@@ -324,12 +372,21 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("binary", type=Path, help="A development (dev-endpoint) mimik build")
     parser.add_argument("--fixture", type=Path, required=True, help="source_fixture output")
+    parser.add_argument(
+        "--stage",
+        choices=("all", "stall-json"),
+        default="all",
+        help="stall-json runs only the stalled-JSON-body stage (red runs)",
+    )
     args = parser.parse_args(argv)
     binary = args.binary.resolve(strict=True)
     fixture = args.fixture.resolve(strict=True)
     FakeModel.token = secrets.token_urlsafe(32)
     server = ThreadingHTTPServer(("127.0.0.1", 0), FakeModel)
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), StallingProxy)
+    threading.Thread(target=proxy.serve_forever, daemon=True).start()
+    front = f"http://127.0.0.1:{proxy.server_address[1]}"
     with tempfile.TemporaryDirectory(prefix="mimik-assistant-browser-") as temp:
         directory = fresh_directory(Path(temp) / "data")
         token_file = Path(temp) / "model.token"
@@ -364,12 +421,14 @@ def main(argv=None):
                         context.add_cookies(
                             [{"name": name, "value": value, "url": "http://127.0.0.1:3000"}]
                         )
-                        scenario(context.new_page(), f"http://127.0.0.1:3000{sheet}")
-                        for stall in (
-                            None,
-                            f"http://127.0.0.1:{server.server_address[1]}/stall-json",
-                        ):
-                            stalled_use(context.new_page(), f"http://127.0.0.1:3000{sheet}", stall)
+                        stages = (None, "front")
+                        if args.stage == "all":
+                            scenario(context.new_page(), f"http://127.0.0.1:3000{sheet}")
+                        else:
+                            stages = ("front",)
+                        for stall in stages:
+                            base = front if stall else "http://127.0.0.1:3000"
+                            stalled_use(context.new_page(), f"{base}{sheet}", stall)
                         context.close()
                 finally:
                     browser.close()

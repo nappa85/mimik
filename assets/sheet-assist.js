@@ -793,12 +793,10 @@ async function interpret(unit, note) {
   }
   stopAssist(unit);
   const token = unit.assist;
-  let started;
-  try {
-    started = await postForm(`${base}/interpretations`, [['csrf', csrfOf(unit)], ['note', note.key]]);
-  } catch {
-    return;
-  }
+  const started = await postForm(`${base}/interpretations`, [
+    ['csrf', csrfOf(unit)],
+    ['note', note.key],
+  ]);
   if (token !== unit.assist) {
     return;
   }
