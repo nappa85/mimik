@@ -80,20 +80,29 @@ implementation for both).
   declare to be data, never instructions.
 - **Context (D-F, D-J):** phrase and target first; then other stored integer and enum fields in
   definition order; derived, text, multiline, notes and list cells are excluded from context
-  and from `@` references; catalogue entry text comes in step 3 and is dropped first.
+  and from `@` references (the one exception: same-row cells under the related-fields rule
+  below); catalogue entry text comes in step 3 and is dropped first.
 - **Related fields only (ASSIST-31, ASSIST-37):** whenever B ≤ 1,024 bytes (always on the CPU
   path; on the GPU path only if the measurement lowers B to 1,024) the context holds only the
-  stored integer and enum scalar fields that the pinned formula layer reads together with the
-  target. Each derived value and each check has a read set: its declared scalar inputs, with
-  every derived value it reads replaced by that value's own read set, recursively (the
-  formula layer's dependency graph, `src/definitions/formula`). A field is related when some
-  read set contains both it and the target (for a row-cell target: the target's list
-  property, read as `item.<property>`). Related fields go in definition order and are dropped
-  from the end as above; pins without a formula layer send none. List cells, of any row
-  including the target's own, stay out of context and references in 2c (a same-row typed
-  reference needs its own reference form and freshness binding: §4 Later). With B above
-  1,024 the context is the D-F/D-J list above. Candidates come only from the snapshot the job
-  is bound to, which the account may read; relatedness never widens what is read.
+  stored integer and enum fields that the pinned formula layer reads together with the target;
+  fields the phrase names or that share the target's group are not added. Each derived value
+  and each check has a read set: its declared scalar inputs and list properties, with every
+  derived value it reads replaced by that value's own read set, recursively (the formula
+  layer's dependency graph, `src/definitions/formula`). A scalar is related when some read set
+  contains both it and the target. For a row-cell target (list property `p` of the row with
+  host ID `h`), the related scalars are those co-read with `p`, and the related cells are the
+  cells of row `h` only whose properties a read set contains together with `p` (as
+  `item.<property>` in the same iteration); cells of other rows are never sent. Such a cell is
+  a context item addressed by its typed address `cell:<list>/<h>/<property>` (the row's stable
+  host ID and the property ID, as the switch and Undo keys and the orphan rules address cells,
+  ASSIST-7, ASSIST-12), and a `ref` names that exact address; Rust maps it to the row by host
+  ID, binds it in the read set (address, host ID, value), and drops the option if the row or
+  the cell is not the one supplied. The address counts towards B like any other item. Related
+  items go in definition order (scalars, then the row's cells in property order) and are
+  dropped from the end as above; pins without a formula layer send none. With B above 1,024
+  the context is the D-F/D-J list above (no list cells). Candidates come only from the
+  snapshot the job is bound to, which the account may read; relatedness never widens what is
+  read.
 - **Output contract:** JSON, checked by llama-server's schema grammar and again in Rust
   (`jsonschema`, then typed Serde decoding, then domain checks), with explicit limits: at most
   3 options, each an expression and an explanation of at most 120 characters, or an
@@ -103,8 +112,9 @@ implementation for both).
   "<field id>"}` or `{"op": "add" | "sub" | "mul" | "div", "l": node, "r": node}`, and a
   `div` node also carries `"round": "floor" | "ceil" | "exact"` (`exact` drops the option on a
   remainder); depth at most 3 below the root, so at most 8 leaves. A negative `lit` is allowed;
-  its magnitude is what provenance checks. References name supplied integer fields only: an
-  enum field is context for reading, and a `ref` to it drops the option.
+  its magnitude is what provenance checks. References name supplied integer fields or
+  supplied same-row integer cells only: an enum field or cell is context for reading, and a
+  `ref` to it drops the option.
   Rust evaluates with checked `i128` arithmetic and range-checks the result to `i64` as
   `entry.rs` does; overflow, division by zero, a reference to an unknown value (D-Z), to a field
   not supplied, or to an excluded type drops the option. Literal provenance: the magnitude of
@@ -189,11 +199,12 @@ implementation for both).
   recheck rights; the `JOBS` permit is not held during the model call. A reminder job (step 3)
   takes its own low-priority slot on the same worker, after interpretations, one per account.
 - **Circuit breaker:** one per configured endpoint, in memory (reset on restart). It counts
-  only transport errors, HTTP 4xx and 5xx, a response over the body bound, and run-deadline
-  expiry. A completed, bounded HTTP 2xx exchange is a success whatever its content (an answer
-  whose options are all dropped still resets the count and closes a half-open breaker);
-  supersession, cancellation and queue-wait expiry (the model was never called) are
-  neutral. Three consecutive counted failures open it for 2
+  only transport errors, a child exit during the job, and invalid replies (HTTP 4xx and 5xx, a
+  response over the body bound, a stream that is not a well-formed completion). A completed,
+  bounded HTTP 2xx exchange is a success whatever its content (an answer whose options are all
+  dropped still resets the count and closes a half-open breaker); supersession, cancellation,
+  queue-wait expiry (the model was never called) and run-deadline expiry are neutral: deadline
+  expiries drive only the restart-and-re-measure rule of §1.4a. Three consecutive counted failures open it for 2
   minutes; then one half-open probe job decides (success closes, failure reopens; a cancelled
   probe clears the in-flight probe flag, leaves it half-open, and the next job becomes the
   probe; while the probe is in flight other starts answer 503 like an open breaker). While open
@@ -289,10 +300,13 @@ natively for these tests (ASSIST-40).
   `--jinja`, `--n-gpu-layers`, `--fit`, threads, `--ctx-size`, `--parallel`, `--cache-ram`,
   `--reasoning`, plus the per-request `cache_prompt: true`, `stream: true` and the greedy
   sampler (temperature 0, top-k 1, seed 0). `--parallel 1`: jobs run one at a time
-  (ASSIST-32). The 2c-2 runtime check (CI, below) runs the pinned binary's `--version` and
-  `--help` for every flag; behaviour that help text cannot show (token channels, `/health`
-  without a token, Unix-socket `--host`, `ignore_eos`, the device list format, the offload
-  line) is checked live against the pinned binary.
+  (ASSIST-32). The pinned b11610 `--help` (checked on the dev host, 2026-10-22) lists
+  `--api-key-file`, `--api-key` with the environment variable `LLAMA_API_KEY`,
+  `--ignore-eos`, `--slots`/`--no-slots`, and `--host` accepting a Unix socket path ending in
+  `.sock`. The 2c-2 runtime check (CI, below) runs the pinned binary's `--version` and
+  `--help` for every flag; behaviour that help text cannot show (`/health` without a token,
+  the per-request `ignore_eos`, the device list format, the offload line) is checked live
+  against the pinned binary.
 - **Packaging and CI (ASSIST-33, REL-2):** `package_release.py` gains an allowlist entry
   `llama/` holding exactly the manifest's files (anything else refuses the package), the
   llama.cpp build number in `BUILD.txt`, and `THIRD-PARTY-NOTICES.md` entries for llama.cpp
@@ -302,9 +316,12 @@ natively for these tests (ASSIST-40).
   and `SHA256SUMS`. A new required CI job, `llama-runtime`, fetches the pinned asset and its
   source archive, verifies both hashes, unpacks the asset, runs the flag check and the
   bubblewrap probe, and fails closed when any of these cannot run; `deployable` requires it,
-  and the packaging step uses only files it verified. A tiny pinned test model for an
-  end-to-end start in that job is a **proposal** (its licence and size checked first);
-  without it the live checks stay host measurements.
+  and the packaging step uses only files it verified. If a GGUF of at most 100 MB under
+  Apache-2.0 or MIT exists, the job also downloads it (pinned by revision and SHA-256, licence
+  recorded; never shipped) and runs an end-to-end start under bubblewrap: token refusal and
+  acceptance, the Unix socket, `/health`, one completion. Otherwise the job runs the start,
+  token and socket checks against the stub path (the fake runner) and the live end-to-end
+  start stays a host measurement.
 - **Runner:** Mimik spawns `mimik assistant-runner` (a hidden subcommand) from one dedicated,
   long-lived thread (the parent-death signal follows the spawning thread). The runner sets
   `PR_SET_PDEATHSIG` (SIGKILL), then checks that its parent is still the Mimik PID it was given
@@ -360,21 +377,24 @@ natively for these tests (ASSIST-40).
   `keyctl`, `add_key`, `request_key`, `mount`, `umount2`, `pivot_root`, `unshare`, `setns`,
   module and `kexec` calls are refused. Seccomp sees no `connect()` address, so it is never
   described as network confinement.
-- **Preflight** (every start, before level 1): bwrap present at a fixed path and new enough
-  for the arguments above; then a real probe run of the full level-1 profile executing the
+- **Preflight** (every start, before level 1): bwrap present at a fixed path; its support for
+  every option used above is probed (no remembered minimum version: bubblewrap 0.13.0 on the
+  dev host has `--unshare-all`, `--clearenv`, `--bind-fd`/`--ro-bind-fd`,
+  `--bind-data`/`--ro-bind-data`, `--perms`, `--seccomp` and `--die-with-parent`, checked
+  2026-10-22); then a real probe run of the full level-1 profile executing the
   pinned llama-server's `--version` inside it. A failure names its cause where it can be
-  told: bwrap missing or too old, user namespaces disabled (`user.max_user_namespaces`,
+  told: bwrap missing or lacking an option (named), user namespaces disabled (`user.max_user_namespaces`,
   `kernel.unprivileged_userns_clone`), the Ubuntu AppArmor restriction on unprivileged user
   namespaces (`kernel.apparmor_restrict_unprivileged_userns`), or the probe's own error. Then
   level 2 is probed the same way, then level 3.
 - **Token:** 32 bytes from the OS random source, base64url, new for every launch, held in
   memory. Channels, in order: level 1, `--ro-bind-data` from a pipe to a file inside the
   sandbox read with `--api-key-file`; levels 2 and 3, `--api-key-file` on a 0600 file in a
-  0700 private directory, deleted once `/health` answers, or the environment variable the
-  pinned build reads, set in the runner's environment (readable only by Mimik's user), never
-  in an argument. If the pinned build supports neither a file nor an environment channel, the
-  assistant does not start ("the model server cannot receive its token safely"); it never
-  runs without a token and never passes it on a command line. `/health` without a token is a
+  0700 private directory, deleted once `/health` answers (`LLAMA_API_KEY` in the runner's
+  environment, readable only by Mimik's user, is the documented alternative), never in an
+  argument. A pinned build without either channel would not start the assistant ("the model
+  server cannot receive its token safely"); b11610 has both. It never runs without a token
+  and never passes it on a command line. `/health` without a token is a
   live-checked property of the pinned build; every other request carries it.
 - **Endpoint check, per connection, before its first byte:** level 1: `SO_PEERCRED` on the
   connected Unix socket must give Mimik's UID and the child PID that bwrap reported for this
@@ -415,7 +435,7 @@ natively for these tests (ASSIST-40).
   | Attempt fails on the GPU path, or the GPU child exits, or is stopped as hung | stop and reap, start on the CPU path at once; CPU until Mimik restarts or the owner presses "Try the GPU again" | not counted |
   | Attempt fails on the CPU path | retry after 2 minutes | +1 |
   | Child exits while ready (CPU path) | restart now | +1 only within 10 minutes of `ready` |
-  | Two consecutive run-deadline expiries with no completed exchange between | stop as hung, reap, restart (whatever `/health` says) | as a child exit |
+  | Two consecutive run-deadline expiries with no completed exchange between | stop as hung, reap, restart, re-measure (whatever `/health` says); expiries never count toward the breaker | as a child exit |
   | Failure count reaches 4 (the first attempt plus 3 retries) | `unavailable` until Mimik restarts or the owner presses "Restart" | — |
   | Budgets do not derive ("too slow") | `unavailable` with the numbers; no retry; "Restart" measures again | — |
   | `ready` for 10 minutes | failure count back to 0 | reset |
@@ -681,10 +701,15 @@ scope. Tests (stub or fake server unless stated):
   excluded field types never appear in the request;
 - related fields (B ≤ 1,024): a field read with the target by a check, or through a derived
   value it reads, is sent; a field only in the same group, or named in the phrase but not
-  co-read, is not; a row-cell target sends the scalars co-read with its property and no list
-  cell of any row; definition order and drop from the end; a pin without a formula layer sends
+  co-read, is not; a row-cell target sends the scalars co-read with its property; definition order and drop from the end; a pin without a formula layer sends
   none; with B 2,048 the full D-F/D-J list is sent; a `ref` to an unsent field or to an enum
   field drops the option;
+- same-row cells (B ≤ 1,024): for a target cell of row `h`, a cell of row `h` co-read with the
+  target's property (`item.a` and `item.b` in one check) is sent as `cell:<list>/<h>/<b>`, a
+  cell of another row with the same property never is, nor a same-row cell not co-read; a
+  `ref` to that exact address evaluates with its value; a `ref` naming another row's host ID
+  or a property of row `h` that was not sent drops the option; the row moved since the job →
+  found by host ID; the cell changed or the row removed before apply → apply refused;
 - injection: a phrase containing "ignore previous instructions" yields at most an option,
   never a write without Use; a context value with instructions stays inside the data envelope;
 - origin: scribble A → scribble B with the same stored value; scribble → typed value; a save
@@ -710,7 +735,9 @@ scope. Tests (stub or fake server unless stated):
   nonsense answers never open it; supersession and cancellation never count; one half-open
   probe while others are refused; probe success closes, failure reopens; a 2xx with all
   options dropped resets the count and closes a half-open breaker; a cancelled probe clears the
-  probe flag and leaves it half-open; a queue-wait expiry does not count; mixed sequences (failure, success, failure) do not open it; while open, number
+  probe flag and leaves it half-open; queue-wait and run-deadline expiries never count (ten in
+  a row leave it closed); a child exit during a job and a malformed completion stream count;
+  mixed sequences (failure, success, failure) do not open it; while open, number
   entry, notes and Undo work and the poll says the assistant is unavailable; a start reports
   `starting` before an open breaker;
 - client: a host name, `localhost`, `127.1`, `0x7f.1`, `2130706433`, `::ffff:127.0.0.1`,
@@ -761,8 +788,9 @@ night or at a weekend):
   exactly the manifest's files and refuses others; the CI runtime check fails closed when the
   asset cannot be fetched or its hash differs;
 - flags (CI, pinned build): `--version` reports the pinned build; `--help` lists every flag of
-  the vector; live: the Unix-socket `--host`, the token channel, `/health` without a token and
-  `ignore_eos` behave as §1.4a assumes, or the step stops for a decision;
+  the vector; live: `/health` without a token, the per-request `ignore_eos` and the
+  device-list and offload-line formats behave as §1.4a assumes, or the step stops for a
+  decision;
 - runner: the child's environment holds only the allowed names (`/proc/<pid>/environ`); no
   inherited descriptor beyond the listed ones (`/proc/<pid>/fd`); `RLIMIT_CORE` 0; a runner
   whose parent died before the parent-death signal was set exits (parent PID mismatch); live:
@@ -787,7 +815,7 @@ night or at a weekend):
   every job, and a new token after a restart; live: no token and a wrong token on
   `/v1/chat/completions` → 401, the right one is served, `/health` answers without it; the
   token is in no command line (`/proc/<pid>/cmdline`), no log line and no file after
-  `/health` (TCP levels); a pinned build without a safe channel → the assistant does not start;
+  `/health` (TCP levels); a fake build without a safe channel → the assistant does not start;
 - endpoint: level 1: a socket in the directory created by another process, or a peer whose
   credentials are not the child's → nothing sent; levels 2 and 3: a squatter on the port →
   nothing sent; a child that exits between the check and the request → the connection fails,
@@ -1007,8 +1035,7 @@ restore; owner-reviewed reminder rules without a model (D-I); a model for quick-
 threads off-hours; the quality bar; macOS (Metal) and Windows (Vulkan) runtime, confinement,
 lifecycle, endpoint check (no token to an unverified listener) and model-file rules, verified
 on a host of each, and Windows confinement without administrator rights (AppContainer);
-measurements on other GPUs; parallel slots on the GPU path (ASSIST-32); same-row list cells as
-context with a typed row-cell reference (ASSIST-37); fraction words and number words across
+measurements on other GPUs; parallel slots on the GPU path (ASSIST-32); fraction words and number words across
 languages (ASSIST-38); gated Hugging Face repositories (owner token) and split GGUF files;
 partial GPU offload; retiring the legacy full-form edit POST; definitions
 choosing a fallback for unknown (L-U4).
