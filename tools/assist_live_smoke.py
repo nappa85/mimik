@@ -69,7 +69,7 @@ def start_job(cookie, sheet, csrf, key):
     return json.loads(body)["poll"]
 
 
-def wait(cookie, poll, limit=300):
+def wait(cookie, poll, limit=600):
     began = time.monotonic()
     while time.monotonic() - began < limit:
         status, _, body = auth_request(poll, cookie=cookie, headers={"Accept": "application/json"})
@@ -87,6 +87,13 @@ def main(argv=None):
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument("--data", type=Path, required=True)
+    parser.add_argument(
+        "--deadline",
+        type=int,
+        default=None,
+        help="--assistant-dev-deadline for an unprimed server (its first request evaluates "
+        "the whole fixed prefix)",
+    )
     args = parser.parse_args(argv)
     binary = args.binary.resolve(strict=True)
     fixture = args.fixture.resolve(strict=True)
@@ -101,6 +108,11 @@ def main(argv=None):
         args.endpoint,
         "--assistant-dev-token-file",
         str(args.token_file.resolve(strict=True)),
+        *(
+            ("--assistant-dev-deadline", str(args.deadline), "--assistant-dev-queue-wait", "600")
+            if args.deadline
+            else ()
+        ),
     )
     process, log = start(binary, directory, auth=True, extra=extra)
     out = {}

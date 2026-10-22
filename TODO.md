@@ -7,9 +7,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 ## Current work
 
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, the plan for 2c/2d
-  and the Rust 1.99.1 / rig-core 0.45.0 upgrade are merged into master. In progress: **2c-1**
-  (interpretation against a hand-started server, dev-only) on branch `assist-2c1` in
-  `mimik-wt/catalogue`.
+  and the Rust 1.99.1 / rig-core 0.45.0 upgrade are merged into master. **2c-1** (interpretation
+  against a hand-started server, dev-only) is implemented on branch `assist-2c1` in
+  `mimik-wt/catalogue`; open: the prefix choice (v2, v2-short or v2-ex, `docs/results.md`), the
+  implementation reviews, then removal of the 2c-1 plan section and the merge.
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
   target/agent-tools/ci.sh <cmd>`, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
@@ -21,7 +22,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 1. 2c-1, then 2c-2 runtime manager, 2d-1 owner model setting, 2d-2 downloads, 3 bundles and
    reminders, 4 suggestions, 5 docs and gate (includes the `docs/release-scope.md` update for
    schema 22 and the assisted scope).
-2. Owed measurements: the rig-core 0.45.0 live request; the native CPU calibration at the
+2. Owed measurements: the native CPU calibration at the
    ASSIST-41 default and at 2 threads (2c-2); GPU-path checks at each llama.cpp pin change;
    the Qwen3.5-9B rev3 S40 re-run.
 
