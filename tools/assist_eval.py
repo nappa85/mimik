@@ -203,7 +203,10 @@ PRIME_CASE = {"id": "prime", "target": "hp", "phrase": "prime"}
 
 SCHEMAS_DIR = Path(__file__).resolve().parent.parent / "schemas"
 SCHEMA_HEADING = "\nJSON schema of the reply:\n"
-CONTRACTS = ("v1", "v2")
+# v2-short (exploratory, not adopted): the prefix quotes the schema with the ref alias enum
+# abbreviated to a description; response_format still sends the full pinned schema.
+CONTRACTS = ("v1", "v2", "v2-short")
+SHORT_REF = {"type": "string", "description": "an alias from the data: t, f<n> or c<n>"}
 
 
 @functools.cache
@@ -223,11 +226,22 @@ def contract_schema(contract):
     return SCHEMA if contract == "v1" else load_v2()[1]
 
 
+@functools.cache
+def short_prefix():
+    """The v2 instructions with the schema quoted without the alias enum."""
+    instructions, schema, _, _ = load_v2()
+    quoted = json.loads(json.dumps(schema))
+    quoted["$defs"]["ref"]["properties"]["ref"] = SHORT_REF
+    return instructions + SCHEMA_HEADING + json.dumps(quoted, separators=(",", ":"))
+
+
 def contract_prefix(contract, variant=None):
     if contract == "v1":
         return system_prefix(variant)
     if variant is not None:
         raise ValueError("prompt variants exist for v1 only")
+    if contract == "v2-short":
+        return short_prefix()
     return load_v2()[3]
 
 
@@ -370,8 +384,11 @@ def build_request(case, sheet, variant=None, contract="v1"):
     Under v2, supplied and excluded are keyed by alias: "t" for the target, "f1"... for the
     context fields in order (the same order and drop rule as v1).
     """
-    if contract == "v2":
-        return _build_request_v2(case, sheet)
+    if contract in ("v2", "v2-short"):
+        request = _build_request_v2(case, sheet)
+        request["system"] = contract_prefix(contract)
+        request["contract"] = contract
+        return request
     fields = case_sheet(case, sheet)
     by_id = {f["id"]: f for f in fields}
     target = by_id[case["target"]]
@@ -521,7 +538,7 @@ def _node_error(node, depth, contract="v1"):
         return None if isinstance(value, int) and not isinstance(value, bool) else "lit type"
     if keys == {"ref"}:
         ref = node["ref"]
-        if contract == "v2":
+        if contract != "v1":
             return None if isinstance(ref, str) and ref in v2_aliases() else "ref alias"
         if not isinstance(ref, str) or not _field_id(ref):
             return "ref id"
@@ -561,7 +578,7 @@ def _checked(value, bounds=I128):
 
 def evaluate(node, request, allowed):
     if "lit" in node:
-        if request.get("contract") == "v2" and not I64[0] <= node["lit"] <= I64[1]:
+        if request.get("contract", "v1") != "v1" and not I64[0] <= node["lit"] <= I64[1]:
             # Rust decodes a literal as i64: one outside it drops the option.
             raise Dropped("shape")
         if abs(node["lit"]) not in allowed:

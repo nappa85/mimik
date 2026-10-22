@@ -418,6 +418,19 @@ class ContractV2(unittest.TestCase):
                 ]
             )
 
+    def test_short_prefix_quotes_no_alias_enum_but_sends_the_full_schema(self):
+        req = ae.build_request(
+            {"id": "t", "target": "hp", "phrase": "heal 5"}, SHEET, contract="v2-short"
+        )
+        self.assertNotIn('"f64"', req["system"])
+        self.assertIn("an alias from the data", req["system"])
+        body = ae.chat_body(req, 192)
+        sent = body["response_format"]["json_schema"]["schema"]
+        self.assertEqual(sent, ae.load_v2()[1])
+        self.assertEqual(
+            ae.shown_values(ae.validate_reply(reply(op("add", ref("t"), lit(5))), req)), [25]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
