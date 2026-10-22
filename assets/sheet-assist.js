@@ -898,33 +898,57 @@ function showAssistant(unit, token, answer) {
   box.replaceChildren(heading);
 }
 
-/** Use: posts the apply route; the answer is a unit save's answer. */
+/** Use: posts the apply route; the answer is a unit save's answer. It is the unit's flight
+ * like a save: the draft generation and sequence are taken before the request, a save asked
+ * for meanwhile waits in the unit's queue, and page posts wait for it, so a draft typed while
+ * Use is on its way is kept. */
 async function applyOption(unit, token, action, button) {
-  if (token !== unit.assist || unit.flight) {
+  if (token !== unit.assist || unit.flight || unit.orphan) {
     return;
   }
   button.disabled = true;
+  unit.seq += 1;
+  const flight = { key: null, gen: unit.gen, seq: unit.seq, submitter: null };
+  unit.flight = flight;
+  pending += 1;
+  unit.form.setAttribute('aria-busy', 'true');
   let result;
   try {
     result = await postForm(action, [['csrf', csrfOf(unit)]]);
   } catch {
     result = { status: 0, answer: null };
   }
-  if (token !== unit.assist) {
-    return;
+  unit.flight = null;
+  unit.form.removeAttribute('aria-busy');
+  try {
+    if (result.status === 200 && valid(result.answer)) {
+      stopAssist(unit);
+      settle(unit, flight, result.answer, 200, null);
+    } else if (token === unit.assist) {
+      assistText(
+        unit,
+        record(result.answer) && text(result.answer.message)
+          ? result.answer.message
+          : 'Not used: the server did not answer; try again.',
+      );
+    }
+  } catch {
+    setAlert(unit, failure(0));
+  } finally {
+    pending -= 1;
+    const queued = unit.queued;
+    unit.queued = null;
+    if (queued) {
+      pending -= 1;
+    }
+    try {
+      if (queued) {
+        request(unit, queued.explicit, queued.submitter);
+      }
+    } finally {
+      settled();
+    }
   }
-  if (result.status === 200 && valid(result.answer)) {
-    stopAssist(unit);
-    unit.seq += 1;
-    settle(unit, { key: null, gen: unit.gen, seq: unit.seq, submitter: null }, result.answer, 200, null);
-    unit.control.focus();
-    return;
-  }
-  const message =
-    record(result.answer) && text(result.answer.message)
-      ? result.answer.message
-      : 'Not used: the server did not answer; try again.';
-  assistText(unit, message);
 }
 
 function enhance(form) {

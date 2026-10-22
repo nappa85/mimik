@@ -148,6 +148,14 @@ def until(page, expression, what):
     raise AssertionError(f"Timed out waiting for {what}")
 
 
+def until_python(page, check, what):
+    for _ in range(400):
+        if check():
+            return
+        page.wait_for_timeout(50)
+    raise AssertionError(f"Timed out waiting for {what}")
+
+
 def scenario(page, sheet):
     errors = []
     page.add_init_script(CSP_PROBE)
@@ -184,10 +192,25 @@ def scenario(page, sheet):
     require(box.get_attribute("role") == "status", "The assistant box is not a status region")
     no_overflow(page, "assistant option")
 
-    # Use: the value and its Undo, then Undo restores it.
+    # Use: held at the network while the player types, so the draft typed meanwhile must
+    # survive the answer (the value is saved, the control keeps the draft); then Undo.
+    held = []
+    page.route("**/proposals/**", lambda route: held.append(route))
     box.locator(".assist-use").click()
-    until(page, f"document.querySelector('#v0').value === '{value - 15}'", "the applied value")
+    until_python(page, lambda: bool(held), "the apply request")
+    hp.fill("70 typed meanwhile")
+    route = held[0]
+    route.fulfill(response=route.fetch())
+    page.unroute("**/proposals/**")
+    until(page, "!document.querySelector('form[aria-busy]')", "the apply answer")
     until(page, "!!document.querySelector('#undo-0')", "the Undo of the applied value")
+    page.wait_for_timeout(300)
+    require(
+        hp.input_value() == "70 typed meanwhile",
+        "A draft typed while Use was in flight was overwritten",
+    )
+    # Back to the saved value, so leaving the field for Undo saves nothing.
+    hp.fill(str(value - 15))
     require(
         page.locator("#was-0").inner_text() == f"Last change: was {value}",
         "The applied value offers no Undo to the value before",
