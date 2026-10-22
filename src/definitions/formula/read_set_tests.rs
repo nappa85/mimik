@@ -161,3 +161,36 @@ fn the_unknown_guard_is_unchanged() {
     assert_eq!(evaluation.derived[0].1, Err(Code::NullValue));
     assert_eq!(evaluation.constraints[0].1, Outcome::Error(Code::NullValue));
 }
+
+#[test]
+fn a_filter_then_map_over_one_list_is_one_iteration() {
+    let all = sets(
+        &[
+            ("kept", "sum(gear.filter(i, i.c > 0).map(j, j.a))"),
+            (
+                "twice",
+                "sum(gear.filter(i, i.c > 0).filter(k, k.b > 0).map(j, j.a))",
+            ),
+        ],
+        &[("some", "gear.filter(i, !has(i.broken)).exists(j, j.b > 0)")],
+    );
+    assert_eq!(
+        names(&one(&all, "kept").co_read_properties("gear", "a")),
+        ["c"]
+    );
+    assert_eq!(one(&all, "kept").iterations.len(), 1);
+    assert_eq!(
+        names(&one(&all, "twice").co_read_properties("gear", "a")),
+        ["b", "c"]
+    );
+    assert_eq!(
+        names(&one(&all, "some").co_read_properties("gear", "b")),
+        ["broken"]
+    );
+    // Two comprehensions that are not chained stay two iterations.
+    let apart = sets(
+        &[("x", "sum(gear.map(i, i.a)) + size(gear.filter(j, j.c > 0))")],
+        &[],
+    );
+    assert!(one(&apart, "x").co_read_properties("gear", "a").is_empty());
+}

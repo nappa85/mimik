@@ -349,6 +349,7 @@ pub(super) fn compile(
         scope: Vec::new(),
         next_binder: *next_binder,
         iterations: BTreeMap::new(),
+        filter_binder: None,
         in_body: false,
         multiplier: 1,
         cost: 0,
@@ -471,6 +472,9 @@ struct Checker<'a> {
     scope: Vec<(String, Ty, u32)>,
     next_binder: u32,
     iterations: BTreeMap<u32, (String, BTreeSet<String>)>,
+    /// The binder of the filter comprehension just checked, for a comprehension whose range
+    /// it is.
+    filter_binder: Option<u32>,
     in_body: bool,
     multiplier: u64,
     cost: u64,
@@ -702,7 +706,14 @@ impl Checker<'_> {
             return Err(Code::NestedAggregate);
         }
         let shape = shape(comprehension).ok_or(Code::UnsupportedConstruct)?;
+        self.filter_binder = None;
         let range = self.check(&comprehension.iter_range)?;
+        // A range that is a filter over the list's records (`gear.filter(i, …).map(j, …)`)
+        // walks the same items: the same iteration, so the same binder (read sets only).
+        let chained = match &comprehension.iter_range.expr {
+            Expr::Comprehension(_) => self.filter_binder.take(),
+            _ => None,
+        };
         let Ty::List(element) = range.ty else {
             return Err(Code::TypeMismatch);
         };
@@ -715,8 +726,11 @@ impl Checker<'_> {
         {
             return Err(Code::InvalidIterationVariable);
         }
-        let binder = self.next_binder;
-        self.next_binder = self.next_binder.saturating_add(1);
+        let binder = chained.unwrap_or_else(|| {
+            let binder = self.next_binder;
+            self.next_binder = self.next_binder.saturating_add(1);
+            binder
+        });
         self.scope
             .push((variable.clone(), (*element).clone(), binder));
         self.in_body = true;
@@ -733,7 +747,12 @@ impl Checker<'_> {
         self.scope.pop();
         let body = body?;
         match shape {
-            Shape::Filter(_) if body.ty == Ty::Bool => Ok(Typed::of(Ty::List(element))),
+            Shape::Filter(_) if body.ty == Ty::Bool => {
+                if matches!(*element, Ty::Record(_)) {
+                    self.filter_binder = Some(binder);
+                }
+                Ok(Typed::of(Ty::List(element)))
+            }
             Shape::Map(_) if matches!(body.ty, Ty::Int | Ty::Bool | Ty::Str { .. }) => {
                 Ok(Typed::of(Ty::List(Box::new(plain(body.ty)))))
             }
