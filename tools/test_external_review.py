@@ -106,7 +106,7 @@ class FallbackTests(unittest.TestCase):
                 "opencode/beam-free",
             ),
         )
-        self.assertEqual(external_review.CHAINS["main"], ("openai/gpt-6.1-sol",))
+        self.assertEqual(external_review.CHAINS["main"], ("openai/gpt-6-astra",))
 
     def test_first_working_model_is_used_and_later_ones_not_tried(self):
         bunny, deepseek, muse = external_review.THIRD_REVIEWER_CHAIN
@@ -256,7 +256,7 @@ class FreeTierTests(unittest.TestCase):
             with self.assertRaises(BlockingIOError):
                 fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
             os.close(other)
-        self.assertIsNone(external_review.free_model_lock("openai/gpt-6.1-sol").__enter__())
+        self.assertIsNone(external_review.free_model_lock("openai/gpt-6-astra").__enter__())
 
 
 if __name__ == "__main__":

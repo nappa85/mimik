@@ -22,15 +22,15 @@ import tempfile
 import time
 from pathlib import Path
 
-# User decision 2026-10-16: Sol and a Sonnet subagent are the main reviewers. The third
+# User decision 2026-10-22: Astra and a Sonnet subagent are the main reviewers. The third
 # reviewer is the first of these that works; if none works, the review proceeds with two.
-SOL_MODEL = "openai/gpt-6.1-sol"
+MAIN_MODEL = "openai/gpt-6-astra"
 THIRD_REVIEWER_CHAIN = (
     "opencode/minimax-m3.1-flash-free",
     "opencode/deepseek-v4.1-flash-free",
     "opencode/beam-free",
 )
-CHAINS = {"main": (SOL_MODEL,), "third": THIRD_REVIEWER_CHAIN}
+CHAINS = {"main": (MAIN_MODEL,), "third": THIRD_REVIEWER_CHAIN}
 EXCLUDES = (
     ".env",
     ".env.*",

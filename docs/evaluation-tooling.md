@@ -104,7 +104,7 @@ Outer elapsed-deadline controller for GGUF transfers.
 
 Implements the reviewer setup defined in `AGENTS.md`.
 
-- **Chains:** `--chain main` is `openai/gpt-6.1-sol`. `--chain third` tries
+- **Chains:** `--chain main` is `openai/gpt-6-astra`. `--chain third` tries
   `opencode/minimax-m3.1-flash-free`, then `opencode/deepseek-v4.1-flash-free`, then
   `opencode/beam-free` (reviewer benchmark 2). Without `--chain` or `--model` it uses the
   third chain.
