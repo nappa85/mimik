@@ -360,7 +360,7 @@ impl Assistant {
                 let mut table = self.table();
                 table.queue.clear();
                 for job in table.jobs.iter_mut().filter(|job| job.live()) {
-                    end(job, Answer::Restarted, now);
+                    self.end(job, Answer::Restarted, now);
                 }
             }
         }
@@ -402,11 +402,12 @@ impl Assistant {
         debug_assert_eq!(registration.sheet, origin.sheet);
         let now = Instant::now();
         let mut table = self.table();
-        let newer_write = table
-            .writes
-            .get(&origin.sheet)
-            .and_then(|writes| writes.latest.get(&origin.target))
-            .is_some_and(|latest| *latest > origin.revision);
+        let newer_write = table.writes.get(&origin.sheet).is_some_and(|writes| {
+            writes
+                .latest
+                .iter()
+                .any(|(target, latest)| *latest > origin.revision && covers(target, &origin.target))
+        });
         if newer_write {
             return Err(Refusal::Conflict);
         }
@@ -446,7 +447,7 @@ impl Assistant {
         if let Some((id, _)) = superseded {
             table.queue.retain(|queued| *queued != id);
             if let Some(job) = table.jobs.iter_mut().find(|job| job.id == id) {
-                end(job, Answer::Superseded, now);
+                self.end(job, Answer::Superseded, now);
             }
         }
         if table.jobs.len() >= MAX_RECORDS {
@@ -497,24 +498,16 @@ impl Assistant {
             let latest = writes.latest.entry(target.clone()).or_insert(revision);
             *latest = (*latest).max(revision);
         }
-        let covers = |origin: &Origin| {
+        let stale_origin = |origin: &Origin| {
             origin.sheet == sheet
                 && origin.revision < revision
-                && targets.iter().any(|target| {
-                    *target == origin.target
-                        || target.strip_prefix("row:").is_some_and(|row| {
-                            origin
-                                .target
-                                .strip_prefix("cell:")
-                                .is_some_and(|cell| cell.starts_with(&format!("{row}/")))
-                        })
-                })
+                && targets.iter().any(|target| covers(target, &origin.target))
         };
         let mut stale = Vec::new();
         for job in &mut table.jobs {
-            if covers(&job.origin) && (job.live() || job.offering(now)) {
+            if stale_origin(&job.origin) && (job.live() || job.offering(now)) {
                 stale.push(job.id);
-                end(job, Answer::Stale, now);
+                self.end(job, Answer::Stale, now);
             }
         }
         table.queue.retain(|id| !stale.contains(id));
@@ -607,13 +600,11 @@ impl Assistant {
                 continue;
             };
             if now > job.enqueued + budgets.queue_wait {
-                end(job, Answer::AskAgain, now);
-                self.breaker()
-                    .record(job.ticket, breaker::Outcome::Neutral, now.into_std());
+                self.end(job, Answer::AskAgain, now);
                 continue;
             }
             if !self.breaker().may_run(job.ticket) {
-                end(job, Answer::Unavailable, now);
+                self.end(job, Answer::Unavailable, now);
                 continue;
             }
             let cancel = Arc::new(Notify::new());
@@ -622,7 +613,7 @@ impl Assistant {
             };
             job.started = Some(now);
             let Some(draft) = job.draft.take() else {
-                end(job, Answer::AskAgain, now);
+                self.end(job, Answer::AskAgain, now);
                 continue;
             };
             return Some(Run {
@@ -649,13 +640,16 @@ impl Assistant {
         };
         let now = Instant::now();
         let mut table = self.table();
-        let Some(job) = table.jobs.iter_mut().find(|job| job.id == run.id) else {
-            return;
+        // A late answer from a job ended meanwhile is discarded; whoever ended it recorded a
+        // neutral outcome, and one more is harmless, so a probe never stays in flight.
+        let current = table.jobs.iter_mut().find(|job| {
+            job.id == run.id
+                && matches!(&job.state, State::Running { cancel } if Arc::ptr_eq(cancel, &run.cancel))
+        });
+        let Some(job) = current else {
+            drop(table);
+            return self.neutral(&run);
         };
-        // A late answer from a job cancelled meanwhile is discarded.
-        if !matches!(&job.state, State::Running { cancel } if Arc::ptr_eq(cancel, &run.cancel)) {
-            return;
-        }
         let (answer, outcome) = match result {
             None => (Answer::AskAgain, breaker::Outcome::Neutral),
             Some(Err(Attempt::TooLong)) => (Answer::TooLong, breaker::Outcome::Neutral),
@@ -667,7 +661,7 @@ impl Assistant {
             ),
             Some(Ok(answer)) => (answer, breaker::Outcome::Success),
         };
-        end(job, answer, now);
+        close(job, answer, now);
         drop(table);
         self.breaker().record(run.ticket, outcome, now.into_std());
     }
@@ -699,6 +693,21 @@ impl Assistant {
     #[cfg(test)]
     pub(crate) fn breaker_closed(&self) -> bool {
         self.breaker().is_closed()
+    }
+}
+
+impl Assistant {
+    /// Every other end of a job: a running one is cancelled (its request dropped, which
+    /// closes the connection), a queued one leaves the queue, finished options are dropped,
+    /// and its ticket gets a neutral breaker outcome, so a probe ended here (superseded,
+    /// stale, restarted, expired) leaves the breaker half-open for the next job instead of
+    /// holding the probe flag. A neutral outcome for a ticket that is not the probe, or
+    /// whose outcome is already recorded, changes nothing; a successor that took the probe
+    /// over on supersession keeps it.
+    fn end(&self, job: &mut Job, answer: Answer, now: Instant) {
+        close(job, answer, now);
+        self.breaker()
+            .record(job.ticket, breaker::Outcome::Neutral, now.into_std());
     }
 }
 
@@ -741,9 +750,22 @@ impl Assistant {
     }
 }
 
-/// Ends a job: a running one is cancelled (its request dropped, which closes the
-/// connection), a queued one leaves the queue, and finished options are dropped.
-fn end(job: &mut Job, answer: Answer, now: Instant) {
+/// Whether a note written at address `write` makes an origin at `target` non-current: the
+/// same address, or a `row:` address of the row a `cell:` target is in. One check for
+/// cancellation (`note_written`) and admission (`start`).
+fn covers(write: &str, target: &str) -> bool {
+    write == target
+        || write.strip_prefix("row:").is_some_and(|row| {
+            target.strip_prefix("cell:").is_some_and(|cell| {
+                cell.strip_prefix(row)
+                    .is_some_and(|rest| rest.starts_with('/'))
+            })
+        })
+}
+
+/// Closes a job without a breaker outcome: only for the worker's own end of a run, which
+/// records the exchange's outcome itself.
+fn close(job: &mut Job, answer: Answer, now: Instant) {
     if let State::Running { cancel } = &job.state {
         cancel.notify_one();
     }

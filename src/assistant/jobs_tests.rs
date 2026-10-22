@@ -630,3 +630,110 @@ async fn an_unavailable_runtime_is_reported_before_anything_else() {
     );
     assert_eq!(assistant.budgets(), None);
 }
+
+/// A ready assistant without a worker (jobs stay queued) whose breaker three counted
+/// failures opened and whose open time has passed: the next start is the half-open probe.
+async fn half_open_without_worker() -> Arc<Assistant> {
+    let assistant = Assistant::new();
+    assistant.event(RuntimeEvent::GenerationStarted { generation: 1 });
+    assistant.event(RuntimeEvent::Ready {
+        generation: 1,
+        budgets: budgets(),
+        interpreter: Arc::new(StubInterpreter::default()),
+    });
+    let now = Instant::now().into_std();
+    for ticket in 1000..1003 {
+        assistant.breaker().admit(ticket, now, None);
+        assistant
+            .breaker()
+            .record(ticket, breaker::Outcome::Failure { generation: 1 }, now);
+    }
+    tokio::time::advance(breaker::OPEN_FOR + Duration::from_secs(1)).await;
+    assistant
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_queued_probe_ended_by_a_note_write_leaves_the_breaker_half_open() {
+    let assistant = half_open_without_worker().await;
+    let (probe, _) = start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
+    assert_eq!(
+        start(&assistant, 2, origin(2, "field:hp", 5)),
+        Err(Refusal::Unavailable)
+    );
+    assistant.note_written(1, 6, &["field:hp".to_owned()]);
+    assert_eq!(assistant.poll(1, 1, probe), Poll::Done(Answer::Stale));
+    // The next job becomes the probe instead of the breaker refusing until a restart.
+    assert!(start(&assistant, 2, origin(2, "field:hp", 5)).is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_queued_probe_ended_by_a_generation_change_leaves_the_breaker_half_open() {
+    let assistant = half_open_without_worker().await;
+    start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
+    assistant.event(RuntimeEvent::GenerationEnded {
+        generation: 1,
+        reason: EndReason::Restart,
+    });
+    assistant.event(RuntimeEvent::GenerationStarted { generation: 2 });
+    assistant.event(RuntimeEvent::Ready {
+        generation: 2,
+        budgets: budgets(),
+        interpreter: Arc::new(StubInterpreter::default()),
+    });
+    assert!(start(&assistant, 2, origin(2, "field:hp", 5)).is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_superseded_queued_probe_hands_the_probe_to_its_successor() {
+    let assistant = half_open_without_worker().await;
+    start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
+    let (successor, _) = start(&assistant, 1, origin(1, "field:hp", 6)).unwrap();
+    // The successor is the probe: another account is still refused.
+    assert_eq!(
+        start(&assistant, 2, origin(2, "field:hp", 5)),
+        Err(Refusal::Unavailable)
+    );
+    assistant.note_written(1, 7, &["field:hp".to_owned()]);
+    assert_eq!(assistant.poll(1, 1, successor), Poll::Done(Answer::Stale));
+    assert!(start(&assistant, 2, origin(2, "field:hp", 5)).is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_queued_probe_past_its_queue_wait_leaves_the_breaker_half_open() {
+    let assistant = half_open_without_worker().await;
+    let (probe, _) = start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
+    tokio::time::advance(Duration::from_secs(36)).await;
+    tokio::spawn(Arc::clone(&assistant).work());
+    settle().await;
+    assert_eq!(assistant.poll(1, 1, probe), Poll::Done(Answer::AskAgain));
+    assert!(start(&assistant, 2, origin(2, "field:hp", 5)).is_ok());
+}
+
+#[tokio::test]
+async fn a_row_removal_between_the_database_check_and_the_enqueue_refuses_a_cell_start() {
+    let stub = Arc::new(StubInterpreter::default());
+    let assistant = ready(stub, budgets());
+    let registration = assistant.register(1, 5);
+    assistant.note_written(1, 6, &["row:gear/r1-1".to_owned()]);
+    assert_eq!(
+        assistant.start(
+            &registration,
+            1,
+            origin(1, "cell:gear/r1-1/weight", 5),
+            draft("heal 15")
+        ),
+        Err(Refusal::Conflict)
+    );
+    // Another row's removal does not.
+    assistant.note_written(1, 7, &["row:gear/r1-10".to_owned()]);
+    assert!(
+        assistant
+            .start(
+                &registration,
+                1,
+                origin(1, "cell:gear/r1-2/weight", 5),
+                draft("heal 15")
+            )
+            .is_ok()
+    );
+}
