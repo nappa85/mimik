@@ -1,0 +1,3 @@
+schemas/*.json text eol=lf
+schemas/*.txt text eol=lf
+tools/fixtures/assist-*.json text eol=lf

@@ -126,8 +126,9 @@ implementation for both).
   its magnitude is what provenance checks. Every context item carries a short request-local
   alias (`f1`, `f2`… for fields, `c1`, `c2`… for same-row cells, plus `t` for the target),
   which Rust maps to its typed address (`field:<id>` or `cell:<list>/<host>/<property>`); a
-  `ref` takes only an alias from the supplied list (output schema v2), so references stay
-  short. References name supplied integer items only: an enum field or cell is context for
+  `ref` takes an alias (output schema v2), so references stay short; the schema's alias
+  enum is a fixed superset (`t`, `f1`…`f64`, `c1`…`c31`), byte-identical across requests,
+  and Rust drops a `ref` to an alias the request did not supply. References name supplied integer items only: an enum field or cell is context for
   reading, and a `ref` to it, or to an alias not supplied, drops the option.
   Rust evaluates with checked `i128` arithmetic and range-checks the result to `i64` as
   `entry.rs` does; overflow, division by zero, a reference to an unknown value (D-Z), to a field
@@ -965,8 +966,9 @@ request builder with the byte and token bounds and the related-fields context; t
 event interface the worker consumes (`generation started`, `generation ended` with its reason,
 `ready` with the budgets B, N(B), R, D, Q), fed in 2c-1 by the development endpoint's fixed
 configuration and by test doubles, and in 2c-2 by the runtime manager; the formula layer's
-read-set accessor (§1.4, Read sets); output schema v2, reviewed before use: `ref` accepts only
-a request-local alias from the supplied list (`f1`, `c1`, `t`), the instructions describe
+read-set accessor (§1.4, Read sets); output schema v2, reviewed before use: `ref` takes a
+request-local alias from a fixed superset (`t`, `f1`…`f64`, `c1`…`c31`; Rust drops an alias
+not supplied), the instructions describe
 aliases and same-row cells, the 2b screen re-run under v2 on the dev host to re-check
 `max_tokens` 192, the Rust copy lives under `schemas/`, the fixed prefix is re-measured
 (tokens and priming time), and a live check confirms the pinned build's grammar conversion

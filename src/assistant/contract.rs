@@ -10,8 +10,9 @@ use serde::Serialize;
 use serde_json::Value;
 use std::sync::LazyLock;
 
-/// The schema's canonical text: compact JSON with sorted keys, ASCII only, one trailing
-/// newline. It is what `response_format` carries and what the prefix quotes.
+/// The schema's text: compact JSON, ASCII only, one trailing newline, its keys in reply
+/// order (llama.cpp's grammar conversion emits object properties in document order). It is
+/// pinned by hash; `response_format` carries these bytes and the prefix quotes them.
 pub(crate) const SCHEMA_TEXT: &str = include_str!("../../schemas/interpretation-v2.json");
 /// The instructions, ending with a newline.
 pub(crate) const INSTRUCTIONS: &str =
@@ -28,11 +29,16 @@ pub(crate) const MAX_TEXT_CHARS: usize = 120;
 /// Operator levels below the root: leaves at depth 3 at most, so at most 8 leaves.
 pub(crate) const MAX_DEPTH: usize = 3;
 
+/// The largest dynamic bound B of any path (the GPU path's 4 KiB, plan §1.4a).
+pub(crate) const MAX_DYNAMIC_BYTES: usize = 4096;
+
 /// The target's alias.
 pub(crate) const TARGET_ALIAS: &str = "t";
 /// The most field aliases (`f1`…`f64`) the schema's alias enum lists. No request can supply
-/// more: at the largest dynamic bound (4,096 bytes) at most 63 of the smallest possible
-/// context items fit (tested), so the enum never makes the builder drop an item.
+/// more: at [`MAX_DYNAMIC_BYTES`] at most 63 of the smallest possible context items fit
+/// (tested at the exact boundary), so the enum never makes the builder drop an item. The
+/// schema is a superset of every request's aliases: Rust drops a reference to an alias the
+/// request did not supply.
 pub(crate) const MAX_FIELD_ALIASES: usize = 64;
 /// The most same-row cell aliases (`c1`…`c31`): a list item has at most 32 properties, one
 /// of which is the target.

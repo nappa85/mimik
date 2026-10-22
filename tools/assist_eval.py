@@ -407,7 +407,11 @@ def build_request(case, sheet, variant=None, contract="v1"):
     }
 
 
-def _build_request_v2(case, sheet):
+def _build_request_v2(case, sheet, limit=DYNAMIC_LIMIT):
+    """The v2 request as Rust builds it: fields ``f1``..., then the target row's cells
+    ``c1``... (``case["cells"]``: same-row integer or enum cells, already co-read), whole
+    items dropped from the end, then the target's label; the phrase, the target's ID and
+    value are never dropped."""
     fields = case_sheet(case, sheet)
     by_id = {f["id"]: f for f in fields}
     target = by_id[case["target"]]
@@ -424,6 +428,17 @@ def _build_request_v2(case, sheet):
         }
         for n, f in enumerate(others, start=1)
     ]
+    context += [
+        {
+            "alias": f"c{n}",
+            "id": cell["id"],
+            "label": cell["label"],
+            "type": cell["type"],
+            "value": cell["value"],
+        }
+        for n, cell in enumerate(case.get("cells", []), start=1)
+        if cell["type"] in ("integer", "enum")
+    ]
     payload = {
         "note": case["phrase"],
         "target": {
@@ -434,10 +449,13 @@ def _build_request_v2(case, sheet):
         },
         "context": context,
     }
-    while len(_envelope(payload).encode()) > DYNAMIC_LIMIT:
-        if not payload["context"]:
+    while len(_envelope(payload).encode()) > limit:
+        if payload["context"]:
+            payload["context"] = payload["context"][:-1]
+        elif "label" in payload["target"]:
+            del payload["target"]["label"]
+        else:
             raise ValueError("phrase and target alone exceed the dynamic limit")
-        payload["context"] = payload["context"][:-1]
     supplied = {"t": target["value"]}
     supplied.update(
         {item["alias"]: item["value"] for item in payload["context"] if item["type"] == "integer"}
@@ -542,6 +560,9 @@ def _checked(value, bounds=I128):
 
 def evaluate(node, request, allowed):
     if "lit" in node:
+        if request.get("contract") == "v2" and not I64[0] <= node["lit"] <= I64[1]:
+            # Rust decodes a literal as i64: one outside it drops the option.
+            raise Dropped("shape")
         if abs(node["lit"]) not in allowed:
             raise Dropped("provenance")
         return _checked(node["lit"])
@@ -1118,10 +1139,10 @@ def prime(args):
 def check_cases(args):
     data = load_cases(args.cases)
     for case in data["cases"]:
-        request = build_request(case, data["sheet"])
+        request = build_request(case, data["sheet"], contract=args.contract)
         if len(request["user"].encode()) > DYNAMIC_LIMIT:
             raise ValueError(case["id"])
-    print(json.dumps({"cases": len(data["cases"]), **contract_identity()}, indent=2))
+    print(json.dumps({"cases": len(data["cases"]), **contract_identity(args.contract)}, indent=2))
 
 
 def main(argv=None):
@@ -1160,7 +1181,10 @@ def main(argv=None):
     primer.add_argument("--contract", choices=CONTRACTS, default="v1")
     check = sub.add_parser("check-cases")
     check.add_argument("--cases", type=Path, default=CASES_PATH)
+    check.add_argument("--contract", choices=CONTRACTS, default="v1")
     args = parser.parse_args(argv)
+    if getattr(args, "variant", None) is not None and getattr(args, "contract", "v1") != "v1":
+        parser.error("--variant exists for --contract v1 only")
     if args.command == "run-llm":
         run_llm(args)
     elif args.command == "run-strot":

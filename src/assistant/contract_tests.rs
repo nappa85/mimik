@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 /// The reviewed fixed prefix. Any change to the instructions, the separator or the schema
 /// changes this hash and needs its own review (plan §1.4: schema v2 is reviewed before use),
 /// a new prefix measurement and the same hash in `tools/test_assist_eval.py`.
-const PREFIX_SHA256: &str = "4285137131c71e57764792548c23aa7e1bff09d38bb79c959e7c0e7990dc1f88";
+const PREFIX_SHA256: &str = "14a3a86a777908a5b68ffbaccaaeb06132b6e3e1127cc2c975445441dbc9612f";
 
 fn validator() -> jsonschema::Validator {
     jsonschema::draft202012::options()
@@ -14,12 +14,94 @@ fn validator() -> jsonschema::Validator {
         .expect("schema v2 compiles")
 }
 
+/// The reviewed schema text, pinned by hash: its key order is the order llama.cpp's grammar
+/// conversion emits object properties in, so it is part of the contract.
+const SCHEMA_SHA256: &str = "39da79360e8d4b67d8360e572ef8c306319a0338fd5358e80eea8b66b1d491fa";
+
 #[test]
-fn schema_text_is_canonical_and_named() {
-    let canonical = serde_json::to_string(&*SCHEMA).unwrap();
-    assert_eq!(format!("{canonical}\n"), SCHEMA_TEXT);
+fn schema_text_is_pinned_compact_and_named() {
+    assert_eq!(
+        hex::encode(Sha256::digest(SCHEMA_TEXT.as_bytes())),
+        SCHEMA_SHA256
+    );
     assert!(SCHEMA_TEXT.is_ascii());
+    assert!(SCHEMA_TEXT.ends_with("}\n") && !SCHEMA_TEXT.contains("\r"));
+    // Re-serialising keeps the file's own key order (serde_json's `preserve_order`, which
+    // rig-core enables), so the bytes sent in `response_format` are the pinned text.
+    assert_eq!(
+        format!("{}\n", serde_json::to_string(&*SCHEMA).unwrap()),
+        SCHEMA_TEXT
+    );
     assert_eq!(SCHEMA["title"], SCHEMA_NAME);
+}
+
+fn property_order(schema: &Value) -> Vec<&str> {
+    schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect()
+}
+
+#[test]
+fn every_object_lists_its_properties_in_reply_order() {
+    assert_eq!(property_order(&SCHEMA["oneOf"][0]), ["kind", "options"]);
+    assert_eq!(property_order(&SCHEMA["oneOf"][1]), ["kind", "readings"]);
+    let defs = &SCHEMA["$defs"];
+    assert_eq!(property_order(&defs["option"]), ["expr", "explanation"]);
+    assert_eq!(property_order(&defs["lit"]), ["lit"]);
+    assert_eq!(property_order(&defs["ref"]), ["ref"]);
+    for level in ["n0", "n1", "n2"] {
+        let alternatives = defs[level]["anyOf"].as_array().unwrap();
+        assert_eq!(
+            property_order(&alternatives[2]),
+            ["op", "l", "r"],
+            "{level}"
+        );
+        assert_eq!(
+            property_order(&alternatives[3]),
+            ["op", "round", "l", "r"],
+            "{level}"
+        );
+    }
+    for schema in SCHEMA["oneOf"].as_array().unwrap() {
+        assert_eq!(
+            schema
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["type", "properties", "required", "additionalProperties"]
+        );
+    }
+}
+
+#[test]
+fn the_schema_states_the_rust_limits() {
+    for (alternative, list) in [(0, "options"), (1, "readings")] {
+        let items = &SCHEMA["oneOf"][alternative]["properties"][list];
+        assert_eq!(items["maxItems"], MAX_OPTIONS);
+    }
+    let readings = &SCHEMA["oneOf"][1]["properties"]["readings"];
+    assert_eq!(readings["minItems"], 1);
+    assert_eq!(readings["items"]["maxLength"], MAX_TEXT_CHARS);
+    assert_eq!(
+        SCHEMA["$defs"]["option"]["properties"]["explanation"]["maxLength"],
+        MAX_TEXT_CHARS
+    );
+    // n0 is the root, n3 the deepest level: leaves only, so MAX_DEPTH operator levels.
+    assert_eq!(SCHEMA["$defs"]["n3"]["anyOf"].as_array().unwrap().len(), 2);
+    let levels = ["n0", "n1", "n2", "n3"];
+    assert_eq!(levels.len(), MAX_DEPTH + 1);
+    for (level, next) in levels.iter().zip(levels.iter().skip(1)) {
+        let alternatives = SCHEMA["$defs"][*level]["anyOf"].as_array().unwrap();
+        assert_eq!(
+            alternatives[2]["properties"]["l"]["$ref"],
+            format!("#/$defs/{next}")
+        );
+    }
 }
 
 #[test]
@@ -66,6 +148,10 @@ fn smallest(n: usize) -> EnvelopeItem {
     }
 }
 
+/// The bound proof's minima: IDs and labels have at least one character (definition
+/// schema `minLength` 1), an enum value is an option ID of at least one character, and an
+/// enum item is never larger than an integer one; aliases are dense from `f1`; the target
+/// label is the first thing dropped, and a phrase has at least one character.
 #[test]
 fn the_field_alias_enum_covers_every_item_count_at_the_largest_bound() {
     let mut content = Envelope {
@@ -78,16 +164,14 @@ fn the_field_alias_enum_covers_every_item_count_at_the_largest_bound() {
         },
         context: Vec::new(),
     };
-    let mut fitting = 0;
-    for n in 1..=300 {
+    for n in 1..=63 {
         content.context.push(smallest(n));
-        if envelope(&content).len() > 4096 {
-            break;
-        }
-        fitting = n;
     }
-    assert!(fitting < MAX_FIELD_ALIASES, "{fitting} items fit");
-    // An integer item is never smaller than the enum one.
+    assert!(envelope(&content).len() <= MAX_DYNAMIC_BYTES);
+    content.context.push(smallest(64));
+    assert!(envelope(&content).len() > MAX_DYNAMIC_BYTES);
+    // So at most 63 fields fit and f64 is one alias to spare.
+    const { assert!(MAX_FIELD_ALIASES > 63) };
     let integer = EnvelopeItem {
         kind: ItemKind::Integer,
         value: json!(0),
@@ -97,6 +181,55 @@ fn the_field_alias_enum_covers_every_item_count_at_the_largest_bound() {
         serde_json::to_string(&integer).unwrap().len()
             >= serde_json::to_string(&smallest(1)).unwrap().len()
     );
+}
+
+#[test]
+fn the_cell_alias_enum_covers_every_other_property_of_a_row() {
+    let definition: Value =
+        serde_json::from_str(include_str!("../../schemas/definition-v1.json")).unwrap();
+    let properties = definition["$defs"]["items"]["properties"]["properties"]["maxItems"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(usize::try_from(properties).unwrap(), MAX_CELL_ALIASES + 1);
+    assert_eq!(
+        crate::definitions::formula::MAX_PROPERTIES,
+        MAX_CELL_ALIASES + 1
+    );
+}
+
+/// The golden envelope shared with `tools/test_assist_eval.py`.
+#[test]
+fn the_golden_envelope_matches_the_python_screen() {
+    let golden: Value =
+        serde_json::from_str(include_str!("../../tools/fixtures/assist-envelope-v2.json")).unwrap();
+    let input = &golden["envelope"];
+    let target = &input["target"];
+    let content = Envelope {
+        note: input["note"].as_str().unwrap().into(),
+        target: EnvelopeTarget {
+            alias: TARGET_ALIAS,
+            id: target["id"].as_str().unwrap().into(),
+            label: target["label"].as_str().map(str::to_owned),
+            value: target["value"].as_i64(),
+        },
+        context: input["context"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| EnvelopeItem {
+                alias: item["alias"].as_str().unwrap().into(),
+                id: item["id"].as_str().unwrap().into(),
+                label: item["label"].as_str().unwrap().into(),
+                kind: if item["type"] == "integer" {
+                    ItemKind::Integer
+                } else {
+                    ItemKind::Enum
+                },
+                value: item["value"].clone(),
+            })
+            .collect(),
+    };
+    assert_eq!(envelope(&content), golden["dynamic"].as_str().unwrap());
 }
 
 #[test]

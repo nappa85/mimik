@@ -318,11 +318,7 @@ class Files(unittest.TestCase):
         self.assertEqual(out["schema_valid"], "1/1")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-V2_PREFIX_SHA256 = "4285137131c71e57764792548c23aa7e1bff09d38bb79c959e7c0e7990dc1f88"
+V2_PREFIX_SHA256 = "14a3a86a777908a5b68ffbaccaaeb06132b6e3e1127cc2c975445441dbc9612f"
 
 
 class ContractV2(unittest.TestCase):
@@ -357,3 +353,69 @@ class ContractV2(unittest.TestCase):
         self.assertEqual(enum["options"][0]["dropped"], "excluded_ref")
         cross = ae.validate_reply(reply(op("add", ref("f1"), lit(5))), req)
         self.assertEqual(ae.shown_values(cross), [8])
+
+    def test_golden_envelope_matches_the_rust_copy(self):
+        golden = json.loads(
+            (Path(ae.__file__).parent / "fixtures" / "assist-envelope-v2.json").read_text()
+        )
+        self.assertEqual(ae._envelope(golden["envelope"]), golden["dynamic"])
+
+    def test_a_literal_outside_i64_drops_the_option_as_in_rust(self):
+        # Sol M2: target i64::MIN, "gain 1", 9223372036854775808 - 1 fits i64 but its
+        # literal does not.
+        sheet = {"fields": [{"id": "hp", "label": "HP", "type": "integer", "value": -(2**63)}]}
+        req = ae.build_request(
+            {"id": "t", "target": "hp", "phrase": "gain 1"}, sheet, contract="v2"
+        )
+        result = ae.validate_reply(reply(op("sub", lit(2**63), lit(1))), req)
+        self.assertEqual(result["options"][0]["dropped"], "shape")
+
+    def test_cells_get_c_aliases_and_the_label_goes_last(self):
+        case = {
+            "id": "t",
+            "target": "hp",
+            "phrase": "x",
+            "cells": [
+                {"id": "weight", "label": "Weight", "type": "integer", "value": 3},
+                {"id": "note", "label": "Note", "type": "text", "value": "n"},
+            ],
+        }
+        req = ae._build_request_v2(case, SHEET)
+        self.assertEqual(req["supplied"]["c1"], 3)
+        self.assertNotIn('"note","label"', req["user"])
+        bare = ae._build_request_v2(
+            case,
+            SHEET,
+            limit=len(
+                '<data>\n{"note":"x","target":{"alias":"t","id":"hp","value":20},"context":[]}\n</data>'
+            ),
+        )
+        self.assertNotIn("label", json.loads(bare["user"][7:-8])["target"])
+        self.assertEqual(json.loads(bare["user"][7:-8])["context"], [])
+
+    def test_variant_with_v2_is_refused_cleanly(self):
+        # run-llm refuses the pair at parse time, before any ledger or request.
+        with self.assertRaises(SystemExit):
+            ae.main(
+                [
+                    "run-llm",
+                    "--endpoint",
+                    "http://127.0.0.1:9/v1",
+                    "--model-label",
+                    "x",
+                    "--model-sha256",
+                    "0",
+                    "--output",
+                    "/nonexistent/x",
+                    "--deadline-epoch",
+                    "0",
+                    "--variant",
+                    "distinct",
+                    "--contract",
+                    "v2",
+                ]
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()
