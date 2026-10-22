@@ -26,6 +26,7 @@ outside the ledger, which stays local.
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import math
@@ -197,6 +198,44 @@ def system_prefix(variant=None):
 
 PRIME_CASE = {"id": "prime", "target": "hp", "phrase": "prime"}
 
+# ---- output schema v2 (step 2c-1): the Rust copy under schemas/ is the source of truth.
+# A ``ref`` names a request-local alias ("t", "f1"..., "c1"...) instead of a field ID.
+
+SCHEMAS_DIR = Path(__file__).resolve().parent.parent / "schemas"
+SCHEMA_HEADING = "\nJSON schema of the reply:\n"
+CONTRACTS = ("v1", "v2")
+
+
+@functools.cache
+def load_v2():
+    """(instructions, schema, schema_text, prefix) of schema v2, read from schemas/."""
+    instructions = (SCHEMAS_DIR / "interpretation-v2-instructions.txt").read_text()
+    schema_text = (SCHEMAS_DIR / "interpretation-v2.json").read_text().rstrip("\n")
+    return (
+        instructions,
+        json.loads(schema_text),
+        schema_text,
+        (instructions + SCHEMA_HEADING + schema_text),
+    )
+
+
+def contract_schema(contract):
+    return SCHEMA if contract == "v1" else load_v2()[1]
+
+
+def contract_prefix(contract, variant=None):
+    if contract == "v1":
+        return system_prefix(variant)
+    if variant is not None:
+        raise ValueError("prompt variants exist for v1 only")
+    return load_v2()[3]
+
+
+@functools.cache
+def v2_aliases():
+    return frozenset(load_v2()[1]["$defs"]["ref"]["properties"]["ref"]["enum"])
+
+
 # ---- phrase-number lexer (§1.4)
 
 SEPARATORS = frozenset(".,٫٬，．")
@@ -325,8 +364,14 @@ def _envelope(payload):
     return "<data>\n" + text + "\n</data>"
 
 
-def build_request(case, sheet, variant=None):
-    """Returns (system, user, supplied) where supplied maps field id -> value for refs."""
+def build_request(case, sheet, variant=None, contract="v1"):
+    """Returns (system, user, supplied) where supplied maps field id -> value for refs.
+
+    Under v2, supplied and excluded are keyed by alias: "t" for the target, "f1"... for the
+    context fields in order (the same order and drop rule as v1).
+    """
+    if contract == "v2":
+        return _build_request_v2(case, sheet)
     fields = case_sheet(case, sheet)
     by_id = {f["id"]: f for f in fields}
     target = by_id[case["target"]]
@@ -362,11 +407,60 @@ def build_request(case, sheet, variant=None):
     }
 
 
+def _build_request_v2(case, sheet):
+    fields = case_sheet(case, sheet)
+    by_id = {f["id"]: f for f in fields}
+    target = by_id[case["target"]]
+    if target["type"] != "integer":
+        raise ValueError("target must be an integer field")
+    others = [f for f in fields if f["id"] != target["id"] and f["type"] in ("integer", "enum")]
+    context = [
+        {
+            "alias": f"f{n}",
+            "id": f["id"],
+            "label": f["label"],
+            "type": f["type"],
+            "value": f["value"],
+        }
+        for n, f in enumerate(others, start=1)
+    ]
+    payload = {
+        "note": case["phrase"],
+        "target": {
+            "alias": "t",
+            "id": target["id"],
+            "label": target["label"],
+            "value": target["value"],
+        },
+        "context": context,
+    }
+    while len(_envelope(payload).encode()) > DYNAMIC_LIMIT:
+        if not payload["context"]:
+            raise ValueError("phrase and target alone exceed the dynamic limit")
+        payload["context"] = payload["context"][:-1]
+    supplied = {"t": target["value"]}
+    supplied.update(
+        {item["alias"]: item["value"] for item in payload["context"] if item["type"] == "integer"}
+    )
+    excluded = {item["alias"] for item in payload["context"] if item["type"] != "integer"}
+    return {
+        "contract": "v2",
+        "system": contract_prefix("v2"),
+        "user": _envelope(payload),
+        "supplied": supplied,
+        "excluded": sorted(excluded),
+        "target": "t",
+        "target_value": target["value"],
+        "phrase": case["phrase"],
+    }
+
+
 # ---- output validation
 
 
-def schema_errors(reply):
-    """Structural check of the reply against SCHEMA, independent of jsonschema."""
+def schema_errors(reply, contract="v1"):
+    """Structural check of the reply against the contract's schema, independent of
+    jsonschema."""
     if not isinstance(reply, dict):
         return "not an object"
     kind = reply.get("kind")
@@ -380,7 +474,7 @@ def schema_errors(reply):
                 return "option shape"
             if not _text_ok(option["explanation"]):
                 return "explanation"
-            error = _node_error(option["expr"], 0)
+            error = _node_error(option["expr"], 0, contract)
             if error:
                 return error
         return None
@@ -399,7 +493,7 @@ def _text_ok(text):
     return isinstance(text, str) and 1 <= len(text) <= MAX_TEXT
 
 
-def _node_error(node, depth):
+def _node_error(node, depth, contract="v1"):
     if not isinstance(node, dict):
         return "node type"
     keys = set(node)
@@ -408,6 +502,8 @@ def _node_error(node, depth):
         return None if isinstance(value, int) and not isinstance(value, bool) else "lit type"
     if keys == {"ref"}:
         ref = node["ref"]
+        if contract == "v2":
+            return None if isinstance(ref, str) and ref in v2_aliases() else "ref alias"
         if not isinstance(ref, str) or not _field_id(ref):
             return "ref id"
         return None
@@ -421,7 +517,9 @@ def _node_error(node, depth):
             return "round"
     else:
         return "operator shape"
-    return _node_error(node["l"], depth + 1) or _node_error(node["r"], depth + 1)
+    return _node_error(node["l"], depth + 1, contract) or _node_error(
+        node["r"], depth + 1, contract
+    )
 
 
 def _field_id(value):
@@ -493,7 +591,7 @@ def validate_reply(text, request, validator=None):
     except (TypeError, ValueError):
         return result
     result["json"] = True
-    structural = schema_errors(reply)
+    structural = schema_errors(reply, request.get("contract", "v1"))
     if validator is not None:
         jsonschema_ok = not any(True for _ in validator.iter_errors(reply))
         result["jsonschema_valid"] = jsonschema_ok
@@ -623,11 +721,12 @@ def file_sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def contract_identity():
+def contract_identity(contract="v1"):
     return {
         "eval_sha256": file_sha256(__file__),
         "cases_sha256": file_sha256(CASES_PATH),
-        "prefix_sha256": hashlib.sha256(SYSTEM_PREFIX.encode()).hexdigest(),
+        "contract": contract,
+        "prefix_sha256": hashlib.sha256(contract_prefix(contract).encode()).hexdigest(),
     }
 
 
@@ -635,6 +734,7 @@ def contract_identity():
 
 
 def chat_body(request, max_tokens, seed=0):
+    schema = contract_schema(request.get("contract", "v1"))
     return {
         "model": "screen",
         "messages": [
@@ -649,7 +749,7 @@ def chat_body(request, max_tokens, seed=0):
         "cache_prompt": True,
         "response_format": {
             "type": "json_schema",
-            "json_schema": {"name": SCHEMA["title"], "strict": True, "schema": SCHEMA},
+            "json_schema": {"name": schema["title"], "strict": True, "schema": schema},
         },
     }
 
@@ -683,19 +783,19 @@ def stream_chat(endpoint, body, timeout):
     return "".join(content), timings, usage, finish, ttft, time.monotonic() - started
 
 
-def _validator():
+def _validator(contract="v1"):
     try:
         import jsonschema
     except ImportError:
         return None
-    return jsonschema.Draft202012Validator(SCHEMA)
+    return jsonschema.Draft202012Validator(contract_schema(contract))
 
 
 def run_llm(args):
     data = load_cases(args.cases)
     sheet = data["sheet"]
     cases = [c for c in data["cases"] if not args.only or c["id"] in args.only]
-    validator = _validator()
+    validator = _validator(args.contract)
     header = {
         "event": "header",
         "arm": "llm",
@@ -704,11 +804,13 @@ def run_llm(args):
         "server_args": args.server_args,
         "max_tokens": args.max_tokens,
         "variant": args.variant,
-        "variant_prefix_sha256": hashlib.sha256(system_prefix(args.variant).encode()).hexdigest(),
+        "variant_prefix_sha256": hashlib.sha256(
+            contract_prefix(args.contract, args.variant).encode()
+        ).hexdigest(),
         "passes": args.passes,
         "jsonschema": validator is not None,
         "started_unix": time.time(),
-        **contract_identity(),
+        **contract_identity(args.contract),
     }
     with open(args.output, "x") as ledger:
         ledger.write(json.dumps(header) + "\n")
@@ -721,7 +823,9 @@ def run_llm(args):
                 row = {"event": "not_run", "case": case["id"], "pass": pass_no}
                 ledger.write(json.dumps(row) + "\n")
                 continue
-            request = build_request(case, data["sheet"] if pass_no else case["sheet"], args.variant)
+            request = build_request(
+                case, data["sheet"] if pass_no else case["sheet"], args.variant, args.contract
+            )
             row = {
                 "event": "case",
                 "case": case["id"],
@@ -901,7 +1005,9 @@ def summarize_ledger(path):
     out = {
         "arm": header["arm"],
         "model": header.get("model_label") or header.get("checkpoint"),
-        "identity": {k: header.get(k) for k in ("eval_sha256", "cases_sha256", "prefix_sha256")},
+        "identity": {
+            k: header.get(k) for k in ("eval_sha256", "cases_sha256", "contract", "prefix_sha256")
+        },
         "scheduled": len(cases) + sum(r["event"] == "not_run" for r in rows),
         "completed": len(completed),
         "failed": sum(r["status"] == "failed" for r in cases),
@@ -989,10 +1095,15 @@ def prime(args):
     Not a job and not scored; the product sends it at start, before admitting jobs.
     """
     data = load_cases(args.cases)
-    request = build_request(PRIME_CASE, data["sheet"], args.variant)
+    request = build_request(PRIME_CASE, data["sheet"], args.variant, args.contract)
     body = chat_body(request, 1)
     started = time.time()
-    row = {"event": "prime", "started_unix": started, "variant": args.variant}
+    row = {
+        "event": "prime",
+        "started_unix": started,
+        "variant": args.variant,
+        "contract": args.contract,
+    }
     try:
         content, timings, _, finish, ttft, total = stream_chat(args.endpoint, body, args.timeout)
         row.update(status="completed", timings=timings, total_seconds=total, finish_reason=finish)
@@ -1039,12 +1150,14 @@ def main(argv=None):
     summary = sub.add_parser("summarize")
     summary.add_argument("ledgers", nargs="+", type=Path)
     llm.add_argument("--variant", choices=sorted(VARIANTS), default=None)
+    llm.add_argument("--contract", choices=CONTRACTS, default="v1")
     primer = sub.add_parser("prime")
     primer.add_argument("--endpoint", required=True)
     primer.add_argument("--output", type=Path, required=True)
     primer.add_argument("--cases", type=Path, default=CASES_PATH)
     primer.add_argument("--timeout", type=float, default=600)
     primer.add_argument("--variant", choices=sorted(VARIANTS), default=None)
+    primer.add_argument("--contract", choices=CONTRACTS, default="v1")
     check = sub.add_parser("check-cases")
     check.add_argument("--cases", type=Path, default=CASES_PATH)
     args = parser.parse_args(argv)

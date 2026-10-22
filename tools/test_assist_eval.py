@@ -320,3 +320,40 @@ class Files(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+V2_PREFIX_SHA256 = "4285137131c71e57764792548c23aa7e1bff09d38bb79c959e7c0e7990dc1f88"
+
+
+class ContractV2(unittest.TestCase):
+    """Schema v2 (step 2c-1): the same files as the Rust copy, refs by alias."""
+
+    def test_prefix_matches_the_rust_copy(self):
+        import hashlib
+
+        prefix = ae.contract_prefix("v2")
+        self.assertEqual(hashlib.sha256(prefix.encode()).hexdigest(), V2_PREFIX_SHA256)
+        self.assertNotEqual(prefix, ae.contract_prefix("v1"))
+
+    def test_request_uses_aliases(self):
+        req = ae.build_request(
+            {"id": "t", "target": "hp", "phrase": "heal 5"}, SHEET, contract="v2"
+        )
+        self.assertEqual(req["supplied"], {"t": 20, "f1": 3})
+        self.assertEqual(req["excluded"], ["f2"])
+        self.assertIn('"alias":"f1","id":"strength"', req["user"])
+
+    def test_alias_refs_validate_and_field_ids_do_not(self):
+        req = ae.build_request(
+            {"id": "t", "target": "hp", "phrase": "heal 5"}, SHEET, contract="v2"
+        )
+        good = ae.validate_reply(reply(op("add", ref("t"), lit(5))), req)
+        self.assertEqual(ae.shown_values(good), [25])
+        by_id = ae.validate_reply(reply(op("add", ref("hp"), lit(5))), req)
+        self.assertFalse(by_id["schema_valid"])
+        unsupplied = ae.validate_reply(reply(op("add", ref("f9"), lit(5))), req)
+        self.assertEqual(unsupplied["options"][0]["dropped"], "unsupplied_ref")
+        enum = ae.validate_reply(reply(op("add", ref("f2"), lit(5))), req)
+        self.assertEqual(enum["options"][0]["dropped"], "excluded_ref")
+        cross = ae.validate_reply(reply(op("add", ref("f1"), lit(5))), req)
+        self.assertEqual(ae.shown_values(cross), [8])
