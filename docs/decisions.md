@@ -285,12 +285,15 @@ Versions and exact pins are in `Cargo.toml`; CI checks licences (`cargo about`) 
 - **DEP-6** (2026-10-13) Sessions use `tower-sessions` 0.15 with Mimik's rusqlite store (`src/auth/persistence.rs`) and epoch binding; published SQLite stores conflict with `libsqlite3-sys`, and `axum-login` 0.18 needs sessions 0.14.
 - **DEP-7** (2026-10-13) Passwords use `argon2` (Argon2id defaults, `zeroize`), `getrandom`, `zeroize` and `subtle`; login throttling uses `governor` as one process-wide quota. No bespoke crypto.
 - **DEP-8** (2026-10-14) Sharing uses `qrcode` (SVG only), `if-addrs` for LAN discovery and `url` for the external URL.
-- **DEP-11** (2026-10-16) `nom` 7/8, `bit-set`/`bit-vec` and dev-only `cssparser` 0.37/0.38 and `phf` duplicates are accepted transitive duplicates.
+- **DEP-11** (2026-10-16, extended 2026-10-22) `nom` 7/8, `bit-set`/`bit-vec`, dev-only `cssparser` 0.37/0.38 and `phf`, and rig-core's `base64` 0.23 and `sha2` 0.10 (with `digest`, `block-buffer` and `crypto-common`) beside Mimik's 0.22 and 0.11 are accepted transitive duplicates.
 - **DEP-12** (2026-10-19) Catalogue display-safety checks use `unicode-general-category =1.1.0`, already in the tree through jsonschema.
-- **DEP-13** (2026-10-16, refined 2026-10-19) Test-only crates (`scraper`, `proptest`, `rqrr`, `tempfile`, `tower`, `futures-util`) never enter the release binary.
+- **DEP-13** (2026-10-16, refined 2026-10-22) Test-only crates (`scraper`, `proptest`, `rqrr`, `tempfile`, `tower`) never enter the release binary.
 - **DEP-14** (2026-10-19) Advisories are taken even when unreachable: ammonia is locked at 4.2.4 for RUSTSEC-2026-0373, and `sources::sanitizer_tests` pins that no `style` attribute survives sanitisation.
 - **DEP-15** (2026-10-11) Release tooling is pinned in containers (cargo-audit, cargo-about, Ruff, actionlint, pathspec, Playwright Chromium); no custom linter, licence analyser or browser engine.
 - **DEP-16** (2026-10-22) askama is built without its `config` feature (Mimik has no `askama.toml`), which keeps the unmaintained basic-toml (RUSTSEC-2026-0374) out of the tree.
+- **DEP-17** (2026-10-22) The interpretation client is `rig-core =0.45.0` (MIT; MSRV 1.97.1; pre-1.0 with frequent breaking releases, 12 in six months, hence the exact pin; D-H, ASSIST-39), default features off plus `reqwest`, on the OpenAI chat route with the llama.cpp dialect, over Mimik's body-bounded `HttpClientExt` transport; `reqwest =0.13.5` (MIT or Apache-2.0; MSRV 1.85) with only `stream` (no TLS, no decompression), and `http`, `bytes` and `futures-util` as normal dependencies. reqwest's own Unix-socket connector carries the socket path (no `hyper` client). The release smoke check proves the release binary refuses `--assistant` and lacks the development endpoint's option; it does not prove whether rig-core and reqwest code is linked into it (the crates are compiled; nothing reaches them before 2c-2, and whether the linker keeps them is not checked).
+- **DEP-18** (2026-10-22) serde_json is built with `preserve_order` (rig-core enables it too): every JSON object keeps document order, so the assistant's schema reaches llama.cpp in its pinned key order.
+- **DEP-19** (2026-10-22) Diacritic folding of the assistant's fraction words uses `unicode-normalization =0.1.25` (MIT or Apache-2.0; MSRV 1.36), already in the tree.
 
 ## Licensing and release
 

@@ -163,8 +163,9 @@ fn unit_json<'a>(
         Unit::Field(f) => {
             let id = &definition.fields[f].id;
             let shown = fields.find(|field| field.list.is_none() && field.key == f.to_string());
+            let address = super::super::notes::field_address(id);
             let mut answer = json!({
-                "address": super::super::notes::field_address(id),
+                "address": address,
                 "action": format!("/private-sheets/{sheet}/fields/{id}"),
             });
             if let Some(field) = shown {
@@ -173,6 +174,7 @@ fn unit_json<'a>(
                     (&field.value, field.nullable.then_some(&field.value_state)),
                     (field.note.as_ref(), field.actions.as_ref()),
                 );
+                note_key(view, &address, &mut answer);
             }
             answer
         }
@@ -197,10 +199,32 @@ fn unit_json<'a>(
                     (&cell.value, property.optional.then_some(&cell.state)),
                     (cell.note.as_ref(), cell.actions.as_ref()),
                 );
+                if let Some(host) = host {
+                    let address =
+                        super::super::notes::cell_address(&list_field.id, host, &property.id);
+                    note_key(view, &address, &mut answer);
+                }
             }
             answer
         }
         Unit::NewRow(_) | Unit::QuickAdd(_) | Unit::Row { .. } => Value::Null,
+    }
+}
+
+/// Adds `key` to the shown note of an `unresolved` scribble (step 2c-1): the stored note's
+/// own revision and typed address (a row cell by host ID, never by index), which the
+/// sheet module posts to start an interpretation. Additive: older clients ignore it.
+fn note_key(view: &SheetView, address: &str, answer: &mut Value) {
+    if answer["note"]["kind"] != "unresolved" {
+        return;
+    }
+    if let Some(stored) = view
+        .notes
+        .current
+        .get(address)
+        .filter(|stored| stored.note.op == super::super::notes::Op::Unresolved)
+    {
+        answer["note"]["key"] = json!(super::super::assist::key(stored));
     }
 }
 

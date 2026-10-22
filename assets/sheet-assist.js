@@ -13,6 +13,8 @@
 // projection revision and change only for an answer at least as new.
 
 const UNIT_PATH = /^\/private-sheets\/\d+\/(?:meta\/(?:name|notes)|fields\/[^/]+|cells\/\d+\/\d+\/\d+)$/;
+const PROPOSAL_PATH = /^\/private-sheets\/\d+\/proposals\/[0-9a-f]{32}\/\d+$/;
+const POLL_PATH = /^\/private-sheets\/\d+\/interpretations\/[0-9a-f]{32}$/;
 const DIGITS = /^\d+$/;
 const JSON_TYPE = 'application/json';
 
@@ -23,6 +25,8 @@ let pending = 0;
 let waiters = [];
 const released = new WeakSet();
 const waiting = new WeakSet();
+/** The assistant (step 2c-1): `false` once its start route answered 404 (it is off). */
+let assistantOn = true;
 
 /** The only attribute names `element` sets: no inline styling, no event handler, no URL that
  * loads anything. */
@@ -591,6 +595,7 @@ function settle(unit, flight, answer, status, submitter) {
     // again, as Enter would.
     const current = unit.gen === flight.gen;
     showUnit(unit, answer.unit, answer.revision, current && answer.status === 'saved');
+    interpret(unit, answer.unit.note);
     unit.sent = answerKey(unit, answer.unit);
     unit.ack = current ? entryKey(unit.form) : unit.sent;
     announce(answer.message);
@@ -624,19 +629,24 @@ async function send(unit, key, submitter) {
   }
   body.set('base', unit.base.toString());
   unit.seq += 1;
+  stopAssist(unit);
   const flight = { key, gen: unit.gen, seq: unit.seq, submitter };
   unit.flight = flight;
   unit.sent = key;
   pending += 1;
   unit.form.setAttribute('aria-busy', 'true');
-  let answer = null;
-  let status = 0;
-  // A save that hangs counts as a network failure after 30 s, so page posts never wait
-  // for it forever.
+  const { status, answer } = await bounded(unit.form.action, body);
+  land(unit, () => settle(unit, flight, answer, status, submitter));
+}
+
+/** A POST asking for JSON, bounded: one that hangs, before its headers or inside its body,
+ * counts as a network failure after 30 s, so a unit's flight, and page posts waiting for it,
+ * never wait forever. Never throws. */
+async function bounded(path, body) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30000);
   try {
-    const response = await fetch(unit.form.action, {
+    const response = await fetch(path, {
       signal: controller.signal,
       method: 'POST',
       body,
@@ -645,21 +655,24 @@ async function send(unit, key, submitter) {
       redirect: 'manual',
       cache: 'no-store',
     });
-    status = response.status;
     const type = (response.headers.get('Content-Type') || '').split(';')[0].trim();
-    if (type === JSON_TYPE) {
-      answer = await response.json();
-    }
+    return { status: response.status, answer: type === JSON_TYPE ? await response.json() : null };
   } catch {
-    answer = null;
+    return { status: 0, answer: null };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Ends a unit's flight (a save or a Use): `draw` shows the answer and says whether a save
+ * queued meanwhile is dropped (after a conflict or an orphaned unit, ASSIST-23); otherwise it
+ * is sent. The pending count is released whatever happens. */
+function land(unit, draw) {
   unit.flight = null;
   unit.form.removeAttribute('aria-busy');
   let drop = false;
   try {
-    drop = settle(unit, flight, answer, status, submitter);
+    drop = draw();
   } catch {
     setAlert(unit, failure(0));
   } finally {
@@ -710,6 +723,208 @@ function request(unit, explicit, submitter) {
   send(unit, key, submitter);
 }
 
+// The interpretation assistant (step 2c-1; docs/assisted-entry.md, "Assistant"). A saved
+// scribble (`unresolved` note with a `key`) starts one job; "Thinking…" shows until the
+// options, the readings of an ambiguous reply or a message arrive. Use posts the apply
+// route; ignoring the options leaves the scribble. Model text is shown with textContent
+// inside <bdi>, never as markup.
+
+/** The sheet's path prefix (`/private-sheets/<id>`) of a unit. */
+function sheetPath(unit) {
+  const match = /^\/private-sheets\/\d+/.exec(new URL(unit.form.action).pathname);
+  return match ? match[0] : null;
+}
+
+function assistBox(unit) {
+  const shown = names(unit);
+  if (!shown) {
+    return null;
+  }
+  let box = document.getElementById(`assist-${shown.key}`);
+  if (!box) {
+    box = element('div', { class: 'entry-assist', id: `assist-${shown.key}`, role: 'status' });
+    const after = unit.form.querySelector('.entry-actions') || unit.form.querySelector('.entry-note') || saveButton(unit.form);
+    if (after) {
+      after.after(box);
+    } else {
+      unit.form.append(box);
+    }
+    const ids = (unit.control.getAttribute('aria-describedby') || '').split(' ').filter(Boolean);
+    if (!ids.includes(box.id)) {
+      unit.control.setAttribute('aria-describedby', [...ids, box.id].join(' '));
+    }
+  }
+  return box;
+}
+
+/** Ends the unit's job on this page: its polling stops and its box goes. */
+function stopAssist(unit) {
+  unit.assist += 1;
+  const shown = names(unit);
+  if (shown) {
+    document.getElementById(`assist-${shown.key}`)?.remove();
+  }
+}
+
+function assistText(unit, text) {
+  const box = assistBox(unit);
+  if (box) {
+    box.replaceChildren(element('p', { class: 'assist-message' }, text));
+  }
+}
+
+function csrfOf(unit) {
+  const csrf = unit.form.elements.namedItem('csrf');
+  return csrf instanceof HTMLInputElement ? csrf.value : '';
+}
+
+function postForm(path, pairs) {
+  return bounded(path, new URLSearchParams(pairs));
+}
+
+/** Starts a job for a saved scribble and polls it. */
+async function interpret(unit, note) {
+  if (!assistantOn || !record(note) || note.kind !== 'unresolved' || !text(note.key)) {
+    return;
+  }
+  const base = sheetPath(unit);
+  if (!base) {
+    return;
+  }
+  stopAssist(unit);
+  const token = unit.assist;
+  const started = await postForm(`${base}/interpretations`, [
+    ['csrf', csrfOf(unit)],
+    ['note', note.key],
+  ]);
+  if (token !== unit.assist) {
+    return;
+  }
+  if (started.status === 404) {
+    assistantOn = false;
+    return;
+  }
+  const answer = started.answer;
+  if ((started.status === 202 || started.status === 200) && record(answer) && text(answer.poll) && POLL_PATH.test(answer.poll)) {
+    assistText(unit, 'Thinking\u2026');
+    poll(unit, token, answer.poll, 500);
+  } else if (record(answer) && text(answer.message) && started.status !== 409) {
+    assistText(unit, answer.message);
+  }
+}
+
+function poll(unit, token, path, delay) {
+  setTimeout(async () => {
+    if (token !== unit.assist || !document.contains(unit.form)) {
+      return;
+    }
+    let status = 0;
+    let answer = null;
+    try {
+      const response = await fetch(path, {
+        headers: { Accept: JSON_TYPE },
+        credentials: 'same-origin',
+        cache: 'no-store',
+      });
+      status = response.status;
+      const type = (response.headers.get('Content-Type') || '').split(';')[0].trim();
+      answer = type === JSON_TYPE ? await response.json() : null;
+    } catch {
+      answer = null;
+    }
+    if (token !== unit.assist) {
+      return;
+    }
+    if (status === 200 && record(answer) && answer.state === 'thinking') {
+      poll(unit, token, path, Math.min(2000, Math.round(delay * 1.5)));
+      return;
+    }
+    showAssistant(unit, token, answer);
+  }, delay);
+}
+
+/** The job's end: its options with Use, an ambiguous reply's readings, or a message. */
+function showAssistant(unit, token, answer) {
+  const box = assistBox(unit);
+  if (!box || token !== unit.assist) {
+    return;
+  }
+  if (!record(answer) || !text(answer.message)) {
+    box.replaceChildren(element('p', { class: 'assist-message' }, 'The assistant is unavailable right now.'));
+    return;
+  }
+  const heading = element('p', { class: 'assist-message' }, answer.message);
+  if (answer.state === 'options' && Array.isArray(answer.options)) {
+    const list = element('ul', { class: 'assist-options' });
+    for (const option of answer.options) {
+      if (!record(option) || ![option.current, option.expression, option.value, option.explanation, option.action].every(text) || !PROPOSAL_PATH.test(option.action)) {
+        continue;
+      }
+      const use = element(
+        'button',
+        { type: 'button', class: 'assist-use', 'aria-label': `Use ${option.expression} = ${option.value}` },
+        'Use',
+      );
+      use.addEventListener('click', () => applyOption(unit, token, option.action, use));
+      list.append(
+        element(
+          'li',
+          {},
+          element('span', {}, `Now ${option.current}: `),
+          element('bdi', {}, option.expression),
+          element('span', {}, ` = ${option.value} \u00b7 `),
+          element('bdi', { class: 'assist-explanation' }, option.explanation),
+          ' ',
+          use,
+        ),
+      );
+    }
+    box.replaceChildren(heading, list);
+    return;
+  }
+  if (answer.state === 'readings' && Array.isArray(answer.readings)) {
+    const list = element('ul', { class: 'assist-readings' });
+    for (const reading of answer.readings.filter(text)) {
+      list.append(element('li', {}, element('bdi', {}, reading)));
+    }
+    box.replaceChildren(heading, list);
+    return;
+  }
+  box.replaceChildren(heading);
+}
+
+/** Use: posts the apply route; the answer is a unit save's answer. It is the unit's flight
+ * like a save: the draft generation and sequence are taken before the request, a save asked
+ * for meanwhile waits in the unit's queue, and page posts wait for it, so a draft typed while
+ * Use is on its way is kept. */
+async function applyOption(unit, token, action, button) {
+  if (token !== unit.assist || unit.flight || unit.orphan) {
+    return;
+  }
+  button.disabled = true;
+  unit.seq += 1;
+  const flight = { key: null, gen: unit.gen, seq: unit.seq, submitter: null };
+  unit.flight = flight;
+  pending += 1;
+  unit.form.setAttribute('aria-busy', 'true');
+  const result = await postForm(action, [['csrf', csrfOf(unit)]]);
+  land(unit, () => {
+    if (result.status === 200 && valid(result.answer)) {
+      stopAssist(unit);
+      return settle(unit, flight, result.answer, 200, null);
+    }
+    if (token === unit.assist) {
+      assistText(
+        unit,
+        record(result.answer) && text(result.answer.message)
+          ? result.answer.message
+          : 'Not used: the server did not answer; try again.',
+      );
+    }
+    return false;
+  });
+}
+
 function enhance(form) {
   if (form.method !== 'post') {
     return;
@@ -740,6 +955,7 @@ function enhance(form) {
     applied: 0,
     hold: false,
     orphan: false,
+    assist: 0,
   };
   units.set(form, unit);
   if (projection === null || unit.base > projection) {

@@ -177,6 +177,8 @@ pub(crate) struct Notes {
     pub bound: Vec<Stored>,
     /// The latest row note of each list on a current page, by list ID (slice 1.5b).
     pub rows: BTreeMap<String, Stored>,
+    /// The pending notes share one new bundle number (an applied proposal, step 2c-1).
+    pub bundle: bool,
 }
 
 /// The typed address of a scalar field (plan §3a, Sol rev-2 M1).
@@ -261,16 +263,28 @@ pub(super) static BEFORE_INSERT: std::sync::Mutex<Option<InsertHook>> = std::syn
 
 /// Inserts the notes of the revision just written. The caller owns the save's `IMMEDIATE`
 /// transaction, so any failure rolls the whole save back.
+/// `bundle`: the notes share one new bundle number, scoped to the sheet (an applied model
+/// proposal, plan §1.4 "Apply").
 pub(crate) fn insert(
     db: &Connection,
     sheet_id: i64,
     revision: i64,
     notes: &[Note],
+    bundle: bool,
 ) -> Result<(), AppError> {
     if notes.len() > MAX_NOTES {
         return Err(too_many());
     }
-    let mut statement = db.prepare_cached("INSERT INTO private_sheet_notes(sheet_id,revision,address,op,raw,before,after,target) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)")?;
+    let bundle: Option<i64> = if bundle {
+        Some(db.query_row(
+            "SELECT coalesce(max(bundle),0)+1 FROM private_sheet_notes WHERE sheet_id=?1",
+            [sheet_id],
+            |row| row.get(0),
+        )?)
+    } else {
+        None
+    };
+    let mut statement = db.prepare_cached("INSERT INTO private_sheet_notes(sheet_id,revision,address,op,raw,before,after,target,bundle) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)")?;
     for note in notes {
         let before = note.before.as_ref().map(NoteValue::encode).transpose()?;
         statement.execute(params![
@@ -282,6 +296,7 @@ pub(crate) fn insert(
             before,
             note.after.encode()?,
             note.target,
+            bundle,
         ])?;
     }
     Ok(())

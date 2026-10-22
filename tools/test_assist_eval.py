@@ -318,5 +318,137 @@ class Files(unittest.TestCase):
         self.assertEqual(out["schema_valid"], "1/1")
 
 
+V2_PREFIX_SHA256 = "7b0ba380d8687cc8dfe2a150bf99d684b3bb4f4d5a22e41b5d46a1b6bbd5fe84"
+
+
+class ContractV2(unittest.TestCase):
+    """Schema v2 (step 2c-1): the same files as the Rust copy, refs by alias."""
+
+    def test_prefix_matches_the_rust_copy(self):
+        import hashlib
+
+        prefix = ae.contract_prefix("v2")
+        self.assertEqual(hashlib.sha256(prefix.encode()).hexdigest(), V2_PREFIX_SHA256)
+        self.assertNotEqual(prefix, ae.contract_prefix("v1"))
+        self.assertEqual(prefix, ae.contract_prefix("v2-short"))
+        self.assertNotEqual(prefix, ae.contract_prefix("v2-full"))
+
+    def test_request_uses_aliases(self):
+        req = ae.build_request(
+            {"id": "t", "target": "hp", "phrase": "heal 5"}, SHEET, contract="v2"
+        )
+        self.assertEqual(req["supplied"], {"t": 20, "f1": 3})
+        self.assertEqual(req["excluded"], ["f2"])
+        self.assertIn('"alias":"f1","id":"strength"', req["user"])
+
+    def test_alias_refs_validate_and_field_ids_do_not(self):
+        req = ae.build_request(
+            {"id": "t", "target": "hp", "phrase": "heal 5"}, SHEET, contract="v2"
+        )
+        good = ae.validate_reply(reply(op("add", ref("t"), lit(5))), req)
+        self.assertEqual(ae.shown_values(good), [25])
+        by_id = ae.validate_reply(reply(op("add", ref("hp"), lit(5))), req)
+        self.assertFalse(by_id["schema_valid"])
+        unsupplied = ae.validate_reply(reply(op("add", ref("f9"), lit(5))), req)
+        self.assertEqual(unsupplied["options"][0]["dropped"], "unsupplied_ref")
+        enum = ae.validate_reply(reply(op("add", ref("f2"), lit(5))), req)
+        self.assertEqual(enum["options"][0]["dropped"], "excluded_ref")
+        cross = ae.validate_reply(reply(op("add", ref("f1"), lit(5))), req)
+        self.assertEqual(ae.shown_values(cross), [8])
+
+    def test_golden_envelope_matches_the_rust_copy(self):
+        golden = json.loads(
+            (Path(ae.__file__).parent / "fixtures" / "assist-envelope-v2.json").read_text()
+        )
+        self.assertEqual(ae._envelope(golden["envelope"]), golden["dynamic"])
+
+    def test_a_literal_outside_i64_drops_the_option_as_in_rust(self):
+        # Sol M2: target i64::MIN, "gain 1", 9223372036854775808 - 1 fits i64 but its
+        # literal does not.
+        sheet = {"fields": [{"id": "hp", "label": "HP", "type": "integer", "value": -(2**63)}]}
+        req = ae.build_request(
+            {"id": "t", "target": "hp", "phrase": "gain 1"}, sheet, contract="v2"
+        )
+        result = ae.validate_reply(reply(op("sub", lit(2**63), lit(1))), req)
+        self.assertEqual(result["options"][0]["dropped"], "shape")
+
+    def test_cells_get_c_aliases_and_the_label_goes_last(self):
+        case = {
+            "id": "t",
+            "target": "hp",
+            "phrase": "x",
+            "cells": [
+                {"id": "note", "label": "Note", "type": "text", "value": "n"},
+                {"id": "weight", "label": "Weight", "type": "integer", "value": 3},
+            ],
+        }
+        req = ae._build_request_v2(case, SHEET)
+        # An excluded cell before an eligible one takes no alias (Sol R2).
+        self.assertEqual(req["supplied"]["c1"], 3)
+        self.assertNotIn("c2", req["supplied"])
+        self.assertNotIn('"note","label"', req["user"])
+        bare = ae._build_request_v2(
+            case,
+            SHEET,
+            limit=len(
+                '<data>\n{"note":"x","target":{"alias":"t","id":"hp","value":20},"context":[]}\n</data>'
+            ),
+        )
+        self.assertNotIn("label", json.loads(bare["user"][7:-8])["target"])
+        self.assertEqual(json.loads(bare["user"][7:-8])["context"], [])
+
+    def test_variant_with_v2_is_refused_cleanly(self):
+        # run-llm refuses the pair at parse time, before any ledger or request.
+        with self.assertRaises(SystemExit):
+            ae.main(
+                [
+                    "run-llm",
+                    "--endpoint",
+                    "http://127.0.0.1:9/v1",
+                    "--model-label",
+                    "x",
+                    "--model-sha256",
+                    "0",
+                    "--output",
+                    "/nonexistent/x",
+                    "--deadline-epoch",
+                    "0",
+                    "--variant",
+                    "distinct",
+                    "--contract",
+                    "v2",
+                ]
+            )
+
+    def test_short_prefix_quotes_no_alias_enum_but_sends_the_full_schema(self):
+        req = ae.build_request(
+            {"id": "t", "target": "hp", "phrase": "heal 5"}, SHEET, contract="v2-short"
+        )
+        self.assertNotIn('"f64"', req["system"])
+        self.assertIn("an alias from the data", req["system"])
+        body = ae.chat_body(req, 192)
+        sent = body["response_format"]["json_schema"]["schema"]
+        self.assertEqual(sent, ae.load_v2()[1])
+        self.assertEqual(
+            ae.shown_values(ae.validate_reply(reply(op("add", ref("t"), lit(5))), req)), [25]
+        )
+
+    def test_ex_prefix_is_compact_with_an_alias_example(self):
+        req = ae.build_request(
+            {"id": "t", "target": "hp", "phrase": "heal 5"}, SHEET, contract="v2-ex"
+        )
+        examples = req["system"].split("Examples (target alias t, current value 9):\n")[1]
+        lines = [line for line in examples.split("\n") if line.startswith("note ")]
+        self.assertEqual(len(lines), 5)
+        for line in lines:
+            reply_json = line.split(" -> ", 1)[1]
+            self.assertEqual(json.dumps(json.loads(reply_json), separators=(",", ":")), reply_json)
+        self.assertIn('{"ref":"f1"}', examples)
+        self.assertIn("compact single-line JSON", req["system"])
+        self.assertEqual(
+            ae.chat_body(req, 384)["response_format"]["json_schema"]["schema"], ae.load_v2()[1]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

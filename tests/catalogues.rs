@@ -31,12 +31,14 @@ async fn cli_import_and_show_print_metadata_only() {
     );
     assert_redacted(&output);
     let printed: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let keys: Vec<&str> = printed
+    // The printed member names as a set: `serde_json` keeps document order (DEP-18).
+    let mut keys: Vec<&str> = printed
         .as_object()
         .unwrap()
         .keys()
         .map(String::as_str)
         .collect();
+    keys.sort_unstable();
     assert_eq!(
         keys,
         [

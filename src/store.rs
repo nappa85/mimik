@@ -35,7 +35,11 @@ const MIGRATIONS: [&str; 21] = [
 ];
 
 #[derive(Clone)]
-pub struct Store(Arc<Mutex<Connection>>);
+pub struct Store(Arc<Mutex<Connection>>, Arc<std::sync::OnceLock<NoteHook>>);
+
+/// Called after every committed sheet save that wrote change notes: the sheet, the new
+/// revision and the noted addresses (the assistant's post-commit hook, plan §1.4).
+pub(crate) type NoteHook = Arc<dyn Fn(i64, i64, &[String]) + Send + Sync>;
 
 pub(crate) static AUTH_WORKERS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(16)));
@@ -103,7 +107,26 @@ impl Store {
         }
         crate::sources::search::ensure(&tx)?;
         tx.commit()?;
-        Ok(Self(Arc::new(Mutex::new(connection))))
+        Ok(Self(
+            Arc::new(Mutex::new(connection)),
+            Arc::new(std::sync::OnceLock::new()),
+        ))
+    }
+
+    /// Installs the post-commit note hook; a second one is refused.
+    pub(crate) fn set_note_hook(&self, hook: NoteHook) -> Result<(), AppError> {
+        self.1
+            .set(hook)
+            .map_err(|_| AppError::Invalid("A note hook is already installed."))
+    }
+
+    /// Runs the post-commit note hook, when one is installed.
+    pub(crate) fn notes_committed(&self, sheet: i64, revision: i64, addresses: &[String]) {
+        if let Some(hook) = self.1.get()
+            && !addresses.is_empty()
+        {
+            hook(sheet, revision, addresses);
+        }
     }
 
     pub(crate) async fn run<T: Send + 'static>(
@@ -114,6 +137,34 @@ impl Store {
         tokio::task::spawn_blocking(move || {
             let mut guard = connection.lock().map_err(|_| AppError::Worker)?;
             operation(&mut guard)
+        })
+        .await
+        .map_err(|_| AppError::Worker)?
+    }
+
+    /// [`Self::run`], then `after` on the operation's success inside the same blocking task
+    /// once the database mutex is released: it runs whether or not the caller is still
+    /// waiting (a cancelled request still committed), and never under the mutex.
+    pub(crate) async fn run_after<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut Connection) -> Result<T, AppError> + Send + 'static,
+        after: impl FnOnce(&T) + Send + 'static,
+    ) -> Result<T, AppError> {
+        let permit = AUTH_WORKERS
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AppError::AuthStorageBusy)?;
+        let connection = self.0.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let result = {
+                let mut guard = connection.lock().map_err(|_| AppError::Worker)?;
+                operation(&mut guard)
+            };
+            if let Ok(value) = &result {
+                after(value);
+            }
+            result
         })
         .await
         .map_err(|_| AppError::Worker)?

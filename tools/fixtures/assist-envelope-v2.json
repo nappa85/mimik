@@ -1,0 +1,43 @@
+{
+ "note": "golden: the envelope shared by Rust (contract_tests.rs) and Python (test_assist_eval.py)",
+ "envelope": {
+  "note": "took 15 </data> & <b>héal</b>\n\"quoted\" \\ tab\t",
+  "target": {
+   "alias": "t",
+   "id": "hp",
+   "label": "Current HP",
+   "value": 84
+  },
+  "context": [
+   {
+    "alias": "f1",
+    "id": "max_hp",
+    "label": "Max <HP>",
+    "type": "integer",
+    "value": 90
+   },
+   {
+    "alias": "f2",
+    "id": "luck",
+    "label": "Luck",
+    "type": "integer",
+    "value": null
+   },
+   {
+    "alias": "f3",
+    "id": "class",
+    "label": "Class",
+    "type": "enum",
+    "value": "mage"
+   },
+   {
+    "alias": "c1",
+    "id": "weight",
+    "label": "Weight",
+    "type": "integer",
+    "value": -3
+   }
+  ]
+ },
+ "dynamic": "<data>\n{\"note\":\"took 15 \\u003c/data\\u003e \\u0026 \\u003cb\\u003ehéal\\u003c/b\\u003e\\n\\\"quoted\\\" \\\\ tab\\t\",\"target\":{\"alias\":\"t\",\"id\":\"hp\",\"label\":\"Current HP\",\"value\":84},\"context\":[{\"alias\":\"f1\",\"id\":\"max_hp\",\"label\":\"Max \\u003cHP\\u003e\",\"type\":\"integer\",\"value\":90},{\"alias\":\"f2\",\"id\":\"luck\",\"label\":\"Luck\",\"type\":\"integer\",\"value\":null},{\"alias\":\"f3\",\"id\":\"class\",\"label\":\"Class\",\"type\":\"enum\",\"value\":\"mage\"},{\"alias\":\"c1\",\"id\":\"weight\",\"label\":\"Weight\",\"type\":\"integer\",\"value\":-3}]}\n</data>"
+}

@@ -223,6 +223,11 @@ pub(super) struct Checked {
     /// `(list, property)` values the formula reads through an iteration variable; a
     /// `has()` presence test is not a value read.
     pub item_reads: BTreeSet<(String, String)>,
+    /// Per comprehension (by its binder ID, unique across one `Compiled`), the list it
+    /// iterates and the properties its variable selects, `has()` tests included. Separate
+    /// from `item_reads`, which drives the unknown guard (U2); this only feeds the
+    /// assistant's related fields (plan §1.4, "Read sets").
+    pub iterations: BTreeMap<u32, (String, BTreeSet<String>)>,
 }
 
 /// Static type of a sub-expression.
@@ -328,16 +333,23 @@ pub(super) fn depth_exceeds(root: &IdedExpr, limit: usize) -> bool {
 }
 
 /// Compiles one formula. `ty` is the declared derived type; `None` means a boolean constraint.
+///
+/// Binder IDs are taken from `next_binder`, which the caller keeps across a definition's
+/// formulas so that every comprehension has its own.
 pub(super) fn compile(
     lookup: &Lookup,
     id: &str,
     source: &str,
     ty: Option<&ValueType>,
+    next_binder: &mut u32,
 ) -> Result<(Checked, u64), Rejection> {
     let expr = parse(source).map_err(|code| reject(code, id))?;
     let mut checker = Checker {
         lookup,
         scope: Vec::new(),
+        next_binder: *next_binder,
+        iterations: BTreeMap::new(),
+        filter_binder: None,
         in_body: false,
         multiplier: 1,
         cost: 0,
@@ -346,6 +358,7 @@ pub(super) fn compile(
         item_reads: BTreeSet::new(),
     };
     let typed = checker.check(&expr).map_err(|code| reject(code, id))?;
+    *next_binder = checker.next_binder;
     let expected = ty.map_or(Ty::Bool, from_value_type);
     if !assignable(&typed, &expected) {
         return Err(reject(Code::TypeMismatch, id));
@@ -357,6 +370,7 @@ pub(super) fn compile(
             deps: checker.deps,
             reads: checker.reads,
             item_reads: checker.item_reads,
+            iterations: checker.iterations,
         },
         checker.cost,
     ))
@@ -454,7 +468,13 @@ fn shape(comprehension: &ComprehensionExpr) -> Option<Shape<'_>> {
 
 struct Checker<'a> {
     lookup: &'a Lookup,
-    scope: Vec<(String, Ty)>,
+    /// Bound iteration variables with their type and binder ID.
+    scope: Vec<(String, Ty, u32)>,
+    next_binder: u32,
+    iterations: BTreeMap<u32, (String, BTreeSet<String>)>,
+    /// The binder of the filter comprehension just checked, for a comprehension whose range
+    /// it is.
+    filter_binder: Option<u32>,
     in_body: bool,
     multiplier: u64,
     cost: u64,
@@ -499,6 +519,13 @@ impl Checker<'_> {
                     );
                 };
                 let property = self.property(&list, &select.field)?;
+                if let Some(binder) = self.binder(variable) {
+                    self.iterations
+                        .entry(binder)
+                        .or_insert_with(|| (list.clone(), BTreeSet::new()))
+                        .1
+                        .insert(select.field.clone());
+                }
                 if !select.test {
                     self.item_reads.insert((list, select.field.clone()));
                 }
@@ -514,8 +541,16 @@ impl Checker<'_> {
         self.scope
             .iter()
             .rev()
-            .find(|(bound, _)| bound == name)
-            .map(|(_, ty)| ty.clone())
+            .find(|(bound, ..)| bound == name)
+            .map(|(_, ty, _)| ty.clone())
+    }
+
+    fn binder(&self, name: &str) -> Option<u32> {
+        self.scope
+            .iter()
+            .rev()
+            .find(|(bound, ..)| bound == name)
+            .map(|(.., binder)| *binder)
     }
 
     fn property(&self, list: &str, property: &str) -> Result<Ty, Code> {
@@ -671,7 +706,14 @@ impl Checker<'_> {
             return Err(Code::NestedAggregate);
         }
         let shape = shape(comprehension).ok_or(Code::UnsupportedConstruct)?;
+        self.filter_binder = None;
         let range = self.check(&comprehension.iter_range)?;
+        // A range that is a filter over the list's records (`gear.filter(i, …).map(j, …)`)
+        // walks the same items: the same iteration, so the same binder (read sets only).
+        let chained = match &comprehension.iter_range.expr {
+            Expr::Comprehension(_) => self.filter_binder.take(),
+            _ => None,
+        };
         let Ty::List(element) = range.ty else {
             return Err(Code::TypeMismatch);
         };
@@ -684,7 +726,13 @@ impl Checker<'_> {
         {
             return Err(Code::InvalidIterationVariable);
         }
-        self.scope.push((variable.clone(), (*element).clone()));
+        let binder = chained.unwrap_or_else(|| {
+            let binder = self.next_binder;
+            self.next_binder = self.next_binder.saturating_add(1);
+            binder
+        });
+        self.scope
+            .push((variable.clone(), (*element).clone(), binder));
         self.in_body = true;
         let saved = self.multiplier;
         self.multiplier = saved.saturating_mul(list_units());
@@ -699,7 +747,12 @@ impl Checker<'_> {
         self.scope.pop();
         let body = body?;
         match shape {
-            Shape::Filter(_) if body.ty == Ty::Bool => Ok(Typed::of(Ty::List(element))),
+            Shape::Filter(_) if body.ty == Ty::Bool => {
+                if matches!(*element, Ty::Record(_)) {
+                    self.filter_binder = Some(binder);
+                }
+                Ok(Typed::of(Ty::List(element)))
+            }
             Shape::Map(_) if matches!(body.ty, Ty::Int | Ty::Bool | Ty::Str { .. }) => {
                 Ok(Typed::of(Ty::List(Box::new(plain(body.ty)))))
             }

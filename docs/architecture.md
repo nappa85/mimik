@@ -3,9 +3,11 @@
 Mimik is a sheet-first tabletop RPG companion for players at a physical table. It is one
 standalone Rust binary (`mimik`, AGPL-3.0-only) that serves server-rendered HTML to browsers on
 the local network and stores everything in one SQLite file. No Node.js, Python, GPU, model
-runtime or internet access is needed at run time. No model is integrated into the application
-yet; the planned optional assistant runs a bundled, pinned official llama.cpp server as a
-confined child process, never a container (`assisted-sheet-plan.md`, §1.4a).
+runtime or internet access is needed at run time. The optional interpretation assistant (off
+by default) exists only in development builds in this release (the `dev-endpoint` feature),
+talking to a llama-server started by hand; the release binary refuses `--assistant`. Its
+production runtime, a bundled, pinned official llama.cpp server as a confined child process,
+never a container, is the next step (`assisted-sheet-plan.md`, §1.4a).
 
 ## Runtime
 
@@ -44,7 +46,10 @@ confined child process, never a container (`assisted-sheet-plan.md`, §1.4a).
 Authenticated startup refuses to serve until an Owner exists (`bootstrap-owner`). The
 prototype keeps the legacy identity/notes records and the native MÖRK BORG editor, isolated
 from the private campaign tables. `--dev-owner-play` (development only) lets the Owner use
-explicit gameplay grants.
+explicit gameplay grants. `--assistant` turns the interpretation assistant on; only a build
+with the `dev-endpoint` feature accepts it, with its `--assistant-dev-*` and
+`--assistant-model*` options ([assisted-entry.md](assisted-entry.md), "Interpretation
+assistant"); every other build refuses it at start.
 
 The authenticated boundary (`src/auth/mod.rs`) admits at most 8 concurrent requests, times a
 request out after 5 s, rate-limits new form sessions, sign-in and credential redemption with
@@ -65,7 +70,8 @@ Origin against the configured authority, and sets `Cache-Control: no-store`,
 | `network.rs` | LAN/loopback selection, peer admission, canonical external URL |
 | `auth/` | Sign-in, sessions, request admission, security headers, error pages; Owner pages `/admin` (accounts), `/admin/materials` (source review), `/admin/rulesets` (registry) |
 | `accounts/` | Accounts, Owner binding, invitations, resets, disable, epochs; Argon2 hashing; protected credential files; browser transport |
-| `campaigns/` | Campaigns, membership and requests (`domain.rs`); private sheets (`sheets.rs`, `snapshots.rs` is the sole writer); value admission (`values.rs`, `transport.rs`); routes (`web.rs`); advisory formulas view (`formulas.rs`); history change summary (`history_diff.rs`); catalogue reading through a sheet (`catalogue.rs`, `catalogue_web.rs`); assisted entry: lenient numbers (`entry.rs`), change notes (`notes.rs`), switch and Undo (`assist.rs`, `assist_web.rs`), per-field save (`unit.rs`, `unit_web.rs`, list units `rows.rs`), quick-add reading (`quick.rs`) |
+| `campaigns/` | Campaigns, membership and requests (`domain.rs`); private sheets (`sheets.rs`, `snapshots.rs` is the sole writer); value admission (`values.rs`, `transport.rs`); routes (`web.rs`); advisory formulas view (`formulas.rs`); history change summary (`history_diff.rs`); catalogue reading through a sheet (`catalogue.rs`, `catalogue_web.rs`); assisted entry: lenient numbers (`entry.rs`), change notes (`notes.rs`), switch and Undo (`assist.rs`, `assist_web.rs`), per-field save (`unit.rs`, `unit_web.rs`, list units `rows.rs`), quick-add reading (`quick.rs`), interpretation context, routes and apply (`interpret.rs`, `interpret_web.rs`) |
+| `assistant/` | Interpretation assistant (development builds): schema v2, instructions and fixed prefix (`contract.rs`), phrase lexer (`lexer.rs`), reply validation (`output.rs`), request bounds (`request.rs`), `rig-core` client and bounded transport (`interpreter.rs`, `transport.rs`), jobs and runtime events (`jobs.rs`), breaker (`breaker.rs`), development endpoint (`development.rs`) |
 | `definitions/` | Declarative game definitions: strict decode, JSON Schema admission, revisioned drafts, immutable publication and withdrawal, private pins; CEL formula engine (`formula/`) and its admission |
 | `catalogues/` | Read-only game catalogues: decode, admission, drafts, sealed publication with projections and name index, read-only lookups |
 | `sources/` | Prepared-source import, page/unit review evidence, FTS5 lexical search, region previews, Owner material operations, prototype source routes |
@@ -126,7 +132,10 @@ migrations.
   excluded from the source package), `qr_decode`, profilers; demo packs
   `sheet-harness-demo/` and `tool-loop-demo/`.
 - **Schemas (`schemas/`):** definition and catalogue JSON Schemas and examples, the
-  SHA-256-locked formula conformance fixture, and `source-kinds.json` shared by Rust and Python.
+  SHA-256-locked formula conformance fixture, `source-kinds.json` shared by Rust and Python, and
+  the assistant's output schema v2 with its instructions (`interpretation-v2.json`,
+  `interpretation-v2-instructions.txt`, SHA-256-pinned in Rust and Python; LF-only through
+  `.gitattributes`).
 - **Containers (`containers/`):** every tool runs in a pinned container, never on the host
   (one exception: the pinned official llama-server build may run natively on the dev host for
   runtime-manager tests, ASSIST-40).
@@ -141,19 +150,21 @@ Runs on every push, pull request and manual dispatch, on `ubuntu-22.04`, with re
 contents permission and pinned actions.
 
 1. **checks** (in the `mimik-ci` container): `cargo fmt --check`; `cargo clippy --locked
-   --all-targets --all-features -- -D warnings`; `ruff check tools` and `ruff format --check
+   --all-targets --all-features -- -D warnings` and the same with default features; `ruff check tools` and `ruff format --check
    tools`; `cargo test --locked --all-targets --all-features`; build the `formula_eval`
    example; generate the synthetic source fixture; `python -m unittest discover -s tools`;
    `actionlint`; `cargo audit --deny warnings`; `cargo about generate --locked --fail`
    (third-party notices); `cargo build --release --locked`; `cargo package` and
-   `verify_source_package.py` (member allowlist); `cargo vendor`; `package_release.py`. Uploads
-   the release archives with `SHA256SUMS` and the synthetic smoke inputs.
+   `verify_source_package.py` (member allowlist); `cargo vendor`; `package_release.py`; a
+   development build with the `dev-endpoint` feature (never packaged). Uploads the release
+   archives with `SHA256SUMS`, the synthetic smoke inputs and that development binary.
 2. **artifact-smoke:** verifies checksums, unpacks the runtime archive and runs
    `smoke_release.py --auth` against the packaged binary from an isolated directory; then
    rebuilds the source archive plus vendored dependencies with `--offline --locked`, no network
    and an empty Cargo home.
 3. **browser-smoke:** runs `browser_smoke.py` in the Chromium container against the unpacked
-   binary, offline, with dropped capabilities and resource limits.
+   binary, offline, with dropped capabilities and resource limits; then
+   `assist_model_browser.py` against the development binary and a fake model server.
 4. **lan-smoke:** `lan_smoke.py` runs the unpacked binary on isolated container networks with
    separate clients, a denied subnet and an HTTPS reverse proxy.
 5. **deployable:** always runs and fails unless all four jobs succeeded.

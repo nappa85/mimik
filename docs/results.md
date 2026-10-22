@@ -5,6 +5,66 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Assisted interpretation: schema v2 re-run of the 2b screen (step 2c-1, 2026-10-22)
+
+Prototype tier (`tools/assist_eval.py --contract`, `tools/run_assist_screen.sh`,
+`CONTRACT=… PRIME=1 MAX_TOKENS=384`); raw ledgers under `/media/data/mimik/assist-2c1/runs/`.
+Same model, server, pinning and 50 cases × 2 passes + 4 stress as the 2b Granite screen
+(llama.cpp b11610, Granite 4.2 3B Q4_K_M, CPUs 0 and 1, 2 threads, greedy, `max_tokens` 384 as
+the measurement cap); only the contract differs. Reviewed with the 2c-1 implementation (Sol,
+Sonnet). **v2-short was adopted (the shipped prefix since 2c-1; `--contract v2` now means
+it, the first prefix is `v2-full`); v2-ex was rejected.** The arms were exploratory and were
+compared and selected on the same 50 development cases: no generalization claim.
+
+- **Arms:** *v2* (now `v2-full`): the first prefix (instructions, the full schema quoted with its 96-entry
+  alias enum). *v2-short*: the same instructions, the schema quoted with the alias enum replaced
+  by a description; `response_format` still sends the full pinned schema. *v2-ex*: the v2-short prefix (the better of the two on the 50 cases) with every example compact, one example referencing a context alias ("one ration for each companion", `f1`; written for this run, it is related to rf-02 and rf-04, a field subtracted from the target) and the sentence "Reply with compact single-line JSON".
+- **Numbers** (pass 1 for quality; latency over the 100 warm requests):
+
+  | | v1 (2b) | v2 | v2-short | v2-ex |
+  |---|---|---|---|---|
+  | Prefix tokens | ~1,460 | 2,253 | 1,987 | 2,007 |
+  | Priming, idle (s) | ~117 | 197.8 | 172.0 | 196.5 |
+  | Correct / false-confident / silent (50) | 36 / 7 / 7 | 37 / 7 / 6 | 37 / 6 / 7 | 33 / 13 / 4 |
+  | Field references (6) correct / false-confident | 1 / 2 | 0 / 3 | 0 / 3 | 0 / 5 |
+  | Cases losing an option to an unsupplied or enum alias | — | 0 | 0 | 0 |
+  | Schema-valid, truncated (at 384) | 100/100, 0 | 100/100, 0 | 100/100, 0 | 100/100, 0 |
+  | Output tokens p50 / p95 / max | 94.5 / 121 / 141 | 96 / 181 / 282 | 97 / 145 / 263 | 45 / 100 / 132 |
+  | Replies over 192 tokens (of 104) | 0 | 5 | 3 | 0 |
+  | Latency p50 / p95 / max (s) | 35.7 / 41.2 / 45.6 | 49.6 / 92.3 / 109.6 (builds alongside) | 50.8 / 67.9 / 103.2 | 36.9 / 54.0 / 61.2 |
+
+- **Adopted prefix (v2-short):** it saves 266 prompt tokens (2,253 to 1,987, about 12%)
+  with the same 37 correct and one fewer false-confident on these cases; the priming times
+  (197.8 s against 172.0 s) are single measurements and no difference is claimed from them.
+  `max_tokens` for the Granite file by the 2b rule over its screen: largest `predicted_n` 263,
+  1.25 × 263 = 328.75, so 352.
+- **`max_tokens` (first prefix):** by the 2b rule (round up to 32 of 1.25 × the largest valid, untruncated
+  `predicted_n`, at most 384) the first v2 prefix gave 384 (largest 282, fv-04), superseded by
+  the adopted prefix's 352. The long replies are fraction cases offering floor and ceil options,
+  pretty-printed across lines (the grammar allows whitespace): re-serialized compactly the
+  three distinct long replies count 116, 135 and 123 tokens (`/tokenize`), and the largest
+  compact form of all 45 distinct v2 replies is 135, which would give 192 (v2-short: largest
+  compact 117 of 47 distinct). v2-ex's compact replies all fit 192 (largest 132) but its
+  quality is worse (13 false-confident against 6 to 7).
+- **Field references:** under v2 the model referenced no context alias in any of the six
+  field-reference cases (only `t`, with values copied as literals); under v1 it referenced
+  field IDs in 4 of 6; v2-short referenced an alias in 2 (one still provenance-dropped), v2-ex
+  in 4, with wrong operators or signs (`t - f5` for "heal equal to my toughness"). Six cases:
+  signals, not proof.
+- **Live smoke** (2c-1 dev build, the sheet's own routes, rig-core 0.45.0 to the pinned
+  server with `--api-key-file`, same pinning): an unprimed first job evaluates the whole prefix
+  (2,101 tokens in 190 s) and finished in 217 s only with the development deadline raised (at
+  the default R 85 s it ends "ask again", and the server kept evaluating the cancelled prompt
+  for about 100 s, delaying the next job past its deadline too); Use wrote 84 − 15 = 69; the
+  next request evaluated 62 tokens (the prefix from the prompt cache), 38 s; a job cancelled
+  mid-generation released its slot within 0.3 s and the next job took 38 s. Neither log held a
+  player phrase.
+- **Grammar:** b11610 accepted the alias enum in `response_format` (every request carried it;
+  100/100 schema-valid).
+- **Limitations:** the v2 and v2-short latencies overlapped builds on cores 4 and 5 (the other
+  core complex) and are not comparable to 2b; priming was re-measured on an idle machine;
+  synthetic, author-written cases (D-D waived); one sampler.
+
 ## Assisted interpretation: crate, topology and model screen (step 2b, 2026-10-20/21)
 
 Prototype tier. The criteria and derivation rules were committed in `28c41ec` (2026-10-20

@@ -90,6 +90,26 @@ pub(crate) fn sheet_busy(response: &Response) -> bool {
         && response.extensions().get::<SheetBusy>().is_some()
 }
 
+/// Marks an interpretation route's JSON answer (step 2c-1): fixed messages for "ask again"
+/// (404), a conflict (409), busy (429) and unavailable (503), which the sheet module shows.
+/// The auth layer keeps such a body instead of its generic one.
+#[derive(Clone)]
+pub(crate) struct AssistantAnswer;
+
+pub(crate) fn assistant_answer(response: &Response) -> bool {
+    matches!(
+        response.status(),
+        StatusCode::NOT_FOUND
+            | StatusCode::CONFLICT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::SERVICE_UNAVAILABLE
+    ) && response.extensions().get::<AssistantAnswer>().is_some()
+        && response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .is_some_and(|value| value == "application/json")
+}
+
 /// Marks a catalogue route's own explanatory page (plan §19): 400 for a malformed address,
 /// 403 for the uniform refusal, 404 for an entry or type missing from a catalogue the reader
 /// may browse. The auth layer keeps such a body instead of its generic one.
@@ -154,12 +174,16 @@ where
 
 #[path = "assist_web.rs"]
 mod assist_web;
+#[path = "interpret_web.rs"]
+mod interpret_web;
 #[path = "sheet_json.rs"]
 mod sheet_json;
 #[path = "unit_web.rs"]
 mod unit_web;
 
-pub(crate) fn routes() -> Router<AuthState> {
+/// The campaign and sheet routes; `assistant` adds the interpretation routes (step 2c-1),
+/// which do not exist otherwise.
+pub(crate) fn routes(assistant: bool) -> Router<AuthState> {
     let sheets = Router::new()
         .route(
             "/campaigns/{id}/sheets/new",
@@ -216,6 +240,33 @@ pub(crate) fn routes() -> Router<AuthState> {
         )
         // The full-form and list-form save waits the same way (review round 1, Sonnet M1).
         .route("/private-sheets/{id}", sheet_post(edit_sheet));
+    let units = if assistant {
+        units
+            .route(
+                "/private-sheets/{id}/interpretations",
+                post(interpret_web::start)
+                    .layer(DefaultBodyLimit::max(interpret_web::INTERPRET_POST_BYTES))
+                    .route_layer(middleware::from_fn(signed_in)),
+            )
+            .route(
+                "/private-sheets/{id}/interpretations/{job}",
+                get(interpret_web::poll),
+            )
+            .route(
+                "/private-sheets/{id}/proposals/{job}/{n}",
+                post(interpret_web::apply)
+                    .layer(DefaultBodyLimit::max(interpret_web::INTERPRET_POST_BYTES))
+                    .route_layer(middleware::from_fn(signed_in)),
+            )
+    } else {
+        // Off: the paths exist only to answer 404 (the router's fallback is 403); no
+        // assistant code is reachable.
+        let off = || async { StatusCode::NOT_FOUND };
+        units
+            .route("/private-sheets/{id}/interpretations", post(off))
+            .route("/private-sheets/{id}/interpretations/{job}", get(off))
+            .route("/private-sheets/{id}/proposals/{job}/{n}", post(off))
+    };
     Router::new()
         .route("/campaigns", get(index).post(create))
         .route("/campaigns/{id}", get(detail))

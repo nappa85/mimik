@@ -11,6 +11,7 @@
 #   MAX_TOKENS (384), VARIANT (exploratory prompt variant, empty = pre-registered prefix),
 #   PRIME (0): 1 sends the priming request (full fixed prefix, max_tokens 1) after every start,
 #   before any case, and records it as prime-<n>.jsonl.
+#   CONTRACT (v1): v2 is output schema v2 (step 2c-1, aliases), read from schemas/.
 #   DEVICE (cpu): gpu passes /dev/dri to the server and offloads all layers (Vulkan). A GPU run
 #   requires the fan in manual mode at pwm1 >= 230 and runs a thermal guard that removes the
 #   containers and stops the run at junction >= 90 C, edge >= 80 C, or the fan leaving
@@ -29,9 +30,11 @@ MAX_TOKENS=${MAX_TOKENS:-384}
 VARIANT=${VARIANT:-}
 PRIME=${PRIME:-0}
 DEVICE=${DEVICE:-cpu}
+CONTRACT=${CONTRACT:-v1}
 [ "$DEVICE" = cpu ] || [ "$DEVICE" = gpu ] || { echo "DEVICE must be cpu or gpu"; exit 2; }
 EXTRA=()
 [ -n "$VARIANT" ] && EXTRA=(--variant "$VARIANT")
+EXTRA+=(--contract "$CONTRACT")
 CHECK_IMAGE=sha256:9578747a34f5e02cb7561c8e2a8903b75100b96ce1b0587d5fa4b687be0d3a9f
 HARNESS_IMAGE=sha256:8477ff915533b4a21a9727d2804acd06bae15b93e95d60627f8e127cd7025a7d
 NET=mimik-assist2b-net
@@ -101,7 +104,8 @@ prime() {  # prime <ledger name>: the priming request, not a case
   docker run --rm --init --pull never --name "$HARNESS" --label "$LABEL" --network "$NET" \
     --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
     --memory 1g --cpus 1 --cpuset-cpus "$HARNESS_CPU" --pids-limit 64 \
-    --mount type=bind,src="$ROOT/tools",dst=/tools,readonly --mount type=bind,src="$OUT",dst=/out \
+    --mount type=bind,src="$ROOT/tools",dst=/tools,readonly \
+    --mount type=bind,src="$ROOT/schemas",dst=/schemas,readonly --mount type=bind,src="$OUT",dst=/out \
     "$HARNESS_IMAGE" python3 /tools/assist_eval.py prime --endpoint http://server:8080/v1/chat/completions \
     --output "/out/$1" "${EXTRA[@]}" >> "$OUT/harness.log" 2>&1
 }
@@ -114,6 +118,7 @@ harness() {  # harness <ledger name> <args...>
     --memory 1g --cpus 1 --cpuset-cpus "$HARNESS_CPU" --pids-limit 64 \
     -e PYTHONDONTWRITEBYTECODE=1 \
     --mount type=bind,src="$ROOT/tools",dst=/tools,readonly \
+    --mount type=bind,src="$ROOT/schemas",dst=/schemas,readonly \
     --mount type=bind,src="$OUT",dst=/out \
     "$HARNESS_IMAGE" python3 /tools/assist_eval.py run-llm --endpoint http://server:8080/v1/chat/completions \
     --model-label "$LABEL_M" --model-sha256 "$SHA" --server-args "${ARGS[*]}" \

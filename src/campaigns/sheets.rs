@@ -342,7 +342,11 @@ impl Store {
         mut view: SheetView,
         permit: OwnedSemaphorePermit,
     ) -> Result<(i64, OwnedSemaphorePermit), (AppError, Option<OwnedSemaphorePermit>)> {
-        let outcome = self.run_campaign(auth.clone(),move |db|{
+        // The post-commit note hook is owned by the committing task (it runs after the commit
+        // even when this caller is cancelled), outside the database mutex (plan §1.4, "Routes").
+        let committed = self.clone();
+        let request = auth.clone();
+        let outcome = self.run_after(move |db| crate::auth::with_domain_request(request, || {
             let result=(||{
             let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             #[cfg(test)]
@@ -374,16 +378,45 @@ impl Store {
             // the whole save back.
             #[cfg(test)]
             if let Some(hook)=super::notes::BEFORE_INSERT.lock().unwrap().take(){hook(&mut view.notes.pending)?;}
-            super::notes::insert(&tx,result.sheet_id,result.revision,&view.notes.pending)?;
-            tx.commit()?;Ok(result.sheet_id)
+            super::notes::insert(&tx,result.sheet_id,result.revision,&view.notes.pending,view.notes.bundle)?;
+            let noted:Vec<String>=view.notes.pending.iter().map(|note|note.address.clone()).collect();
+            tx.commit()?;Ok((result.sheet_id,result.revision,noted))
             })();
             Ok((result,permit))
+        }), move |(result, _)| {
+            if let Ok((id, revision, noted)) = result {
+                committed.notes_committed(*id, *revision, noted);
+            }
         }).await;
         match outcome {
-            Ok((Ok(id), permit)) => Ok((id, permit)),
+            Ok((Ok((id, _, _)), permit)) => Ok((id, permit)),
             Ok((Err(error), permit)) => Err((error, Some(permit))),
             Err(error) => Err((error, None)),
         }
+    }
+
+    /// Whether the request may edit sheet `id` now (an interpretation poll rechecks rights,
+    /// plan §1.4 "Jobs"): request auth, read rights, then edit rights; `false` for a reader
+    /// who may not edit, `NotFound` for one who may not read.
+    pub(crate) async fn private_editable(
+        &self,
+        auth: RequestAuth,
+        id: i64,
+    ) -> Result<bool, AppError> {
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck(&tx)?;
+            snapshots::authorize_read(&tx, &auth, id)?;
+            let live = snapshots::load(&tx, id)?;
+            let editable = match snapshots::authorize_edit(&tx, &auth, &live) {
+                Ok(()) => true,
+                Err(AppError::NotFound) => false,
+                Err(error) => return Err(error),
+            };
+            tx.commit()?;
+            Ok(editable)
+        })
+        .await
     }
 
     /// The no-op save's answer (D-U): nothing is written, but the request's rights, the

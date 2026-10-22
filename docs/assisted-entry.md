@@ -18,6 +18,7 @@ full-form POST pages without scripts; only the `--no-auth` prototype's native ed
 | Validity flag | `src/campaigns/formulas.rs` (`Validity`, `Doubt`), `templates/private_sheet.html` |
 | Sheet module, JSON answer, CSP | `assets/sheet-assist.js`, `src/campaigns/sheet_json.rs`, `SheetPage` in `src/campaigns/web.rs`, `normalize` in `src/auth/mod.rs` |
 | Unknowns in formulas | `src/definitions/formula/convert.rs` |
+| Interpretation assistant | see "Interpretation assistant (development builds)" |
 | Demo | `tools/assist_demo.py`, `assist_definition()` in `tests/support/source_fixture.rs` |
 
 ## Number entry
@@ -68,8 +69,8 @@ target)`, primary key `(sheet_id, revision, address)`, foreign key to the histor
   which nothing writes yet. CHECK: 6–256 bytes, no NUL, one of the four prefixes, each with a
   non-empty rest.
 - **Ops:** `literal`, `sum`, `sign_literal`, `switched`, `unresolved`, `erased`, `reverted`
-  are written; `confirmed` is reserved for model proposals. `bundle` is reserved; `target` is
-  the revision an Undo reverted.
+  and `confirmed` (an applied assistant reading) are written. `bundle` numbers the notes of one
+  applied proposal (per sheet, from 1); `target` is the revision an Undo reverted.
 - **Typed values** (`NoteValue`), canonical JSON ≤ 80 bytes (`MAX_VALUE_BYTES`):
   `{"absent":true}` (optional property not set, distinct from unknown), `{"unknown":true}`,
   `{"int":"-15"}` (decimal string), `{"enum":"<id>"}`, `{"bool":true}`, `{"row":"present"|
@@ -343,7 +344,7 @@ change" and refusals), built by the same view model as the page:
 
 ```text
 {status: saved | unchanged | conflict | invalid, message, revision,
- unit: {address, action, value, state, note: {kind, shown, value, unknown} | null,
+ unit: {address, action, value, state, note: {kind, shown, value, unknown, key?} | null,
         actions: {note, offer: {text, value} | null, undo} | null},
  derived: [{id, text, code}], not_computed: {text, id, label} | null,
  checks: {violated, not_evaluated, passed, items: [{id, status, word, message, code,
@@ -351,7 +352,9 @@ change" and refusals), built by the same view model as the page:
  unavailable: {code, message} | null, validity: {validated, reasons: [{text, anchor}]}}
 ```
 
-Every integer, count and revision is a string, so 9007199254740993 survives. `action` is the
+Every integer, count and revision is a string, so 9007199254740993 survives. An
+`unresolved` note carries `key`, the note's own revision and typed address (a row cell by host
+ID), which starts an interpretation (step 2c-1); the page markup has no key. `action` is the
 unit's route at this revision (a cell's row index can change; `null` when its row is gone); a
 refusal names only `address`, `action` and `current` (the saved value as the page reads it: an
 excerpt in quotes, "(empty)" for empty text, "? (unknown)", "not set" or the value a scribble
@@ -384,6 +387,157 @@ are 200 (saved, "No change"), 409 and 422.
   classes (24 × 24 px targets) and the 390 px layout.
 
 What it does not refresh is listed in ASSIST-L15 and ASSIST-L16.
+
+## Interpretation assistant (development builds)
+
+Step 2c-1 (D-D, D-F, D-H, D-J, D-P, ASSIST-27 to ASSIST-41). The assistant reads a scribble a
+number field could not take (its current `unresolved` note) and offers a confirmable reading;
+it never writes on its own. It is off by default. In this release it exists only in builds with
+the `dev-endpoint` Cargo feature (never a release build), talking to a llama-server started by
+hand; a release build refuses `--assistant` at start ("The assistant is not available in this
+build.") and contains no development endpoint (`smoke_release.py` checks both). Without it there
+is no client, no worker and no job route (the three paths answer 404), and the sheet works as
+above.
+
+| Concern | Code |
+|---|---|
+| Schema v2, instructions, fixed prefix, data envelope | `schemas/interpretation-v2.json`, `schemas/interpretation-v2-instructions.txt`, `src/assistant/contract.rs` |
+| Phrase numbers and fraction words | `src/assistant/lexer.rs` |
+| Reading a reply | `src/assistant/output.rs` |
+| Bounds of a request | `src/assistant/request.rs` |
+| Client and transport | `src/assistant/interpreter.rs`, `src/assistant/transport.rs` |
+| Jobs, admission, runtime events | `src/assistant/jobs.rs` |
+| Circuit breaker | `src/assistant/breaker.rs` |
+| Development endpoint and flags | `src/assistant/development.rs`, `src/main.rs` |
+| Context of a job | `src/campaigns/interpret.rs`, read sets in `src/definitions/formula/mod.rs` (`Compiled::read_sets`) |
+| Routes and apply | `src/campaigns/interpret_web.rs` |
+| Module flow | `assets/sheet-assist.js` (assistant part) |
+
+**Flags (development builds):** `--assistant` with `--assistant-dev-endpoint`
+(`http://127.0.0.1:<port>`, `http://[::1]:<port>` or an absolute Unix socket path; no endpoint
+check) and `--assistant-dev-token-file` (the server's API key, one line, sent as
+`Authorization: Bearer`); `--assistant-model` (`local:<name>.gguf`, default
+`local:granite-4.2-3b-Q4_K_M.gguf`), `--assistant-model-sha256` (required for any other file)
+and `--assistant-model-alias` (the request's model name, which the server must be given as
+`--alias`; default the file name without `.gguf`, lower case). `max_tokens` is 352 for the file
+whose SHA-256 is the compiled-in `e0406663…` (the 2b rule over the 2c-1 screen of the adopted
+prefix: largest `predicted_n` 263, × 1.25, rounded up to a multiple of 32, capped at 384) and
+256 for any other. Development budgets
+(placeholders, not evidence): `--assistant-dev-bytes` (B, default 1,024, at most 4,096),
+`--assistant-dev-token-limit` (N(B), default 384), `--assistant-dev-deadline` (R, 85 s),
+`--assistant-dev-queue` (D, 1), `--assistant-dev-queue-wait` (Q, 35 s). They arrive as one
+generation's `ready` event; the same event interface (generation started, ended with its
+reason, ready with B, N(B), R, D, Q) is what the 2c-2 runtime manager feeds.
+
+**Request.** System message: the fixed prefix, the instructions, `\nJSON schema of the
+reply:\n` and the schema's compact text with the alias enum replaced by a description ("an
+alias from the data: t, f<n> or c<n>"; `response_format`, which the grammar enforces, carries
+the full pinned schema), byte-identical across requests (SHA-256 pinned in Rust
+and `tools/test_assist_eval.py`), so llama-server reuses it from its prompt cache. User
+message: the data envelope, `<data>\n{"note", "target": {alias "t", id, label?, value},
+"context": [{alias, id, label, type, value}]}\n</data>` with `<`, `>` and `&` escaped. Body
+members beside rig's own: `response_format` with the schema (`json_schema`, strict, the pinned
+bytes in their key order; serde_json keeps document order, DEP-18), `temperature` 0, `top_k`
+1, `seed` 0, `cache_prompt` and `stream` true. The phrase is read from the stored note, never
+from the request.
+
+- **Context:** the other stored integer and enum fields in definition order; with B at most
+  1,024 only the fields some read set contains with the target (for a row cell, with its
+  property), none without a formula layer; for a row-cell target, on every path, the integer
+  and enum cells of that row read in the same iteration as its property (a binder per
+  comprehension, shared by a filter and the comprehension it feeds, as in
+  `gear.filter(i, …).map(j, …)`; two unchained iterations over a list are not co-reads;
+  `has()` counts). Never derived,
+  text, multiline, boolean, notes or other rows' cells; an optional cell not set is not sent.
+- **Aliases:** `t`, `f1`…`f64` (fields), `c1`…`c31` (cells of the target's row). The schema's
+  alias enum is this fixed superset; a request supplies some of them and Rust drops a
+  reference to any other. At 4,096 bytes at most 63 minimal items fit (tested).
+- **Bounds:** the envelope must hold B bytes and N(B) tokens (llama-server's `/tokenize`):
+  whole items are dropped from the end, then the target's label; the phrase, the target's ID
+  and its value never are. If they alone exceed a bound the job ends "too long for the
+  assistant on this machine" with no completion request.
+
+**Reply.** JSON, then schema v2 (`jsonschema`), then typed decoding: `options` (at most 3, an
+expression tree of at most 3 operator levels and an explanation of at most 120 characters) or
+`ambiguous` (1 to 3 readings of at most 120 characters, display only). Per option: a `ref`
+must name a supplied integer item with a known value (an enum, unknown or unsupplied alias
+drops it); every literal's magnitude must be a number of the phrase (the phrase-number lexer:
+decimal digits folded to ASCII, a run not touching letters or other number characters, not
+part of a decimal or grouped number, no leading zero, at most 18 digits), the target's value,
+or 2, 3, 4 or 100 when a fraction or percent word is present (EN half, third, quarter,
+percent, `%`; IT metà/meta, mezzo, mezza, terzo, terza, quarto, quarta, percento, per cento;
+whole words after case and diacritic folding, ASSIST-38); a literal outside `i64` drops the
+option; evaluation is checked `i128` with an `i64` result, `div` rounds floor, ceil or exact
+(a remainder drops it), division by zero drops it. Shown: the current value, the expression
+with `−`, `×`, `÷` (references by label, `t` by its value) and the effect, labelled "the
+assistant's reading".
+
+**Jobs.** One worker, one job at a time. A start is admitted only after the origin note was
+found current: the in-memory note-write map (latest note-write revision per target, row
+cells by host ID; entries kept while a start registered before its database check or a live
+job needs them) refuses a start whose target got a newer note (409); a repeat for the origin
+of a live job, or of a finished job with applicable options, returns that job; a start older
+than the account's live job on the sheet is 409, a live job on another sheet 429; then the
+runtime state (503 "starting"/"unavailable"), the breaker (503) and capacity (429: at most D
+waiting, the running job's remaining run deadline plus R per waiting job within Q, fewer than
+64 live jobs), all computed as if the superseded job were gone, so a refused start cancels
+nothing; then the account's earlier job is superseded (its request dropped, which closes the
+connection) and the new one queued. Every save that writes notes calls the post-commit hook
+(`Store::notes_committed`, run by the committing task once the database mutex is released, also when the request was cancelled after the commit): jobs whose origin it makes non-current end ("changed since: ask
+again") or lose their options; a `row:` note covers its row's cells. A job past its queue wait
+or its run deadline ends "ask again"; a generation change ends every queued and running job
+("the assistant restarted"). At most 64 records: a start evicts the oldest finished one, never
+a live one; an evicted job answers "ask again". Options expire 10 minutes after the job ends.
+Each option is stored with a SHA-256 content hash over the job, its index, the origin, the
+value before and after, the expression, the explanation and every reference with its value.
+
+**Breaker** (one per endpoint configuration, in memory, injectable clock): counts transport
+errors, HTTP 4xx and 5xx, bodies over 1 MiB and malformed streams; three consecutive counted
+failures open it for 2 minutes, then one half-open probe decides (a cancelled probe leaves it
+half-open for the next job). A completed 2xx exchange is a success whatever its content;
+supersession, cancellation, queue-wait and run-deadline expiry are neutral. A counted failure
+whose generation exits within 2 s is withdrawn, and a breaker it opened goes back. Only Restart
+and the app's start reset it. While open, a start answers 503 and a queued job ends
+"unavailable"; entry, notes and Undo are unaffected.
+
+**Client policy.** One `reqwest` client per endpoint: proxies off whatever the environment says
+(`no_proxy`), no redirects, no retries, no decompression, HTTP/1 only, no connection reuse,
+plain HTTP only. A TCP endpoint must be `http://127.0.0.1:<port>` (or `[::1]` for the
+development endpoint), checked on the raw authority and on the parsed URL (`localhost`,
+`127.1`, `0x7f.1`, `2130706433`, `::ffff:127.0.0.1`, userinfo, zone IDs, `https` refused); a
+request for any other destination is refused before it is sent. The Unix-socket endpoint uses
+`reqwest`'s own connector, so the same policy applies and nothing but that socket is reached.
+Bodies are refused past 1 MiB, plain and streamed, as they arrive. Nothing is logged: no
+prompt, phrase, reply or token.
+
+**Routes** (JSON, `Accept: application/json`, the sheet CSP; fixed messages survive the auth
+layer's error page through `AssistantAnswer`):
+
+| Route | Keys | Answers |
+|---|---|---|
+| `POST /private-sheets/{id}/interpretations` | exactly `csrf`, `note` | 202 `{job, poll}` (200 for a repeat); 400 malformed or not an integer field or cell of the pin; 403 no edit rights; 409 not the current `unresolved` note; 429 busy; 503 starting, unavailable or breaker open; 413 over 8 KiB |
+| `GET /private-sheets/{id}/interpretations/{job}` | — | `thinking`, then `options` (`n`, `current`, `expression`, `value`, `effect`, `explanation`, `action`), `readings`, or a message (`nothing`, `too_long`, `unavailable`, `ask_again`, `superseded`, `stale`); 404 "ask again" for an unknown, evicted, another account's or another sheet's job; 403 without edit rights |
+| `POST /private-sheets/{id}/proposals/{job}/{n}` | exactly `csrf` | 200 the unit's JSON save answer; 409 "Something this proposal used has changed: ask again."; 403; the styled busy 503 after the D-X3 wait |
+
+The `note` key is the one the JSON save answer now carries in `unit.note.key` whenever the
+note is `unresolved` (`<revision>:<address>`, a row cell as `cell:<list>/<host>/<property>`);
+the page markup is unchanged. An indexed key (`<revision>:<f>.<r>.<p>`) is resolved at its own
+revision. **Apply** reads the live sheet with the permit and requires the origin note still
+current, the target still holding the value the job saw, every reference still holding its
+value in a row that still exists, the content hash and the re-evaluated value to match; then
+it writes the value with a `confirmed` note (raw = the phrase, before = the value) in a new
+bundle number of the sheet, bound to the origin note inside the `IMMEDIATE` transaction, and
+consumes the job after the commit. Any mismatch or expiry writes nothing and never falls back
+to a literal. Undo of the applied value works like any Undo.
+
+**Module.** After a save whose answer has an `unresolved` note with a key, the module starts a
+job (once the start answers 404 it stops trying for the page) and shows "Thinking…" in the
+cell's `role="status"` box (`assist-<key>`, described by the cell); it polls at 500 ms backing
+off to 2 s; a newer save of the cell supersedes it. Options show "Now <value>:", the
+expression in `<bdi>`, "= <value>" and the explanation in `<bdi>`, with a Use button named
+"Use <expression> = <value>"; readings show in `<bdi>` without Use; other answers show their
+message. Use posts the apply route as the cell's flight, like a save (a draft typed meanwhile is kept, a save asked for meanwhile waits), and draws the answer like a save. Everything is
+`textContent`.
 
 ## Adaptive sheet presentation
 

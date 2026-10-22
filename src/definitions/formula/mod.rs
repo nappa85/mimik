@@ -8,6 +8,8 @@ mod error;
 mod functions;
 mod profile;
 #[cfg(test)]
+mod read_set_tests;
+#[cfg(test)]
 mod tests;
 
 pub use error::Code;
@@ -315,6 +317,54 @@ struct Formula {
     /// Declared scalar fields and `(list, property)` values it reads (slice 1.4).
     reads: BTreeSet<String>,
     item_reads: BTreeSet<(String, String)>,
+    /// Per comprehension binder: its list and the properties it selects (plan §1.4).
+    iterations: BTreeMap<u32, (String, BTreeSet<String>)>,
+}
+
+/// What one derived value or check reads, closed through the derived values it reads
+/// (assisted sheet plan §1.4, "Read sets"). Kept apart from the reads that drive the
+/// unknown guard (U2): this feeds only the assistant's related fields, and unlike them it
+/// counts `has()` presence tests.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReadSet {
+    /// Declared scalar fields read.
+    pub scalars: BTreeSet<String>,
+    /// Per iteration (comprehension binder ID, unique across the definition): the list it
+    /// iterates and the properties read in that iteration. Two comprehensions over one list
+    /// are two iterations, also when both name their variable `item`.
+    pub iterations: BTreeMap<u32, (String, BTreeSet<String>)>,
+}
+
+impl ReadSet {
+    fn merge(&mut self, other: &Self) {
+        self.scalars.extend(other.scalars.iter().cloned());
+        for (binder, (list, properties)) in &other.iterations {
+            self.iterations
+                .entry(*binder)
+                .or_insert_with(|| (list.clone(), BTreeSet::new()))
+                .1
+                .extend(properties.iter().cloned());
+        }
+    }
+
+    /// Whether `property` of `list` is read in some iteration of this set.
+    #[must_use]
+    pub fn reads_property(&self, list: &str, property: &str) -> bool {
+        self.iterations
+            .values()
+            .any(|(iterated, properties)| iterated == list && properties.contains(property))
+    }
+
+    /// The properties of `list` read in the same iteration as `property`, itself excluded.
+    #[must_use]
+    pub fn co_read_properties(&self, list: &str, property: &str) -> BTreeSet<String> {
+        self.iterations
+            .values()
+            .filter(|(iterated, properties)| iterated == list && properties.contains(property))
+            .flat_map(|(_, properties)| properties.iter().cloned())
+            .filter(|other| other != property)
+            .collect()
+    }
 }
 
 impl Formula {
@@ -361,15 +411,18 @@ impl Compiled {
         let lookup = profile::Lookup::new(spec)?;
         let mut derived = Vec::new();
         let mut cost: u64 = 0;
+        let mut binders = 0_u32;
         for item in &spec.derived {
             fault_point!("compile", &item.id);
-            let (formula, units) = profile::compile(&lookup, &item.id, &item.expr, Some(&item.ty))?;
+            let (formula, units) =
+                profile::compile(&lookup, &item.id, &item.expr, Some(&item.ty), &mut binders)?;
             derived.push(formula_of(&item.id, Some(item.ty.clone()), formula));
             cost = cost.saturating_add(units);
         }
         let mut constraints = Vec::new();
         for item in &spec.constraints {
-            let (formula, units) = profile::compile(&lookup, &item.id, &item.expr, None)?;
+            let (formula, units) =
+                profile::compile(&lookup, &item.id, &item.expr, None, &mut binders)?;
             constraints.push(formula_of(&item.id, None, formula));
             cost = cost.saturating_add(units);
         }
@@ -386,6 +439,40 @@ impl Compiled {
             constraints,
             cost,
         })
+    }
+
+    /// The read set of every derived value (in evaluation order) and every check (in
+    /// definition order), each closed through the derived values it reads.
+    #[must_use]
+    pub fn read_sets(&self) -> Vec<(FormulaKind, &str, ReadSet)> {
+        let mut closed: BTreeMap<&str, ReadSet> = BTreeMap::new();
+        let mut out = Vec::new();
+        let own = |formula: &Formula, closed: &BTreeMap<&str, ReadSet>| {
+            let mut set = ReadSet {
+                scalars: formula.reads.clone(),
+                iterations: formula.iterations.clone(),
+            };
+            for dependency in &formula.deps {
+                if let Some(read) = closed.get(dependency.as_str()) {
+                    set.merge(read);
+                }
+            }
+            set
+        };
+        // Topological order: every dependency is closed before its dependents.
+        for formula in &self.derived {
+            let set = own(formula, &closed);
+            closed.insert(formula.id.as_str(), set.clone());
+            out.push((FormulaKind::Derived, formula.id.as_str(), set));
+        }
+        for formula in &self.constraints {
+            out.push((
+                FormulaKind::Constraint,
+                formula.id.as_str(),
+                own(formula, &closed),
+            ));
+        }
+        out
     }
 
     /// Derived field IDs in evaluation order.
@@ -567,6 +654,7 @@ fn formula_of(id: &str, ty: Option<ValueType>, compiled: profile::Checked) -> Fo
         deps: compiled.deps,
         reads: compiled.reads,
         item_reads: compiled.item_reads,
+        iterations: compiled.iterations,
     }
 }
 
