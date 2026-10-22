@@ -215,7 +215,8 @@ fn the_executed_server_has_only_the_allowed_environment_descriptors_and_limits()
     assert_eq!(report["core"], json!([0, 0]));
     assert_eq!(report["fsize"], json!([FSIZE, FSIZE]));
     assert_eq!(report["nofile"], json!([EXEC_FD, EXEC_FD]));
-    assert_eq!(report["death_signal"], json!(libc::SIGKILL));
+    // The parent-death signal is per thread and this report runs on libtest's test thread,
+    // so it is not read here; `sigkill_of_mimik_kills_the_server` shows its effect.
     assert_eq!(report["seccomp"], json!("2"));
     assert_eq!(report["no_new_privs"], json!("1"));
     assert_eq!(report["clear_death_signal"], json!(libc::EPERM));
