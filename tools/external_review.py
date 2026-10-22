@@ -178,6 +178,8 @@ def review_with_fallback(models, snap, prompt, total, idle):
         if state == "ok":
             return model, output
         attempts.append(f"{model}: {state} (exit {code})")
+        if state == "incomplete":
+            print(f"{model}: output ended with:\n{output.strip()[-1500:]}", file=sys.stderr)
         print(f"{model}: {state} (exit {code}); trying the next model.", file=sys.stderr)
     return None, "\n".join(attempts)
 
