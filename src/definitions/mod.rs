@@ -307,3 +307,9 @@ pub struct DraftSummary {
     pub content_hash: String,
     pub status: &'static str,
 }
+
+/// The compiled formulas of an admitted definition, for tests outside this module.
+#[cfg(test)]
+pub(crate) fn compiled_for_tests(definition: &Definition) -> Option<formula::Compiled> {
+    formula_admission::check(definition).expect("an admissible test definition")
+}

@@ -797,6 +797,23 @@ fn busy_pairs(id: i64, action: &str, pairs: &Pairs, csrf: &str) -> super::Result
     })
 }
 
+/// The styled busy answer of a request whose only pair is `csrf` (an interpretation apply,
+/// step 2c-1): a button that posts it again.
+pub(super) fn busy_retry(id: i64, action: &str, csrf: &str, retry: &str) -> super::ResultResponse {
+    busy_page(&BusyTemplate {
+        sheet: id,
+        action,
+        csrf,
+        unit: None,
+        retry: Some(retry.to_owned()),
+        hidden: Vec::new(),
+        value: None,
+        name: "value",
+        multiline: false,
+        dropped: false,
+    })
+}
+
 fn busy_page(template: &BusyTemplate<'_>) -> super::ResultResponse {
     let html = template
         .render()

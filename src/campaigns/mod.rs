@@ -6,6 +6,7 @@ mod domain;
 mod entry;
 mod formulas;
 mod history_diff;
+mod interpret;
 mod notes;
 mod quick;
 mod rows;

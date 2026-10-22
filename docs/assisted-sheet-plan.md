@@ -75,7 +75,7 @@ implementation for both).
   measured in bytes after escaping, and at most N(B) tokens, counted with llama-server's
   `/tokenize` on the rendered dynamic part; whole context items are dropped from the end until
   both hold, never cut. The phrase, the target's ID and its value are never dropped; the
-  target's label is dropped before them; if they still exceed a bound the job ends "too long
+  target's label is dropped only once no context item is left; if they still exceed a bound the job ends "too long
   for the assistant on this machine" (no completion request, neutral for the breaker). Every dynamic string goes inside a fixed data envelope that the instructions
   declare to be data, never instructions.
 - **Context (D-F, D-J):** phrase and target first; then other stored integer and enum fields in
@@ -1011,7 +1011,7 @@ note, not the request; the fixed prefix is byte-identical across requests; the d
 stays within B (4,096, 2,048, 1,024, 768, 512) and within N(B) tokens (the fake server's
 `/tokenize` returning a high count drops items that the byte bound kept), dropping whole
 items; the development token limit (`--assistant-dev-token-limit`, default 256) is the N(B)
-2c-1 enforces; the target's label goes before the phrase, target ID or value; a phrase and
+2c-1 enforces; the target's label is dropped after the last context item and never the phrase, target ID or value; a phrase and
 target over a bound end "too long" without a completion request and without a breaker count;
 excluded field types never appear in the request; - read sets: per derived value and check,
 scalar reads and `(list, property)` reads grouped by binder, closed through derived

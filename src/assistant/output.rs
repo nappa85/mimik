@@ -4,7 +4,7 @@
 //! schema or decoding shows nothing; an option that fails a domain check is dropped alone.
 use super::contract::{MAX_DEPTH, MAX_OPTIONS, MAX_TEXT_CHARS, SCHEMA};
 use super::lexer;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
@@ -17,7 +17,7 @@ static VALIDATOR: LazyLock<Result<jsonschema::Validator, ()>> = LazyLock::new(||
 });
 
 /// An operator of the expression tree.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BinOp {
     Add,
@@ -27,7 +27,7 @@ pub(crate) enum BinOp {
 }
 
 /// How a division rounds; `Exact` drops the option on a remainder.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Round {
     Floor,
@@ -36,7 +36,7 @@ pub(crate) enum Round {
 }
 
 /// A node of the expression tree, as the schema allows it.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub(crate) enum Node {
     Lit {
@@ -48,7 +48,7 @@ pub(crate) enum Node {
     },
     Op {
         op: BinOp,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         round: Option<Round>,
         l: Box<Node>,
         r: Box<Node>,
@@ -254,6 +254,28 @@ fn evaluate(
             }
         }
     }
+}
+
+/// Re-evaluates a validated tree with the values `value` gives each alias now (the apply's
+/// recheck): `None` when a value is missing or unknown, or the arithmetic fails.
+pub(crate) fn recompute(node: &Node, value: &dyn Fn(&str) -> Option<i64>) -> Option<i64> {
+    fn inner(node: &Node, value: &dyn Fn(&str) -> Option<i64>) -> Option<i128> {
+        match node {
+            Node::Lit { lit } => Some(i128::from(*lit)),
+            Node::Ref { alias } => value(alias).map(i128::from),
+            Node::Op { op, round, l, r } => {
+                let (left, right) = (inner(l, value)?, inner(r, value)?);
+                match (op, round) {
+                    (BinOp::Add, None) => left.checked_add(right),
+                    (BinOp::Sub, None) => left.checked_sub(right),
+                    (BinOp::Mul, None) => left.checked_mul(right),
+                    (BinOp::Div, Some(round)) => divide(left, right, *round).ok(),
+                    _ => None,
+                }
+            }
+        }
+    }
+    inner(node, value).and_then(|result| i64::try_from(result).ok())
 }
 
 /// Checked division with the requested rounding, on negatives too.

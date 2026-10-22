@@ -35,7 +35,11 @@ const MIGRATIONS: [&str; 21] = [
 ];
 
 #[derive(Clone)]
-pub struct Store(Arc<Mutex<Connection>>);
+pub struct Store(Arc<Mutex<Connection>>, Arc<std::sync::OnceLock<NoteHook>>);
+
+/// Called after every committed sheet save that wrote change notes: the sheet, the new
+/// revision and the noted addresses (the assistant's post-commit hook, plan §1.4).
+pub(crate) type NoteHook = Arc<dyn Fn(i64, i64, &[String]) + Send + Sync>;
 
 pub(crate) static AUTH_WORKERS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(16)));
@@ -103,7 +107,26 @@ impl Store {
         }
         crate::sources::search::ensure(&tx)?;
         tx.commit()?;
-        Ok(Self(Arc::new(Mutex::new(connection))))
+        Ok(Self(
+            Arc::new(Mutex::new(connection)),
+            Arc::new(std::sync::OnceLock::new()),
+        ))
+    }
+
+    /// Installs the post-commit note hook; a second one is refused.
+    pub(crate) fn set_note_hook(&self, hook: NoteHook) -> Result<(), AppError> {
+        self.1
+            .set(hook)
+            .map_err(|_| AppError::Invalid("A note hook is already installed."))
+    }
+
+    /// Runs the post-commit note hook, when one is installed.
+    pub(crate) fn notes_committed(&self, sheet: i64, revision: i64, addresses: &[String]) {
+        if let Some(hook) = self.1.get()
+            && !addresses.is_empty()
+        {
+            hook(sheet, revision, addresses);
+        }
     }
 
     pub(crate) async fn run<T: Send + 'static>(

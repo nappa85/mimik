@@ -102,6 +102,8 @@ pub(crate) struct AuthState {
 #[derive(Clone, Default)]
 pub struct AuthOptions {
     pub development_owner_play: bool,
+    /// The interpretation assistant (`--assistant`, step 2c-1); `None` is off.
+    pub assistant: Option<crate::assistant::AssistantHandle>,
     pub network: crate::network::Network,
     pub external_url: Option<url::Url>,
 }
@@ -133,6 +135,9 @@ async fn app_state(store: Store, options: AuthOptions) -> Result<AuthState, AppE
     crate::network::Access::new(options.network, options.external_url.clone())?;
     let accounts = Accounts::new(store.clone());
     accounts.require_owner_binding().await?;
+    if let Some(assistant) = &options.assistant {
+        store.set_note_hook(assistant.note_hook())?;
+    }
     Ok(AuthState {
         accounts,
         sessions: SqliteSessions::new(store),
@@ -187,7 +192,9 @@ fn router_with_sessions(
         .merge(administration::routes())
         .merge(materials::routes())
         .merge(rulesets::routes())
-        .merge(crate::campaigns::web::routes())
+        .merge(crate::campaigns::web::routes(
+            state.options.assistant.is_some(),
+        ))
         .route("/assets/app.css", get(crate::web::css_asset))
         .route("/assets/logo.png", get(crate::web::logo_asset))
         .route(
@@ -264,6 +271,7 @@ async fn boundary(request: Request, next: Next) -> Response {
             && !trusted_credential
             && !crate::campaigns::web::catalogue_notice(&response)
             && !crate::campaigns::web::sheet_busy(&response)
+            && !crate::campaigns::web::assistant_answer(&response)
             && !materials::trusted(&response)
             && !errors::trusted(&response)
         {
@@ -392,7 +400,8 @@ fn normalize(mut response: Response) -> Response {
     let explained = errors::trusted(&response)
         || materials::trusted(&response)
         || crate::campaigns::web::catalogue_notice(&response)
-        || crate::campaigns::web::sheet_busy(&response);
+        || crate::campaigns::web::sheet_busy(&response)
+        || crate::campaigns::web::assistant_answer(&response);
     if (status.is_client_error() || status.is_server_error())
         && !explained
         && !(matches!(
@@ -652,6 +661,14 @@ pub(crate) async fn request_auth(
 impl AuthState {
     pub(crate) fn store(&self) -> Store {
         self.sessions.store.clone()
+    }
+
+    /// The assistant, when on.
+    pub(crate) fn assistant(&self) -> Option<Arc<crate::assistant::jobs::Assistant>> {
+        self.options
+            .assistant
+            .as_ref()
+            .map(|handle| Arc::clone(&handle.0))
     }
 }
 /// Whether the session carries a principal binding at all (cookie-backed session data only;

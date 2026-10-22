@@ -30,6 +30,8 @@ mod cell_tests;
 mod entry_save_tests;
 #[path = "formula_tests.rs"]
 mod formula_tests;
+#[path = "interpret_route_tests.rs"]
+mod interpret_route_tests;
 #[path = "list_tests.rs"]
 pub(super) mod list_tests;
 #[path = "list_values_tests.rs"]

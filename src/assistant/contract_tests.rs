@@ -25,7 +25,7 @@ fn schema_text_is_pinned_compact_and_named() {
         SCHEMA_SHA256
     );
     assert!(SCHEMA_TEXT.is_ascii());
-    assert!(SCHEMA_TEXT.ends_with("}\n") && !SCHEMA_TEXT.contains("\r"));
+    assert!(SCHEMA_TEXT.ends_with("}\n") && !SCHEMA_TEXT.contains('\r'));
     // Re-serialising keeps the file's own key order (serde_json's `preserve_order`, which
     // rig-core enables), so the bytes sent in `response_format` are the pinned text.
     assert_eq!(
