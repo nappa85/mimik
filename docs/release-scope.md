@@ -124,7 +124,7 @@ fixtures are synthetic and are not release content.
 
 ## Build from source
 
-Unpack the `.crate`, then unpack the dependency sources into the package root. With Rust 1.95.0:
+Unpack the `.crate`, then unpack the dependency sources into the package root. With Rust 1.99.1:
 
 ```sh
 cargo build --release --offline --locked

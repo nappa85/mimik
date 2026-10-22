@@ -228,7 +228,7 @@ async fn late_redemption_admission_failure_offers_fresh_get_and_preserves_creden
         .split('"')
         .next()
         .unwrap();
-    assert!(cookie != anonymous.id);
+    assert_ne!(cookie, anonymous.id);
     assert_eq!(
         app.oneshot(post(cookie, csrf)).await.unwrap().status(),
         StatusCode::SEE_OTHER

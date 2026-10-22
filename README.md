@@ -67,4 +67,4 @@ ruff check tools && python -m unittest discover -s tools -p "test_*.py"
 - [Supported release scope and CI gate](docs/release-scope.md).
 - Active plan: [assisted sheet](docs/assisted-sheet-plan.md).
 
-Rust and Cargo 1.95.0. Third-party htmx attribution is in `assets/README.md`.
+Rust and Cargo 1.99.1. Third-party htmx attribution is in `assets/README.md`.

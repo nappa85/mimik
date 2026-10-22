@@ -105,10 +105,11 @@ implementation for both).
   review; `docs/results.md`, assisted interpretation).
 - **Confidence:** if the runtime returns token log-probabilities they are recorded on the job
   record for evaluation only; nothing is gated or hidden on them in 2c.
-- **Crate (D-H, proposal pending review):** `rig-core` =0.44.0 (0.45 needs Rust 1.97.1),
-  default features off plus `reqwest`, no TLS, on the OpenAI chat route with the llama.cpp
-  dialect; the schema goes in `additional_params` as `response_format` (sent byte-exact; the
-  native `output_schema` path rewrites `oneOf` to `anyOf`). The body bound is a small Mimik
+- **Crate (D-H, proposal pending review):** `rig-core` =0.45.0 (ASSIST-39; 2b's offline
+  checks re-run on it), default features off plus `reqwest`, no TLS, on the OpenAI chat
+  route with the llama.cpp dialect; the schema goes in `additional_params` as
+  `response_format` (sent byte-exact; the native `output_schema` path rewrites `oneOf` to
+  `anyOf`). The body bound is a small Mimik
   transport implementing rig's `HttpClientExt` over the host-built `reqwest` client (plain and
   streaming bodies refused past the bound); no D-H crate offers one. `genai` was rejected (no
   body hook).

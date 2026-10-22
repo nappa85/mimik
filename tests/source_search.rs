@@ -219,7 +219,10 @@ async fn fts_syntax_in_user_queries_is_literal() {
         );
     }
     assert_eq!(texts(&store, "NEAR(veleno body:").await.len(), 1);
-    assert!(texts(&store, "assente OR forza").await.is_empty());
+    assert_eq!(
+        texts(&store, "assente OR forza").await,
+        Vec::<String>::new()
+    );
 }
 
 #[tokio::test]
@@ -283,13 +286,13 @@ async fn rejection_and_correction_maintain_the_index() {
         texts(&store, "corretto").await,
         vec!["Testo corretto giusto".to_owned()]
     );
-    assert!(texts(&store, "sbagliato").await.is_empty());
+    assert_eq!(texts(&store, "sbagliato").await, Vec::<String>::new());
     store
         .review_source_unit(1, 1, review(2, "accepted", ""))
         .await
         .unwrap();
     complete(&store).await;
-    assert!(texts(&store, "corretto").await.is_empty());
+    assert_eq!(texts(&store, "corretto").await, Vec::<String>::new());
     assert_eq!(texts(&store, "sbagliato").await.len(), 1);
     store
         .review_source_unit(1, 1, review(3, "corrected", "Di nuovo corretto"))
@@ -300,8 +303,8 @@ async fn rejection_and_correction_maintain_the_index() {
         .await
         .unwrap();
     complete(&store).await;
-    assert!(texts(&store, "corretto").await.is_empty());
-    assert!(texts(&store, "sbagliato").await.is_empty());
+    assert_eq!(texts(&store, "corretto").await, Vec::<String>::new());
+    assert_eq!(texts(&store, "sbagliato").await, Vec::<String>::new());
 }
 
 async fn complete(store: &Store) {
@@ -503,7 +506,7 @@ async fn unreviewed_and_incomplete_units_are_excluded() {
             ],
         );
     });
-    assert!(texts(&store, "segreto").await.is_empty());
+    assert_eq!(texts(&store, "segreto").await, Vec::<String>::new());
     let indexed: Vec<i64> = fts_rows(dir.path()).into_iter().map(|row| row.0).collect();
     assert_eq!(indexed, vec![3]);
 }
@@ -547,7 +550,7 @@ async fn completeness_changes_do_not_rewrite_the_index() {
         );
     });
     let before = fts_rows(dir.path());
-    assert!(texts(&store, "sospesa").await.is_empty());
+    assert_eq!(texts(&store, "sospesa").await, Vec::<String>::new());
     complete(&store).await;
     assert_eq!(fts_rows(dir.path()), before);
     assert_eq!(texts(&store, "sospesa").await.len(), 1);
@@ -575,7 +578,7 @@ async fn unsanitizable_legacy_unit_does_not_block_open() {
         );
     });
     assert_eq!(store.search_index_failures().await.unwrap(), 1);
-    assert!(fts_rows(dir.path()).is_empty());
+    assert_eq!(fts_rows(dir.path()), Vec::<(i64, String)>::new());
 }
 
 #[tokio::test]

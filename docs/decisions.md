@@ -289,6 +289,7 @@ Versions and exact pins are in `Cargo.toml`; CI checks licences (`cargo about`) 
 - **DEP-13** (2026-10-16, refined 2026-10-19) Test-only crates (`scraper`, `proptest`, `rqrr`, `tempfile`, `tower`, `futures-util`) never enter the release binary.
 - **DEP-14** (2026-10-19) Advisories are taken even when unreachable: ammonia is locked at 4.2.4 for RUSTSEC-2026-0373, and `sources::sanitizer_tests` pins that no `style` attribute survives sanitisation.
 - **DEP-15** (2026-10-11) Release tooling is pinned in containers (cargo-audit, cargo-about, Ruff, actionlint, pathspec, Playwright Chromium); no custom linter, licence analyser or browser engine.
+- **DEP-16** (2026-10-22) askama is built without its `config` feature (Mimik has no `askama.toml`), which keeps the unmaintained basic-toml (RUSTSEC-2026-0374) out of the tree.
 
 ## Licensing and release
 

@@ -1061,7 +1061,7 @@ async fn material_review_path_maintains_the_search_index() {
                 .unwrap()
         }
     };
-    assert!(fts(&store).await.is_empty());
+    assert_eq!(fts(&store).await, Vec::<(i64, String)>::new());
     for (revision, state, correction, expected) in [
         (1, "accepted", "", Some("Fixture\n")),
         (2, "corrected", "Owner correction", Some("Owner correction")),

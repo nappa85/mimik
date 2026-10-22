@@ -287,7 +287,7 @@ fn cli(db: &std::path::Path, args: &[&str]) -> serde_json::Value {
         "CLI failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stderr.is_empty());
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
     let text = std::str::from_utf8(&output.stdout).unwrap();
     for forbidden in ["$argon2", "verifier", "digest", "synthetic password 123"] {
         assert!(!text.contains(forbidden));
@@ -455,7 +455,7 @@ fn cli_reset(db: &std::path::Path, dir: &tempfile::TempDir, pw: &str, alt: &str,
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
 }
 
 const BEFORE_ACCOUNTS: [&str; 9] = [

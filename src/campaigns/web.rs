@@ -519,16 +519,16 @@ struct SheetQuery(Option<String>);
 
 impl<S: Send + Sync> axum::extract::FromRequestParts<S> for SheetQuery {
     type Rejection = std::convert::Infallible;
-    async fn from_request_parts(
+    fn from_request_parts(
         parts: &mut axum::http::request::Parts,
         _: &S,
-    ) -> Result<Self, Self::Rejection> {
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
         let query = parts.uri.query().unwrap_or_default();
         let mut focus = form_urlencoded::parse(query.as_bytes())
             .filter(|(key, _)| key == "focus")
             .map(|(_, value)| value.into_owned());
         let first = focus.next();
-        Ok(Self(first.filter(|_| focus.next().is_none())))
+        std::future::ready(Ok(Self(first.filter(|_| focus.next().is_none()))))
     }
 }
 

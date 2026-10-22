@@ -470,10 +470,16 @@ mod tests {
         assert_eq!(moved(&["a", "b", "c"], &["b", "a", "c"]), ["b"]);
         assert_eq!(moved(&["a", "b", "c"], &["a", "c", "b"]), ["c"]);
         // No net change, and a full reversal (all but one moved, the last kept).
-        assert!(moved(&["a", "b", "c"], &["a", "b", "c"]).is_empty());
+        assert_eq!(
+            moved(&["a", "b", "c"], &["a", "b", "c"]),
+            Vec::<String>::new()
+        );
         assert_eq!(moved(&["a", "b", "c"], &["c", "b", "a"]), ["c", "b"]);
         // Removals and additions do not count as moves.
-        assert!(moved(&["a", "b", "c"], &["x", "a", "c"]).is_empty());
+        assert_eq!(
+            moved(&["a", "b", "c"], &["x", "a", "c"]),
+            Vec::<String>::new()
+        );
         assert_eq!(outside_increasing(&[]), Vec::<usize>::new());
         assert_eq!(outside_increasing(&[2, 0, 1]), [0]);
     }
@@ -494,7 +500,7 @@ mod tests {
         );
         let summary = diff(Some(&before), &after, &definition);
         assert_eq!(kinds(&summary.lines), [(Kind::Reused, "equipment/r1-1")]);
-        assert!(summary.lines[0].properties.is_empty());
+        assert_eq!(summary.lines[0].properties, Vec::<(String, String)>::new());
     }
 
     #[test]

@@ -175,8 +175,8 @@ async fn name_search_quotes_every_token_and_filters_without_ranking() {
             // Operators are quoted tokens: "OR" must occur in the name.
             assert_eq!(found("lantern OR ward")?.0, ["or-ward"]);
             // A column filter is a phrase of its tokens, never a filter.
-            assert!(found("name:lantern")?.0.is_empty());
-            assert!(found("NEAR(lantern ward)")?.0.is_empty());
+            assert_eq!(found("name:lantern")?.0, Vec::<String>::new());
+            assert_eq!(found("NEAR(lantern ward)")?.0, Vec::<String>::new());
             assert_eq!(found("near column")?.0, ["near"]);
             assert_eq!(found("\"lantern")?.0, ["flare", "or-ward"]);
             assert_eq!(found("\"lantern flare\"")?.0, ["flare"]);
@@ -229,7 +229,7 @@ async fn colliding_keys_across_catalogues_never_leak_and_only_the_latest_names_m
                     .collect())
             };
             assert_eq!(names("spells", Some("lantern"))?, ["Spell Lantern"]);
-            assert!(names("spells", Some("brass"))?.is_empty());
+            assert_eq!(names("spells", Some("brass"))?, Vec::<String>::new());
             assert_eq!(names("items", Some("lantern"))?, ["Brass Lantern"]);
             assert_eq!(names("items", None)?, ["Brass Lantern"]);
             Ok(())

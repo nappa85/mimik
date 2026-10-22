@@ -40,7 +40,7 @@ mod tests {
         let date = datetime(100);
         assert_eq!(date.iso, "1970-01-01T00:01:40Z");
         assert_eq!(date.readable, "01 January 1970, 00:01 UTC");
-        assert!(datetime(i64::MAX).iso.is_empty());
+        assert_eq!(datetime(i64::MAX).iso, "");
         assert_eq!(datetime(i64::MAX).readable, "Time unavailable");
     }
 }

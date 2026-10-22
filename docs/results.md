@@ -17,10 +17,10 @@ decides.**
 
 ### Provider crate and client policy (C1 to C7)
 
-- **Setup:** `genai` 0.7.0, `rig-core` 0.44.0 (0.45.0 needs Rust 1.97.1; the toolchain is
-  1.95.0) and `async-openai` 0.42.2, default features off, `reqwest` 0.13.5, built in
-  `mimik-ci`. Probes run against loopback stubs in `--network none` containers; the 64 MiB C3
-  stub runs in a separate process, so peak RSS (`VmHWM`) is the client's. One live request per
+- **Setup:** `genai` 0.7.0, `rig-core` 0.44.0 and `async-openai` 0.42.2, default features
+  off, `reqwest` 0.13.5, built in `mimik-ci` with Rust 1.95.0. `rig-core` is now 0.45.0 (see
+  the re-check below). Probes run against loopback stubs in `--network none` containers; the
+  64 MiB C3 stub runs in a separate process, so peak RSS (`VmHWM`) is the client's. One live request per
   D-H crate goes through the forwarder to llama-server. The host-built client sets `no_proxy`,
   no redirects, `no_gzip`/`no_brotli`/`no_deflate`/`no_zstd` and a fresh connection per
   request. TLS-free: no TLS crate in any probe's dependency tree; `reqwest` features are
@@ -44,8 +44,8 @@ decides.**
   | C3 hook | none | own `HttpClientExt` transport: refused at 1 MiB, about +7 MiB | own tower service: refused, about +2 MiB |
   | C4 drop after 1 s, plain and streaming | closed within 1 ms | closed within 1 ms (also via own transport) | closed within 1 ms |
   | C5 licences outside `about.toml` | none | none | none |
-  | C6 size over the 2.53 MiB baseline | +3.75 MiB, 28 crates new to Mimik | +2.48 MiB, 21 new | +0.82 MiB, 22 new |
-  | C7 releases in 6 months; MSRV | 44 (7 non-prerelease), 0.7.0 on 2026-10-20; ≤ 1.95 | 12, pre-1.0, breaking; 0.44 at 1.95, 0.45 at 1.97.1 | 18; 1.75 |
+  | C6 size over the 2.53 MiB baseline | +3.75 MiB, 28 crates new to Mimik | +2.48 MiB, 21 new (0.45.0 on Rust 1.99.1: +2.67 MiB over a 2.57 MiB baseline) | +0.82 MiB, 22 new |
+  | C7 releases in 6 months; MSRV | 44 (7 non-prerelease), 0.7.0 on 2026-10-20; ≤ 1.95 | 12, pre-1.0, breaking; 0.44 at 1.95, 0.45 (2026-10-19) at 1.97.1 | 18; 1.75 |
 
   Destination guard (ours): 14/14 cases as expected. The WHATWG parser in `url` turns `127.1`,
   `0x7f.1` and `2130706433` into `127.0.0.1`, so the check also runs on the raw authority.
@@ -57,15 +57,31 @@ decides.**
   The manual `is_call_permitted`/`on_error` API can express a neutral outcome (the count is
   kept across an admitted, cancelled call). The mock clock is thread-local and the last release
   is 2024-07. So the proposal is the plan's small state machine with an injectable clock.
-- **Conclusion (proposal):** `rig-core` 0.44.0 is the only D-H crate that meets C1 to C5. The
+- **rig-core 0.45.0 re-check** (Rust 1.99.1, `mimik-ci:1.99.1`, `--network none`; outputs
+  in `probes/v4-rig045/`): the probe builds against 0.45.0 (with `rig-http` and
+  `rig-reqwest` 0.45.0) without source changes. Every offline C1, C2, C3 and C4 result in the
+  table is unchanged: the native path sends the same rewritten schema byte for byte, the
+  `additional_params` schema is exact, proxy trap 1 / 0, 302 and gzip as before, one request
+  on 500 and 429, the own transport refuses the 64 MiB body at about +6.4 MiB (default path
+  +325 MiB, endless SSE line +72 MiB), and drops close within 1 ms. `reqwest` features stay
+  `json, multipart, stream`, with no TLS crate in the tree; all licences are within
+  `about.toml`. The changelog's named breaking changes are in the harness, agent, catalog,
+  document and observe APIs; two broad API-review entries (#2845, #2848) are not itemised,
+  and the APIs the probe uses (`http_client`, `OpenAIConfig`, `CompletionRequest` builders,
+  `LlamaCppOptions`) compile unchanged. `rig-reqwest`'s `rustls` feature (a default, kept
+  off) now also adds a bundled-roots TLS fallback. Not re-run on 0.45.0: the live request
+  through the forwarder (C1 live) and the C5 check against the shipped `Cargo.lock` (due in
+  2c).
+- **Conclusion (proposal):** `rig-core` (0.44.0 measured, 0.45.0 re-checked) is the only D-H
+  crate that meets C1 to C5. The
   schema goes byte-exact through `additional_params` (its native path rewrites `oneOf`), and
   the body bound needs a small Mimik transport (about 80 lines, the probe's `Bounded`).
   `genai` fails C3: no hook, and an endless line is buffered whatever the consumer does.
   `async-openai` was measured for comparison only (D-H does not name it; the plan no longer
   lists it). D-H's stop does not trigger: both D-H crates can send the schema.
 - **Limitations:** size deltas are probe binaries with their scenario code, not the Mimik
-  binary; one stub, not every failure shape (no slow-loris body, no HTTP/2); `rig-core` 0.45
-  was not built; maintenance is release cadence only.
+  binary; one stub, not every failure shape (no slow-loris body, no HTTP/2); `rig-core` 0.45.0
+  has no live run; maintenance is release cadence only.
 
 ### Runtime topology and egress
 

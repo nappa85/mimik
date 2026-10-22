@@ -170,7 +170,7 @@ fn unknown_version_rejection_preserves_all_state() {
                 }))
                 .is_err()
             );
-            assert!(snapshot(&db) == before);
+            assert_eq!(snapshot(&db), before);
         }
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -178,7 +178,7 @@ fn unknown_version_rejection_preserves_all_state() {
             }))
             .is_err()
         );
-        assert!(snapshot(&db) == before);
+        assert_eq!(snapshot(&db), before);
     }
 }
 
@@ -197,7 +197,7 @@ fn later_rewind_failure_rolls_back_account_and_finalization_drops() {
         }))
         .is_err()
     );
-    assert!(snapshot(&db) == before);
+    assert_eq!(snapshot(&db), before);
 }
 
 #[test]
@@ -214,7 +214,7 @@ fn missing_account_table_rejects_before_drops_and_empty_fixtures_remigrate() {
         }))
         .is_err()
     );
-    assert!(snapshot(&db) == before);
+    assert_eq!(snapshot(&db), before);
     drop(db);
     for remigrate in [false, true] {
         let path = dir.path().join(format!("empty-{remigrate}.sqlite3"));
