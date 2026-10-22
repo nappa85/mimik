@@ -148,10 +148,12 @@ enum Start {
     Other(&'static str),
 }
 
+type Probed = Vec<(Level, Result<(), String>)>;
+
 #[derive(Default)]
 struct FakeLauncher {
     preflight: Mutex<Option<String>>,
-    probe: Mutex<Option<Vec<(Level, Result<(), String>)>>>,
+    probe: Mutex<Option<Probed>>,
     script: Mutex<VecDeque<Start>>,
     starts: Mutex<Vec<(u64, Level, Instant)>>,
     children: Mutex<Vec<Arc<FakeChild>>>,
@@ -226,7 +228,12 @@ impl FakeLauncher {
     }
 
     fn levels(&self) -> Vec<Level> {
-        self.starts.lock().unwrap().iter().map(|(_, l, _)| *l).collect()
+        self.starts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, l, _)| *l)
+            .collect()
     }
 
     fn child(&self, n: usize) -> Arc<FakeChild> {
@@ -317,14 +324,21 @@ async fn a_sandbox_failure_moves_to_the_next_probed_level_at_once_not_counted() 
     let status = handle.status();
     assert_eq!(status.failures, 0);
     assert_eq!(status.level, Some(Level::Unconfined));
-    assert!(status.skipped.contains(&(Level::Bubblewrap, "bwrap: setup failed".into())));
+    assert!(
+        status
+            .skipped
+            .contains(&(Level::Bubblewrap, "bwrap: setup failed".into()))
+    );
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_level_that_fails_its_probe_is_never_started() {
     let launcher = FakeLauncher::scripted([]);
     *launcher.probe.lock().unwrap() = Some(vec![
-        (Level::Bubblewrap, Err("user namespaces are disabled".into())),
+        (
+            Level::Bubblewrap,
+            Err("user namespaces are disabled".into()),
+        ),
         (Level::Unconfined, Ok(())),
     ]);
     let (assistant, handle) = manager(&launcher);
@@ -346,7 +360,7 @@ async fn other_failures_retry_after_two_minutes_and_four_make_the_assistant_unav
     ]);
     let (assistant, handle) = manager(&launcher);
     let probe = handle.clone();
-    until(Duration::from_secs(900), move || {
+    until(Duration::from_mins(15), move || {
         matches!(probe.status().state, State::Unavailable(_))
     })
     .await;
@@ -354,7 +368,10 @@ async fn other_failures_retry_after_two_minutes_and_four_make_the_assistant_unav
     assert_eq!(starts.len(), 4);
     for pair in starts.windows(2) {
         let gap = pair[1].2 - pair[0].2;
-        assert!(gap >= RETRY_AFTER && gap < RETRY_AFTER + Duration::from_secs(1), "{gap:?}");
+        assert!(
+            gap >= RETRY_AFTER && gap < RETRY_AFTER + Duration::from_secs(1),
+            "{gap:?}"
+        );
         // The level is kept.
         assert_eq!(pair[1].1, Level::Bubblewrap);
     }
@@ -391,7 +408,10 @@ async fn a_child_exit_while_ready_restarts_at_once_and_counts_only_within_ten_mi
     ready(&assistant).await;
     launcher.child(0).crash();
     let probe = Arc::clone(&launcher);
-    until(Duration::from_secs(5), move || probe.starts.lock().unwrap().len() == 2).await;
+    until(Duration::from_secs(5), move || {
+        probe.starts.lock().unwrap().len() == 2
+    })
+    .await;
     ready(&assistant).await;
     assert_eq!(handle.status().failures, 1);
     assert_eq!(handle.status().generation, 2);
@@ -402,7 +422,10 @@ async fn a_child_exit_while_ready_restarts_at_once_and_counts_only_within_ten_mi
     assert_eq!(handle.status().failures, 0);
     launcher.child(1).crash();
     let probe = Arc::clone(&launcher);
-    until(Duration::from_secs(5), move || probe.starts.lock().unwrap().len() == 3).await;
+    until(Duration::from_secs(5), move || {
+        probe.starts.lock().unwrap().len() == 3
+    })
+    .await;
     ready(&assistant).await;
     assert_eq!(handle.status().failures, 0);
     assert!(!launcher.coexisted.load(Ordering::SeqCst));
@@ -423,7 +446,10 @@ async fn two_consecutive_expiries_stop_the_child_as_hung_and_restart() {
     assert_eq!(launcher.starts.lock().unwrap().len(), 1);
     assistant.signal_for_tests(Signal::Expired { generation: 1 });
     let probe = Arc::clone(&launcher);
-    until(Duration::from_secs(5), move || probe.starts.lock().unwrap().len() == 2).await;
+    until(Duration::from_secs(5), move || {
+        probe.starts.lock().unwrap().len() == 2
+    })
+    .await;
     assert_eq!(launcher.stops.load(Ordering::SeqCst), 1);
     ready(&assistant).await;
     let status = handle.status();
@@ -445,7 +471,7 @@ async fn too_slow_is_unavailable_with_the_numbers_and_no_retry() {
     let launcher = FakeLauncher::scripted([Start::Ok(slow)]);
     let (assistant, handle) = manager(&launcher);
     let probe = handle.clone();
-    until(Duration::from_secs(900), move || {
+    until(Duration::from_mins(15), move || {
         matches!(probe.status().state, State::Unavailable(_))
     })
     .await;
@@ -473,7 +499,10 @@ async fn restart_resets_count_and_breaker_and_returns_to_level_1() {
     assert_eq!(handle.status().level, Some(Level::Unconfined));
     launcher.child(0).crash();
     let probe = Arc::clone(&launcher);
-    until(Duration::from_secs(5), move || probe.starts.lock().unwrap().len() == 3).await;
+    until(Duration::from_secs(5), move || {
+        probe.starts.lock().unwrap().len() == 3
+    })
+    .await;
     ready(&assistant).await;
     // A lower level stays down until Restart; the exit counted.
     assert_eq!(handle.status().level, Some(Level::Unconfined));
@@ -482,7 +511,10 @@ async fn restart_resets_count_and_breaker_and_returns_to_level_1() {
     // A second press while the transition runs is no second transition.
     assert_eq!(handle.restart(), Restart::AlreadyRunning);
     let probe = Arc::clone(&launcher);
-    until(Duration::from_secs(5), move || probe.starts.lock().unwrap().len() == 4).await;
+    until(Duration::from_secs(5), move || {
+        probe.starts.lock().unwrap().len() == 4
+    })
+    .await;
     ready(&assistant).await;
     let status = handle.status();
     assert_eq!(status.level, Some(Level::Bubblewrap));

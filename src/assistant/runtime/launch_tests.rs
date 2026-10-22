@@ -19,7 +19,10 @@ fn helper() {
         return;
     }
     let args: Vec<String> = std::env::args().collect();
-    let at = args.iter().position(|arg| arg == "probe-inner").expect("marker");
+    let at = args
+        .iter()
+        .position(|arg| arg == "probe-inner")
+        .expect("marker");
     std::process::exit(super::super::probe::inner(&args[at + 1..]));
 }
 
@@ -47,9 +50,15 @@ fn fake_server() -> PathBuf {
 }
 
 fn helper_args(test: &str) -> Vec<String> {
-    [test, "--exact", "--nocapture", "--test-threads=1", "--include-ignored"]
-        .map(String::from)
-        .to_vec()
+    [
+        test,
+        "--exact",
+        "--nocapture",
+        "--test-threads=1",
+        "--include-ignored",
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 fn sha(bytes: &[u8]) -> String {
@@ -69,11 +78,13 @@ fn setup(model: &[u8], alias: &str) -> Setup {
     std::fs::create_dir_all(&cpu).unwrap();
     let server = std::fs::read(fake_server()).unwrap();
     std::fs::write(cpu.join("llama-server"), &server).unwrap();
-    std::fs::set_permissions(cpu.join("llama-server"), std::fs::Permissions::from_mode(0o755))
-        .unwrap();
+    std::fs::set_permissions(
+        cpu.join("llama-server"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
     std::fs::write(cpu.join("LICENSE"), b"MIT").unwrap();
-    std::fs::set_permissions(cpu.join("LICENSE"), std::fs::Permissions::from_mode(0o644))
-        .unwrap();
+    std::fs::set_permissions(cpu.join("LICENSE"), std::fs::Permissions::from_mode(0o644)).unwrap();
     let build = Build {
         path: "cpu".into(),
         directory: "cpu".into(),
@@ -137,7 +148,9 @@ fn launch(setup: &Setup) -> Launch {
 const MODEL: &[u8] = b"GGUF a synthetic model";
 
 fn bwrap_installed() -> bool {
-    bwrap::PATHS.iter().any(|path| std::path::Path::new(path).exists())
+    bwrap::PATHS
+        .iter()
+        .any(|path| std::path::Path::new(path).exists())
 }
 
 #[tokio::test]
@@ -191,7 +204,11 @@ async fn the_manager_reaches_ready_and_shutdown_removes_everything() {
     );
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while assistant.state() != RuntimeState::Ready {
-        assert!(std::time::Instant::now() < deadline, "{:?}", handle.status());
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{:?}",
+            handle.status()
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let status = handle.status();
@@ -215,7 +232,10 @@ async fn the_manager_reaches_ready_and_shutdown_removes_everything() {
     assert!(generation.is_dir());
     handle.shutdown().await;
     assert!(!generation.exists());
-    assert_eq!(std::fs::read_to_string(run.join(rundir::PIDFILE)).unwrap(), "");
+    assert_eq!(
+        std::fs::read_to_string(run.join(rundir::PIDFILE)).unwrap(),
+        ""
+    );
 }
 
 #[tokio::test]
@@ -227,13 +247,19 @@ async fn changed_or_extra_runtime_files_refuse_the_start() {
     let Err(Fail::Other(why)) = launch.start(1, Level::Unconfined, Path::Cpu).await else {
         panic!("an extra file must refuse the start");
     };
-    assert_eq!(why, "the model runtime: extra.so is not part of the pinned build");
+    assert_eq!(
+        why,
+        "the model runtime: extra.so is not part of the pinned build"
+    );
     std::fs::remove_file(setup.dir.path().join("runtime/cpu/extra.so")).unwrap();
     std::fs::write(setup.dir.path().join("runtime/cpu/LICENSE"), b"BSD").unwrap();
     let Err(Fail::Other(why)) = launch.start(2, Level::Unconfined, Path::Cpu).await else {
         panic!("a changed file must refuse the start");
     };
-    assert_eq!(why, "the model runtime: LICENSE differs from the pinned file");
+    assert_eq!(
+        why,
+        "the model runtime: LICENSE differs from the pinned file"
+    );
 }
 
 #[tokio::test]
@@ -289,5 +315,8 @@ async fn a_model_larger_than_available_memory_is_refused() {
     big.set_len(available).unwrap();
     let launch = launch(&setup);
     let refused = launch.preflight(Path::Cpu).await.unwrap_err();
-    assert!(refused.starts_with("not enough memory for this model"), "{refused}");
+    assert!(
+        refused.starts_with("not enough memory for this model"),
+        "{refused}"
+    );
 }

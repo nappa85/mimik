@@ -10,18 +10,23 @@ pub(crate) const TEXT: &str = include_str!("../../../schemas/llama-runtime-v1.js
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct Manifest {
-    pub manifest: String,
+    #[serde(rename = "manifest")]
+    pub format: String,
     pub llama_cpp: Llama,
     pub builds: Vec<Build>,
+    /// The CI test model (live tests and `llama-fetch` only).
+    #[cfg(test)]
     pub test_model: TestModel,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct Llama {
     pub tag: String,
-    pub build: u32,
     pub commit: String,
-    /// The first line `llama-server --version` prints.
+    #[cfg(test)]
+    pub build: u32,
+    /// The first line `llama-server --version` prints (checked by the CI flag check).
+    #[cfg(test)]
     pub version_line: String,
 }
 
@@ -43,9 +48,11 @@ pub(crate) struct File {
     pub sha256: String,
     pub size: u64,
     /// Octal, as packaging applies it (`0755`, `0644`).
+    #[cfg(test)]
     pub mode: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 pub(crate) struct TestModel {
     pub name: String,
@@ -57,7 +64,7 @@ pub(crate) struct TestModel {
 pub(crate) static MANIFEST: LazyLock<Manifest> = LazyLock::new(|| {
     let manifest: Manifest =
         serde_json::from_str(TEXT).expect("the embedded runtime manifest is valid");
-    assert_eq!(manifest.manifest, "mimik-llama-runtime-v1");
+    assert_eq!(manifest.format, "mimik-llama-runtime-v1");
     manifest
 });
 
@@ -72,6 +79,7 @@ impl Manifest {
     }
 }
 
+#[cfg(test)]
 impl File {
     /// The manifest's mode as bits.
     pub(crate) fn mode_bits(&self) -> Option<u32> {

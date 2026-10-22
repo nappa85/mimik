@@ -3,8 +3,8 @@
 //! reached only through a checked endpoint with a per-launch token, primed and calibrated
 //! before it takes jobs.
 //!
-//! Linux x86_64 only; the CPU path at levels 1 (bubblewrap) and 3 (unconfined). The GPU path
-//! and level 2 (Landlock) are step 2c-2b; the machinery here already carries the path and
+//! Linux `x86_64` only; the CPU path at levels 1 (bubblewrap) and 3 (unconfined). The GPU path
+//! and level 2 (`Landlock`) are step 2c-2b; the machinery here already carries the path and
 //! the level.
 pub(crate) mod budgets;
 pub(crate) mod bwrap;
@@ -20,15 +20,16 @@ pub(crate) mod rundir;
 pub(crate) mod runner;
 pub(crate) mod seccomp;
 pub(crate) mod server;
-pub(crate) mod token;
 #[cfg(test)]
 pub(crate) mod test_helper;
 pub(crate) mod threads;
+pub(crate) mod token;
 
 /// Which build runs, and so which budgets' caps apply (ASSIST-27, ASSIST-31).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Path {
     Cpu,
+    #[cfg_attr(not(test), expect(dead_code, reason = "the GPU path is step 2c-2b"))]
     Gpu,
 }
 

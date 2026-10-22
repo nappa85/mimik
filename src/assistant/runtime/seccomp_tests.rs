@@ -3,6 +3,7 @@
 use super::super::test_helper::{self, errno};
 use super::*;
 use serde_json::{Value, json};
+use std::os::fd::AsRawFd;
 
 const HELPER: &str = "assistant::runtime::seccomp::tests::helper";
 
@@ -106,7 +107,7 @@ fn probes() -> Value {
         msg_controllen: 0,
         msg_flags: 0,
     };
-    let sendmsg_fast_open = errno(raw(
+    let fast_open_message = errno(raw(
         libc::SYS_sendmsg,
         [
             tcp,
@@ -116,7 +117,7 @@ fn probes() -> Value {
             0,
         ],
     ));
-    let sendmmsg_fast_open = errno(raw(
+    let fast_open_messages = errno(raw(
         libc::SYS_sendmmsg,
         [tcp, 0, 0, i64::from(libc::MSG_FASTOPEN), 0],
     ));
@@ -154,8 +155,8 @@ fn probes() -> Value {
         "set_name": errno(raw(libc::SYS_prctl, [libc::PR_SET_NAME.into(), c"helper".as_ptr() as i64, 0, 0, 0])),
         "fast_open_sendto": fast_open,
         "fast_open_connect": fast_open_connect,
-        "fast_open_sendmsg": sendmsg_fast_open,
-        "fast_open_sendmmsg": sendmmsg_fast_open,
+        "fast_open_sendmsg": fast_open_message,
+        "fast_open_sendmmsg": fast_open_messages,
         "listener_saw": listener_saw,
     })
 }
@@ -187,7 +188,6 @@ fn exec_probes(exec_fd: i32) -> Value {
             ],
         ))
     };
-    use std::os::fd::AsRawFd;
     json!({
         "execve": errno(raw(libc::SYS_execve, [c"/bin/true".as_ptr() as i64, argv.as_ptr() as i64, envp.as_ptr() as i64, 0, 0])),
         "execveat_other": execveat(other.as_raw_fd(), libc::AT_EMPTY_PATH),
@@ -227,6 +227,96 @@ fn limit_descriptors() {
     rustix::process::setrlimit(rustix::process::Resource::Nofile, limit).unwrap();
 }
 
+/// Installs the TCP profile and reports the refused execs, then makes the one allowed.
+fn tcp_exec() {
+    let fd = exec_descriptor();
+    limit_descriptors();
+    install(&program(Profile::Tcp {
+        exec_fd: u32::try_from(fd).unwrap(),
+    }))
+    .unwrap();
+    let mut report = exec_probes(fd);
+    report["before_exec"] = json!(true);
+    test_helper::print(&report);
+    // The allowed exec: this same test binary, as the "after-exec" helper.
+    let exe = c"helper-after-exec";
+    let test = std::ffi::CString::new(HELPER).unwrap();
+    let argv = [
+        exe.as_ptr(),
+        test.as_ptr(),
+        c"--exact".as_ptr(),
+        c"--nocapture".as_ptr(),
+        c"--test-threads=1".as_ptr(),
+        std::ptr::null(),
+    ];
+    let variable = std::ffi::CString::new(format!("{}=after-exec", test_helper::VARIABLE)).unwrap();
+    let envp = [variable.as_ptr(), std::ptr::null()];
+    let result = raw(
+        libc::SYS_execveat,
+        [
+            fd.into(),
+            c"".as_ptr() as i64,
+            argv.as_ptr() as i64,
+            envp.as_ptr() as i64,
+            libc::AT_EMPTY_PATH.into(),
+        ],
+    );
+    test_helper::print(&json!({"exec_failed": errno(result)}));
+}
+
+/// In the executed image: no descriptor can take the exec number any more.
+fn after_exec() {
+    // The runtime descriptor was close-on-exec, and no new descriptor can take its
+    // number: fill every free number below the limit, then try once more.
+    let mut held = Vec::new();
+    let exhausted = loop {
+        match rustix::fs::open(
+            "/dev/null",
+            rustix::fs::OFlags::RDONLY,
+            rustix::fs::Mode::empty(),
+        ) {
+            Ok(fd) => held.push(fd),
+            Err(error) => break error.raw_os_error(),
+        }
+        if held.len() > 4096 {
+            break 0;
+        }
+    };
+    let highest = held.iter().map(AsRawFd::as_raw_fd).max().unwrap_or(-1);
+    drop(held);
+    // SAFETY: dup2 of standard input onto a number at the limit; it must fail.
+    let dup2 = errno(i64::from(unsafe { libc::dup2(0, EXEC_FD) }));
+    let raise = rustix::process::setrlimit(
+        rustix::process::Resource::Nofile,
+        rustix::process::Rlimit {
+            current: Some(4096),
+            maximum: Some(4096),
+        },
+    )
+    .err()
+    .map_or(0, |error| i64::from(error.raw_os_error()));
+    let argv = [c"x".as_ptr(), std::ptr::null()];
+    let envp = [std::ptr::null::<libc::c_char>()];
+    let again = errno(raw(
+        libc::SYS_execveat,
+        [
+            EXEC_FD.into(),
+            c"".as_ptr() as i64,
+            argv.as_ptr() as i64,
+            envp.as_ptr() as i64,
+            libc::AT_EMPTY_PATH.into(),
+        ],
+    ));
+    test_helper::print(&json!({
+        "after_exec": true,
+        "exhausted": exhausted,
+        "highest": highest,
+        "dup2": dup2,
+        "raise": raise,
+        "execveat_again": again,
+    }));
+}
+
 #[test]
 fn helper() {
     let Some(mode) = test_helper::mode() else {
@@ -245,94 +335,8 @@ fn helper() {
             .unwrap();
             test_helper::print(&probes());
         }
-        "tcp-exec" => {
-            let fd = exec_descriptor();
-            limit_descriptors();
-            install(&program(Profile::Tcp {
-                exec_fd: u32::try_from(fd).unwrap(),
-            }))
-            .unwrap();
-            let mut report = exec_probes(fd);
-            report["before_exec"] = json!(true);
-            test_helper::print(&report);
-            // The allowed exec: this same test binary, as the "after-exec" helper.
-            let exe = c"helper-after-exec";
-            let test = std::ffi::CString::new(HELPER).unwrap();
-            let argv = [
-                exe.as_ptr(),
-                test.as_ptr(),
-                c"--exact".as_ptr(),
-                c"--nocapture".as_ptr(),
-                c"--test-threads=1".as_ptr(),
-                std::ptr::null(),
-            ];
-            let variable =
-                std::ffi::CString::new(format!("{}=after-exec", test_helper::VARIABLE)).unwrap();
-            let envp = [variable.as_ptr(), std::ptr::null()];
-            let result = raw(
-                libc::SYS_execveat,
-                [
-                    fd.into(),
-                    c"".as_ptr() as i64,
-                    argv.as_ptr() as i64,
-                    envp.as_ptr() as i64,
-                    libc::AT_EMPTY_PATH.into(),
-                ],
-            );
-            test_helper::print(&json!({"exec_failed": errno(result)}));
-        }
-        "after-exec" => {
-            // The runtime descriptor was close-on-exec, and no new descriptor can take its
-            // number: fill every free number below the limit, then try once more.
-            let mut held = Vec::new();
-            let exhausted = loop {
-                match rustix::fs::open(
-                    "/dev/null",
-                    rustix::fs::OFlags::RDONLY,
-                    rustix::fs::Mode::empty(),
-                ) {
-                    Ok(fd) => held.push(fd),
-                    Err(error) => break error.raw_os_error(),
-                }
-                if held.len() > 4096 {
-                    break 0;
-                }
-            };
-            use std::os::fd::AsRawFd;
-            let highest = held.iter().map(AsRawFd::as_raw_fd).max().unwrap_or(-1);
-            drop(held);
-            // SAFETY: dup2 of standard input onto a number at the limit; it must fail.
-            let dup2 = errno(i64::from(unsafe { libc::dup2(0, EXEC_FD) }));
-            let raise = rustix::process::setrlimit(
-                rustix::process::Resource::Nofile,
-                rustix::process::Rlimit {
-                    current: Some(4096),
-                    maximum: Some(4096),
-                },
-            )
-            .err()
-            .map_or(0, |error| i64::from(error.raw_os_error()));
-            let argv = [c"x".as_ptr(), std::ptr::null()];
-            let envp = [std::ptr::null::<libc::c_char>()];
-            let again = errno(raw(
-                libc::SYS_execveat,
-                [
-                    EXEC_FD.into(),
-                    c"".as_ptr() as i64,
-                    argv.as_ptr() as i64,
-                    envp.as_ptr() as i64,
-                    libc::AT_EMPTY_PATH.into(),
-                ],
-            ));
-            test_helper::print(&json!({
-                "after_exec": true,
-                "exhausted": exhausted,
-                "highest": highest,
-                "dup2": dup2,
-                "raise": raise,
-                "execveat_again": again,
-            }));
-        }
+        "tcp-exec" => tcp_exec(),
+        "after-exec" => after_exec(),
         other => panic!("unknown helper mode {other}"),
     }
 }
@@ -435,4 +439,3 @@ fn exec_is_allowed_once_on_the_runtime_descriptor_and_never_again() {
     assert_eq!(after["raise"], eperm());
     assert_eq!(after["execveat_again"], json!(libc::EBADF));
 }
-

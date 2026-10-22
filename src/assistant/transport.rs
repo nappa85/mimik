@@ -15,7 +15,6 @@ use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use rig_core::http_client::{self, HttpClientExt, LazyBody, MultipartForm, StreamingResponse};
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -25,12 +24,13 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 pub(crate) const BODY_LIMIT: usize = 1024 * 1024;
 
 /// Where the development endpoint listens (2c-1; no endpoint check).
+#[cfg(any(test, feature = "dev-endpoint"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Endpoint {
     /// A loopback IP literal and port, as `http://<host>:<port>` (checked by [`tcp`]).
     Tcp(url::Url),
     /// A Unix socket path; requests name the fixed authority [`UNIX_AUTHORITY`].
-    Unix(PathBuf),
+    Unix(std::path::PathBuf),
 }
 
 /// The authority of request URLs on a Unix socket. It is only a name: every connection goes
@@ -38,6 +38,7 @@ pub(crate) enum Endpoint {
 pub(crate) const UNIX_AUTHORITY: &str = "localhost";
 
 /// Why an endpoint URL is refused.
+#[cfg(any(test, feature = "dev-endpoint"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Refused {
     NotHttp,
@@ -52,6 +53,7 @@ pub(crate) enum Refused {
 /// endpoint only), with no userinfo or zone ID; an explicit port; no path, query or
 /// fragment. The raw authority is checked as typed as well as the parsed URL, because the
 /// WHATWG parser turns `127.1`, `0x7f.1` or `2130706433` into `127.0.0.1`.
+#[cfg(any(test, feature = "dev-endpoint"))]
 pub(crate) fn tcp(raw: &str, ipv6_loopback: bool) -> Result<url::Url, Refused> {
     let rest = raw.strip_prefix("http://").ok_or(Refused::NotHttp)?;
     let (authority, path) = rest.find('/').map_or((rest, ""), |at| rest.split_at(at));
@@ -155,9 +157,11 @@ pub(crate) trait Connect: Send + Sync + std::fmt::Debug {
 
 /// The development endpoint's connector: straight to the address or the socket path, no
 /// check (2c-1, `dev-endpoint` builds and tests only).
+#[cfg(any(test, feature = "dev-endpoint"))]
 #[derive(Debug)]
 pub(crate) struct Direct(pub Endpoint);
 
+#[cfg(any(test, feature = "dev-endpoint"))]
 impl Connect for Direct {
     fn connect(&self) -> Connecting {
         let endpoint = self.0.clone();
@@ -243,6 +247,7 @@ impl Bounded {
     }
 
     /// The development endpoint's transport.
+    #[cfg(any(test, feature = "dev-endpoint"))]
     pub(crate) fn direct(endpoint: Endpoint) -> Self {
         Self::new(Arc::new(Direct(endpoint)))
     }
@@ -259,6 +264,10 @@ impl Bounded {
     }
 
     /// Checks the destination, connects, and sends one request in origin form with its `Host`.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the error type is rig's `http_client::Error`"
+    )]
     async fn exchange(
         &self,
         request: http::Request<Bytes>,

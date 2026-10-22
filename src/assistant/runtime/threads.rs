@@ -27,9 +27,8 @@ pub(crate) fn physical_cores_at(cpus: &Path) -> Option<usize> {
 
 /// The default: physical cores minus one, at least 1.
 pub(crate) fn default_threads() -> u32 {
-    let cores = physical_cores_at(Path::new("/sys/devices/system/cpu")).unwrap_or_else(|| {
-        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
-    });
+    let cores = physical_cores_at(Path::new("/sys/devices/system/cpu"))
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get));
     u32::try_from(cores.saturating_sub(1).max(1)).unwrap_or(1)
 }
 

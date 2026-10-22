@@ -10,10 +10,16 @@ fn data() -> (tempfile::TempDir, OwnedFd) {
 #[test]
 fn run_is_created_private_and_checked() {
     let (dir, _run) = data();
-    let mode = std::fs::metadata(dir.path().join("run")).unwrap().permissions().mode();
+    let mode = std::fs::metadata(dir.path().join("run"))
+        .unwrap()
+        .permissions()
+        .mode();
     assert_eq!(mode & 0o777, 0o700);
-    std::fs::set_permissions(dir.path().join("run"), std::fs::Permissions::from_mode(0o755))
-        .unwrap();
+    std::fs::set_permissions(
+        dir.path().join("run"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
     assert!(matches!(open(dir.path()), Err(Refusal::Mode(_))));
 }
 
@@ -53,7 +59,10 @@ fn entries_round_trip() {
 }
 
 fn sleeper() -> std::process::Child {
-    std::process::Command::new("sleep").arg("30").spawn().unwrap()
+    std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap()
 }
 
 fn gone(child: &mut std::process::Child) -> bool {

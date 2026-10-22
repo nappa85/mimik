@@ -46,7 +46,7 @@ const ENOSYS: u32 = 38;
 const ARCH_OFFSET: u32 = 4;
 const NR_OFFSET: u32 = 0;
 const X32_SYSCALL_BIT: u32 = 0x4000_0000;
-const AUDIT_ARCH_X86_64: u32 = 62 | 0x8000_0000 | 0x4000_0000;
+const AUDIT_ARCH_X86_64: u32 = 0x3e | 0x8000_0000 | 0x4000_0000;
 
 const BPF_LD_W_ABS: u16 = 0x20;
 const BPF_JEQ_K: u16 = 0x15;
@@ -108,55 +108,48 @@ fn rule(conditions: Vec<SeccompCondition>) -> SeccompRule {
     SeccompRule::new(conditions).expect("a rule has conditions")
 }
 
-/// The refusals: a syscall with no rules is refused always; with rules, when any rule
-/// matches (every condition of a rule holds).
-fn refusals(profile: Profile) -> BTreeMap<i64, Vec<SeccompRule>> {
-    let mut map: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
-    for always in [
-        libc::SYS_fork,
-        libc::SYS_vfork,
-        libc::SYS_socketpair,
-        libc::SYS_pidfd_open,
-        libc::SYS_pidfd_getfd,
-        libc::SYS_process_madvise,
-        libc::SYS_kcmp,
-        libc::SYS_io_uring_setup,
-        libc::SYS_io_uring_enter,
-        libc::SYS_io_uring_register,
-        libc::SYS_ptrace,
-        libc::SYS_process_vm_readv,
-        libc::SYS_process_vm_writev,
-        libc::SYS_bpf,
-        libc::SYS_perf_event_open,
-        libc::SYS_keyctl,
-        libc::SYS_add_key,
-        libc::SYS_request_key,
-        libc::SYS_mount,
-        libc::SYS_umount2,
-        libc::SYS_pivot_root,
-        libc::SYS_unshare,
-        libc::SYS_setns,
-        libc::SYS_init_module,
-        libc::SYS_finit_module,
-        libc::SYS_delete_module,
-        libc::SYS_kexec_load,
-        libc::SYS_kexec_file_load,
-        libc::SYS_open_tree,
-        libc::SYS_move_mount,
-        libc::SYS_fsopen,
-        libc::SYS_fsmount,
-        libc::SYS_fsconfig,
-        libc::SYS_fspick,
-        libc::SYS_mount_setattr,
-    ] {
-        map.insert(always, Vec::new());
-    }
-    // A process, not a thread.
-    map.insert(
-        libc::SYS_clone,
-        vec![rule(vec![cond(0, Op::MaskedEq(CLONE_THREAD), 0)])],
-    );
-    // socket(domain, type, protocol): only TCP over IPv4 or IPv6 and stream Unix sockets.
+/// Refused whatever their arguments.
+const ALWAYS: &[i64] = &[
+    libc::SYS_fork,
+    libc::SYS_vfork,
+    libc::SYS_socketpair,
+    libc::SYS_pidfd_open,
+    libc::SYS_pidfd_getfd,
+    libc::SYS_process_madvise,
+    libc::SYS_kcmp,
+    libc::SYS_io_uring_setup,
+    libc::SYS_io_uring_enter,
+    libc::SYS_io_uring_register,
+    libc::SYS_ptrace,
+    libc::SYS_process_vm_readv,
+    libc::SYS_process_vm_writev,
+    libc::SYS_bpf,
+    libc::SYS_perf_event_open,
+    libc::SYS_keyctl,
+    libc::SYS_add_key,
+    libc::SYS_request_key,
+    libc::SYS_mount,
+    libc::SYS_umount2,
+    libc::SYS_pivot_root,
+    libc::SYS_unshare,
+    libc::SYS_setns,
+    libc::SYS_init_module,
+    libc::SYS_finit_module,
+    libc::SYS_delete_module,
+    libc::SYS_kexec_load,
+    libc::SYS_kexec_file_load,
+    libc::SYS_open_tree,
+    libc::SYS_move_mount,
+    libc::SYS_fsopen,
+    libc::SYS_fsmount,
+    libc::SYS_fsconfig,
+    libc::SYS_fspick,
+    libc::SYS_mount_setattr,
+];
+
+/// socket(domain, type, protocol): refused unless TCP over IPv4 or IPv6 or a stream Unix
+/// socket.
+fn socket_rules() -> Vec<SeccompRule> {
     let mut socket = vec![rule(vec![
         cond(0, Op::Ne, AF_UNIX),
         cond(0, Op::Ne, AF_INET),
@@ -178,32 +171,31 @@ fn refusals(profile: Profile) -> BTreeMap<i64, Vec<SeccompRule>> {
         ]));
     }
     socket.push(rule(vec![cond(0, Op::Eq, AF_UNIX), cond(2, Op::Ne, 0)]));
-    map.insert(libc::SYS_socket, socket);
+    socket
+}
+
+/// The refusals: a syscall with no rules is refused always; with rules, when any rule
+/// matches (every condition of a rule holds).
+fn refusals(profile: Profile) -> BTreeMap<i64, Vec<SeccompRule>> {
+    let mut map: BTreeMap<i64, Vec<SeccompRule>> =
+        ALWAYS.iter().map(|number| (*number, Vec::new())).collect();
+    // A process, not a thread.
+    map.insert(
+        libc::SYS_clone,
+        vec![rule(vec![cond(0, Op::MaskedEq(CLONE_THREAD), 0)])],
+    );
+    map.insert(libc::SYS_socket, socket_rules());
     // TCP Fast Open: a send on an unconnected socket must not be a way around connect().
-    map.insert(
-        libc::SYS_sendto,
+    let fast_open = |arg| {
         vec![rule(vec![cond(
-            3,
+            arg,
             Op::MaskedEq(MSG_FASTOPEN),
             MSG_FASTOPEN,
-        )])],
-    );
-    map.insert(
-        libc::SYS_sendmsg,
-        vec![rule(vec![cond(
-            2,
-            Op::MaskedEq(MSG_FASTOPEN),
-            MSG_FASTOPEN,
-        )])],
-    );
-    map.insert(
-        libc::SYS_sendmmsg,
-        vec![rule(vec![cond(
-            3,
-            Op::MaskedEq(MSG_FASTOPEN),
-            MSG_FASTOPEN,
-        )])],
-    );
+        )])]
+    };
+    map.insert(libc::SYS_sendto, fast_open(3));
+    map.insert(libc::SYS_sendmsg, fast_open(2));
+    map.insert(libc::SYS_sendmmsg, fast_open(3));
     map.insert(
         libc::SYS_setsockopt,
         vec![rule(vec![

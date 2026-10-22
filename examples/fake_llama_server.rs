@@ -105,7 +105,7 @@ fn serve<S: Read + Write>(fake: &Fake, stream: S) {
         let (name, value) = header.split_once(':').unwrap_or(("", ""));
         match name.trim().to_ascii_lowercase().as_str() {
             "content-length" => length = value.trim().parse().unwrap_or(0),
-            "authorization" => authorization = value.trim().to_owned(),
+            "authorization" => value.trim().clone_into(&mut authorization),
             _ => {}
         }
     }
@@ -172,7 +172,10 @@ fn main() {
         cached: Mutex::new(None),
     });
     let host = value_of(&args, "--host").unwrap_or_default();
-    if host.ends_with(".sock") {
+    if std::path::Path::new(&host)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("sock"))
+    {
         let listener = std::os::unix::net::UnixListener::bind(&host).expect("the socket binds");
         eprintln!("srv  llama_server: listening on unix://{host}");
         for stream in listener.incoming().flatten() {

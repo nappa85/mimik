@@ -106,7 +106,10 @@ fn limits() -> std::io::Result<()> {
 }
 
 fn c_strings(values: impl IntoIterator<Item = String>) -> Option<Vec<CString>> {
-    values.into_iter().map(|value| CString::new(value).ok()).collect()
+    values
+        .into_iter()
+        .map(|value| CString::new(value).ok())
+        .collect()
 }
 
 /// Executes the TCP levels' server: the descriptor moved to [`EXEC_FD`] (close-on-exec),
@@ -129,7 +132,10 @@ fn exec_server(fd: RawFd, argv: Vec<String>, env: Vec<(String, String)>) -> i32 
     }
     let (Some(argv), Some(envp)) = (
         c_strings(argv),
-        c_strings(env.into_iter().map(|(name, value)| format!("{name}={value}"))),
+        c_strings(
+            env.into_iter()
+                .map(|(name, value)| format!("{name}={value}")),
+        ),
     ) else {
         return exit::SPEC;
     };

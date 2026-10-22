@@ -25,9 +25,15 @@ fn env(name: &str) -> PathBuf {
 }
 
 fn helper_args(test: &str) -> Vec<String> {
-    [test, "--exact", "--nocapture", "--test-threads=1", "--include-ignored"]
-        .map(String::from)
-        .to_vec()
+    [
+        test,
+        "--exact",
+        "--nocapture",
+        "--test-threads=1",
+        "--include-ignored",
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 /// Settings over the live runtime and test model; `inner` is the helper mode run in place
@@ -111,8 +117,8 @@ fn adversary() {
     let udp = errno_of(std::net::UdpSocket::bind("0.0.0.0:0"));
     let abstract_connect = {
         use std::os::linux::net::SocketAddrExt;
-        let address = std::os::unix::net::SocketAddr::from_abstract_name(abstract_name.as_bytes())
-            .unwrap();
+        let address =
+            std::os::unix::net::SocketAddr::from_abstract_name(abstract_name.as_bytes()).unwrap();
         errno_of(std::os::unix::net::UnixStream::connect_addr(&address))
     };
     let root: Vec<String> = std::fs::read_dir("/")
@@ -174,9 +180,10 @@ fn play_mimik() {
         let launch = Launch(real(settings(&scratch, "probe-inner", Vec::new())));
         launch.preflight(Path::Cpu).await.unwrap();
         let probing = Arc::clone(&launch.0);
-        let probed = tokio::task::spawn_blocking(move || probing.probe_level(Path::Cpu, Level::Bubblewrap))
-            .await
-            .unwrap();
+        let probed =
+            tokio::task::spawn_blocking(move || probing.probe_level(Path::Cpu, Level::Bubblewrap))
+                .await
+                .unwrap();
         assert_eq!(probed, Ok(()));
         let child = launch.start(1, Level::Bubblewrap, Path::Cpu).await.unwrap();
         while child.server().health().await != Health::Ready {
@@ -201,11 +208,11 @@ fn descendants(pid: i32) -> Vec<i32> {
             let Ok(status) = std::fs::read_to_string(format!("/proc/{child}/status")) else {
                 continue;
             };
-            let ppid = status
+            let parent_of = status
                 .lines()
                 .find_map(|line| line.strip_prefix("PPid:"))
                 .and_then(|value| value.trim().parse::<i32>().ok());
-            if ppid == Some(parent) {
+            if parent_of == Some(parent) {
                 all.push(child);
                 frontier.push(child);
             }
@@ -215,8 +222,14 @@ fn descendants(pid: i32) -> Vec<i32> {
 }
 
 fn alive(pid: i32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .is_ok_and(|stat| !stat.rsplit(')').next().unwrap_or("").trim_start().starts_with('Z'))
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        !stat
+            .rsplit(')')
+            .next()
+            .unwrap_or("")
+            .trim_start()
+            .starts_with('Z')
+    })
 }
 
 #[test]
@@ -295,7 +308,13 @@ async fn live_level_1_serves_over_the_checked_socket_with_the_token_only() {
     // /health answered without a token (above); every other route needs it.
     let (status, _) = raw(real, "/v1/chat/completions", None, &short_request(8)).await;
     assert_eq!(status, 401);
-    let (status, _) = raw(real, "/v1/chat/completions", Some("wrong-token"), &short_request(8)).await;
+    let (status, _) = raw(
+        real,
+        "/v1/chat/completions",
+        Some("wrong-token"),
+        &short_request(8),
+    )
+    .await;
     assert_eq!(status, 401);
     let server = child.server();
     // The right token through the server API: the per-request ignore_eos generates exactly
@@ -308,11 +327,14 @@ async fn live_level_1_serves_over_the_checked_socket_with_the_token_only() {
     assert_eq!(timings.predicted_n, Some(16.0));
     assert!(server.tokens("hello there").await.unwrap() > 0);
     // The token is in no command line of the sandbox's processes.
-    let pidfile = std::fs::read_to_string(scratch.path().join("data/run").join(rundir::PIDFILE)).unwrap();
+    let pidfile =
+        std::fs::read_to_string(scratch.path().join("data/run").join(rundir::PIDFILE)).unwrap();
     let bwrap: i32 = pidfile.lines().nth(1).unwrap().parse().unwrap();
     for pid in std::iter::once(bwrap).chain(descendants(bwrap)) {
-        let line = String::from_utf8_lossy(&std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default())
-            .replace('\0', " ");
+        let line = String::from_utf8_lossy(
+            &std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default(),
+        )
+        .replace('\0', " ");
         assert!(!line.contains("--api-key "), "{line}");
     }
     // A socket swapped into the directory by a process outside the sandbox gets nothing.
@@ -325,7 +347,7 @@ async fn live_level_1_serves_over_the_checked_socket_with_the_token_only() {
     assert!(!scratch.path().join("data/run/1").exists());
     // The marker reached neither stream.
     let lines = drain::TAP.lock().unwrap().take().unwrap();
-    assert!(!lines.is_empty());
+    assert_ne!(lines, Vec::<String>::new());
     assert!(!lines.iter().any(|line| line.contains(marker)));
     for pid in descendants(bwrap) {
         assert!(!alive(pid), "{pid} outlived the stop");
@@ -338,8 +360,9 @@ async fn live_level_3_loads_the_model_through_proc_self_fd() {
     let scratch = scratch();
     let (_launch, child) = started(scratch.path(), Level::Unconfined).await;
     let real = &*child;
-    let line = String::from_utf8_lossy(&std::fs::read(format!("/proc/{}/cmdline", real.pid())).unwrap())
-        .replace('\0', " ");
+    let line =
+        String::from_utf8_lossy(&std::fs::read(format!("/proc/{}/cmdline", real.pid())).unwrap())
+            .replace('\0', " ");
     assert!(line.contains("--model /proc/self/fd/8"), "{line}");
     assert!(!line.contains("--api-key "));
     assert!(!scratch.path().join("data/run/1").join(token::FILE).exists());
@@ -404,8 +427,14 @@ fn live_an_adversary_in_the_level_1_sandbox_reaches_nothing() {
     assert_eq!(report["fork"], json!(libc::EPERM));
     // Sized temporary space, when this bubblewrap has --size.
     if real.held().bwrap.as_ref().is_some_and(|bwrap| bwrap.size) {
-        assert!(report["tmp_filled"].as_u64().unwrap() <= bwrap::TMP_BYTES, "{report}");
-        assert!(report["shm_filled"].as_u64().unwrap() <= bwrap::SHM_BYTES, "{report}");
+        assert!(
+            report["tmp_filled"].as_u64().unwrap() <= bwrap::TMP_BYTES,
+            "{report}"
+        );
+        assert!(
+            report["shm_filled"].as_u64().unwrap() <= bwrap::SHM_BYTES,
+            "{report}"
+        );
     }
     let root: Vec<&str> = report["root"]
         .as_array()
@@ -415,8 +444,11 @@ fn live_an_adversary_in_the_level_1_sandbox_reaches_nothing() {
         .collect();
     for entry in &root {
         assert!(
-            ["usr", "lib", "lib64", "etc", "sys", "dev", "proc", "tmp", "run", "opt", "models", "bin", "sbin"]
-                .contains(entry),
+            [
+                "usr", "lib", "lib64", "etc", "sys", "dev", "proc", "tmp", "run", "opt", "models",
+                "bin", "sbin"
+            ]
+            .contains(entry),
             "{entry} is visible: {root:?}"
         );
     }
@@ -438,19 +470,28 @@ fn live_sigkill_of_mimik_kills_the_whole_sandbox() {
     let mut reader = std::io::BufReader::new(mimik.stdout.take().unwrap());
     let bwrap = loop {
         let mut line = String::new();
-        assert!(std::io::BufRead::read_line(&mut reader, &mut line).unwrap() > 0, "mimik stopped");
+        assert!(
+            std::io::BufRead::read_line(&mut reader, &mut line).unwrap() > 0,
+            "mimik stopped"
+        );
         if let Some(at) = line.find("HELPER ") {
             let value: Value = serde_json::from_str(&line[at + 7..]).unwrap();
             break i32::try_from(value["bwrap"].as_i64().unwrap()).unwrap();
         }
     };
     let tree: Vec<i32> = std::iter::once(bwrap).chain(descendants(bwrap)).collect();
-    assert!(tree.len() >= 3, "bwrap, its reaper and llama-server: {tree:?}");
+    assert!(
+        tree.len() >= 3,
+        "bwrap, its reaper and llama-server: {tree:?}"
+    );
     mimik.kill().unwrap();
     mimik.wait().unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while tree.iter().any(|pid| alive(*pid)) {
-        assert!(std::time::Instant::now() < deadline, "the sandbox outlived Mimik: {tree:?}");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the sandbox outlived Mimik: {tree:?}"
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
 }

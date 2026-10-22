@@ -94,7 +94,6 @@ pub(crate) struct Verified {
     pub fd: OwnedFd,
     pub identity: Identity,
     pub sha256: [u8; 32],
-    pub mode: u32,
 }
 
 /// Who may own a file.
@@ -286,7 +285,6 @@ fn verified(
         fd,
         identity,
         sha256,
-        mode: stat.st_mode & 0o7777,
     })
 }
 

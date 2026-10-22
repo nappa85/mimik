@@ -56,8 +56,12 @@ pub(crate) trait Server: Send + Sync {
     async fn tokens(&self, text: &str) -> Result<usize, Failure>;
     /// One non-streamed completion: the fixed prefix as the system message, `user` as the
     /// user message, greedy, `max_tokens`, `ignore_eos` when asked, no schema.
-    async fn plain(&self, user: &str, max_tokens: u32, ignore_eos: bool)
-    -> Result<Timings, Failure>;
+    async fn plain(
+        &self,
+        user: &str,
+        max_tokens: u32,
+        ignore_eos: bool,
+    ) -> Result<Timings, Failure>;
     /// The interpretation client over the same transport.
     fn interpreter(&self) -> Arc<dyn Interpreter>;
 }

@@ -76,16 +76,18 @@ pub(crate) fn remove_file(directory: &impl AsFd) {
 mod tests {
     use super::*;
     use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn tokens_are_32_random_bytes_in_base64url_and_never_debug_printed() {
         let one = Token::new();
         let two = Token::new();
         assert_eq!(one.expose().len(), 43);
-        assert!(one
-            .expose()
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
+        assert!(
+            one.expose()
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        );
         assert_ne!(one.expose(), two.expose());
         assert_eq!(format!("{one:?}"), "Token(…)");
     }
@@ -111,7 +113,6 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             format!("{}\n", token.expose())
         );
-        use std::os::unix::fs::PermissionsExt;
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600

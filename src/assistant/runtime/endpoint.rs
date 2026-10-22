@@ -49,8 +49,12 @@ impl Watched {
 
 /// Whether a pidfd reports its process gone (it polls readable then).
 pub(crate) fn exited(pidfd: &OwnedFd) -> bool {
-    let mut fds = [rustix::event::PollFd::new(pidfd, rustix::event::PollFlags::IN)];
-    rustix::event::poll(&mut fds, Some(&rustix::time::Timespec::default())).is_ok_and(|ready| ready > 0)
+    let mut fds = [rustix::event::PollFd::new(
+        pidfd,
+        rustix::event::PollFlags::IN,
+    )];
+    rustix::event::poll(&mut fds, Some(&rustix::time::Timespec::default()))
+        .is_ok_and(|ready| ready > 0)
 }
 
 fn refused(what: &'static str) -> io::Error {
@@ -87,12 +91,15 @@ fn status(pid: i32) -> io::Result<Status> {
             .map(str::trim)
             .ok_or_else(|| refused("no such status field"))
     };
-    let ppid = field("PPid:")?.parse().map_err(|_| refused("bad PPid"))?;
-    let nspid = field("NSpid:")?
+    let parent = field("PPid:")?.parse().map_err(|_| refused("bad PPid"))?;
+    let namespace_pids = field("NSpid:")?
         .split_whitespace()
         .map(|value| value.parse().map_err(|_| refused("bad NSpid")))
         .collect::<io::Result<Vec<i32>>>()?;
-    Ok(Status { ppid, nspid })
+    Ok(Status {
+        ppid: parent,
+        nspid: namespace_pids,
+    })
 }
 
 /// The peer check of level 1 (see the module comment).
@@ -107,7 +114,9 @@ pub(crate) fn check_peer(stream: &impl std::os::fd::AsFd, sandbox: &Sandbox) -> 
     }
     let status = status(pid)?;
     if pid != sandbox.reaper.pid && status.ppid != sandbox.reaper.pid {
-        return Err(refused("the socket's peer is not in this generation's sandbox"));
+        return Err(refused(
+            "the socket's peer is not in this generation's sandbox",
+        ));
     }
     match rustix::fs::stat(format!("/proc/{pid}/ns/pid")) {
         Ok(stat) if stat.st_ino == sandbox.pid_namespace => {}
@@ -184,7 +193,11 @@ fn covers(address: &SocketAddr, port: u16) -> bool {
 pub(crate) fn listeners(port: u16, pid: i32) -> io::Result<Result<(), Listeners>> {
     let map = |error: procfs::ProcError| io::Error::other(error.to_string());
     let mut inodes: Vec<u64> = Vec::new();
-    for entry in procfs::net::tcp().map_err(map)?.into_iter().chain(procfs::net::tcp6().map_err(map)?) {
+    for entry in procfs::net::tcp()
+        .map_err(map)?
+        .into_iter()
+        .chain(procfs::net::tcp6().map_err(map)?)
+    {
         if entry.state == procfs::net::TcpState::Listen && covers(&entry.local_address, port) {
             inodes.push(entry.inode);
         }
@@ -219,7 +232,9 @@ fn listening(port: u16, child: &Watched) -> io::Result<()> {
             io::ErrorKind::ConnectionRefused,
             "the model server is not listening yet",
         )),
-        Err(Listeners::Foreign) => Err(refused("another process listens on the model server's port")),
+        Err(Listeners::Foreign) => Err(refused(
+            "another process listens on the model server's port",
+        )),
     }
 }
 

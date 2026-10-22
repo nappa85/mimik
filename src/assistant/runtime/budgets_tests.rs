@@ -4,19 +4,27 @@ use super::*;
 
 /// A sample with per-token prompt time `p` and generation time `g` (seconds), overhead `o`
 /// (seconds), tail `t`, filler tokens `n`, `max_tokens` generated and `cached` tokens read.
-fn sample(p: f64, g: f64, o: f64, t: f64, n: f64, max_tokens: u32, cached: f64) -> Sample {
-    let prompt_n = t + n;
+fn sample(
+    prompt_s: f64,
+    generation_s: f64,
+    overhead_s: f64,
+    tail: f64,
+    filler: f64,
+    max_tokens: u32,
+    cached: f64,
+) -> Sample {
+    let prompt_n = tail + filler;
     let predicted_n = f64::from(max_tokens);
-    let prompt_ms = p * prompt_n * 1000.0;
-    let predicted_ms = g * predicted_n * 1000.0;
+    let prompt_time = prompt_s * prompt_n * 1000.0;
+    let generation_time = generation_s * predicted_n * 1000.0;
     Sample {
-        wall_ms: prompt_ms + predicted_ms + o * 1000.0,
+        wall_ms: prompt_time + generation_time + overhead_s * 1000.0,
         prompt_n,
-        prompt_ms,
+        prompt_ms: prompt_time,
         cached_n: cached,
         predicted_n,
-        predicted_ms,
-        filler_tokens: n,
+        predicted_ms: generation_time,
+        filler_tokens: filler,
     }
 }
 

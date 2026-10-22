@@ -5,7 +5,7 @@
 //! Per sample i: per-token prompt time pᵢ = `prompt_ms` / `prompt_n`, per-token generation
 //! time gᵢ = `predicted_ms` / `predicted_n`, overhead oᵢ = max(0, W − `prompt_ms` −
 //! `predicted_ms`) and the uncached tail tᵢ = `prompt_n` − Nᵢ. For a candidate bound B,
-//! N(B) = floor(N_cal × B / cap) with N_cal = min(N₁, N₂), Tᵢ(B) = oᵢ + pᵢ × (tᵢ + N(B)) +
+//! N(B) = floor(`N_cal` × B / cap) with `N_cal` = min(N₁, N₂), Tᵢ(B) = oᵢ + pᵢ × (tᵢ + N(B)) +
 //! gᵢ × `max_tokens`, T(B) = max(T₁(B), T₂(B)) and R(B) = max(15, 1.25 × T(B) rounded up to
 //! 5 s). B is the largest candidate whose R fits the path's cap.
 use super::Path;
@@ -29,7 +29,7 @@ impl Path {
     pub(crate) fn cap(self) -> usize {
         match self {
             Self::Cpu => 1024,
-            Self::Gpu => 4096,
+            Self::Gpu => crate::assistant::contract::MAX_DYNAMIC_BYTES,
         }
     }
 

@@ -6,7 +6,7 @@
 {% if let Some(view) = view %}
 <section class="panel"><h2>State</h2>
 <p><strong>{{ view.state }}</strong>{% if !view.reason.is_empty() %}: {{ view.reason }}{% endif %}</p>
-<p>Path: {{ view.path }} · Generation {{ view.generation }} · Failures counted: {{ view.failures }} of 4{% if !view.last_failure.is_empty() %} · Last: {{ view.last_failure }}{% endif %}</p>
+<p>Model server: {{ view.llama }} · Path: {{ view.path }} · Generation {{ view.generation }} · Failures counted: {{ view.failures }} of 4{% if !view.last_failure.is_empty() %} · Last: {{ view.last_failure }}{% endif %}</p>
 <p>Circuit breaker: {{ view.breaker }}</p>
 <form method="post" action="/admin/assistant/restart"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Restart</button></form>
 <p>Restart stops the model server, starts it again from the highest confinement level, measures it again and resets the breaker and the failure count. Number entry, notes and Undo work meanwhile.</p></section>

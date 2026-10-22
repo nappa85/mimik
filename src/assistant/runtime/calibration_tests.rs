@@ -93,7 +93,7 @@ fn timings(prompt_n: f64, cache_n: f64, predicted_n: f64) -> Timings {
 async fn priming_sends_the_minimal_envelope_with_one_token() {
     let server = Scripted::default();
     assert_eq!(prime(&server).await, Ok(1460.0));
-    let requests = server.requests.lock().unwrap();
+    let requests = server.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0], (priming_envelope(), 1, false));
     assert!(requests[0].0.starts_with("<data>\n"));

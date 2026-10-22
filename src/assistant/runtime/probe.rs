@@ -207,15 +207,16 @@ fn cli_probe(args: &[String]) -> i32 {
         .sha256
         .unwrap_or_else(|| crate::assistant::DEFAULT_MODEL_SHA256.to_owned());
     let data = parsed.data.map_or_else(
-        || std::path::PathBuf::from(&models).join("..").join("probe-data"),
+        || {
+            std::path::PathBuf::from(&models)
+                .join("..")
+                .join("probe-data")
+        },
         std::path::PathBuf::from,
     );
-    let (runner, inner) = match (RunnerCommand::mimik(), InnerCommand::mimik()) {
-        (Ok(runner), Ok(inner)) => (runner, inner),
-        _ => {
-            report(json!({"level": null, "error": "Mimik's own binary cannot be found"}));
-            return 2;
-        }
+    let (Ok(runner), Ok(inner)) = (RunnerCommand::mimik(), InnerCommand::mimik()) else {
+        report(json!({"level": null, "error": "Mimik's own binary cannot be found"}));
+        return 2;
     };
     let settings = Settings {
         data_dir: data,
@@ -257,7 +258,8 @@ fn cli_probe(args: &[String]) -> i32 {
                 )
             })
             .collect();
-        json!({"level": reached, "levels": detail, "path": "cpu"})
+        json!({"level": reached, "levels": detail, "path": "cpu",
+            "llama_cpp": super::manifest::MANIFEST.llama_cpp.tag})
     });
     let level_one = result["level"] == json!(Level::Bubblewrap.number());
     report(result);

@@ -124,7 +124,10 @@ impl Pidfile {
     pub(crate) fn leftover(&mut self) -> Option<Entry> {
         let mut text = String::new();
         self.file.rewind().ok()?;
-        Read::by_ref(&mut self.file).take(4096).read_to_string(&mut text).ok()?;
+        Read::by_ref(&mut self.file)
+            .take(4096)
+            .read_to_string(&mut text)
+            .ok()?;
         Entry::parse(&text)
     }
 

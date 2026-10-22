@@ -87,7 +87,11 @@ pub(crate) fn drain(mut reader: impl Read, mut event: impl FnMut(Output)) {
     let mut chunk = [0_u8; 8192];
     let finish = |line: &mut Vec<u8>, event: &mut dyn FnMut(Output)| {
         #[cfg(test)]
-        if let Some(tap) = TAP.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut() {
+        if let Some(tap) = TAP
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
             tap.push(String::from_utf8_lossy(line).into_owned());
         }
         if let Some(found) = classify(&String::from_utf8_lossy(line)) {
@@ -198,7 +202,7 @@ mod tests {
         long.extend_from_slice(b" llama_server: listening on x\n");
         let mut seen = Vec::new();
         drain(long.as_slice(), |event| seen.push(event));
-        assert!(seen.is_empty());
+        assert_eq!(seen, []);
         // 8 MiB without a newline: drained without growing.
         drain(
             Endless {
@@ -215,7 +219,7 @@ mod tests {
             },
             |event| seen.push(event),
         );
-        assert!(seen.is_empty());
+        assert_eq!(seen, []);
         // A pattern after a cut line is still found.
         let mut text = vec![b'z'; 10_000];
         text.extend_from_slice(b"\nllama_server: listening on unix:///x\n");

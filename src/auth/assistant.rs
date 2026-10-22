@@ -102,6 +102,7 @@ struct CalibrationView {
 }
 
 struct View {
+    llama: String,
     state: &'static str,
     reason: String,
     path: &'static str,
@@ -130,7 +131,13 @@ fn view(status: Status, breaker: String) -> View {
         Runtime::Ready => ("Ready", String::new()),
         Runtime::Unavailable(why) => ("Unavailable", why),
     };
+    let pinned = &crate::assistant::runtime::manifest::MANIFEST.llama_cpp;
     View {
+        llama: format!(
+            "llama.cpp {} (commit {})",
+            pinned.tag,
+            pinned.commit.get(..9).unwrap_or(&pinned.commit)
+        ),
         state,
         reason,
         path: match status.path {

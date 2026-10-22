@@ -72,8 +72,12 @@ pub(crate) trait Launcher: Send + Sync {
     async fn preflight(&self, path: Path) -> Result<(), String>;
     /// The start-time probe of each level, in order.
     async fn probe(&self, path: Path) -> Vec<(Level, Result<(), String>)>;
-    async fn start(&self, generation: u64, level: Level, path: Path)
-    -> Result<Arc<dyn Child>, Fail>;
+    async fn start(
+        &self,
+        generation: u64,
+        level: Level,
+        path: Path,
+    ) -> Result<Arc<dyn Child>, Fail>;
 }
 
 /// The runtime's state as the page shows it.
@@ -180,6 +184,11 @@ pub(crate) struct Config {
     pub max_tokens: u32,
 }
 
+/// Answers a shutdown request once the child is gone.
+fn shut(reply: oneshot::Sender<()>) {
+    let _ = reply.send(());
+}
+
 /// One line on standard error per transition: states, levels, reasons and measurements,
 /// never prompt text, URLs with tokens or the token.
 fn log(line: &str) {
@@ -256,9 +265,19 @@ enum Attempt {
 /// How the ready phase ended.
 enum Ended {
     /// The child exited or was stopped as hung: restart at the same level.
-    Exited { counted: bool, why: String },
+    Exited {
+        counted: bool,
+        why: String,
+    },
     Restart,
     Shutdown(oneshot::Sender<()>),
+}
+
+/// How a session ended.
+enum Next {
+    /// Start again from level 1 (the owner's Restart).
+    Fresh,
+    Stop(oneshot::Sender<()>),
 }
 
 /// What waiting for the owner gave.
@@ -323,123 +342,144 @@ impl Manager {
 
     async fn run(mut self) {
         // Mimik's start counts as a Restart: from level 1, breaker and count reset.
-        'fresh: loop {
-            self.failures = 0;
-            self.assistant.reset_breaker();
-            self.update(|status| {
-                status.state = State::Starting("checking");
-                status.skipped.clear();
-                status.failures = 0;
-                status.last_failure = None;
-                status.level = None;
-            });
-            if let Err(why) = self.launcher.preflight(self.config.path).await {
-                self.unavailable(why);
-                match self.wait(None).await {
-                    Wake::Restart | Wake::Timer => continue 'fresh,
-                    Wake::Shutdown(reply) => return drop(reply.send(())),
+        loop {
+            if let Next::Stop(reply) = self.session().await {
+                return shut(reply);
+            }
+        }
+    }
+
+    /// Unavailable with `why` until the owner's Restart or shutdown.
+    async fn hold(&mut self, why: String) -> Next {
+        self.unavailable(why);
+        match self.wait(None).await {
+            Wake::Restart | Wake::Timer => Next::Fresh,
+            Wake::Shutdown(reply) => Next::Stop(reply),
+        }
+    }
+
+    /// The levels that passed their probe, in order; the others are recorded as skipped.
+    async fn probed(&mut self) -> Vec<Level> {
+        let mut levels = Vec::new();
+        for (level, result) in self.launcher.probe(self.config.path).await {
+            match result {
+                Ok(()) => levels.push(level),
+                Err(why) => {
+                    log(&format!("level {} probe failed: {why}", level.number()));
+                    self.update(|status| status.skipped.push((level, why)));
                 }
             }
-            let probed = self.launcher.probe(self.config.path).await;
-            let mut levels = Vec::new();
-            for (level, result) in probed {
-                match result {
-                    Ok(()) => levels.push(level),
-                    Err(why) => {
-                        log(&format!("level {} probe failed: {why}", level.number()));
-                        self.update(|status| status.skipped.push((level, why)));
-                    }
-                }
-            }
-            let mut index = 0;
-            loop {
-                if self.failures >= MAX_FAILURES {
-                    let last = self.status().last_failure.unwrap_or_default();
-                    self.unavailable(format!(
+        }
+        levels
+    }
+
+    /// A new generation at `level`.
+    fn begin(&mut self, level: Level) -> u64 {
+        self.generation += 1;
+        let generation = self.generation;
+        log(&format!(
+            "starting: generation {generation}, level {}",
+            level.number()
+        ));
+        self.assistant
+            .event(RuntimeEvent::GenerationStarted { generation });
+        self.update(|status| {
+            status.state = State::Starting("starting the model server");
+            status.level = Some(level);
+            status.generation = generation;
+            status.restarting = false;
+            status.notes.clear();
+        });
+        generation
+    }
+
+    /// One start from level 1 until the owner's Restart (or shutdown) ends it.
+    async fn session(&mut self) -> Next {
+        self.failures = 0;
+        self.assistant.reset_breaker();
+        self.update(|status| {
+            status.state = State::Starting("checking");
+            status.skipped.clear();
+            status.failures = 0;
+            status.last_failure = None;
+            status.level = None;
+        });
+        if let Err(why) = self.launcher.preflight(self.config.path).await {
+            return self.hold(why).await;
+        }
+        let levels = self.probed().await;
+        let mut index = 0;
+        loop {
+            if self.failures >= MAX_FAILURES {
+                let last = self.status().last_failure.unwrap_or_default();
+                return self
+                    .hold(format!(
                         "the model server failed {MAX_FAILURES} times: {last}"
-                    ));
-                    match self.wait(None).await {
-                        Wake::Restart | Wake::Timer => continue 'fresh,
-                        Wake::Shutdown(reply) => return drop(reply.send(())),
+                    ))
+                    .await;
+            }
+            let Some(&level) = levels.get(index) else {
+                return self
+                    .hold("no confinement level could start the model server".into())
+                    .await;
+            };
+            let generation = self.begin(level);
+            match self.attempt(generation, level).await {
+                Attempt::Ready(child, calibration, budgets) => {
+                    let ended = self.ready(generation, &child, *calibration, budgets).await;
+                    child.stop().await;
+                    match ended {
+                        Ended::Exited { counted, why } => {
+                            self.ended(generation, EndReason::Exited);
+                            if counted {
+                                self.failed(why);
+                            }
+                        }
+                        Ended::Restart => {
+                            self.ended(generation, EndReason::Restart);
+                            return Next::Fresh;
+                        }
+                        Ended::Shutdown(reply) => {
+                            self.ended(generation, EndReason::Exited);
+                            return Next::Stop(reply);
+                        }
                     }
                 }
-                let Some(&level) = levels.get(index) else {
-                    self.unavailable("no confinement level could start the model server".into());
-                    match self.wait(None).await {
-                        Wake::Restart | Wake::Timer => continue 'fresh,
-                        Wake::Shutdown(reply) => return drop(reply.send(())),
-                    }
-                };
-                self.generation += 1;
-                let generation = self.generation;
-                log(&format!(
-                    "starting: generation {generation}, level {}",
-                    level.number()
-                ));
-                self.assistant
-                    .event(RuntimeEvent::GenerationStarted { generation });
-                self.update(|status| {
-                    status.state = State::Starting("starting the model server");
-                    status.level = Some(level);
-                    status.generation = generation;
-                    status.restarting = false;
-                    status.notes.clear();
-                });
-                match self.attempt(generation, level).await {
-                    Attempt::Ready(child, calibration, budgets) => {
-                        match self.ready(generation, &child, *calibration, budgets).await {
-                            Ended::Exited { counted, why } => {
-                                child.stop().await;
-                                self.ended(generation, EndReason::Exited);
-                                if counted {
-                                    self.failed(why);
-                                }
-                            }
-                            Ended::Restart => {
-                                child.stop().await;
-                                self.ended(generation, EndReason::Restart);
-                                continue 'fresh;
-                            }
-                            Ended::Shutdown(reply) => {
-                                child.stop().await;
-                                self.ended(generation, EndReason::Exited);
-                                return drop(reply.send(()));
-                            }
+                Attempt::Failed(Fail::Sandbox(why)) => {
+                    log(&format!("level {} skipped: {why}", level.number()));
+                    self.ended(generation, EndReason::Exited);
+                    self.update(|status| status.skipped.push((level, why)));
+                    index += 1;
+                }
+                Attempt::Failed(Fail::Other(why)) => {
+                    self.ended(generation, EndReason::Exited);
+                    self.failed(why);
+                    if self.failures < MAX_FAILURES {
+                        self.update(|status| {
+                            status.state = State::Starting("waiting to retry");
+                        });
+                        match self.wait(Some(RETRY_AFTER)).await {
+                            Wake::Timer => {}
+                            Wake::Restart => return Next::Fresh,
+                            Wake::Shutdown(reply) => return Next::Stop(reply),
                         }
                     }
-                    Attempt::Failed(Fail::Sandbox(why)) => {
-                        log(&format!("level {} skipped: {why}", level.number()));
-                        self.ended(generation, EndReason::Exited);
-                        self.update(|status| status.skipped.push((level, why)));
-                        index += 1;
-                    }
-                    Attempt::Failed(Fail::Other(why)) => {
-                        self.ended(generation, EndReason::Exited);
-                        self.failed(why);
-                        if self.failures < MAX_FAILURES {
-                            self.update(|status| status.state = State::Starting("waiting to retry"));
-                            match self.wait(Some(RETRY_AFTER)).await {
-                                Wake::Timer => {}
-                                Wake::Restart => continue 'fresh,
-                                Wake::Shutdown(reply) => return drop(reply.send(())),
-                            }
-                        }
-                    }
-                    Attempt::TooSlow(why) => {
-                        self.unavailable(why);
-                        match self.wait(None).await {
-                            Wake::Restart | Wake::Timer => continue 'fresh,
-                            Wake::Shutdown(reply) => return drop(reply.send(())),
-                        }
-                    }
-                    Attempt::Interrupted(Command::Restart) => {
-                        self.ended(generation, EndReason::Restart);
-                        continue 'fresh;
-                    }
-                    Attempt::Interrupted(Command::Shutdown(reply)) => {
-                        self.ended(generation, EndReason::Exited);
-                        return drop(reply.send(()));
-                    }
+                }
+                Attempt::TooSlow(why) => return self.hold(why).await,
+                Attempt::Interrupted(command) => {
+                    let restart = matches!(command, Command::Restart);
+                    self.ended(
+                        generation,
+                        if restart {
+                            EndReason::Restart
+                        } else {
+                            EndReason::Exited
+                        },
+                    );
+                    return match command {
+                        Command::Restart => Next::Fresh,
+                        Command::Shutdown(reply) => Next::Stop(reply),
+                    };
                 }
             }
         }
@@ -498,9 +538,7 @@ impl Manager {
             return Attempt::Failed(Fail::Other("the runtime manager lost its owner".into()));
         };
         match measured {
-            Ok((calibration, budgets)) => {
-                Attempt::Ready(child, Box::new(calibration), budgets)
-            }
+            Ok((calibration, budgets)) => Attempt::Ready(child, Box::new(calibration), budgets),
             Err(outcome) => {
                 child.stop().await;
                 outcome
@@ -621,17 +659,16 @@ async fn measure(
         }
     }
     phase("priming");
-    let prefix = match tokio::time::timeout(PRIMING_WITHIN, calibration::prime(server.as_ref()))
-        .await
-    {
-        Ok(Ok(prefix)) => prefix,
-        Ok(Err(_)) => return Err(Attempt::Failed(Fail::Other("priming failed".into()))),
-        Err(_) => {
-            return Err(Attempt::Failed(Fail::Other(
-                "priming did not finish within 300 s".into(),
-            )));
-        }
-    };
+    let prefix =
+        match tokio::time::timeout(PRIMING_WITHIN, calibration::prime(server.as_ref())).await {
+            Ok(Ok(prefix)) => prefix,
+            Ok(Err(_)) => return Err(Attempt::Failed(Fail::Other("priming failed".into()))),
+            Err(_) => {
+                return Err(Attempt::Failed(Fail::Other(
+                    "priming did not finish within 300 s".into(),
+                )));
+            }
+        };
     phase("calibrating");
     let within = Duration::from_secs(2 * config.path.run_cap());
     let calibration = match tokio::time::timeout(

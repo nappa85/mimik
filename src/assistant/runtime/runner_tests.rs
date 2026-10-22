@@ -8,9 +8,15 @@ use std::os::fd::AsFd;
 const HELPER: &str = "assistant::runtime::runner::tests::helper";
 
 fn helper_args() -> Vec<String> {
-    [HELPER, "--exact", "--nocapture", "--test-threads=1", "--include-ignored"]
-        .map(String::from)
-        .to_vec()
+    [
+        HELPER,
+        "--exact",
+        "--nocapture",
+        "--test-threads=1",
+        "--include-ignored",
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 /// The test binary as the runner.
@@ -102,7 +108,7 @@ fn report() -> Value {
     let death = rustix::process::parent_process_death_signal()
         .ok()
         .flatten()
-        .map(|signal| signal.as_raw());
+        .map(rustix::process::Signal::as_raw);
     // SAFETY: prctl with integer arguments; under the seccomp program it is refused.
     let clear = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, 0, 0, 0, 0) };
     let clear = test_helper::errno(i64::from(clear));
@@ -145,10 +151,9 @@ fn helper() {
             std::thread::sleep(std::time::Duration::from_secs(60));
         }
         "fsize" => {
-            let mut file = std::fs::File::create(std::env::temp_dir().join(format!(
-                "mimik-fsize-{}",
-                own_pid()
-            )))
+            let mut file = std::fs::File::create(
+                std::env::temp_dir().join(format!("mimik-fsize-{}", own_pid())),
+            )
             .unwrap();
             let chunk = vec![0_u8; 1 << 20];
             for _ in 0..80 {
@@ -167,11 +172,12 @@ fn helper() {
                     break;
                 }
             }
-            let report: Value = line
-                .find("HELPER ")
-                .map_or(Value::Null, |at| serde_json::from_str(&line[at + 7..]).unwrap());
+            let report: Value = line.find("HELPER ").map_or(Value::Null, |at| {
+                serde_json::from_str(&line[at + 7..]).unwrap()
+            });
             test_helper::print(&json!({"runner": child.id(), "report": report}));
-            std::thread::sleep(std::time::Duration::from_secs(60));
+            // The server holds for 60 s; this process is killed long before.
+            let _ = child.wait();
         }
         other => panic!("unknown helper mode {other}"),
     }
@@ -179,12 +185,20 @@ fn helper() {
 
 fn wait(mut child: Child) -> (std::process::ExitStatus, String) {
     let mut out = String::new();
-    child.stdout.take().unwrap().read_to_string(&mut out).unwrap();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
     (child.wait().unwrap(), out)
 }
 
 fn parsed(out: &str) -> Value {
-    let line = out.lines().find(|line| line.contains("HELPER ")).unwrap_or_else(|| panic!("{out}"));
+    let line = out
+        .lines()
+        .find(|line| line.contains("HELPER "))
+        .unwrap_or_else(|| panic!("{out}"));
     serde_json::from_str(&line[line.find("HELPER ").unwrap() + 7..]).unwrap()
 }
 
@@ -204,14 +218,22 @@ fn the_executed_server_has_only_the_allowed_environment_descriptors_and_limits()
     assert_eq!(env, ["HOME", "LANG", test_helper::VARIABLE, "PATH"]);
     // 0, 1, 2, the kept descriptor, and the listing's own; the server's descriptor was
     // close-on-exec and the spec's was closed.
-    let fds: Vec<i64> = report["fds"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect();
+    let fds: Vec<i64> = report["fds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
     // (The listing's own takes the lowest free number, 3, the spec's old number.)
     for fd in [0, 1, 2, 8] {
         assert!(fds.contains(&fd), "{fds:?}");
     }
     assert!(!fds.contains(&9));
     assert!(!fds.contains(&i64::from(EXEC_FD)));
-    assert!(fds.iter().filter(|fd| **fd > 2 && **fd != 8).count() <= 1, "{fds:?}");
+    assert!(
+        fds.iter().filter(|fd| **fd > 2 && **fd != 8).count() <= 1,
+        "{fds:?}"
+    );
     assert_eq!(report["core"], json!([0, 0]));
     assert_eq!(report["fsize"], json!([FSIZE, FSIZE]));
     assert_eq!(report["nofile"], json!([EXEC_FD, EXEC_FD]));
@@ -243,8 +265,14 @@ fn a_runner_whose_parent_is_not_mimik_exits_before_its_exec() {
 }
 
 fn alive(pid: i32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .is_ok_and(|stat| !stat.rsplit(')').next().unwrap_or("").trim_start().starts_with('Z'))
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        !stat
+            .rsplit(')')
+            .next()
+            .unwrap_or("")
+            .trim_start()
+            .starts_with('Z')
+    })
 }
 
 #[test]

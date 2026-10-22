@@ -201,7 +201,12 @@ impl Real {
             .map(String::from),
         );
         let threads = self.settings.threads.to_string();
-        args.extend(["--threads".into(), threads.clone(), "--threads-batch".into(), threads]);
+        args.extend([
+            "--threads".into(),
+            threads.clone(),
+            "--threads-batch".into(),
+            threads,
+        ]);
         args.extend(
             [
                 "--ctx-size",
@@ -236,7 +241,9 @@ fn bytes_pipe(bytes: &[u8]) -> Result<OwnedFd, String> {
 
 fn mem_available() -> Option<u64> {
     let text = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let line = text.lines().find(|line| line.starts_with("MemAvailable:"))?;
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("MemAvailable:"))?;
     let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
     kib.checked_mul(1024)
 }
@@ -259,62 +266,16 @@ enum Command {
 }
 
 impl Real {
-    /// Starts level 1: bwrap with the profile, then reads `child-pid` and `pid-namespace`.
-    fn spawn_sandbox(
+    /// The command inside the sandbox: llama-server from the bound runtime, or the probe (its
+    /// own executable bound by descriptor as well).
+    fn sandbox_command(
         &self,
-        name: &str,
-        files: &[Verified],
-        model: &Verified,
-        token: &Token,
         command: &Command,
-    ) -> Result<Spawned, Fail> {
-        let bwrap = self
-            .held()
-            .bwrap
-            .clone()
-            .ok_or_else(|| Fail::Sandbox("bubblewrap did not pass the preflight".into()))?;
-        let run = self.run_dir().map_err(Fail::Other)?;
-        let generation = Generation::create(&run, name)
-            .map_err(|refusal| Fail::Other(format!("the socket directory: {refusal}")))?;
-        let seccomp = bytes_pipe(&seccomp::bytes(&seccomp::program(seccomp::Profile::Sandbox)))
-            .map_err(Fail::Other)?;
-        let (status_read, status_write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
-            .map_err(|_| Fail::Other("no pipe".into()))?;
-        let token_pipe = token.pipe().map_err(|_| Fail::Other("no pipe".into()))?;
-        let mut handover = vec![
-            Handover {
-                fd: status_write,
-                target: fds::STATUS,
-            },
-            Handover {
-                fd: seccomp,
-                target: fds::SECCOMP,
-            },
-            Handover {
-                fd: token_pipe,
-                target: fds::TOKEN,
-            },
-            Handover {
-                fd: dup(&generation.fd).map_err(Fail::Other)?,
-                target: fds::SOCKET_DIR,
-            },
-            Handover {
-                fd: dup(&model.fd).map_err(Fail::Other)?,
-                target: fds::MODEL,
-            },
-        ];
-        let mut runtime = Vec::new();
-        for (n, file) in files.iter().enumerate() {
-            let target = fds::RUNTIME + RawFd::try_from(n).unwrap_or(0);
-            handover.push(Handover {
-                fd: dup(&file.fd).map_err(Fail::Other)?,
-                target,
-            });
-            runtime.push((target, file.name.clone()));
-        }
-        let mut extra = Vec::new();
+        handover: &mut Vec<Handover>,
+        extra: &mut Vec<(RawFd, String)>,
+    ) -> Result<Vec<String>, Fail> {
         let socket = format!("{}/{}", bwrap::SOCKET_DIR, endpoint::SOCKET);
-        let program: Vec<String> = match command {
+        Ok(match command {
             Command::Server => {
                 let server = self
                     .build
@@ -338,10 +299,40 @@ impl Real {
                 extra.push((fds::PROBE, "/opt/mimik/mimik".to_owned()));
                 let mut argv = vec!["/opt/mimik/mimik".to_owned()];
                 argv.extend(self.settings.inner.args.iter().cloned());
-                argv.extend(["1".to_owned()]);
+                argv.push("1".to_owned());
                 argv
             }
-        };
+        })
+    }
+
+    /// Starts level 1: bwrap with the profile, then reads `child-pid` and `pid-namespace`.
+    fn spawn_sandbox(
+        &self,
+        name: &str,
+        files: &[Verified],
+        model: &Verified,
+        token: &Token,
+        command: &Command,
+    ) -> Result<Spawned, Fail> {
+        let bwrap = self
+            .held()
+            .bwrap
+            .clone()
+            .ok_or_else(|| Fail::Sandbox("bubblewrap did not pass the preflight".into()))?;
+        let run = self.run_dir().map_err(Fail::Other)?;
+        let generation = Generation::create(&run, name)
+            .map_err(|refusal| Fail::Other(format!("the socket directory: {refusal}")))?;
+        let seccomp = bytes_pipe(&seccomp::bytes(&seccomp::program(
+            seccomp::Profile::Sandbox,
+        )))
+        .map_err(Fail::Other)?;
+        let (status_read, status_write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
+            .map_err(|_| Fail::Other("no pipe".into()))?;
+        let token_pipe = token.pipe().map_err(|_| Fail::Other("no pipe".into()))?;
+        let (mut handover, runtime) =
+            sandbox_handover(status_write, seccomp, token_pipe, &generation, model, files)?;
+        let mut extra = Vec::new();
+        let program = self.sandbox_command(command, &mut handover, &mut extra)?;
         let env = match command {
             Command::Server => Vec::new(),
             Command::Probe => self.settings.inner.env.clone(),
@@ -389,36 +380,20 @@ impl Real {
         ) {
             self.record(&entry);
         }
-        // bwrap's first status line: the reaper's PID and the PID namespace.
-        let file = std::fs::File::from(status_read);
-        let (lines, report) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
-            .name("assistant-status".into())
-            .spawn(move || {
-                let mut reader = std::io::BufReader::new(file.take(64 * 1024));
-                let mut line = String::new();
-                let started = match reader.read_line(&mut line) {
-                    Ok(n) if n > 0 => bwrap::started(&line),
-                    _ => None,
-                };
-                let rest = std::io::BufReader::new(reader.into_inner().into_inner());
-                let _ = lines.send((started, rest));
-            })
-            .map_err(|_| Fail::Other("no status thread".into()))?;
-        let (started, rest) = report
-            .recv_timeout(STATUS_WITHIN)
-            .map_err(|_| Fail::Sandbox("bubblewrap did not report the sandbox".into()))?;
-        let Some(Started {
-            child_pid,
-            pid_namespace,
-        }) = started
-        else {
-            let mut child = child;
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Fail::Sandbox(
-                "bubblewrap failed before starting the model server".into(),
-            ));
+        let mut child = child;
+        let (
+            Started {
+                child_pid,
+                pid_namespace,
+            },
+            rest,
+        ) = match read_started(status_read) {
+            Ok(started) => started,
+            Err(fail) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(fail);
+            }
         };
         let reaper = Watched::open(child_pid)
             .map_err(|_| Fail::Sandbox("the sandbox's reaper has gone".into()))?;
@@ -456,13 +431,13 @@ impl Real {
         token
             .write_file(generation.fd.as_fd())
             .map_err(|_| Fail::Other("the token file cannot be written".into()))?;
-        rustix::fs::mkdirat(&generation.fd, "home", rustix::fs::Mode::from_raw_mode(0o700))
-            .map_err(|_| Fail::Other("no private home".into()))?;
-        let directory = self
-            .settings
-            .data_dir
-            .join("run")
-            .join(generation.name());
+        rustix::fs::mkdirat(
+            &generation.fd,
+            "home",
+            rustix::fs::Mode::from_raw_mode(0o700),
+        )
+        .map_err(|_| Fail::Other("no private home".into()))?;
+        let directory = self.settings.data_dir.join("run").join(generation.name());
         let token_file = directory.join(token::FILE).display().to_string();
         let model_path = format!("/proc/self/fd/{}", fds::MODEL);
         let (executable, argv) = match command {
@@ -498,7 +473,10 @@ impl Real {
         let mut env = vec![
             ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
             ("LANG".to_owned(), "C.UTF-8".to_owned()),
-            ("HOME".to_owned(), directory.join("home").display().to_string()),
+            (
+                "HOME".to_owned(),
+                directory.join("home").display().to_string(),
+            ),
         ];
         if matches!(command, Command::Probe) {
             env.extend(self.settings.inner.env.iter().cloned());
@@ -518,17 +496,17 @@ impl Real {
         let pid = i32::try_from(child.id()).unwrap_or(0);
         let runner = Watched::open(pid).map_err(|_| Fail::Other("no pidfd".into()))?;
         let mut executables = vec![self.settings.runner.program.display().to_string()];
-        if let Some(server) = server {
-            if let Some(build) = &self.build {
-                executables.push(
-                    self.settings
-                        .runtime_dir
-                        .join(&build.directory)
-                        .join(&server.name)
-                        .display()
-                        .to_string(),
-                );
-            }
+        if let Some(server) = server
+            && let Some(build) = &self.build
+        {
+            executables.push(
+                self.settings
+                    .runtime_dir
+                    .join(&build.directory)
+                    .join(&server.name)
+                    .display()
+                    .to_string(),
+            );
         }
         if let Some(entry) = Entry::of(0, pid, executables) {
             self.record(&entry);
@@ -546,6 +524,79 @@ impl Real {
             status_rest: None,
         })
     }
+}
+
+/// Runtime files bound into the sandbox: descriptor number and name.
+type Binds = Vec<(RawFd, String)>;
+
+/// Level 1's descriptors at their numbers, and the runtime files' binds.
+fn sandbox_handover(
+    status: OwnedFd,
+    seccomp: OwnedFd,
+    token: OwnedFd,
+    generation: &Generation,
+    model: &Verified,
+    files: &[Verified],
+) -> Result<(Vec<Handover>, Binds), Fail> {
+    let mut handover = vec![
+        Handover {
+            fd: status,
+            target: fds::STATUS,
+        },
+        Handover {
+            fd: seccomp,
+            target: fds::SECCOMP,
+        },
+        Handover {
+            fd: token,
+            target: fds::TOKEN,
+        },
+        Handover {
+            fd: dup(&generation.fd).map_err(Fail::Other)?,
+            target: fds::SOCKET_DIR,
+        },
+        Handover {
+            fd: dup(&model.fd).map_err(Fail::Other)?,
+            target: fds::MODEL,
+        },
+    ];
+    let mut runtime = Vec::new();
+    for (n, file) in files.iter().enumerate() {
+        let target = fds::RUNTIME + RawFd::try_from(n).unwrap_or(0);
+        handover.push(Handover {
+            fd: dup(&file.fd).map_err(Fail::Other)?,
+            target,
+        });
+        runtime.push((target, file.name.clone()));
+    }
+    Ok((handover, runtime))
+}
+
+/// bwrap's first status line (the reaper's PID and the PID namespace), within
+/// [`STATUS_WITHIN`], and the rest of the descriptor.
+fn read_started(status: OwnedFd) -> Result<(Started, std::io::BufReader<std::fs::File>), Fail> {
+    let file = std::fs::File::from(status);
+    let (lines, report) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("assistant-status".into())
+        .spawn(move || {
+            let mut reader = std::io::BufReader::new(file.take(64 * 1024));
+            let mut line = String::new();
+            let started = match reader.read_line(&mut line) {
+                Ok(n) if n > 0 => bwrap::started(&line),
+                _ => None,
+            };
+            let rest = std::io::BufReader::new(reader.into_inner().into_inner());
+            let _ = lines.send((started, rest));
+        })
+        .map_err(|_| Fail::Other("no status thread".into()))?;
+    let (started, rest) = report
+        .recv_timeout(STATUS_WITHIN)
+        .map_err(|_| Fail::Sandbox("bubblewrap did not report the sandbox".into()))?;
+    let started = started.ok_or_else(|| {
+        Fail::Sandbox("bubblewrap failed before starting the model server".into())
+    })?;
+    Ok((started, rest))
 }
 
 /// A free loopback port: bound, read, released.
@@ -567,7 +618,8 @@ struct Exit {
 /// A running generation's child.
 pub(crate) struct RealChild {
     server: Arc<dyn Server>,
-    /// The checked connector (tests reach the server through it with other tokens).
+    /// The checked connector (live tests reach the server through it with other tokens).
+    #[cfg(test)]
     connector: Arc<dyn Connect>,
     exit: watch::Receiver<Option<Exit>>,
     pid: i32,
@@ -620,9 +672,7 @@ impl Child for RealChild {
             let gone = tokio::time::timeout(STOP_GRACE, exit.wait_for(Option::is_some))
                 .await
                 .is_ok_and(|result| result.is_ok());
-            if !gone
-                && let Some(pid) = rustix::process::Pid::from_raw(self.pid)
-            {
+            if !gone && let Some(pid) = rustix::process::Pid::from_raw(self.pid) {
                 let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
                 let _ = exit.wait_for(Option::is_some).await;
             }
@@ -634,7 +684,8 @@ impl Child for RealChild {
     }
 
     fn answered_health(&self) {
-        self.healthy.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.healthy
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         if self.level.tcp()
             && let Some(dir) = &*self
                 .generation_dir
@@ -703,8 +754,20 @@ impl Real {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let (events, mut incoming) = tokio::sync::mpsc::unbounded_channel();
         for (name, stream) in [
-            ("stdout", child.stdout.take().map(|s| Box::new(s) as Box<dyn Read + Send>)),
-            ("stderr", child.stderr.take().map(|s| Box::new(s) as Box<dyn Read + Send>)),
+            (
+                "stdout",
+                child
+                    .stdout
+                    .take()
+                    .map(|s| Box::new(s) as Box<dyn Read + Send>),
+            ),
+            (
+                "stderr",
+                child
+                    .stderr
+                    .take()
+                    .map(|s| Box::new(s) as Box<dyn Read + Send>),
+            ),
         ] {
             if let Some(stream) = stream {
                 let _ = drain::spawn(name, stream, events.clone());
@@ -746,6 +809,7 @@ impl Real {
         }
         Arc::new(RealChild {
             server,
+            #[cfg(test)]
             connector,
             exit,
             pid,
@@ -854,26 +918,44 @@ impl Launch {
         let name = generation.to_string();
         let bwrap = real.held().bwrap.clone();
         let spawned = match level {
-            Level::Bubblewrap => real.spawn_sandbox(&name, &files, &model, &token, &Command::Server)?,
+            Level::Bubblewrap => {
+                real.spawn_sandbox(&name, &files, &model, &token, &Command::Server)?
+            }
             Level::Unconfined => {
                 let server_name = real.build.as_ref().map(|build| build.server.clone());
-                let server = files.iter().find(|file| Some(&file.name) == server_name.as_ref());
+                let server = files
+                    .iter()
+                    .find(|file| Some(&file.name) == server_name.as_ref());
                 // A child that cannot bind its port exits; a new port is tried, at most 3.
                 let mut tries = 0;
                 loop {
                     tries += 1;
                     let port = free_port()?;
-                    let spawned = real.spawn_unconfined(&name, server, &model, &token, &Command::Server, port)?;
+                    let spawned = real.spawn_unconfined(
+                        &name,
+                        server,
+                        &model,
+                        &token,
+                        &Command::Server,
+                        port,
+                    )?;
                     let child = real.child(spawned, level, &token, None);
                     let bound = tokio::time::timeout(Duration::from_secs(10), async {
                         loop {
-                            if child.seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&Output::BindError) {
+                            if child
+                                .seen
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .contains(&Output::BindError)
+                            {
                                 return false;
                             }
                             if child.exit.borrow().is_some() {
                                 return true;
                             }
-                            if endpoint::listeners(port, child.pid).is_ok_and(|result| result.is_ok()) {
+                            if endpoint::listeners(port, child.pid)
+                                .is_ok_and(|result| result.is_ok())
+                            {
                                 return true;
                             }
                             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -888,7 +970,9 @@ impl Launch {
                 }
             }
             Level::Landlock => {
-                return Err(Fail::Sandbox("Landlock confinement is not in this release".into()));
+                return Err(Fail::Sandbox(
+                    "Landlock confinement is not in this release".into(),
+                ));
             }
         };
         Ok(real.child(spawned, level, &token, bwrap.as_ref()))
@@ -928,19 +1012,16 @@ impl Real {
             .enable_all()
             .build()
             .map_err(|_| "no probe runtime".to_owned())?;
-        let spawned = match level {
-            Level::Bubblewrap => self
-                .spawn_sandbox(&name, &files, &model, &token, &Command::Probe)
-                .map_err(|fail| match fail {
-                    Fail::Sandbox(why) | Fail::Other(why) => why,
-                })?,
-            _ => {
-                let port = free_port().map_err(|_| "no free loopback port".to_owned())?;
-                self.spawn_unconfined(&name, None, &model, &token, &Command::Probe, port)
-                    .map_err(|fail| match fail {
-                        Fail::Sandbox(why) | Fail::Other(why) => why,
-                    })?
-            }
+        let why = |fail: Fail| match fail {
+            Fail::Sandbox(why) | Fail::Other(why) => why,
+        };
+        let spawned = if level == Level::Bubblewrap {
+            self.spawn_sandbox(&name, &files, &model, &token, &Command::Probe)
+                .map_err(why)?
+        } else {
+            let port = free_port().map_err(why)?;
+            self.spawn_unconfined(&name, None, &model, &token, &Command::Probe, port)
+                .map_err(why)?
         };
         let Spawned {
             mut child,
@@ -966,35 +1047,33 @@ impl Real {
                 break;
             }
         }
-        let result = match report {
-            Some(report) => {
-                let verdict = if report["ok"] == serde_json::json!(true) {
-                    runtime.block_on(async {
-                        match tokio::time::timeout(Duration::from_secs(10), connector.connect())
-                            .await
-                        {
-                            Ok(Ok(_)) => Ok(()),
-                            Ok(Err(error)) => {
-                                Err(format!("the endpoint check refused the probe: {error}"))
-                            }
-                            Err(_) => Err("the probe's socket did not answer".to_owned()),
+        let result = if let Some(report) = report {
+            let verdict = if report["ok"] == serde_json::json!(true) {
+                runtime.block_on(async {
+                    match tokio::time::timeout(Duration::from_secs(10), connector.connect()).await {
+                        Ok(Ok(_)) => Ok(()),
+                        Ok(Err(error)) => {
+                            Err(format!("the endpoint check refused the probe: {error}"))
                         }
-                    })
-                } else {
-                    Err("the probe failed inside the level".to_owned())
-                };
-                Ok((report, verdict))
+                        Err(_) => Err("the probe's socket did not answer".to_owned()),
+                    }
+                })
+            } else {
+                Err("the probe failed inside the level".to_owned())
+            };
+            Ok((report, verdict))
+        } else {
+            let mut text = String::new();
+            if let Some(stderr) = stderr.as_mut() {
+                let _ = stderr.take(4096).read_to_string(&mut text);
             }
-            None => {
-                let mut text = String::new();
-                if let Some(stderr) = stderr.as_mut() {
-                    let _ = stderr.take(4096).read_to_string(&mut text);
-                }
-                let first = text.lines().find(|line| line.starts_with("bwrap: ")).unwrap_or("");
-                Err(format!("the probe did not start {}", first.trim())
-                    .trim()
-                    .to_owned())
-            }
+            let first = text
+                .lines()
+                .find(|line| line.starts_with("bwrap: "))
+                .unwrap_or("");
+            Err(format!("the probe did not start {}", first.trim())
+                .trim()
+                .to_owned())
         };
         let _ = child.kill();
         let _ = child.wait();

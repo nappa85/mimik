@@ -150,7 +150,7 @@ pub(crate) async fn calibrate(
     let cap = path.cap();
     let mut samples = Vec::with_capacity(2);
     let mut density = [0.0; 2];
-    for variant in 0..2 {
+    for (variant, density) in density.iter_mut().enumerate() {
         let text = filler(cap, variant);
         let tokens = server.tokens(&text).await.map_err(Interrupted::Tokenize)?;
         let started = tokio::time::Instant::now();
@@ -165,7 +165,7 @@ pub(crate) async fn calibrate(
             reason = "byte and token counts of at most a 4 KiB filler"
         )]
         let bytes_per_token = cap as f64 / tokens.max(1) as f64;
-        density[variant] = bytes_per_token;
+        *density = bytes_per_token;
     }
     let samples = [samples[0], samples[1]];
     let derived = budgets::derive(&Measured {

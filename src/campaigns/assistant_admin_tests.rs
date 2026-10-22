@@ -35,8 +35,8 @@ async fn body(response: axum::response::Response) -> String {
     .unwrap()
 }
 
-fn restart_form(csrf: &str) -> Option<Vec<(String, String)>> {
-    Some(vec![("csrf".into(), csrf.into())])
+fn restart_form(csrf: &str) -> Vec<(String, String)> {
+    vec![("csrf".to_owned(), csrf.to_owned())]
 }
 
 #[tokio::test]
@@ -56,17 +56,29 @@ async fn the_assistant_page_is_owner_only_and_says_off_without_the_assistant() {
     assert!(page.contains("<strong>Off</strong>"), "{page}");
     // No assistant, nothing to restart.
     assert_eq!(
-        router_request(&app, &auth[0], "/admin/assistant/restart", restart_form(&"a".repeat(64)))
-            .await
-            .status(),
+        router_request(
+            &app,
+            &auth[0],
+            "/admin/assistant/restart",
+            Some(restart_form(&"a".repeat(64)))
+        )
+        .await
+        .status(),
         StatusCode::NOT_FOUND
     );
 }
 
-#[tokio::test]
-async fn restart_is_owner_only_csrf_checked_and_never_doubled() {
-    let _lock = crate::auth::test_resource_lock().await;
-    let (_dir, store, auth, _clock) = fixture_with_owner(1).await;
+struct Assisted {
+    _dir: tempfile::TempDir,
+    store: Store,
+    auth: Vec<RequestAuth>,
+    app: axum::Router,
+    gate: Arc<tokio::sync::Semaphore>,
+    preflights: Arc<AtomicI64>,
+}
+
+async fn assisted() -> Assisted {
+    let (dir, store, auth, _clock) = fixture_with_owner(1).await;
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     let preflights = Arc::new(AtomicI64::new(0));
     let handle = AssistantHandle::with_launcher(
@@ -79,38 +91,92 @@ async fn restart_is_owner_only_csrf_checked_and_never_doubled() {
     let app = crate::auth::app_with_options(
         store.clone(),
         crate::auth::AuthOptions {
-            assistant: Some(handle.clone()),
+            assistant: Some(handle),
             ..crate::auth::AuthOptions::default()
         },
     )
     .await
     .unwrap();
-    let csrf = "a".repeat(64);
+    Assisted {
+        _dir: dir,
+        store,
+        auth,
+        app,
+        gate,
+        preflights,
+    }
+}
+
+#[tokio::test]
+async fn restart_is_owner_only_and_csrf_checked() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let Assisted { app, auth, .. } = assisted().await;
     let page = body(router_request(&app, &auth[0], "/admin/assistant", None).await).await;
     assert!(page.contains("<strong>Starting</strong>"), "{page}");
-    assert!(page.contains("Level") || page.contains("No level is active"));
-    // Not the owner; a wrong token.
+    assert!(page.contains("llama.cpp b11609"), "{page}");
     assert_eq!(
-        router_request(&app, &auth[1], "/admin/assistant/restart", restart_form(&csrf))
+        router_request(&app, &auth[1], "/admin/assistant", None)
             .await
             .status(),
         StatusCode::FORBIDDEN
     );
     assert_eq!(
-        router_request(&app, &auth[0], "/admin/assistant/restart", restart_form(&"b".repeat(64)))
-            .await
-            .status(),
+        router_request(
+            &app,
+            &auth[1],
+            "/admin/assistant/restart",
+            Some(restart_form(&"a".repeat(64)))
+        )
+        .await
+        .status(),
         StatusCode::FORBIDDEN
     );
+    assert_eq!(
+        router_request(
+            &app,
+            &auth[0],
+            "/admin/assistant/restart",
+            Some(restart_form(&"b".repeat(64)))
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn a_second_restart_while_one_runs_starts_nothing_and_a_revoked_session_is_refused() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let Assisted {
+        store,
+        auth,
+        app,
+        gate,
+        preflights,
+        ..
+    } = assisted().await;
+    let csrf = "a".repeat(64);
     // The first preflight is still waiting; a Restart is accepted once, the second press
     // while it runs starts nothing.
-    let first = router_request(&app, &auth[0], "/admin/assistant/restart", restart_form(&csrf)).await;
+    let first = router_request(
+        &app,
+        &auth[0],
+        "/admin/assistant/restart",
+        Some(restart_form(&csrf)),
+    )
+    .await;
     assert_eq!(first.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         first.headers()["location"],
         "/admin/assistant?notice=restarting"
     );
-    let second = router_request(&app, &auth[0], "/admin/assistant/restart", restart_form(&csrf)).await;
+    let second = router_request(
+        &app,
+        &auth[0],
+        "/admin/assistant/restart",
+        Some(restart_form(&csrf)),
+    )
+    .await;
     assert_eq!(
         second.headers()["location"],
         "/admin/assistant?notice=already-restarting"
@@ -126,7 +192,9 @@ async fn restart_is_owner_only_csrf_checked_and_never_doubled() {
     gate.add_permits(1);
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert_eq!(preflights.load(Ordering::SeqCst), 2);
-    let page = body(router_request(&app, &auth[0], "/admin/assistant?notice=restarting", None).await).await;
+    let page =
+        body(router_request(&app, &auth[0], "/admin/assistant?notice=restarting", None).await)
+            .await;
     assert!(page.contains("test: no model server here"), "{page}");
     assert!(page.contains("Restarting: the model server"));
     // A session revoked meanwhile is refused.
@@ -137,9 +205,18 @@ async fn restart_is_owner_only_csrf_checked_and_never_doubled() {
         })
         .await
         .unwrap();
-    let refused = router_request(&app, &auth[0], "/admin/assistant/restart", restart_form(&csrf)).await;
+    let refused = router_request(
+        &app,
+        &auth[0],
+        "/admin/assistant/restart",
+        Some(restart_form(&csrf)),
+    )
+    .await;
     assert!(
-        matches!(refused.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN),
+        matches!(
+            refused.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ),
         "{}",
         refused.status()
     );

@@ -1,11 +1,13 @@
 use super::*;
+use std::fmt::Write as _;
 
 /// A fake bwrap that prints `options` as its help text, with `mode`.
 fn fake(dir: &Path, name: &str, options: &[&str], mode: u32) -> PathBuf {
     let path = dir.join(name);
-    let mut script = String::from("#!/bin/sh\ncat <<'EOF'\nusage: bwrap [OPTIONS...] [--] COMMAND [ARGS...]\n");
+    let mut script =
+        String::from("#!/bin/sh\ncat <<'EOF'\nusage: bwrap [OPTIONS...] [--] COMMAND [ARGS...]\n");
     for option in options {
-        script.push_str(&format!("    {option} ARG     Something\n"));
+        writeln!(script, "    {option} ARG     Something").unwrap();
     }
     script.push_str("EOF\n");
     std::fs::write(&path, script).unwrap();
@@ -37,7 +39,13 @@ fn the_first_fixed_path_that_exists_is_used_with_every_option_probed() {
     let good = fake(dir.path(), "good", &all_options(), 0o755);
     let missing = dir.path().join("missing");
     let found = preflight_at(&[&missing, &good], &proc).unwrap();
-    assert_eq!(found, Bwrap { path: good.clone(), size: true });
+    assert_eq!(
+        found,
+        Bwrap {
+            path: good.clone(),
+            size: true
+        }
+    );
     let no_size = fake(dir.path(), "no-size", OPTIONS, 0o755);
     assert!(!preflight_at(&[&no_size], &proc).unwrap().size);
     assert_eq!(preflight_at(&[&missing], &proc), Err(Unusable::Missing));
@@ -137,14 +145,22 @@ fn profile(size: bool) -> Profile {
 }
 
 fn pairs(args: &[OsString]) -> Vec<(String, String)> {
-    let text: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
-    text.windows(2).map(|w| (w[0].clone(), w[1].clone())).collect()
+    let text: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    text.windows(2)
+        .map(|w| (w[0].clone(), w[1].clone()))
+        .collect()
 }
 
 #[test]
 fn the_profile_unshares_everything_and_binds_only_the_allowlist() {
     let args = profile(true).arguments();
-    let text: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    let text: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     for required in [
         "--unshare-all",
         "--die-with-parent",
@@ -168,13 +184,25 @@ fn the_profile_unshares_everything_and_binds_only_the_allowlist() {
     assert!(pairs.contains(&("--bind-fd".into(), "7".into())));
     assert!(text.windows(3).any(|w| w == ["--bind-fd", "7", SOCKET_DIR]));
     assert!(text.windows(3).any(|w| w == ["--ro-bind-fd", "8", MODEL]));
-    assert!(text.windows(3).any(|w| w == ["--ro-bind-fd", "9", "/opt/llama/llama-server"]));
+    assert!(
+        text.windows(3)
+            .any(|w| w == ["--ro-bind-fd", "9", "/opt/llama/llama-server"])
+    );
     assert!(text.windows(3).any(|w| w == ["--ro-bind-data", "6", TOKEN]));
     assert!(pairs.contains(&("--seccomp".into(), "5".into())));
     assert!(pairs.contains(&("--json-status-fd".into(), "4".into())));
-    assert!(text.windows(4).any(|w| w == ["--size", "67108864", "--tmpfs", "/tmp"]));
-    assert!(text.windows(4).any(|w| w == ["--size", "268435456", "--tmpfs", "/dev/shm"]));
-    assert_eq!(&text[text.len() - 2..], ["/opt/llama/llama-server", "--offline"]);
+    assert!(
+        text.windows(4)
+            .any(|w| w == ["--size", "67108864", "--tmpfs", "/tmp"])
+    );
+    assert!(
+        text.windows(4)
+            .any(|w| w == ["--size", "268435456", "--tmpfs", "/dev/shm"])
+    );
+    assert_eq!(
+        &text[text.len() - 2..],
+        ["/opt/llama/llama-server", "--offline"]
+    );
     // The minimal environment.
     let set: Vec<&[String]> = text.windows(3).filter(|w| w[0] == "--setenv").collect();
     let names: Vec<&str> = set.iter().map(|w| w[1].as_str()).collect();
@@ -194,8 +222,6 @@ fn status_lines_from_the_installed_bwrap_shape() {
             pid_namespace: 4_026_532_682
         })
     );
-    assert_eq!(exit_code(line), None);
-    assert_eq!(exit_code(r#"{ "exit-code": 143 }"#), Some(143));
     assert_eq!(started(r#"{ "exit-code": 0 }"#), None);
     assert_eq!(started("not json"), None);
 }

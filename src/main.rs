@@ -75,6 +75,18 @@ struct DevelopmentAssistant {
     token_file: Option<std::path::PathBuf>,
 }
 
+/// The data directory: the database's folder, absolute.
+fn data_dir(database: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let folder = database
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(
+            || std::path::PathBuf::from("."),
+            std::path::Path::to_path_buf,
+        );
+    std::path::absolute(folder)
+}
+
 /// The assistant `--assistant` asks for: the runtime manager over the data directory.
 fn assistant(
     args: &Args,
@@ -88,14 +100,15 @@ fn assistant(
             .token_file
             .clone()
             .ok_or("--assistant-dev-endpoint needs --assistant-dev-token-file.")?;
-        let handle =
-            mimik::assistant::AssistantHandle::development(mimik::assistant::development::Config {
+        let handle = mimik::assistant::AssistantHandle::development(
+            mimik::assistant::development::Config {
                 endpoint,
                 token_file,
                 model: args.assistant.model.clone(),
                 model_sha256: args.assistant.model_sha256.clone(),
                 model_alias: args.assistant.model_alias.clone(),
-            })?;
+            },
+        )?;
         println!("DEVELOPMENT ONLY: assistant on, development endpoint (no endpoint check).");
         return Ok(handle);
     }
@@ -273,11 +286,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(parent)?;
     }
     if args.assistant.on {
-        let data_dir = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .map_or_else(|| std::path::PathBuf::from("."), std::path::Path::to_path_buf);
-        options.assistant = Some(assistant(&args, &std::path::absolute(data_dir)?)?);
+        options.assistant = Some(assistant(&args, &data_dir(&path)?)?);
     }
     let store = Store::open(&path)?;
     let unindexed = store.search_index_failures().await?;
@@ -287,84 +296,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     if let Some(command) = args.command {
-        let Some(command) = publication_command(&store, command).await? else {
-            return Ok(());
-        };
-        match command {
-            Command::ImportDefinitionDraft {
-                file,
-                expected_revision,
-            } => println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    &store
-                        .import_definition_draft(&file, expected_revision)
-                        .await?
-                )?
-            ),
-            Command::ShowDefinitionDraft { id } => println!(
-                "{}",
-                serde_json::to_string_pretty(&store.definition_draft(id).await?)?
-            ),
-            Command::ListDefinitionDrafts {
-                game_id,
-                edition_id,
-                after_id,
-            } => println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    &store
-                        .definition_drafts(game_id, edition_id, after_id)
-                        .await?
-                )?
-            ),
-            Command::ImportSource { bundle, pdf } => {
-                let id = store.import_source(&bundle, &pdf).await?;
-                println!(
-                    "Registered source {id}. New imports are unreviewed; existing imports retain their review state. Open /sources."
-                );
-            }
-            Command::RegisterRuleset {
-                game_id,
-                game_label,
-                edition_id,
-                edition_label,
-            } => {
-                store
-                    .register_ruleset(mimik::registry::RegisterRuleset {
-                        game_id,
-                        game_label,
-                        edition_id,
-                        edition_label,
-                    })
-                    .await?;
-                println!(
-                    "Ruleset registered. Registration does not approve sources or provide a generic sheet."
-                );
-            }
-            Command::RegisterRulesetAlias {
-                game_id,
-                edition_id,
-                legacy_edition,
-            } => {
-                store
-                    .register_ruleset_alias(mimik::registry::RegisterAlias {
-                        game_id,
-                        edition_id,
-                        legacy_edition,
-                    })
-                    .await?;
-                println!(
-                    "Exact legacy alias registered; matching unresolved records associated without changing their data or review state."
-                );
-            }
-            Command::ListRulesets => println!(
-                "{}",
-                serde_json::to_string_pretty(&store.rulesets().await?)?
-            ),
-            _ => return Err("Unexpected command dispatcher state".into()),
-        }
-        return Ok(());
+        return local_command(&store, command).await;
     }
     let assistant = options.assistant.clone();
     let served = serve(store, auth, options, &path).await;
@@ -372,6 +304,89 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         assistant.shutdown().await;
     }
     served
+}
+
+/// The local operator commands that print their results.
+async fn local_command(store: &Store, command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let store = store.clone();
+    let Some(command) = publication_command(&store, command).await? else {
+        return Ok(());
+    };
+    match command {
+        Command::ImportDefinitionDraft {
+            file,
+            expected_revision,
+        } => println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &store
+                    .import_definition_draft(&file, expected_revision)
+                    .await?
+            )?
+        ),
+        Command::ShowDefinitionDraft { id } => println!(
+            "{}",
+            serde_json::to_string_pretty(&store.definition_draft(id).await?)?
+        ),
+        Command::ListDefinitionDrafts {
+            game_id,
+            edition_id,
+            after_id,
+        } => println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &store
+                    .definition_drafts(game_id, edition_id, after_id)
+                    .await?
+            )?
+        ),
+        Command::ImportSource { bundle, pdf } => {
+            let id = store.import_source(&bundle, &pdf).await?;
+            println!(
+                "Registered source {id}. New imports are unreviewed; existing imports retain their review state. Open /sources."
+            );
+        }
+        Command::RegisterRuleset {
+            game_id,
+            game_label,
+            edition_id,
+            edition_label,
+        } => {
+            store
+                .register_ruleset(mimik::registry::RegisterRuleset {
+                    game_id,
+                    game_label,
+                    edition_id,
+                    edition_label,
+                })
+                .await?;
+            println!(
+                "Ruleset registered. Registration does not approve sources or provide a generic sheet."
+            );
+        }
+        Command::RegisterRulesetAlias {
+            game_id,
+            edition_id,
+            legacy_edition,
+        } => {
+            store
+                .register_ruleset_alias(mimik::registry::RegisterAlias {
+                    game_id,
+                    edition_id,
+                    legacy_edition,
+                })
+                .await?;
+            println!(
+                "Exact legacy alias registered; matching unresolved records associated without changing their data or review state."
+            );
+        }
+        Command::ListRulesets => println!(
+            "{}",
+            serde_json::to_string_pretty(&store.rulesets().await?)?
+        ),
+        _ => return Err("Unexpected command dispatcher state".into()),
+    }
+    Ok(())
 }
 
 fn validate_serving_args(args: &Args) -> Result<(), Box<dyn std::error::Error>> {

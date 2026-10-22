@@ -65,7 +65,6 @@ pub(crate) fn max_tokens(spec: &str, sha256: Option<&str>) -> Result<u32, String
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +98,4 @@ mod tests {
             assert!(default_alias(refused).is_err(), "{refused}");
         }
     }
-
 }

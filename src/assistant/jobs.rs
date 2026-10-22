@@ -48,13 +48,8 @@ pub(crate) enum Signal {
     Completed { generation: u64 },
 }
 
-/// Why a generation ended. The development endpoint has one fixed generation; the 2c-2
-/// runtime manager sends these.
+/// Why a generation ended (the runtime manager sends these).
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    all(feature = "dev-endpoint", not(test)),
-    expect(dead_code, reason = "sent by the 2c-2 runtime manager")
-)]
 pub(crate) enum EndReason {
     /// The child exited, or was stopped for a new generation.
     Exited,
@@ -64,17 +59,12 @@ pub(crate) enum EndReason {
     Unavailable(String),
 }
 
-/// The runtime event interface the worker consumes (plan §2 2c-1): fed in 2c-1 by the
-/// development endpoint's fixed configuration and by test doubles, in 2c-2 by the runtime
-/// manager.
+/// The runtime event interface the worker consumes: fed by the runtime manager (and by test
+/// doubles).
 pub(crate) enum RuntimeEvent {
     GenerationStarted {
         generation: u64,
     },
-    #[cfg_attr(
-        all(feature = "dev-endpoint", not(test)),
-        expect(dead_code, reason = "sent by the 2c-2 runtime manager")
-    )]
     GenerationEnded {
         generation: u64,
         reason: EndReason,
@@ -828,8 +818,8 @@ impl Assistant {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .map_or(Duration::ZERO, |until| until.saturating_duration_since(now));
-        let worst = running_left.max(busy_left)
-            + budgets.run * u32::try_from(waiting).unwrap_or(u32::MAX);
+        let worst =
+            running_left.max(busy_left) + budgets.run * u32::try_from(waiting).unwrap_or(u32::MAX);
         let live_records = table
             .jobs
             .iter()

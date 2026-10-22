@@ -58,7 +58,7 @@ pub(crate) enum Unusable {
     Help,
     /// Unprivileged user namespaces are disabled (the setting named).
     UserNamespaces(&'static str),
-    /// Ubuntu's AppArmor restriction on unprivileged user namespaces.
+    /// Ubuntu's `AppArmor` restriction on unprivileged user namespaces.
     AppArmor,
 }
 
@@ -150,7 +150,9 @@ fn namespaces(root: &Path) -> Result<(), Unusable> {
         return Err(Unusable::UserNamespaces("user.max_user_namespaces = 0"));
     }
     if read("sys/kernel/unprivileged_userns_clone") == Some(0) {
-        return Err(Unusable::UserNamespaces("kernel.unprivileged_userns_clone = 0"));
+        return Err(Unusable::UserNamespaces(
+            "kernel.unprivileged_userns_clone = 0",
+        ));
     }
     if read("sys/kernel/apparmor_restrict_unprivileged_userns") == Some(1) {
         return Err(Unusable::AppArmor);
@@ -202,7 +204,13 @@ pub(crate) struct Profile {
 /// The system library directories and the dynamic loader's cache, as binds or links.
 pub(crate) fn system_libraries() -> Vec<OsString> {
     let mut args: Vec<OsString> = Vec::new();
-    for dir in ["/usr/lib", "/usr/lib64", "/lib", "/lib64", "/usr/libexec/ld"] {
+    for dir in [
+        "/usr/lib",
+        "/usr/lib64",
+        "/lib",
+        "/lib64",
+        "/usr/libexec/ld",
+    ] {
         let path = Path::new(dir);
         let Ok(metadata) = std::fs::symlink_metadata(path) else {
             continue;
@@ -268,7 +276,11 @@ impl Profile {
             args.extend(["--tmpfs".into(), dest.into()]);
         }
         let fd = |n: RawFd| OsString::from(n.to_string());
-        args.extend(["--bind-fd".into(), fd(self.socket_dir_fd), SOCKET_DIR.into()]);
+        args.extend([
+            "--bind-fd".into(),
+            fd(self.socket_dir_fd),
+            SOCKET_DIR.into(),
+        ]);
         for (n, name) in &self.runtime {
             args.extend([
                 "--ro-bind-fd".into(),
@@ -310,12 +322,6 @@ pub(crate) fn started(line: &str) -> Option<Started> {
         child_pid: i32::try_from(value.get("child-pid")?.as_i64()?).ok()?,
         pid_namespace: value.get("pid-namespace")?.as_u64()?,
     })
-}
-
-/// The `exit-code` of a status line, if it is one.
-pub(crate) fn exit_code(line: &str) -> Option<i64> {
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    value.get("exit-code")?.as_i64()
 }
 
 #[cfg(test)]

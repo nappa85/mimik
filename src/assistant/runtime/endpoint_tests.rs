@@ -75,9 +75,13 @@ impl Helper {
         let mut line = String::new();
         while !line.contains("HELPER ") {
             line.clear();
-            assert!(reader.read_line(&mut line).unwrap() > 0, "the helper stopped");
+            assert!(
+                reader.read_line(&mut line).unwrap() > 0,
+                "the helper stopped"
+            );
         }
-        let report: Value = serde_json::from_str(&line[line.find("HELPER ").unwrap() + 7..]).unwrap();
+        let report: Value =
+            serde_json::from_str(&line[line.find("HELPER ").unwrap() + 7..]).unwrap();
         child.stdout = Some(reader.into_inner());
         Self {
             port: u16::try_from(report["port"].as_u64().unwrap()).unwrap(),
@@ -89,10 +93,16 @@ impl Helper {
     fn accepted(mut self) -> u64 {
         drop(self.child.stdin.take());
         let mut rest = String::new();
-        self.child.stdout.take().unwrap().read_to_string(&mut rest).unwrap();
+        self.child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut rest)
+            .unwrap();
         self.child.wait().unwrap();
         let line = rest.lines().find(|line| line.contains("HELPER ")).unwrap();
-        let report: Value = serde_json::from_str(&line[line.find("HELPER ").unwrap() + 7..]).unwrap();
+        let report: Value =
+            serde_json::from_str(&line[line.find("HELPER ").unwrap() + 7..]).unwrap();
         report["accepted"].as_u64().unwrap()
     }
 }
@@ -117,7 +127,9 @@ async fn the_childs_own_listener_is_reached_even_if_it_accepts_late() {
     let Stream::Tcp(mut stream) = stream else {
         panic!("a TCP stream")
     };
-    tokio::io::AsyncWriteExt::write_all(&mut stream, b"x").await.unwrap();
+    tokio::io::AsyncWriteExt::write_all(&mut stream, b"x")
+        .await
+        .unwrap();
     let mut byte = [0];
     accepted.read_exact(&mut byte).unwrap();
     assert_eq!(&byte, b"x");
@@ -194,8 +206,7 @@ async fn a_peer_outside_the_sandbox_is_refused_even_with_mimiks_uid() {
     let directory = tempfile::tempdir().unwrap();
     let dir = files::open_dir(directory.path(), files::Owners::Mine, false).unwrap();
     // An impostor socket swapped into the directory, served by this very process.
-    let _listener =
-        std::os::unix::net::UnixListener::bind(directory.path().join(SOCKET)).unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(directory.path().join(SOCKET)).unwrap();
     let reaper = Helper::start("tcp:0:0");
     let sandbox = Arc::new(Sandbox {
         reaper: Watched::open(i32::try_from(reaper.child.id()).unwrap()).unwrap(),
@@ -207,8 +218,13 @@ async fn a_peer_outside_the_sandbox_is_refused_even_with_mimiks_uid() {
     };
     let error = connector.connect().await.err().unwrap();
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-    assert!(error.to_string().contains("not in this generation's sandbox"), "{error}");
-    drop(reaper.accepted());
+    assert!(
+        error
+            .to_string()
+            .contains("not in this generation's sandbox"),
+        "{error}"
+    );
+    let _ = reaper.accepted();
 }
 
 #[tokio::test]
@@ -227,7 +243,10 @@ async fn a_child_of_the_reaper_outside_a_pid_namespace_is_refused() {
         }),
     };
     let error = connector.connect().await.err().unwrap();
-    assert!(error.to_string().contains("not one namespace deep"), "{error}");
+    assert!(
+        error.to_string().contains("not one namespace deep"),
+        "{error}"
+    );
     // The connection was made (the check needs the peer), but nothing was written to it.
     let _ = peer.accepted();
 }
@@ -251,7 +270,9 @@ async fn the_directory_descriptor_path_works_past_the_sun_path_limit() {
     .unwrap();
     assert!(tokio::net::UnixStream::connect(&path).await.is_err());
     let mut stream = connect_in(&dir).await.unwrap();
-    tokio::io::AsyncWriteExt::write_all(&mut stream, b"y").await.unwrap();
+    tokio::io::AsyncWriteExt::write_all(&mut stream, b"y")
+        .await
+        .unwrap();
     let (mut accepted, _) = listener.accept().unwrap();
     let mut byte = [0];
     accepted.read_exact(&mut byte).unwrap();
