@@ -419,8 +419,10 @@ check) and `--assistant-dev-token-file` (the server's API key, one line, sent as
 `Authorization: Bearer`); `--assistant-model` (`local:<name>.gguf`, default
 `local:granite-4.2-3b-Q4_K_M.gguf`), `--assistant-model-sha256` (required for any other file)
 and `--assistant-model-alias` (the request's model name, which the server must be given as
-`--alias`; default the file name without `.gguf`, lower case). `max_tokens` is 192 for the file
-whose SHA-256 is the compiled-in `e0406663…` and 256 for any other. Development budgets
+`--alias`; default the file name without `.gguf`, lower case). `max_tokens` is 384 for the file
+whose SHA-256 is the compiled-in `e0406663…` (the 2b rule over the v2 re-run of the 2b screen:
+largest `predicted_n` 282, × 1.25, rounded up to a multiple of 32, capped at 384) and 256 for
+any other. Development budgets
 (placeholders, not evidence): `--assistant-dev-bytes` (B, default 1,024, at most 4,096),
 `--assistant-dev-token-limit` (N(B), default 384), `--assistant-dev-deadline` (R, 85 s),
 `--assistant-dev-queue` (D, 1), `--assistant-dev-queue-wait` (Q, 35 s). They arrive as one

@@ -48,7 +48,7 @@ fn interpreter(endpoint: Endpoint) -> RigInterpreter {
 fn completion() -> Completion {
     Completion {
         dynamic: "<data>\n{}\n</data>".into(),
-        max_tokens: 192,
+        max_tokens: 384,
     }
 }
 
@@ -78,7 +78,7 @@ async fn a_completion_carries_the_prefix_schema_and_token() {
     assert_eq!(body["top_k"], 1);
     assert_eq!(body["seed"], 0);
     assert_eq!(body["temperature"], 0.0);
-    assert_eq!(body["max_tokens"], 192);
+    assert_eq!(body["max_tokens"], 384);
     assert_eq!(body["model"], "granite-test");
     assert_eq!(body["response_format"]["type"], "json_schema");
     assert_eq!(

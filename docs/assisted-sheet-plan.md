@@ -158,10 +158,11 @@ implementation for both).
   assistant's reading". The fraction words and the literal-provenance rule stay as frozen for
   2b (ASSIST-38); constants derived from references, such as `hp ÷ ((hp + hp) ÷ hp)`, pass it
   (ASSIST-L22). Schema v2 changes the request and the replies, so the 2b `max_tokens`
-  evidence is re-checked in 2c-1 before 192 is relied on: the 2b screen is re-run under v2 on
-  the dev host (CPU, 2 cores, the 50 cases) and the reply lengths compared. `max_tokens` belongs to the model file: 192 for the Granite 4.2 3B file whose SHA-256
-  is the compiled-in `e0406663…` (the 2b rule over the 104 replies of the 2b screen,
-  `docs/results.md`); any other file, whatever its name, gets the 2d trial's rule (§1.4b),
+  evidence was re-checked in 2c-1: the 2b screen re-run under v2 on the dev host (CPU, 2
+  cores, the 50 cases). `max_tokens` belongs to the model file: 384 for the Granite 4.2 3B file
+  whose SHA-256 is the compiled-in `e0406663…` (the 2b rule over the 104 replies of that v2
+  re-run: largest `predicted_n` 282, 1.25 × 282 = 352.5, rounded up to a multiple of 32 and
+  capped at 384; `docs/results.md`); any other file, whatever its name, gets the 2d trial's rule (§1.4b),
   never below 256.
 - **Confidence:** if the runtime returns token log-probabilities they are recorded on the job
   record for evaluation only; nothing is gated or hidden on them in 2c.
@@ -755,8 +756,9 @@ natively for these tests (ASSIST-40).
   | 768 | about 222 | about 77 to 84 s | about 96 to 105 s | no |
   | 512 | about 148 | about 70 to 77 s | about 88 to 96 s | only at the low end (R 90, D 1, Q 30) |
 
-  With t at the 75 % bound, or with `max_tokens` 256 or more (any model but the default
-  Granite file), nothing fits, so the CPU baseline of ASSIST-27 is not assured with the
+  The table uses 2b's 192 tokens; under schema v2 the default Granite file has `max_tokens`
+  384 (about 82 s of generation at 2 threads). With t at the 75 % bound, or with `max_tokens`
+  256 or more (every model now, the default Granite file included), nothing fits, so the CPU baseline of ASSIST-27 is not assured with the
   default model at 2 threads; ASSIST-41 raises the default to the physical cores minus one,
   and the native calibration at that setting decides. In 2c-2 these are formula fixtures,
   not evidence.
@@ -840,7 +842,7 @@ natively for these tests (ASSIST-40).
   `max_tokens` 384 (the measurement cap): every reply must be schema-valid and untruncated;
   (2) sets the model's `max_tokens` = min(384, max(256, round up to 32 of 1.25 × the largest
   `predicted_n`)) (five phrases cannot measure a tail, hence the 256 floor; the default
-  Granite file, identified by its compiled-in SHA-256, keeps 192 from its 104-reply screen); (3) runs the calibration of §1.4a with that `max_tokens` and
+  Granite file, identified by its compiled-in SHA-256, keeps 384 from its 104-reply v2 screen); (3) runs the calibration of §1.4a with that `max_tokens` and
   derives the budgets. It passes when (1) and (3) succeed. Bounds: each phrase has twice the
   path's run-deadline cap (180 s on the CPU path, 120 s on the GPU path), the whole trial
   30 minutes on the CPU path and 20 on the GPU path (priming and calibration included; each
@@ -1271,7 +1273,7 @@ Tests:
   calibration uses that `max_tokens`; a model too slow for the caps → fails with the numbers;
   a pass shows device, times, speeds, `max_tokens`, B, R, D and Q; players see "starting"
   meanwhile; Switch, Keep and Switch back each restart and re-prime; the default Granite file
-  (by hash) keeps 192, and a different file with the same name does not; a phrase past its
+  (by hash) keeps 384, and a different file with the same name does not; a phrase past its
   deadline, the whole trial past its bound, and the owner's Cancel each stop the candidate and
   restore the previous model; Switch with a stale trial ID (another hash, an older trial or an
   older generation) → refused;

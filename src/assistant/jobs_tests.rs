@@ -16,7 +16,7 @@ fn budgets() -> Budgets {
         run: Duration::from_secs(85),
         depth: 1,
         queue_wait: Duration::from_secs(35),
-        max_tokens: 192,
+        max_tokens: 384,
     }
 }
 
@@ -109,7 +109,7 @@ async fn a_job_runs_and_offers_its_option() {
     assert_eq!(assistant.poll(1, 2, id), Poll::Missing);
     assert!(assistant.proposal(2, 1, id, 0).is_none());
     assert!(assistant.proposal(1, 2, id, 0).is_none());
-    assert_eq!(stub.requests.lock().unwrap()[0].max_tokens, 192);
+    assert_eq!(stub.requests.lock().unwrap()[0].max_tokens, 384);
 }
 
 #[tokio::test]

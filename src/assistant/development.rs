@@ -16,8 +16,10 @@ use std::time::Duration;
 pub const DEFAULT_MODEL: &str = "local:granite-4.2-3b-Q4_K_M.gguf";
 pub const DEFAULT_MODEL_SHA256: &str =
     "e0406663965846ae22a403456eb826ccce5f450840491f71952f18a7cb78e7d5";
-/// `max_tokens` of the default file, from the 2b rule over the 2b screen's 104 replies.
-const DEFAULT_MAX_TOKENS: u32 = 192;
+/// `max_tokens` of the default file under schema v2, by the 2b rule (round up to a multiple of
+/// 32 of 1.25 × the largest `predicted_n` of a valid, untruncated reply, at most 384) over the
+/// v2 re-run of the 2b screen: largest 282, 1.25 × 282 = 352.5, so 384.
+const DEFAULT_MAX_TOKENS: u32 = 384;
 /// Any other file until the 2d trial measures it (never below 256, §1.4b).
 const OTHER_MAX_TOKENS: u32 = 256;
 
@@ -73,7 +75,7 @@ pub fn default_alias(spec: &str) -> Result<String, String> {
     Ok(name.trim_end_matches(".gguf").to_ascii_lowercase())
 }
 
-/// The model's `max_tokens`: 192 for the default file by its SHA-256, 256 otherwise.
+/// The model's `max_tokens`: 384 for the default file by its SHA-256, 256 otherwise.
 fn max_tokens(spec: &str, sha256: Option<&str>) -> Result<u32, String> {
     local_name(spec)?;
     let sha256 = match sha256 {
@@ -168,16 +170,16 @@ mod tests {
             default_alias(DEFAULT_MODEL).unwrap(),
             "granite-4.2-3b-q4_k_m"
         );
-        assert_eq!(max_tokens(DEFAULT_MODEL, None), Ok(192));
+        assert_eq!(max_tokens(DEFAULT_MODEL, None), Ok(384));
         assert_eq!(
             max_tokens(DEFAULT_MODEL, Some(DEFAULT_MODEL_SHA256)),
-            Ok(192)
+            Ok(384)
         );
         // Whatever its name, another file is 256.
         assert_eq!(max_tokens(DEFAULT_MODEL, Some(&"a".repeat(64))), Ok(256));
         assert_eq!(
             max_tokens("local:other.gguf", Some(DEFAULT_MODEL_SHA256)),
-            Ok(192)
+            Ok(384)
         );
         assert!(max_tokens("local:other.gguf", None).is_err());
         assert!(max_tokens("local:other.gguf", Some("ABC")).is_err());
