@@ -24,7 +24,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    budgets from the priming measurement (ASSIST-27); a new step 2d, the owner model setting
    with background Hugging Face downloads (ASSIST-28); 2c reads the model from that setting.
 3. 2c interpretation, 2d model setting, 3 bundles and reminders, 4 suggestions, 5 docs and gate (includes the
-   `docs/release-scope.md` update for schema 20 and the assisted scope).
+   `docs/release-scope.md` update for schema 22 and the assisted scope).
 
 ## Blockers
 
