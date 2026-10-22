@@ -28,6 +28,9 @@
 #   DEVICE          gpu (default) | cpu: no /dev/dri in the server container, -ngl 0, request
 #                   timeout >= 900 s, health wait >= 1800 s, no fan precondition
 #   THREADS         llama.cpp --threads (default: registry; 6 for cpu)
+#   CPUSET          docker --cpuset-cpus for every container this runner starts (a cpuset
+#                   list such as 2-5,8-11, for sharing the host); llama.cpp --threads must not
+#                   exceed its CPU count. Unset: no pinning
 #   MIMIK_MODEL_ROOT  model root (default: registry model_root)
 #   MODEL_PATH / MODEL_SHA256      override the model file and its expected sha256
 #   HASH_CACHE      file of model hashes verified this session (the queue sets it)
@@ -136,6 +139,21 @@ if [ -n "${THREADS:-}" ]; then
     || die 2 "THREADS must be 1..64"
   reg_cmd+=(--threads "$THREADS")
 fi
+cpuset_args=()
+cpuset_count=0
+if [ -n "${CPUSET:-}" ]; then
+  [[ $CPUSET =~ ^[0-9]{1,3}(-[0-9]{1,3})?(,[0-9]{1,3}(-[0-9]{1,3})?)*$ ]] \
+    || die 2 "CPUSET must be a cpuset list such as 2-5,8-11"
+  declare -A cpuset_seen=()
+  IFS=, read -ra cpuset_parts <<< "$CPUSET"
+  for part in "${cpuset_parts[@]}"; do
+    lo=$((10#${part%-*})) hi=$((10#${part#*-}))
+    [ "$lo" -le "$hi" ] || die 2 "CPUSET range $part is descending"
+    for ((c = lo; c <= hi; c++)); do cpuset_seen[$c]=1; done
+  done
+  cpuset_count=${#cpuset_seen[@]}
+  cpuset_args=(--cpuset-cpus "$CPUSET")
+fi
 # Declared here so the names are visible; the registry tool assigns them.
 reg_label=''
 reg_path=''
@@ -158,6 +176,15 @@ reg=$("${reg_cmd[@]}") || exit 2
 # The registry tool prints only shlex-quoted assignments (tools/test_model_registry.py).
 eval "$reg"
 ctx=$reg_ctx
+if [ "$cpuset_count" -gt 0 ]; then  # llama.cpp threads beyond the pinned CPUs only contend
+  prev=''
+  for arg in ${reg_server_args[@]+"${reg_server_args[@]}"}; do
+    if [ "$prev" = --threads ] && [ "$arg" -gt "$cpuset_count" ]; then
+      die 2 "llama.cpp --threads $arg exceeds the $cpuset_count CPUs of CPUSET $CPUSET"
+    fi
+    prev=$arg
+  done
+fi
 srv_memory=${SRV_MEMORY:-$reg_memory}
 health_wait=${HEALTH_WAIT:-$reg_health_wait}
 request_timeout=${REQUEST_TIMEOUT:-$reg_request_timeout}
@@ -205,6 +232,7 @@ fail() {  # fail <exit> <class> <message>: the message never adds a provenance l
   echo "runner=tools/run_tool_loop_benchmark.sh harness=v3 key=$key split=$split arm=${ARM:-}"
   echo "window_end=${WINDOW_END:-} queue_pid=${QUEUE_PID:-} vram_budget_bytes=$reg_vram_budget"
   echo "run_id=$RUN_ID docker_context=$docker_context device=$reg_device"
+  echo "cpuset=${CPUSET:-none} cpuset_cpus=$cpuset_count"
   echo "cpu_temperature=unavailable (no CPU sensor on this host: no k10temp in /sys/class/hwmon)"
 } > "$prov"
 cases_file_sha=
@@ -330,7 +358,7 @@ check_run() {  # check_run <seconds> <mounts and command...>: a named, bounded c
   set +e
   output=$(timeout --foreground -k 10 "$limit" docker run --rm --init --pull never --name "$name" "${LABELS[@]}" --network none \
     --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only --memory 256m \
-    --pids-limit 32 "$@")
+    --pids-limit 32 ${cpuset_args[@]+"${cpuset_args[@]}"} "$@")
   rc=$?
   set -e
   grep -vx "$name" "$check_registry" > "$check_registry.tmp" 2>/dev/null || true
@@ -483,6 +511,7 @@ t0=$(date +%s)
 dk run -d --init --pull never --name "$SRV" "${LABELS[@]}" --network "$NET" --network-alias server \
   --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
   --memory "$srv_memory" --memory-swap "$srv_memory" --cpus 6 --pids-limit 512 \
+  ${cpuset_args[@]+"${cpuset_args[@]}"} \
   ${gpu_devices[@]+"${gpu_devices[@]}"} \
   --mount type=bind,src="$model_real",dst=/models/model.gguf,readonly \
   "$reg_image" ${reg_server_args[@]+"${reg_server_args[@]}"} >/dev/null || fail 4 server_start "server container did not start"
@@ -540,7 +569,8 @@ run_harness() {  # run_harness <phase> <args...>: sets phase_rc; records <phase>
   if labelled "$HARNESS"; then dk rm -f "$HARNESS" >/dev/null 2>&1 || true; fi  # a leftover
   dk run -d --init --pull never --name "$HARNESS" "${LABELS[@]}" --network "$NET" \
     --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
-    --memory 2g --cpus 2 --pids-limit 128 -e PYTHONDONTWRITEBYTECODE=1 \
+    --memory 2g --cpus 2 --pids-limit 128 ${cpuset_args[@]+"${cpuset_args[@]}"} \
+    -e PYTHONDONTWRITEBYTECODE=1 \
     --mount type=bind,src="$ROOT/tools",dst=/tools,readonly \
     --mount type=bind,src="$pack",dst=/pack,readonly \
     --mount type=volume,src=mimik-formula-target,dst=/formula,readonly \

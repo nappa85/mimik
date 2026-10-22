@@ -89,7 +89,8 @@ SMOKE_CASES = ("dev-001", "dev-005", "dev-008")
 MIN_STOP_MARGIN = 300
 FIT_MARGIN = 900  # the runner refuses a step with fewer than 900 s left before the cutoff
 INFRA_CLASSES = ("server_start", "server_health", "oom", "infra_vram")  # retried once
-ENV_ALLOW = ("PATH", "HOME", "MIMIK_MODEL_ROOT")  # the only inherited variables
+# The only inherited variables; CPUSET pins the runner's containers (host sharing).
+ENV_ALLOW = ("PATH", "HOME", "MIMIK_MODEL_ROOT", "CPUSET")
 # Runner pass-through variables a queue file may set (with the C0 / registry defaults).
 PASS_THROUGH = (
     "CTX",

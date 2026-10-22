@@ -64,7 +64,7 @@ def hang(what):
     if env.get("FAKE_HANG") == what:
         time.sleep(3600)
 VALUE = {"--name", "--network", "--network-alias", "--user", "--cap-drop", "--security-opt",
-         "--memory", "--memory-swap", "--cpus", "--pids-limit", "--device", "--group-add",
+         "--memory", "--memory-swap", "--cpus", "--cpuset-cpus", "--pids-limit", "--device", "--group-add",
          "--mount", "--tmpfs", "-e", "--pull", "--label"}
 def labels_of(opts):
     return dict(l.split("=", 1) for l in opts.get("--label", []))
@@ -1019,6 +1019,41 @@ class RunnerTests(unittest.TestCase):
             with self.subTest(env=env):
                 proc, _ = self.run_runner("qwen3-4b-2507", "smoke", "17", **env)
                 self.assertEqual(proc.returncode, 2, proc.stderr)
+
+    # ---- CPU pinning (CPUSET, host shared with other pinned work)
+    def test_cpuset_pins_every_container(self):
+        """Before: no container was pinned, so runs spread over CPUs reserved by other work."""
+        proc, out = self.run_runner("qwen3-4b-2507", "smoke", "17", CPUSET="2-5,8-11")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        runs = [c for c in self.calls() if c[:1] == ["run"]]
+        self.assertGreaterEqual(len(runs), 3)  # hash checks, server, harness
+        for call in runs:
+            with self.subTest(call=call[:6]):
+                self.assertIn("--cpuset-cpus", call)
+                self.assertEqual(call[call.index("--cpuset-cpus") + 1], "2-5,8-11")
+        prov = self.prov(out)
+        self.assertEqual((prov["cpuset"], prov["cpuset_cpus"]), ("2-5,8-11", "8"))
+
+    def test_no_cpuset_means_no_pinning(self):
+        proc, out = self.run_runner("qwen3-4b-2507", "smoke", "17")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for call in self.calls():
+            self.assertNotIn("--cpuset-cpus", call)
+        self.assertEqual(self.prov(out)["cpuset"], "none")
+
+    def test_bad_cpuset_or_too_many_threads_refused(self):
+        cases = (
+            {"CPUSET": "2-"},
+            {"CPUSET": "5-2"},
+            {"CPUSET": "2-5;rm"},
+            {"CPUSET": "2,3", "DEVICE": "cpu", "THREADS": "6"},
+            {"CPUSET": "2-5"},  # the registry's 6 GPU threads on 4 CPUs
+        )
+        for env in cases:
+            with self.subTest(env=env):
+                proc, _ = self.run_runner("qwen3-4b-2507", "smoke", "17", **env)
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+                self.assertFalse((self.log / "server.json").exists())
 
     def test_shellcheck_clean_if_available(self):
         if not shutil.which("shellcheck"):
