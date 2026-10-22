@@ -22,7 +22,9 @@ starts as a child and confines with bubblewrap where it can, never a container i
 caps (ASSIST-31, ASSIST-32). Linux x86_64 is the platform built and verified now.
 
 Every step: its own branch; failing-first tests with the red run recorded; independent
-implementation review before merge; built and tested on 2 cores on weekdays; GPU and live
+implementation review before merge; every new dependency recorded with its licence, MSRV and
+maintenance in the dependency decisions (for example `landlock`, `seccompiler`, `procfs`,
+`rustls`, `rustls-platform-verifier`, and `hyper` if the Unix connector needs it); built and tested on 2 cores on weekdays; GPU and live
 model runs only at night or at weekends (machine schedule). Each step keeps
 the demo (`tools/assist_demo.py`) usable. Any step that adds per-cell markup reruns the
 worst-case page fixtures in `src/campaigns/list_tests.rs` (tightest headroom today 2.0%, a new row kept read-only from a full list) and
@@ -40,11 +42,9 @@ repositories, split (multi-file) GGUF models.
 
 ### 1.4 Interpretation service (2c-1)
 
-POC boundary (2026-10-20, after the plan review of the harness design): one local model, one
-bounded request per job, current unresolved integer scribbles only, strict validation, origin
-binding, poll and apply, the confirmable UI. Plan review round 2 (2026-10-20) fixed the
-expression form, the phrase-number lexer, the start route's note key, `ambiguous` replies and
-the breaker outcomes. Deferred to §4 Later: model escalation, model
+POC boundary: one local model, one bounded request per job, current unresolved integer
+scribbles only, strict validation, origin binding, poll and apply, the confirmable UI.
+Deferred to §4 Later: model escalation, model
 tools, confidence gating, persistent traces and a known-answer set grown from them, and
 catalogue, enum or fuzzy matching before the model (that matcher arrives with step 4, one
 implementation for both).
@@ -82,27 +82,31 @@ implementation for both).
   definition order; derived, text, multiline, notes and list cells are excluded from context
   and from `@` references (the one exception: same-row cells under the related-fields rule
   below); catalogue entry text comes in step 3 and is dropped first.
-- **Related fields only (ASSIST-31, ASSIST-37):** whenever B ≤ 1,024 bytes (always on the CPU
-  path; on the GPU path only if the measurement lowers B to 1,024) the context holds only the
-  stored integer and enum fields that the pinned formula layer reads together with the target;
-  fields the phrase names or that share the target's group are not added. Each derived value
-  and each check has a read set: its declared scalar inputs and list properties, with every
-  derived value it reads replaced by that value's own read set, recursively (the formula
-  layer's dependency graph, `src/definitions/formula`). A scalar is related when some read set
-  contains both it and the target. For a row-cell target (list property `p` of the row with
-  host ID `h`), the related scalars are those co-read with `p`, and the related cells are the
-  cells of row `h` only whose properties a read set contains together with `p` (as
-  `item.<property>` in the same iteration); cells of other rows are never sent. Such a cell is
-  a context item addressed by its typed address `cell:<list>/<h>/<property>` (the row's stable
+- **Related fields (ASSIST-31, ASSIST-37), for interpretation jobs:** the formula layer gives
+  each derived value and each check a read set (below). (1) On every path, a row-cell target
+  (list property `p` of the row with host ID `h`) also sends the integer and enum cells of row
+  `h` only whose properties a read set reads together with `p` in the same iteration; cells of
+  other rows, and text, multiline or derived properties, are never sent. Such a cell is a
+  context item addressed by its typed address `cell:<list>/<h>/<property>` (the row's stable
   host ID and the property ID, as the switch and Undo keys and the orphan rules address cells,
   ASSIST-7, ASSIST-12), and a `ref` names that exact address; Rust maps it to the row by host
   ID, binds it in the read set (address, host ID, value), and drops the option if the row or
-  the cell is not the one supplied. The address counts towards B like any other item. Related
-  items go in definition order (scalars, then the row's cells in property order) and are
-  dropped from the end as above; pins without a formula layer send none. With B above 1,024
-  the context is the D-F/D-J list above (no list cells). Candidates come only from the
-  snapshot the job is bound to, which the account may read; relatedness never widens what is
-  read.
+  the cell is not the one supplied. (2) Whenever B ≤ 1,024 bytes (always on the CPU path; on
+  the GPU path only if the measurement lowers B to 1,024), the scalar context is only the
+  stored integer and enum fields that some read set contains together with the target (for a
+  row-cell target, together with `p`); fields the phrase names or that share the target's
+  group are not added. With B above 1,024 the scalar context is the D-F/D-J list above.
+  Related items go in definition order (scalars, then the row's cells in property order),
+  count towards B, and are dropped from the end as above; pins without a formula layer send
+  no related items. Candidates come only from the snapshot the job is bound to, which the
+  account may read; relatedness never widens what is read. Reminder jobs (step 3) have their
+  own context (§1.5).
+- **Read sets (a 2c-1 deliverable):** today `Formula` keeps its reads, item reads and
+  dependencies private and flat (`src/definitions/formula/mod.rs`, `profile.rs`), with no
+  iteration identity. 2c-1 adds a public accessor on `Compiled` giving, per derived value and
+  per check, its scalar reads and its `(list, property)` reads grouped by comprehension binder,
+  with the transitive closure through derived dependencies. "The same iteration" means the
+  same binder; two separate iterations over one list are not co-reads (tested).
 - **Output contract:** JSON, checked by llama-server's schema grammar and again in Rust
   (`jsonschema`, then typed Serde decoding, then domain checks), with explicit limits: at most
   3 options, each an expression and an explanation of at most 120 characters, or an
@@ -142,9 +146,10 @@ implementation for both).
   the current value, the expression rendered with `− × ÷`, and the effect, labelled "the
   assistant's reading". The fraction words and the literal-provenance rule stay as frozen for
   2b (ASSIST-38); constants derived from references, such as `hp ÷ ((hp + hp) ÷ hp)`, pass it
-  (ASSIST-L22). `max_tokens` belongs to the model: 192 for Granite 4.2 3B (the 2b rule over the
-  104 replies of the 2b screen, `docs/results.md`); for any other model the 2d trial's rule
-  (§1.4b), never below 256.
+  (ASSIST-L22). `max_tokens` belongs to the model file: 192 for the Granite 4.2 3B file whose SHA-256
+  is the compiled-in `e0406663…` (the 2b rule over the 104 replies of the 2b screen,
+  `docs/results.md`); any other file, whatever its name, gets the 2d trial's rule (§1.4b),
+  never below 256.
 - **Confidence:** if the runtime returns token log-probabilities they are recorded on the job
   record for evaluation only; nothing is gated or hidden on them in 2c.
 - **Crate (D-H, ASSIST-39):** `rig-core` =0.45.0 on Rust 1.99.1; the toolchain and crate
@@ -153,8 +158,8 @@ implementation for both).
   dialect; the schema goes in `additional_params` as `response_format` (sent byte-exact; the
   native `output_schema` path rewrites `oneOf` to `anyOf`), with `cache_prompt`, the sampler
   and `stream` beside it. The body bound is a small Mimik transport implementing rig's
-  `HttpClientExt` (plain and streaming bodies refused past the bound); no D-H crate offers
-  one. The same transport carries the Unix-socket connection of the bubblewrap path
+  `HttpClientExt` (plain and streaming bodies refused past 1 MiB, as probed in 2b); no D-H
+  crate offers one. The same transport carries the Unix-socket connection of the bubblewrap path
   (§1.4a): over `reqwest`'s Unix-socket connector if the upgraded `reqwest` has one with the
   client policy below (checked in the upgrade change), otherwise over `hyper`'s HTTP/1
   client connection on a `tokio` `UnixStream`; either way one transport, tested against a
@@ -180,7 +185,9 @@ implementation for both).
   output. Loopback is only the destination rule; the no-egress property comes from the OS
   hardening of the child (§1.4a), at the level the page states.
 - **Runtime:** a `llama-server` child managed by Mimik (§1.4a, 2c-2); in 2c-1 a server started
-  by hand on the dev host. The 2b container topology (internal Docker network with
+  by hand on the dev host, reached through the development endpoint (2c-1), which exists only
+  in builds with the `dev-endpoint` Cargo feature (never in release builds) and has no
+  endpoint check. The 2b container topology (internal Docker network with
   `inhibit_ipv4` and a socat forwarder) is development and benchmark evidence only
   (`docs/results.md`) and is not shipped. Model: configuration in 2c, the owner setting from
   2d (§1.4b); default Granite 4.2 3B (ASSIST-28).
@@ -194,8 +201,11 @@ implementation for both).
   admission (breaker and capacity) is computed as if the superseded job were already gone, so a
   refused start cancels nothing (Routes); an admitted start cancels the superseded request (the
   connection is closed and its slot freed before the new job is enqueued), and a late answer
-  from a cancelled job is discarded. At most 64 job records in all, 128-bit IDs; an evicted or expired
-  job answers "ask again". Options expire 10 minutes after the job finishes. Poll and apply
+  from a cancelled job is discarded. At most 64 job records in all, 128-bit IDs; eviction
+  takes the oldest finished record and never a running or queued job (with 64 live jobs a start
+  answers 429 busy); an evicted or expired job answers "ask again". When the child changes
+  generation (restart, GPU → CPU fallback, a trial), every queued and running job ends with "the
+  assistant restarted: ask again", neutral for the breaker. Options expire 10 minutes after the job finishes. Poll and apply
   recheck rights; the `JOBS` permit is not held during the model call. A reminder job (step 3)
   takes its own low-priority slot on the same worker, after interpretations, one per account.
 - **Circuit breaker:** one per configured endpoint, in memory (reset on restart). It counts
@@ -218,9 +228,13 @@ implementation for both).
   or poll first reports the runtime state (`starting`, `unavailable` with its reason, §1.4a),
   then the open breaker; the assistant page shows both; Restart and a new child reset the
   breaker.
-- **Routes:** `POST /private-sheets/{id}/interpretations` (exactly `csrf` and `note`, the
-  note key already used by switch and Undo and present in the saved page's markup) starts a
-  job for that note. A key is resolved against the snapshot at its own revision: a typed key
+- **Routes:** `POST /private-sheets/{id}/interpretations` (exactly `csrf` and `note`) starts a
+  job for that note. The note key has the form switch and Undo use (`<revision>:<address>`,
+  the indexed `<revision>:<f>.<r>.<p>` for row cells), but today an `unresolved` note has
+  none: the page carries keys only for switch offers and Undo, and the JSON answer has
+  `"actions": null` (`Actions::of`, `sheet_json.rs`). 2c-1 adds `key` to the JSON answer's
+  `note` object whenever the note is `unresolved`, with no page markup (the assistant needs
+  JavaScript, D-G); the module starts the job with it. A key is resolved against the snapshot at its own revision: a typed key
   directly, an indexed row-cell key (`<revision>:<f>.<r>.<p>`) by mapping the row index to its
   host ID at that revision, giving the typed address with host ID. Order as for the other
   sheet routes: session and CSRF, rights (403), keys and malformed values (400); then, before
@@ -241,15 +255,17 @@ implementation for both).
   origin with an in-memory per-sheet map of the latest note-write revision per target (row
   cells keyed by host ID), which every note writer's post-commit hook (saves, Undo, switch,
   row removal) updates and uses to cancel stale jobs in one critical section of the same lock:
-  a write newer than the origin gives 409. Entries are dropped once older than the longest
-  start (a size-bounded sweep) and with their sheet or row; the map and the job table are
+  a write newer than the origin gives 409. A start registers its origin revision in the map's
+  sheet entry before its database check; an entry for a target is dropped only when its
+  revision is below the smallest origin revision registered or live on that sheet, and with its
+  sheet or row; the map and the job table are
   per process and empty after a restart, when the database check alone suffices. 202 with the job
   ID. `GET
   …/interpretations/{job}` polls (the module polls at 500 ms, backing off to 2 s, and stops on
   unload, supersession or a terminal state); an evicted or expired job answers "ask again".
   Another account's or sheet's job is not found, on poll as on apply.
-  Apply: `POST /private-sheets/{id}/proposals/{job}/{n}` (exactly `csrf`), taking the
-  definitions permit with the D-X3 bounded wait like the other sheet writes.
+  Apply: `POST /private-sheets/{id}/proposals/{job}/{n}` (exactly `csrf`), taking the `JOBS`
+  permit with the D-X3 bounded wait like the other sheet writes.
 - **Flow (JS):** a cell save records `unresolved` and the module starts a job; "Thinking…" in
   `role="status"`; then the options or the readings of an `ambiguous` reply; **Use** posts the
   apply route; ignoring them leaves the scribble. The apply route must not rely on how long an
@@ -288,105 +304,140 @@ natively for these tests (ASSIST-40).
   for the host's instruction set, and the documented minimum host; the release scope names
   that host. The runtime directory must hold exactly the manifest's files (an extra or missing
   file refuses the start), and neither it nor its files may be writable by group or others.
-  On the Landlock and unconfined levels the shared libraries beside llama-server are loaded by
-  path from that verified directory, inside the same-user boundary of §1.4b.
+  On levels 2 and 3 the shared libraries beside llama-server are loaded by path from that
+  verified directory, inside the same-user boundary below.
+- **Model and runtime files (verified descriptors):** the model is opened relative to the
+  models folder's descriptor with `openat2` (`RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`,
+  `RESOLVE_NO_MAGICLINKS`) and `O_NOFOLLOW | O_NONBLOCK` (a FIFO cannot block), then `fstat`:
+  a regular file owned by Mimik's user, not writable by group or others. Its SHA-256 is
+  computed from that descriptor before every load, and that descriptor is what the child
+  loads: level 1 binds it read-only (`--ro-bind-fd`); levels 2 and 3 pass it inherited, as
+  `--model /proc/self/fd/<n>` (a live check confirms that the pinned server's open and `mmap`
+  accept that path). Runtime files are hashed the same way; level 1 binds them by descriptor
+  and level 2 executes the verified llama-server descriptor (`execveat`). So a path swap
+  between check and load is impossible on every level. Threat boundary: a process running as
+  Mimik's user could still rewrite an inode in place; that is outside the boundary (it could
+  rewrite Mimik itself). Windows reparse points and path rules come with the Windows runtime.
 - **Flag vector:** the 2b vector (`tools/model_registry.py` `server_args` plus the screen's
-  extra flags), with only the transport changed (ASSIST-30): `--model <verified model>`,
-  `--alias <label>`, `--host <transport>` (the socket path or `127.0.0.1`), `--port <p>` (TCP
-  paths only), `--offline --no-webui --no-slots --no-mmproj --jinja`, `--n-gpu-layers 99` (GPU
-  path) or `0` (CPU path), `--fit off`, `--threads 2 --threads-batch 2` (configurable, 2 as
-  measured), `--ctx-size 8192 --parallel 1 --no-warmup --cache-ram 0 --reasoning off`, and the
-  token (below). Measurement-relevant (a change needs a new measurement before it ships):
-  `--jinja`, `--n-gpu-layers`, `--fit`, threads, `--ctx-size`, `--parallel`, `--cache-ram`,
-  `--reasoning`, plus the per-request `cache_prompt: true`, `stream: true` and the greedy
-  sampler (temperature 0, top-k 1, seed 0). `--parallel 1`: jobs run one at a time
-  (ASSIST-32). The pinned b11610 `--help` (checked on the dev host, 2026-10-22) lists
-  `--api-key-file`, `--api-key` with the environment variable `LLAMA_API_KEY`,
-  `--ignore-eos`, `--slots`/`--no-slots`, and `--host` accepting a Unix socket path ending in
-  `.sock`. The 2c-2 runtime check (CI, below) runs the pinned binary's `--version` and
-  `--help` for every flag; behaviour that help text cannot show (`/health` without a token,
-  the per-request `ignore_eos`, the device list format, the offload line) is checked live
-  against the pinned binary.
+  extra flags), with only the transport and device changed (ASSIST-30): `--model <verified
+  descriptor path>`, `--alias <label>`, `--host <transport>` (the socket path or
+  `127.0.0.1`), `--port <p>` (TCP levels only), `--offline --no-webui --no-slots --no-mmproj
+  --jinja`, on the GPU path `--n-gpu-layers 99 --device <name>` (the selected device, below),
+  on the CPU path `--n-gpu-layers 0`, `--fit off`, `--threads 2 --threads-batch 2`
+  (configurable, 2 as measured), `--ctx-size 8192 --parallel 1 --no-warmup --cache-ram 0
+  --reasoning off`, and the token (below). Measurement-relevant (a change needs a new
+  measurement before it ships): `--jinja`, `--n-gpu-layers`, `--fit`, threads, `--ctx-size`,
+  `--parallel`, `--cache-ram`, `--reasoning`, plus the per-request `cache_prompt: true`,
+  `stream: true` and the greedy sampler (temperature 0, top-k 1, seed 0). `--parallel 1`: jobs
+  run one at a time (ASSIST-32). The pinned b11610 `--help` (checked on the dev host,
+  2026-10-22) lists `--api-key-file`, `--api-key` with the environment variable
+  `LLAMA_API_KEY`, `--ignore-eos`, `--slots`/`--no-slots`, `-dev`/`--device`,
+  `--list-devices`, and `--host` accepting Unix socket paths. The runtime check (CI, below)
+  runs the pinned binary's `--version` and `--help` for every flag; behaviour that help text
+  cannot show is checked live against the pinned binary, and a mismatch stops 2c-2 for a
+  decision: serving and the token over the Unix socket, `/health` without a token, the
+  per-request `ignore_eos`, the `/proc/self/fd` model path, the device list format and the
+  offload line.
 - **Packaging and CI (ASSIST-33, REL-2):** `package_release.py` gains an allowlist entry
   `llama/` holding exactly the manifest's files (anything else refuses the package), the
   llama.cpp build number in `BUILD.txt`, and `THIRD-PARTY-NOTICES.md` entries for llama.cpp
   and ggml (MIT) and for every other file shipped from the asset, by its own licence. REL-2
   requires corresponding source for every shipped binary, so the release also carries the
   pinned llama.cpp tag's source archive (hash-pinned in the manifest), listed in `SOURCE.txt`
-  and `SHA256SUMS`. A new required CI job, `llama-runtime`, fetches the pinned asset and its
-  source archive, verifies both hashes, unpacks the asset, runs the flag check and the
-  bubblewrap probe, and fails closed when any of these cannot run; `deployable` requires it,
-  and the packaging step uses only files it verified. If a GGUF of at most 100 MB under
-  Apache-2.0 or MIT exists, the job also downloads it (pinned by revision and SHA-256, licence
-  recorded; never shipped) and runs an end-to-end start under bubblewrap: token refusal and
-  acceptance, the Unix socket, `/health`, one completion. Otherwise the job runs the start,
-  token and socket checks against the stub path (the fake runner) and the live end-to-end
-  start stays a host measurement.
+  and `SHA256SUMS`. A new required CI job, `llama-runtime`, runs as host steps on the GitHub
+  runner, not inside the `mimik-ci` container (Docker's default seccomp profile refuses the
+  namespace flags `bwrap --unshare-all` needs): it installs `bubblewrap` from the runner's
+  distribution package, fetches the pinned asset and source archive, verifies both hashes,
+  unpacks the asset, runs the flag check and the preflight probe, and uploads the verified
+  `llama/` files and source archive as a job artifact. The packaging job `needs:` it and
+  packages only that artifact. The job reports "runner cannot probe" (bubblewrap or user
+  namespaces unavailable on the runner, so the job fails as not runnable) separately from
+  "probe failed" (the profile is wrong); both fail closed, and `deployable` requires the job.
+  The level the probe reaches is whatever the runner supports; no bubblewrap version floor is
+  assumed beyond the options the probe needs. If a GGUF of at most 100 MB under Apache-2.0 or
+  MIT exists, the job also downloads it (pinned by revision and SHA-256, licence recorded;
+  never shipped) and runs an end-to-end start at the probed level: token refusal and
+  acceptance, the transport, `/health`, one completion. Otherwise the job runs the start,
+  token and socket checks against the stub path (the fake runner), and the release scope says
+  the real transport is verified only on the host.
 - **Runner:** Mimik spawns `mimik assistant-runner` (a hidden subcommand) from one dedicated,
   long-lived thread (the parent-death signal follows the spawning thread). The runner sets
   `PR_SET_PDEATHSIG` (SIGKILL), then checks that its parent is still the Mimik PID it was given
-  and exits otherwise (the race before the signal is set); sets `RLIMIT_CORE` to 0; clears its
-  environment except a fixed minimal set (`PATH`, `LANG`, `HOME` pointing at an empty private
-  directory, the token variable when that channel is used); keeps only the descriptors it was
-  handed (Rust opens everything close-on-exec; the hand-over descriptors are listed by number);
-  then executes the confinement level's command in place (`execve`, so the parent-death signal
-  stays set; a set-user-ID `bwrap` is not used, since that exec would clear it).
-- **Confinement levels (ASSIST-34), tried in order at every start; the active level and the
-  reason for each skipped level are shown on the assistant page and logged:**
+  and exits otherwise (the race before the signal is set); sets `RLIMIT_CORE` to 0 and
+  `RLIMIT_FSIZE` to 64 MiB; clears its environment except a fixed minimal set (`PATH`,
+  `LANG`, `HOME` pointing at an empty private directory, the token variable when that channel
+  is used); keeps only the descriptors it was handed (Rust opens everything close-on-exec; the
+  hand-over descriptors are listed by number); then executes the confinement level's command
+  in place (`execve`, so the parent-death signal stays set). The preflight refuses a `bwrap`
+  that is set-user-ID or set-group-ID (that exec would clear the signal, and it is not the
+  unprivileged setup this design assumes).
+- **Confinement levels (ASSIST-34), tried in order; the active level and the reason for each
+  skipped level are shown on the assistant page and logged:**
   1. **bubblewrap**: `bwrap` from a fixed absolute path (`/usr/bin/bwrap`, `/bin/bwrap`; never
      `PATH`), unprivileged (user namespaces). Arguments: `--unshare-all` (user, network, PID,
      IPC, UTS, cgroup; no `--share-net`), `--die-with-parent`, `--new-session`, `--clearenv`
      plus the minimal environment, `--cap-drop ALL`; `--ro-bind` of the system library
      directories, `/etc/ld.so.cache`, the Vulkan loader and driver files (`/usr/share/vulkan`,
      `/etc/vulkan` where present) and the read-only parts of `/sys` the driver enumerates; the
-     runtime files and the model file bound read-only from their verified open descriptors
-     (`--ro-bind-fd`, so the loaded inode is the hashed one); `--dev /dev`, on the GPU path
-     plus `--dev-bind` of the selected render node (read-write, as Mesa needs), a private
-     `--tmpfs /dev/shm` and `--tmpfs /tmp` (read-write), `--proc /proc`; the socket directory
-     bound read-write; no bind of the host `/`; the token through `--ro-bind-data <fd>`; the
-     seccomp program through `--seccomp <fd>`; `--json-status-fd <fd>` to learn the child PID.
-     The exact path list is fixed by the 2c-2 tests on both paths (CPU and GPU reach `ready`)
-     and listed in the reference doc; nothing outside it is visible. The child has only its own
-     loopback interface, so it listens on a Unix socket (`--host <dir>/llama.sock`, which the
-     pinned build accepts for paths ending in `.sock`) in a directory created per generation,
-     mode 0700, owned by Mimik's user. Abstract Unix sockets are per network namespace and
-     pathname sockets are limited to what is bound in, so the child reaches no host service.
-     OpenFirma's bubblewrap setup is the reference; no code is copied and `firma-run` is not a
-     dependency.
+     runtime files and the model bound read-only from their verified descriptors; `--dev /dev`
+     (a new minimal `/dev`), on the GPU path plus `--dev-bind` of the selected device's render
+     node only (read-write, as Mesa needs); private `--tmpfs /dev/shm` and `--tmpfs /tmp`
+     (read-write, each with `--size`, 256 MiB and 64 MiB, when the probe finds the option;
+     otherwise bounded only by `RLIMIT_FSIZE` per file, shown on the page); `--proc /proc`; the
+     socket directory bound read-write; no bind of the host `/`; the token through
+     `--ro-bind-data <fd>`; the seccomp program through `--seccomp <fd>`; `--json-status-fd
+     <fd>`, which reports `child-pid` (bwrap's PID-1 reaper inside the new PID namespace) and
+     `pid-namespace`, and later the `exit-code`. The exact path list is fixed by the 2c-2 tests
+     on both paths (CPU and GPU reach `ready`) and listed in the reference doc; nothing outside
+     it is visible. The child has only its own loopback interface, so it listens on a Unix
+     socket at `/run/llama/llama.sock` inside the sandbox, a bind of a per-generation
+     directory on the host (mode 0700, owned by Mimik's user, under `$XDG_RUNTIME_DIR/mimik/`
+     or else a 0700 `mimik-<uid>` directory in the system temporary directory; removed when the
+     generation stops). Mimik connects through `/proc/self/fd/<dir fd>/llama.sock`, so the
+     host path's length never meets the 108-byte `sun_path` limit. Abstract Unix sockets are
+     per network namespace and pathname sockets are limited to what is bound in, so the child
+     reaches no host service. OpenFirma's bubblewrap setup is the reference; no code is copied
+     and `firma-run` is not a dependency.
   2. **Landlock with seccomp** (TCP on `127.0.0.1`, random port): the runner applies Landlock
      through the `landlock` crate (network rules: no TCP connect, TCP bind on the chosen port
      only; filesystem rules: read on the same allowlist, read-write on the render node,
      `/dev/shm` and a private temporary directory; abstract Unix sockets scoped from ABI 6),
-     then the seccomp filter, then executes the verified llama-server descriptor (`execveat`).
-     The shown state comes from the crate's `RestrictionStatus`, never from the requested
-     rules. Landlock binds ports, not addresses, and does not filter `connect()` to pathname
-     Unix sockets, so the honest state is "partly confined: outbound TCP, UDP and raw sockets
+     then the seccomp filter, then executes the verified llama-server descriptor. The shown
+     state comes from the crate's `RestrictionStatus`, never from the requested rules.
+     Landlock binds ports, not addresses, and does not filter `connect()` to pathname Unix
+     sockets, so the honest state is "partly confined: outbound TCP, UDP and raw sockets
      denied; it could listen on another address on its port and reach local services over Unix
      sockets"; with a Landlock ABI below 4 (no network rules): "not network-confined: TCP egress
      allowed; filesystem restricted"; partial filesystem enforcement is shown as such.
-  3. **Unconfined** (seccomp only, TCP on `127.0.0.1`): "not confined: TCP egress allowed".
+  3. **Unconfined** (seccomp only, TCP on `127.0.0.1`): "not confined: TCP egress allowed, and
+     the whole filesystem readable by Mimik's user is readable by the model server".
   The assistant runs at every level (hardening is "where available", ASSIST-30); the page
   shows the level next to the assistant state and next to the 2d "Try" button (a downloaded
   GGUF is untrusted input to llama-server, contained only by this).
-- **Seccomp (both confined levels and the unconfined one):** built with `seccompiler`.
-  `socket()` is allowed only for `AF_INET` or `AF_INET6` with `SOCK_STREAM` and protocol 0 or
-  `IPPROTO_TCP`, and for `AF_UNIX` with `SOCK_STREAM` (the listening socket; flags
-  `SOCK_CLOEXEC` and `SOCK_NONBLOCK` masked); `socketpair()` is refused unless the pinned
-  server needs it (then `AF_UNIX` only), fixed by test; `io_uring_setup`, `io_uring_enter`,
-  `io_uring_register`, `ptrace`, `process_vm_readv`/`writev`, `bpf`, `perf_event_open`,
-  `keyctl`, `add_key`, `request_key`, `mount`, `umount2`, `pivot_root`, `unshare`, `setns`,
-  module and `kexec` calls are refused. Seccomp sees no `connect()` address, so it is never
-  described as network confinement.
-- **Preflight** (every start, before level 1): bwrap present at a fixed path; its support for
-  every option used above is probed (no remembered minimum version: bubblewrap 0.13.0 on the
-  dev host has `--unshare-all`, `--clearenv`, `--bind-fd`/`--ro-bind-fd`,
+- **Seccomp (every level):** built with `seccompiler`. `socket()` is allowed only for
+  `AF_INET` or `AF_INET6` with `SOCK_STREAM` and protocol 0 or `IPPROTO_TCP`, and for
+  `AF_UNIX` with `SOCK_STREAM` (the listening socket; flags `SOCK_CLOEXEC` and
+  `SOCK_NONBLOCK` masked); `socketpair()` is refused unless the pinned server needs it (then
+  `AF_UNIX` only), fixed by test; `fork`, `vfork` and `clone` without `CLONE_THREAD` are
+  refused and `clone3` returns `ENOSYS` (its flags cannot be inspected; glibc then falls back
+  to `clone` for threads), so the server cannot start other processes: process-tree
+  containment on levels 2 and 3, where the parent-death signal covers only the direct child
+  (an `exec` without a fork only replaces the server in place); `io_uring_setup`,
+  `io_uring_enter`, `io_uring_register`, `ptrace`, `process_vm_readv`/`writev`, `bpf`,
+  `perf_event_open`, `keyctl`, `add_key`, `request_key`, `mount`, `umount2`, `pivot_root`,
+  `unshare`, `setns`, module and `kexec` calls are refused. Seccomp sees no `connect()`
+  address, so it is never described as network confinement.
+- **Preflight** (every start, before level 1): bwrap present at a fixed path, not set-ID; its
+  support for every option used above is probed (no remembered minimum version: bubblewrap
+  0.13.0 on the dev host has `--unshare-all`, `--clearenv`, `--bind-fd`/`--ro-bind-fd`,
   `--bind-data`/`--ro-bind-data`, `--perms`, `--seccomp` and `--die-with-parent`, checked
-  2026-10-22); then a real probe run of the full level-1 profile executing the
-  pinned llama-server's `--version` inside it. A failure names its cause where it can be
-  told: bwrap missing or lacking an option (named), user namespaces disabled (`user.max_user_namespaces`,
-  `kernel.unprivileged_userns_clone`), the Ubuntu AppArmor restriction on unprivileged user
-  namespaces (`kernel.apparmor_restrict_unprivileged_userns`), or the probe's own error. Then
-  level 2 is probed the same way, then level 3.
+  2026-10-22); then a real probe run of the full level-1 profile executing the pinned
+  llama-server's `--version` inside it. A failure names its cause where it can be told: bwrap
+  missing, set-ID or lacking an option (named), user namespaces disabled
+  (`user.max_user_namespaces`, `kernel.unprivileged_userns_clone`), the Ubuntu AppArmor
+  restriction on unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns`),
+  or the probe's own error. Then level 2 is probed the same way, then level 3. A level that
+  passes the probe can still fail at the real start; the transitions below then move down.
 - **Token:** 32 bytes from the OS random source, base64url, new for every launch, held in
   memory. Channels, in order: level 1, `--ro-bind-data` from a pipe to a file inside the
   sandbox read with `--api-key-file`; levels 2 and 3, `--api-key-file` on a 0600 file in a
@@ -394,97 +445,121 @@ natively for these tests (ASSIST-40).
   environment, readable only by Mimik's user, is the documented alternative), never in an
   argument. A pinned build without either channel would not start the assistant ("the model
   server cannot receive its token safely"); b11610 has both. It never runs without a token
-  and never passes it on a command line. `/health` without a token is a
-  live-checked property of the pinned build; every other request carries it.
+  and never passes it on a command line. `/health` without a token is a live-checked property
+  of the pinned build; every other request carries it.
 - **Endpoint check, per connection, before its first byte:** level 1: `SO_PEERCRED` on the
-  connected Unix socket must give Mimik's UID and the child PID that bwrap reported for this
-  generation. Levels 2 and 3: after `connect()`, the connection's peer socket inode (`/proc/net/tcp`
-  and `tcp6`, `procfs` crate) must be open in the current child (`/proc/<pid>/fd`); the
-  established connection cannot change owner afterwards, so there is no check-to-use gap. The
-  port is picked by binding `127.0.0.1:0` and releasing it; a child that fails to bind it
-  exits, and a new port is tried (at most 3 per attempt). The child's "listening" line is a
-  hint for when to connect, never the proof.
+  connected Unix socket must give Mimik's UID and a PID whose parent is the `child-pid` that
+  bwrap reported for this generation (its PID-1 reaper; checked on this host: with
+  `--unshare-all` the reported `child-pid` is the reaper, and the command is its child) and
+  whose `/proc/<pid>/ns/pid` is the reported `pid-namespace`; a UID-only match is never
+  accepted. Levels 2 and 3: before and after `connect()`, the `LISTEN` entry for
+  `127.0.0.1:<port>` in `/proc/net/tcp` (`procfs` crate) must have its socket inode open in
+  the current child's `/proc/<pid>/fd`. While the child holds that listener no other process
+  can listen on the port, so the connection reaches it; the accepted socket is not required
+  (it enters the child's table only on `accept()`). The port is picked by binding
+  `127.0.0.1:0` and releasing it; a child that fails to bind it exits, and a new port is tried
+  (at most 3 per attempt). The child's "listening" line is a hint for when to connect, never
+  the proof.
 - **Output:** stdout and stderr are each drained by a reader task with a 4 KiB line bound
   (longer lines truncated) and are never copied into Mimik's log. Only fixed patterns become
   events: listening, the build number, "offloaded N/M layers", model-load and device errors.
   The child runs at the pinned build's default verbosity; a live test sends a job with a
   marker phrase and checks the marker appears in neither stream.
-- **Generations and transitions:** every launch has a generation number; the socket directory,
-  the pidfile entry, the endpoint check and every exit or timeout event carry it, and an event
-  from an older generation is ignored. One manager task serializes transitions: a child is
-  stopped (SIGTERM, SIGKILL after 5 s; in level 1 killing bwrap ends the PID namespace) and
-  reaped before the next one starts, so two model servers never coexist (a GPU → CPU fallback
-  included). The pidfile (generation, PID, process start time, binary path) is held under an
-  exclusive `flock`, so a second Mimik on the same data directory cannot run the assistant; at
-  start a leftover is killed only when PID, start time and path all match. On shutdown Mimik
-  stops the child as above.
+- **Generations:** every launch has a generation number; the socket directory, the pidfile
+  entry, the endpoint check, jobs and every exit or timeout event carry it, and an event from an
+  older generation is ignored. One manager task serializes transitions: a child is stopped
+  (SIGTERM, SIGKILL after 5 s) and the next one starts only after it is gone: on level 1 when
+  bwrap's status descriptor reports `exit-code` and a pidfd on the reaper signals exit (the PID
+  namespace, and with it every process and its GPU memory, is gone); on levels 2 and 3 when a
+  pidfd on the child signals exit. So two model servers never coexist (a GPU → CPU fallback and
+  a trial included). On every generation change, every queued and running job ends with "the
+  assistant restarted: ask again", neutral for the breaker. The pidfile (generation, PID,
+  process start time, binary path) is held under an exclusive `flock`, so a second Mimik on
+  the same data directory cannot run the assistant; at start a leftover is killed only when
+  PID, start time and path all match. On shutdown Mimik stops the child as above.
 - **Device (ASSIST-27, HW-1):** at each start the GPU build's `--list-devices` (30 s timeout;
   output format pinned by a test against the pinned build) gives each device's name (what
   `--device` takes) and description. `auto` (default) skips devices whose description names a
-  software renderer (`llvmpipe`, `lavapipe`, `SwiftShader`) and picks the one with the most
-  reported memory, ties in list order; `--assistant-device cpu` forces the CPU and a device
-  name selects that device. The GPU path loads every layer on the GPU: the child's offload
-  line must show N = M, otherwise it is a GPU failure. A Vulkan build that cannot start (for
-  example no Vulkan loader) is a GPU failure. The CPU path uses the CPU build.
+  software renderer (`llvmpipe`, `lavapipe`, `SwiftShader`); among the rest it ranks devices
+  with dedicated memory before integrated ones (an integrated GPU reports shared system memory
+  and could otherwise win), then by reported memory, ties in list order; `--assistant-device
+  cpu` forces the CPU and a device name selects that device. The device is passed as
+  `--device <name>`. For level 1 it is mapped to its render node by probe: `--list-devices`
+  runs inside the level-1 profile once per render node with only that node bound, and the
+  node whose sandboxed list shows exactly the selected device (same name and description) is
+  the one bound; the real start then checks that the sandboxed list still shows that device.
+  The GPU path loads every layer on the GPU: the child's offload line must show N = M,
+  otherwise it is a GPU failure. A Vulkan build that cannot start (for example no Vulkan
+  loader) is a GPU failure. The CPU path uses the CPU build.
 - **Transitions** (attempt = spawn, endpoint check, `/health` within 60 s, priming within
   300 s, calibration within twice the path's run-deadline cap; owner actions are owner-only
   and CSRF-checked):
 
   | Event | Action | Failure count |
   |---|---|---|
-  | Attempt fails on the GPU path, or the GPU child exits, or is stopped as hung | stop and reap, start on the CPU path at once; CPU until Mimik restarts or the owner presses "Try the GPU again" | not counted |
-  | Attempt fails on the CPU path | retry after 2 minutes | +1 |
+  | Attempt fails on the GPU path (budgets that do not derive included), or the GPU child exits, or is stopped as hung | stop and wait until gone, start on the CPU path at the same level at once, showing the reason; CPU until Mimik restarts or the owner presses "Try the GPU again" | not counted |
+  | Attempt on the CPU path fails before `/health` answers at level 1 or 2 | next attempt at once on the next level that passed its probe; the skipped level and its reason are recorded and shown | not counted |
+  | Attempt fails on the CPU path, otherwise | retry after 2 minutes | +1 |
   | Child exits while ready (CPU path) | restart now | +1 only within 10 minutes of `ready` |
-  | Two consecutive run-deadline expiries with no completed exchange between | stop as hung, reap, restart, re-measure (whatever `/health` says); expiries never count toward the breaker | as a child exit |
+  | Two consecutive run-deadline expiries with no completed exchange between | stop as hung, wait until gone, restart, re-measure (whatever `/health` says); expiries never count toward the breaker | as a child exit |
   | Failure count reaches 4 (the first attempt plus 3 retries) | `unavailable` until Mimik restarts or the owner presses "Restart" | — |
-  | Budgets do not derive ("too slow") | `unavailable` with the numbers; no retry; "Restart" measures again | — |
+  | Budgets do not derive on the CPU path ("too slow") | `unavailable` with the numbers; no retry; "Restart" measures again | — |
   | `ready` for 10 minutes | failure count back to 0 | reset |
-  | Owner presses "Restart" | stop, reap, new attempt; breaker reset | reset |
+  | Owner presses "Restart" | stop, wait until gone, new attempt from level 1; breaker reset | reset |
 
   While `starting` or `unavailable`, a job start answers 503 with the state, queues nothing,
   and number entry, notes and Undo work as usual. Logs carry states, levels and reasons, never
   prompt text, URLs with tokens or the token.
 - **Cancellation:** a superseded or expired job's streamed request is dropped, which closes
-  its connection; the pinned server stops generating at the next token. A live test checks
-  that a superseding job's first token arrives within its normal time after cancelling a long
-  job; if the pinned build kept generating, a cancellation would stop the child as hung.
+  its connection; the pinned server is expected to stop at the next token, and during prompt
+  evaluation at its next check of the connection. Live tests measure both: a superseding job's
+  first token after cancelling a job mid-generation and mid-prompt (a 1 KiB prompt on the CPU
+  path). If the server finishes prompt evaluation before noticing, the superseding job waits
+  that long inside its own budget; only two consecutive deadline expiries stop the child.
 - **Priming and calibration:** after `/health`, priming as in 2b (the fixed prefix with a
   minimal data envelope, `max_tokens` 1, which fills the prompt cache: about 117 s for Granite
   at 2 CPU threads in a container, about 1.3 s on the RX 6650 XT). Then two calibration
   samples: fixed synthetic jobs shipped with Mimik (no sheet or player text), each with a
-  dynamic part of exactly the path's byte cap (CPU 1,024, GPU 4,096) built from dense filler
-  (non-ASCII labels, digits and punctuation, so its tokens per byte are at the high end of real
-  sheets), the two fillers differing from their first byte so neither reuses the other's
-  cache; `max_tokens` the model's, `ignore_eos: true` and no schema, so each sample generates
-  exactly `max_tokens` tokens. From each sample: wall time W, `timings.prompt_n` and
-  `prompt_ms` (the evaluated prompt tokens, including any uncached tail of the fixed prefix),
-  `predicted_n` and `predicted_ms`; and from `/tokenize`, the filler's token count N_cal. All
-  must be present, finite and positive, `predicted_n` must equal `max_tokens`, and the tail
-  t = `prompt_n` − N_cal must not be negative, or the attempt fails (a timing criterion, not a
-  content one). Both are outside the breaker. A 2c-2 live measurement compares per-token
-  generation time with and without the grammar on both paths; if the grammar costs more than
-  10 %, the samples carry the schema instead and the rule uses their `predicted_n`.
+  dynamic part of exactly the path's byte cap (CPU 1,024, GPU 4,096) built from filler whose
+  token density matches real sheets (labels and values of the shipped demo and 2b synthetic
+  sheets; the density is recorded), since every request is separately held to N(B) tokens;
+  the two fillers differ from their first byte so neither reuses the other's cache;
+  `max_tokens` the model's, `ignore_eos: true` and no schema, so each sample generates exactly
+  `max_tokens` tokens. From each sample: wall time W, `timings.prompt_n`, `prompt_ms` and the
+  cached prompt tokens (the evaluated prompt tokens include any uncached tail of the fixed
+  prefix and the envelope and template tokens around the filler), `predicted_n` and
+  `predicted_ms`; and from `/tokenize`, the filler's token count N_cal. All must be present,
+  finite and positive, `predicted_n` must equal `max_tokens`, the tail t = `prompt_n` − N_cal
+  must not be negative, and the cached tokens must be at least 75 % of the fixed prefix's
+  tokens measured by priming (2b saw 83 to 88 %), or the attempt fails (a timing criterion,
+  not a content one). Both are outside the breaker. The grammar question is settled once, in
+  2c-2, not at each start: a live measurement compares per-token generation time with and
+  without the grammar on both paths; if the grammar costs more than 10 %, the shipped
+  calibration measures g from schema-carrying samples (then `predicted_n` need only be at
+  least 32 and generation time is g × `max_tokens`), otherwise it stays as above.
 - **Budgets (ASSIST-31, ASSIST-32; recomputed at every start, a latency estimate within hard
-  caps, not a worst-case bound):** from the slower sample (larger W): per-token prompt time
-  p = `prompt_ms` / `prompt_n`, per-token generation time g = `predicted_ms` / `predicted_n`,
-  overhead o = max(0, W − `prompt_ms` − `predicted_ms`). For a candidate bound B, N(B) =
-  floor(N_cal × B / cap) and T(B) = o + p × (t + N(B)) + g × `max_tokens`. Candidates: GPU
-  4,096, 2,048, 1,024; CPU 1,024, 768, 512. B is the largest candidate with R(B) = max(15,
-  round up to 5 s of 1.25 × T(B)) within the path's limits: GPU R ≤ 60 s; CPU R ≤ 90 s.
-  Queue: GPU D = max(1, min(4, floor((120 − R) / R))) and Q = D × R (the 2b rule; Q + R ≤ 120
-  holds since R ≤ 60); CPU D = 1 and Q = 120 − R, so Q + R ≤ 120 s, and the admission rule
-  (§1.4, Jobs) refuses as busy a start that cannot begin in time. Every request also obeys
-  N(B) tokens (§1.4), so its prompt is no longer than the calibration's; the hard run deadline
-  holds when the estimate is wrong, and two consecutive expiries restart and re-measure (the
-  transitions above). If no candidate fits, the assistant is unavailable ("too slow on this
-  machine: about N s needed, the cap is M s"), the page shows the measurement, and entry is
-  never affected. Illustration from the 2b numbers (CPU figures are container measurements; a
-  native child is unmeasured): Granite on 2 CPU threads (prompt about 26 s for a 1 KiB dynamic
-  part with the uncached tail, 192 tokens about 41 s) gives T about 67 s, 1.25 × T about 84 s,
-  so B 1,024, R 85, D 1, Q 35; Granite on the RX 6650 XT (about 1,100 prompt and 80 generated
-  tokens per second) gives T about 4 s, so B 4,096, R 15, D 4, Q 60. In 2c-2 these are
-  formula fixtures, not evidence; the native measurements of this exact procedure go to
-  `docs/results.md`.
+  caps, not a worst-case bound):** per sample i: per-token prompt time pᵢ = `prompt_ms` /
+  `prompt_n`, per-token generation time gᵢ = `predicted_ms` / `predicted_n`, overhead oᵢ =
+  max(0, W − `prompt_ms` − `predicted_ms`), tail tᵢ. For a candidate bound B, N(B) =
+  floor(N_cal × B / cap), Tᵢ(B) = oᵢ + pᵢ × (tᵢ + N(B)) + gᵢ × `max_tokens`, and T(B) =
+  max(T₁(B), T₂(B)). Candidates: GPU 4,096, 2,048, 1,024; CPU 1,024, 768, 512. B is the
+  largest candidate with R(B) = max(15, round up to 5 s of 1.25 × T(B)) within the path's
+  limits: GPU R ≤ 60 s; CPU R ≤ 90 s. Queue: GPU D = max(1, min(4, floor((120 − R) / R))) and
+  Q = D × R (the 2b rule; Q + R ≤ 120 holds since R ≤ 60); CPU D = 1 and Q = 120 − R, so Q +
+  R ≤ 120 s, and the admission rule (§1.4, Jobs) refuses as busy a start that cannot begin in
+  time. Every request also obeys N(B) tokens (§1.4), so its prompt is no longer than the
+  calibration's; the hard run deadline holds when the estimate is wrong, and two consecutive
+  expiries restart and re-measure (the transitions above). On the GPU path, no fitting
+  candidate is a GPU failure (CPU fallback). On the CPU path, if 1,024 does not fit, 768 and
+  then 512 are taken; only when 512 does not fit is the assistant unavailable ("too slow on
+  this machine: about N s needed, the cap is M s"), with the measurement shown; entry is never
+  affected. Expected outcomes: on the GPU path the 2b numbers (about 1,100 prompt and 80
+  generated tokens per second on the RX 6650 XT) give T about 4 s, so B 4,096, R 15, D 4,
+  Q 60. On the CPU path the outcome is set by the first native calibration on this host, a
+  measurement step of 2c-2 recorded in `docs/results.md`: the 2b container figures (about 26 s
+  of prompt for a 1 KiB dynamic part with the uncached tail, 192 tokens in about 41 s) would
+  give T about 67 s, R 85, D 1, Q 35, but they were not taken with this procedure or filler.
+  In 2c-2 both are formula fixtures, not evidence.
 
 ### 1.4b Owner model setting (2d-1, 2d-2; ASSIST-28, ASSIST-35, ASSIST-36)
 
@@ -508,16 +583,8 @@ natively for these tests (ASSIST-40).
     never by concatenation. In 2d-1 an `hf:` spec is refused ("downloads arrive later").
   - `local:<name>.gguf` (2d-1): one name of 1 to 128 `[A-Za-z0-9._-]` ending `.gguf`, not
     starting with `.`, not a Windows device name in any case (`CON`, `NUL`, `COM1`…).
-- **Model file handling (both forms):** opened relative to the models folder's descriptor with
-  `openat2` (`RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`, `RESOLVE_NO_MAGICLINKS`) and
-  `O_NOFOLLOW | O_NONBLOCK` (a FIFO cannot block), then `fstat`: a regular file owned by
-  Mimik's user, not writable by group or others. The SHA-256 is computed from that descriptor
-  and recorded when the owner tries the model, and recomputed from a fresh descriptor before
-  every load; the same descriptor is what the child loads (§1.4a: bound by descriptor or
-  executed by descriptor), so a path swap between check and load is impossible. Threat
-  boundary: a process running as Mimik's user could still rewrite the inode in place; that is
-  outside the boundary (it could rewrite Mimik itself). Windows reparse points and its path
-  rules are designed with the Windows runtime (deferred).
+- **Model file handling (both forms):** as in §1.4a ("Model and runtime files"), built in
+  2c-2: the SHA-256 is recorded when the owner tries the model and checked before every load.
 - **Download (`hf:`, 2d-2, owner-started only):** (1) metadata from the Hub API at that
   revision, JSON bounded at 1 MiB, admitted strictly: the returned commit equals the
   revision; the file is listed with LFS data; its SHA-256 is 64 lowercase hex and its size an
@@ -528,7 +595,10 @@ natively for these tests (ASSIST-40).
   quantisation's licence can differ from the upstream model's). A model without a stated
   licence is allowed with a warning (ASSIST-35). The owner confirms; the confirmation records
   owner, time, licence ID and the SHA-256 of the licence file at that revision (or "none");
-  nothing downloads before it. (3) Free space at least the remaining bytes plus 1 GiB.
+  nothing downloads before it. The licence file is the one the model card names, or else a
+  root `LICENSE`, `LICENSE.md` or `LICENSE.txt` listed in the metadata; it is fetched through
+  the same client and host rules from the `resolve` URL at the pinned revision, bounded at
+  1 MiB, and shown as text; "none" when the card names no file and none of those is listed. (3) Free space at least the remaining bytes plus 1 GiB.
   (4) One download task, at most one partial file at all (starting another download asks to
   discard the existing partial), in the background, never holding the `JOBS` permit:
   `models/.partial/<sha256>`; progress on the page (polled with JavaScript, a reload without);
@@ -545,7 +615,8 @@ natively for these tests (ASSIST-40).
 - **Download network policy (ASSIST-35):** a client separate from the model client: HTTPS
   only (rustls with the OS certificate store through `rustls-platform-verifier`); the system
   proxy is used for downloads only, never by the model client; no cookies, credentials or
-  `Referer`; a fixed `User-Agent`. API and `resolve` requests go to `huggingface.co` only;
+  `Referer`; a fixed `User-Agent`; `Accept-Encoding: identity` on every request, so `Range`
+  offsets and the size bound refer to the file's own bytes. API and `resolve` requests go to `huggingface.co` only;
   redirects are followed only from a `resolve` URL, at most 2 hops, each HTTPS to a host in an
   enumerated list of exact host names (no suffix or wildcard rule), checked on every hop. The
   list is fixed in 2d-2 from Hugging Face's documentation and the observed redirects of the
@@ -557,15 +628,25 @@ natively for these tests (ASSIST-40).
   are presigned and are never logged (only their host). The base URL, host list and root store
   are constructor parameters of the download client so tests can use a fake server with a
   test CA; the shipped values are fixed in code with no configuration knob, and a test asserts
-  the shipped constructor uses them.
+  the shipped constructor uses them. Until 2d-2 confirms the list, no download code ships
+  (the list lands with 2d-2). Updating the list later is a code change with a checklist:
+  observe the redirects of the default and suggested files at their pinned revisions, check
+  Hugging Face's documentation, update the list and its tests, and note the change in the
+  release notes.
 - **Trial and switch (2d-1; ASSIST-36):** "Try" verifies the model's hash, stops the current
   child (players see "starting"), starts the candidate on the current device path and primes
   it, then (1) sends 5 fixed synthetic phrases shipped with Mimik with the schema at
   `max_tokens` 384 (the measurement cap): every reply must be schema-valid and untruncated;
   (2) sets the model's `max_tokens` = min(384, max(256, round up to 32 of 1.25 × the largest
-  `predicted_n`)) (five phrases cannot measure a tail, hence the 256 floor; Granite keeps 192
-  from its 104-reply screen); (3) runs the calibration of §1.4a with that `max_tokens` and
-  derives the budgets. It passes when (1) and (3) succeed. The page shows the device, priming
+  `predicted_n`)) (five phrases cannot measure a tail, hence the 256 floor; the default
+  Granite file, identified by its compiled-in SHA-256, keeps 192 from its 104-reply screen); (3) runs the calibration of §1.4a with that `max_tokens` and
+  derives the budgets. It passes when (1) and (3) succeed. Bounds: each phrase has twice the
+  path's run-deadline cap (180 s on the CPU path, 120 s on the GPU path), the whole trial
+  30 minutes on the CPU path and 10 on the GPU path (priming and calibration included); the
+  owner can Cancel at any time. Expiry, Cancel or failure stop the candidate and restore the
+  previous model automatically. Results are bound to a trial ID (the candidate's hash and the
+  generation it ran in), and "Switch" accepts only the latest finished trial's ID for that
+  hash. The page shows the device, priming
   and calibration times, speeds, `max_tokens`, B, R, D and Q, and per phrase whether the
   expected value was among the options (information only, D-D). "Switch" makes it active,
   recording its hash, `max_tokens` and the final calibration; "Keep the current model"
@@ -622,7 +703,8 @@ natively for these tests (ASSIST-40).
 ### 1.6 Names, "Which Sword?", suggestions (4)
 
 - (3) Several matches: "Which Sword?" lists the candidates (name · type · catalogue); choosing
-  one posts `cells/{list}/{host}/{key}` with the entry key: one revision, no note; the link is
+  one posts the cell route `cells/{f}/{r}/{p}` (ASSIST-6; the row index read at `base`
+  and mapped to its host ID) with the entry key: one revision, no note; the link is
   remembered (D-R). (4) None: "Not in the catalogue" plus Browse; with JS, "Did you mean…?" on
   demand. Saving the name cell with a different name clears the key in the same revision.
   A dangling key just shows no link.
@@ -653,32 +735,50 @@ dynamic prompt ≤ 4 KiB on the GPU path and ≤ 1 KiB (related fields only) on 
 measured job budgets within their caps and the record caps, the breaker, the suggest bounds.
 The model client talks plain HTTP only to its own child: through the generation's Unix socket
 (bubblewrap) or a loopback IP literal, every connection checked to reach the child before its
-first byte, with a per-launch token that never appears on a command line; it follows no
-redirects and ignores proxy settings. The model server is a pinned official llama.cpp build and
-a model file, both hash-verified and loaded from the verified descriptors. Its confinement is
-one of three levels, shown on the assistant page: bubblewrap (no network namespace to reach
-anything, an allowlist of read-only paths plus the GPU node, seccomp); Landlock with seccomp
-(outbound TCP, UDP and raw sockets denied, but listening on another address and local Unix
-sockets are not prevented); or unconfined (TCP egress allowed). Seccomp alone is never
-described as network confinement. So Mimik sends player text only to its child, but on the
-lower levels a compromised model server (for example through a malicious GGUF) could send it
-on. Model downloads are owner-started, HTTPS to an enumerated list of Hugging Face hosts,
-bounded, licence-confirmed and hash-verified, and carry no sheet or player text. No prompts,
-player text, presigned URLs or token in logs; no secrets.
+first byte (the peer in the child's PID namespace under the reaper; the port's listener in
+the child), with a per-launch token that never appears on a command line; it follows no
+redirects and ignores proxy settings. The one exception is the development endpoint of 2c-1,
+which has no endpoint check and exists only in builds with the `dev-endpoint` feature, never
+in a release. The model server is a pinned official llama.cpp build and a model file, both
+hash-verified and loaded from the verified descriptors on every level. Its confinement is one
+of these levels, shown on the assistant page: bubblewrap (private namespaces, so it has no
+network beyond its own loopback and sees only an allowlist of read-only paths plus the GPU
+node; seccomp); Landlock ABI 4 or later with seccomp (outbound TCP, UDP and raw sockets
+denied, but listening on another address and local Unix sockets are not prevented); Landlock
+below ABI 4 (filesystem restricted, TCP egress allowed); or unconfined (TCP egress allowed and
+the user's whole filesystem readable). On every level seccomp refuses new processes and
+non-TCP sockets; it is never described as network confinement. So Mimik sends player text
+only to its child, but below the bubblewrap level a compromised model server (for example
+through a malicious GGUF) could send it on. Model downloads are owner-started, HTTPS to an
+enumerated list of Hugging Face hosts, bounded, licence-confirmed and hash-verified, and carry
+no sheet or player text. No prompts, player text, presigned URLs or token in logs; no secrets.
 
 ## 2. Steps
 
+### Upgrade (ASSIST-39)
+
+Scope: Rust 1.99.1 in `rust-toolchain.toml`, `containers/ci.Dockerfile` and the `BUILD.txt`
+line of `package_release.py`; `rig-core` =0.45.0 and the resulting `Cargo.lock`; Clippy and
+fmt findings of the new toolchain fixed, not suppressed; 2b's rig-core checks C1 to C5 re-run
+against 0.45.0 (schema pass-through, host-built client policy, body bound through the own
+transport, cancellation, licences); and the answer to whether the upgraded `reqwest` has a
+Unix-socket connector that keeps the client policy (§1.4, Crate). Its own branch and reviews;
+2c-1 starts on it.
+
 ### 2c-1 Interpretation
 
-Scope: trait, stub, adapter (after the Rust 1.99.1 and `rig-core` 0.45.0 upgrade, ASSIST-39);
-the client policy with both connectors and the token; the request builder with the byte and
-token bounds and the related-fields context; worker, admission, records and breaker; the job,
-poll and apply routes with origin and read/write-set binding; the UI. The model server is
-started by hand on the dev host (ASSIST-40) and reached through a development endpoint
-setting (`--assistant-dev-endpoint`, a loopback literal or a socket path, with a token file);
-budgets come from configuration, defaulting to the CPU illustration of §1.4a (B 1,024, R 85,
-D 1, Q 35). Until 2c-2 lands the assistant is a development feature, outside the release
-scope. Tests (stub or fake server unless stated):
+Scope: trait, stub, adapter; the client policy with both connectors and the token; the
+request builder with the byte and token bounds and the related-fields context; the formula
+layer's read-set accessor (§1.4, Read sets); the note key in the JSON answer of an
+`unresolved` note (§1.4, Routes); worker, admission, records and breaker; the job, poll and
+apply routes with origin and read/write-set binding; the UI. The model server is started by
+hand on the dev host (ASSIST-40) and reached through a development endpoint setting
+(`--assistant-dev-endpoint`, a loopback literal or a socket path, with a token file), compiled
+only with the `dev-endpoint` Cargo feature, which release builds never enable (the release
+build and the packaging check assert its absence); it has no endpoint check. Budgets come from
+configuration (development defaults B 1,024, R 85, D 1, Q 35). Until 2c-2 lands the assistant
+is a development feature, outside the release scope. Tests (stub or fake server unless
+stated):
 - output: schema-invalid, grammar-invalid and truncated JSON; more than 3 options; a tree deeper
   than 3 below the root (which is also what refuses a ninth leaf); literal provenance (`84 + 915` dropped; `5` from "heal 15" dropped; U+2212, NBSP);
   references to a derived, text, multiline, notes or list-cell field, to an unsupplied field
@@ -699,17 +799,26 @@ scope. Tests (stub or fake server unless stated):
   whole items; the target's label goes before the phrase, target ID or value; a phrase and
   target over a bound end "too long" without a completion request and without a breaker count;
   excluded field types never appear in the request;
+- read sets: per derived value and check, scalar reads and `(list, property)` reads grouped by
+  binder, closed through derived dependencies; `item.a` and `item.b` in one comprehension are
+  co-read, while `a` in one comprehension and `b` in another over the same list are not; a
+  `has()` presence test counts as a read;
 - related fields (B ≤ 1,024): a field read with the target by a check, or through a derived
   value it reads, is sent; a field only in the same group, or named in the phrase but not
-  co-read, is not; a row-cell target sends the scalars co-read with its property; definition order and drop from the end; a pin without a formula layer sends
-  none; with B 2,048 the full D-F/D-J list is sent; a `ref` to an unsent field or to an enum
-  field drops the option;
-- same-row cells (B ≤ 1,024): for a target cell of row `h`, a cell of row `h` co-read with the
-  target's property (`item.a` and `item.b` in one check) is sent as `cell:<list>/<h>/<b>`, a
-  cell of another row with the same property never is, nor a same-row cell not co-read; a
+  co-read, is not; a row-cell target sends the scalars co-read with its property; definition
+  order and drop from the end; a pin without a formula layer sends none; with B 2,048 the full
+  D-F/D-J scalar list is sent; a `ref` to an unsent field or to an enum field drops the
+  option;
+- same-row cells (every path, B 4,096 and B 1,024 alike): for a target cell of row `h`, an
+  integer or enum cell of row `h` co-read with the target's property is sent as
+  `cell:<list>/<h>/<b>`, a text, multiline or derived property never is, a cell of another
+  row with the same property never is, nor a same-row cell not co-read; a
   `ref` to that exact address evaluates with its value; a `ref` naming another row's host ID
   or a property of row `h` that was not sent drops the option; the row moved since the job →
   found by host ID; the cell changed or the row removed before apply → apply refused;
+- note key: a cell save that records `unresolved` answers with `note.key` in the JSON (the
+  typed form for scalars, the indexed form for row cells), the page markup is unchanged, a
+  start with that key is accepted, and a key of a parsed or sign-led note is refused (409);
 - injection: a phrase containing "ignore previous instructions" yields at most an option,
   never a write without Use; a context value with instructions stays inside the data envelope;
 - origin: scribble A → scribble B with the same stored value; scribble → typed value; a save
@@ -730,7 +839,10 @@ scope. Tests (stub or fake server unless stated):
   fake server sees the disconnect and the slot is free); queue wait and run deadline expiry;
   64 records and the evicted-job answer; option expiry at 10 minutes; busy admission (§1.4,
   Jobs): with R 85 and Q 35 a start while a job has more than 35 s left → 429 "busy", with less
-  → queued; a second waiting job beyond D → 429;
+  → queued; a second waiting job beyond D → 429; with 64 records of which some are finished,
+  a new start evicts the oldest finished one and never a running or queued job; with 64 live
+  jobs a start → 429; the note-write map: a start registered with an old origin keeps the
+  entries it needs until it ends (a delayed start after many writes still gets 409);
 - breaker (injectable clock): three transport failures open it, two do not; 100 dropped or
   nonsense answers never open it; supersession and cancellation never count; one half-open
   probe while others are refused; probe success closes, failure reopens; a 2xx with all
@@ -762,7 +874,8 @@ scope. Tests (stub or fake server unless stated):
   expression and effect → Use → value and `confirmed` note → Undo; an `ambiguous` reply shows
   readings without Use; supersession while polling; an escaped explanation;
 - assistant off: no client, no job route (404), no "Thinking…"; no player text in logs or in
-  4xx bodies other than the player's own echoed draft;
+  4xx bodies other than the player's own echoed draft; a release build has no
+  `--assistant-dev-endpoint` option;
 - live (hand-started pinned llama-server, ASSIST-40; reported as live inference): one smoke;
   the second request of a session reports the cached prefix tokens in `timings`; a job
   cancelled mid-generation frees the slot (the next job's first token within its usual time).
@@ -792,15 +905,20 @@ night or at a weekend):
   device-list and offload-line formats behave as §1.4a assumes, or the step stops for a
   decision;
 - runner: the child's environment holds only the allowed names (`/proc/<pid>/environ`); no
-  inherited descriptor beyond the listed ones (`/proc/<pid>/fd`); `RLIMIT_CORE` 0; a runner
+  inherited descriptor beyond the listed ones (`/proc/<pid>/fd`); `RLIMIT_CORE` 0 and
+  `RLIMIT_FSIZE` 64 MiB (a write past it fails); a set-ID `bwrap` → refused by the preflight;
+  a runner
   whose parent died before the parent-death signal was set exits (parent PID mismatch); live:
   SIGKILL of Mimik during startup and while ready kills the whole tree;
 - bubblewrap level (live on this host, where user namespaces work): the CPU and GPU paths reach
   `ready`; inside, the child cannot connect over TCP to a host listener, a LAN address or a
   public address, cannot send UDP, cannot reach a host abstract or pathname Unix socket (an
   adversarial helper binary in place of llama-server, run with the same profile), cannot see
-  host paths outside the allowlist, and cannot create a UDP, raw or `io_uring` instance;
-  Mimik reaches it only through the socket; preflight causes: bwrap absent, user namespaces
+  host paths outside the allowlist, cannot create a UDP, raw or `io_uring` instance, cannot
+  fork or start another process, and cannot fill `/tmp` or `/dev/shm` beyond their sizes;
+  Mimik reaches it only through the socket, connecting through the directory descriptor (a
+  socket directory whose host path is longer than 108 bytes still works); the socket
+  directory is removed when the generation stops; preflight causes: bwrap absent, user namespaces
   disabled, a probe failure (each reported by name and falling to the next level); the
   AppArmor restriction is reported by name on an Ubuntu VM;
 - Landlock level: the state comes from `RestrictionStatus` (full, partial, none) and the
@@ -810,21 +928,36 @@ night or at a weekend):
   Landlock (`CONFIG_SECURITY_LANDLOCK` not set), so these run on a VM with Landlock ABI 4 or
   later; until they have run, the level is labelled unverified in the results and the release
   scope; the "could listen on another address on its port" gap is demonstrated by the
-  adversarial helper and recorded;
+  adversarial helper and recorded; on this host: the helper cannot fork, `vfork` or `clone` a
+  process (`clone3` → `ENOSYS`) while threads still start, so no descendant outlives a SIGKILL
+  of the child;
 - token: the fake server sees `Authorization: Bearer <token>` on priming, calibration and
   every job, and a new token after a restart; live: no token and a wrong token on
   `/v1/chat/completions` → 401, the right one is served, `/health` answers without it; the
   token is in no command line (`/proc/<pid>/cmdline`), no log line and no file after
   `/health` (TCP levels); a fake build without a safe channel → the assistant does not start;
-- endpoint: level 1: a socket in the directory created by another process, or a peer whose
-  credentials are not the child's → nothing sent; levels 2 and 3: a squatter on the port →
-  nothing sent; a child that exits between the check and the request → the connection fails,
-  nothing sent to anyone else; a child that never prints its listening line but listens →
-  reached; a port taken before the child binds → a new port, at most 3;
+- endpoint: level 1 (live): the peer of llama-server's socket has the reaper as parent and the
+  reported `pid-namespace`, and is accepted; a peer with Mimik's UID that is not in that
+  namespace (a helper listening on a socket swapped into the directory) → nothing sent; a
+  UID-only match is never accepted; levels 2 and 3: a squatter listening on the port → its
+  `LISTEN` inode is not the child's → nothing sent; a child that accepts late (after a delay)
+  is still accepted; a child that exits between the check and the request → the connection
+  fails, nothing sent to anyone else; a child that never prints its listening line but listens
+  → reached; a port taken before the child binds → a new port, at most 3;
+- model and runtime files, per level: a symbolic link, a link in a parent position, a
+  directory, a FIFO (no block) and a file writable by others in the models folder → refused;
+  a model swapped for another file after the hash and before the load → the hashed inode is
+  loaded, at level 1 through `--ro-bind-fd` and at levels 2 and 3 through `/proc/self/fd`
+  (live: the pinned server loads from that path);
 - output: a child writing endless lines and a line of 1 MiB → bounded memory, nothing in
   Mimik's log; live: a job with a marker phrase → the marker in neither stream;
 - generations and transitions (fake runner, injectable clock), one test per table row: GPU
-  failure at each phase → CPU at once, not counted, the old child reaped first; CPU failures
+  failure at each phase → CPU at once, not counted, the next child started only after the old
+  one is gone (bwrap's `exit-code` and the reaper's pidfd); GPU budgets that do not derive →
+  CPU path, the page saying why; a CPU attempt failing before `/health` at level 1 → level 2
+  at once, the skip recorded, and at level 2 → level 3; a queue with a running and a waiting
+  job at a generation change → both end "the assistant restarted: ask again", the breaker
+  unchanged; CPU failures
   retried after 2 minutes, four failures → unavailable; a second exit within 10 minutes counts,
   after 10 ready minutes it does not; two consecutive deadline expiries while `/health`
   answers 200 → stopped as hung and restarted; a late exit event of an old generation changes
@@ -832,48 +965,62 @@ night or at a weekend):
   directory cannot take the pidfile lock; a leftover child matching PID, start time and path
   is killed, a reused PID is left alone; shutdown → the tree is gone within 5 s;
 - device and fallback: `--list-devices` output (format pinned from the real build) with only
-  `llvmpipe` → CPU; two GPUs → the one with more memory; an offload line with N < M → GPU
-  failure; `--assistant-device cpu` never lists devices; live: Vulkan on the RX 6650 XT
+  `llvmpipe` → CPU; two discrete GPUs → the one with more memory; an integrated GPU reporting
+  more shared memory than a discrete one → the discrete one; the emitted arguments contain
+  `--device <name>` on the GPU path and none on the CPU path; the render node bound at level 1
+  is the one whose sandboxed list shows the selected device, and a mismatch at the real start
+  is a GPU failure; an offload line with N < M → GPU failure; `--assistant-device cpu` never lists devices; live: Vulkan on the RX 6650 XT
   reaches `ready` with GPU budgets, and killing the child mid-job ends on the CPU path with
   CPU budgets and the page saying why;
 - priming and calibration (fake server): a start before they complete answers 503 "starting"
   and queues nothing; they never count toward the breaker; a sample with a missing, zero or
-  non-finite timing, `predicted_n` different from `max_tokens` or a negative tail fails the
-  attempt; the two samples differ from their first dynamic byte; the slower sample is used;
+  non-finite timing, `predicted_n` different from `max_tokens`, a negative tail or cached
+  tokens below 75 % of the prefix fails the attempt; the two samples differ from their first
+  dynamic byte; T(B) is the larger of the two samples' estimates for each candidate (a sample
+  slower in prompt but faster in generation changes the choice for a small B);
   a restarted child re-primes and re-calibrates before admitting jobs; neither carries sheet
   text;
-- budgets (unit; the §1.4a illustration as formula fixtures): Granite CPU → B 1,024, R 85,
-  D 1, Q 35; Granite GPU → B 4,096, R 15, D 4, Q 60; a GPU measurement that fits only 2,048
-  or 1,024 picks it; a CPU measurement that fits only 768 or 512 picks it; one that fits none
-  → unavailable "too slow" with the numbers while number entry, notes and Undo work; R never
-  below 15 or above the path's cap; CPU Q + R never above 120;
+- budgets (unit; formula fixtures, not evidence): the 2b container figures → B 1,024, R 85,
+  D 1, Q 35; the 2b GPU figures → B 4,096, R 15, D 4, Q 60; a GPU measurement that fits only
+  2,048 or 1,024 picks it, and one that fits none → GPU failure and CPU path; a CPU
+  measurement that fits only 768 or 512 picks it, and one that fits none → unavailable "too
+  slow" with the numbers while number entry, notes and Undo work; R never below 15 or above
+  the path's cap; CPU Q + R never above 120;
 - assistant off: no child process, no device listing, no preflight; the page says "off";
 - rights (connected router): "Restart" and "Try the GPU again" → 403 for a non-owner, CSRF
   checked, a second press while a transition runs → no second transition, a session revoked
   meanwhile → refused;
-- live measurements (to `docs/results.md`): start to `ready`, priming and the two calibration
-  samples, derived budgets on both paths from a native child; grammar against no-grammar
-  per-token generation time; a job's real prompt tokens against N(B); the unpacked official
-  CPU asset starting on the documented minimum host (a VM), as the guaranteed baseline.
+- live checks (stop for a decision on a mismatch): llama-server serving and checking the token
+  over the Unix socket at level 1; `/health` without a token; the per-request `ignore_eos`;
+  the `/proc/self/fd` model path; cancellation mid-generation and mid-prompt (the superseding
+  job's first token);
+- measurement step (to `docs/results.md`, before 2c-2 is marked complete): the first native
+  calibration on this host on both paths (start to `ready`, priming, the two samples, the
+  filler's density, the derived B, R, D and Q), which sets the expected CPU outcome; grammar
+  against no-grammar per-token generation time, which settles the calibration form; a job's
+  real prompt tokens against N(B); the unpacked official CPU asset starting on the documented
+  minimum host (a VM), as the guaranteed baseline.
 
 ### 2d-1 Owner model setting (local models)
 
-Scope: §1.4b without downloads: the "Model" field with the `local:` form, model file
-handling, trial, Switch, Keep and Switch back, migration 022. Tests:
+Scope: §1.4b without downloads: the "Model" field with the `local:` form (file handling is
+2c-2's), trial with its bounds and Cancel, Switch, Keep and Switch back, migration 022.
+Tests:
 - grammar: `local:../x.gguf`, `local:/etc/x.gguf`, `local:a/b.gguf`, `local:a\b.gguf`,
   `local:.x.gguf`, `local:CON.gguf`, `local:nul.gguf`, a non-`.gguf` name, white space, a
   non-ASCII character and 513 bytes refused with the rule named; an `hf:` spec refused
   ("downloads arrive later"); the field keeps a refused input;
-- file handling: a symbolic link, a link in a parent position, a directory, a FIFO (no block)
-  and a file writable by others in the models folder → refused; a file swapped for another
-  after the hash and before the load → the hashed inode is the one loaded; a file changed
-  after its trial → unavailable "the model file changed";
+- file handling (on top of 2c-2's): a `local:` file changed after its trial → unavailable "the
+  model file changed";
 - trial: a reply schema-invalid or truncated at 384 → fails and the previous model restarts;
   `max_tokens` from the phrases' largest `predicted_n` with the 256 floor and the 384 cap; the
   calibration uses that `max_tokens`; a model too slow for the caps → fails with the numbers;
   a pass shows device, times, speeds, `max_tokens`, B, R, D and Q; players see "starting"
-  meanwhile; Switch, Keep and Switch back each restart and re-prime; the default Granite keeps
-  192;
+  meanwhile; Switch, Keep and Switch back each restart and re-prime; the default Granite file
+  (by hash) keeps 192, and a different file with the same name does not; a phrase past its
+  deadline, the whole trial past its bound, and the owner's Cancel each stop the candidate and
+  restore the previous model; Switch with a stale trial ID (another hash, an older trial or an
+  older generation) → refused;
 - rights and routes: a non-owner → 403 on every action; missing or wrong CSRF; extra or
   duplicate keys; body limits; a second trial while one runs → refused; session revoked during
   a trial → its result is not applied.
@@ -889,8 +1036,10 @@ constructor unless stated):
 - metadata: a commit differing from the revision, a missing LFS entry, a malformed hash or
   size, a size of 0 or over 8 GiB, JSON over 1 MiB → refused before any byte; 401 or 403 →
   "download it by hand";
-- licence: no download before confirmation; the record holds the licence file's hash; a model
-  without a stated licence shows the warning and can be confirmed;
+- licence: no download before confirmation; the record holds the licence file's hash; the
+  licence file named by the card, else a root `LICENSE*`, is fetched under the same host rules
+  and bound (over 1 MiB → refused); none listed → "none"; a model without a stated licence
+  shows the warning and can be confirmed;
 - transfer: progress; Cancel keeps the partial and Resume sends `Range` and completes; a 200,
   a wrong start, a wrong total or a malformed `Content-Range` → restart from zero once, then
   failure; a body longer than the expected size is cut off and refused; a hash mismatch
@@ -901,7 +1050,7 @@ constructor unless stated):
   holds the `JOBS` permit and the active model serves jobs throughout;
 - network: a redirect to a host off the list, to `http` or a third hop → stopped naming the
   host; `HTTPS_PROXY` set → used by the download client and never by the model client;
-  requests carry no cookie, credential or `Referer`; with a sheet holding a marker phrase, no
+  requests carry no cookie, credential or `Referer` and send `Accept-Encoding: identity`; with a sheet holding a marker phrase, no
   download request contains it; presigned redirect URLs appear in no log line; a certificate
   not from the root store → refused; the shipped constructor uses the fixed base URL, host
   list and OS store, with no configuration knob;
@@ -938,13 +1087,14 @@ dangling key shows no link; p95 measured.
 ### 5 Docs, release scope, gate
 
 - Update `docs/assisted-entry.md`, `architecture.md` (the model runtime is no longer absent),
+  `evaluation-tooling.md` (its "no provider or model integration" scope),
   `release-scope.md` (schema 22, the sheet module under its strict CSP, the local model as
   confirm-only, the bundled llama.cpp build, its licence and source, the confinement levels and
   which were verified, model downloads over HTTPS, Linux x86_64 as the only verified platform,
   the GPU path measured on one RX 6650 XT), the runtime definition contract (the
   `catalogue` member), publication and dependency docs; replace the statements this work
   reverses: catalogue Q4 (not in the catalogue is a warning, "Which Sword?" remembered), the
-  D9/R9 writer membership check (not built; the key is advisory),
+  catalogue writer membership check (`catalogue_ref`, not built; the key is advisory),
   "no model proposes", the accuracy bar (waived, D-D), and "the LLM does not judge at play
   time" (narrow confirmable proposals and reminders).
 - `cargo about`, audit, packaging (the runtime files verified against the manifest), and the
@@ -1003,7 +1153,9 @@ prevented); one revision per Enter makes history long (no-ops write nothing, no 
 `rig-core` is pre-1.0 with frequent breaking releases (pinned); HTTP client defaults
 (proxies, redirects, retries) could send player text off the machine or repeat it, hence the
 client policy and its tests. Runtime: bubblewrap needs unprivileged user namespaces, which
-some distributions disable or restrict (Ubuntu's AppArmor rule), and Landlock is missing or
+some distributions disable or restrict (Ubuntu's AppArmor rule), and older distributions'
+bubblewrap may lack an option the probe needs; those machines fall back to Landlock or to
+unconfined, as shown on the page; and Landlock is missing or
 lacks network rules on many kernels (this host's included), so a machine can end on a lower
 level; the Landlock level leaves inbound listening on other addresses and local Unix sockets
 open; a malicious GGUF exploiting llama-server is contained only as far as the active level
