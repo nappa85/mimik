@@ -9,6 +9,9 @@
 pub(crate) mod budgets;
 pub(crate) mod files;
 pub(crate) mod manifest;
+pub(crate) mod seccomp;
+#[cfg(test)]
+pub(crate) mod test_helper;
 
 /// Which build runs, and so which budgets' caps apply (ASSIST-27, ASSIST-31).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
