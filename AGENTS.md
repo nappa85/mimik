@@ -16,7 +16,7 @@
 - Preserve layout-aware extraction tables/regions/metadata and compare used evidence against original PDF images. API review is supplemental; no automatic approval from model confidence or remembered rules.
 - Manuals, extracted corpora, rendered source pages, databases, and secrets remain local and outside source releases. Do not print/read back .env contents or credentials; test with dummy secrets. Respect user-owned files.
 - Run checks appropriate to changes. Distinguish unit/helper verification from live inference/provider or browser testing; never report unrun checks as passed.
-- Install new tools, prototype dependencies, and model runtimes in containers, not on the host. Keep build contexts allowlisted and never include secrets/manuals. Preserve the lightweight standalone Rust runtime.
+- Install new tools, prototype dependencies, and model runtimes in containers, not on the host (exception, ASSIST-40: the pinned official llama-server may run natively for the runtime-manager tests). Keep build contexts allowlisted and never include secrets/manuals. Preserve the lightweight standalone Rust runtime.
 
 ## Documentation (user decision 2026-10-19)
 
