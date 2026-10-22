@@ -205,7 +205,10 @@ SCHEMAS_DIR = Path(__file__).resolve().parent.parent / "schemas"
 SCHEMA_HEADING = "\nJSON schema of the reply:\n"
 # v2-short (exploratory, not adopted): the prefix quotes the schema with the ref alias enum
 # abbreviated to a description; response_format still sends the full pinned schema.
-CONTRACTS = ("v1", "v2", "v2-short", "v2-ex")
+# v2 is the adopted contract: its prefix quotes the schema without the alias enum (the
+# 2c-1 v2-short arm; "v2-short" is kept as a name for its ledgers). v2-full is the first v2
+# prefix, quoting the full schema (2c-1 screen, superseded).
+CONTRACTS = ("v1", "v2", "v2-full", "v2-short", "v2-ex")
 # v2-ex (exploratory, not adopted): the v2-short prefix with compact JSON examples, one example
 # referencing a context alias and a sentence asking for compact single-line JSON.
 V2_EX_BASE = "v2-short"
@@ -280,7 +283,7 @@ def contract_prefix(contract, variant=None):
         return system_prefix(variant)
     if variant is not None:
         raise ValueError("prompt variants exist for v1 only")
-    if contract == "v2-short":
+    if contract in ("v2", "v2-short"):
         return short_prefix()
     if contract == "v2-ex":
         return ex_prefix()
@@ -426,7 +429,7 @@ def build_request(case, sheet, variant=None, contract="v1"):
     Under v2, supplied and excluded are keyed by alias: "t" for the target, "f1"... for the
     context fields in order (the same order and drop rule as v1).
     """
-    if contract in ("v2", "v2-short", "v2-ex"):
+    if contract in ("v2", "v2-full", "v2-short", "v2-ex"):
         request = _build_request_v2(case, sheet)
         request["system"] = contract_prefix(contract)
         request["contract"] = contract

@@ -5,7 +5,9 @@ use sha2::{Digest, Sha256};
 /// The reviewed fixed prefix. Any change to the instructions, the separator or the schema
 /// changes this hash and needs its own review (plan §1.4: schema v2 is reviewed before use),
 /// a new prefix measurement and the same hash in `tools/test_assist_eval.py`.
-const PREFIX_SHA256: &str = "bca07a06be15ab62ca855ca017493deba10bb9db3f35e266a6bd9fe8fcd3e4c7";
+/// The adopted prefix quotes the schema with the alias enum abbreviated (v2-short, chosen
+/// after the 2c-1 screens); `response_format` still carries the full pinned schema.
+const PREFIX_SHA256: &str = "7b0ba380d8687cc8dfe2a150bf99d684b3bb4f4d5a22e41b5d46a1b6bbd5fe84";
 
 fn validator() -> jsonschema::Validator {
     jsonschema::draft202012::options()
@@ -122,15 +124,21 @@ fn alias_enum_is_target_fields_then_cells() {
 }
 
 #[test]
-fn fixed_prefix_is_instructions_then_schema() {
+fn fixed_prefix_is_instructions_then_the_quoted_schema() {
     let prefix = FIXED_PREFIX.as_str();
     assert!(prefix.starts_with(INSTRUCTIONS));
-    assert!(prefix.ends_with(SCHEMA_TEXT.trim_end()));
     assert!(INSTRUCTIONS.ends_with('\n'));
+    let quoted = &prefix[INSTRUCTIONS.len() + SCHEMA_HEADING.len()..];
     assert_eq!(
-        prefix.len(),
-        INSTRUCTIONS.len() + SCHEMA_HEADING.len() + SCHEMA_TEXT.len() - 1
+        &prefix[INSTRUCTIONS.len()..INSTRUCTIONS.len() + SCHEMA_HEADING.len()],
+        SCHEMA_HEADING
     );
+    // The quoted copy is the pinned schema with only the alias enum replaced.
+    let mut expected = SCHEMA.clone();
+    expected["$defs"]["ref"]["properties"]["ref"] = serde_json::from_str(QUOTED_REF).unwrap();
+    assert_eq!(quoted, serde_json::to_string(&expected).unwrap());
+    assert!(!quoted.contains("\"f64\""));
+    assert!(SCHEMA_TEXT.contains("\"f64\""));
     assert_eq!(
         hex::encode(Sha256::digest(prefix.as_bytes())),
         PREFIX_SHA256

@@ -11,12 +11,14 @@ Prototype tier (`tools/assist_eval.py --contract`, `tools/run_assist_screen.sh`,
 `CONTRACT=… PRIME=1 MAX_TOKENS=384`); raw ledgers under `/media/data/mimik/assist-2c1/runs/`.
 Same model, server, pinning and 50 cases × 2 passes + 4 stress as the 2b Granite screen
 (llama.cpp b11610, Granite 4.2 3B Q4_K_M, CPUs 0 and 1, 2 threads, greedy, `max_tokens` 384 as
-the measurement cap); only the contract differs. Self-checked; not reviewed yet. **v2 is the
-pinned contract; v2-short and v2-ex are exploratory, not pre-registered, and not adopted.**
+the measurement cap); only the contract differs. Reviewed with the 2c-1 implementation (Sol,
+Sonnet). **v2-short was adopted (the shipped prefix since 2c-1; `--contract v2` now means
+it, the first prefix is `v2-full`); v2-ex was rejected.** The arms were exploratory and were
+compared and selected on the same 50 development cases: no generalization claim.
 
-- **Arms:** *v2*: the pinned prefix (instructions, the full schema quoted with its 96-entry
+- **Arms:** *v2* (now `v2-full`): the first prefix (instructions, the full schema quoted with its 96-entry
   alias enum). *v2-short*: the same instructions, the schema quoted with the alias enum replaced
-  by a description; `response_format` still sends the full pinned schema. *v2-ex*: the v2-short prefix (the better of the two on the 50 cases) with every example compact, one example referencing a context alias ("one ration for each companion", `f1`; nearest cases rf-02 and rf-04) and the sentence "Reply with compact single-line JSON".
+  by a description; `response_format` still sends the full pinned schema. *v2-ex*: the v2-short prefix (the better of the two on the 50 cases) with every example compact, one example referencing a context alias ("one ration for each companion", `f1`; written for this run, it is related to rf-02 and rf-04, a field subtracted from the target) and the sentence "Reply with compact single-line JSON".
 - **Numbers** (pass 1 for quality; latency over the 100 warm requests):
 
   | | v1 (2b) | v2 | v2-short | v2-ex |
@@ -31,9 +33,14 @@ pinned contract; v2-short and v2-ex are exploratory, not pre-registered, and not
   | Replies over 192 tokens (of 104) | 0 | 5 | 3 | 0 |
   | Latency p50 / p95 / max (s) | 35.7 / 41.2 / 45.6 | 49.6 / 92.3 / 109.6 (builds alongside) | 50.8 / 67.9 / 103.2 | 36.9 / 54.0 / 61.2 |
 
-- **`max_tokens`:** by the 2b rule (round up to 32 of 1.25 × the largest valid, untruncated
-  `predicted_n`, at most 384) v2 gives 384 (largest 282, fv-04); adopted for the Granite file
-  (coordinator decision). The long replies are fraction cases offering floor and ceil options,
+- **Adopted prefix (v2-short):** it saves 266 prompt tokens (2,253 to 1,987, about 12%)
+  with the same 37 correct and one fewer false-confident on these cases; the priming times
+  (197.8 s against 172.0 s) are single measurements and no difference is claimed from them.
+  `max_tokens` for the Granite file by the 2b rule over its screen: largest `predicted_n` 263,
+  1.25 × 263 = 328.75, so 352.
+- **`max_tokens` (first prefix):** by the 2b rule (round up to 32 of 1.25 × the largest valid, untruncated
+  `predicted_n`, at most 384) the first v2 prefix gave 384 (largest 282, fv-04), superseded by
+  the adopted prefix's 352. The long replies are fraction cases offering floor and ceil options,
   pretty-printed across lines (the grammar allows whitespace): re-serialized compactly the
   three distinct long replies count 116, 135 and 123 tokens (`/tokenize`), and the largest
   compact form of all 45 distinct v2 replies is 135, which would give 192 (v2-short: largest

@@ -44,17 +44,28 @@ pub(crate) const MAX_FIELD_ALIASES: usize = 64;
 /// of which is the target.
 pub(crate) const MAX_CELL_ALIASES: usize = 31;
 
+/// What the prefix quotes in place of the alias enum: the grammar (`response_format`, the
+/// full pinned schema) enforces the enum, so the prompt copy need not repeat its 96 entries.
+pub(crate) const QUOTED_REF: &str =
+    r#"{"type":"string","description":"an alias from the data: t, f<n> or c<n>"}"#;
+
 /// The parsed schema, for `response_format` and for Rust's own validation.
 pub(crate) static SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     serde_json::from_str(SCHEMA_TEXT).expect("the embedded interpretation schema is JSON")
 });
 
-/// The fixed prefix: the system message of every interpretation request.
+/// The fixed prefix: the system message of every interpretation request: the
+/// instructions, the heading and the schema's compact text with the alias enum replaced by
+/// [`QUOTED_REF`] (keys in the pinned order).
 pub(crate) static FIXED_PREFIX: LazyLock<String> = LazyLock::new(|| {
-    let mut prefix = String::with_capacity(INSTRUCTIONS.len() + SCHEMA_TEXT.len() + 32);
+    let mut quoted = SCHEMA.clone();
+    quoted["$defs"]["ref"]["properties"]["ref"] =
+        serde_json::from_str(QUOTED_REF).expect("the quoted reference is JSON");
+    let quoted = serde_json::to_string(&quoted).expect("the schema serialises");
+    let mut prefix = String::with_capacity(INSTRUCTIONS.len() + quoted.len() + 32);
     prefix.push_str(INSTRUCTIONS);
     prefix.push_str(SCHEMA_HEADING);
-    prefix.push_str(SCHEMA_TEXT.trim_end_matches('\n'));
+    prefix.push_str(&quoted);
     prefix
 });
 

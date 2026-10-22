@@ -318,7 +318,7 @@ class Files(unittest.TestCase):
         self.assertEqual(out["schema_valid"], "1/1")
 
 
-V2_PREFIX_SHA256 = "bca07a06be15ab62ca855ca017493deba10bb9db3f35e266a6bd9fe8fcd3e4c7"
+V2_PREFIX_SHA256 = "7b0ba380d8687cc8dfe2a150bf99d684b3bb4f4d5a22e41b5d46a1b6bbd5fe84"
 
 
 class ContractV2(unittest.TestCase):
@@ -330,6 +330,8 @@ class ContractV2(unittest.TestCase):
         prefix = ae.contract_prefix("v2")
         self.assertEqual(hashlib.sha256(prefix.encode()).hexdigest(), V2_PREFIX_SHA256)
         self.assertNotEqual(prefix, ae.contract_prefix("v1"))
+        self.assertEqual(prefix, ae.contract_prefix("v2-short"))
+        self.assertNotEqual(prefix, ae.contract_prefix("v2-full"))
 
     def test_request_uses_aliases(self):
         req = ae.build_request(
