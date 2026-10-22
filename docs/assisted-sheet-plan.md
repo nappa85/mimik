@@ -105,15 +105,22 @@ implementation for both).
   dependencies private and flat (`src/definitions/formula/mod.rs`, `profile.rs`), with no
   iteration identity. 2c-1 adds a public accessor on `Compiled` giving, per derived value and
   per check, its scalar reads and its `(list, property)` reads grouped by comprehension binder,
-  with the transitive closure through derived dependencies. "The same iteration" means the
-  same binder; two separate iterations over one list are not co-reads (tested).
+  with the transitive closure through derived dependencies. It is a structure separate from
+  `reads` and `item_reads`, which keep driving `reads_unknown` and the U2 unknown guard, so
+  U2, the formula profile bytes and the definition hash are untouched (D-Y); unlike
+  `item_reads` it counts `has()` presence tests. A binder is identified by a per-comprehension
+  ID, not by its variable name (sibling comprehensions both bind `item`), and the closure
+  merges read sets without merging binder IDs: a derived value iterating with one binder and
+  a dependent iterating with another stay two iterations. "The same iteration" means the
+  same binder ID; two separate iterations over one list are not co-reads (tested).
 - **Output contract:** JSON, checked by llama-server's schema grammar and again in Rust
   (`jsonschema`, then typed Serde decoding, then domain checks), with explicit limits: at most
   3 options, each an expression and an explanation of at most 120 characters, or an
   `ambiguous` reply listing at most 3 readings. A reading is display-only text of at most 120
   characters, rendered escaped inside `<bdi>`, with no Use button; an `ambiguous` reply never
   writes. The expression is a JSON tree, not a string: a node is `{"lit": n}`, `{"ref":
-  "<field id>"}` or `{"op": "add" | "sub" | "mul" | "div", "l": node, "r": node}`, and a
+  "<field id>" | "cell:<list>/<host>/<property>"}` (the second form only for a supplied
+  same-row cell) or `{"op": "add" | "sub" | "mul" | "div", "l": node, "r": node}`, and a
   `div` node also carries `"round": "floor" | "ceil" | "exact"` (`exact` drops the option on a
   remainder); depth at most 3 below the root, so at most 8 leaves. A negative `lit` is allowed;
   its magnitude is what provenance checks. References name supplied integer fields or
@@ -173,11 +180,14 @@ implementation for both).
   threshold 0.40, one selection) is rejected (2 of 50 correct, 42 false-confident); a design
   with a few semantic labels was not tested.
 - **Client policy:** one client built by the host for the current child only: no redirects,
-  proxies disabled whatever the environment says (`HTTP_PROXY`, `ALL_PROXY`), plain HTTP only
+  proxies disabled whatever the environment says (`no_proxy()` on the client, so `HTTP_PROXY`,
+  `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and their lowercase forms are all ignored), plain HTTP only
   (an `https` URL is refused), no decompression (`no_gzip`, since the feature can be unified
   in), no retries. On the bubblewrap path the destination is the current generation's socket
   path (§1.4a) and nothing else; on the TCP paths, before every request the URL host must be
-  an IP literal equal to `127.0.0.1` or `::1`,
+  an IP literal equal to `127.0.0.1` (the runtime binds only that, and the endpoint check reads
+  only `/proc/net/tcp`; `::1` is accepted only by the 2c-1 development endpoint, which is
+  dev-only and has no ownership check),
   with no userinfo or zone ID (`localhost`, `127.1` and `::ffff:127.0.0.1` refused), checked on
   the raw authority string as well as the parsed URL (the WHATWG parser turns `127.1` into
   `127.0.0.1`), and the port is the current child's. Every connection is checked to reach the
@@ -236,7 +246,9 @@ implementation for both).
   the indexed `<revision>:<f>.<r>.<p>` for row cells), but today an `unresolved` note has
   none: the page carries keys only for switch offers and Undo, and the JSON answer has
   `"actions": null` (`Actions::of`, `sheet_json.rs`). 2c-1 adds `key` to the JSON answer's
-  `note` object whenever the note is `unresolved`, with no page markup (the assistant needs
+  `note` object whenever the note is `unresolved`, additively (existing ASSIST-22 clients
+  ignore it), built from the stored note with `assist::key` or `assist::indexed_key` so it
+  carries the note's own revision, not the answer's, and with no page markup (the assistant needs
   JavaScript, D-G); the module starts the job with it. A key is resolved against the snapshot at its own revision: a typed key
   directly, an indexed row-cell key (`<revision>:<f>.<r>.<p>`) by mapping the row index to its
   host ID at that revision, giving the typed address with host ID. Order as for the other
@@ -349,26 +361,35 @@ natively for these tests (ASSIST-40).
   requires corresponding source for every shipped binary, so the release also carries the
   pinned llama.cpp source: the release's source asset if the tag publishes one, otherwise a
   `git archive` of the pinned commit, its SHA-256 recorded in the manifest either way, listed
-  in `SOURCE.txt` and `SHA256SUMS`. The packaging check and `smoke_release.py` assert on the
-  shipped binary that `--assistant-dev-endpoint` does not exist (not only through `cargo
-  test`).
+  in `SOURCE.txt` and `SHA256SUMS`. The `dev-endpoint` feature is absent from the release
+  binary because the staged binary comes from `cargo build --release --locked` without
+  features (tests build with `--all-features`); `smoke_release.py` in `artifact-smoke` checks
+  the staged binary: `--assistant-dev-endpoint` is refused as an unknown option.
 - **CI workflow (2c-2 deliverables, `.github/workflows/ci.yml`):**
-  - a new required job `llama-runtime` on a runner pinned by label (`ubuntu-24.04`), as host
-    steps, not inside the `mimik-ci` container (Docker's default seccomp profile refuses the
-    namespace flags `bwrap --unshare-all` needs). It installs `bubblewrap` from the 24.04
-    package and `libvulkan1` with Mesa's lavapipe (so the Vulkan build's `--help` and
-    `--list-devices` run without a GPU); lifts `kernel.apparmor_restrict_unprivileged_userns`
-    with `sudo sysctl` for the job's duration only (and says so in its log); fetches the
-    pinned assets and the source archive and verifies their hashes; unpacks the assets; runs
-    the flag check, the preflight probe for both builds, and the confinement test binary built
-    in `checks` (the seccomp, peer, endpoint and adversarial-helper tests, against the pinned
-    asset). It must reach level 1; anything lower fails the job. It uploads the verified
-    `llama/` files and source archive as an artifact;
-  - `checks` gains `needs: llama-runtime` and packages only that artifact; since
-    `upload-artifact` drops file modes, packaging re-hashes every file against the manifest
-    and reapplies the manifest's modes;
-  - `deployable` adds `llama-runtime` to the jobs it requires; every new action is pinned by
-    commit SHA like the existing ones;
+  - a new required job `llama-fetch` (in the `mimik-ci` container like `checks`): fetches the
+    pinned assets and the source archive, verifies their hashes, unpacks the assets, and
+    uploads the verified `llama/` files and the source archive as an artifact;
+  - `checks` gains `needs: llama-fetch`, downloads that artifact before packaging, packages
+    only it (since `upload-artifact` drops file modes, packaging re-hashes every file against
+    the manifest and reapplies the manifest's modes), and uploads two more artifacts: the
+    release `mimik` binary it built and the confinement test binary (the seccomp, peer,
+    endpoint and adversarial-helper tests);
+  - a new required job `llama-runtime` with `needs: [llama-fetch, checks]` (so there is no
+    cycle: `checks` never waits for `llama-runtime`), on a runner pinned by label
+    (`ubuntu-24.04`), with `timeout-minutes` set, as host steps, not inside the `mimik-ci`
+    container (Docker's default seccomp profile refuses the namespace flags `bwrap
+    --unshare-all` needs). It uses no Rust toolchain: it downloads the two prebuilt binaries
+    and the verified `llama/` files. It installs `bubblewrap` from the 24.04 package and records
+    its version; if that package lacks any option the probe needs, the job instead builds a
+    pinned, hash-verified upstream bubblewrap release (version and hash in the workflow) and
+    uses that. It installs `libvulkan1` with Mesa's lavapipe (so the Vulkan build's `--help`
+    and `--list-devices` run without a GPU); lifts `kernel.apparmor_restrict_unprivileged_userns`
+    with `sudo sysctl` for the job's duration only (and says so in its log); then runs the flag
+    check, the preflight probe for both builds (including the level-1 process-shape assertion,
+    below) and the confinement test binary against the pinned asset. It must reach level 1;
+    anything lower fails the job;
+  - `deployable` requires `llama-fetch`, `checks` and `llama-runtime` with the existing jobs;
+    every new action is pinned by commit SHA like the existing ones;
   - two executable checks of the assistant, kept apart: the unpacked shipped artifact runs its
     production runtime path with the real bundled runtime (no model: start to the "no model"
     state, the preflight and the level report; with a pinned tiny model if one is adopted
@@ -418,25 +439,39 @@ natively for these tests (ASSIST-40).
      directory on the host (mode 0700, owned by Mimik's user, under `$XDG_RUNTIME_DIR/mimik/`
      or else a 0700 `mimik-<uid>` directory in the system temporary directory; removed when the
      generation stops). Mimik connects through `/proc/self/fd/<dir fd>/llama.sock`, so the
-     host path's length never meets the 108-byte `sun_path` limit. Abstract Unix sockets are
+     host path's length never meets the 108-byte `sun_path` limit. A pathname socket is found
+     by the inode its path resolves to, not by the `sun_path` string it was bound with, so the
+     host-side path through the directory descriptor reaches the socket the child bound as
+     `/run/llama/llama.sock`; the `llama-runtime` job performs that real connect against the
+     pinned binary. Abstract Unix sockets are
      per network namespace and pathname sockets are limited to what is bound in, so the child
      reaches no host service. OpenFirma's bubblewrap setup is the reference; no code is copied
      and `firma-run` is not a dependency.
   2. **Landlock with seccomp** (TCP on `127.0.0.1`, random port): the runner applies Landlock
-     through the `landlock` crate (network rules: no TCP connect, TCP bind on the chosen port
-     only; filesystem rules: read on the same allowlist, including the model's resolved file
-     (opening `/proc/self/fd/<n>` is checked against the file it resolves to), execute on the
-     library directories, the ELF interpreter and the runtime directory (llama-server
-     `dlopen`s its ggml backend libraries from its own directory, found through
-     `/proc/self/exe`), read-write on the render node, plus `IOCTL_DEV` on it from ABI 5,
-     `/dev/shm` and a private temporary directory; abstract Unix sockets scoped from ABI 6),
-     then the seccomp filter, then executes the verified llama-server descriptor. The shown
+     through the `landlock` crate, then the seccomp filter, then executes the verified
+     llama-server descriptor. There is no bind mount here, so the rules name host paths (a
+     `/proc/self/fd/<n>` open is checked against the file it resolves to). The ruleset:
+     - network (ABI 4 or later): no TCP connect; TCP bind on the chosen port only;
+     - read: the models folder (the model's resolved file lies in it), the system library
+       directories, `/etc/ld.so.cache`, the Vulkan loader and driver files, the read-only
+       `/sys` parts the driver enumerates, `/proc/self`;
+     - read and execute: the runtime directory (llama-server `dlopen`s its ggml backend
+       libraries from its own directory, found through `/proc/self/exe`), the library
+       directories and the ELF interpreter;
+     - read and write: the selected render node (GPU path, plus `IOCTL_DEV` on it from ABI 5),
+       `/dev/shm`, and a private temporary directory;
+     - scoping (ABI 6 or later): abstract Unix sockets and signals;
+     - nothing else.
+
+     The shown
      state comes from the crate's `RestrictionStatus`, never from the requested rules.
      Landlock binds ports, not addresses, and does not filter `connect()` to pathname Unix
      sockets, so the honest state is "partly confined: outbound TCP, UDP and raw sockets
      denied; it could listen on another address on its port and reach local services over Unix
      sockets"; with a Landlock ABI below 4 (no network rules): "not network-confined: TCP egress
-     allowed; filesystem restricted"; partial filesystem enforcement is shown as such.
+     allowed; filesystem restricted"; partial filesystem enforcement is shown as such; with no
+     Landlock at all (`RestrictionStatus` none) the level is not reached, and level 3 is used
+     with its own wording.
   3. **Unconfined** (seccomp only, TCP on `127.0.0.1`): "not confined: TCP egress allowed, and
      the whole filesystem readable by Mimik's user is readable by the model server".
   The assistant runs at every level (hardening is "where available", ASSIST-30); the page
@@ -451,8 +486,9 @@ natively for these tests (ASSIST-40).
   `AF_UNIX` with `SOCK_STREAM` (the listening socket; flags `SOCK_CLOEXEC` and
   `SOCK_NONBLOCK` masked); `socketpair()` is refused unless the pinned server needs it (then
   `AF_UNIX` only), fixed by test; `fork`, `vfork` and `clone` without `CLONE_THREAD` are
-  refused and `clone3` returns `ENOSYS` (its flags cannot be inspected; glibc then falls back
-  to `clone` for threads), so the server cannot start other processes: process-tree
+  refused and `clone3` returns `ENOSYS` (on x86_64 glibc builds `fork` and `vfork` on `clone`
+  or `clone3`, so the `clone` flag rule and the `clone3` refusal are what operate; `clone3`'s
+  flags cannot be inspected; glibc then falls back to `clone` for threads), so the server cannot start other processes: process-tree
   containment on levels 2 and 3, where the parent-death signal covers only the direct child
   (an `exec` without a fork only replaces the server in place); `io_uring_setup`,
   `io_uring_enter`, `io_uring_register`, `ptrace`, `process_vm_readv`/`writev`, `bpf`,
@@ -465,16 +501,23 @@ natively for these tests (ASSIST-40).
   support for every option used above is probed (no remembered minimum version: bubblewrap
   0.13.0 on the dev host has `--unshare-all`, `--clearenv`, `--bind-fd`/`--ro-bind-fd`,
   `--bind-data`/`--ro-bind-data`, `--perms`, `--seccomp` and `--die-with-parent`, checked
-  2026-10-22); then a real probe run of the full level-1 profile executing the pinned
-  llama-server's `--version` inside it, once for the CPU build and once for the GPU build (a
+  2026-10-22); every option the profile uses is probed, including `--json-status-fd`,
+  `--dev-bind`, `--tmpfs` with `--size`, `--proc`, `--new-session` and `--cap-drop`; then a
+  real probe run of the full level profile with the same binds, descriptors, seccomp program
+  and token channel as a real start, executing a probe mode of the pinned llama-server setup
+  that exercises each resource once: open the model through its descriptor path, bind the
+  socket path in its directory (level 1) or the port (levels 2 and 3), read the token
+  channel, and on the GPU path enumerate the device; on level 1 it also asserts the process
+  shape of the endpoint check (below). It runs once for the CPU build and once for the GPU build (a
   level may work for one and not the other; each path uses the highest level its own build
   passed). A failure names its cause where it can be told: bwrap
   missing, set-ID or lacking an option (named), user namespaces disabled
   (`user.max_user_namespaces`, `kernel.unprivileged_userns_clone`), the Ubuntu AppArmor
   restriction on unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns`),
   or the probe's own error. Then level 2 is probed the same way, then level 3. A level that
-  passes the probe can still fail at the real start; the transitions below then move down
-  only for sandbox-attributable failures. Memory: the child has no memory cap (`RLIMIT_AS` is
+  passes the probe can still fail at the real start; that failure is recorded with its cause
+  and shown on the page, and the transitions below move down only for sandbox-attributable
+  failures. Memory: the child has no memory cap (`RLIMIT_AS` is
   unusable with GPU drivers' address-space mappings, ASSIST-L23); the preflight refuses a model
   file larger than `MemAvailable` minus 1 GiB ("not enough memory for this model").
 - **Token:** 32 bytes from the OS random source, base64url, new for every launch, held in
@@ -487,18 +530,24 @@ natively for these tests (ASSIST-40).
   and never passes it on a command line. `/health` without a token is a live-checked property
   of the pinned build; every other request carries it.
 - **Endpoint check, per connection, before its first byte:** level 1: `SO_PEERCRED` on the
-  connected Unix socket must give Mimik's UID and a PID whose parent is the `child-pid` that
-  bwrap reported for this generation (its PID-1 reaper; checked on this host: with
-  `--unshare-all` the reported `child-pid` is the reaper, and the command is its child),
-  read from `/proc/<pid>/status` (`PPid`, and `NSpid` showing the process inside a nested
-  namespace), with `/proc/<pid>/ns/pid` compared to the reported `pid-namespace` as a
-  cross-check where it is readable (it needs ptrace-read access, which a non-dumpable process
-  denies); Mimik holds a pidfd on the reaper so its PID cannot be reused during the
-  generation. A UID-only match is never accepted. Levels 2 and 3: before and after `connect()`, the `LISTEN` entry for
+  connected Unix socket (the kernel reports the peer PID in Mimik's PID namespace) must give
+  Mimik's UID and a PID that is either the `child-pid` bwrap reported for this generation or
+  a process whose `PPid` (from `/proc/<pid>/status`) is that `child-pid`: with `--unshare-all`
+  bwrap 0.13.0 on this host reports its PID-1 reaper as `child-pid` and runs the command as
+  its child, while a bwrap whose sandbox init executes the command in place gives the other
+  shape; the preflight asserts which shape the installed bwrap has. In both shapes the
+  namespace test must pass: the `st_ino` of `/proc/<pid>/ns/pid` equals the `pid-namespace`
+  number bwrap reported, cross-checked by `NSpid` in `/proc/<pid>/status` (two entries, the
+  inner one small); where `ns/pid` is not readable (it needs ptrace-read access, which a
+  non-dumpable process denies), the `NSpid` and `PPid` tests decide. Mimik holds a pidfd on
+  `child-pid` so its PID cannot be reused during the generation. A UID-only match is never
+  accepted. Levels 2 and 3: before and after `connect()`, the `LISTEN` entry for
   `127.0.0.1:<port>` in `/proc/net/tcp` (`procfs` crate) must have its socket inode open in
   the current child's `/proc/<pid>/fd`. While the child holds that listener no other process
   can listen on the port, so the connection reaches it; the accepted socket is not required
-  (it enters the child's table only on `accept()`). The port is picked by binding
+  (it enters the child's table only on `accept()`). No `LISTEN` entry yet means "not ready"
+  (retried until the `/health` timeout); an entry owned by any other process fails the attempt
+  at once. The port is picked by binding
   `127.0.0.1:0` and releasing it; a child that fails to bind it exits, and a new port is tried
   (at most 3 per attempt). The child's "listening" line is a hint for when to connect, never
   the proof.
@@ -599,13 +648,27 @@ natively for these tests (ASSIST-40).
   candidate is a GPU failure (CPU fallback). On the CPU path, if 1,024 does not fit, 768 and
   then 512 are taken; only when 512 does not fit is the assistant unavailable ("too slow on
   this machine: about N s needed, the cap is M s"), with the measurement shown; entry is never
-  affected. Expected outcomes: on the GPU path the 2b numbers (about 1,100 prompt and 80
-  generated tokens per second on the RX 6650 XT) give T about 4 s, so B 4,096, R 15, D 4,
-  Q 60. On the CPU path the outcome is set by the first native calibration on this host, a
-  measurement step of 2c-2 recorded in `docs/results.md`: the 2b container figures (about 26 s
-  of prompt for a 1 KiB dynamic part with the uncached tail, 192 tokens in about 41 s) would
-  give T about 67 s, R 85, D 1, Q 35, but they were not taken with this procedure or filler.
-  In 2c-2 both are formula fixtures, not evidence.
+  affected: "too slow" on the CPU path turns the assistant off for that machine until a
+  Restart measures again. Expected outcomes, with the prompt term written out as p × (t +
+  N(B)): t is the uncached tail of the fixed prefix (2b saw 170 to 250 of its about 1,460
+  tokens uncached; the 75 % cache rule lets t reach about 365), N(B) the dynamic part. On the
+  GPU path the 2b numbers (about 1,100 prompt and 80 generated tokens per second on the
+  RX 6650 XT) give T about 4 s, so B 4,096, R 15, D 4, Q 60. On the CPU path the outcome is
+  set by the first native calibration on this host, a measurement step of 2c-2 recorded in
+  `docs/results.md`. An illustration from the 2b container figures (p about 88 ms and g
+  about 213 ms per token at 2 threads, o about 1 s, about 3.5 bytes per token, Granite's 192
+  tokens about 41 s), not taken with this procedure or filler:
+
+  | B | N(B) | T with t 170 to 250 | 1.25 × T | Fits 90 s? |
+  |---|---|---|---|---|
+  | 1,024 | about 296 | about 83 to 90 s | about 104 to 113 s | no |
+  | 768 | about 222 | about 77 to 84 s | about 96 to 105 s | no |
+  | 512 | about 148 | about 70 to 77 s | about 88 to 96 s | only at the low end (R 90, D 1, Q 30) |
+
+  With t at the 75 % bound, or with `max_tokens` 256 or more (any model but the default
+  Granite file), nothing fits, so the CPU baseline of ASSIST-27 is not assured with the
+  default model at 2 threads (§5, open question). In 2c-2 these are formula fixtures, not
+  evidence.
 
 ### 1.4b Owner model setting (2d-1, 2d-2; ASSIST-28, ASSIST-35, ASSIST-36)
 
@@ -824,12 +887,15 @@ layer's read-set accessor (§1.4, Read sets); the note key in the JSON answer of
 `unresolved` note (§1.4, Routes); worker, admission, records and breaker; the job, poll and
 apply routes with origin and read/write-set binding; the UI. The model server is started by
 hand on the dev host (ASSIST-40) and reached through a development endpoint setting
-(`--assistant-dev-endpoint`, a loopback literal or a socket path, with a token file), compiled
-only with the `dev-endpoint` Cargo feature, which release builds never enable (the release
-build and the packaging check assert its absence); it has no endpoint check. Budgets come from
-configuration (development defaults B 1,024, N(B) 256 tokens through
-`--assistant-dev-token-limit`, R 85, D 1, Q 35). Until 2c-2 lands the assistant
-is a development feature, outside the release scope. Tests (stub or fake server unless
+(`--assistant-dev-endpoint`, a loopback literal or a socket path, with a token file; the
+request's model name is the alias from `--assistant-model`, default `granite-4.2-3b-q4_k_m`,
+which the hand-started server must be given with `--alias`), compiled
+only with the `dev-endpoint` Cargo feature, which release builds never enable (`smoke_release.py`
+checks the staged binary refuses the option); it has no endpoint check. Budgets come from
+configuration (development placeholders, not evidence: B 1,024, N(B) 256 tokens through
+`--assistant-dev-token-limit`, R 85, D 1, Q 35). Until 2c-2 lands the assistant is a
+development feature, outside the release scope, and the release scope's "no language model"
+statement stays true because the release binary has no endpoint. Tests (stub or fake server unless
 stated):
 - output: schema-invalid, grammar-invalid and truncated JSON; more than 3 options; a tree deeper
   than 3 below the root (which is also what refuses a ninth leaf); literal provenance (`84 + 915` dropped; `5` from "heal 15" dropped; U+2212, NBSP);
@@ -854,8 +920,10 @@ stated):
   excluded field types never appear in the request;
 - read sets: per derived value and check, scalar reads and `(list, property)` reads grouped by
   binder, closed through derived dependencies; `item.a` and `item.b` in one comprehension are
-  co-read, while `a` in one comprehension and `b` in another over the same list are not; a
-  `has()` presence test counts as a read;
+  co-read, while `a` in one comprehension and `b` in another over the same list are not, also
+  when both bind `item` and when one of them is inside a derived value the other reads; a
+  `has()` presence test counts as a co-read; `reads_unknown`, U2 and the formula profile bytes
+  are unchanged by the accessor (asserted on existing fixtures);
 - related fields (B ≤ 1,024): a field read with the target by a check, or through a derived
   value it reads, is sent; a field only in the same group, or named in the phrase but not
   co-read, is not; a row-cell target sends the scalars co-read with its property; definition
@@ -871,6 +939,8 @@ stated):
   found by host ID; the cell changed or the row removed before apply → apply refused;
 - note key: a cell save that records `unresolved` answers with `note.key` in the JSON (the
   typed form for scalars, the indexed form for row cells), the page markup is unchanged, a
+  cell whose note predates the answer's revision yields a key with the note's revision that
+  starts a job, a
   start with that key is accepted, and a key of a parsed or sign-led note is refused (409);
 - injection: a phrase containing "ignore previous instructions" yields at most an option,
   never a write without Use; a context value with instructions stays inside the data envelope;
@@ -909,7 +979,8 @@ stated):
   entry, notes and Undo work and the poll says the assistant is unavailable; a start reports
   `starting` before an open breaker;
 - client: a host name, `localhost`, `127.1`, `0x7f.1`, `2130706433`, `::ffff:127.0.0.1`,
-  userinfo, a zone ID or an `https` URL refused; `HTTP_PROXY` and `ALL_PROXY` set and a 302 from the fake server
+  userinfo, a zone ID or an `https` URL refused; `::1` refused on the runtime paths; `HTTP_PROXY`,
+  `HTTPS_PROXY`, `ALL_PROXY` and their lowercase forms set and a 302 from the fake server
   never reach anything but the endpoint; one request per call on a 500 or 429; a gzip-encoded
   reply is not decoded; a body over the bound is refused, plain and streaming, without
   buffering it; the schema arrives byte-exact in `response_format` with `cache_prompt: true`
@@ -1049,8 +1120,8 @@ night or at a weekend):
   slower in prompt but faster in generation changes the choice for a small B);
   a restarted child re-primes and re-calibrates before admitting jobs; neither carries sheet
   text;
-- budgets (unit; formula fixtures, not evidence): the 2b container figures → B 1,024, R 85,
-  D 1, Q 35; the 2b GPU figures → B 4,096, R 15, D 4, Q 60; a GPU measurement that fits only
+- budgets (unit; formula fixtures, not evidence): the 2b container figures with t 170 → B 512,
+  R 90, D 1, Q 30, and with t 365 → unavailable "too slow"; the 2b GPU figures → B 4,096, R 15, D 4, Q 60; a GPU measurement that fits only
   2,048 or 1,024 picks it, and one that fits none → GPU failure and CPU path; a CPU
   measurement that fits only 768 or 512 picks it, and one that fits none → unavailable "too
   slow" with the numbers while number entry, notes and Undo work; R never below 15 or above
@@ -1215,9 +1286,11 @@ dangling key shows no link; p95 measured.
 
 ## 4. Risks and later
 
-Risks: the CPU path is slow (Granite: an estimated 1 KiB request about 84 s with the margin,
-and `starting` takes priming of about 117 s plus two calibration samples of about 67 s each
-plus hashing the model before the assistant is ready; all from container measurements); model quality is unknown and the bar is waived (the display
+Risks: the CPU path may not meet its caps at all (§1.4a: from the 2b container figures, with
+the uncached prefix tail included, Granite at 2 threads fits only B 512 at best, and a model
+with `max_tokens` 256 or more fits nothing), and `starting` takes priming of about 117 s plus
+two calibration samples of about 85 s each plus hashing the model before the assistant is
+ready; all from container measurements; model quality is unknown and the bar is waived (the display
 and confirmation are the safeguard); reminder prompts carry catalogue text (contained, not
 prevented); one revision per Enter makes history long (no-ops write nothing, no cap; D-U);
 `rig-core` is pre-1.0 with frequent breaking releases (pinned); HTTP client defaults
@@ -1261,3 +1334,14 @@ measurements on other GPUs; parallel slots on the GPU path (ASSIST-32); fraction
 languages (ASSIST-38); gated Hugging Face repositories (owner token) and split GGUF files;
 partial GPU offload; retiring the legacy full-form edit POST; definitions
 choosing a fallback for unknown (L-U4).
+
+## 5. Open questions for the user
+
+- **CPU baseline with the default model (ASSIST-27, ASSIST-31, ASSIST-32):** the §1.4a
+  illustration from the 2b container figures suggests that Granite 4.2 3B at 2 CPU threads
+  fits at best a 512-byte dynamic part within the 90 s cap, and nothing if the uncached prefix
+  tail is near its bound; any model with `max_tokens` 256 or more fits nothing. If the first
+  native calibration confirms it, the CPU path is off on such machines. Options: allow more
+  threads on CPU-only machines (outside the weekday 2-core rule, which governs this dev host),
+  a smaller default model on the CPU path, or accept the assistant being off there. The
+  decision wording of ASSIST-31 and ASSIST-32 is unchanged until the user decides.
