@@ -111,10 +111,10 @@ Implements the reviewer setup defined in `AGENTS.md`.
 - **Free-tier limits:** free models (`opencode/*`) have daily token limits and are throttled
   when several run at once. Free runs take a machine-wide lock
   (`~/.cache/mimik-review/free.lock`), so they never overlap, also across processes. A run
-  killed by the idle timeout is `stalled`; after a stall, or an opencode log error matching a
-  limit, or any logged error on a failed run (`~/.local/share/opencode/log/opencode.log`, printed
-  with the run's log lines), the
-  model is recorded in `~/.cache/mimik-review/limits.json` and skipped until the next UTC day.
+  killed by the idle timeout is `stalled`; after a stall, or any opencode log error on a
+  failed run (`~/.local/share/opencode/log/opencode.log`, printed with the run's log lines),
+  the model is recorded in `~/.cache/mimik-review/limits.json` and skipped until the next UTC
+  day.
 - **Snapshot:** excludes `.env*`, `data`, `target`, `.git`, `.venv*`, caches, `*.sqlite3*`,
   `*.pdf` and `*.gguf`.
 - **Read-only reviewer:** the opencode `reviewer` agent has write, edit, bash, web, task and
