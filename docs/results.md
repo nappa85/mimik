@@ -575,7 +575,10 @@ decides.**
   wrong on severity; both Nemotrons produced confident, invented or misread findings, and
   Nemotron Ultra one harmful proposal (a configurable download host list, against ASSIST-35).
 - **Limitations:** one task, one run per model, one adjudicator; Sonnet's figures are from its
-  condensed list. Durations depend on the free tier's load. A run without a verdict now counts
+  condensed list. All free models ran in parallel; GLM, Nemotron Super VL and MiMo each opened
+  a stream that never returned a byte, which fits throttling of parallel free runs (free models
+  have daily token limits), so their "no review" is not a quality verdict. Free runs are now
+  serialised. Durations depend on the free tier's load. A run without a verdict now counts
   as unavailable in `tools/external_review.py`, so it falls through to the next model.
 
 ## Reviewer benchmark (2026-10-16, concluded)
