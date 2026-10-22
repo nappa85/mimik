@@ -6,25 +6,25 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Current work
 
-- **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Step 1 (slices 1.1–1.7) and step
-  2a (sheet module, strict CSP, D-AA) are merged into master. Next: 2b.
+- **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a and 2b and the plan for
+  2c-1, 2c-2, 2d-1 and 2d-2 are merged into master. In progress: the ASSIST-39 upgrade (Rust
+  1.99.1, rig-core 0.45.0, askama without `config`, DEP-16) on branch `rust-1.99`
+  (`mimik-wt/rust-1.99`), gate passed, Sol and Sonnet READY, third review running.
 
-- **Resume after a reboot:** master is the state (nothing pending on branches; the
-  `assist-2a` worktree at `/home/marco/Progetti/mimik-wt/catalogue` is merged). The CI helper
-  is `target/agent-tools/ci.sh` (`CPUS=2 sh target/agent-tools/ci.sh <cmd>`, image mimik-ci,
-  volumes mimik-cargo-cache and mimik-catalogue-target).
+- **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
+  target/agent-tools/ci.sh <cmd>`, image mimik-ci, volumes mimik-cargo-cache and
+  mimik-catalogue-target). `mimik-ci:latest` is now the 1.99.1 image; master still pins 1.95.0
+  until `rust-1.99` merges, so use `mimik-ci:1.95.0` for master until then.
 
 ## Next steps
 
-1. Step 2b is merged (rig-core, Granite 4.2 3B CPU default; CPU-path budget ASSIST-31). The
-   GPU-path measurement is in `docs/results.md` (all three models under 8 s; Qwen3-4B fits the
-   GPU path), self-checked: review it with the plan update.
-2. Plan update (reviewed before 2c; the plan-2c revision's confirm review runs Sol and
-   Sonnet plus every opencode free model, with a findings-quality benchmark for the user): ASSIST-31 budgets, GPU-first with CPU fallback and
-   budgets from the priming measurement (ASSIST-27); a new step 2d, the owner model setting
-   with background Hugging Face downloads (ASSIST-28); 2c reads the model from that setting.
-3. 2c interpretation, 2d model setting, 3 bundles and reminders, 4 suggestions, 5 docs and gate (includes the
-   `docs/release-scope.md` update for schema 22 and the assisted scope).
+1. Merge `rust-1.99`; sweep the Docker build cache; delete `mimik-ci:1.95.0`.
+2. 2c-1 interpretation against a hand-started server (dev-only), then 2c-2 runtime manager,
+   2d-1 owner model setting, 2d-2 downloads, 3 bundles and reminders, 4 suggestions, 5 docs
+   and gate (includes the `docs/release-scope.md` update for schema 22 and the assisted
+   scope).
+3. Owed measurements: the rig-core 0.45.0 live request; the native CPU calibration (2c-2);
+   GPU-path checks at each llama.cpp pin change; the Qwen3.5-9B rev3 S40 re-run.
 
 ## Blockers
 
@@ -32,6 +32,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Pending user questions
 
+- CPU-only machines (plan §5): model threads default (recommended: all physical cores but one,
+  measured at each start), a smaller CPU model, or the assistant off there.
+- Third-reviewer chain after benchmark 2 (recommended: MiniMax → DeepSeek → Beam, 1,200 s).
 - Does the correct-password login rejection seen on 2026-10-14 still happen? Diagnose or close.
 - Remaining LAN and multi-device scope to support.
 - M4 default Q5 (drafts over 1 MiB are not echoed back), applied without an answer: confirm or
