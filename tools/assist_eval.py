@@ -205,7 +205,10 @@ SCHEMAS_DIR = Path(__file__).resolve().parent.parent / "schemas"
 SCHEMA_HEADING = "\nJSON schema of the reply:\n"
 # v2-short (exploratory, not adopted): the prefix quotes the schema with the ref alias enum
 # abbreviated to a description; response_format still sends the full pinned schema.
-CONTRACTS = ("v1", "v2", "v2-short")
+CONTRACTS = ("v1", "v2", "v2-short", "v2-ex")
+# v2-ex (exploratory, not adopted): the v2-short prefix with compact JSON examples, one example
+# referencing a context alias and a sentence asking for compact single-line JSON.
+V2_EX_BASE = "v2-short"
 SHORT_REF = {"type": "string", "description": "an alias from the data: t, f<n> or c<n>"}
 
 
@@ -226,6 +229,43 @@ def contract_schema(contract):
     return SCHEMA if contract == "v1" else load_v2()[1]
 
 
+EX_EXAMPLES = (
+    "Examples (target alias t, current value 9):\n"
+    'note "lost 2 to the fall" -> {"kind":"options","options":[{"expr":{"op":"sub","l":'
+    '{"ref":"t"},"r":{"lit":2}},"explanation":"9 - 2: lost 2 to the fall"}]}\n'
+    'note "lost half" -> {"kind":"options","options":[{"expr":{"op":"sub","l":{"ref":"t"},'
+    '"r":{"op":"div","round":"floor","l":{"ref":"t"},"r":{"lit":2}}},"explanation":'
+    '"9 - 4: lost half, rounded down"},{"expr":{"op":"sub","l":{"ref":"t"},"r":{"op":"div",'
+    '"round":"ceil","l":{"ref":"t"},"r":{"lit":2}}},"explanation":"9 - 5: lost half, rounded up"}]}\n'
+    'note "one ration for each companion", with f1 the field Companions at 3 -> '
+    '{"kind":"options","options":[{"expr":{"op":"sub","l":{"ref":"t"},"r":{"ref":"f1"}},'
+    '"explanation":"9 - 3: one ration per companion"}]}\n'
+    'note "4 again" -> {"kind":"ambiguous","readings":["lost 4 again","gained 4 again"]}\n'
+    'note "nice weather today" -> {"kind":"options","options":[]}\n'
+)
+EX_COMPACT = "Reply with compact single-line JSON: no spaces or line breaks between tokens.\n"
+
+
+@functools.cache
+def ex_instructions():
+    """The v2 instructions with the v2-ex examples and the compact-reply sentence."""
+    instructions = load_v2()[0]
+    head, marker, _ = instructions.partition("Examples (target alias t, current value 9):\n")
+    assert marker, "the v2 instructions changed"
+    lead = "Reply with one JSON object and nothing else:\n"
+    assert lead in head
+    head = head.replace(lead, EX_COMPACT + lead, 1)
+    return head + EX_EXAMPLES
+
+
+@functools.cache
+def ex_prefix():
+    instructions = ex_instructions()
+    if V2_EX_BASE == "v2-short":
+        return instructions + short_prefix()[len(load_v2()[0]) :]
+    return instructions + SCHEMA_HEADING + load_v2()[2]
+
+
 @functools.cache
 def short_prefix():
     """The v2 instructions with the schema quoted without the alias enum."""
@@ -242,6 +282,8 @@ def contract_prefix(contract, variant=None):
         raise ValueError("prompt variants exist for v1 only")
     if contract == "v2-short":
         return short_prefix()
+    if contract == "v2-ex":
+        return ex_prefix()
     return load_v2()[3]
 
 
@@ -384,7 +426,7 @@ def build_request(case, sheet, variant=None, contract="v1"):
     Under v2, supplied and excluded are keyed by alias: "t" for the target, "f1"... for the
     context fields in order (the same order and drop rule as v1).
     """
-    if contract in ("v2", "v2-short"):
+    if contract in ("v2", "v2-short", "v2-ex"):
         request = _build_request_v2(case, sheet)
         request["system"] = contract_prefix(contract)
         request["contract"] = contract

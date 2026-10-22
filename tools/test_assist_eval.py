@@ -431,6 +431,22 @@ class ContractV2(unittest.TestCase):
             ae.shown_values(ae.validate_reply(reply(op("add", ref("t"), lit(5))), req)), [25]
         )
 
+    def test_ex_prefix_is_compact_with_an_alias_example(self):
+        req = ae.build_request(
+            {"id": "t", "target": "hp", "phrase": "heal 5"}, SHEET, contract="v2-ex"
+        )
+        examples = req["system"].split("Examples (target alias t, current value 9):\n")[1]
+        lines = [line for line in examples.split("\n") if line.startswith("note ")]
+        self.assertEqual(len(lines), 5)
+        for line in lines:
+            reply_json = line.split(" -> ", 1)[1]
+            self.assertEqual(json.dumps(json.loads(reply_json), separators=(",", ":")), reply_json)
+        self.assertIn('{"ref":"f1"}', examples)
+        self.assertIn("compact single-line JSON", req["system"])
+        self.assertEqual(
+            ae.chat_body(req, 384)["response_format"]["json_schema"]["schema"], ae.load_v2()[1]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
