@@ -92,6 +92,13 @@ class FakeModel(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 (http.server API)
         self.send_json(200 if self.path == "/health" else 404, {"status": "ok"})
 
+    def handle_one_request(self):
+        # A superseded job's request is dropped mid-stream by design.
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+
     def do_POST(self):  # noqa: N802 (http.server API)
         if not self.authorized():
             self.send_json(401, {"error": "token"})
@@ -152,6 +159,13 @@ def scenario(page, sheet):
     until(page, "document.documentElement.dataset.sheetAssist === 'ready'", "the module")
     hp = page.locator("#v0")
     start_value = hp.input_value()
+    if not start_value.isdigit():
+        # A scribble left by the previous viewport is echoed (N2): enter a known value first.
+        hp.fill("84")
+        hp.press("Enter")
+        until(page, "!document.querySelector('form[aria-busy]')", "the save")
+        page.wait_for_timeout(300)
+        start_value = hp.input_value()
 
     # A saved scribble: Thinking…, then the option with the current value, the expression,
     # the effect and the explanation as text.
