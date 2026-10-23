@@ -30,4 +30,4 @@ accepted = ["MIT-0"]
 # LGPL-3.0 linking exception, which lets a combined work link it statically without the
 # relinking duties (4d, 6a). AGPL-3.0 combines with LGPLv3 code. Preserve its notice.
 [hakoniwa]
-accepted = ["LGPL-3.0-only"]
+accepted = ["LGPL-3.0-only WITH LGPL-3.0-linking-exception"]
