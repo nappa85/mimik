@@ -4,8 +4,9 @@ Mimik is a sheet-first tabletop RPG companion for players at a physical table. I
 standalone Rust binary (`mimik`, AGPL-3.0-only) that serves server-rendered HTML to browsers on
 the local network and stores everything in one SQLite file. No Node.js, Python, GPU or internet
 access is needed at run time. The optional interpretation assistant (off by default,
-`--assistant`) runs the bundled, pinned official llama.cpp `llama-server` (CPU build, in
-`llama/` beside the binary) as Mimik's own confined child process, never a container
+`--assistant`) runs the bundled, pinned official llama.cpp `llama-server` (the Vulkan build on
+a hardware GPU, else the CPU build, in `llama/` beside the binary) as Mimik's own confined child
+process, never a container
 ([model-runtime.md](model-runtime.md)).
 
 ## Runtime

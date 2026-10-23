@@ -13,8 +13,8 @@ in `docs/assisted-entry.md`; this plan only adds to it.
 
 Remaining, in order (2b measured and reviewed, `docs/results.md`; ASSIST-27 to ASSIST-42
 decided; Rust 1.99.1 and `rig-core` 0.45.0 in place, ASSIST-39; 2c-1, interpretation against a
-hand-started local server, built, `docs/assisted-entry.md`; 2c-2a, the CPU runtime, built,
-`docs/model-runtime.md`): **2c-2** the model runtime (process,
+hand-started local server, built, `docs/assisted-entry.md`; 2c-2a, the CPU runtime, and
+2c-2b-1, the GPU path, built, `docs/model-runtime.md`): **2c-2** the model runtime (process,
 token, confinement, budgets), **2d-1** the owner model setting with local models, **2d-2**
 model downloads, **3** bundles and reminders, **4** suggestions and "Which Sword?", **5** docs
 and gate; each sub-step has its own branch, tests and reviews. The model runs GPU-first with
@@ -76,10 +76,10 @@ steps add:
 
 ### 1.4a Model runtime, device and budgets (2c-2; ASSIST-27, ASSIST-29 to ASSIST-34, ASSIST-40)
 
-Built for the CPU path at level 1 (step 2c-2a; level 3 built but not used, ASSIST-43): [model-runtime.md](model-runtime.md) is
-the reference and wins where it differs from this design. What follows stays the design for
-2c-2b (the GPU path, the device choice and fallback, level 2) and is kept whole as their
-context.
+Built for the CPU path (step 2c-2a) and the GPU path with its device choice and fallback
+(step 2c-2b-1), at level 1 (level 3 built but not used, ASSIST-43):
+[model-runtime.md](model-runtime.md) is the reference and wins where it differs from this
+design. What follows stays the design for level 2 (2c-2b-2) and is kept whole as its context.
 
 Linux x86_64 is the only platform built and verified in 2c-2; macOS (Metal) and Windows
 (Vulkan) runtime code is deferred with no platform designed out (ASSIST-34, §4 Later).
@@ -730,7 +730,7 @@ no sheet or player text. No prompts, player text, presigned URLs or token in log
 
 Split (user, 2026-10-22) into **2c-2a** (the CPU path at confinement level 1; level 3 built,
 not used, ASSIST-43) and
-**2c-2b** (the GPU path and level 2), each with its own branch and reviews; the machinery of
+**2c-2b** (the GPU path and level 2, itself split into 2c-2b-1 and 2c-2b-2, user 2026-10-23), each with its own branch and reviews; the machinery of
 2c-2a is path-aware, so 2c-2b only adds to it.
 
 #### 2c-2a CPU path, bubblewrap (level 3 built, not used: ASSIST-43)
@@ -763,23 +763,30 @@ automatic), shown on the page with its exposure, and these before it can be enab
 - the live cwd-helper hardening: bounded ready wait and read, failing at once on refusal or
   exit, kill-on-drop guards.
 
-#### 2c-2b GPU path and Landlock
+#### 2c-2b-1 GPU path
 
-Scope: §1.4a's device choice, the GPU build and the GPU → CPU fallback, "Try the GPU again" on
-the assistant page, and confinement level 2 (Landlock with seccomp), used only when the owner has explicitly allowed it
-(ASSIST-44): an owner setting, off by default, shown with what level 2 does not confine. Tests:
-- device and fallback: per-node sandboxed listings (format pinned from the real build): one
-  hardware GPU plus lavapipe → the hardware GPU, lavapipe excluded before the count; only
-  `llvmpipe` → CPU; a host where the selected card is `Vulkan1` but its sandboxed list names it
-  `Vulkan0` → `--device Vulkan0`; enumeration order changing between discovery and launch → the
-  launch name still comes from the in-sandbox listing; two identical cards at level 1 → told
-  apart and remembered by PCI address; with the owner's explicit permission for level 3
-  (ASSIST-43), two identical cards at level 3 → CPU path with the page note; dedicated before integrated only when sysfs says so; no `--device` on the CPU path; a
-  mismatch at the real start → GPU failure; an offload line with N < M → GPU failure; a level
-  that passes for the CPU build but not the GPU build → each path at its own level;
-  `--assistant-device cpu` never lists devices; live (dev host): Vulkan on the RX 6650 XT reaches `ready` with GPU
-  budgets, refused calls checked with `strace` once, and killing the child mid-job ends on the
-  CPU path with CPU budgets and the page saying why;
+Built (branch `assist-2c2b`; split from 2c-2b by the user, 2026-10-23; reference
+[model-runtime.md](model-runtime.md)). Remaining before it is marked complete, on the dev host
+with the GPU fan on manual, evening or weekend, through `tools/assist_gpu_live.py` (it refuses
+otherwise):
+
+- the live GPU checks (`live_gpu_*`): Vulkan on the RX 6650 XT reaches `ready` with GPU
+  budgets under the level-1 GPU profile (which fixes the path list), the real listing parses
+  in the pinned format with one hardware GPU per node, and killing the child mid-job ends on
+  the CPU path with CPU budgets and the page saying why;
+- the host fake-GPU checks (`live_fake_gpu_*`, bubblewrap, no GPU): one node bound per listing,
+  the probe opening the node, `--device` and the offload check, the fallback;
+- the first native GPU calibration (start to `ready`, priming, samples, B, R, D, Q) and grammar
+  against no-grammar on the GPU path, to `docs/results.md`;
+- refused calls checked once with `strace` in a container on the GPU path (calls the Vulkan
+  driver needs are decided before 2c-2b-1 completes).
+
+#### 2c-2b-2 Landlock (branch `assist-2c2b2`, from master after 2c-2b-1 merges)
+
+Scope: confinement level 2 (Landlock with seccomp), used only when the owner has explicitly
+allowed it (ASSIST-44) with `--assistant-allow-landlock`, off by default; `/admin/assistant`
+shows whether it is on, what level 2 does not confine, and how to turn it on. Without it a
+level-1 failure means unavailable. Tests:
 - Landlock level: the state comes from `RestrictionStatus` (full, partial, none) and the
   page text matches the table in §1.4a; seccomp refusals as above (testable here); with
   Landlock network rules: no TCP connect to a host listener, LAN or public address, no bind
@@ -790,17 +797,13 @@ the assistant page, and confinement level 2 (Landlock with seccomp), used only w
   adversarial helper and recorded; on this host: the helper cannot fork, `vfork` or `clone` a
   process (`clone3` → `ENOSYS`) while threads still start, so no descendant outlives a SIGKILL
   of the child;
-- generations and transitions: the GPU rows of the table: GPU failure at each phase → CPU at
-  once, not counted; GPU budgets that do not derive → CPU path, the page saying why; a
-  sandbox-setup failure at level 2 → level 3 only with the owner's explicit permission,
-  otherwise `unavailable` (ASSIST-43); a level that passes for the CPU build but not the
-  GPU build → each path at its own level;
-- bubblewrap level: the GPU path reaches `ready` with the selected render node only; probe on
-  the GPU path opens the render node and enumerates the device; no build accepts a software
-  renderer;
-- rights: "Try the GPU again" → 403 for a non-owner, CSRF checked, no second transition;
-- measurement step: the first native GPU calibration (start to `ready`, priming, samples, B, R,
-  D, Q), grammar against no-grammar on the GPU path, refused calls checked with `strace` once.
+- the GPU at the TCP levels: used only when exactly one hardware GPU is visible, counted from
+  sysfs (ASSIST-L25); with the owner's explicit permission for level 3 (ASSIST-43), two
+  identical cards at level 3 → CPU path with the page note;
+- transitions: a sandbox-setup failure at level 2 → level 3 only with the owner's explicit
+  permission, otherwise `unavailable` (ASSIST-43); a level that passes for the CPU build but
+  not the GPU build → each path at its own level;
+- rights: the option off → level 2 never probed or started, whatever the probe would say.
 
 ### 2d-1 Owner model setting (local models)
 
@@ -959,7 +962,7 @@ prevented); one revision per Enter makes history long (no-ops write nothing, no 
 (proxies, redirects, retries) could send player text off the machine or repeat it, hence the
 client policy and its tests. Runtime: bubblewrap needs unprivileged user namespaces, which
 some distributions disable or restrict (Ubuntu's AppArmor rule), and older distributions'
-bubblewrap may lack an option the probe needs; those machines run no assistant unless the owner explicitly allows Landlock (2c-2b, ASSIST-44)
+bubblewrap may lack an option the probe needs; those machines run no assistant unless the owner explicitly allows Landlock (2c-2b-2, ASSIST-44)
 or unconfined (ASSIST-43), as shown on the page; and Landlock is missing or
 lacks network rules on many kernels (this host's included), so a machine can end on a lower
 level; the Landlock level leaves inbound listening on other addresses and local Unix sockets

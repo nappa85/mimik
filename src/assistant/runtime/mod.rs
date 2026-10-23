@@ -10,6 +10,7 @@
 pub(crate) mod budgets;
 pub(crate) mod bwrap;
 pub(crate) mod calibration;
+pub(crate) mod device;
 pub(crate) mod drain;
 pub(crate) mod endpoint;
 pub(crate) mod files;
@@ -30,7 +31,6 @@ pub(crate) mod token;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Path {
     Cpu,
-    #[cfg_attr(not(test), expect(dead_code, reason = "the GPU path is step 2c-2b"))]
     Gpu,
 }
 

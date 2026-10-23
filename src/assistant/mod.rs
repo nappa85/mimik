@@ -45,6 +45,9 @@ pub struct RuntimeConfig {
     pub model_alias: Option<String>,
     /// `--assistant-threads`, default the physical cores minus one (ASSIST-41).
     pub threads: Option<u32>,
+    /// `--assistant-device`: `auto` (the default: the best hardware GPU, else the CPU),
+    /// `cpu`, or a GPU's PCI address.
+    pub device: Option<String>,
 }
 
 impl AssistantHandle {
@@ -88,6 +91,11 @@ impl AssistantHandle {
             Some(alias) => alias,
             None => model::default_alias(&config.model)?,
         };
+        let device = match config.device.as_deref() {
+            None => runtime::device::Choice::Auto,
+            Some(text) => runtime::device::Choice::parse(text)?,
+        };
+        let path = runtime_path(&device);
         if config.threads == Some(0) {
             return Err("--assistant-threads must be at least 1".into());
         }
@@ -116,13 +124,15 @@ impl AssistantHandle {
                 .map_err(|_| "Mimik's own path is unknown".to_owned())?,
             inner: runtime::launch::InnerCommand::mimik()
                 .map_err(|_| "Mimik's own path is unknown".to_owned())?,
+            device,
+            roots: runtime::device::Roots::default(),
         };
         Ok(Self::with_launcher(
             Arc::new(runtime::launch::Launch(Arc::new(
                 runtime::launch::Real::new(settings),
             ))),
             runtime::manager::Config {
-                path: runtime::Path::Cpu,
+                path,
                 max_tokens,
                 levels: runtime::manager::USED_LEVELS,
             },
@@ -155,6 +165,15 @@ impl AssistantHandle {
             assistant,
             runtime: None,
         }
+    }
+}
+
+/// The path the runtime tries first: the GPU unless the CPU was chosen (ASSIST-27); with
+/// `cpu` no device is ever listed.
+pub(crate) fn runtime_path(device: &runtime::device::Choice) -> runtime::Path {
+    match device {
+        runtime::device::Choice::Cpu => runtime::Path::Cpu,
+        runtime::device::Choice::Auto | runtime::device::Choice::Pci(_) => runtime::Path::Gpu,
     }
 }
 

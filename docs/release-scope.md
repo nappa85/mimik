@@ -33,7 +33,7 @@ same private network. No Node.js, Python, GPU, API key or internet access is nee
   `127.0.0.1` only. It is not protected by accounts and does not see private campaign data.
 
 No language model file is part of this release. The archive carries the pinned official
-llama.cpp CPU build (`llama/`, b11609, MIT; its source archive accompanies the release) for the
+llama.cpp CPU and Vulkan builds (`llama/`, b11609, MIT; its source archive accompanies the release) for the
 optional interpretation assistant, which is off unless started with `--assistant` and proposes
 readings the player must confirm; it never applies sheet changes on its own. Its scope is
 Linux `x86_64` on the CPU: the model server runs only confined by bubblewrap, where the
@@ -41,8 +41,10 @@ start-time probe shows unprivileged user namespaces work; otherwise the assistan
 `/admin/assistant` says how to enable them (it never runs the model server unconfined). Level 1 is verified on Ubuntu 24.04 with
 `kernel.apparmor_restrict_unprivileged_userns` switched off (the CI runner) and on the dev host
 (Gentoo, no such restriction); with Ubuntu 24.04's default restriction on, CI records the
-probe's outcome without certifying it. The Landlock level and the GPU path
-are not built; the documented minimum host for the bundled build (Ubuntu 22.04 `x86_64`) is not
+probe's outcome without certifying it. On a machine with a hardware GPU the assistant tries
+the GPU path first (the Vulkan build, `--assistant-device`) and falls back to the CPU; the GPU
+path is not certified: CI does not cover it, and its live checks on the dev host's GPU are
+still owed. The Landlock level is not built; the documented minimum host for the bundled build (Ubuntu 22.04 `x86_64`) is not
 yet verified on a VM.
 
 ## Run
@@ -143,8 +145,8 @@ or storage guard for sheet history and notes).
   into `llama/` with its licence text), `htmx-LICENSE`, `response-targets-LICENSE`,
   `SQLITE-NOTICE.txt`, `BUILD.txt` (version, revision, Rust version, llama.cpp build),
   `SOURCE.txt`, and `llama/`: exactly the pinned files of the official llama.cpp b11609 CPU
-  build in `llama/cpu/` (their hashes and modes are in the manifest built into
-  `mimik`).
+  build in `llama/cpu/` and Vulkan build in `llama/vulkan/` (their hashes and modes are in the
+  manifest built into `mimik`).
 - `mimik-0.1.0-source.crate`: corresponding source: Rust code, templates, migrations, assets
   in preferred form, tests, helper tools, build configuration and documentation.
 - `mimik-0.1.0-dependency-sources.tar.gz`: vendored Rust dependency sources with checksums,

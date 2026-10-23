@@ -1,9 +1,9 @@
 //! `/admin/assistant` (assisted sheet plan §1.4b, "Page"; step 2c-2a): the owner's view of
 //! the model runtime (state, path, confinement level, measurements, budgets, the breaker)
-//! and its Restart. Owner only; Restart is CSRF-checked, and a second press while a Restart
-//! runs starts no second transition.
+//! and its Restart and "Try the GPU again". Owner only; both are CSRF-checked, and a second
+//! press while either runs starts no second transition.
 use super::{AuthResult, AuthState, csrf_admission, materials::html, owner_auth};
-use crate::assistant::runtime::manager::{Restart, State as Runtime, Status};
+use crate::assistant::runtime::manager::{Restart, State as Runtime, Status, TryGpu};
 use crate::assistant::runtime::{Level, Path};
 use askama::Template;
 use axum::{
@@ -20,6 +20,7 @@ pub(super) fn routes() -> Router<AuthState> {
     Router::new()
         .route("/admin/assistant", get(page))
         .route("/admin/assistant/restart", post(restart))
+        .route("/admin/assistant/try-gpu", post(try_gpu))
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -27,6 +28,8 @@ pub(super) fn routes() -> Router<AuthState> {
 enum Notice {
     Restarting,
     AlreadyRestarting,
+    TryingGpu,
+    GpuNotApplicable,
 }
 
 impl Notice {
@@ -34,6 +37,12 @@ impl Notice {
         match self {
             Self::Restarting => "Restarting: the model server is being started and measured again.",
             Self::AlreadyRestarting => "A restart is already running; nothing else was started.",
+            Self::TryingGpu => {
+                "Trying the GPU again: the model server is being started on the GPU and measured again."
+            }
+            Self::GpuNotApplicable => {
+                "Nothing to try: the GPU is in use, or the CPU was chosen with --assistant-device cpu."
+            }
         }
     }
 }
@@ -101,11 +110,25 @@ struct CalibrationView {
     samples: Vec<SampleView>,
 }
 
+struct DeviceLine {
+    description: String,
+    name: String,
+    pci: String,
+    node: String,
+    total_mib: u64,
+}
+
 struct View {
     llama: String,
     state: &'static str,
     reason: String,
     path: &'static str,
+    /// The GPU is wanted but not in use: why, with the "Try the GPU again" button.
+    gpu_note: Option<String>,
+    /// `--assistant-device cpu`.
+    cpu_chosen: bool,
+    device: Option<DeviceLine>,
+    device_notes: Vec<String>,
     generation: u64,
     failures: u32,
     last_failure: String,
@@ -144,6 +167,24 @@ fn view(status: Status, breaker: String) -> View {
             Path::Cpu => "CPU",
             Path::Gpu => "GPU",
         },
+        gpu_note: if status.gpu_wanted && status.path == Path::Cpu {
+            Some(
+                status
+                    .gpu_note
+                    .unwrap_or_else(|| "the GPU path has not been tried yet".to_owned()),
+            )
+        } else {
+            None
+        },
+        cpu_chosen: !status.gpu_wanted,
+        device: status.device.map(|device| DeviceLine {
+            description: device.description,
+            name: device.name,
+            pci: device.pci,
+            node: device.node,
+            total_mib: device.total_mib,
+        }),
+        device_notes: status.device_notes,
         generation: status.generation,
         failures: status.failures,
         last_failure: status.last_failure.unwrap_or_default(),
@@ -227,6 +268,27 @@ async fn restart(
     let notice = match runtime.restart() {
         Restart::Accepted => "restarting",
         Restart::AlreadyRunning => "already-restarting",
+    };
+    Ok(Redirect::to(&format!("/admin/assistant?notice={notice}")).into_response())
+}
+
+async fn try_gpu(
+    State(state): State<AuthState>,
+    session: Session,
+    Form(form): Form<RestartForm>,
+) -> AuthResult {
+    owner_auth(&state, &session).await?;
+    csrf_admission(&session, &form.csrf).await?;
+    let runtime = state
+        .options
+        .assistant
+        .as_ref()
+        .and_then(|handle| handle.runtime.as_ref())
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let notice = match runtime.try_gpu() {
+        TryGpu::Accepted => "trying-gpu",
+        TryGpu::AlreadyRunning => "already-restarting",
+        TryGpu::NotApplicable => "gpu-not-applicable",
     };
     Ok(Redirect::to(&format!("/admin/assistant?notice={notice}")).into_response())
 }

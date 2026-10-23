@@ -71,6 +71,8 @@ fn settings(scratch: &std::path::Path, inner: &str, inner_env: Vec<(String, Stri
             },
             shim_env: vec![(test_helper::VARIABLE.into(), "shim".into())],
         },
+        device: device::Choice::Cpu,
+        roots: device::Roots::default(),
     }
 }
 
@@ -834,3 +836,6 @@ fn live_level_3_does_not_load_a_backend_from_an_attacker_writable_cwd() {
     mimik.kill().unwrap();
     mimik.wait().unwrap();
 }
+
+#[path = "live_gpu_tests.rs"]
+mod gpu;

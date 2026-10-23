@@ -228,3 +228,131 @@ async fn a_second_restart_while_one_runs_starts_nothing_and_a_revoked_session_is
     );
     assert_eq!(preflights.load(Ordering::SeqCst), 2);
 }
+
+/// A launcher with no usable GPU and no level 1: the GPU path fails at its probe, the CPU
+/// path then has no level, and the runtime is unavailable on the CPU path. From the second
+/// GPU probe on, each waits for a permit.
+struct NoGpu {
+    gate: Arc<tokio::sync::Semaphore>,
+    gpu_probes: Arc<AtomicI64>,
+}
+
+#[async_trait::async_trait]
+impl Launcher for NoGpu {
+    async fn preflight(&self, _: Path) -> Result<(), String> {
+        Ok(())
+    }
+    async fn probe(&self, path: Path) -> Vec<(Level, Result<(), String>)> {
+        if path == Path::Cpu {
+            return vec![(Level::Bubblewrap, Err("test: no bubblewrap".into()))];
+        }
+        if self.gpu_probes.fetch_add(1, Ordering::SeqCst) >= 1 {
+            self.gate.acquire().await.unwrap().forget();
+        }
+        vec![(Level::Bubblewrap, Err("test: no hardware GPU".into()))]
+    }
+    async fn start(&self, _: u64, _: Level, _: Path) -> Result<Arc<dyn Child>, Fail> {
+        Err(Fail::Other("never".into()))
+    }
+}
+
+#[tokio::test]
+async fn try_the_gpu_again_is_owner_only_csrf_checked_and_one_transition() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture_with_owner(1).await;
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let gpu_probes = Arc::new(AtomicI64::new(0));
+    let handle = AssistantHandle::with_launcher(
+        Arc::new(NoGpu {
+            gate: Arc::clone(&gate),
+            gpu_probes: Arc::clone(&gpu_probes),
+        }),
+        manager::Config {
+            path: Path::Gpu,
+            max_tokens: 352,
+            levels: manager::USED_LEVELS,
+        },
+    );
+    let app = crate::auth::app_with_options(
+        store.clone(),
+        crate::auth::AuthOptions {
+            assistant: Some(handle),
+            ..crate::auth::AuthOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut page = String::new();
+    for _ in 0..200 {
+        page = body(router_request(&app, &auth[0], "/admin/assistant", None).await).await;
+        if page.contains("<strong>Unavailable</strong>") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(page.contains("Path: CPU"), "{page}");
+    assert!(
+        page.contains("The GPU is not in use: test: no hardware GPU"),
+        "{page}"
+    );
+    assert!(
+        page.contains("action=\"/admin/assistant/try-gpu\""),
+        "{page}"
+    );
+    let csrf = "a".repeat(64);
+    assert_eq!(
+        router_request(
+            &app,
+            &auth[1],
+            "/admin/assistant/try-gpu",
+            Some(restart_form(&csrf))
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        router_request(
+            &app,
+            &auth[0],
+            "/admin/assistant/try-gpu",
+            Some(restart_form(&"b".repeat(64)))
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(gpu_probes.load(Ordering::SeqCst), 1);
+    let first = router_request(
+        &app,
+        &auth[0],
+        "/admin/assistant/try-gpu",
+        Some(restart_form(&csrf)),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        first.headers()["location"],
+        "/admin/assistant?notice=trying-gpu"
+    );
+    let second = router_request(
+        &app,
+        &auth[0],
+        "/admin/assistant/try-gpu",
+        Some(restart_form(&csrf)),
+    )
+    .await;
+    assert_eq!(
+        second.headers()["location"],
+        "/admin/assistant?notice=already-restarting"
+    );
+    for _ in 0..200 {
+        if gpu_probes.load(Ordering::SeqCst) >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    gate.add_permits(4);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(gpu_probes.load(Ordering::SeqCst), 2);
+}

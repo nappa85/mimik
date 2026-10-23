@@ -56,6 +56,10 @@ struct AssistantArgs {
     /// CPU threads of the model server (default: the physical cores minus one).
     #[arg(long = "assistant-threads")]
     threads: Option<u32>,
+    /// The model server's device: `auto` (default: the best hardware GPU, else the CPU),
+    /// `cpu`, or a GPU's PCI address such as `0000:0c:00.0`.
+    #[arg(long = "assistant-device")]
+    device: Option<String>,
     #[cfg(feature = "dev-endpoint")]
     #[command(flatten)]
     development: DevelopmentAssistant,
@@ -120,6 +124,7 @@ fn assistant(
         model_sha256: args.assistant.model_sha256.clone(),
         model_alias: args.assistant.model_alias.clone(),
         threads: args.assistant.threads,
+        device: args.assistant.device.clone(),
     })?;
     println!("Assistant on: the model server is starting (see /admin/assistant).");
     Ok(handle)

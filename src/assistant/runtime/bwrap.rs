@@ -25,6 +25,7 @@ pub(crate) const OPTIONS: &[&str] = &[
     "--ro-bind-data",
     "--perms",
     "--dev",
+    "--dev-bind",
     "--proc",
     "--tmpfs",
     "--dir",
@@ -243,6 +244,89 @@ pub(crate) struct Profile {
     pub env: Vec<(String, String)>,
     /// The command and its arguments.
     pub command: Vec<String>,
+    /// The GPU path: the selected render node and what the driver reads.
+    pub gpu: Option<GpuBinds>,
+}
+
+/// What a GPU sandbox binds besides the CPU profile: one render node read-write, its PCI
+/// device's sysfs folder read-only with the links libdrm resolves to it, and the Vulkan
+/// loader's and driver's data folders that exist. The exact list is fixed by the live GPU
+/// check (plan §1.4a: "the exact path list is fixed by the 2c-2 tests on both paths").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GpuBinds {
+    /// The host's device file.
+    pub dev: PathBuf,
+    /// `renderD128`: bound at `/dev/dri/<name>`.
+    pub name: String,
+    /// The PCI device's sysfs folder (its real path), bound at the same path.
+    pub sysfs: PathBuf,
+    pub rdev: (u32, u32),
+    /// Vulkan ICD manifests and driver data, bound read-only at their own paths.
+    pub shared: Vec<PathBuf>,
+}
+
+/// The Vulkan loader's ICD manifests and the Mesa driver's data (`amdgpu.ids`, driconf).
+pub(crate) const GPU_DATA: &[&str] = &[
+    "/usr/share/vulkan",
+    "/etc/vulkan",
+    "/usr/share/libdrm",
+    "/usr/share/drirc.d",
+];
+
+/// The folders of `candidates` that exist.
+pub(crate) fn shared_data(candidates: &[&Path]) -> Vec<PathBuf> {
+    candidates
+        .iter()
+        .filter(|path| path.is_dir())
+        .map(|path| path.to_path_buf())
+        .collect()
+}
+
+impl GpuBinds {
+    /// The binds of `node` with the data folders this host has.
+    pub(crate) fn of(node: &super::device::Node) -> Self {
+        let data: Vec<&Path> = GPU_DATA.iter().map(Path::new).collect();
+        Self {
+            dev: node.dev.clone(),
+            name: node.name.clone(),
+            sysfs: node.sysfs.clone(),
+            rdev: node.rdev,
+            shared: shared_data(&data),
+        }
+    }
+
+    /// The node's path inside the sandbox.
+    pub(crate) fn inside(&self) -> String {
+        format!("/dev/dri/{}", self.name)
+    }
+
+    fn arguments(&self) -> Vec<OsString> {
+        let node = self.sysfs.join("drm").join(&self.name);
+        let mut args: Vec<OsString> = vec![
+            "--dev-bind".into(),
+            self.dev.clone().into_os_string(),
+            self.inside().into(),
+            "--ro-bind".into(),
+            self.sysfs.clone().into_os_string(),
+            self.sysfs.clone().into_os_string(),
+            "--symlink".into(),
+            node.clone().into_os_string(),
+            format!("/sys/dev/char/{}:{}", self.rdev.0, self.rdev.1).into(),
+            "--symlink".into(),
+            node.into_os_string(),
+            format!("/sys/class/drm/{}", self.name).into(),
+            "--dir".into(),
+            "/sys/bus/pci".into(),
+        ];
+        for path in &self.shared {
+            args.extend([
+                "--ro-bind".into(),
+                path.clone().into_os_string(),
+                path.clone().into_os_string(),
+            ]);
+        }
+        args
+    }
 }
 
 /// The system library directories and the dynamic loader's cache, as binds or links.
@@ -313,6 +397,9 @@ impl Profile {
         }
         args.extend(system_libraries());
         args.extend(["--dev", "/dev", "--proc", "/proc"].map(OsString::from));
+        if let Some(gpu) = &self.gpu {
+            args.extend(gpu.arguments());
+        }
         for (bytes, dest) in [(TMP_BYTES, "/tmp"), (SHM_BYTES, "/dev/shm")] {
             if self.size {
                 args.extend([SIZE.into(), bytes.to_string().into()]);
