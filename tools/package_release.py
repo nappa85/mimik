@@ -70,6 +70,20 @@ def compress_source(fetched, data, output):
     return target
 
 
+COUNTS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
+
+
+def check_inventory(readme, names):
+    """The release scope (shipped as README.md) lists every archive and says how many
+    SHA256SUMS covers."""
+    missing = [name for name in names if f"`{name}`" not in readme]
+    if missing:
+        raise ValueError(f"the release scope does not list: {', '.join(missing)}")
+    expected = f"checksums of the {COUNTS[len(names)]} archives"
+    if expected not in readme:
+        raise ValueError(f"the release scope must say: {expected}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True)
@@ -145,6 +159,10 @@ def main():
     with tarfile.open(archive, "w:gz") as tar:
         tar.add(stage, arcname=name)
     artifacts = [archive, args.output / source_name, args.output / dependency_name, llama_source]
+    check_inventory(
+        Path("docs/release-scope.md").read_text(encoding="utf-8"),
+        [path.name for path in artifacts],
+    )
     checksums = []
     for path in artifacts:
         checksums.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n")

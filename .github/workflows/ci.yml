@@ -119,6 +119,9 @@ jobs:
         working-directory: release
         run: |
           sha256sum --check SHA256SUMS
+          # Every downloaded archive is covered, and the count is the one the release scope states.
+          test "$(wc -l < SHA256SUMS)" -eq "$(find . -maxdepth 1 -type f ! -name SHA256SUMS | wc -l)"
+          test "$(wc -l < SHA256SUMS)" -eq 4
           tar -xzf mimik-0.1.0-linux-x86_64.tar.gz
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -258,6 +261,17 @@ jobs:
             (cd bubblewrap-0.13.0 && meson setup build --prefix=/usr -Dman=disabled -Dtests=false && ninja -C build && sudo ninja -C build install)
             bwrap --version
           fi
+      # Recorded, not gated: what the probe reaches with the runner's AppArmor user-namespace
+      # restriction as shipped (level 1 is certified only with it switched off, below).
+      - name: Start-time probe with the AppArmor restriction as shipped (recorded)
+        run: |
+          sysctl kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo "kernel.apparmor_restrict_unprivileged_userns is absent"
+          status=0
+          target/rel/mimik assistant-runner --probe --runtime target/rel/llama \
+            --models-dir target/models --model local:stories260K.gguf \
+            --model-sha256 270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d \
+            --data-dir target/probe-data-restricted || status=$?
+          echo "probe exit status with the restriction as shipped: $status (0 means level 1)"
       - name: Allow unprivileged user namespaces for this job only
         run: |
           if sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null; then
@@ -287,9 +301,18 @@ jobs:
           MIMIK_LIVE_MODELS: ${{ github.workspace }}/target/models
           MIMIK_LIVE_SCRATCH: ${{ github.workspace }}/target/scratch
         run: |
+          set -o pipefail
           target/confinement-tests --include-ignored --test-threads=2 \
             assistant::runtime::seccomp:: assistant::runtime::endpoint:: \
-            assistant::runtime::runner:: assistant::runtime::launch::live_tests::
+            assistant::runtime::runner:: assistant::runtime::launch::live_tests:: \
+            2>&1 | tee target/confinement.log
+          # A filter that matches too little must not pass: at least the 30 tests of this
+          # revision ran, none failed or was ignored.
+          ran=$(grep -oE '^test result: ok\. [0-9]+ passed; 0 failed; 0 ignored' target/confinement.log | grep -oE '[0-9]+' | head -n 1)
+          if [ "${ran:-0}" -lt 30 ]; then
+            echo "only ${ran:-0} confinement tests ran; expected at least 30"
+            exit 1
+          fi
 
   deployable:
     name: deployable

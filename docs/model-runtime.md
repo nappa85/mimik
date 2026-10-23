@@ -34,8 +34,9 @@ with its SHA-256 compiled in), `--assistant-model-sha256` (required for any othe
 `--assistant-model-alias` (default the file name without `.gguf`, lower case). `--models-dir`
 (default `<data dir>/models`, mode 0700, owned by Mimik's user; the model is placed there by
 hand). `--assistant-runtime` (default `llama/` beside the binary; it must hold exactly the
-pinned files either way). `--assistant-threads` (default the physical cores minus one, at
-least 1; physical cores are the distinct `core_cpus_list` sets in sysfs, ASSIST-41). The data
+pinned files either way). `--assistant-threads` (default the usable physical cores minus one,
+at least 1; physical cores are the distinct `core_cpus_list` sets in sysfs among the CPUs of
+Mimik's affinity mask, capped by its cgroup's `cpu.max` quota, ASSIST-41). The data
 directory is the database's folder; `run/` lives there.
 
 ## Pinned build
@@ -86,9 +87,11 @@ Tried in order; the active level and why each other level was skipped are on the
 the log.
 
 1. **bubblewrap.** `bwrap` from `/usr/bin/bwrap` or `/bin/bwrap` (never `PATH`), refused if
-   set-ID; every option used is checked in its help text, and unprivileged user namespaces
-   (`user.max_user_namespaces`, `kernel.unprivileged_userns_clone`,
-   `kernel.apparmor_restrict_unprivileged_userns`) are named when disabled. Profile:
+   set-ID or carrying file capabilities; every option used is checked in its help text.
+   Only `user.max_user_namespaces = 0` rules the level out before its probe; the probe
+   decides otherwise, and a failed probe names `kernel.unprivileged_userns_clone = 0` or
+   `kernel.apparmor_restrict_unprivileged_userns = 1` as a possible cause (a distribution's
+   AppArmor profile for `bwrap` may still allow it). Profile:
    `--unshare-all --die-with-parent --new-session --clearenv` with `PATH`, `LANG` and `HOME`
    (`/tmp`), `--cap-drop ALL`; read-only binds of `/usr/lib`, `/usr/lib64`, `/lib`, `/lib64`
    (or their links), `/etc/ld.so.cache` and `/sys/devices/system/cpu`; `--dev /dev`, `--proc
@@ -99,7 +102,9 @@ the log.
    `/models/model.gguf`; the token by `--ro-bind-data` (mode 0400) at `/run/token`; the root
    remounted read-only; the seccomp program by `--seccomp`; `--json-status-fd`, whose first
    line gives the sandbox's PID-1 reaper (`child-pid`) and its PID namespace. Nothing else of
-   the host is visible. The server listens on `/run/llama/llama.sock`.
+   the host is visible. The command inside is Mimik's own binary (bound by descriptor) as a
+   shim: it writes a marker on a dedicated pipe, closes every descriptor but 0–2 and executes
+   llama-server (or the probe). The server listens on `/run/llama/llama.sock`.
 2. **Landlock with seccomp:** not in this release (step 2c-2b); the page names it skipped.
 3. **Unconfined (seccomp only)**, on `127.0.0.1` with a random port: "not confined: TCP
    egress allowed, and the whole filesystem readable by Mimik's user is readable by the model
@@ -129,20 +134,24 @@ token channel): it reads the model's magic, the token and binds the socket or po
 one JSON line and answers one connection, on which the endpoint check runs. `mimik
 assistant-runner --probe --runtime <dir> --models-dir <dir> --model local:<name>
 [--model-sha256 <hex>] [--data-dir <dir>]` prints the result as one JSON line and exits 0 only
-at level 1 (the CI and owner check).
+at level 1 (the CI and owner check). A probe that fails for a definite cause skips its level;
+one that is only inconclusive (no report within 30 s, a missing pidfd) is tried again, three
+times in all, and a level that stays inconclusive is kept for the real start to decide.
 
 ## Endpoint check
 
 Every connection is checked before its first byte, and the token goes nowhere else. The
 transport is `hyper`'s HTTP/1 client connection over a stream Mimik opened itself (no pool,
-proxy, redirect, retry or decompression exists to turn off). Level 1: Mimik connects through
-`/proc/self/fd/<directory descriptor>/llama.sock` (no `sun_path` length limit); `SO_PEERCRED`
+proxy, redirect, retry or decompression exists to turn off). Level 1: Mimik checks that `llama.sock` in the generation directory is a socket (not
+following links) and connects through `/proc/self/fd/<directory descriptor>/llama.sock` (no
+`sun_path` length limit); `SO_PEERCRED`
 must give Mimik's UID and a PID that is the reaper or whose `PPid` is it, in the reported PID
 namespace (`/proc/<pid>/ns/pid`, or, where unreadable, `NSpid`), exactly one namespace deep with
 a small inner PID, while the reaper's pidfd shows it alive. Level 3: before and after
 `connect()`, every listening socket that could take a connection to `127.0.0.1:<port>`
 (`127.0.0.1`, `0.0.0.0`, `::`, `::ffff:127.0.0.1` in `/proc/net/tcp` and `tcp6`) must be open
 in the child's `/proc/<pid>/fd`; none yet is "not ready", any foreign one fails the attempt.
+The `/proc` scans run off the async runtime.
 
 ## Token
 
@@ -153,9 +162,13 @@ when dropped; never on a command line or in a log. llama-server reads it with
 ## Output
 
 The child's stdout and stderr are drained by two threads with a 4 KiB line bound and never
-copied into Mimik's log. Fixed patterns become events: bubblewrap's own errors (`bwrap: …`,
-which make an exit before `/health` a sandbox failure), bind failures, listening, the build
-number, the offload line, model-load errors (which name a failed start).
+copied into Mimik's log. Fixed patterns update a fixed-size summary (so memory stays bounded
+however much the child prints): bind failures, listening, the build number, the offload line,
+device and model-load errors (which name a failed start). Nothing the child prints can make
+an exit a sandbox failure: at level 1 that is decided only by the shim's marker never
+arriving (bwrap failed before the exec); once the marker arrived, or when it cannot be read,
+the exit counts at the same level. An exit is classified after both readers ended (5 s at
+most).
 
 ## Generations
 
@@ -163,17 +176,24 @@ Each launch has a generation number; its directory `<data dir>/run/<generation>/
 0700 (anything already there refuses the start) and removed with its contents, never
 following links, when the generation stops. The pidfile `run/assistant.pid` is held under an
 exclusive `flock` for Mimik's life ("another Mimik uses this data directory's assistant"); it
-records the child's PID, start time and possible executables, and at start a leftover is
-killed only when all three match, then old generation directories are removed. One manager
+records the child's PID, start time and possible executables; at start a leftover's pidfd
+is opened first, the three are checked after that, the kill goes through the pidfd and the
+sweep waits (5 s at most) for it to end, then old generation directories are removed. A child
+is owned from its spawn: any failure before the start completes, or dropping an unfinished
+start, kills and reaps it. One manager
 task serializes every transition, so two servers never coexist: a child is stopped with
-SIGTERM (on level 1 to bwrap, which takes the sandbox down with it) and SIGKILL after 5 s, and
-is gone when the runner has exited and, on level 1, the reaper's pidfd shows it gone. On every
+SIGTERM through the runner's pidfd (on level 1 to bwrap, which takes the sandbox down with
+it) and SIGKILL after 5 s, repeated until gone; it is gone, and its exit is published, only
+when the runner has exited and, on level 1, the reaper's pidfd shows it gone. Nothing stops a
+running child but a stop. On every
 generation change, queued and running jobs end "the assistant restarted: ask again" (neutral
 for the breaker); a child exit is never a breaker event. On shutdown Mimik stops the child.
 
 An attempt is: start (preflight once per start from level 1: the pidfile, the run directory,
 the model's size; then each level's probe), spawn and the endpoint check, `/health` within
-60 s (250 ms polls), priming within 300 s, calibration within twice the path's run cap. CPU
+60 s (250 ms polls), priming within 300 s, calibration within twice the path's run cap
+and each calibration sample within the run cap (a sample past it makes the machine "too slow",
+not a counted failure). CPU
 transitions:
 
 | Event | Action | Failure count |
@@ -185,7 +205,7 @@ transitions:
 | Failure count reaches 4 | `unavailable` until Restart | — |
 | Budgets do not derive | `unavailable` ("too slow on this machine: about N s needed, the cap is M s"), no retry | — |
 | `ready` for 10 minutes | count back to 0 | reset |
-| Restart (or Mimik's start) | stop, start again from level 1, breaker reset | reset |
+| Restart (or Mimik's start) | stop, start again from level 1, breaker reset; it interrupts a preflight, probe or start in progress, and further presses are ignored until `ready` or `unavailable` | reset |
 
 While `starting` or `unavailable` a job start answers 503 with the state and queues nothing;
 entry, notes and Undo work as usual. Log lines (`assistant: …` on standard error) carry
@@ -203,8 +223,8 @@ positive, `predicted_n` equal to `max_tokens`, the tail `prompt_n` − Nᵢ not 
 cached tokens at least 75 % of priming's prompt tokens, or the attempt fails. The budgets
 follow `assisted-sheet-plan.md` §1.4a "Budgets" (ASSIST-31, ASSIST-32): T(B) is the larger of
 the two samples' estimates per candidate (CPU 1,024, 768, 512), R = max(15, 1.25 × T rounded up
-to 5 s) within 90 s, D 1, Q = 120 − R. After a run-deadline expiry the next job waits the
-larger sample's prompt term at B (the request may still be in prompt evaluation), and
+to 5 s) within 90 s, D 1, Q = 120 − R. After a run-deadline expiry, or when a running job
+is superseded or cancelled, the next job waits the larger sample's prompt term at B (the request may still be in prompt evaluation), and
 admission counts that wait, so one expiry no longer makes the next job miss its deadline too.
 The measurement and the budgets are on the page.
 

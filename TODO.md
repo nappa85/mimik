@@ -37,6 +37,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   container at 2 CPUs on a loaded host); find whether it is timing (its 500 ms waits) before CI
   relies on it.
 
+- Pending user decision (2c-2a review): whether level 3 (unconfined but for seccomp) needs an
+  explicit owner opt-in before Mimik falls back to it; the fallback is one branch in the
+  manager's level choice, so either answer is a small change.
+
 ## Blockers
 
 - None.

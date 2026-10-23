@@ -232,3 +232,31 @@ class NoticeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InventoryTests(unittest.TestCase):
+    NAMES = [
+        "mimik-0.1.0-linux-x86_64.tar.gz",
+        "mimik-0.1.0-source.crate",
+        "mimik-0.1.0-dependency-sources.tar.gz",
+        "llama.cpp-b11609-source.tar.gz",
+    ]
+
+    def test_the_release_scope_lists_every_archive_and_their_count(self):
+        readme = Path(__file__).resolve().parents[1] / "docs" / "release-scope.md"
+        package_release.check_inventory(readme.read_text(encoding="utf-8"), self.NAMES)
+
+    def test_a_missing_archive_or_a_wrong_count_is_refused(self):
+        listed = "".join(f"- `{name}`: x\n" for name in self.NAMES[:3])
+        with self.assertRaisesRegex(ValueError, "llama.cpp-b11609-source.tar.gz"):
+            package_release.check_inventory(
+                listed + "- `SHA256SUMS`: checksums of the four archives.\n", self.NAMES
+            )
+        listed += f"- `{self.NAMES[3]}`: x\n"
+        with self.assertRaisesRegex(ValueError, "four"):
+            package_release.check_inventory(
+                listed + "- `SHA256SUMS`: checksums of the three archives.\n", self.NAMES
+            )
+        package_release.check_inventory(
+            listed + "- `SHA256SUMS`: checksums of the four archives.\n", self.NAMES
+        )

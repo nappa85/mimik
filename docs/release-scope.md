@@ -36,9 +36,12 @@ No language model file is part of this release. The archive carries the pinned o
 llama.cpp CPU build (`llama/`, b11609, MIT; its source archive accompanies the release) for the
 optional interpretation assistant, which is off unless started with `--assistant` and proposes
 readings the player must confirm; it never applies sheet changes on its own. Its scope is
-Linux `x86_64` on the CPU: the model server runs confined by bubblewrap where unprivileged user
-namespaces work (verified on the CI runner, Ubuntu 24.04, and the dev host), otherwise
-unconfined but for seccomp (shown at `/admin/assistant`). The Landlock level and the GPU path
+Linux `x86_64` on the CPU: the model server runs confined by bubblewrap where the start-time
+probe shows unprivileged user namespaces work, otherwise unconfined but for seccomp (shown at
+`/admin/assistant`). Level 1 is verified on Ubuntu 24.04 with
+`kernel.apparmor_restrict_unprivileged_userns` switched off (the CI runner) and on the dev host
+(Gentoo, no such restriction); with Ubuntu 24.04's default restriction on, CI records the
+probe's outcome without certifying either level. The Landlock level and the GPU path
 are not built; the documented minimum host for the bundled build (Ubuntu 22.04 `x86_64`) is not
 yet verified on a VM.
 
@@ -106,11 +109,14 @@ holding exactly the pinned files);
   with and without JavaScript (the sheet module under its strict CSP);
 - **lan-smoke:** the same binary on isolated networks with separate clients, a denied subnet
   and an HTTPS reverse proxy, including Secure cookies and rendered QR codes;
-- **llama-runtime:** on Ubuntu 24.04 from the unpacked archive: the bundled llama-server's
-  version and flags, the start-time probe reaching bubblewrap, and the confinement tests
-  (seccomp, endpoint check, runner, and the server under the real profiles with the test
-  model: token refusal, socket and peer checks, an adversary in the sandbox reaching nothing,
-  SIGKILL of Mimik ending the sandbox).
+- **llama-runtime:** on Ubuntu 24.04 from the unpacked archive, with the AppArmor user-namespace
+  restriction switched off for the job (the probe's outcome with it on is recorded first, not
+  gated): the bundled llama-server's version and flags, the release binary's start-time probe
+  reaching bubblewrap, and the confinement tests, run from the test build of the same revision
+  against the unpacked `llama/` (seccomp, endpoint check, runner, and the server under the real
+  profiles with the test model: token refusal, socket and peer checks, an adversary in the
+  sandbox reaching nothing, forged sandbox errors keeping level 1, SIGKILL of Mimik ending the
+  sandbox), with a minimum count of tests run so a filter matching too little fails.
 
 **Green means** these checks passed for this revision and these exact archives. It does not mean
 a finished RPG companion.
@@ -133,13 +139,19 @@ or storage guard for sheet history and notes).
 ## Archive contents
 
 - `mimik-0.1.0-linux-x86_64.tar.gz`: `mimik`, this `README.md`, `LICENSE` (AGPL-3.0-only),
-  `THIRD-PARTY-NOTICES.md` (Rust dependencies), `htmx-LICENSE`, `response-targets-LICENSE`,
-  `SQLITE-NOTICE.txt`, `BUILD.txt` (version, revision, Rust version) and `SOURCE.txt`.
+  `THIRD-PARTY-NOTICES.md` (Rust dependencies, then llama.cpp and each component compiled
+  into `llama/` with its licence text), `htmx-LICENSE`, `response-targets-LICENSE`,
+  `SQLITE-NOTICE.txt`, `BUILD.txt` (version, revision, Rust version, llama.cpp build),
+  `SOURCE.txt`, and `llama/`: exactly the pinned files of the official llama.cpp b11609 CPU
+  build in `llama/cpu/` (their hashes and modes are in the manifest built into
+  `mimik`).
 - `mimik-0.1.0-source.crate`: corresponding source: Rust code, templates, migrations, assets
   in preferred form, tests, helper tools, build configuration and documentation.
 - `mimik-0.1.0-dependency-sources.tar.gz`: vendored Rust dependency sources with checksums,
   licences and the source-replacement configuration.
-- `SHA256SUMS`: checksums of the three archives.
+- `llama.cpp-b11609-source.tar.gz`: corresponding source of `llama/`: `git archive` of
+  commit fcac190, its tar hash pinned in the manifest.
+- `SHA256SUMS`: checksums of the four archives.
 
 No manuals, databases, secrets, extracted text or rendered source pages are included. CI smoke
 fixtures are synthetic and are not release content.
