@@ -102,13 +102,20 @@ def running(process):
 
 def kill(process):
     """SIGKILL of the whole group while the leader is still unreaped (so the group ID is
-    still ours), then reap the leader. A leader someone else already reaped is never
-    signalled through its PID: the ID may belong to another process by now."""
+    still ours), then reap the leader. A leader that was already reaped, by `poll` or by
+    another waiter, is never signalled through its PID: the ID may belong to another process
+    by now."""
     if process.returncode is None:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
+            # Peeks without reaping; ECHILD means another waiter has reaped the leader.
+            os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
             pass
+        else:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     process.wait()
 
 
@@ -124,7 +131,7 @@ def selected(args):
             check=False,
             stdin=subprocess.DEVNULL,
         )
-    except (subprocess.TimeoutExpired, OSError) as error:
+    except (subprocess.TimeoutExpired, OSError, UnicodeDecodeError) as error:
         return None, f"the test listing could not be run ({type(error).__name__})"
     names = [
         line[: -len(": test")] for line in listing.stdout.splitlines() if line.endswith(": test")

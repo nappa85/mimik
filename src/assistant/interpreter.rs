@@ -163,6 +163,8 @@ pub(crate) mod stub {
         pub tokenized: Mutex<Vec<String>>,
         /// When set, each completion waits for one permit before answering.
         pub gate: Mutex<Option<std::sync::Arc<tokio::sync::Semaphore>>>,
+        /// When set, `/tokenize` fails with this.
+        pub tokenize_fails: Mutex<Option<Failure>>,
     }
 
     impl StubInterpreter {
@@ -180,6 +182,9 @@ pub(crate) mod stub {
     impl Interpreter for StubInterpreter {
         async fn tokens(&self, text: &str) -> Result<usize, Failure> {
             self.tokenized.lock().unwrap().push(text.to_owned());
+            if let Some(failure) = *self.tokenize_fails.lock().unwrap() {
+                return Err(failure);
+            }
             let ratio = self.token_ratio.lock().unwrap().unwrap_or(3);
             Ok(text.len().div_ceil(ratio.max(1)))
         }

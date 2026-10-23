@@ -319,11 +319,14 @@ class NoticeTests(unittest.TestCase):
             tar = Path(temp) / "source.tar"
             self.write_tar(tar, data, self.FILES)
             self.pinned(tar, data)
-            # A licence text replaced inside an otherwise valid tar (same members and names).
-            forged = [("LICENSE", b"Forged text"), self.FILES[1]]
-            self.write_tar(tar, data, forged)
-            with self.assertRaisesRegex(ValueError, "differs from the pinned"):
-                package_release.llama_notice(data, tar)
+            # A licence text replaced inside an otherwise valid tar: of another length, then of
+            # the same length (the size check alone cannot catch it, the hash does).
+            for forged_text in (b"Forged text", b"MIT TEXT"):
+                self.write_tar(tar, data, [("LICENSE", forged_text), self.FILES[1]])
+                if len(forged_text) == len(b"MIT text"):
+                    self.assertEqual(tar.stat().st_size, data["source"]["tar_size"])
+                with self.assertRaisesRegex(ValueError, "differs from the pinned"):
+                    package_release.llama_notice(data, tar)
             # The pinned size is checked too.
             data["source"]["tar_sha256"] = llama_runtime.sha256(tar)
             data["source"]["tar_size"] = tar.stat().st_size + 1

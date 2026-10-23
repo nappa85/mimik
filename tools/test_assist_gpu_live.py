@@ -3,6 +3,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -153,6 +154,16 @@ class WatchCleanupTests(unittest.TestCase):
             os.killpg(process.pid, signal.SIG_DFL)
 
 
+def alive(pid):
+    """Running, not a zombie (a zombie answers `kill(pid, 0)`, and in a container whose PID 1
+    does not reap it stays one)."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as stat:
+            return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+
+
 class LeaderExitTests(unittest.TestCase):
     def test_a_same_group_child_of_a_leader_that_exited_is_killed(self):
         code = (
@@ -164,7 +175,7 @@ class LeaderExitTests(unittest.TestCase):
         child = int(leader.stdout.readline())
         # The leader has exited but is not reaped (a zombie keeps its group ID).
         os.waitid(os.P_PID, leader.pid, os.WEXITED | os.WNOWAIT)
-        os.kill(child, 0)  # still alive: it outlived its leader
+        self.assertTrue(alive(child))  # it outlived its leader
         live.watch(
             leader,
             ops.ThermalGuard(live.LIMITS),
@@ -175,17 +186,9 @@ class LeaderExitTests(unittest.TestCase):
             print,
         )
         for _ in range(100):
-            try:
-                os.kill(child, 0)
-            except ProcessLookupError:
+            if not alive(child):
                 return
-            try:
-                os.waitpid(child, os.WNOHANG)
-            except ChildProcessError:
-                pass
-            import time as real_time
-
-            real_time.sleep(0.02)
+            time.sleep(0.02)
         self.fail("the leader's same-group child survived the watch")
 
 
@@ -203,6 +206,14 @@ class ReapedLeaderTests(unittest.TestCase):
                 lambda now: True,
                 print,
             )
+        killpg.assert_not_called()
+
+    def test_a_leader_reaped_by_another_waiter_is_never_signalled(self):
+        process = sleeper(0)
+        time.sleep(0.2)
+        os.waitpid(process.pid, 0)  # reaped behind Popen's back: returncode is still None
+        with mock.patch.object(os, "killpg") as killpg:
+            live.kill(process)
         killpg.assert_not_called()
 
     def test_the_group_is_signalled_before_the_leader_is_reaped(self):
@@ -282,6 +293,26 @@ class RunTests(unittest.TestCase):
             names, why = live.selected(args)
         self.assertIsNone(names)
         self.assertIn("listing", why)
+        with mock.patch.object(
+            subprocess, "run", side_effect=UnicodeDecodeError("utf-8", b"", 0, 1, "x")
+        ):
+            self.assertIn("listing", live.selected(args)[1])
+
+    def test_main_exits_2_when_the_listing_cannot_run(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with (
+                mock.patch.object(ops, "heavy_allowed", return_value=True),
+                mock.patch.object(ops, "read_fan", return_value=MANUAL),
+                mock.patch.object(ops, "hwmon_root", return_value=folder),
+            ):
+                code = live.main(
+                    [
+                        *("--binary", "/nonexistent/tests", "--runtime", folder),
+                        *("--models", folder, "--scratch", folder, "--fake-server", "f"),
+                        *("--log", str(Path(folder) / "x.log")),
+                    ]
+                )
+        self.assertEqual(code, 2)
 
     def test_an_empty_selection_or_a_non_gpu_test_is_refused_before_launch(self):
         self.assertEqual(self.run_main([], "x"), 2)

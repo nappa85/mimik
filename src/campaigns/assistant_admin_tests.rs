@@ -318,7 +318,7 @@ async fn the_gpu_state_says_sandboxed_with_graphics_driver_access_and_names_the_
             && page.contains("<code>--assistant-device cpu</code>")
             && page.contains("no access to the user's files")
             && page.contains("read-only system libraries, system driver data")
-            && page.contains("the card's sysfs attributes")
+            && page.contains("the card's sysfs attributes and the CPU topology")
             && !page.contains("no files beyond"),
         "{page}"
     );

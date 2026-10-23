@@ -182,11 +182,13 @@ Why each level was not used is on the page and in the log.
    node, so its exposure to the kernel's graphics driver is wider than on the CPU path. The
    sandbox is otherwise the same: no network, no other processes and no access to the user's
    files; it reads the runtime and the model, read-only system libraries, system driver data
-   (Vulkan ICD manifests, libdrm, drirc) and the card's sysfs attributes (the CPU path reads
-   the read-only system library folders and the dynamic loader cache likewise, without the
-   driver data and sysfs). This is accepted by default and shown on the page (ASSIST-45,
-   ASSIST-L46); `--assistant-device cpu` removes it. This list is not yet checked on a real GPU: the live
-   check (`assisted-sheet-plan.md`, 2c-2b-1) is owed; a driver that needs more falls back to
+   (Vulkan ICD manifests, libdrm, drirc), the card's sysfs attributes and the CPU topology
+   (`/sys/devices/system/cpu`). The CPU path reads the same way the read-only system library
+   folders (`/usr/lib`, `/usr/lib64`, `/lib`, `/lib64`, `/usr/libexec/ld`), the dynamic loader
+   cache and the CPU topology, without the driver data and the card's sysfs. This is accepted
+   by default and shown on the page (ASSIST-45, ASSIST-L46); `--assistant-device cpu` removes
+   it. This list is not yet checked on a real GPU: the live check (`assisted-sheet-plan.md`,
+   2c-2b-1) is owed; a driver that needs more falls back to
    the CPU. The whole PCI sysfs folder is exposed read-only (vendor and device IDs, the
    attributes of that card): a fingerprinting exposure only, to be narrowed to what libdrm and
    Mesa read once the live check shows it (ASSIST-L44). All Vulkan ICD manifests are visible,
