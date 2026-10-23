@@ -636,6 +636,7 @@ async fn live_a_server_that_forges_bubblewraps_errors_keeps_level_1() {
         manager::Config {
             path: Path::Cpu,
             max_tokens: 64,
+            levels: manager::USED_LEVELS,
         },
     );
     let deadline = std::time::Instant::now() + Duration::from_secs(120);

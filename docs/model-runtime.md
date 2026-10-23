@@ -113,8 +113,12 @@ folder); and the current working directory. It is not governed by `LD_LIBRARY_PA
 
 ## Confinement levels
 
-Tried in order; the active level and why each other level was skipped are on the page and in
-the log.
+Mimik runs llama-server at level 1 or not at all (ASSIST-43): when level 1 cannot be used, the
+assistant is unavailable and `/admin/assistant` says how to fix it (install bubblewrap, allow
+unprivileged user namespaces, the AppArmor note), with level 1's own reason. Level 3 is built and
+unit-tested but switched off: no manager path probes or starts it, and `--probe` reports its
+result labelled "not used". It returns later as its own step behind an explicit owner opt-in.
+Why each level was not used is on the page and in the log.
 
 1. **bubblewrap.** `bwrap` from `/usr/bin/bwrap` or `/bin/bwrap` (never `PATH`), refused if
    set-ID or carrying file capabilities; every option used is checked in its help text.
@@ -141,7 +145,8 @@ the log.
    it executes nothing) and executes llama-server (or the probe); an exec failure is written
    to stderr and exits 127 after the marker, so it counts at the same level. The server listens on `/run/llama/llama.sock`.
 2. **Landlock with seccomp:** not in this release (step 2c-2b); the page names it skipped.
-3. **Unconfined (seccomp only)**, on `127.0.0.1` with a random port: "not confined: TCP
+3. **Unconfined (seccomp only), not used in this release (ASSIST-43)**: what follows describes
+   the switched-off code. On `127.0.0.1` with a random port: "not confined: TCP
    egress allowed, and the whole filesystem readable by Mimik's user is readable by the model
    server". The model is `--model /proc/self/fd/8`; the token is a 0600 file in the
    generation's 0700 directory, deleted once `/health` answers; `HOME` is an empty private
@@ -171,7 +176,8 @@ token channel): it reads the model's magic, the token and binds the socket or po
 one JSON line and answers one connection, on which the endpoint check runs. `mimik
 assistant-runner --probe --runtime <dir> --models-dir <dir> --model local:<name>
 [--model-sha256 <hex>] [--data-dir <dir>]` prints the result as one JSON line once its probes'
-cleanup has ended and exits 0 only
+cleanup has ended (level 3's result with `"used": false`; the level reached is 1 or none) and
+exits 0 only
 when level 1's probe passed (the CI and owner check). A probe that fails for a definite cause
 (an unusable bwrap, a changed file, a refusal inside the level or by the endpoint check)
 skips its level; one that is only inconclusive (no report within 30 s, a failed spawn or bwrap
@@ -258,7 +264,7 @@ transitions:
 
 | Event | Action | Failure count |
 |---|---|---|
-| Sandbox-attributable failure (bwrap setup, no status before exec) | next level that passed its probe, at once | not counted |
+| Sandbox-attributable failure (bwrap setup, no status before exec) | `unavailable` with the fix (level 1 is the only level used), at once | not counted |
 | Any other failed attempt (model load, a changed file, an exit after exec, a refused endpoint, no `/health`, failed priming or calibration, invalid timings) | retry after 2 minutes at the same level | +1 |
 | Child exits while ready | restart now | +1 only within 10 minutes of `ready` |
 | Two consecutive run-deadline expiries without a completed exchange between | stop as hung, restart, measure again | as a child exit |

@@ -6,7 +6,7 @@ use super::super::manager::{self, State};
 use super::super::manifest::File as Entry;
 use super::super::test_helper;
 use super::*;
-use crate::assistant::jobs::{Assistant, RuntimeState};
+use crate::assistant::jobs::Assistant;
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 
@@ -163,12 +163,20 @@ fn bwrap_installed() -> bool {
 }
 
 #[tokio::test]
-async fn the_probe_passes_at_level_3_and_names_level_1s_cause() {
+async fn the_manager_probe_runs_level_1_only_and_the_cli_still_probes_level_3() {
     let setup = setup(MODEL, "fake");
     let launch = launch(&setup);
     launch.preflight(Path::Cpu).await.unwrap();
+    // The manager's probe never runs level 3's code (ASSIST-43).
     let levels = launch.probe(Path::Cpu).await;
-    assert_eq!(levels[2], (Level::Unconfined, Ok(())), "{levels:?}");
+    assert_eq!(
+        levels[2],
+        (
+            Level::Unconfined,
+            Err("not used in this release (ASSIST-43)".into())
+        ),
+        "{levels:?}"
+    );
     assert_eq!(levels[1].0, Level::Landlock);
     assert!(levels[1].1.is_err());
     if !bwrap_installed() {
@@ -180,23 +188,30 @@ async fn the_probe_passes_at_level_3_and_names_level_1s_cause() {
             )
         );
     }
-    // The probes' directories are gone; a second probe works the same.
+    // `--probe` (probe_levels) still probes level 3, so its code keeps working.
+    let real = Arc::clone(&launch.0);
+    let all = tokio::task::spawn_blocking(move || {
+        let ticket = real.work().enter();
+        real.probe_levels(Path::Cpu, &ticket)
+    })
+    .await
+    .unwrap();
+    assert_eq!(all[2], (Level::Unconfined, Probed::Passed), "{all:?}");
+    launch.settle().await;
+    // The probes' directories are gone.
     let run: Vec<_> = std::fs::read_dir(setup.settings.data_dir.join("run"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(run, [rundir::PIDFILE]);
-    let again = launch.probe(Path::Cpu).await;
-    assert_eq!(again[2], (Level::Unconfined, Ok(())), "{again:?}");
-}
-
-fn cmdline(pid: i32) -> String {
-    String::from_utf8_lossy(&std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default())
-        .replace('\0', " ")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_manager_reaches_ready_and_shutdown_removes_everything() {
+async fn without_bubblewrap_the_real_manager_is_unavailable_and_starts_nothing() {
+    if bwrap_installed() {
+        // Level 1 is usable here; the level-1 path is covered by the live tests.
+        return;
+    }
     let setup = setup(MODEL, "fake");
     let real = Arc::new(Real::with_build(
         setup.settings.clone(),
@@ -209,42 +224,39 @@ async fn the_manager_reaches_ready_and_shutdown_removes_everything() {
         manager::Config {
             path: Path::Cpu,
             max_tokens: 64,
+            levels: manager::USED_LEVELS,
         },
     );
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    while assistant.state() != RuntimeState::Ready {
+    let why = loop {
+        if let State::Unavailable(why) = handle.status().state {
+            break why;
+        }
         assert!(
             std::time::Instant::now() < deadline,
             "{:?}",
             handle.status()
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    };
+    // Level 3 is never used (ASSIST-43): nothing was started, and the page says how to fix it.
+    assert!(why.starts_with(manager::LEVEL_1_NEEDED), "{why}");
     let status = handle.status();
-    assert_eq!(status.state, State::Ready);
-    if !bwrap_installed() {
-        assert_eq!(status.level, Some(Level::Unconfined));
-    }
-    assert!(status.budgets.is_some());
+    assert_eq!(status.level, None);
+    assert!(
+        status
+            .skipped
+            .iter()
+            .any(|(level, why)| *level == Level::Unconfined && why.contains("ASSIST-43")),
+        "{status:?}"
+    );
     let run = setup.settings.data_dir.join("run");
-    let generation = run.join(status.generation.to_string());
-    if status.level == Some(Level::Unconfined) {
-        // The token file was deleted once /health answered; the token is in no command line.
-        assert!(!generation.join(token::FILE).exists());
-        let pidfile = std::fs::read_to_string(run.join(rundir::PIDFILE)).unwrap();
-        let pid: i32 = pidfile.lines().nth(1).unwrap().parse().unwrap();
-        let line = cmdline(pid);
-        assert!(line.contains("--api-key-file"), "{line}");
-        assert!(line.contains("/proc/self/fd/8"), "{line}");
-        assert!(!line.contains("--api-key "), "{line}");
-    }
-    assert!(generation.is_dir());
-    handle.shutdown().await;
-    assert!(!generation.exists());
+    assert!(!run.join("1").exists());
     assert_eq!(
         std::fs::read_to_string(run.join(rundir::PIDFILE)).unwrap(),
         ""
     );
+    handle.shutdown().await;
 }
 
 #[tokio::test]
@@ -1492,11 +1504,22 @@ fn the_cleanup_waits_for_a_runner_without_a_pidfd_and_says_so() {
     assert!(std::fs::metadata(format!("/proc/{pid}")).is_err());
 }
 
-/// A connector whose socket appears only after `missing` attempts (`ENOENT` until then).
+/// A connector whose socket appears only after `missing` attempts (`errno` until then).
 #[derive(Debug)]
 struct LateSocket {
     missing: std::sync::atomic::AtomicUsize,
+    errno: i32,
     keep: Mutex<Vec<tokio::net::UnixStream>>,
+}
+
+impl LateSocket {
+    fn connector(missing: usize, errno: i32) -> Arc<dyn crate::assistant::transport::Connect> {
+        Arc::new(Self {
+            missing: std::sync::atomic::AtomicUsize::new(missing),
+            errno,
+            keep: Mutex::new(Vec::new()),
+        })
+    }
 }
 
 impl crate::assistant::transport::Connect for LateSocket {
@@ -1504,7 +1527,8 @@ impl crate::assistant::transport::Connect for LateSocket {
         let late = self.missing.load(Ordering::SeqCst) > 0;
         if late {
             self.missing.fetch_sub(1, Ordering::SeqCst);
-            return Box::pin(async { Err(std::io::Error::from_raw_os_error(libc::ENOENT)) });
+            let errno = self.errno;
+            return Box::pin(async move { Err(std::io::Error::from_raw_os_error(errno)) });
         }
         let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
         self.keep.lock().unwrap().push(theirs);
@@ -1520,36 +1544,62 @@ impl crate::assistant::transport::Connect for LateSocket {
 async fn a_probe_socket_that_appears_late_still_passes_and_never_fails() {
     let work = Work::new();
     let ticket = work.enter();
-    let late: Arc<dyn crate::assistant::transport::Connect> = Arc::new(LateSocket {
-        missing: std::sync::atomic::AtomicUsize::new(3),
-        keep: Mutex::new(Vec::new()),
-    });
-    assert_eq!(
-        checked_endpoint_within(&late, &ticket, Duration::from_secs(5)).await,
-        Probe::Passed
-    );
-    // Never there within the window: inconclusive (the level is kept), not a failure.
-    let never: Arc<dyn crate::assistant::transport::Connect> = Arc::new(LateSocket {
-        missing: std::sync::atomic::AtomicUsize::new(usize::MAX),
-        keep: Mutex::new(Vec::new()),
-    });
-    assert!(matches!(
-        checked_endpoint_within(&never, &ticket, Duration::from_millis(300)).await,
-        Probe::Inconclusive(_)
-    ));
+    // Not there yet, not accepting yet, or reset as it starts: all "not ready", retried.
+    for errno in [libc::ENOENT, libc::ECONNREFUSED, libc::ECONNRESET] {
+        let late = LateSocket::connector(3, errno);
+        assert_eq!(
+            checked_endpoint_within(&late, &ticket, Duration::from_secs(5)).await,
+            Probe::Passed,
+            "{errno}"
+        );
+        // Never there within the window: inconclusive (the level is kept), not a failure.
+        let never = LateSocket::connector(usize::MAX, errno);
+        assert!(
+            matches!(
+                checked_endpoint_within(&never, &ticket, Duration::from_millis(300)).await,
+                Probe::Inconclusive(_)
+            ),
+            "{errno}"
+        );
+    }
 }
 
 #[tokio::test]
-async fn a_start_whose_socket_is_not_there_yet_is_not_listening_not_failed() {
-    // /health against a socket not created yet: "not listening", which the start's health
-    // wait retries until its deadline, never a definite failure.
-    let late: Arc<dyn crate::assistant::transport::Connect> = Arc::new(LateSocket {
-        missing: std::sync::atomic::AtomicUsize::new(usize::MAX),
-        keep: Mutex::new(Vec::new()),
-    });
-    let server = Llama::new(Bounded::new(late), "token", "alias");
-    assert_eq!(
-        server.health().await,
-        super::super::server::Health::NotListening
+async fn a_start_whose_socket_is_not_ready_yet_is_not_listening_not_failed() {
+    // /health against a socket not created, not accepting or reset yet: "not listening",
+    // which the start's health wait retries until its deadline, never a definite failure.
+    for errno in [libc::ENOENT, libc::ECONNREFUSED, libc::ECONNRESET] {
+        let server = Llama::new(
+            Bounded::new(LateSocket::connector(usize::MAX, errno)),
+            "token",
+            "alias",
+        );
+        assert_eq!(
+            server.health().await,
+            super::super::server::Health::NotListening,
+            "{errno}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_runtime_path_with_a_newline_is_refused_before_anything_is_spawned() {
+    let mut setup = setup(MODEL, "fake");
+    let dir = setup.dir.path().join("new\nline");
+    std::fs::create_dir(&dir).unwrap();
+    let runner = dir.join("runner");
+    std::fs::copy(&setup.settings.runner.program, &runner).unwrap();
+    setup.settings.runner.program = runner;
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    let result = launch.start(1, Level::Unconfined, Path::Cpu).await;
+    assert!(
+        matches!(&result, Err(Fail::Other(why)) if why.starts_with("runtime path contains a newline")),
+        "{:?}",
+        result.err()
     );
+    launch.settle().await;
+    let marker = setup.settings.data_dir.join("run").display().to_string();
+    assert_eq!(processes_naming(&marker), Vec::<i32>::new());
+    assert_eq!(pidfile_text(&setup), "");
 }

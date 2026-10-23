@@ -126,6 +126,17 @@ struct Held {
     bwrap: Option<Bwrap>,
 }
 
+/// Refuses executable paths with a newline: the pidfile holds one per line.
+fn newline_free(executables: &[String]) -> Result<(), Fail> {
+    match executables.iter().find(|path| path.contains('\n')) {
+        Some(path) => Err(Fail::Other(format!(
+            "runtime path contains a newline: {}",
+            path.escape_debug()
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// What one attempt verified: the pinned files and the model, opened and hashed beneath the
 /// runtime folder's descriptor, and the build folder's real path as checked (level 3's
 /// executable and libraries are found through it, never through the configured path).
@@ -1070,6 +1081,12 @@ impl Real {
             target: fds::MARKER,
         });
         let spec = self.sandbox_spec(&bwrap, command, &mut handover, runtime)?;
+        // The pidfile names these, one per line: checked before anything is spawned.
+        let executables = vec![
+            bwrap.path.display().to_string(),
+            self.settings.runner.program.display().to_string(),
+        ];
+        newline_free(&executables)?;
         self.after_cleanups(job)?;
         pause_at!(self, "before-spawn");
         job.check()?;
@@ -1090,15 +1107,7 @@ impl Real {
         child.runner_pidfd = runner.pidfd.try_clone().ok();
         pause_at!(self, "before-record");
         job.check()?;
-        self.record_child(
-            job,
-            pid,
-            vec![
-                bwrap.path.display().to_string(),
-                self.settings.runner.program.display().to_string(),
-            ],
-            &mut child,
-        )?;
+        self.record_child(job, pid, executables, &mut child)?;
         fault_at!(self, "recorded", child);
         // No status line: bwrap failed before it created the sandbox (nothing it started could
         // have written anything yet).
@@ -1253,6 +1262,17 @@ impl Real {
                 argv,
             },
         };
+        let mut executables = vec![self.settings.runner.program.display().to_string()];
+        if let Some(server) = server {
+            executables.push(
+                server
+                    .build_dir
+                    .join(&server.file.name)
+                    .display()
+                    .to_string(),
+            );
+        }
+        newline_free(&executables)?;
         self.after_cleanups(job)?;
         pause_at!(self, "before-spawn");
         job.check()?;
@@ -1271,16 +1291,6 @@ impl Real {
         let pid = child.pid();
         let runner = Watched::open(pid).map_err(|_| Fail::Other("no pidfd".into()))?;
         child.runner_pidfd = runner.pidfd.try_clone().ok();
-        let mut executables = vec![self.settings.runner.program.display().to_string()];
-        if let Some(server) = server {
-            executables.push(
-                server
-                    .build_dir
-                    .join(&server.file.name)
-                    .display()
-                    .to_string(),
-            );
-        }
         pause_at!(self, "before-record");
         job.check()?;
         self.record_child(job, pid, executables, &mut child)?;
@@ -1997,11 +2007,24 @@ impl Launcher for Launch {
     async fn probe(&self, path: Path) -> Vec<(Level, Result<(), String>)> {
         let real = Arc::clone(&self.0);
         let ticket = real.work.enter();
+        // Only level 1 is probed for the manager (ASSIST-43): no manager path runs level 3's
+        // code, not even its probe. `--probe` still probes level 3 (`probe_levels`).
         tokio::task::spawn_blocking(move || {
-            real.probe_levels(path, &ticket)
-                .into_iter()
-                .map(|(level, probed)| (level, probed.eligible()))
-                .collect()
+            vec![
+                (
+                    Level::Bubblewrap,
+                    real.probe_with_retries(path, Level::Bubblewrap, &ticket)
+                        .eligible(),
+                ),
+                (
+                    Level::Landlock,
+                    Err("Landlock confinement is not in this release".into()),
+                ),
+                (
+                    Level::Unconfined,
+                    Err("not used in this release (ASSIST-43)".into()),
+                ),
+            ]
         })
         .await
         .unwrap_or_default()
@@ -2315,9 +2338,10 @@ async fn checked_endpoint(connector: &Arc<dyn Connect>, ticket: &Ticket) -> Prob
     checked_endpoint_within(connector, ticket, Duration::from_secs(10)).await
 }
 
-/// [`checked_endpoint`] with its window given. A socket not there yet (`ENOENT`) or not yet
-/// accepting (`ECONNREFUSED`) is "not ready": tried again every 100 ms within the window, and
-/// at its end inconclusive, never a definite failure (so never a level skip).
+/// [`checked_endpoint`] with its window given. A socket not there yet (`ENOENT`), not yet
+/// accepting (`ECONNREFUSED`) or reset while it starts (`ECONNRESET`, as `/health` treats it)
+/// is "not ready": tried again every 100 ms within the window, and at its end inconclusive,
+/// never a definite failure (so never a level skip).
 async fn checked_endpoint_within(
     connector: &Arc<dyn Connect>,
     ticket: &Ticket,
@@ -2330,7 +2354,9 @@ async fn checked_endpoint_within(
                 Err(error)
                     if matches!(
                         error.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                        std::io::ErrorKind::NotFound
+                            | std::io::ErrorKind::ConnectionRefused
+                            | std::io::ErrorKind::ConnectionReset
                     ) =>
                 {
                     tokio::time::sleep(Duration::from_millis(100)).await;

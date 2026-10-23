@@ -188,7 +188,23 @@ impl Handle {
 pub(crate) struct Config {
     pub path: Path,
     pub max_tokens: u32,
+    /// The levels this manager may start, in order. Mimik's own runtime uses
+    /// [`USED_LEVELS`] (level 1 only, ASSIST-43); the development endpoint, which reaches a
+    /// hand-started external server and starts nothing, reports that server as level 3.
+    pub levels: &'static [Level],
 }
+
+/// The levels Mimik starts llama-server at (ASSIST-43): level 1 or not at all. Level 3's code
+/// stays built but no manager path reaches it; it returns later behind an owner opt-in.
+pub(crate) const USED_LEVELS: &[Level] = &[Level::Bubblewrap];
+
+/// Why the assistant is unavailable when level 1 cannot be used: how to fix it.
+pub(crate) const LEVEL_1_NEEDED: &str = "the model server runs only confined by bubblewrap \
+(level 1), which is not usable here. Install bubblewrap (/usr/bin/bwrap) and allow unprivileged \
+user namespaces: user.max_user_namespaces above 0, kernel.unprivileged_userns_clone = 1 where \
+the kernel has it, and on Ubuntu 24.04 kernel.apparmor_restrict_unprivileged_userns = 0 or an \
+AppArmor profile that lets bwrap create them. Then press Restart. Level 3 (unconfined) is not \
+used in this release";
 
 /// Answers a shutdown request once the child is gone.
 fn shut(reply: oneshot::Sender<()>) {
@@ -383,19 +399,37 @@ impl Manager {
         Err(next)
     }
 
-    /// The levels that passed their probe, in order; the others are recorded as skipped.
+    /// The levels that passed their probe and this manager may start, in order; the others
+    /// are recorded as skipped.
     fn probed(&mut self, probed: Vec<(Level, Result<(), String>)>) -> Vec<Level> {
         let mut levels = Vec::new();
         for (level, result) in probed {
-            match result {
-                Ok(()) => levels.push(level),
-                Err(why) => {
-                    log(&format!("level {} probe failed: {why}", level.number()));
-                    self.update(|status| status.skipped.push((level, why)));
+            let why = match result {
+                Ok(()) if self.config.levels.contains(&level) => {
+                    levels.push(level);
+                    continue;
                 }
-            }
+                Ok(()) => "not used in this release (ASSIST-43)".to_owned(),
+                Err(why) => why,
+            };
+            log(&format!("level {} not used: {why}", level.number()));
+            self.update(|status| status.skipped.push((level, why)));
         }
         levels
+    }
+
+    /// Unavailable because no usable level is left: the fix, with level 1's own reason.
+    fn no_level(&self) -> String {
+        let level_1 = self
+            .status()
+            .skipped
+            .iter()
+            .find(|(level, _)| *level == Level::Bubblewrap)
+            .map(|(_, why)| why.clone());
+        match level_1 {
+            Some(why) => format!("{LEVEL_1_NEEDED} (level 1: {why})"),
+            None => LEVEL_1_NEEDED.to_owned(),
+        }
     }
 
     /// A new generation at `level`.
@@ -459,9 +493,8 @@ impl Manager {
                     .await;
             }
             let Some(&level) = levels.get(index) else {
-                return self
-                    .hold("no confinement level could start the model server".into())
-                    .await;
+                let why = self.no_level();
+                return self.hold(why).await;
             };
             let generation = self.begin(level);
             match self.attempt(generation, level).await {

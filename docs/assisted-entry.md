@@ -390,10 +390,11 @@ What it does not refresh is listed in ASSIST-L15 and ASSIST-L16.
 
 ## Interpretation assistant
 
-Steps 2c-1 and 2c-2a (D-D, D-F, D-H, D-J, D-P, ASSIST-27 to ASSIST-42). The assistant reads a
+Steps 2c-1 and 2c-2a (D-D, D-F, D-H, D-J, D-P, ASSIST-27 to ASSIST-43). The assistant reads a
 scribble a number field could not take (its current `unresolved` note) and offers a
 confirmable reading; it never writes on its own. It is off by default. With `--assistant`,
-Mimik starts the pinned official llama-server as its confined child, checks every connection
+Mimik starts the pinned official llama-server as its child confined by bubblewrap (and not at
+all where bubblewrap cannot run, ASSIST-43), checks every connection
 to it and primes and calibrates it before it takes jobs ([model-runtime.md](model-runtime.md)).
 Without it there is no client, no worker, no child and no job route (the three paths answer
 404), and the sheet works as above.

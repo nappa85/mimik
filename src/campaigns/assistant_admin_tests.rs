@@ -86,6 +86,7 @@ async fn assisted() -> Assisted {
         manager::Config {
             path: Path::Cpu,
             max_tokens: 352,
+            levels: manager::USED_LEVELS,
         },
     );
     let app = crate::auth::app_with_options(

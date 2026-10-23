@@ -36,12 +36,12 @@ No language model file is part of this release. The archive carries the pinned o
 llama.cpp CPU build (`llama/`, b11609, MIT; its source archive accompanies the release) for the
 optional interpretation assistant, which is off unless started with `--assistant` and proposes
 readings the player must confirm; it never applies sheet changes on its own. Its scope is
-Linux `x86_64` on the CPU: the model server runs confined by bubblewrap where the start-time
-probe shows unprivileged user namespaces work, otherwise unconfined but for seccomp (shown at
-`/admin/assistant`). Level 1 is verified on Ubuntu 24.04 with
+Linux `x86_64` on the CPU: the model server runs only confined by bubblewrap, where the
+start-time probe shows unprivileged user namespaces work; otherwise the assistant stays off and
+`/admin/assistant` says how to enable them (it never runs the model server unconfined). Level 1 is verified on Ubuntu 24.04 with
 `kernel.apparmor_restrict_unprivileged_userns` switched off (the CI runner) and on the dev host
 (Gentoo, no such restriction); with Ubuntu 24.04's default restriction on, CI records the
-probe's outcome without certifying either level. The Landlock level and the GPU path
+probe's outcome without certifying it. The Landlock level and the GPU path
 are not built; the documented minimum host for the bundled build (Ubuntu 22.04 `x86_64`) is not
 yet verified on a VM.
 

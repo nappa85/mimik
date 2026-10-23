@@ -265,6 +265,7 @@ impl FakeLauncher {
 const CONFIG: Config = Config {
     path: Path::Cpu,
     max_tokens: 352,
+    levels: USED_LEVELS,
 };
 
 fn manager(launcher: &Arc<FakeLauncher>) -> (Arc<Assistant>, Handle) {
@@ -305,7 +306,13 @@ async fn a_start_reaches_ready_after_health_priming_and_calibration() {
     assert_eq!(status.generation, 1);
     assert_eq!(
         status.skipped,
-        vec![(Level::Landlock, "not built".to_owned())]
+        vec![
+            (Level::Landlock, "not built".to_owned()),
+            (
+                Level::Unconfined,
+                "not used in this release (ASSIST-43)".to_owned()
+            ),
+        ]
     );
     let budgets = status.budgets.unwrap();
     assert_eq!(budgets.bounds.bytes, 1024);
@@ -333,18 +340,30 @@ async fn before_priming_and_calibration_complete_a_job_start_answers_starting() 
     ready(&assistant).await;
 }
 
+/// Waits until the assistant is unavailable; its reason.
+async fn unavailable(handle: &Handle) -> String {
+    let probe = handle.clone();
+    until(Duration::from_secs(60), move || {
+        matches!(probe.status().state, State::Unavailable(_))
+    })
+    .await;
+    match handle.status().state {
+        State::Unavailable(why) => why,
+        other => panic!("{other:?}"),
+    }
+}
+
 #[tokio::test(start_paused = true)]
-async fn a_sandbox_failure_moves_to_the_next_probed_level_at_once_not_counted() {
+async fn a_level_1_sandbox_failure_makes_the_assistant_unavailable_never_level_3() {
     let launcher = FakeLauncher::scripted([Start::Sandbox("bwrap: setup failed")]);
-    let (assistant, handle) = manager(&launcher);
-    ready(&assistant).await;
-    assert_eq!(launcher.levels(), [Level::Bubblewrap, Level::Unconfined]);
-    let starts = launcher.starts.lock().unwrap().clone();
-    // At once: no retry wait.
-    assert!(starts[1].2 - starts[0].2 < Duration::from_secs(1));
+    let (_assistant, handle) = manager(&launcher);
+    let why = unavailable(&handle).await;
+    // Level 3 passed its (fake) probe, but it is never started (ASSIST-43).
+    assert_eq!(launcher.levels(), [Level::Bubblewrap]);
+    assert!(why.starts_with(LEVEL_1_NEEDED), "{why}");
+    assert!(why.contains("bwrap: setup failed"), "{why}");
     let status = handle.status();
     assert_eq!(status.failures, 0);
-    assert_eq!(status.level, Some(Level::Unconfined));
     assert!(
         status
             .skipped
@@ -353,7 +372,7 @@ async fn a_sandbox_failure_moves_to_the_next_probed_level_at_once_not_counted() 
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_level_that_fails_its_probe_is_never_started() {
+async fn a_level_1_probe_failure_starts_nothing_and_says_how_to_fix_it() {
     let launcher = FakeLauncher::scripted([]);
     *launcher.probe.lock().unwrap() = Some(vec![
         (
@@ -362,12 +381,20 @@ async fn a_level_that_fails_its_probe_is_never_started() {
         ),
         (Level::Unconfined, Ok(())),
     ]);
-    let (assistant, handle) = manager(&launcher);
-    ready(&assistant).await;
-    assert_eq!(launcher.levels(), [Level::Unconfined]);
+    let (_assistant, handle) = manager(&launcher);
+    let why = unavailable(&handle).await;
+    assert_eq!(launcher.levels(), Vec::<Level>::new());
+    assert!(why.contains("Install bubblewrap"), "{why}");
+    assert!(why.contains("user namespaces are disabled"), "{why}");
     assert_eq!(
         handle.status().skipped,
-        vec![(Level::Bubblewrap, "user namespaces are disabled".to_owned())]
+        vec![
+            (Level::Bubblewrap, "user namespaces are disabled".to_owned()),
+            (
+                Level::Unconfined,
+                "not used in this release (ASSIST-43)".to_owned()
+            ),
+        ]
     );
 }
 
@@ -583,36 +610,22 @@ async fn restart_and_shutdown_do_not_wait_behind_a_slow_preflight() {
 #[tokio::test(start_paused = true)]
 async fn restart_resets_count_and_breaker_and_returns_to_level_1() {
     let launcher = FakeLauncher::scripted([
-        Start::Sandbox("bwrap: setup failed"),
+        Start::Other("the model server exited"),
         Start::Ok(Behaviour::default()),
     ]);
     let (assistant, handle) = manager(&launcher);
-    ready(&assistant).await;
-    assert_eq!(handle.status().level, Some(Level::Unconfined));
-    launcher.child(0).crash();
-    let probe = Arc::clone(&launcher);
-    until(Duration::from_secs(5), move || {
-        probe.starts.lock().unwrap().len() == 3
-    })
-    .await;
-    ready(&assistant).await;
-    // A lower level stays down until Restart; the exit counted.
-    assert_eq!(handle.status().level, Some(Level::Unconfined));
-    assert_eq!(handle.status().failures, 1);
+    // The counted failure waits two minutes before the retry; Restart cuts that short.
+    let probe = handle.clone();
+    until(Duration::from_secs(5), move || probe.status().failures == 1).await;
     assert_eq!(handle.restart(), Restart::Accepted);
     // A second press while the transition runs is no second transition.
     assert_eq!(handle.restart(), Restart::AlreadyRunning);
-    let probe = Arc::clone(&launcher);
-    until(Duration::from_secs(5), move || {
-        probe.starts.lock().unwrap().len() == 4
-    })
-    .await;
     ready(&assistant).await;
     let status = handle.status();
     assert_eq!(status.level, Some(Level::Bubblewrap));
     assert_eq!(status.failures, 0);
     assert!(!status.restarting);
-    assert_eq!(launcher.starts.lock().unwrap().len(), 4);
+    assert_eq!(launcher.levels(), [Level::Bubblewrap, Level::Bubblewrap]);
     assert!(!launcher.coexisted.load(Ordering::SeqCst));
     assert!(assistant.breaker_closed());
 }

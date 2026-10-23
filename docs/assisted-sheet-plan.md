@@ -729,7 +729,7 @@ Split (user, 2026-10-22) into **2c-2a** (the CPU path at confinement levels 1 an
 **2c-2b** (the GPU path and level 2), each with its own branch and reviews; the machinery of
 2c-2a is path-aware, so 2c-2b only adds to it.
 
-#### 2c-2a CPU path, bubblewrap and unconfined
+#### 2c-2a CPU path, bubblewrap (level 3 built, not used: ASSIST-43)
 
 Built (branch `assist-2c2`; reference [model-runtime.md](model-runtime.md)). Remaining before
 it is marked complete:
@@ -745,6 +745,19 @@ it is marked complete:
 - the official CPU asset on the documented minimum host (an Ubuntu 22.04 VM) and the AppArmor
   preflight on an Ubuntu VM;
 - the `llama-runtime` CI job's first run (it needs a push).
+
+#### Level 3 behind an owner opt-in (later step, ASSIST-43)
+
+Level 3 is built but switched off in 2c-2a. Bringing it back: an explicit owner setting (never
+automatic), shown on the page with its exposure, and these before it can be enabled:
+
+- refuse a real runtime path holding `$` (the loader's dynamic string tokens in dlopen names),
+  with docs and tests;
+- the bind-deadline items: a robust bind test on a loaded runner, the "deadline passed, exit
+  re-checked" branch exercised, and an early bind error decided at once;
+- a cancel-aware drain settle in `bind_outcome` (100 ms slices);
+- the live cwd-helper hardening: bounded ready wait and read, failing at once on refusal or
+  exit, kill-on-drop guards.
 
 #### 2c-2b GPU path and Landlock
 

@@ -275,21 +275,29 @@ pub(crate) async fn probe_and_settle(launch: &Launch) -> Value {
 /// on inconclusive probes is not "ok").
 pub(crate) fn probe_report(levels: &[(Level, super::launch::Probed)]) -> Value {
     use super::launch::Probed;
+    // Only level 1 is ever used (ASSIST-43): the level reached is 1 when its probe passed, and
+    // none otherwise, whatever level 3's probe says.
     let reached = levels
         .iter()
-        .find(|(_, probed)| *probed == Probed::Passed)
+        .find(|(level, probed)| *level == Level::Bubblewrap && *probed == Probed::Passed)
         .map(|(level, _)| level.number());
     let detail: serde_json::Map<String, Value> = levels
         .iter()
         .map(|(level, probed)| {
-            (
-                level.number().to_string(),
-                match probed {
+            (level.number().to_string(), {
+                let mut detail = match probed {
                     Probed::Passed => json!({"ok": true}),
-                    Probed::Kept(why) => json!({"ok": false, "inconclusive": true, "reason": why}),
+                    Probed::Kept(why) => {
+                        json!({"ok": false, "inconclusive": true, "reason": why})
+                    }
                     Probed::Failed(why) => json!({"ok": false, "reason": why}),
-                },
-            )
+                };
+                if *level == Level::Unconfined {
+                    detail["used"] = json!(false);
+                    detail["note"] = json!("not used in this release (ASSIST-43)");
+                }
+                detail
+            })
         })
         .collect();
     json!({"level": reached, "levels": detail, "path": "cpu",
@@ -424,9 +432,12 @@ mod tests {
             (Level::Landlock, Probed::Failed("not built".into())),
             (Level::Unconfined, Probed::Passed),
         ]);
-        assert_eq!(kept["level"], json!(3));
+        // Level 3 passing is reported, labelled not used; the level reached stays none.
+        assert_eq!(kept["level"], Value::Null);
         assert_eq!(kept["levels"]["1"]["ok"], json!(false));
         assert_eq!(kept["levels"]["1"]["inconclusive"], json!(true));
+        assert_eq!(kept["levels"]["3"]["ok"], json!(true));
+        assert_eq!(kept["levels"]["3"]["used"], json!(false));
         let none = probe_report(&[(Level::Bubblewrap, Probed::Kept("timeout".into()))]);
         assert_eq!(none["level"], Value::Null);
         let passed = probe_report(&[(Level::Bubblewrap, Probed::Passed)]);

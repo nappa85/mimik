@@ -114,6 +114,8 @@ impl AssistantHandle {
             manager::Config {
                 path: Path::Cpu,
                 max_tokens,
+                // A hand-started external server, reported as level 3; nothing is started.
+                levels: &[Level::Unconfined],
             },
         ))
     }

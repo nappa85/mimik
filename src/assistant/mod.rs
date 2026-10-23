@@ -124,6 +124,7 @@ impl AssistantHandle {
             runtime::manager::Config {
                 path: runtime::Path::Cpu,
                 max_tokens,
+                levels: runtime::manager::USED_LEVELS,
             },
         ))
     }
