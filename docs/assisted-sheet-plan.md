@@ -26,7 +26,7 @@ caps (ASSIST-31, ASSIST-32). Linux x86_64 is the platform built and verified now
 
 Every step: its own branch; failing-first tests with the red run recorded; independent
 implementation review before merge; every new dependency recorded with its licence, MSRV and
-maintenance in the dependency decisions (for example `landlock`, `seccompiler`, `procfs`,
+maintenance in the dependency decisions (for example `seccompiler`, `procfs`,
 `rustls`, `rustls-platform-verifier`, and `hyper` if the Unix connector needs it); built and tested on 2 cores on weekdays; GPU and live
 model runs only at night or at weekends (machine schedule). Each step keeps
 the demo (`tools/assist_demo.py`) usable. Any step that adds per-cell markup reruns the
@@ -79,7 +79,7 @@ steps add:
 Built for the CPU path (step 2c-2a) and the GPU path with its device choice and fallback
 (step 2c-2b-1), at level 1 (level 3 built but not used, ASSIST-43):
 [model-runtime.md](model-runtime.md) is the reference and wins where it differs from this
-design. What follows stays the design for level 2 (2c-2b-2) and is kept whole as its context.
+design.
 
 Linux x86_64 is the only platform built and verified in 2c-2; macOS (Metal) and Windows
 (Vulkan) runtime code is deferred with no platform designed out (ASSIST-34, §4 Later).
@@ -99,7 +99,7 @@ natively for these tests (ASSIST-40).
   for the host's instruction set, and the documented minimum host; the release scope names
   that host. The runtime directory must hold exactly the manifest's files (an extra or missing
   file refuses the start), and neither it nor its files may be writable by group or others.
-  On levels 2 and 3 the shared libraries beside llama-server are loaded by path from that
+  On level 3 the shared libraries beside llama-server are loaded by path from that
   verified directory, inside the same-user boundary below.
 - **Model and runtime files (verified descriptors):** the model is opened relative to the
   models folder's descriptor with `openat2` (`RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`,
@@ -107,11 +107,11 @@ natively for these tests (ASSIST-40).
   a regular file owned by Mimik's user, not writable by group or others. Its SHA-256 is
   computed from that descriptor before the first load and again whenever its `fstat` identity
   (device, inode, size, modification and change times) differs from the last hashed one, so a
-  retry does not re-read a 2 GiB file; that descriptor stays open and is what the child loads: level 1 binds it read-only (`--ro-bind-fd`); levels 2 and 3 pass it inherited, as
+  retry does not re-read a 2 GiB file; that descriptor stays open and is what the child loads: level 1 binds it read-only (`--ro-bind-fd`); level 3 pass it inherited, as
   `--model /proc/self/fd/<n>` (a live check confirms that the pinned server's open and `mmap`
   accept that path). Runtime files are hashed the same way; level 1 binds them by descriptor
-  and levels 2 and 3 execute the verified llama-server descriptor (`execveat`). So the model and
-  the executable cannot be swapped between check and load on any level; on levels 2 and 3 the
+  and level 3 execute the verified llama-server descriptor (`execveat`). So the model and
+  the executable cannot be swapped between check and load on any level; on level 3 the
   shared libraries are still loaded by path, so the runtime directory and every ancestor
   directory must not be writable by group or others (checked at start), and the library
   guarantee there is the same-user boundary below. Threat boundary: a process running as
@@ -202,9 +202,7 @@ natively for these tests (ASSIST-40).
     - the confinement test binary (seccomp, endpoint and adversarial-helper tests) against
       the unpacked release's runtime; the adversarial helper is that same binary re-executed
       with a helper flag; the binary reads nothing from the source tree (fixtures embedded);
-      it is run as `target/confinement-tests --exact` with the confinement test filter. If the
-      runner's kernel offers Landlock ABI 4 or later (probed and logged), the level-2 tests
-      run there too; otherwise they stay the VM measurement;
+      it is run as `target/confinement-tests --exact` with the confinement test filter;
   - `deployable` requires `llama-fetch`, `checks` and `llama-runtime` with the existing jobs;
     every new action is pinned by commit SHA like the existing ones;
   - stub-transport integration coverage runs in a test build with the `dev-endpoint` feature,
@@ -212,9 +210,7 @@ natively for these tests (ASSIST-40).
   - not CI-covered, and said so: the GPU path (probe, device listing, live GPU checks),
     mid-prompt cancellation timing and the
     per-request `ignore_eos` with the real default model are dev-host measurements, repeated at
-    every pin change and recorded in `docs/results.md`; Landlock-only tests that need a kernel
-    the runner lacks are a host or VM measurement, recorded in the release scope and in
-    `docs/limitations.md` (ASSIST-L24).
+    every pin change and recorded in `docs/results.md`.
 - **Runner:** Mimik spawns `mimik assistant-runner` (a hidden subcommand) from one dedicated,
   long-lived thread (the parent-death signal follows the spawning thread). The runner sets
   `PR_SET_PDEATHSIG` (SIGKILL), then checks that its parent is still the Mimik PID it was given
@@ -225,7 +221,7 @@ natively for these tests (ASSIST-40).
   is used); keeps only the descriptors it was handed (Rust opens everything close-on-exec; the
   hand-over descriptors are listed by number); then executes the confinement level's command
   in place (`execve` of bwrap on level 1, `execveat` of the verified llama-server descriptor on
-  levels 2 and 3; either way the parent-death signal stays set). On levels 2 and 3 the runner sets
+  level 3; either way the parent-death signal stays set). On level 3 the runner sets
   `PR_SET_PDEATHSIG` and `PR_SET_NO_NEW_PRIVS` before it installs the seccomp filter, and the
   filter refuses any later `prctl(PR_SET_PDEATHSIG)` and `prctl(PR_SET_NO_NEW_PRIVS)` call,
   so a compromised server cannot clear the signal; level 1 keeps bubblewrap's own setup
@@ -266,41 +262,11 @@ natively for these tests (ASSIST-40).
      per network namespace and pathname sockets are limited to what is bound in, so the child
      reaches no host service. OpenFirma's bubblewrap setup is the reference; no code is copied
      and `firma-run` is not a dependency.
-  2. **Landlock with seccomp** (TCP on `127.0.0.1`, random port): the runner applies Landlock
-     through the `landlock` crate, then the seccomp filter, then executes the verified
-     llama-server descriptor. There is no bind mount here, so the rules name host paths (a
-     `/proc/self/fd/<n>` open is checked against the file it resolves to). The ruleset:
-     - network (ABI 4 or later): no TCP connect; TCP bind on the chosen port only;
-     - read: the models folder (the model's resolved file lies in it), the system library
-       directories, `/etc/ld.so.cache`, the Vulkan ICD manifests (`/usr/share/vulkan`,
-       `/etc/vulkan`), the read-only `/sys` parts the driver enumerates,
-       `/sys/devices/system/cpu`, `/proc/self`, `/proc/cpuinfo`, `/proc/meminfo`;
-     - read and execute: the runtime directory (llama-server `dlopen`s its ggml backend
-       libraries from its own directory, found through `/proc/self/exe`), the library
-       directories, the Vulkan driver libraries and the ELF interpreter;
-     - read and write: `/dev/null`, `/dev/zero` and `/dev/urandom` (read for the last), the
-       selected render node (GPU path, plus `IOCTL_DEV` on it from ABI 5) and the card node
-       only if the driver needs it, `/dev/shm`, and a private temporary directory;
-     - scoping (ABI 6 or later): abstract Unix sockets and signals;
-     - nothing else.
-
-     Level 2 is verified only by the VM measurement of ASSIST-L24 until a host with Landlock
-     exists; the list is completed there.
-
-     The shown
-     state comes from the crate's `RestrictionStatus`, never from the requested rules.
-     Landlock binds ports, not addresses, and does not filter `connect()` to pathname Unix
-     sockets, so the honest state is "partly confined: outbound TCP, UDP and raw sockets
-     denied; it could listen on another address on its port and reach local services over Unix
-     sockets"; with a Landlock ABI below 4 (no network rules): "not network-confined: TCP egress
-     allowed; filesystem restricted"; partial filesystem enforcement is shown as such; with no
-     Landlock at all (`RestrictionStatus` none) the level is not reached, and the assistant is
-     unavailable unless the owner has explicitly allowed level 3 (ASSIST-43).
   3. **Unconfined** (seccomp only, TCP on `127.0.0.1`), used only when the owner has
      explicitly allowed it (ASSIST-43; not in 2c-2a): "not confined: TCP egress allowed, and
      the whole filesystem readable by Mimik's user is readable by the model server".
-  The assistant runs at levels 1 and 2, and at level 3 only with the owner's explicit
-  permission (ASSIST-43; hardening is "where available", ASSIST-30); the page
+  There is no level 2 (ASSIST-48). The assistant runs at level 1, and at level 3 only with the
+  owner's explicit permission (ASSIST-43; hardening is "where available", ASSIST-30); the page
   shows the level next to the assistant state and next to the 2d "Try" button (a downloaded
   GGUF is untrusted input to llama-server, contained only by this).
 - **Seccomp (every level):** pure Rust only, adding no runtime shared-library dependency to
@@ -319,7 +285,7 @@ natively for these tests (ASSIST-40).
   refused and `clone3` returns `ENOSYS` (on x86_64 glibc builds `fork` and `vfork` on `clone`
   or `clone3`, so the `clone` flag rule and the `clone3` refusal are what operate; `clone3`'s
   flags cannot be inspected; glibc then falls back to `clone` for threads), so the server cannot start other processes: process-tree
-  containment on levels 2 and 3, where the parent-death signal covers only the direct child
+  containment on level 3, where the parent-death signal covers only the direct child
   (an `exec` without a fork only replaces the server in place). Exec after start is restricted
   too, because a non-leader thread that calls `exec` becomes the process leader without the
   parent-death setting (it is per task): `execve` is refused, and `execveat` is allowed only on
@@ -328,9 +294,8 @@ natively for these tests (ASSIST-40).
   targeting that number are refused if needed. 2c-2a made it sound: the descriptor is 1023 and `RLIMIT_NOFILE` is 1023, so no later descriptor can take the number ([model-runtime.md](model-runtime.md)). `pidfd_open`, `pidfd_getfd`, `process_madvise`
   and `kcmp` are refused (they would let the server reach Mimik's descriptors). TCP Fast Open
   is refused on every level: `sendto` whose flags carry `MSG_FASTOPEN`, `sendmsg` and
-  `sendmmsg` whose flags carry it, and `setsockopt(TCP_FASTOPEN_CONNECT)` return `EPERM`, since
-  Landlock's connect rule is defined on `connect()` and a fast-open send on an unconnected
-  TCP socket must not be a way around it; `io_uring_setup`,
+  `sendmmsg` whose flags carry it, and `setsockopt(TCP_FASTOPEN_CONNECT)` return `EPERM`, so a
+  fast-open send on an unconnected TCP socket is not a way around the endpoint checks; `io_uring_setup`,
   `io_uring_enter`, `io_uring_register`, `ptrace`, `process_vm_readv`/`writev`, `bpf`,
   `perf_event_open`, `keyctl`, `add_key`, `request_key`, `mount`, `umount2`, `pivot_root`,
   `unshare`, `setns`, module and `kexec` calls are refused. Seccomp sees no `connect()`
@@ -348,7 +313,7 @@ natively for these tests (ASSIST-40).
   full level profile (the same binds, descriptors, seccomp program and token channel as a real
   start, plus Mimik's own libraries bound) exercising each resource once: open the model
   through its descriptor path (including `--ro-bind-fd` of a regular-file descriptor), bind
-  the socket path in its directory (level 1) or the port (levels 2 and 3), read the token
+  the socket path in its directory (level 1) or the port (level 3), read the token
   channel, and on the GPU path open the render node and enumerate the device; on level 1 it
   also asserts the process shape of the endpoint check (below). It does not prove
   llama-server's own system calls; the real server start does (CI with the test model, the dev
@@ -358,8 +323,7 @@ natively for these tests (ASSIST-40).
   missing, set-ID or lacking an option (named), user namespaces disabled
   (`user.max_user_namespaces`, `kernel.unprivileged_userns_clone`), the Ubuntu AppArmor
   restriction on unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns`),
-  or the probe's own error. Then level 2 is probed the same way only if the owner has explicitly allowed it (ASSIST-44),
-  then level 3 only if the owner has explicitly allowed it (ASSIST-43). A level that
+  or the probe's own error. Then level 3 is probed only if the owner has explicitly allowed it (ASSIST-43). A level that
   passes the probe can still fail at the real start; that failure is recorded with its cause
   and shown on the page, and the transitions below move down only for sandbox-attributable
   failures. Memory: the child has no memory cap (`RLIMIT_AS` is
@@ -367,7 +331,7 @@ natively for these tests (ASSIST-40).
   file larger than `MemAvailable` minus 1 GiB ("not enough memory for this model").
 - **Token:** 32 bytes from the OS random source, base64url, new for every launch, held in
   memory. Channels, in order: level 1, `--ro-bind-data` from a pipe to a file inside the
-  sandbox read with `--api-key-file`; levels 2 and 3, `--api-key-file` on a 0600 file in a
+  sandbox read with `--api-key-file`; level 3, `--api-key-file` on a 0600 file in a
   0700 private directory, deleted once `/health` answers (`LLAMA_API_KEY` in the runner's
   environment, readable only by Mimik's user, is the documented alternative), never in an
   argument. A pinned build without either channel would not start the assistant ("the model
@@ -386,7 +350,7 @@ natively for these tests (ASSIST-40).
   inner one small); where `ns/pid` is not readable (it needs ptrace-read access, which a
   non-dumpable process denies), the `NSpid` and `PPid` tests decide. Mimik holds a pidfd on
   `child-pid` so its PID cannot be reused during the generation. A UID-only match is never
-  accepted. Levels 2 and 3: before and after `connect()`, every `LISTEN` entry for
+  accepted. Level 3: before and after `connect()`, every `LISTEN` entry for
   `127.0.0.1:<port>` in `/proc/net/tcp` (`procfs` crate) must have its socket inode open in
   the current child's `/proc/<pid>/fd` (with `SO_REUSEPORT` several listeners can share a
   port, so one foreign entry fails the attempt). While the child holds that listener no other process
@@ -409,7 +373,7 @@ natively for these tests (ASSIST-40).
   older generation is ignored. One manager task serializes transitions: a child is stopped
   (SIGTERM, SIGKILL after 5 s) and the next one starts only after it is gone: on level 1 when
   bwrap's status descriptor reports `exit-code` and a pidfd on the reaper signals exit (the PID
-  namespace, and with it every process and its GPU memory, is gone); on levels 2 and 3 when a
+  namespace, and with it every process and its GPU memory, is gone); on level 3 when a
   pidfd on the child signals exit. So two model servers never coexist (a GPU → CPU fallback and
   a trial included). On every generation change, every queued and running job ends with "the
   assistant restarted: ask again", neutral for the breaker. The pidfile (generation, PID,
@@ -426,7 +390,7 @@ natively for these tests (ASSIST-40).
   in-sandbox name is what the real start passes. Whether binding one node really isolates
   enumeration is a 2c-2 live measurement: Mesa enumerates through sysfs and libdrm, so if the
   ICD still lists other cards, the level-1 profile also binds only the matching
-  `/sys/class/drm` entries, or selects by PCI address inside the sandbox. Levels 2 and 3 cannot isolate nodes (level 3
+  `/sys/class/drm` entries, or selects by PCI address inside the sandbox. Level 3 cannot isolate nodes (level 3
   does not restrict device opens at all): the GPU is used there only if exactly one hardware
   GPU is visible, counted from sysfs (`/sys/class/drm/renderD*` with their PCI devices), not
   from `--list-devices`, otherwise the CPU path is used with a page note (multi-GPU without
@@ -448,7 +412,7 @@ natively for these tests (ASSIST-40).
   | Event | Action | Failure count |
   |---|---|---|
   | Attempt fails on the GPU path (budgets that do not derive included), or the GPU child exits, or is stopped as hung | stop and wait until gone, start on the CPU path at the same level at once, showing the reason; CPU until Mimik restarts or the owner presses "Try the GPU again" | not counted |
-  | Attempt on the CPU path fails with a sandbox-attributable failure at level 1 or 2 (a bwrap or Landlock setup error, a status-descriptor failure before exec, the level's preflight failing) | next attempt at once on the next allowed level that passed its probe (level 2 and level 3 each only with the owner's explicit permission, ASSIST-44, ASSIST-43); none left: `unavailable` with the fix; the skipped level and its reason are recorded and shown | not counted |
+  | Attempt on the CPU path fails with a sandbox-attributable failure at level 1 (a bwrap setup error, a status-descriptor failure before exec, the level's preflight failing) | next attempt at once on level 3 if the owner has explicitly allowed it and it passed its probe (ASSIST-43); none left: `unavailable` with the fix; the skipped level and its reason are recorded and shown | not counted |
   | Attempt fails on the CPU path, otherwise (model-load errors, hash mismatches, exits after exec keep the level) | retry after 2 minutes | +1 |
   | Child exits while ready (CPU path) | restart now | +1 only within 10 minutes of `ready` |
   | Two consecutive run-deadline expiries with no completed exchange between | stop as hung, wait until gone, restart, re-measure (whatever `/health` says); expiries never count toward the breaker | as a child exit |
@@ -714,9 +678,7 @@ in a release. The model server is a pinned official llama.cpp build and a model 
 hash-verified and loaded from the verified descriptors on every level. Its confinement is one
 of these levels, shown on the assistant page: bubblewrap (private namespaces, so it has no
 network beyond its own loopback and sees only an allowlist of read-only paths plus the GPU
-node; seccomp); Landlock ABI 4 or later with seccomp (outbound TCP, UDP and raw sockets
-denied, but listening on another address and local Unix sockets are not prevented); Landlock
-below ABI 4 (filesystem restricted, TCP egress allowed); or unconfined (TCP egress allowed and
+node; seccomp), or, only with the owner's explicit permission, unconfined (TCP egress allowed and
 the user's whole filesystem readable). On every level seccomp refuses new processes and
 non-TCP sockets; it is never described as network confinement. So Mimik sends player text
 only to its child, but below the bubblewrap level a compromised model server (for example
@@ -730,7 +692,7 @@ no sheet or player text. No prompts, player text, presigned URLs or token in log
 
 Split (user, 2026-10-22) into **2c-2a** (the CPU path at confinement level 1; level 3 built,
 not used, ASSIST-43) and
-**2c-2b** (the GPU path and level 2, itself split into 2c-2b-1 and 2c-2b-2, user 2026-10-23), each with its own branch and reviews; the machinery of
+**2c-2b** (the GPU path, 2c-2b-1; there is no level 2, ASSIST-48), each with its own branch and reviews; the machinery of
 2c-2a is path-aware, so 2c-2b only adds to it.
 
 #### 2c-2a CPU path, bubblewrap (level 3 built, not used: ASSIST-43)
@@ -767,30 +729,6 @@ checks run on the dev host with the GPU fan on manual, evening or weekend, throu
   Intel, NVIDIA) has been traced where one is available;
 - re-measure the superseding-job timings on both paths with the fixed helper, then the GPU-path
   checks at each llama.cpp pin change (`tools/assist_gpu_live.py`).
-
-#### 2c-2b-2 Landlock (branch `assist-2c2b2`, from master after 2c-2b-1 merges)
-
-Scope: confinement level 2 (Landlock with seccomp), used only when the owner has explicitly
-allowed it (ASSIST-44) with `--assistant-allow-landlock`, off by default; `/admin/assistant`
-shows whether it is on, what level 2 does not confine, and how to turn it on. Without it a
-level-1 failure means unavailable. Tests:
-- Landlock level: the state comes from `RestrictionStatus` (full, partial, none) and the
-  page text matches the table in §1.4a; seccomp refusals as above (testable here); with
-  Landlock network rules: no TCP connect to a host listener, LAN or public address, no bind
-  on another port, the listening socket on `127.0.0.1` works. This host's kernel has no
-  Landlock (`CONFIG_SECURITY_LANDLOCK` not set), so these run on a VM with Landlock ABI 4 or
-  later; until they have run, the level is labelled unverified in the results and the release
-  scope; the "could listen on another address on its port" gap is demonstrated by the
-  adversarial helper and recorded; on this host: the helper cannot fork, `vfork` or `clone` a
-  process (`clone3` → `ENOSYS`) while threads still start, so no descendant outlives a SIGKILL
-  of the child;
-- the GPU at the TCP levels: used only when exactly one hardware GPU is visible, counted from
-  sysfs (ASSIST-L25); with the owner's explicit permission for level 3 (ASSIST-43), two
-  identical cards at level 3 → CPU path with the page note;
-- transitions: a sandbox-setup failure at level 2 → level 3 only with the owner's explicit
-  permission, otherwise `unavailable` (ASSIST-43); a level that passes for the CPU build but
-  not the GPU build → each path at its own level;
-- rights: the option off → level 2 never probed or started, whatever the probe would say.
 
 ### 2d-1 Owner model setting (local models)
 
@@ -908,9 +846,8 @@ dangling key shows no link; p95 measured.
   and the GPU path (Vulkan, RX 6650 XT, night or weekend), each from a native
   child under bubblewrap: start to `ready`, priming and calibration samples, derived budgets,
   token refusal, cancellation, the GPU → CPU fallback, shutdown and orphan cleanup, the
-  confinement tests with the adversarial helper. Landlock on a VM whose kernel has ABI 4 or
-  later (this host's kernel has none) and the AppArmor preflight on an Ubuntu VM; until run,
-  labelled unverified. macOS (Metal) and Windows (Vulkan): deferred, not claimed.
+  confinement tests with the adversarial helper. The AppArmor preflight on an Ubuntu VM;
+  until run, labelled unverified. macOS (Metal) and Windows (Vulkan): deferred, not claimed.
 - Model screen (prototype tier, `tools/assist_eval.py` with unit tests; results note with
   exact scope, denominators and limitations; reviewed; no pass bar, D-D): per path (CPU at 2
   threads, GPU), p50/p95 latency, schema-valid rate, output tokens; per class, correct within the first 3 and
@@ -949,11 +886,8 @@ prevented); one revision per Enter makes history long (no-ops write nothing, no 
 (proxies, redirects, retries) could send player text off the machine or repeat it, hence the
 client policy and its tests. Runtime: bubblewrap needs unprivileged user namespaces, which
 some distributions disable or restrict (Ubuntu's AppArmor rule), and older distributions'
-bubblewrap may lack an option the probe needs; those machines run no assistant unless the owner explicitly allows Landlock (2c-2b-2, ASSIST-44)
-or unconfined (ASSIST-43), as shown on the page; and Landlock is missing or
-lacks network rules on many kernels (this host's included), so a machine can end on a lower
-level; the Landlock level leaves inbound listening on other addresses and local Unix sockets
-open; a malicious GGUF exploiting llama-server is contained only as far as the active level
+bubblewrap may lack an option the probe needs; those machines run no assistant unless the owner explicitly allows
+unconfined (ASSIST-43), as shown on the page; a malicious GGUF exploiting llama-server is contained only as far as the active level
 goes; the official Linux builds link against a distribution's glibc and Vulkan loader, which
 may not match the host; the bubblewrap path list is driver-specific (Mesa on AMD measured;
 other drivers may need more paths, and then fall back to the CPU); other applications can take
