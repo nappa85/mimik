@@ -5,11 +5,11 @@
 //! (Landlock) is step 2c-2b-2. The GPU path runs the Vulkan build at level 1 with the
 //! selected render node bound and `--device` named from the in-sandbox listing.
 use super::bwrap::{self, Bwrap, GpuBinds, Profile, Started};
-use super::hako;
 use super::device::{self, Candidate, Choice, Listed, Roots};
 use super::drain::{self, Summary};
 use super::endpoint::{self, Loopback, Sandbox, SandboxSocket, Watched};
 use super::files::{self, HashCache, Owners, Verified};
+use super::hako;
 use super::manager::{Child, DeviceView, Fail, Launcher};
 use super::manifest::{Build, MANIFEST};
 use super::rundir::{self, Entry, Generation, Pidfile, Swept};
@@ -1211,8 +1211,11 @@ impl Real {
                 .map_err(|_| Fail::Other("a verified object cannot be examined".into()))
         };
         let run = self.run_dir().map_err(Fail::Other)?;
-        let run_path = std::fs::read_link(format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&*run)))
-            .map_err(|_| Fail::Other("the run directory's path cannot be read".into()))?;
+        let run_path = std::fs::read_link(format!(
+            "/proc/self/fd/{}",
+            std::os::fd::AsRawFd::as_raw_fd(&*run)
+        ))
+        .map_err(|_| Fail::Other("the run directory's path cannot be read".into()))?;
         let generation_path = run_path.join(generation.name());
         token
             .write_file(generation.fd.as_fd())
@@ -1983,9 +1986,12 @@ const BIND_LISTENING: Duration = Duration::from_secs(10);
 /// Why a child ended: at level 1, a sandbox failure only when the marker pipe ended cleanly
 /// without the marker (nothing the executed command prints can make it one); an unknown
 /// outcome, like any other exit, is counted at the same level.
-fn classify(level: Level, marker: Marker, summary: Summary, why: &str) -> Fail {
+fn classify(level: Level, backend: Backend, marker: Marker, summary: Summary, why: &str) -> Fail {
     if level == Level::Bubblewrap && marker == Marker::Absent {
-        Fail::Sandbox(format!("bubblewrap could not set up the sandbox ({why})"))
+        Fail::Sandbox(format!(
+            "{} could not set up the sandbox ({why})",
+            backend.name()
+        ))
     } else if summary.failed.model_load {
         Fail::Other(format!("the model could not be loaded ({why})"))
     } else {
@@ -2013,6 +2019,7 @@ pub(crate) struct RealChild {
     healthy: AtomicBool,
     generation_dir: Mutex<Option<Generation>>,
     level: Level,
+    backend: Backend,
     path: Path,
     notes: Vec<String>,
     /// The launcher's runtime directory (a test's key for the drain gate).
@@ -2060,7 +2067,7 @@ impl Child for RealChild {
             }
         };
         let marker = settled_marker(&self.readers, &self.marker, READERS_WITHIN).await;
-        classify(self.level, marker, self.summary(), &why)
+        classify(self.level, self.backend, marker, self.summary(), &why)
     }
 
     async fn stop(&self) {
@@ -2392,6 +2399,7 @@ impl Real {
             healthy: AtomicBool::new(false),
             generation_dir: Mutex::new(Some(generation)),
             level,
+            backend: self.settings.backend,
             path,
             notes,
             #[cfg(test)]

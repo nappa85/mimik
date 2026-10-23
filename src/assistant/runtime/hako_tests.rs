@@ -174,9 +174,11 @@ fn temporary_space_is_bounded_and_dev_is_a_small_tmpfs() {
 #[test]
 fn the_probe_executable_is_an_extra_read_only_bind_with_its_identity() {
     let mut given = inputs(None, &[]);
-    given
-        .extra
-        .push((PathBuf::from("/usr/bin/mimik"), "/opt/mimik/mimik".into(), (7, 9)));
+    given.extra.push((
+        PathBuf::from("/usr/bin/mimik"),
+        "/opt/mimik/mimik".into(),
+        (7, 9),
+    ));
     let plan = plan(&given);
     let bind = plan
         .binds

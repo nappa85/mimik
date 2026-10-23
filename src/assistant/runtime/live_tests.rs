@@ -29,8 +29,10 @@ fn env(name: &str) -> PathBuf {
 /// The sandbox the live suite runs against: `MIMIK_LIVE_SANDBOX` (`bwrap`, the default, or
 /// `hakoniwa`); the same tests run against either.
 fn live_backend() -> Backend {
-    std::env::var("MIMIK_LIVE_SANDBOX")
-        .map_or_else(|_| Backend::default(), |name| Backend::parse(&name).unwrap())
+    std::env::var("MIMIK_LIVE_SANDBOX").map_or_else(
+        |_| Backend::default(),
+        |name| Backend::parse(&name).unwrap(),
+    )
 }
 
 fn helper_args(test: &str) -> Vec<String> {
@@ -235,6 +237,8 @@ fn adversary() {
         "seccomp": field("Seccomp:"),
         "dev": dev,
         "dev_tty": errno_of(std::fs::File::open("/dev/tty")),
+        "stdin": std::fs::read_link("/proc/self/fd/0")
+            .map_or_else(|error| error.to_string(), |path| path.display().to_string()),
         "tiocsti_succeeded": tiocsti,
         "controlling_tty": tty_nr,
         "descriptors": descriptors,
@@ -492,6 +496,15 @@ async fn live_level_1_serves_over_the_checked_socket_with_the_token_only() {
     assert_eq!(status, 200, "{answer}");
     assert_eq!(answer["timings"]["predicted_n"], json!(16));
     assert!(server.tokens("hello there").await.unwrap() > 0);
+    // No token file is left in the generation's directory (the sandbox holds the token by a
+    // descriptor or, with Hakoniwa, by the inode of a bind mount whose name was removed).
+    assert!(
+        !scratch
+            .path()
+            .join("data/run/1")
+            .join(super::super::token::FILE)
+            .exists()
+    );
     // The token is in no command line of the sandbox's processes.
     let pidfile =
         std::fs::read_to_string(scratch.path().join("data/run").join(rundir::PIDFILE)).unwrap();
@@ -657,6 +670,8 @@ fn live_an_adversary_in_the_level_1_sandbox_reaches_nothing() {
     assert!(refused(&report["dev_tty"]), "{report}");
     assert_eq!(report["tiocsti_succeeded"], json!([0, 0, 0]), "{report}");
     assert_eq!(report["controlling_tty"], json!("0"), "{report}");
+    // Standard input is `/dev/null`: with Hakoniwa it was the marker pipe until the exec.
+    assert_eq!(report["stdin"], json!("/dev/null"), "{report}");
     if live_backend() == Backend::Hakoniwa {
         // Hakoniwa's /dev is built here: the five safe nodes and the links, no terminal node,
         // no pts, no ptmx.
@@ -669,8 +684,8 @@ fn live_an_adversary_in_the_level_1_sandbox_reaches_nothing() {
         for entry in &dev {
             assert!(
                 [
-                    "null", "zero", "full", "random", "urandom", "fd", "stdin", "stdout",
-                    "stderr", "shm"
+                    "null", "zero", "full", "random", "urandom", "fd", "stdin", "stdout", "stderr",
+                    "shm"
                 ]
                 .contains(entry),
                 "{entry} is in /dev: {dev:?}"
@@ -732,12 +747,17 @@ fn live_sigkill_of_mimik_during_startup_kills_the_whole_sandbox() {
 /// A fake build in `scratch`: the fake llama-server (`MIMIK_LIVE_FAKE_SERVER`) as the only
 /// executable, a fake model, the test binary as runner and shim.
 fn fake_build(scratch: &std::path::Path, alias: &str) -> Arc<Real> {
+    let server = std::fs::read(env("MIMIK_LIVE_FAKE_SERVER")).unwrap();
+    fake_build_with(scratch, alias, &server)
+}
+
+/// [`fake_build`] with `server` as the runtime's one executable.
+fn fake_build_with(scratch: &std::path::Path, alias: &str, server: &[u8]) -> Arc<Real> {
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
-    let server = std::fs::read(env("MIMIK_LIVE_FAKE_SERVER")).unwrap();
     let cpu = scratch.join("runtime/cpu");
     std::fs::create_dir_all(&cpu).unwrap();
-    std::fs::write(cpu.join("llama-server"), &server).unwrap();
+    std::fs::write(cpu.join("llama-server"), server).unwrap();
     std::fs::set_permissions(
         cpu.join("llama-server"),
         std::fs::Permissions::from_mode(0o755),
@@ -760,7 +780,7 @@ fn fake_build(scratch: &std::path::Path, alias: &str) -> Arc<Real> {
         server: "llama-server".into(),
         files: vec![super::super::manifest::File {
             name: "llama-server".into(),
-            sha256: hex::encode(Sha256::digest(&server)),
+            sha256: hex::encode(Sha256::digest(server)),
             size: server.len() as u64,
             mode: "0755".into(),
         }],
@@ -772,10 +792,16 @@ fn fake_build(scratch: &std::path::Path, alias: &str) -> Arc<Real> {
 /// alias names: the failure is counted as the model server's, the level kept, and nothing
 /// starts unconfined.
 async fn forged_failure_keeps_level_1(alias: &str) {
-    use super::super::manager::{self, State};
-    use crate::assistant::jobs::Assistant;
     let scratch = scratch();
     let real = fake_build(scratch.path(), alias);
+    failed_start_keeps_level_1(real).await;
+}
+
+/// The manager over `real` until its first failed start: counted as the model server's, the
+/// level kept.
+async fn failed_start_keeps_level_1(real: Arc<Real>) {
+    use super::super::manager::{self, State};
+    use crate::assistant::jobs::Assistant;
     let assistant = Assistant::new();
     let handle = manager::spawn(
         assistant,
@@ -821,6 +847,115 @@ async fn forged_failure_keeps_level_1(alias: &str) {
 #[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
 async fn live_a_server_that_forges_bubblewraps_errors_keeps_level_1() {
     forged_failure_keeps_level_1("forge-bwrap").await;
+}
+
+/// A server file that cannot be executed (not an executable format) fails at the exec itself,
+/// after the marker: the server's failure, counted, never a sandbox failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+async fn live_a_server_that_cannot_be_executed_is_the_servers_failure() {
+    let scratch = scratch();
+    let real = fake_build_with(scratch.path(), "no-exec", b"this is not a program\n");
+    failed_start_keeps_level_1(real).await;
+}
+
+/// What a start of the Hakoniwa sandbox does when the object at a bound path is no longer the
+/// one that was verified (the path binds' (device, inode) check; bubblewrap binds the
+/// verified descriptors, so it has no such race).
+#[cfg(feature = "sandbox-hakoniwa")]
+async fn swapped_before_the_spawn(swap: impl FnOnce(&std::path::Path)) -> Fail {
+    let scratch = scratch();
+    let real = fake_build(scratch.path(), "swapped");
+    let mut settings = real.settings.clone();
+    settings.backend = Backend::Hakoniwa;
+    let build = real.cpu.clone();
+    let real = Arc::new(Real::with_build(settings, build));
+    let launch = Launch(Arc::clone(&real));
+    launch.preflight(Path::Cpu).await.unwrap();
+    let (arrived, reached) = std::sync::mpsc::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    PAUSE.lock().unwrap().push(Pause {
+        dir: real.settings.runtime_dir.clone(),
+        step: "before-spawn",
+        arrived,
+        release: wait,
+    });
+    let starting = tokio::spawn({
+        let launch = Launch(Arc::clone(&real));
+        async move { launch.start_real(1, Level::Bubblewrap, Path::Cpu).await }
+    });
+    tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(60)))
+        .await
+        .unwrap()
+        .unwrap();
+    swap(scratch.path());
+    release.send(()).unwrap();
+    let child = starting.await.unwrap().expect("the runner starts");
+    let failure = child.exited().await;
+    // Nothing of the server ran: it would have created its socket.
+    assert!(
+        !scratch.path().join("data/run/1/llama.sock").exists(),
+        "the server ran"
+    );
+    child.stop().await;
+    failure
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+fn replace_file(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let bytes = std::fs::read(path).unwrap();
+    let other = path.with_extension("swapped");
+    std::fs::write(&other, bytes).unwrap();
+    std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::rename(&other, path).unwrap();
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+async fn live_a_model_swapped_after_verification_is_never_run_by_hakoniwa() {
+    let failure = swapped_before_the_spawn(|scratch| {
+        // The same bytes under a new inode: only the identity check can tell.
+        replace_file(&scratch.join("models/m.gguf"));
+    })
+    .await;
+    assert!(
+        matches!(&failure, Fail::Sandbox(why) if why.starts_with("hakoniwa could not set up")),
+        "{failure:?}"
+    );
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+async fn live_a_server_swapped_after_verification_is_never_run_by_hakoniwa() {
+    let failure = swapped_before_the_spawn(|scratch| {
+        replace_file(&scratch.join("runtime/cpu/llama-server"));
+    })
+    .await;
+    assert!(
+        matches!(&failure, Fail::Sandbox(why) if why.starts_with("hakoniwa could not set up")),
+        "{failure:?}"
+    );
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+async fn live_a_model_replaced_by_a_link_to_another_file_is_never_run_by_hakoniwa() {
+    let failure = swapped_before_the_spawn(|scratch| {
+        let model = scratch.join("models/m.gguf");
+        let elsewhere = scratch.join("models/other.gguf");
+        std::fs::copy(&model, &elsewhere).unwrap();
+        std::fs::remove_file(&model).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &model).unwrap();
+    })
+    .await;
+    assert!(
+        matches!(&failure, Fail::Sandbox(why) if why.starts_with("hakoniwa could not set up")),
+        "{failure:?}"
+    );
 }
 
 /// Nothing the executed server exits with can count as a sandbox failure, whatever code the

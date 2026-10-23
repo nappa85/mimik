@@ -401,6 +401,7 @@ fn only_a_missing_shim_marker_makes_a_level_1_exit_a_sandbox_failure() {
     assert!(matches!(
         classify(
             Level::Bubblewrap,
+            Backend::Bwrap,
             Marker::Absent,
             Summary::default(),
             "exit status: 1"
@@ -412,6 +413,7 @@ fn only_a_missing_shim_marker_makes_a_level_1_exit_a_sandbox_failure() {
     assert!(matches!(
         classify(
             Level::Bubblewrap,
+            Backend::Bwrap,
             Marker::Executed,
             Summary::default(),
             "exit status: 1"
@@ -419,13 +421,20 @@ fn only_a_missing_shim_marker_makes_a_level_1_exit_a_sandbox_failure() {
         Fail::Other(_)
     ));
     assert!(matches!(
-        classify(Level::Bubblewrap, Marker::Executed, loaded, "exit status: 1"),
+        classify(
+            Level::Bubblewrap,
+            Backend::Bwrap,
+            Marker::Executed,
+            loaded,
+            "exit status: 1"
+        ),
         Fail::Other(why) if why.starts_with("the model could not be loaded")
     ));
     // Not known (a read error, a reader still running): counted, the level kept.
     assert!(matches!(
         classify(
             Level::Bubblewrap,
+            Backend::Bwrap,
             Marker::Unknown,
             Summary::default(),
             "exit status: 1"
@@ -436,6 +445,7 @@ fn only_a_missing_shim_marker_makes_a_level_1_exit_a_sandbox_failure() {
     assert!(matches!(
         classify(
             Level::Unconfined,
+            Backend::Bwrap,
             Marker::Absent,
             Summary::default(),
             "exit status: 1"
@@ -471,6 +481,7 @@ async fn a_marker_reader_still_running_is_unknown_and_keeps_the_level() {
     assert!(matches!(
         classify(
             Level::Bubblewrap,
+            Backend::Bwrap,
             outcome,
             Summary::default(),
             "exit status: 1"

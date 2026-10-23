@@ -265,9 +265,10 @@ pub(crate) fn identity_mismatch(
     binds: &[Bind],
     stat: impl Fn(&str) -> Option<Identity>,
 ) -> Option<&Bind> {
-    binds
-        .iter()
-        .find(|bind| bind.identity.is_some_and(|want| stat(&bind.target) != Some(want)))
+    binds.iter().find(|bind| {
+        bind.identity
+            .is_some_and(|want| stat(&bind.target) != Some(want))
+    })
 }
 
 #[cfg(feature = "sandbox-hakoniwa")]
@@ -393,7 +394,10 @@ mod run {
             .ok()
             .is_some_and(|null| rustix::stdio::dup2_stdin(&null).is_ok());
         if !replaced || !probe::close_inherited(probe::close_range, probe::fd_listing) {
-            return refuse(exit::DESCRIPTORS, "the inherited descriptors cannot be closed");
+            return refuse(
+                exit::DESCRIPTORS,
+                "the inherited descriptors cannot be closed",
+            );
         }
         let error = std::process::Command::new(&plan.argv[0])
             .args(&plan.argv[1..])
@@ -423,7 +427,8 @@ mod run {
         }
         // SAFETY: both descriptors are handed over by the launcher and owned by this
         // process from here on; nothing else uses these numbers.
-        let (status, marker) = unsafe { (OwnedFd::from_raw_fd(status), OwnedFd::from_raw_fd(marker)) };
+        let (status, marker) =
+            unsafe { (OwnedFd::from_raw_fd(status), OwnedFd::from_raw_fd(marker)) };
         let mut status_file = std::fs::File::from(status);
         let workdir = plan.workdir.clone();
         let container = container(&plan);
@@ -442,9 +447,14 @@ mod run {
         let pidfd = i32::try_from(child.id())
             .ok()
             .and_then(rustix::process::Pid::from_raw)
-            .and_then(|pid| rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).ok());
+            .and_then(|pid| {
+                rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).ok()
+            });
         let early = pidfd.as_ref().is_some_and(|pidfd| {
-            let mut fds = [rustix::event::PollFd::new(pidfd, rustix::event::PollFlags::IN)];
+            let mut fds = [rustix::event::PollFd::new(
+                pidfd,
+                rustix::event::PollFlags::IN,
+            )];
             let wait = rustix::time::Timespec {
                 tv_sec: 0,
                 tv_nsec: i64::try_from(EARLY_END.as_nanos()).unwrap_or(50_000_000),
