@@ -234,23 +234,22 @@ impl Launcher for FakeLauncher {
     async fn probe(&self, path: Path) -> Vec<(Level, Result<(), String>)> {
         self.probed.lock().unwrap().push(path);
         if path == Path::Gpu {
-            return self.gpu_probe.lock().unwrap().clone().unwrap_or_else(|| {
-                vec![
-                    (Level::Bubblewrap, Ok(())),
-                    (Level::Unconfined, Ok(())),
-                ]
-            });
+            return self
+                .gpu_probe
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| vec![(Level::Bubblewrap, Ok(())), (Level::Unconfined, Ok(()))]);
         }
         let gate = self.cpu_probe_gate.lock().unwrap().clone();
         if let Some(gate) = gate {
             gate.notified().await;
         }
-        self.probe.lock().unwrap().clone().unwrap_or_else(|| {
-            vec![
-                (Level::Bubblewrap, Ok(())),
-                (Level::Unconfined, Ok(())),
-            ]
-        })
+        self.probe
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| vec![(Level::Bubblewrap, Ok(())), (Level::Unconfined, Ok(()))])
     }
 
     fn device(&self) -> Option<DeviceView> {

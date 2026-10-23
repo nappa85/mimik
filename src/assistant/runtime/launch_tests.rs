@@ -171,7 +171,11 @@ async fn the_manager_probe_runs_level_1_only_and_the_cli_still_probes_level_3() 
     launch.preflight(Path::Cpu).await.unwrap();
     // The manager's probe never runs level 3's code (ASSIST-43).
     let levels = launch.probe(Path::Cpu).await;
-    assert_eq!(levels.len(), 2, "there is no level 2 (ASSIST-48): {levels:?}");
+    assert_eq!(
+        levels.len(),
+        2,
+        "there is no level 2 (ASSIST-48): {levels:?}"
+    );
     assert_eq!(
         levels[1],
         (
