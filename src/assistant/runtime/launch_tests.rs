@@ -307,7 +307,10 @@ async fn a_port_that_cannot_be_bound_is_tried_three_times_then_fails() {
         holders.push((holder, port));
     }
     drop(holders);
+    // Each exit is seen before the drain is looked at.
+    *EXIT_FIRST.lock().unwrap() = Some(setup.settings.runtime_dir.clone());
     let result = launch.start(1, Level::Unconfined, Path::Cpu).await;
+    *EXIT_FIRST.lock().unwrap() = None;
     assert!(
         matches!(&result, Err(Fail::Other(why)) if why.contains("could not bind a loopback port")),
         "{:?}",

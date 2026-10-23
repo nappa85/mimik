@@ -2118,7 +2118,7 @@ impl Launch {
             let port = pick_port(&real.settings.runtime_dir)?;
             let spawned = joined(spawn(port).await)?;
             let child = real.child(spawned, level, &token, None, generation)?;
-            match bind_outcome(&child, port, &ticket).await {
+            match bind_outcome(&child, port, &ticket, &real.settings.runtime_dir).await {
                 // Bound, or exited for some other reason (its `exited()` reports that): kept.
                 Bind::Bound | Bind::OtherExit => return Ok(child),
                 Bind::Failed => {
@@ -2134,6 +2134,10 @@ impl Launch {
     }
 }
 
+/// Test-forced "exit seen before the drain", keyed by runtime directory.
+#[cfg(test)]
+pub(crate) static EXIT_FIRST: Mutex<Option<PathBuf>> = Mutex::new(None);
+
 /// Whether a level-3 child took its port.
 enum Bind {
     Bound,
@@ -2146,12 +2150,28 @@ enum Bind {
 /// Waits (10 s) for the child to listen on `port` or to exit. On exit the drain is settled
 /// (bounded) and the bind error re-checked, so an exit seen before the drain parsed it is not
 /// mistaken for a bound server.
-async fn bind_outcome(child: &RealChild, port: u16, ticket: &Ticket) -> Bind {
+async fn bind_outcome(
+    child: &RealChild,
+    port: u16,
+    ticket: &Ticket,
+    runtime_dir: &std::path::Path,
+) -> Bind {
+    // A test may make the exit be seen first, before the drain is looked at (the race the
+    // settle below covers).
+    #[cfg(test)]
+    if EXIT_FIRST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_deref()
+        == Some(runtime_dir)
+    {
+        let mut exit = child.exit.clone();
+        let _ = exit.wait_for(Option::is_some).await;
+    }
+    let _ = runtime_dir;
     let outcome = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if child.summary().failed.bind {
-                return Bind::Failed;
-            }
+            // An exit first: the drain is settled before the bind error is looked at.
             if child.exit.borrow().is_some() {
                 child.readers.all_ended(READERS_WITHIN).await;
                 return if child.summary().failed.bind {
@@ -2159,6 +2179,9 @@ async fn bind_outcome(child: &RealChild, port: u16, ticket: &Ticket) -> Bind {
                 } else {
                     Bind::OtherExit
                 };
+            }
+            if child.summary().failed.bind {
+                return Bind::Failed;
             }
             let (pid, held) = (child.pid, ticket.clone());
             let listening = tokio::task::spawn_blocking(move || {
