@@ -146,6 +146,15 @@ def verify_notices(notices, data=None):
         os.chmod(path, 0o644)
 
 
+def verify_source_tar(path, data=None):
+    """The pinned source tar's size and SHA-256 (checked before any text is taken from it)."""
+    data = data or manifest()
+    source = data["source"]
+    path = Path(path)
+    if path.stat().st_size != source.get("tar_size") or sha256(path) != source["tar_sha256"]:
+        raise ValueError(f"{path}: the source archive differs from the pinned one")
+
+
 def source_archive(data, out):
     """`git archive` of the pinned commit from a shallow fetch; the tar's SHA-256 is pinned. It is
     a build-time input only (licence texts for the notices); it is never shipped."""
@@ -167,8 +176,7 @@ def source_archive(data, out):
                 stdout=handle,
                 timeout=600,
             )
-    if sha256(target) != source["tar_sha256"]:
-        raise ValueError(f"{target}: the source archive differs from the pinned one")
+    verify_source_tar(target, data)
     return target
 
 

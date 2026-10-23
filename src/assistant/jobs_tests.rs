@@ -417,6 +417,38 @@ async fn a_generation_change_ends_every_job_neutrally() {
 }
 
 #[tokio::test]
+async fn a_transport_error_before_the_generation_ends_resolves_as_restarted_and_neutral() {
+    // The child's death closes the connection first; its exit is published afterwards. The
+    // job must not be settled by the transport error alone.
+    let stub = Arc::new(StubInterpreter::answering([Err(Failure::Transport)]));
+    let assistant = ready(stub, budgets());
+    let (job, _) = start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
+    settle().await;
+    assert!(
+        !matches!(assistant.poll(1, 1, job), Poll::Done(_)),
+        "the job was settled by the transport error before the exit was published"
+    );
+    assistant.event(RuntimeEvent::GenerationEnded {
+        generation: 1,
+        reason: EndReason::Exited,
+    });
+    assert_eq!(assistant.poll(1, 1, job), Poll::Done(Answer::Restarted));
+    settle().await;
+    assert!(assistant.breaker_closed());
+}
+
+#[tokio::test]
+async fn a_transport_error_on_a_generation_that_stays_alive_still_counts() {
+    let stub = Arc::new(StubInterpreter::answering([Err(Failure::Transport)]));
+    let assistant = ready(stub, budgets());
+    let (job, _) = start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
+    assert_eq!(
+        until_done(&assistant, 1, 1, job).await,
+        Poll::Done(Answer::Unavailable)
+    );
+}
+
+#[tokio::test]
 async fn transport_failures_open_the_breaker_and_a_start_reports_starting_first() {
     let stub = Arc::new(StubInterpreter::answering(
         (0..3).map(|_| Err(Failure::Status(500))),

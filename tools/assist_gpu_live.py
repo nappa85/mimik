@@ -83,8 +83,9 @@ def watch(process, guard, read_sensors, read_fan, clock, allowed, log):
             clock.sleep(SAMPLE_SECONDS)
         return None
     finally:
-        if process.poll() is None:
-            kill(process)
+        # Always the whole group, even when the leader has already exited (a child of its
+        # group may live on); a group that is gone is no error.
+        kill(process)
 
 
 def kill(process):
@@ -99,14 +100,17 @@ def kill(process):
 def selected(args):
     """The tests the filter selects, from the binary's own listing (nothing runs). Refuses an
     empty selection and any test that is not a `live_gpu_` one."""
-    listing = subprocess.run(  # noqa: S603 (fixed argv from the operator's paths)
-        [str(args.binary), args.test or FILTER, "--include-ignored", "--list"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-        stdin=subprocess.DEVNULL,
-    )
+    try:
+        listing = subprocess.run(  # noqa: S603 (fixed argv from the operator's paths)
+            [str(args.binary), args.test or FILTER, "--include-ignored", "--list"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except (subprocess.TimeoutExpired, OSError) as error:
+        return None, f"the test listing could not be run ({type(error).__name__})"
     names = [
         line[: -len(": test")] for line in listing.stdout.splitlines() if line.endswith(": test")
     ]

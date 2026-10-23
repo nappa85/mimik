@@ -1558,11 +1558,26 @@ fn recv_unless_cancelled<T>(
 /// ended.
 fn collect_listing(
     out: impl Read + Send + 'static,
+    err: Option<impl Read + Send + 'static>,
     mut exited: impl FnMut() -> Option<bool>,
     within: Duration,
     ticket: &Ticket,
 ) -> Result<String, String> {
     let deadline = std::time::Instant::now() + within;
+    // The error output is read to its end and dropped (never logged, never held), so a chatty
+    // driver cannot fill the pipe and stall the listing; it is joined below.
+    let (drained, drain) = std::sync::mpsc::channel();
+    if let Some(mut err) = err {
+        std::thread::Builder::new()
+            .name("assistant-devices-err".into())
+            .spawn(move || {
+                let _ = std::io::copy(&mut err, &mut std::io::sink());
+                let _ = drained.send(());
+            })
+            .map_err(|_| "no listing thread".to_owned())?;
+    } else {
+        let _ = drained.send(());
+    }
     let (sender, read) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("assistant-devices".into())
@@ -1599,6 +1614,19 @@ fn collect_listing(
             return Err("the device listing's process did not exit in time".into());
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+    // Joined within the same deadline: a listing whose error output stays open is not over.
+    loop {
+        match drain.recv_timeout(Duration::from_millis(20)) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if ticket.cancelled() {
+            return Err("cancelled".into());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("the device listing's error output did not end in time".into());
+        }
     }
     String::from_utf8(bytes)
         .map_err(|_| "the device listing is not in the pinned build's format".to_owned())
@@ -2844,18 +2872,9 @@ impl Real {
             (child.stdout.take(), child.stderr.take())
         });
         let out = out.ok_or_else(|| "no listing output".to_owned())?;
-        if let Some(err) = err {
-            // Read to its end and dropped (never logged, never held), so a chatty driver
-            // cannot fill the pipe and stall the listing; it ends when the sandbox is killed.
-            let _ = std::thread::Builder::new()
-                .name("assistant-devices-err".into())
-                .spawn(move || {
-                    let mut err = err;
-                    let _ = std::io::copy(&mut err, &mut std::io::sink());
-                });
-        }
         let text = collect_listing(
             out,
+            err,
             || {
                 owned
                     .child

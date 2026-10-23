@@ -214,6 +214,7 @@ fn a_listing_is_whole_output_of_a_process_that_exited_well() {
     let ticket = Work::new().enter();
     let text = collect_listing(
         std::io::Cursor::new(GOOD_LISTING),
+        None::<std::io::Empty>,
         exits(true),
         Duration::from_secs(5),
         &ticket,
@@ -234,6 +235,7 @@ fn a_listing_longer_than_the_bound_is_refused_even_cut_at_a_line_boundary() {
     }
     let error = collect_listing(
         std::io::Cursor::new(output),
+        None::<std::io::Empty>,
         exits(true),
         Duration::from_secs(5),
         &ticket,
@@ -257,8 +259,14 @@ fn a_listing_that_cannot_be_read_to_its_end_is_refused() {
         }
     }
     let ticket = Work::new().enter();
-    let error =
-        collect_listing(Broken(false), exits(true), Duration::from_secs(5), &ticket).unwrap_err();
+    let error = collect_listing(
+        Broken(false),
+        None::<std::io::Empty>,
+        exits(true),
+        Duration::from_secs(5),
+        &ticket,
+    )
+    .unwrap_err();
     assert!(error.contains("could not be read"), "{error}");
 }
 
@@ -267,6 +275,7 @@ fn a_listing_from_a_process_that_failed_is_refused() {
     let ticket = Work::new().enter();
     let error = collect_listing(
         std::io::Cursor::new(GOOD_LISTING),
+        None::<std::io::Empty>,
         exits(false),
         Duration::from_secs(5),
         &ticket,
@@ -281,6 +290,7 @@ fn a_process_that_closes_its_output_but_stays_alive_is_refused_at_the_deadline()
     let started = std::time::Instant::now();
     let error = collect_listing(
         std::io::Cursor::new(GOOD_LISTING),
+        None::<std::io::Empty>,
         || None,
         Duration::from_millis(300),
         &ticket,
@@ -297,10 +307,33 @@ fn a_cancel_ends_the_wait_for_the_listing_process() {
     work.cancel();
     let error = collect_listing(
         std::io::Cursor::new(GOOD_LISTING),
+        None::<std::io::Empty>,
         || None,
         Duration::from_secs(60),
         &ticket,
     )
     .unwrap_err();
     assert_eq!(error, "cancelled");
+}
+
+#[test]
+fn a_listing_whose_error_output_stays_open_is_not_over_at_the_deadline() {
+    // A reader that never ends (a descendant holding stderr open).
+    struct Open;
+    impl Read for Open {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            std::thread::sleep(Duration::from_millis(10));
+            Ok(1)
+        }
+    }
+    let ticket = Work::new().enter();
+    let error = collect_listing(
+        std::io::Cursor::new(GOOD_LISTING),
+        Some(Open),
+        exits(true),
+        Duration::from_millis(300),
+        &ticket,
+    )
+    .unwrap_err();
+    assert!(error.contains("error output did not end"), "{error}");
 }

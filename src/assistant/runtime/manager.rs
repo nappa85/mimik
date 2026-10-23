@@ -597,6 +597,7 @@ impl Manager {
             status.gpu_note = Some(why);
             status.path = Path::Cpu;
             status.device = None;
+            status.device_notes.clear();
             status.budgets = None;
         });
     }

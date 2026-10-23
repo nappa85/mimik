@@ -153,6 +153,41 @@ class WatchCleanupTests(unittest.TestCase):
             os.killpg(process.pid, signal.SIG_DFL)
 
 
+class LeaderExitTests(unittest.TestCase):
+    def test_a_same_group_child_of_a_leader_that_exited_is_killed(self):
+        code = (
+            "import subprocess, sys;c = subprocess.Popen(['sleep', '60']);print(c.pid, flush=True)"
+        )
+        leader = subprocess.Popen(
+            [sys.executable, "-c", code], stdout=subprocess.PIPE, text=True, start_new_session=True
+        )
+        child = int(leader.stdout.readline())
+        leader.wait()
+        os.kill(child, 0)  # still alive: it outlived its leader
+        live.watch(
+            leader,
+            ops.ThermalGuard(live.LIMITS),
+            sensors,
+            lambda: MANUAL,
+            Clock(),
+            lambda now: True,
+            print,
+        )
+        for _ in range(100):
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                return
+            try:
+                os.waitpid(child, os.WNOHANG)
+            except ChildProcessError:
+                pass
+            import time as real_time
+
+            real_time.sleep(0.02)
+        self.fail("the leader's same-group child survived the watch")
+
+
 FAKE_BINARY = """#!{python}
 import sys
 args = sys.argv[1:]
@@ -190,6 +225,16 @@ class RunTests(unittest.TestCase):
     def test_a_successful_summary_of_zero_tests_is_no_pass(self):
         zero = "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out"
         self.assertNotEqual(self.run_main(["m::live_gpu_a"], zero), 0)
+
+    def test_a_listing_that_cannot_run_or_hangs_is_a_clean_refusal(self):
+        args = live.argparse.Namespace(binary=Path("/nonexistent/tests"), test=None)
+        names, why = live.selected(args)
+        self.assertIsNone(names)
+        self.assertIn("listing", why)
+        with mock.patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired("x", 60)):
+            names, why = live.selected(args)
+        self.assertIsNone(names)
+        self.assertIn("listing", why)
 
     def test_an_empty_selection_or_a_non_gpu_test_is_refused_before_launch(self):
         self.assertEqual(self.run_main([], "x"), 2)

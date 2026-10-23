@@ -264,12 +264,17 @@ pub(crate) enum Poll {
     Missing,
 }
 
+/// How long a transport error waits for its generation's end to be published.
+const TRANSPORT_GRACE: Duration = Duration::from_secs(1);
+
 /// The assistant: the job table, the worker's wake-up, the runtime state and the breaker.
 pub(crate) struct Assistant {
     table: Mutex<Table>,
     runtime: Mutex<Runtime>,
     breaker: Mutex<Breaker>,
     wake: Notify,
+    /// Signalled after every runtime event (a generation ended).
+    changed: Notify,
     /// Until when the server is presumed busy with a request cancelled at its deadline.
     busy_until: Mutex<Option<Instant>>,
     signals: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Signal>>>,
@@ -282,6 +287,7 @@ impl Assistant {
             runtime: Mutex::new(Runtime::Starting { generation: None }),
             breaker: Mutex::new(Breaker::new()),
             wake: Notify::new(),
+            changed: Notify::new(),
             busy_until: Mutex::new(None),
             signals: Mutex::new(None),
         })
@@ -376,6 +382,7 @@ impl Assistant {
                 }
             }
         }
+        self.changed.notify_waiters();
     }
 
     /// The breaker's state, for the assistant page.
@@ -704,6 +711,13 @@ impl Assistant {
                 return self.neutral(&run);
             }
         };
+        // A transport error may be the child's death closing the connection before its exit
+        // is published: it settles nothing until the generation is seen ending, or the grace
+        // passes with the generation still alive (then it counts).
+        if matches!(result, Some(Err(Attempt::Failed))) {
+            self.generation_ends_within(run.generation, TRANSPORT_GRACE)
+                .await;
+        }
         let now = Instant::now();
         let mut table = self.table();
         // A late answer from a job ended meanwhile is discarded; whoever ended it recorded a
@@ -748,6 +762,29 @@ impl Assistant {
         close(job, answer, now);
         drop(table);
         self.breaker().record(run.ticket, outcome, now.into_std());
+    }
+
+    /// Whether `generation` is no longer the ready one.
+    fn generation_over(&self, generation: u64) -> bool {
+        !matches!(&*self.runtime(), Runtime::Ready { generation: g, .. } if *g == generation)
+    }
+
+    /// Waits until `generation` is seen ending (its jobs are then ended `Restarted`), at most
+    /// `within`.
+    async fn generation_ends_within(&self, generation: u64, within: Duration) {
+        let deadline = Instant::now() + within;
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.generation_over(generation) {
+                return;
+            }
+            tokio::select! {
+                () = &mut changed => {}
+                () = tokio::time::sleep_until(deadline) => return,
+            }
+        }
     }
 
     /// After a request is dropped (deadline, supersession, a newer note), the server is

@@ -273,22 +273,36 @@ class ExternalNoticeTests(unittest.TestCase):
 
 
 class NoticeTests(unittest.TestCase):
-    def test_every_compiled_in_component_gets_its_text_from_the_source(self):
+    FILES = [
+        ("LICENSE", b"MIT text"),
+        ("h.h", b"code\nlicence line one\nlicence line two\nmore code\n"),
+    ]
+
+    def write_tar(self, path, data, files):
+        with tarfile.open(path, "w") as out:
+            for name, content in files:
+                info = tarfile.TarInfo(data["source"]["prefix"] + name)
+                info.size = len(content)
+                out.addfile(info, io.BytesIO(content))
+
+    def pinned(self, path, data):
+        data["source"]["tar_sha256"] = llama_runtime.sha256(path)
+        data["source"]["tar_size"] = Path(path).stat().st_size
+
+    def manifest(self):
         data = synthetic()
         data["source"]["notices"] = [
             {"component": "llama.cpp", "licence": "MIT", "path": "LICENSE"},
             {"component": "header", "licence": "Unlicense", "path": "h.h", "lines": [2, 3]},
         ]
+        return data
+
+    def test_every_compiled_in_component_gets_its_text_from_the_source(self):
+        data = self.manifest()
         with tempfile.TemporaryDirectory() as temp:
             tar = Path(temp) / "source.tar"
-            with tarfile.open(tar, "w") as out:
-                for name, content in [
-                    ("LICENSE", b"MIT text"),
-                    ("h.h", b"code\nlicence line one\nlicence line two\nmore code\n"),
-                ]:
-                    info = tarfile.TarInfo(data["source"]["prefix"] + name)
-                    info.size = len(content)
-                    out.addfile(info, io.BytesIO(content))
+            self.write_tar(tar, data, self.FILES)
+            self.pinned(tar, data)
             notice = package_release.llama_notice(data, tar)
             self.assertIn("MIT text", notice)
             self.assertIn("licence line one\nlicence line two", notice)
@@ -297,6 +311,23 @@ class NoticeTests(unittest.TestCase):
                 {"component": "absent", "licence": "MIT", "path": "missing"}
             )
             with self.assertRaises(KeyError):
+                package_release.llama_notice(data, tar)
+
+    def test_the_source_tar_is_verified_before_any_text_is_taken_from_it(self):
+        data = self.manifest()
+        with tempfile.TemporaryDirectory() as temp:
+            tar = Path(temp) / "source.tar"
+            self.write_tar(tar, data, self.FILES)
+            self.pinned(tar, data)
+            # A licence text replaced inside an otherwise valid tar (same members and names).
+            forged = [("LICENSE", b"Forged text"), self.FILES[1]]
+            self.write_tar(tar, data, forged)
+            with self.assertRaisesRegex(ValueError, "differs from the pinned"):
+                package_release.llama_notice(data, tar)
+            # The pinned size is checked too.
+            data["source"]["tar_sha256"] = llama_runtime.sha256(tar)
+            data["source"]["tar_size"] = tar.stat().st_size + 1
+            with self.assertRaisesRegex(ValueError, "differs from the pinned"):
                 package_release.llama_notice(data, tar)
 
 

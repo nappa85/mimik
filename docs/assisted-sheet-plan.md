@@ -776,6 +776,8 @@ otherwise):
   whole sandbox is a second test), and the page says why;
 - from the live run, narrow the PCI sysfs and ICD binds to what is read and limit the loader to
   the selected card's driver (ASSIST-L44, ASSIST-L45);
+- the live check records the device listing's exit code and the tail of its stderr, so a driver
+  that exits nonzero at teardown can be diagnosed (a nonzero exit now refuses the listing);
 - the first native GPU calibration (start to `ready`, priming, samples, B, R, D, Q) and grammar
   against no-grammar on the GPU path, to `docs/results.md`;
 - refused calls checked once with `strace` in a container on the GPU path (calls the Vulkan

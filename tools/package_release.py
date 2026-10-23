@@ -45,6 +45,7 @@ def llama_notice(data, tar_path=None, notices_dir=None):
         out.append(f"\n- {notice['component']}: {notice['licence']}")
     out.append("\n")
     if tar_path is not None:
+        llama_runtime.verify_source_tar(tar_path, data)
         prefix = data["source"]["prefix"]
         with tarfile.open(tar_path) as tar:
             for notice in notices:

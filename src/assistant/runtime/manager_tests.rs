@@ -194,6 +194,7 @@ struct FakeLauncher {
     /// The path of each start, in order.
     paths: Mutex<Vec<Path>>,
     device: Mutex<Option<DeviceView>>,
+    device_notes: Mutex<Vec<String>>,
     script: Mutex<VecDeque<Start>>,
     starts: Mutex<Vec<(u64, Level, Instant)>>,
     children: Mutex<Vec<Arc<FakeChild>>>,
@@ -250,6 +251,10 @@ impl Launcher for FakeLauncher {
 
     fn device(&self) -> Option<DeviceView> {
         self.device.lock().unwrap().clone()
+    }
+
+    fn device_notes(&self) -> Vec<String> {
+        self.device_notes.lock().unwrap().clone()
     }
 
     async fn start(
@@ -906,9 +911,11 @@ async fn a_gpu_failure_at_each_phase_moves_to_the_cpu_at_once_uncounted() {
     ] {
         let launcher = FakeLauncher::scripted([gpu, Start::Ok(Behaviour::default())]);
         *launcher.device.lock().unwrap() = Some(rx6650());
+        *launcher.device_notes.lock().unwrap() = vec!["0000:0d:00.0 (renderD129): x".into()];
         let (assistant, handle) = gpu_manager(&launcher);
         ready(&assistant).await;
         let status = handle.status();
+        assert!(status.device_notes.is_empty(), "{why}");
         assert_eq!(
             *launcher.paths.lock().unwrap(),
             [Path::Gpu, Path::Cpu],
