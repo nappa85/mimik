@@ -262,7 +262,7 @@ fn ancestors_writable_by_others_are_refused() {
 #[test]
 fn a_linked_ancestor_is_checked_where_it_leads() {
     // A safe-looking path through a link into a folder whose parent others can write.
-    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/runtime-tests");
+    let base = super::super::test_helper::scratch_base();
     std::fs::create_dir_all(&base).unwrap();
     std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
     let dir = tempfile::Builder::new().tempdir_in(&base).unwrap();
@@ -288,4 +288,36 @@ fn a_cancelled_verification_stops_hashing() {
     };
     assert_eq!(hash(file.as_fd(), "big", &stop), Err(Refusal::Cancelled));
     assert_eq!(chunks.get(), 2);
+}
+
+#[test]
+fn an_ancestor_of_another_user_is_refused() {
+    let base = super::super::test_helper::scratch_base();
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let dir = tempfile::Builder::new().tempdir_in(&base).unwrap();
+    std::fs::create_dir(dir.path().join("runtime")).unwrap();
+    // Seen as if this folder's owner were another user: the walk refuses at the first folder
+    // that user owns (whatever runs the tests).
+    let owner = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(dir.path()).unwrap());
+    let refused = ancestors_safe_for(&dir.path().join("runtime"), |uid| uid != owner).unwrap_err();
+    assert!(matches!(refused, Refusal::Owner(_)), "{refused}");
+    assert!(ancestors_safe_for(&dir.path().join("runtime"), |_| true).is_ok());
+}
+
+#[test]
+fn a_folder_behind_a_linked_parent_opens_at_its_real_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::create_dir(real.join("models")).unwrap();
+    std::fs::set_permissions(real.join("models"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::os::unix::fs::symlink(&real, dir.path().join("home")).unwrap();
+    let fd = open_dir(&dir.path().join("home/models"), Owners::Mine, true).unwrap();
+    let opened = rustix::fs::fstat(&fd).unwrap();
+    let expected = rustix::fs::stat(real.join("models")).unwrap();
+    assert_eq!(
+        (opened.st_dev, opened.st_ino),
+        (expected.st_dev, expected.st_ino)
+    );
 }

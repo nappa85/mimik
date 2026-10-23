@@ -31,7 +31,7 @@ fn helper() {
 
 /// A scratch folder whose ancestors are not writable by others (the level-3 rule).
 fn scratch() -> tempfile::TempDir {
-    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/runtime-tests");
+    let base = test_helper::scratch_base();
     std::fs::create_dir_all(&base).unwrap();
     std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
     tempfile::Builder::new().tempdir_in(base).unwrap()

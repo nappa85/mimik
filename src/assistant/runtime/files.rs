@@ -134,10 +134,37 @@ fn resolve() -> ResolveFlags {
 /// `owners`, not writable by group or others, and of mode 0700 when `private`.
 pub(crate) fn open_dir(path: &Path, owners: Owners, private: bool) -> Result<OwnedFd, Refusal> {
     let name = path.display().to_string();
-    let fd = rustix::fs::open(
-        path,
+    if rustix::fs::lstat(path)
+        .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Symlink)
+    {
+        return Err(Refusal::Link(name));
+    }
+    // Links in earlier components (a symlinked home) are resolved once; the real path is then
+    // opened without following any link, so one put in meanwhile fails the open.
+    let real = std::fs::canonicalize(path).map_err(|error| {
+        error
+            .raw_os_error()
+            .map_or(Refusal::Io(name.clone()), |code| {
+                io_refusal(&name, rustix::io::Errno::from_raw_os_error(code))
+            })
+    })?;
+    let root = rustix::fs::open(
+        "/",
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| io_refusal("/", error))?;
+    let relative = real.strip_prefix("/").unwrap_or(&real);
+    let fd = rustix::fs::openat2(
+        &root,
+        if relative.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            relative
+        },
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
+        ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
     )
     .map_err(|error| match error {
         // `O_DIRECTORY | O_NOFOLLOW` on a link answers ENOTDIR; tell a link apart.
@@ -392,17 +419,55 @@ pub(crate) fn runtime_until(
     Ok(files)
 }
 
-/// Whether `path` and every ancestor directory are not writable by group or others (levels
-/// 2 and 3 load shared libraries by path from the runtime directory). Links are resolved
-/// first, so the folders checked are the ones the path really goes through.
+/// Whether `path` and every ancestor directory are safe for loading libraries by path (levels
+/// 2 and 3): owned by root or Mimik's user and not writable by group or others. Links are
+/// resolved once, then the real path is walked folder by folder from `/` by descriptor without
+/// following any link (a link put in meanwhile fails the walk); the libraries are found
+/// through that same real path. With every folder on it owned by root or Mimik's user and
+/// writable by no one else, nobody else can change it afterwards.
 pub(crate) fn ancestors_safe(path: &Path) -> Result<(), Refusal> {
+    ancestors_safe_for(path, |uid| Owners::MineOrRoot.accepts(uid))
+}
+
+/// [`ancestors_safe`] with the accepted owners given.
+pub(crate) fn ancestors_safe_for(path: &Path, owner: impl Fn(u32) -> bool) -> Result<(), Refusal> {
     let real = std::fs::canonicalize(path).map_err(|_| Refusal::Io(path.display().to_string()))?;
-    for ancestor in real.ancestors() {
-        let stat = rustix::fs::lstat(ancestor)
-            .map_err(|error| io_refusal(&ancestor.display().to_string(), error))?;
-        if stat.st_mode & 0o022 != 0 {
-            return Err(Refusal::Writable(ancestor.display().to_string()));
-        }
+    let mut walked = std::path::PathBuf::from("/");
+    let mut dir = rustix::fs::open(
+        "/",
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| io_refusal("/", error))?;
+    safe_ancestor(&dir, &walked, &owner)?;
+    for component in real.components().skip(1) {
+        let std::path::Component::Normal(name) = component else {
+            return Err(Refusal::Io(real.display().to_string()));
+        };
+        walked.push(name);
+        let shown = walked.display().to_string();
+        dir = rustix::fs::openat2(
+            &dir,
+            name,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+        )
+        .map_err(|error| io_refusal(&shown, error))?;
+        safe_ancestor(&dir, &walked, &owner)?;
+    }
+    Ok(())
+}
+
+/// One folder of [`ancestors_safe`]'s walk: root's or Mimik's user's, writable by no one else.
+fn safe_ancestor(dir: &OwnedFd, path: &Path, owner: &dyn Fn(u32) -> bool) -> Result<(), Refusal> {
+    let name = path.display().to_string();
+    let stat = rustix::fs::fstat(dir).map_err(|error| io_refusal(&name, error))?;
+    if !owner(stat.st_uid) {
+        return Err(Refusal::Owner(name));
+    }
+    if stat.st_mode & 0o022 != 0 {
+        return Err(Refusal::Writable(name));
     }
     Ok(())
 }

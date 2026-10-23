@@ -64,9 +64,11 @@ file are opened beneath their folder's descriptor with `openat2` (`RESOLVE_BENEA
 `fstat` (regular, owned by Mimik's user, not writable by group or others) and hashed from that
 descriptor; a hash is reused while the `fstat` identity (device, inode, size, modification and
 change times) is unchanged. The child loads those descriptors, so a file swapped after the
-check is not what runs. Level 3 also requires the runtime directory and every ancestor of its
-real path (links resolved first) not to be writable by group or others (it loads the
-libraries by path). A model larger than
+check is not what runs. Folders are opened at their real path (links in earlier components,
+such as a symlinked home, resolved once) without following any link. Level 3 also requires
+the runtime directory and every ancestor of its real path, walked from `/` by descriptor
+without following links, to be owned by root or Mimik's user and not writable by group or
+others (it loads the libraries by path, through that real path). A model larger than
 `MemAvailable` minus 1 GiB is refused ("not enough memory for this model").
 
 ## Runner
@@ -198,9 +200,13 @@ has not exited yet") and leaves the old generation directories in place until a 
 finds it gone. A child is owned from its spawn: any failure before the start completes kills
 and reaps it, kills and waits for the sandbox's reaper (5 s at most), and clears the entry it
 recorded. Every probe's and start's blocking part and every child's watcher is in-flight work:
-the owner's Restart or shutdown cancels it (it stops before spawning or recording anything,
-and its waits see the cancel within 100 ms) and the manager waits until it has all finished
-before the next session starts or the shutdown completes. Probe directories are
+the owner's Restart or shutdown cancels it (it stops before spawning or recording anything;
+bwrap's status wait, the probe's report wait, the retry pause, the probe's endpoint check and
+hashing, every MiB, see the cancel within about 100 ms) and the manager waits until it has all
+finished, cleanup included, before the next session starts or the shutdown completes. The
+leftover sweep is such work too, and puts the pidfile back itself. That wait has no deadline:
+a cleanup waits for the runner and the reaper to exit, however long, keeping the pidfile entry
+until then. Probe directories are
 `run/probe-<sequence>-<level>/`. One manager
 task serializes every transition, so two servers never coexist: a child is stopped with
 SIGTERM through the runner's pidfd (on level 1 to bwrap, which takes the sandbox down with
