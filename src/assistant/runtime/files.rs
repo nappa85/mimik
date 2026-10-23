@@ -13,7 +13,7 @@ use rustix::fs::{FileType, Mode, OFlags, ResolveFlags, Stat};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Mutex;
@@ -420,18 +420,52 @@ pub(crate) fn runtime_until(
 }
 
 /// Whether `path` and every ancestor directory are safe for loading libraries by path (levels
-/// 2 and 3): owned by root or Mimik's user and not writable by group or others. Links are
-/// resolved once, then the real path is walked folder by folder from `/` by descriptor without
-/// following any link (a link put in meanwhile fails the walk); the libraries are found
-/// through that same real path. With every folder on it owned by root or Mimik's user and
-/// writable by no one else, nobody else can change it afterwards.
+/// 2 and 3): owned by root or Mimik's user and not writable by group or others (links
+/// resolved first).
+#[cfg(test)]
 pub(crate) fn ancestors_safe(path: &Path) -> Result<(), Refusal> {
     ancestors_safe_for(path, |uid| Owners::MineOrRoot.accepts(uid))
 }
 
 /// [`ancestors_safe`] with the accepted owners given.
+#[cfg(test)]
 pub(crate) fn ancestors_safe_for(path: &Path, owner: impl Fn(u32) -> bool) -> Result<(), Refusal> {
     let real = std::fs::canonicalize(path).map_err(|_| Refusal::Io(path.display().to_string()))?;
+    walk_safe(&real, &owner).map(drop)
+}
+
+/// The runtime folder, resolved once: opened at its real path (an earlier link resolved,
+/// the last component not a link), its real path read back from that descriptor, and, for
+/// the levels that load libraries by path (`by_path`), that exact path walked from `/` by
+/// descriptor without following links, every folder root's or Mimik's user's and writable
+/// by no one else, ending at the very folder opened. `between` runs after the open (tests).
+/// Everything later uses this descriptor and this path, never the configured one again.
+pub(crate) fn runtime_folder(
+    path: &Path,
+    by_path: bool,
+    between: impl FnOnce(),
+) -> Result<(OwnedFd, std::path::PathBuf), Refusal> {
+    let fd = open_dir(path, Owners::MineOrRoot, false)?;
+    let shown = path.display().to_string();
+    let real = std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+        .map_err(|_| Refusal::Io(shown.clone()))?;
+    between();
+    if by_path {
+        let walked = walk_safe(&real, &|uid| Owners::MineOrRoot.accepts(uid))?;
+        let (opened, end) = (
+            rustix::fs::fstat(&fd).map_err(|error| io_refusal(&shown, error))?,
+            rustix::fs::fstat(&walked).map_err(|error| io_refusal(&shown, error))?,
+        );
+        if (opened.st_dev, opened.st_ino) != (end.st_dev, end.st_ino) {
+            return Err(Refusal::Changed(real.display().to_string()));
+        }
+    }
+    Ok((fd, real))
+}
+
+/// Walks the real path `real` from `/` by descriptor without following any link, checking
+/// each folder; returns the last one's descriptor.
+fn walk_safe(real: &Path, owner: &dyn Fn(u32) -> bool) -> Result<OwnedFd, Refusal> {
     let mut walked = std::path::PathBuf::from("/");
     let mut dir = rustix::fs::open(
         "/",
@@ -439,7 +473,7 @@ pub(crate) fn ancestors_safe_for(path: &Path, owner: impl Fn(u32) -> bool) -> Re
         Mode::empty(),
     )
     .map_err(|error| io_refusal("/", error))?;
-    safe_ancestor(&dir, &walked, &owner)?;
+    safe_ancestor(&dir, &walked, owner)?;
     for component in real.components().skip(1) {
         let std::path::Component::Normal(name) = component else {
             return Err(Refusal::Io(real.display().to_string()));
@@ -454,9 +488,9 @@ pub(crate) fn ancestors_safe_for(path: &Path, owner: impl Fn(u32) -> bool) -> Re
             ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
         )
         .map_err(|error| io_refusal(&shown, error))?;
-        safe_ancestor(&dir, &walked, &owner)?;
+        safe_ancestor(&dir, &walked, owner)?;
     }
-    Ok(())
+    Ok(dir)
 }
 
 /// One folder of [`ancestors_safe`]'s walk: root's or Mimik's user's, writable by no one else.

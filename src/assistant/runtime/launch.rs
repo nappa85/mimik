@@ -125,6 +125,22 @@ struct Held {
     bwrap: Option<Bwrap>,
 }
 
+/// What one attempt verified: the pinned files and the model, opened and hashed beneath the
+/// runtime folder's descriptor, and the build folder's real path as checked (level 3's
+/// executable and libraries are found through it, never through the configured path).
+pub(crate) struct Checked {
+    pub files: Vec<Verified>,
+    pub model: Verified,
+    pub build_dir: PathBuf,
+}
+
+/// Level 3's server: its verified file and the checked folder its libraries come from.
+#[derive(Clone, Copy)]
+pub(crate) struct ServerFile<'a> {
+    pub file: &'a Verified,
+    pub build_dir: &'a std::path::Path,
+}
+
 /// The real launcher.
 pub(crate) struct Real {
     settings: Settings,
@@ -276,12 +292,17 @@ impl Real {
     }
 
     /// The model and the build's files, verified.
-    fn verify(&self, path: Path, ticket: &Ticket) -> Result<(Vec<Verified>, Verified), String> {
+    fn verify(&self, path: Path, level: Level, ticket: &Ticket) -> Result<Checked, String> {
         let stop = || ticket.cancelled();
         let build = self
             .build(path)
             .ok_or_else(|| "this build has no model server for this path".to_owned())?;
-        let runtime = files::open_dir(&self.settings.runtime_dir, Owners::MineOrRoot, false)
+        // Resolved once for this attempt: what is checked is what runs.
+        let (runtime, real) =
+            files::runtime_folder(&self.settings.runtime_dir, level.tcp(), || {
+                #[cfg(test)]
+                self.paused("runtime-opened");
+            })
             .map_err(|refusal| format!("the model runtime: {refusal}"))?;
         let files = files::runtime_until(runtime.as_fd(), build, &self.cache, &stop)
             .map_err(|refusal| format!("the model runtime: {refusal}"))?;
@@ -295,7 +316,11 @@ impl Real {
             &stop,
         )
         .map_err(|refusal| format!("the model: {refusal}"))?;
-        Ok((files, model))
+        Ok(Checked {
+            files,
+            model,
+            build_dir: real.join(&build.directory),
+        })
     }
 
     /// The llama-server flag vector (plan §1.4a, "Flag vector"), CPU path, for `host`.
@@ -847,11 +872,39 @@ impl Real {
         })
     }
 
+    /// Level 3's exact environment.
+    fn unconfined_env(
+        &self,
+        command: &Command,
+        server: Option<ServerFile<'_>>,
+        directory: &std::path::Path,
+    ) -> Vec<(String, String)> {
+        let mut env = vec![
+            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+            ("LANG".to_owned(), "C.UTF-8".to_owned()),
+            (
+                "HOME".to_owned(),
+                directory.join("home").display().to_string(),
+            ),
+        ];
+        if matches!(command, Command::Probe) {
+            env.extend(self.settings.inner.probe_env.iter().cloned());
+        }
+        if let Some(server) = server {
+            // The checked real path: the configured one is never resolved again.
+            env.push((
+                "LD_LIBRARY_PATH".to_owned(),
+                server.build_dir.display().to_string(),
+            ));
+        }
+        env
+    }
+
     /// Level 3's executable (llama-server or Mimik's own binary) and its arguments.
     fn unconfined_command(
         &self,
         command: &Command,
-        server: Option<&Verified>,
+        server: Option<ServerFile<'_>>,
         model_path: &str,
         port: u16,
         token_file: &str,
@@ -861,7 +914,7 @@ impl Real {
                 let server = server.ok_or_else(|| Fail::Other("no llama-server".into()))?;
                 let mut argv = vec!["llama-server".to_owned()];
                 argv.extend(self.server_args(model_path, "127.0.0.1", Some(port), token_file));
-                Ok((dup(&server.fd).map_err(Fail::Other)?, argv))
+                Ok((dup(&server.file.fd).map_err(Fail::Other)?, argv))
             }
             Command::Probe => {
                 let exe = rustix::fs::open(
@@ -882,7 +935,7 @@ impl Real {
     fn spawn_unconfined(
         &self,
         job: &Job,
-        server: Option<&Verified>,
+        server: Option<ServerFile<'_>>,
         model: &Verified,
         token: &Token,
         command: &Command,
@@ -915,17 +968,7 @@ impl Real {
                 target: fds::SERVER,
             },
         ];
-        let mut env = vec![
-            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
-            ("LANG".to_owned(), "C.UTF-8".to_owned()),
-            (
-                "HOME".to_owned(),
-                directory.join("home").display().to_string(),
-            ),
-        ];
-        if matches!(command, Command::Probe) {
-            env.extend(self.settings.inner.probe_env.iter().cloned());
-        }
+        let env = self.unconfined_env(command, server, &directory);
         let spec = Spec {
             parent: std::process::id(),
             keep: vec![fds::MODEL],
@@ -951,14 +994,11 @@ impl Real {
         let pid = child.pid();
         let runner = Watched::open(pid).map_err(|_| Fail::Other("no pidfd".into()))?;
         let mut executables = vec![self.settings.runner.program.display().to_string()];
-        if let Some(server) = server
-            && let Some(build) = &self.build
-        {
+        if let Some(server) = server {
             executables.push(
-                self.settings
-                    .runtime_dir
-                    .join(&build.directory)
-                    .join(&server.name)
+                server
+                    .build_dir
+                    .join(&server.file.name)
                     .display()
                     .to_string(),
             );
@@ -1651,6 +1691,27 @@ impl Launcher for Launch {
     }
 }
 
+/// The start's verification, off the async runtime; a cancelled one is "cancelled".
+async fn checked(
+    real: &Arc<Real>,
+    path: Path,
+    level: Level,
+    ticket: &Ticket,
+) -> Result<Checked, Fail> {
+    let (real, ticket) = (Arc::clone(real), ticket.clone());
+    tokio::task::spawn_blocking(move || {
+        real.verify(path, level, &ticket).map_err(|why| {
+            if ticket.cancelled() {
+                Fail::Other("cancelled".into())
+            } else {
+                Fail::Other(why)
+            }
+        })
+    })
+    .await
+    .map_err(|_| Fail::Other("verification failed".into()))?
+}
+
 impl Launch {
     /// [`Launcher::start`] with the concrete child.
     pub(crate) async fn start_real(
@@ -1663,37 +1724,25 @@ impl Launch {
         // Every blocking part holds a ticket: a dropped start's work still counts until it
         // has finished (and cleaned up), and a cancel stops it before it spawns or records.
         let ticket = real.work.enter();
-        let (files, model) = {
-            let (real, ticket) = (Arc::clone(&real), ticket.clone());
-            tokio::task::spawn_blocking(move || real.verify(path, &ticket))
-                .await
-                .map_err(|_| Fail::Other("verification failed".into()))?
-                .map_err(Fail::Other)?
-        };
+        let Checked {
+            files,
+            model,
+            build_dir,
+        } = checked(&real, path, level, &ticket).await?;
+        let build_dir = Arc::new(build_dir);
         let token = Arc::new(Token::new());
         let bwrap = real.held().bwrap.clone();
         let files = Arc::new(files);
         let model = Arc::new(model);
-        if level == Level::Unconfined {
-            // Level 3 loads its libraries by path: the runtime's ancestors are checked at every
-            // start, not only by the probe.
-            let (checking, held) = (Arc::clone(&real), ticket.clone());
-            tokio::task::spawn_blocking(move || {
-                let _ticket = held;
-                files::ancestors_safe(&checking.settings.runtime_dir)
-                    .map_err(|refusal| Fail::Other(format!("the model runtime: {refusal}")))
-            })
-            .await
-            .map_err(|_| Fail::Other("the runtime check did not finish".into()))??;
-        }
         // The spawn blocks (bwrap's status line, up to 30 s): off the async runtime. A start
         // dropped meanwhile drops its result, whose guard kills the child.
         let spawn = |port: u16| {
-            let (real, files, model, token) = (
+            let (real, files, model, token, build_dir) = (
                 Arc::clone(&real),
                 Arc::clone(&files),
                 Arc::clone(&model),
                 Arc::clone(&token),
+                Arc::clone(&build_dir),
             );
             let job = Job {
                 name: generation.to_string(),
@@ -1708,7 +1757,11 @@ impl Launch {
                     let server_name = real.build.as_ref().map(|build| build.server.clone());
                     let server = files
                         .iter()
-                        .find(|file| Some(&file.name) == server_name.as_ref());
+                        .find(|file| Some(&file.name) == server_name.as_ref())
+                        .map(|file| ServerFile {
+                            file,
+                            build_dir: &build_dir,
+                        });
                     real.spawn_unconfined(&job, server, &model, &token, &Command::Server, port)
                 }
                 Level::Landlock => Err(Fail::Sandbox(
@@ -1974,11 +2027,8 @@ impl Real {
             let bwrap =
                 bwrap::preflight().map_err(|unusable| Probe::Failed(unusable.to_string()))?;
             self.held().bwrap = Some(bwrap);
-        } else {
-            files::ancestors_safe(&self.settings.runtime_dir)
-                .map_err(|refusal| Probe::Failed(format!("the model runtime: {refusal}")))?;
         }
-        let (files, model) = self.verify(path, ticket).map_err(|why| {
+        let Checked { files, model, .. } = self.verify(path, level, ticket).map_err(|why| {
             if ticket.cancelled() {
                 Probe::Failed("cancelled".into())
             } else {

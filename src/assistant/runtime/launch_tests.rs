@@ -1066,3 +1066,42 @@ async fn the_probe_command_ends_only_after_its_probes_cleanup() {
     );
     assert_eq!(pidfile_text(&setup), "");
 }
+
+#[tokio::test]
+async fn level_3_executes_and_loads_from_the_checked_real_path_not_the_alias() {
+    let mut setup = setup(MODEL, "fake");
+    let root = setup.dir.path().to_path_buf();
+    let open = root.join("open");
+    std::fs::create_dir(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    // The runtime folder reached through a link held in a folder others can write.
+    std::os::unix::fs::symlink(&root, open.join("rt")).unwrap();
+    setup.settings.runtime_dir = open.join("rt/runtime");
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    let child = launch
+        .start_real(1, Level::Unconfined, Path::Cpu)
+        .await
+        .unwrap();
+    let cpu = std::fs::canonicalize(root.join("runtime/cpu")).unwrap();
+    let environ = std::fs::read(format!("/proc/{}/environ", child.pid)).unwrap();
+    let library = format!("LD_LIBRARY_PATH={}", cpu.display());
+    assert!(
+        environ
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == library.as_bytes()),
+        "{}",
+        String::from_utf8_lossy(&environ)
+    );
+    assert_eq!(
+        std::fs::read_link(format!("/proc/{}/exe", child.pid)).unwrap(),
+        cpu.join("llama-server")
+    );
+    // The pidfile names the real executable, so a later sweep recognises it.
+    assert!(
+        pidfile_text(&setup).contains(&cpu.join("llama-server").display().to_string()),
+        "{}",
+        pidfile_text(&setup)
+    );
+    child.stop().await;
+}

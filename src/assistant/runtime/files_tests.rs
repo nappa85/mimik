@@ -321,3 +321,57 @@ fn a_folder_behind_a_linked_parent_opens_at_its_real_path() {
         (expected.st_dev, expected.st_ino)
     );
 }
+
+/// A safe folder (`safe/`) and one under a folder others can write (`open/unsafe/`), each
+/// holding `llama/cpu/`; the runtime is reached as `<link>/llama` (the runtime folder itself
+/// may not be a link).
+fn runtimes() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let base = super::super::test_helper::scratch_base();
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let dir = tempfile::Builder::new().tempdir_in(&base).unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let safe = dir.path().join("safe");
+    std::fs::create_dir_all(safe.join("llama/cpu")).unwrap();
+    let open = dir.path().join("open");
+    let unsafe_ = open.join("unsafe");
+    std::fs::create_dir_all(unsafe_.join("llama/cpu")).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    (dir, safe, unsafe_)
+}
+
+#[test]
+fn a_runtime_alias_swapped_after_its_open_is_checked_where_it_was_opened() {
+    let (dir, safe, unsafe_) = runtimes();
+    let alias = dir.path().join("rt");
+    // Opened through the alias while it points at the unsafe folder; swapped to the safe one
+    // before the check: the check is of what was opened, so it refuses.
+    std::os::unix::fs::symlink(&unsafe_, &alias).unwrap();
+    let refused = runtime_folder(&alias.join("llama"), true, || {
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&safe, &alias).unwrap();
+    })
+    .unwrap_err();
+    assert_eq!(
+        refused,
+        Refusal::Writable(dir.path().join("open").display().to_string())
+    );
+    // The other way round: opened safe, swapped to unsafe; the checked path is the safe one.
+    std::fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink(&safe, &alias).unwrap();
+    let (_, real) = runtime_folder(&alias.join("llama"), true, || {
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&unsafe_, &alias).unwrap();
+    })
+    .unwrap();
+    assert_eq!(real, std::fs::canonicalize(safe.join("llama")).unwrap());
+}
+
+#[test]
+fn a_runtime_linked_from_a_folder_others_can_write_is_used_at_its_real_path() {
+    let (dir, safe, _) = runtimes();
+    let alias = dir.path().join("open/rt");
+    std::os::unix::fs::symlink(&safe, &alias).unwrap();
+    let (_, real) = runtime_folder(&alias.join("llama"), true, || {}).unwrap();
+    assert_eq!(real, std::fs::canonicalize(safe.join("llama")).unwrap());
+}
