@@ -126,16 +126,6 @@ struct Held {
     bwrap: Option<Bwrap>,
 }
 
-/// Whether a path may be given to the dynamic loader as `LD_LIBRARY_PATH`: no `:` (its
-/// separator) or `;`/`$` (its expansion syntax).
-pub(crate) fn loader_safe(path: &std::path::Path) -> bool {
-    !path
-        .as_os_str()
-        .as_encoded_bytes()
-        .iter()
-        .any(|byte| matches!(byte, b':' | b';' | b'$'))
-}
-
 /// What one attempt verified: the pinned files and the model, opened and hashed beneath the
 /// runtime folder's descriptor, and the build folder's real path as checked (level 3's
 /// executable and libraries are found through it, never through the configured path).
@@ -447,12 +437,6 @@ impl Real {
         )
         .map_err(|refusal| format!("the model: {refusal}"))?;
         let build_dir = real.join(&build.directory);
-        if !loader_safe(&build_dir) {
-            return Err(format!(
-                "unusable runtime path (loader-expansion characters): {}",
-                build_dir.display()
-            ));
-        }
         Ok(Checked {
             files,
             model,
@@ -1557,6 +1541,8 @@ async fn settled_marker(readers: &Readers, marker: &MarkerState, within: Duratio
 
 /// How long `exited` waits for the readers after the exit.
 const READERS_WITHIN: Duration = Duration::from_secs(5);
+/// How long a level-3 child has to start listening before it is taken as running.
+const BIND_LISTENING: Duration = Duration::from_secs(10);
 
 /// Why a child ended: at level 1, a sandbox failure only when the marker pipe ended cleanly
 /// without the marker (nothing the executed command prints can make it one); an unknown
@@ -1592,6 +1578,9 @@ pub(crate) struct RealChild {
     generation_dir: Mutex<Option<Generation>>,
     level: Level,
     notes: Vec<String>,
+    /// The launcher's runtime directory (a test's key for the drain gate).
+    #[cfg(test)]
+    runtime_dir: PathBuf,
 }
 
 impl RealChild {
@@ -1876,6 +1865,8 @@ impl Real {
             generation_dir: Mutex::new(Some(generation)),
             level,
             notes,
+            #[cfg(test)]
+            runtime_dir: self.settings.runtime_dir.clone(),
         }))
     }
 }
@@ -2140,9 +2131,15 @@ impl Launch {
     }
 }
 
-/// Test-forced "exit seen before the drain", keyed by runtime directory.
+/// Test-forced short listening deadline, keyed by runtime directory.
 #[cfg(test)]
-pub(crate) static EXIT_FIRST: Mutex<Option<PathBuf>> = Mutex::new(None);
+pub(crate) static BIND_WITHIN: Mutex<std::collections::BTreeMap<PathBuf, Duration>> =
+    Mutex::new(std::collections::BTreeMap::new());
+/// A test's delay before the post-exit drain settlement, keyed by runtime directory (it
+/// models a drain that outlasts the listening deadline).
+#[cfg(test)]
+pub(crate) static DRAIN_HOLD: Mutex<std::collections::BTreeMap<PathBuf, Duration>> =
+    Mutex::new(std::collections::BTreeMap::new());
 
 /// Whether a level-3 child took its port.
 enum Bind {
@@ -2162,32 +2159,22 @@ async fn bind_outcome(
     ticket: &Ticket,
     runtime_dir: &std::path::Path,
 ) -> Bind {
-    // A test may make the exit be seen first, before the drain is looked at (the race the
-    // settle below covers).
+    let _ = runtime_dir;
+    // The listening wait has a deadline; classifying an exit does not, so an exit near the
+    // deadline is never turned into "bound".
     #[cfg(test)]
-    if EXIT_FIRST
+    let within = BIND_WITHIN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_deref()
-        == Some(runtime_dir)
-    {
-        let mut exit = child.exit.clone();
-        let _ = exit.wait_for(Option::is_some).await;
-    }
-    let _ = runtime_dir;
-    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+        .get(runtime_dir)
+        .copied()
+        .unwrap_or(BIND_LISTENING);
+    #[cfg(not(test))]
+    let within = BIND_LISTENING;
+    let waited = tokio::time::timeout(within, async {
         loop {
-            // An exit first: the drain is settled before the bind error is looked at.
-            if child.exit.borrow().is_some() {
-                child.readers.all_ended(READERS_WITHIN).await;
-                return if child.summary().failed.bind {
-                    Bind::Failed
-                } else {
-                    Bind::OtherExit
-                };
-            }
-            if child.summary().failed.bind {
-                return Bind::Failed;
+            if child.exit.borrow().is_some() || child.summary().failed.bind {
+                return Wait::Ended;
             }
             let (pid, held) = (child.pid, ticket.clone());
             let listening = tokio::task::spawn_blocking(move || {
@@ -2197,13 +2184,51 @@ async fn bind_outcome(
             .await
             .unwrap_or(false);
             if listening {
-                return Bind::Bound;
+                return Wait::Listening;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await;
-    outcome.unwrap_or(Bind::Bound)
+    // Ended within the deadline, or the deadline passed but it has since exited: classify it,
+    // settling the drain (bounded) outside the deadline. Otherwise (listening, or still
+    // starting): kept as running.
+    let ended = matches!(waited, Ok(Wait::Ended)) || child.exit.borrow().is_some();
+    if ended {
+        classify_bind(child).await
+    } else {
+        Bind::Bound
+    }
+}
+
+/// The listening wait's result, before classification.
+enum Wait {
+    Listening,
+    Ended,
+}
+
+/// Classifies an ended level-3 child: the drain is settled (bounded) first, so a bind error
+/// the drain has not yet parsed is not missed, then `failed.bind` decides.
+async fn classify_bind(child: &RealChild) -> Bind {
+    #[cfg(test)]
+    {
+        let hold = DRAIN_HOLD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&child.runtime_dir)
+            .copied();
+        if let Some(hold) = hold {
+            // A drain that outlasts the listening deadline: a classification that ran inside
+            // the deadline would be cancelled here.
+            tokio::time::sleep(hold).await;
+        }
+    }
+    child.readers.all_ended(READERS_WITHIN).await;
+    if child.summary().failed.bind {
+        Bind::Failed
+    } else {
+        Bind::OtherExit
+    }
 }
 
 /// A probe's outcome.

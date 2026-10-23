@@ -98,6 +98,7 @@ fn helper() {
         "adversary" => adversary(),
         "shim" => std::process::exit(super::super::probe::shim()),
         "mimik" => play_mimik(),
+        "cwd-probe" => play_cwd_probe(),
         other => panic!("unknown helper mode {other}"),
     }
 }
@@ -217,6 +218,26 @@ fn play_mimik() {
             std::fs::read_to_string(scratch.join("data/run").join(rundir::PIDFILE)).unwrap();
         let bwrap: i32 = pidfile.lines().nth(1).unwrap().parse().unwrap();
         test_helper::print(&json!({"bwrap": bwrap}));
+        tokio::time::sleep(Duration::from_secs(120)).await;
+    });
+}
+
+/// A level-3 server, started from whatever cwd this process was given, held at Ready; prints
+/// its server PID so the parent can inspect its cwd and whether a planted backend loaded.
+fn play_cwd_probe() {
+    let scratch = env("MIMIK_LIVE_CHILD_SCRATCH");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let launch = Launch(real(settings(&scratch, "probe-inner", Vec::new())));
+        launch.preflight(Path::Cpu).await.unwrap();
+        let child = launch.start(1, Level::Unconfined, Path::Cpu).await.unwrap();
+        while child.server().health().await != Health::Ready {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let pidfile =
+            std::fs::read_to_string(scratch.join("data/run").join(rundir::PIDFILE)).unwrap();
+        let server: i32 = pidfile.lines().nth(1).unwrap().parse().unwrap();
+        test_helper::print(&json!({"server": server}));
         tokio::time::sleep(Duration::from_secs(120)).await;
     });
 }
@@ -736,9 +757,9 @@ fn marker_backend(dir: &std::path::Path, marker: &std::path::Path) -> Option<()>
     status.success().then_some(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[test]
 #[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
-async fn live_level_3_does_not_load_a_backend_from_an_attacker_writable_cwd() {
+fn live_level_3_does_not_load_a_backend_from_an_attacker_writable_cwd() {
     let scratch = scratch();
     let attacker = scratch.path().join("attacker-cwd");
     std::fs::create_dir(&attacker).unwrap();
@@ -748,32 +769,65 @@ async fn live_level_3_does_not_load_a_backend_from_an_attacker_writable_cwd() {
     )
     .unwrap();
     let marker = attacker.join("loaded.marker");
-    let compiled = marker_backend(&attacker, &marker);
-    // Mimik runs from the attacker-writable directory; the child must not inherit it.
-    let previous = std::env::current_dir().unwrap();
-    std::env::set_current_dir(&attacker).unwrap();
-    let (_launch, child) = started(scratch.path(), Level::Unconfined).await;
-    std::env::set_current_dir(&previous).unwrap();
-    let cwd = std::fs::read_link(format!("/proc/{}/cwd", child.pid())).unwrap();
-    assert_ne!(cwd, attacker, "the child kept Mimik's cwd");
-    assert!(cwd.ends_with("cpu"), "{}", cwd.display());
-    // A request makes the backends load; the planted constructor must never run.
-    let (status, _) = raw(
-        &child,
-        "/v1/chat/completions",
-        Some(child.token()),
-        &short_request(8),
-    )
-    .await;
-    assert_eq!(status, 200);
+    // The marker backend must build (cc is present in CI): a silent skip would hide the test.
+    marker_backend(&attacker, &marker).expect("a C compiler to build the marker backend");
+
+    // Positive control: the pinned server run straight from the attacker directory (no chdir
+    // away) loads the planted backend, so its constructor writes the marker.
+    let server = env("MIMIK_LIVE_RUNTIME").join("cpu/llama-server");
+    let model = env("MIMIK_LIVE_MODELS").join("stories260K.gguf");
+    let mut control = std::process::Command::new(&server)
+        .current_dir(&attacker)
+        .args([
+            "--model".as_ref(),
+            model.as_os_str(),
+            "--host".as_ref(),
+            "127.0.0.1".as_ref(),
+            "--port".as_ref(),
+            "0".as_ref(),
+            "--no-webui".as_ref(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !marker.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    control.kill().unwrap();
+    control.wait().unwrap();
     assert!(
-        !marker.exists(),
-        "a backend from the attacker cwd ran{}",
-        if compiled.is_some() {
-            ""
-        } else {
-            " (compiler absent: cwd check only)"
-        }
+        marker.exists(),
+        "the control did not load the planted backend; the test proves nothing"
     );
-    child.stop().await;
+    std::fs::remove_file(&marker).unwrap();
+
+    // Mimik, run from the attacker directory in a subprocess (never set_current_dir here),
+    // chdirs the server into the verified build folder, so the planted backend never loads.
+    let mut mimik = test_helper::command(HELPER, "cwd-probe")
+        .current_dir(&attacker)
+        .env("MIMIK_LIVE_CHILD_SCRATCH", scratch.path())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut reader = std::io::BufReader::new(mimik.stdout.take().unwrap());
+    let pid = loop {
+        let mut line = String::new();
+        assert!(
+            std::io::BufRead::read_line(&mut reader, &mut line).unwrap() > 0,
+            "the child stopped"
+        );
+        if let Some(at) = line.find("HELPER ") {
+            let value: Value = serde_json::from_str(&line[at + 7..]).unwrap();
+            break i32::try_from(value["server"].as_i64().unwrap()).unwrap();
+        }
+    };
+    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).unwrap();
+    assert_ne!(cwd, attacker, "the server kept Mimik's cwd");
+    assert!(cwd.ends_with("cpu"), "{}", cwd.display());
+    // Ready means the model (and its backends) have loaded; the planted one did not.
+    assert!(!marker.exists(), "a backend from the attacker cwd loaded");
+    mimik.kill().unwrap();
+    mimik.wait().unwrap();
 }

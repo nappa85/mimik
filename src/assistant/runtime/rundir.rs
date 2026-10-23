@@ -86,6 +86,11 @@ impl Entry {
 
     /// The entry for a running process, when `/proc` can tell its start time.
     pub(crate) fn of(generation: u64, pid: i32, executables: Vec<String>) -> Option<Self> {
+        // Each line is one field: a newline in an executable path would split it, so such a
+        // path is refused.
+        if executables.iter().any(|exe| exe.contains('\n')) {
+            return None;
+        }
         let entry = Self {
             generation,
             pid,

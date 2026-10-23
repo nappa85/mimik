@@ -307,10 +307,25 @@ async fn a_port_that_cannot_be_bound_is_tried_three_times_then_fails() {
         holders.push((holder, port));
     }
     drop(holders);
-    // Each exit is seen before the drain is looked at.
-    *EXIT_FIRST.lock().unwrap() = Some(setup.settings.runtime_dir.clone());
+    // Each dead child's drain settlement takes longer than the short listening deadline: the
+    // classification must still happen (outside the deadline), never cancelled into "bound".
+    BIND_WITHIN.lock().unwrap().insert(
+        setup.settings.runtime_dir.clone(),
+        Duration::from_millis(200),
+    );
+    DRAIN_HOLD.lock().unwrap().insert(
+        setup.settings.runtime_dir.clone(),
+        Duration::from_millis(400),
+    );
     let result = launch.start(1, Level::Unconfined, Path::Cpu).await;
-    *EXIT_FIRST.lock().unwrap() = None;
+    BIND_WITHIN
+        .lock()
+        .unwrap()
+        .remove(&setup.settings.runtime_dir);
+    DRAIN_HOLD
+        .lock()
+        .unwrap()
+        .remove(&setup.settings.runtime_dir);
     assert!(
         matches!(&result, Err(Fail::Other(why)) if why.contains("could not bind a loopback port")),
         "{:?}",
@@ -1399,14 +1414,6 @@ async fn a_torn_pidfile_refuses_the_start_and_keeps_the_generations() {
     std::fs::remove_file(setup.settings.data_dir.join("run/assistant.pid")).unwrap();
     launch.preflight(Path::Cpu).await.unwrap();
     assert!(!setup.settings.data_dir.join("run/9").exists());
-}
-
-#[test]
-fn a_runtime_path_with_loader_syntax_is_unusable() {
-    assert!(loader_safe(std::path::Path::new("/opt/mimik/llama/cpu")));
-    for bad in ["/opt:/evil", "/opt/llama;rm", "/opt/$ORIGIN/x"] {
-        assert!(!loader_safe(std::path::Path::new(bad)), "{bad}");
-    }
 }
 
 #[tokio::test]

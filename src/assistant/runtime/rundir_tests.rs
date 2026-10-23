@@ -372,15 +372,23 @@ fn a_record_interrupted_before_its_truncate_still_parses() {
 fn an_executable_path_that_reads_like_the_checksum_still_parses() {
     let (_dir, run) = data();
     let mut pidfile = Pidfile::acquire(run.as_fd()).unwrap().unwrap();
-    // A path line that looks like a checksum line must not be mistaken for the terminator.
+    // An executable path that is itself a (wrong) `sha256 ` line, before the genuine
+    // terminator: a parser that took the first such line would verify the wrong body and fail.
+    let wrong = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"nonsense"));
     let entry = Entry {
         generation: 1,
         pid: 7,
         start_time: 2,
-        executables: vec!["/opt/sha256 deadbeef".into(), "/opt/mimik/mimik".into()],
+        executables: vec![format!("sha256 {wrong}"), "/opt/mimik/mimik".into()],
     };
     pidfile.record(&entry).unwrap();
     assert_eq!(pidfile.entry(), Ok(Some(entry)));
+}
+
+#[test]
+fn an_executable_path_with_a_newline_is_refused() {
+    let me = i32::try_from(std::process::id()).unwrap();
+    assert!(Entry::of(1, me, vec!["/opt/mimik\nevil".into()]).is_none());
 }
 
 #[test]
