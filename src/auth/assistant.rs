@@ -72,11 +72,6 @@ fn level_view(level: Level) -> LevelView {
             name: "bubblewrap",
             text: "private namespaces, so the model server has no network beyond its own loopback and sees only an allowlist of read-only paths; seccomp; it is killed with Mimik. Mimik reaches it only through its socket, checked to be this sandbox's process.",
         },
-        Level::Landlock => LevelView {
-            number: 2,
-            name: "Landlock with seccomp",
-            text: "partly confined.",
-        },
         Level::Unconfined => LevelView {
             number: 3,
             name: "unconfined",

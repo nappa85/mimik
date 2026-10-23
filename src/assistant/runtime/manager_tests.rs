@@ -237,7 +237,6 @@ impl Launcher for FakeLauncher {
             return self.gpu_probe.lock().unwrap().clone().unwrap_or_else(|| {
                 vec![
                     (Level::Bubblewrap, Ok(())),
-                    (Level::Landlock, Err("not built".into())),
                     (Level::Unconfined, Ok(())),
                 ]
             });
@@ -249,7 +248,6 @@ impl Launcher for FakeLauncher {
         self.probe.lock().unwrap().clone().unwrap_or_else(|| {
             vec![
                 (Level::Bubblewrap, Ok(())),
-                (Level::Landlock, Err("not built".into())),
                 (Level::Unconfined, Ok(())),
             ]
         })
@@ -372,13 +370,10 @@ async fn a_start_reaches_ready_after_health_priming_and_calibration() {
     assert_eq!(status.generation, 1);
     assert_eq!(
         status.skipped,
-        vec![
-            (Level::Landlock, "not built".to_owned()),
-            (
-                Level::Unconfined,
-                "not used in this release (ASSIST-43)".to_owned()
-            ),
-        ]
+        vec![(
+            Level::Unconfined,
+            "not used in this release (ASSIST-43)".to_owned()
+        )]
     );
     let budgets = status.budgets.unwrap();
     assert_eq!(budgets.bounds.bytes, 1024);

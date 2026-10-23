@@ -171,16 +171,15 @@ async fn the_manager_probe_runs_level_1_only_and_the_cli_still_probes_level_3() 
     launch.preflight(Path::Cpu).await.unwrap();
     // The manager's probe never runs level 3's code (ASSIST-43).
     let levels = launch.probe(Path::Cpu).await;
+    assert_eq!(levels.len(), 2, "there is no level 2 (ASSIST-48): {levels:?}");
     assert_eq!(
-        levels[2],
+        levels[1],
         (
             Level::Unconfined,
             Err("not used in this release (ASSIST-43)".into())
         ),
         "{levels:?}"
     );
-    assert_eq!(levels[1].0, Level::Landlock);
-    assert!(levels[1].1.is_err());
     if !bwrap_installed() {
         assert_eq!(
             levels[0],
@@ -198,7 +197,7 @@ async fn the_manager_probe_runs_level_1_only_and_the_cli_still_probes_level_3() 
     })
     .await
     .unwrap();
-    assert_eq!(all[2], (Level::Unconfined, Probed::Passed), "{all:?}");
+    assert_eq!(all[1], (Level::Unconfined, Probed::Passed), "{all:?}");
     launch.settle().await;
     // The probes' directories are gone.
     let run: Vec<_> = std::fs::read_dir(setup.settings.data_dir.join("run"))
