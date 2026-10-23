@@ -117,7 +117,11 @@ class Server:
             self.port = probe.getsockname()[1]
         self.process = subprocess.Popen(
             [
-                str(args.runtime / "cpu" / "llama-server"),
+                str(
+                    args.runtime
+                    / ("vulkan" if getattr(args, "gpu_device", None) else "cpu")
+                    / "llama-server"
+                ),
                 "--model",
                 str(args.models_dir / args.model),
                 "--alias",
@@ -133,8 +137,11 @@ class Server:
                 "--no-slots",
                 "--no-mmproj",
                 "--jinja",
-                "--n-gpu-layers",
-                "0",
+                *(
+                    ["--n-gpu-layers", "99", "--device", getattr(args, "gpu_device", None)]
+                    if getattr(args, "gpu_device", None)
+                    else ["--n-gpu-layers", "0"]
+                ),
                 "--fit",
                 "off",
                 "--threads",
@@ -386,6 +393,9 @@ def main(argv=None):
     srv.add_argument("--model", default="granite-4.2-3b-Q4_K_M.gguf")
     srv.add_argument("--threads", type=int, required=True)
     srv.add_argument("--max-tokens", type=int, default=352)
+    srv.add_argument(
+        "--gpu-device", help="run the Vulkan build on this device (for example Vulkan0)"
+    )
     srv.add_argument("--jobs", type=int, default=4)
     args = parser.parse_args(argv)
     if not heavy_allowed():

@@ -736,14 +736,6 @@ not used, ASSIST-43) and
 Built (branch `assist-2c2`; reference [model-runtime.md](model-runtime.md)). Remaining before
 it is marked complete:
 
-- the idle native calibration on this host, CPU path, at the ASSIST-41 default (5 threads) and
-  at 2 threads: start to `ready`, priming, the two samples, the filler density, the derived B,
-  R, D and Q, to `docs/results.md` (the first native run was under concurrent load); it sets
-  the expected CPU outcome and comes back to the user if nothing fits;
-- grammar against no-grammar per-token generation time on the CPU path, which settles the
-  calibration form; a job's real prompt tokens against N(B);
-- cancellation with the real model: a superseding job's first token after cancelling a job
-  mid-generation and mid-prompt (a 1 KiB prompt);
 - the official CPU asset on the documented minimum host (an Ubuntu 22.04 VM) and the AppArmor
   preflight on an Ubuntu VM;
 - the `llama-runtime` CI job's first run (it needs a push).
@@ -763,25 +755,15 @@ automatic), shown on the page with its exposure, and these before it can be enab
 
 #### 2c-2b-1 GPU path
 
-Built (branch `assist-2c2b`; split from 2c-2b by the user, 2026-10-23; reference
-[model-runtime.md](model-runtime.md)). Remaining before it is marked complete, on the dev host
-with the GPU fan on manual, evening or weekend, through `tools/assist_gpu_live.py` (it refuses
-otherwise):
+Built and verified live on the RX 6650 XT (branch `assist-2c2b`; split from 2c-2b by the user,
+2026-10-23; reference [model-runtime.md](model-runtime.md), results in `results.md`). The live
+checks run on the dev host with the GPU fan on manual, evening or weekend, through
+`tools/assist_gpu_live.py` (it refuses otherwise). Remaining:
 
-- the live GPU checks (`live_gpu_*`): Vulkan on the RX 6650 XT reaches `ready` with GPU
-  budgets under the level-1 GPU profile (which fixes the path list), the real listing parses
-  in the pinned format with one hardware GPU per node, killing only the llama-server during a
-  real job ends the job neutral and the CPU path takes over at level 1 with CPU budgets, the
-  failure uncounted, the old sandbox gone first and a following job working (killing the
-  whole sandbox is a second test), and the page says why;
-- from the live run, narrow the PCI sysfs and ICD binds to what is read and limit the loader to
-  the selected card's driver (ASSIST-L44, ASSIST-L45);
-- the live check records the device listing's exit code and the tail of its stderr, so a driver
-  that exits nonzero at teardown can be diagnosed (a nonzero exit now refuses the listing);
-- the first native GPU calibration (start to `ready`, priming, samples, B, R, D, Q) and grammar
-  against no-grammar on the GPU path, to `docs/results.md`;
-- refused calls checked once with `strace` in a container on the GPU path (calls the Vulkan
-  driver needs are decided before 2c-2b-1 completes).
+- from the trace, bind only the sysfs files and ICD manifests that are read and limit the
+  loader to the selected card's driver (ASSIST-L44, ASSIST-L45), after another driver (AMDVLK,
+  Intel, NVIDIA) has been traced where one is available;
+- the GPU-path checks at each llama.cpp pin change (`tools/assist_gpu_live.py`).
 
 #### 2c-2b-2 Landlock (branch `assist-2c2b2`, from master after 2c-2b-1 merges)
 

@@ -283,7 +283,11 @@ when dropped; never on a command line or in a log. llama-server reads it with
 The child's stdout and stderr are drained by two threads with a 4 KiB line bound and never
 copied into Mimik's log. Fixed patterns update a fixed-size summary (so memory stays bounded
 however much the child prints): bind failures, listening, the build number, the offload line,
-device and model-load errors (which name a failed start). Nothing the child prints can make
+device and model-load errors (which name a failed start). The summary has no text field and no
+line is ever kept, forwarded or logged, at any verbosity (a test feeds request-looking lines
+with a marker phrase). The GPU path starts llama-server with `--verbosity 4` because the pinned
+build prints the offload line only from that level; in the live check a job's marker phrase
+appeared in neither stream at that level (`results.md`). Nothing the child prints can make
 an exit a sandbox failure: at level 1 that is decided only by the shim's marker pipe ending
 cleanly without the marker (bwrap failed before the exec). The marker's arrival, a read error,
 unexpected bytes, or a reader still running after the readers' wait (5 s) all count the exit
