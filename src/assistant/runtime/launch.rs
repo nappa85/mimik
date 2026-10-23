@@ -1,8 +1,7 @@
 //! The real launcher (assisted sheet plan §1.4a): verified files, the generation's
 //! directory and token, the runner with the level's command, the endpoint check's connector,
 //! the output drain and the child's lifetime. Level 1 runs llama-server under bubblewrap on
-//! a Unix socket; level 3 executes it unconfined but for seccomp on `127.0.0.1`. Level 2
-//! (Landlock) is step 2c-2b-2. The GPU path runs the Vulkan build at level 1 with the
+//! a Unix socket; level 3 executes it unconfined but for seccomp on `127.0.0.1`. The GPU path runs the Vulkan build at level 1 with the
 //! selected render node bound and `--device` named from the in-sandbox listing.
 use super::bwrap::{self, Bwrap, GpuBinds, Profile, Started};
 use super::device::{self, Candidate, Choice, Listed, Roots};
@@ -2012,7 +2011,7 @@ fn refused_start(real: &Real, level: Level, path: Path) -> Result<(), Fail> {
     }
     if path == Path::Gpu && level != Level::Bubblewrap {
         // Without bubblewrap render nodes cannot be isolated (ASSIST-L25); the TCP levels'
-        // single-GPU rule comes with level 2 (step 2c-2b-2).
+        // single-GPU rule comes with level 3's return.
         return Err(Fail::Sandbox(
             "the GPU path runs only at level 1 in this release".into(),
         ));
@@ -2394,10 +2393,6 @@ impl Launcher for Launch {
             vec![
                 (Level::Bubblewrap, level_1),
                 (
-                    Level::Landlock,
-                    Err("Landlock confinement is not in this release".into()),
-                ),
-                (
                     Level::Unconfined,
                     Err("not used in this release (ASSIST-43)".into()),
                 ),
@@ -2535,9 +2530,6 @@ impl Launch {
                         port,
                     )
                 }
-                Level::Landlock => Err(Fail::Sandbox(
-                    "Landlock confinement is not in this release".into(),
-                )),
             })
         };
         let joined = |result: Result<Result<Spawned, Fail>, tokio::task::JoinError>| {
@@ -3047,10 +3039,6 @@ impl Real {
             (
                 Level::Bubblewrap,
                 self.probe_with_retries(path, Level::Bubblewrap, ticket),
-            ),
-            (
-                Level::Landlock,
-                Probed::Failed("Landlock confinement is not in this release".into()),
             ),
             (
                 Level::Unconfined,

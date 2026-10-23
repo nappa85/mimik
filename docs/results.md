@@ -362,8 +362,8 @@ decides.**
   (measured in a container capped to 2 CPUs; a native child at 2 threads is not measured).
   Not exercised in 2b: llama-server `--api-key` auth and the Unix-socket transport. Not
   carried over: the network confinement; the container topology is dev and benchmark
-  evidence only, and production confinement comes from bubblewrap, Landlock with seccomp or
-  nothing (ASSIST-34), unmeasured until 2c-2. The GPU path is measured below.
+  evidence only, and production confinement comes from bubblewrap or
+  nothing (ASSIST-34, ASSIST-48), unmeasured until 2c-2. The GPU path is measured below.
 - **CPU-path budget, decided (ASSIST-31):** on a machine without a usable GPU only the fields
   related to the note are sent, the dynamic part is at most 1 KiB, and the run deadline may
   reach 90 s; the GPU path keeps 60 s and 4 KiB. The analysis that led to it:

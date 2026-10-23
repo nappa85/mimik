@@ -234,25 +234,22 @@ impl Launcher for FakeLauncher {
     async fn probe(&self, path: Path) -> Vec<(Level, Result<(), String>)> {
         self.probed.lock().unwrap().push(path);
         if path == Path::Gpu {
-            return self.gpu_probe.lock().unwrap().clone().unwrap_or_else(|| {
-                vec![
-                    (Level::Bubblewrap, Ok(())),
-                    (Level::Landlock, Err("not built".into())),
-                    (Level::Unconfined, Ok(())),
-                ]
-            });
+            return self
+                .gpu_probe
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| vec![(Level::Bubblewrap, Ok(())), (Level::Unconfined, Ok(()))]);
         }
         let gate = self.cpu_probe_gate.lock().unwrap().clone();
         if let Some(gate) = gate {
             gate.notified().await;
         }
-        self.probe.lock().unwrap().clone().unwrap_or_else(|| {
-            vec![
-                (Level::Bubblewrap, Ok(())),
-                (Level::Landlock, Err("not built".into())),
-                (Level::Unconfined, Ok(())),
-            ]
-        })
+        self.probe
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| vec![(Level::Bubblewrap, Ok(())), (Level::Unconfined, Ok(()))])
     }
 
     fn device(&self) -> Option<DeviceView> {
@@ -372,13 +369,10 @@ async fn a_start_reaches_ready_after_health_priming_and_calibration() {
     assert_eq!(status.generation, 1);
     assert_eq!(
         status.skipped,
-        vec![
-            (Level::Landlock, "not built".to_owned()),
-            (
-                Level::Unconfined,
-                "not used in this release (ASSIST-43)".to_owned()
-            ),
-        ]
+        vec![(
+            Level::Unconfined,
+            "not used in this release (ASSIST-43)".to_owned()
+        )]
     );
     let budgets = status.budgets.unwrap();
     assert_eq!(budgets.bounds.bytes, 1024);
