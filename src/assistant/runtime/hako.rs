@@ -211,7 +211,7 @@ pub(crate) fn plan(inputs: &Inputs<'_>) -> Plan {
     }
 }
 
-/// The assistant page's text when the sandbox cannot start and Ubuntu's AppArmor restriction
+/// The assistant page's text when the sandbox cannot start and Ubuntu's `AppArmor` restriction
 /// of unprivileged user namespaces is on (the draft of the page's message; the profile it
 /// names is `apparmor/mimik`, shipped in the release archive; it has not yet been tried on
 /// Ubuntu 24.04).
@@ -228,6 +228,7 @@ pub(crate) fn preflight() -> Result<bwrap::Bwrap, bwrap::Unusable> {
     })
 }
 
+#[cfg(any(test, feature = "sandbox-hakoniwa"))]
 /// What the runner reports first on its status descriptor, the shape of bubblewrap's line:
 /// the reaper outside the PID namespace. The namespace number is not reported (the reaper is
 /// not dumpable, so `/proc/<pid>/ns/pid_for_children` is unreadable): the endpoint check
@@ -245,6 +246,7 @@ pub(crate) fn started(line: &str) -> Option<bwrap::Started> {
     })
 }
 
+#[cfg(any(test, feature = "sandbox-hakoniwa"))]
 /// The exit codes of the closure when it does not reach its exec. All but [`exit::EXEC`]
 /// come before the marker, so the launcher counts them as sandbox failures.
 pub(crate) mod exit {
@@ -259,6 +261,7 @@ pub(crate) mod exit {
     pub const EXEC: i32 = 127;
 }
 
+#[cfg(any(test, feature = "sandbox-hakoniwa"))]
 /// The first bind whose mounted object is not the verified one: `stat` gives the mounted
 /// target's identity (`None` when it cannot be read, which fails closed).
 pub(crate) fn identity_mismatch(
@@ -391,8 +394,7 @@ mod run {
             return refuse(exit::MARKER, "the marker cannot be written");
         }
         let replaced = std::fs::File::open("/dev/null")
-            .ok()
-            .is_some_and(|null| rustix::stdio::dup2_stdin(&null).is_ok());
+            .is_ok_and(|null| rustix::stdio::dup2_stdin(&null).is_ok());
         if !replaced || !probe::close_inherited(probe::close_range, probe::fd_listing) {
             return refuse(
                 exit::DESCRIPTORS,

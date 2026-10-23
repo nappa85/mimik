@@ -593,6 +593,21 @@ impl Real {
     }
 }
 
+/// The `(device, inode)` of a verified object, from its descriptor.
+fn identity_of(fd: &impl AsFd) -> Result<hako::Identity, Fail> {
+    rustix::fs::fstat(fd)
+        .map(|stat| (stat.st_dev, stat.st_ino))
+        .map_err(|_| Fail::Other("a verified object cannot be examined".into()))
+}
+
+/// What the Hakoniwa sandbox executes.
+struct HakoCommand {
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+    /// Read-only binds beside the allowlist: `(source, target, identity)`.
+    extra: Vec<(PathBuf, String, hako::Identity)>,
+}
+
 fn dup(fd: &impl AsFd) -> Result<OwnedFd, String> {
     fd.as_fd()
         .try_clone_to_owned()
@@ -1185,55 +1200,14 @@ impl Real {
         })
     }
 
-    /// The runner's spec and descriptors for the Hakoniwa sandbox: the plan (binds by path
-    /// with the verified identities), the token file in the generation's directory, and only
-    /// the status and marker descriptors handed over (no verified descriptor enters the
-    /// runner's sandbox: Hakoniwa closes them, and the closure checks identities instead).
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one sandbox: what runs, with which verified files, on which device"
-    )]
-    fn hako_spec(
+    /// What the Hakoniwa sandbox executes: argv and environment, and the probe's own
+    /// executable as an extra read-only bind with its identity.
+    fn hako_command(
         &self,
         path: Path,
         command: &Command<'_>,
         gpu: Option<&GpuBinds>,
-        checked: (&[Verified], &Verified, &std::path::Path),
-        token: &Token,
-        generation: &Generation,
-        pipes: (OwnedFd, OwnedFd),
-    ) -> Result<(Spec, Vec<Handover>), Fail> {
-        let (files, model, build_dir) = checked;
-        let identity = |fd: &OwnedFd| -> Result<hako::Identity, Fail> {
-            rustix::fs::fstat(fd)
-                .map(|stat| (stat.st_dev, stat.st_ino))
-                .map_err(|_| Fail::Other("a verified object cannot be examined".into()))
-        };
-        let run = self.run_dir().map_err(Fail::Other)?;
-        let run_path = std::fs::read_link(format!(
-            "/proc/self/fd/{}",
-            std::os::fd::AsRawFd::as_raw_fd(&*run)
-        ))
-        .map_err(|_| Fail::Other("the run directory's path cannot be read".into()))?;
-        let generation_path = run_path.join(generation.name());
-        token
-            .write_file(generation.fd.as_fd())
-            .map_err(|_| Fail::Other("the token file cannot be written".into()))?;
-        let token_file = rustix::fs::openat(
-            &generation.fd,
-            token::FILE,
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-        )
-        .map_err(|_| Fail::Other("the token file cannot be opened".into()))?;
-        let mut runtime = Vec::new();
-        for file in files {
-            runtime.push(hako::File {
-                name: file.name.clone(),
-                source: build_dir.join(&file.name),
-                identity: identity(&file.fd)?,
-            });
-        }
+    ) -> Result<HakoCommand, Fail> {
         let socket = format!("{}/{}", bwrap::SOCKET_DIR, endpoint::SOCKET);
         let server = format!("{}/{}", bwrap::RUNTIME, self.server_name(path));
         let mut env = sandbox_env(path);
@@ -1256,7 +1230,7 @@ impl Real {
                 extra.push((
                     self.settings.inner.executable.clone(),
                     SHIM_PATH.to_owned(),
-                    identity(&exe)?,
+                    identity_of(&exe)?,
                 ));
                 let mut argv = vec![SHIM_PATH.to_owned()];
                 argv.extend(self.settings.inner.probe_args.iter().cloned());
@@ -1267,14 +1241,62 @@ impl Real {
                 argv
             }
         };
+        Ok(HakoCommand { argv, env, extra })
+    }
+
+    /// The runner's spec and descriptors for the Hakoniwa sandbox: the plan (binds by path
+    /// with the verified identities), the token file in the generation's directory, and only
+    /// the status and marker descriptors handed over (no verified descriptor enters the
+    /// runner's sandbox: Hakoniwa closes them, and the closure checks identities instead).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one sandbox: what runs, with which verified files, on which device"
+    )]
+    fn hako_spec(
+        &self,
+        path: Path,
+        command: &Command<'_>,
+        gpu: Option<&GpuBinds>,
+        checked: (&[Verified], &Verified, &std::path::Path),
+        token: &Token,
+        generation: &Generation,
+        pipes: (OwnedFd, OwnedFd),
+    ) -> Result<(Spec, Vec<Handover>), Fail> {
+        let (files, model, build_dir) = checked;
+        let run = self.run_dir().map_err(Fail::Other)?;
+        let run_path = std::fs::read_link(format!(
+            "/proc/self/fd/{}",
+            std::os::fd::AsRawFd::as_raw_fd(&*run)
+        ))
+        .map_err(|_| Fail::Other("the run directory's path cannot be read".into()))?;
+        let generation_path = run_path.join(generation.name());
+        token
+            .write_file(generation.fd.as_fd())
+            .map_err(|_| Fail::Other("the token file cannot be written".into()))?;
+        let token_file = rustix::fs::openat(
+            &generation.fd,
+            token::FILE,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|_| Fail::Other("the token file cannot be opened".into()))?;
+        let mut runtime = Vec::new();
+        for file in files {
+            runtime.push(hako::File {
+                name: file.name.clone(),
+                source: build_dir.join(&file.name),
+                identity: identity_of(&file.fd)?,
+            });
+        }
+        let HakoCommand { argv, env, extra } = self.hako_command(path, command, gpu)?;
         let plan = hako::plan(&hako::Inputs {
             runtime,
             model: (
                 self.settings.models_dir.join(&model.name),
                 (model.identity.device, model.identity.inode),
             ),
-            token: (generation_path.join(token::FILE), identity(&token_file)?),
-            generation: (generation_path, identity(&generation.fd)?),
+            token: (generation_path.join(token::FILE), identity_of(&token_file)?),
+            generation: (generation_path, identity_of(&generation.fd)?),
             extra,
             gpu,
             env,
@@ -1305,6 +1327,42 @@ impl Real {
                 marker: fds::MARKER,
             },
         };
+        Ok((spec, handover))
+    }
+
+    /// The runner's spec and handover for the configured sandbox.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one sandbox: what runs, with which verified files, on which device"
+    )]
+    fn sandbox_parts(
+        &self,
+        bwrap: &Bwrap,
+        path: Path,
+        command: &Command<'_>,
+        gpu: Option<&GpuBinds>,
+        checked: (&[Verified], &Verified, &std::path::Path),
+        token: &Token,
+        generation: &Generation,
+        pipes: (OwnedFd, OwnedFd),
+    ) -> Result<(Spec, Vec<Handover>), Fail> {
+        let (files, model, _) = checked;
+        if self.settings.backend == Backend::Hakoniwa {
+            return self.hako_spec(path, command, gpu, checked, token, generation, pipes);
+        }
+        let (status_write, marker_write) = pipes;
+        let seccomp = bytes_pipe(&seccomp::bytes(&seccomp::program(
+            seccomp::Profile::Sandbox,
+        )))
+        .map_err(Fail::Other)?;
+        let token_pipe = token.pipe().map_err(|_| Fail::Other("no pipe".into()))?;
+        let (mut handover, runtime) =
+            sandbox_handover(status_write, seccomp, token_pipe, generation, model, files)?;
+        handover.push(Handover {
+            fd: marker_write,
+            target: fds::MARKER,
+        });
+        let spec = self.sandbox_spec(bwrap, path, command, gpu, &mut handover, runtime)?;
         Ok((spec, handover))
     }
 
@@ -1345,31 +1403,16 @@ impl Real {
             .map_err(|_| Fail::Other("no pipe".into()))?;
         let (marker_read, marker_write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
             .map_err(|_| Fail::Other("no pipe".into()))?;
-        let (spec, handover) = if hakoniwa {
-            self.hako_spec(
-                path,
-                command,
-                gpu,
-                (files, model, build_dir),
-                token,
-                &generation,
-                (status_write, marker_write),
-            )?
-        } else {
-            let seccomp = bytes_pipe(&seccomp::bytes(&seccomp::program(
-                seccomp::Profile::Sandbox,
-            )))
-            .map_err(Fail::Other)?;
-            let token_pipe = token.pipe().map_err(|_| Fail::Other("no pipe".into()))?;
-            let (mut handover, runtime) =
-                sandbox_handover(status_write, seccomp, token_pipe, &generation, model, files)?;
-            handover.push(Handover {
-                fd: marker_write,
-                target: fds::MARKER,
-            });
-            let spec = self.sandbox_spec(&bwrap, path, command, gpu, &mut handover, runtime)?;
-            (spec, handover)
-        };
+        let (spec, handover) = self.sandbox_parts(
+            &bwrap,
+            path,
+            command,
+            gpu,
+            (files, model, build_dir),
+            token,
+            &generation,
+            (status_write, marker_write),
+        )?;
         self.after_cleanups(job)?;
         pause_at!(self, "before-spawn");
         job.check()?;
@@ -3245,11 +3288,11 @@ impl Real {
             build_dir,
             ..
         } = self.verify(path, level, ticket).map_err(|why| {
-            if ticket.cancelled() {
-                Probe::Failed("cancelled".into())
+            Probe::Failed(if ticket.cancelled() {
+                "cancelled".into()
             } else {
-                Probe::Failed(why)
-            }
+                why
+            })
         })?;
         let token = Token::new();
         let sequence = self.probes.fetch_add(1, Ordering::SeqCst);
@@ -3322,20 +3365,11 @@ impl Real {
                 Ok((report, verdict))
             }
             Some(None) => {
-                // The probe runs Mimik itself, never llama-server: its stderr (bwrap's and the
-                // shim's) is trusted here.
-                let mut text = String::new();
-                if let Some(mut stderr) = stderr {
-                    let _ = (&mut stderr).take(4096).read_to_string(&mut text);
-                }
-                let first = text
-                    .lines()
-                    .find(|line| line.starts_with("bwrap: ") || line.starts_with("mimik sandbox: "))
-                    .unwrap_or("");
+                // The probe runs Mimik itself, never llama-server: its stderr (the sandbox's
+                // own lines) is trusted here.
+                let first = first_sandbox_line(stderr);
                 Err(Probe::Inconclusive(
-                    format!("the probe did not start {}", first.trim())
-                        .trim()
-                        .to_owned(),
+                    format!("the probe did not start {first}").trim().to_owned(),
                 ))
             }
             None => Err(Probe::Inconclusive(format!(
@@ -3348,6 +3382,19 @@ impl Real {
         drop(generation);
         result
     }
+}
+
+/// The first line of the sandbox's own (bubblewrap's or the Hakoniwa runner's) error text.
+fn first_sandbox_line(stderr: Option<impl Read>) -> String {
+    let mut text = String::new();
+    if let Some(stderr) = stderr {
+        let _ = stderr.take(4096).read_to_string(&mut text);
+    }
+    text.lines()
+        .find(|line| line.starts_with("bwrap: ") || line.starts_with("mimik sandbox: "))
+        .unwrap_or("")
+        .trim()
+        .to_owned()
 }
 
 /// The first JSON line with "ok" (a test harness may print others first, even on the line).
