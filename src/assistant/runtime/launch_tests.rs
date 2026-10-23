@@ -456,6 +456,8 @@ async fn a_failure_after_the_spawn_leaves_no_process_behind() {
     ] {
         *FAULT.lock().unwrap() = Some((setup.settings.runtime_dir.clone(), step));
         let result = launch.start(generation, Level::Unconfined, Path::Cpu).await;
+        // The failed start's cleanup is in-flight work until the child is gone.
+        launch.settle().await;
         let expected = if step == "signal" {
             "no pidfd to signal the model server".to_owned()
         } else {
@@ -764,8 +766,8 @@ async fn a_stale_clear_never_removes_a_newer_entry() {
     assert_eq!(pidfile_text(&setup), "");
 }
 
-#[test]
-fn a_failed_starts_guard_kills_and_waits_for_the_reaper_too() {
+#[tokio::test]
+async fn a_failed_starts_guard_kills_and_waits_for_the_reaper_too() {
     let runner = std::process::Command::new("sleep")
         .arg("30")
         .spawn()
@@ -778,11 +780,57 @@ fn a_failed_starts_guard_kills_and_waits_for_the_reaper_too() {
         reaper: Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap(),
         pid_namespace: 0,
     });
-    let mut owned = Owned::new(runner);
+    let work = Work::new();
+    let mut owned = Owned::new(runner, work.enter());
     owned.reaper = Some(Arc::clone(&sandbox));
     drop(owned);
+    tokio::time::timeout(Duration::from_secs(10), work.settle())
+        .await
+        .unwrap();
     assert!(endpoint::exited(&sandbox.reaper.pidfd));
     reaper_process.wait().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reaper_that_outlives_the_wait_keeps_its_entry_and_blocks_the_settle() {
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    let runner = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let mut reaper_process = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .unwrap();
+    let me = i32::try_from(std::process::id()).unwrap();
+    launch
+        .0
+        .record(&rundir::Entry::of(7, me, vec!["/x".into()]).unwrap());
+    let sandbox = Arc::new(Sandbox {
+        reaper: Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap(),
+        pid_namespace: 0,
+    });
+    let mut owned = Owned::new(runner, launch.0.work().enter());
+    owned.reaper = Some(Arc::clone(&sandbox));
+    owned.recorded = Some((Arc::clone(&launch.0.held), 7));
+    // The kill does not reach it (as with a process that cannot end yet).
+    owned.unkillable = true;
+    drop(owned);
+    // Past the 5 s the cleanup used to give up after: still tracked, the entry kept.
+    let settling = tokio::time::timeout(REAPER_WITHIN + Duration::from_secs(1), launch.settle());
+    assert!(
+        settling.await.is_err(),
+        "settled while the reaper still ran"
+    );
+    assert!(pidfile_text(&setup).starts_with("7\n"));
+    reaper_process.kill().unwrap();
+    reaper_process.wait().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), launch.settle())
+        .await
+        .unwrap();
+    assert_eq!(pidfile_text(&setup), "");
 }
 
 #[test]
@@ -793,4 +841,99 @@ fn the_pinned_build_fits_the_runners_descriptor_bound() {
         1 + fds::FIXED + files <= runner::MAX_HANDOVER,
         "{files} runtime files"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_abandoned_spawn_counts_until_its_cleanup_ends() {
+    let setup = setup(MODEL, "fake");
+    let launch = Arc::new(launch(&setup));
+    launch.preflight(Path::Cpu).await.unwrap();
+    let pause = |step| {
+        let (arrived_sender, arrived) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        PAUSE.lock().unwrap().push(Pause {
+            dir: setup.settings.runtime_dir.clone(),
+            step,
+            arrived: arrived_sender,
+            release: released,
+        });
+        (arrived, release)
+    };
+    let (spawned, release_spawned) = pause("spawned");
+    let (cleaning, release_cleanup) = pause("cleanup");
+    let starting = {
+        let launch = Arc::clone(&launch);
+        tokio::spawn(async move {
+            launch
+                .start(1, Level::Unconfined, Path::Cpu)
+                .await
+                .map(|_| ())
+        })
+    };
+    // Past the last cancel check: the spawn succeeds, for a start nobody awaits any more.
+    tokio::task::spawn_blocking(move || spawned.recv_timeout(Duration::from_secs(30)).unwrap())
+        .await
+        .unwrap();
+    starting.abort();
+    let _ = starting.await;
+    launch.cancel();
+    release_spawned.send(()).unwrap();
+    tokio::task::spawn_blocking(move || cleaning.recv_timeout(Duration::from_secs(30)).unwrap())
+        .await
+        .unwrap();
+    let settling = {
+        let launch = Arc::clone(&launch);
+        tokio::spawn(async move { launch.settle().await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !settling.is_finished(),
+        "settled while the abandoned spawn's cleanup ran"
+    );
+    release_cleanup.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), settling)
+        .await
+        .unwrap()
+        .unwrap();
+    let marker = setup.settings.data_dir.join("run").display().to_string();
+    assert_eq!(processes_naming(&marker), Vec::<i32>::new());
+    assert_eq!(pidfile_text(&setup), "");
+    assert!(!setup.settings.data_dir.join("run/1").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_preflight_dropped_during_its_sweep_settles_after_it_and_the_next_one_proceeds() {
+    let setup = setup(MODEL, "fake");
+    let launch = Arc::new(launch(&setup));
+    let (arrived_sender, arrived) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    PAUSE.lock().unwrap().push(Pause {
+        dir: setup.settings.runtime_dir.clone(),
+        step: "sweep",
+        arrived: arrived_sender,
+        release: released,
+    });
+    let preflight = {
+        let launch = Arc::clone(&launch);
+        tokio::spawn(async move { launch.preflight(Path::Cpu).await })
+    };
+    tokio::task::spawn_blocking(move || arrived.recv_timeout(Duration::from_secs(30)).unwrap())
+        .await
+        .unwrap();
+    preflight.abort();
+    let _ = preflight.await;
+    launch.cancel();
+    let settling = {
+        let launch = Arc::clone(&launch);
+        tokio::spawn(async move { launch.settle().await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!settling.is_finished(), "settled while the sweep ran");
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), settling)
+        .await
+        .unwrap()
+        .unwrap();
+    // The pidfile came back: no "another Mimik".
+    launch.preflight(Path::Cpu).await.unwrap();
 }

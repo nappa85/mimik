@@ -77,6 +77,7 @@ pub(crate) fn start_time(pid: i32) -> Option<u64> {
         .map(|stat| stat.starttime)
 }
 
+#[cfg(test)]
 pub(crate) fn executable(pid: i32) -> Option<String> {
     std::fs::read_link(format!("/proc/{pid}/exe"))
         .ok()
@@ -196,11 +197,17 @@ impl Pidfile {
             Ok(handle) => {
                 between();
                 let (start, exe) = processes.identity(entry.pid);
-                let matches = start == Some(entry.start_time)
-                    && exe.is_some_and(|exe| entry.executables.contains(&exe));
-                if !matches {
+                // A definite mismatch (another process has the PID) clears the entry; an
+                // identity that cannot be read decides nothing while the pinned process runs.
+                let mismatch = start.as_ref().is_ok_and(|start| *start != entry.start_time)
+                    || exe
+                        .as_ref()
+                        .is_ok_and(|exe| !entry.executables.contains(exe));
+                let known = start.is_ok() && exe.is_ok();
+                if mismatch {
                     Swept::Nothing
-                } else if processes.kill(&handle).is_err() {
+                } else if !known || processes.kill(&handle).is_err() {
+                    // Unknown, or the kill failed: decided by whether it still runs.
                     if processes.alive(&handle) {
                         Swept::StillRunning
                     } else {
@@ -225,8 +232,9 @@ impl Pidfile {
 pub(crate) trait Processes {
     type Handle;
     fn open(&self, pid: i32) -> std::io::Result<Self::Handle>;
-    /// The start time and executable of whatever process has `pid` now.
-    fn identity(&self, pid: i32) -> (Option<u64>, Option<String>);
+    /// The start time and executable of whatever process has `pid` now (each an error when
+    /// it cannot be read).
+    fn identity(&self, pid: i32) -> (std::io::Result<u64>, std::io::Result<String>);
     fn kill(&self, handle: &Self::Handle) -> std::io::Result<()>;
     fn alive(&self, handle: &Self::Handle) -> bool;
 }
@@ -241,8 +249,11 @@ impl Processes for Host {
         super::endpoint::Watched::open(pid)
     }
 
-    fn identity(&self, pid: i32) -> (Option<u64>, Option<String>) {
-        (start_time(pid), executable(pid))
+    fn identity(&self, pid: i32) -> (std::io::Result<u64>, std::io::Result<String>) {
+        (
+            start_time(pid).ok_or_else(|| std::io::Error::other("no start time")),
+            std::fs::read_link(format!("/proc/{pid}/exe")).map(|path| path.display().to_string()),
+        )
     }
 
     fn kill(&self, handle: &Self::Handle) -> std::io::Result<()> {

@@ -681,6 +681,7 @@ async fn live_a_failure_after_the_level_1_spawn_leaves_no_process_behind() {
         *FAULT.lock().unwrap() = Some((real.settings.runtime_dir.clone(), step));
         let result = launch.start(generation, Level::Bubblewrap, Path::Cpu).await;
         assert!(result.is_err(), "{step}");
+        launch.settle().await;
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             let left: Vec<i32> = std::fs::read_dir("/proc")

@@ -239,10 +239,15 @@ impl Processes for Reused {
         Ok(self.holder.get())
     }
 
-    fn identity(&self, _: i32) -> (Option<u64>, Option<String>) {
+    fn identity(&self, _: i32) -> (std::io::Result<u64>, std::io::Result<String>) {
         match self.holder.get() {
-            1 => (Some(100), Some("/opt/mimik/mimik".into())),
-            _ => (Some(200), Some("/usr/bin/other".into())),
+            1 => (Ok(100), Ok("/opt/mimik/mimik".into())),
+            // A process whose identity cannot be read.
+            3 => (
+                Err(std::io::Error::from_raw_os_error(libc::EACCES)),
+                Err(std::io::Error::from_raw_os_error(libc::EACCES)),
+            ),
+            _ => (Ok(200), Ok("/usr/bin/other".into())),
         }
     }
 
@@ -251,8 +256,9 @@ impl Processes for Reused {
         Ok(())
     }
 
-    fn alive(&self, _: &u32) -> bool {
-        false
+    fn alive(&self, handle: &u32) -> bool {
+        // The unreadable one runs on; the others have been killed (or were never there).
+        *handle == 3
     }
 }
 
@@ -280,4 +286,27 @@ fn a_pid_taken_over_by_another_process_is_never_signalled() {
     processes.holder.set(1);
     assert_eq!(pidfile.sweep_in(&processes, || {}, |_| true), Swept::Killed);
     assert_eq!(processes.signalled.borrow().as_slice(), &[1]);
+}
+
+#[test]
+fn an_unreadable_identity_of_a_running_process_keeps_the_entry() {
+    let (_dir, run) = data();
+    let mut pidfile = Pidfile::acquire(run.as_fd()).unwrap().unwrap();
+    let entry = Entry {
+        generation: 1,
+        pid: 4242,
+        start_time: 100,
+        executables: vec!["/opt/mimik/mimik".into()],
+    };
+    pidfile.record(&entry).unwrap();
+    let processes = Reused {
+        holder: std::cell::Cell::new(3),
+        signalled: std::cell::RefCell::new(Vec::new()),
+    };
+    assert_eq!(
+        pidfile.sweep_in(&processes, || {}, |_| true),
+        Swept::StillRunning
+    );
+    assert_eq!(pidfile.leftover(), Some(entry));
+    assert!(processes.signalled.borrow().is_empty());
 }
