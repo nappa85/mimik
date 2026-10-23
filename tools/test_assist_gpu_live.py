@@ -1,5 +1,8 @@
+import os
+import signal
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -126,6 +129,82 @@ class WatchTests(unittest.TestCase):
             print,
         )
         self.assertIsNone(stop)
+
+
+class WatchCleanupTests(unittest.TestCase):
+    def test_an_exception_in_the_watch_loop_kills_the_group(self):
+        process = sleeper(60)
+
+        def broken():
+            raise OSError("sensor vanished")
+
+        with self.assertRaises(OSError):
+            live.watch(
+                process,
+                ops.ThermalGuard(live.LIMITS),
+                broken,
+                lambda: MANUAL,
+                Clock(),
+                lambda now: True,
+                print,
+            )
+        self.assertIsNotNone(process.poll())
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(process.pid, signal.SIG_DFL)
+
+
+FAKE_BINARY = """#!{python}
+import sys
+args = sys.argv[1:]
+if "--list" in args:
+    for name in {names!r}:
+        print(name + ": test")
+    sys.exit(0)
+print({output!r})
+"""
+
+
+class RunTests(unittest.TestCase):
+    """`main` against a fake test binary (no GPU, no real tests)."""
+
+    def run_main(self, names, output):
+        with tempfile.TemporaryDirectory() as folder:
+            binary = Path(folder) / "tests"
+            binary.write_text(FAKE_BINARY.format(python=sys.executable, names=names, output=output))
+            binary.chmod(0o755)
+            log = Path(folder) / "run.log"
+            with (
+                mock.patch.object(ops, "heavy_allowed", return_value=True),
+                mock.patch.object(ops, "read_fan", return_value=MANUAL),
+                mock.patch.object(ops, "read_sensors", return_value=sensors()),
+                mock.patch.object(ops, "hwmon_root", return_value=folder),
+            ):
+                code = live.main(
+                    [
+                        *("--binary", str(binary), "--runtime", folder, "--models", folder),
+                        *("--scratch", folder, "--fake-server", "f", "--log", str(log)),
+                    ]
+                )
+            return code
+
+    def test_a_successful_summary_of_zero_tests_is_no_pass(self):
+        zero = "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out"
+        self.assertNotEqual(self.run_main(["m::live_gpu_a"], zero), 0)
+
+    def test_an_empty_selection_or_a_non_gpu_test_is_refused_before_launch(self):
+        self.assertEqual(self.run_main([], "x"), 2)
+        self.assertEqual(self.run_main(["m::live_fake_gpu_a"], "x"), 2)
+
+    def test_every_selected_test_must_run_and_pass(self):
+        names = ["m::live_gpu_a", "m::live_gpu_b"]
+        both = "test m::live_gpu_a ... ok\ntest m::live_gpu_b ... ok\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+        self.assertEqual(self.run_main(names, both), 0)
+        one = "test m::live_gpu_a ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+        self.assertNotEqual(self.run_main(names, one), 0)
+        ignored = "test m::live_gpu_a ... ok\ntest m::live_gpu_b ... ignored\ntest result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out"
+        self.assertNotEqual(self.run_main(names, ignored), 0)
+        renamed = "test m::live_gpu_a ... ok\ntest m::live_gpu_c ... ok\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+        self.assertNotEqual(self.run_main(names, renamed), 0)
 
 
 class CiTests(unittest.TestCase):

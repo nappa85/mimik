@@ -471,6 +471,10 @@ impl Manager {
                     return shut(reply);
                 }
                 Next::Fresh { gpu } => {
+                    // Fresh always follows the owner's command: it stays "being carried out"
+                    // until the session ends in `ready` or `unavailable`, even if one of them
+                    // cleared the flag just before the command was taken.
+                    self.update(|status| status.restarting = true);
                     if gpu {
                         self.gpu_failed = None;
                     }
@@ -592,6 +596,7 @@ impl Manager {
         self.update(|status| {
             status.gpu_note = Some(why);
             status.path = Path::Cpu;
+            status.device = None;
             status.budgets = None;
         });
     }

@@ -270,6 +270,11 @@ class ExternalNoticeTests(unittest.TestCase):
             text = package_release.llama_notice(data, None, notices)
             self.assertIn("### Headers", text)
             self.assertIn("Copyright (c) Example", text)
+            # The provenance claim is exact: the files are the release's binaries, and what
+            # the source archive does not hold is named as coming from its build environment.
+            self.assertNotIn("is built from it", text)
+            self.assertIn("release's own binaries", text)
+            self.assertIn("build environment", text)
             (notices / "Headers-MIT.txt").write_bytes(b"changed")
             with self.assertRaises(ValueError):
                 package_release.llama_notice(data, None, notices)

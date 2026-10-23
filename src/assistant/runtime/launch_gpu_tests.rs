@@ -202,3 +202,105 @@ async fn the_gpu_path_is_started_at_level_1_only() {
         );
     }
 }
+
+const GOOD_LISTING: &str = "Available devices:\n  Vulkan0: AMD Radeon RX 6650 XT (RADV NAVI23) (8176 MiB, 7912 MiB free)\n";
+
+fn exits(success: bool) -> impl FnMut() -> Option<bool> {
+    move || Some(success)
+}
+
+#[test]
+fn a_listing_is_whole_output_of_a_process_that_exited_well() {
+    let ticket = Work::new().enter();
+    let text = collect_listing(
+        std::io::Cursor::new(GOOD_LISTING),
+        exits(true),
+        Duration::from_secs(5),
+        &ticket,
+    )
+    .unwrap();
+    assert_eq!(text, GOOD_LISTING);
+}
+
+#[test]
+fn a_listing_longer_than_the_bound_is_refused_even_cut_at_a_line_boundary() {
+    let ticket = Work::new().enter();
+    // Valid device lines that continue past the bound: the bound cuts at a line end, so what
+    // is read still parses; only the length says it was cut.
+    let line = "  Vulkan0: AMD Radeon RX 6650 XT (RADV NAVI23) (8176 MiB, 7912 MiB free)\n";
+    let mut output = String::from("Available devices:\n");
+    while (output.len() as u64) < LIST_BYTES + 2 * line.len() as u64 {
+        output.push_str(line);
+    }
+    let error = collect_listing(
+        std::io::Cursor::new(output),
+        exits(true),
+        Duration::from_secs(5),
+        &ticket,
+    )
+    .unwrap_err();
+    assert!(error.contains("longer than"), "{error}");
+}
+
+#[test]
+fn a_listing_that_cannot_be_read_to_its_end_is_refused() {
+    struct Broken(bool);
+    impl Read for Broken {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.0 {
+                return Err(std::io::Error::other("reset"));
+            }
+            self.0 = true;
+            let bytes = &GOOD_LISTING.as_bytes()[..buffer.len().min(GOOD_LISTING.len())];
+            buffer[..bytes.len()].copy_from_slice(bytes);
+            Ok(bytes.len())
+        }
+    }
+    let ticket = Work::new().enter();
+    let error =
+        collect_listing(Broken(false), exits(true), Duration::from_secs(5), &ticket).unwrap_err();
+    assert!(error.contains("could not be read"), "{error}");
+}
+
+#[test]
+fn a_listing_from_a_process_that_failed_is_refused() {
+    let ticket = Work::new().enter();
+    let error = collect_listing(
+        std::io::Cursor::new(GOOD_LISTING),
+        exits(false),
+        Duration::from_secs(5),
+        &ticket,
+    )
+    .unwrap_err();
+    assert!(error.contains("process failed"), "{error}");
+}
+
+#[test]
+fn a_process_that_closes_its_output_but_stays_alive_is_refused_at_the_deadline() {
+    let ticket = Work::new().enter();
+    let started = std::time::Instant::now();
+    let error = collect_listing(
+        std::io::Cursor::new(GOOD_LISTING),
+        || None,
+        Duration::from_millis(300),
+        &ticket,
+    )
+    .unwrap_err();
+    assert!(error.contains("did not exit"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn a_cancel_ends_the_wait_for_the_listing_process() {
+    let work = Work::new();
+    let ticket = work.enter();
+    work.cancel();
+    let error = collect_listing(
+        std::io::Cursor::new(GOOD_LISTING),
+        || None,
+        Duration::from_secs(60),
+        &ticket,
+    )
+    .unwrap_err();
+    assert_eq!(error, "cancelled");
+}

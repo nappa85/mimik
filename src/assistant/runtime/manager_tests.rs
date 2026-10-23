@@ -22,6 +22,12 @@ struct Behaviour {
     gate: Option<Arc<tokio::sync::Semaphore>>,
     /// What `loaded` answers (the GPU offload check).
     loaded: Result<(), String>,
+    /// `/health` is refused by the endpoint check.
+    refuse_health: bool,
+    /// `/tokenize` answers HTTP 500.
+    tokenize_fails: bool,
+    /// The samples come back without their prompt timing.
+    missing_timing: bool,
 }
 
 impl Default for Behaviour {
@@ -33,6 +39,9 @@ impl Default for Behaviour {
             g: 0.01,
             gate: None,
             loaded: Ok(()),
+            refuse_health: false,
+            tokenize_fails: false,
+            missing_timing: false,
         }
     }
 }
@@ -47,6 +56,9 @@ struct FakeServer {
 #[async_trait]
 impl Server for FakeServer {
     async fn health(&self) -> Health {
+        if self.behaviour.refuse_health {
+            return Health::Refused("the endpoint check refused the connection".into());
+        }
         if self.health_calls.fetch_add(1, Ordering::SeqCst) < self.behaviour.loading {
             Health::Loading
         } else {
@@ -55,6 +67,9 @@ impl Server for FakeServer {
     }
 
     async fn tokens(&self, text: &str) -> Result<usize, Failure> {
+        if self.behaviour.tokenize_fails {
+            return Err(Failure::Status(500));
+        }
         Ok(text.len().div_ceil(3))
     }
 
@@ -83,7 +98,7 @@ impl Server for FakeServer {
         tokio::time::sleep(Duration::from_secs_f64((prompt_ms + predicted_ms) / 1000.0)).await;
         Ok(Timings {
             prompt_n: Some(prompt_n),
-            prompt_ms: Some(prompt_ms),
+            prompt_ms: (!self.behaviour.missing_timing).then_some(prompt_ms),
             cache_n: Some(1290.0),
             predicted_n: Some(predicted),
             predicted_ms: Some(predicted_ms),
@@ -838,6 +853,30 @@ async fn a_gpu_failure_at_each_phase_moves_to_the_cpu_at_once_uncounted() {
         prime_fails: true,
         ..Behaviour::default()
     };
+    // Never ready: the 60 s health deadline.
+    let never_ready = Behaviour {
+        loading: usize::MAX,
+        ..Behaviour::default()
+    };
+    let refused = Behaviour {
+        refuse_health: true,
+        ..Behaviour::default()
+    };
+    let no_tokenize = Behaviour {
+        tokenize_fails: true,
+        ..Behaviour::default()
+    };
+    let no_timing = Behaviour {
+        missing_timing: true,
+        ..Behaviour::default()
+    };
+    // Each sample (52 s) is under the 60 s cap, but no candidate bound fits a deadline of
+    // 1.25 times its estimate: the budgets do not derive.
+    let no_budgets = Behaviour {
+        p: 0.001,
+        g: 0.148,
+        ..Behaviour::default()
+    };
     for (gpu, why) in [
         (
             Start::Other("the model could not be loaded"),
@@ -849,9 +888,18 @@ async fn a_gpu_failure_at_each_phase_moves_to_the_cpu_at_once_uncounted() {
         ),
         (Start::Ok(not_loaded), "only 30 of 41 layers"),
         (Start::Ok(no_priming), "priming failed"),
-        (Start::Ok(too_slow), "too slow on this machine"),
+        (Start::Ok(too_slow), "a calibration sample took more than"),
+        (Start::Ok(never_ready), "did not answer /health within 60 s"),
+        (Start::Ok(refused), "endpoint check refused"),
+        (Start::Ok(no_tokenize), "/tokenize answered HTTP 500"),
+        (
+            Start::Ok(no_timing),
+            "timing is missing, zero or not finite",
+        ),
+        (Start::Ok(no_budgets), "about"),
     ] {
         let launcher = FakeLauncher::scripted([gpu, Start::Ok(Behaviour::default())]);
+        *launcher.device.lock().unwrap() = Some(rx6650());
         let (assistant, handle) = gpu_manager(&launcher);
         ready(&assistant).await;
         let status = handle.status();
@@ -861,6 +909,7 @@ async fn a_gpu_failure_at_each_phase_moves_to_the_cpu_at_once_uncounted() {
             "{why}"
         );
         assert_eq!(status.path, Path::Cpu, "{why}");
+        assert_eq!(status.device, None, "{why}: the page shows no GPU in use");
         assert_eq!(status.failures, 0, "{why}");
         assert_eq!(status.level, Some(Level::Bubblewrap), "{why}");
         assert!(

@@ -54,6 +54,11 @@ fn software_icds_are_excluded_before_the_count() {
         assert!(is_software(software), "{software}");
     }
     assert!(!is_software("AMD Radeon RX 6650 XT (RADV NAVI23)"));
+    // Anchored to the driver identity: the name leads the description or opens a
+    // parenthesised driver; a hardware description that only mentions one is hardware.
+    assert!(is_software("Microsoft Direct3D12 (llvmpipe)"));
+    assert!(!is_software("Acme Card (not llvmpipe, honest)"));
+    assert!(!is_software("Vendor Lavapipe-Compatible Accelerator X1"));
 }
 
 #[test]
@@ -178,6 +183,17 @@ fn render_nodes_are_found_with_their_pci_address_and_memory() {
     assert!(node.sysfs.ends_with("0000:0c:00.0"));
     assert_eq!(node.dev, tree.roots().dev.join("renderD128"));
     assert!(node.sysfs.is_absolute());
+}
+
+#[test]
+fn render_nodes_of_any_number_of_digits_are_found_in_numeric_order() {
+    let tree = Tree::new(&[
+        ("0000:0d:00.0", 12345, None),
+        ("0000:0c:00.0", 128, None),
+        ("0000:0e:00.0", 1000, None),
+    ]);
+    let names: Vec<String> = scan(&tree.roots()).into_iter().map(|n| n.name).collect();
+    assert_eq!(names, ["renderD128", "renderD1000", "renderD12345"]);
 }
 
 #[test]

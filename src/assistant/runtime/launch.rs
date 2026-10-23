@@ -1552,6 +1552,58 @@ fn recv_unless_cancelled<T>(
     }
 }
 
+/// A device listing's whole output, once its process has also exited successfully: both
+/// within `within`, the output at most [`LIST_BYTES`] and read without error (a truncated or
+/// failed run never reaches the parser). `exited` gives `Some(success)` once the process has
+/// ended.
+fn collect_listing(
+    out: impl Read + Send + 'static,
+    mut exited: impl FnMut() -> Option<bool>,
+    within: Duration,
+    ticket: &Ticket,
+) -> Result<String, String> {
+    let deadline = std::time::Instant::now() + within;
+    let (sender, read) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("assistant-devices".into())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let result = out.take(LIST_BYTES + 1).read_to_end(&mut bytes);
+            let _ = sender.send(result.map(|_| bytes));
+        })
+        .map_err(|_| "no listing thread".to_owned())?;
+    let bytes = recv_unless_cancelled(&read, within, ticket)
+        .map_err(|_| "cancelled".to_owned())?
+        .ok_or_else(|| {
+            format!(
+                "the device listing did not finish within {} s",
+                within.as_secs().max(1)
+            )
+        })?
+        .map_err(|_| "the device listing could not be read".to_owned())?;
+    if bytes.len() as u64 > LIST_BYTES {
+        return Err(format!(
+            "the device listing is longer than {LIST_BYTES} bytes"
+        ));
+    }
+    loop {
+        match exited() {
+            Some(true) => break,
+            Some(false) => return Err("the device listing's process failed".into()),
+            None => {}
+        }
+        if ticket.cancelled() {
+            return Err("cancelled".into());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("the device listing's process did not exit in time".into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| "the device listing is not in the pinned build's format".to_owned())
+}
+
 /// Ports a test hands out first, keyed by runtime directory (`launch_tests.rs`).
 #[cfg(test)]
 pub(crate) static PORTS: Mutex<Vec<(PathBuf, u16)>> = Mutex::new(Vec::new());
@@ -2793,35 +2845,31 @@ impl Real {
         });
         let out = out.ok_or_else(|| "no listing output".to_owned())?;
         if let Some(err) = err {
-            // Read and dropped (never logged), so a chatty driver cannot block the listing.
+            // Read to its end and dropped (never logged, never held), so a chatty driver
+            // cannot fill the pipe and stall the listing; it ends when the sandbox is killed.
             let _ = std::thread::Builder::new()
                 .name("assistant-devices-err".into())
                 .spawn(move || {
-                    let _ = std::io::copy(&mut err.take(LIST_BYTES), &mut std::io::sink());
+                    let mut err = err;
+                    let _ = std::io::copy(&mut err, &mut std::io::sink());
                 });
         }
-        let (sender, read) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
-            .name("assistant-devices".into())
-            .spawn(move || {
-                let mut bytes = Vec::new();
-                let _ = out.take(LIST_BYTES).read_to_end(&mut bytes);
-                let _ = sender.send(bytes);
-            })
-            .map_err(|_| "no listing thread".to_owned())?;
-        let bytes = recv_unless_cancelled(&read, LIST_WITHIN, ticket)
-            .map_err(|_| "cancelled".to_owned())?
-            .ok_or_else(|| {
-                format!(
-                    "the device listing did not finish within {} s",
-                    LIST_WITHIN.as_secs()
-                )
-            })?;
+        let text = collect_listing(
+            out,
+            || {
+                owned
+                    .child
+                    .as_mut()
+                    .and_then(|child| child.try_wait().ok().flatten())
+                    .map(|status| status.success())
+            },
+            LIST_WITHIN,
+            ticket,
+        );
         // Kills what is left of the listing's sandbox and clears its entry.
         drop(owned);
         drop(generation);
-        let text = String::from_utf8(bytes)
-            .map_err(|_| "the device listing is not in the pinned build's format".to_owned())?;
+        let text = text?;
         // Test builds run the runner as the test binary, whose libtest banner precedes the
         // server's output; the shipped runner prints nothing of its own.
         #[cfg(test)]

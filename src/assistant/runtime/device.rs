@@ -106,18 +106,20 @@ pub(crate) fn scan(roots: &Roots) -> Vec<Node> {
     let Ok(entries) = std::fs::read_dir(roots.sys.join("class/drm")) else {
         return Vec::new();
     };
-    let mut names: Vec<String> = entries
+    let mut names: Vec<(u32, String)> = entries
         .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-        .filter(|name| {
-            name.strip_prefix("renderD").is_some_and(|n| {
-                !n.is_empty() && n.len() <= 4 && n.bytes().all(|b| b.is_ascii_digit())
-            })
+        .filter_map(|name| {
+            let digits = name.strip_prefix("renderD")?;
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            Some((digits.parse().ok()?, name))
         })
         .collect();
     names.sort();
     names
         .into_iter()
-        .filter_map(|name| node(roots, name))
+        .filter_map(|(_, name)| node(roots, name))
         .collect()
 }
 
@@ -211,10 +213,16 @@ pub(crate) fn parse_listing(stdout: &str) -> Result<Vec<Listed>, String> {
         })
 }
 
-/// Whether a device description names a software renderer.
+/// Whether a device description names a software renderer: a software name at its start or
+/// opening a parenthesised driver (llvmpipe and lavapipe report `llvmpipe (LLVM …)`).
 pub(crate) fn is_software(description: &str) -> bool {
     let lower = description.to_ascii_lowercase();
-    SOFTWARE.iter().any(|name| lower.contains(name))
+    SOFTWARE.iter().any(|name| {
+        let named = lower
+            .strip_prefix(name)
+            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '-'));
+        named || lower.contains(&format!("({name}"))
+    })
 }
 
 /// The one hardware GPU of a per-node listing, software ICDs excluded first.

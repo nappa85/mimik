@@ -772,8 +772,12 @@ otherwise):
 
 - the live GPU checks (`live_gpu_*`): Vulkan on the RX 6650 XT reaches `ready` with GPU
   budgets under the level-1 GPU profile (which fixes the path list), the real listing parses
-  in the pinned format with one hardware GPU per node, and killing the child mid-job ends on
-  the CPU path with CPU budgets and the page saying why;
+  in the pinned format with one hardware GPU per node, killing only the llama-server during a
+  real job ends the job neutral and the CPU path takes over at level 1 with CPU budgets, the
+  failure uncounted, the old sandbox gone first and a following job working (killing the
+  whole sandbox is a second test), and the page says why;
+- from the live run, narrow the PCI sysfs and ICD binds to what is read and limit the loader to
+  the selected card's driver (ASSIST-L44, ASSIST-L45);
 - the first native GPU calibration (start to `ready`, priming, samples, B, R, D, Q) and grammar
   against no-grammar on the GPU path, to `docs/results.md`;
 - refused calls checked once with `strace` in a container on the GPU path (calls the Vulkan

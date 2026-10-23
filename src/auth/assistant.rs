@@ -127,6 +127,8 @@ struct View {
     gpu_note: Option<String>,
     /// `--assistant-device cpu`.
     cpu_chosen: bool,
+    /// A Restart or "Try the GPU again" is being carried out (the button is disabled).
+    restarting: bool,
     device: Option<DeviceLine>,
     device_notes: Vec<String>,
     generation: u64,
@@ -177,6 +179,7 @@ fn view(status: Status, breaker: String) -> View {
             None
         },
         cpu_chosen: !status.gpu_wanted,
+        restarting: status.restarting || state == "Starting",
         device: status.device.map(|device| DeviceLine {
             description: device.description,
             name: device.name,

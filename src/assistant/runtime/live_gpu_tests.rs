@@ -56,8 +56,18 @@ async fn run_until(
     max_tokens: u32,
     done: impl Fn(&manager::Status) -> bool,
 ) -> manager::Handle {
+    run_with(&Assistant::new(), real, max_tokens, done).await
+}
+
+/// As [`run_until`], over `assistant`.
+async fn run_with(
+    assistant: &Arc<Assistant>,
+    real: &Arc<Real>,
+    max_tokens: u32,
+    done: impl Fn(&manager::Status) -> bool,
+) -> manager::Handle {
     let handle = manager::spawn(
-        Assistant::new(),
+        Arc::clone(assistant),
         Arc::new(Launch(Arc::clone(real))),
         manager::Config {
             path: Path::Gpu,
@@ -227,27 +237,188 @@ async fn live_gpu_the_rx6650_reaches_ready_with_gpu_budgets() {
     handle.shutdown().await;
 }
 
+/// A "heal 15" interpretation of the sheet's Current HP field.
+fn heal_draft() -> crate::assistant::request::Draft {
+    crate::assistant::request::Draft {
+        phrase: "heal 15".into(),
+        target: crate::assistant::contract::EnvelopeTarget {
+            alias: crate::assistant::contract::TARGET_ALIAS,
+            id: "hp".into(),
+            label: Some("Current HP".into()),
+            value: Some(84),
+        },
+        target_address: "field:hp".into(),
+        items: Vec::new(),
+    }
+}
+
+/// Starts a job of account 1 on sheet 1 at `revision`.
+fn start_job(assistant: &Arc<Assistant>, revision: i64) -> crate::assistant::jobs::JobId {
+    let origin = crate::assistant::jobs::Origin {
+        sheet: 1,
+        target: "field:hp".into(),
+        revision,
+    };
+    let registration = assistant.register(1, revision);
+    assistant
+        .start(&registration, 1, origin, heal_draft())
+        .expect("the job starts")
+        .0
+}
+
+/// Polls job `id` until `done` holds for its poll (`within` at most).
+async fn poll_until(
+    assistant: &Arc<Assistant>,
+    id: crate::assistant::jobs::JobId,
+    within: Duration,
+    done: impl Fn(&crate::assistant::jobs::Poll) -> bool,
+) -> crate::assistant::jobs::Poll {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let poll = assistant.poll(1, 1, id);
+        if done(&poll) {
+            return poll;
+        }
+        assert!(std::time::Instant::now() < deadline, "{poll:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The runner's PID from the generation's pidfile (the entry: generation, then the PID,
+/// `rundir.rs`).
+fn runner_pid(scratch: &std::path::Path) -> i32 {
+    let pidfile = std::fs::read_to_string(scratch.join("data/run/assistant.pid")).unwrap();
+    pidfile
+        .lines()
+        .nth(1)
+        .and_then(|pid| pid.trim().parse().ok())
+        .expect("the pidfile names the runner")
+}
+
+/// The descendants of `runner` that are the GPU build's llama-server (by its command line:
+/// the executable's file name and the `--device` flag only the GPU path passes).
+fn llama_servers(runner: i32) -> Vec<i32> {
+    super::descendants(runner)
+        .into_iter()
+        .filter(|pid| {
+            let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+                return false;
+            };
+            let args: Vec<&[u8]> = raw.split(|byte| *byte == 0).collect();
+            let named = args.first().is_some_and(|argv0| {
+                std::path::Path::new(
+                    <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(argv0),
+                )
+                .file_name()
+                    == Some(std::ffi::OsStr::new("llama-server"))
+            });
+            named && args.iter().any(|arg| *arg == b"--device")
+        })
+        .collect()
+}
+
+fn kill(pid: i32) {
+    let _ = rustix::process::kill_process(
+        rustix::process::Pid::from_raw(pid).unwrap(),
+        rustix::process::Signal::KILL,
+    );
+}
+
+/// What the CPU path must then show: ready at level 1 on the CPU budgets, the GPU failure
+/// said and not counted.
+fn assert_cpu_after_gpu_failure(status: &manager::Status) {
+    report(status);
+    assert_eq!(status.path, Path::Cpu, "{status:?}");
+    assert_eq!(status.level, Some(Level::Bubblewrap), "{status:?}");
+    assert!(status.gpu_note.is_some(), "{status:?}");
+    assert_eq!(status.failures, 0, "{status:?}");
+    assert_eq!(status.device, None, "{status:?}");
+    assert_eq!(status.budgets.unwrap().bounds.bytes, 1024);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live GPU: only through tools/assist_gpu_live.py (fan manual, schedule)"]
-async fn live_gpu_killing_the_child_mid_job_ends_on_the_cpu_saying_why() {
+async fn live_gpu_killing_llama_server_mid_job_ends_the_job_neutral_and_runs_on_the_cpu() {
+    use crate::assistant::jobs::{Answer, Poll};
+    gpu_allowed();
+    let scratch = scratch();
+    let real = real_gpu(scratch.path());
+    let assistant = Assistant::new();
+    tokio::spawn(Arc::clone(&assistant).work());
+    let handle = run_with(&assistant, &real, 352, |status| {
+        status.state == State::Ready
+    })
+    .await;
+    assert_eq!(handle.status().path, Path::Gpu);
+    // A real job, confirmed executing before anything is killed.
+    let job = start_job(&assistant, 5);
+    poll_until(&assistant, job, Duration::from_secs(30), |poll| {
+        matches!(poll, Poll::Running)
+    })
+    .await;
+    // Only the verified llama-server goes; the rest of the sandbox is noted to be gone later.
+    let runner = runner_pid(scratch.path());
+    let servers = llama_servers(runner);
+    assert_eq!(servers.len(), 1, "exactly one llama-server: {servers:?}");
+    let sandbox: Vec<i32> = super::descendants(runner);
+    kill(servers[0]);
+    // The job ends on the generation change, neutral for the breaker.
+    let done = poll_until(&assistant, job, Duration::from_secs(120), |poll| {
+        matches!(poll, Poll::Done(_))
+    })
+    .await;
+    assert_eq!(done, Poll::Done(Answer::Restarted));
+    assert!(assistant.breaker_closed());
+    // The old sandbox is gone before the CPU path launches anything.
+    let deadline = std::time::Instant::now() + Duration::from_secs(600);
+    while handle.status().path != Path::Cpu {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{:?}",
+            handle.status()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        sandbox.iter().all(|pid| !super::alive(*pid)),
+        "the GPU sandbox was still running when the CPU path began"
+    );
+    while handle.status().state != State::Ready {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{:?}",
+            handle.status()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_cpu_after_gpu_failure(&handle.status());
+    // A following job on the CPU path works.
+    let next = start_job(&assistant, 6);
+    let answer = poll_until(&assistant, next, Duration::from_secs(180), |poll| {
+        matches!(poll, Poll::Done(_))
+    })
+    .await;
+    assert!(
+        matches!(
+            answer,
+            Poll::Done(Answer::Options(_) | Answer::Nothing | Answer::Readings(_))
+        ),
+        "{answer:?}"
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live GPU: only through tools/assist_gpu_live.py (fan manual, schedule)"]
+async fn live_gpu_killing_the_whole_sandbox_ends_on_the_cpu_saying_why() {
     gpu_allowed();
     let scratch = scratch();
     let real = real_gpu(scratch.path());
     let handle = run_until(&real, 352, |status| status.state == State::Ready).await;
     assert_eq!(handle.status().path, Path::Gpu);
-    // The sandbox's processes are the runner's descendants: kill the llama-server inside.
-    let pidfile = std::fs::read_to_string(scratch.path().join("data/run/assistant.pid")).unwrap();
-    // The entry: generation, then the runner's PID (`rundir.rs`).
-    let runner: i32 = pidfile
-        .lines()
-        .nth(1)
-        .and_then(|pid| pid.trim().parse().ok())
-        .expect("the pidfile names the runner");
-    for pid in super::descendants(runner) {
-        let _ = rustix::process::kill_process(
-            rustix::process::Pid::from_raw(pid).unwrap(),
-            rustix::process::Signal::KILL,
-        );
+    // The sandbox's processes are the runner's descendants.
+    for pid in super::descendants(runner_pid(scratch.path())) {
+        kill(pid);
     }
     let deadline = std::time::Instant::now() + Duration::from_secs(600);
     while !(handle.status().state == State::Ready && handle.status().path == Path::Cpu) {
@@ -258,10 +429,6 @@ async fn live_gpu_killing_the_child_mid_job_ends_on_the_cpu_saying_why() {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    let status = handle.status();
-    report(&status);
-    assert!(status.gpu_note.is_some());
-    assert_eq!(status.failures, 0);
-    assert_eq!(status.budgets.unwrap().bounds.bytes, 1024);
+    assert_cpu_after_gpu_failure(&handle.status());
     handle.shutdown().await;
 }

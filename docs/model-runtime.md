@@ -172,8 +172,12 @@ Why each level was not used is on the page and in the log.
    read-only the Vulkan loader's and driver's data folders that exist (`/usr/share/vulkan`,
    `/etc/vulkan`, `/usr/share/libdrm`, `/usr/share/drirc.d`); llama-server gets
    `MESA_SHADER_CACHE_DISABLE=true` (the sandbox's `/tmp` is private to one launch and bounded,
-   so a shader cache could only fill it). This list is checked live on the dev host's GPU
-   (`assisted-sheet-plan.md`, 2c-2b-1); a driver that needs more falls back to the CPU.
+   so a shader cache could only fill it). This list is not yet checked on a real GPU: the live
+   check (`assisted-sheet-plan.md`, 2c-2b-1) is owed; a driver that needs more falls back to
+   the CPU. The whole PCI sysfs folder is exposed read-only (vendor and device IDs, the
+   attributes of that card): a fingerprinting exposure only, to be narrowed to what libdrm and
+   Mesa read once the live check shows it (ASSIST-L44). All Vulkan ICD manifests are visible,
+   not only the selected card's driver.
 2. **Landlock with seccomp:** not in this release (step 2c-2b-2); the page names it skipped.
 3. **Unconfined (seccomp only), not used in this release (ASSIST-43)**: what follows describes
    the switched-off code. On `127.0.0.1` with a random port: "not confined: TCP
@@ -224,9 +228,14 @@ match a character device `/dev/dri/<node>`. The PCI address is a device's identi
 restarts and tells two identical cards apart. Each node (under a PCI address choice, only that
 one) is listed by the Vulkan build's `--list-devices` inside the level-1 GPU profile with only
 that node bound (30 s at most; the output format is pinned by tests from the pinned build's
-`"  %s: %s (%zu MiB, %zu MiB free)"` and its `(none)`, any other output refuses the node).
-Software renderers (`llvmpipe`, `lavapipe`, `SwiftShader`, by description) are excluded before
-any count, and each list must then show exactly one hardware GPU. Ranking under `auto`: the PCI
+`"  %s: %s (%zu MiB, %zu MiB free)"` and its `(none)`, any other output refuses the node). A
+listing counts only when it is read to its end without error within 64 KiB (longer output is
+refused, never cut) and its process exits successfully within the 30 s; both streams are
+drained and the sandbox is killed when the listing ends or the time runs out.
+Software renderers (`llvmpipe`, `lavapipe`, `SwiftShader`, by description: the name leads it or
+opens a parenthesised driver) are excluded before any count, and each list must then show
+exactly one hardware GPU (a card that two Vulkan drivers both list, such as RADV and AMDVLK,
+shows two and runs on the CPU: ASSIST-L45). Ranking under `auto`: the PCI
 address chosen last while that card is still listed, else dedicated devices (sysfs reports
 `mem_info_vram_total` above 0) before the others, then by listed memory, ties by the lower PCI
 address. `boot_vga` is not used: it marks the firmware's primary display, not a discrete card.
@@ -305,8 +314,9 @@ for the breaker); a child exit is never a breaker event. On shutdown Mimik stops
 
 An attempt is: start (preflight once per start from level 1: the pidfile, the run directory,
 the model's size; then each level's probe), spawn and the endpoint check, `/health` within
-60 s (250 ms polls), priming within 300 s, calibration within twice the path's run cap
-and each calibration sample within the run cap (a sample past it makes the machine "too slow",
+60 s (250 ms polls), priming within 300 s, calibration within twice the path's run cap plus
+60 s (the two samples and the two `/tokenize` calls; GPU 180 s, CPU 240 s) and each
+calibration sample within the run cap (a sample past it makes the machine "too slow",
 not a counted failure). On the GPU path a start first lists the selected node again in its own
 sandbox (it must still show one hardware GPU with the recorded description; `--device` gets
 that listing's name), and after `/health` the child's offload line must show every layer on

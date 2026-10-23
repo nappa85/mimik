@@ -34,7 +34,9 @@ def llama_notice(data, tar_path=None, notices_dir=None):
     out = [
         "\n## llama.cpp and ggml (llama/)\n\n"
         f"The official llama.cpp release {data['llama_cpp']['tag']} "
-        f"({data['llama_cpp']['repository']}): every file of `llama/` is built from it. MIT "
+        f"({data['llama_cpp']['repository']}): every file of `llama/` is one of the release's own binaries, "
+        "built from its source archive (shipped alongside) together with components of the "
+        "release builder's build environment that the archive does not hold (listed below). MIT "
         "License, Copyright (c) 2023-2026 The ggml authors (`llama/cpu/LICENSE`). Components "
         "compiled into it, with their licences:\n"
     ]
