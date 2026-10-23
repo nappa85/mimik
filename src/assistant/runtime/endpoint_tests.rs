@@ -300,3 +300,29 @@ async fn an_entry_that_is_not_a_socket_is_never_connected() {
     let error = connect_in(&dir).await.err().unwrap();
     assert!(error.to_string().contains("not a socket"), "{error}");
 }
+
+#[test]
+fn the_reported_reaper_must_be_the_runners_child_in_the_reported_namespace() {
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let pid = i32::try_from(child.id()).unwrap();
+    let me = i32::try_from(std::process::id()).unwrap();
+    let namespace = rustix::fs::stat(format!("/proc/{pid}/ns/pid"))
+        .unwrap()
+        .st_ino;
+    assert!(open_reaper(pid, me, namespace).is_ok());
+    let error = open_reaper(pid, 1, namespace).unwrap_err();
+    assert!(
+        error.to_string().contains("not bubblewrap's child"),
+        "{error}"
+    );
+    let error = open_reaper(pid, me, namespace + 1).unwrap_err();
+    assert!(
+        error.to_string().contains("another PID namespace"),
+        "{error}"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+}

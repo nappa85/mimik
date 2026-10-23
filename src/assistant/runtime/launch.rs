@@ -9,7 +9,7 @@ use super::endpoint::{self, Loopback, Sandbox, SandboxSocket, Watched};
 use super::files::{self, HashCache, Owners, Verified};
 use super::manager::{Child, Fail, Launcher};
 use super::manifest::{Build, MANIFEST};
-use super::rundir::{self, Entry, Generation, Pidfile};
+use super::rundir::{self, Entry, Generation, Pidfile, Swept};
 use super::runner::{self, Exec, Handover, RunnerCommand, Spec};
 use super::seccomp;
 use super::server::{Llama, Server};
@@ -114,6 +114,8 @@ pub(crate) struct Settings {
 struct Held {
     run: Option<Arc<OwnedFd>>,
     pidfile: Option<Pidfile>,
+    /// The leftover sweep of this Mimik's start is done.
+    swept: bool,
     bwrap: Option<Bwrap>,
 }
 
@@ -348,6 +350,25 @@ impl Real {
     }
 }
 
+/// Test-forced pending sweeps, keyed by data directory (`launch_tests.rs`).
+#[cfg(test)]
+pub(crate) static SWEEP_PENDING: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// The start's leftover sweep (a test may force the killed leftover to look still running).
+fn sweep_leftover(pidfile: &mut Pidfile, data_dir: &std::path::Path) -> Swept {
+    #[cfg(test)]
+    if SWEEP_PENDING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_deref()
+        == Some(data_dir)
+    {
+        return pidfile.sweep_with(|| {}, |_| false);
+    }
+    let _ = data_dir;
+    pidfile.sweep()
+}
+
 /// The shim's arguments and environment.
 type ShimCommand = (Vec<String>, Vec<(String, String)>);
 
@@ -503,8 +524,8 @@ impl Real {
             rest,
         ) = read_started(status_read)?;
         fault_at!(self, "started", child);
-        let reaper = Watched::open(child_pid)
-            .map_err(|_| Fail::Other("the sandbox's reaper has gone".into()))?;
+        let reaper = endpoint::open_reaper(child_pid, pid, pid_namespace)
+            .map_err(|error| Fail::Other(format!("the sandbox's reaper: {error}")))?;
         let sandbox = Arc::new(Sandbox {
             reaper,
             pid_namespace,
@@ -1173,22 +1194,47 @@ impl Launcher for Launch {
             .map_err(|_| "the data directory cannot be created".to_owned())?;
         let run = rundir::open(&real.settings.data_dir)
             .map_err(|refusal| format!("the run directory: {refusal}"))?;
-        {
+        let run = Arc::new(run);
+        let unswept = {
             let mut held = real.held();
             if held.pidfile.is_none() {
                 match Pidfile::acquire(run.as_fd()) {
-                    Ok(Ok(mut pidfile)) => {
-                        pidfile.sweep();
-                        rundir::sweep_generations(run.as_fd());
-                        held.pidfile = Some(pidfile);
-                    }
+                    Ok(Ok(pidfile)) => held.pidfile = Some(pidfile),
                     Ok(Err(_)) => {
                         return Err("another Mimik uses this data directory's assistant".into());
                     }
                     Err(refusal) => return Err(format!("the pidfile: {refusal}")),
                 }
             }
-            held.run = Some(Arc::new(run));
+            held.run = Some(Arc::clone(&run));
+            if held.swept {
+                None
+            } else {
+                held.pidfile.take()
+            }
+        };
+        if let Some(mut pidfile) = unswept {
+            // A leftover's kill waits for its end: off the async runtime. Until it has ended,
+            // its entry and every generation directory stay, and nothing starts.
+            let (data_dir, swept_run) = (real.settings.data_dir.clone(), Arc::clone(&run));
+            let (pidfile, swept) = tokio::task::spawn_blocking(move || {
+                let swept = sweep_leftover(&mut pidfile, &data_dir);
+                if swept != Swept::StillRunning {
+                    rundir::sweep_generations(swept_run.as_fd());
+                }
+                (pidfile, swept)
+            })
+            .await
+            .map_err(|_| "the leftover sweep did not finish".to_owned())?;
+            let mut held = real.held();
+            held.pidfile = Some(pidfile);
+            if swept == Swept::StillRunning {
+                return Err(
+                    "a model server from an earlier run has not exited yet; Restart tries again"
+                        .into(),
+                );
+            }
+            held.swept = true;
         }
         if real.build(path).is_none() {
             return Err("this build has no model server for this path".into());
@@ -1213,20 +1259,10 @@ impl Launcher for Launch {
     async fn probe(&self, path: Path) -> Vec<(Level, Result<(), String>)> {
         let real = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || {
-            vec![
-                (
-                    Level::Bubblewrap,
-                    real.probe_with_retries(path, Level::Bubblewrap),
-                ),
-                (
-                    Level::Landlock,
-                    Err("Landlock confinement is not in this release".into()),
-                ),
-                (
-                    Level::Unconfined,
-                    real.probe_with_retries(path, Level::Unconfined),
-                ),
-            ]
+            real.probe_levels(path)
+                .into_iter()
+                .map(|(level, probed)| (level, probed.eligible()))
+                .collect()
         })
         .await
         .unwrap_or_default()
@@ -1357,22 +1393,45 @@ pub(crate) enum Probe {
     Inconclusive(String),
 }
 
+/// A level's probe after its retries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Probed {
+    Passed,
+    /// Inconclusive every time: eligible for a real start (which decides), but never reported
+    /// as passed.
+    Kept(String),
+    /// Skipped.
+    Failed(String),
+}
+
+impl Probed {
+    /// The manager's view: a kept level is eligible.
+    pub(crate) fn eligible(self) -> Result<(), String> {
+        match self {
+            Probed::Passed | Probed::Kept(_) => Ok(()),
+            Probed::Failed(why) => Err(why),
+        }
+    }
+}
+
 /// Runs `probe` up to [`PROBE_TRIES`] times while it is inconclusive: a definite failure
 /// skips the level, and a level that stays inconclusive is kept (the real start decides).
 pub(crate) fn retry_probe(
     level: Level,
     pause: Duration,
     mut probe: impl FnMut() -> Probe,
-) -> Result<(), String> {
+) -> Probed {
+    let mut last = String::new();
     for attempt in 1..=PROBE_TRIES {
         match probe() {
-            Probe::Passed => return Ok(()),
-            Probe::Failed(why) => return Err(why),
+            Probe::Passed => return Probed::Passed,
+            Probe::Failed(why) => return Probed::Failed(why),
             Probe::Inconclusive(why) => {
                 eprintln!(
                     "assistant: level {} probe inconclusive (attempt {attempt}): {why}",
                     level.number()
                 );
+                last = why;
                 if attempt < PROBE_TRIES {
                     std::thread::sleep(pause);
                 }
@@ -1383,7 +1442,28 @@ pub(crate) fn retry_probe(
         "assistant: level {} kept: its probe stayed inconclusive, the start decides",
         level.number()
     );
-    Ok(())
+    Probed::Kept(last)
+}
+
+/// The probe's verdict on an endpoint error: a refusal is definite; running out of
+/// descriptors, memory or another transient resource proves nothing about the level.
+pub(crate) fn endpoint_verdict(error: &std::io::Error) -> Probe {
+    let transient = [
+        libc::EMFILE,
+        libc::ENFILE,
+        libc::ENOMEM,
+        libc::EAGAIN,
+        libc::EINTR,
+        libc::ENOBUFS,
+    ];
+    if error
+        .raw_os_error()
+        .is_some_and(|code| transient.contains(&code))
+    {
+        Probe::Inconclusive(format!("the endpoint check could not run: {error}"))
+    } else {
+        Probe::Failed(format!("the endpoint check refused the probe: {error}"))
+    }
 }
 
 /// How long the probe may take to report from inside its level.
@@ -1406,16 +1486,37 @@ impl Real {
 
     /// The level's probe, tried again while inconclusive; a level that stays inconclusive is
     /// kept (the real start decides), never skipped on a timeout alone.
-    fn probe_with_retries(self: &Arc<Self>, path: Path, level: Level) -> Result<(), String> {
-        retry_probe(level, Duration::from_secs(2), || {
-            self.probe_level(path, level)
-        })
-        .map_err(|why| {
-            match (level, bwrap::namespace_hint(std::path::Path::new("/proc"))) {
+    fn probe_with_retries(self: &Arc<Self>, path: Path, level: Level) -> Probed {
+        let hinted =
+            |why: String| match (level, bwrap::namespace_hint(std::path::Path::new("/proc"))) {
                 (Level::Bubblewrap, Some(hint)) => format!("{why} ({hint})"),
                 _ => why,
-            }
-        })
+            };
+        match retry_probe(level, Duration::from_secs(2), || {
+            self.probe_level(path, level)
+        }) {
+            Probed::Passed => Probed::Passed,
+            Probed::Kept(why) => Probed::Kept(hinted(why)),
+            Probed::Failed(why) => Probed::Failed(hinted(why)),
+        }
+    }
+
+    /// Every level's probe (blocking).
+    pub(crate) fn probe_levels(self: &Arc<Self>, path: Path) -> Vec<(Level, Probed)> {
+        vec![
+            (
+                Level::Bubblewrap,
+                self.probe_with_retries(path, Level::Bubblewrap),
+            ),
+            (
+                Level::Landlock,
+                Probed::Failed("Landlock confinement is not in this release".into()),
+            ),
+            (
+                Level::Unconfined,
+                self.probe_with_retries(path, Level::Unconfined),
+            ),
+        ]
     }
 
     /// Runs the inner command under the level's profile: its first JSON report, and the
@@ -1440,9 +1541,10 @@ impl Real {
             .enable_all()
             .build()
             .map_err(|_| Probe::Inconclusive("no probe runtime".into()))?;
+        // A spawn that fails (bwrap with no status line included) proves nothing alone: it may
+        // be transient. Three of them keep the level for the real start to decide.
         let failed = |fail: Fail| match fail {
-            Fail::Sandbox(why) => Probe::Failed(why),
-            Fail::Other(why) => Probe::Inconclusive(why),
+            Fail::Sandbox(why) | Fail::Other(why) => Probe::Inconclusive(why),
         };
         let spawned = if level == Level::Bubblewrap {
             self.spawn_sandbox(&name, &files, &model, &token, &Command::Probe)
@@ -1478,9 +1580,7 @@ impl Real {
                             .await
                         {
                             Ok(Ok(_)) => Probe::Passed,
-                            Ok(Err(error)) => Probe::Failed(format!(
-                                "the endpoint check refused the probe: {error}"
-                            )),
+                            Ok(Err(error)) => endpoint_verdict(&error),
                             Err(_) => {
                                 Probe::Inconclusive("the probe's socket did not answer".into())
                             }
@@ -1502,7 +1602,7 @@ impl Real {
                     .lines()
                     .find(|line| line.starts_with("bwrap: "))
                     .unwrap_or("");
-                Err(Probe::Failed(
+                Err(Probe::Inconclusive(
                     format!("the probe did not start {}", first.trim())
                         .trim()
                         .to_owned(),

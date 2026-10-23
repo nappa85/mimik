@@ -77,7 +77,7 @@ pub(crate) fn start_time(pid: i32) -> Option<u64> {
         .map(|stat| stat.starttime)
 }
 
-fn executable(pid: i32) -> Option<String> {
+pub(crate) fn executable(pid: i32) -> Option<String> {
     std::fs::read_link(format!("/proc/{pid}/exe"))
         .ok()
         .map(|path| path.display().to_string())
@@ -145,42 +145,85 @@ impl Pidfile {
         self.file.sync_data()
     }
 
-    /// Kills a leftover child only when its PID, start time and executable all match, then
-    /// clears the entry. Returns whether one was killed.
+    /// Kills a leftover child only when its PID, start time and executable all match; clears
+    /// the entry unless the killed leftover is still running.
     ///
     /// A pidfd is opened first and the identity read after it: if the PID was reused before
     /// the pidfd, the identity is the newcomer's and does not match; if the leftover exits and
     /// its PID is reused after, the signal still goes through the pidfd to the old process
     /// (gone, so nothing is signalled). A kill waits (up to 5 s) for the process to end.
-    pub(crate) fn sweep(&mut self) -> bool {
-        self.sweep_with(|| {})
-    }
-
-    pub(crate) fn sweep_with(&mut self, between: impl FnOnce()) -> bool {
-        let Some(entry) = self.leftover() else {
-            return false;
-        };
-        let killed = super::endpoint::Watched::open(entry.pid).is_ok_and(|watched| {
-            between();
-            let matches = start_time(entry.pid) == Some(entry.start_time)
-                && executable(entry.pid).is_some_and(|exe| entry.executables.contains(&exe));
-            let killed = matches
-                && rustix::process::pidfd_send_signal(
-                    &watched.pidfd,
-                    rustix::process::Signal::KILL,
-                )
-                .is_ok();
-            if killed {
+    /// Blocking: run it off the async runtime.
+    pub(crate) fn sweep(&mut self) -> Swept {
+        self.sweep_with(
+            || {},
+            |watched| {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
                 while watched.alive() && std::time::Instant::now() < deadline {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-            }
-            killed
-        });
-        let _ = self.clear();
-        killed
+                !watched.alive()
+            },
+        )
     }
+
+    /// [`Pidfile::sweep`] with `between` run once the pidfd is open, and `gone` deciding
+    /// whether the killed leftover ended.
+    pub(crate) fn sweep_with(
+        &mut self,
+        between: impl FnOnce(),
+        gone: impl FnOnce(&super::endpoint::Watched) -> bool,
+    ) -> Swept {
+        let Some(entry) = self.leftover() else {
+            return Swept::Nothing;
+        };
+        let outcome = match super::endpoint::Watched::open(entry.pid) {
+            // No such process: nothing to kill.
+            Err(error) if error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) => {
+                Swept::Nothing
+            }
+            // It cannot be told whether the leftover runs: the entry stays.
+            Err(_) => Swept::StillRunning,
+            Ok(watched) => {
+                between();
+                let matches = start_time(entry.pid) == Some(entry.start_time)
+                    && executable(entry.pid).is_some_and(|exe| entry.executables.contains(&exe));
+                if !matches {
+                    Swept::Nothing
+                } else if rustix::process::pidfd_send_signal(
+                    &watched.pidfd,
+                    rustix::process::Signal::KILL,
+                )
+                .is_err()
+                {
+                    if watched.alive() {
+                        Swept::StillRunning
+                    } else {
+                        Swept::Nothing
+                    }
+                } else if gone(&watched) {
+                    Swept::Killed
+                } else {
+                    Swept::StillRunning
+                }
+            }
+        };
+        if outcome != Swept::StillRunning {
+            let _ = self.clear();
+        }
+        outcome
+    }
+}
+
+/// What a sweep found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Swept {
+    /// No leftover (or another process now has its PID).
+    Nothing,
+    /// The leftover was killed and has ended.
+    Killed,
+    /// A leftover runs (killed, not yet ended, or it cannot be told): its entry stays, and
+    /// nothing may start or remove generation directories until it ends.
+    StillRunning,
 }
 
 /// Removes what earlier runs left under `run/`: every generation directory (its plain

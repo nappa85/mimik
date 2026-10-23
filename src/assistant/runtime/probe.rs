@@ -245,29 +245,40 @@ fn cli_probe(args: &[String]) -> i32 {
         if let Err(why) = launch.preflight(Path::Cpu).await {
             return json!({"level": null, "error": why});
         }
-        let levels = launch.probe(Path::Cpu).await;
-        let reached = levels
-            .iter()
-            .find(|(_, result)| result.is_ok())
-            .map(|(level, _)| level.number());
-        let detail: serde_json::Map<String, Value> = levels
-            .iter()
-            .map(|(level, result)| {
-                (
-                    level.number().to_string(),
-                    match result {
-                        Ok(()) => json!({"ok": true}),
-                        Err(why) => json!({"ok": false, "reason": why}),
-                    },
-                )
-            })
-            .collect();
-        json!({"level": reached, "levels": detail, "path": "cpu",
-            "llama_cpp": super::manifest::MANIFEST.llama_cpp.tag})
+        let real = std::sync::Arc::clone(&launch.0);
+        let levels = tokio::task::spawn_blocking(move || real.probe_levels(Path::Cpu))
+            .await
+            .unwrap_or_default();
+        probe_report(&levels)
     });
     let level_one = result["level"] == json!(Level::Bubblewrap.number());
     report(result);
     i32::from(!level_one)
+}
+
+/// `--probe`'s report: the level reached is the first that actually passed (a level kept
+/// on inconclusive probes is not "ok").
+pub(crate) fn probe_report(levels: &[(Level, super::launch::Probed)]) -> Value {
+    use super::launch::Probed;
+    let reached = levels
+        .iter()
+        .find(|(_, probed)| *probed == Probed::Passed)
+        .map(|(level, _)| level.number());
+    let detail: serde_json::Map<String, Value> = levels
+        .iter()
+        .map(|(level, probed)| {
+            (
+                level.number().to_string(),
+                match probed {
+                    Probed::Passed => json!({"ok": true}),
+                    Probed::Kept(why) => json!({"ok": false, "inconclusive": true, "reason": why}),
+                    Probed::Failed(why) => json!({"ok": false, "reason": why}),
+                },
+            )
+        })
+        .collect();
+    json!({"level": reached, "levels": detail, "path": "cpu",
+        "llama_cpp": super::manifest::MANIFEST.llama_cpp.tag})
 }
 
 /// The variable that carries the shim's spec into the sandbox.
@@ -374,6 +385,23 @@ pub fn main(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cli_reports_level_1_only_when_its_probe_passed() {
+        use super::super::launch::Probed;
+        let kept = probe_report(&[
+            (Level::Bubblewrap, Probed::Kept("no status line".into())),
+            (Level::Landlock, Probed::Failed("not built".into())),
+            (Level::Unconfined, Probed::Passed),
+        ]);
+        assert_eq!(kept["level"], json!(3));
+        assert_eq!(kept["levels"]["1"]["ok"], json!(false));
+        assert_eq!(kept["levels"]["1"]["inconclusive"], json!(true));
+        let none = probe_report(&[(Level::Bubblewrap, Probed::Kept("timeout".into()))]);
+        assert_eq!(none["level"], Value::Null);
+        let passed = probe_report(&[(Level::Bubblewrap, Probed::Passed)]);
+        assert_eq!(passed["level"], json!(1));
+    }
 
     #[test]
     fn a_shim_that_cannot_close_its_descriptors_never_executes() {

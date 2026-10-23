@@ -576,8 +576,9 @@ fn a_probe_that_only_times_out_is_retried_and_never_skips_its_level() {
         calls += 1;
         Probe::Inconclusive("did not report within 30 s".into())
     });
-    assert_eq!(kept, Ok(()));
+    assert_eq!(kept, Probed::Kept("did not report within 30 s".into()));
     assert_eq!(calls, PROBE_TRIES);
+    assert_eq!(kept.eligible(), Ok(()));
     let mut calls = 0;
     let passed = retry_probe(Level::Unconfined, Duration::ZERO, || {
         calls += 1;
@@ -587,13 +588,40 @@ fn a_probe_that_only_times_out_is_retried_and_never_skips_its_level() {
             Probe::Passed
         }
     });
-    assert_eq!((passed, calls), (Ok(()), 2));
+    assert_eq!((passed, calls), (Probed::Passed, 2));
     let mut calls = 0;
     let failed = retry_probe(Level::Bubblewrap, Duration::ZERO, || {
         calls += 1;
         Probe::Failed("bwrap: setup failed".into())
     });
-    assert_eq!((failed, calls), (Err("bwrap: setup failed".into()), 1));
+    assert_eq!(
+        (failed, calls),
+        (Probed::Failed("bwrap: setup failed".into()), 1)
+    );
+}
+
+#[test]
+fn a_transient_endpoint_error_is_inconclusive_a_refusal_is_not() {
+    for code in [libc::EMFILE, libc::ENFILE, libc::ENOMEM, libc::EAGAIN] {
+        assert!(
+            matches!(
+                endpoint_verdict(&std::io::Error::from_raw_os_error(code)),
+                Probe::Inconclusive(_)
+            ),
+            "{code}"
+        );
+    }
+    assert!(matches!(
+        endpoint_verdict(&std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the socket's peer is another user"
+        )),
+        Probe::Failed(_)
+    ));
+    assert!(matches!(
+        endpoint_verdict(&std::io::Error::from_raw_os_error(libc::ECONNREFUSED)),
+        Probe::Failed(_)
+    ));
 }
 
 #[test]
@@ -621,4 +649,37 @@ fn a_shim_whose_exec_fails_says_why_after_its_marker() {
     let mut marker = [0_u8; 5];
     std::fs::File::from(read).read_exact(&mut marker).unwrap();
     assert_eq!(&marker, super::super::probe::MARKER);
+}
+
+#[tokio::test]
+async fn a_leftover_still_running_blocks_the_start_and_keeps_its_entry() {
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    std::fs::create_dir_all(&setup.settings.data_dir).unwrap();
+    let run = rundir::open(&setup.settings.data_dir).unwrap();
+    let mut leftover = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let pid = i32::try_from(leftover.id()).unwrap();
+    let entry = rundir::Entry::of(9, pid, vec![rundir::executable(pid).unwrap()]).unwrap();
+    {
+        let mut pidfile = Pidfile::acquire(run.as_fd()).unwrap().unwrap();
+        pidfile.record(&entry).unwrap();
+    }
+    drop(rundir::create_generation(run.as_fd(), "7").unwrap());
+    let generation = setup.settings.data_dir.join("run/7");
+    // Killed, but not yet ended: the start is refused, the entry and the old generation stay.
+    *SWEEP_PENDING.lock().unwrap() = Some(setup.settings.data_dir.clone());
+    let refused = launch.preflight(Path::Cpu).await.unwrap_err();
+    *SWEEP_PENDING.lock().unwrap() = None;
+    assert!(refused.contains("has not exited yet"), "{refused}");
+    assert!(generation.exists());
+    let pidfile_text =
+        std::fs::read_to_string(setup.settings.data_dir.join("run/assistant.pid")).unwrap();
+    assert!(pidfile_text.starts_with("9\n"), "{pidfile_text}");
+    // Once it has ended, the next preflight sweeps and proceeds.
+    leftover.wait().unwrap();
+    launch.preflight(Path::Cpu).await.unwrap();
+    assert!(!generation.exists());
 }

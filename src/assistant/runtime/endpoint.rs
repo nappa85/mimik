@@ -102,6 +102,26 @@ fn status(pid: i32) -> io::Result<Status> {
     })
 }
 
+/// Opens a pidfd on the reaper bwrap reported, then checks the process it pins: a child of
+/// the runner (`PPid`), in the reported PID namespace where that is readable, and still alive
+/// after both reads (so they described this process, not a later one with its PID).
+pub(crate) fn open_reaper(pid: i32, runner: i32, namespace: u64) -> io::Result<Watched> {
+    let watched = Watched::open(pid)?;
+    if status(pid)?.ppid != runner {
+        return Err(refused("the reported reaper is not bubblewrap's child"));
+    }
+    match rustix::fs::stat(format!("/proc/{pid}/ns/pid")) {
+        Ok(stat) if stat.st_ino == namespace => {}
+        Ok(_) => return Err(refused("the reported reaper is in another PID namespace")),
+        Err(rustix::io::Errno::ACCESS | rustix::io::Errno::PERM) => {}
+        Err(error) => return Err(error.into()),
+    }
+    if !watched.alive() {
+        return Err(refused("the sandbox's reaper has gone"));
+    }
+    Ok(watched)
+}
+
 /// The peer check of level 1 (see the module comment).
 pub(crate) fn check_peer(stream: &impl std::os::fd::AsFd, sandbox: &Sandbox) -> io::Result<()> {
     let peer = rustix::net::sockopt::socket_peercred(stream)?;

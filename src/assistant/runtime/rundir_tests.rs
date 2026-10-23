@@ -86,17 +86,17 @@ fn a_leftover_is_killed_only_when_pid_start_time_and_path_match() {
     let mut entry = Entry::of(1, pid, vec![exe.clone()]).unwrap();
     entry.start_time += 1;
     pidfile.record(&entry).unwrap();
-    assert!(!pidfile.sweep());
+    assert_eq!(pidfile.sweep(), Swept::Nothing);
     assert!(child.try_wait().unwrap().is_none());
     // Another executable.
     let entry = Entry::of(1, pid, vec!["/usr/bin/bwrap".into()]).unwrap();
     pidfile.record(&entry).unwrap();
-    assert!(!pidfile.sweep());
+    assert_eq!(pidfile.sweep(), Swept::Nothing);
     assert!(child.try_wait().unwrap().is_none());
     // All three match.
     let entry = Entry::of(1, pid, vec!["/usr/bin/bwrap".into(), exe]).unwrap();
     pidfile.record(&entry).unwrap();
-    assert!(pidfile.sweep());
+    assert_eq!(pidfile.sweep(), Swept::Killed);
     assert!(gone(&mut child));
     assert_eq!(pidfile.leftover(), None);
 }
@@ -155,11 +155,14 @@ fn a_leftover_that_exits_between_the_pidfd_and_the_check_is_never_signalled_twic
     let mut bystander = sleeper();
     // The leftover ends (and is reaped) after the pidfd is open, before the identity check:
     // nothing is killed, and no other process is touched.
-    let killed = pidfile.sweep_with(|| {
-        leftover.kill().unwrap();
-        leftover.wait().unwrap();
-    });
-    assert!(!killed);
+    let killed = pidfile.sweep_with(
+        || {
+            leftover.kill().unwrap();
+            leftover.wait().unwrap();
+        },
+        |_| true,
+    );
+    assert_eq!(killed, Swept::Nothing);
     assert!(bystander.try_wait().unwrap().is_none());
     assert_eq!(pidfile.leftover(), None);
     bystander.kill().unwrap();
@@ -178,14 +181,17 @@ fn the_identity_is_checked_after_the_pidfd_is_open() {
         .unwrap();
     // The recorded process stops being the recorded program once the pidfd is open (here:
     // it ends, unreaped): the check made after that sees it, so nothing is signalled.
-    let killed = pidfile.sweep_with(|| {
-        leftover.kill().unwrap();
-        let stat = format!("/proc/{pid}/stat");
-        while !std::fs::read_to_string(&stat).is_ok_and(|text| text.contains(") Z ")) {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    });
-    assert!(!killed);
+    let killed = pidfile.sweep_with(
+        || {
+            leftover.kill().unwrap();
+            let stat = format!("/proc/{pid}/stat");
+            while !std::fs::read_to_string(&stat).is_ok_and(|text| text.contains(") Z ")) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        },
+        |_| true,
+    );
+    assert_eq!(killed, Swept::Nothing);
     leftover.wait().unwrap();
 }
 
@@ -199,7 +205,21 @@ fn a_killed_leftover_is_gone_when_the_sweep_returns() {
     pidfile
         .record(&Entry::of(1, pid, vec![exe]).unwrap())
         .unwrap();
-    assert!(pidfile.sweep());
+    assert_eq!(pidfile.sweep(), Swept::Killed);
     // Already ended: the status is there at once.
     assert!(leftover.try_wait().unwrap().is_some());
+}
+
+#[test]
+fn a_killed_leftover_not_yet_ended_keeps_its_entry() {
+    let (_dir, run) = data();
+    let mut pidfile = Pidfile::acquire(run.as_fd()).unwrap().unwrap();
+    let mut leftover = sleeper();
+    let pid = i32::try_from(leftover.id()).unwrap();
+    let entry = Entry::of(1, pid, vec![executable(pid).unwrap()]).unwrap();
+    pidfile.record(&entry).unwrap();
+    // The wait reports it still running (as a process slow to end would be).
+    assert_eq!(pidfile.sweep_with(|| {}, |_| false), Swept::StillRunning);
+    assert_eq!(pidfile.leftover(), Some(entry));
+    leftover.wait().unwrap();
 }
