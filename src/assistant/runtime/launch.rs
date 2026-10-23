@@ -1426,8 +1426,12 @@ impl Real {
                 // unopenable render node) ends at once: the sandbox may be gone before the
                 // reaper can be pinned, which tears down the whole PID namespace and needs no
                 // kill. The listing's exit and the probe's report then decide.
+                //
+                // With Hakoniwa a server's start can end as quickly: a bound object that is not
+                // the verified one refuses the exec at once. The marker then classifies the
+                // exit (absent: the sandbox; present: the server).
                 Err(error)
-                    if matches!(command, Command::ListDevices | Command::Probe)
+                    if (hakoniwa || matches!(command, Command::ListDevices | Command::Probe))
                         && endpoint::is_gone(&error) =>
                 {
                     (None, Arc::new(NoSocket))

@@ -794,12 +794,12 @@ fn fake_build_with(scratch: &std::path::Path, alias: &str, server: &[u8]) -> Arc
 async fn forged_failure_keeps_level_1(alias: &str) {
     let scratch = scratch();
     let real = fake_build(scratch.path(), alias);
-    failed_start_keeps_level_1(real).await;
+    failed_start_keeps_level_1(real, &["the model server exited"]).await;
 }
 
 /// The manager over `real` until its first failed start: counted as the model server's, the
 /// level kept.
-async fn failed_start_keeps_level_1(real: Arc<Real>) {
+async fn failed_start_keeps_level_1(real: Arc<Real>, reasons: &[&str]) {
     use super::super::manager::{self, State};
     use crate::assistant::jobs::Assistant;
     let assistant = Assistant::new();
@@ -837,7 +837,7 @@ async fn failed_start_keeps_level_1(real: Arc<Real>) {
         status
             .last_failure
             .as_deref()
-            .is_some_and(|why| why.starts_with("the model server exited")),
+            .is_some_and(|why| reasons.iter().any(|reason| why.starts_with(reason))),
         "{status:?}"
     );
     handle.shutdown().await;
@@ -856,7 +856,16 @@ async fn live_a_server_that_forges_bubblewraps_errors_keeps_level_1() {
 async fn live_a_server_that_cannot_be_executed_is_the_servers_failure() {
     let scratch = scratch();
     let real = fake_build_with(scratch.path(), "no-exec", b"this is not a program\n");
-    failed_start_keeps_level_1(real).await;
+    // It ends within moments of the start: its sandbox may be gone before it can be pinned
+    // (then it says so), else the exit is the server's.
+    failed_start_keeps_level_1(
+        real,
+        &[
+            "the model server exited",
+            "the sandbox's reaper: No such process",
+        ],
+    )
+    .await;
 }
 
 /// What a start of the Hakoniwa sandbox does when the object at a bound path is no longer the
@@ -872,6 +881,13 @@ async fn swapped_before_the_spawn(swap: impl FnOnce(&std::path::Path)) -> Fail {
     let real = Arc::new(Real::with_build(settings, build));
     let launch = Launch(Arc::clone(&real));
     launch.preflight(Path::Cpu).await.unwrap();
+    let probing = Arc::clone(&real);
+    let probed = tokio::task::spawn_blocking(move || {
+        probing.probe_level(Path::Cpu, Level::Bubblewrap, &probing.work().enter())
+    })
+    .await
+    .unwrap();
+    assert_eq!(probed, Probe::Passed);
     let (arrived, reached) = std::sync::mpsc::channel();
     let (release, wait) = std::sync::mpsc::channel();
     PAUSE.lock().unwrap().push(Pause {
