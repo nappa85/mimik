@@ -167,6 +167,29 @@ fn a_leftover_that_exits_between_the_pidfd_and_the_check_is_never_signalled_twic
 }
 
 #[test]
+fn the_identity_is_checked_after_the_pidfd_is_open() {
+    let (_dir, run) = data();
+    let mut pidfile = Pidfile::acquire(run.as_fd()).unwrap().unwrap();
+    let mut leftover = sleeper();
+    let pid = i32::try_from(leftover.id()).unwrap();
+    let exe = executable(pid).unwrap();
+    pidfile
+        .record(&Entry::of(1, pid, vec![exe]).unwrap())
+        .unwrap();
+    // The recorded process stops being the recorded program once the pidfd is open (here:
+    // it ends, unreaped): the check made after that sees it, so nothing is signalled.
+    let killed = pidfile.sweep_with(|| {
+        leftover.kill().unwrap();
+        let stat = format!("/proc/{pid}/stat");
+        while !std::fs::read_to_string(&stat).is_ok_and(|text| text.contains(") Z ")) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    });
+    assert!(!killed);
+    leftover.wait().unwrap();
+}
+
+#[test]
 fn a_killed_leftover_is_gone_when_the_sweep_returns() {
     let (_dir, run) = data();
     let mut pidfile = Pidfile::acquire(run.as_fd()).unwrap().unwrap();

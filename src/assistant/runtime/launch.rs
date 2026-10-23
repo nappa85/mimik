@@ -1326,12 +1326,15 @@ impl Real {
     /// The level's probe, tried again while inconclusive; a level that stays inconclusive is
     /// kept (the real start decides), never skipped on a timeout alone.
     fn probe_with_retries(self: &Arc<Self>, path: Path, level: Level) -> Result<(), String> {
-        retry_probe(level, Duration::from_secs(2), || self.probe_level(path, level)).map_err(
-            |why| match (level, bwrap::namespace_hint(std::path::Path::new("/proc"))) {
+        retry_probe(level, Duration::from_secs(2), || {
+            self.probe_level(path, level)
+        })
+        .map_err(|why| {
+            match (level, bwrap::namespace_hint(std::path::Path::new("/proc"))) {
                 (Level::Bubblewrap, Some(hint)) => format!("{why} ({hint})"),
                 _ => why,
-            },
-        )
+            }
+        })
     }
 
     /// Runs the inner command under the level's profile: its first JSON report, and the
