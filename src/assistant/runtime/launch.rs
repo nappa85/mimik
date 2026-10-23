@@ -620,6 +620,10 @@ struct Owned {
     no_runner_pidfd: bool,
 }
 
+/// Counts the cleanup's "runner has not exited yet" warnings (tests).
+#[cfg(test)]
+pub(crate) static RUNNER_WARNINGS: AtomicU64 = AtomicU64::new(0);
+
 /// After this long without the reaper's exit, the cleanup says so in the log (and waits on).
 const REAPER_WITHIN: Duration = Duration::from_secs(5);
 
@@ -688,6 +692,8 @@ impl Cleanup {
             // pidfd, or, when none was kept or it will not open, a try_wait loop (never a bare,
             // unbounded, unsaid wait).
             let warn = &mut || {
+                #[cfg(test)]
+                RUNNER_WARNINGS.fetch_add(1, Ordering::SeqCst);
                 eprintln!("assistant: a failed start's runner has not exited yet; waiting");
             };
             #[cfg(test)]

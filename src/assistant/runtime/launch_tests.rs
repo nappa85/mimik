@@ -1455,3 +1455,32 @@ async fn a_start_whose_start_time_is_unreadable_fails_and_leaves_nothing() {
     assert_eq!(processes_naming(&marker), Vec::<i32>::new());
     assert_eq!(pidfile_text(&setup), "");
 }
+
+#[test]
+fn the_cleanup_waits_for_a_runner_without_a_pidfd_and_says_so() {
+    // A runner slower than the warning, with no pidfd kept (as if it could not be opened):
+    // the try_wait fallback waits it out and says so, never a bare unsaid wait.
+    let runner = std::process::Command::new("sleep")
+        .arg("6")
+        .spawn()
+        .unwrap();
+    let pid = runner.id();
+    let before = RUNNER_WARNINGS.load(Ordering::SeqCst);
+    let cleanup = Cleanup {
+        child: Some(runner),
+        runner_pidfd: None,
+        reaper: None,
+        recorded: None,
+        ticket: None,
+        cleanups: None,
+        dir: PathBuf::new(),
+        unkillable: false,
+        no_runner_pidfd: true,
+    };
+    let started = std::time::Instant::now();
+    cleanup.run();
+    assert!(started.elapsed() >= Duration::from_secs(5));
+    assert!(RUNNER_WARNINGS.load(Ordering::SeqCst) > before);
+    // Reaped: no zombie left.
+    assert!(std::fs::metadata(format!("/proc/{pid}")).is_err());
+}
