@@ -236,6 +236,57 @@ with no status line, a transient endpoint error such as `EMFILE`, `ENOMEM` or `E
 tried again, three times in all. A level that stays inconclusive is kept for the real start to
 decide, but `--probe` reports it `"ok": false, "inconclusive": true`, never as reached.
 
+## Hakoniwa sandbox (comparison build)
+
+Builds with the `sandbox-hakoniwa` feature (off by default, DEP-24) can run level 1 through
+the Hakoniwa library instead of bubblewrap: `--assistant-sandbox hakoniwa` (also
+`assistant-runner --probe --sandbox hakoniwa`; the live tests take `MIMIK_LIVE_SANDBOX`).
+bubblewrap stays the default. Code: `src/assistant/runtime/hako.rs`; the runner's
+`Exec::Hakoniwa` in `runner.rs`.
+
+The runner (a fresh single-threaded process, checked before it forks) builds the container
+and stays as its supervisor: new user, mount, PID, IPC, UTS, cgroup and network namespaces
+(the network namespace stays empty: no interface, no DNS, no proxy), uid and gid mapped to
+Mimik's own with `setgroups` denied, the root a private directory made read-only, and the
+same allowlist as the bubblewrap profile (`bwrap::system_items` and `GpuBinds::items` feed both):
+`/proc`; a 1 MiB tmpfs `/dev` with only `null`, `zero`, `full`, `random`, `urandom`, the
+`fd` and standard-stream links and (GPU path) the one render node bound without `nodev`; no
+`tty`, `pts`, `ptmx` or `console`; `/tmp` (64 MiB) and `/dev/shm` (256 MiB) tmpfs; the
+generation's directory read-write at `/run/llama`; the runtime files, the model and the
+token file read-only. Differences from the bubblewrap profile, each with its reason:
+
+- Hakoniwa binds host paths and closes every descriptor above 2 in its child, so the
+  verified descriptors are not bound. Each bind carries the `(device, inode)` the launcher
+  verified (`files::Identity`); the closure compares what is mounted with it after the
+  mounts and just before the exec and refuses to go on on any difference (an unreadable
+  target counts as one). The descriptors never enter the sandbox.
+- The token is a 0600 file in the generation's directory bound read-only at `/run/token`;
+  the launcher unlinks the name once the runner has reported the sandbox (the bind mount
+  keeps the inode), so it is on disk only for the moments of the start.
+- The program is PID 1 of its namespace; its reaper is the runner's child outside it, which
+  is the process the endpoint check pins (`child-pid`). The seccomp program already refuses
+  `fork`, so the sandbox holds one process. The runner does not report the PID namespace's
+  number (the reaper is not dumpable); the endpoint check then leaves that comparison to
+  the parent and `NSpid` checks (`endpoint::NAMESPACE_UNREPORTED`).
+- There is no shim. The closure runs in the program's process after the setup: a new
+  session (no controlling terminal), the identity check, every capability set cleared
+  (ambient, bounding, inheritable, permitted, effective), Mimik's seccomp program installed
+  (`no_new_privs` is already set by Hakoniwa), then the marker. The marker pipe's write end is
+  the program's standard input until the closure writes the marker on it, replaces
+  descriptor 0 with `/dev/null` and closes every other descriptor, so nothing the program
+  does can write it. A failure before the marker (a mount, the identity check, capabilities,
+  seccomp) is a sandbox failure; the exec itself failing, and anything the server does or
+  exits with afterwards, is the server's. No exit code or output of the server can count as
+  a sandbox failure (`live_no_exit_code_of_the_server_counts_as_a_sandbox_failure`).
+- A sandbox that ends at once (a mount refused, or a swapped file) is classified by the marker
+  instead of failing the start on a reaper that is already gone.
+- Parent death: the runner dies with Mimik (`PR_SET_PDEATHSIG`), Hakoniwa sets the signal in
+  its two children, so the whole tree dies with the runner (`live_sigkill_of_mimik_*`).
+
+Not tested: Ubuntu's AppArmor restriction of unprivileged user namespaces and the draft
+profile `apparmor/mimik` (it needs an Ubuntu 24.04 VM); Landlock as an extra layer inside the
+namespaces (the dev kernel has none); a real GPU. `results.md` has the comparison.
+
 ## Device (GPU path)
 
 Render nodes come from sysfs: each `/sys/class/drm/renderD*` whose `device` resolves to a PCI

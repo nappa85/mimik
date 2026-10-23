@@ -364,8 +364,23 @@ pub(crate) fn sweep_generations(run: BorrowedFd<'_>) {
         }
         if name.bytes().all(|b| b.is_ascii_digit()) || name.starts_with("probe") {
             remove_generation(run, &name);
+        } else if name.ends_with(ROOT_SUFFIX) {
+            remove_root(run, &name);
         }
     }
+}
+
+/// The suffix of a generation's sandbox root (`run/<name>.root`, the Hakoniwa sandbox's
+/// mount points).
+pub(crate) const ROOT_SUFFIX: &str = ".root";
+
+/// The deepest tree a sandbox root may hold (mount points mirror host paths).
+const ROOT_DEPTH: usize = 32;
+
+/// Removes a sandbox root and everything in it, never following a link.
+pub(crate) fn remove_root(run: BorrowedFd<'_>, name: &str) {
+    empty(run, name, ROOT_DEPTH);
+    let _ = rustix::fs::unlinkat(run, name, AtFlags::REMOVEDIR);
 }
 
 /// Creates `run/<name>/` with mode 0700, opens it without following links and checks
@@ -434,11 +449,24 @@ impl Generation {
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
+
+    /// The name of this generation's sandbox root beside it in `run/`.
+    pub(crate) fn root_name(&self) -> String {
+        format!("{}{ROOT_SUFFIX}", self.name)
+    }
+
+    /// Creates the sandbox root `run/<name>.root` (mode 0700); it goes with the generation.
+    pub(crate) fn create_root(&self) -> Result<(), Refusal> {
+        let name = self.root_name();
+        rustix::fs::mkdirat(self.run.as_fd(), &name, Mode::from_raw_mode(0o700))
+            .map_err(|error| Refusal::Io(format!("run/{name} ({})", error.kind())))
+    }
 }
 
 impl Drop for Generation {
     fn drop(&mut self) {
         remove_generation(self.run.as_fd(), &self.name);
+        remove_root(self.run.as_fd(), &self.root_name());
     }
 }
 

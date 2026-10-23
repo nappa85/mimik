@@ -536,6 +536,8 @@ async fn live_level_1_serves_over_the_checked_socket_with_the_token_only() {
     assert!(matches!(health, Health::Refused(_)), "{health:?}");
     child.stop().await;
     assert!(!scratch.path().join("data/run/1").exists());
+    // Nor does a sandbox root (Hakoniwa's mount points) outlive it.
+    assert!(!scratch.path().join("data/run/1.root").exists());
     // The marker reached neither stream.
     let lines = drain::TAP.lock().unwrap().take().unwrap();
     assert_ne!(lines, Vec::<String>::new());

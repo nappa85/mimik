@@ -3,6 +3,7 @@ use crate::assistant::runtime::Backend;
 
 fn inputs<'a>(gpu: Option<&'a GpuBinds>, files: &[&str]) -> Inputs<'a> {
     Inputs {
+        root: PathBuf::from("/data/run/3.root"),
         runtime: files
             .iter()
             .enumerate()
@@ -325,4 +326,12 @@ fn only_a_failure_of_hakoniwa_itself_is_a_setup_failure() {
         assert!(!setup_failed(&status(code, Some(code))), "{code}");
         assert!(!setup_failed(&status(code, None)), "{code}");
     }
+}
+
+#[test]
+fn the_root_is_the_generations_sibling_so_its_removal_is_the_generations() {
+    let plan = plan(&inputs(None, &[]));
+    assert_eq!(plan.root, "/data/run/3.root");
+    // Not the temporary directory Hakoniwa would make (which a killed runner leaves behind).
+    assert!(!plan.root.starts_with("/tmp"));
 }

@@ -1270,6 +1270,9 @@ impl Real {
         ))
         .map_err(|_| Fail::Other("the run directory's path cannot be read".into()))?;
         let generation_path = run_path.join(generation.name());
+        generation
+            .create_root()
+            .map_err(|refusal| Fail::Other(format!("the sandbox root: {refusal}")))?;
         token
             .write_file(generation.fd.as_fd())
             .map_err(|_| Fail::Other("the token file cannot be written".into()))?;
@@ -1290,6 +1293,7 @@ impl Real {
         }
         let HakoCommand { argv, env, extra } = self.hako_command(path, command, gpu)?;
         let plan = hako::plan(&hako::Inputs {
+            root: run_path.join(generation.root_name()),
             runtime,
             model: (
                 self.settings.models_dir.join(&model.name),

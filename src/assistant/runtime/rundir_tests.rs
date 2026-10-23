@@ -143,6 +143,38 @@ fn generation_directories_are_fresh_private_and_removed() {
 }
 
 #[test]
+fn a_generations_sandbox_root_is_private_deep_and_goes_with_it() {
+    let (dir, run) = data();
+    let generation = Generation::create(&run, "1").unwrap();
+    generation.create_root().unwrap();
+    let root = dir.path().join("run/1.root");
+    assert_eq!(
+        std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    // Mount points mirror host paths: deeper than a generation's own files.
+    let deep = root.join("media/data/mimik/scratch/tmp/a/b/c/d/e/f/g/h/i/j/k/l");
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(deep.join("stub"), b"").unwrap();
+    std::os::unix::fs::symlink(dir.path(), root.join("link-out")).unwrap();
+    drop(generation);
+    assert!(!root.exists());
+    // The link was removed, not followed.
+    assert!(dir.path().exists());
+
+    // A root left by a crashed Mimik is swept at the next start, deep tree included.
+    let left = Generation::create(&run, "7").unwrap();
+    left.create_root().unwrap();
+    let left_root = dir.path().join("run/7.root");
+    std::fs::create_dir_all(left_root.join("x/y/z/a/b/c/d/e/f/g/h/i")).unwrap();
+    std::mem::forget(left);
+    let _pidfile = Pidfile::acquire(run.as_fd()).unwrap().unwrap();
+    sweep_generations(run.as_fd());
+    assert!(!left_root.exists());
+    assert!(!dir.path().join("run/7").exists());
+}
+
+#[test]
 fn a_leftover_that_exits_between_the_pidfd_and_the_check_is_never_signalled_twice() {
     let (_dir, run) = data();
     let mut pidfile = Pidfile::acquire(run.as_fd()).unwrap().unwrap();

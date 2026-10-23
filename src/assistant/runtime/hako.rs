@@ -59,6 +59,9 @@ pub(crate) struct Tmpfs {
 /// The whole sandbox: what the runner builds the container from.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Plan {
+    /// The root directory the sandbox is built in (Mimik's, a sibling of the generation's
+    /// directory in `run/`, so its removal is the generation's).
+    pub root: String,
     pub binds: Vec<Bind>,
     pub tmpfs: Vec<Tmpfs>,
     /// `(target, link)` pairs.
@@ -81,6 +84,7 @@ pub(crate) struct File {
 /// What the launcher gives the plan.
 #[derive(Debug)]
 pub(crate) struct Inputs<'a> {
+    pub root: PathBuf,
     pub runtime: Vec<File>,
     pub model: (PathBuf, Identity),
     pub generation: (PathBuf, Identity),
@@ -185,6 +189,7 @@ pub(crate) fn plan(inputs: &Inputs<'_>) -> Plan {
     dirs.sort();
     dirs.dedup();
     Plan {
+        root: text(&inputs.root),
         binds,
         tmpfs: vec![
             Tmpfs {
@@ -307,6 +312,7 @@ mod run {
 
     fn container(plan: &Plan) -> Container {
         let mut container = Container::empty();
+        container.rootdir(&plan.root);
         for namespace in [
             Namespace::Mount,
             Namespace::User,
