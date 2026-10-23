@@ -4,7 +4,7 @@
 //! a Unix socket; level 3 executes it unconfined but for seccomp on `127.0.0.1`. Level 2
 //! (Landlock) is step 2c-2b.
 use super::bwrap::{self, Bwrap, Profile, Started};
-use super::drain::{self, Output};
+use super::drain::{self, Summary};
 use super::endpoint::{self, Loopback, Sandbox, SandboxSocket, Watched};
 use super::files::{self, HashCache, Owners, Verified};
 use super::manager::{Child, Fail, Launcher};
@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use std::io::{BufRead, Read};
 use std::os::fd::{AsFd, OwnedFd, RawFd};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
@@ -45,31 +46,51 @@ mod fds {
     pub const MODEL: RawFd = 8;
     /// The executable on the TCP levels (moved to `runner::EXEC_FD` by the runner).
     pub const SERVER: RawFd = 9;
-    /// The probe's own executable at level 1.
-    pub const PROBE: RawFd = 10;
+    /// Mimik's own executable at level 1: the shim (and the probe).
+    pub const SHIM: RawFd = 10;
+    /// The shim's marker pipe at level 1.
+    pub const MARKER: RawFd = 12;
     /// The first runtime file at level 1.
-    pub const RUNTIME: RawFd = 11;
+    pub const RUNTIME: RawFd = 16;
 }
 
-/// The probe's command: what runs in place of llama-server (Mimik itself, or the test
-/// binary in tests).
+/// Mimik's own binary inside the levels: the probe (in place of llama-server) and, at level
+/// 1, the shim that marks the exec (the test binary in tests).
 #[derive(Clone, Debug)]
 pub(crate) struct InnerCommand {
     pub executable: PathBuf,
-    /// Arguments after argv[0], before the level's own.
-    pub args: Vec<String>,
-    /// Variables beside the minimal environment (none in production).
-    pub env: Vec<(String, String)>,
+    /// The probe's arguments after argv[0], before the level's own.
+    pub probe_args: Vec<String>,
+    /// Variables the probe gets beside the minimal environment (none in production).
+    pub probe_env: Vec<(String, String)>,
+    /// The shim's arguments after argv[0].
+    pub shim_args: Vec<String>,
+    /// Variables the shim gets beside its spec (none in production).
+    pub shim_env: Vec<(String, String)>,
 }
 
 impl InnerCommand {
     pub(crate) fn mimik() -> std::io::Result<Self> {
         Ok(Self {
             executable: std::env::current_exe()?,
-            args: vec!["assistant-runner".into(), "--probe-inner".into()],
-            env: Vec::new(),
+            probe_args: vec!["assistant-runner".into(), "--probe-inner".into()],
+            probe_env: Vec::new(),
+            shim_args: vec!["assistant-runner".into(), "--shim".into()],
+            shim_env: Vec::new(),
         })
     }
+}
+
+/// The level-1 sandbox's own executable path for Mimik's binary.
+const SHIM_PATH: &str = "/opt/mimik/mimik";
+
+/// The minimal environment inside the sandbox.
+fn sandbox_env() -> Vec<(String, String)> {
+    vec![
+        ("PATH".into(), "/usr/bin:/bin".into()),
+        ("LANG".into(), "C.UTF-8".into()),
+        ("HOME".into(), "/tmp".into()),
+    ]
 }
 
 /// What the launcher needs.
@@ -250,14 +271,77 @@ fn mem_available() -> Option<u64> {
 
 /// One spawned runner and what came with it.
 struct Spawned {
-    child: std::process::Child,
+    /// Killed and reaped if this is dropped before its watcher takes it.
+    child: Owned,
     runner: Watched,
     /// Level 1: bwrap's report and the reaper.
     sandbox: Option<Arc<Sandbox>>,
     generation: Generation,
     connector: Arc<dyn Connect>,
     status_rest: Option<std::io::BufReader<std::fs::File>>,
+    /// Level 1: the read end of the shim's marker pipe.
+    marker: Option<OwnedFd>,
 }
+
+/// Kills and reaps a spawned runner on every failure path until it is handed to its watcher,
+/// so no child outlives a failed start.
+struct Owned(Option<std::process::Child>);
+
+impl Owned {
+    fn pid(&self) -> i32 {
+        self.0
+            .as_ref()
+            .map_or(0, |child| i32::try_from(child.id()).unwrap_or(0))
+    }
+
+    fn hand_over(mut self) -> std::process::Child {
+        self.0.take().expect("handed over once")
+    }
+}
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Test-injected failures after the spawn, keyed by the runtime directory of the launcher
+/// they apply to (`launch_tests.rs`); none outside tests.
+#[cfg(test)]
+pub(crate) static FAULT: Mutex<Option<(PathBuf, &'static str)>> = Mutex::new(None);
+
+/// Fails the start at `step` when a test injected a failure there; nothing outside tests.
+macro_rules! fault_at {
+    ($real:expr, $step:literal) => {
+        #[cfg(test)]
+        $real.fault_at($step)?;
+    };
+}
+
+#[cfg(test)]
+impl Real {
+    fn fault_at(&self, step: &'static str) -> Result<(), Fail> {
+        {
+            let mut fault = FAULT
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if fault
+                .as_ref()
+                .is_some_and(|(dir, at)| *dir == self.settings.runtime_dir && *at == step)
+            {
+                *fault = None;
+                return Err(Fail::Other(format!("injected at {step}")));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The shim's arguments and environment.
+type ShimCommand = (Vec<String>, Vec<(String, String)>);
 
 /// The command run in the child: llama-server, or the probe.
 enum Command {
@@ -266,16 +350,28 @@ enum Command {
 }
 
 impl Real {
-    /// The command inside the sandbox: llama-server from the bound runtime, or the probe (its
-    /// own executable bound by descriptor as well).
+    /// The sandbox's command: the shim (Mimik's own binary, bound by descriptor), which marks
+    /// the exec and executes llama-server from the bound runtime or the probe.
     fn sandbox_command(
         &self,
         command: &Command,
         handover: &mut Vec<Handover>,
         extra: &mut Vec<(RawFd, String)>,
-    ) -> Result<Vec<String>, Fail> {
+    ) -> Result<ShimCommand, Fail> {
         let socket = format!("{}/{}", bwrap::SOCKET_DIR, endpoint::SOCKET);
-        Ok(match command {
+        let exe = rustix::fs::open(
+            &self.settings.inner.executable,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|_| Fail::Other("Mimik's own binary cannot be opened".into()))?;
+        handover.push(Handover {
+            fd: exe,
+            target: fds::SHIM,
+        });
+        extra.push((fds::SHIM, SHIM_PATH.to_owned()));
+        let mut env = sandbox_env();
+        let argv = match command {
             Command::Server => {
                 let server = self
                     .build
@@ -286,23 +382,26 @@ impl Real {
                 argv
             }
             Command::Probe => {
-                let exe = rustix::fs::open(
-                    &self.settings.inner.executable,
-                    rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
-                    rustix::fs::Mode::empty(),
-                )
-                .map_err(|_| Fail::Other("Mimik's own binary cannot be opened".into()))?;
-                handover.push(Handover {
-                    fd: exe,
-                    target: fds::PROBE,
-                });
-                extra.push((fds::PROBE, "/opt/mimik/mimik".to_owned()));
-                let mut argv = vec!["/opt/mimik/mimik".to_owned()];
-                argv.extend(self.settings.inner.args.iter().cloned());
+                env.extend(self.settings.inner.probe_env.iter().cloned());
+                let mut argv = vec![SHIM_PATH.to_owned()];
+                argv.extend(self.settings.inner.probe_args.iter().cloned());
                 argv.push("1".to_owned());
                 argv
             }
-        })
+        };
+        let spec = super::probe::ShimSpec {
+            marker: fds::MARKER,
+            argv,
+            env,
+        };
+        let mut shim_env = self.settings.inner.shim_env.clone();
+        shim_env.push((
+            super::probe::SHIM_VARIABLE.to_owned(),
+            serde_json::to_string(&spec).map_err(|_| Fail::Other("no shim spec".into()))?,
+        ));
+        let mut program = vec![SHIM_PATH.to_owned()];
+        program.extend(self.settings.inner.shim_args.iter().cloned());
+        Ok((program, shim_env))
     }
 
     /// Starts level 1: bwrap with the profile, then reads `child-pid` and `pid-namespace`.
@@ -329,14 +428,16 @@ impl Real {
         let (status_read, status_write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
             .map_err(|_| Fail::Other("no pipe".into()))?;
         let token_pipe = token.pipe().map_err(|_| Fail::Other("no pipe".into()))?;
+        let (marker_read, marker_write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
+            .map_err(|_| Fail::Other("no pipe".into()))?;
         let (mut handover, runtime) =
             sandbox_handover(status_write, seccomp, token_pipe, &generation, model, files)?;
+        handover.push(Handover {
+            fd: marker_write,
+            target: fds::MARKER,
+        });
         let mut extra = Vec::new();
-        let program = self.sandbox_command(command, &mut handover, &mut extra)?;
-        let env = match command {
-            Command::Server => Vec::new(),
-            Command::Probe => self.settings.inner.env.clone(),
-        };
+        let (program, env) = self.sandbox_command(command, &mut handover, &mut extra)?;
         let profile = Profile {
             size: bwrap.size,
             status_fd: fds::STATUS,
@@ -365,10 +466,13 @@ impl Real {
                     .collect(),
             },
         };
-        let child = runner::launch(&self.settings.runner, &spec, &handover)
-            .map_err(|_| Fail::Sandbox("the runner could not be started".into()))?;
+        let child = Owned(Some(
+            runner::launch(&self.settings.runner, &spec, &handover)
+                .map_err(|_| Fail::Other("the runner could not be started".into()))?,
+        ));
         drop(handover);
-        let pid = i32::try_from(child.id()).unwrap_or(0);
+        fault_at!(self, "spawned");
+        let pid = child.pid();
         let runner = Watched::open(pid).map_err(|_| Fail::Other("no pidfd".into()))?;
         if let Some(entry) = Entry::of(
             name.parse().unwrap_or(0),
@@ -380,23 +484,19 @@ impl Real {
         ) {
             self.record(&entry);
         }
-        let mut child = child;
+        fault_at!(self, "recorded");
+        // No status line: bwrap failed before it created the sandbox (nothing it started could
+        // have written anything yet).
         let (
             Started {
                 child_pid,
                 pid_namespace,
             },
             rest,
-        ) = match read_started(status_read) {
-            Ok(started) => started,
-            Err(fail) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(fail);
-            }
-        };
+        ) = read_started(status_read)?;
+        fault_at!(self, "started");
         let reaper = Watched::open(child_pid)
-            .map_err(|_| Fail::Sandbox("the sandbox's reaper has gone".into()))?;
+            .map_err(|_| Fail::Other("the sandbox's reaper has gone".into()))?;
         let sandbox = Arc::new(Sandbox {
             reaper,
             pid_namespace,
@@ -405,6 +505,7 @@ impl Real {
             directory: Arc::new(dup(&generation.fd).map_err(Fail::Other)?),
             sandbox: Arc::clone(&sandbox),
         });
+        fault_at!(self, "connector");
         Ok(Spawned {
             child,
             runner,
@@ -412,7 +513,39 @@ impl Real {
             generation,
             connector,
             status_rest: Some(rest),
+            marker: Some(marker_read),
         })
+    }
+
+    /// Level 3's executable (llama-server or Mimik's own binary) and its arguments.
+    fn unconfined_command(
+        &self,
+        command: &Command,
+        server: Option<&Verified>,
+        model_path: &str,
+        port: u16,
+        token_file: &str,
+    ) -> Result<(OwnedFd, Vec<String>), Fail> {
+        match command {
+            Command::Server => {
+                let server = server.ok_or_else(|| Fail::Other("no llama-server".into()))?;
+                let mut argv = vec!["llama-server".to_owned()];
+                argv.extend(self.server_args(model_path, "127.0.0.1", Some(port), token_file));
+                Ok((dup(&server.fd).map_err(Fail::Other)?, argv))
+            }
+            Command::Probe => {
+                let exe = rustix::fs::open(
+                    &self.settings.inner.executable,
+                    rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::empty(),
+                )
+                .map_err(|_| Fail::Other("Mimik's own binary cannot be opened".into()))?;
+                let mut argv = vec!["mimik".to_owned()];
+                argv.extend(self.settings.inner.probe_args.iter().cloned());
+                argv.extend(["3".to_owned(), port.to_string(), token_file.to_owned()]);
+                Ok((exe, argv))
+            }
+        }
     }
 
     /// Starts level 3: the verified executable with seccomp, on `127.0.0.1:<port>`.
@@ -440,26 +573,8 @@ impl Real {
         let directory = self.settings.data_dir.join("run").join(generation.name());
         let token_file = directory.join(token::FILE).display().to_string();
         let model_path = format!("/proc/self/fd/{}", fds::MODEL);
-        let (executable, argv) = match command {
-            Command::Server => {
-                let server = server.ok_or_else(|| Fail::Other("no llama-server".into()))?;
-                let mut argv = vec!["llama-server".to_owned()];
-                argv.extend(self.server_args(&model_path, "127.0.0.1", Some(port), &token_file));
-                (dup(&server.fd).map_err(Fail::Other)?, argv)
-            }
-            Command::Probe => {
-                let exe = rustix::fs::open(
-                    &self.settings.inner.executable,
-                    rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
-                    rustix::fs::Mode::empty(),
-                )
-                .map_err(|_| Fail::Other("Mimik's own binary cannot be opened".into()))?;
-                let mut argv = vec!["mimik".to_owned()];
-                argv.extend(self.settings.inner.args.iter().cloned());
-                argv.extend(["3".to_owned(), port.to_string(), token_file.clone()]);
-                (exe, argv)
-            }
-        };
+        let (executable, argv) =
+            self.unconfined_command(command, server, &model_path, port, &token_file)?;
         let handover = vec![
             Handover {
                 fd: dup(&model.fd).map_err(Fail::Other)?,
@@ -479,7 +594,7 @@ impl Real {
             ),
         ];
         if matches!(command, Command::Probe) {
-            env.extend(self.settings.inner.env.iter().cloned());
+            env.extend(self.settings.inner.probe_env.iter().cloned());
         }
         let spec = Spec {
             parent: std::process::id(),
@@ -490,10 +605,13 @@ impl Real {
                 argv,
             },
         };
-        let child = runner::launch(&self.settings.runner, &spec, &handover)
-            .map_err(|_| Fail::Other("the runner could not be started".into()))?;
+        let child = Owned(Some(
+            runner::launch(&self.settings.runner, &spec, &handover)
+                .map_err(|_| Fail::Other("the runner could not be started".into()))?,
+        ));
         drop(handover);
-        let pid = i32::try_from(child.id()).unwrap_or(0);
+        fault_at!(self, "spawned");
+        let pid = child.pid();
         let runner = Watched::open(pid).map_err(|_| Fail::Other("no pidfd".into()))?;
         let mut executables = vec![self.settings.runner.program.display().to_string()];
         if let Some(server) = server
@@ -511,10 +629,12 @@ impl Real {
         if let Some(entry) = Entry::of(name.parse().unwrap_or(0), pid, executables) {
             self.record(&entry);
         }
+        fault_at!(self, "recorded");
         let connector: Arc<dyn Connect> = Arc::new(Loopback {
             port,
             child: Arc::new(Watched::open(pid).map_err(|_| Fail::Other("no pidfd".into()))?),
         });
+        fault_at!(self, "connector");
         Ok(Spawned {
             child,
             runner,
@@ -522,6 +642,7 @@ impl Real {
             generation,
             connector,
             status_rest: None,
+            marker: None,
         })
     }
 }
@@ -590,9 +711,13 @@ fn read_started(status: OwnedFd) -> Result<(Started, std::io::BufReader<std::fs:
             let _ = lines.send((started, rest));
         })
         .map_err(|_| Fail::Other("no status thread".into()))?;
-    let (started, rest) = report
-        .recv_timeout(STATUS_WITHIN)
-        .map_err(|_| Fail::Sandbox("bubblewrap did not report the sandbox".into()))?;
+    // A timeout proves nothing about the sandbox (a slow host): counted, the level kept.
+    let (started, rest) = report.recv_timeout(STATUS_WITHIN).map_err(|_| {
+        Fail::Other(format!(
+            "bubblewrap did not report the sandbox within {} s",
+            STATUS_WITHIN.as_secs()
+        ))
+    })?;
     let started = started.ok_or_else(|| {
         Fail::Sandbox("bubblewrap failed before starting the model server".into())
     })?;
@@ -615,6 +740,56 @@ struct Exit {
     why: String,
 }
 
+/// The reader threads of a child (stdout, stderr, the marker): `exited` classifies only
+/// once they have all ended (or after a bounded wait).
+struct Readers {
+    left: AtomicUsize,
+    ended: tokio::sync::Notify,
+}
+
+impl Readers {
+    fn new(count: usize) -> Arc<Self> {
+        Arc::new(Self {
+            left: AtomicUsize::new(count),
+            ended: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn end(&self) {
+        if self.left.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.ended.notify_waiters();
+        }
+    }
+
+    async fn all_ended(&self, within: Duration) {
+        let _ = tokio::time::timeout(within, async {
+            loop {
+                let ended = self.ended.notified();
+                if self.left.load(Ordering::SeqCst) == 0 {
+                    return;
+                }
+                ended.await;
+            }
+        })
+        .await;
+    }
+}
+
+/// How long `exited` waits for the readers after the exit.
+const READERS_WITHIN: Duration = Duration::from_secs(5);
+
+/// Why a child ended: at level 1, a sandbox failure only when the shim never marked its
+/// exec (nothing the executed command prints can make it one); otherwise counted.
+fn classify(level: Level, executed: bool, summary: Summary, why: &str) -> Fail {
+    if level == Level::Bubblewrap && !executed {
+        Fail::Sandbox(format!("bubblewrap could not set up the sandbox ({why})"))
+    } else if summary.failed.model_load {
+        Fail::Other(format!("the model could not be loaded ({why})"))
+    } else {
+        Fail::Other(format!("the model server exited ({why})"))
+    }
+}
+
 /// A running generation's child.
 pub(crate) struct RealChild {
     server: Arc<dyn Server>,
@@ -626,12 +801,41 @@ pub(crate) struct RealChild {
     token: String,
     exit: watch::Receiver<Option<Exit>>,
     pid: i32,
-    /// Output events so far (sandbox and bind errors decide the failure kind).
-    seen: Arc<Mutex<Vec<Output>>>,
-    healthy: std::sync::atomic::AtomicBool,
+    /// The runner's pidfd: signals go to this process and no other.
+    signal: Option<OwnedFd>,
+    summary: Arc<Mutex<Summary>>,
+    /// Level 1: the shim marked its exec.
+    executed: Arc<AtomicBool>,
+    readers: Arc<Readers>,
+    healthy: AtomicBool,
     generation_dir: Mutex<Option<Generation>>,
     level: Level,
     notes: Vec<String>,
+}
+
+impl RealChild {
+    fn kill(&self, signal: rustix::process::Signal) {
+        if let Some(pidfd) = &self.signal {
+            let _ = rustix::process::pidfd_send_signal(pidfd, signal);
+        }
+    }
+
+    fn summary(&self) -> Summary {
+        *self
+            .summary
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl Drop for RealChild {
+    fn drop(&mut self) {
+        // A child nobody holds any more (an interrupted start) does not outlive it; the watcher
+        // still reaps it.
+        if self.exit.borrow().is_none() {
+            self.kill(rustix::process::Signal::KILL);
+        }
+    }
 }
 
 #[async_trait]
@@ -650,33 +854,27 @@ impl Child for RealChild {
                 return std::future::pending().await;
             }
         };
-        let seen = self
-            .seen
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let healthy = self.healthy.load(std::sync::atomic::Ordering::SeqCst);
-        if !healthy && seen.contains(&Output::SandboxError) {
-            Fail::Sandbox(format!("bubblewrap could not set up the sandbox ({why})"))
-        } else if seen.contains(&Output::ModelLoadError) {
-            Fail::Other(format!("the model could not be loaded ({why})"))
-        } else {
-            Fail::Other(format!("the model server exited ({why})"))
-        }
+        self.readers.all_ended(READERS_WITHIN).await;
+        classify(
+            self.level,
+            self.executed.load(Ordering::SeqCst),
+            self.summary(),
+            &why,
+        )
     }
 
     async fn stop(&self) {
         let mut exit = self.exit.clone();
         let running = exit.borrow().is_none();
         if running {
-            if let Some(pid) = rustix::process::Pid::from_raw(self.pid) {
-                let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
-            }
+            self.kill(rustix::process::Signal::TERM);
             let gone = tokio::time::timeout(STOP_GRACE, exit.wait_for(Option::is_some))
                 .await
                 .is_ok_and(|result| result.is_ok());
-            if !gone && let Some(pid) = rustix::process::Pid::from_raw(self.pid) {
-                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+            if !gone {
+                self.kill(rustix::process::Signal::KILL);
+                // Gone only when the watcher confirmed it: until then this blocks, so no new
+                // generation starts beside a sandbox that has not exited.
                 let _ = exit.wait_for(Option::is_some).await;
             }
         }
@@ -687,8 +885,7 @@ impl Child for RealChild {
     }
 
     fn answered_health(&self) {
-        self.healthy
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.healthy.store(true, Ordering::SeqCst);
         if self.level.tcp()
             && let Some(dir) = &*self
                 .generation_dir
@@ -704,8 +901,38 @@ impl Child for RealChild {
     }
 }
 
-/// Waits for the runner's exit (its pidfd), reaps it, and on level 1 waits for the reaper
-/// too, so "gone" means the whole sandbox has gone.
+/// Waits until `pidfd` reports its process gone: every `grace` without it, `kill` is called
+/// again and the wait goes on (there is no giving up: "gone" is never assumed).
+async fn until_gone(pidfd: &OwnedFd, grace: Duration, kill: impl Fn()) {
+    let async_fd = pidfd
+        .try_clone()
+        .ok()
+        .and_then(|fd| tokio::io::unix::AsyncFd::new(fd).ok());
+    let mut warned = false;
+    loop {
+        if endpoint::exited(pidfd) {
+            return;
+        }
+        match &async_fd {
+            Some(fd) => {
+                let _ = tokio::time::timeout(grace, fd.readable()).await;
+            }
+            None => tokio::time::sleep(grace.min(Duration::from_millis(200))).await,
+        }
+        if endpoint::exited(pidfd) {
+            return;
+        }
+        if !warned {
+            eprintln!("assistant: a model server process has not exited yet; waiting");
+            warned = true;
+        }
+        kill();
+    }
+}
+
+/// Waits for the runner's exit (its pidfd), reaps it, and on level 1 for the sandbox's
+/// reaper too (killed through its pidfd until gone): exit is published only once the whole
+/// sandbox is confirmed gone.
 async fn watch_exit(
     mut child: std::process::Child,
     runner: Watched,
@@ -713,21 +940,21 @@ async fn watch_exit(
     exit: watch::Sender<Option<Exit>>,
     on_gone: impl FnOnce() + Send + 'static,
 ) {
-    if let Ok(fd) = tokio::io::unix::AsyncFd::new(runner.pidfd) {
-        let _ = fd.readable().await;
-    }
+    until_gone(&runner.pidfd, STOP_GRACE, || {
+        let _ = rustix::process::pidfd_send_signal(&runner.pidfd, rustix::process::Signal::KILL);
+    })
+    .await;
+    // The pidfd shows it exited, so this returns at once.
     let status = child.wait();
-    if let Some(sandbox) = sandbox
-        && !endpoint::exited(&sandbox.reaper.pidfd)
-    {
-        if let Some(pid) = rustix::process::Pid::from_raw(sandbox.reaper.pid) {
-            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    if let Some(sandbox) = sandbox {
+        let reaper = &sandbox.reaper.pidfd;
+        if !endpoint::exited(reaper) {
+            let _ = rustix::process::pidfd_send_signal(reaper, rustix::process::Signal::KILL);
         }
-        if let Ok(fd) = sandbox.reaper.pidfd.try_clone()
-            && let Ok(fd) = tokio::io::unix::AsyncFd::new(fd)
-        {
-            let _ = tokio::time::timeout(STOP_GRACE, fd.readable()).await;
-        }
+        until_gone(reaper, STOP_GRACE, || {
+            let _ = rustix::process::pidfd_send_signal(reaper, rustix::process::Signal::KILL);
+        })
+        .await;
     }
     on_gone();
     let why = match status {
@@ -735,6 +962,27 @@ async fn watch_exit(
         Err(_) => "unknown status".into(),
     };
     let _ = exit.send(Some(Exit { why }));
+}
+
+/// Reads the shim's marker pipe to its end: `executed` once the marker arrived. Without a
+/// reader thread the exec cannot be shown either way, so it counts as having happened (a
+/// failure then keeps the level).
+fn read_marker(marker: OwnedFd, executed: &Arc<AtomicBool>, readers: &Arc<Readers>) {
+    let (seen, ended) = (Arc::clone(executed), Arc::clone(readers));
+    let spawned = std::thread::Builder::new()
+        .name("assistant-marker".into())
+        .spawn(move || {
+            let mut text = Vec::new();
+            let _ = std::fs::File::from(marker).take(64).read_to_end(&mut text);
+            if text.starts_with(super::probe::MARKER) {
+                seen.store(true, Ordering::SeqCst);
+            }
+            ended.end();
+        });
+    if spawned.is_err() {
+        executed.store(true, Ordering::SeqCst);
+        readers.end();
+    }
 }
 
 impl Real {
@@ -746,16 +994,19 @@ impl Real {
         bwrap: Option<&Bwrap>,
     ) -> Arc<RealChild> {
         let Spawned {
-            mut child,
+            child,
             runner,
             sandbox,
             generation,
             connector,
             status_rest,
+            marker,
         } = spawned;
+        let mut child = child.hand_over();
         let pid = i32::try_from(child.id()).unwrap_or(0);
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let (events, mut incoming) = tokio::sync::mpsc::unbounded_channel();
+        let summary = Arc::new(Mutex::new(Summary::default()));
+        let executed = Arc::new(AtomicBool::new(marker.is_none()));
+        let readers = Readers::new(2 + usize::from(marker.is_some()));
         for (name, stream) in [
             (
                 "stdout",
@@ -772,9 +1023,15 @@ impl Real {
                     .map(|s| Box::new(s) as Box<dyn Read + Send>),
             ),
         ] {
-            if let Some(stream) = stream {
-                let _ = drain::spawn(name, stream, events.clone());
+            let ended = Arc::clone(&readers);
+            let spawned =
+                stream.map(|stream| drain::spawn(name, stream, &summary, move || ended.end()));
+            if !matches!(spawned, Some(Ok(_))) {
+                readers.end();
             }
+        }
+        if let Some(marker) = marker {
+            read_marker(marker, &executed, &readers);
         }
         if let Some(rest) = status_rest {
             // Later status lines (`exit-code`) are read and dropped: exit is seen by pidfd.
@@ -784,15 +1041,7 @@ impl Real {
                     let _ = std::io::copy(&mut rest.take(64 * 1024), &mut std::io::sink());
                 });
         }
-        let collected = Arc::clone(&seen);
-        tokio::spawn(async move {
-            while let Some(event) = incoming.recv().await {
-                collected
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(event);
-            }
-        });
+        let signal = runner.pidfd.try_clone().ok();
         let (exit_sender, exit) = watch::channel(None);
         let launcher = Arc::clone(self);
         tokio::spawn(watch_exit(child, runner, sandbox, exit_sender, move || {
@@ -810,6 +1059,8 @@ impl Real {
                     .into(),
             );
         }
+        #[cfg(not(test))]
+        drop(connector);
         Arc::new(RealChild {
             server,
             #[cfg(test)]
@@ -818,8 +1069,11 @@ impl Real {
             token: token.expose().to_owned(),
             exit,
             pid,
-            seen,
-            healthy: std::sync::atomic::AtomicBool::new(false),
+            signal,
+            summary,
+            executed,
+            readers,
+            healthy: AtomicBool::new(false),
             generation_dir: Mutex::new(Some(generation)),
             level,
             notes,
@@ -879,12 +1133,18 @@ impl Launcher for Launch {
         let real = Arc::clone(&self.0);
         tokio::task::spawn_blocking(move || {
             vec![
-                (Level::Bubblewrap, real.probe_level(path, Level::Bubblewrap)),
+                (
+                    Level::Bubblewrap,
+                    real.probe_with_retries(path, Level::Bubblewrap),
+                ),
                 (
                     Level::Landlock,
                     Err("Landlock confinement is not in this release".into()),
                 ),
-                (Level::Unconfined, real.probe_level(path, Level::Unconfined)),
+                (
+                    Level::Unconfined,
+                    real.probe_with_retries(path, Level::Unconfined),
+                ),
             ]
         })
         .await
@@ -919,81 +1179,159 @@ impl Launch {
                 .map_err(|_| Fail::Other("verification failed".into()))?
                 .map_err(Fail::Other)?
         };
-        let token = Token::new();
+        let token = Arc::new(Token::new());
         let name = generation.to_string();
         let bwrap = real.held().bwrap.clone();
-        let spawned = match level {
-            Level::Bubblewrap => {
-                real.spawn_sandbox(&name, &files, &model, &token, &Command::Server)?
-            }
-            Level::Unconfined => {
-                let server_name = real.build.as_ref().map(|build| build.server.clone());
-                let server = files
-                    .iter()
-                    .find(|file| Some(&file.name) == server_name.as_ref());
-                // A child that cannot bind its port exits; a new port is tried, at most 3.
-                let mut tries = 0;
+        let files = Arc::new(files);
+        let model = Arc::new(model);
+        if level == Level::Unconfined {
+            // Level 3 loads its libraries by path: the runtime's ancestors are checked at every
+            // start, not only by the probe.
+            let checking = Arc::clone(&real);
+            tokio::task::spawn_blocking(move || {
+                files::ancestors_safe(&checking.settings.runtime_dir)
+                    .map_err(|refusal| Fail::Other(format!("the model runtime: {refusal}")))
+            })
+            .await
+            .map_err(|_| Fail::Other("the runtime check did not finish".into()))??;
+        }
+        // The spawn blocks (bwrap's status line, up to 30 s): off the async runtime. A start
+        // dropped meanwhile drops its result, whose guard kills the child.
+        let spawn = |port: u16| {
+            let (real, files, model, token, name) = (
+                Arc::clone(&real),
+                Arc::clone(&files),
+                Arc::clone(&model),
+                Arc::clone(&token),
+                name.clone(),
+            );
+            tokio::task::spawn_blocking(move || match level {
+                Level::Bubblewrap => {
+                    real.spawn_sandbox(&name, &files, &model, &token, &Command::Server)
+                }
+                Level::Unconfined => {
+                    let server_name = real.build.as_ref().map(|build| build.server.clone());
+                    let server = files
+                        .iter()
+                        .find(|file| Some(&file.name) == server_name.as_ref());
+                    real.spawn_unconfined(&name, server, &model, &token, &Command::Server, port)
+                }
+                Level::Landlock => Err(Fail::Sandbox(
+                    "Landlock confinement is not in this release".into(),
+                )),
+            })
+        };
+        let joined = |result: Result<Result<Spawned, Fail>, tokio::task::JoinError>| {
+            result.map_err(|_| Fail::Other("the start did not finish".into()))?
+        };
+        if level != Level::Unconfined {
+            let spawned = joined(spawn(0).await)?;
+            return Ok(real.child(spawned, level, &token, bwrap.as_ref()));
+        }
+        // A child that cannot bind its port exits; a new port is tried, at most 3.
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            let port = free_port()?;
+            let spawned = joined(spawn(port).await)?;
+            let child = real.child(spawned, level, &token, None);
+            let bound = tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
-                    tries += 1;
-                    let port = free_port()?;
-                    let spawned = real.spawn_unconfined(
-                        &name,
-                        server,
-                        &model,
-                        &token,
-                        &Command::Server,
-                        port,
-                    )?;
-                    let child = real.child(spawned, level, &token, None);
-                    let bound = tokio::time::timeout(Duration::from_secs(10), async {
-                        loop {
-                            if child
-                                .seen
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .contains(&Output::BindError)
-                            {
-                                return false;
-                            }
-                            if child.exit.borrow().is_some() {
-                                return true;
-                            }
-                            if endpoint::listeners(port, child.pid)
-                                .is_ok_and(|result| result.is_ok())
-                            {
-                                return true;
-                            }
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
+                    if child.summary().failed.bind {
+                        return false;
+                    }
+                    if child.exit.borrow().is_some() {
+                        return true;
+                    }
+                    let pid = child.pid;
+                    let listening = tokio::task::spawn_blocking(move || {
+                        endpoint::listeners(port, pid).is_ok_and(|result| result.is_ok())
                     })
                     .await
-                    .unwrap_or(true);
-                    if bound || tries >= PORT_TRIES {
-                        return Ok(child);
+                    .unwrap_or(false);
+                    if listening {
+                        return true;
                     }
-                    child.stop().await;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
+            })
+            .await
+            .unwrap_or(true);
+            if bound || tries >= PORT_TRIES {
+                return Ok(child);
             }
-            Level::Landlock => {
-                return Err(Fail::Sandbox(
-                    "Landlock confinement is not in this release".into(),
-                ));
-            }
-        };
-        Ok(real.child(spawned, level, &token, bwrap.as_ref()))
+            child.stop().await;
+        }
     }
 }
+
+/// A probe's outcome.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Probe {
+    Passed,
+    /// The level cannot work here (a definite cause): it is skipped.
+    Failed(String),
+    /// Nothing definite (a timeout, a missing pidfd): tried again, and never a reason alone to
+    /// skip the level.
+    Inconclusive(String),
+}
+
+/// Runs `probe` up to [`PROBE_TRIES`] times while it is inconclusive: a definite failure
+/// skips the level, and a level that stays inconclusive is kept (the real start decides).
+pub(crate) fn retry_probe(
+    level: Level,
+    pause: Duration,
+    mut probe: impl FnMut() -> Probe,
+) -> Result<(), String> {
+    for attempt in 1..=PROBE_TRIES {
+        match probe() {
+            Probe::Passed => return Ok(()),
+            Probe::Failed(why) => return Err(why),
+            Probe::Inconclusive(why) => {
+                eprintln!(
+                    "assistant: level {} probe inconclusive (attempt {attempt}): {why}",
+                    level.number()
+                );
+                if attempt < PROBE_TRIES {
+                    std::thread::sleep(pause);
+                }
+            }
+        }
+    }
+    eprintln!(
+        "assistant: level {} kept: its probe stayed inconclusive, the start decides",
+        level.number()
+    );
+    Ok(())
+}
+
+/// How long the probe may take to report from inside its level.
+const PROBE_REPORT_WITHIN: Duration = Duration::from_secs(30);
+/// Probe attempts while inconclusive.
+const PROBE_TRIES: usize = 3;
 
 impl Real {
     /// Runs the level's probe: the inner command under the full profile, then the endpoint
     /// check against it (on level 1 that asserts the process shape).
-    pub(crate) fn probe_level(self: &Arc<Self>, path: Path, level: Level) -> Result<(), String> {
-        let (report, verdict) = self.inner_report(path, level)?;
-        if report["ok"] == serde_json::json!(true) {
-            verdict
-        } else {
-            Err(format!("the probe failed inside the level: {report}"))
+    pub(crate) fn probe_level(self: &Arc<Self>, path: Path, level: Level) -> Probe {
+        match self.inner_report(path, level) {
+            Ok((report, verdict)) if report["ok"] == serde_json::json!(true) => verdict,
+            Ok((report, _)) => {
+                Probe::Failed(format!("the probe failed inside the level: {report}"))
+            }
+            Err(outcome) => outcome,
         }
+    }
+
+    /// The level's probe, tried again while inconclusive; a level that stays inconclusive is
+    /// kept (the real start decides), never skipped on a timeout alone.
+    fn probe_with_retries(self: &Arc<Self>, path: Path, level: Level) -> Result<(), String> {
+        retry_probe(level, Duration::from_secs(2), || self.probe_level(path, level)).map_err(
+            |why| match (level, bwrap::namespace_hint(std::path::Path::new("/proc"))) {
+                (Level::Bubblewrap, Some(hint)) => format!("{why} ({hint})"),
+                _ => why,
+            },
+        )
     }
 
     /// Runs the inner command under the level's profile: its first JSON report, and the
@@ -1002,90 +1340,117 @@ impl Real {
         self: &Arc<Self>,
         path: Path,
         level: Level,
-    ) -> Result<(serde_json::Value, Result<(), String>), String> {
+    ) -> Result<(serde_json::Value, Probe), Probe> {
         if level == Level::Bubblewrap {
-            let bwrap = bwrap::preflight().map_err(|unusable| unusable.to_string())?;
+            let bwrap =
+                bwrap::preflight().map_err(|unusable| Probe::Failed(unusable.to_string()))?;
             self.held().bwrap = Some(bwrap);
         } else {
             files::ancestors_safe(&self.settings.runtime_dir)
-                .map_err(|refusal| format!("the model runtime: {refusal}"))?;
+                .map_err(|refusal| Probe::Failed(format!("the model runtime: {refusal}")))?;
         }
-        let (files, model) = self.verify(path)?;
+        let (files, model) = self.verify(path).map_err(Probe::Failed)?;
         let token = Token::new();
         let name = format!("probe-{}", level.number());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|_| "no probe runtime".to_owned())?;
-        let why = |fail: Fail| match fail {
-            Fail::Sandbox(why) | Fail::Other(why) => why,
+            .map_err(|_| Probe::Inconclusive("no probe runtime".into()))?;
+        let failed = |fail: Fail| match fail {
+            Fail::Sandbox(why) => Probe::Failed(why),
+            Fail::Other(why) => Probe::Inconclusive(why),
         };
         let spawned = if level == Level::Bubblewrap {
             self.spawn_sandbox(&name, &files, &model, &token, &Command::Probe)
-                .map_err(why)?
+                .map_err(failed)?
         } else {
-            let port = free_port().map_err(why)?;
+            let port = free_port().map_err(failed)?;
             self.spawn_unconfined(&name, None, &model, &token, &Command::Probe, port)
-                .map_err(why)?
+                .map_err(failed)?
         };
         let Spawned {
-            mut child,
+            child: mut owned,
             connector,
             generation,
+            marker: _marker,
             ..
         } = spawned;
-        let mut stdout = std::io::BufReader::new(child.stdout.take().ok_or("no probe output")?);
-        let mut stderr = child.stderr.take();
-        // The first JSON line with "ok" (a test harness may print others first).
-        let mut report: Option<serde_json::Value> = None;
-        for _ in 0..64 {
-            let mut line = String::new();
-            if !stdout.read_line(&mut line).is_ok_and(|n| n > 0) {
-                break;
-            }
-            // A test harness may print before the report on the same line.
-            let start = line.find('{').unwrap_or(0);
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line[start..].trim())
-                && value.get("ok").is_some()
-            {
-                report = Some(value);
-                break;
-            }
-        }
-        let result = if let Some(report) = report {
-            let verdict = if report["ok"] == serde_json::json!(true) {
-                runtime.block_on(async {
-                    match tokio::time::timeout(Duration::from_secs(10), connector.connect()).await {
-                        Ok(Ok(_)) => Ok(()),
-                        Ok(Err(error)) => {
-                            Err(format!("the endpoint check refused the probe: {error}"))
+        // `owned` kills and reaps the probe whichever way this ends.
+        let (out, stderr) = owned.0.as_mut().map_or((None, None), |child| {
+            (child.stdout.take(), child.stderr.take())
+        });
+        let out = out.ok_or_else(|| Probe::Inconclusive("no probe output".into()))?;
+        let (sender, reported) = std::sync::mpsc::channel();
+        let _ = std::thread::Builder::new()
+            .name("assistant-probe".into())
+            .spawn(move || {
+                let _ = sender.send(first_report(std::io::BufReader::new(out)));
+            });
+        let result = match reported.recv_timeout(PROBE_REPORT_WITHIN) {
+            Ok(Some(report)) => {
+                let verdict = if report["ok"] == serde_json::json!(true) {
+                    runtime.block_on(async {
+                        match tokio::time::timeout(Duration::from_secs(10), connector.connect())
+                            .await
+                        {
+                            Ok(Ok(_)) => Probe::Passed,
+                            Ok(Err(error)) => Probe::Failed(format!(
+                                "the endpoint check refused the probe: {error}"
+                            )),
+                            Err(_) => {
+                                Probe::Inconclusive("the probe's socket did not answer".into())
+                            }
                         }
-                        Err(_) => Err("the probe's socket did not answer".to_owned()),
-                    }
-                })
-            } else {
-                Err("the probe failed inside the level".to_owned())
-            };
-            Ok((report, verdict))
-        } else {
-            let mut text = String::new();
-            if let Some(stderr) = stderr.as_mut() {
-                let _ = stderr.take(4096).read_to_string(&mut text);
+                    })
+                } else {
+                    Probe::Failed("the probe failed inside the level".into())
+                };
+                Ok((report, verdict))
             }
-            let first = text
-                .lines()
-                .find(|line| line.starts_with("bwrap: "))
-                .unwrap_or("");
-            Err(format!("the probe did not start {}", first.trim())
-                .trim()
-                .to_owned())
+            Ok(None) => {
+                // The probe runs Mimik itself, never llama-server: its stderr (bwrap's and the
+                // shim's) is trusted here.
+                let mut text = String::new();
+                if let Some(mut stderr) = stderr {
+                    let _ = (&mut stderr).take(4096).read_to_string(&mut text);
+                }
+                let first = text
+                    .lines()
+                    .find(|line| line.starts_with("bwrap: "))
+                    .unwrap_or("");
+                Err(Probe::Failed(
+                    format!("the probe did not start {}", first.trim())
+                        .trim()
+                        .to_owned(),
+                ))
+            }
+            Err(_) => Err(Probe::Inconclusive(format!(
+                "the probe did not report within {} s",
+                PROBE_REPORT_WITHIN.as_secs()
+            ))),
         };
-        let _ = child.kill();
-        let _ = child.wait();
+        drop(owned);
         self.clear();
         drop(generation);
         result
     }
+}
+
+/// The first JSON line with "ok" (a test harness may print others first, even on the line).
+fn first_report(mut stdout: impl BufRead) -> Option<serde_json::Value> {
+    for _ in 0..64 {
+        let mut line = String::new();
+        if !stdout.read_line(&mut line).is_ok_and(|n| n > 0) {
+            return None;
+        }
+        let start = line.find('{').unwrap_or(0);
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line[start..].trim())
+            && value.get("ok").is_some()
+        {
+            return Some(value);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

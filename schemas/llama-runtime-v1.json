@@ -15,7 +15,67 @@
     "how": "git archive --format=tar --prefix=llama.cpp-b11609/ <commit> from a shallow fetch of that commit",
     "prefix": "llama.cpp-b11609/",
     "tar_sha256": "7ca7d6261c85d749947d8938ecb101301c30acf95bba001d46999012871b02a5",
-    "tar_size": 180715520
+    "tar_size": 180715520,
+    "notices": [
+      {
+        "component": "llama.cpp and ggml",
+        "licence": "MIT",
+        "path": "LICENSE"
+      },
+      {
+        "component": "cpp-httplib",
+        "licence": "MIT",
+        "path": "vendor/cpp-httplib/LICENSE"
+      },
+      {
+        "component": "nlohmann/json",
+        "licence": "MIT",
+        "path": "licenses/LICENSE-jsonhpp"
+      },
+      {
+        "component": "stb_image",
+        "licence": "MIT OR Unlicense",
+        "path": "vendor/stb/stb_image.h",
+        "lines": [
+          7950,
+          7987
+        ]
+      },
+      {
+        "component": "sheredom/subprocess.h",
+        "licence": "Unlicense",
+        "path": "vendor/sheredom/subprocess.h",
+        "lines": [
+          7,
+          29
+        ]
+      },
+      {
+        "component": "miniaudio",
+        "licence": "Unlicense OR MIT-0",
+        "path": "vendor/miniaudio/miniaudio.h",
+        "lines": [
+          95817,
+          95863
+        ]
+      },
+      {
+        "component": "sha256 (Igor Pavlov)",
+        "licence": "public domain",
+        "path": "vendor/hash/sha256/LICENSE"
+      },
+      {
+        "component": "xxHash",
+        "licence": "BSD-2-Clause",
+        "path": "vendor/hash/xxhash/LICENSE"
+      },
+      {
+        "component": "rotate-bits",
+        "licence": "MIT",
+        "path": "vendor/hash/rotate-bits/LICENSE.md"
+      }
+    ],
+    "notices_note": "Components compiled into the shipped files, from the source's licenses/ and vendor/ (the asset's own LICENSE is llama.cpp's only); packaging copies each text from the hash-verified source tar into THIRD-PARTY-NOTICES.md."
   },
   "builds": [
     {

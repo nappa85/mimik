@@ -193,12 +193,41 @@ class LlamaRuntimeTests(unittest.TestCase):
             second = package_release.compress_source(fetched, data, out).read_bytes()
             self.assertEqual(first, second)
             self.assertIn("ggml", package_release.llama_notice(data))
+            self.assertIn("notices", llama_runtime.manifest()["source"])
             (fetched / "llama/cpu/extra").write_bytes(b"x")
             with self.assertRaises(ValueError):
                 package_release.stage_llama(fetched, Path(temp) / "stage2", data)
             tar.write_bytes(b"another tar")
             with self.assertRaises(ValueError):
                 package_release.compress_source(fetched, data, out)
+
+
+class NoticeTests(unittest.TestCase):
+    def test_every_compiled_in_component_gets_its_text_from_the_source(self):
+        data = synthetic()
+        data["source"]["notices"] = [
+            {"component": "llama.cpp", "licence": "MIT", "path": "LICENSE"},
+            {"component": "header", "licence": "Unlicense", "path": "h.h", "lines": [2, 3]},
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            tar = Path(temp) / "source.tar"
+            with tarfile.open(tar, "w") as out:
+                for name, content in [
+                    ("LICENSE", b"MIT text"),
+                    ("h.h", b"code\nlicence line one\nlicence line two\nmore code\n"),
+                ]:
+                    info = tarfile.TarInfo(data["source"]["prefix"] + name)
+                    info.size = len(content)
+                    out.addfile(info, io.BytesIO(content))
+            notice = package_release.llama_notice(data, tar)
+            self.assertIn("MIT text", notice)
+            self.assertIn("licence line one\nlicence line two", notice)
+            self.assertNotIn("more code", notice)
+            data["source"]["notices"].append(
+                {"component": "absent", "licence": "MIT", "path": "missing"}
+            )
+            with self.assertRaises(KeyError):
+                package_release.llama_notice(data, tar)
 
 
 if __name__ == "__main__":

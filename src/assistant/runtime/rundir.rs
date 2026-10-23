@@ -147,16 +147,37 @@ impl Pidfile {
 
     /// Kills a leftover child only when its PID, start time and executable all match, then
     /// clears the entry. Returns whether one was killed.
+    ///
+    /// A pidfd is opened first and the identity read after it: if the PID was reused before
+    /// the pidfd, the identity is the newcomer's and does not match; if the leftover exits and
+    /// its PID is reused after, the signal still goes through the pidfd to the old process
+    /// (gone, so nothing is signalled). A kill waits (up to 5 s) for the process to end.
     pub(crate) fn sweep(&mut self) -> bool {
+        self.sweep_with(|| {})
+    }
+
+    pub(crate) fn sweep_with(&mut self, between: impl FnOnce()) -> bool {
         let Some(entry) = self.leftover() else {
             return false;
         };
-        let matches = start_time(entry.pid) == Some(entry.start_time)
-            && executable(entry.pid).is_some_and(|exe| entry.executables.contains(&exe));
-        let killed = matches
-            && rustix::process::Pid::from_raw(entry.pid).is_some_and(|pid| {
-                rustix::process::kill_process(pid, rustix::process::Signal::KILL).is_ok()
-            });
+        let killed = super::endpoint::Watched::open(entry.pid).is_ok_and(|watched| {
+            between();
+            let matches = start_time(entry.pid) == Some(entry.start_time)
+                && executable(entry.pid).is_some_and(|exe| entry.executables.contains(&exe));
+            let killed = matches
+                && rustix::process::pidfd_send_signal(
+                    &watched.pidfd,
+                    rustix::process::Signal::KILL,
+                )
+                .is_ok();
+            if killed {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while watched.alive() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+            killed
+        });
         let _ = self.clear();
         killed
     }

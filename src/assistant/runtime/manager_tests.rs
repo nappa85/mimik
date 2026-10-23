@@ -153,6 +153,8 @@ type Probed = Vec<(Level, Result<(), String>)>;
 #[derive(Default)]
 struct FakeLauncher {
     preflight: Mutex<Option<String>>,
+    preflight_delay: Mutex<Option<Duration>>,
+    preflights: Mutex<usize>,
     probe: Mutex<Option<Probed>>,
     script: Mutex<VecDeque<Start>>,
     starts: Mutex<Vec<(u64, Level, Instant)>>,
@@ -166,6 +168,11 @@ struct FakeLauncher {
 #[async_trait]
 impl Launcher for FakeLauncher {
     async fn preflight(&self, _: Path) -> Result<(), String> {
+        *self.preflights.lock().unwrap() += 1;
+        let delay = *self.preflight_delay.lock().unwrap();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         match self.preflight.lock().unwrap().clone() {
             Some(why) => Err(why),
             None => Ok(()),
@@ -490,6 +497,73 @@ async fn too_slow_is_unavailable_with_the_numbers_and_no_retry() {
     assert_eq!(launcher.starts.lock().unwrap().len(), 1);
     assert_eq!(launcher.alive.load(Ordering::SeqCst), 0);
     assert!(matches!(assistant.state(), RuntimeState::Unavailable(_)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sample_past_the_run_cap_is_too_slow_not_a_counted_failure() {
+    // Each sample would take about 140 s: past the 90 s cap, the attempt ends "too slow" with
+    // what it saw instead of retrying.
+    let slow = Behaviour {
+        p: 0.05,
+        g: 0.35,
+        ..Behaviour::default()
+    };
+    let launcher = FakeLauncher::scripted([Start::Ok(slow)]);
+    let (_assistant, handle) = manager(&launcher);
+    let probe = handle.clone();
+    until(Duration::from_mins(15), move || {
+        matches!(probe.status().state, State::Unavailable(_))
+    })
+    .await;
+    let status = handle.status();
+    assert_eq!(
+        status.state,
+        State::Unavailable(
+            "too slow on this machine: a calibration sample took more than 90 s, the cap is 90 s"
+                .into()
+        )
+    );
+    assert_eq!(status.failures, 0);
+    assert_eq!(launcher.starts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_press_is_deduplicated_until_ready() {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let launcher = FakeLauncher::scripted([
+        Start::Ok(Behaviour::default()),
+        Start::Ok(Behaviour {
+            gate: Some(Arc::clone(&gate)),
+            ..Behaviour::default()
+        }),
+    ]);
+    let (assistant, handle) = manager(&launcher);
+    ready(&assistant).await;
+    assert_eq!(handle.restart(), Restart::Accepted);
+    let probe = handle.clone();
+    until(Duration::from_secs(60), move || {
+        probe.status().state == State::Starting("priming")
+    })
+    .await;
+    // The second generation is priming: the Restart is still running.
+    assert_eq!(handle.restart(), Restart::AlreadyRunning);
+    gate.add_permits(1);
+    ready(&assistant).await;
+    assert_eq!(handle.restart(), Restart::Accepted);
+}
+
+#[tokio::test(start_paused = true)]
+async fn restart_and_shutdown_do_not_wait_behind_a_slow_preflight() {
+    let launcher = FakeLauncher::scripted([]);
+    *launcher.preflight_delay.lock().unwrap() = Some(Duration::from_secs(3600));
+    let (_assistant, handle) = manager(&launcher);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(handle.restart(), Restart::Accepted);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // The Restart started a new session at once (a second preflight began).
+    assert_eq!(*launcher.preflights.lock().unwrap(), 2);
+    let stopping = tokio::time::timeout(Duration::from_secs(5), handle.shutdown()).await;
+    assert!(stopping.is_ok(), "shutdown waited behind the preflight");
 }
 
 #[tokio::test(start_paused = true)]

@@ -1,6 +1,7 @@
 //! The real launcher at level 3 against a fake llama-server (`examples/fake_llama_server.rs`,
 //! built by `cargo test --all-targets`), the test binary as the runner and as the probe.
 //! Level 1 needs bubblewrap and the pinned build and runs in `live_tests.rs`.
+use super::super::drain::Failed;
 use super::super::manager::{self, State};
 use super::super::manifest::File as Entry;
 use super::super::test_helper;
@@ -15,8 +16,10 @@ const RUNNER: &str = "assistant::runtime::runner::tests::helper";
 /// The probe inside its level: the test binary, its level arguments after `probe-inner`.
 #[test]
 fn helper() {
-    if test_helper::mode().as_deref() != Some("probe-inner") {
-        return;
+    match test_helper::mode().as_deref() {
+        Some("probe-inner") => {}
+        Some("shim") => std::process::exit(super::super::probe::shim()),
+        _ => return,
     }
     let args: Vec<String> = std::env::args().collect();
     let at = args
@@ -127,8 +130,14 @@ fn setup(model: &[u8], alias: &str) -> Setup {
         },
         inner: InnerCommand {
             executable: exe,
-            args: inner_args,
-            env: vec![(test_helper::VARIABLE.into(), "probe-inner".into())],
+            probe_args: inner_args,
+            probe_env: vec![(test_helper::VARIABLE.into(), "probe-inner".into())],
+            shim_args: {
+                let mut args = helper_args(HELPER);
+                args.push("shim".into());
+                args
+            },
+            shim_env: vec![(test_helper::VARIABLE.into(), "shim".into())],
         },
     };
     Setup {
@@ -319,4 +328,176 @@ async fn a_model_larger_than_available_memory_is_refused() {
         refused.starts_with("not enough memory for this model"),
         "{refused}"
     );
+}
+
+#[test]
+fn only_a_missing_shim_marker_makes_a_level_1_exit_a_sandbox_failure() {
+    let loaded = Summary {
+        failed: Failed {
+            model_load: true,
+            ..Failed::default()
+        },
+        ..Summary::default()
+    };
+    // The shim never reached its exec: the sandbox was not set up.
+    assert!(matches!(
+        classify(
+            Level::Bubblewrap,
+            false,
+            Summary::default(),
+            "exit status: 1"
+        ),
+        Fail::Sandbox(_)
+    ));
+    // After the marker, whatever the server printed (a forged "bwrap:" line included, which
+    // the drain no longer even recognises) it is a counted failure that keeps the level.
+    assert!(matches!(
+        classify(
+            Level::Bubblewrap,
+            true,
+            Summary::default(),
+            "exit status: 1"
+        ),
+        Fail::Other(_)
+    ));
+    assert!(matches!(
+        classify(Level::Bubblewrap, true, loaded, "exit status: 1"),
+        Fail::Other(why) if why.starts_with("the model could not be loaded")
+    ));
+    // Level 3 has no lower level: never a sandbox failure.
+    assert!(matches!(
+        classify(
+            Level::Unconfined,
+            false,
+            Summary::default(),
+            "exit status: 1"
+        ),
+        Fail::Other(_)
+    ));
+}
+
+/// Every process whose command line names `needle`.
+fn processes_naming(needle: &str) -> Vec<i32> {
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
+        .filter(|pid| {
+            std::fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|line| String::from_utf8_lossy(&line).contains(needle))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_failure_after_the_spawn_leaves_no_process_behind() {
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    let marker = setup.settings.data_dir.join("run").display().to_string();
+    for (generation, step) in [(1, "spawned"), (2, "recorded"), (3, "connector")] {
+        *FAULT.lock().unwrap() = Some((setup.settings.runtime_dir.clone(), step));
+        let result = launch.start(generation, Level::Unconfined, Path::Cpu).await;
+        assert!(
+            matches!(&result, Err(Fail::Other(why)) if why == &format!("injected at {step}")),
+            "{step}"
+        );
+        // The token file path names the generation directory, so the child's command line
+        // would name it: no such process is left, alive or zombie.
+        assert_eq!(processes_naming(&marker), Vec::<i32>::new(), "{step}");
+        // Nor is its generation directory.
+        assert!(
+            !setup
+                .settings
+                .data_dir
+                .join("run")
+                .join(generation.to_string())
+                .exists()
+        );
+    }
+}
+
+#[tokio::test]
+async fn gone_is_never_assumed_while_the_process_runs_past_the_grace() {
+    let mut sleeper = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let watched = Watched::open(i32::try_from(sleeper.id()).unwrap()).unwrap();
+    // The kill does nothing (as if the process could not be killed yet): past several graces
+    // the wait is still pending.
+    let pending = tokio::time::timeout(
+        Duration::from_millis(500),
+        until_gone(&watched.pidfd, Duration::from_millis(100), || {}),
+    )
+    .await;
+    assert!(pending.is_err());
+    sleeper.kill().unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        until_gone(&watched.pidfd, Duration::from_millis(100), || {}),
+    )
+    .await
+    .unwrap();
+    sleeper.wait().unwrap();
+}
+
+#[tokio::test]
+async fn a_child_dropped_by_an_interrupted_start_is_killed() {
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    let child = launch
+        .start_real(1, Level::Unconfined, Path::Cpu)
+        .await
+        .unwrap();
+    let pid = child.pid;
+    assert!(std::fs::metadata(format!("/proc/{pid}")).is_ok());
+    drop(child);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let running = !state.is_empty()
+            && !state
+                .rsplit(')')
+                .next()
+                .unwrap_or("")
+                .trim_start()
+                .starts_with('Z');
+        if !running {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the child outlived its holder"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[test]
+fn a_probe_that_only_times_out_is_retried_and_never_skips_its_level() {
+    let mut calls = 0;
+    let kept = retry_probe(Level::Bubblewrap, Duration::ZERO, || {
+        calls += 1;
+        Probe::Inconclusive("did not report within 30 s".into())
+    });
+    assert_eq!(kept, Ok(()));
+    assert_eq!(calls, PROBE_TRIES);
+    let mut calls = 0;
+    let passed = retry_probe(Level::Unconfined, Duration::ZERO, || {
+        calls += 1;
+        if calls < 2 {
+            Probe::Inconclusive("no pidfd".into())
+        } else {
+            Probe::Passed
+        }
+    });
+    assert_eq!((passed, calls), (Ok(()), 2));
+    let mut calls = 0;
+    let failed = retry_probe(Level::Bubblewrap, Duration::ZERO, || {
+        calls += 1;
+        Probe::Failed("bwrap: setup failed".into())
+    });
+    assert_eq!((failed, calls), (Err("bwrap: setup failed".into()), 1));
 }

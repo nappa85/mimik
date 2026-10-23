@@ -697,7 +697,12 @@ impl Assistant {
         let result = tokio::select! {
             result = work => Some(result),
             () = deadline => None,
-            () = run.cancel.notified() => return self.neutral(&run),
+            () = run.cancel.notified() => {
+                // A superseded or stale job's request is dropped mid-way too: the server may
+                // still be evaluating it.
+                self.presume_busy(&run);
+                return self.neutral(&run);
+            }
         };
         let now = Instant::now();
         let mut table = self.table();
@@ -713,11 +718,7 @@ impl Assistant {
         };
         match &result {
             None => {
-                *self
-                    .busy_until
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some(now + run.budgets.busy_after_expiry);
+                self.presume_busy(&run);
                 self.signal(Signal::Expired {
                     generation: run.generation,
                 });
@@ -741,6 +742,19 @@ impl Assistant {
         close(job, answer, now);
         drop(table);
         self.breaker().record(run.ticket, outcome, now.into_std());
+    }
+
+    /// After a request is dropped (deadline, supersession, a newer note), the server is
+    /// presumed busy for the calibrated prompt term, while it is still this generation's.
+    fn presume_busy(&self, run: &Run) {
+        let current = matches!(&*self.runtime(), Runtime::Ready { generation, .. } if *generation == run.generation);
+        if current {
+            *self
+                .busy_until
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(Instant::now() + run.budgets.busy_after_expiry);
+        }
     }
 
     fn neutral(&self, run: &Run) {

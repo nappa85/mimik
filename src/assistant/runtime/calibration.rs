@@ -98,6 +98,11 @@ pub(crate) enum Interrupted {
     Priming(Failure),
     Sample(Failure),
     Tokenize(Failure),
+    /// A sample ran past the path's run cap: nothing can fit then (R at the smallest bound
+    /// would exceed it too), so it is "too slow", not a failure.
+    SampleOverCap {
+        cap_s: u64,
+    },
 }
 
 impl Interrupted {
@@ -107,6 +112,9 @@ impl Interrupted {
             Self::Priming(failure) => ("the priming request", failure),
             Self::Sample(failure) => ("a calibration sample", failure),
             Self::Tokenize(failure) => ("/tokenize", failure),
+            Self::SampleOverCap { cap_s } => {
+                return format!("a calibration sample took more than {cap_s} s");
+            }
         };
         match failure {
             Failure::Status(status) => format!("{what} answered HTTP {status}"),
@@ -169,10 +177,14 @@ pub(crate) async fn calibrate(
         let text = filler(cap, variant);
         let tokens = server.tokens(&text).await.map_err(Interrupted::Tokenize)?;
         let started = tokio::time::Instant::now();
-        let timings = server
-            .plain(&text, max_tokens, true)
-            .await
-            .map_err(Interrupted::Sample)?;
+        let cap_s = path.run_cap();
+        let timings = tokio::time::timeout(
+            std::time::Duration::from_secs(cap_s),
+            server.plain(&text, max_tokens, true),
+        )
+        .await
+        .map_err(|_| Interrupted::SampleOverCap { cap_s })?
+        .map_err(Interrupted::Sample)?;
         let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
         samples.push(sample(timings, wall_ms, tokens));
         #[expect(

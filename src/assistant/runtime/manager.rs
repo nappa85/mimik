@@ -24,6 +24,7 @@ use super::server::{Health, Server};
 use super::{Level, Path};
 use crate::assistant::jobs::{Assistant, Budgets, EndReason, RuntimeEvent, Signal};
 use async_trait::async_trait;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -358,10 +359,23 @@ impl Manager {
         }
     }
 
+    /// Runs `work` unless the owner's Restart or shutdown comes first (then `work` is dropped:
+    /// a child it started is killed with it).
+    async fn interruptible<T>(&mut self, work: impl Future<Output = T>) -> Result<T, Next> {
+        tokio::select! {
+            done = work => Ok(done),
+            command = self.commands.recv() => match command {
+                Some(Command::Restart) => Err(Next::Fresh),
+                Some(Command::Shutdown(reply)) => Err(Next::Stop(reply)),
+                None => std::future::pending().await,
+            },
+        }
+    }
+
     /// The levels that passed their probe, in order; the others are recorded as skipped.
-    async fn probed(&mut self) -> Vec<Level> {
+    fn probed(&mut self, probed: Vec<(Level, Result<(), String>)>) -> Vec<Level> {
         let mut levels = Vec::new();
-        for (level, result) in self.launcher.probe(self.config.path).await {
+        for (level, result) in probed {
             match result {
                 Ok(()) => levels.push(level),
                 Err(why) => {
@@ -387,7 +401,6 @@ impl Manager {
             status.state = State::Starting("starting the model server");
             status.level = Some(level);
             status.generation = generation;
-            status.restarting = false;
             status.notes.clear();
         });
         generation
@@ -404,10 +417,20 @@ impl Manager {
             status.last_failure = None;
             status.level = None;
         });
-        if let Err(why) = self.launcher.preflight(self.config.path).await {
-            return self.hold(why).await;
+        let launcher = Arc::clone(&self.launcher);
+        match self
+            .interruptible(launcher.preflight(self.config.path))
+            .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(why)) => return self.hold(why).await,
+            Err(next) => return next,
         }
-        let levels = self.probed().await;
+        let probed = match self.interruptible(launcher.probe(self.config.path)).await {
+            Ok(probed) => probed,
+            Err(next) => return next,
+        };
+        let levels = self.probed(probed);
         let mut index = 0;
         loop {
             if self.failures >= MAX_FAILURES {
@@ -511,11 +534,15 @@ impl Manager {
     /// Start, `/health`, priming and calibration, interruptible by the owner. A failed
     /// attempt's child is gone when this returns.
     async fn attempt(&mut self, generation: u64, level: Level) -> Attempt {
-        let child = match self
-            .launcher
-            .start(generation, level, self.config.path)
-            .await
-        {
+        let launcher = Arc::clone(&self.launcher);
+        let started = tokio::select! {
+            started = launcher.start(generation, level, self.config.path) => started,
+            command = self.commands.recv() => match command {
+                Some(command) => return Attempt::Interrupted(command),
+                None => std::future::pending().await,
+            },
+        };
+        let child = match started {
             Ok(child) => child,
             Err(fail) => return Attempt::Failed(fail),
         };
@@ -570,6 +597,8 @@ impl Manager {
         ));
         self.update(|status| {
             status.state = State::Ready;
+            // A Restart ends here or at `unavailable`: a press meanwhile starts nothing.
+            status.restarting = false;
             status.calibration = Some(calibration);
             status.budgets = Some(budgets);
             status.notes = notes;
@@ -689,7 +718,9 @@ async fn measure(
         priming.elapsed().as_secs_f64()
     ));
     phase("calibrating");
-    let within = Duration::from_secs(2 * config.path.run_cap());
+    // Each sample is held to the run cap; this bounds the whole (two samples, two
+    // `/tokenize` calls).
+    let within = Duration::from_secs(2 * config.path.run_cap() + 60);
     let calibration = match tokio::time::timeout(
         within,
         calibration::calibrate(server.as_ref(), config.path, config.max_tokens, prefix),
@@ -697,6 +728,13 @@ async fn measure(
     .await
     {
         Ok(Ok(calibration)) => calibration,
+        Ok(Err(calibration::Interrupted::SampleOverCap { cap_s })) => {
+            let why = format!(
+                "too slow on this machine: a calibration sample took more than {cap_s} s, the cap is {cap_s} s"
+            );
+            log(&format!("measured: {why}"));
+            return Err(Attempt::TooSlow(why));
+        }
         Ok(Err(interrupted)) => {
             return Err(Attempt::Failed(Fail::Other(format!(
                 "calibration failed ({})",

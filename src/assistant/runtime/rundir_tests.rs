@@ -141,3 +141,42 @@ fn generation_directories_are_fresh_private_and_removed() {
     assert!(dir.path().join("run").join(PIDFILE).exists());
     assert!(Generation::create(&run, "2").is_ok());
 }
+
+#[test]
+fn a_leftover_that_exits_between_the_pidfd_and_the_check_is_never_signalled_twice() {
+    let (_dir, run) = data();
+    let mut pidfile = Pidfile::acquire(run.as_fd()).unwrap().unwrap();
+    let mut leftover = sleeper();
+    let pid = i32::try_from(leftover.id()).unwrap();
+    let exe = executable(pid).unwrap();
+    pidfile
+        .record(&Entry::of(1, pid, vec![exe]).unwrap())
+        .unwrap();
+    let mut bystander = sleeper();
+    // The leftover ends (and is reaped) after the pidfd is open, before the identity check:
+    // nothing is killed, and no other process is touched.
+    let killed = pidfile.sweep_with(|| {
+        leftover.kill().unwrap();
+        leftover.wait().unwrap();
+    });
+    assert!(!killed);
+    assert!(bystander.try_wait().unwrap().is_none());
+    assert_eq!(pidfile.leftover(), None);
+    bystander.kill().unwrap();
+    bystander.wait().unwrap();
+}
+
+#[test]
+fn a_killed_leftover_is_gone_when_the_sweep_returns() {
+    let (_dir, run) = data();
+    let mut pidfile = Pidfile::acquire(run.as_fd()).unwrap().unwrap();
+    let mut leftover = sleeper();
+    let pid = i32::try_from(leftover.id()).unwrap();
+    let exe = executable(pid).unwrap();
+    pidfile
+        .record(&Entry::of(1, pid, vec![exe]).unwrap())
+        .unwrap();
+    assert!(pidfile.sweep());
+    // Already ended: the status is there at once.
+    assert!(leftover.try_wait().unwrap().is_some());
+}

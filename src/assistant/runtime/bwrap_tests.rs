@@ -77,6 +77,20 @@ fn the_first_fixed_path_that_exists_is_used_with_every_option_probed() {
 }
 
 #[test]
+fn a_bwrap_with_file_capabilities_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = fake(dir.path(), "good", &all_options(), 0o755);
+    // Setting `security.capability` needs privileges, so the reader is injected; the real one
+    // finds none on an ordinary file.
+    assert!(!has_capabilities(&good));
+    assert_eq!(
+        locate_with(&[&good], |_| true),
+        Err(Unusable::Capabilities(good.display().to_string()))
+    );
+    assert_eq!(locate_with(&[&good], |_| false), Ok(good.clone()));
+}
+
+#[test]
 fn a_set_id_bwrap_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let proc = proc_root(dir.path(), &[]);
@@ -94,39 +108,43 @@ fn a_set_id_bwrap_is_refused() {
 }
 
 #[test]
-fn disabled_user_namespaces_are_named() {
+fn only_disabled_user_namespaces_veto_level_1_the_other_settings_explain_a_failure() {
     let dir = tempfile::tempdir().unwrap();
     let good = fake(dir.path(), "good", &all_options(), 0o755);
-    for (settings, expected) in [
+    let case = tempfile::tempdir_in(dir.path()).unwrap();
+    let proc = proc_root(case.path(), &[("sys/user/max_user_namespaces", "0\n")]);
+    assert_eq!(
+        preflight_at(&[&good], &proc),
+        Err(Unusable::UserNamespaces("user.max_user_namespaces = 0"))
+    );
+    // AppArmor's restriction and Debian's switch do not veto: the real probe decides, and they
+    // only explain its failure.
+    for (setting, hint) in [
         (
-            vec![("sys/user/max_user_namespaces", "0\n")],
-            Unusable::UserNamespaces("user.max_user_namespaces = 0"),
+            "sys/kernel/apparmor_restrict_unprivileged_userns",
+            "AppArmor restricts unprivileged user namespaces",
         ),
         (
-            vec![
-                ("sys/user/max_user_namespaces", "128000\n"),
-                ("sys/kernel/unprivileged_userns_clone", "0\n"),
-            ],
-            Unusable::UserNamespaces("kernel.unprivileged_userns_clone = 0"),
-        ),
-        (
-            vec![("sys/kernel/apparmor_restrict_unprivileged_userns", "1\n")],
-            Unusable::AppArmor,
+            "sys/kernel/unprivileged_userns_clone",
+            "kernel.unprivileged_userns_clone = 0",
         ),
     ] {
         let case = tempfile::tempdir_in(dir.path()).unwrap();
-        let proc = proc_root(case.path(), &settings);
-        assert_eq!(preflight_at(&[&good], &proc), Err(expected));
+        let value = if setting.contains("apparmor") {
+            "1\n"
+        } else {
+            "0\n"
+        };
+        let proc = proc_root(case.path(), &[(setting, value)]);
+        assert!(preflight_at(&[&good], &proc).is_ok(), "{setting}");
+        assert!(
+            namespace_hint(&proc).unwrap().starts_with(hint),
+            "{setting}"
+        );
     }
     let case = tempfile::tempdir_in(dir.path()).unwrap();
-    let proc = proc_root(
-        case.path(),
-        &[
-            ("sys/user/max_user_namespaces", "128000\n"),
-            ("sys/kernel/apparmor_restrict_unprivileged_userns", "0\n"),
-        ],
-    );
-    assert!(preflight_at(&[&good], &proc).is_ok());
+    let proc = proc_root(case.path(), &[("sys/user/max_user_namespaces", "128000\n")]);
+    assert_eq!(namespace_hint(&proc), None);
 }
 
 fn profile(size: bool) -> Profile {

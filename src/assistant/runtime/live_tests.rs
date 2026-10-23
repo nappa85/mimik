@@ -60,8 +60,14 @@ fn settings(scratch: &std::path::Path, inner: &str, inner_env: Vec<(String, Stri
         },
         inner: InnerCommand {
             executable: exe,
-            args,
-            env: env_vars,
+            probe_args: args,
+            probe_env: env_vars,
+            shim_args: {
+                let mut args = helper_args(HELPER);
+                args.push("shim".into());
+                args
+            },
+            shim_env: vec![(test_helper::VARIABLE.into(), "shim".into())],
         },
     }
 }
@@ -88,6 +94,7 @@ fn helper() {
             std::process::exit(super::super::probe::inner(&args[at + 1..]));
         }
         "adversary" => adversary(),
+        "shim" => std::process::exit(super::super::probe::shim()),
         "mimik" => play_mimik(),
         other => panic!("unknown helper mode {other}"),
     }
@@ -153,8 +160,19 @@ fn adversary() {
         }
         total
     };
+    // What the command inherits: the shim closed bwrap's status, seccomp, token, directory and
+    // marker descriptors before its exec.
+    let descriptors: Vec<i64> = std::fs::read_dir("/proc/self/fd")
+        .map(|listing| {
+            listing
+                .filter_map(Result::ok)
+                .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
     let report = json!({
         "ok": true,
+        "descriptors": descriptors,
         "tcp_host_listener": connect(&format!("127.0.0.1:{port}")),
         "tcp_lan": if lan.is_empty() { json!(null) } else { connect(&format!("{lan}:{port}")) },
         "tcp_public": connect("1.1.1.1:443"),
@@ -184,7 +202,7 @@ fn play_mimik() {
             tokio::task::spawn_blocking(move || probing.probe_level(Path::Cpu, Level::Bubblewrap))
                 .await
                 .unwrap();
-        assert_eq!(probed, Ok(()));
+        assert_eq!(probed, Probe::Passed);
         let child = launch.start(1, Level::Bubblewrap, Path::Cpu).await.unwrap();
         // "Ready" waits for /health; "starting" reports at once, while the server loads.
         if std::env::var("MIMIK_LIVE_KILL_AT").as_deref() != Ok("starting") {
@@ -244,8 +262,14 @@ fn live_the_probe_reaches_level_1_and_level_3() {
     runtime
         .block_on(Launch(Arc::clone(&real)).preflight(Path::Cpu))
         .unwrap();
-    assert_eq!(real.probe_level(Path::Cpu, Level::Bubblewrap), Ok(()));
-    assert_eq!(real.probe_level(Path::Cpu, Level::Unconfined), Ok(()));
+    assert_eq!(
+        real.probe_level(Path::Cpu, Level::Bubblewrap),
+        Probe::Passed
+    );
+    assert_eq!(
+        real.probe_level(Path::Cpu, Level::Unconfined),
+        Probe::Passed
+    );
 }
 
 async fn raw(child: &RealChild, path: &str, token: Option<&str>, body: &Value) -> (u16, Value) {
@@ -285,7 +309,7 @@ async fn started(scratch: &std::path::Path, level: Level) -> (Launch, Arc<RealCh
     let probed = tokio::task::spawn_blocking(move || probing.probe_level(Path::Cpu, level))
         .await
         .unwrap();
-    assert_eq!(probed, Ok(()));
+    assert_eq!(probed, Probe::Passed);
     let child = launch.start_real(1, level, Path::Cpu).await.unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     loop {
@@ -423,7 +447,7 @@ fn live_an_adversary_in_the_level_1_sandbox_reaches_nothing() {
         .block_on(Launch(Arc::clone(&real)).preflight(Path::Cpu))
         .unwrap();
     let (report, verdict) = real.inner_report(Path::Cpu, Level::Bubblewrap).unwrap();
-    assert_eq!(verdict, Ok(()), "{report}");
+    assert_eq!(verdict, Probe::Passed, "{report}");
     let refused = |value: &Value| value.as_i64().is_some_and(|errno| errno != 0);
     assert!(refused(&report["tcp_host_listener"]), "{report}");
     if !lan.is_empty() {
@@ -435,6 +459,23 @@ fn live_an_adversary_in_the_level_1_sandbox_reaches_nothing() {
     assert!(refused(&report["host_socket"]), "{report}");
     assert_eq!(report["home_visible"], json!(false));
     assert_eq!(report["fork"], json!(libc::EPERM));
+    // Only 0, 1, 2 and the listing's own descriptor.
+    let descriptors: Vec<i64> = report["descriptors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|fd| fd.as_i64().unwrap())
+        .collect();
+    assert!(
+        descriptors.iter().filter(|fd| **fd > 2).count() <= 1,
+        "{descriptors:?}"
+    );
+    for inherited in [4, 5, 6, 7, 8, 10, 12, 16] {
+        assert!(
+            !descriptors.contains(&inherited),
+            "{inherited} is open: {descriptors:?}"
+        );
+    }
     // Sized temporary space, when this bubblewrap has --size.
     if real.held().bwrap.as_ref().is_some_and(|bwrap| bwrap.size) {
         assert!(
@@ -512,4 +553,146 @@ fn live_sigkill_of_mimik_kills_the_whole_sandbox() {
 #[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
 fn live_sigkill_of_mimik_during_startup_kills_the_whole_sandbox() {
     sigkill_of_mimik_ends_the_sandbox("starting");
+}
+
+/// A fake build in `scratch`: the fake llama-server (`MIMIK_LIVE_FAKE_SERVER`) as the only
+/// executable, a fake model, the test binary as runner and shim.
+fn fake_build(scratch: &std::path::Path, alias: &str) -> Arc<Real> {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+    let server = std::fs::read(env("MIMIK_LIVE_FAKE_SERVER")).unwrap();
+    let cpu = scratch.join("runtime/cpu");
+    std::fs::create_dir_all(&cpu).unwrap();
+    std::fs::write(cpu.join("llama-server"), &server).unwrap();
+    std::fs::set_permissions(
+        cpu.join("llama-server"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let models = scratch.join("models");
+    std::fs::create_dir(&models).unwrap();
+    std::fs::set_permissions(&models, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let model = b"GGUF a fake model";
+    std::fs::write(models.join("m.gguf"), model).unwrap();
+    let mut settings = settings(scratch, "probe-inner", Vec::new());
+    settings.runtime_dir = scratch.join("runtime");
+    settings.models_dir = models;
+    settings.model = "m.gguf".into();
+    settings.model_sha256 = hex::encode(Sha256::digest(model));
+    settings.alias = alias.into();
+    let build = super::super::manifest::Build {
+        path: "cpu".into(),
+        directory: "cpu".into(),
+        server: "llama-server".into(),
+        files: vec![super::super::manifest::File {
+            name: "llama-server".into(),
+            sha256: hex::encode(Sha256::digest(&server)),
+            size: server.len() as u64,
+            mode: "0755".into(),
+        }],
+    };
+    Arc::new(Real::with_build(settings, Some(build)))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+async fn live_a_server_that_forges_bubblewraps_errors_keeps_level_1() {
+    use super::super::manager::{self, State};
+    use crate::assistant::jobs::Assistant;
+    let scratch = scratch();
+    let real = fake_build(scratch.path(), "forge-bwrap");
+    let assistant = Assistant::new();
+    let handle = manager::spawn(
+        assistant,
+        Arc::new(Launch(Arc::clone(&real))),
+        manager::Config {
+            path: Path::Cpu,
+            max_tokens: 64,
+        },
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    while handle.status().failures == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{:?}",
+            handle.status()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let status = handle.status();
+    // The forged lines did not count as a sandbox failure: the level is kept, the failure
+    // counted, no unconfined start.
+    assert_eq!(status.level, Some(Level::Bubblewrap), "{status:?}");
+    assert!(
+        !status
+            .skipped
+            .iter()
+            .any(|(level, _)| *level == Level::Bubblewrap),
+        "{status:?}"
+    );
+    assert!(matches!(&status.state, State::Starting(_)), "{status:?}");
+    assert!(
+        status
+            .last_failure
+            .as_deref()
+            .is_some_and(|why| why.starts_with("the model server exited")),
+        "{status:?}"
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+async fn live_a_failure_after_the_level_1_spawn_leaves_no_process_behind() {
+    let scratch = scratch();
+    // The alias is in the command lines of bwrap, its reaper and the server: a unique one
+    // finds this test's processes and no other's.
+    let alias = format!(
+        "fake-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let real = fake_build(scratch.path(), &alias);
+    let launch = Launch(Arc::clone(&real));
+    launch.preflight(Path::Cpu).await.unwrap();
+    let probing = Arc::clone(&real);
+    let probed =
+        tokio::task::spawn_blocking(move || probing.probe_level(Path::Cpu, Level::Bubblewrap))
+            .await
+            .unwrap();
+    assert_eq!(probed, Probe::Passed);
+    let needle = alias;
+    for (generation, step) in [
+        (1, "spawned"),
+        (2, "recorded"),
+        (3, "started"),
+        (4, "connector"),
+    ] {
+        *FAULT.lock().unwrap() = Some((real.settings.runtime_dir.clone(), step));
+        let result = launch.start(generation, Level::Bubblewrap, Path::Cpu).await;
+        assert!(result.is_err(), "{step}");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let left: Vec<i32> = std::fs::read_dir("/proc")
+                .unwrap()
+                .flatten()
+                .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
+                .filter(|pid| {
+                    alive(*pid)
+                        && std::fs::read(format!("/proc/{pid}/cmdline"))
+                            .is_ok_and(|line| String::from_utf8_lossy(&line).contains(&needle))
+                })
+                .collect();
+            if left.is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{step}: {left:?} survived"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 }

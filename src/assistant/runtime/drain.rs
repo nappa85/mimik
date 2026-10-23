@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 pub(crate) const LINE_BOUND: usize = 4096;
 
 /// What a line of the child's output can signal.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Output {
     /// `llama_server: listening on …` (a hint for when to connect, never the proof).
     Listening,
@@ -22,15 +22,12 @@ pub(crate) enum Output {
     ModelLoadError,
     /// A backend or device could not be initialised.
     DeviceError,
-    /// bubblewrap's own error (`bwrap: …`): the sandbox could not be set up.
-    SandboxError,
     /// The server could not bind its socket or port.
     BindError,
 }
 
-static PATTERNS: LazyLock<[regex::Regex; 7]> = LazyLock::new(|| {
+static PATTERNS: LazyLock<[regex::Regex; 6]> = LazyLock::new(|| {
     [
-        regex::Regex::new(r"^bwrap: ").expect("pattern"),
         regex::Regex::new(r"(?i)(couldn't bind|could not bind|failed to bind|address already in use)")
             .expect("pattern"),
         regex::Regex::new(r"llama_server: listening on ").expect("pattern"),
@@ -47,10 +44,7 @@ static PATTERNS: LazyLock<[regex::Regex; 7]> = LazyLock::new(|| {
 
 /// The event one line signals, if any.
 pub(crate) fn classify(line: &str) -> Option<Output> {
-    let [sandbox, bind, listening, build, offloaded, model, device] = &*PATTERNS;
-    if sandbox.is_match(line) {
-        return Some(Output::SandboxError);
-    }
+    let [bind, listening, build, offloaded, model, device] = &*PATTERNS;
     if bind.is_match(line) {
         return Some(Output::BindError);
     }
@@ -124,18 +118,55 @@ pub(crate) fn drain(mut reader: impl Read, mut event: impl FnMut(Output)) {
     }
 }
 
-/// Drains `reader` on its own thread, sending events to `events`.
+/// What the child's output signalled so far: a fixed-size summary, so memory stays bounded
+/// however many matching lines the child prints.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Summary {
+    pub listening: bool,
+    pub failed: Failed,
+    pub build: Option<u32>,
+    pub offloaded: Option<(u32, u32)>,
+}
+
+/// The failures the child's output reported.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Failed {
+    pub model_load: bool,
+    pub device: bool,
+    pub bind: bool,
+}
+
+impl Summary {
+    pub(crate) fn record(&mut self, event: Output) {
+        match event {
+            Output::Listening => self.listening = true,
+            Output::ModelLoadError => self.failed.model_load = true,
+            Output::DeviceError => self.failed.device = true,
+            Output::BindError => self.failed.bind = true,
+            Output::Build(build) => self.build = Some(build),
+            Output::Offloaded { layers, of } => self.offloaded = Some((layers, of)),
+        }
+    }
+}
+
+/// Drains `reader` on its own thread into `summary`, then calls `done`.
 pub(crate) fn spawn(
     name: &str,
     reader: impl Read + Send + 'static,
-    events: tokio::sync::mpsc::UnboundedSender<Output>,
+    summary: &std::sync::Arc<std::sync::Mutex<Summary>>,
+    done: impl FnOnce() + Send + 'static,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let summary = std::sync::Arc::clone(summary);
     std::thread::Builder::new()
         .name(format!("assistant-{name}"))
         .spawn(move || {
             drain(reader, |event| {
-                let _ = events.send(event);
+                summary
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .record(event);
             });
+            done();
         })
 }
 
@@ -165,9 +196,10 @@ mod tests {
             classify("0.03.067.149 I slot print_timing: id  0 | task 0 | prompt eval time"),
             None
         );
+        // The child's output never says the sandbox failed: that is the shim's marker alone.
         assert_eq!(
             classify("bwrap: Can't find source path /nonexistent: No such file or directory"),
-            Some(Output::SandboxError)
+            None
         );
         assert_eq!(
             classify("srv    init: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 9"),
@@ -193,6 +225,39 @@ mod tests {
             self.left -= n;
             Ok(n)
         }
+    }
+
+    #[test]
+    fn a_flood_of_matching_lines_keeps_a_fixed_summary() {
+        // A million matching lines through the real collector: a fixed-size summary, and the
+        // thread reports its end.
+        let mut text = Vec::new();
+        for n in 0..1_000_000_u32 {
+            text.extend_from_slice(format!("build: {}\n", n % 7).as_bytes());
+        }
+        text.extend_from_slice(
+            b"llama_server: listening on x\nload_tensors: offloaded 3/4 layers to GPU\n",
+        );
+        let summary = std::sync::Arc::new(std::sync::Mutex::new(Summary::default()));
+        let (sender, ended) = std::sync::mpsc::channel();
+        spawn("test", std::io::Cursor::new(text), &summary, move || {
+            sender.send(()).unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+        ended.recv().unwrap();
+        let summary = *summary.lock().unwrap();
+        assert_eq!(
+            summary,
+            Summary {
+                listening: true,
+                build: Some(999_999 % 7),
+                offloaded: Some((3, 4)),
+                ..Summary::default()
+            }
+        );
+        assert!(std::mem::size_of::<Summary>() < 64);
     }
 
     #[test]

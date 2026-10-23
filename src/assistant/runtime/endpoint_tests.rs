@@ -280,3 +280,23 @@ async fn the_directory_descriptor_path_works_past_the_sun_path_limit() {
     let _ = accepted.write_all(b"z");
     let _ = stream.as_fd();
 }
+
+#[tokio::test]
+async fn an_entry_that_is_not_a_socket_is_never_connected() {
+    // A link (to a real socket elsewhere) or a plain file where the socket should be.
+    let directory = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let _real = std::os::unix::net::UnixListener::bind(elsewhere.path().join("real.sock")).unwrap();
+    std::os::unix::fs::symlink(
+        elsewhere.path().join("real.sock"),
+        directory.path().join(SOCKET),
+    )
+    .unwrap();
+    let dir = files::open_dir(directory.path(), files::Owners::Mine, false).unwrap();
+    let error = connect_in(&dir).await.err().unwrap();
+    assert!(error.to_string().contains("not a socket"), "{error}");
+    std::fs::remove_file(directory.path().join(SOCKET)).unwrap();
+    std::fs::write(directory.path().join(SOCKET), b"").unwrap();
+    let error = connect_in(&dir).await.err().unwrap();
+    assert!(error.to_string().contains("not a socket"), "{error}");
+}

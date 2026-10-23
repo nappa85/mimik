@@ -2,7 +2,9 @@
 //! flag vector, refuses a model that is not GGUF, serves `/health` without the token and
 //! everything else only with it (from `--api-key-file`), on the Unix socket or the port it
 //! is given, and answers priming, calibration samples and streamed jobs with synthetic
-//! timings. `--alias fail-bind` makes it fail as a server that cannot bind its port does.
+//! timings. `--alias fail-bind` makes it fail as a server that cannot bind its port does;
+//! `--alias forge-bwrap` prints bubblewrap's error lines and exits, as a compromised server
+//! trying to be restarted unconfined would.
 //!
 //! Plain blocking `std` (one thread per connection, HTTP/1.1, `Connection: close`): it runs
 //! under the model server's seccomp program, which refuses the socket pair an async
@@ -157,6 +159,14 @@ fn main() {
         .is_ok();
     if !ok || &magic != b"GGUF" {
         eprintln!("srv    load_model: failed to load model, '{model}'");
+        std::process::exit(1);
+    }
+    if value_of(&args, "--alias").as_deref() == Some("forge-bwrap") {
+        // What a compromised server could print to look like a sandbox that failed to set up,
+        // once it has been running a moment (so its start went through).
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        eprintln!("bwrap: Can't mount proc on /newroot/proc: Operation not permitted");
+        println!("bwrap: setup failed");
         std::process::exit(1);
     }
     if value_of(&args, "--alias").as_deref() == Some("fail-bind") {

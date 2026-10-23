@@ -270,6 +270,66 @@ fn cli_probe(args: &[String]) -> i32 {
     i32::from(!level_one)
 }
 
+/// The variable that carries the shim's spec into the sandbox.
+pub(crate) const SHIM_VARIABLE: &str = "MIMIK_SHIM";
+
+/// What the shim executes, and where it reports that it reached the exec.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ShimSpec {
+    /// The inherited descriptor the marker is written to.
+    pub marker: i32,
+    pub argv: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+/// The marker written just before the exec.
+pub(crate) const MARKER: &[u8] = b"exec\n";
+
+/// Inside the level-1 sandbox, in place of the command: writes the marker on its
+/// descriptor, closes every descriptor but 0, 1 and 2 (bwrap's status, seccomp, token and
+/// directory descriptors included), then executes the command with exactly its environment.
+/// The marker is the only proof that the sandbox was set up: whatever the command prints or
+/// does later, a marked start is never a sandbox failure (it cannot unsend the marker).
+pub(crate) fn shim() -> i32 {
+    use std::os::unix::process::CommandExt;
+    let Some(spec) = std::env::var(SHIM_VARIABLE)
+        .ok()
+        .and_then(|text| serde_json::from_str::<ShimSpec>(&text).ok())
+    else {
+        return 2;
+    };
+    if spec.argv.is_empty() {
+        return 2;
+    }
+    // SAFETY: the marker descriptor is inherited and used only here, by number.
+    let marker = unsafe { std::os::fd::BorrowedFd::borrow_raw(spec.marker) };
+    if rustix::io::write(marker, MARKER).ok() != Some(MARKER.len()) {
+        return 3;
+    }
+    let listing: Vec<i32> = std::fs::read_dir("/proc/self/fd")
+        .map(|listing| {
+            listing
+                .filter_map(Result::ok)
+                .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    for fd in listing {
+        if fd > 2 {
+            // SAFETY: closing every inherited descriptor but the standard ones before the exec;
+            // nothing in this process uses them afterwards.
+            unsafe { libc::close(fd) };
+        }
+    }
+    let error = std::process::Command::new(&spec.argv[0])
+        .args(&spec.argv[1..])
+        .env_clear()
+        .envs(spec.env)
+        .exec();
+    drop(error);
+    127
+}
+
 /// `mimik assistant-runner …`. Returns the exit code.
 pub fn main(args: &[String]) -> i32 {
     match args {
@@ -278,6 +338,7 @@ pub fn main(args: &[String]) -> i32 {
             _ => runner::exit::SPEC,
         },
         [flag, rest @ ..] if flag == "--probe-inner" => inner(rest),
+        [flag] if flag == "--shim" => shim(),
         [flag, rest @ ..] if flag == "--probe" => cli_probe(rest),
         _ => 2,
     }

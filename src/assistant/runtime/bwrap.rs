@@ -52,6 +52,9 @@ pub(crate) const TOKEN: &str = "/run/token";
 pub(crate) enum Unusable {
     Missing,
     SetId(String),
+    /// It carries file capabilities (`security.capability`): not the unprivileged setup this
+    /// design assumes.
+    Capabilities(String),
     /// The installed bwrap lacks this option.
     Option(&'static str),
     /// Its help text could not be read.
@@ -67,6 +70,7 @@ impl std::fmt::Display for Unusable {
         match self {
             Self::Missing => f.write_str("bubblewrap is not installed (/usr/bin/bwrap or /bin/bwrap)"),
             Self::SetId(path) => write!(f, "{path} is set-user-ID or set-group-ID"),
+            Self::Capabilities(path) => write!(f, "{path} has file capabilities"),
             Self::Option(option) => write!(f, "the installed bubblewrap lacks {option}"),
             Self::Help => f.write_str("the installed bubblewrap's options cannot be read"),
             Self::UserNamespaces(setting) => {
@@ -87,8 +91,26 @@ pub(crate) struct Bwrap {
     pub size: bool,
 }
 
+/// Whether a file carries file capabilities.
+fn has_capabilities(path: &Path) -> bool {
+    let mut value = [0_u8; 64];
+    // No such attribute, or no attribute support: none. Anything else, including an error
+    // that cannot tell, is refused as if it had them.
+    !matches!(
+        rustix::fs::getxattr(path, "security.capability", &mut value),
+        Err(rustix::io::Errno::NODATA | rustix::io::Errno::NOTSUP)
+    )
+}
+
 /// The first of `candidates` that exists.
 fn locate(candidates: &[&Path]) -> Result<PathBuf, Unusable> {
+    locate_with(candidates, has_capabilities)
+}
+
+fn locate_with(
+    candidates: &[&Path],
+    capabilities: impl Fn(&Path) -> bool,
+) -> Result<PathBuf, Unusable> {
     for candidate in candidates {
         let Ok(metadata) = std::fs::metadata(candidate) else {
             continue;
@@ -98,6 +120,9 @@ fn locate(candidates: &[&Path]) -> Result<PathBuf, Unusable> {
         }
         if metadata.permissions().mode() & 0o6000 != 0 {
             return Err(Unusable::SetId(candidate.display().to_string()));
+        }
+        if capabilities(candidate) {
+            return Err(Unusable::Capabilities(candidate.display().to_string()));
         }
         return Ok(candidate.to_path_buf());
     }
@@ -139,25 +164,30 @@ fn lists(help: &str, option: &str) -> bool {
         .any(|word| word == option)
 }
 
-/// The sysctl settings that disable unprivileged user namespaces, read from `root`.
+fn sysctl(root: &Path, name: &str) -> Option<u64> {
+    std::fs::read_to_string(root.join(name))
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+}
+
+/// The one setting that rules user namespaces out for certain, read from `root`.
 fn namespaces(root: &Path) -> Result<(), Unusable> {
-    let read = |name: &str| {
-        std::fs::read_to_string(root.join(name))
-            .ok()
-            .and_then(|text| text.trim().parse::<u64>().ok())
-    };
-    if read("sys/user/max_user_namespaces") == Some(0) {
+    if sysctl(root, "sys/user/max_user_namespaces") == Some(0) {
         return Err(Unusable::UserNamespaces("user.max_user_namespaces = 0"));
     }
-    if read("sys/kernel/unprivileged_userns_clone") == Some(0) {
-        return Err(Unusable::UserNamespaces(
-            "kernel.unprivileged_userns_clone = 0",
-        ));
-    }
-    if read("sys/kernel/apparmor_restrict_unprivileged_userns") == Some(1) {
-        return Err(Unusable::AppArmor);
-    }
     Ok(())
+}
+
+/// Settings that may explain a failed level-1 probe; they decide nothing (a distribution's
+/// `AppArmor` profile for `bwrap`, for example, may still allow it).
+pub(crate) fn namespace_hint(root: &Path) -> Option<String> {
+    if sysctl(root, "sys/kernel/unprivileged_userns_clone") == Some(0) {
+        return Some("kernel.unprivileged_userns_clone = 0".into());
+    }
+    if sysctl(root, "sys/kernel/apparmor_restrict_unprivileged_userns") == Some(1) {
+        return Some(Unusable::AppArmor.to_string());
+    }
+    None
 }
 
 /// The preflight over `candidates` with sysctls under `proc` (tests inject both).

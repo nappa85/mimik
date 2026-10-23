@@ -138,10 +138,24 @@ pub(crate) fn check_peer(stream: &impl std::os::fd::AsFd, sandbox: &Sandbox) -> 
     Ok(())
 }
 
-/// Connects to the socket in `directory` through the directory's descriptor.
+/// Connects to the socket in `directory` through the directory's descriptor, once the entry
+/// is a socket (not a link or anything else; the peer check decides whose it is).
 pub(crate) async fn connect_in(directory: &OwnedFd) -> io::Result<tokio::net::UnixStream> {
+    let entry = rustix::fs::statat(directory, SOCKET, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
+    if rustix::fs::FileType::from_raw_mode(entry.st_mode) != rustix::fs::FileType::Socket {
+        return Err(refused("the socket entry is not a socket"));
+    }
     tokio::net::UnixStream::connect(format!("/proc/self/fd/{}/{SOCKET}", directory.as_raw_fd()))
         .await
+}
+
+/// Runs a `/proc` scan off the async runtime.
+async fn blocking<T: Send + 'static>(
+    scan: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
+    tokio::task::spawn_blocking(scan)
+        .await
+        .map_err(|_| io::Error::other("the endpoint check did not finish"))?
 }
 
 impl Connect for SandboxSocket {
@@ -150,7 +164,8 @@ impl Connect for SandboxSocket {
         let sandbox = Arc::clone(&self.sandbox);
         Box::pin(async move {
             let stream = connect_in(&directory).await?;
-            check_peer(&stream, &sandbox)?;
+            let fd = std::os::fd::AsFd::as_fd(&stream).try_clone_to_owned()?;
+            blocking(move || check_peer(&fd, &sandbox)).await?;
             Ok(Stream::Unix(stream))
         })
     }
@@ -243,9 +258,10 @@ impl Connect for Loopback {
         let port = self.port;
         let child = Arc::clone(&self.child);
         Box::pin(async move {
-            listening(port, &child)?;
+            let before = Arc::clone(&child);
+            blocking(move || listening(port, &before)).await?;
             let stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await?;
-            listening(port, &child)?;
+            blocking(move || listening(port, &child)).await?;
             Ok(Stream::Tcp(stream))
         })
     }

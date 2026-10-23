@@ -27,14 +27,35 @@ def stage_llama(fetched, stage, data=None):
     return data
 
 
-def llama_notice(data):
-    return (
+def llama_notice(data, tar_path=None):
+    """The notice for `llama/`: every component compiled into it, its text copied from the
+    pinned (hash-verified) source tar."""
+    out = [
         "\n## llama.cpp and ggml (llama/)\n\n"
         f"The official llama.cpp release {data['llama_cpp']['tag']} "
-        f"({data['llama_cpp']['repository']}), every file of `llama/` built from it: MIT "
-        "License, Copyright (c) 2023-2026 The ggml authors; the full text is "
-        "`llama/cpu/LICENSE`.\n"
-    )
+        f"({data['llama_cpp']['repository']}): every file of `llama/` is built from it. MIT "
+        "License, Copyright (c) 2023-2026 The ggml authors (`llama/cpu/LICENSE`). Components "
+        "compiled into it, with their licences:\n"
+    ]
+    notices = data["source"].get("notices", [])
+    for notice in notices:
+        out.append(f"\n- {notice['component']}: {notice['licence']}")
+    out.append("\n")
+    if tar_path is not None:
+        prefix = data["source"]["prefix"]
+        with tarfile.open(tar_path) as tar:
+            for notice in notices:
+                member = tar.extractfile(prefix + notice["path"])
+                if member is None:
+                    raise ValueError(f"{notice['path']}: not in the source archive")
+                text = member.read().decode("utf-8")
+                if "lines" in notice:
+                    first, last = notice["lines"]
+                    text = "".join(text.splitlines(keepends=True)[first - 1 : last])
+                if not text.strip():
+                    raise ValueError(f"{notice['path']}: no licence text")
+                out.append(f"\n### {notice['component']}\n\n```\n{text.rstrip()}\n```\n")
+    return "".join(out)
 
 
 def compress_source(fetched, data, output):
@@ -89,7 +110,7 @@ def main():
     ]:
         shutil.copy2(original, stage / filename)
     with open(stage / "THIRD-PARTY-NOTICES.md", "a", encoding="utf-8") as out:
-        out.write(llama_notice(llama))
+        out.write(llama_notice(llama, args.llama / llama["source"]["name"]))
     (stage / "BUILD.txt").write_text(
         f"Version: {args.version}\nRevision: {args.revision}\nRust: {toolchain()}\n"
         f"llama.cpp: {llama['llama_cpp']['tag']} (build {llama['llama_cpp']['build']}, "

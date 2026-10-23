@@ -788,3 +788,26 @@ async fn expiries_and_completed_exchanges_are_signalled_to_the_runtime() {
     }
     assert_eq!(signals.try_recv(), Ok(Signal::Completed { generation: 1 }));
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_superseded_running_job_also_keeps_the_server_busy() {
+    let (stub, gate) = gated(3);
+    let mut busy = budgets();
+    busy.queue_wait = Duration::from_secs(120);
+    busy.busy_after_expiry = Duration::from_secs(30);
+    let assistant = ready(stub, busy);
+    let (first, _) = start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
+    settle().await;
+    assert_eq!(assistant.poll(1, 1, first), Poll::Running);
+    // A newer note of the same account supersedes the running job: its request is dropped.
+    let (second, _) = start(&assistant, 1, origin(1, "field:hp", 6)).unwrap();
+    settle().await;
+    assert_eq!(assistant.poll(1, 1, first), Poll::Done(Answer::Superseded));
+    tokio::time::advance(Duration::from_secs(10)).await;
+    settle().await;
+    assert_eq!(assistant.poll(1, 1, second), Poll::Queued);
+    tokio::time::advance(Duration::from_secs(21)).await;
+    settle().await;
+    assert_eq!(assistant.poll(1, 1, second), Poll::Running);
+    gate.add_permits(3);
+}
