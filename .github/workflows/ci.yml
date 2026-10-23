@@ -311,11 +311,11 @@ jobs:
             assistant::runtime::runner:: assistant::runtime::launch::live_tests:: \
             --skip live_gpu_ \
             2>&1 | tee target/confinement.log
-          # A filter that matches too little must not pass: at least the 38 tests of this
+          # A filter that matches too little must not pass: at least the 40 tests of this
           # revision ran, none failed or was ignored.
           ran=$(grep -oE '^test result: ok\. [0-9]+ passed; 0 failed; 0 ignored' target/confinement.log | grep -oE '[0-9]+' | head -n 1)
-          if [ "${ran:-0}" -lt 38 ]; then
-            echo "only ${ran:-0} confinement tests ran; expected at least 38"
+          if [ "${ran:-0}" -lt 40 ]; then
+            echo "only ${ran:-0} confinement tests ran; expected at least 40"
             exit 1
           fi
 

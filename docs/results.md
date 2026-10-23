@@ -19,16 +19,23 @@ D 1, Q 50 s, busy after expiry 12 s. **2 threads (the weekday dev cap):** primin
 "too slow" (a sample took more than 90 s): the CPU path does not fit at 2 threads. Server
 measurements at 5 threads: generation 121.4 and 121.6 ms per token without the grammar, 110.9 to
 113.8 with it (the grammar costs nothing measurable); a rendered 1 KiB job is 217 to 224 prompt
-tokens with about 1,770 cached; a superseding job's first token comes 12.0 s after a
-mid-generation cancel and 20.45 s after a mid-prompt cancel (the cancelled request keeps the
-slot busy until its current work ends).
+tokens with about 1,770 cached. The superseding-job timings (first token 12.0 s after a
+mid-generation cancel and 20.45 s after a mid-prompt cancel) came from the measuring helper
+before its cancel deadline was made absolute and its cancels recorded: on the CPU path no chunk
+arrives during prompt evaluation, so its 3 s inactivity timeout did fire mid-prompt, but the
+cancel point was not recorded, so treat them as indicative and **to re-measure** with the fixed
+helper (`tools/assist_runtime_measure.py server` now records whether each cancel preceded the
+end of the stream and how many tokens had arrived).
 
 **GPU path (RX 6650 XT, Vulkan build, the shipped code path):** `ready` at level 1 with
 health after 1.5 s and priming 1,806 tokens in 1.5 s; samples W 5.07 and 4.99 s (prompt about
 1,253 tokens in 1.03 s, 352 generated in about 4.0 s, 11.5 ms per token); B 4,096 bytes, N(B)
 1,245 tokens, R 15 s, D 4, Q 60 s, busy after expiry 2 s. Natively: 0.84 ms per prompt token;
-generation 11.0 ms per token with the grammar against 10.9 to 11.2 without it; a superseding
-first token 0.27 s after a mid-generation cancel and 0.26 s after a mid-prompt one. The three
+generation 11.0 ms per token with the grammar against 10.9 to 11.2 without it. The GPU
+cancellation claims (a superseding first token 0.27 s and 0.26 s after a mid-generation and a
+mid-prompt cancel) are **not established; to re-measure**: the helper's 3 s deadline was an
+inactivity timeout that frequent chunks postponed, and GPU prompt evaluation ends in about
+1 s, so the "mid-prompt" request most likely ran to its end. The three
 `live_gpu_*` tests passed: ready with GPU budgets; killing only the llama-server during a real
 job ends the job `Restarted` and breaker-neutral, the old sandbox is gone before the CPU launch,
 the CPU path comes up at level 1 uncounted and a following job works; killing the whole sandbox

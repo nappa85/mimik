@@ -195,6 +195,8 @@ struct FakeLauncher {
     paths: Mutex<Vec<Path>>,
     device: Mutex<Option<DeviceView>>,
     device_notes: Mutex<Vec<String>>,
+    /// Holds the CPU probe until notified.
+    cpu_probe_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
     script: Mutex<VecDeque<Start>>,
     starts: Mutex<Vec<(u64, Level, Instant)>>,
     children: Mutex<Vec<Arc<FakeChild>>>,
@@ -239,6 +241,10 @@ impl Launcher for FakeLauncher {
                     (Level::Unconfined, Ok(())),
                 ]
             });
+        }
+        let gate = self.cpu_probe_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.notified().await;
         }
         self.probe.lock().unwrap().clone().unwrap_or_else(|| {
             vec![
@@ -975,6 +981,29 @@ async fn a_gpu_child_exit_or_hang_while_ready_moves_to_the_cpu_uncounted() {
         assert!(status.gpu_note.is_some());
         assert!(!launcher.coexisted.load(Ordering::SeqCst));
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_page_state_leaves_ready_the_moment_the_gpu_fails_over_to_the_cpu() {
+    let launcher = FakeLauncher::scripted([]);
+    let (assistant, handle) = gpu_manager(&launcher);
+    ready(&assistant).await;
+    // The CPU probe is held pending, so the state right after the fallback stays observable.
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *launcher.cpu_probe_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    launcher.child(0).crash();
+    let probe = handle.clone();
+    until(Duration::from_mins(15), move || {
+        probe.status().path == Path::Cpu
+    })
+    .await;
+    let status = handle.status();
+    assert!(matches!(status.state, State::Starting(_)), "{status:?}");
+    assert_eq!(status.budgets, None, "{status:?}");
+    gate.notify_one();
+    starts(&launcher, 2).await;
+    ready(&assistant).await;
+    assert_eq!(handle.status().path, Path::Cpu);
 }
 
 #[tokio::test(start_paused = true)]

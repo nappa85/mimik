@@ -400,8 +400,10 @@ natively for these tests (ASSIST-40).
 - **Output:** stdout and stderr are each drained by a reader task with a 4 KiB line bound
   (longer lines truncated) and are never copied into Mimik's log. Only fixed patterns become
   events: listening, the build number, "offloaded N/M layers", model-load and device errors.
-  The child runs at the pinned build's default verbosity; a live test sends a job with a
-  marker phrase and checks the marker appears in neither stream.
+  The CPU child runs at the pinned build's default verbosity; the GPU child runs with
+  `--verbosity 4`, the lowest level at which the pinned build prints the offload line. A live
+  test sends a job with a marker phrase and checks the marker appears in neither stream (on
+  the GPU path it was checked at verbosity 4, `results.md`).
 - **Generations:** every launch has a generation number; the socket directory, the pidfile
   entry, the endpoint check, jobs and every exit or timeout event carry it, and an event from an
   older generation is ignored. One manager task serializes transitions: a child is stopped
@@ -763,7 +765,8 @@ checks run on the dev host with the GPU fan on manual, evening or weekend, throu
 - from the trace, bind only the sysfs files and ICD manifests that are read and limit the
   loader to the selected card's driver (ASSIST-L44, ASSIST-L45), after another driver (AMDVLK,
   Intel, NVIDIA) has been traced where one is available;
-- the GPU-path checks at each llama.cpp pin change (`tools/assist_gpu_live.py`).
+- re-measure the superseding-job timings on both paths with the fixed helper, then the GPU-path
+  checks at each llama.cpp pin change (`tools/assist_gpu_live.py`).
 
 #### 2c-2b-2 Landlock (branch `assist-2c2b2`, from master after 2c-2b-1 merges)
 

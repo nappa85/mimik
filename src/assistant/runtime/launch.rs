@@ -956,9 +956,41 @@ macro_rules! fault_at {
     };
 }
 
+/// A pause that only the thread that registered it can hit (live tests share one runtime
+/// folder and so cannot key a pause by it).
+#[cfg(test)]
+pub(crate) struct ThreadPause {
+    pub thread: std::thread::ThreadId,
+    pub step: &'static str,
+    pub arrived: std::sync::mpsc::Sender<()>,
+    pub release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+pub(crate) static THREAD_PAUSE: Mutex<Vec<ThreadPause>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn thread_pause_point(step: &'static str) {
+    let me = std::thread::current().id();
+    let pause = {
+        let mut pauses = THREAD_PAUSE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pauses
+            .iter()
+            .position(|pause| pause.thread == me && pause.step == step)
+            .map(|at| pauses.remove(at))
+    };
+    if let Some(pause) = pause {
+        let _ = pause.arrived.send(());
+        let _ = pause.release.recv();
+    }
+}
+
 #[cfg(test)]
 impl Real {
     fn paused(&self, step: &'static str) {
+        thread_pause_point(step);
         pause_point(&self.settings.runtime_dir, step);
     }
 
@@ -1230,6 +1262,7 @@ impl Real {
             rest,
         ) = read_started(status_read, job)?;
         fault_at!(self, "started", child);
+        pause_at!(self, "before-reaper");
         let (sandbox, connector): (Option<Arc<Sandbox>>, Arc<dyn Connect>) =
             match endpoint::open_reaper(child_pid, pid, pid_namespace) {
                 Ok(reaper) => {
@@ -1574,6 +1607,7 @@ fn exit_description(status: std::process::ExitStatus) -> String {
 fn collect_listing(
     out: impl Read + Send + 'static,
     err: Option<impl Read + Send + 'static>,
+    label: &str,
     mut exited: impl FnMut() -> Option<Result<(), String>>,
     within: Duration,
     ticket: &Ticket,
@@ -1582,6 +1616,8 @@ fn collect_listing(
     // The error output is read to its end and dropped (never logged, never held), so a chatty
     // driver cannot fill the pipe and stall the listing; it is joined below.
     let (drained, drain) = std::sync::mpsc::channel();
+    // Names the test diagnostics' file by node (never by process).
+    let label = label.to_owned();
     if let Some(mut err) = err {
         std::thread::Builder::new()
             .name("assistant-devices-err".into())
@@ -1592,9 +1628,10 @@ fn collect_listing(
                 if let Some(dir) = std::env::var_os("MIMIK_LIVE_DIAG_DIR") {
                     let mut kept = Vec::new();
                     let _ = (&mut err).take(LIST_BYTES).read_to_end(&mut kept);
-                    let name = format!("listing-stderr-{}.txt", std::process::id());
+                    let name = format!("listing-stderr-{label}.txt");
                     let _ = std::fs::write(std::path::Path::new(&dir).join(name), kept);
                 }
+                let _ = &label;
                 let _ = std::io::copy(&mut err, &mut std::io::sink());
                 let _ = drained.send(());
             })
@@ -2904,6 +2941,7 @@ impl Real {
         let text = collect_listing(
             out,
             err,
+            &node.name,
             || {
                 owned
                     .child
@@ -3078,6 +3116,7 @@ impl Real {
             child: mut owned,
             connector,
             generation,
+            sandbox,
             marker: _marker,
             status_rest: _status_rest,
             ..
@@ -3097,10 +3136,14 @@ impl Real {
             .map_err(|_| Probe::Failed("cancelled".into()))?;
         let result = match reported {
             Some(Some(report)) => {
-                let verdict = if report["ok"] == serde_json::json!(true) {
-                    runtime.block_on(checked_endpoint(&connector, ticket))
-                } else {
+                let verdict = if report["ok"] != serde_json::json!(true) {
                     report_verdict(&report)
+                } else if sandbox.is_none() {
+                    // An ok report with no verified reaper can never pass: the sandbox ended
+                    // before its check, so nothing was proven either way.
+                    Probe::Inconclusive("the probe's sandbox ended before its check".into())
+                } else {
+                    runtime.block_on(checked_endpoint(&connector, ticket))
                 };
                 Ok((report, verdict))
             }

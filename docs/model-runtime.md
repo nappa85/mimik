@@ -187,12 +187,14 @@ Why each level was not used is on the page and in the log.
    folders (`/usr/lib`, `/usr/lib64`, `/lib`, `/lib64`, `/usr/libexec/ld`), the dynamic loader
    cache and the CPU topology, without the driver data and the card's sysfs. This is accepted
    by default and shown on the page (ASSIST-45, ASSIST-L46); `--assistant-device cpu` removes
-   it. This list is not yet checked on a real GPU: the live check (`assisted-sheet-plan.md`,
-   2c-2b-1) is owed; a driver that needs more falls back to
-   the CPU. The whole PCI sysfs folder is exposed read-only (vendor and device IDs, the
-   attributes of that card): a fingerprinting exposure only, to be narrowed to what libdrm and
-   Mesa read once the live check shows it (ASSIST-L44). All Vulkan ICD manifests are visible,
-   not only the selected card's driver.
+   it. The list is verified on the dev host's RX 6650 XT with Mesa RADV (the traced start and the
+   three live tests, `results.md`); another driver or GPU that needs more falls back to the
+   CPU, and tracing other drivers (AMDVLK, Intel, NVIDIA) is the outstanding item
+   (ASSIST-L34). The whole PCI sysfs folder is exposed read-only (the trace shows only
+   `vendor`, `device`, `subsystem_vendor`, `subsystem_device`, `uevent` and the `device` and
+   `drm` links read): a fingerprinting exposure only, to be narrowed to those files
+   (ASSIST-L44). All Vulkan ICD manifests are visible, not only the selected card's driver
+   (ASSIST-L45).
 2. **Landlock with seccomp:** not in this release (step 2c-2b-2); the page names it skipped.
 3. **Unconfined (seccomp only), not used in this release (ASSIST-43)**: what follows describes
    the switched-off code. On `127.0.0.1` with a random port: "not confined: TCP
