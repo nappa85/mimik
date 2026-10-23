@@ -230,10 +230,6 @@ class NoticeTests(unittest.TestCase):
                 package_release.llama_notice(data, tar)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class InventoryTests(unittest.TestCase):
     NAMES = [
         "mimik-0.1.0-linux-x86_64.tar.gz",
@@ -260,3 +256,7 @@ class InventoryTests(unittest.TestCase):
         package_release.check_inventory(
             listed + "- `SHA256SUMS`: checksums of the four archives.\n", self.NAMES
         )
+
+
+if __name__ == "__main__":
+    unittest.main()

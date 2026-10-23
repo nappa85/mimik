@@ -45,8 +45,27 @@ pub(crate) fn quota(cpu_max: &str) -> Option<usize> {
 fn own_quota() -> Option<usize> {
     let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
     let path = cgroup.lines().find_map(|line| line.strip_prefix("0::"))?;
-    let text = std::fs::read_to_string(format!("/sys/fs/cgroup{}/cpu.max", path.trim())).ok()?;
-    quota(&text)
+    quota_along(Path::new("/sys/fs/cgroup"), path.trim())
+}
+
+/// The tightest `cpu.max` quota of the cgroup at `path` (under the v2 hierarchy `root`) and
+/// every ancestor: a parent's limit binds an unlimited child.
+pub(crate) fn quota_along(root: &Path, path: &str) -> Option<usize> {
+    let mut dir = root.to_path_buf();
+    let mut tightest = std::fs::read_to_string(dir.join("cpu.max"))
+        .ok()
+        .and_then(|text| quota(&text));
+    for part in path.split('/').filter(|part| !part.is_empty()) {
+        dir.push(part);
+        let here = std::fs::read_to_string(dir.join("cpu.max"))
+            .ok()
+            .and_then(|text| quota(&text));
+        tightest = match (tightest, here) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+    }
+    tightest
 }
 
 /// The usable cores: physical cores in the affinity set, at most the quota.
@@ -98,6 +117,19 @@ mod tests {
             physical_cores_at(root.path(), |cpu| [0, 1, 6].contains(&cpu)),
             Some(2)
         );
+    }
+
+    #[test]
+    fn a_limited_parent_cgroup_binds_an_unlimited_leaf() {
+        let root = tempfile::tempdir().unwrap();
+        let leaf = root.path().join("user.slice/mimik.scope");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::write(root.path().join("user.slice/cpu.max"), "300000 100000\n").unwrap();
+        std::fs::write(leaf.join("cpu.max"), "max 100000\n").unwrap();
+        assert_eq!(quota_along(root.path(), "/user.slice/mimik.scope"), Some(3));
+        std::fs::write(leaf.join("cpu.max"), "100000 100000\n").unwrap();
+        assert_eq!(quota_along(root.path(), "/user.slice/mimik.scope"), Some(1));
+        assert_eq!(quota_along(root.path(), "/"), None);
     }
 
     #[test]

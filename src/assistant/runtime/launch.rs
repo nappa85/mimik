@@ -320,13 +320,15 @@ pub(crate) static FAULTED: Mutex<Option<i32>> = Mutex::new(None);
 macro_rules! fault_at {
     ($real:expr, $step:literal, $child:expr) => {
         #[cfg(test)]
-        $real.fault_at($step, $child.pid())?;
+        if $real.faulted($step, $child.pid()) {
+            return Err(Fail::Other(format!("injected at {}", $step)));
+        }
     };
 }
 
 #[cfg(test)]
 impl Real {
-    fn fault_at(&self, step: &'static str, pid: i32) -> Result<(), Fail> {
+    fn faulted(&self, step: &'static str, pid: i32) -> bool {
         {
             let mut fault = FAULT
                 .lock()
@@ -339,10 +341,10 @@ impl Real {
                 *FAULTED
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pid);
-                return Err(Fail::Other(format!("injected at {step}")));
+                return true;
             }
         }
-        Ok(())
+        false
     }
 }
 
@@ -767,8 +769,9 @@ impl Readers {
         }
     }
 
-    async fn all_ended(&self, within: Duration) {
-        let _ = tokio::time::timeout(within, async {
+    /// Whether they all ended within `within`.
+    async fn all_ended(&self, within: Duration) -> bool {
+        tokio::time::timeout(within, async {
             loop {
                 let ended = self.ended.notified();
                 if self.left.load(Ordering::SeqCst) == 0 {
@@ -777,17 +780,76 @@ impl Readers {
                 ended.await;
             }
         })
-        .await;
+        .await
+        .is_ok()
+    }
+}
+
+/// What the shim's marker pipe showed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Marker {
+    /// The marker arrived: the command was executed.
+    Executed,
+    /// A clean end of the pipe without the marker: the shim never ran (bwrap failed first).
+    Absent,
+    /// Not known (still being read, a read error, anything else): the level is kept.
+    Unknown,
+}
+
+/// The marker pipe's outcome, set once by its reader.
+struct MarkerState(std::sync::atomic::AtomicU8);
+
+impl MarkerState {
+    fn new() -> Arc<Self> {
+        Arc::new(Self(std::sync::atomic::AtomicU8::new(0)))
+    }
+
+    fn set(&self, marker: Marker) {
+        let value = match marker {
+            Marker::Executed => 1,
+            Marker::Absent => 2,
+            Marker::Unknown => 3,
+        };
+        self.0.store(value, Ordering::SeqCst);
+    }
+
+    /// The outcome so far; a reader still running is `Unknown`.
+    fn get(&self) -> Marker {
+        match self.0.load(Ordering::SeqCst) {
+            1 => Marker::Executed,
+            2 => Marker::Absent,
+            _ => Marker::Unknown,
+        }
+    }
+}
+
+/// Reads the marker pipe to its end (64 bytes at most).
+fn marker_outcome(mut pipe: impl Read) -> Marker {
+    let mut text = Vec::new();
+    match pipe.by_ref().take(64).read_to_end(&mut text) {
+        Ok(_) if text.starts_with(super::probe::MARKER) => Marker::Executed,
+        Ok(0) => Marker::Absent,
+        _ => Marker::Unknown,
+    }
+}
+
+/// The marker once the readers ended, or `Unknown` when they did not within `within`.
+async fn settled_marker(readers: &Readers, marker: &MarkerState, within: Duration) -> Marker {
+    if readers.all_ended(within).await {
+        marker.get()
+    } else {
+        Marker::Unknown
     }
 }
 
 /// How long `exited` waits for the readers after the exit.
 const READERS_WITHIN: Duration = Duration::from_secs(5);
 
-/// Why a child ended: at level 1, a sandbox failure only when the shim never marked its
-/// exec (nothing the executed command prints can make it one); otherwise counted.
-fn classify(level: Level, executed: bool, summary: Summary, why: &str) -> Fail {
-    if level == Level::Bubblewrap && !executed {
+/// Why a child ended: at level 1, a sandbox failure only when the marker pipe ended cleanly
+/// without the marker (nothing the executed command prints can make it one); an unknown
+/// outcome, like any other exit, is counted at the same level.
+fn classify(level: Level, marker: Marker, summary: Summary, why: &str) -> Fail {
+    if level == Level::Bubblewrap && marker == Marker::Absent {
         Fail::Sandbox(format!("bubblewrap could not set up the sandbox ({why})"))
     } else if summary.failed.model_load {
         Fail::Other(format!("the model could not be loaded ({why})"))
@@ -808,10 +870,10 @@ pub(crate) struct RealChild {
     exit: watch::Receiver<Option<Exit>>,
     pid: i32,
     /// The runner's pidfd: signals go to this process and no other.
-    signal: Option<OwnedFd>,
+    signal: OwnedFd,
     summary: Arc<Mutex<Summary>>,
-    /// Level 1: the shim marked its exec.
-    executed: Arc<AtomicBool>,
+    /// Level 1: what the shim's marker pipe showed.
+    marker: Arc<MarkerState>,
     readers: Arc<Readers>,
     healthy: AtomicBool,
     generation_dir: Mutex<Option<Generation>>,
@@ -821,9 +883,7 @@ pub(crate) struct RealChild {
 
 impl RealChild {
     fn kill(&self, signal: rustix::process::Signal) {
-        if let Some(pidfd) = &self.signal {
-            let _ = rustix::process::pidfd_send_signal(pidfd, signal);
-        }
+        let _ = rustix::process::pidfd_send_signal(&self.signal, signal);
     }
 
     fn summary(&self) -> Summary {
@@ -860,13 +920,8 @@ impl Child for RealChild {
                 return std::future::pending().await;
             }
         };
-        self.readers.all_ended(READERS_WITHIN).await;
-        classify(
-            self.level,
-            self.executed.load(Ordering::SeqCst),
-            self.summary(),
-            &why,
-        )
+        let marker = settled_marker(&self.readers, &self.marker, READERS_WITHIN).await;
+        classify(self.level, marker, self.summary(), &why)
     }
 
     async fn stop(&self) {
@@ -985,23 +1040,18 @@ async fn watch_exit(
     let _ = exit.send(Some(Exit { why }));
 }
 
-/// Reads the shim's marker pipe to its end: `executed` once the marker arrived. Without a
-/// reader thread the exec cannot be shown either way, so it counts as having happened (a
-/// failure then keeps the level).
-fn read_marker(marker: OwnedFd, executed: &Arc<AtomicBool>, readers: &Arc<Readers>) {
-    let (seen, ended) = (Arc::clone(executed), Arc::clone(readers));
+/// Reads the shim's marker pipe to its end on its own thread. Without a reader thread the
+/// outcome stays unknown (a failure then keeps the level).
+fn read_marker(pipe: OwnedFd, marker: &Arc<MarkerState>, readers: &Arc<Readers>) {
+    let (seen, ended) = (Arc::clone(marker), Arc::clone(readers));
     let spawned = std::thread::Builder::new()
         .name("assistant-marker".into())
         .spawn(move || {
-            let mut text = Vec::new();
-            let _ = std::fs::File::from(marker).take(64).read_to_end(&mut text);
-            if text.starts_with(super::probe::MARKER) {
-                seen.store(true, Ordering::SeqCst);
-            }
+            seen.set(marker_outcome(std::fs::File::from(pipe)));
             ended.end();
         });
     if spawned.is_err() {
-        executed.store(true, Ordering::SeqCst);
+        marker.set(Marker::Unknown);
         readers.end();
     }
 }
@@ -1013,7 +1063,7 @@ impl Real {
         level: Level,
         token: &Token,
         bwrap: Option<&Bwrap>,
-    ) -> Arc<RealChild> {
+    ) -> Result<Arc<RealChild>, Fail> {
         let Spawned {
             child,
             runner,
@@ -1023,10 +1073,21 @@ impl Real {
             status_rest,
             marker,
         } = spawned;
+        // Signals need their own handle on the runner: without one the child could not be
+        // stopped, so the start fails (and the guard kills it).
+        let signal = runner.pidfd.try_clone();
+        #[cfg(test)]
+        let signal = if self.faulted("signal", child.pid()) {
+            Err(std::io::Error::other("injected"))
+        } else {
+            signal
+        };
+        let signal =
+            signal.map_err(|_| Fail::Other("no pidfd to signal the model server".into()))?;
         let mut child = child.hand_over();
         let pid = i32::try_from(child.id()).unwrap_or(0);
         let summary = Arc::new(Mutex::new(Summary::default()));
-        let executed = Arc::new(AtomicBool::new(marker.is_none()));
+        let marker_state = MarkerState::new();
         let readers = Readers::new(2 + usize::from(marker.is_some()));
         for (name, stream) in [
             (
@@ -1052,7 +1113,7 @@ impl Real {
             }
         }
         if let Some(marker) = marker {
-            read_marker(marker, &executed, &readers);
+            read_marker(marker, &marker_state, &readers);
         }
         if let Some(rest) = status_rest {
             // Later status lines (`exit-code`) are read and dropped: exit is seen by pidfd.
@@ -1062,7 +1123,6 @@ impl Real {
                     let _ = std::io::copy(&mut rest.take(64 * 1024), &mut std::io::sink());
                 });
         }
-        let signal = runner.pidfd.try_clone().ok();
         let (exit_sender, exit) = watch::channel(None);
         let launcher = Arc::clone(self);
         tokio::spawn(watch_exit(child, runner, sandbox, exit_sender, move || {
@@ -1082,7 +1142,7 @@ impl Real {
         }
         #[cfg(not(test))]
         drop(connector);
-        Arc::new(RealChild {
+        Ok(Arc::new(RealChild {
             server,
             #[cfg(test)]
             connector,
@@ -1092,13 +1152,13 @@ impl Real {
             pid,
             signal,
             summary,
-            executed,
+            marker: marker_state,
             readers,
             healthy: AtomicBool::new(false),
             generation_dir: Mutex::new(Some(generation)),
             level,
             notes,
-        })
+        }))
     }
 }
 
@@ -1247,7 +1307,7 @@ impl Launch {
         };
         if level != Level::Unconfined {
             let spawned = joined(spawn(0).await)?;
-            return Ok(real.child(spawned, level, &token, bwrap.as_ref()));
+            return real.child(spawned, level, &token, bwrap.as_ref());
         }
         // A child that cannot bind its port exits; a new port is tried, at most 3.
         let mut tries = 0;
@@ -1255,7 +1315,7 @@ impl Launch {
             tries += 1;
             let port = free_port()?;
             let spawned = joined(spawn(port).await)?;
-            let child = real.child(spawned, level, &token, None);
+            let child = real.child(spawned, level, &token, None)?;
             let bound = tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
                     if child.summary().failed.bind {

@@ -343,7 +343,7 @@ fn only_a_missing_shim_marker_makes_a_level_1_exit_a_sandbox_failure() {
     assert!(matches!(
         classify(
             Level::Bubblewrap,
-            false,
+            Marker::Absent,
             Summary::default(),
             "exit status: 1"
         ),
@@ -354,26 +354,78 @@ fn only_a_missing_shim_marker_makes_a_level_1_exit_a_sandbox_failure() {
     assert!(matches!(
         classify(
             Level::Bubblewrap,
-            true,
+            Marker::Executed,
             Summary::default(),
             "exit status: 1"
         ),
         Fail::Other(_)
     ));
     assert!(matches!(
-        classify(Level::Bubblewrap, true, loaded, "exit status: 1"),
+        classify(Level::Bubblewrap, Marker::Executed, loaded, "exit status: 1"),
         Fail::Other(why) if why.starts_with("the model could not be loaded")
+    ));
+    // Not known (a read error, a reader still running): counted, the level kept.
+    assert!(matches!(
+        classify(
+            Level::Bubblewrap,
+            Marker::Unknown,
+            Summary::default(),
+            "exit status: 1"
+        ),
+        Fail::Other(_)
     ));
     // Level 3 has no lower level: never a sandbox failure.
     assert!(matches!(
         classify(
             Level::Unconfined,
-            false,
+            Marker::Absent,
             Summary::default(),
             "exit status: 1"
         ),
         Fail::Other(_)
     ));
+}
+
+struct Failing;
+
+impl Read for Failing {
+    fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::from_raw_os_error(libc::EIO))
+    }
+}
+
+#[test]
+fn only_a_clean_end_without_the_marker_is_absent() {
+    assert_eq!(marker_outcome(&b"exec\n"[..]), Marker::Executed);
+    assert_eq!(marker_outcome(&b""[..]), Marker::Absent);
+    assert_eq!(marker_outcome(Failing), Marker::Unknown);
+    assert_eq!(marker_outcome(&b"ex"[..]), Marker::Unknown);
+}
+
+#[tokio::test]
+async fn a_marker_reader_still_running_is_unknown_and_keeps_the_level() {
+    // The marker reader never ends (a slow pipe): after the bounded wait the outcome is
+    // unknown, so the exit is counted at level 1.
+    let readers = Readers::new(1);
+    let marker = MarkerState::new();
+    let outcome = settled_marker(&readers, &marker, Duration::from_millis(20)).await;
+    assert_eq!(outcome, Marker::Unknown);
+    assert!(matches!(
+        classify(
+            Level::Bubblewrap,
+            outcome,
+            Summary::default(),
+            "exit status: 1"
+        ),
+        Fail::Other(_)
+    ));
+    // Once it ended cleanly without the marker: absent.
+    marker.set(Marker::Absent);
+    readers.end();
+    assert_eq!(
+        settled_marker(&readers, &marker, Duration::from_millis(20)).await,
+        Marker::Absent
+    );
 }
 
 /// Every process whose command line names `needle`.
@@ -395,12 +447,24 @@ async fn a_failure_after_the_spawn_leaves_no_process_behind() {
     let launch = launch(&setup);
     launch.preflight(Path::Cpu).await.unwrap();
     let marker = setup.settings.data_dir.join("run").display().to_string();
-    for (generation, step) in [(1, "spawned"), (2, "recorded"), (3, "connector")] {
+    // `signal`: the second pidfd handle, without which the child could not be stopped.
+    for (generation, step) in [
+        (1, "spawned"),
+        (2, "recorded"),
+        (3, "connector"),
+        (4, "signal"),
+    ] {
         *FAULT.lock().unwrap() = Some((setup.settings.runtime_dir.clone(), step));
         let result = launch.start(generation, Level::Unconfined, Path::Cpu).await;
+        let expected = if step == "signal" {
+            "no pidfd to signal the model server".to_owned()
+        } else {
+            format!("injected at {step}")
+        };
         assert!(
-            matches!(&result, Err(Fail::Other(why)) if why == &format!("injected at {step}")),
-            "{step}"
+            matches!(&result, Err(Fail::Other(why)) if why == &expected),
+            "{step}: {:?}",
+            result.err()
         );
         // The runner the failure fired on is gone and reaped (no zombie either), and no
         // process naming the generation directory is left.
@@ -530,4 +594,31 @@ fn a_probe_that_only_times_out_is_retried_and_never_skips_its_level() {
         Probe::Failed("bwrap: setup failed".into())
     });
     assert_eq!((failed, calls), (Err("bwrap: setup failed".into()), 1));
+}
+
+#[test]
+fn a_shim_whose_exec_fails_says_why_after_its_marker() {
+    let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::empty()).unwrap();
+    let spec = super::super::probe::ShimSpec {
+        marker: std::os::fd::AsRawFd::as_raw_fd(&write),
+        argv: vec!["/nonexistent/llama-server".into()],
+        env: Vec::new(),
+    };
+    let output = test_helper::command("assistant::runtime::launch::tests::helper", "shim")
+        .env(
+            super::super::probe::SHIM_VARIABLE,
+            serde_json::to_string(&spec).unwrap(),
+        )
+        .output()
+        .unwrap();
+    drop(write);
+    assert_eq!(output.status.code(), Some(127));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("mimik shim: cannot execute /nonexistent/llama-server"),
+        "{stderr}"
+    );
+    let mut marker = [0_u8; 5];
+    std::fs::File::from(read).read_exact(&mut marker).unwrap();
+    assert_eq!(&marker, super::super::probe::MARKER);
 }

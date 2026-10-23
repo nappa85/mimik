@@ -306,14 +306,47 @@ pub(crate) fn shim() -> i32 {
     if rustix::io::write(marker, MARKER).ok() != Some(MARKER.len()) {
         return 3;
     }
-    let listing: Vec<i32> = std::fs::read_dir("/proc/self/fd")
-        .map(|listing| {
-            listing
-                .filter_map(Result::ok)
-                .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
-                .collect()
-        })
-        .unwrap_or_default();
+    if !close_inherited(close_range, fd_listing) {
+        eprintln!("mimik shim: the inherited descriptors cannot be closed; not executing");
+        return 4;
+    }
+    let error = std::process::Command::new(&spec.argv[0])
+        .args(&spec.argv[1..])
+        .env_clear()
+        .envs(spec.env)
+        .exec();
+    // The marker went out already: this failure is counted at the same level, never a
+    // sandbox failure.
+    eprintln!("mimik shim: cannot execute {}: {error}", spec.argv[0]);
+    127
+}
+
+/// `close_range(3, ~0, 0)`: every descriptor above the standard ones.
+fn close_range() -> bool {
+    // SAFETY: a plain system call closing descriptors this process no longer uses.
+    unsafe { libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, 0_u32) == 0 }
+}
+
+/// The open descriptors, from `/proc/self/fd`.
+fn fd_listing() -> std::io::Result<Vec<i32>> {
+    Ok(std::fs::read_dir("/proc/self/fd")?
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+        .collect())
+}
+
+/// Closes every descriptor but 0, 1 and 2: `close_range`, else each one `/proc/self/fd`
+/// lists. False when neither works: the shim then never executes anything.
+pub(crate) fn close_inherited(
+    close_range: impl FnOnce() -> bool,
+    listing: impl FnOnce() -> std::io::Result<Vec<i32>>,
+) -> bool {
+    if close_range() {
+        return true;
+    }
+    let Ok(listing) = listing() else {
+        return false;
+    };
     for fd in listing {
         if fd > 2 {
             // SAFETY: closing every inherited descriptor but the standard ones before the exec;
@@ -321,13 +354,7 @@ pub(crate) fn shim() -> i32 {
             unsafe { libc::close(fd) };
         }
     }
-    let error = std::process::Command::new(&spec.argv[0])
-        .args(&spec.argv[1..])
-        .env_clear()
-        .envs(spec.env)
-        .exec();
-    drop(error);
-    127
+    true
 }
 
 /// `mimik assistant-runner …`. Returns the exit code.
@@ -347,6 +374,19 @@ pub fn main(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shim_that_cannot_close_its_descriptors_never_executes() {
+        assert!(!close_inherited(
+            || false,
+            || Err(std::io::Error::other("no /proc"))
+        ));
+        assert!(close_inherited(|| false, || Ok(Vec::new())));
+        assert!(close_inherited(
+            || true,
+            || unreachable!("close_range worked")
+        ));
+    }
 
     #[test]
     fn outside_its_level_the_probe_names_every_missing_resource_and_fails() {
