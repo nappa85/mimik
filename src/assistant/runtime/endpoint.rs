@@ -61,6 +61,8 @@ fn refused(what: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, what)
 }
 
+const GONE: &str = "the sandbox's reaper has gone";
+
 /// What bwrap reported for this generation's sandbox.
 #[derive(Debug)]
 pub(crate) struct Sandbox {
@@ -117,9 +119,17 @@ pub(crate) fn open_reaper(pid: i32, runner: i32, namespace: u64) -> io::Result<W
         Err(error) => return Err(error.into()),
     }
     if !watched.alive() {
-        return Err(refused("the sandbox's reaper has gone"));
+        return Err(refused(GONE));
     }
     Ok(watched)
+}
+
+/// Whether `open_reaper` failed because the reaper had already exited.
+pub(crate) fn is_gone(error: &io::Error) -> bool {
+    [rustix::io::Errno::SRCH, rustix::io::Errno::NOENT]
+        .iter()
+        .any(|gone| error.raw_os_error() == Some(gone.raw_os_error()))
+        || (error.kind() == io::ErrorKind::PermissionDenied && error.to_string() == GONE)
 }
 
 /// The peer check of level 1 (see the module comment).

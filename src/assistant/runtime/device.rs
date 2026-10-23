@@ -25,7 +25,7 @@ static LINE: LazyLock<regex::Regex> = LazyLock::new(|| {
 });
 
 /// The listing's first line.
-const HEADER: &str = "Available devices:";
+pub(crate) const HEADER: &str = "Available devices:";
 /// An empty listing's only device line.
 const NONE: &str = "  (none)";
 /// Descriptions of software renderers (Mesa's llvmpipe and lavapipe, Google's `SwiftShader`),

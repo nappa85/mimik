@@ -774,8 +774,6 @@ otherwise):
   budgets under the level-1 GPU profile (which fixes the path list), the real listing parses
   in the pinned format with one hardware GPU per node, and killing the child mid-job ends on
   the CPU path with CPU budgets and the page saying why;
-- the host fake-GPU checks (`live_fake_gpu_*`, bubblewrap, no GPU): one node bound per listing,
-  the probe opening the node, `--device` and the offload check, the fallback;
 - the first native GPU calibration (start to `ready`, priming, samples, B, R, D, Q) and grammar
   against no-grammar on the GPU path, to `docs/results.md`;
 - refused calls checked once with `strace` in a container on the GPU path (calls the Vulkan

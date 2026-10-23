@@ -697,6 +697,20 @@ struct Owned {
 #[cfg(test)]
 pub(crate) static RUNNER_WARNINGS: AtomicU64 = AtomicU64::new(0);
 
+/// The connector of a sandbox that serves nothing (a device listing).
+#[derive(Debug)]
+struct NoSocket;
+
+impl Connect for NoSocket {
+    fn connect(&self) -> crate::assistant::transport::Connecting {
+        Box::pin(async { Err(std::io::Error::other("this sandbox serves no socket")) })
+    }
+
+    fn authority(&self) -> String {
+        crate::assistant::transport::UNIX_AUTHORITY.to_owned()
+    }
+}
+
 /// After this long without the reaper's exit, the cleanup says so in the log (and waits on).
 const REAPER_WITHIN: Duration = Duration::from_secs(5);
 
@@ -1213,23 +1227,38 @@ impl Real {
             rest,
         ) = read_started(status_read, job)?;
         fault_at!(self, "started", child);
-        let reaper = endpoint::open_reaper(child_pid, pid, pid_namespace)
-            .map_err(|error| Fail::Other(format!("the sandbox's reaper: {error}")))?;
-        let sandbox = Arc::new(Sandbox {
-            reaper,
-            pid_namespace,
-        });
-        child.reaper = Some(Arc::clone(&sandbox));
-        let connector: Arc<dyn Connect> = Arc::new(SandboxSocket {
-            directory: Arc::new(dup(&generation.fd).map_err(Fail::Other)?),
-            sandbox: Arc::clone(&sandbox),
-        });
+        let (sandbox, connector): (Option<Arc<Sandbox>>, Arc<dyn Connect>) =
+            match endpoint::open_reaper(child_pid, pid, pid_namespace) {
+                Ok(reaper) => {
+                    let sandbox = Arc::new(Sandbox {
+                        reaper,
+                        pid_namespace,
+                    });
+                    child.reaper = Some(Arc::clone(&sandbox));
+                    let connector: Arc<dyn Connect> = Arc::new(SandboxSocket {
+                        directory: Arc::new(dup(&generation.fd).map_err(Fail::Other)?),
+                        sandbox: Arc::clone(&sandbox),
+                    });
+                    (Some(sandbox), connector)
+                }
+                // A device listing is over in milliseconds and never opens a socket: its
+                // sandbox may be gone before the reaper can be pinned, which tears down the
+                // whole PID namespace and needs no kill.
+                Err(error)
+                    if matches!(command, Command::ListDevices) && endpoint::is_gone(&error) =>
+                {
+                    (None, Arc::new(NoSocket))
+                }
+                Err(error) => {
+                    return Err(Fail::Other(format!("the sandbox's reaper: {error}")));
+                }
+            };
         fault_at!(self, "connector", child);
         pause_at!(self, "spawned");
         Ok(Spawned {
             child,
             runner,
-            sandbox: Some(sandbox),
+            sandbox,
             generation,
             connector,
             status_rest: Some(rest),
@@ -2793,6 +2822,12 @@ impl Real {
         drop(generation);
         let text = String::from_utf8(bytes)
             .map_err(|_| "the device listing is not in the pinned build's format".to_owned())?;
+        // Test builds run the runner as the test binary, whose libtest banner precedes the
+        // server's output; the shipped runner prints nothing of its own.
+        #[cfg(test)]
+        let text = text
+            .find(device::HEADER)
+            .map_or(text.clone(), |at| text[at..].to_owned());
         device::parse_listing(&text)
     }
 

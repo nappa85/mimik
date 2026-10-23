@@ -134,9 +134,7 @@ def main():
     ]:
         shutil.copy2(original, stage / filename)
     with open(stage / "THIRD-PARTY-NOTICES.md", "a", encoding="utf-8") as out:
-        out.write(
-            llama_notice(llama, args.llama / llama["source"]["name"], args.llama / "notices")
-        )
+        out.write(llama_notice(llama, args.llama / llama["source"]["name"], args.llama / "notices"))
     (stage / "BUILD.txt").write_text(
         f"Version: {args.version}\nRevision: {args.revision}\nRust: {toolchain()}\n"
         f"llama.cpp: {llama['llama_cpp']['tag']} (build {llama['llama_cpp']['build']}, "
