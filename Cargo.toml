@@ -17,6 +17,9 @@ auth-test-support = []
 # The assistant's development endpoint (step 2c-1): a hand-started llama-server reached
 # without an endpoint check. Never enabled in release builds (smoke_release.py checks).
 dev-endpoint = []
+# Level-1 sandbox through the Hakoniwa library instead of bubblewrap (comparison spike; bwrap
+# stays the default, ASSIST-48). LGPL-3.0 with the linking exception (DEP-24).
+sandbox-hakoniwa = ["dep:hakoniwa"]
 
 [dependencies]
 async-trait = "0.1"
@@ -78,6 +81,10 @@ seccompiler = { version = "=0.5.0", default-features = false }
 procfs = { version = "=0.18.0", default-features = false }
 # The runner's `execveat` of the verified llama-server descriptor (no safe wrapper exists).
 libc = "0.2"
+# Level-1 sandbox without bubblewrap (DEP-24): namespaces, mounts and pivot_root in the runner
+# process. `seccomp` stays off (it needs the libseccomp C library): Mimik installs its own
+# seccompiler program.
+hakoniwa = { version = "=1.8.0", default-features = false, optional = true }
 
 [dev-dependencies]
 rqrr = { version = "=0.11.0", default-features = false }
