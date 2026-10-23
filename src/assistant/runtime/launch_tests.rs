@@ -1105,3 +1105,126 @@ async fn level_3_executes_and_loads_from_the_checked_real_path_not_the_alias() {
     );
     child.stop().await;
 }
+
+/// A pause at `step` for this setup's launcher: (arrived, release).
+fn pause_for(
+    setup: &Setup,
+    step: &'static str,
+) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    let (arrived_sender, arrived) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    PAUSE.lock().unwrap().push(Pause {
+        dir: setup.settings.runtime_dir.clone(),
+        step,
+        arrived: arrived_sender,
+        release: released,
+    });
+    (arrived, release)
+}
+
+/// With the earlier attempt's cleanup held, a start of generation 2 does not reach its spawn
+/// (and leaves the earlier entry alone); released, it proceeds.
+async fn the_next_spawn_waits(
+    setup: &Setup,
+    launch: &Arc<Launch>,
+    release_cleanup: std::sync::mpsc::Sender<()>,
+) {
+    let (spawning, release_spawn) = pause_for(setup, "before-spawn");
+    let starting = {
+        let launch = Arc::clone(launch);
+        tokio::spawn(async move { launch.start_real(2, Level::Unconfined, Path::Cpu).await })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        spawning.try_recv().is_err(),
+        "a spawn began beside an earlier attempt's cleanup"
+    );
+    assert!(!pidfile_text(setup).starts_with("2\n"));
+    release_cleanup.send(()).unwrap();
+    tokio::task::spawn_blocking(move || spawning.recv_timeout(Duration::from_secs(30)).unwrap())
+        .await
+        .unwrap();
+    release_spawn.send(()).unwrap();
+    let child = starting.await.unwrap().unwrap();
+    assert!(pidfile_text(setup).starts_with("2\n"));
+    child.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_a_failed_start_the_next_spawn_waits_for_its_cleanup() {
+    let setup = setup(MODEL, "fake");
+    let launch = Arc::new(launch(&setup));
+    launch.preflight(Path::Cpu).await.unwrap();
+    let (cleaning, release_cleanup) = pause_for(&setup, "cleanup");
+    *FAULT.lock().unwrap() = Some((setup.settings.runtime_dir.clone(), "connector"));
+    assert!(launch.start(1, Level::Unconfined, Path::Cpu).await.is_err());
+    tokio::task::spawn_blocking(move || cleaning.recv_timeout(Duration::from_secs(30)).unwrap())
+        .await
+        .unwrap();
+    assert!(pidfile_text(&setup).starts_with("1\n"));
+    the_next_spawn_waits(&setup, &launch, release_cleanup).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_a_probe_the_first_start_waits_for_its_cleanup() {
+    let setup = setup(MODEL, "fake");
+    let launch = Arc::new(launch(&setup));
+    launch.preflight(Path::Cpu).await.unwrap();
+    let (cleaning, release_cleanup) = pause_for(&setup, "cleanup");
+    let real = Arc::clone(&launch.0);
+    let probed = tokio::task::spawn_blocking(move || {
+        let ticket = real.work().enter();
+        real.probe_with_retries(Path::Cpu, Level::Unconfined, &ticket)
+    })
+    .await
+    .unwrap();
+    assert_eq!(probed, Probed::Passed);
+    tokio::task::spawn_blocking(move || cleaning.recv_timeout(Duration::from_secs(30)).unwrap())
+        .await
+        .unwrap();
+    the_next_spawn_waits(&setup, &launch, release_cleanup).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_preflight_during_a_sweep_says_the_sweep_runs() {
+    let setup = setup(MODEL, "fake");
+    let launch = Arc::new(launch(&setup));
+    let (sweeping, release) = pause_for(&setup, "sweep");
+    let first = {
+        let launch = Arc::clone(&launch);
+        tokio::spawn(async move { launch.preflight(Path::Cpu).await })
+    };
+    tokio::task::spawn_blocking(move || sweeping.recv_timeout(Duration::from_secs(30)).unwrap())
+        .await
+        .unwrap();
+    let refused = launch.preflight(Path::Cpu).await.unwrap_err();
+    assert!(refused.contains("leftover sweep"), "{refused}");
+    release.send(()).unwrap();
+    first.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn a_panic_in_the_sweep_ends_the_sweep_and_keeps_the_pidfile() {
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    *SWEEP_PANIC.lock().unwrap() = Some(setup.settings.data_dir.clone());
+    let failed = launch.preflight(Path::Cpu).await.unwrap_err();
+    *SWEEP_PANIC.lock().unwrap() = None;
+    assert!(failed.contains("did not finish"), "{failed}");
+    // Neither "the sweep is still running" nor "another Mimik": the next preflight sweeps.
+    launch.preflight(Path::Cpu).await.unwrap();
+}
+
+#[test]
+fn a_slow_exit_is_said_once_and_still_waited_for() {
+    let until = std::time::Instant::now() + Duration::from_millis(400);
+    let mut warnings = 0;
+    wait_exited(
+        &|| std::time::Instant::now() < until,
+        &|| {},
+        Duration::from_millis(100),
+        &mut || warnings += 1,
+    );
+    assert!(std::time::Instant::now() >= until);
+    assert_eq!(warnings, 1);
+}

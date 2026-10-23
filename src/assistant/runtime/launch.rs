@@ -152,6 +152,8 @@ pub(crate) struct Real {
     work: Arc<Work>,
     /// Probe sequence numbers: unique directory names and pidfile keys.
     probes: AtomicU64,
+    /// Failed attempts' cleanups still running: no new process is spawned until they end.
+    cleanups: Arc<watch::Sender<usize>>,
 }
 
 /// Pidfile keys of probes: above any generation number.
@@ -254,6 +256,7 @@ impl Real {
             held: Arc::new(Mutex::new(Held::default())),
             work: Work::new(),
             probes: AtomicU64::new(1),
+            cleanups: Arc::new(watch::channel(0).0),
         }
     }
 
@@ -279,6 +282,23 @@ impl Real {
         if let Some(pidfile) = self.held().pidfile.as_mut() {
             let _ = pidfile.record(entry);
         }
+    }
+
+    /// Waits until no earlier attempt's cleanup runs (its process may still be ending, its
+    /// pidfile entry still standing): each spawn follows the previous one's end. A cancel
+    /// ends the wait.
+    fn after_cleanups(&self, job: &Job) -> Result<(), Fail> {
+        let mut warned = false;
+        let started = std::time::Instant::now();
+        while *self.cleanups.borrow() > 0 {
+            job.check()?;
+            if !warned && started.elapsed() >= REAPER_WITHIN {
+                eprintln!("assistant: waiting for an earlier start's processes to end");
+                warned = true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
     }
 
     /// Clears the pidfile's entry when it is still `key`'s (never a newer one's).
@@ -441,6 +461,8 @@ struct Owned {
     reaper: Option<Arc<Sandbox>>,
     recorded: Option<(Arc<Mutex<Held>>, u64)>,
     ticket: Option<Ticket>,
+    /// The launcher's count of running cleanups (the next spawn waits for them).
+    cleanups: Option<Arc<watch::Sender<usize>>>,
     /// The launcher's runtime directory (a test's pause key).
     #[cfg(test)]
     dir: PathBuf,
@@ -459,6 +481,7 @@ impl Owned {
             reaper: None,
             recorded: None,
             ticket: Some(ticket),
+            cleanups: None,
             #[cfg(test)]
             dir: PathBuf::new(),
             #[cfg(test)]
@@ -489,6 +512,7 @@ struct Cleanup {
     reaper: Option<Arc<Sandbox>>,
     recorded: Option<(Arc<Mutex<Held>>, u64)>,
     ticket: Option<Ticket>,
+    cleanups: Option<Arc<watch::Sender<usize>>>,
     #[cfg(test)]
     dir: PathBuf,
     #[cfg(test)]
@@ -499,35 +523,64 @@ impl Cleanup {
     fn run(mut self) {
         #[cfg(test)]
         pause_point(&self.dir, "cleanup");
+        #[cfg(test)]
+        let kill_reaper = !self.unkillable;
+        #[cfg(not(test))]
+        let kill_reaper = true;
         if let Some(mut child) = self.child.take() {
+            // Killed already; its exit is waited for through a pidfd, so a slow one is said.
+            if let Ok(runner) = Watched::open(i32::try_from(child.id()).unwrap_or(0)) {
+                wait_exited(&|| runner.alive(), &|| {}, REAPER_WITHIN, &mut || {
+                    eprintln!("assistant: a failed start's runner has not exited yet; waiting");
+                });
+            }
             let _ = child.wait();
         }
         if let Some(sandbox) = self.reaper.take() {
             let reaper = &sandbox.reaper;
-            let started = std::time::Instant::now();
-            let mut warned = false;
-            while reaper.alive() {
-                #[cfg(test)]
-                let kill = !self.unkillable;
-                #[cfg(not(test))]
-                let kill = true;
-                if kill {
-                    let _ = rustix::process::pidfd_send_signal(
-                        &reaper.pidfd,
-                        rustix::process::Signal::KILL,
-                    );
-                }
-                if !warned && started.elapsed() >= REAPER_WITHIN {
+            wait_exited(
+                &|| reaper.alive(),
+                &|| {
+                    if kill_reaper {
+                        let _ = rustix::process::pidfd_send_signal(
+                            &reaper.pidfd,
+                            rustix::process::Signal::KILL,
+                        );
+                    }
+                },
+                REAPER_WITHIN,
+                &mut || {
                     eprintln!("assistant: a failed start's sandbox has not exited yet; waiting");
-                    warned = true;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
+                },
+            );
         }
         if let Some((held, key)) = self.recorded.take() {
             clear_key(&held, key);
         }
+        if let Some(cleanups) = self.cleanups.take() {
+            cleanups.send_modify(|running| *running = running.saturating_sub(1));
+        }
         drop(self.ticket.take());
+    }
+}
+
+/// Waits, without a deadline, until `alive` says no, calling `kill` each round; `warn` once
+/// after `warn_after`.
+pub(crate) fn wait_exited(
+    alive: &dyn Fn() -> bool,
+    kill: &dyn Fn(),
+    warn_after: Duration,
+    warn: &mut dyn FnMut(),
+) {
+    let started = std::time::Instant::now();
+    let mut warned = false;
+    while alive() {
+        kill();
+        if !warned && started.elapsed() >= warn_after {
+            warn();
+            warned = true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -541,6 +594,7 @@ impl Drop for Owned {
             reaper: self.reaper.take(),
             recorded: self.recorded.take(),
             ticket: self.ticket.take(),
+            cleanups: self.cleanups.take(),
             #[cfg(test)]
             dir: std::mem::take(&mut self.dir),
             #[cfg(test)]
@@ -548,6 +602,9 @@ impl Drop for Owned {
         };
         if cleanup.child.is_none() && cleanup.reaper.is_none() && cleanup.recorded.is_none() {
             return;
+        }
+        if let Some(cleanups) = &cleanup.cleanups {
+            cleanups.send_modify(|running| *running += 1);
         }
         // Off the caller's thread (often a tokio worker); inline only if no thread starts.
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -652,12 +709,45 @@ impl Real {
     }
 }
 
+/// Returns the pidfile and the sweep's outcome to `held` when the sweep ends, however it ends.
+struct SweepGuard {
+    held: Arc<Mutex<Held>>,
+    pidfile: Option<Pidfile>,
+    swept: bool,
+    _ticket: Ticket,
+}
+
+impl Drop for SweepGuard {
+    fn drop(&mut self) {
+        let mut held = self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.pidfile = self.pidfile.take();
+        held.sweeping = false;
+        held.swept = self.swept;
+    }
+}
+
+/// Test-forced panics in the sweep, keyed by data directory (`launch_tests.rs`).
+#[cfg(test)]
+pub(crate) static SWEEP_PANIC: Mutex<Option<PathBuf>> = Mutex::new(None);
+
 /// Test-forced pending sweeps, keyed by data directory (`launch_tests.rs`).
 #[cfg(test)]
 pub(crate) static SWEEP_PENDING: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// The start's leftover sweep (a test may force the killed leftover to look still running).
 fn sweep_leftover(pidfile: &mut Pidfile, data_dir: &std::path::Path) -> Swept {
+    #[cfg(test)]
+    assert!(
+        SWEEP_PANIC
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_deref()
+            != Some(data_dir),
+        "a test's panic in the sweep"
+    );
     #[cfg(test)]
     if SWEEP_PENDING
         .lock()
@@ -808,6 +898,7 @@ impl Real {
             target: fds::MARKER,
         });
         let spec = self.sandbox_spec(&bwrap, command, &mut handover, runtime)?;
+        self.after_cleanups(job)?;
         pause_at!(self, "before-spawn");
         job.check()?;
         let mut child = Owned::new(
@@ -815,6 +906,7 @@ impl Real {
                 .map_err(|_| Fail::Other("the runner could not be started".into()))?,
             job.ticket.clone(),
         );
+        child.cleanups = Some(Arc::clone(&self.cleanups));
         #[cfg(test)]
         {
             child.dir.clone_from(&self.settings.runtime_dir);
@@ -978,6 +1070,7 @@ impl Real {
                 argv,
             },
         };
+        self.after_cleanups(job)?;
         pause_at!(self, "before-spawn");
         job.check()?;
         let mut child = Owned::new(
@@ -985,6 +1078,7 @@ impl Real {
                 .map_err(|_| Fail::Other("the runner could not be started".into()))?,
             job.ticket.clone(),
         );
+        child.cleanups = Some(Arc::clone(&self.cleanups));
         #[cfg(test)]
         {
             child.dir.clone_from(&self.settings.runtime_dir);
@@ -1583,6 +1677,10 @@ impl Launcher for Launch {
         let run = Arc::new(run);
         let unswept = {
             let mut held = real.held();
+            // First: during a sweep the pidfile is out of `held` (and its lock still taken).
+            if held.sweeping {
+                return Err("the leftover sweep of an earlier start is still running".into());
+            }
             if held.pidfile.is_none() {
                 match Pidfile::acquire(run.as_fd()) {
                     Ok(Ok(pidfile)) => held.pidfile = Some(pidfile),
@@ -1592,9 +1690,6 @@ impl Launcher for Launch {
                     Err(refusal) => return Err(format!("the pidfile: {refusal}")),
                 }
             }
-            if held.sweeping {
-                return Err("the leftover sweep of an earlier start is still running".into());
-            }
             held.run = Some(Arc::clone(&run));
             if held.swept {
                 None
@@ -1603,7 +1698,7 @@ impl Launcher for Launch {
                 held.pidfile.take()
             }
         };
-        if let Some(mut pidfile) = unswept {
+        if let Some(pidfile) = unswept {
             // A leftover's kill waits for its end: off the async runtime, as in-flight work
             // (a settle waits for it), and the sweep itself puts the pidfile back, so a
             // preflight dropped meanwhile loses nothing. Until the leftover has ended, its
@@ -1613,20 +1708,22 @@ impl Launcher for Launch {
             #[cfg(test)]
             let pausing = Arc::clone(real);
             let swept = tokio::task::spawn_blocking(move || {
+                // Puts the pidfile back and ends the sweep however this closure ends, a panic
+                // included.
+                let mut sweep = SweepGuard {
+                    held,
+                    pidfile: Some(pidfile),
+                    swept: false,
+                    _ticket: ticket,
+                };
                 #[cfg(test)]
                 pausing.paused("sweep");
-                let swept = sweep_leftover(&mut pidfile, &data_dir);
+                let pidfile = sweep.pidfile.as_mut().expect("held until dropped");
+                let swept = sweep_leftover(pidfile, &data_dir);
                 if swept != Swept::StillRunning {
                     rundir::sweep_generations(swept_run.as_fd());
                 }
-                let mut held = held
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                held.pidfile = Some(pidfile);
-                held.sweeping = false;
-                held.swept = swept != Swept::StillRunning;
-                drop(held);
-                drop(ticket);
+                sweep.swept = swept != Swept::StillRunning;
                 swept
             })
             .await
