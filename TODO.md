@@ -8,11 +8,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1, 2c-2a (the CPU
   runtime at level 1 only, ASSIST-43, `docs/model-runtime.md`) and the Rust 1.99.1 / rig-core
-  0.45.0 upgrade are merged into master. 2c-2b is split (user, 2026-10-23): 2c-2b-1, the GPU
-  path, is built and live-verified on `assist-2c2b` (the reviews of the last fixes and the merge
-  are owed, plan "2c-2b-1"); then
-  2c-2b-2, Landlock behind `--assistant-allow-landlock`, on `assist-2c2b2` from master. Level
-  3's return is its own later step (plan, "Level 3 behind an owner opt-in").
+  0.45.0 upgrade are merged into master, and so is 2c-2b-1 (the GPU path, live-verified on the
+  RX 6650 XT). Next: 2c-2b-2, Landlock behind `--assistant-allow-landlock` (ASSIST-44), on
+  `assist-2c2b2` from master; its kernel checks need a VM. Level 3's return is its own later
+  step (plan, "Level 3 behind an owner opt-in").
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
   target/agent-tools/ci.sh <cmd>`, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
