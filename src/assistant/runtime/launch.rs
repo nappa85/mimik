@@ -276,21 +276,23 @@ impl Real {
     }
 
     /// The model and the build's files, verified.
-    fn verify(&self, path: Path) -> Result<(Vec<Verified>, Verified), String> {
+    fn verify(&self, path: Path, ticket: &Ticket) -> Result<(Vec<Verified>, Verified), String> {
+        let stop = || ticket.cancelled();
         let build = self
             .build(path)
             .ok_or_else(|| "this build has no model server for this path".to_owned())?;
         let runtime = files::open_dir(&self.settings.runtime_dir, Owners::MineOrRoot, false)
             .map_err(|refusal| format!("the model runtime: {refusal}"))?;
-        let files = files::runtime(runtime.as_fd(), build, &self.cache)
+        let files = files::runtime_until(runtime.as_fd(), build, &self.cache, &stop)
             .map_err(|refusal| format!("the model runtime: {refusal}"))?;
         let models = files::open_dir(&self.settings.models_dir, Owners::Mine, true)
             .map_err(|refusal| format!("the models folder: {refusal}"))?;
-        let model = files::model(
+        let model = files::model_until(
             models.as_fd(),
             &self.settings.model,
             &self.settings.model_sha256,
             &self.cache,
+            &stop,
         )
         .map_err(|refusal| format!("the model: {refusal}"))?;
         Ok((files, model))
@@ -1663,13 +1665,10 @@ impl Launch {
         let ticket = real.work.enter();
         let (files, model) = {
             let (real, ticket) = (Arc::clone(&real), ticket.clone());
-            tokio::task::spawn_blocking(move || {
-                let _ticket = ticket;
-                real.verify(path)
-            })
-            .await
-            .map_err(|_| Fail::Other("verification failed".into()))?
-            .map_err(Fail::Other)?
+            tokio::task::spawn_blocking(move || real.verify(path, &ticket))
+                .await
+                .map_err(|_| Fail::Other("verification failed".into()))?
+                .map_err(Fail::Other)?
         };
         let token = Arc::new(Token::new());
         let bwrap = real.held().bwrap.clone();
@@ -1799,6 +1798,7 @@ impl Probed {
 pub(crate) fn retry_probe(
     level: Level,
     pause: Duration,
+    cancelled: &dyn Fn() -> bool,
     mut probe: impl FnMut() -> Probe,
 ) -> Probed {
     let mut last = String::new();
@@ -1812,8 +1812,8 @@ pub(crate) fn retry_probe(
                     level.number()
                 );
                 last = why;
-                if attempt < PROBE_TRIES {
-                    std::thread::sleep(pause);
+                if attempt < PROBE_TRIES && sleep_unless_cancelled(pause, cancelled) {
+                    return Probed::Failed("cancelled".into());
                 }
             }
         }
@@ -1823,6 +1823,53 @@ pub(crate) fn retry_probe(
         level.number()
     );
     Probed::Kept(last)
+}
+
+/// Sleeps `pause` in 100 ms slices; true (at once) when `cancelled` says so.
+fn sleep_unless_cancelled(pause: Duration, cancelled: &dyn Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + pause;
+    loop {
+        if cancelled() {
+            return true;
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        std::thread::sleep(left.min(Duration::from_millis(100)));
+    }
+}
+
+/// The endpoint check of the probe's connection, ended by a cancel.
+async fn checked_endpoint(connector: &Arc<dyn Connect>, ticket: &Ticket) -> Probe {
+    let connecting = tokio::time::timeout(Duration::from_secs(10), connector.connect());
+    let connected = tokio::select! {
+        connected = connecting => connected,
+        () = until_cancelled(ticket) => return Probe::Failed("cancelled".into()),
+    };
+    match connected {
+        Ok(Ok(_)) => Probe::Passed,
+        Ok(Err(error)) => endpoint_verdict(&error),
+        Err(_) => Probe::Inconclusive("the probe's socket did not answer".into()),
+    }
+}
+
+/// The verdict on a report that is not ok: a port another process took between the
+/// launcher's pick and the probe's bind is tried again (on a fresh port); anything else
+/// failed inside the level.
+pub(crate) fn report_verdict(report: &serde_json::Value) -> Probe {
+    if report["retry"] == serde_json::json!(true) {
+        Probe::Inconclusive("the probe's port was taken meanwhile".into())
+    } else {
+        Probe::Failed(format!("the probe failed inside the level: {report}"))
+    }
+}
+
+/// Resolves once `ticket` is cancelled (checked every 100 ms).
+async fn until_cancelled(ticket: &Ticket) {
+    while !ticket.cancelled() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// The probe's verdict on an endpoint error: a refusal is definite; running out of
@@ -1862,9 +1909,7 @@ impl Real {
     ) -> Probe {
         match self.inner_report(path, level, ticket) {
             Ok((report, verdict)) if report["ok"] == serde_json::json!(true) => verdict,
-            Ok((report, _)) => {
-                Probe::Failed(format!("the probe failed inside the level: {report}"))
-            }
+            Ok((_, verdict)) => verdict,
             Err(outcome) => outcome,
         }
     }
@@ -1877,13 +1922,18 @@ impl Real {
                 (Level::Bubblewrap, Some(hint)) => format!("{why} ({hint})"),
                 _ => why,
             };
-        match retry_probe(level, Duration::from_secs(2), || {
-            if ticket.cancelled() {
-                // Ends the retries at once; the session that asked is gone.
-                return Probe::Failed("cancelled".into());
-            }
-            self.probe_level(path, level, ticket)
-        }) {
+        match retry_probe(
+            level,
+            Duration::from_secs(2),
+            &|| ticket.cancelled(),
+            || {
+                if ticket.cancelled() {
+                    // Ends the retries at once; the session that asked is gone.
+                    return Probe::Failed("cancelled".into());
+                }
+                self.probe_level(path, level, ticket)
+            },
+        ) {
             Probed::Passed => Probed::Passed,
             Probed::Kept(why) => Probed::Kept(hinted(why)),
             Probed::Failed(why) => Probed::Failed(hinted(why)),
@@ -1928,7 +1978,13 @@ impl Real {
             files::ancestors_safe(&self.settings.runtime_dir)
                 .map_err(|refusal| Probe::Failed(format!("the model runtime: {refusal}")))?;
         }
-        let (files, model) = self.verify(path).map_err(Probe::Failed)?;
+        let (files, model) = self.verify(path, ticket).map_err(|why| {
+            if ticket.cancelled() {
+                Probe::Failed("cancelled".into())
+            } else {
+                Probe::Failed(why)
+            }
+        })?;
         let token = Token::new();
         let sequence = self.probes.fetch_add(1, Ordering::SeqCst);
         let job = Job {
@@ -1976,19 +2032,9 @@ impl Real {
         let result = match reported {
             Some(Some(report)) => {
                 let verdict = if report["ok"] == serde_json::json!(true) {
-                    runtime.block_on(async {
-                        match tokio::time::timeout(Duration::from_secs(10), connector.connect())
-                            .await
-                        {
-                            Ok(Ok(_)) => Probe::Passed,
-                            Ok(Err(error)) => endpoint_verdict(&error),
-                            Err(_) => {
-                                Probe::Inconclusive("the probe's socket did not answer".into())
-                            }
-                        }
-                    })
+                    runtime.block_on(checked_endpoint(&connector, ticket))
                 } else {
-                    Probe::Failed("the probe failed inside the level".into())
+                    report_verdict(&report)
                 };
                 Ok((report, verdict))
             }

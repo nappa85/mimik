@@ -39,11 +39,14 @@ pub(crate) enum Refusal {
     /// Something already exists where a fresh directory must be made.
     Exists(String),
     Io(String),
+    /// The work that asked was cancelled.
+    Cancelled,
 }
 
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Cancelled => write!(f, "cancelled"),
             Self::Missing(name) => write!(f, "{name} is missing"),
             Self::Link(name) => write!(f, "{name} is or passes through a symbolic link"),
             Self::NotRegular(name) => write!(f, "{name} is not a regular file"),
@@ -220,7 +223,11 @@ pub(crate) fn open_file(
 
 /// SHA-256 of a descriptor's content, read by offset from 0 (the descriptor's own offset is
 /// left alone).
-pub(crate) fn hash(fd: BorrowedFd<'_>, name: &str) -> Result<[u8; 32], Refusal> {
+pub(crate) fn hash(
+    fd: BorrowedFd<'_>,
+    name: &str,
+    stop: &dyn Fn() -> bool,
+) -> Result<[u8; 32], Refusal> {
     let file = File::from(
         fd.try_clone_to_owned()
             .map_err(|_| Refusal::Io(name.to_owned()))?,
@@ -229,6 +236,10 @@ pub(crate) fn hash(fd: BorrowedFd<'_>, name: &str) -> Result<[u8; 32], Refusal> 
     let mut buffer = vec![0; 1 << 20];
     let mut offset = 0_u64;
     loop {
+        // Every MiB: a cancelled start stops hashing a 2 GiB model within moments.
+        if stop() {
+            return Err(Refusal::Cancelled);
+        }
         let read = file
             .read_at(&mut buffer, offset)
             .map_err(|_| Refusal::Io(name.to_owned()))?;
@@ -254,6 +265,7 @@ impl HashCache {
         key: &str,
         fd: BorrowedFd<'_>,
         identity: Identity,
+        stop: &dyn Fn() -> bool,
     ) -> Result<[u8; 32], Refusal> {
         let mut known = self
             .known
@@ -264,7 +276,7 @@ impl HashCache {
         {
             return Ok(*sha);
         }
-        let sha = hash(fd, key)?;
+        let sha = hash(fd, key, stop)?;
         known.insert(key.to_owned(), (identity, sha));
         Ok(sha)
     }
@@ -276,10 +288,11 @@ fn verified(
     owners: Owners,
     cache: &HashCache,
     key: &str,
+    stop: &dyn Fn() -> bool,
 ) -> Result<Verified, Refusal> {
     let (fd, stat) = open_file(dir, name, owners)?;
     let identity = Identity::of(&stat);
-    let sha256 = cache.hash(key, fd.as_fd(), identity)?;
+    let sha256 = cache.hash(key, fd.as_fd(), identity, stop)?;
     Ok(Verified {
         name: name.to_owned(),
         fd,
@@ -290,13 +303,32 @@ fn verified(
 
 /// Opens and verifies the model `name` in the models folder against `sha256` (64 lowercase
 /// hex digits).
+#[cfg(test)]
 pub(crate) fn model(
     models: BorrowedFd<'_>,
     name: &str,
     sha256: &str,
     cache: &HashCache,
 ) -> Result<Verified, Refusal> {
-    let file = verified(models, name, Owners::Mine, cache, &format!("model/{name}"))?;
+    model_until(models, name, sha256, cache, &|| false)
+}
+
+/// [`model`], stopping once `stop` says so.
+pub(crate) fn model_until(
+    models: BorrowedFd<'_>,
+    name: &str,
+    sha256: &str,
+    cache: &HashCache,
+    stop: &dyn Fn() -> bool,
+) -> Result<Verified, Refusal> {
+    let file = verified(
+        models,
+        name,
+        Owners::Mine,
+        cache,
+        &format!("model/{name}"),
+        stop,
+    )?;
     if hex::encode(file.sha256) != sha256 {
         return Err(Refusal::Changed(name.to_owned()));
     }
@@ -306,10 +338,21 @@ pub(crate) fn model(
 /// Opens and verifies a build's directory beneath the runtime directory: it holds exactly the
 /// manifest's files, each regular, not writable by group or others, of its pinned size and
 /// SHA-256. The returned files are in manifest order.
+#[cfg(test)]
 pub(crate) fn runtime(
     runtime: BorrowedFd<'_>,
     build: &Build,
     cache: &HashCache,
+) -> Result<Vec<Verified>, Refusal> {
+    runtime_until(runtime, build, cache, &|| false)
+}
+
+/// [`runtime`], stopping once `stop` says so.
+pub(crate) fn runtime_until(
+    runtime: BorrowedFd<'_>,
+    build: &Build,
+    cache: &HashCache,
+    stop: &dyn Fn() -> bool,
 ) -> Result<Vec<Verified>, Refusal> {
     let dir = open_dir_beneath(runtime, &build.directory, Owners::MineOrRoot, false)?;
     let mut present = std::collections::BTreeSet::new();
@@ -333,7 +376,14 @@ pub(crate) fn runtime(
             return Err(Refusal::Missing(file.name.clone()));
         }
         let key = format!("runtime/{}/{}", build.directory, file.name);
-        let opened = verified(dir.as_fd(), &file.name, Owners::MineOrRoot, cache, &key)?;
+        let opened = verified(
+            dir.as_fd(),
+            &file.name,
+            Owners::MineOrRoot,
+            cache,
+            &key,
+            stop,
+        )?;
         if opened.identity.size != file.size || hex::encode(opened.sha256) != file.sha256 {
             return Err(Refusal::Changed(file.name.clone()));
         }

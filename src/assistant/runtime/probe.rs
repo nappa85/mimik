@@ -135,11 +135,18 @@ fn inner_to(args: &[String], out: &mut dyn Write) -> i32 {
                 .map(|_| ())
                 .map_err(|error| format!("the port cannot be bound: {}", error.kind()));
             let ok = model.is_ok() && token.is_ok() && bound.is_ok();
+            // Only a port taken by someone else (after the launcher picked it) is worth
+            // another try.
+            let retry = model.is_ok()
+                && token.is_ok()
+                && listener
+                    .as_ref()
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::AddrInUse);
             let _ = writeln!(
                 out,
                 "{}",
                 json!({"ok": ok, "model": verdict(&model), "token": verdict(&token),
-                    "port": verdict(&bound), "pid": pid})
+                    "port": verdict(&bound), "retry": retry, "pid": pid})
             );
             let _ = out.flush();
             if ok && let Ok(listener) = listener {
@@ -341,10 +348,25 @@ fn close_range() -> bool {
 
 /// The open descriptors, from `/proc/self/fd`.
 fn fd_listing() -> std::io::Result<Vec<i32>> {
-    Ok(std::fs::read_dir("/proc/self/fd")?
-        .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
-        .collect())
+    descriptors(
+        std::fs::read_dir("/proc/self/fd")?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())),
+    )
+}
+
+/// Descriptor numbers from directory entry names: any error or other name fails the whole
+/// listing (a partial one could leave a descriptor open).
+pub(crate) fn descriptors(
+    names: impl Iterator<Item = std::io::Result<String>>,
+) -> std::io::Result<Vec<i32>> {
+    names
+        .map(|name| {
+            name.and_then(|name| {
+                name.parse()
+                    .map_err(|_| std::io::Error::other("not a descriptor number"))
+            })
+        })
+        .collect()
 }
 
 /// Closes every descriptor but 0, 1 and 2: `close_range`, else each one `/proc/self/fd`
@@ -402,6 +424,30 @@ mod tests {
         assert_eq!(none["level"], Value::Null);
         let passed = probe_report(&[(Level::Bubblewrap, Probed::Passed)]);
         assert_eq!(passed["level"], json!(1));
+    }
+
+    #[test]
+    fn a_partial_descriptor_listing_is_no_listing() {
+        let partial = [
+            Ok("3".to_owned()),
+            Err(std::io::Error::from_raw_os_error(libc::EIO)),
+            Ok("7".to_owned()),
+        ];
+        assert!(descriptors(partial.into_iter()).is_err());
+        assert!(descriptors([Ok("x".to_owned())].into_iter()).is_err());
+        assert_eq!(
+            descriptors([Ok("3".to_owned()), Ok("12".to_owned())].into_iter()).unwrap(),
+            [3, 12]
+        );
+        // So the shim executes nothing.
+        let listing = [
+            Ok("3".to_owned()),
+            Err(std::io::Error::from_raw_os_error(libc::EIO)),
+        ];
+        assert!(!close_inherited(
+            || false,
+            || descriptors(listing.into_iter())
+        ));
     }
 
     #[test]

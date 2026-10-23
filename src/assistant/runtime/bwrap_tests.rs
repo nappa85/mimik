@@ -173,6 +173,19 @@ fn pairs(args: &[OsString]) -> Vec<(String, String)> {
 }
 
 #[test]
+fn every_profile_dies_with_its_parent() {
+    // A sandbox whose reaper cannot be verified is ended by killing bwrap: only this option
+    // takes the sandbox down with it.
+    for size in [true, false] {
+        let args = profile(size).arguments();
+        assert!(
+            args.iter().any(|arg| arg == "--die-with-parent"),
+            "size {size}"
+        );
+    }
+}
+
+#[test]
 fn the_profile_unshares_everything_and_binds_only_the_allowlist() {
     let args = profile(true).arguments();
     let text: Vec<String> = args

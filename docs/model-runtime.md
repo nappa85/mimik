@@ -106,7 +106,9 @@ the log.
    remounted read-only; the seccomp program by `--seccomp`; `--json-status-fd`, whose first
    line gives the sandbox's PID-1 reaper (`child-pid`) and its PID namespace. Nothing else of
    the host is visible. bwrap's reported reaper is accepted only as the runner's child in the
-   reported PID namespace, checked through its pidfd. The command inside is Mimik's own binary
+   reported PID namespace, checked through its pidfd; when it cannot be verified the start
+   fails and bwrap is killed, which ends the sandbox only through `--die-with-parent` (every
+   profile has it). The command inside is Mimik's own binary
    (bound by descriptor) as a shim: it writes a marker on a dedicated pipe, closes every
    descriptor but 0–2 (`close_range`, else each one `/proc/self/fd` lists; when neither works
    it executes nothing) and executes llama-server (or the probe); an exec failure is written

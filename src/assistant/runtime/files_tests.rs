@@ -116,18 +116,18 @@ fn a_hash_is_reused_while_the_identity_is_unchanged() {
     let identity = Identity::of(&stat);
     let (b, _) = open_file(fd.as_fd(), "b", Owners::Mine).unwrap();
     assert_eq!(
-        hex::encode(cache.hash("k", a.as_fd(), identity).unwrap()),
+        hex::encode(cache.hash("k", a.as_fd(), identity, &|| false).unwrap()),
         sha(b"first")
     );
     // Same identity: not re-read (the other descriptor's content is never looked at).
     assert_eq!(
-        hex::encode(cache.hash("k", b.as_fd(), identity).unwrap()),
+        hex::encode(cache.hash("k", b.as_fd(), identity, &|| false).unwrap()),
         sha(b"first")
     );
     let mut changed = identity;
     changed.size += 1;
     assert_eq!(
-        hex::encode(cache.hash("k", b.as_fd(), changed).unwrap()),
+        hex::encode(cache.hash("k", b.as_fd(), changed, &|| false).unwrap()),
         sha(b"second")
     );
 }
@@ -274,4 +274,18 @@ fn a_linked_ancestor_is_checked_where_it_leads() {
         ancestors_safe(&dir.path().join("link/runtime")),
         Err(Refusal::Writable(open.display().to_string()))
     );
+}
+
+#[test]
+fn a_cancelled_verification_stops_hashing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("big"), vec![0_u8; 3 << 20]).unwrap();
+    let file = std::fs::File::open(dir.path().join("big")).unwrap();
+    let chunks = std::cell::Cell::new(0);
+    let stop = || {
+        chunks.set(chunks.get() + 1);
+        chunks.get() > 1
+    };
+    assert_eq!(hash(file.as_fd(), "big", &stop), Err(Refusal::Cancelled));
+    assert_eq!(chunks.get(), 2);
 }

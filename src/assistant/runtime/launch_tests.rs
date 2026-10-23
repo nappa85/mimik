@@ -576,7 +576,7 @@ async fn a_child_dropped_by_an_interrupted_start_is_killed() {
 #[test]
 fn a_probe_that_only_times_out_is_retried_and_never_skips_its_level() {
     let mut calls = 0;
-    let kept = retry_probe(Level::Bubblewrap, Duration::ZERO, || {
+    let kept = retry_probe(Level::Bubblewrap, Duration::ZERO, &|| false, || {
         calls += 1;
         Probe::Inconclusive("did not report within 30 s".into())
     });
@@ -584,7 +584,7 @@ fn a_probe_that_only_times_out_is_retried_and_never_skips_its_level() {
     assert_eq!(calls, PROBE_TRIES);
     assert_eq!(kept.eligible(), Ok(()));
     let mut calls = 0;
-    let passed = retry_probe(Level::Unconfined, Duration::ZERO, || {
+    let passed = retry_probe(Level::Unconfined, Duration::ZERO, &|| false, || {
         calls += 1;
         if calls < 2 {
             Probe::Inconclusive("no pidfd".into())
@@ -594,7 +594,7 @@ fn a_probe_that_only_times_out_is_retried_and_never_skips_its_level() {
     });
     assert_eq!((passed, calls), (Probed::Passed, 2));
     let mut calls = 0;
-    let failed = retry_probe(Level::Bubblewrap, Duration::ZERO, || {
+    let failed = retry_probe(Level::Bubblewrap, Duration::ZERO, &|| false, || {
         calls += 1;
         Probe::Failed("bwrap: setup failed".into())
     });
@@ -936,4 +936,95 @@ async fn a_preflight_dropped_during_its_sweep_settles_after_it_and_the_next_one_
         .unwrap();
     // The pidfile came back: no "another Mimik".
     launch.preflight(Path::Cpu).await.unwrap();
+}
+
+#[test]
+fn a_transient_proc_error_in_the_listener_scan_stays_inconclusive() {
+    use procfs::ProcError;
+    let emfile = || ProcError::Io(std::io::Error::from_raw_os_error(libc::EMFILE), None);
+    // The descriptor walk: a closed descriptor is skipped, any other error fails the scan
+    // with its errno, which the probe's verdict treats as transient.
+    let scanned = endpoint::socket_inodes(
+        [
+            Ok(Some(5)),
+            Err(ProcError::NotFound(None)),
+            Ok(None),
+            Ok(Some(7)),
+        ]
+        .into_iter(),
+    )
+    .unwrap();
+    assert_eq!(scanned.into_iter().collect::<Vec<_>>(), [5, 7]);
+    let failed = endpoint::socket_inodes([Ok(Some(5)), Err(emfile())].into_iter()).unwrap_err();
+    assert!(
+        matches!(endpoint_verdict(&failed), Probe::Inconclusive(_)),
+        "{failed}"
+    );
+    // The tables' reads: the same errno.
+    assert!(matches!(
+        endpoint_verdict(&endpoint::proc_error(emfile())),
+        Probe::Inconclusive(_)
+    ));
+    assert!(matches!(
+        endpoint_verdict(&endpoint::proc_error(ProcError::Incomplete(None))),
+        Probe::Inconclusive(_)
+    ));
+}
+
+#[test]
+fn a_cancel_ends_the_retry_pause_at_once() {
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let started = std::time::Instant::now();
+    let probed = retry_probe(
+        Level::Bubblewrap,
+        Duration::from_secs(30),
+        &|| cancelled.load(Ordering::SeqCst),
+        || {
+            cancelled.store(true, Ordering::SeqCst);
+            Probe::Inconclusive("timed out".into())
+        },
+    );
+    assert_eq!(probed, Probed::Failed("cancelled".into()));
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn a_cancel_ends_a_wait_for_the_endpoint() {
+    let work = Work::new();
+    let ticket = work.enter();
+    work.cancel();
+    tokio::time::timeout(Duration::from_secs(2), until_cancelled(&ticket))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn three_real_spawn_failures_keep_the_level_for_the_start() {
+    let mut setup = setup(MODEL, "fake");
+    // The runner cannot be started at all: each spawn really fails.
+    setup.settings.runner.program = PathBuf::from("/nonexistent/mimik");
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    let real = Arc::clone(&launch.0);
+    let probed = tokio::task::spawn_blocking(move || {
+        let ticket = real.work().enter();
+        let probed = real.probe_with_retries(Path::Cpu, Level::Unconfined, &ticket);
+        (probed, real.probes.load(Ordering::SeqCst))
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(&probed.0, Probed::Kept(why) if why.contains("runner")),
+        "{probed:?}"
+    );
+    // Three attempts (the sequence started at 1).
+    assert_eq!(probed.1, 1 + PROBE_TRIES as u64);
+}
+
+#[test]
+fn a_probe_port_taken_meanwhile_is_tried_again() {
+    let taken = serde_json::json!({"ok": false, "port": "address in use", "retry": true});
+    assert!(matches!(report_verdict(&taken), Probe::Inconclusive(_)));
+    let failed = serde_json::json!({"ok": false, "model": "unreadable", "retry": false});
+    assert!(matches!(report_verdict(&failed), Probe::Failed(_)));
 }

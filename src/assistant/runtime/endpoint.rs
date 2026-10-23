@@ -226,7 +226,7 @@ fn covers(address: &SocketAddr, port: u16) -> bool {
 /// Every listening entry that could take a connection to `127.0.0.1:<port>` belongs to
 /// `pid`.
 pub(crate) fn listeners(port: u16, pid: i32) -> io::Result<Result<(), Listeners>> {
-    let map = |error: procfs::ProcError| io::Error::other(error.to_string());
+    let map = proc_error;
     let mut inodes: Vec<u64> = Vec::new();
     for entry in procfs::net::tcp()
         .map_err(map)?
@@ -241,20 +241,47 @@ pub(crate) fn listeners(port: u16, pid: i32) -> io::Result<Result<(), Listeners>
         return Ok(Err(Listeners::NotReady));
     }
     let process = procfs::process::Process::new(pid).map_err(map)?;
-    let owned: BTreeSet<u64> = process
-        .fd()
-        .map_err(map)?
-        .filter_map(Result::ok)
-        .filter_map(|fd| match fd.target {
+    let owned = socket_inodes(process.fd().map_err(map)?.map(|fd| {
+        fd.map(|fd| match fd.target {
             procfs::process::FDTarget::Socket(inode) => Some(inode),
             _ => None,
         })
-        .collect();
+    }))?;
     if inodes.iter().all(|inode| owned.contains(inode)) {
         Ok(Ok(()))
     } else {
         Ok(Err(Listeners::Foreign))
     }
+}
+
+/// A `/proc` error as the `io::Error` underneath (its errno kept, so a transient one such as
+/// `EMFILE` stays recognisable).
+pub(crate) fn proc_error(error: procfs::ProcError) -> io::Error {
+    match error {
+        procfs::ProcError::Io(error, _) => error,
+        procfs::ProcError::PermissionDenied(_) => io::Error::from_raw_os_error(libc::EACCES),
+        procfs::ProcError::NotFound(_) => io::Error::from_raw_os_error(libc::ENOENT),
+        procfs::ProcError::Incomplete(_) => io::Error::from_raw_os_error(libc::EAGAIN),
+        other => io::Error::other(other.to_string()),
+    }
+}
+
+/// The socket inodes among a process's descriptors (`None` for the others). A descriptor
+/// closed while it is listed is skipped; any other error fails the whole scan.
+pub(crate) fn socket_inodes(
+    descriptors: impl Iterator<Item = procfs::ProcResult<Option<u64>>>,
+) -> io::Result<BTreeSet<u64>> {
+    let mut inodes = BTreeSet::new();
+    for descriptor in descriptors {
+        match descriptor {
+            Ok(Some(inode)) => {
+                inodes.insert(inode);
+            }
+            Ok(None) | Err(procfs::ProcError::NotFound(_)) => {}
+            Err(error) => return Err(proc_error(error)),
+        }
+    }
+    Ok(inodes)
 }
 
 fn listening(port: u16, child: &Watched) -> io::Result<()> {
