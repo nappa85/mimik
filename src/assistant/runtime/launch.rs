@@ -170,7 +170,66 @@ pub(crate) struct Real {
     /// Probe sequence numbers: unique directory names and pidfile keys.
     probes: AtomicU64,
     /// Failed attempts' cleanups still running: no new process is spawned until they end.
-    cleanups: Arc<watch::Sender<usize>>,
+    cleanups: Arc<Cleanups>,
+}
+
+/// A count of running cleanups, waited on without polling: a spawn blocks until it is 0.
+#[derive(Default)]
+pub(crate) struct Cleanups {
+    count: Mutex<usize>,
+    done: std::sync::Condvar,
+}
+
+impl Cleanups {
+    fn enter(&self) {
+        *self
+            .count
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+    }
+
+    fn leave(&self) {
+        let mut count = self
+            .count
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            self.done.notify_all();
+        }
+    }
+
+    /// Waits (in `slice`s, so a cancel is seen) until no cleanup runs; `warn` once after
+    /// `warn_after`. Returns whether it reached 0 (false means `stop` ended the wait).
+    fn settle(
+        &self,
+        slice: Duration,
+        warn_after: Duration,
+        warn: &mut dyn FnMut(),
+        stop: &dyn Fn() -> bool,
+    ) -> bool {
+        let started = std::time::Instant::now();
+        let mut warned = false;
+        let mut count = self
+            .count
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *count > 0 {
+            if stop() {
+                return false;
+            }
+            if !warned && started.elapsed() >= warn_after {
+                warn();
+                warned = true;
+            }
+            let (guard, _) = self
+                .done
+                .wait_timeout(count, slice)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            count = guard;
+        }
+        true
+    }
 }
 
 /// Pidfile keys of probes: above any generation number.
@@ -274,7 +333,7 @@ impl Real {
             pidfile: Arc::new(Mutex::new(None)),
             work: Work::new(),
             probes: AtomicU64::new(1),
-            cleanups: Arc::new(watch::channel(0).0),
+            cleanups: Arc::new(Cleanups::default()),
         }
     }
 
@@ -294,6 +353,25 @@ impl Real {
             .run
             .clone()
             .ok_or_else(|| "the run directory is not open".to_owned())
+    }
+
+    /// Records a spawned child under the Owned guard: an unreadable start time or a failed
+    /// write fails the start (an unrecorded child could outlive a crash of Mimik unseen).
+    fn record_child(
+        &self,
+        job: &Job,
+        pid: i32,
+        executables: Vec<String>,
+        child: &mut Owned,
+    ) -> Result<(), Fail> {
+        let entry = recorded_entry(
+            Entry::of(job.key, pid, executables),
+            &self.settings.runtime_dir,
+        )
+        .ok_or_else(|| Fail::Other("the model server's start time cannot be read".into()))?;
+        self.record(&entry)?;
+        child.recorded = Some((Arc::clone(&self.pidfile), job.key));
+        Ok(())
     }
 
     /// Records the child; a failure fails the start (an unrecorded child could outlive a
@@ -321,17 +399,13 @@ impl Real {
     /// pidfile entry still standing): each spawn follows the previous one's end. A cancel
     /// ends the wait.
     fn after_cleanups(&self, job: &Job) -> Result<(), Fail> {
-        let mut warned = false;
-        let started = std::time::Instant::now();
-        while *self.cleanups.borrow() > 0 {
-            job.check()?;
-            if !warned && started.elapsed() >= REAPER_WITHIN {
-                eprintln!("assistant: waiting for an earlier start's processes to end");
-                warned = true;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        Ok(())
+        let reached = self.cleanups.settle(
+            Duration::from_millis(100),
+            REAPER_WITHIN,
+            &mut || eprintln!("assistant: waiting for an earlier start's processes to end"),
+            &|| job.ticket.cancelled(),
+        );
+        if reached { Ok(()) } else { job.check() }
     }
 
     /// Clears the pidfile's entry when it is still `key`'s (never a newer one's).
@@ -487,6 +561,24 @@ type PidSlot = Arc<Mutex<Option<Pidfile>>>;
 /// Test-forced record failures, keyed by runtime directory (`launch_tests.rs`).
 #[cfg(test)]
 pub(crate) static RECORD_FAILS: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// Test-forced "start time unreadable", keyed by runtime directory (`launch_tests.rs`).
+#[cfg(test)]
+pub(crate) static NO_START_TIME: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// `entry` unless a test forces an unreadable start time for `dir`.
+fn recorded_entry(entry: Option<Entry>, dir: &std::path::Path) -> Option<Entry> {
+    #[cfg(test)]
+    if NO_START_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_deref()
+        == Some(dir)
+    {
+        return None;
+    }
+    let _ = dir;
+    entry
+}
 
 /// Clears the pidfile's entry when it is `key`'s.
 fn clear_key(slot: &Mutex<Option<Pidfile>>, key: u64) {
@@ -516,7 +608,7 @@ struct Owned {
     recorded: Option<(PidSlot, u64)>,
     ticket: Option<Ticket>,
     /// The launcher's count of running cleanups (the next spawn waits for them).
-    cleanups: Option<Arc<watch::Sender<usize>>>,
+    cleanups: Option<Arc<Cleanups>>,
     /// The launcher's runtime directory (a test's pause key).
     #[cfg(test)]
     dir: PathBuf,
@@ -574,7 +666,7 @@ struct Cleanup {
     reaper: Option<Arc<Sandbox>>,
     recorded: Option<(PidSlot, u64)>,
     ticket: Option<Ticket>,
-    cleanups: Option<Arc<watch::Sender<usize>>>,
+    cleanups: Option<Arc<Cleanups>>,
     #[cfg(test)]
     dir: PathBuf,
     #[cfg(test)]
@@ -640,7 +732,7 @@ impl Cleanup {
             clear_key(&held, key);
         }
         if let Some(cleanups) = self.cleanups.take() {
-            cleanups.send_modify(|running| *running = running.saturating_sub(1));
+            cleanups.leave();
         }
         drop(self.ticket.take());
     }
@@ -689,7 +781,7 @@ impl Drop for Owned {
             return;
         }
         if let Some(cleanups) = &cleanup.cleanups {
-            cleanups.send_modify(|running| *running += 1);
+            cleanups.enter();
         }
         // Off the caller's thread (often a tokio worker); inline only if no thread starts.
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -1008,17 +1100,15 @@ impl Real {
         child.runner_pidfd = runner.pidfd.try_clone().ok();
         pause_at!(self, "before-record");
         job.check()?;
-        if let Some(entry) = Entry::of(
-            job.key,
+        self.record_child(
+            job,
             pid,
             vec![
                 bwrap.path.display().to_string(),
                 self.settings.runner.program.display().to_string(),
             ],
-        ) {
-            self.record(&entry)?;
-            child.recorded = Some((Arc::clone(&self.pidfile), job.key));
-        }
+            &mut child,
+        )?;
         fault_at!(self, "recorded", child);
         // No status line: bwrap failed before it created the sandbox (nothing it started could
         // have written anything yet).
@@ -1203,10 +1293,7 @@ impl Real {
         }
         pause_at!(self, "before-record");
         job.check()?;
-        if let Some(entry) = Entry::of(job.key, pid, executables) {
-            self.record(&entry)?;
-            child.recorded = Some((Arc::clone(&self.pidfile), job.key));
-        }
+        self.record_child(job, pid, executables, &mut child)?;
         fault_at!(self, "recorded", child);
         let connector: Arc<dyn Connect> = Arc::new(Loopback {
             port,
@@ -2031,35 +2118,63 @@ impl Launch {
             let port = pick_port(&real.settings.runtime_dir)?;
             let spawned = joined(spawn(port).await)?;
             let child = real.child(spawned, level, &token, None, generation)?;
-            let bound = tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    if child.summary().failed.bind {
-                        return false;
+            match bind_outcome(&child, port, &ticket).await {
+                // Bound, or exited for some other reason (its `exited()` reports that): kept.
+                Bind::Bound | Bind::OtherExit => return Ok(child),
+                Bind::Failed => {
+                    child.stop().await;
+                    if tries >= PORT_TRIES {
+                        return Err(Fail::Other(format!(
+                            "the model server could not bind a loopback port in {PORT_TRIES} tries"
+                        )));
                     }
-                    if child.exit.borrow().is_some() {
-                        return true;
-                    }
-                    let (pid, held) = (child.pid, ticket.clone());
-                    let listening = tokio::task::spawn_blocking(move || {
-                        let _ticket = held;
-                        endpoint::listeners(port, pid).is_ok_and(|result| result.is_ok())
-                    })
-                    .await
-                    .unwrap_or(false);
-                    if listening {
-                        return true;
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-            })
-            .await
-            .unwrap_or(true);
-            if bound || tries >= PORT_TRIES {
-                return Ok(child);
             }
-            child.stop().await;
         }
     }
+}
+
+/// Whether a level-3 child took its port.
+enum Bind {
+    Bound,
+    /// It exited reporting a bind failure: another port is tried.
+    Failed,
+    /// It exited for another reason: kept, so its exit is classified.
+    OtherExit,
+}
+
+/// Waits (10 s) for the child to listen on `port` or to exit. On exit the drain is settled
+/// (bounded) and the bind error re-checked, so an exit seen before the drain parsed it is not
+/// mistaken for a bound server.
+async fn bind_outcome(child: &RealChild, port: u16, ticket: &Ticket) -> Bind {
+    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if child.summary().failed.bind {
+                return Bind::Failed;
+            }
+            if child.exit.borrow().is_some() {
+                child.readers.all_ended(READERS_WITHIN).await;
+                return if child.summary().failed.bind {
+                    Bind::Failed
+                } else {
+                    Bind::OtherExit
+                };
+            }
+            let (pid, held) = (child.pid, ticket.clone());
+            let listening = tokio::task::spawn_blocking(move || {
+                let _ticket = held;
+                endpoint::listeners(port, pid).is_ok_and(|result| result.is_ok())
+            })
+            .await
+            .unwrap_or(false);
+            if listening {
+                return Bind::Bound;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    outcome.unwrap_or(Bind::Bound)
 }
 
 /// A probe's outcome.

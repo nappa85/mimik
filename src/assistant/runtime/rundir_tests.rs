@@ -382,3 +382,12 @@ fn an_executable_path_that_reads_like_the_checksum_still_parses() {
     pidfile.record(&entry).unwrap();
     assert_eq!(pidfile.entry(), Ok(Some(entry)));
 }
+
+#[test]
+fn an_entry_longer_than_the_read_is_refused() {
+    let me = i32::try_from(std::process::id()).unwrap();
+    assert!(Entry::of(1, me, vec!["/opt/mimik/mimik".into()]).is_some());
+    // Executable paths that together exceed the 4096-byte read.
+    let long = vec!["x".repeat(5000)];
+    assert!(Entry::of(1, me, long).is_none());
+}

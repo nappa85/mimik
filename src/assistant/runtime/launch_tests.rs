@@ -288,16 +288,40 @@ async fn a_model_that_does_not_load_is_a_counted_exit() {
 }
 
 #[tokio::test]
-async fn a_port_that_cannot_be_bound_is_tried_three_times() {
+async fn a_port_that_cannot_be_bound_is_tried_three_times_then_fails() {
+    // The server exits reporting a bind failure (even if the drain has not parsed it when the
+    // exit is seen); after three ports the start fails with a definite error, never a dead
+    // child reported as bound.
     let setup = setup(MODEL, "fail-bind");
     let launch = launch(&setup);
     launch.preflight(Path::Cpu).await.unwrap();
-    let child = launch.start(1, Level::Unconfined, Path::Cpu).await.unwrap();
-    let fail = tokio::time::timeout(Duration::from_secs(30), child.exited())
-        .await
-        .unwrap();
-    assert!(matches!(fail, Fail::Other(_)), "{fail:?}");
-    child.stop().await;
+    // Three known free ports for this launcher: all three must be consumed.
+    let mut holders = Vec::new();
+    for _ in 0..PORT_TRIES {
+        let holder = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = holder.local_addr().unwrap().port();
+        PORTS
+            .lock()
+            .unwrap()
+            .push((setup.settings.runtime_dir.clone(), port));
+        holders.push((holder, port));
+    }
+    drop(holders);
+    let result = launch.start(1, Level::Unconfined, Path::Cpu).await;
+    assert!(
+        matches!(&result, Err(Fail::Other(why)) if why.contains("could not bind a loopback port")),
+        "{:?}",
+        result.err()
+    );
+    // All three were taken (none of this launcher's ports is left).
+    assert!(
+        !PORTS
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(dir, _)| *dir == setup.settings.runtime_dir)
+    );
+    launch.settle().await;
 }
 
 #[tokio::test]
@@ -1408,4 +1432,23 @@ async fn level_3_loads_from_the_verified_inode_after_a_runtime_rename() {
         (before.st_dev, before.st_ino)
     );
     child.stop().await;
+}
+
+#[tokio::test]
+async fn a_start_whose_start_time_is_unreadable_fails_and_leaves_nothing() {
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    *NO_START_TIME.lock().unwrap() = Some(setup.settings.runtime_dir.clone());
+    let result = launch.start(1, Level::Unconfined, Path::Cpu).await;
+    *NO_START_TIME.lock().unwrap() = None;
+    assert!(
+        matches!(&result, Err(Fail::Other(why)) if why.contains("start time cannot be read")),
+        "{:?}",
+        result.err()
+    );
+    launch.settle().await;
+    let marker = setup.settings.data_dir.join("run").display().to_string();
+    assert_eq!(processes_naming(&marker), Vec::<i32>::new());
+    assert_eq!(pidfile_text(&setup), "");
 }

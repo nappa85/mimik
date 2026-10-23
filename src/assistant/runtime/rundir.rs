@@ -86,12 +86,14 @@ impl Entry {
 
     /// The entry for a running process, when `/proc` can tell its start time.
     pub(crate) fn of(generation: u64, pid: i32, executables: Vec<String>) -> Option<Self> {
-        Some(Self {
+        let entry = Self {
             generation,
             pid,
             start_time: start_time(pid)?,
             executables,
-        })
+        };
+        // The leftover read takes 4096 bytes; a longer entry could not be read back whole.
+        (entry.text().len() <= 4096).then_some(entry)
     }
 }
 
