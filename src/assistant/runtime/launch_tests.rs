@@ -1296,3 +1296,31 @@ async fn a_cancel_ends_the_probes_endpoint_check() {
         .unwrap();
     assert_eq!(verdict, Probe::Failed("cancelled".into()));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_cancelled_during_its_verification_is_cancelled() {
+    let setup = setup(MODEL, "fake");
+    let launch = Arc::new(launch(&setup));
+    launch.preflight(Path::Cpu).await.unwrap();
+    let (verifying, release) = pause_for(&setup, "runtime-opened");
+    let starting = {
+        let launch = Arc::clone(&launch);
+        tokio::spawn(async move {
+            launch
+                .start_real(1, Level::Unconfined, Path::Cpu)
+                .await
+                .map(|_| ())
+        })
+    };
+    tokio::task::spawn_blocking(move || verifying.recv_timeout(Duration::from_secs(30)).unwrap())
+        .await
+        .unwrap();
+    launch.cancel();
+    release.send(()).unwrap();
+    let result = starting.await.unwrap();
+    assert!(
+        matches!(&result, Err(Fail::Other(why)) if why == "cancelled"),
+        "{:?}",
+        result.err()
+    );
+}
