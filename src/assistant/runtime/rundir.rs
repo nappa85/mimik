@@ -17,7 +17,11 @@ pub(crate) fn open(data_dir: &Path) -> Result<OwnedFd, Refusal> {
     match rustix::fs::mkdir(&path, Mode::from_raw_mode(0o700)) {
         Ok(()) | Err(rustix::io::Errno::EXIST) => {}
         Err(error) => {
-            return Err(Refusal::Io(format!("{} ({})", path.display(), error.kind())));
+            return Err(Refusal::Io(format!(
+                "{} ({})",
+                path.display(),
+                error.kind()
+            )));
         }
     }
     files::open_dir(&path, Owners::Mine, true)

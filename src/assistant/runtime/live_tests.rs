@@ -353,7 +353,9 @@ fn live_a_failing_probe_that_ended_before_its_reaper_was_pinned_still_reports_it
 #[ignore = "live: bubblewrap, pinned runtime (MIMIK_LIVE_*)"]
 fn live_an_ok_probe_without_a_verified_reaper_can_never_pass() {
     match probe_after_exit("probe-ok-fast") {
-        Probe::Inconclusive(why) => assert!(why.contains("sandbox ended before its check"), "{why}"),
+        Probe::Inconclusive(why) => {
+            assert!(why.contains("sandbox ended before its check"), "{why}");
+        }
         other => panic!("an ok report without a reaper must stay inconclusive: {other:?}"),
     }
 }

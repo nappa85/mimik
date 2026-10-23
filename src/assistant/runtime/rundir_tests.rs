@@ -417,5 +417,8 @@ fn io_refusals_of_the_run_directory_and_the_pidfile_name_the_error_kind() {
     let Err(Refusal::Io(message)) = Pidfile::acquire(std::os::fd::AsFd::as_fd(&run)) else {
         panic!("expected an I/O refusal");
     };
-    assert!(message.contains(PIDFILE) && message.contains('('), "{message}");
+    assert!(
+        message.contains(PIDFILE) && message.contains('('),
+        "{message}"
+    );
 }

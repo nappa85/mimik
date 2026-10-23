@@ -3138,9 +3138,10 @@ impl Real {
             Some(Some(report)) => {
                 let verdict = if report["ok"] != serde_json::json!(true) {
                     report_verdict(&report)
-                } else if sandbox.is_none() {
-                    // An ok report with no verified reaper can never pass: the sandbox ended
-                    // before its check, so nothing was proven either way.
+                } else if level == Level::Bubblewrap && sandbox.is_none() {
+                    // An ok report with no verified reaper can never pass at level 1: the
+                    // sandbox ended before its check, so nothing was proven either way (level
+                    // 3 has no sandbox and is checked by its port's listeners).
                     Probe::Inconclusive("the probe's sandbox ended before its check".into())
                 } else {
                     runtime.block_on(checked_endpoint(&connector, ticket))
