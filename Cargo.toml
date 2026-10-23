@@ -19,7 +19,7 @@ auth-test-support = []
 dev-endpoint = []
 # Level-1 sandbox through the Hakoniwa library instead of bubblewrap (comparison spike; bwrap
 # stays the default, ASSIST-48). LGPL-3.0 with the linking exception (DEP-24).
-sandbox-hakoniwa = ["dep:hakoniwa"]
+sandbox-hakoniwa = ["dep:hakoniwa", "dep:caps"]
 
 [dependencies]
 async-trait = "0.1"
@@ -49,7 +49,7 @@ jsonschema = { version = "=0.58.6", default-features = false }
 lopdf = { version = "0.45", default-features = false }
 png = "0.18"
 rusqlite = { version = "0.37", features = ["bundled", "functions", "hooks"] }
-rustix = { version = "1", features = ["fs", "process", "net", "thread", "pipe", "event", "time"] }
+rustix = { version = "1", features = ["fs", "process", "net", "thread", "pipe", "event", "time", "stdio"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` (also enabled by rig-core): the assistant's schema must reach llama.cpp in
 # its pinned key order (step 2c-1), and every JSON object keeps document order.
@@ -85,6 +85,8 @@ libc = "0.2"
 # process. `seccomp` stays off (it needs the libseccomp C library): Mimik installs its own
 # seccompiler program.
 hakoniwa = { version = "=1.8.0", default-features = false, optional = true }
+# The capability sets dropped inside the Hakoniwa sandbox (already in the tree through it).
+caps = { version = "=0.5.6", optional = true }
 
 [dev-dependencies]
 rqrr = { version = "=0.11.0", default-features = false }

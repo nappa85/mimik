@@ -5,6 +5,7 @@
 //! (Landlock) is step 2c-2b-2. The GPU path runs the Vulkan build at level 1 with the
 //! selected render node bound and `--device` named from the in-sandbox listing.
 use super::bwrap::{self, Bwrap, GpuBinds, Profile, Started};
+use super::hako;
 use super::device::{self, Candidate, Choice, Listed, Roots};
 use super::drain::{self, Summary};
 use super::endpoint::{self, Loopback, Sandbox, SandboxSocket, Watched};
@@ -16,7 +17,7 @@ use super::runner::{self, Exec, Handover, RunnerCommand, Spec};
 use super::seccomp;
 use super::server::{Llama, Server};
 use super::token::{self, Token};
-use super::{Level, Path};
+use super::{Backend, Level, Path};
 use crate::assistant::transport::{Bounded, Connect};
 use async_trait::async_trait;
 use std::io::{BufRead, Read};
@@ -131,6 +132,8 @@ pub(crate) struct Settings {
     pub device: Choice,
     /// Where render nodes are found (`/sys`, `/dev/dri`; tests give fake trees).
     pub roots: Roots,
+    /// Which sandbox builds level 1.
+    pub backend: Backend,
 }
 
 #[derive(Default)]
@@ -1183,6 +1186,126 @@ impl Real {
         })
     }
 
+    /// The runner's spec and descriptors for the Hakoniwa sandbox: the plan (binds by path
+    /// with the verified identities), the token file in the generation's directory, and only
+    /// the status and marker descriptors handed over (no verified descriptor enters the
+    /// runner's sandbox: Hakoniwa closes them, and the closure checks identities instead).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one sandbox: what runs, with which verified files, on which device"
+    )]
+    fn hako_spec(
+        &self,
+        path: Path,
+        command: &Command<'_>,
+        gpu: Option<&GpuBinds>,
+        checked: (&[Verified], &Verified, &std::path::Path),
+        token: &Token,
+        generation: &Generation,
+        pipes: (OwnedFd, OwnedFd),
+    ) -> Result<(Spec, Vec<Handover>), Fail> {
+        let (files, model, build_dir) = checked;
+        let identity = |fd: &OwnedFd| -> Result<hako::Identity, Fail> {
+            rustix::fs::fstat(fd)
+                .map(|stat| (stat.st_dev, stat.st_ino))
+                .map_err(|_| Fail::Other("a verified object cannot be examined".into()))
+        };
+        let run = self.run_dir().map_err(Fail::Other)?;
+        let run_path = std::fs::read_link(format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&*run)))
+            .map_err(|_| Fail::Other("the run directory's path cannot be read".into()))?;
+        let generation_path = run_path.join(generation.name());
+        token
+            .write_file(generation.fd.as_fd())
+            .map_err(|_| Fail::Other("the token file cannot be written".into()))?;
+        let token_file = rustix::fs::openat(
+            &generation.fd,
+            token::FILE,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|_| Fail::Other("the token file cannot be opened".into()))?;
+        let mut runtime = Vec::new();
+        for file in files {
+            runtime.push(hako::File {
+                name: file.name.clone(),
+                source: build_dir.join(&file.name),
+                identity: identity(&file.fd)?,
+            });
+        }
+        let socket = format!("{}/{}", bwrap::SOCKET_DIR, endpoint::SOCKET);
+        let server = format!("{}/{}", bwrap::RUNTIME, self.server_name(path));
+        let mut env = sandbox_env(path);
+        let mut extra = Vec::new();
+        let argv = match command {
+            Command::Server { device } => {
+                let mut argv = vec![server];
+                argv.extend(self.server_args(bwrap::MODEL, &socket, None, bwrap::TOKEN, *device));
+                argv
+            }
+            Command::ListDevices => vec![server, "--list-devices".to_owned()],
+            Command::Probe => {
+                env.extend(self.settings.inner.probe_env.iter().cloned());
+                let exe = rustix::fs::open(
+                    &self.settings.inner.executable,
+                    rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::empty(),
+                )
+                .map_err(|_| Fail::Other("Mimik's own binary cannot be opened".into()))?;
+                extra.push((
+                    self.settings.inner.executable.clone(),
+                    SHIM_PATH.to_owned(),
+                    identity(&exe)?,
+                ));
+                let mut argv = vec![SHIM_PATH.to_owned()];
+                argv.extend(self.settings.inner.probe_args.iter().cloned());
+                argv.push("1".to_owned());
+                if let Some(gpu) = gpu {
+                    argv.extend([super::probe::RENDER.to_owned(), gpu.inside()]);
+                }
+                argv
+            }
+        };
+        let plan = hako::plan(&hako::Inputs {
+            runtime,
+            model: (
+                self.settings.models_dir.join(&model.name),
+                (model.identity.device, model.identity.inode),
+            ),
+            token: (generation_path.join(token::FILE), identity(&token_file)?),
+            generation: (generation_path, identity(&generation.fd)?),
+            extra,
+            gpu,
+            env,
+            argv,
+        });
+        let (status, marker) = pipes;
+        let handover = vec![
+            Handover {
+                fd: status,
+                target: fds::STATUS,
+            },
+            Handover {
+                fd: marker,
+                target: fds::MARKER,
+            },
+        ];
+        let spec = Spec {
+            parent: std::process::id(),
+            keep: handover.iter().map(|h| h.target).collect(),
+            env: vec![
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("LANG".into(), "C.UTF-8".into()),
+            ],
+            chdir: None,
+            exec: Exec::Hakoniwa {
+                plan: Box::new(plan),
+                status: fds::STATUS,
+                marker: fds::MARKER,
+            },
+        };
+        Ok((spec, handover))
+    }
+
     /// Starts level 1: bwrap with the profile (and on the GPU path the selected node's
     /// binds), then reads `child-pid` and `pid-namespace`.
     #[expect(
@@ -1198,38 +1321,53 @@ impl Real {
         token: &Token,
         command: &Command<'_>,
         gpu: Option<&GpuBinds>,
+        build_dir: &std::path::Path,
     ) -> Result<Spawned, Fail> {
+        let hakoniwa = self.settings.backend == Backend::Hakoniwa;
         let bwrap = self
             .held()
             .bwrap
             .clone()
-            .ok_or_else(|| Fail::Sandbox("bubblewrap did not pass the preflight".into()))?;
+            .ok_or_else(|| Fail::Sandbox("the sandbox did not pass the preflight".into()))?;
         // The pidfile names these, one per line: checked before anything is created or
         // spawned.
-        let executables = vec![
-            bwrap.path.display().to_string(),
-            self.settings.runner.program.display().to_string(),
-        ];
+        let mut executables = vec![self.settings.runner.program.display().to_string()];
+        if !hakoniwa {
+            executables.insert(0, bwrap.path.display().to_string());
+        }
         newline_free(&executables)?;
         let run = self.run_dir().map_err(Fail::Other)?;
         let generation = Generation::create(&run, &job.name)
             .map_err(|refusal| Fail::Other(format!("the socket directory: {refusal}")))?;
-        let seccomp = bytes_pipe(&seccomp::bytes(&seccomp::program(
-            seccomp::Profile::Sandbox,
-        )))
-        .map_err(Fail::Other)?;
         let (status_read, status_write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
             .map_err(|_| Fail::Other("no pipe".into()))?;
-        let token_pipe = token.pipe().map_err(|_| Fail::Other("no pipe".into()))?;
         let (marker_read, marker_write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
             .map_err(|_| Fail::Other("no pipe".into()))?;
-        let (mut handover, runtime) =
-            sandbox_handover(status_write, seccomp, token_pipe, &generation, model, files)?;
-        handover.push(Handover {
-            fd: marker_write,
-            target: fds::MARKER,
-        });
-        let spec = self.sandbox_spec(&bwrap, path, command, gpu, &mut handover, runtime)?;
+        let (spec, handover) = if hakoniwa {
+            self.hako_spec(
+                path,
+                command,
+                gpu,
+                (files, model, build_dir),
+                token,
+                &generation,
+                (status_write, marker_write),
+            )?
+        } else {
+            let seccomp = bytes_pipe(&seccomp::bytes(&seccomp::program(
+                seccomp::Profile::Sandbox,
+            )))
+            .map_err(Fail::Other)?;
+            let token_pipe = token.pipe().map_err(|_| Fail::Other("no pipe".into()))?;
+            let (mut handover, runtime) =
+                sandbox_handover(status_write, seccomp, token_pipe, &generation, model, files)?;
+            handover.push(Handover {
+                fd: marker_write,
+                target: fds::MARKER,
+            });
+            let spec = self.sandbox_spec(&bwrap, path, command, gpu, &mut handover, runtime)?;
+            (spec, handover)
+        };
         self.after_cleanups(job)?;
         pause_at!(self, "before-spawn");
         job.check()?;
@@ -1260,7 +1398,12 @@ impl Real {
                 pid_namespace,
             },
             rest,
-        ) = read_started(status_read, job)?;
+        ) = read_started(status_read, job, self.settings.backend)?;
+        if hakoniwa {
+            // The sandbox holds the token file's inode through its bind mount (mounted before
+            // the runner reports): the name is not needed any more.
+            token::remove_file(&generation.fd);
+        }
         fault_at!(self, "started", child);
         pause_at!(self, "before-reaper");
         let (sandbox, connector): (Option<Arc<Sandbox>>, Arc<dyn Connect>) =
@@ -1536,6 +1679,7 @@ fn sandbox_handover(
 fn read_started(
     status: OwnedFd,
     job: &Job,
+    backend: Backend,
 ) -> Result<(Started, std::io::BufReader<std::fs::File>), Fail> {
     let file = std::fs::File::from(status);
     let (lines, report) = std::sync::mpsc::channel();
@@ -1545,7 +1689,10 @@ fn read_started(
             let mut reader = std::io::BufReader::new(file.take(64 * 1024));
             let mut line = String::new();
             let started = match reader.read_line(&mut line) {
-                Ok(n) if n > 0 => bwrap::started(&line),
+                Ok(n) if n > 0 => match backend {
+                    Backend::Bwrap => bwrap::started(&line),
+                    Backend::Hakoniwa => hako::started(&line),
+                },
                 _ => None,
             };
             let rest = std::io::BufReader::new(reader.into_inner().into_inner());
@@ -1561,7 +1708,10 @@ fn read_started(
             ))
         })?;
     let started = started.ok_or_else(|| {
-        Fail::Sandbox("bubblewrap failed before starting the model server".into())
+        Fail::Sandbox(format!(
+            "{} failed before starting the model server",
+            backend.name()
+        ))
     })?;
     Ok((started, rest))
 }
@@ -2514,6 +2664,7 @@ impl Launch {
                         &token,
                         &Command::Server { device },
                         gpu.as_deref().map(|(binds, _)| binds),
+                        &build_dir,
                     )
                 }
                 Level::Unconfined => {
@@ -2575,7 +2726,10 @@ impl Launch {
 pub(crate) static NO_BWRAP: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 /// bwrap's preflight (a test may force it unusable for the launcher at `runtime_dir`).
-fn bwrap_preflight(runtime_dir: &std::path::Path) -> Result<Bwrap, bwrap::Unusable> {
+fn bwrap_preflight(
+    runtime_dir: &std::path::Path,
+    backend: Backend,
+) -> Result<Bwrap, bwrap::Unusable> {
     #[cfg(test)]
     if NO_BWRAP
         .lock()
@@ -2586,7 +2740,10 @@ fn bwrap_preflight(runtime_dir: &std::path::Path) -> Result<Bwrap, bwrap::Unusab
         return Err(bwrap::Unusable::Missing);
     }
     let _ = runtime_dir;
-    bwrap::preflight()
+    match backend {
+        Backend::Bwrap => bwrap::preflight(),
+        Backend::Hakoniwa => hako::preflight(),
+    }
 }
 
 /// Test-forced short listening deadline, keyed by runtime directory.
@@ -2902,11 +3059,16 @@ impl Real {
         ticket: &Ticket,
     ) -> Result<Vec<Listed>, String> {
         if self.held().bwrap.is_none() {
-            let bwrap = bwrap_preflight(&self.settings.runtime_dir)
+            let bwrap = bwrap_preflight(&self.settings.runtime_dir, self.settings.backend)
                 .map_err(|unusable| unusable.to_string())?;
             self.held().bwrap = Some(bwrap);
         }
-        let Checked { files, model, .. } = self.verify(Path::Gpu, Level::Bubblewrap, ticket)?;
+        let Checked {
+            files,
+            model,
+            build_dir,
+            ..
+        } = self.verify(Path::Gpu, Level::Bubblewrap, ticket)?;
         let token = Token::new();
         let sequence = self.probes.fetch_add(1, Ordering::SeqCst);
         let job = Job {
@@ -2932,6 +3094,7 @@ impl Real {
                 &token,
                 &Command::ListDevices,
                 Some(&binds),
+                &build_dir,
             )
             .map_err(|(Fail::Sandbox(why) | Fail::Other(why))| why)?;
         let (out, err) = owned.child.as_mut().map_or((None, None), |child| {
@@ -3068,11 +3231,16 @@ impl Real {
         ticket: &Ticket,
     ) -> Result<(serde_json::Value, Probe), Probe> {
         if level == Level::Bubblewrap {
-            let bwrap = bwrap_preflight(&self.settings.runtime_dir)
+            let bwrap = bwrap_preflight(&self.settings.runtime_dir, self.settings.backend)
                 .map_err(|unusable| Probe::Failed(unusable.to_string()))?;
             self.held().bwrap = Some(bwrap);
         }
-        let Checked { files, model, .. } = self.verify(path, level, ticket).map_err(|why| {
+        let Checked {
+            files,
+            model,
+            build_dir,
+            ..
+        } = self.verify(path, level, ticket).map_err(|why| {
             if ticket.cancelled() {
                 Probe::Failed("cancelled".into())
             } else {
@@ -3105,6 +3273,7 @@ impl Real {
                 &token,
                 &Command::Probe,
                 gpu.as_ref(),
+                &build_dir,
             )
             .map_err(failed)?
         } else {
@@ -3157,7 +3326,7 @@ impl Real {
                 }
                 let first = text
                     .lines()
-                    .find(|line| line.starts_with("bwrap: "))
+                    .find(|line| line.starts_with("bwrap: ") || line.starts_with("mimik sandbox: "))
                     .unwrap_or("");
                 Err(Probe::Inconclusive(
                     format!("the probe did not start {}", first.trim())

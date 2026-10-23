@@ -50,6 +50,13 @@ pub(crate) enum Exec {
     Bwrap { path: String, args: Vec<String> },
     /// The TCP levels: the descriptor `fd` (llama-server, or the probe), argv given whole.
     Server { fd: RawFd, argv: Vec<String> },
+    /// Level 1 through Hakoniwa (`hako.rs`): the runner builds the sandbox itself and stays
+    /// as its supervisor; `status` and `marker` are the handed-over descriptors.
+    Hakoniwa {
+        plan: Box<super::hako::Plan>,
+        status: RawFd,
+        marker: RawFd,
+    },
 }
 
 /// The runner's whole input.
@@ -231,6 +238,17 @@ pub(crate) fn run(spec_fd: RawFd) -> i32 {
             exit::EXEC
         }
         Exec::Server { fd, argv } => exec_server(fd, argv, spec.env, spec.chdir),
+        #[cfg(feature = "sandbox-hakoniwa")]
+        Exec::Hakoniwa {
+            plan,
+            status,
+            marker,
+        } => super::hako::run(*plan, status, marker),
+        #[cfg(not(feature = "sandbox-hakoniwa"))]
+        Exec::Hakoniwa { .. } => {
+            eprintln!("mimik runner: this build has no Hakoniwa sandbox");
+            exit::EXEC
+        }
     }
 }
 

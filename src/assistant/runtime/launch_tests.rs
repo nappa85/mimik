@@ -141,6 +141,7 @@ fn setup(model: &[u8], alias: &str) -> Setup {
         },
         device: device::Choice::Cpu,
         roots: device::Roots::default(),
+        backend: Backend::default(),
     };
     Setup {
         dir,
@@ -1658,6 +1659,7 @@ async fn a_bwrap_path_with_a_newline_is_refused_before_any_directory_is_made() {
             &Token::new(),
             &Command::Server { device: None },
             None,
+            &checked.build_dir,
         )
         .err()
     })

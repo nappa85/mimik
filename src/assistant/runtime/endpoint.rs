@@ -63,6 +63,11 @@ fn refused(what: &'static str) -> io::Error {
 
 const GONE: &str = "the sandbox's reaper has gone";
 
+/// `pid_namespace` when the sandbox's launcher could not read the namespace number (Hakoniwa's
+/// reaper is not dumpable): the namespace comparison is then left to the parent and `NSpid`
+/// checks. No real namespace has inode 0.
+pub(crate) const NAMESPACE_UNREPORTED: u64 = 0;
+
 /// What bwrap reported for this generation's sandbox.
 #[derive(Debug)]
 pub(crate) struct Sandbox {
@@ -113,6 +118,7 @@ pub(crate) fn open_reaper(pid: i32, runner: i32, namespace: u64) -> io::Result<W
         return Err(refused("the reported reaper is not bubblewrap's child"));
     }
     match rustix::fs::stat(format!("/proc/{pid}/ns/pid")) {
+        _ if namespace == NAMESPACE_UNREPORTED => {}
         Ok(stat) if stat.st_ino == namespace => {}
         Ok(_) => return Err(refused("the reported reaper is in another PID namespace")),
         Err(rustix::io::Errno::ACCESS | rustix::io::Errno::PERM) => {}
@@ -149,6 +155,7 @@ pub(crate) fn check_peer(stream: &impl std::os::fd::AsFd, sandbox: &Sandbox) -> 
         ));
     }
     match rustix::fs::stat(format!("/proc/{pid}/ns/pid")) {
+        _ if sandbox.pid_namespace == NAMESPACE_UNREPORTED => {}
         Ok(stat) if stat.st_ino == sandbox.pid_namespace => {}
         Ok(_) => return Err(refused("the socket's peer is in another PID namespace")),
         // A non-dumpable peer denies it; NSpid and PPid decide.

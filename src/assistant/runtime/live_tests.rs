@@ -26,6 +26,13 @@ fn env(name: &str) -> PathBuf {
     PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("{name} is not set")))
 }
 
+/// The sandbox the live suite runs against: `MIMIK_LIVE_SANDBOX` (`bwrap`, the default, or
+/// `hakoniwa`); the same tests run against either.
+fn live_backend() -> Backend {
+    std::env::var("MIMIK_LIVE_SANDBOX")
+        .map_or_else(|_| Backend::default(), |name| Backend::parse(&name).unwrap())
+}
+
 fn helper_args(test: &str) -> Vec<String> {
     [
         test,
@@ -73,6 +80,7 @@ fn settings(scratch: &std::path::Path, inner: &str, inner_env: Vec<(String, Stri
         },
         device: device::Choice::Cpu,
         roots: device::Roots::default(),
+        backend: live_backend(),
     }
 }
 

@@ -186,7 +186,7 @@ fn sysctl(root: &Path, name: &str) -> Option<u64> {
 }
 
 /// The one setting that rules user namespaces out for certain, read from `root`.
-fn namespaces(root: &Path) -> Result<(), Unusable> {
+pub(crate) fn namespaces(root: &Path) -> Result<(), Unusable> {
     if sysctl(root, "sys/user/max_user_namespaces") == Some(0) {
         return Err(Unusable::UserNamespaces("user.max_user_namespaces = 0"));
     }
@@ -300,38 +300,70 @@ impl GpuBinds {
         format!("/dev/dri/{}", self.name)
     }
 
-    fn arguments(&self) -> Vec<OsString> {
+    /// What the GPU path binds besides the render node itself, as typed items.
+    pub(crate) fn items(&self) -> Vec<Item> {
         let node = self.sysfs.join("drm").join(&self.name);
+        let mut items = vec![
+            Item::RoBind(self.sysfs.clone()),
+            Item::Symlink {
+                target: node.clone(),
+                at: format!("/sys/dev/char/{}:{}", self.rdev.0, self.rdev.1).into(),
+            },
+            Item::Symlink {
+                target: node,
+                at: format!("/sys/class/drm/{}", self.name).into(),
+            },
+            Item::Dir("/sys/bus/pci".into()),
+        ];
+        items.extend(self.shared.iter().cloned().map(Item::RoBind));
+        items
+    }
+
+    fn arguments(&self) -> Vec<OsString> {
         let mut args: Vec<OsString> = vec![
             "--dev-bind".into(),
             self.dev.clone().into_os_string(),
             self.inside().into(),
-            "--ro-bind".into(),
-            self.sysfs.clone().into_os_string(),
-            self.sysfs.clone().into_os_string(),
-            "--symlink".into(),
-            node.clone().into_os_string(),
-            format!("/sys/dev/char/{}:{}", self.rdev.0, self.rdev.1).into(),
-            "--symlink".into(),
-            node.into_os_string(),
-            format!("/sys/class/drm/{}", self.name).into(),
-            "--dir".into(),
-            "/sys/bus/pci".into(),
         ];
-        for path in &self.shared {
-            args.extend([
-                "--ro-bind".into(),
-                path.clone().into_os_string(),
-                path.clone().into_os_string(),
-            ]);
-        }
+        args.extend(self.items().iter().flat_map(Item::arguments));
         args
     }
 }
 
-/// The system library directories and the dynamic loader's cache, as binds or links.
-pub(crate) fn system_libraries() -> Vec<OsString> {
-    let mut args: Vec<OsString> = Vec::new();
+/// One entry of the sandbox's allowlist, independent of the sandbox that builds it (bwrap's
+/// arguments and the Hakoniwa plan are both made from these).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Item {
+    /// A read-only bind of a host path at the same path inside.
+    RoBind(PathBuf),
+    /// A symbolic link `at` pointing to `target`.
+    Symlink { target: PathBuf, at: PathBuf },
+    /// An empty directory.
+    Dir(PathBuf),
+}
+
+impl Item {
+    fn arguments(&self) -> Vec<OsString> {
+        match self {
+            Self::RoBind(path) => vec![
+                "--ro-bind".into(),
+                path.clone().into_os_string(),
+                path.clone().into_os_string(),
+            ],
+            Self::Symlink { target, at } => vec![
+                "--symlink".into(),
+                target.clone().into_os_string(),
+                at.clone().into_os_string(),
+            ],
+            Self::Dir(path) => vec!["--dir".into(), path.clone().into_os_string()],
+        }
+    }
+}
+
+/// The system library directories, the dynamic loader's cache and the CPU topology, as
+/// binds or links.
+pub(crate) fn system_items() -> Vec<Item> {
+    let mut items = Vec::new();
     for dir in [
         "/usr/lib",
         "/usr/lib64",
@@ -345,27 +377,27 @@ pub(crate) fn system_libraries() -> Vec<OsString> {
         };
         if metadata.file_type().is_symlink() {
             if let Ok(target) = std::fs::read_link(path) {
-                args.extend(["--symlink".into(), target.into_os_string(), dir.into()]);
+                items.push(Item::Symlink {
+                    target,
+                    at: path.to_path_buf(),
+                });
             }
         } else if metadata.is_dir() {
-            args.extend(["--ro-bind".into(), dir.into(), dir.into()]);
+            items.push(Item::RoBind(path.to_path_buf()));
         }
     }
     if Path::new("/etc/ld.so.cache").is_file() {
-        args.extend([
-            "--ro-bind".into(),
-            "/etc/ld.so.cache".into(),
-            "/etc/ld.so.cache".into(),
-        ]);
+        items.push(Item::RoBind("/etc/ld.so.cache".into()));
     }
     if Path::new("/sys/devices/system/cpu").is_dir() {
-        args.extend([
-            "--ro-bind".into(),
-            "/sys/devices/system/cpu".into(),
-            "/sys/devices/system/cpu".into(),
-        ]);
+        items.push(Item::RoBind("/sys/devices/system/cpu".into()));
     }
-    args
+    items
+}
+
+/// [`system_items`] as bwrap arguments.
+pub(crate) fn system_libraries() -> Vec<OsString> {
+    system_items().iter().flat_map(Item::arguments).collect()
 }
 
 impl Profile {

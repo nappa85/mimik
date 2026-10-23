@@ -1,0 +1,289 @@
+use super::*;
+use crate::assistant::runtime::Backend;
+
+fn inputs<'a>(gpu: Option<&'a GpuBinds>, files: &[&str]) -> Inputs<'a> {
+    Inputs {
+        runtime: files
+            .iter()
+            .enumerate()
+            .map(|(n, name)| File {
+                name: (*name).to_owned(),
+                source: PathBuf::from("/data/llama/cpu").join(name),
+                identity: (7, 100 + n as u64),
+            })
+            .collect(),
+        model: (PathBuf::from("/data/models/m.gguf"), (7, 200)),
+        generation: (PathBuf::from("/data/run/3"), (7, 300)),
+        token: (PathBuf::from("/data/run/3/token"), (7, 301)),
+        extra: Vec::new(),
+        gpu,
+        env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+        argv: vec!["/opt/llama/llama-server".into(), "--help".into()],
+    }
+}
+
+fn gpu() -> GpuBinds {
+    GpuBinds {
+        dev: PathBuf::from("/dev/dri/renderD128"),
+        name: "renderD128".into(),
+        sysfs: PathBuf::from("/sys/devices/pci0000:00/0000:0c:00.0"),
+        rdev: (226, 128),
+        shared: vec![PathBuf::from("/usr/share/vulkan")],
+    }
+}
+
+fn targets(plan: &Plan) -> Vec<&str> {
+    plan.binds.iter().map(|bind| bind.target.as_str()).collect()
+}
+
+#[test]
+fn the_plan_binds_the_runtime_model_token_and_one_writable_directory_by_identity() {
+    let plan = plan(&inputs(None, &["llama-server", "libllama.so.0"]));
+    let bind = |target: &str| {
+        plan.binds
+            .iter()
+            .find(|bind| bind.target == target)
+            .unwrap_or_else(|| panic!("no bind at {target}"))
+    };
+    assert_eq!(bind("/opt/llama/llama-server").identity, Some((7, 100)));
+    assert_eq!(bind("/opt/llama/libllama.so.0").identity, Some((7, 101)));
+    assert_eq!(bind(bwrap::MODEL).identity, Some((7, 200)));
+    assert_eq!(bind(bwrap::TOKEN).identity, Some((7, 301)));
+    assert_eq!(bind(bwrap::SOCKET_DIR).identity, Some((7, 300)));
+    let writable: Vec<_> = plan
+        .binds
+        .iter()
+        .filter(|bind| bind.access == Access::ReadWrite)
+        .map(|bind| bind.target.as_str())
+        .collect();
+    assert_eq!(writable, [bwrap::SOCKET_DIR]);
+    for bind in &plan.binds {
+        if bind.access == Access::ReadOnly {
+            continue;
+        }
+        assert!(
+            bind.target == bwrap::SOCKET_DIR || bind.target.starts_with("/dev/"),
+            "{bind:?}"
+        );
+    }
+}
+
+#[test]
+fn the_minimal_dev_has_no_terminal_pts_or_ptmx() {
+    let plan = plan(&inputs(Some(&gpu()), &[]));
+    let mut dev: Vec<&str> = targets(&plan)
+        .into_iter()
+        .filter(|target| target.starts_with("/dev/"))
+        .collect();
+    dev.sort_unstable();
+    assert_eq!(
+        dev,
+        [
+            "/dev/dri/renderD128",
+            "/dev/full",
+            "/dev/null",
+            "/dev/random",
+            "/dev/urandom",
+            "/dev/zero"
+        ]
+    );
+    let everything: Vec<&str> = plan
+        .symlinks
+        .iter()
+        .flat_map(|(original, link)| [original.as_str(), link.as_str()])
+        .chain(plan.dirs.iter().map(String::as_str))
+        .chain(targets(&plan))
+        .collect();
+    for forbidden in ["tty", "pts", "ptmx", "console", "kcore"] {
+        assert!(
+            !everything.iter().any(|path| path.contains(forbidden)),
+            "{forbidden} is in the plan"
+        );
+    }
+}
+
+#[test]
+fn only_the_render_node_is_a_device_beside_the_five_safe_ones() {
+    let plan = plan(&inputs(Some(&gpu()), &[]));
+    let devices: Vec<&str> = plan
+        .binds
+        .iter()
+        .filter(|bind| bind.access == Access::Device)
+        .map(|bind| bind.target.as_str())
+        .collect();
+    assert_eq!(devices.len(), DEVICES.len() + 1);
+    assert!(devices.contains(&"/dev/dri/renderD128"));
+    let cpu = super::plan(&inputs(None, &[]));
+    assert_eq!(
+        cpu.binds
+            .iter()
+            .filter(|bind| bind.access == Access::Device)
+            .count(),
+        DEVICES.len()
+    );
+}
+
+#[test]
+fn the_plan_has_the_same_system_allowlist_as_the_bwrap_profile() {
+    let plan = plan(&inputs(Some(&gpu()), &[]));
+    let mut items = bwrap::system_items();
+    items.extend(gpu().items());
+    for item in items {
+        match item {
+            Item::RoBind(path) => {
+                let found = plan.binds.iter().any(|bind| {
+                    bind.source == path.to_string_lossy()
+                        && bind.target == path.to_string_lossy()
+                        && bind.access == Access::ReadOnly
+                });
+                assert!(found, "{path:?}");
+            }
+            Item::Symlink { target, at } => assert!(
+                plan.symlinks
+                    .contains(&(target.to_string_lossy().into(), at.to_string_lossy().into())),
+                "{at:?}"
+            ),
+            Item::Dir(path) => assert!(plan.dirs.contains(&path.to_string_lossy().into_owned())),
+        }
+    }
+}
+
+#[test]
+fn every_symlink_has_its_parent_directories() {
+    let plan = plan(&inputs(Some(&gpu()), &[]));
+    for (_, link) in &plan.symlinks {
+        for parent in parents(link) {
+            assert!(plan.dirs.contains(&parent), "{link}: no {parent}");
+        }
+    }
+    assert!(plan.dirs.contains(&"/sys/dev/char".to_owned()));
+    assert!(plan.dirs.contains(&"/sys/class/drm".to_owned()));
+}
+
+#[test]
+fn temporary_space_is_bounded_and_dev_is_a_small_tmpfs() {
+    let plan = plan(&inputs(None, &[]));
+    let tmpfs = |target: &str| plan.tmpfs.iter().find(|t| t.target == target).unwrap();
+    assert_eq!(tmpfs("/tmp").bytes, bwrap::TMP_BYTES);
+    assert_eq!(tmpfs("/dev/shm").bytes, bwrap::SHM_BYTES);
+    assert!(tmpfs("/dev").bytes <= 1 << 20);
+    assert_eq!(plan.tmpfs.len(), 3);
+    assert_eq!(plan.workdir, bwrap::RUNTIME);
+}
+
+#[test]
+fn the_probe_executable_is_an_extra_read_only_bind_with_its_identity() {
+    let mut given = inputs(None, &[]);
+    given
+        .extra
+        .push((PathBuf::from("/usr/bin/mimik"), "/opt/mimik/mimik".into(), (7, 9)));
+    let plan = plan(&given);
+    let bind = plan
+        .binds
+        .iter()
+        .find(|bind| bind.target == "/opt/mimik/mimik")
+        .unwrap();
+    assert_eq!(bind.access, Access::ReadOnly);
+    assert_eq!(bind.identity, Some((7, 9)));
+}
+
+#[test]
+fn a_bound_object_that_is_not_the_verified_one_is_refused() {
+    let binds = plan(&inputs(None, &["llama-server"])).binds;
+    let right = |target: &str| match target {
+        "/opt/llama/llama-server" => Some((7, 100)),
+        "/models/model.gguf" => Some((7, 200)),
+        "/run/token" => Some((7, 301)),
+        "/run/llama" => Some((7, 300)),
+        _ => None,
+    };
+    assert!(identity_mismatch(&binds, right).is_none());
+    // Another inode (a swapped file), another device, an unreadable target, each refuses.
+    let swapped = |target: &str| {
+        if target == "/models/model.gguf" {
+            Some((7, 999))
+        } else {
+            right(target)
+        }
+    };
+    assert_eq!(
+        identity_mismatch(&binds, swapped).map(|bind| bind.target.as_str()),
+        Some("/models/model.gguf")
+    );
+    let other_device = |target: &str| right(target).map(|(_, inode)| (8, inode));
+    assert!(identity_mismatch(&binds, other_device).is_some());
+    let unreadable = |target: &str| {
+        if target == "/run/llama" {
+            None
+        } else {
+            right(target)
+        }
+    };
+    assert_eq!(
+        identity_mismatch(&binds, unreadable).map(|bind| bind.target.as_str()),
+        Some("/run/llama")
+    );
+}
+
+#[test]
+fn the_start_report_is_the_reapers_pid_without_a_namespace_number() {
+    let line = started_line(4242);
+    assert_eq!(line, "{\"child-pid\":4242}\n");
+    let started = started(&line).unwrap();
+    assert_eq!(started.child_pid, 4242);
+    assert_eq!(
+        started.pid_namespace,
+        crate::assistant::runtime::endpoint::NAMESPACE_UNREPORTED
+    );
+    for bad in ["", "{}", "{\"child-pid\":\"x\"}", "not json"] {
+        assert!(super::started(bad).is_none(), "{bad}");
+    }
+}
+
+#[test]
+fn closure_exit_codes_are_distinct_and_only_the_exec_is_after_the_marker() {
+    let before = [
+        exit::SESSION,
+        exit::IDENTITY,
+        exit::CAPABILITIES,
+        exit::SECCOMP,
+        exit::MARKER,
+        exit::DESCRIPTORS,
+        exit::SPEC,
+    ];
+    let mut all = before.to_vec();
+    all.push(exit::EXEC);
+    all.sort_unstable();
+    all.dedup();
+    assert_eq!(all.len(), before.len() + 1);
+}
+
+#[test]
+fn the_hakoniwa_exec_travels_in_the_runner_spec() {
+    use crate::assistant::runtime::runner::{Exec, Spec};
+    let spec = Spec {
+        parent: 1,
+        keep: vec![4, 12],
+        env: Vec::new(),
+        chdir: None,
+        exec: Exec::Hakoniwa {
+            plan: Box::new(plan(&inputs(None, &["llama-server"]))),
+            status: 4,
+            marker: 12,
+        },
+    };
+    let text = serde_json::to_string(&spec).unwrap();
+    assert_eq!(serde_json::from_str::<Spec>(&text).unwrap(), spec);
+}
+
+#[test]
+fn the_backend_names_parse_and_unknown_ones_are_refused() {
+    assert_eq!(Backend::parse("bwrap"), Ok(Backend::Bwrap));
+    assert_eq!(Backend::parse("bubblewrap"), Ok(Backend::Bwrap));
+    assert!(Backend::parse("docker").unwrap_err().contains("docker"));
+    assert_eq!(Backend::default(), Backend::Bwrap);
+    #[cfg(feature = "sandbox-hakoniwa")]
+    assert_eq!(Backend::parse("hakoniwa"), Ok(Backend::Hakoniwa));
+    #[cfg(not(feature = "sandbox-hakoniwa"))]
+    assert!(Backend::parse("hakoniwa").is_err());
+}
