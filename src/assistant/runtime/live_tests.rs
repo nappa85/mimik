@@ -169,7 +169,20 @@ fn process_facts() -> Value {
                 .collect()
         })
         .unwrap_or_default();
+    // Every mount with its options (field 5 of /proc/self/mountinfo is the mount point and
+    // field 6 its per-mount options).
+    let mounts: Vec<Value> = std::fs::read_to_string("/proc/self/mountinfo")
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let point = fields.nth(4)?;
+            let options = fields.next()?;
+            Some(json!([point, options]))
+        })
+        .collect();
     json!({
+        "mounts": mounts,
         "caps": {"inh": field("CapInh:"), "prm": field("CapPrm:"), "eff": field("CapEff:"),
             "bnd": field("CapBnd:"), "amb": field("CapAmb:")},
         "no_new_privs": field("NoNewPrivs:"),
@@ -573,6 +586,28 @@ async fn live_level_3_loads_the_model_through_proc_self_fd() {
     child.stop().await;
 }
 
+/// Every mount is read-only (the root and each bind of host files) but the few the server
+/// writes to: its socket directory, the temporary space and the device nodes.
+fn assert_only_the_writable_mounts_are_writable(report: &Value) {
+    for mount in report["mounts"].as_array().unwrap() {
+        let (point, options) = (mount[0].as_str().unwrap(), mount[1].as_str().unwrap());
+        let writable = ["/run/llama", "/tmp", "/dev/shm", "/proc"].contains(&point)
+            || point == "/dev"
+            || point.starts_with("/dev/");
+        let read_only = options.split(',').any(|option| option == "ro");
+        assert!(
+            writable || read_only,
+            "{point} is mounted writable ({options}): {report}"
+        );
+        // No mount may carry set-user-ID files, and only device mounts may carry devices.
+        let has = |flag: &str| options.split(',').any(|option| option == flag);
+        assert!(has("nosuid") || point == "/", "{point}: {options}");
+        if !point.starts_with("/dev") && point != "/" {
+            assert!(has("nodev"), "{point}: {options}");
+        }
+    }
+}
+
 /// No capability in any set, `no_new_privs` and seccomp in force, no terminal, and with
 /// Hakoniwa a `/dev` of the five safe nodes.
 fn assert_no_privilege_or_terminal(report: &Value) {
@@ -713,6 +748,7 @@ fn live_an_adversary_in_the_level_1_sandbox_reaches_nothing() {
         );
     }
     assert_no_privilege_or_terminal(&report);
+    assert_only_the_writable_mounts_are_writable(&report);
     // Nothing reached the host's listeners.
     assert!(listener.accept().is_err());
     assert!(abstract_listener.accept().is_err());

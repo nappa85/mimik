@@ -278,6 +278,12 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
   seccomp) is a sandbox failure; the exec itself failing, and anything the server does or
   exits with afterwards, is the server's. No exit code or output of the server can count as
   a sandbox failure (`live_no_exit_code_of_the_server_counts_as_a_sandbox_failure`).
+- Mount flags: each bind is `nosuid` and (but device nodes) `nodev`, plus `noexec` when its
+  source mount has it, given up front, because the kernel refuses an unprivileged remount that
+  drops a locked flag and Hakoniwa's fallback for that refusal silently drops read-only; the
+  fallback is not enabled, so a mount that cannot be made as planned fails the start. A
+  test lists the sandbox's mounts and requires read-only on all but the socket directory,
+  the temporary space, `/dev` and `/proc`.
 - A sandbox that ends at once (a mount refused, or a swapped file) is classified by the marker
   instead of failing the start on a reaper that is already gone.
 - Parent death: the runner dies with Mimik (`PR_SET_PDEATHSIG`), Hakoniwa sets the signal in

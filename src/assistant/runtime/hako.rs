@@ -286,9 +286,9 @@ pub(crate) use run::{setup_failed, single_threaded};
 
 #[cfg(feature = "sandbox-hakoniwa")]
 mod run {
-    use super::{Access, Plan, exit, identity_mismatch, started_line};
+    use super::{Access, Bind, Plan, exit, identity_mismatch, started_line};
     use crate::assistant::runtime::{probe, seccomp};
-    use hakoniwa::{Container, MountOptions, Namespace, Runctl, Stdio};
+    use hakoniwa::{Container, MountOptions, Namespace, Stdio};
     use std::io::Write;
     use std::os::fd::{FromRawFd, OwnedFd, RawFd};
     use std::os::unix::process::CommandExt;
@@ -299,15 +299,26 @@ mod run {
     /// (a failed setup ends at once; a program that runs is still there).
     const EARLY_END: std::time::Duration = std::time::Duration::from_millis(50);
 
-    fn options(access: Access) -> MountOptions {
+    /// The mount options of a bind: the plan's, plus every restriction the source's own mount
+    /// carries. The kernel refuses an unprivileged remount that drops a locked flag (`nosuid`,
+    /// `nodev`, `noexec`), and the library's fallback for that refusal drops read-only
+    /// instead, so the flags are given up front and no fallback is used: a mount that cannot be
+    /// made as planned fails the start.
+    fn options(bind: &Bind) -> MountOptions {
         let base = MountOptions::BIND | MountOptions::NOSUID;
-        match access {
+        let mut options = match bind.access {
             Access::ReadOnly => {
                 base | MountOptions::REC | MountOptions::NODEV | MountOptions::RDONLY
             }
             Access::ReadWrite => base | MountOptions::REC | MountOptions::NODEV,
             Access::Device => base,
+        };
+        if rustix::fs::statvfs(&bind.source)
+            .is_ok_and(|stat| stat.f_flag.contains(rustix::fs::StatVfsMountFlags::NOEXEC))
+        {
+            options |= MountOptions::NOEXEC;
         }
+        options
     }
 
     fn container(plan: &Plan) -> Container {
@@ -328,10 +339,9 @@ mod run {
         container
             .uidmap(rustix::process::getuid().as_raw())
             .gidmap(rustix::process::getgid().as_raw())
-            .procfsmount("/proc")
-            .runctl(Runctl::MountFallback);
+            .procfsmount("/proc");
         for bind in &plan.binds {
-            container.mount(&bind.source, &bind.target, "", options(bind.access), None);
+            container.mount(&bind.source, &bind.target, "", options(bind), None);
         }
         for tmpfs in &plan.tmpfs {
             container.mount(

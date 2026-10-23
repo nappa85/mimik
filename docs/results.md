@@ -5,6 +5,48 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Hakoniwa level-1 sandbox against bubblewrap (prototype tier, 2026-10-23)
+
+Scope: Hakoniwa 1.8.0 (`seccomp` feature off; Mimik's seccompiler program installed in its
+closure) against bubblewrap 0.13.0 as level 1, one dev host (Gentoo, kernel 7.2.8, no
+AppArmor or Landlock in the kernel's LSM list, unprivileged user namespaces on, `/` mounted
+`noatime`), the pinned llama.cpp b11609 CPU build with the CI test model (`stories260K`) and
+Mimik's fake server (forged output, exec failure, swapped files, fake GPU nodes). One run per
+backend of the same suite (the seccomp, endpoint, runner and `launch::live_tests` tests that
+`MIMIK_LIVE_SANDBOX` parametrises; 45 tests, 3 of them force Hakoniwa) and ten start-time
+probes each. Not covered: Ubuntu's AppArmor restriction (needs an Ubuntu 24.04 VM; the draft
+profile `apparmor/mimik` only passes `apparmor_parser`'s syntax check), Landlock inside the
+namespaces (no Landlock kernel), a real GPU (only the fake render node), other kernels or
+distributions, load. Reviewers have not seen it; no product decision rests on it yet.
+
+- Every check passes on both backends: nothing but the Unix socket reachable (host TCP, LAN,
+  public TCP, UDP, abstract and host Unix sockets all refused; no network interface is
+  configured in the empty namespace), `/home` and the host root invisible, `fork` refused,
+  `/tmp` and `/dev/shm` bounded, no inherited descriptor above 2 (standard input is
+  `/dev/null`), every capability set empty (bounding included), `no_new_privs` and the seccomp
+  filter in force, no controlling terminal, `/dev/tty` unopenable and `TIOCSTI` refused on
+  descriptors 0 to 2, every mount read-only or `nosuid`/`nodev` as planned, the whole process
+  tree gone within 10 s of a SIGKILL of Mimik (during startup and when ready), forged
+  sandbox-failure lines and thirteen exit codes (110 to 137, those the runner and its closure
+  use among them) from the server count as the server's failure with the level kept, a server
+  file that cannot be executed is the server's failure, and the CPU path and the fake GPU
+  paths (listing, node binding, partial offload, no node) behave the same.
+- Hakoniwa-only checks pass: a model or server file replaced after verification (a new
+  inode with the same bytes, a link to a copy) is refused before the exec, as a sandbox
+  failure, and the server never runs; the token file is unlinked once the sandbox holds it.
+- Differences that are not bugs: the verified descriptors cannot be bound (path binds with an
+  identity check instead); the program is PID 1 with its reaper outside the namespace; no
+  shim, no helper binary, no seccomp descriptor; Mimik's PID-namespace-number comparison is
+  skipped (`HAKO-L2`). Hakoniwa's own fallback for a refused read-only remount drops
+  read-only, so Mimik gives the source's locked flags up front and does not enable it.
+- Start-time probe, ten runs each: bubblewrap 1.88 to 1.99 s, Hakoniwa 1.91 to 2.03 s: no
+  measurable difference at that resolution.
+- Cost side (DEP-24): `cargo audit --deny warnings` fails on `RUSTSEC-2023-0089`
+  (`atomic-polyfill` through `postcard` and `heapless`), `chrono` and `flate2` enter the tree
+  through Hakoniwa's `procfs` features, the LGPL exception text must join the notices, and
+  the project is young (one main author). Its source is 5.4k lines with 23 `unsafe` lines; Mimik's
+  adapter adds three justified `unsafe` blocks.
+
 ## Model runtime: idle CPU calibration and the GPU path (steps 2c-2a and 2c-2b-1, 2026-10-23)
 
 Granite 4.2 3B Q4_K_M, `max_tokens` 352, pinned llama.cpp b11609 (CPU and Vulkan builds),

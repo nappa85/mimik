@@ -37,16 +37,13 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    false-confident count. Run it in a container with the `laya` package, since stock
    llama-server does not run it, and write the decision rule down before running. Shipping it
    would need its own runtime decision (ASSIST-29/33).
-3. A prototype-tier Hakoniwa comparison (user 2026-10-23). It now decides Linux level 1:
-   Hakoniwa or nothing (ASSIST-48); until adopted, bubblewrap stays. Its optional Landlock layer
-   inside the namespaces needs the user's Landlock-enabled kernel (7.3.0, landlock in CONFIG_LSM; check `/sys/kernel/security/lsm`
-   after the reboot). Hakoniwa is a Rust
-   library (LGPL-3.0 with linking exception) that does Linux isolation in-process, so the host
-   would not need `bwrap`. Run it in the runner process with its `seccomp` feature off, so there
-   is no libseccomp C dependency, and install Mimik's own seccompiler filter instead. Compare it
-   with the bwrap profile on the same live adversary checks. Use a stock Ubuntu 24.04 VM to see
-   whether its AppArmor user-namespace restriction blocks Mimik's binary where it allows `bwrap`.
-   If Hakoniwa holds up, adopting it is its own decision and review.
+3. Hakoniwa comparison (user 2026-10-23; it decides Linux level 1: Hakoniwa or nothing, ASSIST-48;
+   bubblewrap stays the default until then). Built on branch `hakoniwa-spike` behind the
+   `sandbox-hakoniwa` feature (DEP-24, `docs/model-runtime.md`, `docs/results.md`): the whole live
+   suite passes on both backends on the dev host. Open: the Ubuntu 24.04 VM check of the AppArmor
+   profile `apparmor/mimik` (after the KVM reboot), the Landlock layer inside the namespaces
+   (Landlock kernel, 7.3.0), the audit ignore for RUSTSEC-2023-0089 and the LGPL notice text
+   (approval), an independent review, then the adoption decision.
 4. Owed measurements: the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks
    at each llama.cpp pin change (`tools/assist_gpu_live.py`); a trace of the GPU path on another
    driver (AMDVLK, Intel, NVIDIA) for ASSIST-L44/L45; the superseding-job (cancel) timings on CPU and GPU with the fixed
