@@ -118,8 +118,11 @@ assistant is unavailable and `/admin/assistant` says how to fix it (install bubb
 unprivileged user namespaces, the AppArmor note), with level 1's own reason. Level 3 is built and
 unit-tested but switched off: no manager path probes or starts it, and `--probe` reports its
 result labelled "not used". It returns later as its own step behind an explicit owner opt-in. The launcher itself refuses
-to start level 3 whatever a configuration asks. This covers what Mimik starts (the manager,
-Restart, the routes and the start-time probe); the private `assistant-runner` entry points
+to start level 3 whatever a configuration asks (a sandbox-class failure, neither counted nor
+retried). This covers what Mimik starts (the manager,
+Restart, the routes and the start-time probe, which runs level 1 only); `--probe` is the one
+path that still runs level 3's probe, which starts Mimik's own probe child under seccomp,
+never llama-server; the private `assistant-runner` entry points
 (`--spec-fd`, `--shim`, `--probe-inner`) are an internal protocol between Mimik and its runner,
 not a privilege boundary (a local user who can run them can run llama-server directly).
 Why each level was not used is on the page and in the log.

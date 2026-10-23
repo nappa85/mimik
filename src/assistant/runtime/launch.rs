@@ -2086,7 +2086,8 @@ impl Launch {
         let real = Arc::clone(&self.0);
         if level == Level::Unconfined && !real.unconfined {
             // ASSIST-43: whatever a Config asks, level 3 is not started in this release.
-            return Err(Fail::Other("level 3 is not used in this release".into()));
+            // Sandbox-class: the manager neither counts nor retries it.
+            return Err(Fail::Sandbox("level 3 is not used in this release".into()));
         }
         // Every blocking part holds a ticket: a dropped start's work still counts until it
         // has finished (and cleaned up), and a cancel stops it before it spawns or records.

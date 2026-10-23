@@ -76,7 +76,7 @@ steps add:
 
 ### 1.4a Model runtime, device and budgets (2c-2; ASSIST-27, ASSIST-29 to ASSIST-34, ASSIST-40)
 
-Built for the CPU path at levels 1 and 3 (step 2c-2a): [model-runtime.md](model-runtime.md) is
+Built for the CPU path at level 1 (step 2c-2a; level 3 built but not used, ASSIST-43): [model-runtime.md](model-runtime.md) is
 the reference and wins where it differs from this design. What follows stays the design for
 2c-2b (the GPU path, the device choice and fallback, level 2) and is kept whole as their
 context.
@@ -728,7 +728,8 @@ no sheet or player text. No prompts, player text, presigned URLs or token in log
 
 ### 2c-2 Model runtime
 
-Split (user, 2026-10-22) into **2c-2a** (the CPU path at confinement levels 1 and 3) and
+Split (user, 2026-10-22) into **2c-2a** (the CPU path at confinement level 1; level 3 built,
+not used, ASSIST-43) and
 **2c-2b** (the GPU path and level 2), each with its own branch and reviews; the machinery of
 2c-2a is path-aware, so 2c-2b only adds to it.
 
@@ -771,8 +772,8 @@ the assistant page, and confinement level 2 (Landlock with seccomp). Tests:
   `llvmpipe` → CPU; a host where the selected card is `Vulkan1` but its sandboxed list names it
   `Vulkan0` → `--device Vulkan0`; enumeration order changing between discovery and launch → the
   launch name still comes from the in-sandbox listing; two identical cards at level 1 → told
-  apart and remembered by PCI address; two identical cards at level 3 → CPU path with the page
-  note; dedicated before integrated only when sysfs says so; no `--device` on the CPU path; a
+  apart and remembered by PCI address; with the owner's explicit permission for level 3
+  (ASSIST-43), two identical cards at level 3 → CPU path with the page note; dedicated before integrated only when sysfs says so; no `--device` on the CPU path; a
   mismatch at the real start → GPU failure; an offload line with N < M → GPU failure; a level
   that passes for the CPU build but not the GPU build → each path at its own level;
   `--assistant-device cpu` never lists devices; live (dev host): Vulkan on the RX 6650 XT reaches `ready` with GPU

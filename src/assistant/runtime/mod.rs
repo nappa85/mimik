@@ -1,9 +1,10 @@
 //! The model runtime (assisted sheet plan §1.4a; step 2c-2a): the pinned official
-//! llama-server started as Mimik's child under the highest confinement level that works,
+//! llama-server started as Mimik's child confined by bubblewrap (level 1, ASSIST-43),
 //! reached only through a checked endpoint with a per-launch token, primed and calibrated
 //! before it takes jobs.
 //!
-//! Linux `x86_64` only; the CPU path at levels 1 (bubblewrap) and 3 (unconfined). The GPU path
+//! Linux `x86_64` only; the CPU path at level 1 (bubblewrap); level 3 (unconfined) is built
+//! but not used (ASSIST-43), and returns later behind an owner opt-in. The GPU path
 //! and level 2 (`Landlock`) are step 2c-2b; the machinery here already carries the path and
 //! the level.
 pub(crate) mod budgets;

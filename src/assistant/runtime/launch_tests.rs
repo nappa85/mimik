@@ -1593,6 +1593,9 @@ async fn a_runtime_path_with_a_newline_is_refused_before_anything_is_spawned() {
     setup.settings.runner.program = runner;
     let launch = launch(&setup);
     launch.preflight(Path::Cpu).await.unwrap();
+    // run/1 already there: had the generation directory been created first, the start would
+    // fail on it ("already exists") instead of on the newline.
+    std::fs::create_dir(setup.settings.data_dir.join("run/1")).unwrap();
     let result = launch.start(1, Level::Unconfined, Path::Cpu).await;
     assert!(
         matches!(&result, Err(Fail::Other(why)) if why.starts_with("runtime path contains a newline")),
@@ -1600,7 +1603,6 @@ async fn a_runtime_path_with_a_newline_is_refused_before_anything_is_spawned() {
         result.err()
     );
     launch.settle().await;
-    assert!(!setup.settings.data_dir.join("run/1").exists());
     let marker = setup.settings.data_dir.join("run").display().to_string();
     assert_eq!(processes_naming(&marker), Vec::<i32>::new());
     assert_eq!(pidfile_text(&setup), "");
@@ -1616,8 +1618,9 @@ async fn level_3_is_refused_unless_explicitly_allowed() {
     )));
     launch.preflight(Path::Cpu).await.unwrap();
     let result = launch.start(1, Level::Unconfined, Path::Cpu).await;
+    // A sandbox-class refusal: the manager neither counts nor retries it.
     assert!(
-        matches!(&result, Err(Fail::Other(why)) if why == "level 3 is not used in this release"),
+        matches!(&result, Err(Fail::Sandbox(why)) if why == "level 3 is not used in this release"),
         "{:?}",
         result.err()
     );
@@ -1635,6 +1638,8 @@ async fn a_bwrap_path_with_a_newline_is_refused_before_any_directory_is_made() {
         path: PathBuf::from("/usr/bin/bw\nrap"),
         size: true,
     });
+    // run/1 already there: a generation directory made before the check would fail on it.
+    std::fs::create_dir(setup.settings.data_dir.join("run/1")).unwrap();
     let refused = tokio::task::spawn_blocking(move || {
         let ticket = real.work().enter();
         let checked = real.verify(Path::Cpu, Level::Bubblewrap, &ticket).unwrap();
@@ -1658,6 +1663,4 @@ async fn a_bwrap_path_with_a_newline_is_refused_before_any_directory_is_made() {
         matches!(&refused, Some(Fail::Other(why)) if why.starts_with("runtime path contains a newline")),
         "{refused:?}"
     );
-    // Refused before the generation directory was created.
-    assert!(!setup.settings.data_dir.join("run/1").exists());
 }
