@@ -1028,3 +1028,41 @@ fn a_probe_port_taken_meanwhile_is_tried_again() {
     let failed = serde_json::json!({"ok": false, "model": "unreadable", "retry": false});
     assert!(matches!(report_verdict(&failed), Probe::Failed(_)));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_probe_command_ends_only_after_its_probes_cleanup() {
+    let setup = setup(MODEL, "fake");
+    let launch = Arc::new(launch(&setup));
+    launch.preflight(Path::Cpu).await.unwrap();
+    let (arrived_sender, arrived) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    PAUSE.lock().unwrap().push(Pause {
+        dir: setup.settings.runtime_dir.clone(),
+        step: "cleanup",
+        arrived: arrived_sender,
+        release: released,
+    });
+    let probing = {
+        let launch = Arc::clone(&launch);
+        tokio::spawn(async move { super::super::probe::probe_and_settle(&launch).await })
+    };
+    tokio::task::spawn_blocking(move || arrived.recv_timeout(Duration::from_secs(60)).unwrap())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !probing.is_finished(),
+        "the probe command ended before its cleanup"
+    );
+    release.send(()).unwrap();
+    let report = tokio::time::timeout(Duration::from_secs(60), probing)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        report["levels"]["3"]["ok"],
+        serde_json::json!(true),
+        "{report}"
+    );
+    assert_eq!(pidfile_text(&setup), "");
+}

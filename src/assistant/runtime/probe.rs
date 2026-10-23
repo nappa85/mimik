@@ -252,16 +252,23 @@ fn cli_probe(args: &[String]) -> i32 {
         if let Err(why) = launch.preflight(Path::Cpu).await {
             return json!({"level": null, "error": why});
         }
-        let real = std::sync::Arc::clone(&launch.0);
-        let ticket = real.work().enter();
-        let levels = tokio::task::spawn_blocking(move || real.probe_levels(Path::Cpu, &ticket))
-            .await
-            .unwrap_or_default();
-        probe_report(&levels)
+        probe_and_settle(&launch).await
     });
     let level_one = result["level"] == json!(Level::Bubblewrap.number());
     report(result);
     i32::from(!level_one)
+}
+
+/// Every level's probe, then a settle: the probes' cleanup (killing them, clearing their
+/// pidfile entries) ends before the command exits.
+pub(crate) async fn probe_and_settle(launch: &Launch) -> Value {
+    let real = std::sync::Arc::clone(&launch.0);
+    let ticket = real.work().enter();
+    let levels = tokio::task::spawn_blocking(move || real.probe_levels(Path::Cpu, &ticket))
+        .await
+        .unwrap_or_default();
+    launch.0.work().settle().await;
+    probe_report(&levels)
 }
 
 /// `--probe`'s report: the level reached is the first that actually passed (a level kept
