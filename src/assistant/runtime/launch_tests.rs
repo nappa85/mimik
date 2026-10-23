@@ -402,8 +402,13 @@ async fn a_failure_after_the_spawn_leaves_no_process_behind() {
             matches!(&result, Err(Fail::Other(why)) if why == &format!("injected at {step}")),
             "{step}"
         );
-        // The token file path names the generation directory, so the child's command line
-        // would name it: no such process is left, alive or zombie.
+        // The runner the failure fired on is gone and reaped (no zombie either), and no
+        // process naming the generation directory is left.
+        let pid = FAULTED.lock().unwrap().take().unwrap();
+        assert!(
+            std::fs::metadata(format!("/proc/{pid}")).is_err(),
+            "{step}: {pid} is left"
+        );
         assert_eq!(processes_naming(&marker), Vec::<i32>::new(), "{step}");
         // Nor is its generation directory.
         assert!(
@@ -440,6 +445,31 @@ async fn gone_is_never_assumed_while_the_process_runs_past_the_grace() {
     .await
     .unwrap();
     sleeper.wait().unwrap();
+}
+
+#[tokio::test]
+async fn a_running_server_outlives_the_stop_grace() {
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    let child = launch
+        .start_real(1, Level::Unconfined, Path::Cpu)
+        .await
+        .unwrap();
+    // Nothing asked it to stop: past the grace it still runs and has not exited.
+    tokio::time::sleep(STOP_GRACE + Duration::from_secs(2)).await;
+    assert!(child.exit.borrow().is_none());
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", child.pid)).unwrap();
+    assert!(
+        !stat
+            .rsplit(')')
+            .next()
+            .unwrap()
+            .trim_start()
+            .starts_with('Z'),
+        "{stat}"
+    );
+    child.stop().await;
 }
 
 #[tokio::test]

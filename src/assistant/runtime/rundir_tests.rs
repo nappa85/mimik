@@ -189,11 +189,38 @@ fn the_identity_is_checked_after_the_pidfd_is_open() {
     leftover.wait().unwrap();
 }
 
+const HEAVY: &str = "assistant::runtime::rundir::tests::heavy_helper";
+
+/// A leftover whose exit takes a while: 128 MiB of touched memory to tear down.
+#[test]
+fn heavy_helper() {
+    if super::super::test_helper::mode().as_deref() != Some("heavy") {
+        return;
+    }
+    let mut memory = vec![0_u8; 128 << 20];
+    for page in memory.chunks_mut(4096) {
+        page[0] = 1;
+    }
+    println!("HELPER {{\"ready\":{}}}", memory.len());
+    std::thread::sleep(std::time::Duration::from_secs(30));
+    std::hint::black_box(&memory);
+}
+
 #[test]
 fn a_killed_leftover_is_gone_when_the_sweep_returns() {
     let (_dir, run) = data();
     let mut pidfile = Pidfile::acquire(run.as_fd()).unwrap().unwrap();
-    let mut leftover = sleeper();
+    let mut leftover = super::super::test_helper::command(HEAVY, "heavy")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Its memory is touched once it reports.
+    let stdout = std::io::BufReader::new(leftover.stdout.take().unwrap());
+    assert!(
+        std::io::BufRead::lines(stdout)
+            .map_while(Result::ok)
+            .any(|line| line.contains("HELPER"))
+    );
     let pid = i32::try_from(leftover.id()).unwrap();
     let exe = executable(pid).unwrap();
     pidfile

@@ -312,18 +312,21 @@ impl Drop for Owned {
 /// they apply to (`launch_tests.rs`); none outside tests.
 #[cfg(test)]
 pub(crate) static FAULT: Mutex<Option<(PathBuf, &'static str)>> = Mutex::new(None);
+/// The runner's PID when the injected failure fired.
+#[cfg(test)]
+pub(crate) static FAULTED: Mutex<Option<i32>> = Mutex::new(None);
 
 /// Fails the start at `step` when a test injected a failure there; nothing outside tests.
 macro_rules! fault_at {
-    ($real:expr, $step:literal) => {
+    ($real:expr, $step:literal, $child:expr) => {
         #[cfg(test)]
-        $real.fault_at($step)?;
+        $real.fault_at($step, $child.pid())?;
     };
 }
 
 #[cfg(test)]
 impl Real {
-    fn fault_at(&self, step: &'static str) -> Result<(), Fail> {
+    fn fault_at(&self, step: &'static str, pid: i32) -> Result<(), Fail> {
         {
             let mut fault = FAULT
                 .lock()
@@ -333,6 +336,9 @@ impl Real {
                 .is_some_and(|(dir, at)| *dir == self.settings.runtime_dir && *at == step)
             {
                 *fault = None;
+                *FAULTED
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pid);
                 return Err(Fail::Other(format!("injected at {step}")));
             }
         }
@@ -471,7 +477,7 @@ impl Real {
                 .map_err(|_| Fail::Other("the runner could not be started".into()))?,
         ));
         drop(handover);
-        fault_at!(self, "spawned");
+        fault_at!(self, "spawned", child);
         let pid = child.pid();
         let runner = Watched::open(pid).map_err(|_| Fail::Other("no pidfd".into()))?;
         if let Some(entry) = Entry::of(
@@ -484,7 +490,7 @@ impl Real {
         ) {
             self.record(&entry);
         }
-        fault_at!(self, "recorded");
+        fault_at!(self, "recorded", child);
         // No status line: bwrap failed before it created the sandbox (nothing it started could
         // have written anything yet).
         let (
@@ -494,7 +500,7 @@ impl Real {
             },
             rest,
         ) = read_started(status_read)?;
-        fault_at!(self, "started");
+        fault_at!(self, "started", child);
         let reaper = Watched::open(child_pid)
             .map_err(|_| Fail::Other("the sandbox's reaper has gone".into()))?;
         let sandbox = Arc::new(Sandbox {
@@ -505,7 +511,7 @@ impl Real {
             directory: Arc::new(dup(&generation.fd).map_err(Fail::Other)?),
             sandbox: Arc::clone(&sandbox),
         });
-        fault_at!(self, "connector");
+        fault_at!(self, "connector", child);
         Ok(Spawned {
             child,
             runner,
@@ -610,7 +616,7 @@ impl Real {
                 .map_err(|_| Fail::Other("the runner could not be started".into()))?,
         ));
         drop(handover);
-        fault_at!(self, "spawned");
+        fault_at!(self, "spawned", child);
         let pid = child.pid();
         let runner = Watched::open(pid).map_err(|_| Fail::Other("no pidfd".into()))?;
         let mut executables = vec![self.settings.runner.program.display().to_string()];
@@ -629,12 +635,12 @@ impl Real {
         if let Some(entry) = Entry::of(name.parse().unwrap_or(0), pid, executables) {
             self.record(&entry);
         }
-        fault_at!(self, "recorded");
+        fault_at!(self, "recorded", child);
         let connector: Arc<dyn Connect> = Arc::new(Loopback {
             port,
             child: Arc::new(Watched::open(pid).map_err(|_| Fail::Other("no pidfd".into()))?),
         });
-        fault_at!(self, "connector");
+        fault_at!(self, "connector", child);
         Ok(Spawned {
             child,
             runner,
@@ -903,6 +909,23 @@ impl Child for RealChild {
 
 /// Waits until `pidfd` reports its process gone: every `grace` without it, `kill` is called
 /// again and the wait goes on (there is no giving up: "gone" is never assumed).
+/// Waits, without any deadline or signal, until the pidfd's process has exited.
+async fn exited(pidfd: &OwnedFd) {
+    let async_fd = pidfd
+        .try_clone()
+        .ok()
+        .and_then(|fd| tokio::io::unix::AsyncFd::new(fd).ok());
+    while !endpoint::exited(pidfd) {
+        match &async_fd {
+            Some(fd) => match fd.readable().await {
+                Ok(mut guard) => guard.clear_ready(),
+                Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+            },
+            None => tokio::time::sleep(Duration::from_millis(200)).await,
+        }
+    }
+}
+
 async fn until_gone(pidfd: &OwnedFd, grace: Duration, kill: impl Fn()) {
     let async_fd = pidfd
         .try_clone()
@@ -940,10 +963,8 @@ async fn watch_exit(
     exit: watch::Sender<Option<Exit>>,
     on_gone: impl FnOnce() + Send + 'static,
 ) {
-    until_gone(&runner.pidfd, STOP_GRACE, || {
-        let _ = rustix::process::pidfd_send_signal(&runner.pidfd, rustix::process::Signal::KILL);
-    })
-    .await;
+    // However long it runs: stopping it is `stop`'s job, not the watcher's.
+    exited(&runner.pidfd).await;
     // The pidfd shows it exited, so this returns at once.
     let status = child.wait();
     if let Some(sandbox) = sandbox {
