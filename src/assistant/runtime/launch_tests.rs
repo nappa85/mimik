@@ -1086,7 +1086,8 @@ async fn level_3_executes_and_loads_from_the_checked_real_path_not_the_alias() {
         .unwrap();
     let cpu = std::fs::canonicalize(root.join("runtime/cpu")).unwrap();
     let environ = std::fs::read(format!("/proc/{}/environ", child.pid)).unwrap();
-    let library = format!("LD_LIBRARY_PATH={}", cpu.display());
+    // LD_LIBRARY_PATH names the verified directory by descriptor (its inode), not a path.
+    let library = format!("LD_LIBRARY_PATH=/proc/self/fd/{}", fds::BUILD_DIR);
     assert!(
         environ
             .split(|byte| *byte == 0)
@@ -1094,6 +1095,9 @@ async fn level_3_executes_and_loads_from_the_checked_real_path_not_the_alias() {
         "{}",
         String::from_utf8_lossy(&environ)
     );
+    // That descriptor is the verified cpu directory.
+    let fd_dir = std::fs::read_link(format!("/proc/{}/fd/{}", child.pid, fds::BUILD_DIR)).unwrap();
+    assert_eq!(fd_dir, cpu, "{}", fd_dir.display());
     assert_eq!(
         std::fs::read_link(format!("/proc/{}/exe", child.pid)).unwrap(),
         cpu.join("llama-server")
@@ -1364,6 +1368,10 @@ async fn a_torn_pidfile_refuses_the_start_and_keeps_the_generations() {
     let refused = launch.preflight(Path::Cpu).await.unwrap_err();
     assert!(refused.contains("cannot be read"), "{refused}");
     assert!(setup.settings.data_dir.join("run/9").exists());
+    // The owner removes the torn file; the next preflight re-acquires and proceeds.
+    std::fs::remove_file(setup.settings.data_dir.join("run/assistant.pid")).unwrap();
+    launch.preflight(Path::Cpu).await.unwrap();
+    assert!(!setup.settings.data_dir.join("run/9").exists());
 }
 
 #[test]
@@ -1372,4 +1380,32 @@ fn a_runtime_path_with_loader_syntax_is_unusable() {
     for bad in ["/opt:/evil", "/opt/llama;rm", "/opt/$ORIGIN/x"] {
         assert!(!loader_safe(std::path::Path::new(bad)), "{bad}");
     }
+}
+
+#[tokio::test]
+async fn level_3_loads_from_the_verified_inode_after_a_runtime_rename() {
+    let setup = setup(MODEL, "fake");
+    let root = setup.dir.path().to_path_buf();
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    let cpu = std::fs::canonicalize(root.join("runtime/cpu")).unwrap();
+    let before = rustix::fs::stat(&cpu).unwrap();
+    let child = launch
+        .start_real(1, Level::Unconfined, Path::Cpu)
+        .await
+        .unwrap();
+    // The runtime directory is renamed after the start: the handed-over descriptor still names
+    // the verified inode, so the loader is not redirected.
+    std::fs::rename(root.join("runtime/cpu"), root.join("runtime/moved")).unwrap();
+    let fd_inode = rustix::fs::stat(format!("/proc/{}/fd/{}", child.pid, fds::BUILD_DIR)).unwrap();
+    assert_eq!(
+        (fd_inode.st_dev, fd_inode.st_ino),
+        (before.st_dev, before.st_ino)
+    );
+    let cwd_inode = rustix::fs::stat(format!("/proc/{}/cwd", child.pid)).unwrap();
+    assert_eq!(
+        (cwd_inode.st_dev, cwd_inode.st_ino),
+        (before.st_dev, before.st_ino)
+    );
+    child.stop().await;
 }

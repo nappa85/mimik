@@ -509,6 +509,9 @@ fn clear_key(slot: &Mutex<Option<Pidfile>>, key: u64) {
 /// confirmed the entry stays and a settle (so the next session) waits.
 struct Owned {
     child: Option<std::process::Child>,
+    /// The runner's own pidfd (not re-opened by PID, which could be reused): its exit is
+    /// waited for through this.
+    runner_pidfd: Option<OwnedFd>,
     reaper: Option<Arc<Sandbox>>,
     recorded: Option<(PidSlot, u64)>,
     ticket: Option<Ticket>,
@@ -520,6 +523,9 @@ struct Owned {
     /// A test's reaper that the kill does not reach.
     #[cfg(test)]
     unkillable: bool,
+    /// A test's forced fallback from the runner pidfd to the `try_wait` loop.
+    #[cfg(test)]
+    no_runner_pidfd: bool,
 }
 
 /// After this long without the reaper's exit, the cleanup says so in the log (and waits on).
@@ -529,6 +535,7 @@ impl Owned {
     fn new(child: std::process::Child, ticket: Ticket) -> Self {
         Self {
             child: Some(child),
+            runner_pidfd: None,
             reaper: None,
             recorded: None,
             ticket: Some(ticket),
@@ -537,6 +544,8 @@ impl Owned {
             dir: PathBuf::new(),
             #[cfg(test)]
             unkillable: false,
+            #[cfg(test)]
+            no_runner_pidfd: false,
         }
     }
 
@@ -551,6 +560,7 @@ impl Owned {
     fn hand_over(mut self) -> (std::process::Child, Ticket) {
         self.reaper = None;
         self.recorded = None;
+        self.runner_pidfd = None;
         let child = self.child.take().expect("handed over once");
         let ticket = self.ticket.take().expect("handed over once");
         (child, ticket)
@@ -560,6 +570,7 @@ impl Owned {
 /// What a dropped [`Owned`] still has to do.
 struct Cleanup {
     child: Option<std::process::Child>,
+    runner_pidfd: Option<OwnedFd>,
     reaper: Option<Arc<Sandbox>>,
     recorded: Option<(PidSlot, u64)>,
     ticket: Option<Ticket>,
@@ -568,6 +579,8 @@ struct Cleanup {
     dir: PathBuf,
     #[cfg(test)]
     unkillable: bool,
+    #[cfg(test)]
+    no_runner_pidfd: bool,
 }
 
 impl Cleanup {
@@ -579,13 +592,31 @@ impl Cleanup {
         #[cfg(not(test))]
         let kill_reaper = true;
         if let Some(mut child) = self.child.take() {
-            // Killed already; its exit is waited for through a pidfd, so a slow one is said.
-            if let Ok(runner) = Watched::open(i32::try_from(child.id()).unwrap_or(0)) {
-                wait_exited(&|| runner.alive(), &|| {}, REAPER_WITHIN, &mut || {
-                    eprintln!("assistant: a failed start's runner has not exited yet; waiting");
-                });
+            // Killed already; its exit is waited for, and said if slow, through the runner's own
+            // pidfd, or, when none was kept or it will not open, a try_wait loop (never a bare,
+            // unbounded, unsaid wait).
+            let warn = &mut || {
+                eprintln!("assistant: a failed start's runner has not exited yet; waiting");
+            };
+            #[cfg(test)]
+            let pidfd = self.runner_pidfd.take().filter(|_| !self.no_runner_pidfd);
+            #[cfg(not(test))]
+            let pidfd = self.runner_pidfd.take();
+            if let Some(pidfd) = pidfd {
+                wait_exited(&|| !endpoint::exited(&pidfd), &|| {}, REAPER_WITHIN, warn);
+                let _ = child.wait();
+            } else {
+                // No pidfd: a try_wait loop, said after 5 s, never a bare blocking wait.
+                let started = std::time::Instant::now();
+                let mut warned = false;
+                while matches!(child.try_wait(), Ok(None)) {
+                    if !warned && started.elapsed() >= REAPER_WITHIN {
+                        warn();
+                        warned = true;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
             }
-            let _ = child.wait();
         }
         if let Some(sandbox) = self.reaper.take() {
             let reaper = &sandbox.reaper;
@@ -642,6 +673,7 @@ impl Drop for Owned {
         }
         let cleanup = Cleanup {
             child: self.child.take(),
+            runner_pidfd: self.runner_pidfd.take(),
             reaper: self.reaper.take(),
             recorded: self.recorded.take(),
             ticket: self.ticket.take(),
@@ -650,6 +682,8 @@ impl Drop for Owned {
             dir: std::mem::take(&mut self.dir),
             #[cfg(test)]
             unkillable: self.unkillable,
+            #[cfg(test)]
+            no_runner_pidfd: self.no_runner_pidfd,
         };
         if cleanup.child.is_none() && cleanup.reaper.is_none() && cleanup.recorded.is_none() {
             return;
@@ -971,6 +1005,7 @@ impl Real {
         fault_at!(self, "spawned", child);
         let pid = child.pid();
         let runner = Watched::open(pid).map_err(|_| Fail::Other("no pidfd".into()))?;
+        child.runner_pidfd = runner.pidfd.try_clone().ok();
         pause_at!(self, "before-record");
         job.check()?;
         if let Some(entry) = Entry::of(
@@ -1038,11 +1073,12 @@ impl Real {
         if matches!(command, Command::Probe) {
             env.extend(self.settings.inner.probe_env.iter().cloned());
         }
-        if let Some(server) = server {
-            // The checked real path: the configured one is never resolved again.
+        if server.is_some() {
+            // The verified directory by its handed-over descriptor: its inode, so a rename of
+            // the runtime path cannot redirect the loader to other libraries.
             env.push((
                 "LD_LIBRARY_PATH".to_owned(),
-                server.build_dir.display().to_string(),
+                format!("/proc/self/fd/{}", fds::BUILD_DIR),
             ));
         }
         env
@@ -1154,6 +1190,7 @@ impl Real {
         fault_at!(self, "spawned", child);
         let pid = child.pid();
         let runner = Watched::open(pid).map_err(|_| Fail::Other("no pidfd".into()))?;
+        child.runner_pidfd = runner.pidfd.try_clone().ok();
         let mut executables = vec![self.settings.runner.program.display().to_string()];
         if let Some(server) = server {
             executables.push(
@@ -1833,7 +1870,14 @@ impl Launcher for Launch {
                     );
                 }
                 Swept::Unreadable => {
-                    return Err("the pidfile run/assistant.pid cannot be read: check that no model server of an earlier run is left, then remove the file".into());
+                    // Drop the held pidfile (and its lock) so, once the owner removes the file,
+                    // the next preflight re-acquires a fresh one; nothing starts meanwhile.
+                    *real
+                        .pidfile
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                    real.held().swept = false;
+                    return Err("the pidfile run/assistant.pid cannot be read (it may be torn): check that no model server of an earlier run is left, then remove the file and try again".into());
                 }
                 Swept::Nothing | Swept::Killed => {}
             }

@@ -367,3 +367,18 @@ fn a_record_interrupted_before_its_truncate_still_parses() {
     pidfile.record(&short).unwrap();
     assert_eq!(pidfile.entry(), Ok(Some(short)));
 }
+
+#[test]
+fn an_executable_path_that_reads_like_the_checksum_still_parses() {
+    let (_dir, run) = data();
+    let mut pidfile = Pidfile::acquire(run.as_fd()).unwrap().unwrap();
+    // A path line that looks like a checksum line must not be mistaken for the terminator.
+    let entry = Entry {
+        generation: 1,
+        pid: 7,
+        start_time: 2,
+        executables: vec!["/opt/sha256 deadbeef".into(), "/opt/mimik/mimik".into()],
+    };
+    pidfile.record(&entry).unwrap();
+    assert_eq!(pidfile.entry(), Ok(Some(entry)));
+}

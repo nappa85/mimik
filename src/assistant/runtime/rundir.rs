@@ -51,13 +51,26 @@ impl Entry {
     /// The entry the text begins with, when its checksum line matches (anything after it,
     /// left by a longer earlier entry before the truncate, is ignored).
     fn parse(text: &str) -> Option<Self> {
-        let at = text.find("sha256 ")?;
-        let (body, rest) = text.split_at(at);
-        let sum = rest.strip_prefix("sha256 ")?.lines().next()?;
-        if hex::encode(<sha2::Sha256 as sha2::Digest>::digest(body.as_bytes())) != sum {
-            return None;
+        // The checksum line ends the entry, but a longer earlier entry may leave bytes after
+        // it. Each `sha256 ` line is a candidate terminator; the body before it that hashes to
+        // its hex is the entry (a path line that happened to read `sha256 …` cannot forge the
+        // hash of the bytes before itself).
+        let mut offset = 0;
+        let mut body = None;
+        for line in text.split_inclusive('\n') {
+            let start = offset;
+            offset += line.len();
+            let Some(hex_sum) = line.trim_end().strip_prefix("sha256 ") else {
+                continue;
+            };
+            let candidate = &text[..start];
+            if hex::encode(<sha2::Sha256 as sha2::Digest>::digest(candidate.as_bytes())) == hex_sum
+            {
+                body = Some(candidate);
+                break;
+            }
         }
-        let text = body;
+        let text = body?;
         let mut lines = text.lines();
         let generation = lines.next()?.parse().ok()?;
         let pid = lines.next()?.parse().ok()?;

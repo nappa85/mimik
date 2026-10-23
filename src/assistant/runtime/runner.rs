@@ -130,12 +130,12 @@ fn exec_server(
     // Into the checked build folder before seccomp and the exec: ggml's backend search of the
     // current directory then finds only it, never Mimik's (attacker-influenced) cwd.
     if let Some(chdir) = chdir {
-        // SAFETY: a handed-over directory descriptor, used only here.
+        // SAFETY: a handed-over directory descriptor. It stays open across the exec so the
+        // loader can reach the verified directory as `/proc/self/fd/<n>` (its inode, not a
+        // mutable name).
         if unsafe { libc::fchdir(chdir) } != 0 {
             return exit::EXEC;
         }
-        // SAFETY: closing the directory descriptor now that the cwd is set.
-        unsafe { libc::close(chdir) };
     }
     // SAFETY: dup3 onto the fixed number; `fd` is a handed-over descriptor.
     if fd != EXEC_FD && unsafe { libc::dup3(fd, EXEC_FD, libc::O_CLOEXEC) } != EXEC_FD {
