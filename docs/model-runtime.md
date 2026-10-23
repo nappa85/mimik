@@ -5,8 +5,8 @@ ASSIST-34, ASSIST-40 to ASSIST-42): with `--assistant`, Mimik starts the pinned 
 llama.cpp `llama-server` as its own child process, confined at the highest level that works,
 reaches it only through a checked endpoint with a per-launch token, and primes and calibrates
 it before any job runs. Linux `x86_64`: the GPU path (the Vulkan build on one hardware GPU)
-first, the CPU path (the CPU build) as the fallback. Confinement level 2 (Landlock) is step
-2c-2b-2 (`assisted-sheet-plan.md`); macOS and Windows are not built. What the assistant does
+first, the CPU path (the CPU build) as the fallback. There is no confinement level 2 (ASSIST-48);
+macOS and Windows are not built. What the assistant does
 with the server is in [assisted-entry.md](assisted-entry.md), "Interpretation assistant".
 
 | Concern | Code |
@@ -133,7 +133,7 @@ folder); and the current working directory. It is not governed by `LD_LIBRARY_PA
 
 ## Confinement levels
 
-Mimik runs llama-server at level 1 or not at all (ASSIST-43): when level 1 cannot be used, the
+Mimik runs llama-server at level 1 or not at all (ASSIST-43, ASSIST-48; there is no level 2): when level 1 cannot be used, the
 assistant is unavailable and `/admin/assistant` says how to fix it (install bubblewrap, allow
 unprivileged user namespaces, the AppArmor note), with level 1's own reason. Level 3 is built and
 unit-tested but switched off: no manager path probes or starts it, and `--probe` reports its
@@ -195,7 +195,6 @@ Why each level was not used is on the page and in the log.
    `drm` links read): a fingerprinting exposure only, to be narrowed to those files
    (ASSIST-L44). All Vulkan ICD manifests are visible, not only the selected card's driver
    (ASSIST-L45).
-2. **Landlock with seccomp:** not in this release (step 2c-2b-2); the page names it skipped.
 3. **Unconfined (seccomp only), not used in this release (ASSIST-43)**: what follows describes
    the switched-off code. On `127.0.0.1` with a random port: "not confined: TCP
    egress allowed, and the whole filesystem readable by Mimik's user is readable by the model
@@ -257,7 +256,7 @@ address chosen last while that card is still listed, else dedicated devices (sys
 `mem_info_vram_total` above 0) before the others, then by listed memory, ties by the lower PCI
 address. `boot_vga` is not used: it marks the firmware's primary display, not a discrete card.
 Why each other node was not used is on the page. The GPU path runs at level 1 only; the
-single-GPU rule of the TCP levels comes with level 2 (ASSIST-L25).
+single-GPU rule of the TCP level comes with level 3's return (ASSIST-L25).
 
 ## Endpoint check
 
