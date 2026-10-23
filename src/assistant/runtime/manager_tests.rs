@@ -22,12 +22,20 @@ struct Behaviour {
     gate: Option<Arc<tokio::sync::Semaphore>>,
     /// What `loaded` answers (the GPU offload check).
     loaded: Result<(), String>,
+    /// A malfunction of the fake server, if any.
+    fault: Fault,
+}
+
+/// What a fake server gets wrong.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fault {
+    None,
     /// `/health` is refused by the endpoint check.
-    refuse_health: bool,
+    RefuseHealth,
     /// `/tokenize` answers HTTP 500.
-    tokenize_fails: bool,
+    TokenizeFails,
     /// The samples come back without their prompt timing.
-    missing_timing: bool,
+    MissingTiming,
 }
 
 impl Default for Behaviour {
@@ -39,9 +47,7 @@ impl Default for Behaviour {
             g: 0.01,
             gate: None,
             loaded: Ok(()),
-            refuse_health: false,
-            tokenize_fails: false,
-            missing_timing: false,
+            fault: Fault::None,
         }
     }
 }
@@ -56,7 +62,7 @@ struct FakeServer {
 #[async_trait]
 impl Server for FakeServer {
     async fn health(&self) -> Health {
-        if self.behaviour.refuse_health {
+        if self.behaviour.fault == Fault::RefuseHealth {
             return Health::Refused("the endpoint check refused the connection".into());
         }
         if self.health_calls.fetch_add(1, Ordering::SeqCst) < self.behaviour.loading {
@@ -67,7 +73,7 @@ impl Server for FakeServer {
     }
 
     async fn tokens(&self, text: &str) -> Result<usize, Failure> {
-        if self.behaviour.tokenize_fails {
+        if self.behaviour.fault == Fault::TokenizeFails {
             return Err(Failure::Status(500));
         }
         Ok(text.len().div_ceil(3))
@@ -98,7 +104,7 @@ impl Server for FakeServer {
         tokio::time::sleep(Duration::from_secs_f64((prompt_ms + predicted_ms) / 1000.0)).await;
         Ok(Timings {
             prompt_n: Some(prompt_n),
-            prompt_ms: (!self.behaviour.missing_timing).then_some(prompt_ms),
+            prompt_ms: (self.behaviour.fault != Fault::MissingTiming).then_some(prompt_ms),
             cache_n: Some(1290.0),
             predicted_n: Some(predicted),
             predicted_ms: Some(predicted_ms),
@@ -859,15 +865,15 @@ async fn a_gpu_failure_at_each_phase_moves_to_the_cpu_at_once_uncounted() {
         ..Behaviour::default()
     };
     let refused = Behaviour {
-        refuse_health: true,
+        fault: Fault::RefuseHealth,
         ..Behaviour::default()
     };
     let no_tokenize = Behaviour {
-        tokenize_fails: true,
+        fault: Fault::TokenizeFails,
         ..Behaviour::default()
     };
     let no_timing = Behaviour {
-        missing_timing: true,
+        fault: Fault::MissingTiming,
         ..Behaviour::default()
     };
     // Each sample (52 s) is under the 60 s cap, but no candidate bound fits a deadline of

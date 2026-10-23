@@ -256,6 +256,16 @@ impl Launcher for NoGpu {
     }
 }
 
+/// The assistant page shows "Try the GPU again" disabled.
+async fn assert_try_gpu_disabled(app: &axum::Router, auth: &crate::auth::RequestAuth) {
+    let page = body(router_request(app, auth, "/admin/assistant", None).await).await;
+    assert!(
+        page.contains("action=\"/admin/assistant/try-gpu\"")
+            && page.contains("<button disabled>Try the GPU again</button>"),
+        "{page}"
+    );
+}
+
 #[tokio::test]
 async fn try_the_gpu_again_is_owner_only_csrf_checked_and_one_transition() {
     let _lock = crate::auth::test_resource_lock().await;
@@ -336,12 +346,7 @@ async fn try_the_gpu_again_is_owner_only_csrf_checked_and_one_transition() {
         "/admin/assistant?notice=trying-gpu"
     );
     // While that transition runs the button is disabled (a press would only be refused).
-    let page = body(router_request(&app, &auth[0], "/admin/assistant", None).await).await;
-    assert!(
-        page.contains("action=\"/admin/assistant/try-gpu\"")
-            && page.contains("<button disabled>Try the GPU again</button>"),
-        "{page}"
-    );
+    assert_try_gpu_disabled(&app, &auth[0]).await;
     let second = router_request(
         &app,
         &auth[0],
