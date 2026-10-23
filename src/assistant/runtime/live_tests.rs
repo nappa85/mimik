@@ -194,8 +194,49 @@ fn adversary() {
                 .collect()
         })
         .unwrap_or_default();
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let field = |name: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .map_or_else(String::new, |value| value.trim().to_owned())
+    };
+    // `TIOCSTI` pushes a byte into a terminal's input queue; on each standard descriptor it
+    // must fail (they are pipes or `/dev/null`, never a terminal).
+    let tiocsti: Vec<i64> = (0..3)
+        .map(|fd| {
+            let byte = b'x';
+            // SAFETY: an ioctl on a standard descriptor with a pointer to a live byte; the
+            // request is refused (ENOTTY) unless the descriptor were a terminal.
+            let result = unsafe { libc::ioctl(fd, libc::TIOCSTI, &byte) };
+            i64::from(result == 0)
+        })
+        .collect();
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    // Field 7 of /proc/self/stat is the controlling terminal (after the parenthesised name).
+    let tty_nr = stat
+        .rsplit(')')
+        .next()
+        .and_then(|rest| rest.split_whitespace().nth(4))
+        .map_or_else(String::new, str::to_owned);
+    let dev: Vec<String> = std::fs::read_dir("/dev")
+        .map(|listing| {
+            listing
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
     let report = json!({
         "ok": true,
+        "caps": {"inh": field("CapInh:"), "prm": field("CapPrm:"), "eff": field("CapEff:"),
+            "bnd": field("CapBnd:"), "amb": field("CapAmb:")},
+        "no_new_privs": field("NoNewPrivs:"),
+        "seccomp": field("Seccomp:"),
+        "dev": dev,
+        "dev_tty": errno_of(std::fs::File::open("/dev/tty")),
+        "tiocsti_succeeded": tiocsti,
+        "controlling_tty": tty_nr,
         "descriptors": descriptors,
         "tcp_host_listener": connect(&format!("127.0.0.1:{port}")),
         "tcp_lan": if lan.is_empty() { json!(null) } else { connect(&format!("{lan}:{port}")) },
@@ -603,6 +644,39 @@ fn live_an_adversary_in_the_level_1_sandbox_reaches_nothing() {
             "{entry} is visible: {root:?}"
         );
     }
+    // No capability left in any set (the bounding set too: bubblewrap's `--cap-drop ALL` and
+    // the Hakoniwa closure both empty it), `no_new_privs` and the seccomp filter in force.
+    let zero = "0000000000000000";
+    for set in ["inh", "prm", "eff", "bnd", "amb"] {
+        assert_eq!(report["caps"][set], json!(zero), "{set}: {report}");
+    }
+    assert_eq!(report["no_new_privs"], json!("1"), "{report}");
+    assert_eq!(report["seccomp"], json!("2"), "{report}");
+    // No terminal: /dev/tty cannot be opened, no standard descriptor takes TIOCSTI, and the
+    // process has no controlling terminal.
+    assert!(refused(&report["dev_tty"]), "{report}");
+    assert_eq!(report["tiocsti_succeeded"], json!([0, 0, 0]), "{report}");
+    assert_eq!(report["controlling_tty"], json!("0"), "{report}");
+    if live_backend() == Backend::Hakoniwa {
+        // Hakoniwa's /dev is built here: the five safe nodes and the links, no terminal node,
+        // no pts, no ptmx.
+        let dev: Vec<&str> = report["dev"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        for entry in &dev {
+            assert!(
+                [
+                    "null", "zero", "full", "random", "urandom", "fd", "stdin", "stdout",
+                    "stderr", "shm"
+                ]
+                .contains(entry),
+                "{entry} is in /dev: {dev:?}"
+            );
+        }
+    }
     // Nothing reached the host's listeners.
     assert!(listener.accept().is_err());
     assert!(abstract_listener.accept().is_err());
@@ -694,13 +768,14 @@ fn fake_build(scratch: &std::path::Path, alias: &str) -> Arc<Real> {
     Arc::new(Real::with_build(settings, Some(build)))
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
-async fn live_a_server_that_forges_bubblewraps_errors_keeps_level_1() {
+/// A server (the fake one) that prints sandbox-failure lines and exits with the code the
+/// alias names: the failure is counted as the model server's, the level kept, and nothing
+/// starts unconfined.
+async fn forged_failure_keeps_level_1(alias: &str) {
     use super::super::manager::{self, State};
     use crate::assistant::jobs::Assistant;
     let scratch = scratch();
-    let real = fake_build(scratch.path(), "forge-bwrap");
+    let real = fake_build(scratch.path(), alias);
     let assistant = Assistant::new();
     let handle = manager::spawn(
         assistant,
@@ -740,6 +815,22 @@ async fn live_a_server_that_forges_bubblewraps_errors_keeps_level_1() {
         "{status:?}"
     );
     handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+async fn live_a_server_that_forges_bubblewraps_errors_keeps_level_1() {
+    forged_failure_keeps_level_1("forge-bwrap").await;
+}
+
+/// Nothing the executed server exits with can count as a sandbox failure, whatever code the
+/// runner or its closure use for one (or the signal-like codes above 128).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+async fn live_no_exit_code_of_the_server_counts_as_a_sandbox_failure() {
+    for code in [110, 111, 112, 113, 114, 115, 116, 120, 125, 126, 127, 137] {
+        forged_failure_keeps_level_1(&format!("forge-exit-{code}")).await;
+    }
 }
 
 #[tokio::test]

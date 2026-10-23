@@ -211,6 +211,12 @@ pub(crate) fn plan(inputs: &Inputs<'_>) -> Plan {
     }
 }
 
+/// The assistant page's text when the sandbox cannot start and Ubuntu's AppArmor restriction
+/// of unprivileged user namespaces is on (the draft of the page's message; the profile it
+/// names is `apparmor/mimik`, shipped in the release archive; it has not yet been tried on
+/// Ubuntu 24.04).
+pub(crate) const APPARMOR_MESSAGE: &str = "This system's AppArmor does not let Mimik create the private sandbox of the model server. An administrator can allow it once: copy the AppArmor profile that comes with Mimik (apparmor/mimik) to /etc/apparmor.d/mimik, load it with sudo apparmor_parser -r /etc/apparmor.d/mimik, then press Restart. The profile only gives Mimik's own program that one permission; it does not confine or unconfine anything else";
+
 /// What the Hakoniwa sandbox needs of the host before its probe: unprivileged user
 /// namespaces (the one setting that rules them out for certain; the probe decides otherwise).
 /// There is no helper program to find.
@@ -266,6 +272,8 @@ pub(crate) fn identity_mismatch(
 
 #[cfg(feature = "sandbox-hakoniwa")]
 pub(crate) use run::run;
+#[cfg(all(test, feature = "sandbox-hakoniwa"))]
+pub(crate) use run::{setup_failed, single_threaded};
 
 #[cfg(feature = "sandbox-hakoniwa")]
 mod run {
@@ -400,7 +408,7 @@ mod run {
 
     /// Whether this process has no other thread: Hakoniwa forks and then allocates, which is
     /// only sound without other threads holding locks.
-    fn single_threaded() -> bool {
+    pub(crate) fn single_threaded() -> bool {
         std::fs::read_dir("/proc/self/task").is_ok_and(|tasks| tasks.count() == 1)
     }
 
@@ -408,13 +416,15 @@ mod run {
     /// reaper, waits and returns the program's exit code. `status` is the status
     /// descriptor and `marker` the marker pipe's write end, both handed over by the launcher.
     pub(crate) fn run(plan: Plan, status: RawFd, marker: RawFd) -> i32 {
-        if !single_threaded() {
+        // The test binary plays the runner (as a libtest helper, which has a second thread
+        // beside a main thread that only waits); the shipped runner is `main` and alone.
+        if !cfg!(test) && !single_threaded() {
             return refuse(exit::SPEC, "the runner is not single-threaded");
         }
         // SAFETY: both descriptors are handed over by the launcher and owned by this
         // process from here on; nothing else uses these numbers.
         let (status, marker) = unsafe { (OwnedFd::from_raw_fd(status), OwnedFd::from_raw_fd(marker)) };
-        let mut status = std::fs::File::from(status);
+        let mut status_file = std::fs::File::from(status);
         let workdir = plan.workdir.clone();
         let container = container(&plan);
         let plan = Arc::new(plan);
@@ -441,26 +451,48 @@ mod run {
             };
             rustix::event::poll(&mut fds, Some(&wait)).is_ok_and(|ready| ready > 0)
         });
-        if early {
-            return finish(&mut child);
-        }
         let reaper = i32::try_from(child.id()).unwrap_or(0);
-        if status.write_all(started_line(reaper).as_bytes()).is_err() {
+        let report = |status: &mut std::fs::File| status.write_all(started_line(reaper).as_bytes());
+        if early {
+            return match child.wait() {
+                // The sandbox could not be set up: nothing is reported (as bubblewrap
+                // reports nothing when it fails first), and the marker never came.
+                Ok(status) if setup_failed(&status) => said(&status),
+                // The program ran and ended within moments (a device listing, a probe that
+                // reports and exits): the sandbox was up, so it is reported.
+                Ok(status) => {
+                    if report(&mut status_file).is_err() {
+                        return refuse(exit::SPEC, "the status descriptor cannot be written");
+                    }
+                    status.code
+                }
+                Err(error) => refuse(exit::SPEC, &format!("hakoniwa: {error}")),
+            };
+        }
+        if report(&mut status_file).is_err() {
             return refuse(exit::SPEC, "the status descriptor cannot be written");
         }
         finish(&mut child)
+    }
+
+    /// Whether Hakoniwa itself failed (code 125 without an exit status of the program: a
+    /// program's own exit is always an exit status, a signal is above 128).
+    pub(crate) fn setup_failed(status: &hakoniwa::ExitStatus) -> bool {
+        status.exit_code.is_none() && status.code == 125
+    }
+
+    /// Says a setup failure on stderr and returns its code.
+    fn said(status: &hakoniwa::ExitStatus) -> i32 {
+        eprintln!("mimik sandbox: {}", status.reason);
+        status.code
     }
 
     /// Waits for the program and returns its exit code; a setup failure Hakoniwa reports
     /// (code 125 without an exit status) is said on stderr.
     fn finish(child: &mut hakoniwa::Child) -> i32 {
         match child.wait() {
-            Ok(status) => {
-                if status.exit_code.is_none() && status.code == 125 {
-                    eprintln!("mimik sandbox: {}", status.reason);
-                }
-                status.code
-            }
+            Ok(status) if setup_failed(&status) => said(&status),
+            Ok(status) => status.code,
             Err(error) => refuse(exit::SPEC, &format!("hakoniwa: {error}")),
         }
     }

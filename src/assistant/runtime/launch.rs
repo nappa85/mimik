@@ -3028,8 +3028,12 @@ impl Real {
     /// The level's probe, tried again while inconclusive; a level that stays inconclusive is
     /// kept (the real start decides), never skipped on a timeout alone.
     fn probe_with_retries(self: &Arc<Self>, path: Path, level: Level, ticket: &Ticket) -> Probed {
+        let backend = self.settings.backend;
         let hinted =
             |why: String| match (level, bwrap::namespace_hint(std::path::Path::new("/proc"))) {
+                (Level::Bubblewrap, Some(hint)) if backend == Backend::Hakoniwa => {
+                    format!("{why} ({hint}). {}", hako::APPARMOR_MESSAGE)
+                }
                 (Level::Bubblewrap, Some(hint)) => format!("{why} ({hint})"),
                 _ => why,
             };

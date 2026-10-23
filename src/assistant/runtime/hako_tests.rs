@@ -287,3 +287,40 @@ fn the_backend_names_parse_and_unknown_ones_are_refused() {
     #[cfg(not(feature = "sandbox-hakoniwa"))]
     assert!(Backend::parse("hakoniwa").is_err());
 }
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn a_process_with_another_thread_is_not_single_threaded() {
+    // The runner forks and then allocates: that is only sound alone, and it checks.
+    let (stop, hold) = std::sync::mpsc::channel::<()>();
+    let (ready_sender, ready) = std::sync::mpsc::channel::<()>();
+    let other = std::thread::spawn(move || {
+        ready_sender.send(()).unwrap();
+        let _ = hold.recv();
+    });
+    ready.recv().unwrap();
+    assert!(!single_threaded());
+    stop.send(()).unwrap();
+    other.join().unwrap();
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn only_a_failure_of_hakoniwa_itself_is_a_setup_failure() {
+    let status = |code, exit_code| hakoniwa::ExitStatus {
+        code,
+        reason: String::new(),
+        exit_code,
+        rusage: None,
+        proc_pid_smaps_rollup: None,
+        proc_pid_status: None,
+    };
+    // Hakoniwa's own failure: code 125 and no exit status of the program.
+    assert!(setup_failed(&status(125, None)));
+    // The program's exit, whatever its code (125 too), is its own; so is a death by signal.
+    assert!(!setup_failed(&status(125, Some(125))));
+    for code in [0, 1, 110, 116, 126, 127, 128, 137, 139] {
+        assert!(!setup_failed(&status(code, Some(code))), "{code}");
+        assert!(!setup_failed(&status(code, None)), "{code}");
+    }
+}
