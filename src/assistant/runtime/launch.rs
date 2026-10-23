@@ -172,6 +172,9 @@ pub(crate) struct Real {
     probes: AtomicU64,
     /// Failed attempts' cleanups still running: no new process is spawned until they end.
     cleanups: Arc<Cleanups>,
+    /// Whether level 3 may be started (ASSIST-43: never in this release; only tests that keep
+    /// its code from rotting set it, through [`Real::allowing_unconfined`]).
+    unconfined: bool,
 }
 
 /// A count of running cleanups, waited on without polling: a spawn blocks until it is 0.
@@ -335,7 +338,15 @@ impl Real {
             work: Work::new(),
             probes: AtomicU64::new(1),
             cleanups: Arc::new(Cleanups::default()),
+            unconfined: false,
         }
+    }
+
+    /// Tests only: lets level 3 start, so its switched-off code stays exercised.
+    #[cfg(test)]
+    pub(crate) fn allowing_unconfined(mut self) -> Self {
+        self.unconfined = true;
+        self
     }
 
     fn build(&self, path: Path) -> Option<&Build> {
@@ -1062,6 +1073,13 @@ impl Real {
             .bwrap
             .clone()
             .ok_or_else(|| Fail::Sandbox("bubblewrap did not pass the preflight".into()))?;
+        // The pidfile names these, one per line: checked before anything is created or
+        // spawned.
+        let executables = vec![
+            bwrap.path.display().to_string(),
+            self.settings.runner.program.display().to_string(),
+        ];
+        newline_free(&executables)?;
         let run = self.run_dir().map_err(Fail::Other)?;
         let generation = Generation::create(&run, &job.name)
             .map_err(|refusal| Fail::Other(format!("the socket directory: {refusal}")))?;
@@ -1081,12 +1099,6 @@ impl Real {
             target: fds::MARKER,
         });
         let spec = self.sandbox_spec(&bwrap, command, &mut handover, runtime)?;
-        // The pidfile names these, one per line: checked before anything is spawned.
-        let executables = vec![
-            bwrap.path.display().to_string(),
-            self.settings.runner.program.display().to_string(),
-        ];
-        newline_free(&executables)?;
         self.after_cleanups(job)?;
         pause_at!(self, "before-spawn");
         job.check()?;
@@ -1214,6 +1226,17 @@ impl Real {
         command: &Command,
         port: u16,
     ) -> Result<Spawned, Fail> {
+        let mut executables = vec![self.settings.runner.program.display().to_string()];
+        if let Some(server) = server {
+            executables.push(
+                server
+                    .build_dir
+                    .join(&server.file.name)
+                    .display()
+                    .to_string(),
+            );
+        }
+        newline_free(&executables)?;
         let run = self.run_dir().map_err(Fail::Other)?;
         let generation = Generation::create(&run, &job.name)
             .map_err(|refusal| Fail::Other(format!("the generation directory: {refusal}")))?;
@@ -1262,17 +1285,6 @@ impl Real {
                 argv,
             },
         };
-        let mut executables = vec![self.settings.runner.program.display().to_string()];
-        if let Some(server) = server {
-            executables.push(
-                server
-                    .build_dir
-                    .join(&server.file.name)
-                    .display()
-                    .to_string(),
-            );
-        }
-        newline_free(&executables)?;
         self.after_cleanups(job)?;
         pause_at!(self, "before-spawn");
         job.check()?;
@@ -2072,6 +2084,10 @@ impl Launch {
         path: Path,
     ) -> Result<Arc<RealChild>, Fail> {
         let real = Arc::clone(&self.0);
+        if level == Level::Unconfined && !real.unconfined {
+            // ASSIST-43: whatever a Config asks, level 3 is not started in this release.
+            return Err(Fail::Other("level 3 is not used in this release".into()));
+        }
         // Every blocking part holds a ticket: a dropped start's work still counts until it
         // has finished (and cleaned up), and a cancel stops it before it spawns or records.
         let ticket = real.work.enter();
@@ -2152,6 +2168,25 @@ impl Launch {
             }
         }
     }
+}
+
+/// Test-forced "bwrap unusable", keyed by runtime directory.
+#[cfg(test)]
+pub(crate) static NO_BWRAP: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// bwrap's preflight (a test may force it unusable for the launcher at `runtime_dir`).
+fn bwrap_preflight(runtime_dir: &std::path::Path) -> Result<Bwrap, bwrap::Unusable> {
+    #[cfg(test)]
+    if NO_BWRAP
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|dir| dir == runtime_dir)
+    {
+        return Err(bwrap::Unusable::Missing);
+    }
+    let _ = runtime_dir;
+    bwrap::preflight()
 }
 
 /// Test-forced short listening deadline, keyed by runtime directory.
@@ -2490,8 +2525,8 @@ impl Real {
         ticket: &Ticket,
     ) -> Result<(serde_json::Value, Probe), Probe> {
         if level == Level::Bubblewrap {
-            let bwrap =
-                bwrap::preflight().map_err(|unusable| Probe::Failed(unusable.to_string()))?;
+            let bwrap = bwrap_preflight(&self.settings.runtime_dir)
+                .map_err(|unusable| Probe::Failed(unusable.to_string()))?;
             self.held().bwrap = Some(bwrap);
         }
         let Checked { files, model, .. } = self.verify(path, level, ticket).map_err(|why| {

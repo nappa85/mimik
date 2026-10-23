@@ -8,7 +8,7 @@
 //!
 //! | Event | Action | Failure count |
 //! |---|---|---|
-//! | Sandbox-attributable failure at a level | next level that passed its probe, at once | not counted |
+//! | Sandbox-attributable failure at a level | next allowed level that passed its probe, at once; with none left (level 1 is the only one Mimik uses, ASSIST-43) `unavailable` with the fix | not counted |
 //! | Any other failed attempt | retry after 2 minutes, same level | +1 |
 //! | Child exits while ready | restart now | +1 only within 10 minutes of `ready` |
 //! | Two consecutive run-deadline expiries | stop as hung, restart, re-measure | as a child exit |
@@ -42,7 +42,8 @@ pub(crate) const MAX_FAILURES: u32 = 4;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Fail {
     /// Attributable to the sandbox (a bwrap setup error, a status-descriptor failure before
-    /// exec, the level's preflight): the next level is tried, not counted.
+    /// exec, the level's preflight): not counted; the next allowed level is tried, and with
+    /// none left (only level 1 is used, ASSIST-43) the assistant is unavailable.
     Sandbox(String),
     /// Anything else (model-load errors, hash mismatches, exits after exec): counted.
     Other(String),

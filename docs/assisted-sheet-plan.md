@@ -296,11 +296,13 @@ natively for these tests (ASSIST-40).
      denied; it could listen on another address on its port and reach local services over Unix
      sockets"; with a Landlock ABI below 4 (no network rules): "not network-confined: TCP egress
      allowed; filesystem restricted"; partial filesystem enforcement is shown as such; with no
-     Landlock at all (`RestrictionStatus` none) the level is not reached, and level 3 is used
-     with its own wording.
-  3. **Unconfined** (seccomp only, TCP on `127.0.0.1`): "not confined: TCP egress allowed, and
+     Landlock at all (`RestrictionStatus` none) the level is not reached, and the assistant is
+     unavailable unless the owner has explicitly allowed level 3 (ASSIST-43).
+  3. **Unconfined** (seccomp only, TCP on `127.0.0.1`), used only when the owner has
+     explicitly allowed it (ASSIST-43; not in 2c-2a): "not confined: TCP egress allowed, and
      the whole filesystem readable by Mimik's user is readable by the model server".
-  The assistant runs at every level (hardening is "where available", ASSIST-30); the page
+  The assistant runs at levels 1 and 2, and at level 3 only with the owner's explicit
+  permission (ASSIST-43; hardening is "where available", ASSIST-30); the page
   shows the level next to the assistant state and next to the 2d "Try" button (a downloaded
   GGUF is untrusted input to llama-server, contained only by this).
 - **Seccomp (every level):** pure Rust only, adding no runtime shared-library dependency to
@@ -358,7 +360,8 @@ natively for these tests (ASSIST-40).
   missing, set-ID or lacking an option (named), user namespaces disabled
   (`user.max_user_namespaces`, `kernel.unprivileged_userns_clone`), the Ubuntu AppArmor
   restriction on unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns`),
-  or the probe's own error. Then level 2 is probed the same way, then level 3. A level that
+  or the probe's own error. Then level 2 is probed the same way, then level 3 only if the owner
+  has explicitly allowed it (ASSIST-43). A level that
   passes the probe can still fail at the real start; that failure is recorded with its cause
   and shown on the page, and the transitions below move down only for sandbox-attributable
   failures. Memory: the child has no memory cap (`RLIMIT_AS` is
@@ -445,7 +448,7 @@ natively for these tests (ASSIST-40).
   | Event | Action | Failure count |
   |---|---|---|
   | Attempt fails on the GPU path (budgets that do not derive included), or the GPU child exits, or is stopped as hung | stop and wait until gone, start on the CPU path at the same level at once, showing the reason; CPU until Mimik restarts or the owner presses "Try the GPU again" | not counted |
-  | Attempt on the CPU path fails with a sandbox-attributable failure at level 1 or 2 (a bwrap or Landlock setup error, a status-descriptor failure before exec, the level's preflight failing) | next attempt at once on the next level that passed its probe; the skipped level and its reason are recorded and shown | not counted |
+  | Attempt on the CPU path fails with a sandbox-attributable failure at level 1 or 2 (a bwrap or Landlock setup error, a status-descriptor failure before exec, the level's preflight failing) | next attempt at once on the next allowed level that passed its probe (level 3 only with the owner's explicit permission, ASSIST-43); none left: `unavailable` with the fix; the skipped level and its reason are recorded and shown | not counted |
   | Attempt fails on the CPU path, otherwise (model-load errors, hash mismatches, exits after exec keep the level) | retry after 2 minutes | +1 |
   | Child exits while ready (CPU path) | restart now | +1 only within 10 minutes of `ready` |
   | Two consecutive run-deadline expiries with no completed exchange between | stop as hung, wait until gone, restart, re-measure (whatever `/health` says); expiries never count toward the breaker | as a child exit |
@@ -787,7 +790,8 @@ the assistant page, and confinement level 2 (Landlock with seccomp). Tests:
   of the child;
 - generations and transitions: the GPU rows of the table: GPU failure at each phase → CPU at
   once, not counted; GPU budgets that do not derive → CPU path, the page saying why; a
-  sandbox-setup failure at level 2 → level 3; a level that passes for the CPU build but not the
+  sandbox-setup failure at level 2 → level 3 only with the owner's explicit permission,
+  otherwise `unavailable` (ASSIST-43); a level that passes for the CPU build but not the
   GPU build → each path at its own level;
 - bubblewrap level: the GPU path reaches `ready` with the selected render node only; probe on
   the GPU path opens the render node and enumerates the device; no build accepts a software
@@ -953,8 +957,9 @@ prevented); one revision per Enter makes history long (no-ops write nothing, no 
 (proxies, redirects, retries) could send player text off the machine or repeat it, hence the
 client policy and its tests. Runtime: bubblewrap needs unprivileged user namespaces, which
 some distributions disable or restrict (Ubuntu's AppArmor rule), and older distributions'
-bubblewrap may lack an option the probe needs; those machines fall back to Landlock or to
-unconfined, as shown on the page; and Landlock is missing or
+bubblewrap may lack an option the probe needs; those machines fall back to Landlock (2c-2b),
+or run no assistant unless the owner explicitly allows unconfined (ASSIST-43), as shown on the
+page; and Landlock is missing or
 lacks network rules on many kernels (this host's included), so a machine can end on a lower
 level; the Landlock level leaves inbound listening on other addresses and local Unix sockets
 open; a malicious GGUF exploiting llama-server is contained only as far as the active level

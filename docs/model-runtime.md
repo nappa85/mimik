@@ -117,7 +117,11 @@ Mimik runs llama-server at level 1 or not at all (ASSIST-43): when level 1 canno
 assistant is unavailable and `/admin/assistant` says how to fix it (install bubblewrap, allow
 unprivileged user namespaces, the AppArmor note), with level 1's own reason. Level 3 is built and
 unit-tested but switched off: no manager path probes or starts it, and `--probe` reports its
-result labelled "not used". It returns later as its own step behind an explicit owner opt-in.
+result labelled "not used". It returns later as its own step behind an explicit owner opt-in. The launcher itself refuses
+to start level 3 whatever a configuration asks. This covers what Mimik starts (the manager,
+Restart, the routes and the start-time probe); the private `assistant-runner` entry points
+(`--spec-fd`, `--shim`, `--probe-inner`) are an internal protocol between Mimik and its runner,
+not a privilege boundary (a local user who can run them can run llama-server directly).
 Why each level was not used is on the page and in the log.
 
 1. **bubblewrap.** `bwrap` from `/usr/bin/bwrap` or `/bin/bwrap` (never `PATH`), refused if

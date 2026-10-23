@@ -147,11 +147,11 @@ fn setup(model: &[u8], alias: &str) -> Setup {
     }
 }
 
+/// The launcher over the fake build, level 3 allowed (its switched-off code is tested here).
 fn launch(setup: &Setup) -> Launch {
-    Launch(Arc::new(Real::with_build(
-        setup.settings.clone(),
-        Some(setup.build.clone()),
-    )))
+    Launch(Arc::new(
+        Real::with_build(setup.settings.clone(), Some(setup.build.clone())).allowing_unconfined(),
+    ))
 }
 
 const MODEL: &[u8] = b"GGUF a synthetic model";
@@ -208,11 +208,12 @@ async fn the_manager_probe_runs_level_1_only_and_the_cli_still_probes_level_3() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn without_bubblewrap_the_real_manager_is_unavailable_and_starts_nothing() {
-    if bwrap_installed() {
-        // Level 1 is usable here; the level-1 path is covered by the live tests.
-        return;
-    }
     let setup = setup(MODEL, "fake");
+    // bwrap is unusable for this launcher, wherever the test runs.
+    NO_BWRAP
+        .lock()
+        .unwrap()
+        .push(setup.settings.runtime_dir.clone());
     let real = Arc::new(Real::with_build(
         setup.settings.clone(),
         Some(setup.build.clone()),
@@ -1599,7 +1600,64 @@ async fn a_runtime_path_with_a_newline_is_refused_before_anything_is_spawned() {
         result.err()
     );
     launch.settle().await;
+    assert!(!setup.settings.data_dir.join("run/1").exists());
     let marker = setup.settings.data_dir.join("run").display().to_string();
     assert_eq!(processes_naming(&marker), Vec::<i32>::new());
     assert_eq!(pidfile_text(&setup), "");
+}
+
+#[tokio::test]
+async fn level_3_is_refused_unless_explicitly_allowed() {
+    let setup = setup(MODEL, "fake");
+    // Mimik's own launcher (no allowance): whatever a Config asks, level 3 never starts.
+    let launch = Launch(Arc::new(Real::with_build(
+        setup.settings.clone(),
+        Some(setup.build.clone()),
+    )));
+    launch.preflight(Path::Cpu).await.unwrap();
+    let result = launch.start(1, Level::Unconfined, Path::Cpu).await;
+    assert!(
+        matches!(&result, Err(Fail::Other(why)) if why == "level 3 is not used in this release"),
+        "{:?}",
+        result.err()
+    );
+    assert!(!setup.settings.data_dir.join("run/1").exists());
+    assert_eq!(pidfile_text(&setup), "");
+}
+
+#[tokio::test]
+async fn a_bwrap_path_with_a_newline_is_refused_before_any_directory_is_made() {
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    let real = Arc::clone(&launch.0);
+    real.held().bwrap = Some(Bwrap {
+        path: PathBuf::from("/usr/bin/bw\nrap"),
+        size: true,
+    });
+    let refused = tokio::task::spawn_blocking(move || {
+        let ticket = real.work().enter();
+        let checked = real.verify(Path::Cpu, Level::Bubblewrap, &ticket).unwrap();
+        let job = Job {
+            name: "1".into(),
+            key: 1,
+            ticket,
+        };
+        real.spawn_sandbox(
+            &job,
+            &checked.files,
+            &checked.model,
+            &Token::new(),
+            &Command::Server,
+        )
+        .err()
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(&refused, Some(Fail::Other(why)) if why.starts_with("runtime path contains a newline")),
+        "{refused:?}"
+    );
+    // Refused before the generation directory was created.
+    assert!(!setup.settings.data_dir.join("run/1").exists());
 }

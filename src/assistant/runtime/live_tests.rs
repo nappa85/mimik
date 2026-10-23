@@ -80,8 +80,10 @@ fn scratch() -> tempfile::TempDir {
         .unwrap()
 }
 
+/// The live launcher, level 3 allowed (the live level-3 tests keep its switched-off code
+/// working; Mimik's own launcher never allows it, ASSIST-43).
 fn real(settings: Settings) -> Arc<Real> {
-    Arc::new(Real::new(settings))
+    Arc::new(Real::new(settings).allowing_unconfined())
 }
 
 #[test]

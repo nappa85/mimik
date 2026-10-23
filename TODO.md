@@ -8,8 +8,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1 and the Rust
   1.99.1 / rig-core 0.45.0 upgrade are merged into master. **2c-2a** (the CPU runtime at
-  levels 1 and 3, `docs/model-runtime.md`) is built on branch `assist-2c2`, awaiting reviews
-  and its remaining live measurements (plan, "2c-2a"); then 2c-2b (GPU path, Landlock).
+  level 1 only, ASSIST-43, `docs/model-runtime.md`) is built on branch `assist-2c2`, awaiting
+  its final review and its remaining live measurements (plan, "2c-2a"); then 2c-2b (GPU path,
+  Landlock). Level 3's return is its own later step (plan, "Level 3 behind an owner opt-in").
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
   target/agent-tools/ci.sh <cmd>`, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
@@ -36,10 +37,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   on the dev host for master's release binary as well as `assist-2c2`'s (2026-10-23, Chromium
   container at 2 CPUs on a loaded host); find whether it is timing (its 500 ms waits) before CI
   relies on it.
-
-- Pending user decision (2c-2a review): whether level 3 (unconfined but for seccomp) needs an
-  explicit owner opt-in before Mimik falls back to it; the fallback is one branch in the
-  manager's level choice, so either answer is a small change.
 
 ## Blockers
 
