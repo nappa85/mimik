@@ -211,6 +211,7 @@ async fn a_peer_outside_the_sandbox_is_refused_even_with_mimiks_uid() {
     let sandbox = Arc::new(Sandbox {
         reaper: Watched::open(i32::try_from(reaper.child.id()).unwrap()).unwrap(),
         pid_namespace: own_namespace(),
+        inner: None,
     });
     let connector = SandboxSocket {
         directory: Arc::new(dir),
@@ -240,6 +241,7 @@ async fn a_child_of_the_reaper_outside_a_pid_namespace_is_refused() {
         sandbox: Arc::new(Sandbox {
             reaper: Watched::open(i32::try_from(std::process::id()).unwrap()).unwrap(),
             pid_namespace: own_namespace(),
+            inner: None,
         }),
     };
     let error = connector.connect().await.err().unwrap();

@@ -362,10 +362,11 @@ pub(crate) fn sweep_generations(run: BorrowedFd<'_>) {
         if name == "." || name == ".." || name == PIDFILE {
             continue;
         }
-        if name.bytes().all(|b| b.is_ascii_digit()) || name.starts_with("probe") {
-            remove_generation(run, &name);
-        } else if name.ends_with(ROOT_SUFFIX) {
+        // A root first: a probe's is named `probe-…` too, and a generation's depth is shorter.
+        if name.ends_with(ROOT_SUFFIX) {
             remove_root(run, &name);
+        } else if name.bytes().all(|b| b.is_ascii_digit()) || name.starts_with("probe") {
+            remove_generation(run, &name);
         }
     }
 }

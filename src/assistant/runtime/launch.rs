@@ -824,6 +824,23 @@ impl Cleanup {
             }
         }
         if let Some(sandbox) = self.reaper.take() {
+            if let Some(inner) = &sandbox.inner {
+                wait_exited(
+                    &|| inner.alive(),
+                    &|| {
+                        if kill_reaper {
+                            let _ = rustix::process::pidfd_send_signal(
+                                &inner.pidfd,
+                                rustix::process::Signal::KILL,
+                            );
+                        }
+                    },
+                    REAPER_WITHIN,
+                    &mut || {
+                        eprintln!("assistant: a failed start's server has not exited yet; waiting");
+                    },
+                );
+            }
             let reaper = &sandbox.reaper;
             wait_exited(
                 &|| reaper.alive(),
@@ -1435,6 +1452,7 @@ impl Real {
             Started {
                 child_pid,
                 pid_namespace,
+                inner_pid,
             },
             rest,
         ) = read_started(status_read, job, self.settings.backend)?;
@@ -1443,9 +1461,26 @@ impl Real {
         let (sandbox, connector): (Option<Arc<Sandbox>>, Arc<dyn Connect>) =
             match endpoint::open_reaper(child_pid, pid, pid_namespace) {
                 Ok(reaper) => {
+                    // Hakoniwa: the server (PID 1) is watched itself; a missing or
+                    // unverifiable inner process fails the start (a reaper that is gone
+                    // says nothing about the server's memory).
+                    let inner = match inner_pid {
+                        Some(inner) => {
+                            Some(endpoint::open_inner(inner, child_pid).map_err(|error| {
+                                Fail::Other(format!("the sandbox's server process: {error}"))
+                            })?)
+                        }
+                        None if hakoniwa => {
+                            return Err(Fail::Other(
+                                "the sandbox's server process was not reported".into(),
+                            ));
+                        }
+                        None => None,
+                    };
                     let sandbox = Arc::new(Sandbox {
                         reaper,
                         pid_namespace,
+                        inner,
                     });
                     child.reaper = Some(Arc::clone(&sandbox));
                     let connector: Arc<dyn Connect> = Arc::new(SandboxSocket {
@@ -2299,6 +2334,18 @@ async fn watch_exit(
     // The pidfd shows it exited, so this returns at once.
     let status = child.wait();
     if let Some(sandbox) = sandbox {
+        // The server first: it holds the memory, and its reaper (Hakoniwa) is outside its
+        // namespace and may end before it has finished dying.
+        if let Some(inner) = &sandbox.inner {
+            let pidfd = &inner.pidfd;
+            if !endpoint::exited(pidfd) {
+                let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
+            }
+            until_gone(pidfd, STOP_GRACE, || {
+                let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
+            })
+            .await;
+        }
         let reaper = &sandbox.reaper.pidfd;
         if !endpoint::exited(reaper) {
             let _ = rustix::process::pidfd_send_signal(reaper, rustix::process::Signal::KILL);
@@ -3070,17 +3117,23 @@ impl Real {
     /// kept (the real start decides), never skipped on a timeout alone.
     fn probe_with_retries(self: &Arc<Self>, path: Path, level: Level, ticket: &Ticket) -> Probed {
         let backend = self.settings.backend;
-        let hinted =
-            |why: String| match (level, bwrap::namespace_hint(std::path::Path::new("/proc"))) {
-                (Level::Bubblewrap, Some(hint)) if backend == Backend::Hakoniwa => {
-                    format!(
-                        "{why} ({hint}). {}",
-                        hako::apparmor_message(&self.settings.inner.executable)
-                    )
+        let exe = self.settings.inner.executable.clone();
+        let hinted = |why: String| {
+            if level != Level::Bubblewrap {
+                return why;
+            }
+            let proc = std::path::Path::new("/proc");
+            match (backend, bwrap::namespace_cause(proc)) {
+                (Backend::Hakoniwa, Some(cause)) => {
+                    format!("{why}. {}", hako::remedy(cause, &exe))
                 }
-                (Level::Bubblewrap, Some(hint)) => format!("{why} ({hint})"),
-                _ => why,
-            };
+                (Backend::Bwrap, Some(_)) => match bwrap::namespace_hint(proc) {
+                    Some(hint) => format!("{why} ({hint})"),
+                    None => why,
+                },
+                (_, None) => why,
+            }
+        };
         match retry_probe(
             level,
             Duration::from_secs(2),

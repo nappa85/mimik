@@ -193,16 +193,33 @@ pub(crate) fn namespaces(root: &Path) -> Result<(), Unusable> {
     Ok(())
 }
 
-/// Settings that may explain a failed level-1 probe; they decide nothing (a distribution's
-/// `AppArmor` profile for `bwrap`, for example, may still allow it).
-pub(crate) fn namespace_hint(root: &Path) -> Option<String> {
+/// A setting that may explain a failed level-1 probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Cause {
+    /// `kernel.unprivileged_userns_clone = 0` (Debian's and some other kernels' switch).
+    UsernsClone,
+    /// Ubuntu's `AppArmor` restriction (`kernel.apparmor_restrict_unprivileged_userns = 1`).
+    AppArmor,
+}
+
+/// The setting under `root` that may explain a failed probe; it decides nothing (a
+/// distribution's `AppArmor` profile for `bwrap`, for example, may still allow it).
+pub(crate) fn namespace_cause(root: &Path) -> Option<Cause> {
     if sysctl(root, "sys/kernel/unprivileged_userns_clone") == Some(0) {
-        return Some("kernel.unprivileged_userns_clone = 0".into());
+        return Some(Cause::UsernsClone);
     }
     if sysctl(root, "sys/kernel/apparmor_restrict_unprivileged_userns") == Some(1) {
-        return Some(Unusable::AppArmor.to_string());
+        return Some(Cause::AppArmor);
     }
     None
+}
+
+/// [`namespace_cause`] as the text bubblewrap's reason carries.
+pub(crate) fn namespace_hint(root: &Path) -> Option<String> {
+    namespace_cause(root).map(|cause| match cause {
+        Cause::UsernsClone => "kernel.unprivileged_userns_clone = 0".to_owned(),
+        Cause::AppArmor => Unusable::AppArmor.to_string(),
+    })
 }
 
 /// The preflight over `candidates` with sysctls under `proc` (tests inject both).
@@ -476,6 +493,9 @@ impl Profile {
 pub(crate) struct Started {
     pub child_pid: i32,
     pub pid_namespace: u64,
+    /// The sandbox's PID-1 process as seen from outside (Hakoniwa only: its reaper is not
+    /// inside the namespace, so the process that holds the memory must be watched itself).
+    pub inner_pid: Option<i32>,
 }
 
 /// Reads one status line; `None` when it is not the start report.
@@ -484,6 +504,7 @@ pub(crate) fn started(line: &str) -> Option<Started> {
     Some(Started {
         child_pid: i32::try_from(value.get("child-pid")?.as_i64()?).ok()?,
         pid_namespace: value.get("pid-namespace")?.as_u64()?,
+        inner_pid: None,
     })
 }
 

@@ -75,6 +75,10 @@ pub(crate) struct Sandbox {
     pub reaper: Watched,
     /// `pid-namespace`: the sandbox's PID namespace inode.
     pub pid_namespace: u64,
+    /// Hakoniwa: the sandbox's PID 1 (the server itself), held by its own pidfd. Its reaper
+    /// is outside the namespace and can end before the server has finished dying (its memory
+    /// is released only then), so the sandbox is gone when this process is.
+    pub inner: Option<Watched>,
 }
 
 /// Level 1's connector: the generation's socket, checked by its peer.
@@ -123,6 +127,21 @@ pub(crate) fn open_reaper(pid: i32, runner: i32, namespace: u64) -> io::Result<W
         Ok(_) => return Err(refused("the reported reaper is in another PID namespace")),
         Err(rustix::io::Errno::ACCESS | rustix::io::Errno::PERM) => {}
         Err(error) => return Err(error.into()),
+    }
+    if !watched.alive() {
+        return Err(refused(GONE));
+    }
+    Ok(watched)
+}
+
+/// Opens a pidfd on the sandbox's PID 1 as the runner reported it, then checks it is the
+/// reaper's child (`PPid`) and still alive afterwards.
+pub(crate) fn open_inner(pid: i32, reaper: i32) -> io::Result<Watched> {
+    let watched = Watched::open(pid)?;
+    if status(pid)?.ppid != reaper {
+        return Err(refused(
+            "the reported inner process is not the reaper's child",
+        ));
     }
     if !watched.alive() {
         return Err(refused(GONE));

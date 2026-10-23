@@ -851,6 +851,7 @@ async fn a_failed_starts_guard_kills_and_waits_for_the_reaper_too() {
     let sandbox = Arc::new(Sandbox {
         reaper: Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap(),
         pid_namespace: 0,
+        inner: None,
     });
     let work = Work::new();
     let mut owned = Owned::new(runner, work.enter());
@@ -861,6 +862,97 @@ async fn a_failed_starts_guard_kills_and_waits_for_the_reaper_too() {
         .unwrap();
     assert!(endpoint::exited(&sandbox.reaper.pidfd));
     reaper_process.wait().unwrap();
+}
+
+/// Whether `pid` is a live process (a zombie is not).
+fn pid_alive(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        !stat
+            .rsplit(')')
+            .next()
+            .unwrap_or("")
+            .trim_start()
+            .starts_with('Z')
+    })
+}
+
+/// With Hakoniwa the reaper is outside the PID namespace and the server (PID 1 inside) holds
+/// the memory: a reaper that has gone says nothing about the server. A sandbox is gone only
+/// when its inner process is, and a forced stop kills that process first.
+#[tokio::test]
+async fn a_failed_starts_guard_kills_and_waits_for_the_inner_process_too() {
+    let runner = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    // The reaper is already gone; the server is not.
+    let mut reaper_process = std::process::Command::new("true").spawn().unwrap();
+    let mut inner_process = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let reaper_watch = Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap();
+    reaper_process.wait().unwrap();
+    let sandbox = Arc::new(Sandbox {
+        reaper: reaper_watch,
+        pid_namespace: 0,
+        inner: Some(Watched::open(i32::try_from(inner_process.id()).unwrap()).unwrap()),
+    });
+    let work = Work::new();
+    let mut owned = Owned::new(runner, work.enter());
+    owned.reaper = Some(Arc::clone(&sandbox));
+    drop(owned);
+    tokio::time::timeout(Duration::from_secs(10), work.settle())
+        .await
+        .unwrap();
+    assert!(endpoint::exited(&sandbox.inner.as_ref().unwrap().pidfd));
+    inner_process.wait().unwrap();
+}
+
+#[tokio::test]
+async fn the_exit_is_published_only_once_the_inner_process_is_gone() {
+    let mut runner = std::process::Command::new("true").spawn().unwrap();
+    let runner_watch = Watched::open(i32::try_from(runner.id()).unwrap()).unwrap();
+    let mut reaper_process = std::process::Command::new("true").spawn().unwrap();
+    let inner_process = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let inner_pid = i32::try_from(inner_process.id()).unwrap();
+    let sandbox = Arc::new(Sandbox {
+        reaper: Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap(),
+        pid_namespace: 0,
+        inner: Some(Watched::open(inner_pid).unwrap()),
+    });
+    reaper_process.wait().unwrap();
+    let (sender, mut receiver) = watch::channel(None);
+    let sampled = Arc::new(Mutex::new(None));
+    let on_gone = {
+        let sampled = Arc::clone(&sampled);
+        move || {
+            // The instant the exit is about to be published: is the server still there?
+            *sampled.lock().unwrap() = Some(pid_alive(inner_pid));
+        }
+    };
+    let _ = runner.wait();
+    tokio::spawn(watch_exit(
+        runner,
+        runner_watch,
+        Some(sandbox),
+        sender,
+        on_gone,
+    ));
+    tokio::time::timeout(Duration::from_secs(10), receiver.wait_for(Option::is_some))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        *sampled.lock().unwrap(),
+        Some(false),
+        "the server outlived the exit"
+    );
+    let mut inner_process = inner_process;
+    let _ = inner_process.wait();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -884,6 +976,7 @@ async fn a_reaper_that_outlives_the_wait_keeps_its_entry_and_blocks_the_settle()
     let sandbox = Arc::new(Sandbox {
         reaper: Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap(),
         pid_namespace: 0,
+        inner: None,
     });
     let mut owned = Owned::new(runner, launch.0.work().enter());
     owned.reaper = Some(Arc::clone(&sandbox));

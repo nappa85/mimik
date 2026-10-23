@@ -228,7 +228,7 @@ fn a_bound_object_that_is_not_the_verified_one_is_refused() {
 
 #[test]
 fn the_start_report_is_the_reapers_pid_without_a_namespace_number() {
-    let line = started_line(4242);
+    let line = started_line(4242, None);
     assert_eq!(line, "{\"child-pid\":4242}\n");
     let started = started(&line).unwrap();
     assert_eq!(started.child_pid, 4242);
@@ -384,14 +384,154 @@ fn a_path_apparmor_would_interpret_gets_no_profile() {
 #[test]
 fn the_page_message_carries_the_generating_command_and_the_install_steps() {
     let message = apparmor_message(Path::new("/opt/mimik/bin/mimik"));
+    // Generated to a file first and chained with `&&`: a failing generator installs nothing.
     assert!(message.contains(
-        "/opt/mimik/bin/mimik assistant-apparmor-profile | sudo tee /etc/apparmor.d/mimik"
+        "/opt/mimik/bin/mimik assistant-apparmor-profile > mimik.apparmor && sudo install -m 0644 mimik.apparmor /etc/apparmor.d/mimik && sudo apparmor_parser -r /etc/apparmor.d/mimik"
     ));
-    assert!(message.contains("sudo apparmor_parser -r /etc/apparmor.d/mimik"));
+    assert!(!message.contains("tee"));
+    assert!(message.contains("may be why"));
     assert!(message.contains("Restart"));
     let spaced = apparmor_message(Path::new("/opt/it's here/mimik"));
     assert!(
-        spaced.contains("'/opt/it'\\''s here/mimik' assistant-apparmor-profile"),
+        spaced.contains("'/opt/it'\\''s here/mimik' assistant-apparmor-profile >"),
         "{spaced}"
     );
+}
+
+#[test]
+fn the_start_report_may_name_the_inner_process() {
+    let line = started_line(4242, Some(4243));
+    let started = started(&line).unwrap();
+    assert_eq!((started.child_pid, started.inner_pid), (4242, Some(4243)));
+    assert!(super::started("{\"child-pid\":1,\"inner-pid\":\"x\"}").is_none());
+}
+
+/// Fake steps in the closure's order: each records that it ran; `fail` fails the one at that
+/// index. Returns what ran and the outcome.
+fn sequence(fail: Option<usize>) -> (Vec<&'static str>, Result<(), (i32, String)>) {
+    let ran = std::cell::RefCell::new(Vec::new());
+    let steps: Vec<Step<'_>> = STEP_ORDER
+        .iter()
+        .enumerate()
+        .map(|(at, name)| {
+            let ran = &ran;
+            let step: Step<'_> = (
+                100 + i32::try_from(at).unwrap(),
+                Box::new(move || {
+                    ran.borrow_mut().push(*name);
+                    if fail == Some(at) {
+                        Err(format!("{name} failed"))
+                    } else {
+                        Ok(())
+                    }
+                }),
+            );
+            step
+        })
+        .collect();
+    let outcome = run_steps(steps);
+    (ran.into_inner(), outcome)
+}
+
+#[test]
+fn the_marker_is_the_last_step_and_a_failure_of_any_step_gives_none() {
+    assert_eq!(STEP_ORDER.last(), Some(&"marker"));
+    let (ran, outcome) = sequence(None);
+    assert_eq!(outcome, Ok(()));
+    assert_eq!(ran, STEP_ORDER);
+    for at in 0..STEP_ORDER.len() {
+        let (ran, outcome) = sequence(Some(at));
+        let (code, _) = outcome.unwrap_err();
+        assert_eq!(code, 100 + i32::try_from(at).unwrap());
+        // Nothing after the failing step ran, and the marker only ever when it was reached
+        // and succeeded (so, for a failure of the marker step itself, none was written).
+        assert_eq!(ran.len(), at + 1, "{ran:?}");
+        if at + 1 < STEP_ORDER.len() {
+            assert!(!ran.contains(&"marker"), "step {at}: {ran:?}");
+        }
+    }
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn the_real_closure_has_the_documented_steps_with_the_marker_last() {
+    let plan = plan(&inputs(None, &[]));
+    let steps = steps(&plan, rustix::fs::Mode::from_raw_mode(0o022));
+    assert_eq!(steps.len(), STEP_ORDER.len());
+    // The codes: every step before the marker is a sandbox failure; the marker's is its own.
+    let codes: Vec<i32> = steps.iter().map(|(code, _)| *code).collect();
+    assert_eq!(codes.last(), Some(&exit::MARKER));
+    assert!(!codes.contains(&exit::EXEC));
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn binds_are_not_recursive_so_no_submount_can_stay_writable_under_a_read_only_bind() {
+    use hakoniwa::MountOptions;
+    let bind = |access| Bind {
+        source: "/usr/lib".into(),
+        target: "/usr/lib".into(),
+        access,
+        identity: None,
+    };
+    for access in [Access::ReadOnly, Access::ReadWrite, Access::Device] {
+        let options = options(&bind(access));
+        assert!(!options.contains(MountOptions::REC), "{access:?}");
+        assert!(options.contains(MountOptions::NOSUID), "{access:?}");
+    }
+    assert!(options(&bind(Access::ReadOnly)).contains(MountOptions::RDONLY));
+    assert!(options(&bind(Access::ReadOnly)).contains(MountOptions::NODEV));
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn a_runner_with_another_thread_refuses_before_it_takes_or_spawns_anything() {
+    let (read, write) = rustix::pipe::pipe().unwrap();
+    let (status_read, status_write) = rustix::pipe::pipe().unwrap();
+    let (stop, hold) = std::sync::mpsc::channel::<()>();
+    let (ready_sender, ready) = std::sync::mpsc::channel::<()>();
+    let other = std::thread::spawn(move || {
+        ready_sender.send(()).unwrap();
+        let _ = hold.recv();
+    });
+    ready.recv().unwrap();
+    let plan = plan(&inputs(None, &[]));
+    let status = rustix::io::dup(&status_write).unwrap();
+    let marker = rustix::io::dup(&write).unwrap();
+    let (status_fd, marker_fd) = (
+        std::os::fd::AsRawFd::as_raw_fd(&status),
+        std::os::fd::AsRawFd::as_raw_fd(&marker),
+    );
+    let code = run_guarded(plan, status_fd, marker_fd, true);
+    assert_eq!(code, exit::SPEC);
+    // The descriptors were never taken: they are still open here (a taken one would have been
+    // closed with its owner), and nothing was written to either pipe or spawned.
+    assert!(rustix::io::fcntl_getfd(&status).is_ok());
+    assert!(rustix::io::fcntl_getfd(&marker).is_ok());
+    drop((status, marker, write, status_write));
+    let mut seen = Vec::new();
+    std::io::Read::read_to_end(&mut std::fs::File::from(read), &mut seen).unwrap();
+    std::io::Read::read_to_end(&mut std::fs::File::from(status_read), &mut seen).unwrap();
+    assert!(seen.is_empty());
+    stop.send(()).unwrap();
+    other.join().unwrap();
+}
+
+#[test]
+fn a_replaced_executable_gets_no_profile() {
+    let error = apparmor_profile(Path::new("/opt/mimik/mimik (deleted)")).unwrap_err();
+    assert!(error.contains("replaced or removed"), "{error}");
+}
+
+#[test]
+fn each_cause_gets_its_own_worded_as_possible_remedy() {
+    let exe = Path::new("/opt/mimik/mimik");
+    let apparmor = remedy(bwrap::Cause::AppArmor, exe);
+    assert!(apparmor.contains("AppArmor") && apparmor.contains("may be why"));
+    assert!(apparmor.contains("apparmor_parser"));
+    let clone = remedy(bwrap::Cause::UsernsClone, exe);
+    assert!(clone.contains("unprivileged_userns_clone") && clone.contains("may be why"));
+    // The AppArmor steps are never offered for the other setting, and the reverse.
+    assert!(!clone.contains("apparmor_parser"));
+    assert!(!apparmor.contains("sysctl"));
 }

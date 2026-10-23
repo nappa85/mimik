@@ -172,6 +172,16 @@ fn a_generations_sandbox_root_is_private_deep_and_goes_with_it() {
     sweep_generations(run.as_fd());
     assert!(!left_root.exists());
     assert!(!dir.path().join("run/7").exists());
+
+    // A probe's root is named like a probe (`probe-…`) and ends in `.root`: it is swept as a
+    // root (deep trees included), not as a generation's directory (8 levels).
+    let probe = Generation::create(&run, "probe-3-1").unwrap();
+    probe.create_root().unwrap();
+    let probe_root = dir.path().join("run/probe-3-1.root");
+    std::fs::create_dir_all(probe_root.join("m/e/d/i/a/t/o/mimik/scratch/x/y/z")).unwrap();
+    std::mem::forget(probe);
+    sweep_generations(run.as_fd());
+    assert!(!probe_root.exists());
 }
 
 #[test]

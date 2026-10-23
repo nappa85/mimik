@@ -78,7 +78,8 @@ fn read_spec(fd: RawFd) -> Option<Spec> {
     // SAFETY: the spec descriptor is handed over by the parent and owned by this process
     // from here on; nothing else uses that number.
     let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
-    let mut text = String::new();
+    // The spec may hold the token (Hakoniwa): its buffers are wiped when dropped.
+    let mut text = zeroize::Zeroizing::new(String::new());
     file.take(SPEC_BOUND).read_to_string(&mut text).ok()?;
     serde_json::from_str(&text).ok()
 }
@@ -324,7 +325,7 @@ pub(crate) fn launch(
     spec: &Spec,
     handover: &[Handover],
 ) -> std::io::Result<Child> {
-    let text = serde_json::to_vec(spec).map_err(std::io::Error::other)?;
+    let text = zeroize::Zeroizing::new(serde_json::to_vec(spec).map_err(std::io::Error::other)?);
     if u64::try_from(text.len()).unwrap_or(u64::MAX) > SPEC_BOUND {
         return Err(std::io::Error::other(format!(
             "the runner's spec is {} bytes, more than the {SPEC_BOUND} it reads",
