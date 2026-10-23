@@ -1098,6 +1098,12 @@ async fn level_3_executes_and_loads_from_the_checked_real_path_not_the_alias() {
         std::fs::read_link(format!("/proc/{}/exe", child.pid)).unwrap(),
         cpu.join("llama-server")
     );
+    // The cwd is the checked build folder, so ggml's search of the current directory finds
+    // only it, never Mimik's own (attacker-influenced) cwd.
+    assert_eq!(
+        std::fs::read_link(format!("/proc/{}/cwd", child.pid)).unwrap(),
+        cpu
+    );
     // The pidfile names the real executable, so a later sweep recognises it.
     assert!(
         pidfile_text(&setup).contains(&cpu.join("llama-server").display().to_string()),
@@ -1358,4 +1364,12 @@ async fn a_torn_pidfile_refuses_the_start_and_keeps_the_generations() {
     let refused = launch.preflight(Path::Cpu).await.unwrap_err();
     assert!(refused.contains("cannot be read"), "{refused}");
     assert!(setup.settings.data_dir.join("run/9").exists());
+}
+
+#[test]
+fn a_runtime_path_with_loader_syntax_is_unusable() {
+    assert!(loader_safe(std::path::Path::new("/opt/mimik/llama/cpu")));
+    for bad in ["/opt:/evil", "/opt/llama;rm", "/opt/$ORIGIN/x"] {
+        assert!(!loader_safe(std::path::Path::new(bad)), "{bad}");
+    }
 }

@@ -48,6 +48,8 @@ mod fds {
     pub const SERVER: RawFd = 9;
     /// Mimik's own executable at level 1: the shim (and the probe).
     pub const SHIM: RawFd = 10;
+    /// Level 3: the checked build folder, to chdir into.
+    pub const BUILD_DIR: RawFd = 11;
     /// The shim's marker pipe at level 1.
     pub const MARKER: RawFd = 12;
     /// The first runtime file at level 1.
@@ -124,6 +126,16 @@ struct Held {
     bwrap: Option<Bwrap>,
 }
 
+/// Whether a path may be given to the dynamic loader as `LD_LIBRARY_PATH`: no `:` (its
+/// separator) or `;`/`$` (its expansion syntax).
+pub(crate) fn loader_safe(path: &std::path::Path) -> bool {
+    !path
+        .as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .any(|byte| matches!(byte, b':' | b';' | b'$'))
+}
+
 /// What one attempt verified: the pinned files and the model, opened and hashed beneath the
 /// runtime folder's descriptor, and the build folder's real path as checked (level 3's
 /// executable and libraries are found through it, never through the configured path).
@@ -131,6 +143,8 @@ pub(crate) struct Checked {
     pub files: Vec<Verified>,
     pub model: Verified,
     pub build_dir: PathBuf,
+    /// The checked build folder, opened: level 3 chdirs into it before exec.
+    pub build_fd: OwnedFd,
 }
 
 /// Level 3's server: its verified file and the checked folder its libraries come from.
@@ -138,6 +152,8 @@ pub(crate) struct Checked {
 pub(crate) struct ServerFile<'a> {
     pub file: &'a Verified,
     pub build_dir: &'a std::path::Path,
+    /// The checked build folder, handed over and chdir'd into.
+    pub build_fd: &'a OwnedFd,
 }
 
 /// The real launcher.
@@ -341,7 +357,10 @@ impl Real {
                 self.paused("runtime-opened");
             })
             .map_err(|refusal| format!("the model runtime: {refusal}"))?;
-        let files = files::runtime_until(runtime.as_fd(), build, &self.cache, &stop)
+        let build_fd =
+            files::open_dir_beneath(runtime.as_fd(), &build.directory, Owners::MineOrRoot, false)
+                .map_err(|refusal| format!("the model runtime: {refusal}"))?;
+        let files = files::runtime_until(build_fd.as_fd(), build, &self.cache, &stop)
             .map_err(|refusal| format!("the model runtime: {refusal}"))?;
         let models = files::open_dir(&self.settings.models_dir, Owners::Mine, true)
             .map_err(|refusal| format!("the models folder: {refusal}"))?;
@@ -353,10 +372,18 @@ impl Real {
             &stop,
         )
         .map_err(|refusal| format!("the model: {refusal}"))?;
+        let build_dir = real.join(&build.directory);
+        if !loader_safe(&build_dir) {
+            return Err(format!(
+                "unusable runtime path (loader-expansion characters): {}",
+                build_dir.display()
+            ));
+        }
         Ok(Checked {
             files,
             model,
-            build_dir: real.join(&build.directory),
+            build_dir,
+            build_fd,
         })
     }
 
@@ -883,6 +910,7 @@ impl Real {
                 ("PATH".into(), "/usr/bin:/bin".into()),
                 ("LANG".into(), "C.UTF-8".into()),
             ],
+            chdir: None,
             exec: Exec::Bwrap {
                 path: bwrap.path.display().to_string(),
                 args: profile
@@ -1078,7 +1106,7 @@ impl Real {
         let model_path = format!("/proc/self/fd/{}", fds::MODEL);
         let (executable, argv) =
             self.unconfined_command(command, server, &model_path, port, &token_file)?;
-        let handover = vec![
+        let mut handover = vec![
             Handover {
                 fd: dup(&model.fd).map_err(Fail::Other)?,
                 target: fds::MODEL,
@@ -1088,10 +1116,21 @@ impl Real {
                 target: fds::SERVER,
             },
         ];
+        // Level 3 chdirs into the checked build folder before the exec.
+        let chdir = server
+            .map(|server| -> Result<RawFd, Fail> {
+                handover.push(Handover {
+                    fd: dup(server.build_fd).map_err(Fail::Other)?,
+                    target: fds::BUILD_DIR,
+                });
+                Ok(fds::BUILD_DIR)
+            })
+            .transpose()?;
         let env = self.unconfined_env(command, server, &directory);
         let spec = Spec {
             parent: std::process::id(),
             keep: vec![fds::MODEL],
+            chdir,
             env,
             exec: Exec::Server {
                 fd: fds::SERVER,
@@ -1889,8 +1928,10 @@ impl Launch {
             files,
             model,
             build_dir,
+            build_fd,
         } = checked(&real, path, level, &ticket).await?;
         let build_dir = Arc::new(build_dir);
+        let build_fd = Arc::new(build_fd);
         let token = Arc::new(Token::new());
         let bwrap = real.held().bwrap.clone();
         let files = Arc::new(files);
@@ -1898,12 +1939,13 @@ impl Launch {
         // The spawn blocks (bwrap's status line, up to 30 s): off the async runtime. A start
         // dropped meanwhile drops its result, whose guard kills the child.
         let spawn = |port: u16| {
-            let (real, files, model, token, build_dir) = (
+            let (real, files, model, token, build_dir, build_fd) = (
                 Arc::clone(&real),
                 Arc::clone(&files),
                 Arc::clone(&model),
                 Arc::clone(&token),
                 Arc::clone(&build_dir),
+                Arc::clone(&build_fd),
             );
             let job = Job {
                 name: generation.to_string(),
@@ -1922,6 +1964,7 @@ impl Launch {
                         .map(|file| ServerFile {
                             file,
                             build_dir: &build_dir,
+                            build_fd: &build_fd,
                         });
                     real.spawn_unconfined(&job, server, &model, &token, &Command::Server, port)
                 }

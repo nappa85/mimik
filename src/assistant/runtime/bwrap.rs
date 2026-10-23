@@ -346,7 +346,7 @@ impl Profile {
         args.extend(["--remount-ro".into(), "/".into()]);
         args.extend(["--seccomp".into(), fd(self.seccomp_fd)]);
         args.extend(["--json-status-fd".into(), fd(self.status_fd)]);
-        args.extend(["--chdir".into(), "/".into()]);
+        args.extend(["--chdir".into(), RUNTIME.into()]);
         args.extend(self.command.iter().map(OsString::from));
         args
     }

@@ -61,6 +61,9 @@ pub(crate) struct Spec {
     pub keep: Vec<RawFd>,
     /// The exact environment of the exec.
     pub env: Vec<(String, String)>,
+    /// The working directory to `fchdir` into before the exec (level 3's checked build
+    /// folder, so ggml's cwd search finds only it); `None` leaves bwrap to set its own.
+    pub chdir: Option<RawFd>,
     pub exec: Exec,
 }
 
@@ -118,7 +121,22 @@ fn c_strings(values: impl IntoIterator<Item = String>) -> Option<Vec<CString>> {
 
 /// Executes the TCP levels' server: the descriptor moved to [`EXEC_FD`] (close-on-exec),
 /// `RLIMIT_NOFILE` set to that number, the seccomp program installed, then `execveat`.
-fn exec_server(fd: RawFd, argv: Vec<String>, env: Vec<(String, String)>) -> i32 {
+fn exec_server(
+    fd: RawFd,
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+    chdir: Option<RawFd>,
+) -> i32 {
+    // Into the checked build folder before seccomp and the exec: ggml's backend search of the
+    // current directory then finds only it, never Mimik's (attacker-influenced) cwd.
+    if let Some(chdir) = chdir {
+        // SAFETY: a handed-over directory descriptor, used only here.
+        if unsafe { libc::fchdir(chdir) } != 0 {
+            return exit::EXEC;
+        }
+        // SAFETY: closing the directory descriptor now that the cwd is set.
+        unsafe { libc::close(chdir) };
+    }
     // SAFETY: dup3 onto the fixed number; `fd` is a handed-over descriptor.
     if fd != EXEC_FD && unsafe { libc::dup3(fd, EXEC_FD, libc::O_CLOEXEC) } != EXEC_FD {
         return exit::EXEC;
@@ -196,6 +214,9 @@ pub(crate) fn run(spec_fd: RawFd) -> i32 {
     if let Exec::Server { fd, .. } = &spec.exec {
         keep.push(*fd);
     }
+    if let Some(chdir) = spec.chdir {
+        keep.push(chdir);
+    }
     if close_others(&keep).is_err() {
         return exit::DESCRIPTORS;
     }
@@ -209,7 +230,7 @@ pub(crate) fn run(spec_fd: RawFd) -> i32 {
             drop(error);
             exit::EXEC
         }
-        Exec::Server { fd, argv } => exec_server(fd, argv, spec.env),
+        Exec::Server { fd, argv } => exec_server(fd, argv, spec.env, spec.chdir),
     }
 }
 

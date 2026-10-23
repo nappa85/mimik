@@ -71,7 +71,8 @@ user and not writable by group or others. The runtime is resolved once per attem
 its real path read back from that descriptor, that exact path walked from `/` by descriptor
 without following links and ending at the same folder; the pinned files are opened and hashed
 beneath that descriptor, and level 3 executes the verified descriptor with `LD_LIBRARY_PATH`
-set to the checked build folder's real path, so the configured path is never resolved again.
+set to the checked build folder's real path and the runner `fchdir`'d into it, so neither the
+configured path nor Mimik's cwd is used again (see "Backend loading").
 A failed attempt's processes end before the next spawn (probe, retry, start or next level). A model larger than
 `MemAvailable` minus 1 GiB is refused ("not enough memory for this model").
 
@@ -89,6 +90,24 @@ level 3 the verified llama-server descriptor, moved to number 1023 (close-on-exe
 `RLIMIT_NOFILE` set to 1023, after installing the seccomp program, by `execveat(1023, "",
 …, AT_EMPTY_PATH)`. Descriptors are moved to their numbers between fork and exec with
 `fcntl(F_DUPFD_CLOEXEC)` then `dup2` only.
+
+## Backend loading (ggml)
+
+The bundled build is `GGML_BACKEND_DL=ON` with `GGML_CPU_ALL_VARIANTS=ON`: ggml picks a CPU
+backend at run time by `dlopen`ing each `libggml-cpu-*.so` it finds and scoring it, and a
+candidate's constructors run while it is open (ASSIST-42, audited against the b11609 source,
+`ggml/src/ggml-backend-reg.cpp`). `ggml_backend_load_best` searches, in order: `GGML_BACKEND_DIR`
+(a compile-time path, not set in this build); the executable's directory (`/proc/self/exe`'s
+folder); and the current working directory. It is not governed by `LD_LIBRARY_PATH`.
+`ggml_backend_load_all` also reads `GGML_BACKEND_PATH` and `dlopen`s it. So Mimik:
+
+- hands level 3 the verified server by descriptor, whose `/proc/self/exe` resolves to the
+  checked build folder (the executable-directory search is that folder);
+- `fchdir`es the runner into the checked build folder before seccomp and the exec, at level 3
+  (the current-directory search is that folder, never Mimik's own cwd); at level 1 bwrap does
+  the `chdir` into `/opt/llama`, and only the allowlisted binds are visible inside the sandbox;
+- clears the environment and never sets `GGML_BACKEND_PATH` or `GGML_BACKEND_DIR`;
+- refuses a runtime whose real path holds `:`, `;` or `$` (a path handed to the loader).
 
 ## Confinement levels
 

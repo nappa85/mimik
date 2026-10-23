@@ -705,3 +705,75 @@ async fn live_a_failure_after_the_level_1_spawn_leaves_no_process_behind() {
         }
     }
 }
+
+/// Builds `libggml-cpu-zzevil.so` in `dir`, whose constructor writes `marker`; `None` when no
+/// C compiler is available.
+fn marker_backend(dir: &std::path::Path, marker: &std::path::Path) -> Option<()> {
+    let source = dir.join("evil.c");
+    std::fs::write(
+        &source,
+        format!(
+            "#include <stdio.h>\n__attribute__((constructor)) static void run(void) {{\n  FILE *f = fopen(\"{}\", \"w\"); if (f) {{ fputs(\"loaded\", f); fclose(f); }}\n}}\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    let out = dir.join("libggml-cpu-zzevil.so");
+    let compiler = ["cc", "gcc"].into_iter().find(|cc| {
+        std::process::Command::new(cc)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    })?;
+    let status = std::process::Command::new(compiler)
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(&out)
+        .arg(&source)
+        .status()
+        .ok()?;
+    status.success().then_some(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+async fn live_level_3_does_not_load_a_backend_from_an_attacker_writable_cwd() {
+    let scratch = scratch();
+    let attacker = scratch.path().join("attacker-cwd");
+    std::fs::create_dir(&attacker).unwrap();
+    std::fs::set_permissions(
+        &attacker,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o777),
+    )
+    .unwrap();
+    let marker = attacker.join("loaded.marker");
+    let compiled = marker_backend(&attacker, &marker);
+    // Mimik runs from the attacker-writable directory; the child must not inherit it.
+    let previous = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&attacker).unwrap();
+    let (_launch, child) = started(scratch.path(), Level::Unconfined).await;
+    std::env::set_current_dir(&previous).unwrap();
+    let cwd = std::fs::read_link(format!("/proc/{}/cwd", child.pid())).unwrap();
+    assert_ne!(cwd, attacker, "the child kept Mimik's cwd");
+    assert!(cwd.ends_with("cpu"), "{}", cwd.display());
+    // A request makes the backends load; the planted constructor must never run.
+    let (status, _) = raw(
+        &child,
+        "/v1/chat/completions",
+        Some(child.token()),
+        &short_request(8),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(
+        !marker.exists(),
+        "a backend from the attacker cwd ran{}",
+        if compiled.is_some() {
+            ""
+        } else {
+            " (compiler absent: cwd check only)"
+        }
+    );
+    child.stop().await;
+}

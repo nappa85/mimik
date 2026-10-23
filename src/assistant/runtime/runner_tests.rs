@@ -54,6 +54,7 @@ fn spec(parent: u32, mode: &str) -> Spec {
             ("HOME".into(), "/nonexistent-private-home".into()),
             (test_helper::VARIABLE.into(), mode.into()),
         ],
+        chdir: None,
         exec: Exec::Server {
             fd: SERVER_FD,
             argv,

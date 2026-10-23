@@ -371,20 +371,20 @@ pub(crate) fn runtime(
     build: &Build,
     cache: &HashCache,
 ) -> Result<Vec<Verified>, Refusal> {
-    runtime_until(runtime, build, cache, &|| false)
+    let dir = open_dir_beneath(runtime, &build.directory, Owners::MineOrRoot, false)?;
+    runtime_until(dir.as_fd(), build, cache, &|| false)
 }
 
 /// [`runtime`], stopping once `stop` says so.
 pub(crate) fn runtime_until(
-    runtime: BorrowedFd<'_>,
+    dir: BorrowedFd<'_>,
     build: &Build,
     cache: &HashCache,
     stop: &dyn Fn() -> bool,
 ) -> Result<Vec<Verified>, Refusal> {
-    let dir = open_dir_beneath(runtime, &build.directory, Owners::MineOrRoot, false)?;
     let mut present = std::collections::BTreeSet::new();
     let listing =
-        rustix::fs::Dir::read_from(&dir).map_err(|error| io_refusal(&build.directory, error))?;
+        rustix::fs::Dir::read_from(dir).map_err(|error| io_refusal(&build.directory, error))?;
     for entry in listing {
         let entry = entry.map_err(|error| io_refusal(&build.directory, error))?;
         let name = entry.file_name().to_string_lossy().into_owned();
