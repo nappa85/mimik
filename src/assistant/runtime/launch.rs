@@ -2047,10 +2047,8 @@ fn pidfd_watch(pidfd: &OwnedFd) -> Option<tokio::io::unix::AsyncFd<OwnedFd>> {
     // SAFETY: `fd` is an owned descriptor moved into the `AsyncFd`; nothing else holds or closes
     // it, so it stays open and refers to the same pidfd for the `AsyncFd`'s whole lifetime, and
     // `OwnedFd::as_raw_fd` always returns that same descriptor.
-    unsafe {
-        tokio::io::unix::AsyncFd::register_with_interest(fd, tokio::io::Interest::READABLE)
-    }
-    .ok()
+    unsafe { tokio::io::unix::AsyncFd::register_with_interest(fd, tokio::io::Interest::READABLE) }
+        .ok()
 }
 
 /// Waits until `pidfd` reports its process gone: every `grace` without it, `kill` is called
