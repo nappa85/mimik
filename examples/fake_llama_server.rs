@@ -156,6 +156,9 @@ fn list_devices() {
         .ok()
         .and_then(|mut entries| entries.next())
         .is_some();
+    // A real driver takes a moment: the listing's sandbox outlives its parent's reads of the
+    // sandbox's status pipe (bubblewrap writes the exit status to it as the last thing).
+    std::thread::sleep(std::time::Duration::from_millis(300));
     println!("Available devices:");
     if node {
         println!("  Vulkan0: AMD Radeon RX 6650 XT (RADV NAVI23) (8176 MiB, 7912 MiB free)");

@@ -366,7 +366,7 @@ pub(crate) fn sweep_generations(run: BorrowedFd<'_>) {
 pub(crate) fn create_generation(run: BorrowedFd<'_>, name: &str) -> Result<OwnedFd, Refusal> {
     rustix::fs::mkdirat(run, name, Mode::from_raw_mode(0o700)).map_err(|error| match error {
         rustix::io::Errno::EXIST => Refusal::Exists(format!("run/{name}")),
-        _ => Refusal::Io(format!("run/{name}")),
+        other => Refusal::Io(format!("run/{name} ({})", other.kind())),
     })?;
     files::open_dir_beneath(run, name, Owners::Mine, true)
 }

@@ -595,6 +595,8 @@ impl Manager {
         self.gpu_failed = Some(why.clone());
         self.update(|status| {
             status.gpu_note = Some(why);
+            // The GPU child's state is over: the CPU server starts now.
+            status.state = State::Starting("checking");
             status.path = Path::Cpu;
             status.device = None;
             status.device_notes.clear();

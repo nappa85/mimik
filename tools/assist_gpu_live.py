@@ -9,7 +9,8 @@ junction reaches 85 °C, a sensor is unreadable, the fan leaves manual, or the h
 ends. It never reads input. The tests themselves refuse to run without `MIMIK_LIVE_GPU=1` and a
 manual fan, so the binary run by hand does nothing to the GPU.
 
-  python3 tools/assist_gpu_live.py --binary <confinement-tests> --runtime <llama dir> \
+  python3 tools/assist_gpu_live.py --binary <confinement-tests> --mimik <release mimik> \
+      --runtime <llama dir> \
       --models <0700 folder holding the default model> --scratch <folder> \
       --fake-server <fake_llama_server> --log <file> [--test <name filter>]
 
@@ -61,6 +62,7 @@ def environment(args, base=None):
             "MIMIK_LIVE_GPU_MODELS": str(args.models),
             "MIMIK_LIVE_SCRATCH": str(args.scratch),
             "MIMIK_LIVE_FAKE_SERVER": str(args.fake_server),
+            "MIMIK_LIVE_MIMIK": str(args.mimik),
         }
     )
     return env
@@ -165,7 +167,15 @@ def verified(text, names):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    for name in ("--binary", "--runtime", "--models", "--scratch", "--fake-server", "--log"):
+    for name in (
+        "--binary",
+        "--mimik",
+        "--runtime",
+        "--models",
+        "--scratch",
+        "--fake-server",
+        "--log",
+    ):
         parser.add_argument(name, type=Path, required=True)
     parser.add_argument("--test")
     args = parser.parse_args(argv)

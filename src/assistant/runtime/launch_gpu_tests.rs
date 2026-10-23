@@ -50,6 +50,9 @@ fn the_gpu_flag_vector_offloads_every_layer_on_the_listed_device_and_the_cpu_nam
         .collect();
     assert!(pairs.contains(&("--n-gpu-layers", "99")));
     assert!(pairs.contains(&("--device", "Vulkan0")));
+    // The pinned build prints `offloaded N/M layers to GPU` only from verbosity 4 on (checked
+    // on the real build, 2026-10-23); the drain keeps no line of it.
+    assert!(pairs.contains(&("--verbosity", "4")));
     assert!(pairs.contains(&("--fit", "off")));
     assert!(pairs.contains(&("--threads", "3")));
     let cpu = real.server_args(
@@ -60,7 +63,10 @@ fn the_gpu_flag_vector_offloads_every_layer_on_the_listed_device_and_the_cpu_nam
         None,
     );
     assert!(cpu.windows(2).any(|w| w == ["--n-gpu-layers", "0"]));
-    assert!(!cpu.iter().any(|arg| arg == "--device"));
+    assert!(
+        !cpu.iter()
+            .any(|arg| arg == "--device" || arg == "--verbosity")
+    );
     // The rest of the vector is the same on both paths.
     let strip = |args: &[String]| -> Vec<String> {
         let mut out = Vec::new();
@@ -70,7 +76,7 @@ fn the_gpu_flag_vector_offloads_every_layer_on_the_listed_device_and_the_cpu_nam
                 skip -= 1;
                 continue;
             }
-            if arg == "--n-gpu-layers" || arg == "--device" {
+            if arg == "--n-gpu-layers" || arg == "--device" || arg == "--verbosity" {
                 skip = 1;
                 continue;
             }
@@ -205,8 +211,14 @@ async fn the_gpu_path_is_started_at_level_1_only() {
 
 const GOOD_LISTING: &str = "Available devices:\n  Vulkan0: AMD Radeon RX 6650 XT (RADV NAVI23) (8176 MiB, 7912 MiB free)\n";
 
-fn exits(success: bool) -> impl FnMut() -> Option<bool> {
-    move || Some(success)
+fn exits(success: bool) -> impl FnMut() -> Option<Result<(), String>> {
+    move || {
+        Some(if success {
+            Ok(())
+        } else {
+            Err("exit code 1".into())
+        })
+    }
 }
 
 #[test]
@@ -281,7 +293,7 @@ fn a_listing_from_a_process_that_failed_is_refused() {
         &ticket,
     )
     .unwrap_err();
-    assert!(error.contains("process failed"), "{error}");
+    assert!(error.contains("process failed (exit code 1)"), "{error}");
 }
 
 #[test]

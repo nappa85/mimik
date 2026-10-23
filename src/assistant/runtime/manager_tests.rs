@@ -954,6 +954,18 @@ async fn a_gpu_child_exit_or_hang_while_ready_moves_to_the_cpu_uncounted() {
         } else {
             launcher.child(0).crash();
         }
+        // The moment the CPU path is current, the page no longer says Ready (the GPU child's
+        // state) while the CPU server is still starting.
+        let probe = handle.clone();
+        until(Duration::from_mins(15), move || {
+            probe.status().path == Path::Cpu
+        })
+        .await;
+        assert!(
+            !matches!(handle.status().state, State::Ready) || handle.status().budgets.is_some(),
+            "{:?}",
+            handle.status()
+        );
         starts(&launcher, 2).await;
         ready(&assistant).await;
         let status = handle.status();

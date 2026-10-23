@@ -60,7 +60,7 @@ class RefusalTests(unittest.TestCase):
         ):
             code = live.main(
                 [
-                    *("--binary", "b", "--runtime", "r", "--models", "m"),
+                    *("--binary", "b", "--mimik", "x", "--runtime", "r", "--models", "m"),
                     *("--scratch", "s", "--fake-server", "f", "--log", "/nonexistent/x"),
                 ]
             )
@@ -74,12 +74,14 @@ class RefusalTests(unittest.TestCase):
             models=Path("/m"),
             scratch=Path("/s"),
             fake_server=Path("/f"),
+            mimik=Path("/mimik"),
             test=None,
         )
         self.assertEqual(live.command(args)[1], live.FILTER)
         env = live.environment(args, {})
         self.assertEqual(env["MIMIK_LIVE_GPU"], "1")
         self.assertEqual(env["MIMIK_LIVE_GPU_MODELS"], "/m")
+        self.assertEqual(env["MIMIK_LIVE_MIMIK"], "/mimik")
 
 
 class WatchTests(unittest.TestCase):
@@ -274,7 +276,16 @@ class RunTests(unittest.TestCase):
             ):
                 code = live.main(
                     [
-                        *("--binary", str(binary), "--runtime", folder, "--models", folder),
+                        *(
+                            "--binary",
+                            str(binary),
+                            "--mimik",
+                            "x",
+                            "--runtime",
+                            folder,
+                            "--models",
+                            folder,
+                        ),
                         *("--scratch", folder, "--fake-server", "f", "--log", str(log)),
                     ]
                 )
@@ -307,7 +318,7 @@ class RunTests(unittest.TestCase):
             ):
                 code = live.main(
                     [
-                        *("--binary", "/nonexistent/tests", "--runtime", folder),
+                        *("--binary", "/nonexistent/tests", "--mimik", "x", "--runtime", folder),
                         *("--models", folder, "--scratch", folder, "--fake-server", "f"),
                         *("--log", str(Path(folder) / "x.log")),
                     ]

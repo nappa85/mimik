@@ -5,7 +5,8 @@
 //!   the sandbox wiring (one node bound per listing, the probe opening the node, `--device`
 //!   and the offload check, the fallback) runs without touching a GPU.
 //! - `live_gpu_*` (the dev host's GPU): the pinned Vulkan build and the real model. They
-//!   refuse to run unless `MIMIK_LIVE_GPU=1` is set and the amdgpu fan reads manual
+//!   (they use Mimik's release binary, `MIMIK_LIVE_MIMIK`, as runner, probe and shim) refuse to
+//!   run unless `MIMIK_LIVE_GPU=1` is set and the amdgpu fan reads manual
 //!   (`pwm1_enable` 1, `pwm1` at least 230): run them only through
 //!   `tools/assist_gpu_live.py`, which also enforces the machine schedule and the thermal
 //!   limits.
@@ -191,9 +192,21 @@ fn real_gpu(scratch: &std::path::Path) -> Arc<Real> {
     settings.model_sha256 = crate::assistant::DEFAULT_MODEL_SHA256.to_owned();
     settings.alias = "granite".into();
     settings.ctx_size = CTX_SIZE;
-    settings.threads = 2;
+    // The CPU fallback is measured at the ASSIST-41 default (physical cores minus one, 5
+    // here); at 2 threads it is "too slow" (docs/results.md).
+    settings.threads = 5;
     settings.device = Choice::Auto;
     settings.roots = Roots::default();
+    // The real code path: Mimik's own binary as the runner, the probe and the shim (the test
+    // binary cannot take the probe's `--render` option).
+    let mimik = env("MIMIK_LIVE_MIMIK");
+    settings.runner.program.clone_from(&mimik);
+    settings.runner.env.clear();
+    settings.runner.args = RunnerCommand::mimik().unwrap().args;
+    settings.inner = InnerCommand {
+        executable: mimik,
+        ..InnerCommand::mimik().unwrap()
+    };
     real(settings)
 }
 

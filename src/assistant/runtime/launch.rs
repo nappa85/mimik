@@ -559,6 +559,9 @@ impl Real {
                 "99".into(),
                 "--device".into(),
                 device.into(),
+                // The offload line is not printed at the default verbosity.
+                "--verbosity".into(),
+                "4".into(),
             ]),
             None => args.extend(["--n-gpu-layers".into(), "0".into()]),
         }
@@ -1241,11 +1244,13 @@ impl Real {
                     });
                     (Some(sandbox), connector)
                 }
-                // A device listing is over in milliseconds and never opens a socket: its
-                // sandbox may be gone before the reaper can be pinned, which tears down the
-                // whole PID namespace and needs no kill.
+                // A device listing is over in moments and a probe that cannot start (an
+                // unopenable render node) ends at once: the sandbox may be gone before the
+                // reaper can be pinned, which tears down the whole PID namespace and needs no
+                // kill. The listing's exit and the probe's report then decide.
                 Err(error)
-                    if matches!(command, Command::ListDevices) && endpoint::is_gone(&error) =>
+                    if matches!(command, Command::ListDevices | Command::Probe)
+                        && endpoint::is_gone(&error) =>
                 {
                     (None, Arc::new(NoSocket))
                 }
@@ -1552,14 +1557,24 @@ fn recv_unless_cancelled<T>(
     }
 }
 
+/// How a process ended, for a message: its exit code or the signal that ended it.
+fn exit_description(status: std::process::ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt;
+    match (status.code(), status.signal()) {
+        (Some(code), _) => format!("exit code {code}"),
+        (None, Some(signal)) => format!("signal {signal}"),
+        (None, None) => "unknown status".to_owned(),
+    }
+}
+
 /// A device listing's whole output, once its process has also exited successfully: both
 /// within `within`, the output at most [`LIST_BYTES`] and read without error (a truncated or
-/// failed run never reaches the parser). `exited` gives `Some(success)` once the process has
-/// ended.
+/// failed run never reaches the parser). `exited` gives `Some(Ok(()))` once the process has
+/// ended well, `Some(Err(how))` (its exit code or signal) when it did not.
 fn collect_listing(
     out: impl Read + Send + 'static,
     err: Option<impl Read + Send + 'static>,
-    mut exited: impl FnMut() -> Option<bool>,
+    mut exited: impl FnMut() -> Option<Result<(), String>>,
     within: Duration,
     ticket: &Ticket,
 ) -> Result<String, String> {
@@ -1571,6 +1586,15 @@ fn collect_listing(
         std::thread::Builder::new()
             .name("assistant-devices-err".into())
             .spawn(move || {
+                // Test builds with MIMIK_LIVE_DIAG_DIR keep the listing's error output for the
+                // live check's record (the shipped build never keeps or logs it).
+                #[cfg(test)]
+                if let Some(dir) = std::env::var_os("MIMIK_LIVE_DIAG_DIR") {
+                    let mut kept = Vec::new();
+                    let _ = (&mut err).take(LIST_BYTES).read_to_end(&mut kept);
+                    let name = format!("listing-stderr-{}.txt", std::process::id());
+                    let _ = std::fs::write(std::path::Path::new(&dir).join(name), kept);
+                }
                 let _ = std::io::copy(&mut err, &mut std::io::sink());
                 let _ = drained.send(());
             })
@@ -1603,8 +1627,10 @@ fn collect_listing(
     }
     loop {
         match exited() {
-            Some(true) => break,
-            Some(false) => return Err("the device listing's process failed".into()),
+            Some(Ok(())) => break,
+            Some(Err(how)) => {
+                return Err(format!("the device listing's process failed ({how})"));
+            }
             None => {}
         }
         if ticket.cancelled() {
@@ -2856,6 +2882,9 @@ impl Real {
             child: mut owned,
             generation,
             marker: _marker,
+            // Held until the listing's process has ended: bubblewrap writes the sandbox's exit
+            // status to this pipe as its last act, and a closed read end kills it with SIGPIPE.
+            status_rest: _status_rest,
             ..
         } = self
             .spawn_sandbox(
@@ -2880,7 +2909,13 @@ impl Real {
                     .child
                     .as_mut()
                     .and_then(|child| child.try_wait().ok().flatten())
-                    .map(|status| status.success())
+                    .map(|status| {
+                        if status.success() {
+                            Ok(())
+                        } else {
+                            Err(exit_description(status))
+                        }
+                    })
             },
             LIST_WITHIN,
             ticket,
@@ -3044,6 +3079,7 @@ impl Real {
             connector,
             generation,
             marker: _marker,
+            status_rest: _status_rest,
             ..
         } = spawned;
         // `owned` kills and reaps the probe whichever way this ends.
