@@ -61,11 +61,17 @@ supports. The Vulkan asset `llama-b11609-bin-ubuntu-vulkan-x64.tar.gz` (SHA-256
 Vulkan backend, which ggml loads from beside llama-server like the CPU backends and which needs
 the system's Vulkan loader `libvulkan.so.1` and a Vulkan driver); the manifest pins it as the
 `vulkan` build, shipped in `llama/vulkan/` (the CPU files are shipped twice, once per build
-folder). `vulkan.hpp` is compiled into `libggml-vulkan.so` but is not in the llama.cpp source
-archive: its licence text is an external notice, Vulkan-Headers' MIT text pinned by URL and
-SHA-256 at tag `vulkan-sdk-1.4.357.0` (the release does not record the SDK version of its Linux
-Vulkan build; that tag is the one its workflow names for the Windows Vulkan build), which
-`llama-fetch` downloads and checks and packaging copies into `THIRD-PARTY-NOTICES.md`. Mimik
+folder). The Vulkan loader `libvulkan.so.1` and the GPU driver (Mesa or the vendor's) are
+system dependencies: the release never bundles them (the packaged archive holds no
+`libvulkan`, and the manifest's file list is exact), `libggml-vulkan.so` resolves the loader
+through `ld.so.cache` and the sandbox binds the system's library folders read-only. The
+headers (`vulkan.hpp`) compiled into `libggml-vulkan.so` are an SDK build input of the upstream
+binary, not shipped source (REL-2): only their licence text is an external notice,
+Vulkan-Headers' MIT text pinned by URL and SHA-256 at tag `vulkan-sdk-1.4.357.0` (the release
+does not record the SDK version of its Linux Vulkan build; the Linux job installs the unpinned
+`vulkan-sdk` package of LunarG's rolling repository, and that tag is the one its workflow names
+for the Windows job), which `llama-fetch` downloads and checks and packaging copies into
+`THIRD-PARTY-NOTICES.md`. Mimik
 embeds the manifest (a test asserts it equals the file).
 
 ## Files
@@ -172,7 +178,11 @@ Why each level was not used is on the page and in the log.
    read-only the Vulkan loader's and driver's data folders that exist (`/usr/share/vulkan`,
    `/etc/vulkan`, `/usr/share/libdrm`, `/usr/share/drirc.d`); llama-server gets
    `MESA_SHADER_CACHE_DISABLE=true` (the sandbox's `/tmp` is private to one launch and bounded,
-   so a shader cache could only fill it). This list is not yet checked on a real GPU: the live
+   so a shader cache could only fill it). The server can issue any ioctl on that one render
+   node, so its exposure to the kernel's graphics driver is wider than on the CPU path;
+   nothing else is wider (no network, no files beyond the runtime and the model, no other
+   processes). This is accepted by default and shown on the page (ASSIST-45, ASSIST-L46);
+   `--assistant-device cpu` removes it. This list is not yet checked on a real GPU: the live
    check (`assisted-sheet-plan.md`, 2c-2b-1) is owed; a driver that needs more falls back to
    the CPU. The whole PCI sysfs folder is exposed read-only (vendor and device IDs, the
    attributes of that card): a fingerprinting exposure only, to be narrowed to what libdrm and

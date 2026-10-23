@@ -256,6 +256,70 @@ impl Launcher for NoGpu {
     }
 }
 
+/// A launcher whose GPU probe passes with a device and whose start never ends: the runtime
+/// stays on the GPU path, starting.
+struct HangingGpu;
+
+#[async_trait::async_trait]
+impl Launcher for HangingGpu {
+    async fn preflight(&self, _: Path) -> Result<(), String> {
+        Ok(())
+    }
+    async fn probe(&self, _: Path) -> Vec<(Level, Result<(), String>)> {
+        vec![(Level::Bubblewrap, Ok(()))]
+    }
+    fn device(&self) -> Option<manager::DeviceView> {
+        Some(manager::DeviceView {
+            pci: "0000:0c:00.0".into(),
+            node: "renderD128".into(),
+            name: "Vulkan0".into(),
+            description: "AMD Radeon RX 6650 XT (RADV NAVI23)".into(),
+            total_mib: 8176,
+        })
+    }
+    async fn start(&self, _: u64, _: Level, _: Path) -> Result<Arc<dyn Child>, Fail> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn the_gpu_state_says_sandboxed_with_graphics_driver_access_and_names_the_cpu_switch() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture_with_owner(1).await;
+    let handle = AssistantHandle::with_launcher(
+        Arc::new(HangingGpu),
+        manager::Config {
+            path: Path::Gpu,
+            max_tokens: 352,
+            levels: manager::USED_LEVELS,
+        },
+    );
+    let app = crate::auth::app_with_options(
+        store.clone(),
+        crate::auth::AuthOptions {
+            assistant: Some(handle),
+            ..crate::auth::AuthOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut page = String::new();
+    for _ in 0..200 {
+        page = body(router_request(&app, &auth[0], "/admin/assistant", None).await).await;
+        if page.contains("AMD Radeon RX 6650 XT") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(page.contains("Path: GPU"), "{page}");
+    assert!(
+        page.contains("Sandboxed, with graphics-driver access:")
+            && page.contains("any ioctl on its one render node")
+            && page.contains("<code>--assistant-device cpu</code>"),
+        "{page}"
+    );
+}
+
 /// The assistant page shows "Try the GPU again" disabled.
 async fn assert_try_gpu_disabled(app: &axum::Router, auth: &crate::auth::RequestAuth) {
     let page = body(router_request(app, auth, "/admin/assistant", None).await).await;
