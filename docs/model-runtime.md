@@ -260,9 +260,12 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
   verified (`files::Identity`); the closure compares what is mounted with it after the
   mounts and just before the exec and refuses to go on on any difference (an unreadable
   target counts as one). The descriptors never enter the sandbox.
-- The token is a 0600 file in the generation's directory bound read-only at `/run/token`;
-  the launcher unlinks the name once the runner has reported the sandbox (the bind mount
-  keeps the inode), so it is on disk only for the moments of the start.
+- The token is the content of a file the runner has Hakoniwa write at `/run/token` into the
+  sandbox's own `/run`, a 64 KiB tmpfs (memory) under the socket directory's bind. It reaches
+  the runner in the spec memory file only: never a file on the host, a command line or an
+  environment variable (a test scans the data and scratch directories for it). Unlike
+  bubblewrap's memory file it is an ordinary file inside the sandbox, which the server can
+  read (it needs to) and rewrite (harmless: it knows the token).
 - The program is PID 1 of its namespace; its reaper is the runner's child outside it, which
   is the process the endpoint check pins (`child-pid`). The seccomp program already refuses
   `fork`, so the sandbox holds one process. The runner does not report the PID namespace's
@@ -289,8 +292,11 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
 - Parent death: the runner dies with Mimik (`PR_SET_PDEATHSIG`), Hakoniwa sets the signal in
   its two children, so the whole tree dies with the runner (`live_sigkill_of_mimik_*`).
 
-Not tested: Ubuntu's AppArmor restriction of unprivileged user namespaces and the draft
-profile `apparmor/mimik` (it needs an Ubuntu 24.04 VM); Landlock as an extra layer inside the
+`mimik assistant-apparmor-profile` prints the `AppArmor` profile for the running binary's own
+path (template `apparmor/mimik`, also for distribution packages); when the sandbox cannot
+start and Ubuntu's restriction is on, the assistant page's message gives that command with
+the `tee` and `apparmor_parser -r` steps. Not tested: Ubuntu's AppArmor restriction of
+unprivileged user namespaces and that profile (it needs an Ubuntu 24.04 VM); Landlock as an extra layer inside the
 namespaces (the dev kernel has none); a real GPU. `results.md` has the comparison.
 
 ## Device (GPU path)

@@ -280,6 +280,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if raw.get(1).map(String::as_str) == Some("assistant-runner") {
         std::process::exit(mimik::assistant::runner_main(&raw[2..]));
     }
+    if raw.get(1).map(String::as_str) == Some("assistant-apparmor-profile") {
+        std::process::exit(mimik::assistant::apparmor_profile_main());
+    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?

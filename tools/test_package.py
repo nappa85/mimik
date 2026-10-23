@@ -22,6 +22,27 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn("Rust: 1.", script)
         self.assertNotIn("(Rust 1.", script)
 
+    def test_hakoniwa_notices_carry_the_linking_exception_text(self):
+        """DEP-24: cargo-about prints only the LGPL for `LGPL-3.0-only WITH
+        LGPL-3.0-linking-exception`; when the notices name hakoniwa the exception must follow."""
+        project = Path(__file__).resolve().parents[1]
+        license_path = project / "assets" / "hakoniwa-LICENSE"
+        text = package_release.hakoniwa_notice(
+            "## GNU Lesser General Public License v3.0 only\n\n- hakoniwa 1.8.0\n",
+            license_path,
+        )
+        self.assertIn("As a special exception to the GNU Lesser General Public License", text)
+        self.assertIn("GNU LESSER GENERAL PUBLIC LICENSE", text)
+        # Without hakoniwa in the build there is nothing to add.
+        self.assertEqual(package_release.hakoniwa_notice("## MIT\n- serde 1\n", license_path), "")
+        # A copy that lost the exception is refused.
+        with tempfile.TemporaryDirectory() as tmp:
+            stripped = Path(tmp) / "LICENSE"
+            stripped.write_text("GNU LESSER GENERAL PUBLIC LICENSE\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                package_release.hakoniwa_notice("- hakoniwa 1.8.0", stripped)
+        self.assertIn("assets/hakoniwa-LICENSE", REQUIRED)
+
     def test_hierarchy_and_screen_regressions_are_required_source_members(self):
         members = [f"mimik/{name}" for name in REQUIRED]
         for name in (

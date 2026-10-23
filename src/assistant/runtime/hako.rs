@@ -14,6 +14,8 @@
 //! - The program is PID 1 of its namespace and its reaper is the runner's child outside it
 //!   (the process the endpoint check pins). The sandbox has no further process: the seccomp
 //!   program already refuses `fork`.
+//! - The token is the content of a file the runner has Hakoniwa write into the sandbox's own
+//!   `/run` tmpfs (memory): never on the host's disk, a command line or an environment.
 //! - The shim is gone. The marker pipe's write end is the program's standard input until the
 //!   closure writes the marker on it, replaces descriptor 0 with `/dev/null` and closes every
 //!   other descriptor, just before the exec: nothing the program does can write the marker.
@@ -25,6 +27,24 @@ use std::path::{Path, PathBuf};
 
 /// `device` and `inode` of a verified object.
 pub(crate) type Identity = (u64, u64);
+
+/// A secret that never prints: `Debug` shows nothing of it, `Serialize` is transparent (the
+/// runner's spec is a memory file, never a disk file).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct Secret(String);
+
+impl Secret {
+    pub(crate) fn new(text: String) -> Self {
+        Self(text)
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(..)")
+    }
+}
 
 /// How a bind is mounted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +82,10 @@ pub(crate) struct Plan {
     /// The root directory the sandbox is built in (Mimik's, a sibling of the generation's
     /// directory in `run/`, so its removal is the generation's).
     pub root: String,
+    /// The token file's content, written at [`bwrap::TOKEN`] into the sandbox's own `/run`
+    /// tmpfs (memory) by the runner: it is never in a file on the host, a command line or an
+    /// environment variable.
+    pub token: Secret,
     pub binds: Vec<Bind>,
     pub tmpfs: Vec<Tmpfs>,
     /// `(target, link)` pairs.
@@ -88,7 +112,7 @@ pub(crate) struct Inputs<'a> {
     pub runtime: Vec<File>,
     pub model: (PathBuf, Identity),
     pub generation: (PathBuf, Identity),
-    pub token: (PathBuf, Identity),
+    pub token: Secret,
     /// Further read-only files `(source, target, identity)` (the probe's own executable).
     pub extra: Vec<(PathBuf, String, Identity)>,
     pub gpu: Option<&'a GpuBinds>,
@@ -165,7 +189,6 @@ pub(crate) fn plan(inputs: &Inputs<'_>) -> Plan {
         ));
     }
     binds.push(ro(&inputs.model.0, bwrap::MODEL, Some(inputs.model.1)));
-    binds.push(ro(&inputs.token.0, bwrap::TOKEN, Some(inputs.token.1)));
     for (source, target, identity) in &inputs.extra {
         binds.push(ro(source, target, Some(*identity)));
     }
@@ -190,8 +213,15 @@ pub(crate) fn plan(inputs: &Inputs<'_>) -> Plan {
     dirs.dedup();
     Plan {
         root: text(&inputs.root),
+        token: inputs.token.clone(),
         binds,
         tmpfs: vec![
+            // The token's file lives here, in memory; the socket directory is bound under it.
+            Tmpfs {
+                target: "/run".to_owned(),
+                bytes: 64 << 10,
+                mode: 0o755,
+            },
             Tmpfs {
                 target: "/dev".to_owned(),
                 bytes: 1 << 20,
@@ -216,11 +246,58 @@ pub(crate) fn plan(inputs: &Inputs<'_>) -> Plan {
     }
 }
 
-/// The assistant page's text when the sandbox cannot start and Ubuntu's `AppArmor` restriction
-/// of unprivileged user namespaces is on (the draft of the page's message; the profile it
-/// names is `apparmor/mimik`, shipped in the release archive; it has not yet been tried on
-/// Ubuntu 24.04).
-pub(crate) const APPARMOR_MESSAGE: &str = "This system's AppArmor does not let Mimik create the private sandbox of the model server. An administrator can allow it once: copy the AppArmor profile that comes with Mimik (apparmor/mimik) to /etc/apparmor.d/mimik, load it with sudo apparmor_parser -r /etc/apparmor.d/mimik, then press Restart. The profile only gives Mimik's own program that one permission; it does not confine or unconfine anything else";
+/// The AppArmor profile template (`apparmor/mimik`, also for distribution packages): the
+/// placeholder is the executable's path.
+const APPARMOR_TEMPLATE: &str = include_str!("../../../apparmor/mimik");
+const APPARMOR_PLACEHOLDER: &str = "@MIMIK_EXE@";
+
+/// The profile for the binary at `exe` (an absolute path): the template with that one path
+/// in it. A path AppArmor would read as more than a file name (globs, braces, quotes,
+/// control characters) is refused rather than escaped.
+///
+/// # Errors
+///
+/// The path is relative or has a character a profile attachment would interpret.
+pub(crate) fn apparmor_profile(exe: &Path) -> Result<String, String> {
+    let name = exe
+        .to_str()
+        .ok_or_else(|| "the executable's path is not text".to_owned())?;
+    if !exe.is_absolute() {
+        return Err("the executable's path is not absolute".into());
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|c| c.is_control() || "\"\\{}[]*?^,@".contains(*c))
+    {
+        return Err(format!(
+            "the executable's path has a character AppArmor would interpret ({bad:?})"
+        ));
+    }
+    Ok(APPARMOR_TEMPLATE.replace(APPARMOR_PLACEHOLDER, name))
+}
+
+/// `text` as one shell word.
+fn shell_word(text: &str) -> String {
+    if !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@%".contains(c))
+    {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+}
+
+/// The assistant page's text when the sandbox cannot start and Ubuntu's `AppArmor`
+/// restriction of unprivileged user namespaces is on: the profile for this very binary,
+/// generated by it, and the steps to install it (the page's draft; untested on Ubuntu 24.04).
+pub(crate) fn apparmor_message(exe: &Path) -> String {
+    let command = shell_word(&exe.to_string_lossy());
+    format!(
+        "This system's AppArmor does not let Mimik create the private sandbox of the model server. An administrator can allow it once for this program: run `{command} assistant-apparmor-profile | sudo tee /etc/apparmor.d/mimik`, then `sudo apparmor_parser -r /etc/apparmor.d/mimik`, then press Restart. The profile only gives this one program that permission; it does not confine or unconfine anything else."
+    )
+}
 
 /// What the Hakoniwa sandbox needs of the host before its probe: unprivileged user
 /// namespaces (the one setting that rules them out for certain; the probe decides otherwise).
@@ -286,7 +363,7 @@ pub(crate) use run::{setup_failed, single_threaded};
 
 #[cfg(feature = "sandbox-hakoniwa")]
 mod run {
-    use super::{Access, Bind, Plan, exit, identity_mismatch, started_line};
+    use super::{Access, Bind, Plan, bwrap, exit, identity_mismatch, started_line};
     use crate::assistant::runtime::{probe, seccomp};
     use hakoniwa::{Container, MountOptions, Namespace, Stdio};
     use std::io::Write;
@@ -355,6 +432,7 @@ mod run {
         for dir in &plan.dirs {
             container.dir(dir, 0o755);
         }
+        container.file(bwrap::TOKEN, &plan.token.0);
         for (original, link) in &plan.symlinks {
             container.symlink(original, link);
         }
@@ -440,6 +518,8 @@ mod run {
     pub(crate) fn run(plan: Plan, status: RawFd, marker: RawFd) -> i32 {
         // The test binary plays the runner (as a libtest helper, which has a second thread
         // beside a main thread that only waits); the shipped runner is `main` and alone.
+        // Files the sandbox makes (the token's) are private to Mimik's user.
+        rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o077));
         if !cfg!(test) && !single_threaded() {
             return refuse(exit::SPEC, "the runner is not single-threaded");
         }

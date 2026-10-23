@@ -16,6 +16,21 @@ def toolchain(path=Path("rust-toolchain.toml")):
     return tomllib.loads(path.read_text(encoding="utf-8"))["toolchain"]["channel"]
 
 
+EXCEPTION_MARKER = "As a special exception to the GNU Lesser General Public License"
+
+
+def hakoniwa_notice(notices_text, license_path=Path("assets/hakoniwa-LICENSE")):
+    """Hakoniwa (DEP-24) is LGPL-3.0-only WITH the LGPL-3.0 linking exception; cargo-about
+    prints only the LGPL text. When the generated notices name it, its own LICENSE (the
+    exception statement and the LGPL) is appended; a copy without the exception is refused."""
+    if "hakoniwa" not in notices_text:
+        return ""
+    text = license_path.read_text(encoding="utf-8")
+    if EXCEPTION_MARKER not in text:
+        raise ValueError(f"{license_path} lacks the linking exception statement")
+    return f"\n## Hakoniwa: LGPL-3.0-only WITH LGPL-3.0-linking-exception\n\n{text.rstrip()}\n"
+
+
 def stage_llama(fetched, stage, data=None):
     """Copies llama-fetch's verified `llama/` into the stage, holding exactly the manifest's
     files (anything else refuses the package), re-hashed and with the manifest's modes."""
@@ -140,6 +155,7 @@ def main():
     ]:
         shutil.copy2(original, stage / filename)
     with open(stage / "THIRD-PARTY-NOTICES.md", "a", encoding="utf-8") as out:
+        out.write(hakoniwa_notice(notices.read_text(encoding="utf-8")))
         out.write(llama_notice(llama, args.llama / llama["source"]["name"], args.llama / "notices"))
     (stage / "BUILD.txt").write_text(
         f"Version: {args.version}\nRevision: {args.revision}\nRust: {toolchain()}\n"

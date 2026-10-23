@@ -1273,16 +1273,6 @@ impl Real {
         generation
             .create_root()
             .map_err(|refusal| Fail::Other(format!("the sandbox root: {refusal}")))?;
-        token
-            .write_file(generation.fd.as_fd())
-            .map_err(|_| Fail::Other("the token file cannot be written".into()))?;
-        let token_file = rustix::fs::openat(
-            &generation.fd,
-            token::FILE,
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-        )
-        .map_err(|_| Fail::Other("the token file cannot be opened".into()))?;
         let mut runtime = Vec::new();
         for file in files {
             runtime.push(hako::File {
@@ -1299,7 +1289,7 @@ impl Real {
                 self.settings.models_dir.join(&model.name),
                 (model.identity.device, model.identity.inode),
             ),
-            token: (generation_path.join(token::FILE), identity_of(&token_file)?),
+            token: hako::Secret::new(String::from_utf8_lossy(&token.line()).into_owned()),
             generation: (generation_path, identity_of(&generation.fd)?),
             extra,
             gpu,
@@ -1448,11 +1438,6 @@ impl Real {
             },
             rest,
         ) = read_started(status_read, job, self.settings.backend)?;
-        if hakoniwa {
-            // The sandbox holds the token file's inode through its bind mount (mounted before
-            // the runner reports): the name is not needed any more.
-            token::remove_file(&generation.fd);
-        }
         fault_at!(self, "started", child);
         pause_at!(self, "before-reaper");
         let (sandbox, connector): (Option<Arc<Sandbox>>, Arc<dyn Connect>) =
@@ -3083,7 +3068,10 @@ impl Real {
         let hinted =
             |why: String| match (level, bwrap::namespace_hint(std::path::Path::new("/proc"))) {
                 (Level::Bubblewrap, Some(hint)) if backend == Backend::Hakoniwa => {
-                    format!("{why} ({hint}). {}", hako::APPARMOR_MESSAGE)
+                    format!(
+                        "{why} ({hint}). {}",
+                        hako::apparmor_message(&self.settings.inner.executable)
+                    )
                 }
                 (Level::Bubblewrap, Some(hint)) => format!("{why} ({hint})"),
                 _ => why,

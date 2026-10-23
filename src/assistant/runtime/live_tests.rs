@@ -530,6 +530,10 @@ async fn live_level_1_serves_over_the_checked_socket_with_the_token_only() {
             .join(super::super::token::FILE)
             .exists()
     );
+    // The token is in no file under the data and scratch directories (the sandbox root's mount
+    // points, the generation's directory, the pidfile): with Hakoniwa it is in the sandbox's
+    // own memory-backed /run only.
+    assert_eq!(files_holding(scratch.path(), child.token().as_bytes()), 0);
     // The token is in no command line of the sandbox's processes.
     let pidfile =
         std::fs::read_to_string(scratch.path().join("data/run").join(rundir::PIDFILE)).unwrap();
@@ -843,6 +847,25 @@ fn fake_build_with(scratch: &std::path::Path, alias: &str, server: &[u8]) -> Arc
         }],
     };
     Arc::new(Real::with_build(settings, Some(build)))
+}
+
+/// How many regular files under `dir` (not followed through links) contain `needle`.
+fn files_holding(dir: &std::path::Path, needle: &[u8]) -> usize {
+    let mut found = 0;
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            found += files_holding(&entry.path(), needle);
+        } else if kind.is_file()
+            && std::fs::read(entry.path())
+                .is_ok_and(|bytes| bytes.windows(needle.len()).any(|window| window == needle))
+        {
+            found += 1;
+        }
+    }
+    found
 }
 
 /// A server (the fake one) that prints sandbox-failure lines and exits with the code the

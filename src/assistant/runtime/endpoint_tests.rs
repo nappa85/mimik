@@ -336,7 +336,11 @@ fn only_a_reaper_that_has_exited_counts_as_gone() {
     let error = open_reaper(pid, 1, 0).unwrap_err();
     assert!(is_gone(&error), "{error:?}");
     // A reaper that is alive but not the runner's child is refused, not gone.
-    let own = open_reaper(i32::try_from(std::process::id()).unwrap(), 1, 0).unwrap_err();
+    // The claimed runner is this very process: never its own parent, whatever started the
+    // tests (a runner of PID 1 made this test pass only when the test's parent was not
+    // PID 1, as under `docker run cargo`).
+    let me = i32::try_from(std::process::id()).unwrap();
+    let own = open_reaper(me, me, 0).unwrap_err();
     assert!(!is_gone(&own), "{own:?}");
     assert!(!is_gone(&refused(
         "the reported reaper is in another PID namespace"

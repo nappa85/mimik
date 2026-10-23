@@ -192,5 +192,24 @@ pub fn runner_main(args: &[String]) -> i32 {
     runtime::probe::main(args)
 }
 
+/// `mimik assistant-apparmor-profile`: prints the `AppArmor` profile for this binary (the
+/// Hakoniwa sandbox needs it on Ubuntu 23.10 and later). Returns the exit code.
+#[must_use]
+pub fn apparmor_profile_main() -> i32 {
+    match std::env::current_exe()
+        .map_err(|_| "Mimik's own path is unknown".to_owned())
+        .and_then(|exe| runtime::hako::apparmor_profile(&exe))
+    {
+        Ok(profile) => {
+            print!("{profile}");
+            0
+        }
+        Err(why) => {
+            eprintln!("assistant-apparmor-profile: {why}");
+            1
+        }
+    }
+}
+
 #[cfg(feature = "dev-endpoint")]
 pub mod development;

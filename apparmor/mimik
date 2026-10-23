@@ -8,12 +8,13 @@
 # it only grants that one permission to Mimik's own binary, as Ubuntu ships for bubblewrap
 # (/etc/apparmor.d/bwrap-userns-restrict).
 #
-# Install once, as an administrator, after checking that the path below is where Mimik's
-# binary is (edit the attachment if it is somewhere else; the profile applies to that file
-# only, and the sandbox's helper is the same binary):
+# This file is a template: the quoted path in the profile line below stands for the path of
+# Mimik's binary. Mimik fills it in for itself (the profile applies to that one file; the sandbox's helper is the same binary):
 #
-#   sudo install -m 0644 apparmor/mimik /etc/apparmor.d/mimik
+#   /path/to/mimik assistant-apparmor-profile | sudo tee /etc/apparmor.d/mimik
 #   sudo apparmor_parser -r /etc/apparmor.d/mimik
+#
+# A distribution package can instead substitute its install path for that word.
 #
 # Remove with:  sudo apparmor_parser -R /etc/apparmor.d/mimik && sudo rm /etc/apparmor.d/mimik
 #
@@ -22,7 +23,7 @@
 abi <abi/4.0>,
 include <tunables/global>
 
-profile mimik /{opt/mimik,usr/local/bin,usr/bin}/mimik flags=(unconfined) {
+profile mimik "@MIMIK_EXE@" flags=(unconfined) {
   userns,
 
   include if exists <local/mimik>

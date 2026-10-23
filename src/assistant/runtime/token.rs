@@ -34,7 +34,7 @@ impl Token {
     }
 
     /// The file content `--api-key-file` reads: the key and a newline.
-    fn line(&self) -> Zeroizing<Vec<u8>> {
+    pub(crate) fn line(&self) -> Zeroizing<Vec<u8>> {
         let mut line = Zeroizing::new(Vec::with_capacity(self.0.len() + 1));
         line.extend_from_slice(self.0.as_bytes());
         line.push(b'\n');

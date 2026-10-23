@@ -15,7 +15,7 @@ fn inputs<'a>(gpu: Option<&'a GpuBinds>, files: &[&str]) -> Inputs<'a> {
             .collect(),
         model: (PathBuf::from("/data/models/m.gguf"), (7, 200)),
         generation: (PathBuf::from("/data/run/3"), (7, 300)),
-        token: (PathBuf::from("/data/run/3/token"), (7, 301)),
+        token: Secret::new("secret-token\n".into()),
         extra: Vec::new(),
         gpu,
         env: vec![("PATH".into(), "/usr/bin:/bin".into())],
@@ -38,7 +38,7 @@ fn targets(plan: &Plan) -> Vec<&str> {
 }
 
 #[test]
-fn the_plan_binds_the_runtime_model_token_and_one_writable_directory_by_identity() {
+fn the_plan_binds_the_runtime_model_and_one_writable_directory_by_identity() {
     let plan = plan(&inputs(None, &["llama-server", "libllama.so.0"]));
     let bind = |target: &str| {
         plan.binds
@@ -49,7 +49,6 @@ fn the_plan_binds_the_runtime_model_token_and_one_writable_directory_by_identity
     assert_eq!(bind("/opt/llama/llama-server").identity, Some((7, 100)));
     assert_eq!(bind("/opt/llama/libllama.so.0").identity, Some((7, 101)));
     assert_eq!(bind(bwrap::MODEL).identity, Some((7, 200)));
-    assert_eq!(bind(bwrap::TOKEN).identity, Some((7, 301)));
     assert_eq!(bind(bwrap::SOCKET_DIR).identity, Some((7, 300)));
     let writable: Vec<_> = plan
         .binds
@@ -168,7 +167,7 @@ fn temporary_space_is_bounded_and_dev_is_a_small_tmpfs() {
     assert_eq!(tmpfs("/tmp").bytes, bwrap::TMP_BYTES);
     assert_eq!(tmpfs("/dev/shm").bytes, bwrap::SHM_BYTES);
     assert!(tmpfs("/dev").bytes <= 1 << 20);
-    assert_eq!(plan.tmpfs.len(), 3);
+    assert_eq!(plan.tmpfs.len(), 4);
     assert_eq!(plan.workdir, bwrap::RUNTIME);
 }
 
@@ -196,7 +195,6 @@ fn a_bound_object_that_is_not_the_verified_one_is_refused() {
     let right = |target: &str| match target {
         "/opt/llama/llama-server" => Some((7, 100)),
         "/models/model.gguf" => Some((7, 200)),
-        "/run/token" => Some((7, 301)),
         "/run/llama" => Some((7, 300)),
         _ => None,
     };
@@ -334,4 +332,66 @@ fn the_root_is_the_generations_sibling_so_its_removal_is_the_generations() {
     assert_eq!(plan.root, "/data/run/3.root");
     // Not the temporary directory Hakoniwa would make (which a killed runner leaves behind).
     assert!(!plan.root.starts_with("/tmp"));
+}
+
+#[test]
+fn the_token_is_in_the_plan_only_as_content_for_the_sandbox_own_tmpfs() {
+    let plan = plan(&inputs(None, &[]));
+    assert_eq!(plan.token, Secret::new("secret-token\n".into()));
+    // Not a bind of a host file, and the /run it is written into is a bounded tmpfs.
+    assert!(!targets(&plan).contains(&bwrap::TOKEN));
+    let run = plan.tmpfs.iter().find(|t| t.target == "/run").unwrap();
+    assert!(run.bytes <= 1 << 20);
+    // It never prints, in debug output or anywhere a plan is formatted.
+    assert!(!format!("{plan:?}").contains("secret-token"));
+}
+
+#[test]
+fn the_apparmor_profile_is_made_for_the_actual_path() {
+    let profile = apparmor_profile(Path::new("/opt/my apps/mimik")).unwrap();
+    assert!(
+        profile.contains("profile mimik \"/opt/my apps/mimik\" flags=(unconfined) {"),
+        "{profile}"
+    );
+    assert!(profile.contains("\n  userns,\n"));
+    assert!(
+        !profile.contains(APPARMOR_PLACEHOLDER) || profile.contains("# This file is a template")
+    );
+    // The profile is the template, with the path the only thing put in.
+    assert_eq!(
+        profile.replace("/opt/my apps/mimik", APPARMOR_PLACEHOLDER),
+        APPARMOR_TEMPLATE
+    );
+}
+
+#[test]
+fn a_path_apparmor_would_interpret_gets_no_profile() {
+    for bad in [
+        "mimik",
+        "relative/mimik",
+        "/opt/{a,b}/mimik",
+        "/opt/*/mimik",
+        "/opt/mi\"mik",
+        "/opt/mi\nmik",
+        "/opt/mi\\mik",
+        "/opt/mi@{x}mik",
+        "/opt/[a]/mimik",
+    ] {
+        assert!(apparmor_profile(Path::new(bad)).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn the_page_message_carries_the_generating_command_and_the_install_steps() {
+    let message = apparmor_message(Path::new("/opt/mimik/bin/mimik"));
+    assert!(message.contains(
+        "/opt/mimik/bin/mimik assistant-apparmor-profile | sudo tee /etc/apparmor.d/mimik"
+    ));
+    assert!(message.contains("sudo apparmor_parser -r /etc/apparmor.d/mimik"));
+    assert!(message.contains("Restart"));
+    let spaced = apparmor_message(Path::new("/opt/it's here/mimik"));
+    assert!(
+        spaced.contains("'/opt/it'\\''s here/mimik' assistant-apparmor-profile"),
+        "{spaced}"
+    );
 }

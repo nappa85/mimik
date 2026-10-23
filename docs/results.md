@@ -33,7 +33,8 @@ distributions, load. Reviewers have not seen it; no product decision rests on it
   paths (listing, node binding, partial offload, no node) behave the same.
 - Hakoniwa-only checks pass: a model or server file replaced after verification (a new
   inode with the same bytes, a link to a copy) is refused before the exec, as a sandbox
-  failure, and the server never runs; the token file is unlinked once the sandbox holds it.
+  failure, and the server never runs; the token is in no file under the data and scratch
+  directories (it lives in the sandbox's own memory-backed `/run`).
 - Differences that are not bugs: the verified descriptors cannot be bound (path binds with an
   identity check instead); the program is PID 1 with its reaper outside the namespace; no
   shim, no helper binary, no seccomp descriptor; Mimik's PID-namespace-number comparison is
@@ -43,8 +44,7 @@ distributions, load. Reviewers have not seen it; no product decision rests on it
   measurable difference at that resolution.
 - Cost side (DEP-24): `cargo audit --deny warnings` fails on `RUSTSEC-2023-0089`
   (`atomic-polyfill` through `postcard` and `heapless`), `chrono` and `flate2` enter the tree
-  through Hakoniwa's `procfs` features, the LGPL exception text must join the notices, and
-  the project is young (one main author). Its source is 5.4k lines with 23 `unsafe` lines; Mimik's
+  through Hakoniwa's `procfs` features, the project is young (one main author). Its source is 5.4k lines with 23 `unsafe` lines; Mimik's
   adapter adds three justified `unsafe` blocks.
 
 ## Model runtime: idle CPU calibration and the GPU path (steps 2c-2a and 2c-2b-1, 2026-10-23)

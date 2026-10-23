@@ -42,8 +42,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    `sandbox-hakoniwa` feature (DEP-24, `docs/model-runtime.md`, `docs/results.md`): the whole live
    suite passes on both backends on the dev host. Open: the Ubuntu 24.04 VM check of the AppArmor
    profile `apparmor/mimik` (after the KVM reboot), the Landlock layer inside the namespaces
-   (Landlock kernel, 7.3.0), the audit ignore for RUSTSEC-2023-0089 and the LGPL notice text
-   (approval), an independent review, then the adoption decision.
+   (Landlock kernel, 7.3.0), the lock file's RUSTSEC-2023-0089 (atomic-polyfill via Hakoniwa's
+   postcard; needs a patched Hakoniwa or an approved ignore), an independent review, then the adoption decision.
 4. Owed measurements: the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks
    at each llama.cpp pin change (`tools/assist_gpu_live.py`); a trace of the GPU path on another
    driver (AMDVLK, Intel, NVIDIA) for ASSIST-L44/L45; the superseding-job (cancel) timings on CPU and GPU with the fixed

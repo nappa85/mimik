@@ -24,6 +24,7 @@ REQUIRED = {
     "assets/response-targets.source.js",
     "assets/response-targets-LICENSE",
     "assets/htmx-LICENSE",
+    "assets/hakoniwa-LICENSE",
     "migrations/001_characters.sql",
     "tools/smoke_release.py",
     "tools/evidence_forest.py",
