@@ -145,7 +145,8 @@ the server under each level's full profile (the same binds, descriptors, seccomp
 token channel): it reads the model's magic, the token and binds the socket or port, reports
 one JSON line and answers one connection, on which the endpoint check runs. `mimik
 assistant-runner --probe --runtime <dir> --models-dir <dir> --model local:<name>
-[--model-sha256 <hex>] [--data-dir <dir>]` prints the result as one JSON line and exits 0 only
+[--model-sha256 <hex>] [--data-dir <dir>]` prints the result as one JSON line once its probes'
+cleanup has ended and exits 0 only
 when level 1's probe passed (the CI and owner check). A probe that fails for a definite cause
 (an unusable bwrap, a changed file, a refusal inside the level or by the endpoint check)
 skips its level; one that is only inconclusive (no report within 30 s, a failed spawn or bwrap
