@@ -591,11 +591,11 @@ async fn live_level_3_loads_the_model_through_proc_self_fd() {
 }
 
 /// Every mount is read-only (the root and each bind of host files) but the few the server
-/// writes to: its socket directory, the temporary space and the device nodes.
+/// writes to: its socket directory, the temporary space (Hakoniwa's 64 KiB `/run` for the token included) and the device nodes.
 fn assert_only_the_writable_mounts_are_writable(report: &Value) {
     for mount in report["mounts"].as_array().unwrap() {
         let (point, options) = (mount[0].as_str().unwrap(), mount[1].as_str().unwrap());
-        let writable = ["/run/llama", "/tmp", "/dev/shm", "/proc"].contains(&point)
+        let writable = ["/run/llama", "/run", "/tmp", "/dev/shm", "/proc"].contains(&point)
             || point == "/dev"
             || point.starts_with("/dev/");
         let read_only = options.split(',').any(|option| option == "ro");
