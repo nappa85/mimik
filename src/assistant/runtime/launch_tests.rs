@@ -784,3 +784,13 @@ fn a_failed_starts_guard_kills_and_waits_for_the_reaper_too() {
     assert!(endpoint::exited(&sandbox.reaper.pidfd));
     reaper_process.wait().unwrap();
 }
+
+#[test]
+fn the_pinned_build_fits_the_runners_descriptor_bound() {
+    // The spec's descriptor, level 1's fixed ones and one per runtime file.
+    let files = MANIFEST.build(Path::Cpu).unwrap().files.len();
+    assert!(
+        1 + fds::FIXED + files <= runner::MAX_HANDOVER,
+        "{files} runtime files"
+    );
+}

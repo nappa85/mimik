@@ -811,3 +811,25 @@ async fn a_superseded_running_job_also_keeps_the_server_busy() {
     assert_eq!(assistant.poll(1, 1, second), Poll::Running);
     gate.add_permits(3);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_job_superseded_as_its_deadline_fires_still_keeps_the_server_busy() {
+    let (stub, gate) = gated(3);
+    let mut busy = budgets();
+    busy.queue_wait = Duration::from_secs(120);
+    busy.busy_after_expiry = Duration::from_secs(30);
+    let assistant = ready(stub, busy);
+    let (first, _) = start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
+    settle().await;
+    assert_eq!(assistant.poll(1, 1, first), Poll::Running);
+    tokio::time::advance(budgets().run.saturating_sub(Duration::from_millis(1))).await;
+    settle().await;
+    // The supersession and the run deadline reach the worker together.
+    let (second, _) = start(&assistant, 1, origin(1, "field:hp", 6)).unwrap();
+    tokio::time::advance(Duration::from_millis(1)).await;
+    settle().await;
+    tokio::time::advance(Duration::from_secs(10)).await;
+    settle().await;
+    assert_eq!(assistant.poll(1, 1, second), Poll::Queued);
+    gate.add_permits(3);
+}

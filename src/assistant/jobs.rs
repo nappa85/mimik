@@ -714,6 +714,12 @@ impl Assistant {
         });
         let Some(job) = current else {
             drop(table);
+            // Ended meanwhile (superseded or stale as the deadline fired): its request was
+            // still dropped mid-way, so the server is presumed busy as on any expiry, while
+            // it is still this generation's (`presume_busy` checks).
+            if result.is_none() {
+                self.presume_busy(&run);
+            }
             return self.neutral(&run);
         };
         match &result {

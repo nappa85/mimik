@@ -308,3 +308,41 @@ fn sigkill_of_mimik_kills_the_server() {
     assert!(gone, "the server outlived Mimik");
     let _ = reader.get_ref().as_fd();
 }
+
+#[test]
+fn a_spec_larger_than_a_pipe_starts_the_runner() {
+    let mut big = spec(own_pid(), "report");
+    big.env.push(("PADDING".into(), "x".repeat(100 << 10)));
+    let (sender, started) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(launch(&runner(), &big, &handover()));
+    });
+    let child = started
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the launch blocked on the spec")
+        .unwrap();
+    let (status, out) = wait(child);
+    assert!(status.success(), "{status:?} {out}");
+}
+
+#[test]
+fn a_spec_or_handover_past_the_runners_bounds_is_refused() {
+    let mut huge = spec(own_pid(), "report");
+    huge.env.push(("PADDING".into(), "x".repeat(2 << 20)));
+    let error = launch(&runner(), &huge, &handover()).unwrap_err();
+    assert!(
+        error.to_string().contains("more than the 1048576"),
+        "{error}"
+    );
+    let many: Vec<Handover> = (0..MAX_HANDOVER)
+        .map(|n| Handover {
+            fd: own_binary(),
+            target: 100 + i32::try_from(n).unwrap(),
+        })
+        .collect();
+    let error = launch(&runner(), &spec(own_pid(), "report"), &many).unwrap_err();
+    assert!(
+        error.to_string().contains("more than the runner's 64"),
+        "{error}"
+    );
+}

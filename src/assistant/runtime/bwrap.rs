@@ -131,14 +131,28 @@ fn locate_with(
 
 /// The help text of `path` (5 s at most).
 fn help(path: &Path) -> Result<String, Unusable> {
-    let mut child = std::process::Command::new(path)
-        .arg("--help")
-        .env_clear()
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|_| Unusable::Help)?;
+    let spawn = || {
+        std::process::Command::new(path)
+            .arg("--help")
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+    };
+    // ETXTBSY: a file just written may still be open for writing in a child another thread
+    // forked meanwhile (until that child's exec); it passes in moments.
+    let mut tries = 0;
+    let mut child = loop {
+        match spawn() {
+            Ok(child) => break child,
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return Err(Unusable::Help),
+        }
+    };
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         match child.try_wait() {

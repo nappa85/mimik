@@ -343,12 +343,12 @@ pub(crate) fn runtime(
 }
 
 /// Whether `path` and every ancestor directory are not writable by group or others (levels
-/// 2 and 3 load shared libraries by path from the runtime directory).
+/// 2 and 3 load shared libraries by path from the runtime directory). Links are resolved
+/// first, so the folders checked are the ones the path really goes through.
 pub(crate) fn ancestors_safe(path: &Path) -> Result<(), Refusal> {
-    let absolute =
-        std::path::absolute(path).map_err(|_| Refusal::Io(path.display().to_string()))?;
-    for ancestor in absolute.ancestors() {
-        let stat = rustix::fs::stat(ancestor)
+    let real = std::fs::canonicalize(path).map_err(|_| Refusal::Io(path.display().to_string()))?;
+    for ancestor in real.ancestors() {
+        let stat = rustix::fs::lstat(ancestor)
             .map_err(|error| io_refusal(&ancestor.display().to_string(), error))?;
         if stat.st_mode & 0o022 != 0 {
             return Err(Refusal::Writable(ancestor.display().to_string()));

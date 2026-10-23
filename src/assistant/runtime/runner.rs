@@ -26,6 +26,10 @@ pub(crate) const EXEC_FD: RawFd = 1023;
 pub(crate) const FSIZE: u64 = 64 << 20;
 /// The most bytes of a spec.
 const SPEC_BOUND: u64 = 1 << 20;
+/// The most descriptors (the spec's included) moved between fork and exec: a fixed array, as
+/// nothing may allocate there. Level 1 hands over the status, seccomp, token, directory,
+/// model, shim and marker descriptors and one per runtime file.
+pub(crate) const MAX_HANDOVER: usize = 64;
 
 /// The runner's exit codes when it does not reach its exec.
 pub(crate) mod exit {
@@ -282,11 +286,26 @@ pub(crate) fn launch(
     handover: &[Handover],
 ) -> std::io::Result<Child> {
     let text = serde_json::to_vec(spec).map_err(std::io::Error::other)?;
-    let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
+    if u64::try_from(text.len()).unwrap_or(u64::MAX) > SPEC_BOUND {
+        return Err(std::io::Error::other(format!(
+            "the runner's spec is {} bytes, more than the {SPEC_BOUND} it reads",
+            text.len()
+        )));
+    }
+    if handover.len() + 1 > MAX_HANDOVER {
+        return Err(std::io::Error::other(format!(
+            "{} descriptors to hand over, more than the runner's {MAX_HANDOVER}",
+            handover.len() + 1
+        )));
+    }
+    // A memory file, not a pipe: written whole before the spawn, whatever its size (a pipe
+    // holds about 64 KiB and nothing reads it yet).
+    let read = rustix::fs::memfd_create("mimik-runner-spec", rustix::fs::MemfdFlags::CLOEXEC)?;
     {
-        let mut writer = std::fs::File::from(write);
+        let mut writer = std::fs::File::from(rustix::io::dup(&read)?);
         std::io::Write::write_all(&mut writer, &text)?;
     }
+    rustix::fs::seek(&read, rustix::fs::SeekFrom::Start(0))?;
     let mut pairs: Vec<(RawFd, RawFd)> = vec![(read.as_raw_fd(), SPEC_FD)];
     pairs.extend(handover.iter().map(|h| (h.fd.as_raw_fd(), h.target)));
     let mut command = Command::new(&runner.program);
@@ -304,7 +323,7 @@ pub(crate) fn launch(
     // overwritten before it is moved; dup2 clears close-on-exec on each target.
     unsafe {
         command.pre_exec(move || {
-            let mut moved = [0 as RawFd; 64];
+            let mut moved = [0 as RawFd; MAX_HANDOVER];
             if pairs.len() > moved.len() {
                 return Err(std::io::Error::from_raw_os_error(libc::EMFILE));
             }

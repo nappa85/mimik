@@ -258,3 +258,20 @@ fn ancestors_writable_by_others_are_refused() {
     ));
     assert!(ancestors_safe(Path::new("/")).is_ok());
 }
+
+#[test]
+fn a_linked_ancestor_is_checked_where_it_leads() {
+    // A safe-looking path through a link into a folder whose parent others can write.
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/runtime-tests");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let dir = tempfile::Builder::new().tempdir_in(&base).unwrap();
+    let open = dir.path().join("open");
+    std::fs::create_dir_all(open.join("real/runtime")).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    std::os::unix::fs::symlink(open.join("real"), dir.path().join("link")).unwrap();
+    assert_eq!(
+        ancestors_safe(&dir.path().join("link/runtime")),
+        Err(Refusal::Writable(open.display().to_string()))
+    );
+}

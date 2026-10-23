@@ -52,6 +52,10 @@ mod fds {
     pub const MARKER: RawFd = 12;
     /// The first runtime file at level 1.
     pub const RUNTIME: RawFd = 16;
+    /// Level 1's descriptors besides the runtime files: status, seccomp, token, socket
+    /// directory, model, shim and marker.
+    #[cfg(test)]
+    pub const FIXED: usize = 7;
 }
 
 /// Mimik's own binary inside the levels: the probe (in place of llama-server) and, at level
