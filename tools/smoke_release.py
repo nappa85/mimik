@@ -1941,9 +1941,9 @@ def stop(process, log):
 
 
 def smoke_no_assistant(binary, directory):
-    """A release build has no development endpoint and no assistant (step 2c-1): the
-    option's name is not in the binary, it is refused as unknown, and `--assistant` is
-    refused at start, before any database is opened."""
+    """A release build has no development endpoint (steps 2c-1, 2c-2a): the option's name is
+    not in the binary and it is refused as unknown. The runtime's probe fails closed without
+    a runtime: one JSON line, no level, a non-zero exit."""
     require(
         b"assistant-dev-endpoint" not in binary.read_bytes(),
         "The release binary contains the development endpoint",
@@ -1960,20 +1960,32 @@ def smoke_no_assistant(binary, directory):
         unknown.returncode == 2 and "unexpected argument" in unknown.stderr,
         "The release binary accepts --assistant-dev-endpoint",
     )
-    database = directory / "assistant-refused.sqlite3"
-    refused = subprocess.run(
-        [str(binary), "--loopback", "--assistant", "--database", str(database)],
+    models = directory / "probe-models"
+    models.mkdir(mode=0o700)
+    probe = subprocess.run(
+        [
+            str(binary),
+            "assistant-runner",
+            "--probe",
+            "--runtime",
+            str(directory / "no-runtime"),
+            "--models-dir",
+            str(models),
+            "--model",
+            "local:absent.gguf",
+            "--data-dir",
+            str(directory / "probe-data"),
+        ],
         cwd=directory,
         env=smoke_environment(directory),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=60,
     )
+    report = json.loads(probe.stdout.strip().splitlines()[-1])
     require(
-        refused.returncode != 0
-        and "The assistant is not available in this build." in refused.stderr
-        and not database.exists(),
-        "The release binary does not refuse --assistant",
+        probe.returncode != 0 and report["level"] is None,
+        "The release binary's runtime probe does not fail closed without a runtime",
     )
 
 

@@ -2,7 +2,7 @@
 //! [`Interpreter`] trait, the rig-core adapter over Mimik's bounded transport, and a stub
 //! for tests. One request per call: nothing retries.
 use super::contract::{FIXED_PREFIX, SCHEMA, SCHEMA_NAME};
-use super::transport::{Bounded, Endpoint};
+use super::transport::Bounded;
 use async_trait::async_trait;
 use rig_core::completion::CompletionRequest;
 use rig_core::http_client::HttpClientExt;
@@ -57,24 +57,16 @@ pub(crate) struct RigInterpreter {
 }
 
 impl RigInterpreter {
-    /// # Errors
-    ///
-    /// Returns the transport builder's error.
-    pub(crate) fn new(
-        endpoint: Endpoint,
-        token: String,
-        model: String,
-    ) -> Result<Self, reqwest::Error> {
-        let transport = Bounded::new(endpoint)?;
+    pub(crate) fn new(transport: Bounded, token: String, model: String) -> Self {
         let client = OpenAIConfig::with_key(&LLAMACPP, token.as_str())
             .with_base_url(format!("{}/v1", transport.base()))
             .connect(transport.clone());
-        Ok(Self {
+        Self {
             client,
             transport,
             token,
             model,
-        })
+        }
     }
 }
 

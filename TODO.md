@@ -6,9 +6,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Current work
 
-- **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1 (interpretation
-  against a hand-started server, dev-only) and the Rust 1.99.1 / rig-core 0.45.0 upgrade are
-  merged into master. Next: **2c-2** runtime manager.
+- **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1 and the Rust
+  1.99.1 / rig-core 0.45.0 upgrade are merged into master. **2c-2a** (the CPU runtime at
+  level 1 only, ASSIST-43, `docs/model-runtime.md`) is built on branch `assist-2c2`, awaiting
+  its final review and its remaining live measurements (plan, "2c-2a"); then 2c-2b (GPU path,
+  Landlock). Level 3's return is its own later step (plan, "Level 3 behind an owner opt-in").
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
   target/agent-tools/ci.sh <cmd>`, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
@@ -17,7 +19,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
-1. 2c-2 runtime manager, 2d-1 owner model setting, 2d-2 downloads, 3 bundles and
+1. 2c-2a reviews and the idle native calibration (5 and 2 threads; an evening or weekend
+   when the host is otherwise idle), 2c-2b GPU path and Landlock, 2d-1 owner model setting, 2d-2 downloads, 3 bundles and
    reminders, 4 suggestions, 5 docs and gate (includes the `docs/release-scope.md` update for
    schema 22 and the assisted scope).
 2. Before 2d-1 chooses the default model (ASSIST-L32), a field-reference experiment, decision
@@ -25,9 +28,15 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    adds only the compact-output sentence; about 30 fresh field-reference cases written without
    reusing screen cases; real 1 KiB related-context requests rendered by the Rust builder; an
    idle host at the ASSIST-41 thread count; pass 1 only.
-3. Owed measurements: the native CPU calibration at the
-   ASSIST-41 default and at 2 threads (2c-2); GPU-path checks at each llama.cpp pin change;
-   the Qwen3.5-9B rev3 S40 re-run.
+3. Owed measurements: the idle native CPU calibration at the ASSIST-41 default and at 2 threads
+   (2c-2a); grammar against no-grammar generation time and cancellation timing with Granite
+   (2c-2a); the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks at each
+   llama.cpp pin change; the Qwen3.5-9B rev3 S40 re-run.
+
+- `browser_smoke.py`'s "A 409 with an unreadable body did not hold the field" check fails
+  on the dev host for master's release binary as well as `assist-2c2`'s (2026-10-23, Chromium
+  container at 2 CPUs on a loaded host); find whether it is timing (its 500 ms waits) before CI
+  relies on it.
 
 ## Blockers
 
@@ -46,9 +55,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Other next actions
 
-- Production model runtime (ASSIST-29, ASSIST-30): official llama-server child process on a
-  random loopback port with a per-launch token, Landlock on Linux, sandbox profile on macOS;
-  goes into the plan update with 2c/2d. Not verifiable on macOS or Windows from this host.
+- macOS and Windows model runtime (ASSIST-34): not verifiable from this host.
 - **GPU back in service (2026-10-20, after the re-paste):** at 143 W for 5 min with the fan
   on manual 255 and a room fan, the junction plateaus at 77–79 °C (max 83), edge 57 °C, gap
   about 21 °C. On automatic fan it reaches 85 °C in 22 s, so GPU runs need the manual fan

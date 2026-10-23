@@ -32,85 +32,96 @@ struct Args {
 /// The interpretation assistant's options.
 #[derive(clap::Args)]
 struct AssistantArgs {
-    /// Turn on the interpretation assistant (off by default; a development feature in this
-    /// release).
+    /// Turn on the interpretation assistant (off by default): Mimik starts the pinned
+    /// llama-server as its child, confined where it can (see /admin/assistant).
     #[arg(long = "assistant", conflicts_with = "no_auth")]
     on: bool,
+    /// The model spec (`local:<name>.gguf`, a file in the models folder).
+    #[arg(long = "assistant-model", default_value = mimik::assistant::DEFAULT_MODEL)]
+    model: String,
+    /// The model file's SHA-256 (required for any file but the default).
+    #[arg(long = "assistant-model-sha256")]
+    model_sha256: Option<String>,
+    /// The request's model name, given to the server as `--alias` (default: derived from
+    /// the spec's file name).
+    #[arg(long = "assistant-model-alias")]
+    model_alias: Option<String>,
+    /// The models folder (default: `models/` in the data directory; mode 0700).
+    #[arg(long = "models-dir")]
+    models_dir: Option<std::path::PathBuf>,
+    /// The llama.cpp runtime folder (default: `llama/` beside this binary); it must hold
+    /// exactly the pinned files.
+    #[arg(long = "assistant-runtime")]
+    runtime: Option<std::path::PathBuf>,
+    /// CPU threads of the model server (default: the physical cores minus one).
+    #[arg(long = "assistant-threads")]
+    threads: Option<u32>,
     #[cfg(feature = "dev-endpoint")]
     #[command(flatten)]
     development: DevelopmentAssistant,
 }
 
-/// The 2c-1 development endpoint (development builds only, never a release).
+/// The 2c-1 development endpoint (development builds only, never a release; tests).
 #[cfg(feature = "dev-endpoint")]
 #[derive(clap::Args)]
 struct DevelopmentAssistant {
     /// Development only: a hand-started llama-server at `http://127.0.0.1:<port>`,
-    /// `http://[::1]:<port>` or an absolute Unix socket path; no endpoint check.
+    /// `http://[::1]:<port>` or an absolute Unix socket path; no endpoint check. It is
+    /// primed and calibrated like the runtime's own child.
     #[arg(long = "assistant-dev-endpoint", requires = "on")]
     endpoint: Option<String>,
     /// Development only: the file holding that server's API key.
     #[arg(long = "assistant-dev-token-file", requires = "endpoint")]
     token_file: Option<std::path::PathBuf>,
-    /// The model spec (`local:<name>.gguf`).
-    #[arg(long = "assistant-model", default_value = mimik::assistant::development::DEFAULT_MODEL)]
-    model: String,
-    /// The model file's SHA-256 (required for any file but the default).
-    #[arg(long = "assistant-model-sha256")]
-    model_sha256: Option<String>,
-    /// The request's model name, which the server must be given as `--alias` (default:
-    /// derived from the spec's file name).
-    #[arg(long = "assistant-model-alias")]
-    model_alias: Option<String>,
-    /// Development placeholder for B, the dynamic part's byte bound (at most 4096).
-    #[arg(long = "assistant-dev-bytes", default_value_t = 1024)]
-    bytes: usize,
-    /// Development placeholder for N(B), the dynamic part's token bound.
-    #[arg(long = "assistant-dev-token-limit", default_value_t = 384)]
-    token_limit: usize,
-    /// Development placeholder for R, a job's run deadline in seconds.
-    #[arg(long = "assistant-dev-deadline", default_value_t = 85)]
-    deadline: u64,
-    /// Development placeholder for D, how many jobs may wait.
-    #[arg(long = "assistant-dev-queue", default_value_t = 1)]
-    queue: usize,
-    /// Development placeholder for Q, a job's queue wait in seconds.
-    #[arg(long = "assistant-dev-queue-wait", default_value_t = 35)]
-    queue_wait: u64,
 }
 
-/// The assistant `--assistant` asks for: in a build without the development endpoint (every
-/// release build) there is no runtime yet, so it is refused.
-#[cfg(not(feature = "dev-endpoint"))]
-fn assistant(_: &Args) -> Result<mimik::assistant::AssistantHandle, Box<dyn std::error::Error>> {
-    Err("The assistant is not available in this build.".into())
+/// The data directory: the database's folder, absolute.
+fn data_dir(database: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let folder = database
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(
+            || std::path::PathBuf::from("."),
+            std::path::Path::to_path_buf,
+        );
+    std::path::absolute(folder)
 }
 
-#[cfg(feature = "dev-endpoint")]
-fn assistant(args: &Args) -> Result<mimik::assistant::AssistantHandle, Box<dyn std::error::Error>> {
-    let dev = &args.assistant.development;
-    let endpoint = dev
-        .endpoint
-        .clone()
-        .ok_or("--assistant needs --assistant-dev-endpoint in this development build.")?;
-    let token_file = dev
-        .token_file
-        .clone()
-        .ok_or("--assistant-dev-endpoint needs --assistant-dev-token-file.")?;
-    let handle =
-        mimik::assistant::AssistantHandle::development(mimik::assistant::development::Config {
-            endpoint,
-            token_file,
-            model: dev.model.clone(),
-            model_sha256: dev.model_sha256.clone(),
-            model_alias: dev.model_alias.clone(),
-            bytes: dev.bytes,
-            tokens: dev.token_limit,
-            deadline: std::time::Duration::from_secs(dev.deadline),
-            queue: dev.queue,
-            queue_wait: std::time::Duration::from_secs(dev.queue_wait),
-        })?;
-    println!("DEVELOPMENT ONLY: assistant on, development endpoint (no endpoint check).");
+/// The assistant `--assistant` asks for: the runtime manager over the data directory.
+fn assistant(
+    args: &Args,
+    data_dir: &std::path::Path,
+) -> Result<mimik::assistant::AssistantHandle, Box<dyn std::error::Error>> {
+    #[cfg(feature = "dev-endpoint")]
+    if let Some(endpoint) = args.assistant.development.endpoint.clone() {
+        let token_file = args
+            .assistant
+            .development
+            .token_file
+            .clone()
+            .ok_or("--assistant-dev-endpoint needs --assistant-dev-token-file.")?;
+        let handle = mimik::assistant::AssistantHandle::development(
+            mimik::assistant::development::Config {
+                endpoint,
+                token_file,
+                model: args.assistant.model.clone(),
+                model_sha256: args.assistant.model_sha256.clone(),
+                model_alias: args.assistant.model_alias.clone(),
+            },
+        )?;
+        println!("DEVELOPMENT ONLY: assistant on, development endpoint (no endpoint check).");
+        return Ok(handle);
+    }
+    let handle = mimik::assistant::AssistantHandle::runtime(mimik::assistant::RuntimeConfig {
+        data_dir: data_dir.to_path_buf(),
+        models_dir: args.assistant.models_dir.clone(),
+        runtime_dir: args.assistant.runtime.clone(),
+        model: args.assistant.model.clone(),
+        model_sha256: args.assistant.model_sha256.clone(),
+        model_alias: args.assistant.model_alias.clone(),
+        threads: args.assistant.threads,
+    })?;
+    println!("Assistant on: the model server is starting (see /admin/assistant).");
     Ok(handle)
 }
 
@@ -252,18 +263,30 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The hidden runner runs before any thread or runtime starts (it sets the parent-death
+    // signal and executes in place).
+    let raw: Vec<String> = std::env::args().collect();
+    if raw.get(1).map(String::as_str) == Some("assistant-runner") {
+        std::process::exit(mimik::assistant::runner_main(&raw[2..]));
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     validate_serving_args(&args)?;
     let auth = !args.no_auth;
     let mut options = server_options(&args, std::env::var("MIMIK_EXTERNAL_URL").ok())?;
-    if args.assistant.on {
-        options.assistant = Some(assistant(&args)?);
-    }
-    let path = database_path(args.database, std::env::var_os("MIMIK_DATABASE"));
+    let path = database_path(args.database.clone(), std::env::var_os("MIMIK_DATABASE"));
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
+    }
+    if args.assistant.on {
+        options.assistant = Some(assistant(&args, &data_dir(&path)?)?);
     }
     let store = Store::open(&path)?;
     let unindexed = store.search_index_failures().await?;
@@ -273,86 +296,97 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     if let Some(command) = args.command {
-        let Some(command) = publication_command(&store, command).await? else {
-            return Ok(());
-        };
-        match command {
-            Command::ImportDefinitionDraft {
-                file,
-                expected_revision,
-            } => println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    &store
-                        .import_definition_draft(&file, expected_revision)
-                        .await?
-                )?
-            ),
-            Command::ShowDefinitionDraft { id } => println!(
-                "{}",
-                serde_json::to_string_pretty(&store.definition_draft(id).await?)?
-            ),
-            Command::ListDefinitionDrafts {
-                game_id,
-                edition_id,
-                after_id,
-            } => println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    &store
-                        .definition_drafts(game_id, edition_id, after_id)
-                        .await?
-                )?
-            ),
-            Command::ImportSource { bundle, pdf } => {
-                let id = store.import_source(&bundle, &pdf).await?;
-                println!(
-                    "Registered source {id}. New imports are unreviewed; existing imports retain their review state. Open /sources."
-                );
-            }
-            Command::RegisterRuleset {
-                game_id,
-                game_label,
-                edition_id,
-                edition_label,
-            } => {
-                store
-                    .register_ruleset(mimik::registry::RegisterRuleset {
-                        game_id,
-                        game_label,
-                        edition_id,
-                        edition_label,
-                    })
-                    .await?;
-                println!(
-                    "Ruleset registered. Registration does not approve sources or provide a generic sheet."
-                );
-            }
-            Command::RegisterRulesetAlias {
-                game_id,
-                edition_id,
-                legacy_edition,
-            } => {
-                store
-                    .register_ruleset_alias(mimik::registry::RegisterAlias {
-                        game_id,
-                        edition_id,
-                        legacy_edition,
-                    })
-                    .await?;
-                println!(
-                    "Exact legacy alias registered; matching unresolved records associated without changing their data or review state."
-                );
-            }
-            Command::ListRulesets => println!(
-                "{}",
-                serde_json::to_string_pretty(&store.rulesets().await?)?
-            ),
-            _ => return Err("Unexpected command dispatcher state".into()),
-        }
-        return Ok(());
+        return local_command(&store, command).await;
     }
-    serve(store, auth, options, &path).await
+    let assistant = options.assistant.clone();
+    let served = serve(store, auth, options, &path).await;
+    if let Some(assistant) = assistant {
+        assistant.shutdown().await;
+    }
+    served
+}
+
+/// The local operator commands that print their results.
+async fn local_command(store: &Store, command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    let store = store.clone();
+    let Some(command) = publication_command(&store, command).await? else {
+        return Ok(());
+    };
+    match command {
+        Command::ImportDefinitionDraft {
+            file,
+            expected_revision,
+        } => println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &store
+                    .import_definition_draft(&file, expected_revision)
+                    .await?
+            )?
+        ),
+        Command::ShowDefinitionDraft { id } => println!(
+            "{}",
+            serde_json::to_string_pretty(&store.definition_draft(id).await?)?
+        ),
+        Command::ListDefinitionDrafts {
+            game_id,
+            edition_id,
+            after_id,
+        } => println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &store
+                    .definition_drafts(game_id, edition_id, after_id)
+                    .await?
+            )?
+        ),
+        Command::ImportSource { bundle, pdf } => {
+            let id = store.import_source(&bundle, &pdf).await?;
+            println!(
+                "Registered source {id}. New imports are unreviewed; existing imports retain their review state. Open /sources."
+            );
+        }
+        Command::RegisterRuleset {
+            game_id,
+            game_label,
+            edition_id,
+            edition_label,
+        } => {
+            store
+                .register_ruleset(mimik::registry::RegisterRuleset {
+                    game_id,
+                    game_label,
+                    edition_id,
+                    edition_label,
+                })
+                .await?;
+            println!(
+                "Ruleset registered. Registration does not approve sources or provide a generic sheet."
+            );
+        }
+        Command::RegisterRulesetAlias {
+            game_id,
+            edition_id,
+            legacy_edition,
+        } => {
+            store
+                .register_ruleset_alias(mimik::registry::RegisterAlias {
+                    game_id,
+                    edition_id,
+                    legacy_edition,
+                })
+                .await?;
+            println!(
+                "Exact legacy alias registered; matching unresolved records associated without changing their data or review state."
+            );
+        }
+        Command::ListRulesets => println!(
+            "{}",
+            serde_json::to_string_pretty(&store.rulesets().await?)?
+        ),
+        _ => return Err("Unexpected command dispatcher state".into()),
+    }
+    Ok(())
 }
 
 fn validate_serving_args(args: &Args) -> Result<(), Box<dyn std::error::Error>> {

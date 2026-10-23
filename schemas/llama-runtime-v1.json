@@ -1,0 +1,278 @@
+{
+  "manifest": "mimik-llama-runtime-v1",
+  "note": "The pinned official llama.cpp build Mimik ships and runs (ASSIST-33, ASSIST-42). Mimik embeds this file; llama-fetch and packaging read it. Shipped files carry their SONAME as their name (no links).",
+  "llama_cpp": {
+    "tag": "b11609",
+    "build": 11609,
+    "commit": "fcac19079f3f2985fe74ed845f0880e7e9a8030a",
+    "repository": "https://github.com/ggml-org/llama.cpp",
+    "licence": "MIT",
+    "release": "https://github.com/ggml-org/llama.cpp/releases/tag/b11609",
+    "version_line": "version: 0.6.0-dev (build 11609, commit fcac19079)"
+  },
+  "source": {
+    "name": "llama.cpp-b11609-source.tar",
+    "how": "git archive --format=tar --prefix=llama.cpp-b11609/ <commit> from a shallow fetch of that commit",
+    "prefix": "llama.cpp-b11609/",
+    "tar_sha256": "7ca7d6261c85d749947d8938ecb101301c30acf95bba001d46999012871b02a5",
+    "tar_size": 180715520,
+    "notices": [
+      {
+        "component": "llama.cpp and ggml",
+        "licence": "MIT",
+        "path": "LICENSE"
+      },
+      {
+        "component": "cpp-httplib",
+        "licence": "MIT",
+        "path": "vendor/cpp-httplib/LICENSE"
+      },
+      {
+        "component": "nlohmann/json",
+        "licence": "MIT",
+        "path": "licenses/LICENSE-jsonhpp"
+      },
+      {
+        "component": "stb_image",
+        "licence": "MIT OR Unlicense",
+        "path": "vendor/stb/stb_image.h",
+        "lines": [
+          7950,
+          7987
+        ]
+      },
+      {
+        "component": "sheredom/subprocess.h",
+        "licence": "Unlicense",
+        "path": "vendor/sheredom/subprocess.h",
+        "lines": [
+          7,
+          29
+        ]
+      },
+      {
+        "component": "miniaudio",
+        "licence": "Unlicense OR MIT-0",
+        "path": "vendor/miniaudio/miniaudio.h",
+        "lines": [
+          95817,
+          95863
+        ]
+      },
+      {
+        "component": "sha256 (Igor Pavlov)",
+        "licence": "public domain",
+        "path": "vendor/hash/sha256/LICENSE"
+      },
+      {
+        "component": "xxHash",
+        "licence": "BSD-2-Clause",
+        "path": "vendor/hash/xxhash/LICENSE"
+      },
+      {
+        "component": "rotate-bits",
+        "licence": "MIT",
+        "path": "vendor/hash/rotate-bits/LICENSE.md"
+      }
+    ],
+    "notices_note": "Components compiled into the shipped files, from the source's licenses/ and vendor/ (the asset's own LICENSE is llama.cpp's only); packaging copies each text from the hash-verified source tar into THIRD-PARTY-NOTICES.md."
+  },
+  "builds": [
+    {
+      "path": "cpu",
+      "asset": "llama-b11609-bin-ubuntu-x64.tar.gz",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11609/llama-b11609-bin-ubuntu-x64.tar.gz",
+      "sha256": "f95cbb27dd6e377f2ce30f5cfd7ec987af3259c025fc7c98fff62927a16ff528",
+      "size": 17732148,
+      "directory": "cpu",
+      "server": "llama-server",
+      "system_libraries": [
+        "libc.so.6",
+        "libm.so.6",
+        "libstdc++.so.6",
+        "libgcc_s.so.1",
+        "libgomp.so.1",
+        "libssl.so.3",
+        "libcrypto.so.3",
+        "ld-linux-x86-64.so.2"
+      ],
+      "symbol_floors": {
+        "GLIBC": "2.34",
+        "GLIBCXX": "3.4.30",
+        "OPENSSL": "3.0.0",
+        "GOMP": "4.5"
+      },
+      "cpu_backend": "ggml loads every libggml-cpu-<variant>.so beside llama-server and uses the best one the host's instruction set supports; libggml-cpu-x64.so is the baseline",
+      "minimum_host": "Ubuntu 22.04 x86_64 (glibc 2.35, libstdc++ from GCC 12, OpenSSL 3, libgomp1), the release builds' own build host",
+      "files": [
+        {
+          "name": "llama-server",
+          "from": "llama-b11609/llama-server",
+          "sha256": "6983fb9d14f2e0874698548dc47cba6014fab4572c737c5a9ef314a08c0c1458",
+          "size": 17864,
+          "mode": "0755"
+        },
+        {
+          "name": "libllama-server-impl.so",
+          "from": "llama-b11609/libllama-server-impl.so",
+          "sha256": "6f0de7db709d4a737df9efa46e0636c7c543cbb9fde0ba4e32bc56e6675efdea",
+          "size": 7505688,
+          "mode": "0755"
+        },
+        {
+          "name": "libllama-common.so.0",
+          "from": "llama-b11609/libllama-common.so.0.6.0",
+          "sha256": "7ba2ed6ae36bb0705ed73d78b37b1ea33070f3ca530f9040959a17c0d84e0797",
+          "size": 6471952,
+          "mode": "0755"
+        },
+        {
+          "name": "libmtmd.so.0",
+          "from": "llama-b11609/libmtmd.so.0.6.0",
+          "sha256": "5245e1b79ad76ff4d1911cc320312422065119e63e04430611cc8d91d9ab5a92",
+          "size": 1929664,
+          "mode": "0755"
+        },
+        {
+          "name": "libllama.so.0",
+          "from": "llama-b11609/libllama.so.0.6.0",
+          "sha256": "220468c633df4b24127df5af5a58dbbdcc46696c3cf571735049d0a1892beff3",
+          "size": 4947648,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml.so.0",
+          "from": "llama-b11609/libggml.so.0.26.0",
+          "sha256": "8643a58bb37af6fb153e2ea98b48efa227855725ee51c05f4ca76b9867956463",
+          "size": 51040,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-base.so.0",
+          "from": "llama-b11609/libggml-base.so.0.26.0",
+          "sha256": "84c771ef5bd7351134d43de64292133da1218383a586af0a121b7c215171da85",
+          "size": 897792,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-alderlake.so",
+          "from": "llama-b11609/libggml-cpu-alderlake.so",
+          "sha256": "50c8b810b9e26d88a0cc2d521aef559c78d8a44d779a2c0eb56fd98a83bce779",
+          "size": 1412200,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-cannonlake.so",
+          "from": "llama-b11609/libggml-cpu-cannonlake.so",
+          "sha256": "89944d7dbf0823c778c5c2757b764fb92ea9f142f0d5df49a9bb4679abcae4d9",
+          "size": 1561576,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-cascadelake.so",
+          "from": "llama-b11609/libggml-cpu-cascadelake.so",
+          "sha256": "7dc668118370dadd4a442633ea1c2ee70e2d79bb61b828b1336c311db01f21cd",
+          "size": 1573568,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-cooperlake.so",
+          "from": "llama-b11609/libggml-cpu-cooperlake.so",
+          "sha256": "ab3a3b037275d820e9d04fa477b7c4b75b682b491aa2551e1d71a04bb29997ee",
+          "size": 1573640,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-haswell.so",
+          "from": "llama-b11609/libggml-cpu-haswell.so",
+          "sha256": "c17103d0406928eb5ebf08ba2040317ca171a1c4570abe4afef59822ee694288",
+          "size": 1416296,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-icelake.so",
+          "from": "llama-b11609/libggml-cpu-icelake.so",
+          "sha256": "69fa2bca90ff7af7bba5fdf2329aeb9cb15042cfccc58e51d5dcc2055d4bf453",
+          "size": 1573568,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-ivybridge.so",
+          "from": "llama-b11609/libggml-cpu-ivybridge.so",
+          "sha256": "c4b87e1a767ea639694aff812a31bc82c0c118cd9adf589e3475e6845bb68ca7",
+          "size": 1347848,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-piledriver.so",
+          "from": "llama-b11609/libggml-cpu-piledriver.so",
+          "sha256": "aa52a7951b674327287f3d0f1bb6c3165b1fa8b6bdfd92764f74285da9418c51",
+          "size": 1343752,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-sandybridge.so",
+          "from": "llama-b11609/libggml-cpu-sandybridge.so",
+          "sha256": "fd588706b8b3cc784085baf70a93c2b877c83f33183f778bb31784f0057f9f14",
+          "size": 1346800,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-sapphirerapids.so",
+          "from": "llama-b11609/libggml-cpu-sapphirerapids.so",
+          "sha256": "edd34053ce919ebecab29fc4a07a0063c6193dc4f6705fac4c7be16be290d004",
+          "size": 1827680,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-skylakex.so",
+          "from": "llama-b11609/libggml-cpu-skylakex.so",
+          "sha256": "725df7b17c75ee2598b43d029fa15b1c9114c340365256bf5eeb6ac5c03d6232",
+          "size": 1561576,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-sse42.so",
+          "from": "llama-b11609/libggml-cpu-sse42.so",
+          "sha256": "9868b6a0e8f26ad1972d3f347c6d8dfeba31ee2cbf78ea89529ff72e2c1237a6",
+          "size": 954440,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-x64.so",
+          "from": "llama-b11609/libggml-cpu-x64.so",
+          "sha256": "37626deedabb4bfe6ba850f12f6b1d38828d6bb11ef69b6115c1216fc2f19899",
+          "size": 946392,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-zen4.so",
+          "from": "llama-b11609/libggml-cpu-zen4.so",
+          "sha256": "47d8938c89f5aed9494d206cabaae080fe60cd0bca8a8aaaac40aa8a987c1e5b",
+          "size": 1573640,
+          "mode": "0755"
+        },
+        {
+          "name": "LICENSE",
+          "from": "llama-b11609/LICENSE",
+          "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d",
+          "size": 1078,
+          "mode": "0644"
+        }
+      ]
+    }
+  ],
+  "test_model": {
+    "use": "CI only, never shipped",
+    "repository": "ggml-org/models-moved",
+    "revision": "499bc8821c6b12b4e53c5bffcb21ec206f212d81",
+    "file": "tinyllamas/stories260K.gguf",
+    "name": "stories260K.gguf",
+    "url": "https://huggingface.co/ggml-org/models-moved/resolve/499bc8821c6b12b4e53c5bffcb21ec206f212d81/tinyllamas/stories260K.gguf",
+    "size": 1185376,
+    "sha256": "270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d",
+    "licence": "the repository states none; upstream karpathy/tinyllamas at 0bd21da7698eaf29a0d7de3992de8a46ef624add is MIT",
+    "upstream": "karpathy/tinyllamas@0bd21da7698eaf29a0d7de3992de8a46ef624add",
+    "ctx_size": 256
+  }
+}

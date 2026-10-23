@@ -33,15 +33,23 @@ pub(crate) struct Budgets {
     pub queue_wait: Duration,
     /// The model's `max_tokens`.
     pub max_tokens: u32,
+    /// How long the server may still be evaluating a request cancelled at its run deadline
+    /// (the calibrated prompt term at B): the next job waits that long, and admission counts
+    /// it.
+    pub busy_after_expiry: Duration,
 }
 
-/// Why a generation ended. The development endpoint has one fixed generation; the 2c-2
-/// runtime manager sends these.
+/// What the worker tells the runtime manager about exchanges (plan §1.4a, "Transitions":
+/// two consecutive run-deadline expiries with no completed exchange between stop the child
+/// as hung).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Signal {
+    Expired { generation: u64 },
+    Completed { generation: u64 },
+}
+
+/// Why a generation ended (the runtime manager sends these).
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    all(feature = "dev-endpoint", not(test)),
-    expect(dead_code, reason = "sent by the 2c-2 runtime manager")
-)]
 pub(crate) enum EndReason {
     /// The child exited, or was stopped for a new generation.
     Exited,
@@ -51,17 +59,12 @@ pub(crate) enum EndReason {
     Unavailable(String),
 }
 
-/// The runtime event interface the worker consumes (plan §2 2c-1): fed in 2c-1 by the
-/// development endpoint's fixed configuration and by test doubles, in 2c-2 by the runtime
-/// manager.
+/// The runtime event interface the worker consumes: fed by the runtime manager (and by test
+/// doubles).
 pub(crate) enum RuntimeEvent {
     GenerationStarted {
         generation: u64,
     },
-    #[cfg_attr(
-        all(feature = "dev-endpoint", not(test)),
-        expect(dead_code, reason = "sent by the 2c-2 runtime manager")
-    )]
     GenerationEnded {
         generation: u64,
         reason: EndReason,
@@ -267,6 +270,9 @@ pub(crate) struct Assistant {
     runtime: Mutex<Runtime>,
     breaker: Mutex<Breaker>,
     wake: Notify,
+    /// Until when the server is presumed busy with a request cancelled at its deadline.
+    busy_until: Mutex<Option<Instant>>,
+    signals: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Signal>>>,
 }
 
 impl Assistant {
@@ -276,6 +282,8 @@ impl Assistant {
             runtime: Mutex::new(Runtime::Starting { generation: None }),
             breaker: Mutex::new(Breaker::new()),
             wake: Notify::new(),
+            busy_until: Mutex::new(None),
+            signals: Mutex::new(None),
         })
     }
 
@@ -357,6 +365,10 @@ impl Assistant {
                     _ => Runtime::Starting { generation: None },
                 };
                 self.breaker().generation_ended(generation, now.into_std());
+                *self
+                    .busy_until
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                 let mut table = self.table();
                 table.queue.clear();
                 for job in table.jobs.iter_mut().filter(|job| job.live()) {
@@ -364,6 +376,19 @@ impl Assistant {
                 }
             }
         }
+    }
+
+    /// The breaker's state, for the assistant page.
+    pub(crate) fn breaker_state(&self) -> String {
+        self.breaker().describe(Instant::now().into_std())
+    }
+
+    /// Where expiries and completed exchanges are reported (the runtime manager).
+    pub(crate) fn subscribe(&self, sender: tokio::sync::mpsc::UnboundedSender<Signal>) {
+        *self
+            .signals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sender);
     }
 
     /// The owner's Restart or the app's start: the breaker is reset.
@@ -580,10 +605,42 @@ impl Assistant {
     /// The worker: runs one job at a time until the process ends.
     pub(crate) async fn work(self: Arc<Self>) {
         loop {
+            if let Some(until) = self.busy() {
+                tokio::select! {
+                    () = tokio::time::sleep_until(until) => {}
+                    () = self.wake.notified() => {}
+                }
+                continue;
+            }
             match self.next() {
                 Some(run) => self.run(run).await,
                 None => self.wake.notified().await,
             }
+        }
+    }
+
+    /// The end of the presumed busy time after a deadline cancel, while it lasts.
+    fn busy(&self) -> Option<Instant> {
+        let mut busy = self
+            .busy_until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match *busy {
+            Some(until) if Instant::now() < until => Some(until),
+            _ => {
+                *busy = None;
+                None
+            }
+        }
+    }
+
+    fn signal(&self, signal: Signal) {
+        if let Some(sender) = &*self
+            .signals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            let _ = sender.send(signal);
         }
     }
 
@@ -640,7 +697,12 @@ impl Assistant {
         let result = tokio::select! {
             result = work => Some(result),
             () = deadline => None,
-            () = run.cancel.notified() => return self.neutral(&run),
+            () = run.cancel.notified() => {
+                // A superseded or stale job's request is dropped mid-way too: the server may
+                // still be evaluating it.
+                self.presume_busy(&run);
+                return self.neutral(&run);
+            }
         };
         let now = Instant::now();
         let mut table = self.table();
@@ -652,8 +714,26 @@ impl Assistant {
         });
         let Some(job) = current else {
             drop(table);
+            // Ended meanwhile (superseded or stale as the deadline fired): its request was
+            // still dropped mid-way, so the server is presumed busy as on any expiry, while
+            // it is still this generation's (`presume_busy` checks).
+            if result.is_none() {
+                self.presume_busy(&run);
+            }
             return self.neutral(&run);
         };
+        match &result {
+            None => {
+                self.presume_busy(&run);
+                self.signal(Signal::Expired {
+                    generation: run.generation,
+                });
+            }
+            Some(Ok(_)) => self.signal(Signal::Completed {
+                generation: run.generation,
+            }),
+            Some(Err(_)) => {}
+        }
         let (answer, outcome) = match result {
             None => (Answer::AskAgain, breaker::Outcome::Neutral),
             Some(Err(Attempt::TooLong)) => (Answer::TooLong, breaker::Outcome::Neutral),
@@ -668,6 +748,19 @@ impl Assistant {
         close(job, answer, now);
         drop(table);
         self.breaker().record(run.ticket, outcome, now.into_std());
+    }
+
+    /// After a request is dropped (deadline, supersession, a newer note), the server is
+    /// presumed busy for the calibrated prompt term, while it is still this generation's.
+    fn presume_busy(&self, run: &Run) {
+        let current = matches!(&*self.runtime(), Runtime::Ready { generation, .. } if *generation == run.generation);
+        if current {
+            *self
+                .busy_until
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(Instant::now() + run.budgets.busy_after_expiry);
+        }
     }
 
     fn neutral(&self, run: &Run) {
@@ -694,6 +787,12 @@ impl Assistant {
         self.table().jobs.len()
     }
 
+    /// Sends a signal as the worker would (manager tests).
+    #[cfg(test)]
+    pub(crate) fn signal_for_tests(&self, signal: Signal) {
+        self.signal(signal);
+    }
+
     #[cfg(test)]
     pub(crate) fn breaker_closed(&self) -> bool {
         self.breaker().is_closed()
@@ -717,7 +816,8 @@ impl Assistant {
 
 /// The breaker (503) then capacity (429) of a start, computed as if `superseded` were
 /// already gone (plan §1.4, "Jobs"): at most D waiting, the worst-case wait (the running
-/// job's remaining run deadline plus R per waiting job) within Q, fewer than 64 live jobs.
+/// job's remaining run deadline, or the rest of the busy time after a deadline cancel, plus
+/// R per waiting job) within Q, fewer than 64 live jobs.
 impl Assistant {
     fn admissible(
         &self,
@@ -733,7 +833,13 @@ impl Assistant {
             .iter()
             .find(|job| matches!(job.state, State::Running { .. }) && Some(job.id) != gone)
             .map_or(Duration::ZERO, |job| job.started_left(budgets.run, now));
-        let worst = running_left + budgets.run * u32::try_from(waiting).unwrap_or(u32::MAX);
+        let busy_left = self
+            .busy_until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map_or(Duration::ZERO, |until| until.saturating_duration_since(now));
+        let worst =
+            running_left.max(busy_left) + budgets.run * u32::try_from(waiting).unwrap_or(u32::MAX);
         let live_records = table
             .jobs
             .iter()

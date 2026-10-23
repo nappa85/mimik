@@ -11,9 +11,10 @@ bound, quick-add, the validity flag, the sheet module with save on leaving a fie
 interpretation assistant of development builds) is described
 in `docs/assisted-entry.md`; this plan only adds to it.
 
-Remaining, in order (2b measured and reviewed, `docs/results.md`; ASSIST-27 to ASSIST-41
+Remaining, in order (2b measured and reviewed, `docs/results.md`; ASSIST-27 to ASSIST-42
 decided; Rust 1.99.1 and `rig-core` 0.45.0 in place, ASSIST-39; 2c-1, interpretation against a
-hand-started local server, built, `docs/assisted-entry.md`): **2c-2** the model runtime (process,
+hand-started local server, built, `docs/assisted-entry.md`; 2c-2a, the CPU runtime, built,
+`docs/model-runtime.md`): **2c-2** the model runtime (process,
 token, confinement, budgets), **2d-1** the owner model setting with local models, **2d-2**
 model downloads, **3** bundles and reminders, **4** suggestions and "Which Sword?", **5** docs
 and gate; each sub-step has its own branch, tests and reviews. The model runs GPU-first with
@@ -75,6 +76,11 @@ steps add:
 
 ### 1.4a Model runtime, device and budgets (2c-2; ASSIST-27, ASSIST-29 to ASSIST-34, ASSIST-40)
 
+Built for the CPU path at level 1 (step 2c-2a; level 3 built but not used, ASSIST-43): [model-runtime.md](model-runtime.md) is
+the reference and wins where it differs from this design. What follows stays the design for
+2c-2b (the GPU path, the device choice and fallback, level 2) and is kept whole as their
+context.
+
 Linux x86_64 is the only platform built and verified in 2c-2; macOS (Metal) and Windows
 (Vulkan) runtime code is deferred with no platform designed out (ASSIST-34, §4 Later).
 Production never needs a container (ASSIST-29); on the dev host the pinned official build runs
@@ -82,9 +88,11 @@ natively for these tests (ASSIST-40).
 
 - **Pinned build (ASSIST-33):** a manifest, the data file `schemas/llama-runtime-v1.json`
   embedded into Mimik with `include_str!` (a test asserts the embedded copy equals the file),
-  also read by `llama-fetch` and by packaging, so CI and the binary verify the same set, pins one llama.cpp build (b11610
-  as in 2b unless the 2c-2 review picks a newer one) for Linux x86_64: the official GitHub
-  release assets for the Vulkan and the CPU build, each asset's SHA-256, and the path and
+  also read by `llama-fetch` and by packaging, so CI and the binary verify the same set, pins one llama.cpp build (b11609,
+  ASSIST-42: b11610, measured in 2b, has no release assets, and b11609's CPU and Vulkan source
+  is identical to it) for Linux x86_64: the official GitHub release assets for the Vulkan and
+  the CPU build (`llama-b11609-bin-ubuntu-vulkan-x64.tar.gz`, SHA-256 `8aff1888…`, and
+  `llama-b11609-bin-ubuntu-x64.tar.gz`, SHA-256 `f95cbb27…`; gzip tarballs), each asset's SHA-256, and the path and
   SHA-256 of every file Mimik runs from them. Before 2c-2 depends on them, the manifest entry
   records the exact asset names, the system libraries each binary needs (from its ELF
   dependencies: glibc version floor, `libvulkan.so.1`, others), how the CPU backend is chosen
@@ -120,8 +128,8 @@ natively for these tests (ASSIST-40).
   measurement before it ships): `--jinja`, `--n-gpu-layers`, `--fit`, threads, `--ctx-size`,
   `--parallel`, `--cache-ram`, `--reasoning`, plus the per-request `cache_prompt: true`,
   `stream: true` and the greedy sampler (temperature 0, top-k 1, seed 0). `--parallel 1`: jobs
-  run one at a time (ASSIST-32). The pinned b11610 `--help` (checked on the dev host,
-  2026-10-22) lists `--api-key-file`, `--api-key` with the environment variable
+  run one at a time (ASSIST-32). The b11610 `--help` (checked on the dev host,
+  2026-10-22, from the 2b image; the pinned b11609 is the same source) lists `--api-key-file`, `--api-key` with the environment variable
   `LLAMA_API_KEY`, `--ignore-eos`, `--slots`/`--no-slots`, `-dev`/`--device`,
   `--list-devices`, and `--host` accepting Unix socket paths. The runtime check (CI, below)
   runs the pinned binary's `--version` and `--help` for every flag; behaviour that help text
@@ -153,8 +161,8 @@ natively for these tests (ASSIST-40).
   - a new required job `llama-fetch` (in the `mimik-ci` container like `checks`, with
     `timeout-minutes: 15`): fetches the
     pinned assets, builds the source archive with `git archive` of the pinned commit, fetches
-    the test model, verifies every hash, unpacks the assets (with `unzip`, installed in the
-    image, under `target/`), and uploads the verified `llama/` files, the source archive and
+    the test model, verifies every hash, unpacks the assets (gzip tarballs, with Python's
+    `tarfile` refusing links outside the archive, under `target/`), and uploads the verified `llama/` files, the source archive and
     the test model as artifacts;
   - `checks` gains `needs: llama-fetch`, downloads that artifact before packaging, packages
     only it (since `upload-artifact` drops file modes, every job that unpacks re-hashes each
@@ -288,11 +296,13 @@ natively for these tests (ASSIST-40).
      denied; it could listen on another address on its port and reach local services over Unix
      sockets"; with a Landlock ABI below 4 (no network rules): "not network-confined: TCP egress
      allowed; filesystem restricted"; partial filesystem enforcement is shown as such; with no
-     Landlock at all (`RestrictionStatus` none) the level is not reached, and level 3 is used
-     with its own wording.
-  3. **Unconfined** (seccomp only, TCP on `127.0.0.1`): "not confined: TCP egress allowed, and
+     Landlock at all (`RestrictionStatus` none) the level is not reached, and the assistant is
+     unavailable unless the owner has explicitly allowed level 3 (ASSIST-43).
+  3. **Unconfined** (seccomp only, TCP on `127.0.0.1`), used only when the owner has
+     explicitly allowed it (ASSIST-43; not in 2c-2a): "not confined: TCP egress allowed, and
      the whole filesystem readable by Mimik's user is readable by the model server".
-  The assistant runs at every level (hardening is "where available", ASSIST-30); the page
+  The assistant runs at levels 1 and 2, and at level 3 only with the owner's explicit
+  permission (ASSIST-43; hardening is "where available", ASSIST-30); the page
   shows the level next to the assistant state and next to the 2d "Try" button (a downloaded
   GGUF is untrusted input to llama-server, contained only by this).
 - **Seccomp (every level):** pure Rust only, adding no runtime shared-library dependency to
@@ -317,9 +327,7 @@ natively for these tests (ASSIST-40).
   parent-death setting (it is per task): `execve` is refused, and `execveat` is allowed only on
   the verified runtime descriptor's number with `AT_EMPTY_PATH`, that descriptor being
   `O_CLOEXEC` so it is gone after the first exec; `dup2`, `dup3` and `fcntl(F_DUPFD*)`
-  targeting that number are refused if needed. If 2c-2's live check shows this cannot be made
-  sound, lifetime containment on levels 2 and 3 is best effort (the pidfile sweep at the next
-  start) and the page says so (ASSIST-L27). `pidfd_open`, `pidfd_getfd`, `process_madvise`
+  targeting that number are refused if needed. 2c-2a made it sound: the descriptor is 1023 and `RLIMIT_NOFILE` is 1023, so no later descriptor can take the number ([model-runtime.md](model-runtime.md)). `pidfd_open`, `pidfd_getfd`, `process_madvise`
   and `kcmp` are refused (they would let the server reach Mimik's descriptors). TCP Fast Open
   is refused on every level: `sendto` whose flags carry `MSG_FASTOPEN`, `sendmsg` and
   `sendmmsg` whose flags carry it, and `setsockopt(TCP_FASTOPEN_CONNECT)` return `EPERM`, since
@@ -352,7 +360,8 @@ natively for these tests (ASSIST-40).
   missing, set-ID or lacking an option (named), user namespaces disabled
   (`user.max_user_namespaces`, `kernel.unprivileged_userns_clone`), the Ubuntu AppArmor
   restriction on unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns`),
-  or the probe's own error. Then level 2 is probed the same way, then level 3. A level that
+  or the probe's own error. Then level 2 is probed the same way, then level 3 only if the owner
+  has explicitly allowed it (ASSIST-43). A level that
   passes the probe can still fail at the real start; that failure is recorded with its cause
   and shown on the page, and the transitions below move down only for sandbox-attributable
   failures. Memory: the child has no memory cap (`RLIMIT_AS` is
@@ -364,7 +373,7 @@ natively for these tests (ASSIST-40).
   0700 private directory, deleted once `/health` answers (`LLAMA_API_KEY` in the runner's
   environment, readable only by Mimik's user, is the documented alternative), never in an
   argument. A pinned build without either channel would not start the assistant ("the model
-  server cannot receive its token safely"); b11610 has both. It never runs without a token
+  server cannot receive its token safely"); b11609 has both. It never runs without a token
   and never passes it on a command line. `/health` without a token is a live-checked property
   of the pinned build; every other request carries it.
 - **Endpoint check, per connection, before its first byte:** level 1: `SO_PEERCRED` on the
@@ -439,7 +448,7 @@ natively for these tests (ASSIST-40).
   | Event | Action | Failure count |
   |---|---|---|
   | Attempt fails on the GPU path (budgets that do not derive included), or the GPU child exits, or is stopped as hung | stop and wait until gone, start on the CPU path at the same level at once, showing the reason; CPU until Mimik restarts or the owner presses "Try the GPU again" | not counted |
-  | Attempt on the CPU path fails with a sandbox-attributable failure at level 1 or 2 (a bwrap or Landlock setup error, a status-descriptor failure before exec, the level's preflight failing) | next attempt at once on the next level that passed its probe; the skipped level and its reason are recorded and shown | not counted |
+  | Attempt on the CPU path fails with a sandbox-attributable failure at level 1 or 2 (a bwrap or Landlock setup error, a status-descriptor failure before exec, the level's preflight failing) | next attempt at once on the next allowed level that passed its probe (level 3 only with the owner's explicit permission, ASSIST-43); none left: `unavailable` with the fix; the skipped level and its reason are recorded and shown | not counted |
   | Attempt fails on the CPU path, otherwise (model-load errors, hash mismatches, exits after exec keep the level) | retry after 2 minutes | +1 |
   | Child exits while ready (CPU path) | restart now | +1 only within 10 minutes of `ready` |
   | Two consecutive run-deadline expiries with no completed exchange between | stop as hung, wait until gone, restart, re-measure (whatever `/health` says); expiries never count toward the breaker | as a child exit |
@@ -719,46 +728,57 @@ no sheet or player text. No prompts, player text, presigned URLs or token in log
 
 ### 2c-2 Model runtime
 
-Scope: §1.4a on Linux x86_64: manifest, packaging and the CI runtime check, runner,
-confinement levels, preflight, token, endpoint check, output drain, generations and
-transitions, device choice and fallback, priming, calibration and budgets; the owner's
-assistant page (state, path, level, measurements, budgets, "Restart", "Try the GPU again").
-The development endpoint of 2c-1 stays for tests only. Tests (fake runner binary or fake server
-unless stated; live means the pinned official build on this host, reported separately; GPU at
-night or at a weekend):
-- manifest and packaging: an extra, missing or changed runtime file → no child, unavailable
-  with the reason; a group-writable runtime file → refused; a development override
-  (`--assistant-runtime <dir>`) with other files → refused; `package_release.py` stages
-  exactly the manifest's files and refuses others, and after the artifact hand-off re-hashes
-  them and reapplies the manifest's modes; the `llama-runtime` job fails closed when the asset
-  cannot be fetched, its hash differs, or the probe reaches less than level 1; the shipped
-  binary has no `--assistant-dev-endpoint` (asserted by the packaging check and
-  `smoke_release.py`);
-- flags (CI, pinned build): `--version` reports the pinned build; `--help` lists every flag of
-  the vector; live: `/health` without a token, the per-request `ignore_eos` and the
-  device-list and offload-line formats behave as §1.4a assumes, or the step stops for a
-  decision;
-- runner: the child's environment holds only the allowed names (`/proc/<pid>/environ`); no
-  inherited descriptor beyond the listed ones (`/proc/<pid>/fd`); `RLIMIT_CORE` 0 and
-  `RLIMIT_FSIZE` 64 MiB (a write past it kills the child with `SIGXFSZ`, handled as a child
-  exit); a helper that calls `prctl(PR_SET_PDEATHSIG, 0)` on levels 2 and 3 is refused, and
-  SIGKILL of Mimik still kills it; a set-ID `bwrap` → refused by the preflight;
-  a runner
-  whose parent died before the parent-death signal was set exits (parent PID mismatch); live:
-  SIGKILL of Mimik during startup and while ready kills the whole tree;
-- bubblewrap level (live on this host, where user namespaces work): the CPU and GPU paths reach
-  `ready`; inside, the child cannot connect over TCP to a host listener, a LAN address or a
-  public address, cannot send UDP, cannot reach a host abstract or pathname Unix socket (an
-  adversarial helper binary in place of llama-server, run with the same profile), cannot see
-  host paths outside the allowlist, cannot create a UDP, raw or `io_uring` instance, cannot
-  fork or start another process; with the probed `--size` it cannot fill `/tmp` or
-  `/dev/shm` beyond their sizes in many small files, and without it only the per-file limit
-  holds and the page states "temporary space unbounded";
-  Mimik reaches it only through the socket, connecting through the directory descriptor (a
-  socket directory whose host path is longer than 108 bytes still works); the socket
-  directory is removed when the generation stops; preflight causes: bwrap absent, user namespaces
-  disabled, a probe failure (each reported by name and falling to the next level); the
-  AppArmor restriction is reported by name on an Ubuntu VM;
+Split (user, 2026-10-22) into **2c-2a** (the CPU path at confinement level 1; level 3 built,
+not used, ASSIST-43) and
+**2c-2b** (the GPU path and level 2), each with its own branch and reviews; the machinery of
+2c-2a is path-aware, so 2c-2b only adds to it.
+
+#### 2c-2a CPU path, bubblewrap (level 3 built, not used: ASSIST-43)
+
+Built (branch `assist-2c2`; reference [model-runtime.md](model-runtime.md)). Remaining before
+it is marked complete:
+
+- the idle native calibration on this host, CPU path, at the ASSIST-41 default (5 threads) and
+  at 2 threads: start to `ready`, priming, the two samples, the filler density, the derived B,
+  R, D and Q, to `docs/results.md` (the first native run was under concurrent load); it sets
+  the expected CPU outcome and comes back to the user if nothing fits;
+- grammar against no-grammar per-token generation time on the CPU path, which settles the
+  calibration form; a job's real prompt tokens against N(B);
+- cancellation with the real model: a superseding job's first token after cancelling a job
+  mid-generation and mid-prompt (a 1 KiB prompt);
+- the official CPU asset on the documented minimum host (an Ubuntu 22.04 VM) and the AppArmor
+  preflight on an Ubuntu VM;
+- the `llama-runtime` CI job's first run (it needs a push).
+
+#### Level 3 behind an owner opt-in (later step, ASSIST-43)
+
+Level 3 is built but switched off in 2c-2a. Bringing it back: an explicit owner setting (never
+automatic), shown on the page with its exposure, and these before it can be enabled:
+
+- refuse a real runtime path holding `$` (the loader's dynamic string tokens in dlopen names),
+  with docs and tests;
+- the bind-deadline items: a robust bind test on a loaded runner, the "deadline passed, exit
+  re-checked" branch exercised, and an early bind error decided at once;
+- a cancel-aware drain settle in `bind_outcome` (100 ms slices);
+- the live cwd-helper hardening: bounded ready wait and read, failing at once on refusal or
+  exit, kill-on-drop guards.
+
+#### 2c-2b GPU path and Landlock
+
+Scope: §1.4a's device choice, the GPU build and the GPU → CPU fallback, "Try the GPU again" on
+the assistant page, and confinement level 2 (Landlock with seccomp). Tests:
+- device and fallback: per-node sandboxed listings (format pinned from the real build): one
+  hardware GPU plus lavapipe → the hardware GPU, lavapipe excluded before the count; only
+  `llvmpipe` → CPU; a host where the selected card is `Vulkan1` but its sandboxed list names it
+  `Vulkan0` → `--device Vulkan0`; enumeration order changing between discovery and launch → the
+  launch name still comes from the in-sandbox listing; two identical cards at level 1 → told
+  apart and remembered by PCI address; with the owner's explicit permission for level 3
+  (ASSIST-43), two identical cards at level 3 → CPU path with the page note; dedicated before integrated only when sysfs says so; no `--device` on the CPU path; a
+  mismatch at the real start → GPU failure; an offload line with N < M → GPU failure; a level
+  that passes for the CPU build but not the GPU build → each path at its own level;
+  `--assistant-device cpu` never lists devices; live (dev host): Vulkan on the RX 6650 XT reaches `ready` with GPU
+  budgets, refused calls checked with `strace` once, and killing the child mid-job ends on the
+  CPU path with CPU budgets and the page saying why;
 - Landlock level: the state comes from `RestrictionStatus` (full, partial, none) and the
   page text matches the table in §1.4a; seccomp refusals as above (testable here); with
   Landlock network rules: no TCP connect to a host listener, LAN or public address, no bind
@@ -769,103 +789,17 @@ night or at a weekend):
   adversarial helper and recorded; on this host: the helper cannot fork, `vfork` or `clone` a
   process (`clone3` → `ENOSYS`) while threads still start, so no descendant outlives a SIGKILL
   of the child;
-- token: the fake server sees `Authorization: Bearer <token>` on priming, calibration and
-  every job, and a new token after a restart; live: no token and a wrong token on
-  `/v1/chat/completions` → 401, the right one is served, `/health` answers without it; the
-  token is in no command line (`/proc/<pid>/cmdline`), no log line and no file after
-  `/health` (TCP levels); a fake build without a safe channel → the assistant does not start;
-- socket directory: a pre-created `<data dir>/run/<generation>/` that is a symbolic link, owned
-  by another user or of another mode → the start is refused; files written into it by a helper
-  are each bounded by `RLIMIT_FSIZE`;
-- exec and descriptors (levels 2 and 3, adversarial helper): a thread that calls `execve` →
-  refused; `execveat` on any descriptor but the runtime one, or on a duplicate of it → refused;
-  thread → exec → SIGKILL of Mimik → nothing survives (or, if 2c-2 finds this unsound, the
-  pidfile sweep removes it at the next start and the page says lifetime containment is best
-  effort); a ptrace-accessible cooperative helper holding a forbidden descriptor → the child's
-  `pidfd_open` and `pidfd_getfd` are refused, also with Yama scope 0; a `sendto`, `sendmsg`
-  or `sendmmsg` with `MSG_FASTOPEN` to a host listener and `setsockopt(TCP_FASTOPEN_CONNECT)`
-  → `EPERM` on every level, and the listener sees no connection;
-- endpoint: level 1 (live): the peer of llama-server's socket has the reaper as parent and the
-  reported `pid-namespace`, and is accepted; a peer with Mimik's UID that is not in that
-  namespace (a helper listening on a socket swapped into the directory) → nothing sent; a
-  UID-only match is never accepted; levels 2 and 3: a second `SO_REUSEPORT` listener on the
-  child's port → nothing sent; a squatter listening on the port → its
-  `LISTEN` inode is not the child's → nothing sent; a child that accepts late (after a delay)
-  is still accepted; a child that exits between the check and the request → the connection
-  fails, nothing sent to anyone else; a child that never prints its listening line but listens
-  → reached; a port taken before the child binds → a new port, at most 3;
-- model and runtime files, per level: a symbolic link, a link in a parent position, a
-  directory, a FIFO (no block) and a file writable by others in the models folder → refused;
-  a model swapped for another file after the hash and before the load → the hashed inode is
-  loaded, at level 1 through `--ro-bind-fd` and at levels 2 and 3 through `/proc/self/fd`
-  (live: the pinned server loads from that path);
-- output: a child writing endless lines and a line of 1 MiB → bounded memory, nothing in
-  Mimik's log; live: a job with a marker phrase → the marker in neither stream;
-- generations and transitions (fake runner, injectable clock), one test per table row: GPU
-  failure at each phase → CPU at once, not counted, the next child started only after the old
-  one is gone (bwrap's `exit-code` and the reaper's pidfd); GPU budgets that do not derive →
-  CPU path, the page saying why; a CPU attempt with a sandbox-setup failure at level 1 (a
-  bwrap setup error, a status-descriptor failure before exec, the level's probe failing) →
-  level 2 at once, the skip recorded, and the same at level 2 → level 3; a model-load error
-  before the first successful `/health`, a hash mismatch or an exit after exec → same level,
-  retry path; a lower level goes back up only on Restart or
-  app start; a queue with a running and a waiting
-  job at a generation change → both end "the assistant restarted: ask again", the breaker
-  unchanged; CPU failures
-  retried after 2 minutes, four failures → unavailable; a second exit within 10 minutes counts,
-  after 10 ready minutes it does not; two consecutive deadline expiries while `/health`
-  answers 200 → stopped as hung and restarted; a late exit event of an old generation changes
-  nothing; Restart resets the failure count and the breaker, a new child alone does not; a second Mimik on the same data
-  directory cannot take the pidfile lock; a leftover child matching PID, start time and path
-  is killed, a reused PID is left alone; shutdown → the tree is gone within 5 s;
-- device and fallback: per-node sandboxed listings (format pinned from the real build): one
-  hardware GPU plus lavapipe → the hardware GPU, lavapipe excluded before the count; only
-  `llvmpipe` → CPU; a host where the selected card is `Vulkan1` but its sandboxed list names it
-  `Vulkan0` → `--device Vulkan0`; enumeration order changing between discovery and launch → the
-  launch name still comes from the in-sandbox listing; two identical cards at level 1 → told
-  apart and remembered by PCI address; two identical cards at level 3 → CPU path with the page
-  note; dedicated before integrated only when sysfs says so; no `--device` on the CPU path; a
-  mismatch at the real start → GPU failure; an offload line with N < M → GPU failure; a level
-  that passes for the CPU build but not the GPU build → each path at its own level; a model
-  larger than `MemAvailable` minus 1 GiB → refused with the reason; `--assistant-device cpu`
-  never lists devices; live (dev host): Vulkan on the RX 6650 XT reaches `ready` with GPU
-  budgets, refused calls checked with `strace` once, and killing the child mid-job ends on the
-  CPU path with CPU budgets and the page saying why;
-- probe: `mimik assistant-runner --probe` at each level opens the model through its
-  descriptor (a regular-file `--ro-bind-fd` at level 1), binds the socket or port, reads the
-  token channel and, on the GPU path, opens the render node; a removed bind, a missing token
-  channel or a refused open fails the probe with that cause; the probe's JSON line and exit
-  status match its level; no build accepts a software renderer;
-- priming and calibration (fake server): a start before they complete answers 503 "starting"
-  and queues nothing; they never count toward the breaker; a sample with a missing, zero or
-  non-finite timing, `predicted_n` different from `max_tokens`, a negative tail or cached
-  tokens below 75 % of the prefix fails the attempt; the two samples differ from their first
-  dynamic byte; fillers of equal bytes but unequal token counts → N_cal is the smaller and the
-  same N(B) enters both estimates; T(B) is the larger of the two samples' estimates for each candidate (a sample
-  slower in prompt but faster in generation changes the choice for a small B);
-  a restarted child re-primes and re-calibrates before admitting jobs; neither carries sheet
-  text;
-- budgets (unit; formula fixtures, not evidence): the 2b container figures with t 170 → B 512,
-  R 90, D 1, Q 30, and with t 365 → unavailable "too slow"; the 2b GPU figures → B 4,096, R 15, D 4, Q 60; a GPU measurement that fits only
-  2,048 or 1,024 picks it, and one that fits none → GPU failure and CPU path; a CPU
-  measurement that fits only 768 or 512 picks it, and one that fits none → unavailable "too
-  slow" with the numbers while number entry, notes and Undo work; R never below 15 or above
-  the path's cap; CPU Q + R never above 120;
-- assistant off: no child process, no device listing, no preflight; the page says "off";
-- rights (connected router): "Restart" and "Try the GPU again" → 403 for a non-owner, CSRF
-  checked, a second press while a transition runs → no second transition, a session revoked
-  meanwhile → refused;
-- live checks (stop for a decision on a mismatch): llama-server serving and checking the token
-  over the Unix socket at level 1; `/health` without a token; the per-request `ignore_eos`;
-  the `/proc/self/fd` model path; cancellation mid-generation and mid-prompt (the superseding
-  job's first token);
-- measurement step (to `docs/results.md`, before 2c-2 is marked complete; 2c-2's CPU-baseline
-  claim rests on it, while 2c-1 does not): the first native calibration on this host on both
-  paths, the CPU path at the ASSIST-41 default and at 2 threads (start to `ready`, priming, the two samples, the
-  filler's density, the derived B, R, D and Q), which sets the expected CPU outcome; grammar
-  against no-grammar per-token generation time, which settles the calibration form; a job's
-  real prompt tokens against N(B); the unpacked official CPU asset starting on the documented
-  minimum host (a VM), as the guaranteed baseline.
+- generations and transitions: the GPU rows of the table: GPU failure at each phase → CPU at
+  once, not counted; GPU budgets that do not derive → CPU path, the page saying why; a
+  sandbox-setup failure at level 2 → level 3 only with the owner's explicit permission,
+  otherwise `unavailable` (ASSIST-43); a level that passes for the CPU build but not the
+  GPU build → each path at its own level;
+- bubblewrap level: the GPU path reaches `ready` with the selected render node only; probe on
+  the GPU path opens the render node and enumerates the device; no build accepts a software
+  renderer;
+- rights: "Try the GPU again" → 403 for a non-owner, CSRF checked, no second transition;
+- measurement step: the first native GPU calibration (start to `ready`, priming, samples, B, R,
+  D, Q), grammar against no-grammar on the GPU path, refused calls checked with `strace` once.
 
 ### 2d-1 Owner model setting (local models)
 
@@ -1024,8 +958,9 @@ prevented); one revision per Enter makes history long (no-ops write nothing, no 
 (proxies, redirects, retries) could send player text off the machine or repeat it, hence the
 client policy and its tests. Runtime: bubblewrap needs unprivileged user namespaces, which
 some distributions disable or restrict (Ubuntu's AppArmor rule), and older distributions'
-bubblewrap may lack an option the probe needs; those machines fall back to Landlock or to
-unconfined, as shown on the page; and Landlock is missing or
+bubblewrap may lack an option the probe needs; those machines fall back to Landlock (2c-2b),
+or run no assistant unless the owner explicitly allows unconfined (ASSIST-43), as shown on the
+page; and Landlock is missing or
 lacks network rules on many kernels (this host's included), so a machine can end on a lower
 level; the Landlock level leaves inbound listening on other addresses and local Unix sockets
 open; a malicious GGUF exploiting llama-server is contained only as far as the active level

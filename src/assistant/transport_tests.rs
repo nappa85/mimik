@@ -38,11 +38,10 @@ fn tcp_endpoint_guard() {
 
 fn interpreter(endpoint: Endpoint) -> RigInterpreter {
     RigInterpreter::new(
-        endpoint,
+        Bounded::direct(endpoint),
         "dummy-token-not-a-secret".into(),
         "granite-test".into(),
     )
-    .unwrap()
 }
 
 fn completion() -> Completion {
@@ -172,7 +171,7 @@ async fn bodies_over_the_bound_are_refused() {
 async fn a_plain_body_over_the_bound_is_refused_without_buffering() {
     let (url, shared) = fake_server::tcp().await;
     shared.push(Reply::Huge(2 * BODY_LIMIT));
-    let transport = Bounded::new(Endpoint::Tcp(tcp(&url, false).unwrap())).unwrap();
+    let transport = Bounded::direct(Endpoint::Tcp(tcp(&url, false).unwrap()));
     let request = http::Request::post(format!("{url}/v1/chat/completions"))
         .body(Bytes::from_static(b"{}"))
         .unwrap();
@@ -203,7 +202,7 @@ async fn a_stream_that_is_not_a_well_formed_completion_is_a_transport_failure() 
 async fn a_request_for_another_destination_is_refused() {
     let (url, shared) = fake_server::tcp().await;
     let (other, other_shared) = fake_server::tcp().await;
-    let transport = Bounded::new(Endpoint::Tcp(tcp(&url, false).unwrap())).unwrap();
+    let transport = Bounded::direct(Endpoint::Tcp(tcp(&url, false).unwrap()));
     let request = http::Request::post(format!("{other}/v1/chat/completions"))
         .body(Bytes::from_static(b"{}"))
         .unwrap();

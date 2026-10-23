@@ -209,6 +209,19 @@ impl Breaker {
         }
     }
 
+    /// The state as the assistant page names it.
+    pub(crate) fn describe(&self, now: Instant) -> String {
+        match self.state {
+            State::Closed => format!("closed ({} counted failures)", self.counts.len()),
+            State::Open { until } => format!(
+                "open for {} s more",
+                until.saturating_duration_since(now).as_secs()
+            ),
+            State::HalfOpen { probe: Some(_) } => "half-open, a probe job is running".into(),
+            State::HalfOpen { probe: None } => "half-open, the next job is the probe".into(),
+        }
+    }
+
     /// The owner's Restart or the app's start.
     pub(crate) fn reset(&mut self) {
         *self = Self::new();

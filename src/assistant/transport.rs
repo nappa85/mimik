@@ -1,31 +1,44 @@
 //! The model client's transport and its policy (assisted sheet plan §1.4, "Crate" and
-//! "Client policy"): one `reqwest` client per endpoint, no proxies whatever the environment
-//! says, no redirects, no retries, no decompression, plain HTTP/1 only, a fresh connection
-//! per request, and response bodies refused past [`BODY_LIMIT`], plain and streaming,
-//! without buffering them. It implements rig's `HttpClientExt`, so rig-core builds the
-//! requests and Mimik keeps the wire.
+//! "Client policy"; §1.4a, "Endpoint"): one HTTP/1 exchange per connection, over a stream
+//! Mimik opened itself and checked before its first byte, and response bodies refused past
+//! [`BODY_LIMIT`], plain and streaming, without buffering them. It implements rig's
+//! `HttpClientExt`, so rig-core builds the requests and Mimik keeps the wire.
+//!
+//! The exchange is `hyper`'s client connection on that stream (2c-2a): there is no pool, no
+//! proxy, no redirect, no retry and no decompression to turn off, and every connection goes
+//! through a [`Connect`] that the runtime gives the endpoint check (`reqwest`'s Unix-socket
+//! connector has no per-connection hook that could see the socket). Plain HTTP only: no TLS
+//! code is reachable from here.
 use bytes::Bytes;
 use futures_util::StreamExt;
+use http_body_util::{BodyExt, Full};
+use hyper_util::rt::TokioIo;
 use rig_core::http_client::{self, HttpClientExt, LazyBody, MultipartForm, StreamingResponse};
-use std::path::{Path, PathBuf};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 /// The most bytes of a response body, plain or streamed (as probed in 2b).
 pub(crate) const BODY_LIMIT: usize = 1024 * 1024;
 
-/// Where the model server listens.
+/// Where the development endpoint listens (2c-1; no endpoint check).
+#[cfg(any(test, feature = "dev-endpoint"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Endpoint {
     /// A loopback IP literal and port, as `http://<host>:<port>` (checked by [`tcp`]).
     Tcp(url::Url),
     /// A Unix socket path; requests name the fixed authority [`UNIX_AUTHORITY`].
-    Unix(PathBuf),
+    Unix(std::path::PathBuf),
 }
 
-/// The authority of request URLs on the Unix-socket connector. The connector ignores it:
-/// every connection goes to the configured path and nowhere else.
+/// The authority of request URLs on a Unix socket. It is only a name: every connection goes
+/// to the connector's socket and nowhere else.
 pub(crate) const UNIX_AUTHORITY: &str = "localhost";
 
 /// Why an endpoint URL is refused.
+#[cfg(any(test, feature = "dev-endpoint"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Refused {
     NotHttp,
@@ -40,6 +53,7 @@ pub(crate) enum Refused {
 /// endpoint only), with no userinfo or zone ID; an explicit port; no path, query or
 /// fragment. The raw authority is checked as typed as well as the parsed URL, because the
 /// WHATWG parser turns `127.1`, `0x7f.1` or `2130706433` into `127.0.0.1`.
+#[cfg(any(test, feature = "dev-endpoint"))]
 pub(crate) fn tcp(raw: &str, ipv6_loopback: bool) -> Result<url::Url, Refused> {
     let rest = raw.strip_prefix("http://").ok_or(Refused::NotHttp)?;
     let (authority, path) = rest.find('/').map_or((rest, ""), |at| rest.split_at(at));
@@ -84,37 +98,102 @@ pub(crate) fn tcp(raw: &str, ipv6_loopback: bool) -> Result<url::Url, Refused> {
     Ok(url)
 }
 
-/// The policy client for `endpoint`.
-///
-/// # Errors
-///
-/// Returns the builder's error (it builds no TLS, so none is expected).
-pub(crate) fn policy_client(endpoint: &Endpoint) -> Result<reqwest::Client, reqwest::Error> {
-    let builder = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .no_gzip()
-        .no_brotli()
-        .no_deflate()
-        .no_zstd()
-        .http1_only()
-        .https_only(false)
-        .pool_max_idle_per_host(0);
-    match endpoint {
-        Endpoint::Tcp(_) => builder.build(),
-        Endpoint::Unix(path) => unix(builder, path).build(),
+/// A connected stream to the model server.
+pub(crate) enum Stream {
+    Tcp(tokio::net::TcpStream),
+    Unix(tokio::net::UnixStream),
+}
+
+impl AsyncRead for Stream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
+        }
     }
 }
 
-#[cfg(unix)]
-fn unix(builder: reqwest::ClientBuilder, path: &Path) -> reqwest::ClientBuilder {
-    builder.unix_socket(path)
+impl AsyncWrite for Stream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Self::Tcp(stream) => Pin::new(stream).poll_write(cx, buf),
+            Self::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Unix(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
+        }
+    }
 }
 
-#[cfg(not(unix))]
-fn unix(builder: reqwest::ClientBuilder, _: &Path) -> reqwest::ClientBuilder {
-    builder
+/// A boxed connection attempt.
+pub(crate) type Connecting = Pin<Box<dyn Future<Output = std::io::Result<Stream>> + Send>>;
+
+/// Opens one connection to the model server. The runtime's connectors check, before the
+/// first byte, that it reaches the current child (§1.4a, "Endpoint check").
+pub(crate) trait Connect: Send + Sync + std::fmt::Debug {
+    fn connect(&self) -> Connecting;
+    /// The authority request URLs carry (`127.0.0.1:<port>`, or [`UNIX_AUTHORITY`]).
+    fn authority(&self) -> String;
+}
+
+/// The development endpoint's connector: straight to the address or the socket path, no
+/// check (2c-1, `dev-endpoint` builds and tests only).
+#[cfg(any(test, feature = "dev-endpoint"))]
+#[derive(Debug)]
+pub(crate) struct Direct(pub Endpoint);
+
+#[cfg(any(test, feature = "dev-endpoint"))]
+impl Connect for Direct {
+    fn connect(&self) -> Connecting {
+        let endpoint = self.0.clone();
+        Box::pin(async move {
+            match endpoint {
+                Endpoint::Tcp(url) => {
+                    let host = url.host_str().unwrap_or_default().trim_matches(['[', ']']);
+                    let ip: std::net::IpAddr = host
+                        .parse()
+                        .map_err(|_| std::io::Error::other("not an IP literal"))?;
+                    let port = url.port().ok_or_else(|| std::io::Error::other("no port"))?;
+                    tokio::net::TcpStream::connect((ip, port))
+                        .await
+                        .map(Stream::Tcp)
+                }
+                Endpoint::Unix(path) => tokio::net::UnixStream::connect(path)
+                    .await
+                    .map(Stream::Unix),
+            }
+        })
+    }
+
+    fn authority(&self) -> String {
+        match &self.0 {
+            Endpoint::Tcp(url) => format!(
+                "{}:{}",
+                url.host_str().unwrap_or_default(),
+                url.port().unwrap_or_default()
+            ),
+            Endpoint::Unix(_) => UNIX_AUTHORITY.to_owned(),
+        }
+    }
 }
 
 /// A response body past the bound.
@@ -141,70 +220,94 @@ impl std::fmt::Display for Elsewhere {
 
 impl std::error::Error for Elsewhere {}
 
-/// rig's transport: the policy client bound to one endpoint.
+/// rig's transport: one connector, one exchange per connection.
 #[derive(Clone, Debug)]
 pub(crate) struct Bounded {
-    client: reqwest::Client,
-    endpoint: Endpoint,
+    connector: Arc<dyn Connect>,
+    authority: String,
+}
+
+/// Aborts the connection's task when dropped, which closes the socket: a dropped response
+/// (a superseded or expired job) closes its connection at once.
+struct Driver(tokio::task::AbortHandle);
+
+impl Drop for Driver {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl Bounded {
-    pub(crate) fn new(endpoint: Endpoint) -> Result<Self, reqwest::Error> {
-        Ok(Self {
-            client: policy_client(&endpoint)?,
-            endpoint,
-        })
+    pub(crate) fn new(connector: Arc<dyn Connect>) -> Self {
+        let authority = connector.authority();
+        Self {
+            connector,
+            authority,
+        }
+    }
+
+    /// The development endpoint's transport.
+    #[cfg(any(test, feature = "dev-endpoint"))]
+    pub(crate) fn direct(endpoint: Endpoint) -> Self {
+        Self::new(Arc::new(Direct(endpoint)))
     }
 
     /// The base URL rig and the tokenizer build request URLs from (no trailing slash).
     pub(crate) fn base(&self) -> String {
-        match &self.endpoint {
-            Endpoint::Tcp(url) => url.as_str().trim_end_matches('/').to_owned(),
-            Endpoint::Unix(_) => format!("http://{UNIX_AUTHORITY}"),
-        }
+        format!("http://{}", self.authority)
     }
 
-    /// Whether a request URI goes to the endpoint: the same scheme, host and port on TCP,
-    /// the fixed authority on the Unix socket.
+    /// Whether a request URI goes to the endpoint: `http` and the connector's authority.
     fn destined(&self, uri: &http::Uri) -> bool {
-        if uri.scheme_str() != Some("http") {
-            return false;
-        }
-        match &self.endpoint {
-            Endpoint::Tcp(url) => {
-                let authority = uri.authority().map(http::uri::Authority::as_str);
-                let expected = format!(
-                    "{}:{}",
-                    url.host_str().unwrap_or_default(),
-                    url.port().unwrap_or_default()
-                );
-                authority == Some(expected.as_str())
-            }
-            Endpoint::Unix(_) => {
-                uri.authority().map(http::uri::Authority::as_str) == Some(UNIX_AUTHORITY)
-            }
-        }
+        uri.scheme_str() == Some("http")
+            && uri.authority().map(http::uri::Authority::as_str) == Some(self.authority.as_str())
     }
 
-    fn builder<T: Into<Bytes>>(
+    /// Checks the destination, connects, and sends one request in origin form with its `Host`.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the error type is rig's `http_client::Error`"
+    )]
+    async fn exchange(
         &self,
-        request: http::Request<T>,
-    ) -> Result<reqwest::RequestBuilder, Elsewhere> {
-        let (parts, body) = request.into_parts();
+        request: http::Request<Bytes>,
+    ) -> http_client::Result<(http::Response<hyper::body::Incoming>, Driver)> {
+        let (mut parts, body) = request.into_parts();
         if !self.destined(&parts.uri) {
-            return Err(Elsewhere);
+            return Err(http_client::Error::instance(Elsewhere));
         }
-        Ok(self
-            .client
-            .request(parts.method, parts.uri.to_string())
-            .headers(parts.headers)
-            .body(body.into()))
+        let target = parts
+            .uri
+            .path_and_query()
+            .map_or("/", http::uri::PathAndQuery::as_str)
+            .to_owned();
+        parts.uri = target
+            .parse()
+            .map_err(|error: http::uri::InvalidUri| http_client::Error::Protocol(error.into()))?;
+        let host = http::HeaderValue::from_str(&self.authority)
+            .map_err(|error| http_client::Error::Protocol(error.into()))?;
+        parts.headers.insert(http::header::HOST, host);
+        let request = http::Request::from_parts(parts, Full::new(body));
+        let stream = self
+            .connector
+            .connect()
+            .await
+            .map_err(http_client::Error::instance)?;
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .map_err(http_client::Error::instance)?;
+        let driver = Driver(tokio::spawn(connection).abort_handle());
+        let response = sender
+            .send_request(request)
+            .await
+            .map_err(http_client::Error::instance)?;
+        Ok((response, driver))
     }
 }
 
 /// Why a body was not read whole.
 enum BodyError {
-    Transport(reqwest::Error),
+    Transport(hyper::Error),
     Over,
 }
 
@@ -218,17 +321,18 @@ impl BodyError {
 }
 
 /// Reads a whole body, refusing it as soon as it passes `limit`.
-async fn bounded_body(response: reqwest::Response, limit: usize) -> Result<Bytes, BodyError> {
-    let mut stream = response.bytes_stream();
-    let mut body = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(BodyError::Transport)?;
-        if body.len() + chunk.len() > limit {
-            return Err(BodyError::Over);
+async fn bounded_body(mut body: hyper::body::Incoming, limit: usize) -> Result<Bytes, BodyError> {
+    let mut out = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(BodyError::Transport)?;
+        if let Ok(chunk) = frame.into_data() {
+            if out.len() + chunk.len() > limit {
+                return Err(BodyError::Over);
+            }
+            out.extend_from_slice(&chunk);
         }
-        body.extend_from_slice(&chunk);
     }
-    Ok(Bytes::from(body))
+    Ok(Bytes::from(out))
 }
 
 fn rebuild<B>(
@@ -241,6 +345,11 @@ fn rebuild<B>(
     Ok(out)
 }
 
+fn owned<T: Into<Bytes>>(request: http::Request<T>) -> http::Request<Bytes> {
+    let (parts, body) = request.into_parts();
+    http::Request::from_parts(parts, body.into())
+}
+
 impl HttpClientExt for Bounded {
     fn send<T, U>(
         &self,
@@ -250,13 +359,10 @@ impl HttpClientExt for Bounded {
         T: Into<Bytes> + Send,
         U: From<Bytes> + Send + 'static,
     {
-        let builder = self.builder(request);
+        let this = self.clone();
+        let request = owned(request);
         async move {
-            let response = builder
-                .map_err(http_client::Error::instance)?
-                .send()
-                .await
-                .map_err(http_client::Error::instance)?;
+            let (response, driver) = this.exchange(request).await?;
             let status = response.status();
             let headers = response.headers().clone();
             if !status.is_success() {
@@ -267,9 +373,10 @@ impl HttpClientExt for Bounded {
                     String::new(),
                 ));
             }
-            let body = bounded_body(response, BODY_LIMIT)
+            let body = bounded_body(response.into_body(), BODY_LIMIT)
                 .await
                 .map_err(BodyError::into_http)?;
+            drop(driver);
             let lazy: LazyBody<U> = Box::pin(async move { Ok(U::from(body)) });
             rebuild(status, headers, lazy).map_err(http_client::Error::Protocol)
         }
@@ -292,13 +399,10 @@ impl HttpClientExt for Bounded {
     where
         T: Into<Bytes> + Send,
     {
-        let builder = self.builder(request);
+        let this = self.clone();
+        let request = owned(request);
         async move {
-            let response = builder
-                .map_err(http_client::Error::instance)?
-                .send()
-                .await
-                .map_err(http_client::Error::instance)?;
+            let (response, driver) = this.exchange(request).await?;
             let status = response.status();
             let headers = response.headers().clone();
             if !status.is_success() {
@@ -313,7 +417,10 @@ impl HttpClientExt for Bounded {
                 clippy::result_large_err,
                 reason = "the item type is rig's `http_client::Result`"
             )]
-            let stream = response.bytes_stream().map(move |chunk| {
+            let stream = response.into_body().into_data_stream().map(move |chunk| {
+                // The driver lives as long as the stream: dropping the stream closes the
+                // connection.
+                let _ = &driver;
                 let chunk = chunk.map_err(http_client::Error::instance)?;
                 seen = seen.saturating_add(chunk.len());
                 if seen > BODY_LIMIT {
