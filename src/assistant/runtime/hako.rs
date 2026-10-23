@@ -246,13 +246,13 @@ pub(crate) fn plan(inputs: &Inputs<'_>) -> Plan {
     }
 }
 
-/// The AppArmor profile template (`apparmor/mimik`, also for distribution packages): the
+/// The `AppArmor` profile template (`apparmor/mimik`, also for distribution packages): the
 /// placeholder is the executable's path.
 const APPARMOR_TEMPLATE: &str = include_str!("../../../apparmor/mimik");
 const APPARMOR_PLACEHOLDER: &str = "@MIMIK_EXE@";
 
 /// The profile for the binary at `exe` (an absolute path): the template with that one path
-/// in it. A path AppArmor would read as more than a file name (globs, braces, quotes,
+/// in it. A path `AppArmor` would read as more than a file name (globs, braces, quotes,
 /// control characters) is refused rather than escaped.
 ///
 /// # Errors
