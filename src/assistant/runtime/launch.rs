@@ -2040,14 +2040,24 @@ async fn relisted(real: &Arc<Real>, ticket: &Ticket) -> Result<(GpuBinds, String
     Ok((selected.binds, name))
 }
 
+/// A clone of `pidfd` registered with the runtime for readiness (a pidfd becomes readable when
+/// its process exits), or `None` when it cannot be cloned or registered; callers then poll.
+fn pidfd_watch(pidfd: &OwnedFd) -> Option<tokio::io::unix::AsyncFd<OwnedFd>> {
+    let fd = pidfd.try_clone().ok()?;
+    // SAFETY: `fd` is an owned descriptor moved into the `AsyncFd`; nothing else holds or closes
+    // it, so it stays open and refers to the same pidfd for the `AsyncFd`'s whole lifetime, and
+    // `OwnedFd::as_raw_fd` always returns that same descriptor.
+    unsafe {
+        tokio::io::unix::AsyncFd::register_with_interest(fd, tokio::io::Interest::READABLE)
+    }
+    .ok()
+}
+
 /// Waits until `pidfd` reports its process gone: every `grace` without it, `kill` is called
 /// again and the wait goes on (there is no giving up: "gone" is never assumed).
 /// Waits, without any deadline or signal, until the pidfd's process has exited.
 async fn exited(pidfd: &OwnedFd) {
-    let async_fd = pidfd
-        .try_clone()
-        .ok()
-        .and_then(|fd| tokio::io::unix::AsyncFd::new(fd).ok());
+    let async_fd = pidfd_watch(pidfd);
     while !endpoint::exited(pidfd) {
         match &async_fd {
             Some(fd) => match fd.readable().await {
@@ -2060,10 +2070,7 @@ async fn exited(pidfd: &OwnedFd) {
 }
 
 async fn until_gone(pidfd: &OwnedFd, grace: Duration, kill: impl Fn()) {
-    let async_fd = pidfd
-        .try_clone()
-        .ok()
-        .and_then(|fd| tokio::io::unix::AsyncFd::new(fd).ok());
+    let async_fd = pidfd_watch(pidfd);
     let mut warned = false;
     loop {
         if endpoint::exited(pidfd) {
