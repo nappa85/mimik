@@ -107,7 +107,7 @@ natively for these tests (ASSIST-40).
   a regular file owned by Mimik's user, not writable by group or others. Its SHA-256 is
   computed from that descriptor before the first load and again whenever its `fstat` identity
   (device, inode, size, modification and change times) differs from the last hashed one, so a
-  retry does not re-read a 2 GiB file; that descriptor stays open and is what the child loads: level 1 binds it read-only (`--ro-bind-fd`); level 3 pass it inherited, as
+  retry does not re-read a 2 GiB file; that descriptor stays open and is what the child loads: level 1 binds it read-only (`--ro-bind-fd`); level 3 passes it inherited, as
   `--model /proc/self/fd/<n>` (a live check confirms that the pinned server's open and `mmap`
   accept that path). Runtime files are hashed the same way; level 1 binds them by descriptor
   and level 3 execute the verified llama-server descriptor (`execveat`). So the model and
@@ -390,7 +390,7 @@ natively for these tests (ASSIST-40).
   in-sandbox name is what the real start passes. Whether binding one node really isolates
   enumeration is a 2c-2 live measurement: Mesa enumerates through sysfs and libdrm, so if the
   ICD still lists other cards, the level-1 profile also binds only the matching
-  `/sys/class/drm` entries, or selects by PCI address inside the sandbox. Level 3 cannot isolate nodes (level 3
+  `/sys/class/drm` entries, or selects by PCI address inside the sandbox. Level 3 cannot isolate nodes (it
   does not restrict device opens at all): the GPU is used there only if exactly one hardware
   GPU is visible, counted from sysfs (`/sys/class/drm/renderD*` with their PCI devices), not
   from `--list-devices`, otherwise the CPU path is used with a page note (multi-GPU without

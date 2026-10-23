@@ -38,8 +38,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    llama-server does not run it, and write the decision rule down before running. Shipping it
    would need its own runtime decision (ASSIST-29/33).
 3. A prototype-tier Hakoniwa comparison (user 2026-10-23). It now decides Linux level 1:
-   Hakoniwa or nothing (ASSIST-48); until adopted, bubblewrap stays. Needs the user's
-   Landlock-enabled kernel (7.3.0, landlock in CONFIG_LSM; check `/sys/kernel/security/lsm`
+   Hakoniwa or nothing (ASSIST-48); until adopted, bubblewrap stays. Its optional Landlock layer
+   inside the namespaces needs the user's Landlock-enabled kernel (7.3.0, landlock in CONFIG_LSM; check `/sys/kernel/security/lsm`
    after the reboot). Hakoniwa is a Rust
    library (LGPL-3.0 with linking exception) that does Linux isolation in-process, so the host
    would not need `bwrap`. Run it in the runner process with its `seccomp` feature off, so there
