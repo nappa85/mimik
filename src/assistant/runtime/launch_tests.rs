@@ -1228,3 +1228,71 @@ fn a_slow_exit_is_said_once_and_still_waited_for() {
     assert!(std::time::Instant::now() >= until);
     assert_eq!(warnings, 1);
 }
+
+#[tokio::test]
+async fn a_probe_whose_port_is_taken_tries_again_on_a_fresh_port() {
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    // Another process holds the port the launcher picked first.
+    let holder = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let taken = holder.local_addr().unwrap().port();
+    PORTS
+        .lock()
+        .unwrap()
+        .push((setup.settings.runtime_dir.clone(), taken));
+    let real = Arc::clone(&launch.0);
+    let (first, probed, attempts) = tokio::task::spawn_blocking(move || {
+        let ticket = real.work().enter();
+        // The inner probe itself (valid model and token) against the taken port.
+        let first = real.probe_level(Path::Cpu, Level::Unconfined, &ticket);
+        PORTS
+            .lock()
+            .unwrap()
+            .push((real.settings.runtime_dir.clone(), taken));
+        let probed = real.probe_with_retries(Path::Cpu, Level::Unconfined, &ticket);
+        (first, probed, real.probes.load(Ordering::SeqCst))
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        first,
+        Probe::Inconclusive("the probe's port was taken meanwhile".into())
+    );
+    // Retried on a new port: passed on the second attempt (sequence from 1: one probe, then
+    // two attempts).
+    assert_eq!(probed, Probed::Passed);
+    assert_eq!(attempts, 1 + 1 + 2);
+    drop(holder);
+}
+
+#[derive(Debug)]
+struct Stalled;
+
+impl crate::assistant::transport::Connect for Stalled {
+    fn connect(&self) -> crate::assistant::transport::Connecting {
+        Box::pin(std::future::pending())
+    }
+
+    fn authority(&self) -> String {
+        "127.0.0.1:1".into()
+    }
+}
+
+#[tokio::test]
+async fn a_cancel_ends_the_probes_endpoint_check() {
+    let work = Work::new();
+    let ticket = work.enter();
+    let connector: Arc<dyn crate::assistant::transport::Connect> = Arc::new(Stalled);
+    let checking = tokio::spawn({
+        let ticket = ticket.clone();
+        async move { checked_endpoint(&connector, &ticket).await }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    work.cancel();
+    let verdict = tokio::time::timeout(Duration::from_secs(2), checking)
+        .await
+        .expect("the endpoint check outlived the cancel")
+        .unwrap();
+    assert_eq!(verdict, Probe::Failed("cancelled".into()));
+}

@@ -66,9 +66,13 @@ descriptor; a hash is reused while the `fstat` identity (device, inode, size, mo
 change times) is unchanged. The child loads those descriptors, so a file swapped after the
 check is not what runs. Folders are opened at their real path (links in earlier components,
 such as a symlinked home, resolved once) without following any link. Level 3 also requires
-the runtime directory and every ancestor of its real path, walked from `/` by descriptor
-without following links, to be owned by root or Mimik's user and not writable by group or
-others (it loads the libraries by path, through that real path). A model larger than
+the runtime directory and every ancestor of its real path to be owned by root or Mimik's
+user and not writable by group or others. The runtime is resolved once per attempt: opened,
+its real path read back from that descriptor, that exact path walked from `/` by descriptor
+without following links and ending at the same folder; the pinned files are opened and hashed
+beneath that descriptor, and level 3 executes the verified descriptor with `LD_LIBRARY_PATH`
+set to the checked build folder's real path, so the configured path is never resolved again.
+A failed attempt's processes end before the next spawn (probe, retry, start or next level). A model larger than
 `MemAvailable` minus 1 GiB is refused ("not enough memory for this model").
 
 ## Runner
@@ -203,7 +207,8 @@ and reaps it, kills and waits for the sandbox's reaper (5 s at most), and clears
 recorded. Every probe's and start's blocking part and every child's watcher is in-flight work:
 the owner's Restart or shutdown cancels it (it stops before spawning or recording anything;
 bwrap's status wait, the probe's report wait, the retry pause, the probe's endpoint check and
-hashing, every MiB, see the cancel within about 100 ms) and the manager waits until it has all
+hashing, every MiB, see the cancel within about 100 ms; a file read that stalls, on a slow or
+hung disk, holds it longer) and the manager waits until it has all
 finished, cleanup included, before the next session starts or the shutdown completes. The
 leftover sweep is such work too, and puts the pidfile back itself. That wait has no deadline:
 a cleanup waits for the runner and the reaper to exit, however long, keeping the pidfile entry

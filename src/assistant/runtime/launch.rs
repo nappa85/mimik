@@ -1228,6 +1228,26 @@ fn recv_unless_cancelled<T>(
     }
 }
 
+/// Ports a test hands out first, keyed by runtime directory (`launch_tests.rs`).
+#[cfg(test)]
+pub(crate) static PORTS: Mutex<Vec<(PathBuf, u16)>> = Mutex::new(Vec::new());
+
+/// A port for a level-3 child of the launcher at `runtime_dir`: a fresh free one each time
+/// (a test may hand one out).
+fn pick_port(runtime_dir: &std::path::Path) -> Result<u16, Fail> {
+    #[cfg(test)]
+    {
+        let mut ports = PORTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(at) = ports.iter().position(|(dir, _)| dir == runtime_dir) {
+            return Ok(ports.remove(at).1);
+        }
+    }
+    let _ = runtime_dir;
+    free_port()
+}
+
 /// A free loopback port: bound, read, released.
 fn free_port() -> Result<u16, Fail> {
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -1877,7 +1897,7 @@ impl Launch {
         let mut tries = 0;
         loop {
             tries += 1;
-            let port = free_port()?;
+            let port = pick_port(&real.settings.runtime_dir)?;
             let spawned = joined(spawn(port).await)?;
             let child = real.child(spawned, level, &token, None, generation)?;
             let bound = tokio::time::timeout(Duration::from_secs(10), async {
@@ -2152,7 +2172,7 @@ impl Real {
             self.spawn_sandbox(&job, &files, &model, &token, &Command::Probe)
                 .map_err(failed)?
         } else {
-            let port = free_port().map_err(failed)?;
+            let port = pick_port(&self.settings.runtime_dir).map_err(failed)?;
             self.spawn_unconfined(&job, None, &model, &token, &Command::Probe, port)
                 .map_err(failed)?
         };
