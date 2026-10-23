@@ -197,14 +197,20 @@ Each launch has a generation number; its directory `<data dir>/run/<generation>/
 following links, when the generation stops. The pidfile `run/assistant.pid` is held under an
 exclusive `flock` for Mimik's life ("another Mimik uses this data directory's assistant"); it
 records the child's PID, start time, possible executables and its owner's key (the generation
-number, or a probe's own key above any generation); an entry is cleared only by its owner. At
+number, or a probe's own key above any generation), followed by a SHA-256 line over them; an
+entry is cleared only by its owner. A record writes the entry over the old one, syncs, then
+truncates, so an interruption leaves the old entry, the new one, or a torn one that never
+parses; a record that fails fails the start. The pidfile has its own lock (its writes never
+hold the launcher's state lock). An empty pidfile means no child; one that cannot be read or
+does not parse refuses the start ("the pidfile run/assistant.pid cannot be read") and leaves
+the generation directories in place, as nothing tells what ran. At
 start, off the async runtime, a leftover's pidfd is opened first, the three are checked after
 that, the kill goes through the pidfd and the sweep waits (5 s at most) for it to end; a
 leftover still running keeps its entry, refuses the start ("a model server from an earlier run
 has not exited yet") and leaves the old generation directories in place until a later start
 finds it gone. A child is owned from its spawn: any failure before the start completes kills
-and reaps it, kills and waits for the sandbox's reaper (5 s at most), and clears the entry it
-recorded. Every probe's and start's blocking part and every child's watcher is in-flight work:
+and reaps it, kills and waits for the sandbox's reaper (without a deadline, saying so in the
+log after 5 s), and clears the entry it recorded; the next spawn waits until that has ended. Every probe's and start's blocking part and every child's watcher is in-flight work:
 the owner's Restart or shutdown cancels it (it stops before spawning or recording anything;
 bwrap's status wait, the probe's report wait, the retry pause, the probe's endpoint check and
 hashing, every MiB, see the cancel within about 100 ms; a file read that stalls, on a slow or

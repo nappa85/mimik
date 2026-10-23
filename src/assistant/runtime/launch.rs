@@ -117,7 +117,6 @@ pub(crate) struct Settings {
 #[derive(Default)]
 struct Held {
     run: Option<Arc<OwnedFd>>,
-    pidfile: Option<Pidfile>,
     /// The leftover sweep of this Mimik's start is done.
     swept: bool,
     /// The sweep runs (it holds the pidfile meanwhile).
@@ -148,6 +147,8 @@ pub(crate) struct Real {
     build: Option<Build>,
     cache: HashCache,
     held: Arc<Mutex<Held>>,
+    /// The locked pidfile, under its own lock: its writes never hold `held`.
+    pidfile: PidSlot,
     /// Probes and starts in flight (their blocking work and watchers).
     work: Arc<Work>,
     /// Probe sequence numbers: unique directory names and pidfile keys.
@@ -254,6 +255,7 @@ impl Real {
             build,
             cache: HashCache::default(),
             held: Arc::new(Mutex::new(Held::default())),
+            pidfile: Arc::new(Mutex::new(None)),
             work: Work::new(),
             probes: AtomicU64::new(1),
             cleanups: Arc::new(watch::channel(0).0),
@@ -278,10 +280,25 @@ impl Real {
             .ok_or_else(|| "the run directory is not open".to_owned())
     }
 
-    fn record(&self, entry: &Entry) {
-        if let Some(pidfile) = self.held().pidfile.as_mut() {
-            let _ = pidfile.record(entry);
+    /// Records the child; a failure fails the start (an unrecorded child could outlive a
+    /// crash of Mimik unseen).
+    fn record(&self, entry: &Entry) -> Result<(), Fail> {
+        #[cfg(test)]
+        if RECORD_FAILS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_deref()
+            == Some(self.settings.runtime_dir.as_path())
+        {
+            return Err(Fail::Other("the pidfile cannot be written".into()));
         }
+        self.pidfile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+            .ok_or_else(|| Fail::Other("the pidfile is not held".into()))?
+            .record(entry)
+            .map_err(|_| Fail::Other("the pidfile cannot be written".into()))
     }
 
     /// Waits until no earlier attempt's cleanup runs (its process may still be ending, its
@@ -303,7 +320,7 @@ impl Real {
 
     /// Clears the pidfile's entry when it is still `key`'s (never a newer one's).
     pub(crate) fn clear(&self, key: u64) {
-        clear_key(&self.held, key);
+        clear_key(&self.pidfile, key);
     }
 
     /// The launcher's in-flight work.
@@ -437,12 +454,19 @@ struct Spawned {
     ticket: Ticket,
 }
 
+/// The pidfile's slot: `None` until the first preflight takes the lock.
+type PidSlot = Arc<Mutex<Option<Pidfile>>>;
+
+/// Test-forced record failures, keyed by runtime directory (`launch_tests.rs`).
+#[cfg(test)]
+pub(crate) static RECORD_FAILS: Mutex<Option<PathBuf>> = Mutex::new(None);
+
 /// Clears the pidfile's entry when it is `key`'s.
-fn clear_key(held: &Mutex<Held>, key: u64) {
-    let mut held = held
+fn clear_key(slot: &Mutex<Option<Pidfile>>, key: u64) {
+    let mut slot = slot
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(pidfile) = held.pidfile.as_mut()
+    if let Some(pidfile) = slot.as_mut()
         && pidfile
             .leftover()
             .is_some_and(|entry| entry.generation == key)
@@ -459,7 +483,7 @@ fn clear_key(held: &Mutex<Held>, key: u64) {
 struct Owned {
     child: Option<std::process::Child>,
     reaper: Option<Arc<Sandbox>>,
-    recorded: Option<(Arc<Mutex<Held>>, u64)>,
+    recorded: Option<(PidSlot, u64)>,
     ticket: Option<Ticket>,
     /// The launcher's count of running cleanups (the next spawn waits for them).
     cleanups: Option<Arc<watch::Sender<usize>>>,
@@ -510,7 +534,7 @@ impl Owned {
 struct Cleanup {
     child: Option<std::process::Child>,
     reaper: Option<Arc<Sandbox>>,
-    recorded: Option<(Arc<Mutex<Held>>, u64)>,
+    recorded: Option<(PidSlot, u64)>,
     ticket: Option<Ticket>,
     cleanups: Option<Arc<watch::Sender<usize>>>,
     #[cfg(test)]
@@ -712,6 +736,7 @@ impl Real {
 /// Returns the pidfile and the sweep's outcome to `held` when the sweep ends, however it ends.
 struct SweepGuard {
     held: Arc<Mutex<Held>>,
+    slot: PidSlot,
     pidfile: Option<Pidfile>,
     swept: bool,
     _ticket: Ticket,
@@ -719,11 +744,14 @@ struct SweepGuard {
 
 impl Drop for SweepGuard {
     fn drop(&mut self) {
+        *self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = self.pidfile.take();
         let mut held = self
             .held
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        held.pidfile = self.pidfile.take();
         held.sweeping = false;
         held.swept = self.swept;
     }
@@ -925,8 +953,8 @@ impl Real {
                 self.settings.runner.program.display().to_string(),
             ],
         ) {
-            self.record(&entry);
-            child.recorded = Some((Arc::clone(&self.held), job.key));
+            self.record(&entry)?;
+            child.recorded = Some((Arc::clone(&self.pidfile), job.key));
         }
         fault_at!(self, "recorded", child);
         // No status line: bwrap failed before it created the sandbox (nothing it started could
@@ -1100,8 +1128,8 @@ impl Real {
         pause_at!(self, "before-record");
         job.check()?;
         if let Some(entry) = Entry::of(job.key, pid, executables) {
-            self.record(&entry);
-            child.recorded = Some((Arc::clone(&self.held), job.key));
+            self.record(&entry)?;
+            child.recorded = Some((Arc::clone(&self.pidfile), job.key));
         }
         fault_at!(self, "recorded", child);
         let connector: Arc<dyn Connect> = Arc::new(Loopback {
@@ -1701,9 +1729,13 @@ impl Launcher for Launch {
             if held.sweeping {
                 return Err("the leftover sweep of an earlier start is still running".into());
             }
-            if held.pidfile.is_none() {
+            let mut slot = real
+                .pidfile
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if slot.is_none() {
                 match Pidfile::acquire(run.as_fd()) {
-                    Ok(Ok(pidfile)) => held.pidfile = Some(pidfile),
+                    Ok(Ok(pidfile)) => *slot = Some(pidfile),
                     Ok(Err(_)) => {
                         return Err("another Mimik uses this data directory's assistant".into());
                     }
@@ -1715,7 +1747,7 @@ impl Launcher for Launch {
                 None
             } else {
                 held.sweeping = true;
-                held.pidfile.take()
+                slot.take()
             }
         };
         if let Some(pidfile) = unswept {
@@ -1724,7 +1756,11 @@ impl Launcher for Launch {
             // preflight dropped meanwhile loses nothing. Until the leftover has ended, its
             // entry and every generation directory stay, and nothing starts.
             let (data_dir, swept_run) = (real.settings.data_dir.clone(), Arc::clone(&run));
-            let (held, ticket) = (Arc::clone(&real.held), real.work.enter());
+            let (held, slot, ticket) = (
+                Arc::clone(&real.held),
+                Arc::clone(&real.pidfile),
+                real.work.enter(),
+            );
             #[cfg(test)]
             let pausing = Arc::clone(real);
             let swept = tokio::task::spawn_blocking(move || {
@@ -1732,6 +1768,7 @@ impl Launcher for Launch {
                 // included.
                 let mut sweep = SweepGuard {
                     held,
+                    slot,
                     pidfile: Some(pidfile),
                     swept: false,
                     _ticket: ticket,
@@ -1740,19 +1777,26 @@ impl Launcher for Launch {
                 pausing.paused("sweep");
                 let pidfile = sweep.pidfile.as_mut().expect("held until dropped");
                 let swept = sweep_leftover(pidfile, &data_dir);
-                if swept != Swept::StillRunning {
+                let ended = matches!(swept, Swept::Nothing | Swept::Killed);
+                if ended {
                     rundir::sweep_generations(swept_run.as_fd());
                 }
-                sweep.swept = swept != Swept::StillRunning;
+                sweep.swept = ended;
                 swept
             })
             .await
             .map_err(|_| "the leftover sweep did not finish".to_owned())?;
-            if swept == Swept::StillRunning {
-                return Err(
-                    "a model server from an earlier run has not exited yet; Restart tries again"
-                        .into(),
-                );
+            match swept {
+                Swept::StillRunning => {
+                    return Err(
+                        "a model server from an earlier run has not exited yet; Restart tries again"
+                            .into(),
+                    );
+                }
+                Swept::Unreadable => {
+                    return Err("the pidfile run/assistant.pid cannot be read: check that no model server of an earlier run is left, then remove the file".into());
+                }
+                Swept::Nothing | Swept::Killed => {}
             }
         }
         if real.build(path).is_none() {

@@ -758,7 +758,7 @@ async fn a_stale_clear_never_removes_a_newer_entry() {
     launch.preflight(Path::Cpu).await.unwrap();
     let me = i32::try_from(std::process::id()).unwrap();
     let entry = rundir::Entry::of(5, me, vec!["/x".into()]).unwrap();
-    launch.0.record(&entry);
+    launch.0.record(&entry).unwrap();
     // A probe of an earlier session ends after generation 5 recorded itself.
     launch.0.clear(PROBE_KEYS + 1);
     assert!(pidfile_text(&setup).starts_with("5\n"));
@@ -807,14 +807,15 @@ async fn a_reaper_that_outlives_the_wait_keeps_its_entry_and_blocks_the_settle()
     let me = i32::try_from(std::process::id()).unwrap();
     launch
         .0
-        .record(&rundir::Entry::of(7, me, vec!["/x".into()]).unwrap());
+        .record(&rundir::Entry::of(7, me, vec!["/x".into()]).unwrap())
+        .unwrap();
     let sandbox = Arc::new(Sandbox {
         reaper: Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap(),
         pid_namespace: 0,
     });
     let mut owned = Owned::new(runner, launch.0.work().enter());
     owned.reaper = Some(Arc::clone(&sandbox));
-    owned.recorded = Some((Arc::clone(&launch.0.held), 7));
+    owned.recorded = Some((Arc::clone(&launch.0.pidfile), 7));
     // The kill does not reach it (as with a process that cannot end yet).
     owned.unkillable = true;
     drop(owned);
@@ -1323,4 +1324,38 @@ async fn a_start_cancelled_during_its_verification_is_cancelled() {
         "{:?}",
         result.err()
     );
+}
+
+#[tokio::test]
+async fn a_start_whose_record_fails_fails_and_leaves_nothing() {
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    *RECORD_FAILS.lock().unwrap() = Some(setup.settings.runtime_dir.clone());
+    let result = launch.start(1, Level::Unconfined, Path::Cpu).await;
+    *RECORD_FAILS.lock().unwrap() = None;
+    assert!(
+        matches!(&result, Err(Fail::Other(why)) if why == "the pidfile cannot be written"),
+        "{:?}",
+        result.err()
+    );
+    launch.settle().await;
+    let marker = setup.settings.data_dir.join("run").display().to_string();
+    assert_eq!(processes_naming(&marker), Vec::<i32>::new());
+}
+
+#[tokio::test]
+async fn a_torn_pidfile_refuses_the_start_and_keeps_the_generations() {
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    std::fs::create_dir_all(&setup.settings.data_dir).unwrap();
+    let run = rundir::open(&setup.settings.data_dir).unwrap();
+    {
+        let mut pidfile = Pidfile::acquire(run.as_fd()).unwrap().unwrap();
+        pidfile.write_raw(b"9\n4242\n");
+    }
+    drop(rundir::create_generation(run.as_fd(), "9").unwrap());
+    let refused = launch.preflight(Path::Cpu).await.unwrap_err();
+    assert!(refused.contains("cannot be read"), "{refused}");
+    assert!(setup.settings.data_dir.join("run/9").exists());
 }

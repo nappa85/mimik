@@ -34,16 +34,30 @@ pub(crate) struct Entry {
 }
 
 impl Entry {
+    /// The entry's lines, then `sha256 <hex>` of them: a torn write never parses.
     fn text(&self) -> String {
         let mut text = format!("{}\n{}\n{}\n", self.generation, self.pid, self.start_time);
         for executable in &self.executables {
             text.push_str(executable);
             text.push('\n');
         }
+        let sum = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()));
+        text.push_str("sha256 ");
+        text.push_str(&sum);
+        text.push('\n');
         text
     }
 
+    /// The entry the text begins with, when its checksum line matches (anything after it,
+    /// left by a longer earlier entry before the truncate, is ignored).
     fn parse(text: &str) -> Option<Self> {
+        let at = text.find("sha256 ")?;
+        let (body, rest) = text.split_at(at);
+        let sum = rest.strip_prefix("sha256 ")?.lines().next()?;
+        if hex::encode(<sha2::Sha256 as sha2::Digest>::digest(body.as_bytes())) != sum {
+            return None;
+        }
+        let text = body;
         let mut lines = text.lines();
         let generation = lines.next()?.parse().ok()?;
         let pid = lines.next()?.parse().ok()?;
@@ -121,23 +135,45 @@ impl Pidfile {
         }
     }
 
-    /// The entry a previous Mimik left, if any.
+    /// The entry a previous Mimik left, if any (`None` for an unreadable one too).
     pub(crate) fn leftover(&mut self) -> Option<Entry> {
+        self.entry().ok().flatten()
+    }
+
+    /// The recorded entry: `Ok(None)` for an empty file (no child), an error for one that
+    /// cannot be read or does not parse (a torn write, a disk error), which decides nothing.
+    pub(crate) fn entry(&mut self) -> Result<Option<Entry>, Unreadable> {
         let mut text = String::new();
-        self.file.rewind().ok()?;
+        self.file.rewind().map_err(|_| Unreadable)?;
         Read::by_ref(&mut self.file)
             .take(4096)
             .read_to_string(&mut text)
-            .ok()?;
-        Entry::parse(&text)
+            .map_err(|_| Unreadable)?;
+        if text.is_empty() {
+            return Ok(None);
+        }
+        Entry::parse(&text).map(Some).ok_or(Unreadable)
     }
 
-    /// Records the running child.
+    /// Records the running child: the entry is written over the old one, synced, and only
+    /// then the file truncated to it, so an interruption leaves either the old entry, a torn
+    /// one (which never parses), or the new one followed by old bytes (which parses).
     pub(crate) fn record(&mut self, entry: &Entry) -> std::io::Result<()> {
-        self.file.set_len(0)?;
+        let text = entry.text();
         self.file.rewind()?;
-        self.file.write_all(entry.text().as_bytes())?;
+        self.file.write_all(text.as_bytes())?;
+        self.file.sync_data()?;
+        self.file
+            .set_len(u64::try_from(text.len()).unwrap_or(u64::MAX))?;
         self.file.sync_data()
+    }
+
+    /// Test only: writes raw bytes, as an interrupted or corrupted record would leave them.
+    #[cfg(test)]
+    pub(crate) fn write_raw(&mut self, bytes: &[u8]) {
+        self.file.set_len(0).unwrap();
+        self.file.rewind().unwrap();
+        self.file.write_all(bytes).unwrap();
     }
 
     /// No child runs.
@@ -184,8 +220,11 @@ impl Pidfile {
         between: impl FnOnce(),
         gone: impl FnOnce(&P::Handle) -> bool,
     ) -> Swept {
-        let Some(entry) = self.leftover() else {
-            return Swept::Nothing;
+        let entry = match self.entry() {
+            Ok(Some(entry)) => entry,
+            Ok(None) => return Swept::Nothing,
+            // It cannot be told what ran: nothing is killed, cleared or removed.
+            Err(Unreadable) => return Swept::Unreadable,
         };
         let outcome = match processes.open(entry.pid) {
             // No such process: nothing to kill.
@@ -266,6 +305,10 @@ impl Processes for Host {
     }
 }
 
+/// The pidfile cannot be read or does not parse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Unreadable;
+
 /// What a sweep found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Swept {
@@ -276,6 +319,9 @@ pub(crate) enum Swept {
     /// A leftover runs (killed, not yet ended, or it cannot be told): its entry stays, and
     /// nothing may start or remove generation directories until it ends.
     StillRunning,
+    /// The pidfile cannot be read or is torn: the entry stays, and nothing starts or is
+    /// removed until the owner has looked.
+    Unreadable,
 }
 
 /// Removes what earlier runs left under `run/`: every generation directory (its plain

@@ -310,3 +310,60 @@ fn an_unreadable_identity_of_a_running_process_keeps_the_entry() {
     assert_eq!(pidfile.leftover(), Some(entry));
     assert!(processes.signalled.borrow().is_empty());
 }
+
+#[test]
+fn a_torn_or_corrupt_pidfile_decides_nothing_an_empty_one_means_no_child() {
+    let (_dir, run) = data();
+    let mut pidfile = Pidfile::acquire(run.as_fd()).unwrap().unwrap();
+    let entry = Entry {
+        generation: 3,
+        pid: 4242,
+        start_time: 100,
+        executables: vec!["/opt/mimik/mimik".into()],
+    };
+    let text = entry.text();
+    // A write cut short.
+    pidfile.write_raw(&text.as_bytes()[..text.len() / 2]);
+    assert_eq!(pidfile.entry(), Err(Unreadable));
+    assert_eq!(pidfile.sweep(), Swept::Unreadable);
+    // Bytes that are no entry at all.
+    pidfile.write_raw(b"\xff\xfe garbage");
+    assert_eq!(pidfile.sweep(), Swept::Unreadable);
+    // An entry with a wrong checksum.
+    pidfile.write_raw(text.replace("4242", "4243").as_bytes());
+    assert_eq!(pidfile.sweep(), Swept::Unreadable);
+    // Empty: no child.
+    pidfile.write_raw(b"");
+    assert_eq!(pidfile.entry(), Ok(None));
+    assert_eq!(pidfile.sweep(), Swept::Nothing);
+}
+
+#[test]
+fn a_record_interrupted_before_its_truncate_still_parses() {
+    let (_dir, run) = data();
+    let mut pidfile = Pidfile::acquire(run.as_fd()).unwrap().unwrap();
+    let long = Entry {
+        generation: 1,
+        pid: 1_234_567,
+        start_time: 99_999_999,
+        executables: vec![
+            "/a/very/long/path/to/the/runner".into(),
+            "/usr/bin/bwrap".into(),
+        ],
+    };
+    let short = Entry {
+        generation: 2,
+        pid: 7,
+        start_time: 1,
+        executables: vec!["/x".into()],
+    };
+    // The new entry written over the old one, the truncate never reached.
+    let mut bytes = short.text().into_bytes();
+    bytes.extend_from_slice(&long.text().as_bytes()[bytes.len()..]);
+    pidfile.write_raw(&bytes);
+    assert_eq!(pidfile.entry(), Ok(Some(short.clone())));
+    // A complete record leaves exactly the entry.
+    pidfile.record(&long).unwrap();
+    pidfile.record(&short).unwrap();
+    assert_eq!(pidfile.entry(), Ok(Some(short)));
+}
