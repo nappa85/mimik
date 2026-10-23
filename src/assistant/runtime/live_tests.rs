@@ -200,10 +200,11 @@ fn play_mimik() {
         let launch = Launch(real(settings(&scratch, "probe-inner", Vec::new())));
         launch.preflight(Path::Cpu).await.unwrap();
         let probing = Arc::clone(&launch.0);
-        let probed =
-            tokio::task::spawn_blocking(move || probing.probe_level(Path::Cpu, Level::Bubblewrap))
-                .await
-                .unwrap();
+        let probed = tokio::task::spawn_blocking(move || {
+            probing.probe_level(Path::Cpu, Level::Bubblewrap, &probing.work().enter())
+        })
+        .await
+        .unwrap();
         assert_eq!(probed, Probe::Passed);
         let child = launch.start(1, Level::Bubblewrap, Path::Cpu).await.unwrap();
         // "Ready" waits for /health; "starting" reports at once, while the server loads.
@@ -265,11 +266,11 @@ fn live_the_probe_reaches_level_1_and_level_3() {
         .block_on(Launch(Arc::clone(&real)).preflight(Path::Cpu))
         .unwrap();
     assert_eq!(
-        real.probe_level(Path::Cpu, Level::Bubblewrap),
+        real.probe_level(Path::Cpu, Level::Bubblewrap, &real.work().enter()),
         Probe::Passed
     );
     assert_eq!(
-        real.probe_level(Path::Cpu, Level::Unconfined),
+        real.probe_level(Path::Cpu, Level::Unconfined, &real.work().enter()),
         Probe::Passed
     );
 }
@@ -308,9 +309,11 @@ async fn started(scratch: &std::path::Path, level: Level) -> (Launch, Arc<RealCh
     let launch = Launch(real(settings(scratch, "probe-inner", Vec::new())));
     launch.preflight(Path::Cpu).await.unwrap();
     let probing = Arc::clone(&launch.0);
-    let probed = tokio::task::spawn_blocking(move || probing.probe_level(Path::Cpu, level))
-        .await
-        .unwrap();
+    let probed = tokio::task::spawn_blocking(move || {
+        probing.probe_level(Path::Cpu, level, &probing.work().enter())
+    })
+    .await
+    .unwrap();
     assert_eq!(probed, Probe::Passed);
     let child = launch.start_real(1, level, Path::Cpu).await.unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
@@ -448,7 +451,9 @@ fn live_an_adversary_in_the_level_1_sandbox_reaches_nothing() {
         .unwrap()
         .block_on(Launch(Arc::clone(&real)).preflight(Path::Cpu))
         .unwrap();
-    let (report, verdict) = real.inner_report(Path::Cpu, Level::Bubblewrap).unwrap();
+    let (report, verdict) = real
+        .inner_report(Path::Cpu, Level::Bubblewrap, &real.work().enter())
+        .unwrap();
     assert_eq!(verdict, Probe::Passed, "{report}");
     let refused = |value: &Value| value.as_i64().is_some_and(|errno| errno != 0);
     assert!(refused(&report["tcp_host_listener"]), "{report}");
@@ -660,10 +665,11 @@ async fn live_a_failure_after_the_level_1_spawn_leaves_no_process_behind() {
     let launch = Launch(Arc::clone(&real));
     launch.preflight(Path::Cpu).await.unwrap();
     let probing = Arc::clone(&real);
-    let probed =
-        tokio::task::spawn_blocking(move || probing.probe_level(Path::Cpu, Level::Bubblewrap))
-            .await
-            .unwrap();
+    let probed = tokio::task::spawn_blocking(move || {
+        probing.probe_level(Path::Cpu, Level::Bubblewrap, &probing.work().enter())
+    })
+    .await
+    .unwrap();
     assert_eq!(probed, Probe::Passed);
     let needle = alias;
     for (generation, step) in [

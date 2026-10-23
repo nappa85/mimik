@@ -155,6 +155,9 @@ struct FakeLauncher {
     preflight: Mutex<Option<String>>,
     preflight_delay: Mutex<Option<Duration>>,
     preflights: Mutex<usize>,
+    /// While set, `settle` waits (as for a blocking start still finishing).
+    unsettled: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    cancels: AtomicUsize,
     probe: Mutex<Option<Probed>>,
     script: Mutex<VecDeque<Start>>,
     starts: Mutex<Vec<(u64, Level, Instant)>>,
@@ -176,6 +179,17 @@ impl Launcher for FakeLauncher {
         match self.preflight.lock().unwrap().clone() {
             Some(why) => Err(why),
             None => Ok(()),
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancels.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn settle(&self) {
+        let gate = self.unsettled.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.notified().await;
         }
     }
 
@@ -678,4 +692,29 @@ async fn shutdown_stops_the_child() {
     handle.shutdown().await;
     assert_eq!(launcher.alive.load(Ordering::SeqCst), 0);
     assert_eq!(launcher.stops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_starts_the_next_session_only_after_the_launchers_work_settled() {
+    let launcher = FakeLauncher::scripted([]);
+    *launcher.preflight_delay.lock().unwrap() = Some(Duration::from_secs(3600));
+    let (_assistant, handle) = manager(&launcher);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // The interrupted preflight's blocking work is still finishing.
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *launcher.unsettled.lock().unwrap() = Some(Arc::clone(&gate));
+    assert_eq!(handle.restart(), Restart::Accepted);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(launcher.cancels.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *launcher.preflights.lock().unwrap(),
+        1,
+        "the next session overlapped"
+    );
+    *launcher.unsettled.lock().unwrap() = None;
+    gate.notify_waiters();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(*launcher.preflights.lock().unwrap(), 2);
+    let stopping = tokio::time::timeout(Duration::from_secs(5), handle.shutdown()).await;
+    assert!(stopping.is_ok());
 }

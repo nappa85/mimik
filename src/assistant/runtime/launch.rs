@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use std::io::{BufRead, Read};
 use std::os::fd::{AsFd, OwnedFd, RawFd};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
@@ -125,7 +125,97 @@ pub(crate) struct Real {
     /// The pinned CPU build (the embedded manifest's; tests give another).
     build: Option<Build>,
     cache: HashCache,
-    held: Mutex<Held>,
+    held: Arc<Mutex<Held>>,
+    /// Probes and starts in flight (their blocking work and watchers).
+    work: Arc<Work>,
+    /// Probe sequence numbers: unique directory names and pidfile keys.
+    probes: AtomicU64,
+}
+
+/// Pidfile keys of probes: above any generation number.
+const PROBE_KEYS: u64 = 1 << 40;
+
+/// The launcher's in-flight work: every probe or start's blocking part and every child's
+/// watcher holds a [`Ticket`]. A cancel invalidates the tickets taken before it (their work
+/// stops at its next check, before spawning or recording anything); `settle` waits until no
+/// ticket is held, so nothing of an earlier session runs beside the next.
+pub(crate) struct Work {
+    epoch: AtomicU64,
+    running: watch::Sender<usize>,
+}
+
+impl Work {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            epoch: AtomicU64::new(0),
+            running: watch::channel(0).0,
+        })
+    }
+
+    pub(crate) fn enter(self: &Arc<Self>) -> Ticket {
+        self.running.send_modify(|running| *running += 1);
+        Ticket {
+            epoch: self.epoch.load(Ordering::SeqCst),
+            work: Arc::clone(self),
+        }
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) async fn settle(&self) {
+        let mut running = self.running.subscribe();
+        let _ = running.wait_for(|running| *running == 0).await;
+    }
+}
+
+/// One holder of in-flight work (see [`Work`]).
+pub(crate) struct Ticket {
+    epoch: u64,
+    work: Arc<Work>,
+}
+
+impl Ticket {
+    pub(crate) fn cancelled(&self) -> bool {
+        self.work.epoch.load(Ordering::SeqCst) != self.epoch
+    }
+}
+
+impl Clone for Ticket {
+    fn clone(&self) -> Self {
+        self.work.running.send_modify(|running| *running += 1);
+        Self {
+            epoch: self.epoch,
+            work: Arc::clone(&self.work),
+        }
+    }
+}
+
+impl Drop for Ticket {
+    fn drop(&mut self) {
+        self.work
+            .running
+            .send_modify(|running| *running = running.saturating_sub(1));
+    }
+}
+
+/// A probe or start: its generation directory's name, its pidfile key and its ticket.
+pub(crate) struct Job {
+    name: String,
+    key: u64,
+    ticket: Ticket,
+}
+
+impl Job {
+    /// Fails once the work was cancelled.
+    fn check(&self) -> Result<(), Fail> {
+        if self.ticket.cancelled() {
+            Err(Fail::Other("cancelled".into()))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl Real {
@@ -139,7 +229,9 @@ impl Real {
             settings,
             build,
             cache: HashCache::default(),
-            held: Mutex::new(Held::default()),
+            held: Arc::new(Mutex::new(Held::default())),
+            work: Work::new(),
+            probes: AtomicU64::new(1),
         }
     }
 
@@ -167,10 +259,14 @@ impl Real {
         }
     }
 
-    fn clear(&self) {
-        if let Some(pidfile) = self.held().pidfile.as_mut() {
-            let _ = pidfile.clear();
-        }
+    /// Clears the pidfile's entry when it is still `key`'s (never a newer one's).
+    pub(crate) fn clear(&self, key: u64) {
+        clear_key(&self.held, key);
+    }
+
+    /// The launcher's in-flight work.
+    pub(crate) fn work(&self) -> &Arc<Work> {
+        &self.work
     }
 
     /// The model and the build's files, verified.
@@ -285,29 +381,101 @@ struct Spawned {
     marker: Option<OwnedFd>,
 }
 
+/// Clears the pidfile's entry when it is `key`'s.
+fn clear_key(held: &Mutex<Held>, key: u64) {
+    let mut held = held
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(pidfile) = held.pidfile.as_mut()
+        && pidfile
+            .leftover()
+            .is_some_and(|entry| entry.generation == key)
+    {
+        let _ = pidfile.clear();
+    }
+}
+
 /// Kills and reaps a spawned runner on every failure path until it is handed to its watcher,
-/// so no child outlives a failed start.
-struct Owned(Option<std::process::Child>);
+/// so no child outlives a failed start: then, on level 1, the sandbox's reaper is killed and
+/// waited for too, and the pidfile entry it recorded is cleared.
+struct Owned {
+    child: Option<std::process::Child>,
+    reaper: Option<Arc<Sandbox>>,
+    recorded: Option<(Arc<Mutex<Held>>, u64)>,
+}
+
+/// How long a failed start waits for the sandbox's reaper after killing it.
+const REAPER_WITHIN: Duration = Duration::from_secs(5);
 
 impl Owned {
+    fn new(child: std::process::Child) -> Self {
+        Self {
+            child: Some(child),
+            reaper: None,
+            recorded: None,
+        }
+    }
+
     fn pid(&self) -> i32 {
-        self.0
+        self.child
             .as_ref()
             .map_or(0, |child| i32::try_from(child.id()).unwrap_or(0))
     }
 
+    /// The runner, for its watcher (which then owns the reaper's end and the entry).
     fn hand_over(mut self) -> std::process::Child {
-        self.0.take().expect("handed over once")
+        self.reaper = None;
+        self.recorded = None;
+        self.child.take().expect("handed over once")
     }
 }
 
 impl Drop for Owned {
     fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
+        if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
+        if let Some(sandbox) = self.reaper.take() {
+            let reaper = &sandbox.reaper;
+            let deadline = std::time::Instant::now() + REAPER_WITHIN;
+            while reaper.alive() {
+                let _ = rustix::process::pidfd_send_signal(
+                    &reaper.pidfd,
+                    rustix::process::Signal::KILL,
+                );
+                if std::time::Instant::now() >= deadline {
+                    eprintln!("assistant: a failed start's sandbox has not exited yet");
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        if let Some((held, key)) = self.recorded.take() {
+            clear_key(&held, key);
+        }
     }
+}
+
+/// Holds a test's pause point (see [`PAUSE`]).
+#[cfg(test)]
+pub(crate) struct Pause {
+    pub dir: PathBuf,
+    pub step: &'static str,
+    pub arrived: std::sync::mpsc::Sender<()>,
+    pub release: std::sync::mpsc::Receiver<()>,
+}
+
+/// A test's pause inside the blocking start or probe, keyed by runtime directory.
+#[cfg(test)]
+pub(crate) static PAUSE: Mutex<Vec<Pause>> = Mutex::new(Vec::new());
+
+/// Blocks at `step` while a test holds it there; nothing outside tests.
+macro_rules! pause_at {
+    ($real:expr, $step:literal) => {
+        #[cfg(test)]
+        $real.paused($step);
+    };
 }
 
 /// Test-injected failures after the spawn, keyed by the runtime directory of the launcher
@@ -330,6 +498,22 @@ macro_rules! fault_at {
 
 #[cfg(test)]
 impl Real {
+    fn paused(&self, step: &'static str) {
+        let pause = {
+            let mut pauses = PAUSE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            pauses
+                .iter()
+                .position(|pause| pause.dir == self.settings.runtime_dir && pause.step == step)
+                .map(|at| pauses.remove(at))
+        };
+        if let Some(pause) = pause {
+            let _ = pause.arrived.send(());
+            let _ = pause.release.recv();
+        }
+    }
+
     fn faulted(&self, step: &'static str, pid: i32) -> bool {
         {
             let mut fault = FAULT
@@ -433,10 +617,50 @@ impl Real {
         Ok((program, shim_env))
     }
 
+    /// The runner's spec for bwrap with the full profile around the shim.
+    fn sandbox_spec(
+        &self,
+        bwrap: &Bwrap,
+        command: &Command,
+        handover: &mut Vec<Handover>,
+        runtime: Binds,
+    ) -> Result<Spec, Fail> {
+        let mut extra = Vec::new();
+        let (program, env) = self.sandbox_command(command, handover, &mut extra)?;
+        let profile = Profile {
+            size: bwrap.size,
+            status_fd: fds::STATUS,
+            seccomp_fd: fds::SECCOMP,
+            token_fd: fds::TOKEN,
+            socket_dir_fd: fds::SOCKET_DIR,
+            model_fd: fds::MODEL,
+            runtime,
+            extra,
+            env,
+            command: program,
+        }
+        .arguments();
+        Ok(Spec {
+            parent: std::process::id(),
+            keep: handover.iter().map(|h| h.target).collect(),
+            env: vec![
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("LANG".into(), "C.UTF-8".into()),
+            ],
+            exec: Exec::Bwrap {
+                path: bwrap.path.display().to_string(),
+                args: profile
+                    .iter()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect(),
+            },
+        })
+    }
+
     /// Starts level 1: bwrap with the profile, then reads `child-pid` and `pid-namespace`.
     fn spawn_sandbox(
         &self,
-        name: &str,
+        job: &Job,
         files: &[Verified],
         model: &Verified,
         token: &Token,
@@ -448,7 +672,7 @@ impl Real {
             .clone()
             .ok_or_else(|| Fail::Sandbox("bubblewrap did not pass the preflight".into()))?;
         let run = self.run_dir().map_err(Fail::Other)?;
-        let generation = Generation::create(&run, name)
+        let generation = Generation::create(&run, &job.name)
             .map_err(|refusal| Fail::Other(format!("the socket directory: {refusal}")))?;
         let seccomp = bytes_pipe(&seccomp::bytes(&seccomp::program(
             seccomp::Profile::Sandbox,
@@ -465,46 +689,21 @@ impl Real {
             fd: marker_write,
             target: fds::MARKER,
         });
-        let mut extra = Vec::new();
-        let (program, env) = self.sandbox_command(command, &mut handover, &mut extra)?;
-        let profile = Profile {
-            size: bwrap.size,
-            status_fd: fds::STATUS,
-            seccomp_fd: fds::SECCOMP,
-            token_fd: fds::TOKEN,
-            socket_dir_fd: fds::SOCKET_DIR,
-            model_fd: fds::MODEL,
-            runtime,
-            extra,
-            env,
-            command: program,
-        }
-        .arguments();
-        let spec = Spec {
-            parent: std::process::id(),
-            keep: handover.iter().map(|h| h.target).collect(),
-            env: vec![
-                ("PATH".into(), "/usr/bin:/bin".into()),
-                ("LANG".into(), "C.UTF-8".into()),
-            ],
-            exec: Exec::Bwrap {
-                path: bwrap.path.display().to_string(),
-                args: profile
-                    .iter()
-                    .map(|arg| arg.to_string_lossy().into_owned())
-                    .collect(),
-            },
-        };
-        let child = Owned(Some(
+        let spec = self.sandbox_spec(&bwrap, command, &mut handover, runtime)?;
+        pause_at!(self, "before-spawn");
+        job.check()?;
+        let mut child = Owned::new(
             runner::launch(&self.settings.runner, &spec, &handover)
                 .map_err(|_| Fail::Other("the runner could not be started".into()))?,
-        ));
+        );
         drop(handover);
         fault_at!(self, "spawned", child);
         let pid = child.pid();
         let runner = Watched::open(pid).map_err(|_| Fail::Other("no pidfd".into()))?;
+        pause_at!(self, "before-record");
+        job.check()?;
         if let Some(entry) = Entry::of(
-            name.parse().unwrap_or(0),
+            job.key,
             pid,
             vec![
                 bwrap.path.display().to_string(),
@@ -512,6 +711,7 @@ impl Real {
             ],
         ) {
             self.record(&entry);
+            child.recorded = Some((Arc::clone(&self.held), job.key));
         }
         fault_at!(self, "recorded", child);
         // No status line: bwrap failed before it created the sandbox (nothing it started could
@@ -522,7 +722,7 @@ impl Real {
                 pid_namespace,
             },
             rest,
-        ) = read_started(status_read)?;
+        ) = read_started(status_read, job)?;
         fault_at!(self, "started", child);
         let reaper = endpoint::open_reaper(child_pid, pid, pid_namespace)
             .map_err(|error| Fail::Other(format!("the sandbox's reaper: {error}")))?;
@@ -530,6 +730,7 @@ impl Real {
             reaper,
             pid_namespace,
         });
+        child.reaper = Some(Arc::clone(&sandbox));
         let connector: Arc<dyn Connect> = Arc::new(SandboxSocket {
             directory: Arc::new(dup(&generation.fd).map_err(Fail::Other)?),
             sandbox: Arc::clone(&sandbox),
@@ -580,7 +781,7 @@ impl Real {
     /// Starts level 3: the verified executable with seccomp, on `127.0.0.1:<port>`.
     fn spawn_unconfined(
         &self,
-        name: &str,
+        job: &Job,
         server: Option<&Verified>,
         model: &Verified,
         token: &Token,
@@ -588,7 +789,7 @@ impl Real {
         port: u16,
     ) -> Result<Spawned, Fail> {
         let run = self.run_dir().map_err(Fail::Other)?;
-        let generation = Generation::create(&run, name)
+        let generation = Generation::create(&run, &job.name)
             .map_err(|refusal| Fail::Other(format!("the generation directory: {refusal}")))?;
         token
             .write_file(generation.fd.as_fd())
@@ -634,10 +835,12 @@ impl Real {
                 argv,
             },
         };
-        let child = Owned(Some(
+        pause_at!(self, "before-spawn");
+        job.check()?;
+        let mut child = Owned::new(
             runner::launch(&self.settings.runner, &spec, &handover)
                 .map_err(|_| Fail::Other("the runner could not be started".into()))?,
-        ));
+        );
         drop(handover);
         fault_at!(self, "spawned", child);
         let pid = child.pid();
@@ -655,8 +858,11 @@ impl Real {
                     .to_string(),
             );
         }
-        if let Some(entry) = Entry::of(name.parse().unwrap_or(0), pid, executables) {
+        pause_at!(self, "before-record");
+        job.check()?;
+        if let Some(entry) = Entry::of(job.key, pid, executables) {
             self.record(&entry);
+            child.recorded = Some((Arc::clone(&self.held), job.key));
         }
         fault_at!(self, "recorded", child);
         let connector: Arc<dyn Connect> = Arc::new(Loopback {
@@ -724,7 +930,10 @@ fn sandbox_handover(
 
 /// bwrap's first status line (the reaper's PID and the PID namespace), within
 /// [`STATUS_WITHIN`], and the rest of the descriptor.
-fn read_started(status: OwnedFd) -> Result<(Started, std::io::BufReader<std::fs::File>), Fail> {
+fn read_started(
+    status: OwnedFd,
+    job: &Job,
+) -> Result<(Started, std::io::BufReader<std::fs::File>), Fail> {
     let file = std::fs::File::from(status);
     let (lines, report) = std::sync::mpsc::channel();
     std::thread::Builder::new()
@@ -741,16 +950,41 @@ fn read_started(status: OwnedFd) -> Result<(Started, std::io::BufReader<std::fs:
         })
         .map_err(|_| Fail::Other("no status thread".into()))?;
     // A timeout proves nothing about the sandbox (a slow host): counted, the level kept.
-    let (started, rest) = report.recv_timeout(STATUS_WITHIN).map_err(|_| {
-        Fail::Other(format!(
-            "bubblewrap did not report the sandbox within {} s",
-            STATUS_WITHIN.as_secs()
-        ))
-    })?;
+    let (started, rest) =
+        recv_unless_cancelled(&report, STATUS_WITHIN, &job.ticket)?.ok_or_else(|| {
+            Fail::Other(format!(
+                "bubblewrap did not report the sandbox within {} s",
+                STATUS_WITHIN.as_secs()
+            ))
+        })?;
     let started = started.ok_or_else(|| {
         Fail::Sandbox("bubblewrap failed before starting the model server".into())
     })?;
     Ok((started, rest))
+}
+
+/// Waits up to `within` for `receiver`, in short slices so a cancel ends the wait: `None` on
+/// a timeout (or a sender gone), a failure once cancelled.
+fn recv_unless_cancelled<T>(
+    receiver: &std::sync::mpsc::Receiver<T>,
+    within: Duration,
+    ticket: &Ticket,
+) -> Result<Option<T>, Fail> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        if ticket.cancelled() {
+            return Err(Fail::Other("cancelled".into()));
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Ok(None);
+        }
+        match receiver.recv_timeout(left.min(Duration::from_millis(100))) {
+            Ok(value) => return Ok(Some(value)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
+        }
+    }
 }
 
 /// A free loopback port: bound, read, released.
@@ -1084,6 +1318,7 @@ impl Real {
         level: Level,
         token: &Token,
         bwrap: Option<&Bwrap>,
+        key: u64,
     ) -> Result<Arc<RealChild>, Fail> {
         let Spawned {
             child,
@@ -1146,8 +1381,11 @@ impl Real {
         }
         let (exit_sender, exit) = watch::channel(None);
         let launcher = Arc::clone(self);
+        // The watcher is in-flight work until the child is gone (a settle waits for it).
+        let ticket = self.work.enter();
         tokio::spawn(watch_exit(child, runner, sandbox, exit_sender, move || {
-            launcher.clear();
+            launcher.clear(key);
+            drop(ticket);
         }));
         let server: Arc<dyn Server> = Arc::new(Llama::new(
             Bounded::new(Arc::clone(&connector)),
@@ -1256,10 +1494,19 @@ impl Launcher for Launch {
         Ok(())
     }
 
+    fn cancel(&self) {
+        self.0.work.cancel();
+    }
+
+    async fn settle(&self) {
+        self.0.work.settle().await;
+    }
+
     async fn probe(&self, path: Path) -> Vec<(Level, Result<(), String>)> {
         let real = Arc::clone(&self.0);
+        let ticket = real.work.enter();
         tokio::task::spawn_blocking(move || {
-            real.probe_levels(path)
+            real.probe_levels(path, &ticket)
                 .into_iter()
                 .map(|(level, probed)| (level, probed.eligible()))
                 .collect()
@@ -1289,23 +1536,29 @@ impl Launch {
         path: Path,
     ) -> Result<Arc<RealChild>, Fail> {
         let real = Arc::clone(&self.0);
+        // Every blocking part holds a ticket: a dropped start's work still counts until it
+        // has finished (and cleaned up), and a cancel stops it before it spawns or records.
+        let ticket = real.work.enter();
         let (files, model) = {
-            let real = Arc::clone(&real);
-            tokio::task::spawn_blocking(move || real.verify(path))
-                .await
-                .map_err(|_| Fail::Other("verification failed".into()))?
-                .map_err(Fail::Other)?
+            let (real, ticket) = (Arc::clone(&real), ticket.clone());
+            tokio::task::spawn_blocking(move || {
+                let _ticket = ticket;
+                real.verify(path)
+            })
+            .await
+            .map_err(|_| Fail::Other("verification failed".into()))?
+            .map_err(Fail::Other)?
         };
         let token = Arc::new(Token::new());
-        let name = generation.to_string();
         let bwrap = real.held().bwrap.clone();
         let files = Arc::new(files);
         let model = Arc::new(model);
         if level == Level::Unconfined {
             // Level 3 loads its libraries by path: the runtime's ancestors are checked at every
             // start, not only by the probe.
-            let checking = Arc::clone(&real);
+            let (checking, held) = (Arc::clone(&real), ticket.clone());
             tokio::task::spawn_blocking(move || {
+                let _ticket = held;
                 files::ancestors_safe(&checking.settings.runtime_dir)
                     .map_err(|refusal| Fail::Other(format!("the model runtime: {refusal}")))
             })
@@ -1315,23 +1568,27 @@ impl Launch {
         // The spawn blocks (bwrap's status line, up to 30 s): off the async runtime. A start
         // dropped meanwhile drops its result, whose guard kills the child.
         let spawn = |port: u16| {
-            let (real, files, model, token, name) = (
+            let (real, files, model, token) = (
                 Arc::clone(&real),
                 Arc::clone(&files),
                 Arc::clone(&model),
                 Arc::clone(&token),
-                name.clone(),
             );
+            let job = Job {
+                name: generation.to_string(),
+                key: generation,
+                ticket: ticket.clone(),
+            };
             tokio::task::spawn_blocking(move || match level {
                 Level::Bubblewrap => {
-                    real.spawn_sandbox(&name, &files, &model, &token, &Command::Server)
+                    real.spawn_sandbox(&job, &files, &model, &token, &Command::Server)
                 }
                 Level::Unconfined => {
                     let server_name = real.build.as_ref().map(|build| build.server.clone());
                     let server = files
                         .iter()
                         .find(|file| Some(&file.name) == server_name.as_ref());
-                    real.spawn_unconfined(&name, server, &model, &token, &Command::Server, port)
+                    real.spawn_unconfined(&job, server, &model, &token, &Command::Server, port)
                 }
                 Level::Landlock => Err(Fail::Sandbox(
                     "Landlock confinement is not in this release".into(),
@@ -1343,7 +1600,7 @@ impl Launch {
         };
         if level != Level::Unconfined {
             let spawned = joined(spawn(0).await)?;
-            return real.child(spawned, level, &token, bwrap.as_ref());
+            return real.child(spawned, level, &token, bwrap.as_ref(), generation);
         }
         // A child that cannot bind its port exits; a new port is tried, at most 3.
         let mut tries = 0;
@@ -1351,7 +1608,7 @@ impl Launch {
             tries += 1;
             let port = free_port()?;
             let spawned = joined(spawn(port).await)?;
-            let child = real.child(spawned, level, &token, None)?;
+            let child = real.child(spawned, level, &token, None, generation)?;
             let bound = tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
                     if child.summary().failed.bind {
@@ -1360,8 +1617,9 @@ impl Launch {
                     if child.exit.borrow().is_some() {
                         return true;
                     }
-                    let pid = child.pid;
+                    let (pid, held) = (child.pid, ticket.clone());
                     let listening = tokio::task::spawn_blocking(move || {
+                        let _ticket = held;
                         endpoint::listeners(port, pid).is_ok_and(|result| result.is_ok())
                     })
                     .await
@@ -1474,8 +1732,13 @@ const PROBE_TRIES: usize = 3;
 impl Real {
     /// Runs the level's probe: the inner command under the full profile, then the endpoint
     /// check against it (on level 1 that asserts the process shape).
-    pub(crate) fn probe_level(self: &Arc<Self>, path: Path, level: Level) -> Probe {
-        match self.inner_report(path, level) {
+    pub(crate) fn probe_level(
+        self: &Arc<Self>,
+        path: Path,
+        level: Level,
+        ticket: &Ticket,
+    ) -> Probe {
+        match self.inner_report(path, level, ticket) {
             Ok((report, verdict)) if report["ok"] == serde_json::json!(true) => verdict,
             Ok((report, _)) => {
                 Probe::Failed(format!("the probe failed inside the level: {report}"))
@@ -1486,14 +1749,18 @@ impl Real {
 
     /// The level's probe, tried again while inconclusive; a level that stays inconclusive is
     /// kept (the real start decides), never skipped on a timeout alone.
-    fn probe_with_retries(self: &Arc<Self>, path: Path, level: Level) -> Probed {
+    fn probe_with_retries(self: &Arc<Self>, path: Path, level: Level, ticket: &Ticket) -> Probed {
         let hinted =
             |why: String| match (level, bwrap::namespace_hint(std::path::Path::new("/proc"))) {
                 (Level::Bubblewrap, Some(hint)) => format!("{why} ({hint})"),
                 _ => why,
             };
         match retry_probe(level, Duration::from_secs(2), || {
-            self.probe_level(path, level)
+            if ticket.cancelled() {
+                // Ends the retries at once; the session that asked is gone.
+                return Probe::Failed("cancelled".into());
+            }
+            self.probe_level(path, level, ticket)
         }) {
             Probed::Passed => Probed::Passed,
             Probed::Kept(why) => Probed::Kept(hinted(why)),
@@ -1502,11 +1769,15 @@ impl Real {
     }
 
     /// Every level's probe (blocking).
-    pub(crate) fn probe_levels(self: &Arc<Self>, path: Path) -> Vec<(Level, Probed)> {
+    pub(crate) fn probe_levels(
+        self: &Arc<Self>,
+        path: Path,
+        ticket: &Ticket,
+    ) -> Vec<(Level, Probed)> {
         vec![
             (
                 Level::Bubblewrap,
-                self.probe_with_retries(path, Level::Bubblewrap),
+                self.probe_with_retries(path, Level::Bubblewrap, ticket),
             ),
             (
                 Level::Landlock,
@@ -1514,7 +1785,7 @@ impl Real {
             ),
             (
                 Level::Unconfined,
-                self.probe_with_retries(path, Level::Unconfined),
+                self.probe_with_retries(path, Level::Unconfined, ticket),
             ),
         ]
     }
@@ -1525,6 +1796,7 @@ impl Real {
         self: &Arc<Self>,
         path: Path,
         level: Level,
+        ticket: &Ticket,
     ) -> Result<(serde_json::Value, Probe), Probe> {
         if level == Level::Bubblewrap {
             let bwrap =
@@ -1536,7 +1808,12 @@ impl Real {
         }
         let (files, model) = self.verify(path).map_err(Probe::Failed)?;
         let token = Token::new();
-        let name = format!("probe-{}", level.number());
+        let sequence = self.probes.fetch_add(1, Ordering::SeqCst);
+        let job = Job {
+            name: format!("probe-{sequence}-{}", level.number()),
+            key: PROBE_KEYS + sequence,
+            ticket: ticket.clone(),
+        };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1547,11 +1824,11 @@ impl Real {
             Fail::Sandbox(why) | Fail::Other(why) => Probe::Inconclusive(why),
         };
         let spawned = if level == Level::Bubblewrap {
-            self.spawn_sandbox(&name, &files, &model, &token, &Command::Probe)
+            self.spawn_sandbox(&job, &files, &model, &token, &Command::Probe)
                 .map_err(failed)?
         } else {
             let port = free_port().map_err(failed)?;
-            self.spawn_unconfined(&name, None, &model, &token, &Command::Probe, port)
+            self.spawn_unconfined(&job, None, &model, &token, &Command::Probe, port)
                 .map_err(failed)?
         };
         let Spawned {
@@ -1562,7 +1839,7 @@ impl Real {
             ..
         } = spawned;
         // `owned` kills and reaps the probe whichever way this ends.
-        let (out, stderr) = owned.0.as_mut().map_or((None, None), |child| {
+        let (out, stderr) = owned.child.as_mut().map_or((None, None), |child| {
             (child.stdout.take(), child.stderr.take())
         });
         let out = out.ok_or_else(|| Probe::Inconclusive("no probe output".into()))?;
@@ -1572,8 +1849,10 @@ impl Real {
             .spawn(move || {
                 let _ = sender.send(first_report(std::io::BufReader::new(out)));
             });
-        let result = match reported.recv_timeout(PROBE_REPORT_WITHIN) {
-            Ok(Some(report)) => {
+        let reported = recv_unless_cancelled(&reported, PROBE_REPORT_WITHIN, ticket)
+            .map_err(|_| Probe::Failed("cancelled".into()))?;
+        let result = match reported {
+            Some(Some(report)) => {
                 let verdict = if report["ok"] == serde_json::json!(true) {
                     runtime.block_on(async {
                         match tokio::time::timeout(Duration::from_secs(10), connector.connect())
@@ -1591,7 +1870,7 @@ impl Real {
                 };
                 Ok((report, verdict))
             }
-            Ok(None) => {
+            Some(None) => {
                 // The probe runs Mimik itself, never llama-server: its stderr (bwrap's and the
                 // shim's) is trusted here.
                 let mut text = String::new();
@@ -1608,13 +1887,13 @@ impl Real {
                         .to_owned(),
                 ))
             }
-            Err(_) => Err(Probe::Inconclusive(format!(
+            None => Err(Probe::Inconclusive(format!(
                 "the probe did not report within {} s",
                 PROBE_REPORT_WITHIN.as_secs()
             ))),
         };
+        // Kills the probe (and its sandbox), then clears its own entry only.
         drop(owned);
-        self.clear();
         drop(generation);
         result
     }

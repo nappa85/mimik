@@ -474,6 +474,8 @@ async fn a_failure_after_the_spawn_leaves_no_process_behind() {
             "{step}: {pid} is left"
         );
         assert_eq!(processes_naming(&marker), Vec::<i32>::new(), "{step}");
+        // Nor its pidfile entry.
+        assert_eq!(pidfile_text(&setup), "", "{step}");
         // Nor is its generation directory.
         assert!(
             !setup
@@ -682,4 +684,103 @@ async fn a_leftover_still_running_blocks_the_start_and_keeps_its_entry() {
     leftover.wait().unwrap();
     launch.preflight(Path::Cpu).await.unwrap();
     assert!(!generation.exists());
+}
+
+fn pidfile_text(setup: &Setup) -> String {
+    std::fs::read_to_string(setup.settings.data_dir.join("run/assistant.pid")).unwrap()
+}
+
+/// Starts generation 1 at level 3 paused at `step`, drops the start, cancels, and checks
+/// that the settle waits for the blocking work, which then leaves nothing behind.
+async fn cancelled_at(step: &'static str) {
+    let setup = setup(MODEL, "fake");
+    let launch = Arc::new(launch(&setup));
+    launch.preflight(Path::Cpu).await.unwrap();
+    let (arrived_sender, arrived) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    PAUSE.lock().unwrap().push(Pause {
+        dir: setup.settings.runtime_dir.clone(),
+        step,
+        arrived: arrived_sender,
+        release: released,
+    });
+    let starting = {
+        let launch = Arc::clone(&launch);
+        tokio::spawn(async move {
+            launch
+                .start(1, Level::Unconfined, Path::Cpu)
+                .await
+                .map(|_| ())
+        })
+    };
+    tokio::task::spawn_blocking(move || arrived.recv_timeout(Duration::from_secs(30)).unwrap())
+        .await
+        .unwrap();
+    starting.abort();
+    let _ = starting.await;
+    launch.cancel();
+    let settling = {
+        let launch = Arc::clone(&launch);
+        tokio::spawn(async move { launch.settle().await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !settling.is_finished(),
+        "{step}: settled while the start's blocking work still ran"
+    );
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), settling)
+        .await
+        .unwrap()
+        .unwrap();
+    let marker = setup.settings.data_dir.join("run").display().to_string();
+    assert_eq!(processes_naming(&marker), Vec::<i32>::new(), "{step}");
+    assert_eq!(pidfile_text(&setup), "", "{step}");
+    assert!(!setup.settings.data_dir.join("run/1").exists(), "{step}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_cancelled_before_its_spawn_spawns_nothing_and_settles_after_it() {
+    cancelled_at("before-spawn").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_cancelled_after_its_spawn_never_records_and_leaves_nothing() {
+    cancelled_at("before-record").await;
+}
+
+#[tokio::test]
+async fn a_stale_clear_never_removes_a_newer_entry() {
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    let me = i32::try_from(std::process::id()).unwrap();
+    let entry = rundir::Entry::of(5, me, vec!["/x".into()]).unwrap();
+    launch.0.record(&entry);
+    // A probe of an earlier session ends after generation 5 recorded itself.
+    launch.0.clear(PROBE_KEYS + 1);
+    assert!(pidfile_text(&setup).starts_with("5\n"));
+    launch.0.clear(5);
+    assert_eq!(pidfile_text(&setup), "");
+}
+
+#[test]
+fn a_failed_starts_guard_kills_and_waits_for_the_reaper_too() {
+    let runner = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let mut reaper_process = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let sandbox = Arc::new(Sandbox {
+        reaper: Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap(),
+        pid_namespace: 0,
+    });
+    let mut owned = Owned::new(runner);
+    owned.reaper = Some(Arc::clone(&sandbox));
+    drop(owned);
+    assert!(endpoint::exited(&sandbox.reaper.pidfd));
+    reaper_process.wait().unwrap();
 }

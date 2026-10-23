@@ -246,7 +246,8 @@ fn cli_probe(args: &[String]) -> i32 {
             return json!({"level": null, "error": why});
         }
         let real = std::sync::Arc::clone(&launch.0);
-        let levels = tokio::task::spawn_blocking(move || real.probe_levels(Path::Cpu))
+        let ticket = real.work().enter();
+        let levels = tokio::task::spawn_blocking(move || real.probe_levels(Path::Cpu, &ticket))
             .await
             .unwrap_or_default();
         probe_report(&levels)

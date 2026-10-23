@@ -73,6 +73,11 @@ pub(crate) trait Launcher: Send + Sync {
     async fn preflight(&self, path: Path) -> Result<(), String>;
     /// The start-time probe of each level, in order.
     async fn probe(&self, path: Path) -> Vec<(Level, Result<(), String>)>;
+    /// Stops in-flight probes and starts at their next check (before they spawn or record
+    /// anything).
+    fn cancel(&self) {}
+    /// Waits until no probe, start or child watcher of an earlier session runs.
+    async fn settle(&self) {}
     async fn start(
         &self,
         generation: u64,
@@ -345,6 +350,8 @@ impl Manager {
         // Mimik's start counts as a Restart: from level 1, breaker and count reset.
         loop {
             if let Next::Stop(reply) = self.session().await {
+                self.launcher.cancel();
+                self.launcher.settle().await;
                 return shut(reply);
             }
         }
@@ -359,17 +366,21 @@ impl Manager {
         }
     }
 
-    /// Runs `work` unless the owner's Restart or shutdown comes first (then `work` is dropped:
-    /// a child it started is killed with it).
+    /// Runs `work` unless the owner's Restart or shutdown comes first: then `work` is dropped,
+    /// its blocking part is cancelled, and this waits until that has finished and cleaned up
+    /// (so nothing of it overlaps the next session or outlives the shutdown).
     async fn interruptible<T>(&mut self, work: impl Future<Output = T>) -> Result<T, Next> {
-        tokio::select! {
-            done = work => Ok(done),
+        let next = tokio::select! {
+            done = work => return Ok(done),
             command = self.commands.recv() => match command {
-                Some(Command::Restart) => Err(Next::Fresh),
-                Some(Command::Shutdown(reply)) => Err(Next::Stop(reply)),
+                Some(Command::Restart) => Next::Fresh,
+                Some(Command::Shutdown(reply)) => Next::Stop(reply),
                 None => std::future::pending().await,
             },
-        }
+        };
+        self.launcher.cancel();
+        self.launcher.settle().await;
+        Err(next)
     }
 
     /// The levels that passed their probe, in order; the others are recorded as skipped.
@@ -406,8 +417,24 @@ impl Manager {
         generation
     }
 
+    /// The preflight, then the probes: the levels to try.
+    async fn levels(&mut self) -> Result<Vec<Level>, Next> {
+        let launcher = Arc::clone(&self.launcher);
+        match self
+            .interruptible(launcher.preflight(self.config.path))
+            .await?
+        {
+            Ok(()) => {}
+            Err(why) => return Err(self.hold(why).await),
+        }
+        let probed = self.interruptible(launcher.probe(self.config.path)).await?;
+        Ok(self.probed(probed))
+    }
+
     /// One start from level 1 until the owner's Restart (or shutdown) ends it.
     async fn session(&mut self) -> Next {
+        // Nothing of an earlier session (a child's watcher, a cancelled probe) runs beside it.
+        self.launcher.settle().await;
         self.failures = 0;
         self.assistant.reset_breaker();
         self.update(|status| {
@@ -417,20 +444,10 @@ impl Manager {
             status.last_failure = None;
             status.level = None;
         });
-        let launcher = Arc::clone(&self.launcher);
-        match self
-            .interruptible(launcher.preflight(self.config.path))
-            .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(why)) => return self.hold(why).await,
-            Err(next) => return next,
-        }
-        let probed = match self.interruptible(launcher.probe(self.config.path)).await {
-            Ok(probed) => probed,
+        let levels = match self.levels().await {
+            Ok(levels) => levels,
             Err(next) => return next,
         };
-        let levels = self.probed(probed);
         let mut index = 0;
         loop {
             if self.failures >= MAX_FAILURES {
@@ -538,7 +555,11 @@ impl Manager {
         let started = tokio::select! {
             started = launcher.start(generation, level, self.config.path) => started,
             command = self.commands.recv() => match command {
-                Some(command) => return Attempt::Interrupted(command),
+                Some(command) => {
+                    self.launcher.cancel();
+                    self.launcher.settle().await;
+                    return Attempt::Interrupted(command);
+                }
                 None => std::future::pending().await,
             },
         };
