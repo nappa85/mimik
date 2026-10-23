@@ -6,11 +6,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Current work
 
-- **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1 and the Rust
-  1.99.1 / rig-core 0.45.0 upgrade are merged into master. **2c-2a** (the CPU runtime at
-  level 1 only, ASSIST-43, `docs/model-runtime.md`) is built on branch `assist-2c2`, awaiting
-  its final review and its remaining live measurements (plan, "2c-2a"); then 2c-2b (GPU path,
-  Landlock). Level 3's return is its own later step (plan, "Level 3 behind an owner opt-in").
+- **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1, 2c-2a (the CPU
+  runtime at level 1 only, ASSIST-43, `docs/model-runtime.md`) and the Rust 1.99.1 / rig-core
+  0.45.0 upgrade are merged into master. Next: 2c-2b (GPU path, Landlock). Level 3's return is
+  its own later step (plan, "Level 3 behind an owner opt-in").
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
   target/agent-tools/ci.sh <cmd>`, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
@@ -19,8 +18,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
-1. 2c-2a reviews and the idle native calibration (5 and 2 threads; an evening or weekend
-   when the host is otherwise idle), 2c-2b GPU path and Landlock, 2d-1 owner model setting, 2d-2 downloads, 3 bundles and
+1. The idle native calibration (5 and 2 threads; the detached waiter in
+   `/media/data/mimik/assist-2c2/live/` runs it when the host is idle outside weekday hours), 2c-2b GPU path and Landlock, 2d-1 owner model setting, 2d-2 downloads, 3 bundles and
    reminders, 4 suggestions, 5 docs and gate (includes the `docs/release-scope.md` update for
    schema 22 and the assisted scope).
 2. Before 2d-1 chooses the default model (ASSIST-L32), a field-reference experiment, decision
@@ -28,6 +27,12 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    adds only the compact-output sentence; about 30 fresh field-reference cases written without
    reusing screen cases; real 1 KiB related-context requests rendered by the Rust builder; an
    idle host at the ASSIST-41 thread count; pass 1 only.
+   Alongside it (user 2026-10-23), a prototype-tier Laya experiment (Convai Innovations'
+   Apache-2.0 non-generative decision models, 322M/421M): choose the field from the supplied
+   aliases on the same fresh cases, and act-versus-ask on the 50 dev cases against Granite's
+   false-confident count. Run it in a container with the `laya` package, since stock
+   llama-server does not run it, and write the decision rule down before running. Shipping it
+   would need its own runtime decision (ASSIST-29/33).
 3. Owed measurements: the idle native CPU calibration at the ASSIST-41 default and at 2 threads
    (2c-2a); grammar against no-grammar generation time and cancellation timing with Granite
    (2c-2a); the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks at each
