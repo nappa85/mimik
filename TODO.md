@@ -33,7 +33,14 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    false-confident count. Run it in a container with the `laya` package, since stock
    llama-server does not run it, and write the decision rule down before running. Shipping it
    would need its own runtime decision (ASSIST-29/33).
-3. Owed measurements: the idle native CPU calibration at the ASSIST-41 default and at 2 threads
+3. After 2c-2b, a prototype-tier Hakoniwa comparison (user 2026-10-23). Hakoniwa is a Rust
+   library (LGPL-3.0 with linking exception) that does Linux isolation in-process, so the host
+   would not need `bwrap`. Run it in the runner process with its `seccomp` feature off, so there
+   is no libseccomp C dependency, and install Mimik's own seccompiler filter instead. Compare it
+   with the bwrap profile on the same live adversary checks. Use a stock Ubuntu 24.04 VM to see
+   whether its AppArmor user-namespace restriction blocks Mimik's binary where it allows `bwrap`.
+   If Hakoniwa holds up, adopting it is its own decision and review.
+4. Owed measurements: the idle native CPU calibration at the ASSIST-41 default and at 2 threads
    (2c-2a); grammar against no-grammar generation time and cancellation timing with Granite
    (2c-2a); the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks at each
    llama.cpp pin change; the Qwen3.5-9B rev3 S40 re-run.
