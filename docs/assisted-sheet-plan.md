@@ -360,8 +360,8 @@ natively for these tests (ASSIST-40).
   missing, set-ID or lacking an option (named), user namespaces disabled
   (`user.max_user_namespaces`, `kernel.unprivileged_userns_clone`), the Ubuntu AppArmor
   restriction on unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns`),
-  or the probe's own error. Then level 2 is probed the same way, then level 3 only if the owner
-  has explicitly allowed it (ASSIST-43). A level that
+  or the probe's own error. Then level 2 is probed the same way only if the owner has explicitly allowed it (ASSIST-44),
+  then level 3 only if the owner has explicitly allowed it (ASSIST-43). A level that
   passes the probe can still fail at the real start; that failure is recorded with its cause
   and shown on the page, and the transitions below move down only for sandbox-attributable
   failures. Memory: the child has no memory cap (`RLIMIT_AS` is
@@ -448,7 +448,7 @@ natively for these tests (ASSIST-40).
   | Event | Action | Failure count |
   |---|---|---|
   | Attempt fails on the GPU path (budgets that do not derive included), or the GPU child exits, or is stopped as hung | stop and wait until gone, start on the CPU path at the same level at once, showing the reason; CPU until Mimik restarts or the owner presses "Try the GPU again" | not counted |
-  | Attempt on the CPU path fails with a sandbox-attributable failure at level 1 or 2 (a bwrap or Landlock setup error, a status-descriptor failure before exec, the level's preflight failing) | next attempt at once on the next allowed level that passed its probe (level 3 only with the owner's explicit permission, ASSIST-43); none left: `unavailable` with the fix; the skipped level and its reason are recorded and shown | not counted |
+  | Attempt on the CPU path fails with a sandbox-attributable failure at level 1 or 2 (a bwrap or Landlock setup error, a status-descriptor failure before exec, the level's preflight failing) | next attempt at once on the next allowed level that passed its probe (level 2 and level 3 each only with the owner's explicit permission, ASSIST-44, ASSIST-43); none left: `unavailable` with the fix; the skipped level and its reason are recorded and shown | not counted |
   | Attempt fails on the CPU path, otherwise (model-load errors, hash mismatches, exits after exec keep the level) | retry after 2 minutes | +1 |
   | Child exits while ready (CPU path) | restart now | +1 only within 10 minutes of `ready` |
   | Two consecutive run-deadline expiries with no completed exchange between | stop as hung, wait until gone, restart, re-measure (whatever `/health` says); expiries never count toward the breaker | as a child exit |
@@ -766,7 +766,8 @@ automatic), shown on the page with its exposure, and these before it can be enab
 #### 2c-2b GPU path and Landlock
 
 Scope: §1.4a's device choice, the GPU build and the GPU → CPU fallback, "Try the GPU again" on
-the assistant page, and confinement level 2 (Landlock with seccomp). Tests:
+the assistant page, and confinement level 2 (Landlock with seccomp), used only when the owner has explicitly allowed it
+(ASSIST-44): an owner setting, off by default, shown with what level 2 does not confine. Tests:
 - device and fallback: per-node sandboxed listings (format pinned from the real build): one
   hardware GPU plus lavapipe → the hardware GPU, lavapipe excluded before the count; only
   `llvmpipe` → CPU; a host where the selected card is `Vulkan1` but its sandboxed list names it
@@ -958,9 +959,8 @@ prevented); one revision per Enter makes history long (no-ops write nothing, no 
 (proxies, redirects, retries) could send player text off the machine or repeat it, hence the
 client policy and its tests. Runtime: bubblewrap needs unprivileged user namespaces, which
 some distributions disable or restrict (Ubuntu's AppArmor rule), and older distributions'
-bubblewrap may lack an option the probe needs; those machines fall back to Landlock (2c-2b),
-or run no assistant unless the owner explicitly allows unconfined (ASSIST-43), as shown on the
-page; and Landlock is missing or
+bubblewrap may lack an option the probe needs; those machines run no assistant unless the owner explicitly allows Landlock (2c-2b, ASSIST-44)
+or unconfined (ASSIST-43), as shown on the page; and Landlock is missing or
 lacks network rules on many kernels (this host's included), so a machine can end on a lower
 level; the Landlock level leaves inbound listening on other addresses and local Unix sockets
 open; a malicious GGUF exploiting llama-server is contained only as far as the active level
