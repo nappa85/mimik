@@ -223,3 +223,61 @@ fn a_killed_leftover_not_yet_ended_keeps_its_entry() {
     assert_eq!(pidfile.leftover(), Some(entry));
     leftover.wait().unwrap();
 }
+
+/// A model of the process table where a PID changes hands: each process has an id; a handle
+/// pins the process that had the PID when it was opened.
+struct Reused {
+    /// The process holding the recorded PID now: 1 (the leftover) or 2 (a newcomer).
+    holder: std::cell::Cell<u32>,
+    signalled: std::cell::RefCell<Vec<u32>>,
+}
+
+impl Processes for Reused {
+    type Handle = u32;
+
+    fn open(&self, _: i32) -> std::io::Result<u32> {
+        Ok(self.holder.get())
+    }
+
+    fn identity(&self, _: i32) -> (Option<u64>, Option<String>) {
+        match self.holder.get() {
+            1 => (Some(100), Some("/opt/mimik/mimik".into())),
+            _ => (Some(200), Some("/usr/bin/other".into())),
+        }
+    }
+
+    fn kill(&self, handle: &u32) -> std::io::Result<()> {
+        self.signalled.borrow_mut().push(*handle);
+        Ok(())
+    }
+
+    fn alive(&self, _: &u32) -> bool {
+        false
+    }
+}
+
+#[test]
+fn a_pid_taken_over_by_another_process_is_never_signalled() {
+    let (_dir, run) = data();
+    let mut pidfile = Pidfile::acquire(run.as_fd()).unwrap().unwrap();
+    let entry = Entry {
+        generation: 1,
+        pid: 4242,
+        start_time: 100,
+        executables: vec!["/opt/mimik/mimik".into()],
+    };
+    pidfile.record(&entry).unwrap();
+    let processes = Reused {
+        holder: std::cell::Cell::new(1),
+        signalled: std::cell::RefCell::new(Vec::new()),
+    };
+    // The leftover ends and another process takes its PID, after the handle is opened.
+    let outcome = pidfile.sweep_in(&processes, || processes.holder.set(2), |_| true);
+    assert_eq!(outcome, Swept::Nothing);
+    assert_eq!(processes.signalled.borrow().as_slice(), &[] as &[u32]);
+    // Without a takeover the leftover itself is the one signalled.
+    pidfile.record(&entry).unwrap();
+    processes.holder.set(1);
+    assert_eq!(pidfile.sweep_in(&processes, || {}, |_| true), Swept::Killed);
+    assert_eq!(processes.signalled.borrow().as_slice(), &[1]);
+}

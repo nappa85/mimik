@@ -173,34 +173,40 @@ impl Pidfile {
         between: impl FnOnce(),
         gone: impl FnOnce(&super::endpoint::Watched) -> bool,
     ) -> Swept {
+        self.sweep_in(&Host, between, gone)
+    }
+
+    /// The sweep against `processes` (the host's, or a test's model of PID reuse).
+    pub(crate) fn sweep_in<P: Processes>(
+        &mut self,
+        processes: &P,
+        between: impl FnOnce(),
+        gone: impl FnOnce(&P::Handle) -> bool,
+    ) -> Swept {
         let Some(entry) = self.leftover() else {
             return Swept::Nothing;
         };
-        let outcome = match super::endpoint::Watched::open(entry.pid) {
+        let outcome = match processes.open(entry.pid) {
             // No such process: nothing to kill.
             Err(error) if error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) => {
                 Swept::Nothing
             }
             // It cannot be told whether the leftover runs: the entry stays.
             Err(_) => Swept::StillRunning,
-            Ok(watched) => {
+            Ok(handle) => {
                 between();
-                let matches = start_time(entry.pid) == Some(entry.start_time)
-                    && executable(entry.pid).is_some_and(|exe| entry.executables.contains(&exe));
+                let (start, exe) = processes.identity(entry.pid);
+                let matches = start == Some(entry.start_time)
+                    && exe.is_some_and(|exe| entry.executables.contains(&exe));
                 if !matches {
                     Swept::Nothing
-                } else if rustix::process::pidfd_send_signal(
-                    &watched.pidfd,
-                    rustix::process::Signal::KILL,
-                )
-                .is_err()
-                {
-                    if watched.alive() {
+                } else if processes.kill(&handle).is_err() {
+                    if processes.alive(&handle) {
                         Swept::StillRunning
                     } else {
                         Swept::Nothing
                     }
-                } else if gone(&watched) {
+                } else if gone(&handle) {
                     Swept::Killed
                 } else {
                     Swept::StillRunning
@@ -211,6 +217,41 @@ impl Pidfile {
             let _ = self.clear();
         }
         outcome
+    }
+}
+
+/// What the sweep needs of processes: a handle pinning one process (a pidfd on the host),
+/// a PID's current identity, and a kill through the handle (never by PID).
+pub(crate) trait Processes {
+    type Handle;
+    fn open(&self, pid: i32) -> std::io::Result<Self::Handle>;
+    /// The start time and executable of whatever process has `pid` now.
+    fn identity(&self, pid: i32) -> (Option<u64>, Option<String>);
+    fn kill(&self, handle: &Self::Handle) -> std::io::Result<()>;
+    fn alive(&self, handle: &Self::Handle) -> bool;
+}
+
+/// The host's processes, through pidfds.
+pub(crate) struct Host;
+
+impl Processes for Host {
+    type Handle = super::endpoint::Watched;
+
+    fn open(&self, pid: i32) -> std::io::Result<Self::Handle> {
+        super::endpoint::Watched::open(pid)
+    }
+
+    fn identity(&self, pid: i32) -> (Option<u64>, Option<String>) {
+        (start_time(pid), executable(pid))
+    }
+
+    fn kill(&self, handle: &Self::Handle) -> std::io::Result<()> {
+        rustix::process::pidfd_send_signal(&handle.pidfd, rustix::process::Signal::KILL)
+            .map_err(Into::into)
+    }
+
+    fn alive(&self, handle: &Self::Handle) -> bool {
+        handle.alive()
     }
 }
 
