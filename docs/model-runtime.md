@@ -36,7 +36,7 @@ with its SHA-256 compiled in), `--assistant-model-sha256` (required for any othe
 hand). `--assistant-runtime` (default `llama/` beside the binary; it must hold exactly the
 pinned files either way). `--assistant-threads` (default the usable physical cores minus one,
 at least 1; physical cores are the distinct `core_cpus_list` sets in sysfs among the CPUs of
-Mimik's affinity mask, capped by its cgroup's `cpu.max` quota, ASSIST-41). The data
+Mimik's affinity mask, capped by the tightest `cpu.max` quota of its cgroup and the cgroup's ancestors, ASSIST-41). The data
 directory is the database's folder; `run/` lives there.
 
 ## Pinned build
@@ -64,15 +64,18 @@ file are opened beneath their folder's descriptor with `openat2` (`RESOLVE_BENEA
 `fstat` (regular, owned by Mimik's user, not writable by group or others) and hashed from that
 descriptor; a hash is reused while the `fstat` identity (device, inode, size, modification and
 change times) is unchanged. The child loads those descriptors, so a file swapped after the
-check is not what runs. Level 3 also requires the runtime directory and every ancestor not to
-be writable by group or others (it loads the libraries by path). A model larger than
+check is not what runs. Level 3 also requires the runtime directory and every ancestor of its
+real path (links resolved first) not to be writable by group or others (it loads the
+libraries by path). A model larger than
 `MemAvailable` minus 1 GiB is refused ("not enough memory for this model").
 
 ## Runner
 
 Mimik spawns `mimik assistant-runner --spec-fd 3` from one long-lived thread (the
 parent-death signal follows the spawning thread); the spec (parent PID, kept descriptors,
-the exact environment, the exec) arrives on descriptor 3. The runner sets `PR_SET_PDEATHSIG`
+the exact environment, the exec) arrives on descriptor 3, a memory file written whole before
+the spawn (1 MiB at most; at most 64 descriptors, the spec's included, are moved, which the
+pinned build's level 1 fits with room to spare). The runner sets `PR_SET_PDEATHSIG`
 (SIGKILL), exits if its parent is no longer Mimik, sets `RLIMIT_CORE` 0 and `RLIMIT_FSIZE`
 64 MiB (a larger write kills the server with `SIGXFSZ`), closes every descriptor it was not
 handed, and executes in place with only `PATH`, `LANG` and `HOME`: `bwrap` on level 1; on
@@ -102,9 +105,12 @@ the log.
    `/models/model.gguf`; the token by `--ro-bind-data` (mode 0400) at `/run/token`; the root
    remounted read-only; the seccomp program by `--seccomp`; `--json-status-fd`, whose first
    line gives the sandbox's PID-1 reaper (`child-pid`) and its PID namespace. Nothing else of
-   the host is visible. The command inside is Mimik's own binary (bound by descriptor) as a
-   shim: it writes a marker on a dedicated pipe, closes every descriptor but 0–2 and executes
-   llama-server (or the probe). The server listens on `/run/llama/llama.sock`.
+   the host is visible. bwrap's reported reaper is accepted only as the runner's child in the
+   reported PID namespace, checked through its pidfd. The command inside is Mimik's own binary
+   (bound by descriptor) as a shim: it writes a marker on a dedicated pipe, closes every
+   descriptor but 0–2 (`close_range`, else each one `/proc/self/fd` lists; when neither works
+   it executes nothing) and executes llama-server (or the probe); an exec failure is written
+   to stderr and exits 127 after the marker, so it counts at the same level. The server listens on `/run/llama/llama.sock`.
 2. **Landlock with seccomp:** not in this release (step 2c-2b); the page names it skipped.
 3. **Unconfined (seccomp only)**, on `127.0.0.1` with a random port: "not confined: TCP
    egress allowed, and the whole filesystem readable by Mimik's user is readable by the model
@@ -113,7 +119,7 @@ the log.
    directory there. A child that cannot bind its port exits and a new port is tried, at most
    3 per attempt.
 
-**Seccomp (both levels), pure Rust** (`seccompiler` plus four hand-written first
+**Seccomp (both levels; the exec rule at level 3 only), pure Rust** (`seccompiler` plus four hand-written first
 instructions, which `seccompiler` cannot express): anything but `AUDIT_ARCH_X86_64` is
 killed; every x32 syscall number is refused; `clone3` answers `ENOSYS` (glibc falls back to
 `clone`). Default allow; `EPERM` for `fork`, `vfork`, `clone` without `CLONE_THREAD`,
@@ -126,7 +132,9 @@ the new mount API, `pivot_root`, `unshare`, `setns`, module and `kexec` calls, a
 `execveat` is allowed only on descriptor 1023 with exactly `AT_EMPTY_PATH`: that descriptor is
 close-on-exec and no new descriptor can take its number (the limit is 1023 and an
 unprivileged process cannot raise it), so no exec is possible after the first, from any
-thread. Seccomp sees no `connect()` address and is not network confinement.
+thread. Level 1 allows exec: the shim executes llama-server inside the sandbox, and anything
+executed there reaches only what the sandbox holds. Seccomp sees no `connect()` address and is
+not network confinement.
 
 The start-time probe (`mimik assistant-runner --probe-inner`) runs Mimik itself in place of
 the server under each level's full profile (the same binds, descriptors, seccomp program and
@@ -134,9 +142,12 @@ token channel): it reads the model's magic, the token and binds the socket or po
 one JSON line and answers one connection, on which the endpoint check runs. `mimik
 assistant-runner --probe --runtime <dir> --models-dir <dir> --model local:<name>
 [--model-sha256 <hex>] [--data-dir <dir>]` prints the result as one JSON line and exits 0 only
-at level 1 (the CI and owner check). A probe that fails for a definite cause skips its level;
-one that is only inconclusive (no report within 30 s, a missing pidfd) is tried again, three
-times in all, and a level that stays inconclusive is kept for the real start to decide.
+when level 1's probe passed (the CI and owner check). A probe that fails for a definite cause
+(an unusable bwrap, a changed file, a refusal inside the level or by the endpoint check)
+skips its level; one that is only inconclusive (no report within 30 s, a failed spawn or bwrap
+with no status line, a transient endpoint error such as `EMFILE`, `ENOMEM` or `EAGAIN`) is
+tried again, three times in all. A level that stays inconclusive is kept for the real start to
+decide, but `--probe` reports it `"ok": false, "inconclusive": true`, never as reached.
 
 ## Endpoint check
 
@@ -165,10 +176,10 @@ The child's stdout and stderr are drained by two threads with a 4 KiB line bound
 copied into Mimik's log. Fixed patterns update a fixed-size summary (so memory stays bounded
 however much the child prints): bind failures, listening, the build number, the offload line,
 device and model-load errors (which name a failed start). Nothing the child prints can make
-an exit a sandbox failure: at level 1 that is decided only by the shim's marker never
-arriving (bwrap failed before the exec); once the marker arrived, or when it cannot be read,
-the exit counts at the same level. An exit is classified after both readers ended (5 s at
-most).
+an exit a sandbox failure: at level 1 that is decided only by the shim's marker pipe ending
+cleanly without the marker (bwrap failed before the exec). The marker's arrival, a read error,
+unexpected bytes, or a reader still running after the readers' wait (5 s) all count the exit
+at the same level.
 
 ## Generations
 
@@ -176,11 +187,19 @@ Each launch has a generation number; its directory `<data dir>/run/<generation>/
 0700 (anything already there refuses the start) and removed with its contents, never
 following links, when the generation stops. The pidfile `run/assistant.pid` is held under an
 exclusive `flock` for Mimik's life ("another Mimik uses this data directory's assistant"); it
-records the child's PID, start time and possible executables; at start a leftover's pidfd
-is opened first, the three are checked after that, the kill goes through the pidfd and the
-sweep waits (5 s at most) for it to end, then old generation directories are removed. A child
-is owned from its spawn: any failure before the start completes, or dropping an unfinished
-start, kills and reaps it. One manager
+records the child's PID, start time, possible executables and its owner's key (the generation
+number, or a probe's own key above any generation); an entry is cleared only by its owner. At
+start, off the async runtime, a leftover's pidfd is opened first, the three are checked after
+that, the kill goes through the pidfd and the sweep waits (5 s at most) for it to end; a
+leftover still running keeps its entry, refuses the start ("a model server from an earlier run
+has not exited yet") and leaves the old generation directories in place until a later start
+finds it gone. A child is owned from its spawn: any failure before the start completes kills
+and reaps it, kills and waits for the sandbox's reaper (5 s at most), and clears the entry it
+recorded. Every probe's and start's blocking part and every child's watcher is in-flight work:
+the owner's Restart or shutdown cancels it (it stops before spawning or recording anything,
+and its waits see the cancel within 100 ms) and the manager waits until it has all finished
+before the next session starts or the shutdown completes. Probe directories are
+`run/probe-<sequence>-<level>/`. One manager
 task serializes every transition, so two servers never coexist: a child is stopped with
 SIGTERM through the runner's pidfd (on level 1 to bwrap, which takes the sandbox down with
 it) and SIGKILL after 5 s, repeated until gone; it is gone, and its exit is published, only
