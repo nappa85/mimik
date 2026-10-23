@@ -71,7 +71,7 @@ def watch(process, guard, read_sensors, read_fan, clock, allowed, log):
     interruption of this loop (the group is never left running). Returns the stop reason or
     None."""
     try:
-        while process.poll() is None:
+        while running(process):
             now = clock.time()
             kind, reason = guard.check(read_sensors(), now, read_fan())
             if kind is None and not allowed(now):
@@ -88,12 +88,27 @@ def watch(process, guard, read_sensors, read_fan, clock, allowed, log):
         kill(process)
 
 
-def kill(process):
-    """SIGKILL of the whole group, then reap."""
+def running(process):
+    """Whether the leader is still running, without reaping it: an exited leader stays a
+    zombie, which keeps its PID, and so the group ID, from being reused until `kill` has
+    signalled the group."""
+    if process.returncode is not None:
+        return False
     try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+        return os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None
+    except ChildProcessError:
+        return False
+
+
+def kill(process):
+    """SIGKILL of the whole group while the leader is still unreaped (so the group ID is
+    still ours), then reap the leader. A leader someone else already reaped is never
+    signalled through its PID: the ID may belong to another process by now."""
+    if process.returncode is None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     process.wait()
 
 

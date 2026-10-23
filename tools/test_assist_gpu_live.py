@@ -162,7 +162,8 @@ class LeaderExitTests(unittest.TestCase):
             [sys.executable, "-c", code], stdout=subprocess.PIPE, text=True, start_new_session=True
         )
         child = int(leader.stdout.readline())
-        leader.wait()
+        # The leader has exited but is not reaped (a zombie keeps its group ID).
+        os.waitid(os.P_PID, leader.pid, os.WEXITED | os.WNOWAIT)
         os.kill(child, 0)  # still alive: it outlived its leader
         live.watch(
             leader,
@@ -186,6 +187,52 @@ class LeaderExitTests(unittest.TestCase):
 
             real_time.sleep(0.02)
         self.fail("the leader's same-group child survived the watch")
+
+
+class ReapedLeaderTests(unittest.TestCase):
+    def test_a_leader_reaped_elsewhere_is_never_signalled_through_its_pid(self):
+        process = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        process.wait()  # reaped: its PID may be reused by now
+        with mock.patch.object(os, "killpg") as killpg:
+            live.watch(
+                process,
+                ops.ThermalGuard(live.LIMITS),
+                sensors,
+                lambda: MANUAL,
+                Clock(),
+                lambda now: True,
+                print,
+            )
+        killpg.assert_not_called()
+
+    def test_the_group_is_signalled_before_the_leader_is_reaped(self):
+        process = sleeper(60)
+        order = []
+        real_killpg, real_wait = os.killpg, process.wait
+
+        def killpg(pid, sig):
+            order.append(("killpg", process.returncode))
+            real_killpg(pid, sig)
+
+        def wait(*args, **kwargs):
+            order.append(("wait", None))
+            return real_wait(*args, **kwargs)
+
+        with (
+            mock.patch.object(os, "killpg", killpg),
+            mock.patch.object(process, "wait", wait),
+        ):
+            live.watch(
+                process,
+                ops.ThermalGuard(live.LIMITS),
+                lambda: sensors(90.0),
+                lambda: MANUAL,
+                Clock(),
+                lambda now: True,
+                print,
+            )
+        self.assertEqual(order[0], ("killpg", None))
+        self.assertEqual(order[1][0], "wait")
 
 
 FAKE_BINARY = """#!{python}
