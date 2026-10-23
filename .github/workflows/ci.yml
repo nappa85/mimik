@@ -72,6 +72,8 @@ jobs:
               cargo test --locked --all-features --lib --no-run --message-format=json > target/test-build.json
               mkdir -p target/confinement
               python -c "import json,shutil; e=[m[\"executable\"] for m in map(json.loads, open(\"target/test-build.json\")) if m.get(\"reason\")==\"compiler-artifact\" and m[\"target\"][\"name\"]==\"mimik\" and m[\"target\"][\"kind\"]==[\"lib\"] and m[\"profile\"][\"test\"]]; assert len(e)==1, e; shutil.copy2(e[0], \"target/confinement/confinement-tests\")"
+              cargo build --locked --example fake_llama_server
+              cp target/debug/examples/fake_llama_server target/confinement/fake_llama_server
               cargo build --locked --features dev-endpoint --bin mimik --target-dir target/dev-endpoint
             '
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -88,7 +90,9 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: confinement-tests
-          path: target/confinement/confinement-tests
+          path: |
+            target/confinement/confinement-tests
+            target/confinement/fake_llama_server
           if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -242,7 +246,7 @@ jobs:
           tar -xzf release/mimik-0.1.0-linux-x86_64.tar.gz -C target/rel --strip-components=1
           cp fetched/models/* target/models/
           python3 tools/llama_runtime.py verify --dir target/rel/llama --models target/models
-          chmod 0755 target/rel/mimik target/confinement-tests
+          chmod 0755 target/rel/mimik target/confinement-tests target/fake_llama_server
       - name: Install bubblewrap (a pinned upstream release if the package lacks an option)
         run: |
           sudo apt-get update
@@ -300,6 +304,7 @@ jobs:
           MIMIK_LIVE_RUNTIME: ${{ github.workspace }}/target/rel/llama
           MIMIK_LIVE_MODELS: ${{ github.workspace }}/target/models
           MIMIK_LIVE_SCRATCH: ${{ github.workspace }}/target/scratch
+          MIMIK_LIVE_FAKE_SERVER: ${{ github.workspace }}/target/fake_llama_server
         run: |
           set -o pipefail
           target/confinement-tests --include-ignored --test-threads=2 \

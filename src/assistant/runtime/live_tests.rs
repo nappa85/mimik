@@ -4,7 +4,9 @@
 //!
 //! - `MIMIK_LIVE_RUNTIME`: the runtime folder (holding `cpu/` with exactly the pinned files);
 //! - `MIMIK_LIVE_MODELS`: a 0700 models folder holding `stories260K.gguf`;
-//! - `MIMIK_LIVE_SCRATCH`: a folder whose ancestors are not writable by others.
+//! - `MIMIK_LIVE_SCRATCH`: a folder whose ancestors are not writable by others;
+//! - `MIMIK_LIVE_FAKE_SERVER`: the `fake_llama_server` example binary (the forged-output and
+//!   post-spawn-failure tests run it in place of llama-server).
 //!
 //! A missing variable fails the test (never a silent skip). The test binary plays the runner,
 //! the adversarial helper and "Mimik" for the SIGKILL check.
