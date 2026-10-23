@@ -17,6 +17,12 @@
 //! | `ready` for 10 minutes | failure count back to 0 | reset |
 //! | Restart (or Mimik's start) | stop, new attempt from level 1, breaker reset | reset |
 //!
+//! On the GPU path (ASSIST-27; `--assistant-device` not `cpu`) any failed attempt (the
+//! start, `/health`, the offload check, priming, calibration, budgets that do not derive), a
+//! child exit while ready or a stop as hung moves to the CPU path at once at the same level,
+//! uncounted, and the CPU path stays until Mimik restarts or the owner presses "Try the GPU
+//! again"; a Restart keeps it.
+//!
 //! Every timer is Tokio's, so tests drive the clock.
 use super::budgets::NoBudgets;
 use super::calibration::{self, Calibration};
@@ -64,6 +70,22 @@ pub(crate) trait Child: Send + Sync {
     fn notes(&self) -> Vec<String> {
         Vec::new()
     }
+    /// After `/health`: on the GPU path every layer must be on the GPU (the offload line),
+    /// otherwise the attempt is a GPU failure.
+    async fn loaded(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// The selected GPU as the assistant page shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DeviceView {
+    pub pci: String,
+    pub node: String,
+    /// The in-sandbox listing's name (`Vulkan0`) and description.
+    pub name: String,
+    pub description: String,
+    pub total_mib: u64,
 }
 
 /// Starts children (the real one spawns the runner; tests use a fake).
@@ -85,6 +107,14 @@ pub(crate) trait Launcher: Send + Sync {
         level: Level,
         path: Path,
     ) -> Result<Arc<dyn Child>, Fail>;
+    /// The GPU the last GPU probe selected.
+    fn device(&self) -> Option<DeviceView> {
+        None
+    }
+    /// Why render nodes were not used, from the last GPU probe.
+    fn device_notes(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// The runtime's state as the page shows it.
@@ -111,11 +141,23 @@ pub(crate) struct Status {
     pub notes: Vec<String>,
     /// A Restart is being carried out.
     pub restarting: bool,
+    /// The GPU path is wanted (`--assistant-device` is not `cpu`).
+    pub gpu_wanted: bool,
+    /// Why the GPU is not in use although it is wanted (shown with "Try the GPU again").
+    pub gpu_note: Option<String>,
+    /// The GPU the last GPU probe selected.
+    pub device: Option<DeviceView>,
+    /// Why other render nodes were not used.
+    pub device_notes: Vec<String>,
 }
 
 impl Status {
     fn new(path: Path) -> Self {
         Self {
+            gpu_wanted: path == Path::Gpu,
+            gpu_note: None,
+            device: None,
+            device_notes: Vec::new(),
             state: State::Starting("checking"),
             path,
             level: None,
@@ -132,7 +174,10 @@ impl Status {
 }
 
 enum Command {
-    Restart,
+    /// The owner's Restart; with `gpu`, "Try the GPU again".
+    Restart {
+        gpu: bool,
+    },
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -141,6 +186,16 @@ enum Command {
 pub(crate) struct Handle {
     status: Arc<Mutex<Status>>,
     commands: mpsc::UnboundedSender<Command>,
+}
+
+/// Whether "Try the GPU again" was accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TryGpu {
+    Accepted,
+    /// A Restart (or another try) is already being carried out: no second transition.
+    AlreadyRunning,
+    /// The GPU is in use, or not wanted (`--assistant-device cpu`): nothing to try.
+    NotApplicable,
 }
 
 /// Whether a Restart was accepted.
@@ -170,8 +225,27 @@ impl Handle {
         }
         status.restarting = true;
         drop(status);
-        let _ = self.commands.send(Command::Restart);
+        let _ = self.commands.send(Command::Restart { gpu: false });
         Restart::Accepted
+    }
+
+    /// The owner's "Try the GPU again": a Restart that starts from the GPU path again. Only
+    /// while the GPU is wanted and the CPU path is in use.
+    pub(crate) fn try_gpu(&self) -> TryGpu {
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if status.restarting {
+            return TryGpu::AlreadyRunning;
+        }
+        if !status.gpu_wanted || status.path == Path::Gpu {
+            return TryGpu::NotApplicable;
+        }
+        status.restarting = true;
+        drop(status);
+        let _ = self.commands.send(Command::Restart { gpu: true });
+        TryGpu::Accepted
     }
 
     /// Stops the child and the manager; resolves once the child is gone (or the manager
@@ -272,6 +346,7 @@ pub(crate) fn spawn(
         signals,
         generation: 0,
         failures: 0,
+        gpu_failed: None,
     };
     tokio::spawn(manager.run());
     Handle { status, commands }
@@ -292,22 +367,42 @@ enum Ended {
         counted: bool,
         why: String,
     },
-    Restart,
+    Restart {
+        gpu: bool,
+    },
     Shutdown(oneshot::Sender<()>),
 }
 
 /// How a session ended.
 enum Next {
-    /// Start again from level 1 (the owner's Restart).
-    Fresh,
+    /// Start again from level 1 (the owner's Restart); with `gpu`, from the GPU path again.
+    Fresh {
+        gpu: bool,
+    },
     Stop(oneshot::Sender<()>),
+}
+
+/// How one path's attempts ended.
+enum PathEnd {
+    Next(Next),
+    /// The GPU path failed: the CPU path next, at once, uncounted.
+    GpuFailed(String),
 }
 
 /// What waiting for the owner gave.
 enum Wake {
-    Restart,
+    Restart { gpu: bool },
     Shutdown(oneshot::Sender<()>),
     Timer,
+}
+
+impl From<Command> for Next {
+    fn from(command: Command) -> Self {
+        match command {
+            Command::Restart { gpu } => Next::Fresh { gpu },
+            Command::Shutdown(reply) => Next::Stop(reply),
+        }
+    }
 }
 
 struct Manager {
@@ -319,6 +414,9 @@ struct Manager {
     signals: mpsc::UnboundedReceiver<Signal>,
     generation: u64,
     failures: u32,
+    /// Why the GPU path failed: the CPU path is used until Mimik restarts or the owner
+    /// presses "Try the GPU again" (a Restart keeps it).
+    gpu_failed: Option<String>,
 }
 
 impl Manager {
@@ -341,7 +439,7 @@ impl Manager {
         };
         tokio::select! {
             command = self.commands.recv() => match command {
-                Some(Command::Restart) => Wake::Restart,
+                Some(Command::Restart { gpu }) => Wake::Restart { gpu },
                 Some(Command::Shutdown(reply)) => Wake::Shutdown(reply),
                 // Every handle is gone: nothing can wake it again.
                 None => std::future::pending().await,
@@ -366,10 +464,21 @@ impl Manager {
     async fn run(mut self) {
         // Mimik's start counts as a Restart: from level 1, breaker and count reset.
         loop {
-            if let Next::Stop(reply) = self.session().await {
-                self.launcher.cancel();
-                self.launcher.settle().await;
-                return shut(reply);
+            match self.session().await {
+                Next::Stop(reply) => {
+                    self.launcher.cancel();
+                    self.launcher.settle().await;
+                    return shut(reply);
+                }
+                Next::Fresh { gpu } => {
+                    // Fresh always follows the owner's command: it stays "being carried out"
+                    // until the session ends in `ready` or `unavailable`, even if one of them
+                    // cleared the flag just before the command was taken.
+                    self.update(|status| status.restarting = true);
+                    if gpu {
+                        self.gpu_failed = None;
+                    }
+                }
             }
         }
     }
@@ -378,7 +487,8 @@ impl Manager {
     async fn hold(&mut self, why: String) -> Next {
         self.unavailable(why);
         match self.wait(None).await {
-            Wake::Restart | Wake::Timer => Next::Fresh,
+            Wake::Restart { gpu } => Next::Fresh { gpu },
+            Wake::Timer => Next::Fresh { gpu: false },
             Wake::Shutdown(reply) => Next::Stop(reply),
         }
     }
@@ -390,8 +500,7 @@ impl Manager {
         let next = tokio::select! {
             done = work => return Ok(done),
             command = self.commands.recv() => match command {
-                Some(Command::Restart) => Next::Fresh,
-                Some(Command::Shutdown(reply)) => Next::Stop(reply),
+                Some(command) => Next::from(command),
                 None => std::future::pending().await,
             },
         };
@@ -452,72 +561,143 @@ impl Manager {
         generation
     }
 
-    /// The preflight, then the probes: the levels to try.
-    async fn levels(&mut self) -> Result<Vec<Level>, Next> {
+    /// The preflight of the session (the CPU build's: the fallback always needs it).
+    async fn preflight(&mut self) -> Result<(), Next> {
         let launcher = Arc::clone(&self.launcher);
-        match self
-            .interruptible(launcher.preflight(self.config.path))
-            .await?
-        {
-            Ok(()) => {}
-            Err(why) => return Err(self.hold(why).await),
+        match self.interruptible(launcher.preflight(Path::Cpu)).await? {
+            Ok(()) => Ok(()),
+            Err(why) => Err(self.hold(why).await),
         }
-        let probed = self.interruptible(launcher.probe(self.config.path)).await?;
+    }
+
+    /// `path`'s probes: the levels to try (its own, as its build passed them).
+    async fn levels(&mut self, path: Path) -> Result<Vec<Level>, Next> {
+        let launcher = Arc::clone(&self.launcher);
+        let probed = self.interruptible(launcher.probe(path)).await?;
+        self.update(|status| {
+            status.path = path;
+            status.skipped.clear();
+        });
+        if path == Path::Gpu {
+            let (device, notes) = (launcher.device(), launcher.device_notes());
+            self.update(|status| {
+                status.device = device;
+                status.device_notes = notes;
+            });
+        }
         Ok(self.probed(probed))
     }
 
-    /// One start from level 1 until the owner's Restart (or shutdown) ends it.
+    /// The GPU path failed: the CPU path is used from now on, until Mimik restarts or the
+    /// owner presses "Try the GPU again".
+    fn gpu_fallback(&mut self, why: String) {
+        log(&format!("GPU path not used, on the CPU path: {why}"));
+        self.gpu_failed = Some(why.clone());
+        self.update(|status| {
+            status.gpu_note = Some(why);
+            // The GPU child's state is over: the CPU server starts now.
+            status.state = State::Starting("checking");
+            status.path = Path::Cpu;
+            status.device = None;
+            status.device_notes.clear();
+            status.budgets = None;
+        });
+    }
+
+    /// One start from level 1 until the owner's Restart (or shutdown) ends it: the GPU path
+    /// first when it is wanted and has not failed, the CPU path after a GPU failure.
     async fn session(&mut self) -> Next {
         // Nothing of an earlier session (a child's watcher, a cancelled probe) runs beside it.
         self.launcher.settle().await;
         self.failures = 0;
         self.assistant.reset_breaker();
+        let gpu = self.config.path == Path::Gpu && self.gpu_failed.is_none();
+        let note = self.gpu_failed.clone();
         self.update(|status| {
             status.state = State::Starting("checking");
             status.skipped.clear();
             status.failures = 0;
             status.last_failure = None;
             status.level = None;
+            status.gpu_note = note;
         });
-        let levels = match self.levels().await {
-            Ok(levels) => levels,
-            Err(next) => return next,
-        };
+        if let Err(next) = self.preflight().await {
+            return next;
+        }
+        let mut path = if gpu { Path::Gpu } else { Path::Cpu };
+        loop {
+            let levels = match self.levels(path).await {
+                Ok(levels) => levels,
+                Err(next) => return next,
+            };
+            match self.on_path(path, &levels).await {
+                PathEnd::Next(next) => return next,
+                PathEnd::GpuFailed(why) => {
+                    self.gpu_fallback(why);
+                    path = Path::Cpu;
+                }
+            }
+        }
+    }
+
+    /// `path`'s attempts over its levels until the owner acts, the assistant is held
+    /// unavailable, or (on the GPU path) an attempt fails.
+    async fn on_path(&mut self, path: Path, levels: &[Level]) -> PathEnd {
+        let gpu = path == Path::Gpu;
         let mut index = 0;
         loop {
             if self.failures >= MAX_FAILURES {
                 let last = self.status().last_failure.unwrap_or_default();
-                return self
-                    .hold(format!(
+                return PathEnd::Next(
+                    self.hold(format!(
                         "the model server failed {MAX_FAILURES} times: {last}"
                     ))
-                    .await;
+                    .await,
+                );
             }
             let Some(&level) = levels.get(index) else {
+                if gpu {
+                    let why = self
+                        .status()
+                        .skipped
+                        .first()
+                        .map_or_else(|| "no confinement level".to_owned(), |(_, why)| why.clone());
+                    return PathEnd::GpuFailed(why);
+                }
                 let why = self.no_level();
-                return self.hold(why).await;
+                return PathEnd::Next(self.hold(why).await);
             };
             let generation = self.begin(level);
-            match self.attempt(generation, level).await {
+            match self.attempt(generation, level, path).await {
                 Attempt::Ready(child, calibration, budgets) => {
                     let ended = self.ready(generation, &child, *calibration, budgets).await;
                     child.stop().await;
                     match ended {
+                        Ended::Exited { why, .. } if gpu => {
+                            self.ended(generation, EndReason::Exited);
+                            return PathEnd::GpuFailed(why);
+                        }
                         Ended::Exited { counted, why } => {
                             self.ended(generation, EndReason::Exited);
                             if counted {
                                 self.failed(why);
                             }
                         }
-                        Ended::Restart => {
+                        Ended::Restart { gpu } => {
                             self.ended(generation, EndReason::Restart);
-                            return Next::Fresh;
+                            return PathEnd::Next(Next::Fresh { gpu });
                         }
                         Ended::Shutdown(reply) => {
                             self.ended(generation, EndReason::Exited);
-                            return Next::Stop(reply);
+                            return PathEnd::Next(Next::Stop(reply));
                         }
                     }
+                }
+                Attempt::Failed(Fail::Sandbox(why) | Fail::Other(why)) | Attempt::TooSlow(why)
+                    if gpu =>
+                {
+                    self.ended(generation, EndReason::Exited);
+                    return PathEnd::GpuFailed(why);
                 }
                 Attempt::Failed(Fail::Sandbox(why)) => {
                     log(&format!("level {} skipped: {why}", level.number()));
@@ -534,14 +714,14 @@ impl Manager {
                         });
                         match self.wait(Some(RETRY_AFTER)).await {
                             Wake::Timer => {}
-                            Wake::Restart => return Next::Fresh,
-                            Wake::Shutdown(reply) => return Next::Stop(reply),
+                            Wake::Restart { gpu } => return PathEnd::Next(Next::Fresh { gpu }),
+                            Wake::Shutdown(reply) => return PathEnd::Next(Next::Stop(reply)),
                         }
                     }
                 }
-                Attempt::TooSlow(why) => return self.hold(why).await,
+                Attempt::TooSlow(why) => return PathEnd::Next(self.hold(why).await),
                 Attempt::Interrupted(command) => {
-                    let restart = matches!(command, Command::Restart);
+                    let restart = matches!(command, Command::Restart { .. });
                     self.ended(
                         generation,
                         if restart {
@@ -550,10 +730,7 @@ impl Manager {
                             EndReason::Exited
                         },
                     );
-                    return match command {
-                        Command::Restart => Next::Fresh,
-                        Command::Shutdown(reply) => Next::Stop(reply),
-                    };
+                    return PathEnd::Next(Next::from(command));
                 }
             }
         }
@@ -584,10 +761,10 @@ impl Manager {
 
     /// Start, `/health`, priming and calibration, interruptible by the owner. A failed
     /// attempt's child is gone when this returns.
-    async fn attempt(&mut self, generation: u64, level: Level) -> Attempt {
+    async fn attempt(&mut self, generation: u64, level: Level, path: Path) -> Attempt {
         let launcher = Arc::clone(&self.launcher);
         let started = tokio::select! {
-            started = launcher.start(generation, level, self.config.path) => started,
+            started = launcher.start(generation, level, path) => started,
             command = self.commands.recv() => match command {
                 Some(command) => {
                     self.launcher.cancel();
@@ -602,7 +779,7 @@ impl Manager {
             Err(fail) => return Attempt::Failed(fail),
         };
         let measured = {
-            let measure = measure(&child, self.config, &self.status);
+            let measure = measure(&child, path, self.config.max_tokens, &self.status);
             tokio::select! {
                 result = measure => Some(result),
                 fail = child.exited() => Some(Err(Attempt::Failed(fail))),
@@ -661,6 +838,7 @@ impl Manager {
         let ready_at = Instant::now();
         let mut reset_pending = true;
         let mut expiries = 0;
+        let mut closed = false;
         loop {
             let reset = async {
                 if reset_pending {
@@ -694,10 +872,12 @@ impl Manager {
                     self.failures = 0;
                     self.update(|status| status.failures = 0);
                 }
-                command = self.commands.recv() => match command {
-                    Some(Command::Restart) => return Ended::Restart,
+                command = self.commands.recv(), if !closed => match command {
+                    Some(Command::Restart { gpu }) => return Ended::Restart { gpu },
                     Some(Command::Shutdown(reply)) => return Ended::Shutdown(reply),
-                    None => {}
+                    // Every handle is gone: no command can come again (polling the closed
+                    // channel again would spin).
+                    None => closed = true,
                 },
             }
         }
@@ -734,7 +914,8 @@ async fn healthy(child: &Arc<dyn Child>) -> Result<(), Attempt> {
 /// `/health`, priming and calibration within their limits.
 async fn measure(
     child: &Arc<dyn Child>,
-    config: Config,
+    path: Path,
+    max_tokens: u32,
     status: &Arc<Mutex<Status>>,
 ) -> Result<(Calibration, Budgets), Attempt> {
     let phase = |phase: &'static str| {
@@ -751,6 +932,10 @@ async fn measure(
         "health after {:.1} s",
         began.elapsed().as_secs_f64()
     ));
+    child
+        .loaded()
+        .await
+        .map_err(|why| Attempt::Failed(Fail::Other(why)))?;
     phase("priming");
     let priming = Instant::now();
     let prefix =
@@ -775,10 +960,10 @@ async fn measure(
     phase("calibrating");
     // Each sample is held to the run cap; this bounds the whole (two samples, two
     // `/tokenize` calls).
-    let within = Duration::from_secs(2 * config.path.run_cap() + 60);
+    let within = Duration::from_secs(2 * path.run_cap() + 60);
     let calibration = match tokio::time::timeout(
         within,
-        calibration::calibrate(server.as_ref(), config.path, config.max_tokens, prefix),
+        calibration::calibrate(server.as_ref(), path, max_tokens, prefix),
     )
     .await
     {

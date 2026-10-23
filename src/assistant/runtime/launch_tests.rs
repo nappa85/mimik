@@ -139,6 +139,8 @@ fn setup(model: &[u8], alias: &str) -> Setup {
             },
             shim_env: vec![(test_helper::VARIABLE.into(), "shim".into())],
         },
+        device: device::Choice::Cpu,
+        roots: device::Roots::default(),
     };
     Setup {
         dir,
@@ -1650,10 +1652,12 @@ async fn a_bwrap_path_with_a_newline_is_refused_before_any_directory_is_made() {
         };
         real.spawn_sandbox(
             &job,
+            Path::Cpu,
             &checked.files,
             &checked.model,
             &Token::new(),
-            &Command::Server,
+            &Command::Server { device: None },
+            None,
         )
         .err()
     })

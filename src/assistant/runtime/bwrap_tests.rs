@@ -159,7 +159,73 @@ fn profile(size: bool) -> Profile {
         extra: Vec::new(),
         env: Vec::new(),
         command: vec!["/opt/llama/llama-server".into(), "--offline".into()],
+        gpu: None,
     }
+}
+
+fn gpu_binds() -> GpuBinds {
+    GpuBinds {
+        dev: PathBuf::from("/dev/dri/renderD129"),
+        name: "renderD129".into(),
+        sysfs: PathBuf::from("/sys/devices/pci0000:00/0000:00:03.1/0000:0c:00.0"),
+        rdev: (226, 129),
+        shared: vec![PathBuf::from("/usr/share/vulkan")],
+    }
+}
+
+#[test]
+fn the_gpu_profile_binds_the_selected_render_node_only() {
+    let mut gpu = profile(true);
+    gpu.gpu = Some(gpu_binds());
+    let args = gpu.arguments();
+    let text: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    // The node read-write (Mesa needs it), at its own name under /dev/dri; nothing else is.
+    let dev_binds: Vec<&[String]> = text.windows(3).filter(|w| w[0] == "--dev-bind").collect();
+    assert_eq!(
+        dev_binds,
+        [["--dev-bind", "/dev/dri/renderD129", "/dev/dri/renderD129"]]
+    );
+    assert!(!text.iter().any(|a| a == "--bind"));
+    // Its PCI device's sysfs folder read-only, and the links libdrm resolves to it.
+    let sysfs = "/sys/devices/pci0000:00/0000:00:03.1/0000:0c:00.0";
+    assert!(text.windows(3).any(|w| w == ["--ro-bind", sysfs, sysfs]));
+    let node = format!("{sysfs}/drm/renderD129");
+    assert!(
+        text.windows(3)
+            .any(|w| w == ["--symlink", node.as_str(), "/sys/dev/char/226:129"])
+    );
+    assert!(
+        text.windows(3)
+            .any(|w| w == ["--symlink", node.as_str(), "/sys/class/drm/renderD129"])
+    );
+    assert!(text.windows(2).any(|w| w == ["--dir", "/sys/bus/pci"]));
+    assert!(
+        text.windows(3)
+            .any(|w| w == ["--ro-bind", "/usr/share/vulkan", "/usr/share/vulkan"])
+    );
+    // Before the root is remounted read-only, and the command still last.
+    let remount = text.iter().position(|a| a == "--remount-ro").unwrap();
+    let bind = text.iter().position(|a| a == "--dev-bind").unwrap();
+    assert!(bind < remount);
+    assert_eq!(
+        &text[text.len() - 2..],
+        ["/opt/llama/llama-server", "--offline"]
+    );
+    // The CPU profile binds no device at all.
+    let cpu = profile(true).arguments();
+    assert!(!cpu.iter().any(|a| a == "--dev-bind" || a == "/sys/bus/pci"));
+}
+
+#[test]
+fn the_gpu_binds_take_only_the_vulkan_and_driver_data_that_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    let existing = dir.path().join("vulkan");
+    std::fs::create_dir(&existing).unwrap();
+    let missing = dir.path().join("absent");
+    assert_eq!(shared_data(&[&existing, &missing]), [existing]);
 }
 
 fn pairs(args: &[OsString]) -> Vec<(String, String)> {

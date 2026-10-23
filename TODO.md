@@ -8,8 +8,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1, 2c-2a (the CPU
   runtime at level 1 only, ASSIST-43, `docs/model-runtime.md`) and the Rust 1.99.1 / rig-core
-  0.45.0 upgrade are merged into master. Next: 2c-2b (GPU path, Landlock). Level 3's return is
-  its own later step (plan, "Level 3 behind an owner opt-in").
+  0.45.0 upgrade are merged into master. 2c-2b is split (user, 2026-10-23): 2c-2b-1, the GPU
+  path, is built and live-verified on `assist-2c2b` (the reviews of the last fixes and the merge
+  are owed, plan "2c-2b-1"); then
+  2c-2b-2, Landlock behind `--assistant-allow-landlock`, on `assist-2c2b2` from master. Level
+  3's return is its own later step (plan, "Level 3 behind an owner opt-in").
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
   target/agent-tools/ci.sh <cmd>`, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
@@ -18,10 +21,13 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
-1. The idle native calibration (5 and 2 threads; the detached waiter in
-   `/media/data/mimik/assist-2c2/live/` runs it when the host is idle outside weekday hours), 2c-2b GPU path and Landlock, 2d-1 owner model setting, 2d-2 downloads, 3 bundles and
-   reminders, 4 suggestions, 5 docs and gate (includes the `docs/release-scope.md` update for
-   schema 22 and the assisted scope).
+0. llama.cpp versions (ASSIST-46): (a) a scheduled CI job that tries each new llama.cpp release
+   against the test suite (flags, output parsing, grammar conversion, the confinement suite),
+   before the first release; (b) the system-llama.cpp mode with distribution packaging
+   (compatibility checks instead of a version pin; its own design).
+1. 2c-2b-2 Landlock, 2d-1 owner model setting, 2d-2 downloads, 3 bundles and reminders, 4
+   suggestions, 5 docs and gate (includes the `docs/release-scope.md` update for schema 22 and the
+   assisted scope).
 2. Before 2d-1 chooses the default model (ASSIST-L32), a field-reference experiment, decision
    rule written down before running: base the adopted v2 prefix (v2-short), plus one arm that
    adds only the compact-output sentence; about 30 fresh field-reference cases written without
@@ -40,10 +46,13 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    with the bwrap profile on the same live adversary checks. Use a stock Ubuntu 24.04 VM to see
    whether its AppArmor user-namespace restriction blocks Mimik's binary where it allows `bwrap`.
    If Hakoniwa holds up, adopting it is its own decision and review.
-4. Owed measurements: the idle native CPU calibration at the ASSIST-41 default and at 2 threads
-   (2c-2a); grammar against no-grammar generation time and cancellation timing with Granite
-   (2c-2a); the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks at each
-   llama.cpp pin change; the Qwen3.5-9B rev3 S40 re-run.
+4. Owed measurements: the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks
+   at each llama.cpp pin change (`tools/assist_gpu_live.py`); a trace of the GPU path on another
+   driver (AMDVLK, Intel, NVIDIA) for ASSIST-L44/L45; the superseding-job (cancel) timings on CPU and GPU with the fixed
+   helper; the Qwen3.5-9B rev3 S40 re-run.
+5. 2c-2b-1 review leftovers (Minor): `tools/assist_runtime_measure.py` stop-reason race
+   between the watchdog and `wait_healthy` (set the reason before killing), and `poll()`
+   reaping the leader before `killpg`.
 
 - `browser_smoke.py`'s "A 409 with an unreadable body did not hold the field" check fails
   on the dev host for master's release binary as well as `assist-2c2`'s (2026-10-23, Chromium

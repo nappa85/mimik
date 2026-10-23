@@ -16,6 +16,7 @@ while they run (the machine schedule).
 """
 
 import argparse
+import collections
 import http.client
 import json
 import os
@@ -31,6 +32,8 @@ from datetime import datetime
 from pathlib import Path
 
 import assist_eval
+import assist_gpu_live
+import toolloop_ops as ops
 from assist_demo import create_accounts, demo_passwords, fresh_directory
 from smoke_release import smoke_environment
 
@@ -38,6 +41,23 @@ from smoke_release import smoke_environment
 def heavy_allowed(now=None):
     now = now or datetime.now()
     return now.weekday() >= 5 or not 9 <= now.hour < 18
+
+
+class RefusedError(RuntimeError):
+    """The run must not start (schedule, fan or temperature)."""
+
+
+def gpu_refusal(root, now=None):
+    """Why a native GPU run must not start, or None: the schedule, the manual fan and a
+    sensor reading under the junction limit."""
+    now = time.time() if now is None else now
+    why = assist_gpu_live.refusal(now, ops.read_fan(root))
+    if why:
+        return why
+    kind, reason = ops.ThermalGuard(assist_gpu_live.LIMITS).check(
+        ops.read_sensors(root), now, ops.read_fan(root)
+    )
+    return f"{kind}: {reason}" if kind else None
 
 
 def guard(processes):
@@ -115,48 +135,95 @@ class Server:
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             self.port = probe.getsockname()[1]
-        self.process = subprocess.Popen(
-            [
-                str(args.runtime / "cpu" / "llama-server"),
-                "--model",
-                str(args.models_dir / args.model),
-                "--alias",
-                "measure",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(self.port),
-                "--api-key-file",
-                str(key_file),
-                "--offline",
-                "--no-webui",
-                "--no-slots",
-                "--no-mmproj",
-                "--jinja",
-                "--n-gpu-layers",
-                "0",
-                "--fit",
-                "off",
-                "--threads",
-                str(args.threads),
-                "--threads-batch",
-                str(args.threads),
-                "--ctx-size",
-                "8192",
-                "--parallel",
-                "1",
-                "--no-warmup",
-                "--cache-ram",
-                "0",
-                "--reasoning",
-                "off",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env={"PATH": "/usr/bin:/bin", "HOME": self.dir.name},
+        self.process = None
+        self.watchdog = None
+        self.stop_reason = None
+        gpu = getattr(args, "gpu_device", None)
+        if gpu:
+            # A native GPU run needs the manual fan and the thermal and schedule guard, as
+            # `assist_gpu_live.py` does: refused before the spawn, watched from the spawn on.
+            root = ops.hwmon_root()
+            why = gpu_refusal(root)
+            if why:
+                self.dir.cleanup()
+                raise RefusedError(why)
+        try:
+            self.process = subprocess.Popen(
+                self.command(args, key_file, gpu),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env={"PATH": "/usr/bin:/bin", "HOME": self.dir.name},
+                start_new_session=bool(gpu),
+            )
+            if gpu:
+                self.watchdog = threading.Thread(target=self.watch_gpu, args=(root,), daemon=True)
+                self.watchdog.start()
+            self.wait_healthy()
+        except BaseException:
+            # An interrupt or a failure at any point kills and reaps the server.
+            self.stop()
+            raise
+
+    def command(self, args, key_file, gpu):
+        return [
+            str(
+                args.runtime
+                / ("vulkan" if getattr(args, "gpu_device", None) else "cpu")
+                / "llama-server"
+            ),
+            "--model",
+            str(args.models_dir / args.model),
+            "--alias",
+            "measure",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(self.port),
+            "--api-key-file",
+            str(key_file),
+            "--offline",
+            "--no-webui",
+            "--no-slots",
+            "--no-mmproj",
+            "--jinja",
+            *(
+                ["--n-gpu-layers", "99", "--device", getattr(args, "gpu_device", None)]
+                if getattr(args, "gpu_device", None)
+                else ["--n-gpu-layers", "0"]
+            ),
+            "--fit",
+            "off",
+            "--threads",
+            str(args.threads),
+            "--threads-batch",
+            str(args.threads),
+            "--ctx-size",
+            "8192",
+            "--parallel",
+            "1",
+            "--no-warmup",
+            "--cache-ram",
+            "0",
+            "--reasoning",
+            "off",
+        ]
+
+    def watch_gpu(self, root):
+        self.stop_reason = assist_gpu_live.watch(
+            self.process,
+            ops.ThermalGuard(assist_gpu_live.LIMITS),
+            lambda: ops.read_sensors(root),
+            lambda: ops.read_fan(root),
+            ops.SystemClock(),
+            ops.heavy_allowed,
+            lambda line: print(line, file=sys.stderr),
         )
+
+    def wait_healthy(self):
         deadline = time.monotonic() + 300
         while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                raise RuntimeError(f"the server stopped: {self.stop_reason or 'it exited'}")
             try:
                 if self.get("/health")[0] == 200:
                     return
@@ -212,8 +279,10 @@ class Server:
         return answer
 
     def stream_first_token(self, user, max_tokens, drop_after=None, drop_at_token=None):
-        """A streamed request; returns seconds to its first content token. With `drop_after`
-        (seconds) or `drop_at_token` (tokens), the connection is closed then instead."""
+        """A streamed request. `drop_after` is an absolute deadline in seconds from the send
+        (frequent chunks cannot postpone it); `drop_at_token` drops after that many content
+        tokens. Returns a [`Stream`]: the seconds to the first content token, and whether the
+        connection was dropped before the stream ended (and with how many tokens seen)."""
         body = {
             "messages": [
                 {"role": "system", "content": [{"type": "text", "text": PREFIX}]},
@@ -237,42 +306,63 @@ class Server:
             ).encode()
             + payload
         )
-        began = time.monotonic()
-        if drop_after is not None:
-            raw.settimeout(drop_after)
-        seen = 0
-        first = None
-        buffer = b""
-        try:
-            while True:
-                chunk = raw.recv(65536)
-                if not chunk:
-                    break
-                buffer += chunk
-                while b"\n\n" in buffer:
-                    event, buffer = buffer.split(b"\n\n", 1)
-                    if b'"content"' in event and b'"delta":{"content"' in event.replace(b" ", b""):
-                        seen += 1
-                        if first is None:
-                            first = time.monotonic() - began
-                        if drop_at_token is not None and seen >= drop_at_token:
-                            raw.close()
-                            return first
-                    if b"[DONE]" in event:
-                        raw.close()
-                        return first
-        except TimeoutError:
-            pass
-        raw.close()
-        return first
+        return read_stream(raw, drop_after, drop_at_token)
 
     def stop(self):
-        self.process.terminate()
-        try:
-            self.process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
+        if self.process is not None:
+            if self.watchdog is not None:
+                # Kills the whole group and reaps the leader.
+                assist_gpu_live.kill(self.process)
+            else:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait()
         self.dir.cleanup()
+
+
+class Stream(collections.namedtuple("Stream", "first cancelled tokens")):
+    """`first`: seconds to the first content token (None if none came); `cancelled`: the
+    connection was dropped before the stream ended; `tokens`: content tokens seen."""
+
+    __slots__ = ()
+
+
+def read_stream(raw, drop_after=None, drop_at_token=None, clock=time.monotonic):
+    """Reads a streamed completion from `raw`, dropping it at the absolute `drop_after`
+    deadline or after `drop_at_token` content tokens, whichever comes first."""
+    began = clock()
+    deadline = None if drop_after is None else began + drop_after
+    seen = 0
+    first = None
+    buffer = b""
+    try:
+        while True:
+            if deadline is not None:
+                left = deadline - clock()
+                if left <= 0:
+                    return Stream(first, True, seen)
+                raw.settimeout(left)
+            chunk = raw.recv(65536)
+            if not chunk:
+                return Stream(first, False, seen)
+            buffer += chunk
+            while b"\n\n" in buffer:
+                event, buffer = buffer.split(b"\n\n", 1)
+                if b'"delta":{"content"' in event.replace(b" ", b""):
+                    seen += 1
+                    if first is None:
+                        first = clock() - began
+                    if drop_at_token is not None and seen >= drop_at_token:
+                        return Stream(first, True, seen)
+                if b"[DONE]" in event:
+                    return Stream(first, False, seen)
+    except TimeoutError:
+        return Stream(first, True, seen)
+    finally:
+        raw.close()
 
 
 PREFIX = assist_eval.contract_prefix("v2")
@@ -354,14 +444,29 @@ def server(args):
         out["rendered_1k_prompt_tokens"] = tokens
         out["jobs_prompt"] = [{k: a["timings"][k] for k in ("prompt_n", "cache_n")} for a in jobs]
         # Cancellation mid-generation: drop at the 20th token, then a superseding request.
-        run.stream_first_token(filler(0), args.max_tokens, drop_at_token=20)
+        cancel_generation = run.stream_first_token(filler(0), args.max_tokens, drop_at_token=20)
         mid_generation = run.stream_first_token(filler(1), 8)
-        # Mid-prompt: a fresh 1 KiB part (uncached) dropped after 3 s of prompt evaluation.
-        run.stream_first_token(filler(2, 1024).replace(" ", "x"), args.max_tokens, drop_after=3)
+        # Mid-prompt: a fresh 1 KiB part (uncached) dropped at an absolute 3 s deadline. It is
+        # a mid-prompt cancel only if no token had arrived by then (`tokens` 0); on a fast
+        # GPU prompt evaluation ends first and the record says so.
+        cancel_prompt = run.stream_first_token(
+            filler(2, 1024).replace(" ", "x"), args.max_tokens, drop_after=3
+        )
         mid_prompt = run.stream_first_token(filler(1), 8)
         out["superseding_first_token_s"] = {
-            "after_mid_generation_cancel": round(mid_generation or -1, 2),
-            "after_mid_prompt_cancel": round(mid_prompt or -1, 2),
+            "after_mid_generation_cancel": round(mid_generation.first or -1, 2),
+            "after_mid_prompt_cancel": round(mid_prompt.first or -1, 2),
+        }
+        out["superseding_cancels"] = {
+            "mid_generation": {
+                "cancelled": cancel_generation.cancelled,
+                "tokens_before_cancel": cancel_generation.tokens,
+            },
+            "mid_prompt": {
+                "cancelled": cancel_prompt.cancelled,
+                "tokens_before_cancel": cancel_prompt.tokens,
+                "valid_mid_prompt": cancel_prompt.cancelled and cancel_prompt.tokens == 0,
+            },
         }
     finally:
         run.stop()
@@ -386,6 +491,9 @@ def main(argv=None):
     srv.add_argument("--model", default="granite-4.2-3b-Q4_K_M.gguf")
     srv.add_argument("--threads", type=int, required=True)
     srv.add_argument("--max-tokens", type=int, default=352)
+    srv.add_argument(
+        "--gpu-device", help="run the Vulkan build on this device (for example Vulkan0)"
+    )
     srv.add_argument("--jobs", type=int, default=4)
     args = parser.parse_args(argv)
     if not heavy_allowed():

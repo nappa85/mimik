@@ -13,8 +13,8 @@ in `docs/assisted-entry.md`; this plan only adds to it.
 
 Remaining, in order (2b measured and reviewed, `docs/results.md`; ASSIST-27 to ASSIST-42
 decided; Rust 1.99.1 and `rig-core` 0.45.0 in place, ASSIST-39; 2c-1, interpretation against a
-hand-started local server, built, `docs/assisted-entry.md`; 2c-2a, the CPU runtime, built,
-`docs/model-runtime.md`): **2c-2** the model runtime (process,
+hand-started local server, built, `docs/assisted-entry.md`; 2c-2a, the CPU runtime, and
+2c-2b-1, the GPU path, built, `docs/model-runtime.md`): **2c-2** the model runtime (process,
 token, confinement, budgets), **2d-1** the owner model setting with local models, **2d-2**
 model downloads, **3** bundles and reminders, **4** suggestions and "Which Sword?", **5** docs
 and gate; each sub-step has its own branch, tests and reviews. The model runs GPU-first with
@@ -76,10 +76,10 @@ steps add:
 
 ### 1.4a Model runtime, device and budgets (2c-2; ASSIST-27, ASSIST-29 to ASSIST-34, ASSIST-40)
 
-Built for the CPU path at level 1 (step 2c-2a; level 3 built but not used, ASSIST-43): [model-runtime.md](model-runtime.md) is
-the reference and wins where it differs from this design. What follows stays the design for
-2c-2b (the GPU path, the device choice and fallback, level 2) and is kept whole as their
-context.
+Built for the CPU path (step 2c-2a) and the GPU path with its device choice and fallback
+(step 2c-2b-1), at level 1 (level 3 built but not used, ASSIST-43):
+[model-runtime.md](model-runtime.md) is the reference and wins where it differs from this
+design. What follows stays the design for level 2 (2c-2b-2) and is kept whole as its context.
 
 Linux x86_64 is the only platform built and verified in 2c-2; macOS (Metal) and Windows
 (Vulkan) runtime code is deferred with no platform designed out (ASSIST-34, §4 Later).
@@ -140,13 +140,11 @@ natively for these tests (ASSIST-40).
 - **Packaging and CI (ASSIST-33, REL-2):** `package_release.py` gains an allowlist entry
   `llama/` holding exactly the manifest's files (anything else refuses the package), the
   llama.cpp build number in `BUILD.txt`, and `THIRD-PARTY-NOTICES.md` entries for llama.cpp
-  and ggml (MIT) and for every other file shipped from the asset, by its own licence. REL-2
-  requires corresponding source for every shipped binary, so the release also carries the
-  pinned llama.cpp source: always a `git archive --format=tar` of the pinned commit from a
-  shallow clone at that commit (GitHub's generated tag tarballs are not byte-stable), its tar
-  SHA-256 recorded in the manifest and compressed afterwards with a pinned `gzip -n` for
-  shipping (the tar hash is what is verified), staged at the release root, never inside
-  `llama/`, listed in `SOURCE.txt` and `SHA256SUMS`. The `dev-endpoint` feature is absent from the release
+  and ggml (MIT) and for every other file shipped from the asset, by its own licence. ASSIST-47:
+  the release does not ship llama.cpp's source; `SOURCE.txt` and `BUILD.txt` point to the
+  exact upstream tag, commit and asset hashes. The pinned `git archive --format=tar` of the
+  commit (its tar SHA-256 in the manifest) is a `llama-fetch` build-time input for the licence
+  texts only. The `dev-endpoint` feature is absent from the release
   binary because the staged binary comes from `cargo build --release --locked` without
   features (tests build with `--all-features`); `smoke_release.py` in `artifact-smoke` checks
   the staged binary: it contains no `assistant-dev-endpoint` string, and the option is
@@ -402,8 +400,10 @@ natively for these tests (ASSIST-40).
 - **Output:** stdout and stderr are each drained by a reader task with a 4 KiB line bound
   (longer lines truncated) and are never copied into Mimik's log. Only fixed patterns become
   events: listening, the build number, "offloaded N/M layers", model-load and device errors.
-  The child runs at the pinned build's default verbosity; a live test sends a job with a
-  marker phrase and checks the marker appears in neither stream.
+  The CPU child runs at the pinned build's default verbosity; the GPU child runs with
+  `--verbosity 4`, the lowest level at which the pinned build prints the offload line. A live
+  test sends a job with a marker phrase and checks the marker appears in neither stream (on
+  the GPU path it was checked at verbosity 4, `results.md`).
 - **Generations:** every launch has a generation number; the socket directory, the pidfile
   entry, the endpoint check, jobs and every exit or timeout event carry it, and an event from an
   older generation is ignored. One manager task serializes transitions: a child is stopped
@@ -730,7 +730,7 @@ no sheet or player text. No prompts, player text, presigned URLs or token in log
 
 Split (user, 2026-10-22) into **2c-2a** (the CPU path at confinement level 1; level 3 built,
 not used, ASSIST-43) and
-**2c-2b** (the GPU path and level 2), each with its own branch and reviews; the machinery of
+**2c-2b** (the GPU path and level 2, itself split into 2c-2b-1 and 2c-2b-2, user 2026-10-23), each with its own branch and reviews; the machinery of
 2c-2a is path-aware, so 2c-2b only adds to it.
 
 #### 2c-2a CPU path, bubblewrap (level 3 built, not used: ASSIST-43)
@@ -738,14 +738,6 @@ not used, ASSIST-43) and
 Built (branch `assist-2c2`; reference [model-runtime.md](model-runtime.md)). Remaining before
 it is marked complete:
 
-- the idle native calibration on this host, CPU path, at the ASSIST-41 default (5 threads) and
-  at 2 threads: start to `ready`, priming, the two samples, the filler density, the derived B,
-  R, D and Q, to `docs/results.md` (the first native run was under concurrent load); it sets
-  the expected CPU outcome and comes back to the user if nothing fits;
-- grammar against no-grammar per-token generation time on the CPU path, which settles the
-  calibration form; a job's real prompt tokens against N(B);
-- cancellation with the real model: a superseding job's first token after cancelling a job
-  mid-generation and mid-prompt (a 1 KiB prompt);
 - the official CPU asset on the documented minimum host (an Ubuntu 22.04 VM) and the AppArmor
   preflight on an Ubuntu VM;
 - the `llama-runtime` CI job's first run (it needs a push).
@@ -763,23 +755,25 @@ automatic), shown on the page with its exposure, and these before it can be enab
 - the live cwd-helper hardening: bounded ready wait and read, failing at once on refusal or
   exit, kill-on-drop guards.
 
-#### 2c-2b GPU path and Landlock
+#### 2c-2b-1 GPU path
 
-Scope: §1.4a's device choice, the GPU build and the GPU → CPU fallback, "Try the GPU again" on
-the assistant page, and confinement level 2 (Landlock with seccomp), used only when the owner has explicitly allowed it
-(ASSIST-44): an owner setting, off by default, shown with what level 2 does not confine. Tests:
-- device and fallback: per-node sandboxed listings (format pinned from the real build): one
-  hardware GPU plus lavapipe → the hardware GPU, lavapipe excluded before the count; only
-  `llvmpipe` → CPU; a host where the selected card is `Vulkan1` but its sandboxed list names it
-  `Vulkan0` → `--device Vulkan0`; enumeration order changing between discovery and launch → the
-  launch name still comes from the in-sandbox listing; two identical cards at level 1 → told
-  apart and remembered by PCI address; with the owner's explicit permission for level 3
-  (ASSIST-43), two identical cards at level 3 → CPU path with the page note; dedicated before integrated only when sysfs says so; no `--device` on the CPU path; a
-  mismatch at the real start → GPU failure; an offload line with N < M → GPU failure; a level
-  that passes for the CPU build but not the GPU build → each path at its own level;
-  `--assistant-device cpu` never lists devices; live (dev host): Vulkan on the RX 6650 XT reaches `ready` with GPU
-  budgets, refused calls checked with `strace` once, and killing the child mid-job ends on the
-  CPU path with CPU budgets and the page saying why;
+Built and verified live on the RX 6650 XT (branch `assist-2c2b`; split from 2c-2b by the user,
+2026-10-23; reference [model-runtime.md](model-runtime.md), results in `results.md`). The live
+checks run on the dev host with the GPU fan on manual, evening or weekend, through
+`tools/assist_gpu_live.py` (it refuses otherwise). Remaining:
+
+- from the trace, bind only the sysfs files and ICD manifests that are read and limit the
+  loader to the selected card's driver (ASSIST-L44, ASSIST-L45), after another driver (AMDVLK,
+  Intel, NVIDIA) has been traced where one is available;
+- re-measure the superseding-job timings on both paths with the fixed helper, then the GPU-path
+  checks at each llama.cpp pin change (`tools/assist_gpu_live.py`).
+
+#### 2c-2b-2 Landlock (branch `assist-2c2b2`, from master after 2c-2b-1 merges)
+
+Scope: confinement level 2 (Landlock with seccomp), used only when the owner has explicitly
+allowed it (ASSIST-44) with `--assistant-allow-landlock`, off by default; `/admin/assistant`
+shows whether it is on, what level 2 does not confine, and how to turn it on. Without it a
+level-1 failure means unavailable. Tests:
 - Landlock level: the state comes from `RestrictionStatus` (full, partial, none) and the
   page text matches the table in §1.4a; seccomp refusals as above (testable here); with
   Landlock network rules: no TCP connect to a host listener, LAN or public address, no bind
@@ -790,17 +784,13 @@ the assistant page, and confinement level 2 (Landlock with seccomp), used only w
   adversarial helper and recorded; on this host: the helper cannot fork, `vfork` or `clone` a
   process (`clone3` → `ENOSYS`) while threads still start, so no descendant outlives a SIGKILL
   of the child;
-- generations and transitions: the GPU rows of the table: GPU failure at each phase → CPU at
-  once, not counted; GPU budgets that do not derive → CPU path, the page saying why; a
-  sandbox-setup failure at level 2 → level 3 only with the owner's explicit permission,
-  otherwise `unavailable` (ASSIST-43); a level that passes for the CPU build but not the
-  GPU build → each path at its own level;
-- bubblewrap level: the GPU path reaches `ready` with the selected render node only; probe on
-  the GPU path opens the render node and enumerates the device; no build accepts a software
-  renderer;
-- rights: "Try the GPU again" → 403 for a non-owner, CSRF checked, no second transition;
-- measurement step: the first native GPU calibration (start to `ready`, priming, samples, B, R,
-  D, Q), grammar against no-grammar on the GPU path, refused calls checked with `strace` once.
+- the GPU at the TCP levels: used only when exactly one hardware GPU is visible, counted from
+  sysfs (ASSIST-L25); with the owner's explicit permission for level 3 (ASSIST-43), two
+  identical cards at level 3 → CPU path with the page note;
+- transitions: a sandbox-setup failure at level 2 → level 3 only with the owner's explicit
+  permission, otherwise `unavailable` (ASSIST-43); a level that passes for the CPU build but
+  not the GPU build → each path at its own level;
+- rights: the option off → level 2 never probed or started, whatever the probe would say.
 
 ### 2d-1 Owner model setting (local models)
 
@@ -959,7 +949,7 @@ prevented); one revision per Enter makes history long (no-ops write nothing, no 
 (proxies, redirects, retries) could send player text off the machine or repeat it, hence the
 client policy and its tests. Runtime: bubblewrap needs unprivileged user namespaces, which
 some distributions disable or restrict (Ubuntu's AppArmor rule), and older distributions'
-bubblewrap may lack an option the probe needs; those machines run no assistant unless the owner explicitly allows Landlock (2c-2b, ASSIST-44)
+bubblewrap may lack an option the probe needs; those machines run no assistant unless the owner explicitly allows Landlock (2c-2b-2, ASSIST-44)
 or unconfined (ASSIST-43), as shown on the page; and Landlock is missing or
 lacks network rules on many kernels (this host's included), so a machine can end on a lower
 level; the Landlock level leaves inbound listening on other addresses and local Unix sockets

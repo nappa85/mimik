@@ -20,6 +20,22 @@ struct Behaviour {
     g: f64,
     /// Holds priming until a permit is added.
     gate: Option<Arc<tokio::sync::Semaphore>>,
+    /// What `loaded` answers (the GPU offload check).
+    loaded: Result<(), String>,
+    /// A malfunction of the fake server, if any.
+    fault: Fault,
+}
+
+/// What a fake server gets wrong.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fault {
+    None,
+    /// `/health` is refused by the endpoint check.
+    RefuseHealth,
+    /// `/tokenize` answers HTTP 500.
+    TokenizeFails,
+    /// The samples come back without their prompt timing.
+    MissingTiming,
 }
 
 impl Default for Behaviour {
@@ -30,6 +46,8 @@ impl Default for Behaviour {
             p: 0.001,
             g: 0.01,
             gate: None,
+            loaded: Ok(()),
+            fault: Fault::None,
         }
     }
 }
@@ -44,6 +62,9 @@ struct FakeServer {
 #[async_trait]
 impl Server for FakeServer {
     async fn health(&self) -> Health {
+        if self.behaviour.fault == Fault::RefuseHealth {
+            return Health::Refused("the endpoint check refused the connection".into());
+        }
         if self.health_calls.fetch_add(1, Ordering::SeqCst) < self.behaviour.loading {
             Health::Loading
         } else {
@@ -52,6 +73,9 @@ impl Server for FakeServer {
     }
 
     async fn tokens(&self, text: &str) -> Result<usize, Failure> {
+        if self.behaviour.fault == Fault::TokenizeFails {
+            return Err(Failure::Status(500));
+        }
         Ok(text.len().div_ceil(3))
     }
 
@@ -80,7 +104,7 @@ impl Server for FakeServer {
         tokio::time::sleep(Duration::from_secs_f64((prompt_ms + predicted_ms) / 1000.0)).await;
         Ok(Timings {
             prompt_n: Some(prompt_n),
-            prompt_ms: Some(prompt_ms),
+            prompt_ms: (self.behaviour.fault != Fault::MissingTiming).then_some(prompt_ms),
             cache_n: Some(1290.0),
             predicted_n: Some(predicted),
             predicted_ms: Some(predicted_ms),
@@ -124,6 +148,10 @@ impl Child for FakeChild {
             self.gone();
         }
     }
+
+    async fn loaded(&self) -> Result<(), String> {
+        self.server.behaviour.loaded.clone()
+    }
 }
 
 impl FakeChild {
@@ -159,6 +187,16 @@ struct FakeLauncher {
     unsettled: Mutex<Option<Arc<tokio::sync::Notify>>>,
     cancels: AtomicUsize,
     probe: Mutex<Option<Probed>>,
+    /// The GPU path's probe (default: level 1 passes).
+    gpu_probe: Mutex<Option<Probed>>,
+    /// The paths probed, in order.
+    probed: Mutex<Vec<Path>>,
+    /// The path of each start, in order.
+    paths: Mutex<Vec<Path>>,
+    device: Mutex<Option<DeviceView>>,
+    device_notes: Mutex<Vec<String>>,
+    /// Holds the CPU probe until notified.
+    cpu_probe_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
     script: Mutex<VecDeque<Start>>,
     starts: Mutex<Vec<(u64, Level, Instant)>>,
     children: Mutex<Vec<Arc<FakeChild>>>,
@@ -193,7 +231,21 @@ impl Launcher for FakeLauncher {
         }
     }
 
-    async fn probe(&self, _: Path) -> Vec<(Level, Result<(), String>)> {
+    async fn probe(&self, path: Path) -> Vec<(Level, Result<(), String>)> {
+        self.probed.lock().unwrap().push(path);
+        if path == Path::Gpu {
+            return self.gpu_probe.lock().unwrap().clone().unwrap_or_else(|| {
+                vec![
+                    (Level::Bubblewrap, Ok(())),
+                    (Level::Landlock, Err("not built".into())),
+                    (Level::Unconfined, Ok(())),
+                ]
+            });
+        }
+        let gate = self.cpu_probe_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
         self.probe.lock().unwrap().clone().unwrap_or_else(|| {
             vec![
                 (Level::Bubblewrap, Ok(())),
@@ -203,7 +255,21 @@ impl Launcher for FakeLauncher {
         })
     }
 
-    async fn start(&self, generation: u64, level: Level, _: Path) -> Result<Arc<dyn Child>, Fail> {
+    fn device(&self) -> Option<DeviceView> {
+        self.device.lock().unwrap().clone()
+    }
+
+    fn device_notes(&self) -> Vec<String> {
+        self.device_notes.lock().unwrap().clone()
+    }
+
+    async fn start(
+        &self,
+        generation: u64,
+        level: Level,
+        path: Path,
+    ) -> Result<Arc<dyn Child>, Fail> {
+        self.paths.lock().unwrap().push(path);
         self.starts
             .lock()
             .unwrap()
@@ -730,4 +796,302 @@ async fn a_restart_starts_the_next_session_only_after_the_launchers_work_settled
     assert_eq!(*launcher.preflights.lock().unwrap(), 2);
     let stopping = tokio::time::timeout(Duration::from_secs(5), handle.shutdown()).await;
     assert!(stopping.is_ok());
+}
+
+// The GPU path (ASSIST-27): GPU first, any GPU failure moves to the CPU at once, uncounted,
+// until Mimik restarts or the owner presses "Try the GPU again".
+
+const GPU_CONFIG: Config = Config {
+    path: Path::Gpu,
+    max_tokens: 352,
+    levels: USED_LEVELS,
+};
+
+fn gpu_manager(launcher: &Arc<FakeLauncher>) -> (Arc<Assistant>, Handle) {
+    let assistant = Assistant::new();
+    let handle = spawn(
+        Arc::clone(&assistant),
+        Arc::clone(launcher) as Arc<dyn Launcher>,
+        GPU_CONFIG,
+    );
+    (assistant, handle)
+}
+
+fn rx6650() -> DeviceView {
+    DeviceView {
+        pci: "0000:0c:00.0".into(),
+        node: "renderD128".into(),
+        name: "Vulkan0".into(),
+        description: "AMD Radeon RX 6650 XT (RADV NAVI23)".into(),
+        total_mib: 8176,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_gpu_path_reaches_ready_with_gpu_budgets() {
+    let launcher = FakeLauncher::scripted([]);
+    *launcher.device.lock().unwrap() = Some(rx6650());
+    let (assistant, handle) = gpu_manager(&launcher);
+    ready(&assistant).await;
+    let status = handle.status();
+    assert_eq!(status.path, Path::Gpu);
+    assert_eq!(status.level, Some(Level::Bubblewrap));
+    assert_eq!(status.device, Some(rx6650()));
+    assert_eq!(status.gpu_note, None);
+    let budgets = status.budgets.unwrap();
+    assert_eq!(budgets.bounds.bytes, 4096);
+    assert_eq!(budgets.run, Duration::from_secs(15));
+    assert_eq!(budgets.depth, 4);
+    assert_eq!(*launcher.paths.lock().unwrap(), [Path::Gpu]);
+    assert_eq!(*launcher.probed.lock().unwrap(), [Path::Gpu]);
+}
+
+/// Waits for `n` starts.
+async fn starts(launcher: &Arc<FakeLauncher>, n: usize) {
+    let probe = Arc::clone(launcher);
+    until(Duration::from_mins(15), move || {
+        probe.starts.lock().unwrap().len() >= n
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_gpu_failure_at_each_phase_moves_to_the_cpu_at_once_uncounted() {
+    let too_slow = Behaviour {
+        p: 0.01,
+        g: 0.2,
+        ..Behaviour::default()
+    };
+    let not_loaded = Behaviour {
+        loaded: Err("only 30 of 41 layers were placed on the GPU".into()),
+        ..Behaviour::default()
+    };
+    let no_priming = Behaviour {
+        prime_fails: true,
+        ..Behaviour::default()
+    };
+    // Never ready: the 60 s health deadline.
+    let never_ready = Behaviour {
+        loading: usize::MAX,
+        ..Behaviour::default()
+    };
+    let refused = Behaviour {
+        fault: Fault::RefuseHealth,
+        ..Behaviour::default()
+    };
+    let no_tokenize = Behaviour {
+        fault: Fault::TokenizeFails,
+        ..Behaviour::default()
+    };
+    let no_timing = Behaviour {
+        fault: Fault::MissingTiming,
+        ..Behaviour::default()
+    };
+    // Each sample (52 s) is under the 60 s cap, but no candidate bound fits a deadline of
+    // 1.25 times its estimate: the budgets do not derive.
+    let no_budgets = Behaviour {
+        p: 0.001,
+        g: 0.148,
+        ..Behaviour::default()
+    };
+    for (gpu, why) in [
+        (
+            Start::Other("the model could not be loaded"),
+            "the model could not be loaded",
+        ),
+        (
+            Start::Sandbox("bubblewrap could not set up the sandbox"),
+            "bubblewrap could not set up",
+        ),
+        (Start::Ok(not_loaded), "only 30 of 41 layers"),
+        (Start::Ok(no_priming), "priming failed"),
+        (Start::Ok(too_slow), "a calibration sample took more than"),
+        (Start::Ok(never_ready), "did not answer /health within 60 s"),
+        (Start::Ok(refused), "endpoint check refused"),
+        (Start::Ok(no_tokenize), "/tokenize answered HTTP 500"),
+        (
+            Start::Ok(no_timing),
+            "timing is missing, zero or not finite",
+        ),
+        (Start::Ok(no_budgets), "about"),
+    ] {
+        let launcher = FakeLauncher::scripted([gpu, Start::Ok(Behaviour::default())]);
+        *launcher.device.lock().unwrap() = Some(rx6650());
+        *launcher.device_notes.lock().unwrap() = vec!["0000:0d:00.0 (renderD129): x".into()];
+        let (assistant, handle) = gpu_manager(&launcher);
+        ready(&assistant).await;
+        let status = handle.status();
+        assert!(status.device_notes.is_empty(), "{why}");
+        assert_eq!(
+            *launcher.paths.lock().unwrap(),
+            [Path::Gpu, Path::Cpu],
+            "{why}"
+        );
+        assert_eq!(status.path, Path::Cpu, "{why}");
+        assert_eq!(status.device, None, "{why}: the page shows no GPU in use");
+        assert_eq!(status.failures, 0, "{why}");
+        assert_eq!(status.level, Some(Level::Bubblewrap), "{why}");
+        assert!(
+            status
+                .gpu_note
+                .as_deref()
+                .is_some_and(|note| note.contains(why)),
+            "{why}: {:?}",
+            status.gpu_note
+        );
+        // CPU budgets, and the CPU start followed at once (no 2-minute retry).
+        assert_eq!(status.budgets.unwrap().bounds.bytes, 1024, "{why}");
+        let starts = launcher.starts.lock().unwrap().clone();
+        assert!(starts[1].2 - starts[0].2 < RETRY_AFTER, "{why}");
+        assert!(!launcher.coexisted.load(Ordering::SeqCst), "{why}");
+        assert!(assistant.breaker_closed(), "{why}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_gpu_child_exit_or_hang_while_ready_moves_to_the_cpu_uncounted() {
+    for hang in [false, true] {
+        let launcher = FakeLauncher::scripted([]);
+        let (assistant, handle) = gpu_manager(&launcher);
+        ready(&assistant).await;
+        if hang {
+            assistant.signal_for_tests(Signal::Expired { generation: 1 });
+            assistant.signal_for_tests(Signal::Expired { generation: 1 });
+        } else {
+            launcher.child(0).crash();
+        }
+        // The moment the CPU path is current, the page no longer says Ready (the GPU child's
+        // state) while the CPU server is still starting.
+        let probe = handle.clone();
+        until(Duration::from_mins(15), move || {
+            probe.status().path == Path::Cpu
+        })
+        .await;
+        assert!(
+            !matches!(handle.status().state, State::Ready) || handle.status().budgets.is_some(),
+            "{:?}",
+            handle.status()
+        );
+        starts(&launcher, 2).await;
+        ready(&assistant).await;
+        let status = handle.status();
+        assert_eq!(*launcher.paths.lock().unwrap(), [Path::Gpu, Path::Cpu]);
+        assert_eq!(status.path, Path::Cpu);
+        assert_eq!(status.failures, 0);
+        assert!(status.gpu_note.is_some());
+        assert!(!launcher.coexisted.load(Ordering::SeqCst));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_page_state_leaves_ready_the_moment_the_gpu_fails_over_to_the_cpu() {
+    let launcher = FakeLauncher::scripted([]);
+    let (assistant, handle) = gpu_manager(&launcher);
+    ready(&assistant).await;
+    // The CPU probe is held pending, so the state right after the fallback stays observable.
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *launcher.cpu_probe_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    launcher.child(0).crash();
+    let probe = handle.clone();
+    until(Duration::from_mins(15), move || {
+        probe.status().path == Path::Cpu
+    })
+    .await;
+    let status = handle.status();
+    assert!(matches!(status.state, State::Starting(_)), "{status:?}");
+    assert_eq!(status.budgets, None, "{status:?}");
+    gate.notify_one();
+    starts(&launcher, 2).await;
+    ready(&assistant).await;
+    assert_eq!(handle.status().path, Path::Cpu);
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_usable_gpu_level_runs_the_cpu_path_at_its_own_level() {
+    // The GPU build's probe fails at level 1 (for example no hardware GPU, or the render node
+    // refused); the CPU build's passes: each path at its own level.
+    let launcher = FakeLauncher::scripted([]);
+    *launcher.gpu_probe.lock().unwrap() = Some(vec![(
+        Level::Bubblewrap,
+        Err("no hardware GPU is listed (software renderers are not used)".into()),
+    )]);
+    let (assistant, handle) = gpu_manager(&launcher);
+    ready(&assistant).await;
+    let status = handle.status();
+    assert_eq!(*launcher.paths.lock().unwrap(), [Path::Cpu]);
+    assert_eq!(*launcher.probed.lock().unwrap(), [Path::Gpu, Path::Cpu]);
+    assert_eq!(status.path, Path::Cpu);
+    assert_eq!(status.level, Some(Level::Bubblewrap));
+    assert!(status.gpu_note.unwrap().contains("no hardware GPU"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_cpu_choice_never_probes_or_starts_the_gpu() {
+    let launcher = FakeLauncher::scripted([]);
+    let (assistant, handle) = manager(&launcher);
+    ready(&assistant).await;
+    assert_eq!(*launcher.probed.lock().unwrap(), [Path::Cpu]);
+    assert_eq!(*launcher.paths.lock().unwrap(), [Path::Cpu]);
+    assert_eq!(handle.try_gpu(), TryGpu::NotApplicable);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(launcher.starts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn restart_keeps_the_cpu_after_a_gpu_failure_and_try_the_gpu_again_goes_back() {
+    let launcher = FakeLauncher::scripted([Start::Other("device lost")]);
+    let (assistant, handle) = gpu_manager(&launcher);
+    ready(&assistant).await;
+    assert_eq!(handle.status().path, Path::Cpu);
+    // Restart keeps the CPU path.
+    assert_eq!(handle.restart(), Restart::Accepted);
+    starts(&launcher, 3).await;
+    ready(&assistant).await;
+    assert_eq!(
+        *launcher.paths.lock().unwrap(),
+        [Path::Gpu, Path::Cpu, Path::Cpu]
+    );
+    assert_eq!(handle.try_gpu(), TryGpu::Accepted);
+    // A second press while that transition runs is no second transition.
+    assert_eq!(handle.try_gpu(), TryGpu::AlreadyRunning);
+    assert_eq!(handle.restart(), Restart::AlreadyRunning);
+    starts(&launcher, 4).await;
+    ready(&assistant).await;
+    let status = handle.status();
+    assert_eq!(
+        *launcher.paths.lock().unwrap(),
+        [Path::Gpu, Path::Cpu, Path::Cpu, Path::Gpu]
+    );
+    assert_eq!(status.path, Path::Gpu);
+    assert_eq!(status.gpu_note, None);
+    assert!(!status.restarting);
+    assert_eq!(handle.try_gpu(), TryGpu::NotApplicable);
+    assert!(!launcher.coexisted.load(Ordering::SeqCst));
+}
+
+#[test]
+fn a_manager_whose_handles_are_all_dropped_while_ready_does_not_spin() {
+    // Regression: the ready loop took a closed command channel's `None` as "nothing" and
+    // polled it again at once, spinning. On one thread with the paused clock a spinning
+    // manager keeps the runtime busy, so the clock never advances and the sleep never ends.
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let launcher = FakeLauncher::scripted([]);
+            let (assistant, handle) = manager(&launcher);
+            ready(&assistant).await;
+            drop(handle);
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        let _ = done.send(());
+    });
+    assert!(
+        finished.recv_timeout(Duration::from_secs(30)).is_ok(),
+        "the manager spun once its handles were gone"
+    );
 }

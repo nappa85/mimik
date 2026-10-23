@@ -175,6 +175,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn request_text_in_the_output_at_any_verbosity_reaches_nothing_but_the_fixed_summary() {
+        // At higher verbosity the server may log request contents. The drain's only outputs
+        // are the fixed events (numbers and flags), and the summary has no text field.
+        let marker = "ZZ-PLAYER-MARKER-7731";
+        let log = format!(
+            "srv  log_server_r: request: POST /v1/chat/completions {{\"messages\":[{{\"content\":\"{marker}\"}}]}}\n\
+             slot update_slots: prompt = {marker}\n\
+             slot launch_slot_: id 0 | task 0 | processing task, text: {marker}\n"
+        );
+        let mut events = Vec::new();
+        drain(log.as_bytes(), |event| events.push(event));
+        assert!(events.is_empty(), "{events:?}");
+        // A phrase shaped like a pattern yields the numeric event alone, never its text.
+        let shaped = format!("prompt: {marker} offloaded 1/2 layers to GPU\n");
+        let mut summary = Summary::default();
+        drain(shaped.as_bytes(), |event| summary.record(event));
+        assert_eq!(summary.offloaded, Some((1, 2)));
+        assert!(!format!("{summary:?}").contains(marker));
+        assert!(std::mem::size_of::<Summary>() <= 32);
+    }
+
+    #[test]
     fn fixed_patterns_from_the_pinned_build() {
         assert_eq!(
             classify("0.00.029.302 I srv  llama_server: listening on unix:///run/llama/llama.sock"),

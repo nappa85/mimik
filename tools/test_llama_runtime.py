@@ -171,7 +171,7 @@ class LlamaRuntimeTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     llama_runtime.download(url, Path(temp) / "bad", expected, size)
 
-    def test_packaging_stages_exactly_the_verified_files_and_a_deterministic_source(self):
+    def test_packaging_stages_exactly_the_verified_files(self):
         data = synthetic()
         with tempfile.TemporaryDirectory() as temp:
             fetched = Path(temp) / "fetched"
@@ -187,38 +187,122 @@ class LlamaRuntimeTests(unittest.TestCase):
                 ["LICENSE", "libllama.so.0", "llama-server"],
             )
             self.assertEqual(stat.S_IMODE((stage / "llama/cpu/llama-server").stat().st_mode), 0o755)
-            out = Path(temp) / "out"
-            out.mkdir()
-            first = package_release.compress_source(fetched, data, out).read_bytes()
-            second = package_release.compress_source(fetched, data, out).read_bytes()
-            self.assertEqual(first, second)
             self.assertIn("ggml", package_release.llama_notice(data))
             self.assertIn("notices", llama_runtime.manifest()["source"])
             (fetched / "llama/cpu/extra").write_bytes(b"x")
             with self.assertRaises(ValueError):
                 package_release.stage_llama(fetched, Path(temp) / "stage2", data)
-            tar.write_bytes(b"another tar")
+
+
+class GpuBuildTests(unittest.TestCase):
+    def test_the_vulkan_build_is_the_cpu_build_plus_the_vulkan_backend(self):
+        data = llama_runtime.manifest()
+        builds = {build["path"]: build for build in data["builds"]}
+        self.assertEqual(sorted(builds), ["cpu", "vulkan"])
+        cpu, vulkan = builds["cpu"], builds["vulkan"]
+        self.assertEqual(vulkan["directory"], "vulkan")
+        self.assertEqual(vulkan["asset"], "llama-b11609-bin-ubuntu-vulkan-x64.tar.gz")
+        self.assertEqual(
+            vulkan["sha256"], "8aff188828de76492343e19905f72408c10f5b870a03592155b0e7dd19b76ed0"
+        )
+        shared = {entry["name"]: entry for entry in cpu["files"]}
+        extra = [entry for entry in vulkan["files"] if entry["name"] not in shared]
+        self.assertEqual([entry["name"] for entry in extra], ["libggml-vulkan.so"])
+        for entry in vulkan["files"]:
+            if entry["name"] in shared:
+                self.assertEqual(entry, shared[entry["name"]])
+        self.assertIn("libvulkan.so.1", vulkan["system_libraries"])
+        names = [notice["name"] for notice in data["external_notices"]]
+        self.assertIn("Vulkan-Headers-MIT.txt", names)
+
+
+class ExternalNoticeTests(unittest.TestCase):
+    TEXT = b"MIT License\n\nCopyright (c) Example\n"
+
+    def data(self, url):
+        data = synthetic()
+        data["external_notices"] = [
+            {
+                "component": "Headers",
+                "licence": "MIT",
+                "name": "Headers-MIT.txt",
+                "url": url,
+                "sha256": digest(self.TEXT),
+                "size": len(self.TEXT),
+            }
+        ]
+        return data
+
+    def test_fetched_notices_are_hash_checked_and_exactly_the_pinned_set(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "upstream.txt"
+            source.write_bytes(self.TEXT)
+            data = self.data(source.as_uri())
+            out = Path(temp) / "out"
+            out.mkdir()
+            llama_runtime.fetch_notices(out, data)
+            llama_runtime.verify_notices(out / "notices", data)
+            (out / "notices/extra.txt").write_bytes(b"x")
             with self.assertRaises(ValueError):
-                package_release.compress_source(fetched, data, out)
+                llama_runtime.verify_notices(out / "notices", data)
+            (out / "notices/extra.txt").unlink()
+            (out / "notices/Headers-MIT.txt").write_bytes(b"changed")
+            with self.assertRaises(ValueError):
+                llama_runtime.verify_notices(out / "notices", data)
+            source.write_bytes(b"another text")
+            with self.assertRaises(ValueError):
+                llama_runtime.fetch_notices(Path(temp) / "again", data)
+
+    def test_the_package_notice_carries_each_external_text(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = self.data("file:///unused")
+            notices = Path(temp) / "notices"
+            notices.mkdir()
+            (notices / "Headers-MIT.txt").write_bytes(self.TEXT)
+            text = package_release.llama_notice(data, None, notices)
+            self.assertIn("### Headers", text)
+            self.assertIn("Copyright (c) Example", text)
+            # The provenance claim is exact: the files are the release's binaries, and what
+            # the source archive does not hold is named as coming from its build environment.
+            self.assertNotIn("is built from it", text)
+            self.assertIn("release's own binaries", text)
+            self.assertIn("build environment", text)
+            (notices / "Headers-MIT.txt").write_bytes(b"changed")
+            with self.assertRaises(ValueError):
+                package_release.llama_notice(data, None, notices)
 
 
 class NoticeTests(unittest.TestCase):
-    def test_every_compiled_in_component_gets_its_text_from_the_source(self):
+    FILES = [
+        ("LICENSE", b"MIT text"),
+        ("h.h", b"code\nlicence line one\nlicence line two\nmore code\n"),
+    ]
+
+    def write_tar(self, path, data, files):
+        with tarfile.open(path, "w") as out:
+            for name, content in files:
+                info = tarfile.TarInfo(data["source"]["prefix"] + name)
+                info.size = len(content)
+                out.addfile(info, io.BytesIO(content))
+
+    def pinned(self, path, data):
+        data["source"]["tar_sha256"] = llama_runtime.sha256(path)
+        data["source"]["tar_size"] = Path(path).stat().st_size
+
+    def manifest(self):
         data = synthetic()
         data["source"]["notices"] = [
             {"component": "llama.cpp", "licence": "MIT", "path": "LICENSE"},
             {"component": "header", "licence": "Unlicense", "path": "h.h", "lines": [2, 3]},
         ]
+        return data
+
+    def test_every_compiled_in_component_gets_its_text_from_the_source(self):
+        data = self.manifest()
         with tempfile.TemporaryDirectory() as temp:
             tar = Path(temp) / "source.tar"
-            with tarfile.open(tar, "w") as out:
-                for name, content in [
-                    ("LICENSE", b"MIT text"),
-                    ("h.h", b"code\nlicence line one\nlicence line two\nmore code\n"),
-                ]:
-                    info = tarfile.TarInfo(data["source"]["prefix"] + name)
-                    info.size = len(content)
-                    out.addfile(info, io.BytesIO(content))
+            self.write_tar(tar, data, self.FILES)
+            self.pinned(tar, data)
             notice = package_release.llama_notice(data, tar)
             self.assertIn("MIT text", notice)
             self.assertIn("licence line one\nlicence line two", notice)
@@ -229,13 +313,32 @@ class NoticeTests(unittest.TestCase):
             with self.assertRaises(KeyError):
                 package_release.llama_notice(data, tar)
 
+    def test_the_source_tar_is_verified_before_any_text_is_taken_from_it(self):
+        data = self.manifest()
+        with tempfile.TemporaryDirectory() as temp:
+            tar = Path(temp) / "source.tar"
+            self.write_tar(tar, data, self.FILES)
+            self.pinned(tar, data)
+            # A licence text replaced inside an otherwise valid tar: of another length, then of
+            # the same length (the size check alone cannot catch it, the hash does).
+            for forged_text in (b"Forged text", b"MIT TEXT"):
+                self.write_tar(tar, data, [("LICENSE", forged_text), self.FILES[1]])
+                if len(forged_text) == len(b"MIT text"):
+                    self.assertEqual(tar.stat().st_size, data["source"]["tar_size"])
+                with self.assertRaisesRegex(ValueError, "differs from the pinned"):
+                    package_release.llama_notice(data, tar)
+            # The pinned size is checked too.
+            data["source"]["tar_sha256"] = llama_runtime.sha256(tar)
+            data["source"]["tar_size"] = tar.stat().st_size + 1
+            with self.assertRaisesRegex(ValueError, "differs from the pinned"):
+                package_release.llama_notice(data, tar)
+
 
 class InventoryTests(unittest.TestCase):
     NAMES = [
         "mimik-0.1.0-linux-x86_64.tar.gz",
         "mimik-0.1.0-source.crate",
         "mimik-0.1.0-dependency-sources.tar.gz",
-        "llama.cpp-b11609-source.tar.gz",
     ]
 
     def test_the_release_scope_lists_every_archive_and_their_count(self):
@@ -243,19 +346,43 @@ class InventoryTests(unittest.TestCase):
         package_release.check_inventory(readme.read_text(encoding="utf-8"), self.NAMES)
 
     def test_a_missing_archive_or_a_wrong_count_is_refused(self):
-        listed = "".join(f"- `{name}`: x\n" for name in self.NAMES[:3])
-        with self.assertRaisesRegex(ValueError, "llama.cpp-b11609-source.tar.gz"):
-            package_release.check_inventory(
-                listed + "- `SHA256SUMS`: checksums of the four archives.\n", self.NAMES
-            )
-        listed += f"- `{self.NAMES[3]}`: x\n"
-        with self.assertRaisesRegex(ValueError, "four"):
+        listed = "".join(f"- `{name}`: x\n" for name in self.NAMES[:2])
+        with self.assertRaisesRegex(ValueError, "dependency-sources"):
             package_release.check_inventory(
                 listed + "- `SHA256SUMS`: checksums of the three archives.\n", self.NAMES
             )
+        listed += f"- `{self.NAMES[2]}`: x\n"
+        with self.assertRaisesRegex(ValueError, "three"):
+            package_release.check_inventory(
+                listed + "- `SHA256SUMS`: checksums of the four archives.\n", self.NAMES
+            )
         package_release.check_inventory(
-            listed + "- `SHA256SUMS`: checksums of the four archives.\n", self.NAMES
+            listed + "- `SHA256SUMS`: checksums of the three archives.\n", self.NAMES
         )
+
+    def test_the_release_scope_no_longer_lists_the_llama_source_archive(self):
+        readme = Path(__file__).resolve().parents[1] / "docs" / "release-scope.md"
+        self.assertNotIn("llama.cpp-b11609-source", readme.read_text(encoding="utf-8"))
+
+    def test_ci_expects_three_archives_and_uploads_no_llama_source(self):
+        ci = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("-eq 3", ci)
+        self.assertNotIn("-source.tar.gz", ci)
+
+    def test_llama_cpp_is_pointed_to_never_shipped_as_source(self):
+        self.assertFalse(hasattr(package_release, "compress_source"))
+        data = llama_runtime.manifest()
+        text = package_release.llama_pointer(data)
+        self.assertIn(data["llama_cpp"]["repository"], text)
+        self.assertIn(data["llama_cpp"]["tag"], text)
+        self.assertIn(data["llama_cpp"]["commit"], text)
+        for build in data["builds"]:
+            self.assertIn(build["asset"], text)
+            self.assertIn(build["sha256"], text)
+        self.assertNotIn("accompanying", text)
+        self.assertIn("not shipped", text)
 
 
 if __name__ == "__main__":

@@ -71,6 +71,8 @@ fn settings(scratch: &std::path::Path, inner: &str, inner_env: Vec<(String, Stri
             },
             shim_env: vec![(test_helper::VARIABLE.into(), "shim".into())],
         },
+        device: device::Choice::Cpu,
+        roots: device::Roots::default(),
     }
 }
 
@@ -96,6 +98,15 @@ fn helper() {
             let args: Vec<String> = std::env::args().collect();
             let at = args.iter().position(|arg| arg == "probe-inner").unwrap();
             std::process::exit(super::super::probe::inner(&args[at + 1..]));
+        }
+        // A probe that reports and exits at once (before its reaper can be pinned).
+        "probe-negative-fast" => {
+            println!(r#"{{"ok":false,"render":"the render node cannot be opened: test","pid":1}}"#);
+            std::process::exit(0);
+        }
+        "probe-ok-fast" => {
+            println!(r#"{{"ok":true,"pid":1}}"#);
+            std::process::exit(0);
         }
         "adversary" => adversary(),
         "shim" => std::process::exit(super::super::probe::shim()),
@@ -296,6 +307,57 @@ fn live_the_probe_reaches_level_1_and_level_3() {
         real.probe_level(Path::Cpu, Level::Unconfined, &real.work().enter()),
         Probe::Passed
     );
+}
+
+/// Probes level 1 with the helper `mode` as the probe, held at the reaper step until the
+/// probe has exited, so the sandbox is gone before its reaper is pinned.
+fn probe_after_exit(mode: &str) -> Probe {
+    use super::super::launch::{THREAD_PAUSE, ThreadPause};
+    let scratch = scratch();
+    let real = real(settings(scratch.path(), mode, Vec::new()));
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime
+        .block_on(Launch(Arc::clone(&real)).preflight(Path::Cpu))
+        .unwrap();
+    let (arrived, reached) = std::sync::mpsc::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let worker = {
+        let real = Arc::clone(&real);
+        std::thread::spawn(move || {
+            THREAD_PAUSE.lock().unwrap().push(ThreadPause {
+                thread: std::thread::current().id(),
+                step: "before-reaper",
+                arrived,
+                release: wait,
+            });
+            real.probe_level(Path::Cpu, Level::Bubblewrap, &real.work().enter())
+        })
+    };
+    reached.recv_timeout(Duration::from_secs(60)).unwrap();
+    // The probe prints and exits at once; give it ample time to be gone.
+    std::thread::sleep(Duration::from_millis(1500));
+    release.send(()).unwrap();
+    worker.join().unwrap()
+}
+
+#[test]
+#[ignore = "live: bubblewrap, pinned runtime (MIMIK_LIVE_*)"]
+fn live_a_failing_probe_that_ended_before_its_reaper_was_pinned_still_reports_its_verdict() {
+    match probe_after_exit("probe-negative-fast") {
+        Probe::Failed(why) => assert!(why.contains("the render node cannot be opened"), "{why}"),
+        other => panic!("the negative report did not decide: {other:?}"),
+    }
+}
+
+#[test]
+#[ignore = "live: bubblewrap, pinned runtime (MIMIK_LIVE_*)"]
+fn live_an_ok_probe_without_a_verified_reaper_can_never_pass() {
+    match probe_after_exit("probe-ok-fast") {
+        Probe::Inconclusive(why) => {
+            assert!(why.contains("sandbox ended before its check"), "{why}");
+        }
+        other => panic!("an ok report without a reaper must stay inconclusive: {other:?}"),
+    }
 }
 
 async fn raw(child: &RealChild, path: &str, token: Option<&str>, body: &Value) -> (u16, Value) {
@@ -834,3 +896,6 @@ fn live_level_3_does_not_load_a_backend_from_an_attacker_writable_cwd() {
     mimik.kill().unwrap();
     mimik.wait().unwrap();
 }
+
+#[path = "live_gpu_tests.rs"]
+mod gpu;

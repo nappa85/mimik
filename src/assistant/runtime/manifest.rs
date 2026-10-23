@@ -33,7 +33,7 @@ pub(crate) struct Llama {
 /// One official release asset and the files Mimik runs from it.
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Build {
-    /// `cpu` (and `vulkan` from 2c-2b).
+    /// `cpu` or `vulkan`.
     pub path: String,
     /// The subdirectory of the runtime directory holding exactly `files`.
     pub directory: String,
@@ -129,5 +129,27 @@ mod tests {
         assert!(!names.iter().any(|name| name.contains("rpc")));
         assert_eq!(manifest.test_model.sha256.len(), 64);
         assert!(manifest.test_model.ctx_size > 0);
+    }
+
+    #[test]
+    fn the_gpu_build_is_the_cpu_build_plus_the_vulkan_backend() {
+        let manifest = &*MANIFEST;
+        let cpu = manifest.build(Path::Cpu).unwrap();
+        let gpu = manifest.build(Path::Gpu).unwrap();
+        assert_eq!(gpu.directory, "vulkan");
+        assert_eq!(gpu.server, cpu.server);
+        let extra: Vec<&str> = gpu
+            .files
+            .iter()
+            .filter(|file| {
+                !cpu.files
+                    .iter()
+                    .any(|shared| shared.name == file.name && shared.sha256 == file.sha256)
+            })
+            .map(|file| file.name.as_str())
+            .collect();
+        assert_eq!(extra, ["libggml-vulkan.so"]);
+        assert_eq!(gpu.files.len(), cpu.files.len() + 1);
+        assert!(!gpu.files.iter().any(|file| file.name.contains("rpc")));
     }
 }

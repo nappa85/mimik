@@ -2,12 +2,14 @@
 //! directory and token, the runner with the level's command, the endpoint check's connector,
 //! the output drain and the child's lifetime. Level 1 runs llama-server under bubblewrap on
 //! a Unix socket; level 3 executes it unconfined but for seccomp on `127.0.0.1`. Level 2
-//! (Landlock) is step 2c-2b.
-use super::bwrap::{self, Bwrap, Profile, Started};
+//! (Landlock) is step 2c-2b-2. The GPU path runs the Vulkan build at level 1 with the
+//! selected render node bound and `--device` named from the in-sandbox listing.
+use super::bwrap::{self, Bwrap, GpuBinds, Profile, Started};
+use super::device::{self, Candidate, Choice, Listed, Roots};
 use super::drain::{self, Summary};
 use super::endpoint::{self, Loopback, Sandbox, SandboxSocket, Watched};
 use super::files::{self, HashCache, Owners, Verified};
-use super::manager::{Child, Fail, Launcher};
+use super::manager::{Child, DeviceView, Fail, Launcher};
 use super::manifest::{Build, MANIFEST};
 use super::rundir::{self, Entry, Generation, Pidfile, Swept};
 use super::runner::{self, Exec, Handover, RunnerCommand, Spec};
@@ -35,6 +37,12 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 const PORT_TRIES: usize = 3;
 /// Free memory a model must leave (`MemAvailable` minus this, ASSIST-L23).
 const MEMORY_MARGIN: u64 = 1 << 30;
+/// How long one in-sandbox `--list-devices` may take (plan §1.4a, "Device").
+const LIST_WITHIN: Duration = Duration::from_secs(30);
+/// The most of a listing's output that is read.
+const LIST_BYTES: u64 = 64 * 1024;
+/// How long the GPU child has, after `/health`, to have reported its offload line.
+const OFFLOAD_WITHIN: Duration = Duration::from_secs(5);
 
 /// The descriptor numbers the child sees.
 mod fds {
@@ -90,13 +98,18 @@ impl InnerCommand {
 /// The level-1 sandbox's own executable path for Mimik's binary.
 const SHIM_PATH: &str = "/opt/mimik/mimik";
 
-/// The minimal environment inside the sandbox.
-fn sandbox_env() -> Vec<(String, String)> {
-    vec![
+/// The minimal environment inside the sandbox; on the GPU path Mesa's shader cache is off
+/// (the sandbox's `/tmp` is private to one launch and bounded, so a cache could only fill it).
+fn sandbox_env(path: Path) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = vec![
         ("PATH".into(), "/usr/bin:/bin".into()),
         ("LANG".into(), "C.UTF-8".into()),
         ("HOME".into(), "/tmp".into()),
-    ]
+    ];
+    if path == Path::Gpu {
+        env.push(("MESA_SHADER_CACHE_DISABLE".into(), "true".into()));
+    }
+    env
 }
 
 /// What the launcher needs.
@@ -114,6 +127,10 @@ pub(crate) struct Settings {
     pub ctx_size: u32,
     pub runner: RunnerCommand,
     pub inner: InnerCommand,
+    /// `--assistant-device`.
+    pub device: Choice,
+    /// Where render nodes are found (`/sys`, `/dev/dri`; tests give fake trees).
+    pub roots: Roots,
 }
 
 #[derive(Default)]
@@ -124,6 +141,20 @@ struct Held {
     /// The sweep runs (it holds the pidfile meanwhile).
     sweeping: bool,
     bwrap: Option<Bwrap>,
+    /// The GPU this Mimik uses, from the last discovery.
+    gpu: Option<Selected>,
+    /// The PCI address chosen last: kept while that card is listed (two identical cards are
+    /// told apart by it).
+    remembered: Option<String>,
+    /// Why render nodes were not used, from the last discovery.
+    device_notes: Vec<String>,
+}
+
+/// The selected GPU: its node with the in-sandbox listing, and the binds of its sandbox.
+#[derive(Clone, Debug)]
+pub(crate) struct Selected {
+    pub candidate: Candidate,
+    pub binds: GpuBinds,
 }
 
 /// Refuses executable paths with a newline: the pidfile holds one per line.
@@ -161,7 +192,9 @@ pub(crate) struct ServerFile<'a> {
 pub(crate) struct Real {
     settings: Settings,
     /// The pinned CPU build (the embedded manifest's; tests give another).
-    build: Option<Build>,
+    cpu: Option<Build>,
+    /// The pinned GPU (Vulkan) build.
+    gpu: Option<Build>,
     cache: HashCache,
     held: Arc<Mutex<Held>>,
     /// The locked pidfile, under its own lock: its writes never hold `held`.
@@ -325,13 +358,24 @@ impl Job {
 impl Real {
     /// The launcher of the embedded manifest's build.
     pub(crate) fn new(settings: Settings) -> Self {
-        Self::with_build(settings, MANIFEST.build(Path::Cpu).cloned())
+        Self::with_builds(
+            settings,
+            MANIFEST.build(Path::Cpu).cloned(),
+            MANIFEST.build(Path::Gpu).cloned(),
+        )
     }
 
+    /// A launcher of a CPU build only (tests).
+    #[cfg(test)]
     pub(crate) fn with_build(settings: Settings, build: Option<Build>) -> Self {
+        Self::with_builds(settings, build, None)
+    }
+
+    pub(crate) fn with_builds(settings: Settings, cpu: Option<Build>, gpu: Option<Build>) -> Self {
         Self {
             settings,
-            build,
+            cpu,
+            gpu,
             cache: HashCache::default(),
             held: Arc::new(Mutex::new(Held::default())),
             pidfile: Arc::new(Mutex::new(None)),
@@ -350,8 +394,16 @@ impl Real {
     }
 
     fn build(&self, path: Path) -> Option<&Build> {
-        // The CPU path is the only one built in 2c-2a.
-        (path == Path::Cpu).then_some(self.build.as_ref()).flatten()
+        match path {
+            Path::Cpu => self.cpu.as_ref(),
+            Path::Gpu => self.gpu.as_ref(),
+        }
+    }
+
+    /// The server executable's name in `path`'s build.
+    fn server_name(&self, path: Path) -> &str {
+        self.build(path)
+            .map_or("llama-server", |build| build.server.as_str())
     }
 
     fn held(&self) -> std::sync::MutexGuard<'_, Held> {
@@ -467,8 +519,17 @@ impl Real {
         })
     }
 
-    /// The llama-server flag vector (plan §1.4a, "Flag vector"), CPU path, for `host`.
-    fn server_args(&self, model: &str, host: &str, port: Option<u16>, token: &str) -> Vec<String> {
+    /// The llama-server flag vector (plan §1.4a, "Flag vector") for `host`: on the GPU path
+    /// every layer on `device` (the in-sandbox listing's name), on the CPU path none and no
+    /// `--device`.
+    fn server_args(
+        &self,
+        model: &str,
+        host: &str,
+        port: Option<u16>,
+        token: &str,
+        device: Option<&str>,
+    ) -> Vec<String> {
         let mut args: Vec<String> = vec![
             "--model".into(),
             model.into(),
@@ -489,13 +550,22 @@ impl Real {
                 "--no-slots",
                 "--no-mmproj",
                 "--jinja",
-                "--n-gpu-layers",
-                "0",
-                "--fit",
-                "off",
             ]
             .map(String::from),
         );
+        match device {
+            Some(device) => args.extend([
+                "--n-gpu-layers".into(),
+                "99".into(),
+                "--device".into(),
+                device.into(),
+                // The offload line is not printed at the default verbosity.
+                "--verbosity".into(),
+                "4".into(),
+            ]),
+            None => args.extend(["--n-gpu-layers".into(), "0".into()]),
+        }
+        args.extend(["--fit".into(), "off".into()]);
         let threads = self.settings.threads.to_string();
         args.extend([
             "--threads".into(),
@@ -629,6 +699,20 @@ struct Owned {
 /// Counts the cleanup's "runner has not exited yet" warnings (tests).
 #[cfg(test)]
 pub(crate) static RUNNER_WARNINGS: AtomicU64 = AtomicU64::new(0);
+
+/// The connector of a sandbox that serves nothing (a device listing).
+#[derive(Debug)]
+struct NoSocket;
+
+impl Connect for NoSocket {
+    fn connect(&self) -> crate::assistant::transport::Connecting {
+        Box::pin(async { Err(std::io::Error::other("this sandbox serves no socket")) })
+    }
+
+    fn authority(&self) -> String {
+        crate::assistant::transport::UNIX_AUTHORITY.to_owned()
+    }
+}
 
 /// After this long without the reaper's exit, the cleanup says so in the log (and waits on).
 const REAPER_WITHIN: Duration = Duration::from_secs(5);
@@ -872,9 +956,41 @@ macro_rules! fault_at {
     };
 }
 
+/// A pause that only the thread that registered it can hit (live tests share one runtime
+/// folder and so cannot key a pause by it).
+#[cfg(test)]
+pub(crate) struct ThreadPause {
+    pub thread: std::thread::ThreadId,
+    pub step: &'static str,
+    pub arrived: std::sync::mpsc::Sender<()>,
+    pub release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+pub(crate) static THREAD_PAUSE: Mutex<Vec<ThreadPause>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn thread_pause_point(step: &'static str) {
+    let me = std::thread::current().id();
+    let pause = {
+        let mut pauses = THREAD_PAUSE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pauses
+            .iter()
+            .position(|pause| pause.thread == me && pause.step == step)
+            .map(|at| pauses.remove(at))
+    };
+    if let Some(pause) = pause {
+        let _ = pause.arrived.send(());
+        let _ = pause.release.recv();
+    }
+}
+
 #[cfg(test)]
 impl Real {
     fn paused(&self, step: &'static str) {
+        thread_pause_point(step);
         pause_point(&self.settings.runtime_dir, step);
     }
 
@@ -957,9 +1073,11 @@ fn sweep_leftover(pidfile: &mut Pidfile, data_dir: &std::path::Path) -> Swept {
 /// The shim's arguments and environment.
 type ShimCommand = (Vec<String>, Vec<(String, String)>);
 
-/// The command run in the child: llama-server, or the probe.
-enum Command {
-    Server,
+/// The command run in the child: llama-server (on `device` when the GPU path names one),
+/// its device listing, or the probe.
+enum Command<'a> {
+    Server { device: Option<&'a str> },
+    ListDevices,
     Probe,
 }
 
@@ -968,7 +1086,9 @@ impl Real {
     /// the exec and executes llama-server from the bound runtime or the probe.
     fn sandbox_command(
         &self,
-        command: &Command,
+        path: Path,
+        command: &Command<'_>,
+        gpu: Option<&GpuBinds>,
         handover: &mut Vec<Handover>,
         extra: &mut Vec<(RawFd, String)>,
     ) -> Result<ShimCommand, Fail> {
@@ -984,22 +1104,23 @@ impl Real {
             target: fds::SHIM,
         });
         extra.push((fds::SHIM, SHIM_PATH.to_owned()));
-        let mut env = sandbox_env();
+        let mut env = sandbox_env(path);
+        let server = format!("{}/{}", bwrap::RUNTIME, self.server_name(path));
         let argv = match command {
-            Command::Server => {
-                let server = self
-                    .build
-                    .as_ref()
-                    .map_or("llama-server", |build| build.server.as_str());
-                let mut argv = vec![format!("{}/{server}", bwrap::RUNTIME)];
-                argv.extend(self.server_args(bwrap::MODEL, &socket, None, bwrap::TOKEN));
+            Command::Server { device } => {
+                let mut argv = vec![server];
+                argv.extend(self.server_args(bwrap::MODEL, &socket, None, bwrap::TOKEN, *device));
                 argv
             }
+            Command::ListDevices => vec![server, "--list-devices".to_owned()],
             Command::Probe => {
                 env.extend(self.settings.inner.probe_env.iter().cloned());
                 let mut argv = vec![SHIM_PATH.to_owned()];
                 argv.extend(self.settings.inner.probe_args.iter().cloned());
                 argv.push("1".to_owned());
+                if let Some(gpu) = gpu {
+                    argv.extend([super::probe::RENDER.to_owned(), gpu.inside()]);
+                }
                 argv
             }
         };
@@ -1022,12 +1143,14 @@ impl Real {
     fn sandbox_spec(
         &self,
         bwrap: &Bwrap,
-        command: &Command,
+        path: Path,
+        command: &Command<'_>,
+        gpu: Option<&GpuBinds>,
         handover: &mut Vec<Handover>,
         runtime: Binds,
     ) -> Result<Spec, Fail> {
         let mut extra = Vec::new();
-        let (program, env) = self.sandbox_command(command, handover, &mut extra)?;
+        let (program, env) = self.sandbox_command(path, command, gpu, handover, &mut extra)?;
         let profile = Profile {
             size: bwrap.size,
             status_fd: fds::STATUS,
@@ -1039,6 +1162,7 @@ impl Real {
             extra,
             env,
             command: program,
+            gpu: gpu.cloned(),
         }
         .arguments();
         Ok(Spec {
@@ -1059,14 +1183,21 @@ impl Real {
         })
     }
 
-    /// Starts level 1: bwrap with the profile, then reads `child-pid` and `pid-namespace`.
+    /// Starts level 1: bwrap with the profile (and on the GPU path the selected node's
+    /// binds), then reads `child-pid` and `pid-namespace`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one sandbox start: what runs, with which files, on which device"
+    )]
     fn spawn_sandbox(
         &self,
         job: &Job,
+        path: Path,
         files: &[Verified],
         model: &Verified,
         token: &Token,
-        command: &Command,
+        command: &Command<'_>,
+        gpu: Option<&GpuBinds>,
     ) -> Result<Spawned, Fail> {
         let bwrap = self
             .held()
@@ -1098,7 +1229,7 @@ impl Real {
             fd: marker_write,
             target: fds::MARKER,
         });
-        let spec = self.sandbox_spec(&bwrap, command, &mut handover, runtime)?;
+        let spec = self.sandbox_spec(&bwrap, path, command, gpu, &mut handover, runtime)?;
         self.after_cleanups(job)?;
         pause_at!(self, "before-spawn");
         job.check()?;
@@ -1131,23 +1262,41 @@ impl Real {
             rest,
         ) = read_started(status_read, job)?;
         fault_at!(self, "started", child);
-        let reaper = endpoint::open_reaper(child_pid, pid, pid_namespace)
-            .map_err(|error| Fail::Other(format!("the sandbox's reaper: {error}")))?;
-        let sandbox = Arc::new(Sandbox {
-            reaper,
-            pid_namespace,
-        });
-        child.reaper = Some(Arc::clone(&sandbox));
-        let connector: Arc<dyn Connect> = Arc::new(SandboxSocket {
-            directory: Arc::new(dup(&generation.fd).map_err(Fail::Other)?),
-            sandbox: Arc::clone(&sandbox),
-        });
+        pause_at!(self, "before-reaper");
+        let (sandbox, connector): (Option<Arc<Sandbox>>, Arc<dyn Connect>) =
+            match endpoint::open_reaper(child_pid, pid, pid_namespace) {
+                Ok(reaper) => {
+                    let sandbox = Arc::new(Sandbox {
+                        reaper,
+                        pid_namespace,
+                    });
+                    child.reaper = Some(Arc::clone(&sandbox));
+                    let connector: Arc<dyn Connect> = Arc::new(SandboxSocket {
+                        directory: Arc::new(dup(&generation.fd).map_err(Fail::Other)?),
+                        sandbox: Arc::clone(&sandbox),
+                    });
+                    (Some(sandbox), connector)
+                }
+                // A device listing is over in moments and a probe that cannot start (an
+                // unopenable render node) ends at once: the sandbox may be gone before the
+                // reaper can be pinned, which tears down the whole PID namespace and needs no
+                // kill. The listing's exit and the probe's report then decide.
+                Err(error)
+                    if matches!(command, Command::ListDevices | Command::Probe)
+                        && endpoint::is_gone(&error) =>
+                {
+                    (None, Arc::new(NoSocket))
+                }
+                Err(error) => {
+                    return Err(Fail::Other(format!("the sandbox's reaper: {error}")));
+                }
+            };
         fault_at!(self, "connector", child);
         pause_at!(self, "spawned");
         Ok(Spawned {
             child,
             runner,
-            sandbox: Some(sandbox),
+            sandbox,
             generation,
             connector,
             status_rest: Some(rest),
@@ -1159,7 +1308,7 @@ impl Real {
     /// Level 3's exact environment.
     fn unconfined_env(
         &self,
-        command: &Command,
+        command: &Command<'_>,
         server: Option<ServerFile<'_>>,
         directory: &std::path::Path,
     ) -> Vec<(String, String)> {
@@ -1188,19 +1337,29 @@ impl Real {
     /// Level 3's executable (llama-server or Mimik's own binary) and its arguments.
     fn unconfined_command(
         &self,
-        command: &Command,
+        command: &Command<'_>,
         server: Option<ServerFile<'_>>,
         model_path: &str,
         port: u16,
         token_file: &str,
     ) -> Result<(OwnedFd, Vec<String>), Fail> {
         match command {
-            Command::Server => {
+            Command::Server { .. } => {
                 let server = server.ok_or_else(|| Fail::Other("no llama-server".into()))?;
                 let mut argv = vec!["llama-server".to_owned()];
-                argv.extend(self.server_args(model_path, "127.0.0.1", Some(port), token_file));
+                // Level 3 runs the CPU build only.
+                argv.extend(self.server_args(
+                    model_path,
+                    "127.0.0.1",
+                    Some(port),
+                    token_file,
+                    None,
+                ));
                 Ok((dup(&server.file.fd).map_err(Fail::Other)?, argv))
             }
+            Command::ListDevices => Err(Fail::Other(
+                "devices are listed only inside the level-1 sandbox".into(),
+            )),
             Command::Probe => {
                 let exe = rustix::fs::open(
                     &self.settings.inner.executable,
@@ -1223,7 +1382,7 @@ impl Real {
         server: Option<ServerFile<'_>>,
         model: &Verified,
         token: &Token,
-        command: &Command,
+        command: &Command<'_>,
         port: u16,
     ) -> Result<Spawned, Fail> {
         let mut executables = vec![self.settings.runner.program.display().to_string()];
@@ -1431,6 +1590,111 @@ fn recv_unless_cancelled<T>(
     }
 }
 
+/// How a process ended, for a message: its exit code or the signal that ended it.
+fn exit_description(status: std::process::ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt;
+    match (status.code(), status.signal()) {
+        (Some(code), _) => format!("exit code {code}"),
+        (None, Some(signal)) => format!("signal {signal}"),
+        (None, None) => "unknown status".to_owned(),
+    }
+}
+
+/// A device listing's whole output, once its process has also exited successfully: both
+/// within `within`, the output at most [`LIST_BYTES`] and read without error (a truncated or
+/// failed run never reaches the parser). `exited` gives `Some(Ok(()))` once the process has
+/// ended well, `Some(Err(how))` (its exit code or signal) when it did not.
+fn collect_listing(
+    out: impl Read + Send + 'static,
+    err: Option<impl Read + Send + 'static>,
+    label: &str,
+    mut exited: impl FnMut() -> Option<Result<(), String>>,
+    within: Duration,
+    ticket: &Ticket,
+) -> Result<String, String> {
+    let deadline = std::time::Instant::now() + within;
+    // The error output is read to its end and dropped (never logged, never held), so a chatty
+    // driver cannot fill the pipe and stall the listing; it is joined below.
+    let (drained, drain) = std::sync::mpsc::channel();
+    // Names the test diagnostics' file by node (never by process).
+    let label = label.to_owned();
+    if let Some(mut err) = err {
+        std::thread::Builder::new()
+            .name("assistant-devices-err".into())
+            .spawn(move || {
+                // Test builds with MIMIK_LIVE_DIAG_DIR keep the listing's error output for the
+                // live check's record (the shipped build never keeps or logs it).
+                #[cfg(test)]
+                if let Some(dir) = std::env::var_os("MIMIK_LIVE_DIAG_DIR") {
+                    let mut kept = Vec::new();
+                    let _ = (&mut err).take(LIST_BYTES).read_to_end(&mut kept);
+                    let name = format!("listing-stderr-{label}.txt");
+                    let _ = std::fs::write(std::path::Path::new(&dir).join(name), kept);
+                }
+                let _ = &label;
+                let _ = std::io::copy(&mut err, &mut std::io::sink());
+                let _ = drained.send(());
+            })
+            .map_err(|_| "no listing thread".to_owned())?;
+    } else {
+        let _ = drained.send(());
+    }
+    let (sender, read) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("assistant-devices".into())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let result = out.take(LIST_BYTES + 1).read_to_end(&mut bytes);
+            let _ = sender.send(result.map(|_| bytes));
+        })
+        .map_err(|_| "no listing thread".to_owned())?;
+    let bytes = recv_unless_cancelled(&read, within, ticket)
+        .map_err(|_| "cancelled".to_owned())?
+        .ok_or_else(|| {
+            format!(
+                "the device listing did not finish within {} s",
+                within.as_secs().max(1)
+            )
+        })?
+        .map_err(|_| "the device listing could not be read".to_owned())?;
+    if bytes.len() as u64 > LIST_BYTES {
+        return Err(format!(
+            "the device listing is longer than {LIST_BYTES} bytes"
+        ));
+    }
+    loop {
+        match exited() {
+            Some(Ok(())) => break,
+            Some(Err(how)) => {
+                return Err(format!("the device listing's process failed ({how})"));
+            }
+            None => {}
+        }
+        if ticket.cancelled() {
+            return Err("cancelled".into());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("the device listing's process did not exit in time".into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Joined within the same deadline: a listing whose error output stays open is not over.
+    loop {
+        match drain.recv_timeout(Duration::from_millis(20)) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if ticket.cancelled() {
+            return Err("cancelled".into());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("the device listing's error output did not end in time".into());
+        }
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| "the device listing is not in the pinned build's format".to_owned())
+}
+
 /// Ports a test hands out first, keyed by runtime directory (`launch_tests.rs`).
 #[cfg(test)]
 pub(crate) static PORTS: Mutex<Vec<(PathBuf, u16)>> = Mutex::new(Vec::new());
@@ -1599,6 +1863,7 @@ pub(crate) struct RealChild {
     healthy: AtomicBool,
     generation_dir: Mutex<Option<Generation>>,
     level: Level,
+    path: Path,
     notes: Vec<String>,
     /// The launcher's runtime directory (a test's key for the drain gate).
     #[cfg(test)]
@@ -1684,6 +1949,96 @@ impl Child for RealChild {
     fn notes(&self) -> Vec<String> {
         self.notes.clone()
     }
+
+    async fn loaded(&self) -> Result<(), String> {
+        if self.path == Path::Cpu {
+            return Ok(());
+        }
+        // The offload line comes before `/health` answers; the drain may lag a moment.
+        let deadline = tokio::time::Instant::now() + OFFLOAD_WITHIN;
+        loop {
+            let summary = self.summary();
+            if let Some(verdict) = offload_verdict(summary.offloaded, summary.failed.device) {
+                return verdict;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("the model server did not report its GPU offload".into());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// The GPU path loads every layer on the GPU: an offload line with N = M (and M above 0),
+/// or a device error. `None` while neither has been seen.
+pub(crate) fn offload_verdict(
+    offloaded: Option<(u32, u32)>,
+    device_error: bool,
+) -> Option<Result<(), String>> {
+    if device_error {
+        return Some(Err("the GPU backend reported a device error".into()));
+    }
+    let (layers, of) = offloaded?;
+    Some(if layers == of && of > 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "only {layers} of {of} layers were placed on the GPU"
+        ))
+    })
+}
+
+/// The selected GPU listed again right before its start: the recorded description must be
+/// the one hardware GPU of the new listing, whose name (which may differ from the first
+/// listing's) is what `--device` gets.
+pub(crate) fn check_relisted(recorded: &Listed, listed: &[Listed]) -> Result<String, String> {
+    let now = device::one_hardware(listed)?;
+    if now.description == recorded.description {
+        Ok(now.name.clone())
+    } else {
+        Err(format!(
+            "the GPU's sandboxed listing changed since it was chosen (then {}, now {})",
+            recorded.description, now.description
+        ))
+    }
+}
+
+/// Starts the launcher never makes, whatever a Config asks (sandbox-class: the manager
+/// neither counts nor retries them).
+fn refused_start(real: &Real, level: Level, path: Path) -> Result<(), Fail> {
+    if level == Level::Unconfined && !real.unconfined {
+        // ASSIST-43: level 3 is not started in this release.
+        return Err(Fail::Sandbox("level 3 is not used in this release".into()));
+    }
+    if path == Path::Gpu && level != Level::Bubblewrap {
+        // Without bubblewrap render nodes cannot be isolated (ASSIST-L25); the TCP levels'
+        // single-GPU rule comes with level 2 (step 2c-2b-2).
+        return Err(Fail::Sandbox(
+            "the GPU path runs only at level 1 in this release".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The selected GPU listed again in its own sandbox: its binds and the in-sandbox name.
+async fn relisted(real: &Arc<Real>, ticket: &Ticket) -> Result<(GpuBinds, String), Fail> {
+    let selected = real
+        .held()
+        .gpu
+        .clone()
+        .ok_or_else(|| Fail::Other("no GPU was selected".into()))?;
+    let (owner, held, node) = (
+        Arc::clone(real),
+        ticket.clone(),
+        selected.candidate.node.clone(),
+    );
+    let listed = tokio::task::spawn_blocking(move || owner.list_node(&node, &held))
+        .await
+        .map_err(|_| Fail::Other("the device listing did not finish".into()))?
+        .map_err(|why| Fail::Other(format!("the GPU at start: {why}")))?;
+    let name = check_relisted(&selected.candidate.listed, &listed)
+        .map_err(|why| Fail::Other(format!("the GPU at start: {why}")))?;
+    Ok((selected.binds, name))
 }
 
 /// Waits until `pidfd` reports its process gone: every `grace` without it, `kill` is called
@@ -1785,6 +2140,7 @@ impl Real {
         self: &Arc<Self>,
         spawned: Spawned,
         level: Level,
+        path: Path,
         token: &Token,
         bwrap: Option<&Bwrap>,
         key: u64,
@@ -1886,6 +2242,7 @@ impl Real {
             healthy: AtomicBool::new(false),
             generation_dir: Mutex::new(Some(generation)),
             level,
+            path,
             notes,
             #[cfg(test)]
             runtime_dir: self.settings.runtime_dir.clone(),
@@ -2022,12 +2379,20 @@ impl Launcher for Launch {
         // Only level 1 is probed for the manager (ASSIST-43): no manager path runs level 3's
         // code, not even its probe. `--probe` still probes level 3 (`probe_levels`).
         tokio::task::spawn_blocking(move || {
+            // The GPU path first finds its device (each node listed in its own sandbox);
+            // without one no level is usable for it.
+            let found = match path {
+                Path::Cpu => Ok(()),
+                Path::Gpu => real.discover(&ticket),
+            };
+            let level_1 = match found {
+                Ok(()) => real
+                    .probe_with_retries(path, Level::Bubblewrap, &ticket)
+                    .eligible(),
+                Err(why) => Err(why),
+            };
             vec![
-                (
-                    Level::Bubblewrap,
-                    real.probe_with_retries(path, Level::Bubblewrap, &ticket)
-                        .eligible(),
-                ),
+                (Level::Bubblewrap, level_1),
                 (
                     Level::Landlock,
                     Err("Landlock confinement is not in this release".into()),
@@ -2051,6 +2416,20 @@ impl Launcher for Launch {
         self.start_real(generation, level, path)
             .await
             .map(|child| child as Arc<dyn Child>)
+    }
+
+    fn device(&self) -> Option<DeviceView> {
+        self.0.held().gpu.as_ref().map(|selected| DeviceView {
+            pci: selected.candidate.node.pci.clone(),
+            node: selected.candidate.node.name.clone(),
+            name: selected.candidate.listed.name.clone(),
+            description: selected.candidate.listed.description.clone(),
+            total_mib: selected.candidate.listed.total_mib,
+        })
+    }
+
+    fn device_notes(&self) -> Vec<String> {
+        self.0.held().device_notes.clone()
     }
 }
 
@@ -2084,11 +2463,7 @@ impl Launch {
         path: Path,
     ) -> Result<Arc<RealChild>, Fail> {
         let real = Arc::clone(&self.0);
-        if level == Level::Unconfined && !real.unconfined {
-            // ASSIST-43: whatever a Config asks, level 3 is not started in this release.
-            // Sandbox-class: the manager neither counts nor retries it.
-            return Err(Fail::Sandbox("level 3 is not used in this release".into()));
-        }
+        refused_start(&real, level, path)?;
         // Every blocking part holds a ticket: a dropped start's work still counts until it
         // has finished (and cleaned up), and a cancel stops it before it spawns or records.
         let ticket = real.work.enter();
@@ -2098,6 +2473,13 @@ impl Launch {
             build_dir,
             build_fd,
         } = checked(&real, path, level, &ticket).await?;
+        // The GPU: listed again in its own sandbox right before the start, which must still
+        // show one hardware GPU with the recorded description; the name `--device` gets is
+        // this listing's.
+        let gpu = match path {
+            Path::Cpu => None,
+            Path::Gpu => Some(Arc::new(relisted(&real, &ticket).await?)),
+        };
         let build_dir = Arc::new(build_dir);
         let build_fd = Arc::new(build_fd);
         let token = Arc::new(Token::new());
@@ -2107,13 +2489,14 @@ impl Launch {
         // The spawn blocks (bwrap's status line, up to 30 s): off the async runtime. A start
         // dropped meanwhile drops its result, whose guard kills the child.
         let spawn = |port: u16| {
-            let (real, files, model, token, build_dir, build_fd) = (
+            let (real, files, model, token, build_dir, build_fd, gpu) = (
                 Arc::clone(&real),
                 Arc::clone(&files),
                 Arc::clone(&model),
                 Arc::clone(&token),
                 Arc::clone(&build_dir),
                 Arc::clone(&build_fd),
+                gpu.clone(),
             );
             let job = Job {
                 name: generation.to_string(),
@@ -2122,10 +2505,19 @@ impl Launch {
             };
             tokio::task::spawn_blocking(move || match level {
                 Level::Bubblewrap => {
-                    real.spawn_sandbox(&job, &files, &model, &token, &Command::Server)
+                    let device = gpu.as_deref().map(|(_, name)| name.as_str());
+                    real.spawn_sandbox(
+                        &job,
+                        path,
+                        &files,
+                        &model,
+                        &token,
+                        &Command::Server { device },
+                        gpu.as_deref().map(|(binds, _)| binds),
+                    )
                 }
                 Level::Unconfined => {
-                    let server_name = real.build.as_ref().map(|build| build.server.clone());
+                    let server_name = Some(real.server_name(path).to_owned());
                     let server = files
                         .iter()
                         .find(|file| Some(&file.name) == server_name.as_ref())
@@ -2134,7 +2526,14 @@ impl Launch {
                             build_dir: &build_dir,
                             build_fd: &build_fd,
                         });
-                    real.spawn_unconfined(&job, server, &model, &token, &Command::Server, port)
+                    real.spawn_unconfined(
+                        &job,
+                        server,
+                        &model,
+                        &token,
+                        &Command::Server { device: None },
+                        port,
+                    )
                 }
                 Level::Landlock => Err(Fail::Sandbox(
                     "Landlock confinement is not in this release".into(),
@@ -2146,7 +2545,7 @@ impl Launch {
         };
         if level != Level::Unconfined {
             let spawned = joined(spawn(0).await)?;
-            return real.child(spawned, level, &token, bwrap.as_ref(), generation);
+            return real.child(spawned, level, path, &token, bwrap.as_ref(), generation);
         }
         // A child that cannot bind its port exits; a new port is tried, at most 3.
         let mut tries = 0;
@@ -2154,7 +2553,7 @@ impl Launch {
             tries += 1;
             let port = pick_port(&real.settings.runtime_dir)?;
             let spawned = joined(spawn(port).await)?;
-            let child = real.child(spawned, level, &token, None, generation)?;
+            let child = real.child(spawned, level, path, &token, None, generation)?;
             match bind_outcome(&child, port, &ticket, &real.settings.runtime_dir).await {
                 // Bound, or exited for some other reason (its `exited()` reports that): kept.
                 Bind::Bound | Bind::OtherExit => return Ok(child),
@@ -2495,6 +2894,149 @@ impl Real {
         }
     }
 
+    /// `--list-devices` of the GPU build in the level-1 sandbox with only `node` bound (the
+    /// same profile as a real GPU start). Blocking.
+    pub(crate) fn list_node(
+        self: &Arc<Self>,
+        node: &device::Node,
+        ticket: &Ticket,
+    ) -> Result<Vec<Listed>, String> {
+        if self.held().bwrap.is_none() {
+            let bwrap = bwrap_preflight(&self.settings.runtime_dir)
+                .map_err(|unusable| unusable.to_string())?;
+            self.held().bwrap = Some(bwrap);
+        }
+        let Checked { files, model, .. } = self.verify(Path::Gpu, Level::Bubblewrap, ticket)?;
+        let token = Token::new();
+        let sequence = self.probes.fetch_add(1, Ordering::SeqCst);
+        let job = Job {
+            name: format!("devices-{sequence}"),
+            key: PROBE_KEYS + sequence,
+            ticket: ticket.clone(),
+        };
+        let binds = GpuBinds::of(node);
+        let Spawned {
+            child: mut owned,
+            generation,
+            marker: _marker,
+            // Held until the listing's process has ended: bubblewrap writes the sandbox's exit
+            // status to this pipe as its last act, and a closed read end kills it with SIGPIPE.
+            status_rest: _status_rest,
+            ..
+        } = self
+            .spawn_sandbox(
+                &job,
+                Path::Gpu,
+                &files,
+                &model,
+                &token,
+                &Command::ListDevices,
+                Some(&binds),
+            )
+            .map_err(|(Fail::Sandbox(why) | Fail::Other(why))| why)?;
+        let (out, err) = owned.child.as_mut().map_or((None, None), |child| {
+            (child.stdout.take(), child.stderr.take())
+        });
+        let out = out.ok_or_else(|| "no listing output".to_owned())?;
+        let text = collect_listing(
+            out,
+            err,
+            &node.name,
+            || {
+                owned
+                    .child
+                    .as_mut()
+                    .and_then(|child| child.try_wait().ok().flatten())
+                    .map(|status| {
+                        if status.success() {
+                            Ok(())
+                        } else {
+                            Err(exit_description(status))
+                        }
+                    })
+            },
+            LIST_WITHIN,
+            ticket,
+        );
+        // Kills what is left of the listing's sandbox and clears its entry.
+        drop(owned);
+        drop(generation);
+        let text = text?;
+        // Test builds run the runner as the test binary, whose libtest banner precedes the
+        // server's output; the shipped runner prints nothing of its own.
+        #[cfg(test)]
+        let text = text
+            .find(device::HEADER)
+            .map_or(text.clone(), |at| text[at..].to_owned());
+        device::parse_listing(&text)
+    }
+
+    /// Finds the GPU (plan §1.4a, "Device"): each render node of a PCI device (only the
+    /// chosen address's, when one is given) listed in its own sandbox, software ICDs excluded
+    /// and one hardware GPU required per list, then the ranking. Blocking.
+    pub(crate) fn discover(self: &Arc<Self>, ticket: &Ticket) -> Result<(), String> {
+        let choice = self.settings.device.clone();
+        if choice == Choice::Cpu {
+            return Err("the CPU path was chosen (--assistant-device cpu)".into());
+        }
+        let mut renders = device::scan(&self.settings.roots);
+        if let Choice::Pci(pci) = &choice {
+            renders.retain(|node| &node.pci == pci);
+        }
+        let mut notes = Vec::new();
+        let mut candidates = Vec::new();
+        let found = renders.len();
+        for node in renders {
+            if ticket.cancelled() {
+                return Err("cancelled".into());
+            }
+            match self
+                .list_node(&node, ticket)
+                .and_then(|listed| device::one_hardware(&listed).cloned())
+            {
+                Ok(listed) => candidates.push(Candidate { node, listed }),
+                Err(why) => notes.push(format!("{} ({}): {why}", node.pci, node.name)),
+            }
+        }
+        let remembered = self.held().remembered.clone();
+        let chosen = device::select(&candidates, &choice, remembered.as_deref()).cloned();
+        let mut held = self.held();
+        held.device_notes.clone_from(&notes);
+        match chosen {
+            Ok(candidate) => {
+                held.remembered = Some(candidate.node.pci.clone());
+                held.gpu = Some(Selected {
+                    binds: GpuBinds::of(&candidate.node),
+                    candidate,
+                });
+                Ok(())
+            }
+            Err(why) => {
+                held.gpu = None;
+                Err(if found == 0 {
+                    "no render node of a PCI GPU was found".to_owned()
+                } else if notes.is_empty() {
+                    why
+                } else {
+                    format!("{why}: {}", notes.join("; "))
+                })
+            }
+        }
+    }
+
+    /// The GPU path's selected node binds (none on the CPU path).
+    fn selected_binds(&self, path: Path) -> Result<Option<GpuBinds>, Probe> {
+        match path {
+            Path::Cpu => Ok(None),
+            Path::Gpu => self
+                .held()
+                .gpu
+                .as_ref()
+                .map(|selected| Some(selected.binds.clone()))
+                .ok_or_else(|| Probe::Failed("no GPU was selected".into())),
+        }
+    }
+
     /// Every level's probe (blocking).
     pub(crate) fn probe_levels(
         self: &Arc<Self>,
@@ -2554,8 +3096,17 @@ impl Real {
             Fail::Sandbox(why) | Fail::Other(why) => Probe::Inconclusive(why),
         };
         let spawned = if level == Level::Bubblewrap {
-            self.spawn_sandbox(&job, &files, &model, &token, &Command::Probe)
-                .map_err(failed)?
+            let gpu = self.selected_binds(path)?;
+            self.spawn_sandbox(
+                &job,
+                path,
+                &files,
+                &model,
+                &token,
+                &Command::Probe,
+                gpu.as_ref(),
+            )
+            .map_err(failed)?
         } else {
             let port = pick_port(&self.settings.runtime_dir).map_err(failed)?;
             self.spawn_unconfined(&job, None, &model, &token, &Command::Probe, port)
@@ -2565,7 +3116,9 @@ impl Real {
             child: mut owned,
             connector,
             generation,
+            sandbox,
             marker: _marker,
+            status_rest: _status_rest,
             ..
         } = spawned;
         // `owned` kills and reaps the probe whichever way this ends.
@@ -2583,10 +3136,15 @@ impl Real {
             .map_err(|_| Probe::Failed("cancelled".into()))?;
         let result = match reported {
             Some(Some(report)) => {
-                let verdict = if report["ok"] == serde_json::json!(true) {
-                    runtime.block_on(checked_endpoint(&connector, ticket))
-                } else {
+                let verdict = if report["ok"] != serde_json::json!(true) {
                     report_verdict(&report)
+                } else if level == Level::Bubblewrap && sandbox.is_none() {
+                    // An ok report with no verified reaper can never pass at level 1: the
+                    // sandbox ended before its check, so nothing was proven either way (level
+                    // 3 has no sandbox and is checked by its port's listeners).
+                    Probe::Inconclusive("the probe's sandbox ended before its check".into())
+                } else {
+                    runtime.block_on(checked_endpoint(&connector, ticket))
                 };
                 Ok((report, verdict))
             }
@@ -2658,3 +3216,7 @@ mod tests;
 #[cfg(test)]
 #[path = "live_tests.rs"]
 mod live_tests;
+
+#[cfg(test)]
+#[path = "launch_gpu_tests.rs"]
+mod gpu_tests;

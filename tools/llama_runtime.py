@@ -2,9 +2,10 @@
 files of `schemas/llama-runtime-v1.json`, the manifest Mimik embeds.
 
   python tools/llama_runtime.py fetch --out target/llama-fetch
-      downloads each pinned release asset, the test model and the pinned source (a shallow
-      fetch of the commit, then `git archive`), verifies every hash, and writes
-      <out>/llama/<build dir>/<file>, <out>/<source tar> and <out>/models/<test model>.
+      downloads each pinned release asset, the external licence notices, the test model and
+      the pinned source (a shallow fetch of the commit, then `git archive`), verifies every
+      hash, and writes <out>/llama/<build dir>/<file>, <out>/notices/<notice>, <out>/<source
+      tar> and <out>/models/<test model>.
   python tools/llama_runtime.py verify --dir <llama dir> [--models <dir>]
       re-hashes every file against the manifest (an extra, missing or changed file fails),
       then reapplies the manifest's modes (artifact hand-offs drop them).
@@ -117,8 +118,46 @@ def verify_model(models_dir, data=None):
     os.chmod(models_dir, 0o700)
 
 
+def fetch_notices(out, data=None):
+    """Downloads each external licence text (components compiled into a build whose text is
+    not in the source archive) to <out>/notices/<name>, size and SHA-256 checked."""
+    data = data or manifest()
+    notices = Path(out) / "notices"
+    notices.mkdir(parents=True, exist_ok=False)
+    for notice in data.get("external_notices", []):
+        download(notice["url"], notices / notice["name"], notice["sha256"], notice["size"])
+    verify_notices(notices, data)
+
+
+def verify_notices(notices, data=None):
+    """Exactly the pinned notice files, each matching its size and SHA-256."""
+    data = data or manifest()
+    notices = Path(notices)
+    pinned = {notice["name"]: notice for notice in data.get("external_notices", [])}
+    present = {path.name for path in notices.iterdir()} if notices.exists() else set()
+    if present != set(pinned):
+        raise ValueError(f"{notices}: holds {sorted(present)}, not {sorted(pinned)}")
+    for name, notice in pinned.items():
+        path = notices / name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"{path}: not a regular file")
+        if path.stat().st_size != notice["size"] or sha256(path) != notice["sha256"]:
+            raise ValueError(f"{path}: differs from the pinned notice")
+        os.chmod(path, 0o644)
+
+
+def verify_source_tar(path, data=None):
+    """The pinned source tar's size and SHA-256 (checked before any text is taken from it)."""
+    data = data or manifest()
+    source = data["source"]
+    path = Path(path)
+    if path.stat().st_size != source.get("tar_size") or sha256(path) != source["tar_sha256"]:
+        raise ValueError(f"{path}: the source archive differs from the pinned one")
+
+
 def source_archive(data, out):
-    """`git archive` of the pinned commit from a shallow fetch; the tar's SHA-256 is pinned."""
+    """`git archive` of the pinned commit from a shallow fetch; the tar's SHA-256 is pinned. It is
+    a build-time input only (licence texts for the notices); it is never shipped."""
     source = data["source"]
     commit = data["llama_cpp"]["commit"]
     target = out / source["name"]
@@ -137,8 +176,7 @@ def source_archive(data, out):
                 stdout=handle,
                 timeout=600,
             )
-    if sha256(target) != source["tar_sha256"]:
-        raise ValueError(f"{target}: the source archive differs from the pinned one")
+    verify_source_tar(target, data)
     return target
 
 
@@ -152,6 +190,7 @@ def fetch(out, data=None):
             download(build["url"], asset, build["sha256"], build["size"])
             extract(asset, build, out / "llama" / build["directory"])
     verify(out / "llama", data)
+    fetch_notices(out, data)
     model = data["test_model"]
     (out / "models").mkdir(mode=0o700)
     download(model["url"], out / "models" / model["name"], model["sha256"], model["size"])

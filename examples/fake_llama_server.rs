@@ -4,7 +4,10 @@
 //! is given, and answers priming, calibration samples and streamed jobs with synthetic
 //! timings. `--alias fail-bind` makes it fail as a server that cannot bind its port does;
 //! `--alias forge-bwrap` prints bubblewrap's error lines and exits, as a compromised server
-//! trying to be restarted unconfined would.
+//! trying to be restarted unconfined would. `--list-devices` prints the pinned build's
+//! listing of one RX 6650 XT when a render node is bound under `/dev/dri` and `(none)`
+//! otherwise; with `--n-gpu-layers 99` it prints the offload line (`--alias partial-offload`:
+//! 30 of 41 layers).
 //!
 //! Plain blocking `std` (one thread per connection, HTTP/1.1, `Connection: close`): it runs
 //! under the model server's seccomp program, which refuses the socket pair an async
@@ -147,8 +150,29 @@ fn value_of(args: &[String], flag: &str) -> Option<String> {
         .and_then(|at| args.get(at + 1).cloned())
 }
 
+/// `--list-devices` as the pinned build prints it (`common_print_available_devices`).
+fn list_devices() {
+    let node = std::fs::read_dir("/dev/dri")
+        .ok()
+        .and_then(|mut entries| entries.next())
+        .is_some();
+    // A real driver takes a moment: the listing's sandbox outlives its parent's reads of the
+    // sandbox's status pipe (bubblewrap writes the exit status to it as the last thing).
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    println!("Available devices:");
+    if node {
+        println!("  Vulkan0: AMD Radeon RX 6650 XT (RADV NAVI23) (8176 MiB, 7912 MiB free)");
+    } else {
+        println!("  (none)");
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--list-devices") {
+        list_devices();
+        return;
+    }
     // Run by `cargo test` without arguments: nothing to do.
     let Some(model) = value_of(&args, "--model") else {
         return;
@@ -168,6 +192,14 @@ fn main() {
         eprintln!("bwrap: Can't mount proc on /newroot/proc: Operation not permitted");
         println!("bwrap: setup failed");
         std::process::exit(1);
+    }
+    if value_of(&args, "--n-gpu-layers").as_deref() == Some("99") {
+        let layers = if value_of(&args, "--alias").as_deref() == Some("partial-offload") {
+            30
+        } else {
+            41
+        };
+        eprintln!("load_tensors: offloaded {layers}/41 layers to GPU");
     }
     if value_of(&args, "--alias").as_deref() == Some("fail-bind") {
         eprintln!("srv    init: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 1");

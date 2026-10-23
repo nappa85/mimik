@@ -4,8 +4,9 @@ Mimik is a sheet-first tabletop RPG companion for players at a physical table. I
 standalone Rust binary (`mimik`, AGPL-3.0-only) that serves server-rendered HTML to browsers on
 the local network and stores everything in one SQLite file. No Node.js, Python, GPU or internet
 access is needed at run time. The optional interpretation assistant (off by default,
-`--assistant`) runs the bundled, pinned official llama.cpp `llama-server` (CPU build, in
-`llama/` beside the binary) as Mimik's own confined child process, never a container
+`--assistant`) runs the bundled, pinned official llama.cpp `llama-server` (the Vulkan build on
+a hardware GPU, else the CPU build, in `llama/` beside the binary) as Mimik's own confined child
+process, never a container
 ([model-runtime.md](model-runtime.md)).
 
 ## Runtime
@@ -160,8 +161,8 @@ Runs on every push, pull request and manual dispatch, on `ubuntu-22.04` (`llama-
    (third-party notices); `cargo build --release --locked`; `cargo package` and
    `verify_source_package.py` (member allowlist); `cargo vendor`; `llama_runtime.py verify` of
    the fetched files (hashes, then the manifest's modes); `package_release.py` (stages exactly
-   the manifest's files as `llama/`, their notice, `BUILD.txt`, and the llama.cpp source
-   archive, gzip without name or time); the lib test binary (`--no-run --message-format=json`)
+   the manifest's files as `llama/`, their notice, `BUILD.txt` and `SOURCE.txt` (which points to llama.cpp's upstream commit; its
+   source is not shipped, ASSIST-47)); the lib test binary (`--no-run --message-format=json`)
    as `confinement-tests`; a development build with the `dev-endpoint` feature (never
    packaged). Uploads the release archives with `SHA256SUMS`, the confinement test binary, the
    synthetic smoke inputs and that development binary.

@@ -6,7 +6,7 @@
 //! check-then-enqueue and every post-commit note-write hook; it is never held across a
 //! database wait, the permit wait or the model call.
 use super::breaker::{self, Admission, Breaker};
-use super::interpreter::{Completion, Interpreter};
+use super::interpreter::{Completion, Failure, Interpreter};
 use super::output::{self, Candidate, Reading};
 use super::request::{self, Bounds, Draft, NotRendered};
 use sha2::{Digest, Sha256};
@@ -264,12 +264,19 @@ pub(crate) enum Poll {
     Missing,
 }
 
+/// How long a transport error waits for its generation's end to be published.
+const TRANSPORT_GRACE: Duration = Duration::from_secs(1);
+
 /// The assistant: the job table, the worker's wake-up, the runtime state and the breaker.
 pub(crate) struct Assistant {
     table: Mutex<Table>,
     runtime: Mutex<Runtime>,
     breaker: Mutex<Breaker>,
     wake: Notify,
+    /// Signalled after every runtime event (a generation ended).
+    changed: Notify,
+    /// How long a transport error waits for its generation's end to be published.
+    grace: Mutex<Duration>,
     /// Until when the server is presumed busy with a request cancelled at its deadline.
     busy_until: Mutex<Option<Instant>>,
     signals: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Signal>>>,
@@ -282,6 +289,8 @@ impl Assistant {
             runtime: Mutex::new(Runtime::Starting { generation: None }),
             breaker: Mutex::new(Breaker::new()),
             wake: Notify::new(),
+            changed: Notify::new(),
+            grace: Mutex::new(TRANSPORT_GRACE),
             busy_until: Mutex::new(None),
             signals: Mutex::new(None),
         })
@@ -376,6 +385,7 @@ impl Assistant {
                 }
             }
         }
+        self.changed.notify_waiters();
     }
 
     /// The breaker's state, for the assistant page.
@@ -694,9 +704,10 @@ impl Assistant {
     async fn run(&self, run: Run) {
         let work = attempt(&run);
         let deadline = tokio::time::sleep(run.budgets.run);
+        tokio::pin!(deadline);
         let result = tokio::select! {
             result = work => Some(result),
-            () = deadline => None,
+            () = &mut deadline => None,
             () = run.cancel.notified() => {
                 // A superseded or stale job's request is dropped mid-way too: the server may
                 // still be evaluating it.
@@ -704,6 +715,25 @@ impl Assistant {
                 return self.neutral(&run);
             }
         };
+        // A transport error may be the child's death closing the connection before its exit
+        // is published: it settles nothing until the generation is seen ending, or the grace
+        // passes with the generation still alive (then it counts as a failure). The wait ends
+        // at once on a cancel or supersession and never runs past the job's run deadline, so
+        // the admission arithmetic (run deadlines) still bounds the worker.
+        if matches!(result, Some(Err(Attempt::Transport))) {
+            let grace = *self
+                .grace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            tokio::select! {
+                () = self.generation_ends_within(run.generation, grace) => {}
+                () = &mut deadline => {}
+                () = run.cancel.notified() => {
+                    self.presume_busy(&run);
+                    return self.neutral(&run);
+                }
+            }
+        }
         let now = Instant::now();
         let mut table = self.table();
         // A late answer from a job ended meanwhile is discarded; whoever ended it recorded a
@@ -737,7 +767,7 @@ impl Assistant {
         let (answer, outcome) = match result {
             None => (Answer::AskAgain, breaker::Outcome::Neutral),
             Some(Err(Attempt::TooLong)) => (Answer::TooLong, breaker::Outcome::Neutral),
-            Some(Err(Attempt::Failed)) => (
+            Some(Err(Attempt::Failed | Attempt::Transport)) => (
                 Answer::Unavailable,
                 breaker::Outcome::Failure {
                     generation: run.generation,
@@ -748,6 +778,29 @@ impl Assistant {
         close(job, answer, now);
         drop(table);
         self.breaker().record(run.ticket, outcome, now.into_std());
+    }
+
+    /// Whether `generation` is no longer the ready one.
+    fn generation_over(&self, generation: u64) -> bool {
+        !matches!(&*self.runtime(), Runtime::Ready { generation: g, .. } if *g == generation)
+    }
+
+    /// Waits until `generation` is seen ending (its jobs are then ended `Restarted`), at most
+    /// `within`.
+    async fn generation_ends_within(&self, generation: u64, within: Duration) {
+        let deadline = Instant::now() + within;
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.generation_over(generation) {
+                return;
+            }
+            tokio::select! {
+                () = &mut changed => {}
+                () = tokio::time::sleep_until(deadline) => return,
+            }
+        }
     }
 
     /// After a request is dropped (deadline, supersession, a newer note), the server is
@@ -785,6 +838,15 @@ impl Assistant {
     #[cfg(test)]
     pub(crate) fn records(&self) -> usize {
         self.table().jobs.len()
+    }
+
+    /// Sets the transport-error grace (tests: no test may depend on real time beating it).
+    #[cfg(test)]
+    pub(crate) fn set_transport_grace(&self, grace: Duration) {
+        *self
+            .grace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = grace;
     }
 
     /// Sends a signal as the worker would (manager tests).
@@ -920,7 +982,11 @@ struct Run {
 
 enum Attempt {
     TooLong,
+    /// A failure that counts at once (an HTTP status, a tokenizer failure).
     Failed,
+    /// No well-formed exchange (the connection closed, the body or stream broke): possibly
+    /// the child's death, so it waits for the generation's end before it counts.
+    Transport,
 }
 
 /// Renders, calls the model once and reads the reply.
@@ -938,7 +1004,10 @@ async fn attempt(run: &Run) -> Result<Answer, Attempt> {
             max_tokens: run.budgets.max_tokens,
         })
         .await
-        .map_err(|_| Attempt::Failed)?;
+        .map_err(|failure| match failure {
+            Failure::Transport => Attempt::Transport,
+            Failure::Status(_) => Attempt::Failed,
+        })?;
     Ok(match output::read(&completed.text, &rendered.checks) {
         Err(_) => Answer::Nothing,
         Ok(Reading::Ambiguous(readings)) => Answer::Readings(readings),

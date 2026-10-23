@@ -89,6 +89,19 @@ fn answer(accept: impl Fn() -> std::io::Result<Box<dyn Peer>>) {
     }
 }
 
+/// The probe's option naming the render node to open (the GPU path at level 1).
+pub(crate) const RENDER: &str = "--render";
+
+/// Opens the render node read-write, as the driver does.
+fn render_ok(path: &str) -> Result<(), String> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map(|_| ())
+        .map_err(|error| format!("the render node cannot be opened: {}", error.kind()))
+}
+
 /// The probe inside its level. Returns the exit code.
 pub(crate) fn inner(args: &[String]) -> i32 {
     inner_to(args, &mut std::io::stdout().lock())
@@ -98,7 +111,12 @@ pub(crate) fn inner(args: &[String]) -> i32 {
 fn inner_to(args: &[String], out: &mut dyn Write) -> i32 {
     let pid = std::process::id();
     match args {
-        [level] if level == "1" => {
+        [level, rest @ ..] if level == "1" && matches!(rest, [] | [_, _]) => {
+            let render = match rest {
+                [flag, node] if flag == RENDER => Some(render_ok(node)),
+                [] => None,
+                _ => return 2,
+            };
             let model = model_ok(bwrap::MODEL);
             let token = token_ok(bwrap::TOKEN);
             let socket = format!("{}/{}", bwrap::SOCKET_DIR, endpoint::SOCKET);
@@ -107,13 +125,16 @@ fn inner_to(args: &[String], out: &mut dyn Write) -> i32 {
                 .as_ref()
                 .map(|_| ())
                 .map_err(|error| format!("the socket cannot be bound: {}", error.kind()));
-            let ok = model.is_ok() && token.is_ok() && bound.is_ok();
-            let _ = writeln!(
-                out,
-                "{}",
-                json!({"ok": ok, "model": verdict(&model), "token": verdict(&token),
-                    "socket": verdict(&bound), "pid": pid})
-            );
+            let ok = model.is_ok()
+                && token.is_ok()
+                && bound.is_ok()
+                && render.as_ref().is_none_or(Result::is_ok);
+            let mut report = json!({"ok": ok, "model": verdict(&model), "token": verdict(&token),
+                "socket": verdict(&bound), "pid": pid});
+            if let Some(render) = &render {
+                report["render"] = verdict(render);
+            }
+            let _ = writeln!(out, "{report}");
             let _ = out.flush();
             if ok && let Ok(listener) = listener {
                 let _ = listener.set_nonblocking(true);
@@ -240,6 +261,8 @@ fn cli_probe(args: &[String]) -> i32 {
         ctx_size: 256,
         runner,
         inner,
+        device: super::device::Choice::Cpu,
+        roots: super::device::Roots::default(),
     };
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -523,5 +546,37 @@ mod tests {
                 .starts_with("the token cannot be read")
         );
         assert_eq!(inner(&["2".into()]), 2);
+    }
+
+    #[test]
+    fn on_the_gpu_path_the_probe_opens_the_render_node_read_write() {
+        let mut out = Vec::new();
+        assert_eq!(
+            inner_to(&["1".into(), RENDER.into(), "/dev/null".into()], &mut out),
+            1
+        );
+        let report: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(report["render"], json!("ok"));
+        let mut out = Vec::new();
+        inner_to(
+            &["1".into(), RENDER.into(), "/nonexistent/renderD128".into()],
+            &mut out,
+        );
+        let report: Value = serde_json::from_slice(&out).unwrap();
+        assert!(
+            report["render"]
+                .as_str()
+                .unwrap()
+                .starts_with("the render node cannot be opened")
+        );
+        // The CPU path's report has no render entry; anything else is refused.
+        let mut out = Vec::new();
+        inner_to(&["1".into()], &mut out);
+        let report: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(report.get("render"), None);
+        assert_eq!(
+            inner_to(&["1".into(), "--other".into(), "x".into()], &mut Vec::new()),
+            2
+        );
     }
 }

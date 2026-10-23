@@ -326,3 +326,19 @@ fn the_reported_reaper_must_be_the_runners_child_in_the_reported_namespace() {
     child.kill().unwrap();
     child.wait().unwrap();
 }
+
+#[test]
+fn only_a_reaper_that_has_exited_counts_as_gone() {
+    // A process that exited and was reaped: pinning it fails with no such process.
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let pid = i32::try_from(child.id()).unwrap();
+    child.wait().unwrap();
+    let error = open_reaper(pid, 1, 0).unwrap_err();
+    assert!(is_gone(&error), "{error:?}");
+    // A reaper that is alive but not the runner's child is refused, not gone.
+    let own = open_reaper(i32::try_from(std::process::id()).unwrap(), 1, 0).unwrap_err();
+    assert!(!is_gone(&own), "{own:?}");
+    assert!(!is_gone(&refused(
+        "the reported reaper is in another PID namespace"
+    )));
+}

@@ -5,6 +5,62 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Model runtime: idle CPU calibration and the GPU path (steps 2c-2a and 2c-2b-1, 2026-10-23)
+
+Granite 4.2 3B Q4_K_M, `max_tokens` 352, pinned llama.cpp b11609 (CPU and Vulkan builds),
+level 1, this host (Ryzen, RX 6650 XT with Mesa RADV), idle. Raw output:
+`/media/data/mimik/assist-2c2/live/calibration-20261023-0051/` (CPU) and
+`/media/data/mimik/assist-2c2b/live-gpu/` (GPU, with the traces). One host, one GPU, one model.
+
+**CPU path, 5 threads (the ASSIST-41 default here):** `ready` at level 1; priming 1,806 tokens
+in 60.6 s; samples W 54.2 s and 55.0 s (prompt 316 tokens in 11.8 s, 352 generated in 42.4 and
+43.2 s, about 120 ms per token); density 3.3 bytes per token; B 1,024 bytes, N(B) 309, R 70 s,
+D 1, Q 50 s, busy after expiry 12 s. **2 threads (the weekday dev cap):** priming 146.6 s, then
+"too slow" (a sample took more than 90 s): the CPU path does not fit at 2 threads. Server
+measurements at 5 threads: generation 121.4 and 121.6 ms per token without the grammar, 110.9 to
+113.8 with it (the grammar costs nothing measurable); a rendered 1 KiB job is 217 to 224 prompt
+tokens with about 1,770 cached. The superseding-job timings (first token 12.0 s after a
+mid-generation cancel and 20.45 s after a mid-prompt cancel) came from the measuring helper
+before its cancel deadline was made absolute and its cancels recorded: on the CPU path no chunk
+arrives during prompt evaluation, so its 3 s inactivity timeout did fire mid-prompt, but the
+cancel point was not recorded, so treat them as indicative and **to re-measure** with the fixed
+helper (`tools/assist_runtime_measure.py server` now records whether each cancel preceded the
+end of the stream and how many tokens had arrived).
+
+**GPU path (RX 6650 XT, Vulkan build, the shipped code path):** `ready` at level 1 with
+health after 1.5 s and priming 1,806 tokens in 1.5 s; samples W 5.07 and 4.99 s (prompt about
+1,253 tokens in 1.03 s, 352 generated in about 4.0 s, 11.5 ms per token); B 4,096 bytes, N(B)
+1,245 tokens, R 15 s, D 4, Q 60 s, busy after expiry 2 s. Natively: 0.84 ms per prompt token;
+generation 11.0 ms per token with the grammar against 10.9 to 11.2 without it. The GPU
+cancellation claims (a superseding first token 0.27 s and 0.26 s after a mid-generation and a
+mid-prompt cancel) are **not established; to re-measure**: the helper's 3 s deadline was an
+inactivity timeout that frequent chunks postponed, and GPU prompt evaluation ends in about
+1 s, so the "mid-prompt" request most likely ran to its end. The three
+`live_gpu_*` tests passed: ready with GPU budgets; killing only the llama-server during a real
+job ends the job `Restarted` and breaker-neutral, the old sandbox is gone before the CPU launch,
+the CPU path comes up at level 1 uncounted and a following job works; killing the whole sandbox
+ends on the CPU path the same way (the CPU fallback needs the 5-thread default to fit).
+
+**Findings from the live run (all fixed):** the device listing's status pipe was closed early,
+so bubblewrap died of SIGPIPE writing its exit status and the listing was refused; the pinned
+build prints `load_tensors: offloaded N/M layers to GPU` only from verbosity 4 on (the GPU
+flag vector now passes it); the listing process exits 0 with an empty stderr, natively and in
+the sandbox. At verbosity 4 a job's marker phrase appeared in neither the child's stdout nor
+its stderr (0 hits in 247 lines); the drain keeps only a fixed summary at any verbosity.
+
+**Traced GPU start (strace from a container, the ready test, twice):** the seccomp profile
+refused no call the Vulkan stack needs: the only refusal is `clone3` answering `ENOSYS`, which
+glibc takes as its cue to fall back to `clone`; the other failures are normal (DRM wait
+timeouts, `readlink` on non-links, an unprivileged high-priority AMDGPU context answered
+`EACCES`, `TCP_NODELAY` on the Unix socket). Read inside the sandbox: from the card's sysfs
+folder only `vendor`, `device`, `subsystem_vendor`, `subsystem_device`, `uevent`, the `device`
+and `drm` links (and `boot_vga`, absent); `/sys/devices/system/cpu` (`possible`, `online`,
+`cpu_capacity`); `/dev/dri/renderD128`; the loader's `/usr/share/vulkan/icd.d`
+(`radeon_icd.x86_64.json` and `.i686.json`), `implicit_layer.d` and `explicit_layer.d`
+manifests and `/etc/vulkan/{icd.d,implicit_layer.d,loader_settings.d}`; `libvulkan_radeon.so`,
+`/usr/share/libdrm/amdgpu.ids` and `/usr/share/drirc.d/00-*.conf`. Only the radeon ICD is
+installed here, so the two-driver double listing (ASSIST-L45) could not be exercised.
+
 ## Model runtime: first native start (step 2c-2a, 2026-10-22)
 
 Live run of the shipped code path (`tools/assist_live_smoke.py` in runtime mode, a debug

@@ -1,12 +1,13 @@
 # Model runtime
 
-The interpretation assistant's model server (step 2c-2a; ASSIST-27, ASSIST-29 to ASSIST-34,
-ASSIST-40 to ASSIST-42): with `--assistant`, Mimik starts the pinned official llama.cpp
-`llama-server` as its own child process, confined at the highest level that works, reaches it
-only through a checked endpoint with a per-launch token, and primes and calibrates it before
-any job runs. Linux `x86_64`, CPU build only. The GPU path and confinement level 2 (Landlock)
-are step 2c-2b (`assisted-sheet-plan.md`); macOS and Windows are not built. What the assistant
-does with the server is in [assisted-entry.md](assisted-entry.md), "Interpretation assistant".
+The interpretation assistant's model server (steps 2c-2a and 2c-2b-1; ASSIST-27, ASSIST-29 to
+ASSIST-34, ASSIST-40 to ASSIST-42): with `--assistant`, Mimik starts the pinned official
+llama.cpp `llama-server` as its own child process, confined at the highest level that works,
+reaches it only through a checked endpoint with a per-launch token, and primes and calibrates
+it before any job runs. Linux `x86_64`: the GPU path (the Vulkan build on one hardware GPU)
+first, the CPU path (the CPU build) as the fallback. Confinement level 2 (Landlock) is step
+2c-2b-2 (`assisted-sheet-plan.md`); macOS and Windows are not built. What the assistant does
+with the server is in [assisted-entry.md](assisted-entry.md), "Interpretation assistant".
 
 | Concern | Code |
 |---|---|
@@ -24,6 +25,7 @@ does with the server is in [assisted-entry.md](assisted-entry.md), "Interpretati
 | Priming, calibration, budgets | `src/assistant/runtime/calibration.rs`, `server.rs`, `budgets.rs` |
 | Generations and transitions | `src/assistant/runtime/manager.rs` |
 | Thread count | `src/assistant/runtime/threads.rs` |
+| Device choice (render nodes, listing, ranking) | `src/assistant/runtime/device.rs` |
 | Owner page | `src/auth/assistant.rs`, `templates/admin_assistant.html` |
 
 ## Options
@@ -36,8 +38,10 @@ with its SHA-256 compiled in), `--assistant-model-sha256` (required for any othe
 hand). `--assistant-runtime` (default `llama/` beside the binary; it must hold exactly the
 pinned files either way). `--assistant-threads` (default the usable physical cores minus one,
 at least 1; physical cores are the distinct `core_cpus_list` sets in sysfs among the CPUs of
-Mimik's affinity mask, capped by the tightest `cpu.max` quota of its cgroup and the cgroup's ancestors, ASSIST-41). The data
-directory is the database's folder; `run/` lives there.
+Mimik's affinity mask, capped by the tightest `cpu.max` quota of its cgroup and the cgroup's ancestors, ASSIST-41). `--assistant-device`
+(`auto`, the default: the best hardware GPU, else the CPU; `cpu`: the CPU path only, no device
+is ever listed; or a GPU's PCI address such as `0000:0c:00.0`, or `0c:00.0` for domain 0). The
+data directory is the database's folder; `run/` lives there.
 
 ## Pinned build
 
@@ -49,14 +53,30 @@ the 14 `libggml-cpu-<variant>.so` backends and `LICENSE`; the RPC backend is not
 with size, SHA-256 and mode, the system libraries they need (`libc.so.6`, `libm.so.6`,
 `libstdc++.so.6`, `libgcc_s.so.1`, `libgomp.so.1`, `libssl.so.3`, `libcrypto.so.3`; symbol
 floors GLIBC 2.34, GLIBCXX 3.4.30, OpenSSL 3.0.0), the documented minimum host (Ubuntu 22.04
-`x86_64`), the source archive (`git archive` of the commit, tar SHA-256) and the CI test model
+`x86_64`), the source archive (`git archive` of the commit, tar SHA-256; a build-time input for the notice texts only, never shipped, ASSIST-47) and the CI test model
 (`ggml-org/models-moved` at `499bc88…`, `tinyllamas/stories260K.gguf`, upstream MIT). ggml
 loads every `libggml-cpu-<variant>.so` beside the server and uses the best one the CPU
-supports. Mimik embeds the manifest (a test asserts it equals the file).
+supports. The Vulkan asset `llama-b11609-bin-ubuntu-vulkan-x64.tar.gz` (SHA-256
+`8aff1888…`, ASSIST-42) holds the same 22 files byte for byte plus `libggml-vulkan.so` (the
+Vulkan backend, which ggml loads from beside llama-server like the CPU backends and which needs
+the system's Vulkan loader `libvulkan.so.1` and a Vulkan driver); the manifest pins it as the
+`vulkan` build, shipped in `llama/vulkan/` (the CPU files are shipped twice, once per build
+folder). The Vulkan loader `libvulkan.so.1` and the GPU driver (Mesa or the vendor's) are
+system dependencies: the release never bundles them (the packaged archive holds no
+`libvulkan`, and the manifest's file list is exact), `libggml-vulkan.so` resolves the loader
+through `ld.so.cache` and the sandbox binds the system's library folders read-only. The
+headers (`vulkan.hpp`) compiled into `libggml-vulkan.so` are an SDK build input of the upstream
+binary, not shipped source (REL-2): only their licence text is an external notice,
+Vulkan-Headers' MIT text pinned by URL and SHA-256 at tag `vulkan-sdk-1.4.357.0` (the release
+does not record the SDK version of its Linux Vulkan build; the Linux job installs the unpinned
+`vulkan-sdk` package of LunarG's rolling repository, and that tag is the one its workflow names
+for the Windows job), which `llama-fetch` downloads and checks and packaging copies into
+`THIRD-PARTY-NOTICES.md`. Mimik
+embeds the manifest (a test asserts it equals the file).
 
 ## Files
 
-The runtime directory's `cpu/` must hold exactly the manifest's files: an extra, missing or
+Each build's folder (`cpu/`, `vulkan/`) must hold exactly the manifest's files for that build: an extra, missing or
 changed (size or SHA-256) file, a link, or a file or folder writable by group or others
 refuses the start with that reason (owner Mimik's user or root). The model and every runtime
 file are opened beneath their folder's descriptor with `openat2` (`RESOLVE_BENEATH`,
@@ -151,7 +171,31 @@ Why each level was not used is on the page and in the log.
    descriptor but 0–2 (`close_range`, else each one `/proc/self/fd` lists; when neither works
    it executes nothing) and executes llama-server (or the probe); an exec failure is written
    to stderr and exits 127 after the marker, so it counts at the same level. The server listens on `/run/llama/llama.sock`.
-2. **Landlock with seccomp:** not in this release (step 2c-2b); the page names it skipped.
+   On the GPU path the profile also binds the selected render node read-write at
+   `/dev/dri/<node>` (`--dev-bind`, the only device bound; the CPU path binds none), its PCI
+   device's sysfs folder read-only at its own path, the links libdrm resolves to it
+   (`/sys/dev/char/<major>:<minor>` and `/sys/class/drm/<node>`), an empty `/sys/bus/pci`, and
+   read-only the Vulkan loader's and driver's data folders that exist (`/usr/share/vulkan`,
+   `/etc/vulkan`, `/usr/share/libdrm`, `/usr/share/drirc.d`); llama-server gets
+   `MESA_SHADER_CACHE_DISABLE=true` (the sandbox's `/tmp` is private to one launch and bounded,
+   so a shader cache could only fill it). The server can issue any ioctl on that one render
+   node, so its exposure to the kernel's graphics driver is wider than on the CPU path. The
+   sandbox is otherwise the same: no network, no other processes and no access to the user's
+   files; it reads the runtime and the model, read-only system libraries, system driver data
+   (Vulkan ICD manifests, libdrm, drirc), the card's sysfs attributes and the CPU topology
+   (`/sys/devices/system/cpu`). The CPU path reads the same way the read-only system library
+   folders (`/usr/lib`, `/usr/lib64`, `/lib`, `/lib64`, `/usr/libexec/ld`), the dynamic loader
+   cache and the CPU topology, without the driver data and the card's sysfs. This is accepted
+   by default and shown on the page (ASSIST-45, ASSIST-L46); `--assistant-device cpu` removes
+   it. The list is verified on the dev host's RX 6650 XT with Mesa RADV (the traced start and the
+   three live tests, `results.md`); another driver or GPU that needs more falls back to the
+   CPU, and tracing other drivers (AMDVLK, Intel, NVIDIA) is the outstanding item
+   (ASSIST-L34). The whole PCI sysfs folder is exposed read-only (the trace shows only
+   `vendor`, `device`, `subsystem_vendor`, `subsystem_device`, `uevent` and the `device` and
+   `drm` links read): a fingerprinting exposure only, to be narrowed to those files
+   (ASSIST-L44). All Vulkan ICD manifests are visible, not only the selected card's driver
+   (ASSIST-L45).
+2. **Landlock with seccomp:** not in this release (step 2c-2b-2); the page names it skipped.
 3. **Unconfined (seccomp only), not used in this release (ASSIST-43)**: what follows describes
    the switched-off code. On `127.0.0.1` with a random port: "not confined: TCP
    egress allowed, and the whole filesystem readable by Mimik's user is readable by the model
@@ -179,8 +223,9 @@ not network confinement.
 
 The start-time probe (`mimik assistant-runner --probe-inner`) runs Mimik itself in place of
 the server under each level's full profile (the same binds, descriptors, seccomp program and
-token channel): it reads the model's magic, the token and binds the socket or port, reports
-one JSON line and answers one connection, on which the endpoint check runs. `mimik
+token channel): it reads the model's magic, the token and binds the socket or port (on the GPU
+path it also opens the bound render node read-write), reports one JSON line and answers one
+connection, on which the endpoint check runs. `mimik
 assistant-runner --probe --runtime <dir> --models-dir <dir> --model local:<name>
 [--model-sha256 <hex>] [--data-dir <dir>]` prints the result as one JSON line once its probes'
 cleanup has ended (level 3's result with `"used": false`; the level reached is 1 or none) and
@@ -191,6 +236,28 @@ skips its level; one that is only inconclusive (no report within 30 s, a failed 
 with no status line, a transient endpoint error such as `EMFILE`, `ENOMEM` or `EAGAIN`) is
 tried again, three times in all. A level that stays inconclusive is kept for the real start to
 decide, but `--probe` reports it `"ok": false, "inconclusive": true`, never as reached.
+
+## Device (GPU path)
+
+Render nodes come from sysfs: each `/sys/class/drm/renderD*` whose `device` resolves to a PCI
+device (its `subsystem` is `pci` and its folder is named by a PCI address), whose `dev` numbers
+match a character device `/dev/dri/<node>`. The PCI address is a device's identity across
+restarts and tells two identical cards apart. Each node (under a PCI address choice, only that
+one) is listed by the Vulkan build's `--list-devices` inside the level-1 GPU profile with only
+that node bound (30 s at most; the output format is pinned by tests from the pinned build's
+`"  %s: %s (%zu MiB, %zu MiB free)"` and its `(none)`, any other output refuses the node). A
+listing counts only when it is read to its end without error within 64 KiB (longer output is
+refused, never cut) and its process exits successfully within the 30 s; both streams are
+drained and the sandbox is killed when the listing ends or the time runs out.
+Software renderers (`llvmpipe`, `lavapipe`, `SwiftShader`, by description: the name leads it or
+opens a parenthesised driver) are excluded before any count, and each list must then show
+exactly one hardware GPU (a card that two Vulkan drivers both list, such as RADV and AMDVLK,
+shows two and runs on the CPU: ASSIST-L45). Ranking under `auto`: the PCI
+address chosen last while that card is still listed, else dedicated devices (sysfs reports
+`mem_info_vram_total` above 0) before the others, then by listed memory, ties by the lower PCI
+address. `boot_vga` is not used: it marks the firmware's primary display, not a discrete card.
+Why each other node was not used is on the page. The GPU path runs at level 1 only; the
+single-GPU rule of the TCP levels comes with level 2 (ASSIST-L25).
 
 ## Endpoint check
 
@@ -218,7 +285,11 @@ when dropped; never on a command line or in a log. llama-server reads it with
 The child's stdout and stderr are drained by two threads with a 4 KiB line bound and never
 copied into Mimik's log. Fixed patterns update a fixed-size summary (so memory stays bounded
 however much the child prints): bind failures, listening, the build number, the offload line,
-device and model-load errors (which name a failed start). Nothing the child prints can make
+device and model-load errors (which name a failed start). The summary has no text field and no
+line is ever kept, forwarded or logged, at any verbosity (a test feeds request-looking lines
+with a marker phrase). The GPU path starts llama-server with `--verbosity 4` because the pinned
+build prints the offload line only from that level; in the live check a job's marker phrase
+appeared in neither stream at that level (`results.md`). Nothing the child prints can make
 an exit a sandbox failure: at level 1 that is decided only by the shim's marker pipe ending
 cleanly without the marker (bwrap failed before the exec). The marker's arrival, a read error,
 unexpected bytes, or a reader still running after the readers' wait (5 s) all count the exit
@@ -264,9 +335,22 @@ for the breaker); a child exit is never a breaker event. On shutdown Mimik stops
 
 An attempt is: start (preflight once per start from level 1: the pidfile, the run directory,
 the model's size; then each level's probe), spawn and the endpoint check, `/health` within
-60 s (250 ms polls), priming within 300 s, calibration within twice the path's run cap
-and each calibration sample within the run cap (a sample past it makes the machine "too slow",
-not a counted failure). CPU
+60 s (250 ms polls), priming within 300 s, calibration within twice the path's run cap plus
+60 s (the two samples and the two `/tokenize` calls; GPU 180 s, CPU 240 s) and each
+calibration sample within the run cap (a sample past it makes the machine "too slow",
+not a counted failure). On the GPU path a start first lists the selected node again in its own
+sandbox (it must still show one hardware GPU with the recorded description; `--device` gets
+that listing's name), and after `/health` the child's offload line must show every layer on
+the GPU (N = M, within 5 s; a device error or N < M fails the attempt). GPU transitions (any
+failure on the GPU path, including those the CPU rows count or hold):
+
+| Event | Action | Failure count |
+|---|---|---|
+| The GPU probe finds no usable device or level, or a GPU attempt fails (start, the listing check, `/health`, the offload line, priming, calibration, budgets that do not derive), or the GPU child exits while ready or is stopped as hung | stop and wait until gone, then the CPU path at once (its own probe, from level 1), the reason on the page | not counted |
+| Restart | stop, start again from level 1, staying on the CPU path after a GPU failure | reset |
+| "Try the GPU again" (owner, CSRF-checked; only while the GPU is wanted and the CPU path runs) | as Restart, from the GPU path; a second press while it runs starts nothing | reset |
+
+The CPU path stays until Mimik restarts or the owner presses "Try the GPU again". CPU
 transitions:
 
 | Event | Action | Failure count |
@@ -290,13 +374,14 @@ Priming is the readiness gate: the fixed prefix with a minimal envelope and `max
 fills the prompt cache before any job is admitted. Then two samples, non-streamed, `max_tokens`
 the model's, `ignore_eos`, no schema, each with a filler of exactly the path's byte cap (CPU
 1,024) made of context items shaped as requests carry them, from the labels and values of the
-shipped demo and 2b synthetic sheets (one opens with `[`, the other with `{`, so neither
+shipped demo and 2b synthetic sheets (GPU 4,096; one opens with `[`, the other with `{`, so neither
 reuses the other's cache), each counted by `/tokenize`. Timings must be present, finite and
 positive, `predicted_n` equal to `max_tokens`, the tail `prompt_n` − Nᵢ not negative and the
 cached tokens at least 75 % of priming's prompt tokens, or the attempt fails. The budgets
 follow `assisted-sheet-plan.md` §1.4a "Budgets" (ASSIST-31, ASSIST-32): T(B) is the larger of
-the two samples' estimates per candidate (CPU 1,024, 768, 512), R = max(15, 1.25 × T rounded up
-to 5 s) within 90 s, D 1, Q = 120 − R. After a run-deadline expiry, or when a running job
+the two samples' estimates per candidate (CPU 1,024, 768, 512; GPU 4,096, 2,048, 1,024), R =
+max(15, 1.25 × T rounded up to 5 s) within 90 s on the CPU path (D 1, Q = 120 − R) and 60 s on
+the GPU path (D = max(1, min(4, floor((120 − R) / R))), Q = D × R). After a run-deadline expiry, or when a running job
 is superseded or cancelled, the next job waits the larger sample's prompt term at B (the request may still be in prompt evaluation), and
 admission counts that wait, so one expiry no longer makes the next job miss its deadline too.
 The measurement and the budgets are on the page.
@@ -305,9 +390,13 @@ The measurement and the budgets are on the page.
 
 `/admin/assistant` (owner only): the state with its reason, the pinned build, path,
 generation, failure count and last failure, the breaker, the active level with its wording,
-notes, skipped levels with reasons, the budgets, and the priming and sample measurements.
-Restart (POST, CSRF-checked) stops the server and starts again from level 1; a second press
-while one runs starts nothing ("A restart is already running").
+notes, skipped levels with reasons, the device (the selected GPU's description, in-sandbox
+name, PCI address, render node and memory; render nodes not used, with why; "CPU only" under
+`--assistant-device cpu`; why the GPU is not in use), the budgets, and the priming and sample
+measurements. Restart (POST, CSRF-checked) stops the server and starts again from level 1; "Try
+the GPU again" (POST `/admin/assistant/try-gpu`, CSRF-checked) is shown while the GPU is wanted
+and the CPU path runs; a second press of either while one runs starts nothing ("A restart is
+already running").
 
 ## Development endpoint
 

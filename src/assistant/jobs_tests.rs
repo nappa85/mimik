@@ -46,6 +46,9 @@ fn origin(sheet: i64, target: &str, revision: i64) -> Origin {
 /// A ready assistant over `stub`, with its worker running.
 fn ready(stub: Arc<StubInterpreter>, budgets: Budgets) -> Arc<Assistant> {
     let assistant = Assistant::new();
+    // Tests never depend on real time beating the grace: a short one where failures must
+    // count, a long one where the exit is published first.
+    assistant.set_transport_grace(Duration::from_millis(10));
     assistant.event(RuntimeEvent::GenerationStarted { generation: 1 });
     assistant.event(RuntimeEvent::Ready {
         generation: 1,
@@ -414,6 +417,78 @@ async fn a_generation_change_ends_every_job_neutrally() {
     );
     gate.add_permits(2);
     assert!(assistant.breaker_closed());
+}
+
+#[tokio::test]
+async fn a_transport_error_before_the_generation_ends_resolves_as_restarted_and_neutral() {
+    // The child's death closes the connection first; its exit is published afterwards. The
+    // job must not be settled by the transport error alone.
+    let stub = Arc::new(StubInterpreter::answering([Err(Failure::Transport)]));
+    let assistant = ready(stub, budgets());
+    assistant.set_transport_grace(Duration::from_secs(3600));
+    let (job, _) = start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
+    settle().await;
+    assert!(
+        !matches!(assistant.poll(1, 1, job), Poll::Done(_)),
+        "the job was settled by the transport error before the exit was published"
+    );
+    assistant.event(RuntimeEvent::GenerationEnded {
+        generation: 1,
+        reason: EndReason::Exited,
+    });
+    assert_eq!(assistant.poll(1, 1, job), Poll::Done(Answer::Restarted));
+    settle().await;
+    assert!(assistant.breaker_closed());
+}
+
+#[tokio::test]
+async fn a_transport_error_on_a_generation_that_stays_alive_counts_after_the_grace() {
+    let stub = Arc::new(StubInterpreter::answering([Err(Failure::Transport)]));
+    let assistant = ready(stub, budgets());
+    let (job, _) = start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
+    assert_eq!(
+        until_done(&assistant, 1, 1, job).await,
+        Poll::Done(Answer::Unavailable)
+    );
+}
+
+#[tokio::test]
+async fn an_http_status_or_a_tokenizer_failure_counts_at_once_without_the_grace() {
+    for tokenizer in [false, true] {
+        let stub = Arc::new(StubInterpreter::answering([Err(Failure::Status(500))]));
+        if tokenizer {
+            *stub.tokenize_fails.lock().unwrap() = Some(Failure::Transport);
+        }
+        let assistant = ready(stub, budgets());
+        // A grace that would never end in a test: only an immediate answer passes.
+        assistant.set_transport_grace(Duration::from_secs(3600));
+        let (job, _) = start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
+        assert_eq!(
+            until_done(&assistant, 1, 1, job).await,
+            Poll::Done(Answer::Unavailable),
+            "tokenizer: {tokenizer}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_supersession_ends_the_transport_grace_at_once() {
+    let stub = Arc::new(StubInterpreter::answering([
+        Err(Failure::Transport),
+        Ok(HEAL.to_owned()),
+    ]));
+    let assistant = ready(stub, budgets());
+    assistant.set_transport_grace(Duration::from_secs(3600));
+    let (first, _) = start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
+    settle().await;
+    assert!(!matches!(assistant.poll(1, 1, first), Poll::Done(_)));
+    // A newer job of the account replaces it: the worker is free for it at once.
+    let (second, _) = start(&assistant, 1, origin(1, "field:hp", 6)).unwrap();
+    assert_eq!(assistant.poll(1, 1, first), Poll::Done(Answer::Superseded));
+    assert!(matches!(
+        until_done(&assistant, 1, 1, second).await,
+        Poll::Done(Answer::Options(_))
+    ));
 }
 
 #[tokio::test]

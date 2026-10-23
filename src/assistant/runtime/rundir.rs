@@ -16,7 +16,13 @@ pub(crate) fn open(data_dir: &Path) -> Result<OwnedFd, Refusal> {
     let path = data_dir.join("run");
     match rustix::fs::mkdir(&path, Mode::from_raw_mode(0o700)) {
         Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-        Err(_) => return Err(Refusal::Io(path.display().to_string())),
+        Err(error) => {
+            return Err(Refusal::Io(format!(
+                "{} ({})",
+                path.display(),
+                error.kind()
+            )));
+        }
     }
     files::open_dir(&path, Owners::Mine, true)
 }
@@ -138,8 +144,9 @@ impl Pidfile {
             Mode::from_raw_mode(0o600),
             ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
         )
-        .map_err(|_| Refusal::Io(PIDFILE.into()))?;
-        let stat = rustix::fs::fstat(&fd).map_err(|_| Refusal::Io(PIDFILE.into()))?;
+        .map_err(|error| Refusal::Io(format!("{PIDFILE} ({})", error.kind())))?;
+        let stat = rustix::fs::fstat(&fd)
+            .map_err(|error| Refusal::Io(format!("{PIDFILE} ({})", error.kind())))?;
         if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
             return Err(Refusal::NotRegular(PIDFILE.into()));
         }
@@ -151,7 +158,7 @@ impl Pidfile {
                 file: std::fs::File::from(fd),
             })),
             Err(rustix::io::Errno::WOULDBLOCK) => Ok(Err(Busy)),
-            Err(_) => Err(Refusal::Io(PIDFILE.into())),
+            Err(error) => Err(Refusal::Io(format!("{PIDFILE} ({})", error.kind()))),
         }
     }
 
@@ -366,7 +373,7 @@ pub(crate) fn sweep_generations(run: BorrowedFd<'_>) {
 pub(crate) fn create_generation(run: BorrowedFd<'_>, name: &str) -> Result<OwnedFd, Refusal> {
     rustix::fs::mkdirat(run, name, Mode::from_raw_mode(0o700)).map_err(|error| match error {
         rustix::io::Errno::EXIST => Refusal::Exists(format!("run/{name}")),
-        _ => Refusal::Io(format!("run/{name}")),
+        other => Refusal::Io(format!("run/{name} ({})", other.kind())),
     })?;
     files::open_dir_beneath(run, name, Owners::Mine, true)
 }

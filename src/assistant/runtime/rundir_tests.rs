@@ -399,3 +399,26 @@ fn an_entry_longer_than_the_read_is_refused() {
     let long = vec!["x".repeat(5000)];
     assert!(Entry::of(1, me, long).is_none());
 }
+
+#[test]
+fn io_refusals_of_the_run_directory_and_the_pidfile_name_the_error_kind() {
+    // A data directory that is a file: `run/` cannot be made, and the refusal says why.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("not-a-directory");
+    std::fs::write(&file, b"x").unwrap();
+    let Err(Refusal::Io(message)) = open(&file) else {
+        panic!("expected an I/O refusal");
+    };
+    assert!(message.contains('(') && message.contains(')'), "{message}");
+    // The pidfile: opening it through a directory that is not there fails the same way.
+    let gone = tempfile::tempdir().unwrap();
+    let run = std::fs::File::open(gone.path()).unwrap();
+    std::fs::remove_dir(gone.path()).unwrap();
+    let Err(Refusal::Io(message)) = Pidfile::acquire(std::os::fd::AsFd::as_fd(&run)) else {
+        panic!("expected an I/O refusal");
+    };
+    assert!(
+        message.contains(PIDFILE) && message.contains('('),
+        "{message}"
+    );
+}
