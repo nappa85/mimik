@@ -9,8 +9,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1, 2c-2a (the CPU
   runtime at level 1 only, ASSIST-43, `docs/model-runtime.md`) and the Rust 1.99.1 / rig-core
   0.45.0 upgrade are merged into master, and so is 2c-2b-1 (the GPU path, live-verified on the
-  RX 6650 XT). Next: 2c-2b-2, Landlock behind `--assistant-allow-landlock` (ASSIST-44), on
-  `assist-2c2b2` from master; its kernel checks need a VM. Level 3's return is its own later
+  RX 6650 XT). There is no level 2 (ASSIST-48). Next: 2d-1. Level 3's return is its own later
   step (plan, "Level 3 behind an owner opt-in").
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
@@ -24,7 +23,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    against the test suite (flags, output parsing, grammar conversion, the confinement suite),
    before the first release; (b) the system-llama.cpp mode with distribution packaging
    (compatibility checks instead of a version pin; its own design).
-1. 2c-2b-2 Landlock, 2d-1 owner model setting, 2d-2 downloads, 3 bundles and reminders, 4
+1. 2d-1 owner model setting, 2d-2 downloads, 3 bundles and reminders, 4
    suggestions, 5 docs and gate (includes the `docs/release-scope.md` update for schema 22 and the
    assisted scope).
 2. Before 2d-1 chooses the default model (ASSIST-L32), a field-reference experiment, decision
@@ -38,7 +37,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    false-confident count. Run it in a container with the `laya` package, since stock
    llama-server does not run it, and write the decision rule down before running. Shipping it
    would need its own runtime decision (ASSIST-29/33).
-3. After 2c-2b, a prototype-tier Hakoniwa comparison (user 2026-10-23). Hakoniwa is a Rust
+3. A prototype-tier Hakoniwa comparison (user 2026-10-23). It now decides Linux level 1:
+   Hakoniwa or nothing (ASSIST-48); until adopted, bubblewrap stays. Needs the user's
+   Landlock-enabled kernel (7.3.0, landlock in CONFIG_LSM; check `/sys/kernel/security/lsm`
+   after the reboot). Hakoniwa is a Rust
    library (LGPL-3.0 with linking exception) that does Linux isolation in-process, so the host
    would not need `bwrap`. Run it in the runner process with its `seccomp` feature off, so there
    is no libseccomp C dependency, and install Mimik's own seccompiler filter instead. Compare it
