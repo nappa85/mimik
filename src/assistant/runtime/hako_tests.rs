@@ -512,7 +512,7 @@ fn a_runner_with_another_thread_refuses_before_it_takes_or_spawns_anything() {
     let mut seen = Vec::new();
     std::io::Read::read_to_end(&mut std::fs::File::from(read), &mut seen).unwrap();
     std::io::Read::read_to_end(&mut std::fs::File::from(status_read), &mut seen).unwrap();
-    assert!(seen.is_empty());
+    assert_eq!(seen, Vec::<u8>::new());
     stop.send(()).unwrap();
     other.join().unwrap();
 }

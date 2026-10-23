@@ -359,7 +359,7 @@ pub(crate) fn started(line: &str) -> Option<bwrap::Started> {
 /// The closure's steps in the order it runs them; the marker is the last, right before the
 /// exec, so nothing that fails after it can be a sandbox failure and nothing that fails
 /// before it can come with a marker.
-#[cfg(any(test, feature = "sandbox-hakoniwa"))]
+#[cfg(test)]
 pub(crate) const STEP_ORDER: [&str; 9] = [
     "session",
     "identity",
@@ -769,11 +769,11 @@ mod run {
             let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
                 continue;
             };
-            let ppid = status
+            let parent_of = status
                 .lines()
                 .find_map(|line| line.strip_prefix("PPid:"))
                 .and_then(|value| value.trim().parse::<i32>().ok());
-            if ppid == Some(parent) {
+            if parent_of == Some(parent) {
                 if found.is_some() {
                     return None;
                 }

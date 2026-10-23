@@ -593,6 +593,21 @@ impl Real {
     }
 }
 
+/// Hakoniwa: the server (PID 1 of the sandbox) held by its own pidfd. A missing or
+/// unverifiable one fails the start (a reaper that is gone says nothing about the server's
+/// memory); bubblewrap's reaper is inside the namespace and needs none.
+fn open_inner(reported: Option<i32>, reaper: i32, hakoniwa: bool) -> Result<Option<Watched>, Fail> {
+    match reported {
+        Some(inner) => endpoint::open_inner(inner, reaper)
+            .map(Some)
+            .map_err(|error| Fail::Other(format!("the sandbox's server process: {error}"))),
+        None if hakoniwa => Err(Fail::Other(
+            "the sandbox's server process was not reported".into(),
+        )),
+        None => Ok(None),
+    }
+}
+
 /// The `(device, inode)` of a verified object, from its descriptor.
 fn identity_of(fd: &impl AsFd) -> Result<hako::Identity, Fail> {
     rustix::fs::fstat(fd)
@@ -1461,22 +1476,7 @@ impl Real {
         let (sandbox, connector): (Option<Arc<Sandbox>>, Arc<dyn Connect>) =
             match endpoint::open_reaper(child_pid, pid, pid_namespace) {
                 Ok(reaper) => {
-                    // Hakoniwa: the server (PID 1) is watched itself; a missing or
-                    // unverifiable inner process fails the start (a reaper that is gone
-                    // says nothing about the server's memory).
-                    let inner = match inner_pid {
-                        Some(inner) => {
-                            Some(endpoint::open_inner(inner, child_pid).map_err(|error| {
-                                Fail::Other(format!("the sandbox's server process: {error}"))
-                            })?)
-                        }
-                        None if hakoniwa => {
-                            return Err(Fail::Other(
-                                "the sandbox's server process was not reported".into(),
-                            ));
-                        }
-                        None => None,
-                    };
+                    let inner = open_inner(inner_pid, child_pid, hakoniwa)?;
                     let sandbox = Arc::new(Sandbox {
                         reaper,
                         pid_namespace,

@@ -270,27 +270,38 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
   is the process the endpoint check pins (`child-pid`). The seccomp program already refuses
   `fork`, so the sandbox holds one process. The runner does not report the PID namespace's
   number (the reaper is not dumpable); the endpoint check then leaves that comparison to
-  the parent and `NSpid` checks (`endpoint::NAMESPACE_UNREPORTED`).
-- There is no shim. The closure runs in the program's process after the setup: a new
-  session (no controlling terminal), the identity check, every capability set cleared
-  (ambient, bounding, inheritable, permitted, effective), Mimik's seccomp program installed
-  (`no_new_privs` is already set by Hakoniwa), then the marker. The marker pipe's write end is
-  the program's standard input until the closure writes the marker on it, replaces
-  descriptor 0 with `/dev/null` and closes every other descriptor, so nothing the program
-  does can write it. A failure before the marker (a mount, the identity check, capabilities,
-  seccomp) is a sandbox failure; the exec itself failing, and anything the server does or
-  exits with afterwards, is the server's. No exit code or output of the server can count as
-  a sandbox failure (`live_no_exit_code_of_the_server_counts_as_a_sandbox_failure`).
-- Mount flags: each bind is `nosuid` and (but device nodes) `nodev`, plus `noexec` when its
-  source mount has it, given up front, because the kernel refuses an unprivileged remount that
-  drops a locked flag and Hakoniwa's fallback for that refusal silently drops read-only; the
-  fallback is not enabled, so a mount that cannot be made as planned fails the start. A
-  test lists the sandbox's mounts and requires read-only on all but the socket directory,
-  the temporary space, `/dev` and `/proc`.
+  the parent and `NSpid` checks (`endpoint::NAMESPACE_UNREPORTED`). The runner reports the
+  server's own host PID (`inner-pid`) too, and Mimik holds a pidfd on it: a forced stop kills
+  and waits for the server first, then the reaper, and publishes the exit only then, because
+  the reaper can end before the server has released its memory.
+- There is no shim. The closure runs in the program's process after the setup, in this
+  order (`hako::STEP_ORDER`): a new session (no controlling terminal), the identity check, the
+  bounding set dropped capability by capability (up to the kernel's last one) and the other
+  sets cleared, Mimik's seccomp program installed (`no_new_privs` is already set by Hakoniwa),
+  the marker pipe's end (standard input) moved to descriptor 3 close-on-exec, `/dev/null`
+  put on descriptor 0, every descriptor above 3 closed, the runner's umask restored, and
+  the marker written on descriptor 3 as the very last step before the exec, which closes it.
+  A step that fails ends the closure at once, with no marker; so the marker proves that every
+  step passed, and nothing the program does can write it (it never holds the descriptor). A
+  failure before the marker is a sandbox failure; the exec itself failing, and anything the
+  server does or exits with afterwards, is the server's. No exit code or output of the
+  server can count as a sandbox failure
+  (`live_no_exit_code_of_the_server_counts_as_a_sandbox_failure`).
+- Mount flags: each bind is non-recursive (a mount under a bound directory shows as an empty
+  directory, so no submount can stay writable under a read-only bind), `nosuid` and (but
+  device nodes) `nodev`, plus `noexec` when its source mount has it, given up front, because
+  the kernel refuses an unprivileged remount that drops a locked flag and Hakoniwa's fallback
+  for that refusal silently drops read-only; the fallback is not enabled, so a mount that
+  cannot be made as planned fails the start (the atime flags are not given: the library has no
+  option for them; `noatime` on `/` works on the dev host, other atime settings are untried,
+  HAKO-L4). A test lists the sandbox's mounts and requires read-only on all but the socket
+  directory, the temporary space, `/dev` and `/proc`.
 - A sandbox that ends at once (a mount refused, or a swapped file) is classified by the marker
   instead of failing the start on a reaper that is already gone.
-- Parent death: the runner dies with Mimik (`PR_SET_PDEATHSIG`), Hakoniwa sets the signal in
-  its two children, so the whole tree dies with the runner (`live_sigkill_of_mimik_*`).
+- Parent death: the runner dies with Mimik (`PR_SET_PDEATHSIG` and a parent check), Hakoniwa
+  sets the signal in its two children right after their fork, so the whole tree dies with the
+  runner (`live_sigkill_of_mimik_*`, and a sweep of kill delays over a start). Hakoniwa does
+  not re-check its parent after setting the signal (HAKO-L5).
 
 `mimik assistant-apparmor-profile` prints the `AppArmor` profile for the running binary's own
 path (template `apparmor/mimik`, also for distribution packages); when the sandbox cannot

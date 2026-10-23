@@ -55,20 +55,38 @@ fn settings(scratch: &std::path::Path, inner: &str, inner_env: Vec<(String, Stri
     args.push("probe-inner".into());
     let mut env_vars = vec![(test_helper::VARIABLE.to_owned(), inner.to_owned())];
     env_vars.extend(inner_env);
+    // A unique tag (`MIMIK_LIVE_TAG`, set for a helper process by the test that watches its
+    // processes) is the server's alias and an extra argument of the runner, so every process
+    // of that run, the runner's forks included, has it in its command line.
+    let tag = std::env::var("MIMIK_LIVE_TAG").ok();
+    let mut runner_args: Vec<std::ffi::OsString> =
+        helper_args(RUNNER).into_iter().map(Into::into).collect();
+    runner_args.extend(tag.clone().map(Into::into));
+    // `MIMIK_LIVE_RUNNER`: Mimik's own binary (built with the feature under test) as the
+    // runner, as shipped: single-threaded, its guards active, instead of the test binary.
+    let runner_program = std::env::var_os("MIMIK_LIVE_RUNNER").map(PathBuf::from);
+    let runner = match runner_program {
+        Some(program) => RunnerCommand {
+            program,
+            args: vec!["assistant-runner".into(), "--spec-fd".into(), "3".into()],
+            env: Vec::new(),
+        },
+        None => RunnerCommand {
+            program: exe.clone(),
+            args: runner_args,
+            env: vec![(test_helper::VARIABLE.into(), "runner".into())],
+        },
+    };
     Settings {
         data_dir: scratch.join("data"),
         models_dir: env("MIMIK_LIVE_MODELS"),
         runtime_dir: env("MIMIK_LIVE_RUNTIME"),
         model: MANIFEST.test_model.name.clone(),
         model_sha256: MANIFEST.test_model.sha256.clone(),
-        alias: "stories".into(),
+        alias: tag.unwrap_or_else(|| "stories".into()),
         threads: 2,
         ctx_size: MANIFEST.test_model.ctx_size,
-        runner: RunnerCommand {
-            program: exe.clone(),
-            args: helper_args(RUNNER).into_iter().map(Into::into).collect(),
-            env: vec![(test_helper::VARIABLE.into(), "runner".into())],
-        },
+        runner,
         inner: InnerCommand {
             executable: exe,
             probe_args: args,
@@ -1225,6 +1243,117 @@ fn live_level_3_does_not_load_a_backend_from_an_attacker_writable_cwd() {
     assert!(!marker.exists(), "a backend from the attacker cwd loaded");
     mimik.kill().unwrap();
     mimik.wait().unwrap();
+}
+
+/// The processes whose command line names `tag`.
+fn tagged(tag: &str) -> Vec<i32> {
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
+        .filter(|pid| {
+            std::fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|line| String::from_utf8_lossy(&line).contains(tag))
+        })
+        .collect()
+}
+
+/// Mimik (a helper process) is killed at `delay` after its first runner process appeared, at
+/// each moment of a start in turn; every process of the run (runner, Hakoniwa's reaper, the
+/// program before and after its exec) must be gone for real: its `/proc` entry absent.
+fn killed_after(tag: &str, delay: Duration) {
+    let scratch = scratch();
+    let mut mimik = test_helper::command(HELPER, "mimik")
+        .env("MIMIK_LIVE_CHILD_SCRATCH", scratch.path())
+        .env("MIMIK_LIVE_KILL_AT", "starting")
+        .env("MIMIK_LIVE_TAG", tag)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let appeared = std::time::Instant::now() + Duration::from_secs(60);
+    while tagged(tag).is_empty() {
+        assert!(
+            std::time::Instant::now() < appeared,
+            "no process of the run"
+        );
+        std::thread::sleep(Duration::from_micros(200));
+    }
+    std::thread::sleep(delay);
+    mimik.kill().unwrap();
+    mimik.wait().unwrap();
+    let mut seen: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        seen.extend(tagged(tag));
+        let left: Vec<i32> = seen
+            .iter()
+            .copied()
+            .filter(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
+            .collect();
+        if left.is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{delay:?}: {left:?} survived Mimik"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+fn live_killing_mimik_at_any_moment_of_a_start_leaves_no_process_of_the_run() {
+    // Hakoniwa sets the parent-death signal itself in its two children after their fork and
+    // does not re-check its parent, so a parent that dies between the fork and that call
+    // leaves a child behind (HAKO-L4); the delays sweep that window (and bubblewrap's).
+    let delays_ms = [0_u64, 1, 2, 3, 5, 8, 12, 20, 35, 60];
+    for round in 0..3 {
+        for (n, delay) in delays_ms.iter().enumerate() {
+            let tag = format!("mimik-live-{}-{round}-{n}", std::process::id());
+            killed_after(&tag, Duration::from_millis(*delay));
+        }
+    }
+}
+
+/// With Hakoniwa the reaper is outside the namespace: a forced stop is over only when the
+/// server (PID 1 inside) is gone, sampled at the instant the exit is published.
+#[cfg(feature = "sandbox-hakoniwa")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+async fn live_the_exit_is_published_only_once_hakoniwas_server_is_gone() {
+    let scratch = scratch();
+    let mut settings = settings(scratch.path(), "probe-inner", Vec::new());
+    settings.backend = Backend::Hakoniwa;
+    let launch = Launch(real(settings));
+    launch.preflight(Path::Cpu).await.unwrap();
+    let probing = Arc::clone(&launch.0);
+    let probed = tokio::task::spawn_blocking(move || {
+        probing.probe_level(Path::Cpu, Level::Bubblewrap, &probing.work().enter())
+    })
+    .await
+    .unwrap();
+    assert_eq!(probed, Probe::Passed);
+    let child = launch
+        .start_real(1, Level::Bubblewrap, Path::Cpu)
+        .await
+        .unwrap();
+    let runner = child.pid;
+    let tree: Vec<i32> = descendants(runner);
+    assert!(tree.len() >= 2, "the reaper and the server: {tree:?}");
+    // The runner is killed as a crash would; the watcher takes it from there.
+    rustix::process::kill_process(
+        rustix::process::Pid::from_raw(runner).unwrap(),
+        rustix::process::Signal::KILL,
+    )
+    .unwrap();
+    child.exited().await;
+    for pid in &tree {
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists() || !alive(*pid),
+            "{pid} was alive when the exit was published: {tree:?}"
+        );
+    }
 }
 
 #[path = "live_gpu_tests.rs"]
