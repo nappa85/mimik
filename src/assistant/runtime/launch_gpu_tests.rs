@@ -199,15 +199,10 @@ async fn the_gpu_path_is_started_at_level_1_only() {
     let launch = Launch(Arc::new(
         Real::new(settings(dir.path(), Choice::Auto, Roots::default())).allowing_unconfined(),
     ));
-    for level in [Level::Landlock, Level::Unconfined] {
-        assert!(
-            matches!(
-                launch.start_real(1, level, Path::Gpu).await,
-                Err(Fail::Sandbox(why)) if why.contains("only at level 1")
-            ),
-            "{level:?}"
-        );
-    }
+    assert!(matches!(
+        launch.start_real(1, Level::Unconfined, Path::Gpu).await,
+        Err(Fail::Sandbox(why)) if why.contains("only at level 1")
+    ));
 }
 
 const GOOD_LISTING: &str = "Available devices:\n  Vulkan0: AMD Radeon RX 6650 XT (RADV NAVI23) (8176 MiB, 7912 MiB free)\n";

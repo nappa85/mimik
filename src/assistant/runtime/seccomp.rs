@@ -29,7 +29,7 @@ pub(crate) enum Profile {
     /// Level 1: bubblewrap installs it just before it executes llama-server inside the
     /// sandbox, so exec stays allowed (the PID namespace contains whatever runs there).
     Sandbox,
-    /// Levels 2 and 3: the runner installs it, then executes the verified llama-server
+    /// Level 3: the runner installs it, then executes the verified llama-server
     /// descriptor `exec_fd` with `execveat(…, AT_EMPTY_PATH)`. `execve` is refused and
     /// `execveat` is allowed only on that descriptor number with exactly `AT_EMPTY_PATH`. The
     /// descriptor is close-on-exec and the runner sets `RLIMIT_NOFILE` to its number, so after

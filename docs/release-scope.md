@@ -44,7 +44,7 @@ start-time probe shows unprivileged user namespaces work; otherwise the assistan
 probe's outcome without certifying it. On a machine with a hardware GPU the assistant tries
 the GPU path first (the Vulkan build, `--assistant-device`) and falls back to the CPU; the GPU
 path is not certified: CI does not cover it, and its live checks on the dev host's GPU are
-still owed. The Landlock level is not built; the documented minimum host for the bundled build (Ubuntu 22.04 `x86_64`) is not
+still owed. The documented minimum host for the bundled build (Ubuntu 22.04 `x86_64`) is not
 yet verified on a VM.
 
 ## Run
@@ -125,7 +125,7 @@ a finished RPG companion.
 
 **Not certified:** physical phone or router setups; Windows, macOS or other CPU architectures;
 browsers other than Chromium; public internet exposure; path-prefix proxying; the quality or
-speed of any model's interpretations, inference on a GPU, the Landlock level, API providers; PDF extraction or OCR; accuracy of any real manual's extraction; fidelity to
+speed of any model's interpretations, inference on a GPU, API providers; PDF extraction or OCR; accuracy of any real manual's extraction; fidelity to
 official sheet layouts; any game's rules legality; tamper evidence of change notes (they are
 not sealed or verified); protection against unbounded growth (no per-account write-rate limit
 or storage guard for sheet history and notes).

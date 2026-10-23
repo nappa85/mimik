@@ -4,9 +4,8 @@
 //! before it takes jobs.
 //!
 //! Linux `x86_64` only; the CPU path at level 1 (bubblewrap); level 3 (unconfined) is built
-//! but not used (ASSIST-43), and returns later behind an owner opt-in. The GPU path
-//! and level 2 (`Landlock`) are step 2c-2b; the machinery here already carries the path and
-//! the level.
+//! but not used (ASSIST-43), and returns later behind an owner opt-in. There is no level 2
+//! (ASSIST-48); the level numbers stay 1 and 3.
 pub(crate) mod budgets;
 pub(crate) mod bwrap;
 pub(crate) mod calibration;
@@ -73,8 +72,6 @@ impl Backend {
 pub(crate) enum Level {
     /// bubblewrap: private namespaces, an allowlist of read-only paths, a Unix socket.
     Bubblewrap,
-    /// Landlock with seccomp on `127.0.0.1` (step 2c-2b).
-    Landlock,
     /// seccomp only, on `127.0.0.1`.
     Unconfined,
 }
@@ -84,7 +81,6 @@ impl Level {
     pub(crate) fn number(self) -> u8 {
         match self {
             Self::Bubblewrap => 1,
-            Self::Landlock => 2,
             Self::Unconfined => 3,
         }
     }

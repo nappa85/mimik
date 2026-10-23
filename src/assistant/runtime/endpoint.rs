@@ -9,7 +9,7 @@
 //!   one small). A UID-only match is never accepted. Mimik connects through
 //!   `/proc/self/fd/<directory descriptor>/llama.sock`, so the host path's length never meets
 //!   the 108-byte `sun_path` limit, and the reaper's pidfd tells when it has gone.
-//! - Levels 2 and 3 (TCP on `127.0.0.1`): before and after `connect()`, every listening entry
+//! - Level 3 (TCP on `127.0.0.1`): before and after `connect()`, every listening entry
 //!   on the port (`127.0.0.1`, the IPv4 wildcard, and the IPv6 wildcard or mapped loopback)
 //!   must be a socket open in the child's `/proc/<pid>/fd`; no entry yet means "not ready";
 //!   one foreign entry fails the attempt.
@@ -212,7 +212,7 @@ impl Connect for SandboxSocket {
     }
 }
 
-/// Levels 2 and 3's connector: `127.0.0.1:<port>`, checked by the port's listeners.
+/// Level 3's connector: `127.0.0.1:<port>`, checked by the port's listeners.
 #[derive(Debug)]
 pub(crate) struct Loopback {
     pub port: u16,

@@ -463,7 +463,6 @@ mod tests {
         use super::super::launch::Probed;
         let kept = probe_report(&[
             (Level::Bubblewrap, Probed::Kept("no status line".into())),
-            (Level::Landlock, Probed::Failed("not built".into())),
             (Level::Unconfined, Probed::Passed),
         ]);
         // Level 3 passing is reported, labelled not used; the level reached stays none.
