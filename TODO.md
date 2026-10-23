@@ -20,6 +20,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
+0. llama.cpp versions (ASSIST-46): (a) a scheduled CI job that tries each new llama.cpp release
+   against the test suite (flags, output parsing, grammar conversion, the confinement suite),
+   before the first release; (b) the system-llama.cpp mode with distribution packaging
+   (compatibility checks instead of a version pin; its own design).
 1. The idle native calibration (5 and 2 threads; the detached waiter in
    `/media/data/mimik/assist-2c2/live/` runs it when the host is idle outside weekday hours), the
    2c-2b-1 live GPU checks once the fan is on manual (`tools/assist_gpu_live.py`; staged

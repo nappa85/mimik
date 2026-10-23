@@ -33,7 +33,7 @@ same private network. No Node.js, Python, GPU, API key or internet access is nee
   `127.0.0.1` only. It is not protected by accounts and does not see private campaign data.
 
 No language model file is part of this release. The archive carries the pinned official
-llama.cpp CPU and Vulkan builds (`llama/`, b11609, MIT; its source archive accompanies the release) for the
+llama.cpp CPU and Vulkan builds (`llama/`, b11609, MIT; pinned and hash-checked, its source is at the upstream commit named in `SOURCE.txt`) for the
 optional interpretation assistant, which is off unless started with `--assistant` and proposes
 readings the player must confirm; it never applies sheet changes on its own. Its scope is
 Linux `x86_64` on the CPU: the model server runs only confined by bubblewrap, where the
@@ -95,8 +95,8 @@ PDFs.
 The CI workflow ends in one status, **`deployable`**, which passes only when every job below
 succeeded for the same revision:
 
-- **llama-fetch:** the pinned llama.cpp release asset, the test model and the llama.cpp source,
-  every size and hash checked against the manifest;
+- **llama-fetch:** the pinned llama.cpp release asset, the test model and the llama.cpp source (a build-time input for the notice
+  texts, never shipped), every size and hash checked against the manifest;
 - **checks:** formatting, Clippy with all and pedantic lints denied, all Rust tests
   (`--locked --all-targets --all-features`), Ruff and the Python helper tests, workflow lint,
   `cargo audit --deny warnings`, third-party licence notices, release build, source-package
@@ -151,9 +151,12 @@ or storage guard for sheet history and notes).
   in preferred form, tests, helper tools, build configuration and documentation.
 - `mimik-0.1.0-dependency-sources.tar.gz`: vendored Rust dependency sources with checksums,
   licences and the source-replacement configuration.
-- `llama.cpp-b11609-source.tar.gz`: corresponding source of `llama/`: `git archive` of
-  commit fcac190, its tar hash pinned in the manifest.
-- `SHA256SUMS`: checksums of the four archives.
+- `SHA256SUMS`: checksums of the three archives.
+
+llama.cpp is a separately executed, pinned build dependency: its source is not shipped.
+`SOURCE.txt` and `BUILD.txt` name the exact upstream tag, commit and asset hashes, and
+`THIRD-PARTY-NOTICES.md` carries llama.cpp's MIT text and the component licences. Corresponding
+source covers Mimik and the crates linked into it.
 
 No manuals, databases, secrets, extracted text or rendered source pages are included. CI smoke
 fixtures are synthetic and are not release content.

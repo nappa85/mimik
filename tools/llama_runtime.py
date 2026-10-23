@@ -147,7 +147,8 @@ def verify_notices(notices, data=None):
 
 
 def source_archive(data, out):
-    """`git archive` of the pinned commit from a shallow fetch; the tar's SHA-256 is pinned."""
+    """`git archive` of the pinned commit from a shallow fetch; the tar's SHA-256 is pinned. It is
+    a build-time input only (licence texts for the notices); it is never shipped."""
     source = data["source"]
     commit = data["llama_cpp"]["commit"]
     target = out / source["name"]

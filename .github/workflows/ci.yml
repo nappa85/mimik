@@ -82,7 +82,6 @@ jobs:
           path: |
             target/dist/*.tar.gz
             target/dist/*-source.crate
-            target/dist/*-source.tar.gz
             target/dist/SHA256SUMS
           if-no-files-found: error
       # The lib test binary with the confinement and live tests (built in the Ubuntu 22.04
@@ -125,7 +124,7 @@ jobs:
           sha256sum --check SHA256SUMS
           # Every downloaded archive is covered, and the count is the one the release scope states.
           test "$(wc -l < SHA256SUMS)" -eq "$(find . -maxdepth 1 -type f ! -name SHA256SUMS | wc -l)"
-          test "$(wc -l < SHA256SUMS)" -eq 4
+          test "$(wc -l < SHA256SUMS)" -eq 3
           tar -xzf mimik-0.1.0-linux-x86_64.tar.gz
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:

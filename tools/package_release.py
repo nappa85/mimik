@@ -1,7 +1,6 @@
 """Package the Linux runtime and corresponding source using explicit allowlists."""
 
 import argparse
-import gzip
 import hashlib
 import io
 import shutil
@@ -35,8 +34,9 @@ def llama_notice(data, tar_path=None, notices_dir=None):
         "\n## llama.cpp and ggml (llama/)\n\n"
         f"The official llama.cpp release {data['llama_cpp']['tag']} "
         f"({data['llama_cpp']['repository']}): every file of `llama/` is one of the release's own binaries, "
-        "built from its source archive (shipped alongside) together with components of the "
-        "release builder's build environment that the archive does not hold (listed below). MIT "
+        "built by upstream from llama.cpp's source (not shipped here: `SOURCE.txt` points to the "
+        "exact commit) together with components of the release builder's build environment "
+        "(listed below). MIT "
         "License, Copyright (c) 2023-2026 The ggml authors (`llama/cpu/LICENSE`). Components "
         "compiled into it, with their licences:\n"
     ]
@@ -70,16 +70,19 @@ def llama_notice(data, tar_path=None, notices_dir=None):
     return "".join(out)
 
 
-def compress_source(fetched, data, output):
-    """The pinned source tar, verified, gzip-compressed deterministically (no name, no time)."""
-    tar = fetched / data["source"]["name"]
-    if llama_runtime.sha256(tar) != data["source"]["tar_sha256"]:
-        raise ValueError("the llama.cpp source archive differs from the pinned one")
-    target = output / (tar.name + ".gz")
-    with open(tar, "rb") as source, open(target, "wb") as raw:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0, compresslevel=9) as out:
-            shutil.copyfileobj(source, out)
-    return target
+def llama_pointer(data):
+    """Where llama.cpp's source is: upstream, by exact tag, commit and asset hashes. It is a
+    separately executed, pinned build dependency, credited and pointed to, not shipped as
+    source (a distribution package would depend on the distribution's llama.cpp)."""
+    pinned = data["llama_cpp"]
+    lines = [
+        f"llama.cpp (llama/): the official release {pinned['tag']} ({pinned['release']}), source "
+        f"at {pinned['repository']} commit {pinned['commit']}; not shipped as source, a "
+        "separately executed build dependency built by upstream's release workflow. The "
+        "shipped files are the release assets, hash-pinned:",
+    ]
+    lines += [f"  {build['asset']} SHA-256 {build['sha256']}" for build in data["builds"]]
+    return "\n".join(lines) + "\n"
 
 
 COUNTS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
@@ -105,7 +108,7 @@ def main():
         "--llama",
         type=Path,
         default=Path("target/llama-fetch"),
-        help="llama-fetch's verified output: llama/ and the pinned source archive",
+        help="llama-fetch's verified output: llama/, the notices and the pinned source archive (read for licence texts only, never shipped)",
     )
     args = parser.parse_args()
     source = Path("target/package") / f"mimik-{args.version}.crate"
@@ -159,18 +162,15 @@ def main():
         entry.size = len(config_bytes)
         entry.mode = 0o644
         tar.addfile(entry, io.BytesIO(config_bytes))
-    llama_source = compress_source(args.llama, llama, args.output)
     (stage / "SOURCE.txt").write_text(
         f"Corresponding source: accompanying {source_name} and {dependency_name}\nRevision: {args.revision}\nUnpack the .crate, then unpack dependency sources into that package root.\nBuild: cargo build --release --offline --locked (Rust {toolchain()}).\n"
-        f"llama.cpp (llama/): accompanying {llama_source.name}, `git archive` of commit "
-        f"{llama['llama_cpp']['commit']} (tar SHA-256 {llama['source']['tar_sha256']}); built by "
-        "the official llama.cpp release workflow at that commit.\n",
+        + llama_pointer(llama),
         encoding="utf-8",
     )
     archive = args.output / f"{name}.tar.gz"
     with tarfile.open(archive, "w:gz") as tar:
         tar.add(stage, arcname=name)
-    artifacts = [archive, args.output / source_name, args.output / dependency_name, llama_source]
+    artifacts = [archive, args.output / source_name, args.output / dependency_name]
     check_inventory(
         Path("docs/release-scope.md").read_text(encoding="utf-8"),
         [path.name for path in artifacts],

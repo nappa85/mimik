@@ -140,13 +140,11 @@ natively for these tests (ASSIST-40).
 - **Packaging and CI (ASSIST-33, REL-2):** `package_release.py` gains an allowlist entry
   `llama/` holding exactly the manifest's files (anything else refuses the package), the
   llama.cpp build number in `BUILD.txt`, and `THIRD-PARTY-NOTICES.md` entries for llama.cpp
-  and ggml (MIT) and for every other file shipped from the asset, by its own licence. REL-2
-  requires corresponding source for every shipped binary, so the release also carries the
-  pinned llama.cpp source: always a `git archive --format=tar` of the pinned commit from a
-  shallow clone at that commit (GitHub's generated tag tarballs are not byte-stable), its tar
-  SHA-256 recorded in the manifest and compressed afterwards with a pinned `gzip -n` for
-  shipping (the tar hash is what is verified), staged at the release root, never inside
-  `llama/`, listed in `SOURCE.txt` and `SHA256SUMS`. The `dev-endpoint` feature is absent from the release
+  and ggml (MIT) and for every other file shipped from the asset, by its own licence. ASSIST-47:
+  the release does not ship llama.cpp's source; `SOURCE.txt` and `BUILD.txt` point to the
+  exact upstream tag, commit and asset hashes. The pinned `git archive --format=tar` of the
+  commit (its tar SHA-256 in the manifest) is a `llama-fetch` build-time input for the licence
+  texts only. The `dev-endpoint` feature is absent from the release
   binary because the staged binary comes from `cargo build --release --locked` without
   features (tests build with `--all-features`); `smoke_release.py` in `artifact-smoke` checks
   the staged binary: it contains no `assistant-dev-endpoint` string, and the option is

@@ -171,7 +171,7 @@ class LlamaRuntimeTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     llama_runtime.download(url, Path(temp) / "bad", expected, size)
 
-    def test_packaging_stages_exactly_the_verified_files_and_a_deterministic_source(self):
+    def test_packaging_stages_exactly_the_verified_files(self):
         data = synthetic()
         with tempfile.TemporaryDirectory() as temp:
             fetched = Path(temp) / "fetched"
@@ -187,19 +187,11 @@ class LlamaRuntimeTests(unittest.TestCase):
                 ["LICENSE", "libllama.so.0", "llama-server"],
             )
             self.assertEqual(stat.S_IMODE((stage / "llama/cpu/llama-server").stat().st_mode), 0o755)
-            out = Path(temp) / "out"
-            out.mkdir()
-            first = package_release.compress_source(fetched, data, out).read_bytes()
-            second = package_release.compress_source(fetched, data, out).read_bytes()
-            self.assertEqual(first, second)
             self.assertIn("ggml", package_release.llama_notice(data))
             self.assertIn("notices", llama_runtime.manifest()["source"])
             (fetched / "llama/cpu/extra").write_bytes(b"x")
             with self.assertRaises(ValueError):
                 package_release.stage_llama(fetched, Path(temp) / "stage2", data)
-            tar.write_bytes(b"another tar")
-            with self.assertRaises(ValueError):
-                package_release.compress_source(fetched, data, out)
 
 
 class GpuBuildTests(unittest.TestCase):
@@ -313,7 +305,6 @@ class InventoryTests(unittest.TestCase):
         "mimik-0.1.0-linux-x86_64.tar.gz",
         "mimik-0.1.0-source.crate",
         "mimik-0.1.0-dependency-sources.tar.gz",
-        "llama.cpp-b11609-source.tar.gz",
     ]
 
     def test_the_release_scope_lists_every_archive_and_their_count(self):
@@ -321,19 +312,43 @@ class InventoryTests(unittest.TestCase):
         package_release.check_inventory(readme.read_text(encoding="utf-8"), self.NAMES)
 
     def test_a_missing_archive_or_a_wrong_count_is_refused(self):
-        listed = "".join(f"- `{name}`: x\n" for name in self.NAMES[:3])
-        with self.assertRaisesRegex(ValueError, "llama.cpp-b11609-source.tar.gz"):
-            package_release.check_inventory(
-                listed + "- `SHA256SUMS`: checksums of the four archives.\n", self.NAMES
-            )
-        listed += f"- `{self.NAMES[3]}`: x\n"
-        with self.assertRaisesRegex(ValueError, "four"):
+        listed = "".join(f"- `{name}`: x\n" for name in self.NAMES[:2])
+        with self.assertRaisesRegex(ValueError, "dependency-sources"):
             package_release.check_inventory(
                 listed + "- `SHA256SUMS`: checksums of the three archives.\n", self.NAMES
             )
+        listed += f"- `{self.NAMES[2]}`: x\n"
+        with self.assertRaisesRegex(ValueError, "three"):
+            package_release.check_inventory(
+                listed + "- `SHA256SUMS`: checksums of the four archives.\n", self.NAMES
+            )
         package_release.check_inventory(
-            listed + "- `SHA256SUMS`: checksums of the four archives.\n", self.NAMES
+            listed + "- `SHA256SUMS`: checksums of the three archives.\n", self.NAMES
         )
+
+    def test_the_release_scope_no_longer_lists_the_llama_source_archive(self):
+        readme = Path(__file__).resolve().parents[1] / "docs" / "release-scope.md"
+        self.assertNotIn("llama.cpp-b11609-source", readme.read_text(encoding="utf-8"))
+
+    def test_ci_expects_three_archives_and_uploads_no_llama_source(self):
+        ci = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("-eq 3", ci)
+        self.assertNotIn("-source.tar.gz", ci)
+
+    def test_llama_cpp_is_pointed_to_never_shipped_as_source(self):
+        self.assertFalse(hasattr(package_release, "compress_source"))
+        data = llama_runtime.manifest()
+        text = package_release.llama_pointer(data)
+        self.assertIn(data["llama_cpp"]["repository"], text)
+        self.assertIn(data["llama_cpp"]["tag"], text)
+        self.assertIn(data["llama_cpp"]["commit"], text)
+        for build in data["builds"]:
+            self.assertIn(build["asset"], text)
+            self.assertIn(build["sha256"], text)
+        self.assertNotIn("accompanying", text)
+        self.assertIn("not shipped", text)
 
 
 if __name__ == "__main__":
