@@ -1491,3 +1491,65 @@ fn the_cleanup_waits_for_a_runner_without_a_pidfd_and_says_so() {
     // Reaped: no zombie left.
     assert!(std::fs::metadata(format!("/proc/{pid}")).is_err());
 }
+
+/// A connector whose socket appears only after `missing` attempts (`ENOENT` until then).
+#[derive(Debug)]
+struct LateSocket {
+    missing: std::sync::atomic::AtomicUsize,
+    keep: Mutex<Vec<tokio::net::UnixStream>>,
+}
+
+impl crate::assistant::transport::Connect for LateSocket {
+    fn connect(&self) -> crate::assistant::transport::Connecting {
+        let late = self.missing.load(Ordering::SeqCst) > 0;
+        if late {
+            self.missing.fetch_sub(1, Ordering::SeqCst);
+            return Box::pin(async { Err(std::io::Error::from_raw_os_error(libc::ENOENT)) });
+        }
+        let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+        self.keep.lock().unwrap().push(theirs);
+        Box::pin(async move { Ok(crate::assistant::transport::Stream::Unix(ours)) })
+    }
+
+    fn authority(&self) -> String {
+        crate::assistant::transport::UNIX_AUTHORITY.into()
+    }
+}
+
+#[tokio::test]
+async fn a_probe_socket_that_appears_late_still_passes_and_never_fails() {
+    let work = Work::new();
+    let ticket = work.enter();
+    let late: Arc<dyn crate::assistant::transport::Connect> = Arc::new(LateSocket {
+        missing: std::sync::atomic::AtomicUsize::new(3),
+        keep: Mutex::new(Vec::new()),
+    });
+    assert_eq!(
+        checked_endpoint_within(&late, &ticket, Duration::from_secs(5)).await,
+        Probe::Passed
+    );
+    // Never there within the window: inconclusive (the level is kept), not a failure.
+    let never: Arc<dyn crate::assistant::transport::Connect> = Arc::new(LateSocket {
+        missing: std::sync::atomic::AtomicUsize::new(usize::MAX),
+        keep: Mutex::new(Vec::new()),
+    });
+    assert!(matches!(
+        checked_endpoint_within(&never, &ticket, Duration::from_millis(300)).await,
+        Probe::Inconclusive(_)
+    ));
+}
+
+#[tokio::test]
+async fn a_start_whose_socket_is_not_there_yet_is_not_listening_not_failed() {
+    // /health against a socket not created yet: "not listening", which the start's health
+    // wait retries until its deadline, never a definite failure.
+    let late: Arc<dyn crate::assistant::transport::Connect> = Arc::new(LateSocket {
+        missing: std::sync::atomic::AtomicUsize::new(usize::MAX),
+        keep: Mutex::new(Vec::new()),
+    });
+    let server = Llama::new(Bounded::new(late), "token", "alias");
+    assert_eq!(
+        server.health().await,
+        super::super::server::Health::NotListening
+    );
+}

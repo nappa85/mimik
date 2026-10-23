@@ -2312,16 +2312,39 @@ fn sleep_unless_cancelled(pause: Duration, cancelled: &dyn Fn() -> bool) -> bool
 
 /// The endpoint check of the probe's connection, ended by a cancel.
 async fn checked_endpoint(connector: &Arc<dyn Connect>, ticket: &Ticket) -> Probe {
-    let connecting = tokio::time::timeout(Duration::from_secs(10), connector.connect());
+    checked_endpoint_within(connector, ticket, Duration::from_secs(10)).await
+}
+
+/// [`checked_endpoint`] with its window given. A socket not there yet (`ENOENT`) or not yet
+/// accepting (`ECONNREFUSED`) is "not ready": tried again every 100 ms within the window, and
+/// at its end inconclusive, never a definite failure (so never a level skip).
+async fn checked_endpoint_within(
+    connector: &Arc<dyn Connect>,
+    ticket: &Ticket,
+    within: Duration,
+) -> Probe {
+    let attempts = async {
+        loop {
+            match connector.connect().await {
+                Ok(_) => return Probe::Passed,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => return endpoint_verdict(&error),
+            }
+        }
+    };
     let connected = tokio::select! {
-        connected = connecting => connected,
+        connected = tokio::time::timeout(within, attempts) => connected,
         () = until_cancelled(ticket) => return Probe::Failed("cancelled".into()),
     };
-    match connected {
-        Ok(Ok(_)) => Probe::Passed,
-        Ok(Err(error)) => endpoint_verdict(&error),
-        Err(_) => Probe::Inconclusive("the probe's socket did not answer".into()),
-    }
+    connected
+        .unwrap_or_else(|_| Probe::Inconclusive("the probe's socket did not answer in time".into()))
 }
 
 /// The verdict on a report that is not ok: a port another process took between the
