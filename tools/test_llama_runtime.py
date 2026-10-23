@@ -202,6 +202,79 @@ class LlamaRuntimeTests(unittest.TestCase):
                 package_release.compress_source(fetched, data, out)
 
 
+class GpuBuildTests(unittest.TestCase):
+    def test_the_vulkan_build_is_the_cpu_build_plus_the_vulkan_backend(self):
+        data = llama_runtime.manifest()
+        builds = {build["path"]: build for build in data["builds"]}
+        self.assertEqual(sorted(builds), ["cpu", "vulkan"])
+        cpu, vulkan = builds["cpu"], builds["vulkan"]
+        self.assertEqual(vulkan["directory"], "vulkan")
+        self.assertEqual(vulkan["asset"], "llama-b11609-bin-ubuntu-vulkan-x64.tar.gz")
+        self.assertEqual(
+            vulkan["sha256"], "8aff188828de76492343e19905f72408c10f5b870a03592155b0e7dd19b76ed0"
+        )
+        shared = {entry["name"]: entry for entry in cpu["files"]}
+        extra = [entry for entry in vulkan["files"] if entry["name"] not in shared]
+        self.assertEqual([entry["name"] for entry in extra], ["libggml-vulkan.so"])
+        for entry in vulkan["files"]:
+            if entry["name"] in shared:
+                self.assertEqual(entry, shared[entry["name"]])
+        self.assertIn("libvulkan.so.1", vulkan["system_libraries"])
+        names = [notice["name"] for notice in data["external_notices"]]
+        self.assertIn("Vulkan-Headers-MIT.txt", names)
+
+
+class ExternalNoticeTests(unittest.TestCase):
+    TEXT = b"MIT License\n\nCopyright (c) Example\n"
+
+    def data(self, url):
+        data = synthetic()
+        data["external_notices"] = [
+            {
+                "component": "Headers",
+                "licence": "MIT",
+                "name": "Headers-MIT.txt",
+                "url": url,
+                "sha256": digest(self.TEXT),
+                "size": len(self.TEXT),
+            }
+        ]
+        return data
+
+    def test_fetched_notices_are_hash_checked_and_exactly_the_pinned_set(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "upstream.txt"
+            source.write_bytes(self.TEXT)
+            data = self.data(source.as_uri())
+            out = Path(temp) / "out"
+            out.mkdir()
+            llama_runtime.fetch_notices(out, data)
+            llama_runtime.verify_notices(out / "notices", data)
+            (out / "notices/extra.txt").write_bytes(b"x")
+            with self.assertRaises(ValueError):
+                llama_runtime.verify_notices(out / "notices", data)
+            (out / "notices/extra.txt").unlink()
+            (out / "notices/Headers-MIT.txt").write_bytes(b"changed")
+            with self.assertRaises(ValueError):
+                llama_runtime.verify_notices(out / "notices", data)
+            source.write_bytes(b"another text")
+            with self.assertRaises(ValueError):
+                llama_runtime.fetch_notices(Path(temp) / "again", data)
+
+    def test_the_package_notice_carries_each_external_text(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = self.data("file:///unused")
+            notices = Path(temp) / "notices"
+            notices.mkdir()
+            (notices / "Headers-MIT.txt").write_bytes(self.TEXT)
+            text = package_release.llama_notice(data, None, notices)
+            self.assertIn("### Headers", text)
+            self.assertIn("Copyright (c) Example", text)
+            (notices / "Headers-MIT.txt").write_bytes(b"changed")
+            with self.assertRaises(ValueError):
+                package_release.llama_notice(data, None, notices)
+
+
 class NoticeTests(unittest.TestCase):
     def test_every_compiled_in_component_gets_its_text_from_the_source(self):
         data = synthetic()

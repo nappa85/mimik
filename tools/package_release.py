@@ -27,9 +27,10 @@ def stage_llama(fetched, stage, data=None):
     return data
 
 
-def llama_notice(data, tar_path=None):
+def llama_notice(data, tar_path=None, notices_dir=None):
     """The notice for `llama/`: every component compiled into it, its text copied from the
-    pinned (hash-verified) source tar."""
+    pinned (hash-verified) source tar, or, for a component the source does not hold, from
+    the pinned external notice llama-fetch verified (re-checked here)."""
     out = [
         "\n## llama.cpp and ggml (llama/)\n\n"
         f"The official llama.cpp release {data['llama_cpp']['tag']} "
@@ -38,7 +39,7 @@ def llama_notice(data, tar_path=None):
         "compiled into it, with their licences:\n"
     ]
     notices = data["source"].get("notices", [])
-    for notice in notices:
+    for notice in [*notices, *data.get("external_notices", [])]:
         out.append(f"\n- {notice['component']}: {notice['licence']}")
     out.append("\n")
     if tar_path is not None:
@@ -55,6 +56,15 @@ def llama_notice(data, tar_path=None):
                 if not text.strip():
                     raise ValueError(f"{notice['path']}: no licence text")
                 out.append(f"\n### {notice['component']}\n\n```\n{text.rstrip()}\n```\n")
+    external = data.get("external_notices", [])
+    if notices_dir is not None and external:
+        llama_runtime.verify_notices(notices_dir, data)
+        for notice in external:
+            text = (Path(notices_dir) / notice["name"]).read_text(encoding="utf-8")
+            out.append(
+                f"\n### {notice['component']}\n\n{notice['licence']}.\n\n"
+                f"```\n{text.rstrip()}\n```\n"
+            )
     return "".join(out)
 
 
@@ -124,7 +134,9 @@ def main():
     ]:
         shutil.copy2(original, stage / filename)
     with open(stage / "THIRD-PARTY-NOTICES.md", "a", encoding="utf-8") as out:
-        out.write(llama_notice(llama, args.llama / llama["source"]["name"]))
+        out.write(
+            llama_notice(llama, args.llama / llama["source"]["name"], args.llama / "notices")
+        )
     (stage / "BUILD.txt").write_text(
         f"Version: {args.version}\nRevision: {args.revision}\nRust: {toolchain()}\n"
         f"llama.cpp: {llama['llama_cpp']['tag']} (build {llama['llama_cpp']['build']}, "

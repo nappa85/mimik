@@ -77,6 +77,17 @@
     ],
     "notices_note": "Components compiled into the shipped files, from the source's licenses/ and vendor/ (the asset's own LICENSE is llama.cpp's only); packaging copies each text from the hash-verified source tar into THIRD-PARTY-NOTICES.md."
   },
+  "external_notices": [
+    {
+      "component": "Vulkan-Headers (vulkan.hpp, compiled into llama/vulkan/libggml-vulkan.so)",
+      "licence": "Apache-2.0 OR MIT (the MIT text is shipped)",
+      "name": "Vulkan-Headers-MIT.txt",
+      "url": "https://raw.githubusercontent.com/KhronosGroup/Vulkan-Headers/e3b1eec08173d6b825cd3ac88c885a63b621504a/LICENSES/MIT.txt",
+      "sha256": "1ca3502222d967f3be5751c55f6b7ee735b5383909c3b501495f54b216dbf227",
+      "size": 1084,
+      "note": "The Linux Vulkan release asset is built on Ubuntu 22.04 against the LunarG Vulkan SDK (release.yml, job ubuntu-vulkan), whose version the release does not record; the text is pinned at tag vulkan-sdk-1.4.357.0, the SDK version the same workflow names for its Windows Vulkan build. Header-only code, not in the llama.cpp source archive."
+    }
+  ],
   "builds": [
     {
       "path": "cpu",
@@ -260,6 +271,198 @@
           "mode": "0644"
         }
       ]
+    },
+    {
+      "path": "vulkan",
+      "asset": "llama-b11609-bin-ubuntu-vulkan-x64.tar.gz",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11609/llama-b11609-bin-ubuntu-vulkan-x64.tar.gz",
+      "sha256": "8aff188828de76492343e19905f72408c10f5b870a03592155b0e7dd19b76ed0",
+      "size": 30359149,
+      "directory": "vulkan",
+      "server": "llama-server",
+      "system_libraries": [
+        "libc.so.6",
+        "libm.so.6",
+        "libstdc++.so.6",
+        "libgcc_s.so.1",
+        "libgomp.so.1",
+        "libssl.so.3",
+        "libcrypto.so.3",
+        "libvulkan.so.1",
+        "ld-linux-x86-64.so.2"
+      ],
+      "symbol_floors": {
+        "GLIBC": "2.34",
+        "GLIBCXX": "3.4.30",
+        "OPENSSL": "3.0.0",
+        "GOMP": "4.5"
+      },
+      "cpu_backend": "ggml loads every libggml-cpu-<variant>.so beside llama-server and uses the best one the host's instruction set supports; libggml-cpu-x64.so is the baseline",
+      "minimum_host": "Ubuntu 22.04 x86_64 (glibc 2.35, libstdc++ from GCC 12, OpenSSL 3, libgomp1), the release builds' own build host",
+      "files": [
+        {
+          "name": "llama-server",
+          "from": "llama-b11609/llama-server",
+          "sha256": "6983fb9d14f2e0874698548dc47cba6014fab4572c737c5a9ef314a08c0c1458",
+          "size": 17864,
+          "mode": "0755"
+        },
+        {
+          "name": "libllama-server-impl.so",
+          "from": "llama-b11609/libllama-server-impl.so",
+          "sha256": "6f0de7db709d4a737df9efa46e0636c7c543cbb9fde0ba4e32bc56e6675efdea",
+          "size": 7505688,
+          "mode": "0755"
+        },
+        {
+          "name": "libllama-common.so.0",
+          "from": "llama-b11609/libllama-common.so.0.6.0",
+          "sha256": "7ba2ed6ae36bb0705ed73d78b37b1ea33070f3ca530f9040959a17c0d84e0797",
+          "size": 6471952,
+          "mode": "0755"
+        },
+        {
+          "name": "libmtmd.so.0",
+          "from": "llama-b11609/libmtmd.so.0.6.0",
+          "sha256": "5245e1b79ad76ff4d1911cc320312422065119e63e04430611cc8d91d9ab5a92",
+          "size": 1929664,
+          "mode": "0755"
+        },
+        {
+          "name": "libllama.so.0",
+          "from": "llama-b11609/libllama.so.0.6.0",
+          "sha256": "220468c633df4b24127df5af5a58dbbdcc46696c3cf571735049d0a1892beff3",
+          "size": 4947648,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml.so.0",
+          "from": "llama-b11609/libggml.so.0.26.0",
+          "sha256": "8643a58bb37af6fb153e2ea98b48efa227855725ee51c05f4ca76b9867956463",
+          "size": 51040,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-base.so.0",
+          "from": "llama-b11609/libggml-base.so.0.26.0",
+          "sha256": "84c771ef5bd7351134d43de64292133da1218383a586af0a121b7c215171da85",
+          "size": 897792,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-alderlake.so",
+          "from": "llama-b11609/libggml-cpu-alderlake.so",
+          "sha256": "50c8b810b9e26d88a0cc2d521aef559c78d8a44d779a2c0eb56fd98a83bce779",
+          "size": 1412200,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-cannonlake.so",
+          "from": "llama-b11609/libggml-cpu-cannonlake.so",
+          "sha256": "89944d7dbf0823c778c5c2757b764fb92ea9f142f0d5df49a9bb4679abcae4d9",
+          "size": 1561576,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-cascadelake.so",
+          "from": "llama-b11609/libggml-cpu-cascadelake.so",
+          "sha256": "7dc668118370dadd4a442633ea1c2ee70e2d79bb61b828b1336c311db01f21cd",
+          "size": 1573568,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-cooperlake.so",
+          "from": "llama-b11609/libggml-cpu-cooperlake.so",
+          "sha256": "ab3a3b037275d820e9d04fa477b7c4b75b682b491aa2551e1d71a04bb29997ee",
+          "size": 1573640,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-haswell.so",
+          "from": "llama-b11609/libggml-cpu-haswell.so",
+          "sha256": "c17103d0406928eb5ebf08ba2040317ca171a1c4570abe4afef59822ee694288",
+          "size": 1416296,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-icelake.so",
+          "from": "llama-b11609/libggml-cpu-icelake.so",
+          "sha256": "69fa2bca90ff7af7bba5fdf2329aeb9cb15042cfccc58e51d5dcc2055d4bf453",
+          "size": 1573568,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-ivybridge.so",
+          "from": "llama-b11609/libggml-cpu-ivybridge.so",
+          "sha256": "c4b87e1a767ea639694aff812a31bc82c0c118cd9adf589e3475e6845bb68ca7",
+          "size": 1347848,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-piledriver.so",
+          "from": "llama-b11609/libggml-cpu-piledriver.so",
+          "sha256": "aa52a7951b674327287f3d0f1bb6c3165b1fa8b6bdfd92764f74285da9418c51",
+          "size": 1343752,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-sandybridge.so",
+          "from": "llama-b11609/libggml-cpu-sandybridge.so",
+          "sha256": "fd588706b8b3cc784085baf70a93c2b877c83f33183f778bb31784f0057f9f14",
+          "size": 1346800,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-sapphirerapids.so",
+          "from": "llama-b11609/libggml-cpu-sapphirerapids.so",
+          "sha256": "edd34053ce919ebecab29fc4a07a0063c6193dc4f6705fac4c7be16be290d004",
+          "size": 1827680,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-skylakex.so",
+          "from": "llama-b11609/libggml-cpu-skylakex.so",
+          "sha256": "725df7b17c75ee2598b43d029fa15b1c9114c340365256bf5eeb6ac5c03d6232",
+          "size": 1561576,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-sse42.so",
+          "from": "llama-b11609/libggml-cpu-sse42.so",
+          "sha256": "9868b6a0e8f26ad1972d3f347c6d8dfeba31ee2cbf78ea89529ff72e2c1237a6",
+          "size": 954440,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-x64.so",
+          "from": "llama-b11609/libggml-cpu-x64.so",
+          "sha256": "37626deedabb4bfe6ba850f12f6b1d38828d6bb11ef69b6115c1216fc2f19899",
+          "size": 946392,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-cpu-zen4.so",
+          "from": "llama-b11609/libggml-cpu-zen4.so",
+          "sha256": "47d8938c89f5aed9494d206cabaae080fe60cd0bca8a8aaaac40aa8a987c1e5b",
+          "size": 1573640,
+          "mode": "0755"
+        },
+        {
+          "name": "libggml-vulkan.so",
+          "from": "llama-b11609/libggml-vulkan.so",
+          "sha256": "3a9242b2390044b7244efb49b3ac167b9fab94bdc646c8f979a1ee85000e8d7e",
+          "size": 40612936,
+          "mode": "0755"
+        },
+        {
+          "name": "LICENSE",
+          "from": "llama-b11609/LICENSE",
+          "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d",
+          "size": 1078,
+          "mode": "0644"
+        }
+      ],
+      "gpu_backend": "libggml-vulkan.so (the Vulkan backend, loaded by ggml from beside llama-server like the CPU backends); it needs the system's Vulkan loader libvulkan.so.1 and a Vulkan driver (ICD); the CPU files are byte-identical to the cpu build's"
     }
   ],
   "test_model": {
