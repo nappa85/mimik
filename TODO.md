@@ -21,6 +21,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   mimik-catalogue-target). Free-model reviews: never in parallel (`tools/external_review.py`
   locks and skips limited models, `~/.cache/mimik-review/limits.json`).
 
+## Hakoniwa audit exception
+
+- Check new Hakoniwa releases; when one drops postcard's default features, remove the RUSTSEC-2023-0089 ignore from `.cargo/audit.toml` (DEP-24).
+
 ## Next steps
 
 0. llama.cpp versions (ASSIST-46): (a) a scheduled CI job that tries each new llama.cpp release
