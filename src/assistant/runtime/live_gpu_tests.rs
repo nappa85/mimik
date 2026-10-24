@@ -164,12 +164,12 @@ async fn live_fake_gpu_a_partial_offload_ends_on_the_cpu_saying_why() {
 }
 
 /// A Vulkan backend (not in the server's own dependencies: the real build loads
-/// `libggml-vulkan.so` at run time) that needs a library the host lacks: found by the real
-/// inspection of the build's files, reported through the GPU to CPU fallback, and the CPU path
-/// runs.
+/// `libggml-vulkan.so` at run time) that names a library the host lacks. The advisory check
+/// believes it missing, and it is wrong here (the fake server never loads it): the GPU start is
+/// still attempted, reaches ready on the GPU, and nothing of the belief shows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: bubblewrap, fake server (MIMIK_LIVE_*)"]
-async fn live_fake_gpu_a_missing_vulkan_library_falls_back_to_the_cpu_saying_which() {
+async fn live_fake_gpu_a_believed_missing_library_does_not_stop_the_gpu_start() {
     let scratch = scratch();
     let tree = Tree::new(&[("0000:0c:00.0", 128, Some(8 << 30))]);
     let backend = super::super::libs::tests::elf_needing(&["libvulkan-not-installed.so.1"]);
@@ -180,19 +180,20 @@ async fn live_fake_gpu_a_missing_vulkan_library_falls_back_to_the_cpu_saying_whi
         &[("libggml-vulkan.so", backend)],
     );
     let handle = run_until(&real, 64, |status| {
-        status.state == State::Ready && status.path == Path::Cpu
+        status.state == State::Ready || matches!(status.state, State::Unavailable(_))
     })
     .await;
     let status = handle.status();
+    assert_eq!(status.state, State::Ready, "{status:?}");
+    assert_eq!(status.path, Path::Gpu, "{status:?}");
+    assert_eq!(status.gpu_note, None, "{status:?}");
+    assert_eq!(status.level, Some(Level::Bubblewrap), "{status:?}");
+    // The belief is kept for a failure to explain; the successful start shows nothing.
+    let hint = Launcher::failure_hint(&Launch(Arc::clone(&real)), Path::Gpu).unwrap();
     assert!(
-        status
-            .gpu_note
-            .as_deref()
-            .is_some_and(|why| why.contains("needs libvulkan-not-installed.so.1")),
-        "{status:?}"
+        hint.contains("may need libvulkan-not-installed.so.1"),
+        "{hint}"
     );
-    assert_eq!(status.failures, 0, "{status:?}");
-    assert_eq!(status.device, None, "{status:?}");
     handle.shutdown().await;
 }
 

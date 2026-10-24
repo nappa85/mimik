@@ -235,6 +235,9 @@ pub(crate) struct Real {
     /// Whether level 3 may be started (ASSIST-43: never in this release; only tests that keep
     /// its code from rotting set it, through [`Real::allowing_unconfined`]).
     unconfined: bool,
+    /// What the advisory library check last believed was missing for each path (CPU, GPU): a
+    /// hint added to a failed start, never a reason to refuse or change one.
+    library_hints: Mutex<[Option<String>; 2]>,
 }
 
 /// A count of running cleanups, waited on without polling: a spawn blocks until it is 0.
@@ -408,6 +411,7 @@ impl Real {
             pidfile: Arc::new(Mutex::new(None)),
             work: Work::new(),
             probes: AtomicU64::new(1),
+            library_hints: Mutex::new([None, None]),
             cleanups: Arc::new(Cleanups::default()),
             unconfined: false,
         }
@@ -567,10 +571,13 @@ impl Real {
         )
         .map_err(|refusal| format!("the model: {refusal}"))?;
         let build_dir = real.join(&build.directory);
-        // A library the host lacks, named now instead of a server that never answers.
-        if let Some(why) = libs::explain(&files, self.server_name(path), &|| ticket.cancelled()) {
-            return Err(why);
-        }
+        // Advisory only: a library the host seems to lack is remembered as a hint for a start
+        // that then fails. It never refuses a start, and nothing about the sandbox depends on it.
+        let hint = libs::explain(&files, self.server_name(path), &|| ticket.cancelled());
+        self.library_hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)[usize::from(path == Path::Gpu)] =
+            hint;
         Ok(Checked {
             files,
             model,
@@ -2744,6 +2751,14 @@ pub(crate) struct Launch(pub Arc<Real>);
 
 #[async_trait]
 impl Launcher for Launch {
+    fn failure_hint(&self, path: Path) -> Option<String> {
+        self.0
+            .library_hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)[usize::from(path == Path::Gpu)]
+        .clone()
+    }
+
     async fn preflight(&self, path: Path) -> Result<(), String> {
         let real = &self.0;
         std::fs::create_dir_all(&real.settings.data_dir)

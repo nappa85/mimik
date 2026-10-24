@@ -343,14 +343,24 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
   file (a link must resolve) that is an ELF of the same class and machine in the folders the
   sandbox binds: the loader's default folders (`/usr/lib`, `/lib64` and the multiarch folders
   directly under them) or the path `ld.so.cache` gives (parsed read-only). A name found
-  nowhere in a complete search fails the start with a message naming it and what to install
-  (on the GPU path that is a GPU failure and the CPU path runs instead; on the CPU path it is
-  the start error). Nothing is executed on the host: no dynamic loader run, no host-side
+  nowhere in a complete search is advisory only: the sandboxed start is always attempted, and
+  the check changes no level, no confinement and nothing about whether the sandbox is required.
+  If that start then fails (no `/health`, an exit before ready, a GPU listing or start failure),
+  the failure's reason gets the hint "llama-server may need libgomp.so.1: install libgomp1
+  (Debian/Ubuntu) or your distribution's OpenMP runtime" (on the GPU path with the GPU to CPU
+  fallback reason, counted or not exactly as the failure itself); if the start succeeds nothing
+  shows. Nothing is executed on the host: no dynamic loader run, no host-side
   process. The answer is "unknown", and the start goes on as it would without the check, when a
   file is over 256 MiB, cannot be read or parsed, or names something that is not a plain library
   name; when a name has candidates only in places the loader would not look; and when the search
   was incomplete (its budget of entries, folders and depth was reached, a folder could not be
   read, or the start was cancelled). Folders that are aliases of each other are walked once.
+  Candidates are opened without blocking and must be regular files (a FIFO or a link to one is
+  refused), and entries that are neither files, links nor folders are never opened. The
+  `ld.so.cache` read is bounded (64 MiB; header and table checked, each string at most 4 KiB, a
+  total string budget, cancellable); a cache that cannot be read or recognised (an old-format-only
+  one, a damaged one) is "unknown", which is not the same as a cache that parsed and is empty. The
+  parsed cache is kept for the process while the file does not change.
 - Mount flags: each bind is non-recursive, and a mount under a read-only bound directory
   (read from the host's mount table at the start) is masked by an empty read-only tmpfs, so
   no submount can stay writable under a read-only bind and the files the directory holds

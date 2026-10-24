@@ -112,6 +112,11 @@ pub(crate) trait Launcher: Send + Sync {
         level: Level,
         path: Path,
     ) -> Result<Arc<dyn Child>, Fail>;
+    /// What an advisory check believes explains a failed start of `path` (a library the host
+    /// seems to lack): added to the failure's reason, never a reason to refuse a start.
+    fn failure_hint(&self, _path: Path) -> Option<String> {
+        None
+    }
     /// The GPU the last GPU probe selected.
     fn device(&self) -> Option<DeviceView> {
         None
@@ -519,7 +524,15 @@ impl Manager {
 
     /// The levels that passed their probe and this manager may start, in order; the others
     /// are recorded as skipped.
-    fn probed(&mut self, probed: Vec<(Level, Result<(), String>)>) -> Vec<Level> {
+    /// `why` with the launcher's hint for `path`, when there is one and `why` lacks it.
+    fn hinted(&self, path: Path, why: String) -> String {
+        match self.launcher.failure_hint(path) {
+            Some(hint) if !why.contains(&hint) => format!("{why} ({hint})"),
+            _ => why,
+        }
+    }
+
+    fn probed(&mut self, path: Path, probed: Vec<(Level, Result<(), String>)>) -> Vec<Level> {
         let mut levels = Vec::new();
         for (level, result) in probed {
             let why = match result {
@@ -528,7 +541,7 @@ impl Manager {
                     continue;
                 }
                 Ok(()) => "not used in this release (ASSIST-43)".to_owned(),
-                Err(why) => why,
+                Err(why) => self.hinted(path, why),
             };
             log(&format!("level {} not used: {why}", level.number()));
             self.update(|status| status.skipped.push((level, why)));
@@ -594,12 +607,13 @@ impl Manager {
                 status.device_notes = notes;
             });
         }
-        Ok(self.probed(probed))
+        Ok(self.probed(path, probed))
     }
 
     /// The GPU path failed: the CPU path is used from now on, until Mimik restarts or the
     /// owner presses "Try the GPU again".
     fn gpu_fallback(&mut self, why: String) {
+        let why = self.hinted(Path::Gpu, why);
         log(&format!("GPU path not used, on the CPU path: {why}"));
         self.gpu_failed = Some(why.clone());
         self.update(|status| {
@@ -760,6 +774,7 @@ impl Manager {
     }
 
     fn failed(&mut self, why: String) {
+        let why = self.hinted(self.status().path, why);
         log(&format!("attempt failed (counted): {why}"));
         self.failures += 1;
         let failures = self.failures;

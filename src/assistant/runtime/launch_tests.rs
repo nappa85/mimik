@@ -320,24 +320,35 @@ async fn a_group_writable_runtime_folder_is_refused_with_the_exact_fix() {
 }
 
 #[tokio::test]
-async fn a_library_the_server_needs_and_the_host_lacks_is_named_at_the_start() {
+async fn a_library_the_check_believes_missing_never_refuses_the_start_and_leaves_a_hint() {
+    // The server (the fake) really runs; its ELF is replaced by one that names a library
+    // nobody has, so the advisory check believes it is missing. The start is still attempted
+    // (here the stand-in is not an executable server, so it fails after the attempt), the
+    // hint is remembered for the failure, and the verification itself no longer refuses.
     let server = super::super::libs::tests::elf_needing(&["libgomp-not-installed.so.1"]);
     let setup = setup_with_server(MODEL, "fake", &server);
     let launch = launch(&setup);
     launch.preflight(Path::Cpu).await.unwrap();
-    let Err(Fail::Other(why)) = launch.start(1, Level::Unconfined, Path::Cpu).await else {
-        panic!("a missing library must refuse the start");
-    };
+    let result = launch.start(1, Level::Unconfined, Path::Cpu).await;
+    if let Err(Fail::Other(why) | Fail::Sandbox(why)) = &result {
+        assert!(
+            !why.contains("may need"),
+            "the check refused the start: {why}"
+        );
+    }
+    let hint = Launcher::failure_hint(&launch, Path::Cpu).unwrap();
     assert!(
-        why.starts_with("llama-server needs libgomp-not-installed.so.1: "),
-        "{why}"
+        hint.starts_with("llama-server may need libgomp-not-installed.so.1: "),
+        "{hint}"
     );
+    // Nothing for the other path.
+    assert_eq!(Launcher::failure_hint(&launch, Path::Gpu), None);
 }
 
 #[tokio::test]
-async fn a_backend_loaded_with_dlopen_is_inspected_and_its_missing_library_named() {
-    // The server (the fake) is fine; a CPU backend variant of the build, which the server would
-    // load at run time and which no `DT_NEEDED` of the server names, needs a library nobody has.
+async fn a_backend_loaded_with_dlopen_is_inspected_and_leaves_a_hint() {
+    // The server (the fake) is fine; a CPU backend variant of the build, which no `DT_NEEDED`
+    // of the server names, needs a library nobody has.
     let mut setup = setup(MODEL, "fake");
     let backend = super::super::libs::tests::elf_needing(&["libgomp-not-installed.so.1"]);
     let path = setup.dir.path().join("runtime/cpu/libggml-cpu-haswell.so");
@@ -351,12 +362,15 @@ async fn a_backend_loaded_with_dlopen_is_inspected_and_its_missing_library_named
     });
     let launch = launch(&setup);
     launch.preflight(Path::Cpu).await.unwrap();
-    let Err(Fail::Other(why)) = launch.start(1, Level::Unconfined, Path::Cpu).await else {
-        panic!("a missing library of a backend must refuse the start");
-    };
+    // The start is attempted and not refused for it.
+    let started = launch.start(1, Level::Unconfined, Path::Cpu).await;
+    if let Err(Fail::Other(why) | Fail::Sandbox(why)) = &started {
+        assert!(!why.contains("may need"), "{why}");
+    }
+    let hint = Launcher::failure_hint(&launch, Path::Cpu).unwrap();
     assert!(
-        why.starts_with("llama-server needs libgomp-not-installed.so.1: "),
-        "{why}"
+        hint.starts_with("llama-server may need libgomp-not-installed.so.1: "),
+        "{hint}"
     );
 }
 

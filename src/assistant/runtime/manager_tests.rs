@@ -210,10 +210,16 @@ struct FakeLauncher {
     stops: Arc<AtomicUsize>,
     primed: Arc<AtomicUsize>,
     coexisted: AtomicBool,
+    /// What the advisory library check says per path (CPU, GPU).
+    hints: Mutex<[Option<String>; 2]>,
 }
 
 #[async_trait]
 impl Launcher for FakeLauncher {
+    fn failure_hint(&self, path: Path) -> Option<String> {
+        self.hints.lock().unwrap()[usize::from(path == Path::Gpu)].clone()
+    }
+
     async fn preflight(&self, _: Path) -> Result<(), String> {
         *self.preflights.lock().unwrap() += 1;
         let delay = *self.preflight_delay.lock().unwrap();
@@ -929,12 +935,6 @@ async fn a_gpu_failure_at_each_phase_moves_to_the_cpu_at_once_uncounted() {
             Start::Sandbox("bubblewrap could not set up the sandbox"),
             "bubblewrap could not set up",
         ),
-        (
-            Start::Other(
-                "llama-server needs libvulkan.so.1: install libvulkan1 (Debian/Ubuntu) or your distribution's Vulkan loader",
-            ),
-            "needs libvulkan.so.1",
-        ),
         (Start::Ok(not_loaded), "only 30 of 41 layers"),
         (Start::Ok(no_priming), "priming failed"),
         (Start::Ok(too_slow), "a calibration sample took more than"),
@@ -1126,4 +1126,65 @@ fn a_manager_whose_handles_are_all_dropped_while_ready_does_not_spin() {
         finished.recv_timeout(Duration::from_secs(30)).is_ok(),
         "the manager spun once its handles were gone"
     );
+}
+
+#[tokio::test]
+async fn a_failed_gpu_start_gets_the_libraries_hint_and_falls_back() {
+    let hint = "llama-server may need libvulkan.so.1: install libvulkan1 (Debian/Ubuntu) or your distribution's Vulkan loader";
+    let launcher = FakeLauncher::scripted([
+        Start::Other("the model server exited before it was ready"),
+        Start::Ok(Behaviour::default()),
+    ]);
+    launcher.hints.lock().unwrap()[1] = Some(hint.into());
+    *launcher.device.lock().unwrap() = Some(rx6650());
+    let (assistant, handle) = gpu_manager(&launcher);
+    ready(&assistant).await;
+    let status = handle.status();
+    // The GPU start was attempted, failed, and the reason names the library.
+    assert_eq!(*launcher.paths.lock().unwrap(), [Path::Gpu, Path::Cpu]);
+    let note = status.gpu_note.unwrap();
+    assert!(note.contains("exited before it was ready"), "{note}");
+    assert!(note.contains(hint), "{note}");
+    assert_eq!(status.path, Path::Cpu);
+    assert_eq!(status.level, Some(Level::Bubblewrap));
+}
+
+#[tokio::test]
+async fn a_hint_for_a_library_never_changes_a_start_that_succeeds() {
+    // A false "missing": the start works, and nothing of the hint shows.
+    let launcher = FakeLauncher::scripted([Start::Ok(Behaviour::default())]);
+    launcher.hints.lock().unwrap()[0] = Some("llama-server may need libgomp.so.1: x".into());
+    let (assistant, handle) = manager(&launcher);
+    ready(&assistant).await;
+    let status = handle.status();
+    assert_eq!(status.state, State::Ready);
+    assert_eq!(status.level, Some(Level::Bubblewrap));
+    assert_eq!(status.failures, 0);
+    assert_eq!(status.last_failure, None);
+    assert!(
+        status.skipped.is_empty()
+            || status
+                .skipped
+                .iter()
+                .all(|(_, why)| !why.contains("libgomp"))
+    );
+}
+
+#[tokio::test]
+async fn a_failed_cpu_start_is_counted_with_the_libraries_hint() {
+    let launcher = FakeLauncher::scripted([Start::Other("the model server did not answer")]);
+    launcher.hints.lock().unwrap()[0] =
+        Some("llama-server may need libgomp.so.1: install libgomp1".into());
+    let (_assistant, handle) = manager(&launcher);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let last = loop {
+        if let Some(last) = handle.status().last_failure {
+            break last;
+        }
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(last.contains("did not answer"), "{last}");
+    assert!(last.contains("may need libgomp.so.1"), "{last}");
+    handle.shutdown().await;
 }

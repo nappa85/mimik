@@ -69,14 +69,23 @@ fn kind_of(head: &[u8]) -> Option<Kind> {
     })
 }
 
+/// Opens `path` without ever blocking (a FIFO, or a link to one, opens at once and is then
+/// refused) and gives the file only if the descriptor is a regular file.
+fn open_regular(path: &Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    file.metadata().ok()?.is_file().then_some(file)
+}
+
 /// Whether `path` is a regular file (a link must resolve to one) that is an ELF of `kind`.
 fn compatible(path: &Path, kind: Kind) -> bool {
-    let Ok(file) = std::fs::File::open(path) else {
+    let Some(file) = open_regular(path) else {
         return false;
     };
-    if !file.metadata().is_ok_and(|meta| meta.is_file()) {
-        return false;
-    }
     let mut head = [0_u8; 20];
     file.take(20).read_exact(&mut head).is_ok() && kind_of(&head) == Some(kind)
 }
@@ -123,31 +132,110 @@ pub(crate) fn read_fd(fd: BorrowedFd<'_>, size: u64) -> Option<Vec<u8>> {
     Some(data)
 }
 
+/// The most of `ld.so.cache` that is read.
+pub(crate) const CACHE_MAX: u64 = 64 << 20;
+/// The longest name or path in the cache that is accepted.
+const STRING_MAX: usize = 4096;
+/// The most string bytes looked at over one parse (entries may share or overlap strings, so
+/// this bounds the work a crafted cache can cause).
+const PARSE_WORK: usize = 16 << 20;
+
 /// `(name, path)` of each library in a glibc `ld.so.cache` (the new format, alone or after the
-/// old one); `None` when it is neither.
-pub(crate) fn parse_cache(data: &[u8]) -> Option<Vec<(String, PathBuf)>> {
+/// old one). `None` when the cache is not one this recognises or is not sound: a bad header, an
+/// entry or string outside the table, a string over [`STRING_MAX`], more work than
+/// [`PARSE_WORK`], or a cancel. `Some` with no entries is a cache that parsed and is empty.
+pub(crate) fn parse_cache(
+    data: &[u8],
+    cancelled: &dyn Fn() -> bool,
+) -> Option<Vec<(String, PathBuf)>> {
     const MAGIC: &[u8] = b"glibc-ld.so.cache1.1";
+    const HEADER: usize = 48;
+    const ENTRY: usize = 24;
     let start = data
         .windows(MAGIC.len())
         .position(|window| window == MAGIC)?;
     let cache = &data[start..];
     let word = |at: usize| -> Option<usize> {
-        Some(u32::from_le_bytes(cache.get(at..at + 4)?.try_into().ok()?) as usize)
+        let bytes = cache.get(at..at.checked_add(4)?)?;
+        Some(u32::from_le_bytes(bytes.try_into().ok()?) as usize)
     };
     let count = word(20)?;
-    let strings = |at: usize| -> Option<String> {
-        let tail = cache.get(at..)?;
+    let table_end = count.checked_mul(ENTRY)?.checked_add(HEADER)?;
+    if table_end > cache.len() {
+        return None;
+    }
+    let mut spent = 0_usize;
+    // A string at `at` in the strings region (after the table), borrowed, bounded and counted.
+    let mut string = |at: usize| -> Option<&str> {
+        if at < table_end || at >= cache.len() {
+            return None;
+        }
+        let tail = &cache[at..cache.len().min(at + STRING_MAX + 1)];
         let end = tail.iter().position(|byte| *byte == 0)?;
-        String::from_utf8(tail[..end].to_vec()).ok()
+        spent = spent.checked_add(end + 1)?;
+        if spent > PARSE_WORK {
+            return None;
+        }
+        std::str::from_utf8(&tail[..end]).ok()
     };
     let mut found = Vec::new();
     for index in 0..count {
-        // flags i32, key u32, value u32, osversion u32, hwcap u64: 24 bytes after 48 of header.
-        let at = 48 + index * 24;
+        if index % 1024 == 0 && cancelled() {
+            return None;
+        }
+        // flags i32, key u32, value u32, osversion u32, hwcap u64.
+        let at = HEADER + index * ENTRY;
         let (key, value) = (word(at + 4)?, word(at + 8)?);
-        found.push((strings(key)?, PathBuf::from(strings(value)?)));
+        let name = string(key)?;
+        let path = string(value)?;
+        found.push((name.to_owned(), PathBuf::from(path)));
     }
     Some(found)
+}
+
+/// Reads at most `max` bytes of a regular file, never blocking (`None`: not a regular file,
+/// unreadable, or larger).
+fn read_bounded(path: &Path, max: u64) -> Option<Vec<u8>> {
+    let file = open_regular(path)?;
+    if file.metadata().ok()?.len() > max {
+        return None;
+    }
+    let mut data = Vec::new();
+    file.take(max + 1).read_to_end(&mut data).ok()?;
+    (data.len() as u64 <= max).then_some(data)
+}
+
+/// The parsed `ld.so.cache`, kept for the process while the file does not change (its
+/// identity, size and modification time): every start would otherwise read and parse it again.
+fn cached_entries(cancelled: &dyn Fn() -> bool) -> Option<Vec<(String, PathBuf)>> {
+    type CacheStamp = (u64, u64, u64, i64, i64);
+    type Entries = Option<Vec<(String, PathBuf)>>;
+    static MEMO: std::sync::Mutex<Option<(CacheStamp, Entries)>> = std::sync::Mutex::new(None);
+    let path = Path::new("/etc/ld.so.cache");
+    let meta = std::fs::metadata(path).ok()?;
+    let stamp = (
+        meta.dev(),
+        meta.ino(),
+        meta.len(),
+        meta.mtime(),
+        meta.mtime_nsec(),
+    );
+    if let Some((known, entries)) = MEMO
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        && *known == stamp
+    {
+        return entries.clone();
+    }
+    let parsed = read_bounded(path, CACHE_MAX).and_then(|data| parse_cache(&data, cancelled));
+    // A parse cut short by a cancel is not the cache's answer: not kept.
+    if !cancelled() {
+        *MEMO
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((stamp, parsed.clone()));
+    }
+    parsed
 }
 
 /// What the search of the host's library folders found for the names it was asked about.
@@ -165,8 +253,9 @@ pub(crate) enum Found {
 pub(crate) struct Host<'a> {
     /// The loader's default folders (top-level library folders and their multiarch children).
     pub standard: Vec<PathBuf>,
-    /// The cache's `(name, path)` entries, if it could be read.
-    pub cache: Vec<(String, PathBuf)>,
+    /// The cache's `(name, path)` entries; `None` when it could not be read or recognised,
+    /// which is not the same as a cache that parsed and is empty.
+    pub cache: Option<Vec<(String, PathBuf)>>,
     /// The folders the sandbox binds, walked for names found nowhere else.
     pub roots: Vec<PathBuf>,
     pub budget: Budget,
@@ -190,20 +279,16 @@ impl Host<'_> {
             .map(PathBuf::from)
             .filter(|dir| identity(dir).is_some_and(|id| seen.insert(id)))
             .collect();
-        let cache = std::fs::read("/etc/ld.so.cache")
-            .ok()
-            .and_then(|data| parse_cache(&data))
-            .map(|entries| {
-                entries
-                    .into_iter()
-                    .filter(|(_, path)| {
-                        LIBRARY_DIRS
-                            .iter()
-                            .any(|dir| path.starts_with(dir) && path.is_absolute())
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let cache = cached_entries(cancelled).map(|entries| {
+            entries
+                .into_iter()
+                .filter(|(_, path)| {
+                    LIBRARY_DIRS
+                        .iter()
+                        .any(|dir| path.starts_with(dir) && path.is_absolute())
+                })
+                .collect()
+        });
         Host {
             standard: Vec::new(),
             cache,
@@ -243,6 +328,7 @@ impl Host<'_> {
             let in_cache = self
                 .cache
                 .iter()
+                .flatten()
                 .any(|(cached, path)| cached == name && compatible(path, *kind));
             if in_standard || in_cache {
                 result.insert(name.clone(), Found::Yes);
@@ -257,7 +343,8 @@ impl Host<'_> {
         for (name, _) in open {
             let found = if elsewhere.contains(name) {
                 Found::Elsewhere
-            } else if complete {
+            } else if complete && self.cache.is_some() {
+                // Only a complete search with a cache that was read can say "nowhere".
                 Found::No
             } else {
                 Found::Elsewhere
@@ -324,7 +411,8 @@ impl Host<'_> {
                     if !state.complete {
                         return;
                     }
-                } else {
+                } else if kind.is_file() || kind.is_symlink() {
+                    // A FIFO, socket or device entry is never opened.
                     let name = entry.file_name().to_string_lossy().into_owned();
                     if let Some(expected) = state.open.get(&name)
                         && compatible(&entry.path(), *expected)
@@ -406,7 +494,10 @@ pub(crate) fn message(server: &str, missing: &[String]) -> Option<String> {
     } else {
         String::new()
     };
-    Some(format!("{server} needs {first}: {}{also}", remedy(first)))
+    Some(format!(
+        "{server} may need {first}: {}{also}",
+        remedy(first)
+    ))
 }
 
 /// The error for the libraries the runtime build's `files` (the server `server` among them)
