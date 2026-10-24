@@ -1272,7 +1272,13 @@ impl Sweep {
                             let line = std::fs::read(format!("/proc/{pid}/cmdline"))
                                 .map(|bytes| String::from_utf8_lossy(&bytes).replace('\0', " "))
                                 .unwrap_or_default();
-                            seen.lock().unwrap().entry((pid, start)).or_insert(line);
+                            // A process caught between its fork and exec shows no command line
+                            // yet: the first one that shows is kept.
+                            let mut seen = seen.lock().unwrap();
+                            let known: &mut String = seen.entry((pid, start)).or_default();
+                            if known.is_empty() {
+                                *known = line;
+                            }
                         }
                     }
                     std::thread::sleep(Duration::from_micros(300));
@@ -1337,7 +1343,7 @@ fn killed_after(delay: Duration) {
     let appeared = std::time::Instant::now() + Duration::from_secs(60);
     let first = loop {
         let seen = sweep.snapshot();
-        if !seen.is_empty() {
+        if seen.values().any(|line| !line.is_empty()) {
             break seen;
         }
         assert!(
