@@ -276,8 +276,12 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
   publishes the exit only then, because the reaper can end before the server has released its
   memory. The runner does not reap the reaper (a zombie can still be pinned) until Mimik has
   pinned both and said so on an acknowledgement pipe (a closed pipe makes it end the sandbox);
-  each handle is attached to the failed-start guard the moment it is opened. A server whose
-  pid is gone, or reused (another start time), has ended and is never pinned or signalled; a
+  each handle is attached to the failed-start guard the moment it is opened. The runner finds
+  the server by pinning each candidate with a pidfd and reading its parent and start time from
+  one read of its `stat`, and takes it only while its pidfd still reads as running. A server
+  whose pid is gone, or reused (another start time), has ended and is never pinned or signalled;
+  one whose start time cannot be read for another reason (`EMFILE`, `EACCES`, a garbled line)
+  keeps its pidfd and is waited for until it exits, never signalled; a
   sandbox that ended before the report says so (`ended`, the reaper reaped after the server's
   own exit status), and the marker then classifies the exit.
 - There is no shim. The closure runs in the program's process after the setup, in this

@@ -80,7 +80,16 @@ pub(crate) struct Sandbox {
     /// Hakoniwa: the sandbox's PID 1 (the server itself), held by its own pidfd. Its reaper
     /// is outside the namespace and can end before the server has finished dying (its memory
     /// is released only then), so the sandbox is gone when this process is.
-    pub inner: std::sync::OnceLock<Watched>,
+    pub inner: std::sync::OnceLock<InnerPin>,
+}
+
+/// The sandbox's PID 1, pinned. `verified` says its start time matched what the runner
+/// reported; one that could not be read keeps the pidfd (waited for until it exits) but is
+/// never signalled: an unverified process may be another's.
+#[derive(Debug)]
+pub(crate) struct InnerPin {
+    pub watched: Watched,
+    pub verified: bool,
 }
 
 /// Level 1's connector: the generation's socket, checked by its peer.
@@ -145,26 +154,51 @@ pub(crate) fn open_reaper(pid: i32, runner: i32, namespace: u64) -> io::Result<W
     Ok(watched)
 }
 
+/// What pinning the server found.
+#[derive(Debug)]
+pub(crate) enum Inner {
+    /// The process the runner reported: same pid and start time.
+    Ours(Watched),
+    /// Proof it is gone: no process has the pid, or one has it that started at another time
+    /// (the pid was reused after the server ended).
+    Gone,
+    /// The pid is held by a process whose start time could not be read (`EMFILE`, `EACCES`, an
+    /// unreadable line): it may be the server. Its pidfd is kept to be waited on, never used to
+    /// signal.
+    Unverified(Watched),
+}
+
 /// Pins the sandbox's PID 1 as the runner reported it: its pid and start time are its
-/// identity, whatever its parent is now (a killed reaper leaves it reparented). `None` is
-/// proof it is gone: no process has the pid, or one has it that started at another time (the
-/// pid was reused after the server ended). A process that has exited but is not reaped pins
-/// fine (its pidfd reads as ended).
+/// identity, whatever its parent is now (a killed reaper leaves it reparented). A process that
+/// has exited but is not reaped pins fine (its pidfd reads as ended).
 ///
 /// # Errors
 ///
 /// A failure of the pidfd that does not say the process is gone.
-pub(crate) fn open_inner(pid: i32, start: u64) -> io::Result<Option<Watched>> {
+pub(crate) fn open_inner(pid: i32, start: u64) -> io::Result<Inner> {
+    open_inner_with(pid, start, |pid| {
+        super::rundir::stat_of(pid).map(|(_, start)| start)
+    })
+}
+
+/// [`open_inner`] with the start-time read given (the tests inject its failures).
+pub(crate) fn open_inner_with(
+    pid: i32,
+    start: u64,
+    start_of: impl Fn(i32) -> io::Result<u64>,
+) -> io::Result<Inner> {
     let watched = match Watched::open(pid) {
         Ok(watched) => watched,
-        Err(error) if is_gone(&error) => return Ok(None),
+        Err(error) if is_gone(&error) => return Ok(Inner::Gone),
         Err(error) => return Err(error),
     };
     // Read after the pidfd is open: a pid reused since then is the other process's, not the
-    // one pinned (the pinned one would read its own time or none).
-    match super::rundir::start_time(pid) {
-        Some(found) if found == start => Ok(Some(watched)),
-        _ => Ok(None),
+    // one pinned (which, if it ended, reads as another start time or none).
+    match start_of(pid) {
+        Ok(found) if found == start => Ok(Inner::Ours(watched)),
+        Ok(_) => Ok(Inner::Gone),
+        Err(error) if is_gone(&error) => Ok(Inner::Gone),
+        Err(_) => Ok(Inner::Unverified(watched)),
     }
 }
 

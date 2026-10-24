@@ -610,32 +610,396 @@ fn the_topmost_mounts_under_a_directory_are_found_by_their_decoded_mount_point()
     assert_eq!(nested_mounts("", "/usr/lib"), Vec::<String>::new());
 }
 
-#[test]
-fn a_mount_under_a_read_only_bound_directory_is_masked_by_an_empty_read_only_tmpfs() {
-    let mut given = inputs(None, &[]);
-    given.mountinfo = MOUNTINFO.to_owned();
-    let plan = plan(&given);
-    // /usr/lib is a read-only bind on hosts that have it as a directory; the fixture's
-    // nested mounts then get masks at the same places.
-    if plan
-        .binds
-        .iter()
-        .any(|bind| bind.target == "/usr/lib" && bind.access == Access::ReadOnly)
-        && Path::new("/usr/lib").is_dir()
-    {
-        for target in ["/usr/lib/modules", "/usr/lib/with space"] {
-            let mask = plan.tmpfs.iter().find(|t| t.target == target);
-            let mask = mask.unwrap_or_else(|| panic!("no mask at {target}"));
-            assert!(mask.read_only && mask.bytes <= 4096, "{mask:?}");
-        }
-        // Not the inner one, which is under a masked mount already.
-        assert!(
-            !plan
-                .tmpfs
-                .iter()
-                .any(|t| t.target == "/usr/lib/modules/inner")
-        );
+/// A stand-in for Hakoniwa's reaper process: scripted answers, and a log of what was done to it.
+#[cfg(feature = "sandbox-hakoniwa")]
+struct FakeReaper {
+    log: std::sync::Arc<std::sync::Mutex<Vec<(&'static str, std::time::Instant)>>>,
+    wait: Option<hakoniwa::ExitStatus>,
+    try_wait: Option<hakoniwa::ExitStatus>,
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+fn ran(code: i32) -> hakoniwa::ExitStatus {
+    hakoniwa::ExitStatus {
+        code,
+        reason: String::new(),
+        exit_code: Some(code),
+        rusage: None,
+        proc_pid_smaps_rollup: None,
+        proc_pid_status: None,
     }
-    // The ordinary tmpfs mounts are not read-only.
-    assert!(plan.tmpfs.iter().filter(|t| !t.read_only).count() >= 4);
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+impl FakeReaper {
+    fn new(wait: i32, try_wait: Option<i32>) -> Self {
+        Self {
+            log: std::sync::Arc::default(),
+            wait: Some(ran(wait)),
+            try_wait: try_wait.map(ran),
+        }
+    }
+    fn note(&self, what: &'static str) {
+        self.log
+            .lock()
+            .unwrap()
+            .push((what, std::time::Instant::now()));
+    }
+    fn calls(&self) -> Vec<&'static str> {
+        self.log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(what, _)| *what)
+            .collect()
+    }
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+impl Reaper for FakeReaper {
+    fn wait(&mut self) -> Result<hakoniwa::ExitStatus, hakoniwa::Error> {
+        self.note("wait");
+        Ok(self.wait.clone().unwrap())
+    }
+    fn try_wait(&mut self) -> Result<Option<hakoniwa::ExitStatus>, hakoniwa::Error> {
+        self.note("try_wait");
+        Ok(self.try_wait.clone())
+    }
+    fn kill(&mut self) {
+        self.note("kill");
+    }
+}
+
+/// Scripted `/proc`: `(pid, parent, start)`, with the pids whose pidfd reads as exited after
+/// the read, and the pids whose `stat` cannot be read.
+#[cfg(feature = "sandbox-hakoniwa")]
+#[derive(Default)]
+struct FakeProcs {
+    table: Vec<(i32, i32, u64)>,
+    exited: Vec<i32>,
+    unreadable: Vec<i32>,
+    // Each pidfd is a real descriptor (a pipe end) keyed by pid.
+    fds: std::sync::Mutex<Vec<(i32, i32)>>,
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+impl Procs for FakeProcs {
+    fn pids(&self) -> Vec<i32> {
+        self.table.iter().map(|(pid, _, _)| *pid).collect()
+    }
+    fn open(&self, pid: i32) -> std::io::Result<std::os::fd::OwnedFd> {
+        let (read, _write) = rustix::pipe::pipe().unwrap();
+        let raw = std::os::fd::AsRawFd::as_raw_fd(&read);
+        self.fds.lock().unwrap().push((raw, pid));
+        Ok(read)
+    }
+    fn stat(&self, pid: i32) -> std::io::Result<(i32, u64)> {
+        if self.unreadable.contains(&pid) {
+            return Err(std::io::Error::from_raw_os_error(libc::EMFILE));
+        }
+        self.table
+            .iter()
+            .find(|(candidate, _, _)| *candidate == pid)
+            .map(|(_, parent, start)| (*parent, *start))
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ESRCH))
+    }
+    fn exited(&self, pidfd: &std::os::fd::OwnedFd) -> bool {
+        let raw = std::os::fd::AsRawFd::as_raw_fd(pidfd);
+        self.fds
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(fd, pid)| *fd == raw && self.exited.contains(pid))
+    }
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn the_server_is_the_live_child_identified_from_one_read_of_its_stat() {
+    let procs = FakeProcs {
+        table: vec![(10, 1, 5), (11, 7, 6), (12, 7, 999)],
+        exited: vec![12],
+        ..FakeProcs::default()
+    };
+    // 11 is the parent's live child; 12 is its child too but its pidfd reads ended after the
+    // read (it may be a reused pid by then): not the server; 10 is another's.
+    assert_eq!(find_child(&procs, 7), Ok(Some((11, 6))));
+    assert_eq!(find_child(&procs, 99), Ok(None));
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn a_bystander_substituted_for_the_discovered_pid_is_never_the_server() {
+    // The pid listed for the reaper's child is, by the time it is identified, another
+    // process's (its parent is not the reaper): the one read of `stat` says so, and the
+    // bystander is not returned, so never pinned or signalled.
+    let bystander = FakeProcs {
+        table: vec![(11, 4242, 777)],
+        ..FakeProcs::default()
+    };
+    assert_eq!(find_child(&bystander, 7), Ok(None));
+    // And one whose parent still reads as the reaper's but has ended since the pidfd was
+    // opened (a reaped, reused pid): skipped.
+    let reused = FakeProcs {
+        table: vec![(11, 7, 777)],
+        exited: vec![11],
+        ..FakeProcs::default()
+    };
+    assert_eq!(find_child(&reused, 7), Ok(None));
+    // A stat that cannot be read is no identity either.
+    let unreadable = FakeProcs {
+        table: vec![(11, 7, 777)],
+        unreadable: vec![11],
+        ..FakeProcs::default()
+    };
+    assert_eq!(find_child(&unreadable, 7), Ok(None));
+    // Two live children: refused.
+    let two = FakeProcs {
+        table: vec![(11, 7, 1), (12, 7, 2)],
+        ..FakeProcs::default()
+    };
+    assert_eq!(find_child(&two, 7), Err(()));
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+fn ack_pipe() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
+    rustix::pipe::pipe().unwrap()
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+fn procs_with_one_child() -> FakeProcs {
+    FakeProcs {
+        table: vec![(11, 7, 6)],
+        ..FakeProcs::default()
+    }
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+const SHORT: std::time::Duration = std::time::Duration::from_millis(200);
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn a_reaper_that_ended_in_the_early_window_is_reaped_and_reported_as_ended() {
+    let (ack, _keep) = ack_pipe();
+    let mut reaper = FakeReaper::new(3, None);
+    let mut status = Vec::new();
+    let code = supervise(
+        &mut reaper,
+        7,
+        true,
+        &FakeProcs::default(),
+        &mut status,
+        &ack,
+        SHORT,
+    );
+    assert_eq!(code, 3);
+    assert_eq!(
+        String::from_utf8(status).unwrap(),
+        "{\"child-pid\":7,\"ended\":true}\n"
+    );
+    assert_eq!(reaper.calls(), ["wait"]);
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn a_reaper_that_ended_between_the_early_poll_and_the_child_lookup_is_taken_as_ended() {
+    let (ack, _keep) = ack_pipe();
+    // No live child (the server ended), and the reaper has ended too: its status is taken.
+    let mut reaper = FakeReaper::new(0, Some(3));
+    let mut status = Vec::new();
+    let code = supervise(
+        &mut reaper,
+        7,
+        false,
+        &FakeProcs::default(),
+        &mut status,
+        &ack,
+        SHORT,
+    );
+    assert_eq!(code, 3);
+    assert_eq!(
+        String::from_utf8(status).unwrap(),
+        "{\"child-pid\":7,\"ended\":true}\n"
+    );
+    assert_eq!(reaper.calls(), ["try_wait"]);
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn a_live_reaper_with_no_child_is_killed_reaped_and_refused() {
+    let (ack, _keep) = ack_pipe();
+    let mut reaper = FakeReaper::new(0, None);
+    let mut status = Vec::new();
+    let code = supervise(
+        &mut reaper,
+        7,
+        false,
+        &FakeProcs::default(),
+        &mut status,
+        &ack,
+        SHORT,
+    );
+    assert_eq!(code, exit::SPEC);
+    assert!(status.is_empty(), "nothing is reported");
+    assert_eq!(reaper.calls(), ["try_wait", "kill", "wait"]);
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn the_reaper_is_not_reaped_until_the_launcher_acknowledges() {
+    let (ack, send) = ack_pipe();
+    let mut reaper = FakeReaper::new(5, None);
+    let log = std::sync::Arc::clone(&reaper.log);
+    let acknowledged_at = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let writer = {
+        let acknowledged_at = std::sync::Arc::clone(&acknowledged_at);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            *acknowledged_at.lock().unwrap() = Some(std::time::Instant::now());
+            rustix::io::write(&send, b"1").unwrap();
+        })
+    };
+    let mut status = Vec::new();
+    let code = supervise(
+        &mut reaper,
+        7,
+        false,
+        &procs_with_one_child(),
+        &mut status,
+        &ack,
+        std::time::Duration::from_secs(10),
+    );
+    writer.join().unwrap();
+    assert_eq!(code, 5);
+    assert_eq!(
+        String::from_utf8(status).unwrap(),
+        "{\"child-pid\":7,\"inner-pid\":11,\"inner-start\":6}\n"
+    );
+    let log = log.lock().unwrap();
+    assert_eq!(
+        log.iter().map(|(what, _)| *what).collect::<Vec<_>>(),
+        ["wait"]
+    );
+    // The reaper was reaped only after the acknowledgement was sent.
+    assert!(log[0].1 >= acknowledged_at.lock().unwrap().unwrap());
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn a_launcher_that_closes_the_pipe_without_a_byte_gets_the_sandbox_ended() {
+    let (ack, send) = ack_pipe();
+    drop(send);
+    let mut reaper = FakeReaper::new(0, None);
+    let mut status = Vec::new();
+    let code = supervise(
+        &mut reaper,
+        7,
+        false,
+        &procs_with_one_child(),
+        &mut status,
+        &ack,
+        SHORT,
+    );
+    assert_eq!(code, exit::SPEC);
+    assert_eq!(reaper.calls(), ["kill", "wait"]);
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn no_acknowledgement_within_the_time_ends_the_sandbox_in_bounded_time() {
+    let (ack, _send) = ack_pipe();
+    let mut reaper = FakeReaper::new(0, None);
+    let mut status = Vec::new();
+    let started = std::time::Instant::now();
+    let code = supervise(
+        &mut reaper,
+        7,
+        false,
+        &procs_with_one_child(),
+        &mut status,
+        &ack,
+        SHORT,
+    );
+    assert_eq!(code, exit::SPEC);
+    assert!(started.elapsed() >= SHORT && started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(reaper.calls(), ["kill", "wait"]);
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn more_than_one_process_in_the_sandbox_ends_it() {
+    let (ack, _keep) = ack_pipe();
+    let mut reaper = FakeReaper::new(0, None);
+    let procs = FakeProcs {
+        table: vec![(11, 7, 1), (12, 7, 2)],
+        ..FakeProcs::default()
+    };
+    let mut status = Vec::new();
+    let code = supervise(&mut reaper, 7, false, &procs, &mut status, &ack, SHORT);
+    assert_eq!(code, exit::SPEC);
+    assert_eq!(reaper.calls(), ["kill", "wait"]);
+}
+
+#[test]
+fn the_stat_line_gives_the_parent_and_the_start_time_of_the_same_read() {
+    let me = i32::try_from(std::process::id()).unwrap();
+    let (parent, start) = crate::assistant::runtime::rundir::stat_of(me).unwrap();
+    assert_eq!(
+        Some(start),
+        crate::assistant::runtime::rundir::start_time(me)
+    );
+    assert_eq!(
+        parent,
+        rustix::process::getppid().unwrap().as_raw_nonzero().get()
+    );
+    // A name with spaces and parentheses does not shift the fields.
+    let line = "42 (a) b (c) S 7 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 987654 0 0 0";
+    assert_eq!(
+        crate::assistant::runtime::rundir::parse_stat(line),
+        Some((7, 987_654))
+    );
+    assert_eq!(
+        crate::assistant::runtime::rundir::parse_stat("garbage"),
+        None
+    );
+    assert_eq!(
+        crate::assistant::runtime::rundir::parse_stat("1 (x) S"),
+        None
+    );
+}
+
+#[test]
+fn a_mount_under_a_read_only_bound_directory_is_masked_whatever_the_host_has() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().to_str().unwrap().to_owned();
+    let binds = vec![
+        Bind {
+            source: source.clone(),
+            target: "/opt/lib".into(),
+            access: Access::ReadOnly,
+            identity: None,
+        },
+        // A writable bind is not masked: it is the server's own directory.
+        Bind {
+            source: source.clone(),
+            target: "/run/llama".into(),
+            access: Access::ReadWrite,
+            identity: None,
+        },
+    ];
+    let info = format!(
+        "40 36 0:30 / {source}/modules rw - tmpfs t rw\n41 40 0:31 / {source}/modules/deep rw - tmpfs t rw\n"
+    );
+    let masks = masks(&binds, &info);
+    assert_eq!(masks.len(), 1, "{masks:?}");
+    assert_eq!(masks[0].target, "/opt/lib/modules");
+    assert!(masks[0].read_only && masks[0].bytes <= 4096);
+    // A source that is a file or does not exist is not masked.
+    let file = Bind {
+        source: format!("{source}/nothing"),
+        target: "/opt/file".into(),
+        access: Access::ReadOnly,
+        identity: None,
+    };
+    assert_eq!(super::masks(&[file], &info), Vec::<Tmpfs>::new());
 }

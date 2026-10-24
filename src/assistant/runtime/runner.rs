@@ -321,6 +321,46 @@ fn spawn_on_spawner(command: Command) -> std::io::Result<Child> {
         .map_err(|_| std::io::Error::other("the spawner thread has gone"))?
 }
 
+/// A writer into a buffer reserved to its limit that refuses what would pass it, so the
+/// buffer (which may hold the token) is never reallocated, leaving an unwiped copy behind.
+pub(crate) struct Bounded {
+    buffer: zeroize::Zeroizing<Vec<u8>>,
+    limit: usize,
+}
+
+impl Bounded {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            buffer: zeroize::Zeroizing::new(Vec::with_capacity(limit)),
+            limit,
+        }
+    }
+}
+
+impl std::io::Write for Bounded {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.buffer.len() + data.len() > self.limit {
+            return Err(std::io::Error::other(format!(
+                "the runner's spec is more than the {} bytes it reads",
+                self.limit
+            )));
+        }
+        self.buffer.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// `spec` as the runner reads it: JSON in a buffer that never reallocates, wiped when dropped.
+fn encode_spec(spec: &Spec, limit: usize) -> std::io::Result<zeroize::Zeroizing<Vec<u8>>> {
+    let mut writer = Bounded::new(limit);
+    serde_json::to_writer(&mut writer, spec).map_err(std::io::Error::other)?;
+    Ok(writer.buffer)
+}
+
 /// Starts the runner with `spec` on [`SPEC_FD`] and every handover at its target number;
 /// stdout and stderr are pipes for the drain.
 ///
@@ -332,12 +372,7 @@ pub(crate) fn launch(
     spec: &Spec,
     handover: &[Handover],
 ) -> std::io::Result<Child> {
-    // Written into a buffer reserved to the bound, so a spec within it never reallocates
-    // (an unwiped old copy of the token); one beyond it is refused just below.
-    let mut text = zeroize::Zeroizing::new(Vec::with_capacity(
-        usize::try_from(SPEC_BOUND).unwrap_or(1 << 20) + 1,
-    ));
-    serde_json::to_writer(&mut *text, spec).map_err(std::io::Error::other)?;
+    let text = encode_spec(spec, usize::try_from(SPEC_BOUND).unwrap_or(1 << 20))?;
     if u64::try_from(text.len()).unwrap_or(u64::MAX) > SPEC_BOUND {
         return Err(std::io::Error::other(format!(
             "the runner's spec is {} bytes, more than the {SPEC_BOUND} it reads",

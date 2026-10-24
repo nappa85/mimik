@@ -896,9 +896,10 @@ async fn a_failed_starts_guard_kills_and_waits_for_the_inner_process_too() {
     let sandbox = Arc::new(Sandbox {
         reaper: reaper_watch,
         pid_namespace: 0,
-        inner: std::sync::OnceLock::from(
-            Watched::open(i32::try_from(inner_process.id()).unwrap()).unwrap(),
-        ),
+        inner: std::sync::OnceLock::from(endpoint::InnerPin {
+            watched: Watched::open(i32::try_from(inner_process.id()).unwrap()).unwrap(),
+            verified: true,
+        }),
     });
     let work = Work::new();
     let mut owned = Owned::new(runner, work.enter());
@@ -907,7 +908,9 @@ async fn a_failed_starts_guard_kills_and_waits_for_the_inner_process_too() {
     tokio::time::timeout(Duration::from_secs(10), work.settle())
         .await
         .unwrap();
-    assert!(endpoint::exited(&sandbox.inner.get().unwrap().pidfd));
+    assert!(endpoint::exited(
+        &sandbox.inner.get().unwrap().watched.pidfd
+    ));
     inner_process.wait().unwrap();
 }
 
@@ -924,7 +927,10 @@ async fn the_exit_is_published_only_once_the_inner_process_is_gone() {
     let sandbox = Arc::new(Sandbox {
         reaper: Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap(),
         pid_namespace: 0,
-        inner: std::sync::OnceLock::from(Watched::open(inner_pid).unwrap()),
+        inner: std::sync::OnceLock::from(endpoint::InnerPin {
+            watched: Watched::open(inner_pid).unwrap(),
+            verified: true,
+        }),
     });
     reaper_process.wait().unwrap();
     let (sender, mut receiver) = watch::channel(None);
@@ -1933,4 +1939,154 @@ async fn a_start_without_a_reported_server_fails_with_the_reaper_waited_for() {
         rustix::process::Pid::from_raw(fake.inner_pid).unwrap(),
         rustix::process::Signal::KILL,
     );
+}
+
+fn emfile() -> std::io::Error {
+    std::io::Error::from_raw_os_error(libc::EMFILE)
+}
+
+#[test]
+fn a_server_is_gone_only_when_it_is_proven_and_unverified_when_its_start_cannot_be_read() {
+    let mut sleeper = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let pid = i32::try_from(sleeper.id()).unwrap();
+    let start = rundir::start_time(pid).unwrap();
+    // The reported start time, read: ours.
+    assert!(matches!(
+        endpoint::open_inner_with(pid, start, |_| Ok(start)),
+        Ok(endpoint::Inner::Ours(_))
+    ));
+    // Another start time: the pid was reused, so the reported process is gone.
+    assert!(matches!(
+        endpoint::open_inner_with(pid, start, |_| Ok(start + 1)),
+        Ok(endpoint::Inner::Gone)
+    ));
+    // The process vanished under the read (`ENOENT`, `ESRCH`): gone.
+    for errno in [libc::ENOENT, libc::ESRCH] {
+        assert!(matches!(
+            endpoint::open_inner_with(pid, start, |_| Err(std::io::Error::from_raw_os_error(
+                errno
+            ))),
+            Ok(endpoint::Inner::Gone)
+        ));
+    }
+    // Any other failure (no descriptors, no permission, an unreadable line) proves nothing:
+    // the pidfd is kept, as unverified.
+    for error in [
+        emfile as fn() -> std::io::Error,
+        || std::io::Error::from_raw_os_error(libc::EACCES),
+        || std::io::Error::new(std::io::ErrorKind::InvalidData, "garbled"),
+    ] {
+        match endpoint::open_inner_with(pid, start, |_| Err(error())) {
+            Ok(endpoint::Inner::Unverified(watched)) => assert!(watched.alive()),
+            other => panic!("{other:?}"),
+        }
+    }
+    sleeper.kill().unwrap();
+    sleeper.wait().unwrap();
+}
+
+/// A live server whose start time could not be read is waited for, never signalled: no exit is
+/// published while it runs, and the watcher goes on once it ends by itself.
+#[tokio::test]
+async fn an_unverified_live_server_keeps_the_exit_unpublished_and_is_never_signalled() {
+    let mut runner = std::process::Command::new("true").spawn().unwrap();
+    let runner_watch = Watched::open(i32::try_from(runner.id()).unwrap()).unwrap();
+    let mut reaper_process = std::process::Command::new("true").spawn().unwrap();
+    let reaper_watch = Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap();
+    let mut stranger = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let stranger_pid = i32::try_from(stranger.id()).unwrap();
+    let pinned = match endpoint::open_inner_with(stranger_pid, 1, |_| Err(emfile())).unwrap() {
+        endpoint::Inner::Unverified(watched) => watched,
+        other => panic!("{other:?}"),
+    };
+    let sandbox = Arc::new(Sandbox {
+        reaper: reaper_watch,
+        pid_namespace: 0,
+        inner: std::sync::OnceLock::from(endpoint::InnerPin {
+            watched: pinned,
+            verified: false,
+        }),
+    });
+    reaper_process.wait().unwrap();
+    let _ = runner.wait();
+    let (sender, mut receiver) = watch::channel(None);
+    tokio::spawn(watch_exit(
+        runner,
+        runner_watch,
+        Some(sandbox),
+        sender,
+        || {},
+    ));
+    // Past the grace in which a verified one would have been signalled (and then some).
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(
+        receiver.borrow().is_none(),
+        "the exit was published with the server running"
+    );
+    assert!(
+        pid_alive(stranger_pid),
+        "an unverified process was signalled"
+    );
+    // It ends by itself: now the exit is published.
+    stranger.kill().unwrap();
+    stranger.wait().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), receiver.wait_for(Option::is_some))
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// What `pin_or_end` makes of a reaper that no longer exists: for Hakoniwa only a runner that
+/// said it had ended (`ended`) makes that acceptable; a missing reaper is otherwise an error,
+/// never proof that the server is gone.
+#[tokio::test]
+async fn a_missing_hakoniwa_reaper_fails_the_start_unless_the_runner_said_it_had_ended() {
+    let mut setup = setup(MODEL, "fake");
+    setup.settings.backend = Backend::Hakoniwa;
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    let run = launch.0.run_dir().unwrap();
+    let generation = Generation::create(&run, "9").unwrap();
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    let reaper_pid = i32::try_from(gone.id()).unwrap();
+    gone.wait().unwrap();
+    let runner = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let work = Work::new();
+    let mut owned = Owned::new(runner, work.enter());
+    let me = i32::try_from(std::process::id()).unwrap();
+    let mut started = Started {
+        child_pid: reaper_pid,
+        pid_namespace: endpoint::NAMESPACE_UNREPORTED,
+        inner_pid: None,
+        inner_start: None,
+        ended: false,
+    };
+    let command = Command::Server { device: None };
+    let refused = launch
+        .0
+        .pin_or_end(&mut owned, &started, me, &command, &generation);
+    assert!(
+        matches!(&refused, Err(Fail::Other(why)) if why.contains("reaper")),
+        "{:?}",
+        refused.map(|_| ())
+    );
+    started.ended = true;
+    let (sandbox, pinned, _) = launch
+        .0
+        .pin_or_end(&mut owned, &started, me, &command, &generation)
+        .unwrap();
+    assert!(sandbox.is_none() && pinned.is_none());
+    drop(owned);
+    tokio::time::timeout(Duration::from_secs(10), work.settle())
+        .await
+        .unwrap();
 }

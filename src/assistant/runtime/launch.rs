@@ -639,12 +639,23 @@ fn pin_sandbox(
     child.reaper = Some(Arc::clone(&sandbox));
     match (started.inner_pid, started.inner_start) {
         (Some(inner), Some(start)) => match endpoint::open_inner(inner, start) {
-            Ok(Some(watched)) => {
-                let _ = sandbox.inner.set(watched);
+            Ok(endpoint::Inner::Ours(watched)) => {
+                let _ = sandbox.inner.set(endpoint::InnerPin {
+                    watched,
+                    verified: true,
+                });
+            }
+            // Its start time could not be read: it may be the server, so it is waited on
+            // (never signalled) until it exits.
+            Ok(endpoint::Inner::Unverified(watched)) => {
+                let _ = sandbox.inner.set(endpoint::InnerPin {
+                    watched,
+                    verified: false,
+                });
             }
             // Gone (no such process, or the pid was reused): it has ended; its reaper, pinned
             // above and attached, is still waited for.
-            Ok(None) => {}
+            Ok(endpoint::Inner::Gone) => {}
             Err(error) => {
                 return Err(Pin::Fail(Fail::Other(format!(
                     "the sandbox's server process: {error}"
@@ -895,12 +906,13 @@ impl Cleanup {
         }
         if let Some(sandbox) = self.reaper.take() {
             if let Some(inner) = sandbox.inner.get() {
+                let verified = inner.verified;
                 wait_exited(
-                    &|| inner.alive(),
+                    &|| inner.watched.alive(),
                     &|| {
-                        if kill_reaper {
+                        if kill_reaper && verified {
                             let _ = rustix::process::pidfd_send_signal(
-                                &inner.pidfd,
+                                &inner.watched.pidfd,
                                 rustix::process::Signal::KILL,
                             );
                         }
@@ -2435,12 +2447,17 @@ async fn watch_exit(
         // The server first: it holds the memory, and its reaper (Hakoniwa) is outside its
         // namespace and may end before it has finished dying.
         if let Some(inner) = sandbox.inner.get() {
-            let pidfd = &inner.pidfd;
-            if !endpoint::exited(pidfd) {
+            let pidfd = &inner.watched.pidfd;
+            // An unverified one may be another's process: waited for, never signalled.
+            let verified = inner.verified;
+            if verified && !endpoint::exited(pidfd) {
                 let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
             }
             until_gone(pidfd, STOP_GRACE, || {
-                let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
+                if verified {
+                    let _ =
+                        rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
+                }
             })
             .await;
         }

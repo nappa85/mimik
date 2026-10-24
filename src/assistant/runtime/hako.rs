@@ -517,7 +517,10 @@ pub(crate) fn identity_mismatch(
 #[cfg(feature = "sandbox-hakoniwa")]
 pub(crate) use run::run;
 #[cfg(all(test, feature = "sandbox-hakoniwa"))]
-pub(crate) use run::{after_end, options, run_guarded, setup_failed, single_threaded, steps};
+pub(crate) use run::{
+    Procs, Reaper, after_end, find_child, options, run_guarded, setup_failed, single_threaded,
+    steps, supervise,
+};
 
 #[cfg(feature = "sandbox-hakoniwa")]
 mod run {
@@ -855,69 +858,186 @@ mod run {
             rustix::event::poll(&mut fds, Some(&wait)).is_ok_and(|ready| ready > 0)
         });
         let reaper = i32::try_from(child.id()).unwrap_or(0);
-        let report = |status: &mut std::fs::File, inner: Option<(i32, u64)>, ended: bool| {
-            status.write_all(started_line(reaper, inner, ended).as_bytes())
-        };
-        if early {
-            // Reaped here: its status came from the server's own exit, so the server is gone
-            // (`ended`).
-            let result = child.wait();
-            return after_end(result, || report(&mut status_file, None, true));
-        }
-        // The program is PID 1 of the namespace, the reaper's one child: its host PID is
-        // reported, so Mimik can watch the process that holds the memory.
-        let Some(inner) = child_of(reaper) else {
-            // No child: the reaper has ended in the moments since the early window (take its
-            // status like the early branch), or it is alive with nothing to reap, an error.
-            return match child.try_wait() {
-                Ok(Some(status)) => after_end(Ok(status), || report(&mut status_file, None, true)),
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    refuse(exit::SPEC, "the sandbox's server process cannot be found")
-                }
-                Err(error) => refuse(exit::SPEC, &format!("hakoniwa: {error}")),
-            };
-        };
-        let Some(start) = crate::assistant::runtime::rundir::start_time(inner) else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return refuse(
-                exit::SPEC,
-                "the sandbox's server process cannot be identified",
-            );
-        };
-        if report(&mut status_file, Some((inner, start)), false).is_err() {
-            return refuse(exit::SPEC, "the status descriptor cannot be written");
-        }
-        // Mimik pins the reaper and the server, then says so; the reaper is not reaped before
-        // (a zombie can still be pinned), and a launcher that fails closes the pipe instead.
-        if !acknowledged(&ack) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return refuse(exit::SPEC, "the launcher did not acknowledge the sandbox");
-        }
-        finish(&mut child)
+        supervise(
+            &mut child,
+            reaper,
+            early,
+            &Host,
+            &mut status_file,
+            &ack,
+            ACK_WITHIN,
+        )
     }
 
     /// How long the runner waits for the launcher's acknowledgement.
     const ACK_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
 
-    /// Whether one byte arrives on `ack` in time (a closed pipe or a timeout is no).
-    fn acknowledged(ack: &OwnedFd) -> bool {
-        let mut fds = [rustix::event::PollFd::new(
-            ack,
-            rustix::event::PollFlags::IN,
-        )];
-        let wait = rustix::time::Timespec {
-            tv_sec: i64::try_from(ACK_WITHIN.as_secs()).unwrap_or(30),
-            tv_nsec: 0,
+    /// The sandbox's reaper process as the runner sees it (Hakoniwa's `Child`, or a stand-in
+    /// in tests).
+    pub(crate) trait Reaper {
+        fn wait(&mut self) -> Result<hakoniwa::ExitStatus, hakoniwa::Error>;
+        fn try_wait(&mut self) -> Result<Option<hakoniwa::ExitStatus>, hakoniwa::Error>;
+        fn kill(&mut self);
+    }
+
+    impl Reaper for hakoniwa::Child {
+        fn wait(&mut self) -> Result<hakoniwa::ExitStatus, hakoniwa::Error> {
+            hakoniwa::Child::wait(self)
+        }
+        fn try_wait(&mut self) -> Result<Option<hakoniwa::ExitStatus>, hakoniwa::Error> {
+            hakoniwa::Child::try_wait(self)
+        }
+        fn kill(&mut self) {
+            let _ = hakoniwa::Child::kill(self);
+        }
+    }
+
+    /// What the runner reads of `/proc` to find the server (injectable: the tests substitute
+    /// processes between the steps).
+    pub(crate) trait Procs {
+        fn pids(&self) -> Vec<i32>;
+        /// A pidfd on `pid`, which pins the process it opened.
+        fn open(&self, pid: i32) -> std::io::Result<OwnedFd>;
+        /// `(parent, start time)` of `pid`, from one read of its `stat`.
+        fn stat(&self, pid: i32) -> std::io::Result<(i32, u64)>;
+        fn exited(&self, pidfd: &OwnedFd) -> bool;
+    }
+
+    /// The host's `/proc`.
+    pub(crate) struct Host;
+
+    impl Procs for Host {
+        fn pids(&self) -> Vec<i32> {
+            std::fs::read_dir("/proc")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|entry| entry.file_name().to_string_lossy().parse().ok())
+                .collect()
+        }
+        fn open(&self, pid: i32) -> std::io::Result<OwnedFd> {
+            let pid = rustix::process::Pid::from_raw(pid)
+                .ok_or_else(|| std::io::Error::other("pid 0"))?;
+            Ok(rustix::process::pidfd_open(
+                pid,
+                rustix::process::PidfdFlags::empty(),
+            )?)
+        }
+        fn stat(&self, pid: i32) -> std::io::Result<(i32, u64)> {
+            crate::assistant::runtime::rundir::stat_of(pid)
+        }
+        fn exited(&self, pidfd: &OwnedFd) -> bool {
+            crate::assistant::runtime::endpoint::exited(pidfd)
+        }
+    }
+
+    /// The one live child of `parent`, as `(pid, start time)`. Each candidate is pinned by a
+    /// pidfd first; its parent and start time come from one read of its `stat`; and it must
+    /// still be running after that read (one that has ended may be a reused pid by then, and
+    /// is not the server). `Ok(None)`: no live child. `Err`: more than one.
+    pub(crate) fn find_child(procs: &impl Procs, parent: i32) -> Result<Option<(i32, u64)>, ()> {
+        let mut found = None;
+        for pid in procs.pids() {
+            let Ok(pidfd) = procs.open(pid) else {
+                continue;
+            };
+            let Ok((owner, start)) = procs.stat(pid) else {
+                continue;
+            };
+            if procs.exited(&pidfd) || owner != parent {
+                continue;
+            }
+            if found.replace((pid, start)).is_some() {
+                return Err(());
+            }
+        }
+        Ok(found)
+    }
+
+    /// After the sandbox is spawned: reports it, holds it for the launcher's pinning and
+    /// waits for the program. `early` says the reaper had already ended when it was looked at.
+    pub(crate) fn supervise<R: Reaper>(
+        child: &mut R,
+        reaper: i32,
+        early: bool,
+        procs: &impl Procs,
+        status: &mut impl Write,
+        ack: &OwnedFd,
+        ack_within: std::time::Duration,
+    ) -> i32 {
+        let mut report = |inner: Option<(i32, u64)>, ended: bool| {
+            status.write_all(started_line(reaper, inner, ended).as_bytes())
         };
-        if !rustix::event::poll(&mut fds, Some(&wait)).is_ok_and(|ready| ready > 0) {
-            return false;
+        if early {
+            // Reaped here: its status came from the server's own exit, so the server is gone
+            // (`ended`).
+            return after_end(child.wait(), || report(None, true));
+        }
+        // The program is PID 1 of the namespace, the reaper's one child: its host PID and
+        // start time are reported, so Mimik can watch the process that holds the memory.
+        match find_child(procs, reaper) {
+            Ok(Some(inner)) => {
+                if report(Some(inner), false).is_err() {
+                    return refuse(exit::SPEC, "the status descriptor cannot be written");
+                }
+                // Mimik pins the reaper and the server, then says so; the reaper is not reaped
+                // before (a zombie can still be pinned), and a launcher that fails closes the
+                // pipe instead.
+                if !acknowledged(ack, ack_within) {
+                    child.kill();
+                    let _ = child.wait();
+                    return refuse(exit::SPEC, "the launcher did not acknowledge the sandbox");
+                }
+                finish(child)
+            }
+            // No live child: the reaper has ended in the moments since the early window (take
+            // its status like the early branch), or it is alive with nothing to reap, an error.
+            Ok(None) => match child.try_wait() {
+                Ok(Some(done)) => after_end(Ok(done), || report(None, true)),
+                Ok(None) => {
+                    child.kill();
+                    let _ = child.wait();
+                    refuse(exit::SPEC, "the sandbox's server process cannot be found")
+                }
+                Err(error) => refuse(exit::SPEC, &format!("hakoniwa: {error}")),
+            },
+            Err(()) => {
+                child.kill();
+                let _ = child.wait();
+                refuse(exit::SPEC, "the sandbox has more than one process")
+            }
+        }
+    }
+
+    /// Whether one byte arrives on `ack` within `within` (a closed pipe or a timeout is no;
+    /// an interrupted wait goes on).
+    pub(crate) fn acknowledged(ack: &OwnedFd, within: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let mut fds = [rustix::event::PollFd::new(
+                ack,
+                rustix::event::PollFlags::IN,
+            )];
+            let wait = rustix::time::Timespec {
+                tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
+                tv_nsec: i64::from(left.subsec_nanos()),
+            };
+            match rustix::event::poll(&mut fds, Some(&wait)) {
+                Ok(0) => return false,
+                Ok(_) => break,
+                Err(rustix::io::Errno::INTR) => {}
+                Err(_) => return false,
+            }
         }
         let mut byte = [0_u8; 1];
-        rustix::io::read(ack, &mut byte).is_ok_and(|read| read == 1)
+        loop {
+            match rustix::io::read(ack, &mut byte) {
+                Ok(read) => return read == 1,
+                Err(rustix::io::Errno::INTR) => {}
+                Err(_) => return false,
+            }
+        }
     }
 
     /// The end of a sandbox that ended at once: a setup failure of Hakoniwa's own is said and
@@ -939,31 +1059,6 @@ mod run {
         }
     }
 
-    /// The one process whose parent is `parent` (`PPid` of every process in `/proc`; the
-    /// kernel option for a children list is not always on).
-    fn child_of(parent: i32) -> Option<i32> {
-        let mut found = None;
-        for entry in std::fs::read_dir("/proc").ok()?.flatten() {
-            let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
-                continue;
-            };
-            let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
-                continue;
-            };
-            let parent_of = status
-                .lines()
-                .find_map(|line| line.strip_prefix("PPid:"))
-                .and_then(|value| value.trim().parse::<i32>().ok());
-            if parent_of == Some(parent) {
-                if found.is_some() {
-                    return None;
-                }
-                found = Some(pid);
-            }
-        }
-        found
-    }
-
     /// Whether Hakoniwa itself failed (code 125 without an exit status of the program: a
     /// program's own exit is always an exit status, a signal is above 128).
     pub(crate) fn setup_failed(status: &hakoniwa::ExitStatus) -> bool {
@@ -978,7 +1073,7 @@ mod run {
 
     /// Waits for the program and returns its exit code; a setup failure Hakoniwa reports
     /// (code 125 without an exit status) is said on stderr.
-    fn finish(child: &mut hakoniwa::Child) -> i32 {
+    fn finish(child: &mut impl Reaper) -> i32 {
         match child.wait() {
             Ok(status) if setup_failed(&status) => said(&status),
             Ok(status) => status.code,

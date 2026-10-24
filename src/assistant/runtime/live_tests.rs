@@ -645,14 +645,9 @@ fn assert_no_privilege_or_terminal(report: &Value) {
     assert_eq!(report["controlling_tty"], json!("0"), "{report}");
     // Standard input is `/dev/null`: with Hakoniwa it was the marker pipe until the exec.
     assert_eq!(report["stdin"], json!("/dev/null"), "{report}");
-    // The runner's own umask is back before the exec (it ran with 077 while it built the
-    // sandbox): the same as this test process's.
-    let mine = std::fs::read_to_string("/proc/self/status")
-        .unwrap()
-        .lines()
-        .find_map(|line| line.strip_prefix("Umask:").map(|v| v.trim().to_owned()))
-        .unwrap();
-    assert_eq!(report["umask"], json!(mine), "{report}");
+    // The runner's own umask (027, set around the run) is back before the exec (it ran with
+    // 077 while it built the sandbox).
+    assert_eq!(report["umask"], json!("0027"), "{report}");
     if live_backend() == Backend::Hakoniwa {
         // Hakoniwa's /dev is built here: the five safe nodes and the links, no terminal node,
         // no pts, no ptmx.
@@ -714,9 +709,11 @@ fn live_an_adversary_in_the_level_1_sandbox_reaches_nothing() {
         .unwrap()
         .block_on(Launch(Arc::clone(&real)).preflight(Path::Cpu))
         .unwrap();
-    let (report, verdict) = real
-        .inner_report(Path::Cpu, Level::Bubblewrap, &real.work().enter())
-        .unwrap();
+    // The runner inherits this process's umask: an explicit one, restored at once.
+    let before = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o027));
+    let reported = real.inner_report(Path::Cpu, Level::Bubblewrap, &real.work().enter());
+    rustix::process::umask(before);
+    let (report, verdict) = reported.unwrap();
     assert_eq!(verdict, Probe::Passed, "{report}");
     let refused = |value: &Value| value.as_i64().is_some_and(|errno| errno != 0);
     assert!(refused(&report["tcp_host_listener"]), "{report}");
@@ -1267,7 +1264,19 @@ impl Sweep {
             let (seen, stop) = (Arc::clone(&seen), Arc::clone(&stop));
             std::thread::spawn(move || {
                 while !stop.load(Ordering::SeqCst) {
-                    for pid in descendants(root) {
+                    // The root, and every process already recorded (still the same process):
+                    // what is reparented after the root's death is still found by them.
+                    let mut roots = vec![root];
+                    roots.extend(
+                        seen.lock()
+                            .unwrap()
+                            .keys()
+                            .filter(|(pid, start)| rundir::start_time(*pid) == Some(*start))
+                            .map(|(pid, _)| *pid),
+                    );
+                    let found: std::collections::BTreeSet<i32> =
+                        roots.into_iter().flat_map(descendants).collect();
+                    for pid in found {
                         if let Some(start) = rundir::start_time(pid) {
                             let line = std::fs::read(format!("/proc/{pid}/cmdline"))
                                 .map(|bytes| String::from_utf8_lossy(&bytes).replace('\0', " "))
@@ -1352,20 +1361,33 @@ fn killed_after(delay: Duration) {
         );
         std::thread::sleep(Duration::from_micros(100));
     };
-    // What was seen first is the runner, before any server's exec.
+    // The earliest process of the run (the smallest start time) is the runner, before any
+    // server's exec; its command line, empty while it is between its fork and exec, is waited
+    // for.
+    let earliest = first
+        .keys()
+        .min_by_key(|(_, start)| *start)
+        .copied()
+        .unwrap();
+    let line = loop {
+        let line = sweep.snapshot().get(&earliest).cloned().unwrap_or_default();
+        if !line.is_empty() {
+            break line;
+        }
+        assert!(
+            std::time::Instant::now() < appeared,
+            "no command line for {earliest:?}"
+        );
+        std::thread::sleep(Duration::from_micros(200));
+    };
     // (With bubblewrap the runner has already executed bwrap in place by then.)
     assert!(
-        first
-            .values()
-            .any(|line| line.contains("runner::tests::helper")
-                || line.contains("assistant-runner")
-                || (live_backend() == Backend::Bwrap && line.contains("bwrap "))),
-        "the first process seen is not the runner: {first:?}"
+        line.contains("runner::tests::helper")
+            || line.contains("assistant-runner")
+            || (live_backend() == Backend::Bwrap && line.contains("bwrap ")),
+        "the earliest process seen is not the runner: {line}"
     );
-    assert!(
-        !first.values().any(|line| line.contains("llama-server")),
-        "{first:?}"
-    );
+    assert!(!line.contains("llama-server"), "{line}");
     std::thread::sleep(delay);
     mimik.kill().unwrap();
     mimik.wait().unwrap();
