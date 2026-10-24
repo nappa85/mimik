@@ -851,7 +851,7 @@ async fn a_failed_starts_guard_kills_and_waits_for_the_reaper_too() {
     let sandbox = Arc::new(Sandbox {
         reaper: Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap(),
         pid_namespace: 0,
-        inner: None,
+        inner: std::sync::OnceLock::new(),
     });
     let work = Work::new();
     let mut owned = Owned::new(runner, work.enter());
@@ -896,7 +896,9 @@ async fn a_failed_starts_guard_kills_and_waits_for_the_inner_process_too() {
     let sandbox = Arc::new(Sandbox {
         reaper: reaper_watch,
         pid_namespace: 0,
-        inner: Some(Watched::open(i32::try_from(inner_process.id()).unwrap()).unwrap()),
+        inner: std::sync::OnceLock::from(
+            Watched::open(i32::try_from(inner_process.id()).unwrap()).unwrap(),
+        ),
     });
     let work = Work::new();
     let mut owned = Owned::new(runner, work.enter());
@@ -905,7 +907,7 @@ async fn a_failed_starts_guard_kills_and_waits_for_the_inner_process_too() {
     tokio::time::timeout(Duration::from_secs(10), work.settle())
         .await
         .unwrap();
-    assert!(endpoint::exited(&sandbox.inner.as_ref().unwrap().pidfd));
+    assert!(endpoint::exited(&sandbox.inner.get().unwrap().pidfd));
     inner_process.wait().unwrap();
 }
 
@@ -922,7 +924,7 @@ async fn the_exit_is_published_only_once_the_inner_process_is_gone() {
     let sandbox = Arc::new(Sandbox {
         reaper: Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap(),
         pid_namespace: 0,
-        inner: Some(Watched::open(inner_pid).unwrap()),
+        inner: std::sync::OnceLock::from(Watched::open(inner_pid).unwrap()),
     });
     reaper_process.wait().unwrap();
     let (sender, mut receiver) = watch::channel(None);
@@ -976,7 +978,7 @@ async fn a_reaper_that_outlives_the_wait_keeps_its_entry_and_blocks_the_settle()
     let sandbox = Arc::new(Sandbox {
         reaper: Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap(),
         pid_namespace: 0,
-        inner: None,
+        inner: std::sync::OnceLock::new(),
     });
     let mut owned = Owned::new(runner, launch.0.work().enter());
     owned.reaper = Some(Arc::clone(&sandbox));
@@ -1775,5 +1777,160 @@ async fn a_bwrap_path_with_a_newline_is_refused_before_any_directory_is_made() {
     assert!(
         matches!(&refused, Some(Fail::Other(why)) if why.starts_with("runtime path contains a newline")),
         "{refused:?}"
+    );
+}
+
+/// A fake sandbox for the pin tests: the "reaper" is a shell (a child of this test, standing
+/// for the runner's child) that starts a `sleep` (its one child, the "server") and reports
+/// its pid.
+struct FakeSandbox {
+    reaper: std::process::Child,
+    inner_pid: i32,
+    inner_start: u64,
+}
+
+fn fake_sandbox() -> FakeSandbox {
+    use std::io::BufRead;
+    let mut reaper = std::process::Command::new("sh")
+        .args(["-c", "sleep 30 & echo $!; wait"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(reaper.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let inner_pid: i32 = line.trim().parse().unwrap();
+    let inner_start = rundir::start_time(inner_pid).unwrap();
+    FakeSandbox {
+        reaper,
+        inner_pid,
+        inner_start,
+    }
+}
+
+fn started_of(reaper: &std::process::Child, inner: (i32, u64)) -> Started {
+    Started {
+        child_pid: i32::try_from(reaper.id()).unwrap(),
+        pid_namespace: endpoint::NAMESPACE_UNREPORTED,
+        inner_pid: Some(inner.0),
+        inner_start: Some(inner.1),
+        ended: false,
+    }
+}
+
+/// Pins `started` for a guard over a stand-in runner, then drops the guard and waits for its
+/// cleanup: what the guard left standing afterwards is what it did not wait for or kill.
+async fn pinned_then_cleaned(started: &Started) -> Result<Arc<Sandbox>, String> {
+    let runner = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let work = Work::new();
+    let mut owned = Owned::new(runner, work.enter());
+    let me = i32::try_from(std::process::id()).unwrap();
+    let outcome = match pin_sandbox(&mut owned, started, me, true) {
+        Ok(pinned) => Ok(pinned.sandbox),
+        Err(Pin::Gone(error)) => Err(format!("gone: {error}")),
+        Err(Pin::Fail(Fail::Other(why) | Fail::Sandbox(why))) => Err(why),
+    };
+    drop(owned);
+    tokio::time::timeout(Duration::from_secs(10), work.settle())
+        .await
+        .unwrap();
+    outcome
+}
+
+/// Mimik pauses before it pins; the reaper is killed meanwhile (left unreaped, as the
+/// runner's child), and the server lives on, reparented. It is still pinned, by identity,
+/// and the cleanup waits for it.
+#[tokio::test]
+async fn a_server_that_outlives_its_killed_reaper_is_pinned_and_waited_for() {
+    let mut fake = fake_sandbox();
+    rustix::process::kill_process(
+        rustix::process::Pid::from_raw(i32::try_from(fake.reaper.id()).unwrap()).unwrap(),
+        rustix::process::Signal::KILL,
+    )
+    .unwrap();
+    // Give the kill time to land and the server to be reparented (not reaped: it is alive).
+    while pid_alive(i32::try_from(fake.reaper.id()).unwrap()) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(pid_alive(fake.inner_pid));
+    let started = started_of(&fake.reaper, (fake.inner_pid, fake.inner_start));
+    let sandbox = pinned_then_cleaned(&started).await.unwrap();
+    assert!(
+        sandbox.inner.get().is_some(),
+        "the server was not pinned although its reaper was gone"
+    );
+    assert!(
+        !pid_alive(fake.inner_pid),
+        "the cleanup left the server running"
+    );
+    let _ = fake.reaper.wait();
+}
+
+/// A server that is already gone (its pid reaped) pins nothing, and the reaper is still
+/// attached and waited for.
+#[tokio::test]
+async fn a_dead_server_pins_nothing_and_the_reaper_is_still_waited_for() {
+    let mut fake = fake_sandbox();
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    let gone_pid = i32::try_from(gone.id()).unwrap();
+    let gone_start = rundir::start_time(gone_pid).unwrap();
+    gone.wait().unwrap();
+    let started = started_of(&fake.reaper, (gone_pid, gone_start));
+    let sandbox = pinned_then_cleaned(&started).await.unwrap();
+    assert!(sandbox.inner.get().is_none());
+    assert!(
+        endpoint::exited(&sandbox.reaper.pidfd),
+        "the reaper was not waited for"
+    );
+    let _ = fake.reaper.wait();
+    // The real server of this fixture was never named: the cleanup of the reaper leaves it.
+    let _ = rustix::process::kill_process(
+        rustix::process::Pid::from_raw(fake.inner_pid).unwrap(),
+        rustix::process::Signal::KILL,
+    );
+}
+
+/// A pid that another process has now (the reported server's pid reused, so another start
+/// time) is not the server: it is not pinned, never killed, and the reaper is waited for.
+#[tokio::test]
+async fn a_reused_server_pid_is_never_pinned_or_killed() {
+    let mut fake = fake_sandbox();
+    let mut bystander = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let bystander_pid = i32::try_from(bystander.id()).unwrap();
+    let wrong_start = rundir::start_time(bystander_pid).unwrap() + 1;
+    let started = started_of(&fake.reaper, (bystander_pid, wrong_start));
+    let sandbox = pinned_then_cleaned(&started).await.unwrap();
+    assert!(sandbox.inner.get().is_none());
+    assert!(endpoint::exited(&sandbox.reaper.pidfd));
+    assert!(pid_alive(bystander_pid), "an unrelated process was killed");
+    bystander.kill().unwrap();
+    bystander.wait().unwrap();
+    let _ = fake.reaper.wait();
+    let _ = rustix::process::kill_process(
+        rustix::process::Pid::from_raw(fake.inner_pid).unwrap(),
+        rustix::process::Signal::KILL,
+    );
+}
+
+/// A Hakoniwa runner that names no server fails the start, the reaper attached and waited for.
+#[tokio::test]
+async fn a_start_without_a_reported_server_fails_with_the_reaper_waited_for() {
+    let mut fake = fake_sandbox();
+    let mut started = started_of(&fake.reaper, (0, 0));
+    started.inner_pid = None;
+    started.inner_start = None;
+    let error = pinned_then_cleaned(&started).await.unwrap_err();
+    assert!(error.contains("not reported"), "{error}");
+    let _ = fake.reaper.wait();
+    let _ = rustix::process::kill_process(
+        rustix::process::Pid::from_raw(fake.inner_pid).unwrap(),
+        rustix::process::Signal::KILL,
     );
 }

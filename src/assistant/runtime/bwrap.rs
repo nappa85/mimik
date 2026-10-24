@@ -496,6 +496,12 @@ pub(crate) struct Started {
     /// The sandbox's PID-1 process as seen from outside (Hakoniwa only: its reaper is not
     /// inside the namespace, so the process that holds the memory must be watched itself).
     pub inner_pid: Option<i32>,
+    /// Its start time (`/proc/<pid>/stat` field 22): with the pid it is the process's identity,
+    /// which a reused pid does not share.
+    pub inner_start: Option<u64>,
+    /// Hakoniwa: the sandbox had already ended when it was reported, its reaper reaped
+    /// after the server's own exit status: the server is proven gone.
+    pub ended: bool,
 }
 
 /// Reads one status line; `None` when it is not the start report.
@@ -505,6 +511,8 @@ pub(crate) fn started(line: &str) -> Option<Started> {
         child_pid: i32::try_from(value.get("child-pid")?.as_i64()?).ok()?,
         pid_namespace: value.get("pid-namespace")?.as_u64()?,
         inner_pid: None,
+        inner_start: None,
+        ended: false,
     })
 }
 

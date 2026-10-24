@@ -62,6 +62,8 @@ fn refused(what: &'static str) -> io::Error {
 }
 
 const GONE: &str = "the sandbox's reaper has gone";
+/// [`GONE`] for messages built elsewhere.
+pub(crate) const GONE_TEXT: &str = GONE;
 
 /// `pid_namespace` when the sandbox's launcher could not read the namespace number (Hakoniwa's
 /// reaper is not dumpable): the namespace comparison is then left to the parent and `NSpid`
@@ -78,7 +80,7 @@ pub(crate) struct Sandbox {
     /// Hakoniwa: the sandbox's PID 1 (the server itself), held by its own pidfd. Its reaper
     /// is outside the namespace and can end before the server has finished dying (its memory
     /// is released only then), so the sandbox is gone when this process is.
-    pub inner: Option<Watched>,
+    pub inner: std::sync::OnceLock<Watched>,
 }
 
 /// Level 1's connector: the generation's socket, checked by its peer.
@@ -113,10 +115,11 @@ fn status(pid: i32) -> io::Result<Status> {
     })
 }
 
-/// Opens a pidfd on the reaper bwrap reported, then checks the process it pins: a child of
-/// the runner (`PPid`), in the reported PID namespace where that is readable, and still alive
-/// after both reads (so they described this process, not a later one with its PID).
-pub(crate) fn open_reaper(pid: i32, runner: i32, namespace: u64) -> io::Result<Watched> {
+/// Opens a pidfd on the reaper the launcher reported and checks the process it pins: a child
+/// of the runner (`PPid`), in the reported PID namespace where that is readable. A reaper that
+/// has already exited (and is still the runner's unreaped child) pins fine: the caller decides
+/// what an ended sandbox means.
+pub(crate) fn pin_reaper(pid: i32, runner: i32, namespace: u64) -> io::Result<Watched> {
     let watched = Watched::open(pid)?;
     if status(pid)?.ppid != runner {
         return Err(refused("the reported reaper is not bubblewrap's child"));
@@ -128,25 +131,40 @@ pub(crate) fn open_reaper(pid: i32, runner: i32, namespace: u64) -> io::Result<W
         Err(rustix::io::Errno::ACCESS | rustix::io::Errno::PERM) => {}
         Err(error) => return Err(error.into()),
     }
+    Ok(watched)
+}
+
+/// [`pin_reaper`] and still alive after both reads (so they described this process, not a
+/// later one with its PID).
+pub(crate) fn open_reaper(pid: i32, runner: i32, namespace: u64) -> io::Result<Watched> {
+    let watched = pin_reaper(pid, runner, namespace)?;
     if !watched.alive() {
         return Err(refused(GONE));
     }
     Ok(watched)
 }
 
-/// Opens a pidfd on the sandbox's PID 1 as the runner reported it, then checks it is the
-/// reaper's child (`PPid`) and still alive afterwards.
-pub(crate) fn open_inner(pid: i32, reaper: i32) -> io::Result<Watched> {
-    let watched = Watched::open(pid)?;
-    if status(pid)?.ppid != reaper {
-        return Err(refused(
-            "the reported inner process is not the reaper's child",
-        ));
+/// Pins the sandbox's PID 1 as the runner reported it: its pid and start time are its
+/// identity, whatever its parent is now (a killed reaper leaves it reparented). `None` is
+/// proof it is gone: no process has the pid, or one has it that started at another time (the
+/// pid was reused after the server ended). A process that has exited but is not reaped pins
+/// fine (its pidfd reads as ended).
+///
+/// # Errors
+///
+/// A failure of the pidfd that does not say the process is gone.
+pub(crate) fn open_inner(pid: i32, start: u64) -> io::Result<Option<Watched>> {
+    let watched = match Watched::open(pid) {
+        Ok(watched) => watched,
+        Err(error) if is_gone(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    // Read after the pidfd is open: a pid reused since then is the other process's, not the
+    // one pinned (the pinned one would read its own time or none).
+    match super::rundir::start_time(pid) {
+        Some(found) if found == start => Ok(Some(watched)),
+        _ => Ok(None),
     }
-    if !watched.alive() {
-        return Err(refused(GONE));
-    }
-    Ok(watched)
 }
 
 /// Whether `open_reaper` failed because the reaper had already exited.

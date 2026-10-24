@@ -56,6 +56,9 @@ pub(crate) enum Exec {
         plan: Box<super::hako::Plan>,
         status: RawFd,
         marker: RawFd,
+        /// Mimik's acknowledgement that it has pinned the sandbox's processes: one byte,
+        /// or the pipe's closing (the start failed).
+        ack: RawFd,
     },
 }
 
@@ -79,7 +82,10 @@ fn read_spec(fd: RawFd) -> Option<Spec> {
     // from here on; nothing else uses that number.
     let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
     // The spec may hold the token (Hakoniwa): its buffers are wiped when dropped.
-    let mut text = zeroize::Zeroizing::new(String::new());
+    // Reserved up front so reading never reallocates (an unwiped old buffer).
+    let mut text = zeroize::Zeroizing::new(String::with_capacity(
+        usize::try_from(SPEC_BOUND).unwrap_or(1 << 20) + 1,
+    ));
     file.take(SPEC_BOUND).read_to_string(&mut text).ok()?;
     serde_json::from_str(&text).ok()
 }
@@ -244,7 +250,8 @@ pub(crate) fn run(spec_fd: RawFd) -> i32 {
             plan,
             status,
             marker,
-        } => super::hako::run(*plan, status, marker),
+            ack,
+        } => super::hako::run(*plan, status, marker, ack),
         #[cfg(not(feature = "sandbox-hakoniwa"))]
         Exec::Hakoniwa { .. } => {
             eprintln!("mimik runner: this build has no Hakoniwa sandbox");
@@ -325,7 +332,12 @@ pub(crate) fn launch(
     spec: &Spec,
     handover: &[Handover],
 ) -> std::io::Result<Child> {
-    let text = zeroize::Zeroizing::new(serde_json::to_vec(spec).map_err(std::io::Error::other)?);
+    // Written into a buffer reserved to the bound, so a spec within it never reallocates
+    // (an unwiped old copy of the token); one beyond it is refused just below.
+    let mut text = zeroize::Zeroizing::new(Vec::with_capacity(
+        usize::try_from(SPEC_BOUND).unwrap_or(1 << 20) + 1,
+    ));
+    serde_json::to_writer(&mut *text, spec).map_err(std::io::Error::other)?;
     if u64::try_from(text.len()).unwrap_or(u64::MAX) > SPEC_BOUND {
         return Err(std::io::Error::other(format!(
             "the runner's spec is {} bytes, more than the {SPEC_BOUND} it reads",

@@ -228,7 +228,7 @@ fn a_bound_object_that_is_not_the_verified_one_is_refused() {
 
 #[test]
 fn the_start_report_is_the_reapers_pid_without_a_namespace_number() {
-    let line = started_line(4242, None);
+    let line = started_line(4242, None, false);
     assert_eq!(line, "{\"child-pid\":4242}\n");
     let started = started(&line).unwrap();
     assert_eq!(started.child_pid, 4242);
@@ -271,6 +271,7 @@ fn the_hakoniwa_exec_travels_in_the_runner_spec() {
             plan: Box::new(plan(&inputs(None, &["llama-server"]))),
             status: 4,
             marker: 12,
+            ack: 13,
         },
     };
     let text = serde_json::to_string(&spec).unwrap();
@@ -400,9 +401,10 @@ fn the_page_message_carries_the_generating_command_and_the_install_steps() {
 
 #[test]
 fn the_start_report_may_name_the_inner_process() {
-    let line = started_line(4242, Some(4243));
+    let line = started_line(4242, Some((4243, 99)), false);
     let started = started(&line).unwrap();
     assert_eq!((started.child_pid, started.inner_pid), (4242, Some(4243)));
+    assert_eq!(started.inner_start, Some(99));
     assert!(super::started("{\"child-pid\":1,\"inner-pid\":\"x\"}").is_none());
 }
 
@@ -502,7 +504,7 @@ fn a_runner_with_another_thread_refuses_before_it_takes_or_spawns_anything() {
         std::os::fd::AsRawFd::as_raw_fd(&status),
         std::os::fd::AsRawFd::as_raw_fd(&marker),
     );
-    let code = run_guarded(plan, status_fd, marker_fd, true);
+    let code = run_guarded(plan, status_fd, marker_fd, status_fd, true);
     assert_eq!(code, exit::SPEC);
     // The descriptors were never taken: they are still open here (a taken one would have been
     // closed with its owner), and nothing was written to either pipe or spawned.
@@ -534,4 +536,47 @@ fn each_cause_gets_its_own_worded_as_possible_remedy() {
     // The AppArmor steps are never offered for the other setting, and the reverse.
     assert!(!clone.contains("apparmor_parser"));
     assert!(!apparmor.contains("sysctl"));
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn a_sandbox_that_ended_is_reported_only_when_the_program_ran() {
+    let status = |code, exit_code| hakoniwa::ExitStatus {
+        code,
+        reason: "r".into(),
+        exit_code,
+        rusage: None,
+        proc_pid_smaps_rollup: None,
+        proc_pid_status: None,
+    };
+    let reported = std::cell::Cell::new(0);
+    let report = || {
+        reported.set(reported.get() + 1);
+        Ok(())
+    };
+    // The program ran and ended in the window between the early wait and the child lookup:
+    // reported (the sandbox was up), its own code returned.
+    assert_eq!(after_end(Ok(status(3, Some(3))), report), 3);
+    assert_eq!(reported.get(), 1);
+    // Hakoniwa's own failure: not reported, its 125 returned.
+    assert_eq!(after_end(Ok(status(125, None)), report), 125);
+    assert_eq!(reported.get(), 1);
+    // A program that exits 125 itself is its own exit, reported.
+    assert_eq!(after_end(Ok(status(125, Some(125))), report), 125);
+    assert_eq!(reported.get(), 2);
+    // A report that cannot be written is a failure of the runner.
+    let failing = || Err(std::io::Error::other("closed"));
+    assert_eq!(after_end(Ok(status(0, Some(0))), failing), exit::SPEC);
+}
+
+#[test]
+fn the_start_report_says_when_the_sandbox_had_ended_and_names_the_server_by_identity() {
+    let line = started_line(10, Some((11, 12345)), false);
+    let started = started(&line).unwrap();
+    assert_eq!(
+        (started.inner_pid, started.inner_start, started.ended),
+        (Some(11), Some(12345), false)
+    );
+    let ended = super::started(&started_line(10, None, true)).unwrap();
+    assert!(ended.ended && ended.inner_pid.is_none());
 }

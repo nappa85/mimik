@@ -349,6 +349,8 @@ fn status_lines_from_the_installed_bwrap_shape() {
             child_pid: 3_183_140,
             pid_namespace: 4_026_532_682,
             inner_pid: None,
+            inner_start: None,
+            ended: false,
         })
     );
     assert_eq!(started(r#"{ "exit-code": 0 }"#), None);

@@ -60,6 +60,8 @@ mod fds {
     pub const BUILD_DIR: RawFd = 11;
     /// The shim's marker pipe at level 1.
     pub const MARKER: RawFd = 12;
+    /// Hakoniwa: the acknowledgement pipe the runner waits on.
+    pub const ACK: RawFd = 13;
     /// The first runtime file at level 1.
     pub const RUNTIME: RawFd = 16;
     /// Level 1's descriptors besides the runtime files: status, seccomp, token, socket
@@ -593,19 +595,66 @@ impl Real {
     }
 }
 
-/// Hakoniwa: the server (PID 1 of the sandbox) held by its own pidfd. A missing or
-/// unverifiable one fails the start (a reaper that is gone says nothing about the server's
-/// memory); bubblewrap's reaper is inside the namespace and needs none.
-fn open_inner(reported: Option<i32>, reaper: i32, hakoniwa: bool) -> Result<Option<Watched>, Fail> {
-    match reported {
-        Some(inner) => endpoint::open_inner(inner, reaper)
-            .map(Some)
-            .map_err(|error| Fail::Other(format!("the sandbox's server process: {error}"))),
-        None if hakoniwa => Err(Fail::Other(
-            "the sandbox's server process was not reported".into(),
-        )),
-        None => Ok(None),
+/// Why the sandbox's processes could not be pinned.
+enum Pin {
+    /// The reaper does not exist any more (its pid was reaped).
+    Gone(std::io::Error),
+    Fail(Fail),
+}
+
+/// The sandbox's pinned processes.
+struct Pinned {
+    sandbox: Arc<Sandbox>,
+}
+
+/// Pins the reaper the launcher reported and attaches it to `child`'s guard at once, then
+/// the server (Hakoniwa: PID 1 of the sandbox, reported by the runner with its start time)
+/// the same way. A server that is gone (no such pid, or the pid reused) has ended, and its
+/// reaper, pinned and attached, is still waited for; one that is there is pinned whoever its
+/// parent now is. A Hakoniwa runner that reports no server fails the start.
+fn pin_sandbox(
+    child: &mut Owned,
+    started: &Started,
+    runner: i32,
+    hakoniwa: bool,
+) -> Result<Pinned, Pin> {
+    let reaper = endpoint::pin_reaper(started.child_pid, runner, started.pid_namespace).map_err(
+        |error| {
+            if endpoint::is_gone(&error) {
+                Pin::Gone(error)
+            } else {
+                Pin::Fail(Fail::Other(format!("the sandbox's reaper: {error}")))
+            }
+        },
+    )?;
+    let sandbox = Arc::new(Sandbox {
+        reaper,
+        pid_namespace: started.pid_namespace,
+        inner: std::sync::OnceLock::new(),
+    });
+    child.reaper = Some(Arc::clone(&sandbox));
+    match (started.inner_pid, started.inner_start) {
+        (Some(inner), Some(start)) => match endpoint::open_inner(inner, start) {
+            Ok(Some(watched)) => {
+                let _ = sandbox.inner.set(watched);
+            }
+            // Gone (no such process, or the pid was reused): it has ended; its reaper, pinned
+            // above and attached, is still waited for.
+            Ok(None) => {}
+            Err(error) => {
+                return Err(Pin::Fail(Fail::Other(format!(
+                    "the sandbox's server process: {error}"
+                ))));
+            }
+        },
+        _ if hakoniwa => {
+            return Err(Pin::Fail(Fail::Other(
+                "the sandbox's server process was not reported".into(),
+            )));
+        }
+        _ => {}
     }
+    Ok(Pinned { sandbox })
 }
 
 /// The `(device, inode)` of a verified object, from its descriptor.
@@ -651,8 +700,10 @@ struct Spawned {
     /// Killed and reaped if this is dropped before its watcher takes it.
     child: Owned,
     runner: Watched,
-    /// Level 1: bwrap's report and the reaper.
+    /// Level 1: bwrap's report and the reaper (`None` when it had ended before the check).
     sandbox: Option<Arc<Sandbox>>,
+    /// The sandbox's pinned processes, ended or not: what the watcher waits for.
+    pinned: Option<Arc<Sandbox>>,
     generation: Generation,
     connector: Arc<dyn Connect>,
     status_rest: Option<std::io::BufReader<std::fs::File>>,
@@ -839,7 +890,7 @@ impl Cleanup {
             }
         }
         if let Some(sandbox) = self.reaper.take() {
-            if let Some(inner) = &sandbox.inner {
+            if let Some(inner) = sandbox.inner.get() {
                 wait_exited(
                     &|| inner.alive(),
                     &|| {
@@ -1292,7 +1343,7 @@ impl Real {
         checked: (&[Verified], &Verified, &std::path::Path),
         token: &Token,
         generation: &Generation,
-        pipes: (OwnedFd, OwnedFd),
+        pipes: (OwnedFd, OwnedFd, Option<OwnedFd>),
     ) -> Result<(Spec, Vec<Handover>), Fail> {
         let (files, model, build_dir) = checked;
         let run = self.run_dir().map_err(Fail::Other)?;
@@ -1328,8 +1379,8 @@ impl Real {
             env,
             argv,
         });
-        let (status, marker) = pipes;
-        let handover = vec![
+        let (status, marker, ack) = pipes;
+        let mut handover = vec![
             Handover {
                 fd: status,
                 target: fds::STATUS,
@@ -1339,6 +1390,16 @@ impl Real {
                 target: fds::MARKER,
             },
         ];
+        // The runner holds the sandbox's processes (their pids pinned or not) until Mimik has
+        // pinned them: one byte on this pipe says so, its closing without one says the start
+        // failed and the runner must end the sandbox.
+        let ack_target = ack.map(|fd| {
+            handover.push(Handover {
+                fd,
+                target: fds::ACK,
+            });
+            fds::ACK
+        });
         let spec = Spec {
             parent: std::process::id(),
             keep: handover.iter().map(|h| h.target).collect(),
@@ -1351,6 +1412,7 @@ impl Real {
                 plan: Box::new(plan),
                 status: fds::STATUS,
                 marker: fds::MARKER,
+                ack: ack_target.ok_or_else(|| Fail::Other("no acknowledgement pipe".into()))?,
             },
         };
         Ok((spec, handover))
@@ -1370,13 +1432,13 @@ impl Real {
         checked: (&[Verified], &Verified, &std::path::Path),
         token: &Token,
         generation: &Generation,
-        pipes: (OwnedFd, OwnedFd),
+        pipes: (OwnedFd, OwnedFd, Option<OwnedFd>),
     ) -> Result<(Spec, Vec<Handover>), Fail> {
         let (files, model, _) = checked;
         if self.settings.backend == Backend::Hakoniwa {
             return self.hako_spec(path, command, gpu, checked, token, generation, pipes);
         }
-        let (status_write, marker_write) = pipes;
+        let (status_write, marker_write, _) = pipes;
         let seccomp = bytes_pipe(&seccomp::bytes(&seccomp::program(
             seccomp::Profile::Sandbox,
         )))
@@ -1429,6 +1491,13 @@ impl Real {
             .map_err(|_| Fail::Other("no pipe".into()))?;
         let (marker_read, marker_write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
             .map_err(|_| Fail::Other("no pipe".into()))?;
+        let (ack_read, ack_write) = if hakoniwa {
+            let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
+                .map_err(|_| Fail::Other("no pipe".into()))?;
+            (Some(read), Some(write))
+        } else {
+            (None, None)
+        };
         let (spec, handover) = self.sandbox_parts(
             &bwrap,
             path,
@@ -1437,7 +1506,7 @@ impl Real {
             (files, model, build_dir),
             token,
             &generation,
-            (status_write, marker_write),
+            (status_write, marker_write, ack_read),
         )?;
         self.after_cleanups(job)?;
         pause_at!(self, "before-spawn");
@@ -1463,56 +1532,65 @@ impl Real {
         fault_at!(self, "recorded", child);
         // No status line: bwrap failed before it created the sandbox (nothing it started could
         // have written anything yet).
-        let (
-            Started {
-                child_pid,
-                pid_namespace,
-                inner_pid,
-            },
-            rest,
-        ) = read_started(status_read, job, self.settings.backend)?;
+        let (started, rest) = read_started(status_read, job, self.settings.backend)?;
         fault_at!(self, "started", child);
         pause_at!(self, "before-reaper");
-        let (sandbox, connector): (Option<Arc<Sandbox>>, Arc<dyn Connect>) =
-            match endpoint::open_reaper(child_pid, pid, pid_namespace) {
-                Ok(reaper) => {
-                    let inner = open_inner(inner_pid, child_pid, hakoniwa)?;
-                    let sandbox = Arc::new(Sandbox {
-                        reaper,
-                        pid_namespace,
-                        inner,
-                    });
-                    child.reaper = Some(Arc::clone(&sandbox));
-                    let connector: Arc<dyn Connect> = Arc::new(SandboxSocket {
-                        directory: Arc::new(dup(&generation.fd).map_err(Fail::Other)?),
-                        sandbox: Arc::clone(&sandbox),
-                    });
-                    (Some(sandbox), connector)
-                }
-                // A device listing is over in moments and a probe that cannot start (an
-                // unopenable render node) ends at once: the sandbox may be gone before the
-                // reaper can be pinned, which tears down the whole PID namespace and needs no
-                // kill. The listing's exit and the probe's report then decide.
-                //
-                // With Hakoniwa a server's start can end as quickly: a bound object that is not
-                // the verified one refuses the exec at once. The marker then classifies the
-                // exit (absent: the sandbox; present: the server).
-                Err(error)
-                    if (hakoniwa || matches!(command, Command::ListDevices | Command::Probe))
-                        && endpoint::is_gone(&error) =>
-                {
-                    (None, Arc::new(NoSocket))
-                }
-                Err(error) => {
-                    return Err(Fail::Other(format!("the sandbox's reaper: {error}")));
-                }
-            };
+        // Every handle is attached to the failed-start guard the moment it is opened, and a
+        // reaper that is gone is never taken for a server that is (the inner process is
+        // pinned, or proven gone, either way).
+        let ended_ok = hakoniwa || matches!(command, Command::ListDevices | Command::Probe);
+        let (sandbox, pinned, connector): (
+            Option<Arc<Sandbox>>,
+            Option<Arc<Sandbox>>,
+            Arc<dyn Connect>,
+        ) = match pin_sandbox(&mut child, &started, pid, hakoniwa) {
+            Ok(pinned) if pinned.sandbox.reaper.alive() => {
+                let connector: Arc<dyn Connect> = Arc::new(SandboxSocket {
+                    directory: Arc::new(dup(&generation.fd).map_err(Fail::Other)?),
+                    sandbox: Arc::clone(&pinned.sandbox),
+                });
+                (
+                    Some(Arc::clone(&pinned.sandbox)),
+                    Some(pinned.sandbox),
+                    connector,
+                )
+            }
+            // A device listing is over in moments and a probe that cannot start (an unopenable
+            // render node) ends at once: the sandbox may be gone before the reaper is checked,
+            // which tears down the whole PID namespace and needs no kill. The listing's exit
+            // and the probe's report then decide. With Hakoniwa a server's start can end as
+            // quickly (a bound object that is not the verified one refuses the exec at once):
+            // the marker then classifies the exit (absent: the sandbox; present: the server).
+            // The pinned processes stay with the guard and the watcher either way.
+            Ok(pinned) if ended_ok => (None, Some(pinned.sandbox), Arc::new(NoSocket)),
+            Ok(_) => {
+                return Err(Fail::Other(format!(
+                    "the sandbox's reaper: {}",
+                    endpoint::GONE_TEXT
+                )));
+            }
+            // The reaper is already reaped: for a listing or a probe the sandbox is over; with
+            // Hakoniwa only when the runner said it reaped it after the server's own exit
+            // status (`ended`), never because a reaper happens to be missing.
+            Err(Pin::Gone(_)) if (ended_ok && !hakoniwa) || (hakoniwa && started.ended) => {
+                (None, None, Arc::new(NoSocket))
+            }
+            Err(Pin::Gone(error)) => {
+                return Err(Fail::Other(format!("the sandbox's reaper: {error}")));
+            }
+            Err(Pin::Fail(fail)) => return Err(fail),
+        };
+        // Pinned and attached: the runner may go on (and reap the reaper when it ends).
+        if let Some(ack) = ack_write {
+            let _ = rustix::io::write(&ack, b"1");
+        }
         fault_at!(self, "connector", child);
         pause_at!(self, "spawned");
         Ok(Spawned {
             child,
             runner,
             sandbox,
+            pinned,
             generation,
             connector,
             status_rest: Some(rest),
@@ -1692,6 +1770,7 @@ impl Real {
             child,
             runner,
             sandbox: None,
+            pinned: None,
             generation,
             connector,
             status_rest: None,
@@ -2336,7 +2415,7 @@ async fn watch_exit(
     if let Some(sandbox) = sandbox {
         // The server first: it holds the memory, and its reaper (Hakoniwa) is outside its
         // namespace and may end before it has finished dying.
-        if let Some(inner) = &sandbox.inner {
+        if let Some(inner) = sandbox.inner.get() {
             let pidfd = &inner.pidfd;
             if !endpoint::exited(pidfd) {
                 let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
@@ -2392,7 +2471,8 @@ impl Real {
         let Spawned {
             child,
             runner,
-            sandbox,
+            sandbox: _,
+            pinned,
             generation,
             connector,
             status_rest,
@@ -2453,7 +2533,7 @@ impl Real {
         let launcher = Arc::clone(self);
         // The watcher is in-flight work until the child is gone (a settle waits for it): it
         // keeps the start's ticket.
-        tokio::spawn(watch_exit(child, runner, sandbox, exit_sender, move || {
+        tokio::spawn(watch_exit(child, runner, pinned, exit_sender, move || {
             launcher.clear(key);
             drop(ticket);
         }));
