@@ -892,3 +892,9 @@ decides.**
   below ABI 6 unless demanded.
 - **Limitations:** one image, one kernel, one run; no GPU in the VM; the profile was tried for a
   binary in the user's home only.
+
+- **Later the same day (after a reboot):** three short GPU batches on the automatic fan were
+  stopped by the 75 °C guard (75, 77 and 77 °C, sampled peak 78 °C) before finishing, so the
+  GPU runs of the dependency-check change are not repeated; the pinned Vulkan server's
+  dependency check passed on this host and the fake-GPU live tests passed. The guard worked as
+  designed (ASSIST-50, HAKO-L9); the hotter junction after the reboot was not explained.
