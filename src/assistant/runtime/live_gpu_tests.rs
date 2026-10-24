@@ -19,6 +19,16 @@ use crate::assistant::jobs::Assistant;
 
 /// Both builds of the fake server, the device choice `auto` over `roots`.
 fn fake_gpu_build(scratch: &std::path::Path, alias: &str, roots: Roots) -> Arc<Real> {
+    fake_gpu_build_with(scratch, alias, roots, &[])
+}
+
+/// [`fake_gpu_build`] with `extra` files `(name, bytes)` in the Vulkan build too.
+fn fake_gpu_build_with(
+    scratch: &std::path::Path,
+    alias: &str,
+    roots: Roots,
+    extra: &[(&str, Vec<u8>)],
+) -> Arc<Real> {
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
     let cpu = fake_build(scratch, alias);
@@ -37,11 +47,27 @@ fn fake_gpu_build(scratch: &std::path::Path, alias: &str, roots: Roots) -> Arc<R
         size: server.len() as u64,
         mode: "0755".into(),
     };
+    let mut vulkan_files = vec![file.clone()];
+    for (name, bytes) in extra {
+        std::fs::write(vulkan.join(name), bytes).unwrap();
+        std::fs::set_permissions(vulkan.join(name), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        vulkan_files.push(super::super::super::manifest::File {
+            name: (*name).into(),
+            sha256: hex::encode(Sha256::digest(bytes)),
+            size: bytes.len() as u64,
+            mode: "0755".into(),
+        });
+    }
     let build = |path: &str| super::super::super::manifest::Build {
         path: path.into(),
         directory: path.into(),
         server: "llama-server".into(),
-        files: vec![file.clone()],
+        files: if path == "vulkan" {
+            vulkan_files.clone()
+        } else {
+            vec![file.clone()]
+        },
     };
     let mut settings = cpu.settings.clone();
     settings.device = Choice::Auto;
@@ -134,6 +160,39 @@ async fn live_fake_gpu_a_partial_offload_ends_on_the_cpu_saying_why() {
     );
     assert_eq!(status.failures, 0);
     assert_eq!(status.budgets.unwrap().bounds.bytes, 1024);
+    handle.shutdown().await;
+}
+
+/// A Vulkan backend (not in the server's own dependencies: the real build loads
+/// `libggml-vulkan.so` at run time) that needs a library the host lacks: found by the real
+/// inspection of the build's files, reported through the GPU to CPU fallback, and the CPU path
+/// runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: bubblewrap, fake server (MIMIK_LIVE_*)"]
+async fn live_fake_gpu_a_missing_vulkan_library_falls_back_to_the_cpu_saying_which() {
+    let scratch = scratch();
+    let tree = Tree::new(&[("0000:0c:00.0", 128, Some(8 << 30))]);
+    let backend = super::super::libs::tests::elf_needing(&["libvulkan-not-installed.so.1"]);
+    let real = fake_gpu_build_with(
+        scratch.path(),
+        "missing-vulkan",
+        tree.roots(),
+        &[("libggml-vulkan.so", backend)],
+    );
+    let handle = run_until(&real, 64, |status| {
+        status.state == State::Ready && status.path == Path::Cpu
+    })
+    .await;
+    let status = handle.status();
+    assert!(
+        status
+            .gpu_note
+            .as_deref()
+            .is_some_and(|why| why.contains("needs libvulkan-not-installed.so.1")),
+        "{status:?}"
+    );
+    assert_eq!(status.failures, 0, "{status:?}");
+    assert_eq!(status.device, None, "{status:?}");
     handle.shutdown().await;
 }
 

@@ -335,6 +335,32 @@ async fn a_library_the_server_needs_and_the_host_lacks_is_named_at_the_start() {
 }
 
 #[tokio::test]
+async fn a_backend_loaded_with_dlopen_is_inspected_and_its_missing_library_named() {
+    // The server (the fake) is fine; a CPU backend variant of the build, which the server would
+    // load at run time and which no `DT_NEEDED` of the server names, needs a library nobody has.
+    let mut setup = setup(MODEL, "fake");
+    let backend = super::super::libs::tests::elf_needing(&["libgomp-not-installed.so.1"]);
+    let path = setup.dir.path().join("runtime/cpu/libggml-cpu-haswell.so");
+    std::fs::write(&path, &backend).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    setup.build.files.push(Entry {
+        name: "libggml-cpu-haswell.so".into(),
+        sha256: sha(&backend),
+        size: backend.len() as u64,
+        mode: "0755".into(),
+    });
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    let Err(Fail::Other(why)) = launch.start(1, Level::Unconfined, Path::Cpu).await else {
+        panic!("a missing library of a backend must refuse the start");
+    };
+    assert!(
+        why.starts_with("llama-server needs libgomp-not-installed.so.1: "),
+        "{why}"
+    );
+}
+
+#[tokio::test]
 async fn the_models_folder_gets_the_chmod_700_advice_and_the_runtime_folder_does_not() {
     use std::os::unix::fs::PermissionsExt;
     let setup = setup(MODEL, "fake");

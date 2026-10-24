@@ -1429,6 +1429,12 @@ fn a_landlock_list_rule_covers_the_directories_beneath_it_and_no_file_in_them() 
             std::env::var("MIMIK_LIVE_LANDLOCK").as_deref() != Ok("require"),
             "this run requires Landlock, and this kernel has none"
         );
+        // A run that demands Landlock (`MIMIK_LIVE_LANDLOCK=require`, CI on a capable runner)
+        // fails instead of skipping.
+        assert!(
+            std::env::var("MIMIK_LIVE_LANDLOCK").as_deref() != Ok("require"),
+            "this run requires Landlock, and the kernel has none"
+        );
         eprintln!("SKIPPED: this kernel has no Landlock; nothing was checked");
         return;
     };

@@ -88,7 +88,9 @@ Assistant requirements on the host:
   installs lack: `sudo apt install libgomp1` on Debian and Ubuntu, or your distribution's
   OpenMP runtime package. The GPU build also needs the Vulkan loader (`libvulkan.so.1`). If one
   is missing the assistant says which library and what to install; it finds out by reading the
-  ELF dynamic sections of the bundled files, without running anything.
+  ELF dynamic sections of the bundled files (the server, its libraries and its backends),
+  without running anything. This is a best-effort check: when it cannot tell, for example
+  because a library lives in an unusual folder, the start goes on without a message.
 - Mimik refuses a `llama/` folder, its files, or a models folder that group or others can
   write. Ubuntu's default umask (002) makes folders made with `mkdir -p` or copied with `scp`
   group-writable; unpacking the archive with `tar` keeps the archive's modes (0755) and is not

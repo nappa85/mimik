@@ -334,14 +334,23 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
   server needs only the execute right on its file and the loader.
   Starting a new session clears the previous report before preflight and namespace probing,
   so a failed restart never presents the stopped generation's protection as current.
-- Missing libraries: before the sandbox starts, the `DT_NEEDED` names are read from the ELF
-  dynamic section of the verified server and of each verified runtime library, from their
-  verified descriptors (`libs.rs`, `object` crate, DEP-26); each name is looked for among the
-  verified runtime files, then in the library folders the sandbox binds (and their multiarch
-  folders). A name found nowhere fails the start with a message naming it and what to install
-  (on the GPU path that is a GPU failure and the CPU path runs instead). Nothing is executed on
-  the host: no dynamic loader run, no host-side process. A file that cannot be read or parsed,
-  or a name that is not a plain library name, is "unknown" and the start goes on.
+- Missing libraries (a best-effort diagnostic, not the loader): before the sandbox starts, the
+  `DT_NEEDED` names are read from the ELF dynamic section of every ELF file of the runtime
+  build, the server, its libraries and the backends it loads with `dlopen` (`libggml-cpu-*.so`
+  link `libgomp.so.1`, `libggml-vulkan.so` links `libvulkan.so.1`), out of the descriptors the
+  runtime check opened and hashed (`libs.rs`, `object` crate, DEP-26); non-ELF files (the
+  licence) are skipped. A name is found when it is another file of the build, or a regular
+  file (a link must resolve) that is an ELF of the same class and machine in the folders the
+  sandbox binds: the loader's default folders (`/usr/lib`, `/lib64` and the multiarch folders
+  directly under them) or the path `ld.so.cache` gives (parsed read-only). A name found
+  nowhere in a complete search fails the start with a message naming it and what to install
+  (on the GPU path that is a GPU failure and the CPU path runs instead; on the CPU path it is
+  the start error). Nothing is executed on the host: no dynamic loader run, no host-side
+  process. The answer is "unknown", and the start goes on as it would without the check, when a
+  file is over 256 MiB, cannot be read or parsed, or names something that is not a plain library
+  name; when a name has candidates only in places the loader would not look; and when the search
+  was incomplete (its budget of entries, folders and depth was reached, a folder could not be
+  read, or the start was cancelled). Folders that are aliases of each other are walked once.
 - Mount flags: each bind is non-recursive, and a mount under a read-only bound directory
   (read from the host's mount table at the start) is masked by an empty read-only tmpfs, so
   no submount can stay writable under a read-only bind and the files the directory holds

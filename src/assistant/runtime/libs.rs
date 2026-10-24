@@ -1,36 +1,95 @@
 //! A shared library the model server needs and the host lacks (`libgomp.so.1` on a minimal
 //! Ubuntu server): named before the sandbox starts, so the page can say which library and what
 //! to install instead of reporting a server that never answered `/health` with nothing on its
-//! error output.
+//! error output. It is a best-effort diagnostic, not the loader: when it cannot tell, it says
+//! nothing and the start goes on as it would without it.
 //!
-//! Nothing is executed. The `DT_NEEDED` names are read from the ELF dynamic section of the
-//! verified server and of each verified runtime library, from their verified descriptors (so
-//! what is inspected is what was hashed, whatever happens to the paths afterwards), with the
-//! `object` crate (DEP-26). Each name is looked for among the verified runtime files first (the
-//! server's own folder) and then in the library directories the sandbox binds
-//! ([`bwrap::LIBRARY_DIRS`], a few folders down: multiarch and compiler-runtime folders). A name found nowhere is
-//! reported; a file that cannot be read or parsed, or a name that is not a plain library name,
-//! makes the answer "unknown" and the start goes on as it would without this check.
+//! Nothing is executed. Every ELF file of the runtime build is inspected, the server and each
+//! library and each backend the server loads with `dlopen` (`libggml-cpu-*.so` links the OpenMP
+//! runtime, `libggml-vulkan.so` the Vulkan loader), by reading its `DT_NEEDED` names from the
+//! ELF dynamic section (the `object` crate, DEP-26) out of the descriptor the runtime check
+//! opened and hashed, so what is read is that file whatever happens to its path afterwards.
+//! Non-ELF files (the licence) are skipped; a file larger than 256 MiB, unreadable, or an ELF
+//! that cannot be parsed makes the answer "unknown".
+//!
+//! A name is found when it is another file of the build, or a library the sandbox could load
+//! from the folders it binds ([`bwrap::LIBRARY_DIRS`]): in the loader's own default folders
+//! (those folders and the multiarch ones directly under them), or at the path `ld.so.cache`
+//! gives for it (the cache is parsed read-only), and in each case a regular file (or a link that
+//! resolves) that is an ELF of the same class and machine as the file that needs it. A name that
+//! is found nowhere is reported, but only when the search was complete; a name whose only
+//! candidates lie in other places, or a search that hit its budget, met an unreadable folder or
+//! was cancelled, is "unknown", never "missing".
 use super::bwrap::LIBRARY_DIRS;
 use super::files::Verified;
 use object::read::elf::{Dyn, FileHeader};
 use object::{Endianness, elf};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::io::Read;
 use std::os::fd::{AsFd, BorrowedFd};
-use std::os::unix::fs::FileExt;
-use std::path::PathBuf;
+use std::os::unix::fs::{FileExt, MetadataExt};
+use std::path::{Path, PathBuf};
 
 /// The most a library file may weigh for its dynamic section to be read (a bound on memory).
-const MAX_BYTES: u64 = 256 << 20;
+pub(crate) const MAX_BYTES: u64 = 256 << 20;
 
-/// The `DT_NEEDED` names of the 64-bit ELF `data` (`None`: not an ELF this can read, or no
-/// dynamic section).
+/// How far the search for a name outside the loader's default folders goes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Budget {
+    /// Directory entries looked at, over the whole search.
+    pub entries: usize,
+    /// Folders opened.
+    pub dirs: usize,
+    /// Folders down from a library directory (`/usr/lib/gcc/x86_64-pc-linux-gnu/15` is 4).
+    pub depth: usize,
+}
+
+impl Budget {
+    pub(crate) const DEFAULT: Self = Self {
+        entries: 1_500_000,
+        dirs: 100_000,
+        depth: 6,
+    };
+}
+
+/// The identity of a file for compatibility: ELF class and machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Kind {
+    machine: u16,
+}
+
+/// The kind of a 64-bit little-endian ELF from its first bytes (`None`: not one).
+fn kind_of(head: &[u8]) -> Option<Kind> {
+    if head.len() < 20 || &head[..4] != b"\x7fELF" || head[4] != 2 || head[5] != 1 {
+        return None;
+    }
+    Some(Kind {
+        machine: u16::from_le_bytes([head[18], head[19]]),
+    })
+}
+
+/// Whether `path` is a regular file (a link must resolve to one) that is an ELF of `kind`.
+fn compatible(path: &Path, kind: Kind) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    if !file.metadata().is_ok_and(|meta| meta.is_file()) {
+        return false;
+    }
+    let mut head = [0_u8; 20];
+    file.take(20).read_exact(&mut head).is_ok() && kind_of(&head) == Some(kind)
+}
+
+/// The `DT_NEEDED` names of the 64-bit ELF `data`: `None` when it cannot be read as one; an
+/// ELF without a dynamic section (a static one) needs nothing.
 pub(crate) fn needed(data: &[u8]) -> Option<Vec<String>> {
     let header = elf::FileHeader64::<Endianness>::parse(data).ok()?;
     let endian = header.endian().ok()?;
     let sections = header.sections(endian, data).ok()?;
     // The section index returned with the entries is that of their string table.
-    let (entries, strings_index) = sections.dynamic(endian, data).ok()??;
+    let Some((entries, strings_index)) = sections.dynamic(endian, data).ok()? else {
+        return Some(Vec::new());
+    };
     let strings = sections.strings(endian, data, strings_index).ok()?;
     let mut names = Vec::new();
     for entry in entries {
@@ -52,36 +111,6 @@ fn plain(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c))
 }
 
-/// The libraries `start` needs, directly or through the runtime files, that are neither among
-/// those files (`in_runtime`) nor in the system directories (`in_system`). `read` gives a
-/// runtime file's bytes. `None` when anything cannot be told.
-pub(crate) fn missing_from(
-    start: &str,
-    read: &dyn Fn(&str) -> Option<Vec<u8>>,
-    in_runtime: &dyn Fn(&str) -> bool,
-    in_system: &dyn Fn(&str) -> bool,
-) -> Option<Vec<String>> {
-    let mut queue = vec![start.to_owned()];
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut missing: BTreeSet<String> = BTreeSet::new();
-    while let Some(file) = queue.pop() {
-        if !seen.insert(file.clone()) {
-            continue;
-        }
-        for name in needed(&read(&file)?)? {
-            if !plain(&name) {
-                return None;
-            }
-            if in_runtime(&name) {
-                queue.push(name);
-            } else if !in_system(&name) {
-                missing.insert(name);
-            }
-        }
-    }
-    Some(missing.into_iter().collect())
-}
-
 /// Reads `size` bytes of the descriptor from offset 0 (its own offset is left alone).
 pub(crate) fn read_fd(fd: BorrowedFd<'_>, size: u64) -> Option<Vec<u8>> {
     if size > MAX_BYTES {
@@ -93,39 +122,268 @@ pub(crate) fn read_fd(fd: BorrowedFd<'_>, size: u64) -> Option<Vec<u8>> {
     Some(data)
 }
 
-/// How deep under a library directory names are collected (`/usr/lib/gcc/x86_64-pc-linux-gnu/15`
-/// is three folders down; `ld.so.cache` points into such folders).
-const DEPTH: usize = 4;
-/// The most names collected (a bound on the walk).
-const MAX_NAMES: usize = 400_000;
+/// `(name, path)` of each library in a glibc `ld.so.cache` (the new format, alone or after the
+/// old one); `None` when it is neither.
+pub(crate) fn parse_cache(data: &[u8]) -> Option<Vec<(String, PathBuf)>> {
+    const MAGIC: &[u8] = b"glibc-ld.so.cache1.1";
+    let start = data
+        .windows(MAGIC.len())
+        .position(|window| window == MAGIC)?;
+    let cache = &data[start..];
+    let word = |at: usize| -> Option<usize> {
+        Some(u32::from_le_bytes(cache.get(at..at + 4)?.try_into().ok()?) as usize)
+    };
+    let count = word(20)?;
+    let strings = |at: usize| -> Option<String> {
+        let tail = cache.get(at..)?;
+        let end = tail.iter().position(|byte| *byte == 0)?;
+        String::from_utf8(tail[..end].to_vec()).ok()
+    };
+    let mut found = Vec::new();
+    for index in 0..count {
+        // flags i32, key u32, value u32, osversion u32, hwcap u64: 24 bytes after 48 of header.
+        let at = 48 + index * 24;
+        let (key, value) = (word(at + 4)?, word(at + 8)?);
+        found.push((strings(key)?, PathBuf::from(strings(value)?)));
+    }
+    Some(found)
+}
 
-/// The file names (files and links) under `dirs`, to [`DEPTH`] folders down, not following
-/// links to folders below the top ones: the names the sandbox's loader could resolve in the
-/// folders it binds.
-pub(crate) fn system_names(dirs: &[PathBuf]) -> BTreeSet<String> {
-    fn walk(dir: &std::path::Path, depth: usize, names: &mut BTreeSet<String>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            if names.len() >= MAX_NAMES {
+/// What the search of the host's library folders found for the names it was asked about.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Found {
+    /// Resolvable by the loader's own rules.
+    Yes,
+    /// Candidates exist only where the loader would not look: unknown.
+    Elsewhere,
+    /// Nowhere in a complete search.
+    No,
+}
+
+/// The host side of the check: where to look, with the means to test and stop it.
+pub(crate) struct Host<'a> {
+    /// The loader's default folders (top-level library folders and their multiarch children).
+    pub standard: Vec<PathBuf>,
+    /// The cache's `(name, path)` entries, if it could be read.
+    pub cache: Vec<(String, PathBuf)>,
+    /// The folders the sandbox binds, walked for names found nowhere else.
+    pub roots: Vec<PathBuf>,
+    pub budget: Budget,
+    pub cancelled: &'a dyn Fn() -> bool,
+}
+
+/// `(device, inode)` of a folder, following links.
+fn identity(path: &Path) -> Option<(u64, u64)> {
+    std::fs::metadata(path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
+impl Host<'_> {
+    /// The host's real folders: the bound library folders (one per distinct folder, as `/lib`
+    /// may be an alias of `/usr/lib`), their multiarch children, and the cache.
+    pub(crate) fn of_system(cancelled: &dyn Fn() -> bool) -> Host<'_> {
+        let mut seen = HashSet::new();
+        let roots: Vec<PathBuf> = LIBRARY_DIRS
+            .iter()
+            .map(PathBuf::from)
+            .filter(|dir| identity(dir).is_some_and(|id| seen.insert(id)))
+            .collect();
+        let cache = std::fs::read("/etc/ld.so.cache")
+            .ok()
+            .and_then(|data| parse_cache(&data))
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .filter(|(_, path)| {
+                        LIBRARY_DIRS
+                            .iter()
+                            .any(|dir| path.starts_with(dir) && path.is_absolute())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Host {
+            standard: Vec::new(),
+            cache,
+            roots,
+            budget: Budget::DEFAULT,
+            cancelled,
+        }
+        .with_multiarch()
+    }
+
+    /// `standard` as the roots plus their `*-linux-*` children.
+    pub(crate) fn with_multiarch(mut self) -> Self {
+        let mut standard = self.roots.clone();
+        for root in &self.roots {
+            for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+                if entry.file_name().to_string_lossy().contains("-linux-")
+                    && entry.file_type().is_ok_and(|kind| kind.is_dir())
+                {
+                    standard.push(entry.path());
+                }
+            }
+        }
+        self.standard = standard;
+        self
+    }
+
+    /// Where `wanted` (name and the kind of its dependant) can be had. One walk serves every
+    /// name that the default folders and the cache do not settle.
+    pub(crate) fn find(&self, wanted: &BTreeMap<String, Kind>) -> BTreeMap<String, Found> {
+        let mut result = BTreeMap::new();
+        let mut open: BTreeMap<&String, Kind> = BTreeMap::new();
+        for (name, kind) in wanted {
+            let in_standard = self
+                .standard
+                .iter()
+                .any(|dir| compatible(&dir.join(name), *kind));
+            let in_cache = self
+                .cache
+                .iter()
+                .any(|(cached, path)| cached == name && compatible(path, *kind));
+            if in_standard || in_cache {
+                result.insert(name.clone(), Found::Yes);
+            } else {
+                open.insert(name, *kind);
+            }
+        }
+        if open.is_empty() {
+            return result;
+        }
+        let (elsewhere, complete) = self.walk(&open);
+        for (name, _) in open {
+            let found = if elsewhere.contains(name) {
+                Found::Elsewhere
+            } else if complete {
+                Found::No
+            } else {
+                Found::Elsewhere
+            };
+            result.insert(name.clone(), found);
+        }
+        result
+    }
+
+    /// The names of `open` with a compatible candidate anywhere under the roots, and whether the
+    /// walk saw everything (a budget hit, an unreadable folder or a cancel makes it incomplete).
+    fn walk(&self, open: &BTreeMap<&String, Kind>) -> (BTreeSet<String>, bool) {
+        struct State<'a> {
+            open: &'a BTreeMap<&'a String, Kind>,
+            found: BTreeSet<String>,
+            entries: usize,
+            dirs: usize,
+            seen: HashSet<(u64, u64)>,
+            complete: bool,
+        }
+        fn visit(host: &Host<'_>, state: &mut State<'_>, dir: &Path, depth: usize) {
+            if !state.complete {
                 return;
             }
-            let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
-            if is_dir {
-                if depth + 1 < DEPTH {
-                    walk(&entry.path(), depth + 1, names);
+            // A folder already walked (an alias of another root) costs nothing.
+            match identity(dir) {
+                Some(id) if !state.seen.insert(id) => return,
+                Some(_) => {}
+                None => {
+                    state.complete = false;
+                    return;
                 }
-            } else {
-                names.insert(entry.file_name().to_string_lossy().into_owned());
+            }
+            if (host.cancelled)() || state.dirs >= host.budget.dirs {
+                state.complete = false;
+                return;
+            }
+            state.dirs += 1;
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                state.complete = false;
+                return;
+            };
+            for entry in entries {
+                let Ok(entry) = entry else {
+                    state.complete = false;
+                    return;
+                };
+                state.entries += 1;
+                if state.entries > host.budget.entries || (host.cancelled)() {
+                    state.complete = false;
+                    return;
+                }
+                let Ok(kind) = entry.file_type() else {
+                    state.complete = false;
+                    return;
+                };
+                if kind.is_dir() {
+                    if depth < host.budget.depth {
+                        visit(host, state, &entry.path(), depth + 1);
+                    } else {
+                        // Folders below the bound were not looked at.
+                        state.complete = false;
+                    }
+                    if !state.complete {
+                        return;
+                    }
+                } else {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if let Some(expected) = state.open.get(&name)
+                        && compatible(&entry.path(), *expected)
+                    {
+                        state.found.insert(name);
+                    }
+                }
+            }
+        }
+        let mut state = State {
+            open,
+            found: BTreeSet::new(),
+            entries: 0,
+            dirs: 0,
+            seen: HashSet::new(),
+            complete: true,
+        };
+        for root in &self.roots {
+            visit(self, &mut state, root, 0);
+        }
+        (state.found, state.complete)
+    }
+}
+
+/// The libraries the runtime files need and nothing provides, from `read` (a runtime file's
+/// bytes by name) over `files` (every file name of the build). `None`: unknown.
+pub(crate) fn missing_from(
+    files: &[String],
+    read: &dyn Fn(&str) -> Option<Vec<u8>>,
+    host: &Host<'_>,
+) -> Option<Vec<String>> {
+    let own: BTreeSet<&str> = files.iter().map(String::as_str).collect();
+    let mut wanted: BTreeMap<String, Kind> = BTreeMap::new();
+    for file in files {
+        let data = read(file)?;
+        // The licence and other files that are not ELF files are not libraries.
+        let Some(kind) = kind_of(data.get(..20).unwrap_or(&data)) else {
+            if data.starts_with(b"\x7fELF") {
+                return None;
+            }
+            continue;
+        };
+        for name in needed(&data)? {
+            if !plain(&name) {
+                return None;
+            }
+            if !own.contains(name.as_str()) {
+                wanted.entry(name).or_insert(kind);
             }
         }
     }
-    let mut names = BTreeSet::new();
-    for dir in dirs {
-        walk(dir, 0, &mut names);
+    let mut missing = Vec::new();
+    for (name, found) in host.find(&wanted) {
+        match found {
+            Found::Yes => {}
+            Found::Elsewhere => return None,
+            Found::No => missing.push(name),
+        }
     }
-    names
+    Some(missing)
 }
 
 /// What the owner can install for `library`.
@@ -150,33 +408,36 @@ pub(crate) fn message(server: &str, missing: &[String]) -> Option<String> {
     Some(format!("{server} needs {first}: {}{also}", remedy(first)))
 }
 
-/// The error for the libraries the verified `files` (the server `server` among them) need and
-/// the host lacks, from their descriptors; `None` when none is missing or nothing could be told.
-pub(crate) fn explain(files: &[Verified], server: &str) -> Option<String> {
+/// The error for the libraries the runtime build's `files` (the server `server` among them)
+/// need and the host lacks, from their descriptors; `None` when none is missing or nothing
+/// could be told.
+pub(crate) fn explain(
+    files: &[Verified],
+    server: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Option<String> {
+    let names: Vec<String> = files.iter().map(|file| file.name.clone()).collect();
     let find = |name: &str| files.iter().find(|file| file.name == name);
-    let dirs: Vec<PathBuf> = LIBRARY_DIRS.iter().map(PathBuf::from).collect();
-    let system = system_names(&dirs);
+    let host = Host::of_system(cancelled);
     let missing = missing_from(
-        server,
+        &names,
         &|name| find(name).and_then(|file| read_fd(file.fd.as_fd(), file.identity.size)),
-        &|name| find(name).is_some(),
-        &|name| system.contains(name),
+        &host,
     )?;
     message(server, &missing)
 }
 
 /// The same over a folder on disk (the live check of a pinned build).
 #[cfg(test)]
-pub(crate) fn explain_dir(dir: &std::path::Path, server: &str) -> Option<String> {
-    let dirs: Vec<PathBuf> = LIBRARY_DIRS.iter().map(PathBuf::from).collect();
-    let system = system_names(&dirs);
-    let missing = missing_from(
-        server,
-        &|name| std::fs::read(dir.join(name)).ok(),
-        &|name| plain(name) && dir.join(name).is_file(),
-        &|name| system.contains(name),
-    )?;
-    message(server, &missing)
+pub(crate) fn explain_dir(dir: &Path) -> Option<Vec<String>> {
+    let names: Vec<String> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    let host = Host::of_system(&|| false);
+    missing_from(&names, &|name| std::fs::read(dir.join(name)).ok(), &host)
 }
 
 #[cfg(test)]

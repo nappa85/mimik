@@ -568,7 +568,7 @@ impl Real {
         .map_err(|refusal| format!("the model: {refusal}"))?;
         let build_dir = real.join(&build.directory);
         // A library the host lacks, named now instead of a server that never answers.
-        if let Some(why) = libs::explain(&files, self.server_name(path)) {
+        if let Some(why) = libs::explain(&files, self.server_name(path), &|| ticket.cancelled()) {
             return Err(why);
         }
         Ok(Checked {
