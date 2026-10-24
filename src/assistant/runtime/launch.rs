@@ -162,21 +162,29 @@ pub(crate) struct Selected {
     pub binds: GpuBinds,
 }
 
-/// Refuses executable paths with a newline: the pidfile holds one per line.
-/// A refusal of a folder or file under `folder`, as the page says it: for a mode the owner
-/// can fix, with the exact command (Ubuntu's default umask 002 makes `mkdir -p` and `scp`
-/// leave group-writable folders; Mimik never accepts them).
-fn refused(what: &str, folder: &std::path::Path, refusal: &files::Refusal) -> String {
+/// A refusal of a folder or file under `folder`, as the page says it, with the exact command
+/// when the owner can fix it (Ubuntu's default umask 002 makes `mkdir -p` and `scp` leave
+/// group-writable folders; Mimik never accepts them). `private` is the models folder, which
+/// must also be 0700; the runtime folder only has to be unwritable by group and others.
+fn refused(
+    what: &str,
+    folder: &std::path::Path,
+    private: bool,
+    refusal: &files::Refusal,
+) -> String {
     let quoted = super::hako::shell_word(&folder.to_string_lossy());
     match refusal {
         files::Refusal::Writable(_) => {
             format!("{what}: {refusal}; fix it with `chmod -R go-w {quoted}`")
         }
-        files::Refusal::Mode(_) => format!("{what}: {refusal}; fix it with `chmod 700 {quoted}`"),
+        files::Refusal::Mode(_) if private => {
+            format!("{what}: {refusal}; fix it with `chmod 700 {quoted}`")
+        }
         _ => format!("{what}: {refusal}"),
     }
 }
 
+/// Refuses executable paths with a newline: the pidfile holds one per line.
 fn newline_free(executables: &[String]) -> Result<(), Fail> {
     match executables.iter().find(|path| path.contains('\n')) {
         Some(path) => Err(Fail::Other(format!(
@@ -514,18 +522,42 @@ impl Real {
                 self.paused("runtime-opened");
             })
             .map_err(|refusal| {
-                refused("the model runtime", &self.settings.runtime_dir, &refusal)
+                refused(
+                    "the model runtime",
+                    &self.settings.runtime_dir,
+                    false,
+                    &refusal,
+                )
             })?;
         let build_fd =
             files::open_dir_beneath(runtime.as_fd(), &build.directory, Owners::MineOrRoot, false)
                 .map_err(|refusal| {
-                refused("the model runtime", &self.settings.runtime_dir, &refusal)
+                refused(
+                    "the model runtime",
+                    &self.settings.runtime_dir,
+                    false,
+                    &refusal,
+                )
             })?;
         let files = files::runtime_until(build_fd.as_fd(), build, &self.cache, &stop).map_err(
-            |refusal| refused("the model runtime", &self.settings.runtime_dir, &refusal),
+            |refusal| {
+                refused(
+                    "the model runtime",
+                    &self.settings.runtime_dir,
+                    false,
+                    &refusal,
+                )
+            },
         )?;
-        let models = files::open_dir(&self.settings.models_dir, Owners::Mine, true)
-            .map_err(|refusal| refused("the models folder", &self.settings.models_dir, &refusal))?;
+        let models =
+            files::open_dir(&self.settings.models_dir, Owners::Mine, true).map_err(|refusal| {
+                refused(
+                    "the models folder",
+                    &self.settings.models_dir,
+                    true,
+                    &refusal,
+                )
+            })?;
         let model = files::model_until(
             models.as_fd(),
             &self.settings.model,
@@ -536,7 +568,7 @@ impl Real {
         .map_err(|refusal| format!("the model: {refusal}"))?;
         let build_dir = real.join(&build.directory);
         // A library the host lacks, named now instead of a server that never answers.
-        if let Some(why) = libs::explain(&build_dir.join(self.server_name(path)), &build_dir) {
+        if let Some(why) = libs::explain(&files, self.server_name(path)) {
             return Err(why);
         }
         Ok(Checked {

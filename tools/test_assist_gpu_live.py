@@ -1,4 +1,5 @@
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -74,12 +75,24 @@ class RefusalTests(unittest.TestCase):
             Path(__file__).parent.parent / "src/assistant/runtime/live_gpu_tests.rs"
         ).read_text()
         block = source.split("const SHORT_TESTS: [&str;")[1].split("];")[0]
-        rust = {
-            name.rsplit("::", 1)[-1]
-            for name in __import__("re").findall(r'"(live_gpu_\w+)"', block)
-        }
+        rust = {name.rsplit("::", 1)[-1] for name in re.findall(r'"(live_gpu_\w+)"', block)}
         tool = {name.rsplit("::", 1)[-1] for name in live.SHORT_TESTS}
         self.assertEqual(rust, tool)
+
+    def test_each_gpu_test_passes_its_own_name_to_the_gate(self):
+        source = (
+            Path(__file__).parent.parent / "src/assistant/runtime/live_gpu_tests.rs"
+        ).read_text()
+        found = re.findall(
+            r'async fn (live_gpu_\w+)\(\) \{\n(?:    use [^\n]*\n)?    gpu_allowed\("(\w+)"\);',
+            source,
+        )
+        self.assertEqual(len(found), 4)
+        for function, passed in found:
+            self.assertEqual(function, passed)
+        self.assertEqual(
+            {name for name, _ in found}, {n.rsplit("::", 1)[-1] for n in live.SHORT_TESTS}
+        )
 
     def test_short_is_never_the_default_and_reaches_the_tests_only_when_asked(self):
         def args(**more):

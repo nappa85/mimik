@@ -163,6 +163,40 @@ const SHORT_TESTS: [&str; 4] = [
     "live_gpu_landlock_the_rx6650_reaches_ready_under_hakoniwa",
 ];
 
+/// Whether `test` runs in short mode (`short` is the variable's value): the automatic fan is
+/// then allowed, only for a test on the short list.
+///
+/// # Panics
+///
+/// Short mode was asked for and `test` is not on the short list.
+fn short_mode(short: Option<&str>, test: &str) -> bool {
+    if short != Some("1") {
+        return false;
+    }
+    assert!(
+        SHORT_TESTS.contains(&test),
+        "refusing: {test} is not on the short list (tools/assist_gpu_live.py SHORT_TESTS); it needs the manual fan"
+    );
+    true
+}
+
+#[test]
+fn short_mode_refuses_a_test_that_is_not_on_the_short_list() {
+    for name in SHORT_TESTS {
+        assert!(short_mode(Some("1"), name));
+        assert!(!short_mode(None, name));
+        assert!(!short_mode(Some("0"), name));
+    }
+    for name in ["live_gpu_a_sustained_benchmark", "live_fake_gpu_x", ""] {
+        assert!(
+            std::panic::catch_unwind(|| short_mode(Some("1"), name)).is_err(),
+            "{name}"
+        );
+        // Not in short mode the list does not matter (the manual fan is checked instead).
+        assert!(!short_mode(None, name));
+    }
+}
+
 /// Refuses unless the live GPU run was asked for and the amdgpu fan reads manual at 230 or
 /// more (the manual setting resets on every reboot; on the automatic curve the junction
 /// reached 85 °C in 22 s at a sustained 143 W, 2026-10-20). A short test run by the tool's
@@ -174,11 +208,7 @@ fn gpu_allowed(test: &str) {
         Ok("1"),
         "refusing: run the GPU checks only through tools/assist_gpu_live.py"
     );
-    if std::env::var("MIMIK_LIVE_GPU_SHORT").as_deref() == Ok("1") {
-        assert!(
-            SHORT_TESTS.contains(&test),
-            "refusing: {test} is not on the short list (tools/assist_gpu_live.py SHORT_TESTS); it needs the manual fan"
-        );
+    if short_mode(std::env::var("MIMIK_LIVE_GPU_SHORT").ok().as_deref(), test) {
         return;
     }
     let chip = std::fs::read_dir("/sys/class/hwmon")

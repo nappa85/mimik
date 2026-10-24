@@ -929,6 +929,12 @@ async fn a_gpu_failure_at_each_phase_moves_to_the_cpu_at_once_uncounted() {
             Start::Sandbox("bubblewrap could not set up the sandbox"),
             "bubblewrap could not set up",
         ),
+        (
+            Start::Other(
+                "llama-server needs libvulkan.so.1: install libvulkan1 (Debian/Ubuntu) or your distribution's Vulkan loader",
+            ),
+            "needs libvulkan.so.1",
+        ),
         (Start::Ok(not_loaded), "only 30 of 41 layers"),
         (Start::Ok(no_priming), "priming failed"),
         (Start::Ok(too_slow), "a calibration sample took more than"),

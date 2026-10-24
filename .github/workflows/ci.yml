@@ -344,18 +344,25 @@ jobs:
         run: |
           set -o pipefail
           chmod 0755 target/hakoniwa-binary/mimik
-          # The kernel's Landlock ABI (x86_64 landlock_create_ruleset, version flag; negative
-          # when absent). From ABI 6 up the confinement assertions are demanded
-          # (`MIMIK_LIVE_LANDLOCK=require`), so a runner that has Landlock can never pass with
-          # them skipped; below 6 they skip with their reason.
-          abi=$(python3 -c "import ctypes; print(ctypes.CDLL(None, use_errno=True).syscall(444, None, 0, 1))") || abi=-1
-          echo "Landlock ABI found on this runner: $abi"
-          # A failed probe (python missing, an unexpected output) is an error; -1 from the
-          # syscall itself means "no Landlock" and is a valid answer.
-          case "$abi" in
-            -1 | [0-9] | [0-9][0-9]) ;;
-            *) echo "the Landlock ABI probe failed: '$abi'"; exit 1 ;;
+          # The kernel's Landlock ABI from the x86_64 `landlock_create_ruleset` version call. The
+          # snippet prints the ABI number, or `-1 <errno>` when the syscall itself fails (ENOSYS 38
+          # no Landlock, EOPNOTSUPP 95 disabled at boot, EPERM 1 filtered); that is a valid answer
+          # and the assertions then skip. Anything else, including python failing, fails the job.
+          probe=$(python3 -c "
+          import ctypes
+          libc = ctypes.CDLL(None, use_errno=True)
+          abi = libc.syscall(444, None, 0, 1)
+          print(abi if abi >= 0 else f'-1 {ctypes.get_errno()}')
+          ") || { echo "the Landlock ABI probe could not run"; exit 1; }
+          echo "Landlock probe on this runner: $probe"
+          case "$probe" in
+            -1\ 1 | -1\ 38 | -1\ 95) abi=-1 ;;
+            [0-9] | [0-9][0-9]) abi=$probe ;;
+            *) echo "the Landlock ABI probe gave an unexpected answer: '$probe'"; exit 1 ;;
           esac
+          # From ABI 6 up the confinement assertions are demanded (`MIMIK_LIVE_LANDLOCK=require`),
+          # so a runner that has Landlock can never pass with them skipped; below 6 they skip
+          # with their reason.
           if [ "$abi" -ge 6 ]; then
             export MIMIK_LIVE_LANDLOCK=require
             echo "Landlock confinement assertions: required"

@@ -63,21 +63,57 @@ fn local_commands_ignore_server_configuration_and_reject_serving_flags() {
     }
 }
 
+/// The folders `create_data_dir` makes, in a process whose umask is permissive (Ubuntu's 002):
+/// the parent starts this very test binary with that umask, so the check does not depend on the
+/// umask of the run, and fails without explicit modes (the old `create_dir_all` gave 0775).
 #[test]
-fn the_data_folders_mimik_makes_are_private_whatever_the_umask() {
-    use std::os::unix::fs::PermissionsExt;
+fn the_data_folders_mimik_makes_are_private_under_a_permissive_umask() {
+    use std::os::unix::process::CommandExt;
     let root = tempfile::tempdir().unwrap();
-    let existing = root.path().join("existing");
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "tests::data_folder_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("MIMIK_TEST_DATA_ROOT", root.path());
+    // SAFETY: `umask` is async-signal-safe and touches no memory.
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(0o002);
+            Ok(())
+        });
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The child really ran its checks (a filtered-out child also exits 0).
+    assert!(String::from_utf8_lossy(&output.stdout).contains("data folders checked"));
+}
+
+#[test]
+fn data_folder_child() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(root) = std::env::var_os("MIMIK_TEST_DATA_ROOT") else {
+        return;
+    };
+    let existing = std::path::PathBuf::from(root).join("existing");
     std::fs::create_dir(&existing).unwrap();
-    std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o775)).unwrap();
     let data = existing.join("data/nested");
     create_data_dir(&data).unwrap();
     let mode =
         |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
-    // Explicit 0700 (a umask can only remove bits from it, so 002 leaves it as it is).
     assert_eq!(mode(&data), 0o700);
     assert_eq!(mode(&existing.join("data")), 0o700);
     // A folder that was there is the owner's to set.
-    assert_eq!(mode(&existing), 0o755);
+    assert_eq!(mode(&existing), 0o775);
     create_data_dir(&data).unwrap();
+    println!("data folders checked");
 }

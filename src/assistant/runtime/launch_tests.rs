@@ -75,11 +75,15 @@ struct Setup {
 }
 
 fn setup(model: &[u8], alias: &str) -> Setup {
+    setup_with_server(model, alias, std::fs::read(fake_server()).unwrap())
+}
+
+/// [`setup`] with the bytes of the runtime's `llama-server` given.
+fn setup_with_server(model: &[u8], alias: &str, server: Vec<u8>) -> Setup {
     let dir = scratch();
     let root = dir.path();
     let cpu = root.join("runtime/cpu");
     std::fs::create_dir_all(&cpu).unwrap();
-    let server = std::fs::read(fake_server()).unwrap();
     std::fs::write(cpu.join("llama-server"), &server).unwrap();
     std::fs::set_permissions(
         cpu.join("llama-server"),
@@ -313,6 +317,61 @@ async fn a_group_writable_runtime_folder_is_refused_with_the_exact_fix() {
         launch.start(2, Level::Unconfined, Path::Cpu).await,
         Err(Fail::Other(ref why)) if why.contains("writable")
     ));
+}
+
+#[tokio::test]
+async fn a_library_the_server_needs_and_the_host_lacks_is_named_at_the_start() {
+    let server = super::super::libs::tests::elf_needing(&["libgomp-not-installed.so.1"]);
+    let setup = setup_with_server(MODEL, "fake", server);
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    let Err(Fail::Other(why)) = launch.start(1, Level::Unconfined, Path::Cpu).await else {
+        panic!("a missing library must refuse the start");
+    };
+    assert!(
+        why.starts_with("llama-server needs libgomp-not-installed.so.1: "),
+        "{why}"
+    );
+}
+
+#[tokio::test]
+async fn the_models_folder_gets_the_chmod_700_advice_and_the_runtime_folder_does_not() {
+    use std::os::unix::fs::PermissionsExt;
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    std::fs::set_permissions(
+        &setup.settings.models_dir,
+        std::fs::Permissions::from_mode(0o770),
+    )
+    .unwrap();
+    let Err(Fail::Other(why)) = launch.start(1, Level::Unconfined, Path::Cpu).await else {
+        panic!("a models folder that is not 0700 must refuse the start");
+    };
+    assert!(why.starts_with("the models folder: "), "{why}");
+    assert!(
+        why.contains(&format!(
+            "chmod 700 {}",
+            setup.settings.models_dir.display()
+        )),
+        "{why}"
+    );
+    assert!(!why.contains("go-w"), "{why}");
+    // The runtime folder's refusal names `go-w`, never `chmod 700`.
+    std::fs::set_permissions(
+        &setup.settings.models_dir,
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &setup.settings.runtime_dir,
+        std::fs::Permissions::from_mode(0o775),
+    )
+    .unwrap();
+    let Err(Fail::Other(why)) = launch.start(2, Level::Unconfined, Path::Cpu).await else {
+        panic!("a group-writable runtime must refuse the start");
+    };
+    assert!(why.contains("go-w") && !why.contains("chmod 700"), "{why}");
 }
 
 #[tokio::test]

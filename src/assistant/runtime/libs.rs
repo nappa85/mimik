@@ -1,33 +1,110 @@
 //! A shared library the model server needs and the host lacks (`libgomp.so.1` on a minimal
-//! Ubuntu server): found before the sandbox starts, by the dynamic loader's own list mode, so
-//! the page can name the library instead of reporting a server that never answered `/health`
-//! with nothing on its error output.
+//! Ubuntu server): named before the sandbox starts, so the page can say which library and what
+//! to install instead of reporting a server that never answered `/health` with nothing on its
+//! error output.
 //!
-//! The loader is run on the already verified server file with the runtime folder as its
-//! library path and nothing else of the environment; its list mode resolves the libraries and
-//! does not run the program. Without a loader at a known place, or if it cannot be run, nothing
-//! is said (the start goes on and fails as before).
+//! Nothing is executed. The `DT_NEEDED` names are read from the ELF dynamic section of the
+//! verified server and of each verified runtime library, from their verified descriptors (so
+//! what is inspected is what was hashed, whatever happens to the paths afterwards), with the
+//! `object` crate (DEP-26). Each name is looked for among the verified runtime files first (the
+//! server's own folder) and then in the library directories the sandbox binds
+//! ([`bwrap::LIBRARY_DIRS`], and their `*-linux-*` multiarch folders). A name found nowhere is
+//! reported; a file that cannot be read or parsed, or a name that is not a plain library name,
+//! makes the answer "unknown" and the start goes on as it would without this check.
+use super::bwrap::LIBRARY_DIRS;
+use super::files::Verified;
+use object::read::elf::{Dyn, FileHeader};
+use object::{Endianness, elf};
+use std::collections::BTreeSet;
+use std::os::fd::{AsFd, BorrowedFd};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
-/// Where the dynamic loader lives on the platforms Mimik ships for.
-const LOADERS: [&str; 5] = [
-    "/lib64/ld-linux-x86-64.so.2",
-    "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-    "/usr/lib64/ld-linux-x86-64.so.2",
-    "/lib/ld-linux-aarch64.so.1",
-    "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1",
-];
+/// The most a library file may weigh for its dynamic section to be read (a bound on memory).
+const MAX_BYTES: u64 = 256 << 20;
 
-/// The libraries `--list` output reports as not found.
-pub(crate) fn not_found(listing: &str) -> Vec<String> {
-    listing
-        .lines()
-        .filter_map(|line| {
-            let (name, rest) = line.trim().split_once("=>")?;
-            (rest.trim() == "not found").then(|| name.trim().to_owned())
-        })
-        .collect()
+/// The `DT_NEEDED` names of the 64-bit ELF `data` (`None`: not an ELF this can read, or no
+/// dynamic section).
+pub(crate) fn needed(data: &[u8]) -> Option<Vec<String>> {
+    let header = elf::FileHeader64::<Endianness>::parse(data).ok()?;
+    let endian = header.endian().ok()?;
+    let sections = header.sections(endian, data).ok()?;
+    // The section index returned with the entries is that of their string table.
+    let (entries, strings_index) = sections.dynamic(endian, data).ok()??;
+    let strings = sections.strings(endian, data, strings_index).ok()?;
+    let mut names = Vec::new();
+    for entry in entries {
+        if entry.tag(endian) == elf::DT_NEEDED {
+            let name = entry.string(endian, strings).ok()?;
+            names.push(String::from_utf8(name.to_vec()).ok()?);
+        }
+    }
+    Some(names)
+}
+
+/// A plain library file name: nothing a path, a page or a command line would read as more.
+fn plain(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c))
+}
+
+/// The libraries `start` needs, directly or through the runtime files, that are neither among
+/// those files (`in_runtime`) nor in the system directories (`in_system`). `read` gives a
+/// runtime file's bytes. `None` when anything cannot be told.
+pub(crate) fn missing_from(
+    start: &str,
+    read: &dyn Fn(&str) -> Option<Vec<u8>>,
+    in_runtime: &dyn Fn(&str) -> bool,
+    in_system: &dyn Fn(&str) -> bool,
+) -> Option<Vec<String>> {
+    let mut queue = vec![start.to_owned()];
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut missing: BTreeSet<String> = BTreeSet::new();
+    while let Some(file) = queue.pop() {
+        if !seen.insert(file.clone()) {
+            continue;
+        }
+        for name in needed(&read(&file)?)? {
+            if !plain(&name) {
+                return None;
+            }
+            if in_runtime(&name) {
+                queue.push(name);
+            } else if !in_system(&name) {
+                missing.insert(name);
+            }
+        }
+    }
+    Some(missing.into_iter().collect())
+}
+
+/// Reads `size` bytes of the descriptor from offset 0 (its own offset is left alone).
+pub(crate) fn read_fd(fd: BorrowedFd<'_>, size: u64) -> Option<Vec<u8>> {
+    if size > MAX_BYTES {
+        return None;
+    }
+    let file = std::fs::File::from(fd.try_clone_to_owned().ok()?);
+    let mut data = vec![0; usize::try_from(size).ok()?];
+    file.read_exact_at(&mut data, 0).ok()?;
+    Some(data)
+}
+
+/// Whether `name` is in one of `dirs` or in a multiarch folder (`x86_64-linux-gnu`) directly
+/// under it.
+pub(crate) fn in_dirs(name: &str, dirs: &[PathBuf]) -> bool {
+    dirs.iter().any(|dir| {
+        dir.join(name).exists()
+            || std::fs::read_dir(dir).is_ok_and(|entries| {
+                entries.flatten().any(|entry| {
+                    entry.file_name().to_string_lossy().contains("-linux-")
+                        && entry.path().join(name).exists()
+                })
+            })
+    })
 }
 
 /// What the owner can install for `library`.
@@ -41,41 +118,44 @@ fn remedy(library: &str) -> String {
     }
 }
 
-/// The start-time error for the libraries of `server` the host lacks, run through `loader`
-/// with `library_dir` as the library path (`None`: none missing, or nothing could be told).
-pub(crate) fn explain_with(loader: &Path, server: &Path, library_dir: &Path) -> Option<String> {
-    let output = Command::new(loader)
-        .arg("--list")
-        .arg(server)
-        .env_clear()
-        .env("LD_LIBRARY_PATH", library_dir)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    let missing = not_found(&String::from_utf8_lossy(&output.stdout));
+/// The start-time error for `missing` libraries of `server` (`None`: none).
+pub(crate) fn message(server: &str, missing: &[String]) -> Option<String> {
     let first = missing.first()?;
-    let name = server.file_name()?.to_string_lossy();
-    Some(format!(
-        "{name} needs {first}: {}{}",
-        remedy(first),
-        if missing.len() > 1 {
-            format!(" (also missing: {})", missing[1..].join(", "))
-        } else {
-            String::new()
-        }
-    ))
+    let also = if missing.len() > 1 {
+        format!(" (also missing: {})", missing[1..].join(", "))
+    } else {
+        String::new()
+    };
+    Some(format!("{server} needs {first}: {}{also}", remedy(first)))
 }
 
-/// [`explain_with`] with the host's dynamic loader.
-pub(crate) fn explain(server: &Path, library_dir: &Path) -> Option<String> {
-    let loader: PathBuf = LOADERS
-        .iter()
-        .map(PathBuf::from)
-        .find(|path| path.is_file())?;
-    explain_with(&loader, server, library_dir)
+/// The error for the libraries the verified `files` (the server `server` among them) need and
+/// the host lacks, from their descriptors; `None` when none is missing or nothing could be told.
+pub(crate) fn explain(files: &[Verified], server: &str) -> Option<String> {
+    let find = |name: &str| files.iter().find(|file| file.name == name);
+    let dirs: Vec<PathBuf> = LIBRARY_DIRS.iter().map(PathBuf::from).collect();
+    let missing = missing_from(
+        server,
+        &|name| find(name).and_then(|file| read_fd(file.fd.as_fd(), file.identity.size)),
+        &|name| find(name).is_some(),
+        &|name| in_dirs(name, &dirs),
+    )?;
+    message(server, &missing)
+}
+
+/// The same over a folder on disk (the live check of a pinned build).
+#[cfg(test)]
+pub(crate) fn explain_dir(dir: &Path, server: &str) -> Option<String> {
+    let dirs: Vec<PathBuf> = LIBRARY_DIRS.iter().map(PathBuf::from).collect();
+    let missing = missing_from(
+        server,
+        &|name| std::fs::read(dir.join(name)).ok(),
+        &|name| plain(name) && dir.join(name).is_file(),
+        &|name| in_dirs(name, &dirs),
+    )?;
+    message(server, &missing)
 }
 
 #[cfg(test)]
 #[path = "libs_tests.rs"]
-mod tests;
+pub(crate) mod tests;
