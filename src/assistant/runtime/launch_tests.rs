@@ -75,16 +75,16 @@ struct Setup {
 }
 
 fn setup(model: &[u8], alias: &str) -> Setup {
-    setup_with_server(model, alias, std::fs::read(fake_server()).unwrap())
+    setup_with_server(model, alias, &std::fs::read(fake_server()).unwrap())
 }
 
 /// [`setup`] with the bytes of the runtime's `llama-server` given.
-fn setup_with_server(model: &[u8], alias: &str, server: Vec<u8>) -> Setup {
+fn setup_with_server(model: &[u8], alias: &str, server: &[u8]) -> Setup {
     let dir = scratch();
     let root = dir.path();
     let cpu = root.join("runtime/cpu");
     std::fs::create_dir_all(&cpu).unwrap();
-    std::fs::write(cpu.join("llama-server"), &server).unwrap();
+    std::fs::write(cpu.join("llama-server"), server).unwrap();
     std::fs::set_permissions(
         cpu.join("llama-server"),
         std::fs::Permissions::from_mode(0o755),
@@ -99,7 +99,7 @@ fn setup_with_server(model: &[u8], alias: &str, server: Vec<u8>) -> Setup {
         files: vec![
             Entry {
                 name: "llama-server".into(),
-                sha256: sha(&server),
+                sha256: sha(server),
                 size: server.len() as u64,
                 mode: "0755".into(),
             },
@@ -322,7 +322,7 @@ async fn a_group_writable_runtime_folder_is_refused_with_the_exact_fix() {
 #[tokio::test]
 async fn a_library_the_server_needs_and_the_host_lacks_is_named_at_the_start() {
     let server = super::super::libs::tests::elf_needing(&["libgomp-not-installed.so.1"]);
-    let setup = setup_with_server(MODEL, "fake", server);
+    let setup = setup_with_server(MODEL, "fake", &server);
     let launch = launch(&setup);
     launch.preflight(Path::Cpu).await.unwrap();
     let Err(Fail::Other(why)) = launch.start(1, Level::Unconfined, Path::Cpu).await else {

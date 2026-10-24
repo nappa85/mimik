@@ -18,7 +18,7 @@ use object::{Endianness, elf};
 use std::collections::BTreeSet;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::FileExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// The most a library file may weigh for its dynamic section to be read (a bound on memory).
 const MAX_BYTES: u64 = 256 << 20;
@@ -145,7 +145,7 @@ pub(crate) fn explain(files: &[Verified], server: &str) -> Option<String> {
 
 /// The same over a folder on disk (the live check of a pinned build).
 #[cfg(test)]
-pub(crate) fn explain_dir(dir: &Path, server: &str) -> Option<String> {
+pub(crate) fn explain_dir(dir: &std::path::Path, server: &str) -> Option<String> {
     let dirs: Vec<PathBuf> = LIBRARY_DIRS.iter().map(PathBuf::from).collect();
     let missing = missing_from(
         server,
