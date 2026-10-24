@@ -173,18 +173,22 @@ fn inspection_reads_the_descriptor_not_the_path() {
 }
 
 #[test]
-fn system_directories_are_searched_with_their_multiarch_folders() {
+fn system_directories_are_searched_a_few_folders_down() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join("x86_64-linux-gnu")).unwrap();
-    std::fs::write(dir.path().join("x86_64-linux-gnu/libgomp.so.1"), b"x").unwrap();
+    let nested = dir.path().join("gcc/x86_64-pc-linux-gnu/15");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("libgomp.so.1"), b"x").unwrap();
     std::fs::write(dir.path().join("libplain.so.1"), b"x").unwrap();
-    std::fs::create_dir_all(dir.path().join("other")).unwrap();
-    std::fs::write(dir.path().join("other/libhidden.so.1"), b"x").unwrap();
-    let dirs = vec![dir.path().to_path_buf()];
-    assert!(in_dirs("libgomp.so.1", &dirs));
-    assert!(in_dirs("libplain.so.1", &dirs));
-    assert!(!in_dirs("libhidden.so.1", &dirs));
-    assert!(!in_dirs("libabsent.so.1", &dirs));
+    let too_deep = dir.path().join("a/b/c/d");
+    std::fs::create_dir_all(&too_deep).unwrap();
+    std::fs::write(too_deep.join("libdeep.so.1"), b"x").unwrap();
+    std::os::unix::fs::symlink("libplain.so.1", dir.path().join("liblink.so.1")).unwrap();
+    let names = system_names(&[dir.path().to_path_buf(), dir.path().join("absent")]);
+    for present in ["libgomp.so.1", "libplain.so.1", "liblink.so.1"] {
+        assert!(names.contains(present), "{present}");
+    }
+    assert!(!names.contains("libdeep.so.1"));
+    assert!(!names.contains("libabsent.so.1"));
 }
 
 /// The pinned builds on this host (`MIMIK_LIVE_RUNTIME`, the unpacked runtime): nothing is
@@ -199,11 +203,12 @@ fn live_the_pinned_servers_report_nothing_missing_on_this_host() {
         assert_eq!(explain_dir(&dir, "llama-server"), None, "{build}");
         // `None` also means "unknown": the check must really have read the files.
         let dirs: Vec<PathBuf> = LIBRARY_DIRS.iter().map(PathBuf::from).collect();
+        let system = system_names(&dirs);
         let found = missing_from(
             "llama-server",
             &|name| std::fs::read(dir.join(name)).ok(),
             &|name| plain(name) && dir.join(name).is_file(),
-            &|name| in_dirs(name, &dirs),
+            &|name| system.contains(name),
         );
         assert_eq!(found.map(|missing| missing.len()), Some(0), "{build}");
     }

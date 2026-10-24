@@ -8,7 +8,7 @@
 //! what is inspected is what was hashed, whatever happens to the paths afterwards), with the
 //! `object` crate (DEP-26). Each name is looked for among the verified runtime files first (the
 //! server's own folder) and then in the library directories the sandbox binds
-//! ([`bwrap::LIBRARY_DIRS`], and their `*-linux-*` multiarch folders). A name found nowhere is
+//! ([`bwrap::LIBRARY_DIRS`], a few folders down: multiarch and compiler-runtime folders). A name found nowhere is
 //! reported; a file that cannot be read or parsed, or a name that is not a plain library name,
 //! makes the answer "unknown" and the start goes on as it would without this check.
 use super::bwrap::LIBRARY_DIRS;
@@ -93,18 +93,39 @@ pub(crate) fn read_fd(fd: BorrowedFd<'_>, size: u64) -> Option<Vec<u8>> {
     Some(data)
 }
 
-/// Whether `name` is in one of `dirs` or in a multiarch folder (`x86_64-linux-gnu`) directly
-/// under it.
-pub(crate) fn in_dirs(name: &str, dirs: &[PathBuf]) -> bool {
-    dirs.iter().any(|dir| {
-        dir.join(name).exists()
-            || std::fs::read_dir(dir).is_ok_and(|entries| {
-                entries.flatten().any(|entry| {
-                    entry.file_name().to_string_lossy().contains("-linux-")
-                        && entry.path().join(name).exists()
-                })
-            })
-    })
+/// How deep under a library directory names are collected (`/usr/lib/gcc/x86_64-pc-linux-gnu/15`
+/// is three folders down; `ld.so.cache` points into such folders).
+const DEPTH: usize = 4;
+/// The most names collected (a bound on the walk).
+const MAX_NAMES: usize = 400_000;
+
+/// The file names (files and links) under `dirs`, to [`DEPTH`] folders down, not following
+/// links to folders below the top ones: the names the sandbox's loader could resolve in the
+/// folders it binds.
+pub(crate) fn system_names(dirs: &[PathBuf]) -> BTreeSet<String> {
+    fn walk(dir: &std::path::Path, depth: usize, names: &mut BTreeSet<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if names.len() >= MAX_NAMES {
+                return;
+            }
+            let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+            if is_dir {
+                if depth + 1 < DEPTH {
+                    walk(&entry.path(), depth + 1, names);
+                }
+            } else {
+                names.insert(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+    }
+    let mut names = BTreeSet::new();
+    for dir in dirs {
+        walk(dir, 0, &mut names);
+    }
+    names
 }
 
 /// What the owner can install for `library`.
@@ -134,11 +155,12 @@ pub(crate) fn message(server: &str, missing: &[String]) -> Option<String> {
 pub(crate) fn explain(files: &[Verified], server: &str) -> Option<String> {
     let find = |name: &str| files.iter().find(|file| file.name == name);
     let dirs: Vec<PathBuf> = LIBRARY_DIRS.iter().map(PathBuf::from).collect();
+    let system = system_names(&dirs);
     let missing = missing_from(
         server,
         &|name| find(name).and_then(|file| read_fd(file.fd.as_fd(), file.identity.size)),
         &|name| find(name).is_some(),
-        &|name| in_dirs(name, &dirs),
+        &|name| system.contains(name),
     )?;
     message(server, &missing)
 }
@@ -147,11 +169,12 @@ pub(crate) fn explain(files: &[Verified], server: &str) -> Option<String> {
 #[cfg(test)]
 pub(crate) fn explain_dir(dir: &std::path::Path, server: &str) -> Option<String> {
     let dirs: Vec<PathBuf> = LIBRARY_DIRS.iter().map(PathBuf::from).collect();
+    let system = system_names(&dirs);
     let missing = missing_from(
         server,
         &|name| std::fs::read(dir.join(name)).ok(),
         &|name| plain(name) && dir.join(name).is_file(),
-        &|name| in_dirs(name, &dirs),
+        &|name| system.contains(name),
     )?;
     message(server, &missing)
 }
