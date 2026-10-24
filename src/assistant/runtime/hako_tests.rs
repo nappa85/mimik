@@ -714,12 +714,12 @@ impl Procs for FakeProcs {
     fn stat(&self, pid: i32) -> std::io::Result<(i32, u64)> {
         let opened = self.done("open", pid);
         self.calls.lock().unwrap().push(("stat", pid));
-        if opened {
-            if let Some((_, parent, start)) =
-                self.replaced_after_open.iter().find(|(p, _, _)| *p == pid)
-            {
-                return Ok((*parent, *start));
-            }
+        if let Some((_, parent, start)) = self
+            .replaced_after_open
+            .iter()
+            .find(|(p, _, _)| opened && *p == pid)
+        {
+            return Ok((*parent, *start));
         }
         if self.unreadable.contains(&pid) {
             return Err(std::io::Error::from_raw_os_error(libc::EMFILE));
