@@ -43,8 +43,8 @@ start-time probe shows unprivileged user namespaces work; otherwise the assistan
 (Gentoo, no such restriction); with Ubuntu 24.04's default restriction on, CI records the
 probe's outcome without certifying it. On a machine with a hardware GPU the assistant tries
 the GPU path first (the Vulkan build, `--assistant-device`) and falls back to the CPU; the GPU
-path is not certified: CI does not cover it, and its live checks on the dev host's GPU are
-still owed. The documented minimum host for the bundled build (Ubuntu 22.04 `x86_64`) is not
+path is not certified: CI does not cover it, and its live checks have been run on the dev
+host's GPU only (RX 6650 XT, Mesa RADV; `results.md`). The documented minimum host for the bundled build (Ubuntu 22.04 `x86_64`) is not
 yet verified on a VM.
 
 ## Run
@@ -87,13 +87,15 @@ Assistant requirements on the host:
 - The bundled model server needs the OpenMP runtime (`libgomp.so.1`), which minimal Linux
   installs lack: `sudo apt install libgomp1` on Debian and Ubuntu, or your distribution's
   OpenMP runtime package. The GPU build also needs the Vulkan loader (`libvulkan.so.1`). If one
-  is missing the assistant says which library and what to install.
+  is missing the assistant says which library and what to install; it finds out by reading the
+  ELF dynamic sections of the bundled files, without running anything.
 - Mimik refuses a `llama/` folder, its files, or a models folder that group or others can
   write. Ubuntu's default umask (002) makes folders made with `mkdir -p` or copied with `scp`
   group-writable; unpacking the archive with `tar` keeps the archive's modes (0755) and is not
   affected. The page names the fix: `chmod -R go-w <llama folder>` and `chmod 700 data/models`.
   The folders Mimik makes itself (`data/`, `data/run/` and its generations) are 0700 whatever
-  the umask.
+  the umask, and so are the intermediate folders it creates for a `--database` path that did
+  not exist.
 - Ubuntu 23.10 and later restrict unprivileged user namespaces: with `--assistant-sandbox
   hakoniwa`, run `./mimik assistant-apparmor-profile` (or `--for <absolute path>` for another
   location) and install the profile as the assistant page says. Checked on Ubuntu 24.04, where
