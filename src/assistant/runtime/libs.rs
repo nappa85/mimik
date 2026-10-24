@@ -40,7 +40,8 @@ pub(crate) struct Budget {
     pub entries: usize,
     /// Folders opened.
     pub dirs: usize,
-    /// Folders down from a library directory (`/usr/lib/gcc/x86_64-pc-linux-gnu/15` is 4).
+    /// Folders down from a library directory (`/usr/lib/gcc/x86_64-pc-linux-gnu/15` is 4; the
+    /// deepest on a full Gentoo `/usr/lib` is 12).
     pub depth: usize,
 }
 
@@ -48,7 +49,7 @@ impl Budget {
     pub(crate) const DEFAULT: Self = Self {
         entries: 1_500_000,
         dirs: 100_000,
-        depth: 6,
+        depth: 24,
     };
 }
 
