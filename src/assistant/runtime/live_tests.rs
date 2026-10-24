@@ -1350,33 +1350,32 @@ fn killed_after(delay: Duration) {
         .unwrap();
     let sweep = Sweep::watch(i32::try_from(mimik.id()).unwrap());
     let appeared = std::time::Instant::now() + Duration::from_secs(60);
-    let first = loop {
-        let seen = sweep.snapshot();
-        if seen.values().any(|line| !line.is_empty()) {
-            break seen;
+    loop {
+        if sweep.snapshot().values().any(|line| !line.is_empty()) {
+            break;
         }
         assert!(
             std::time::Instant::now() < appeared,
             "no process of the run"
         );
         std::thread::sleep(Duration::from_micros(100));
-    };
-    // The earliest process of the run (the smallest start time) is the runner, before any
-    // server's exec; its command line, empty while it is between its fork and exec, is waited
-    // for.
-    let earliest = first
-        .keys()
-        .min_by_key(|(_, start)| *start)
-        .copied()
-        .unwrap();
+    }
+    // The earliest process of the run that shows a command line (the smallest start time) is
+    // the runner, before any server's exec. A process caught between its exit and its reaping
+    // shows none, and bubblewrap's own `--help` probe at the start is not the run's.
     let line = loop {
-        let line = sweep.snapshot().get(&earliest).cloned().unwrap_or_default();
-        if !line.is_empty() {
+        let seen = sweep.snapshot();
+        let earliest = seen
+            .iter()
+            .filter(|(_, line)| !line.is_empty() && !line.contains(" --help"))
+            .min_by_key(|((_, start), _)| *start)
+            .map(|(_, line)| line.clone());
+        if let Some(line) = earliest {
             break line;
         }
         assert!(
             std::time::Instant::now() < appeared,
-            "no command line for {earliest:?}"
+            "no command line seen: {seen:?}"
         );
         std::thread::sleep(Duration::from_micros(200));
     };
