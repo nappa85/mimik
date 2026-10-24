@@ -312,7 +312,6 @@ jobs:
             --data-dir target/probe-data
       - name: Confinement, endpoint and live tests against the unpacked runtime
         env:
-          MIMIK_LIVE_LANDLOCK: any
           MIMIK_LIVE_RUNTIME: ${{ github.workspace }}/target/rel/llama
           MIMIK_LIVE_MODELS: ${{ github.workspace }}/target/models
           MIMIK_LIVE_SCRATCH: ${{ github.workspace }}/target/scratch
@@ -336,7 +335,6 @@ jobs:
       # libtest binary; the start-time probe with it exits 0 only at level 1.
       - name: Hakoniwa sandbox, start-time probe and the whole live suite
         env:
-          MIMIK_LIVE_LANDLOCK: any
           MIMIK_LIVE_RUNTIME: ${{ github.workspace }}/target/rel/llama
           MIMIK_LIVE_MODELS: ${{ github.workspace }}/target/models
           MIMIK_LIVE_SCRATCH: ${{ github.workspace }}/target/scratch
@@ -347,10 +345,9 @@ jobs:
           set -o pipefail
           chmod 0755 target/hakoniwa-binary/mimik
           # The kernel's Landlock ABI (x86_64 landlock_create_ruleset, version flag; negative
-          # when absent). `MIMIK_LIVE_LANDLOCK=any` skips the confinement assertions on a
-          # kernel below ABI 6; on one at 6 or above they are required, so a runner that
-          # has Landlock can never pass with them skipped (and the suite's own check says
-          # the report is "full" only from ABI 6).
+          # when absent). From ABI 6 up the confinement assertions are demanded
+          # (`MIMIK_LIVE_LANDLOCK=require`), so a runner that has Landlock can never pass with
+          # them skipped; below 6 they skip with their reason.
           abi=$(python3 -c "import ctypes; print(ctypes.CDLL(None, use_errno=True).syscall(444, None, 0, 1))") || abi=-1
           echo "Landlock ABI found on this runner: $abi"
           # A failed probe (python missing, an unexpected output) is an error; -1 from the
@@ -360,7 +357,7 @@ jobs:
             *) echo "the Landlock ABI probe failed: '$abi'"; exit 1 ;;
           esac
           if [ "$abi" -ge 6 ]; then
-            unset MIMIK_LIVE_LANDLOCK
+            export MIMIK_LIVE_LANDLOCK=require
             echo "Landlock confinement assertions: required"
           else
             echo "Landlock confinement assertions: SKIPPED (ABI below 6)"

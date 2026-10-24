@@ -82,6 +82,24 @@ Options:
   --models-dir data/models --model local:<name>.gguf` reports the confinement level this
   machine reaches.
 
+Assistant requirements on the host:
+
+- The bundled model server needs the OpenMP runtime (`libgomp.so.1`), which minimal Linux
+  installs lack: `sudo apt install libgomp1` on Debian and Ubuntu, or your distribution's
+  OpenMP runtime package. The GPU build also needs the Vulkan loader (`libvulkan.so.1`). If one
+  is missing the assistant says which library and what to install.
+- Mimik refuses a `llama/` folder, its files, or a models folder that group or others can
+  write. Ubuntu's default umask (002) makes folders made with `mkdir -p` or copied with `scp`
+  group-writable; unpacking the archive with `tar` keeps the archive's modes (0755) and is not
+  affected. The page names the fix: `chmod -R go-w <llama folder>` and `chmod 700 data/models`.
+  The folders Mimik makes itself (`data/`, `data/run/` and its generations) are 0700 whatever
+  the umask.
+- Ubuntu 23.10 and later restrict unprivileged user namespaces: with `--assistant-sandbox
+  hakoniwa`, run `./mimik assistant-apparmor-profile` (or `--for <absolute path>` for another
+  location) and install the profile as the assistant page says. Checked on Ubuntu 24.04, where
+  the profile covers that one binary path only: a copy or hard link elsewhere is refused, a
+  symbolic link to it works.
+
 Ctrl+C stops the server. Stop it before copying the database file as a backup. Back up before
 upgrading: a newer binary migrates the database in place, and older binaries then refuse it.
 Text that earlier builds stored with CR LF line breaks is written with LF on its next save.

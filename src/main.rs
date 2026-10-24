@@ -95,6 +95,17 @@ fn data_dir(database: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
     std::path::absolute(folder)
 }
 
+/// Makes the data folder and its missing parents with an explicit mode of 0700, so the folders
+/// Mimik makes do not depend on the umask (Ubuntu's default 002 would make them group-writable).
+/// A folder that already exists keeps its mode.
+fn create_data_dir(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+}
+
 /// The assistant `--assistant` asks for: the runtime manager over the data directory.
 fn assistant(
     args: &Args,
@@ -281,7 +292,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(mimik::assistant::runner_main(&raw[2..]));
     }
     if raw.get(1).map(String::as_str) == Some("assistant-apparmor-profile") {
-        std::process::exit(mimik::assistant::apparmor_profile_main());
+        std::process::exit(mimik::assistant::apparmor_profile_main(&raw[2..]));
     }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -296,7 +307,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut options = server_options(&args, std::env::var("MIMIK_EXTERNAL_URL").ok())?;
     let path = database_path(args.database.clone(), std::env::var_os("MIMIK_DATABASE"));
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
+        create_data_dir(parent)?;
     }
     if args.assistant.on {
         options.assistant = Some(assistant(&args, &data_dir(&path)?)?);

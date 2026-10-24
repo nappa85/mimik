@@ -1431,3 +1431,23 @@ fn a_landlock_list_rule_covers_the_directories_beneath_it_and_no_file_in_them() 
     assert!(!other);
     assert!(!file);
 }
+
+#[test]
+fn the_apparmor_profile_command_takes_a_path_for_packagers_and_defaults_to_this_binary() {
+    let profile = apparmor_profile_for(&["--for".into(), "/opt/mimik/bin/mimik".into()]).unwrap();
+    assert!(profile.contains("/opt/mimik/bin/mimik"), "{profile}");
+    assert!(!profile.contains(APPARMOR_PLACEHOLDER));
+    let own = apparmor_profile_for(&[]).unwrap();
+    let exe = std::env::current_exe().unwrap();
+    assert!(own.contains(exe.to_str().unwrap()), "{own}");
+    // A relative path, a path AppArmor would interpret, a missing value and anything else.
+    for bad in [
+        vec!["--for".to_owned(), "mimik".to_owned()],
+        vec!["--for".to_owned(), "/opt/{a,b}/mimik".to_owned()],
+        vec!["--for".to_owned()],
+        vec!["--other".to_owned()],
+        vec!["--for".to_owned(), "/a".to_owned(), "/b".to_owned()],
+    ] {
+        assert!(apparmor_profile_for(&bad).is_err(), "{bad:?}");
+    }
+}

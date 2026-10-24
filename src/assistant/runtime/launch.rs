@@ -9,6 +9,7 @@ use super::drain::{self, Summary};
 use super::endpoint::{self, Loopback, Sandbox, SandboxSocket, Watched};
 use super::files::{self, HashCache, Owners, Verified};
 use super::hako;
+use super::libs;
 use super::manager::{Child, DeviceView, Fail, Launcher};
 use super::manifest::{Build, MANIFEST};
 use super::rundir::{self, Entry, Generation, Pidfile, Swept};
@@ -162,6 +163,20 @@ pub(crate) struct Selected {
 }
 
 /// Refuses executable paths with a newline: the pidfile holds one per line.
+/// A refusal of a folder or file under `folder`, as the page says it: for a mode the owner
+/// can fix, with the exact command (Ubuntu's default umask 002 makes `mkdir -p` and `scp`
+/// leave group-writable folders; Mimik never accepts them).
+fn refused(what: &str, folder: &std::path::Path, refusal: &files::Refusal) -> String {
+    let quoted = super::hako::shell_word(&folder.to_string_lossy());
+    match refusal {
+        files::Refusal::Writable(_) => {
+            format!("{what}: {refusal}; fix it with `chmod -R go-w {quoted}`")
+        }
+        files::Refusal::Mode(_) => format!("{what}: {refusal}; fix it with `chmod 700 {quoted}`"),
+        _ => format!("{what}: {refusal}"),
+    }
+}
+
 fn newline_free(executables: &[String]) -> Result<(), Fail> {
     match executables.iter().find(|path| path.contains('\n')) {
         Some(path) => Err(Fail::Other(format!(
@@ -498,14 +513,19 @@ impl Real {
                 #[cfg(test)]
                 self.paused("runtime-opened");
             })
-            .map_err(|refusal| format!("the model runtime: {refusal}"))?;
+            .map_err(|refusal| {
+                refused("the model runtime", &self.settings.runtime_dir, &refusal)
+            })?;
         let build_fd =
             files::open_dir_beneath(runtime.as_fd(), &build.directory, Owners::MineOrRoot, false)
-                .map_err(|refusal| format!("the model runtime: {refusal}"))?;
-        let files = files::runtime_until(build_fd.as_fd(), build, &self.cache, &stop)
-            .map_err(|refusal| format!("the model runtime: {refusal}"))?;
+                .map_err(|refusal| {
+                refused("the model runtime", &self.settings.runtime_dir, &refusal)
+            })?;
+        let files = files::runtime_until(build_fd.as_fd(), build, &self.cache, &stop).map_err(
+            |refusal| refused("the model runtime", &self.settings.runtime_dir, &refusal),
+        )?;
         let models = files::open_dir(&self.settings.models_dir, Owners::Mine, true)
-            .map_err(|refusal| format!("the models folder: {refusal}"))?;
+            .map_err(|refusal| refused("the models folder", &self.settings.models_dir, &refusal))?;
         let model = files::model_until(
             models.as_fd(),
             &self.settings.model,
@@ -515,6 +535,10 @@ impl Real {
         )
         .map_err(|refusal| format!("the model: {refusal}"))?;
         let build_dir = real.join(&build.directory);
+        // A library the host lacks, named now instead of a server that never answers.
+        if let Some(why) = libs::explain(&build_dir.join(self.server_name(path)), &build_dir) {
+            return Err(why);
+        }
         Ok(Checked {
             files,
             model,

@@ -355,10 +355,11 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
 `mimik assistant-apparmor-profile` prints the `AppArmor` profile for the running binary's own
 path (template `apparmor/mimik`, also for distribution packages); when the sandbox cannot
 start and Ubuntu's restriction is on, the assistant page's message gives that command with
-the `tee` and `apparmor_parser -r` steps. Not tested: Ubuntu's AppArmor restriction of
-unprivileged user namespaces and that profile (it needs an Ubuntu 24.04 VM); the Landlock layer on a kernel
-below ABI 6 (only a simulated kernel without Landlock is tested, with a seccomp filter answering `ENOSYS` to its
-calls); a real GPU under Landlock. `results.md` has the comparison.
+the `tee` and `apparmor_parser -r` steps. `--for <absolute path>` prints it for
+another binary (packagers, test setups). Ubuntu 24.04's restriction and the profile were checked in a VM
+(`results.md`; repeatable with `/media/data/mimik/ubuntu-vm/run.sh`). The Landlock layer on a kernel below ABI 6
+ran once on that VM (ABI 4); a kernel with Landlock disabled at boot is only simulated (a seccomp filter
+answering `ENOSYS`, `EOPNOTSUPP` or `EPERM` to its calls). `results.md` has the comparison.
 
 ## Device (GPU path)
 

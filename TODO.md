@@ -6,11 +6,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Current work
 
-- **Hakoniwa Landlock change** (`hakoniwa-spike`, ASSIST-49): implementation and local live
-  checks in place; completion blocked on the review of the fixes, the owed live GPU check under Landlock
-  (`assist_gpu_live.py --short --binary <feature-built confinement-tests> --mimik <feature-built
-  release mimik>`; the user triggers it) and older-ABI evidence.
-  Adoption also needs the dependency-audit resolution and Ubuntu AppArmor VM check.
+- **Hakoniwa Landlock change** (`hakoniwa-spike`, ASSIST-49): implemented; live GPU under Landlock and the
+  Ubuntu 24.04 VM (ABI 4) checked (`docs/results.md`). Completion waits for the review of the
+  latest fixes (Astra's confirm findings, the VM follow-ups); adoption also needs the dependency-audit
+  exception's removal path (below).
 
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1, 2c-2a (the CPU
   runtime at level 1 only, ASSIST-43, `docs/model-runtime.md`) and the Rust 1.99.1 / rig-core

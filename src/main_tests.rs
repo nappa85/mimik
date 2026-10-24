@@ -62,3 +62,22 @@ fn local_commands_ignore_server_configuration_and_reject_serving_flags() {
         assert!(validate_serving_args(&args).is_err());
     }
 }
+
+#[test]
+fn the_data_folders_mimik_makes_are_private_whatever_the_umask() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let existing = root.path().join("existing");
+    std::fs::create_dir(&existing).unwrap();
+    std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let data = existing.join("data/nested");
+    create_data_dir(&data).unwrap();
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+    // Explicit 0700 (a umask can only remove bits from it, so 002 leaves it as it is).
+    assert_eq!(mode(&data), 0o700);
+    assert_eq!(mode(&existing.join("data")), 0o700);
+    // A folder that was there is the owner's to set.
+    assert_eq!(mode(&existing), 0o755);
+    create_data_dir(&data).unwrap();
+}

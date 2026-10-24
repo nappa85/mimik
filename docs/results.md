@@ -38,9 +38,7 @@ AppArmor or Landlock in the kernel's LSM list, unprivileged user namespaces on, 
 Mimik's fake server (forged output, exec failure, swapped files, fake GPU nodes). One run per
 backend of the same suite (the seccomp, endpoint, runner and `launch::live_tests` tests that
 `MIMIK_LIVE_SANDBOX` parametrises; 45 tests, 3 of them force Hakoniwa) and ten start-time
-probes each. Not covered: Ubuntu's AppArmor restriction (needs an Ubuntu 24.04 VM; the draft
-profile `apparmor/mimik` only passes `apparmor_parser`'s syntax check), Landlock inside the
-namespaces (no Landlock kernel), a real GPU (only the fake render node), other kernels or
+probes each. Not covered here (Ubuntu 24.04 and Landlock have their own sections below): a real GPU (only the fake render node), other kernels or
 distributions, load. Reviewers have not seen it; no product decision rests on it yet.
 
 - Every check passes on both backends: nothing but the Unix socket reachable (host TCP, LAN,
@@ -871,3 +869,26 @@ decides.**
 - **Limitations:** one host, one GPU, one run; the cold-start timeout was not reproduced; a
   guard with 1 s samples can miss a short spike; raw output in
   `/media/data/mimik/hakoniwa/live-gpu/`.
+
+## Hakoniwa sandbox on Ubuntu 24.04 (2026-10-24)
+
+- **Question:** does the generated AppArmor profile make Hakoniwa level 1 reachable on Ubuntu's
+  default restriction of unprivileged user namespaces, and how does the Landlock layer behave
+  on a kernel below ABI 6?
+- **Setup:** QEMU/KVM VM (4 vCPU, 8 GiB) booted from the official Ubuntu noble cloud image,
+  serial 20261017, checksum and GPG signature verified (key D2EB 4462 6FDD C30B 513D 5BB7 1A5D
+  6C4C 7DB8 7C81), kernel 6.8.0-147, Landlock ABI 4. Mimik release build with `sandbox-hakoniwa`,
+  the pinned llama.cpp b11609 CPU runtime, the stories260K model. Repeat with
+  `/media/data/mimik/ubuntu-vm/run.sh`; raw output in
+  `/media/data/mimik/ubuntu-vm/run/20261024-103115/`.
+- **Numbers:** without the profile the probe is refused with the page's AppArmor message; with
+  the generated profile level 1 is reached. A copy or a hard link of the binary at another path is
+  refused; a symbolic link to the original works. The live suite passed 55 of 57; the two
+  failures (`live_the_hakoniwa_closure_reports_landlock_in_full_force` and the scope test) need
+  ABI 6, and the status read "partial (kernel ABI 4)".
+- **Findings that changed the code:** a missing `libgomp.so.1` showed only as a server that never
+  answered `/health` (now named at start); `mkdir -p` and `scp` leave group-writable folders under
+  umask 002, which Mimik refuses (the page now gives the `chmod` fix); the ABI 6 tests now skip
+  below ABI 6 unless demanded.
+- **Limitations:** one image, one kernel, one run; no GPU in the VM; the profile was tried for a
+  binary in the user's home only.

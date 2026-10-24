@@ -1,5 +1,5 @@
 # AppArmor profile that lets Mimik create the private sandbox of its model server
-# (DRAFT, untested: it needs an Ubuntu 24.04 VM; nothing installs it automatically).
+# (tested on Ubuntu 24.04, kernel 6.8; nothing installs it automatically).
 #
 # Why: Ubuntu 23.10 and later set kernel.apparmor_restrict_unprivileged_userns=1. A program
 # without an AppArmor profile that allows `userns` can still create a user namespace, but the

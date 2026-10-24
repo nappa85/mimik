@@ -291,6 +291,31 @@ async fn changed_or_extra_runtime_files_refuse_the_start() {
 }
 
 #[tokio::test]
+async fn a_group_writable_runtime_folder_is_refused_with_the_exact_fix() {
+    use std::os::unix::fs::PermissionsExt;
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    // What Ubuntu's umask 002 gives a folder made with `mkdir -p`.
+    let runtime = setup.dir.path().join("runtime");
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let Err(Fail::Other(why)) = launch.start(1, Level::Unconfined, Path::Cpu).await else {
+        panic!("a group-writable runtime folder must refuse the start");
+    };
+    assert!(why.starts_with("the model runtime: "), "{why}");
+    assert!(why.contains("writable by group or others"), "{why}");
+    // The command that fixes it, with the folder's own path.
+    let fix = format!("chmod -R go-w {}", runtime.display());
+    assert!(why.contains(&fix), "{why}");
+    // Never relaxed: the same folder with the fix applied starts.
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!matches!(
+        launch.start(2, Level::Unconfined, Path::Cpu).await,
+        Err(Fail::Other(ref why)) if why.contains("writable")
+    ));
+}
+
+#[tokio::test]
 async fn a_model_that_does_not_load_is_a_counted_exit() {
     let setup = setup(b"not a gguf model", "fake");
     let launch = launch(&setup);

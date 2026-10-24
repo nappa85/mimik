@@ -15,6 +15,7 @@ pub(crate) mod endpoint;
 pub(crate) mod files;
 pub(crate) mod hako;
 pub(crate) mod launch;
+pub(crate) mod libs;
 pub(crate) mod manager;
 pub(crate) mod manifest;
 pub(crate) mod probe;

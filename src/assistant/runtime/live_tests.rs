@@ -743,11 +743,27 @@ fn assert_no_privilege_or_terminal(report: &Value) {
     }
 }
 
-/// Whether this run must find Landlock in full force under Hakoniwa: it must, unless
-/// `MIMIK_LIVE_LANDLOCK=any` says the host's kernel may lack it (a CI runner; DEP-25).
+/// Whether the run demands ABI 6 (`MIMIK_LIVE_LANDLOCK=require`: CI on a capable runner, where
+/// skipping the confinement assertions would hide a regression). Without it the assertions
+/// that need ABI 6 skip, with their reason, on a kernel below it (DEP-25).
+fn landlock_demanded() -> bool {
+    std::env::var("MIMIK_LIVE_LANDLOCK").as_deref() == Ok("require")
+}
+
+/// Whether the confinement assertions apply: under Hakoniwa on a kernel of ABI 6 or more. A
+/// demanded run on an older kernel fails; otherwise it skips and says why.
 fn landlock_required(abi: i64) -> bool {
-    live_backend() == Backend::Hakoniwa
-        && (abi >= 6 || std::env::var("MIMIK_LIVE_LANDLOCK").as_deref() != Ok("any"))
+    if live_backend() != Backend::Hakoniwa {
+        return false;
+    }
+    assert!(
+        abi >= 6 || !landlock_demanded(),
+        "this run requires Landlock ABI >=6, found {abi}"
+    );
+    if abi < 6 {
+        eprintln!("SKIPPED: the Landlock confinement assertions need kernel ABI 6, found {abi}");
+    }
+    abi >= 6
 }
 
 /// Under Hakoniwa with Landlock in force the ruleset refuses, with `EACCES`, what the mounts
@@ -1618,17 +1634,17 @@ async fn live_the_hakoniwa_closure_reports_landlock_in_full_force() {
         settings.backend = Backend::Hakoniwa;
     })
     .await;
-    assert_landlock_report(
-        child.landlock(),
-        landlock_abi(),
-        std::env::var("MIMIK_LIVE_LANDLOCK").as_deref() == Ok("any"),
-    );
+    assert_landlock_report(child.landlock(), landlock_abi(), landlock_demanded());
     child.stop().await;
 }
 
 #[cfg(feature = "sandbox-hakoniwa")]
-fn assert_landlock_report(reported: Option<super::super::hako::Landlock>, abi: i64, any: bool) {
-    if !any {
+fn assert_landlock_report(
+    reported: Option<super::super::hako::Landlock>,
+    abi: i64,
+    demanded: bool,
+) {
+    if demanded {
         assert!(abi >= 6, "this run requires Landlock ABI >=6, found {abi}");
     }
     assert_eq!(reported, Some(expected_landlock(abi)));
@@ -1760,8 +1776,12 @@ fn live_landlock_refuses_abstract_sockets_and_signals_outside_its_domain() {
     let status = report["status"].as_str().unwrap();
     let abi = landlock_abi();
     assert_eq!(status, expected_landlock(abi).describe());
-    if std::env::var("MIMIK_LIVE_LANDLOCK").as_deref() == Ok("any") && abi < 6 {
-        eprintln!("Landlock is {status} on this kernel: the scope assertions do not apply");
+    if abi < 6 {
+        assert!(
+            !landlock_demanded(),
+            "this run requires Landlock ABI >=6, found {abi}"
+        );
+        eprintln!("SKIPPED: Landlock is {status} on this kernel: the scope assertions need ABI 6");
         return;
     }
     assert!(status.starts_with("full"), "{report}");
