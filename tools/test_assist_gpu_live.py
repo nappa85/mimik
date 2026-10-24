@@ -52,6 +52,64 @@ class RefusalTests(unittest.TestCase):
             self.assertIn("not in manual mode", live.refusal(0.0, dict(MANUAL, pwm1=200)))
             self.assertIsNone(live.refusal(0.0, MANUAL))
 
+    def test_the_automatic_fan_is_accepted_for_short_tests_and_refused_for_long_ones(self):
+        with mock.patch.object(ops, "heavy_allowed", return_value=True):
+            self.assertIsNone(live.refusal(0.0, AUTO, short=True))
+            self.assertIn("not in manual mode", live.refusal(0.0, AUTO))
+            self.assertIn("not in manual mode", live.refusal(0.0, AUTO, short=False))
+        # The schedule check stays in short mode.
+        with mock.patch.object(ops, "heavy_allowed", return_value=False):
+            self.assertIn("not allowed now", live.refusal(0.0, AUTO, short=True))
+
+    def test_short_mode_takes_only_the_fixed_short_tests(self):
+        short = sorted(live.SHORT_TESTS)
+        self.assertIsNone(live.short_refusal(short))
+        for name in short:
+            self.assertIn("::live_gpu_", name)
+        self.assertIn("not a short test", live.short_refusal([*short, "a::live_gpu_sustained"]))
+        self.assertIn("not a short test", live.short_refusal(["bench::calibrate_loop"]))
+
+    def test_short_is_never_the_default_and_reaches_the_tests_only_when_asked(self):
+        def args(**more):
+            return live.argparse.Namespace(
+                binary=Path("/b"),
+                runtime=Path("/r"),
+                models=Path("/m"),
+                scratch=Path("/s"),
+                fake_server=Path("/f"),
+                mimik=Path("/x"),
+                test=None,
+                **more,
+            )
+
+        self.assertNotIn("MIMIK_LIVE_GPU_SHORT", live.environment(args(), {}))
+        self.assertNotIn("MIMIK_LIVE_GPU_SHORT", live.environment(args(short=False), {}))
+        self.assertEqual(live.environment(args(short=True), {})["MIMIK_LIVE_GPU_SHORT"], "1")
+        # A variable inherited from the caller never switches it on.
+        inherited = {"MIMIK_LIVE_GPU_SHORT": "1"}
+        self.assertNotIn("MIMIK_LIVE_GPU_SHORT", live.environment(args(short=False), inherited))
+        self.assertEqual(live.SHORT_LIMITS["junction_stop_c"], 75.0)
+        self.assertEqual(live.LIMITS["junction_stop_c"], 85.0)
+
+    def test_main_refuses_an_automatic_fan_without_short_and_a_long_test_with_it(self):
+        base = [
+            *("--binary", "b", "--mimik", "x", "--runtime", "r", "--models", "m"),
+            *("--scratch", "s", "--fake-server", "f", "--log", "/nonexistent/x"),
+        ]
+        with (
+            mock.patch.object(ops, "heavy_allowed", return_value=True),
+            mock.patch.object(ops, "read_fan", return_value=AUTO),
+            mock.patch.object(live, "selected", return_value=(["a::live_gpu_sustained"], None)),
+            mock.patch.object(subprocess, "Popen") as popen,
+        ):
+            self.assertEqual(live.main(base), 2)
+            self.assertEqual(live.main([*base, "--short"]), 2)
+        popen.assert_not_called()
+
+    def test_an_unreadable_fan_is_refused_for_a_long_run(self):
+        with mock.patch.object(ops, "heavy_allowed", return_value=True):
+            self.assertIn("not in manual mode", live.refusal(0.0, dict(AUTO, pwm1_enable=None)))
+
     def test_main_refuses_before_starting_anything(self):
         with (
             mock.patch.object(ops, "heavy_allowed", return_value=True),
@@ -106,6 +164,49 @@ class WatchTests(unittest.TestCase):
         self.assertIn("junction 85.0", stop)
         self.assertIsNotNone(process.returncode)
         self.assertTrue(lines[0].startswith("STOP thermal"))
+
+    def test_short_mode_stops_at_75_degrees_sampled_every_second_without_a_fan(self):
+        process = sleeper(60)
+        lines, clock = [], Clock()
+        readings = iter([sensors(60.0), sensors(74.9), sensors(75.0)])
+        stop = live.watch(
+            process,
+            ops.ThermalGuard(live.SHORT_LIMITS),
+            lambda: next(readings),
+            lambda: None,
+            clock,
+            lambda now: True,
+            lines.append,
+        )
+        self.assertIn("junction 75.0", stop)
+        # Three samples, one second apart.
+        self.assertEqual(clock.now, 2.0)
+        self.assertIsNotNone(process.returncode)
+
+    def test_short_mode_ignores_an_automatic_fan_but_not_an_unreadable_sensor(self):
+        process = sleeper(60)
+        stop = live.watch(
+            process,
+            ops.ThermalGuard(live.SHORT_LIMITS),
+            lambda: {EDGE: {"value": None, "crit": None}},
+            lambda: None,
+            Clock(),
+            lambda now: True,
+            lambda line: None,
+        )
+        self.assertTrue(stop.startswith("thermal_unknown"))
+        process = sleeper(0.2)
+        stop = live.watch(
+            process,
+            ops.ThermalGuard(live.SHORT_LIMITS),
+            lambda: sensors(50.0),
+            lambda: None,
+            Clock(),
+            lambda now: True,
+            lambda line: None,
+        )
+        # The process ended by itself; the wall clock is real, the fake one only counts.
+        self.assertIsNone(stop)
 
     def test_an_unreadable_sensor_kills_the_tests(self):
         stop, _, _ = self.run_watch([{EDGE: {"value": None, "crit": None}}])

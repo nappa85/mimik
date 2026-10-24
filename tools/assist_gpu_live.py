@@ -3,16 +3,23 @@
 
 Prototype tier, stdlib only. It refuses to start unless heavy work is allowed now (the machine
 schedule, `toolloop_ops.heavy_allowed`) and the amdgpu fan is manual at pwm >= 230 (it resets
-on every reboot; on the automatic curve the junction reached 85 °C in 22 s, 2026-10-20). While
-the tests run it samples the GPU every second and kills the whole test process group when the
-junction reaches 85 °C, a sensor is unreadable, the fan leaves manual, or the heavy window
-ends. It never reads input. The tests themselves refuse to run without `MIMIK_LIVE_GPU=1` and a
-manual fan, so the binary run by hand does nothing to the GPU.
+on every reboot; on the automatic curve the junction reached 85 °C in 22 s at a sustained
+143 W, 2026-10-20). While the tests run it samples the GPU every second and kills the whole
+test process group when the junction reaches 85 °C, a sensor is unreadable, the fan leaves
+manual, or the heavy window ends. It never reads input. The tests themselves refuse to run
+without `MIMIK_LIVE_GPU=1` and a manual fan, so the binary run by hand does nothing to the GPU.
+
+`--short` (explicit, never the default) is for the fixed list `SHORT_TESTS` only (the live GPU
+checks that last a minute or two; at most 44 °C was seen during them): the automatic fan is
+allowed, the junction limit is 75 °C, and the schedule check and the unreadable-sensor stop
+stay. Any selected test outside the list is refused in that mode. Long or sustained runs
+(benchmarks, model screens, calibration loops, `assist_runtime_measure.py server`, the queue
+tooling) keep the manual fan and the 85 °C limit.
 
   python3 tools/assist_gpu_live.py --binary <confinement-tests> --mimik <release mimik> \
       --runtime <llama dir> \
       --models <0700 folder holding the default model> --scratch <folder> \
-      --fake-server <fake_llama_server> --log <file> [--test <name filter>]
+      --fake-server <fake_llama_server> --log <file> [--test <name filter>] [--short]
 
 Exit 0 only when every selected test passed; the `GPU-LIVE {...}` lines (the measurement for
 docs/results.md) are copied to the log.
@@ -31,15 +38,38 @@ import toolloop_ops as ops
 
 # The run's own junction limit, below the queue's 90 °C (the 2026-10-20 diagnostic used 85).
 LIMITS = {"junction_stop_c": 85.0}
+# Short mode: lower, because the automatic fan is allowed.
+SHORT_LIMITS = {"junction_stop_c": 75.0}
 SAMPLE_SECONDS = 1.0
 FILTER = "assistant::runtime::launch::live_tests::gpu::live_gpu_"
+# The tests short mode accepts (by full name): each runs a minute or two.
+SHORT_TESTS = frozenset(
+    FILTER[: -len("live_gpu_")] + name
+    for name in (
+        "live_gpu_the_rx6650_reaches_ready_with_gpu_budgets",
+        "live_gpu_killing_llama_server_mid_job_ends_the_job_neutral_and_runs_on_the_cpu",
+        "live_gpu_killing_the_whole_sandbox_ends_on_the_cpu_saying_why",
+        "live_gpu_landlock_the_rx6650_reaches_ready_under_hakoniwa",
+    )
+)
 
 
-def refusal(now, fan):
-    """Why the run must not start, or None."""
+def refusal(now, fan, short=False):
+    """Why the run must not start, or None. Only `short` (the fixed short tests) goes without
+    the manual fan."""
     if not ops.heavy_allowed(now):
         return "heavy work is not allowed now (weekdays 09:00-18:00); run it in the evening or at the weekend"
+    if short:
+        return None
     return ops.fan_precondition(fan)
+
+
+def short_refusal(names):
+    """Why short mode must refuse the selected tests, or None."""
+    other = [name for name in names if name not in SHORT_TESTS]
+    if other:
+        return f"not a short test (the manual fan is required): {other[0]}"
+    return None
 
 
 def command(args):
@@ -54,6 +84,9 @@ def command(args):
 
 def environment(args, base=None):
     env = dict(os.environ if base is None else base)
+    env.pop("MIMIK_LIVE_GPU_SHORT", None)
+    if getattr(args, "short", False):
+        env["MIMIK_LIVE_GPU_SHORT"] = "1"
     env.update(
         {
             "MIMIK_LIVE_GPU": "1",
@@ -178,15 +211,22 @@ def main(argv=None):
     ):
         parser.add_argument(name, type=Path, required=True)
     parser.add_argument("--test")
+    parser.add_argument(
+        "--short",
+        action="store_true",
+        help="the fixed short tests only: automatic fan allowed, junction limit 75 °C",
+    )
     args = parser.parse_args(argv)
     ops.pin_local_time()
     root = ops.hwmon_root()
     fan = ops.read_fan(root)
-    why = refusal(time.time(), fan)
+    why = refusal(time.time(), fan, args.short)
     if why:
         print(f"assist-gpu-live: refusing: {why}", file=sys.stderr)
         return 2
     names, why = selected(args)
+    if not why and args.short:
+        why = short_refusal(names)
     if why:
         print(f"assist-gpu-live: refusing: {why}", file=sys.stderr)
         return 2
@@ -198,7 +238,7 @@ def main(argv=None):
             out.write(line + "\n")
             out.flush()
 
-        log(f"START {time.strftime('%Y-%m-%dT%H:%M:%S')} fan {fan}")
+        log(f"START {time.strftime('%Y-%m-%dT%H:%M:%S')} fan {fan} short {args.short}")
         process = subprocess.Popen(  # noqa: S603 (fixed argv from the operator's paths)
             command(args),
             env=environment(args),
@@ -209,9 +249,10 @@ def main(argv=None):
         )
         stopped = watch(
             process,
-            ops.ThermalGuard(LIMITS),
+            ops.ThermalGuard(SHORT_LIMITS if args.short else LIMITS),
             lambda: ops.read_sensors(root),
-            lambda: ops.read_fan(root),
+            # Short mode does not watch the fan (the automatic curve is allowed there).
+            (lambda: None) if args.short else (lambda: ops.read_fan(root)),
             ops.SystemClock(),
             ops.heavy_allowed,
             log,

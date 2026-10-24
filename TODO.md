@@ -7,7 +7,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 ## Current work
 
 - **Hakoniwa Landlock change** (`hakoniwa-spike`, ASSIST-49): implementation and local live
-  checks in place; completion blocked on the required Sonnet review and older-ABI evidence.
+  checks in place; completion blocked on the review of the fixes, the owed live GPU check under Landlock
+  (`assist_gpu_live.py --short --binary <feature-built confinement-tests> --mimik <feature-built
+  release mimik>`; the user triggers it) and older-ABI evidence.
   Adoption also needs the dependency-audit resolution and Ubuntu AppArmor VM check.
 
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1, 2c-2a (the CPU
@@ -93,8 +95,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - macOS and Windows model runtime (ASSIST-34): not verifiable from this host.
 - **GPU back in service (2026-10-20, after the re-paste):** at 143 W for 5 min with the fan
   on manual 255 and a room fan, the junction plateaus at 77–79 °C (max 83), edge 57 °C, gap
-  about 21 °C. On automatic fan it reaches 85 °C in 22 s, so GPU runs need the manual fan
-  after every reboot (the queue refuses otherwise). Switch the model tooling back from the
+  about 21 °C. On automatic fan it reaches 85 °C in 22 s, so long GPU runs need the manual fan
+  after every reboot (the queue refuses otherwise); the short live GPU tests (`assist_gpu_live.py
+  --short`, ASSIST-50) accept the automatic fan with a 75 °C stop. Switch the model tooling back from the
   CPU-only default (`tools/model_registry.py`, `tools/run_tool_loop_benchmark.sh`
   `DEVICE=cpu`). Diagnostic: `LIMIT=90 DUR=300 target/agent-tools/gpu_diag.sh`.
 - 2a module test gaps from the last review (Minor): no browser case for the `requestSubmit`

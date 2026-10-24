@@ -7,9 +7,11 @@
 //! - `live_gpu_*` (the dev host's GPU): the pinned Vulkan build and the real model. They
 //!   (they use Mimik's release binary, `MIMIK_LIVE_MIMIK`, as runner, probe and shim) refuse to
 //!   run unless `MIMIK_LIVE_GPU=1` is set and the amdgpu fan reads manual
-//!   (`pwm1_enable` 1, `pwm1` at least 230): run them only through
-//!   `tools/assist_gpu_live.py`, which also enforces the machine schedule and the thermal
-//!   limits.
+//!   (`pwm1_enable` 1, `pwm1` at least 230), or `MIMIK_LIVE_GPU_SHORT=1` is set: run them
+//!   only through `tools/assist_gpu_live.py`, which also enforces the machine schedule and the
+//!   thermal limits, and sets the short variable only for its fixed list of short tests
+//!   (automatic fan allowed, junction limit 75 °C). `live_gpu_landlock_*` needs the
+//!   `MIMIK_LIVE_MIMIK` binary built with `sandbox-hakoniwa`.
 use super::super::super::device::tests::Tree;
 use super::super::super::manager::{self, State};
 use super::*;
@@ -154,13 +156,18 @@ async fn live_fake_gpu_no_render_node_runs_the_cpu_path() {
 
 /// Refuses unless the live GPU run was asked for and the amdgpu fan reads manual at 230 or
 /// more (the manual setting resets on every reboot; on the automatic curve the junction
-/// reached 85 °C in 22 s, 2026-10-20).
+/// reached 85 °C in 22 s at a sustained 143 W, 2026-10-20). A short test run by the tool's
+/// short mode (`MIMIK_LIVE_GPU_SHORT=1`: automatic fan, the tool's 75 °C limit) needs no
+/// manual fan.
 fn gpu_allowed() {
     assert_eq!(
         std::env::var("MIMIK_LIVE_GPU").as_deref(),
         Ok("1"),
         "refusing: run the GPU checks only through tools/assist_gpu_live.py"
     );
+    if std::env::var("MIMIK_LIVE_GPU_SHORT").as_deref() == Ok("1") {
+        return;
+    }
     let chip = std::fs::read_dir("/sys/class/hwmon")
         .unwrap()
         .filter_map(Result::ok)
@@ -184,6 +191,11 @@ fn gpu_allowed() {
 /// The real runtime (`MIMIK_LIVE_RUNTIME` with `cpu/` and `vulkan/`) and the default model
 /// (`MIMIK_LIVE_GPU_MODELS`, a 0700 folder holding it).
 fn real_gpu(scratch: &std::path::Path) -> Arc<Real> {
+    real_gpu_on(scratch, Backend::Bwrap)
+}
+
+/// [`real_gpu`] on `backend`.
+fn real_gpu_on(scratch: &std::path::Path, backend: Backend) -> Arc<Real> {
     let mut settings = settings(scratch, "probe-inner", Vec::new());
     settings.models_dir = env("MIMIK_LIVE_GPU_MODELS");
     settings.model = crate::assistant::model::local_name(crate::assistant::DEFAULT_MODEL)
@@ -196,6 +208,7 @@ fn real_gpu(scratch: &std::path::Path) -> Arc<Real> {
     // here); at 2 threads it is "too slow" (docs/results.md).
     settings.threads = 5;
     settings.device = Choice::Auto;
+    settings.backend = backend;
     settings.roots = Roots::default();
     // The real code path: Mimik's own binary as the runner, the probe and the shim (the test
     // binary cannot take the probe's `--render` option).
@@ -247,6 +260,36 @@ async fn live_gpu_the_rx6650_reaches_ready_with_gpu_budgets() {
     assert!(!device::is_software(&device.description));
     let budgets = status.budgets.unwrap();
     assert!(budgets.run <= Duration::from_secs(60));
+    handle.shutdown().await;
+}
+
+/// The GPU under Hakoniwa with the Landlock layer in force (owed since ASSIST-49; the rule
+/// table is unit-tested, this shows that Vulkan discovery, the render node and the driver data
+/// work under it). A short test.
+#[cfg(feature = "sandbox-hakoniwa")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live GPU: only through tools/assist_gpu_live.py --short (schedule, thermal guard)"]
+async fn live_gpu_landlock_the_rx6650_reaches_ready_under_hakoniwa() {
+    gpu_allowed();
+    let scratch = scratch();
+    let real = real_gpu_on(scratch.path(), Backend::Hakoniwa);
+    let handle = run_until(&real, 352, |status| {
+        status.state == State::Ready || matches!(status.state, State::Unavailable(_))
+    })
+    .await;
+    let status = handle.status();
+    report(&status);
+    assert_eq!(status.path, Path::Gpu, "{status:?}");
+    assert!(!device::is_software(
+        &status.device.clone().unwrap().description
+    ));
+    assert!(
+        matches!(
+            status.landlock,
+            Some(super::super::super::hako::Landlock::Full { .. })
+        ),
+        "{status:?}"
+    );
     handle.shutdown().await;
 }
 
