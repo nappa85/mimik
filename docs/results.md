@@ -866,6 +866,8 @@ decides.**
   (shader cache included) on this host; the GPU path works under Landlock. The "at most 44 °C"
   basis of ASSIST-50 is not borne out for a 10-minute batch: the junction reached 72–76 °C on the
   automatic fan, right at the 75 °C guard.
+- **Rerun** after the Landlock ruleset was rebuilt for the probed ABI (commit 3f62e96): all four
+  tests passed in one run (828 s), sampled junction at most 71 °C.
 - **Limitations:** one host, one GPU, one run; the cold-start timeout was not reproduced; a
   guard with 1 s samples can miss a short spike; raw output in
   `/media/data/mimik/hakoniwa/live-gpu/`.
