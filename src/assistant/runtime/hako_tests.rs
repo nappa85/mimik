@@ -680,6 +680,23 @@ struct FakeProcs {
     unreadable: Vec<i32>,
     // Each pidfd is a real descriptor (a pipe end) keyed by pid.
     fds: std::sync::Mutex<Vec<(i32, i32)>>,
+    /// `(pid, parent, start)` that `stat` answers once the pid has been opened: the process
+    /// was replaced between the listing and the pinning.
+    replaced_after_open: Vec<(i32, i32, u64)>,
+    /// Pids whose pidfd reads as ended only once they have been read (they ended after it).
+    ended_after_stat: Vec<i32>,
+    /// Every call in order: `("open" | "stat" | "exited", pid)`.
+    calls: std::sync::Mutex<Vec<(&'static str, i32)>>,
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+impl FakeProcs {
+    fn done(&self, what: &'static str, pid: i32) -> bool {
+        self.calls.lock().unwrap().contains(&(what, pid))
+    }
+    fn calls(&self) -> Vec<(&'static str, i32)> {
+        self.calls.lock().unwrap().clone()
+    }
 }
 
 #[cfg(feature = "sandbox-hakoniwa")]
@@ -688,12 +705,22 @@ impl Procs for FakeProcs {
         self.table.iter().map(|(pid, _, _)| *pid).collect()
     }
     fn open(&self, pid: i32) -> std::io::Result<std::os::fd::OwnedFd> {
+        self.calls.lock().unwrap().push(("open", pid));
         let (read, _write) = rustix::pipe::pipe().unwrap();
         let raw = std::os::fd::AsRawFd::as_raw_fd(&read);
         self.fds.lock().unwrap().push((raw, pid));
         Ok(read)
     }
     fn stat(&self, pid: i32) -> std::io::Result<(i32, u64)> {
+        let opened = self.done("open", pid);
+        self.calls.lock().unwrap().push(("stat", pid));
+        if opened {
+            if let Some((_, parent, start)) =
+                self.replaced_after_open.iter().find(|(p, _, _)| *p == pid)
+            {
+                return Ok((*parent, *start));
+            }
+        }
         if self.unreadable.contains(&pid) {
             return Err(std::io::Error::from_raw_os_error(libc::EMFILE));
         }
@@ -705,11 +732,18 @@ impl Procs for FakeProcs {
     }
     fn exited(&self, pidfd: &std::os::fd::OwnedFd) -> bool {
         let raw = std::os::fd::AsRawFd::as_raw_fd(pidfd);
-        self.fds
+        let pid = self
+            .fds
             .lock()
             .unwrap()
             .iter()
-            .any(|(fd, pid)| *fd == raw && self.exited.contains(pid))
+            // The newest: a closed descriptor's number is handed out again.
+            .rfind(|(fd, _)| *fd == raw)
+            .map(|(_, pid)| *pid)
+            .unwrap();
+        let statted = self.done("stat", pid);
+        self.calls.lock().unwrap().push(("exited", pid));
+        self.exited.contains(&pid) || (statted && self.ended_after_stat.contains(&pid))
     }
 }
 
@@ -1002,4 +1036,37 @@ fn a_mount_under_a_read_only_bound_directory_is_masked_whatever_the_host_has() {
         identity: None,
     };
     assert_eq!(super::masks(&[file], &info), Vec::<Tmpfs>::new());
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn the_child_is_pinned_then_read_once_then_checked_for_having_ended_in_that_order() {
+    let procs = procs_with_one_child();
+    assert_eq!(find_child(&procs, 7), Ok(Some((11, 6))));
+    assert_eq!(procs.calls(), [("open", 11), ("stat", 11), ("exited", 11)]);
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn a_process_replaced_after_it_was_pinned_is_not_the_server_and_one_ended_after_the_read_is_skipped()
+ {
+    // The pid listed as the reaper's child was another process's by the time its pidfd was
+    // opened: `stat`, read after the pinning, says so (a `stat` read before it would have
+    // seen the original and returned it).
+    let replaced = FakeProcs {
+        table: vec![(11, 7, 6)],
+        replaced_after_open: vec![(11, 4242, 777)],
+        ..FakeProcs::default()
+    };
+    assert_eq!(find_child(&replaced, 7), Ok(None));
+    assert_eq!(replaced.calls()[..2], [("open", 11), ("stat", 11)]);
+    // One that ended after the read (its pidfd then reads as ended, and the pid may be reused
+    // by now) is checked after the read, not before it: skipped.
+    let ended = FakeProcs {
+        table: vec![(11, 7, 6)],
+        ended_after_stat: vec![11],
+        ..FakeProcs::default()
+    };
+    assert_eq!(find_child(&ended, 7), Ok(None));
+    assert_eq!(ended.calls(), [("open", 11), ("stat", 11), ("exited", 11)]);
 }
