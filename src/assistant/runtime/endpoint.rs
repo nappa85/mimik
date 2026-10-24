@@ -134,6 +134,7 @@ pub(crate) fn pin_reaper(pid: i32, runner: i32, namespace: u64) -> io::Result<Wa
     Ok(watched)
 }
 
+#[cfg(test)]
 /// [`pin_reaper`] and still alive after both reads (so they described this process, not a
 /// later one with its PID).
 pub(crate) fn open_reaper(pid: i32, runner: i32, namespace: u64) -> io::Result<Watched> {

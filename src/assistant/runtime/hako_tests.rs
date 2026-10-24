@@ -4,6 +4,7 @@ use crate::assistant::runtime::Backend;
 fn inputs<'a>(gpu: Option<&'a GpuBinds>, files: &[&str]) -> Inputs<'a> {
     Inputs {
         root: PathBuf::from("/data/run/3.root"),
+        mountinfo: String::new(),
         runtime: files
             .iter()
             .enumerate()
@@ -418,6 +419,7 @@ fn sequence(fail: Option<usize>) -> (Vec<&'static str>, Result<(), (i32, String)
         .map(|(at, name)| {
             let ran = &ran;
             let step: Step<'_> = (
+                name,
                 100 + i32::try_from(at).unwrap(),
                 Box::new(move || {
                     ran.borrow_mut().push(*name);
@@ -459,9 +461,11 @@ fn the_marker_is_the_last_step_and_a_failure_of_any_step_gives_none() {
 fn the_real_closure_has_the_documented_steps_with_the_marker_last() {
     let plan = plan(&inputs(None, &[]));
     let steps = steps(&plan, rustix::fs::Mode::from_raw_mode(0o022));
-    assert_eq!(steps.len(), STEP_ORDER.len());
+    // The names are the production steps' own, so the order asserted is the order run.
+    let names: Vec<&str> = steps.iter().map(|(name, _, _)| *name).collect();
+    assert_eq!(names, STEP_ORDER);
     // The codes: every step before the marker is a sandbox failure; the marker's is its own.
-    let codes: Vec<i32> = steps.iter().map(|(code, _)| *code).collect();
+    let codes: Vec<i32> = steps.iter().map(|(_, code, _)| *code).collect();
     assert_eq!(codes.last(), Some(&exit::MARKER));
     assert!(!codes.contains(&exit::EXEC));
 }
@@ -579,4 +583,59 @@ fn the_start_report_says_when_the_sandbox_had_ended_and_names_the_server_by_iden
     );
     let ended = super::started(&started_line(10, None, true)).unwrap();
     assert!(ended.ended && ended.inner_pid.is_none());
+}
+
+const MOUNTINFO: &str = "\
+36 1 8:2 / / rw,noatime - ext4 /dev/sda2 rw\n\
+40 36 0:30 / /usr/lib/modules rw - ext4 /dev/sdb1 rw\n\
+41 40 0:31 / /usr/lib/modules/inner rw - tmpfs tmpfs rw\n\
+42 36 0:32 / /usr/lib/with\\040space rw - tmpfs tmpfs rw\n\
+43 36 0:33 / /usr/lib64 rw - ext4 /dev/sdc1 rw\n\
+44 36 0:34 / /usr/library rw - ext4 /dev/sdd1 rw\n\
+45 36 0:35 / /usr/lib rw - ext4 /dev/sde1 rw\n";
+
+#[test]
+fn the_topmost_mounts_under_a_directory_are_found_by_their_decoded_mount_point() {
+    assert_eq!(
+        nested_mounts(MOUNTINFO, "/usr/lib"),
+        ["/usr/lib/modules", "/usr/lib/with space"]
+    );
+    // A sibling that merely starts with the same letters, and the directory itself, are not
+    // under it.
+    assert_eq!(nested_mounts(MOUNTINFO, "/usr/lib64"), Vec::<String>::new());
+    assert_eq!(
+        nested_mounts(MOUNTINFO, "/usr/lib/modules"),
+        ["/usr/lib/modules/inner"]
+    );
+    assert_eq!(nested_mounts("", "/usr/lib"), Vec::<String>::new());
+}
+
+#[test]
+fn a_mount_under_a_read_only_bound_directory_is_masked_by_an_empty_read_only_tmpfs() {
+    let mut given = inputs(None, &[]);
+    given.mountinfo = MOUNTINFO.to_owned();
+    let plan = plan(&given);
+    // /usr/lib is a read-only bind on hosts that have it as a directory; the fixture's
+    // nested mounts then get masks at the same places.
+    if plan
+        .binds
+        .iter()
+        .any(|bind| bind.target == "/usr/lib" && bind.access == Access::ReadOnly)
+        && Path::new("/usr/lib").is_dir()
+    {
+        for target in ["/usr/lib/modules", "/usr/lib/with space"] {
+            let mask = plan.tmpfs.iter().find(|t| t.target == target);
+            let mask = mask.unwrap_or_else(|| panic!("no mask at {target}"));
+            assert!(mask.read_only && mask.bytes <= 4096, "{mask:?}");
+        }
+        // Not the inner one, which is under a masked mount already.
+        assert!(
+            !plan
+                .tmpfs
+                .iter()
+                .any(|t| t.target == "/usr/lib/modules/inner")
+        );
+    }
+    // The ordinary tmpfs mounts are not read-only.
+    assert!(plan.tmpfs.iter().filter(|t| !t.read_only).count() >= 4);
 }

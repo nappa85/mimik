@@ -55,13 +55,8 @@ fn settings(scratch: &std::path::Path, inner: &str, inner_env: Vec<(String, Stri
     args.push("probe-inner".into());
     let mut env_vars = vec![(test_helper::VARIABLE.to_owned(), inner.to_owned())];
     env_vars.extend(inner_env);
-    // A unique tag (`MIMIK_LIVE_TAG`, set for a helper process by the test that watches its
-    // processes) is the server's alias and an extra argument of the runner, so every process
-    // of that run, the runner's forks included, has it in its command line.
-    let tag = std::env::var("MIMIK_LIVE_TAG").ok();
-    let mut runner_args: Vec<std::ffi::OsString> =
+    let runner_args: Vec<std::ffi::OsString> =
         helper_args(RUNNER).into_iter().map(Into::into).collect();
-    runner_args.extend(tag.clone().map(Into::into));
     // `MIMIK_LIVE_RUNNER`: Mimik's own binary (built with the feature under test) as the
     // runner, as shipped: single-threaded, its guards active, instead of the test binary.
     let runner_program = std::env::var_os("MIMIK_LIVE_RUNNER").map(PathBuf::from);
@@ -83,7 +78,7 @@ fn settings(scratch: &std::path::Path, inner: &str, inner_env: Vec<(String, Stri
         runtime_dir: env("MIMIK_LIVE_RUNTIME"),
         model: MANIFEST.test_model.name.clone(),
         model_sha256: MANIFEST.test_model.sha256.clone(),
-        alias: tag.unwrap_or_else(|| "stories".into()),
+        alias: "stories".into(),
         threads: 2,
         ctx_size: MANIFEST.test_model.ctx_size,
         runner,
@@ -204,6 +199,7 @@ fn process_facts() -> Value {
         "caps": {"inh": field("CapInh:"), "prm": field("CapPrm:"), "eff": field("CapEff:"),
             "bnd": field("CapBnd:"), "amb": field("CapAmb:")},
         "no_new_privs": field("NoNewPrivs:"),
+        "umask": field("Umask:"),
         "seccomp": field("Seccomp:"),
         "dev": dev,
         "dev_tty": errno_of(std::fs::File::open("/dev/tty")),
@@ -649,6 +645,14 @@ fn assert_no_privilege_or_terminal(report: &Value) {
     assert_eq!(report["controlling_tty"], json!("0"), "{report}");
     // Standard input is `/dev/null`: with Hakoniwa it was the marker pipe until the exec.
     assert_eq!(report["stdin"], json!("/dev/null"), "{report}");
+    // The runner's own umask is back before the exec (it ran with 077 while it built the
+    // sandbox): the same as this test process's.
+    let mine = std::fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("Umask:").map(|v| v.trim().to_owned()))
+        .unwrap();
+    assert_eq!(report["umask"], json!(mine), "{report}");
     if live_backend() == Backend::Hakoniwa {
         // Hakoniwa's /dev is built here: the five safe nodes and the links, no terminal node,
         // no pts, no ptmx.
@@ -1245,60 +1249,151 @@ fn live_level_3_does_not_load_a_backend_from_an_attacker_writable_cwd() {
     mimik.wait().unwrap();
 }
 
-/// The processes whose command line names `tag`.
-fn tagged(tag: &str) -> Vec<i32> {
-    std::fs::read_dir("/proc")
-        .unwrap()
-        .flatten()
-        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
-        .filter(|pid| {
-            std::fs::read(format!("/proc/{pid}/cmdline"))
-                .is_ok_and(|line| String::from_utf8_lossy(&line).contains(tag))
-        })
+/// A watcher that records every descendant of `root` it sees, by pid and start time (a
+/// reused pid is another process), at short intervals until stopped. The run's own processes
+/// are found by their ancestry, not by anything in their command lines, so a runner, a
+/// reaper and a program before its exec are all seen.
+struct Sweep {
+    seen: Arc<Mutex<std::collections::BTreeMap<(i32, u64), String>>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Sweep {
+    fn watch(root: i32) -> Self {
+        let seen = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let (seen, stop) = (Arc::clone(&seen), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    for pid in descendants(root) {
+                        if let Some(start) = rundir::start_time(pid) {
+                            let line = std::fs::read(format!("/proc/{pid}/cmdline"))
+                                .map(|bytes| String::from_utf8_lossy(&bytes).replace('\0', " "))
+                                .unwrap_or_default();
+                            seen.lock().unwrap().entry((pid, start)).or_insert(line);
+                        }
+                    }
+                    std::thread::sleep(Duration::from_micros(300));
+                }
+            })
+        };
+        Self {
+            seen,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    /// The processes seen so far with the command line each had when first seen.
+    fn snapshot(&self) -> std::collections::BTreeMap<(i32, u64), String> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    fn finish(mut self) -> std::collections::BTreeMap<(i32, u64), String> {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+        self.snapshot()
+    }
+}
+
+/// The recorded processes still there: same pid with the same start time, zombies included
+/// (a zombie is not gone until its `/proc` entry is).
+fn survivors(seen: &std::collections::BTreeMap<(i32, u64), String>) -> Vec<i32> {
+    seen.keys()
+        .filter(|(pid, start)| rundir::start_time(*pid) == Some(*start))
+        .map(|(pid, _)| *pid)
         .collect()
 }
 
-/// Mimik (a helper process) is killed at `delay` after its first runner process appeared, at
-/// each moment of a start in turn; every process of the run (runner, Hakoniwa's reaper, the
-/// program before and after its exec) must be gone for real: its `/proc` entry absent.
-fn killed_after(tag: &str, delay: Duration) {
+/// Waits (10 s) for every recorded process to be gone; the survivors if some are not.
+fn wait_all_gone(seen: &std::collections::BTreeMap<(i32, u64), String>) -> Vec<i32> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let left = survivors(seen);
+        if left.is_empty() || std::time::Instant::now() >= deadline {
+            return left;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Mimik (a helper process) is killed at `delay` after the first process of its run (the
+/// runner) appeared, at each moment of a start in turn; every process of the run seen from
+/// then on (the runner, Hakoniwa's reaper, the program before and after its exec) must be
+/// gone for real: same pid and start time no longer in `/proc`, zombies included.
+fn killed_after(delay: Duration) {
     let scratch = scratch();
     let mut mimik = test_helper::command(HELPER, "mimik")
         .env("MIMIK_LIVE_CHILD_SCRATCH", scratch.path())
         .env("MIMIK_LIVE_KILL_AT", "starting")
-        .env("MIMIK_LIVE_TAG", tag)
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
+    let sweep = Sweep::watch(i32::try_from(mimik.id()).unwrap());
     let appeared = std::time::Instant::now() + Duration::from_secs(60);
-    while tagged(tag).is_empty() {
+    let first = loop {
+        let seen = sweep.snapshot();
+        if !seen.is_empty() {
+            break seen;
+        }
         assert!(
             std::time::Instant::now() < appeared,
             "no process of the run"
         );
-        std::thread::sleep(Duration::from_micros(200));
-    }
+        std::thread::sleep(Duration::from_micros(100));
+    };
+    // What was seen first is the runner, before any server's exec.
+    assert!(
+        first.values().any(|line| line.contains("runner::tests::helper")
+            || line.contains("assistant-runner")),
+        "the first process seen is not the runner: {first:?}"
+    );
+    assert!(
+        !first.values().any(|line| line.contains("llama-server")),
+        "{first:?}"
+    );
     std::thread::sleep(delay);
     mimik.kill().unwrap();
     mimik.wait().unwrap();
-    let mut seen: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        seen.extend(tagged(tag));
-        let left: Vec<i32> = seen
-            .iter()
-            .copied()
-            .filter(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
-            .collect();
-        if left.is_empty() {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "{delay:?}: {left:?} survived Mimik"
-        );
-        std::thread::sleep(Duration::from_millis(20));
+    let seen = sweep.finish();
+    let left = wait_all_gone(&seen);
+    assert!(
+        left.is_empty(),
+        "{delay:?}: {left:?} survived Mimik ({seen:?})"
+    );
+}
+
+/// The detector itself: a child that survives its parent is reported, and one that does not
+/// is not.
+#[test]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+fn live_the_survivor_detector_sees_a_child_that_outlives_its_parent() {
+    let mut parent = std::process::Command::new("sh")
+        .args(["-c", "sleep 60 & wait"])
+        .spawn()
+        .unwrap();
+    let sweep = Sweep::watch(i32::try_from(parent.id()).unwrap());
+    while sweep.snapshot().is_empty() {
+        std::thread::sleep(Duration::from_millis(1));
     }
+    parent.kill().unwrap();
+    parent.wait().unwrap();
+    let seen = sweep.finish();
+    std::thread::sleep(Duration::from_millis(300));
+    let left = survivors(&seen);
+    assert_eq!(left.len(), 1, "{seen:?}");
+    for pid in left {
+        rustix::process::kill_process(
+            rustix::process::Pid::from_raw(pid).unwrap(),
+            rustix::process::Signal::KILL,
+        )
+        .unwrap();
+    }
+    assert_eq!(wait_all_gone(&seen), Vec::<i32>::new());
 }
 
 #[test]
@@ -1306,12 +1401,12 @@ fn killed_after(tag: &str, delay: Duration) {
 fn live_killing_mimik_at_any_moment_of_a_start_leaves_no_process_of_the_run() {
     // Hakoniwa sets the parent-death signal itself in its two children after their fork and
     // does not re-check its parent, so a parent that dies between the fork and that call
-    // leaves a child behind (HAKO-L4); the delays sweep that window (and bubblewrap's).
+    // leaves a child behind (HAKO-L5); the delays sweep that window (and bubblewrap's).
     let delays_ms = [0_u64, 1, 2, 3, 5, 8, 12, 20, 35, 60];
     for round in 0..3 {
         for (n, delay) in delays_ms.iter().enumerate() {
-            let tag = format!("mimik-live-{}-{round}-{n}", std::process::id());
-            killed_after(&tag, Duration::from_millis(*delay));
+            let _ = (round, n);
+            killed_after(Duration::from_millis(*delay));
         }
     }
 }

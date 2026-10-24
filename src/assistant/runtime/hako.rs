@@ -80,6 +80,8 @@ pub(crate) struct Tmpfs {
     pub target: String,
     pub bytes: u64,
     pub mode: u32,
+    /// Mounted read-only (an empty mask over a mount under a read-only bind).
+    pub read_only: bool,
 }
 
 /// The whole sandbox: what the runner builds the container from.
@@ -115,6 +117,8 @@ pub(crate) struct File {
 #[derive(Debug)]
 pub(crate) struct Inputs<'a> {
     pub root: PathBuf,
+    /// The host's `/proc/self/mountinfo`: what is mounted under a bound directory.
+    pub mountinfo: String,
     pub runtime: Vec<File>,
     pub model: (PathBuf, Identity),
     pub generation: (PathBuf, Identity),
@@ -152,6 +156,105 @@ fn parents(path: &str) -> Vec<String> {
         .collect();
     found.reverse();
     found
+}
+
+/// The mount point of one `mountinfo` line, its octal escapes (`\\040` for a space) decoded.
+fn mount_point(line: &str) -> Option<String> {
+    let field = line.split(' ').nth(4)?;
+    let mut out = Vec::new();
+    let bytes = field.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'\\'
+            && at + 3 < bytes.len()
+            && bytes[at + 1..at + 4].iter().all(u8::is_ascii_digit)
+        {
+            let value =
+                u32::from_str_radix(std::str::from_utf8(&bytes[at + 1..at + 4]).ok()?, 8).ok()?;
+            out.push(u8::try_from(value).ok()?);
+            at += 4;
+        } else {
+            out.push(bytes[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// The topmost mount points strictly under `dir` in `mountinfo`. A non-recursive bind of
+/// `dir` shows the directory underneath such a mount (possibly stale files), so each is
+/// masked.
+pub(crate) fn nested_mounts(mountinfo: &str, dir: &str) -> Vec<String> {
+    let prefix = format!("{}/", dir.trim_end_matches('/'));
+    let mut found: Vec<String> = mountinfo
+        .lines()
+        .filter_map(mount_point)
+        .filter(|point| point.starts_with(&prefix))
+        .collect();
+    found.sort();
+    found.dedup();
+    let mut topmost: Vec<String> = Vec::new();
+    for point in found {
+        if !topmost
+            .iter()
+            .any(|above| point.starts_with(&format!("{above}/")))
+        {
+            topmost.push(point);
+        }
+    }
+    topmost
+}
+
+/// The sandbox's own tmpfs mounts: `/run` (the token's file and the socket directory's bind),
+/// `/dev`, `/tmp` and `/dev/shm`, each bounded.
+fn fixed_tmpfs() -> Vec<Tmpfs> {
+    vec![
+        // The token's file lives here, in memory; the socket directory is bound under it.
+        Tmpfs {
+            target: "/run".to_owned(),
+            bytes: 64 << 10,
+            mode: 0o755,
+            read_only: false,
+        },
+        Tmpfs {
+            target: "/dev".to_owned(),
+            bytes: 1 << 20,
+            mode: 0o755,
+            read_only: false,
+        },
+        Tmpfs {
+            target: "/tmp".to_owned(),
+            bytes: bwrap::TMP_BYTES,
+            mode: 0o1777,
+            read_only: false,
+        },
+        Tmpfs {
+            target: "/dev/shm".to_owned(),
+            bytes: bwrap::SHM_BYTES,
+            mode: 0o1777,
+            read_only: false,
+        },
+    ]
+}
+
+/// A mount under a read-only directory bind is not part of the (non-recursive) bind: an
+/// empty read-only tmpfs masks what the directory itself holds underneath it.
+fn masks(binds: &[Bind], mountinfo: &str) -> Vec<Tmpfs> {
+    binds
+        .iter()
+        .filter(|bind| bind.access == Access::ReadOnly && Path::new(&bind.source).is_dir())
+        .flat_map(|bind| {
+            nested_mounts(mountinfo, &bind.source)
+                .into_iter()
+                .map(|point| Tmpfs {
+                    target: format!("{}{}", bind.target, &point[bind.source.len()..]),
+                    bytes: 4096,
+                    mode: 0o555,
+                    read_only: true,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// The plan for `inputs`: the same allowlist as bubblewrap's profile.
@@ -217,33 +320,12 @@ pub(crate) fn plan(inputs: &Inputs<'_>) -> Plan {
     }
     dirs.sort();
     dirs.dedup();
+    let masks = masks(&binds, &inputs.mountinfo);
     Plan {
         root: text(&inputs.root),
         token: inputs.token.clone(),
         binds,
-        tmpfs: vec![
-            // The token's file lives here, in memory; the socket directory is bound under it.
-            Tmpfs {
-                target: "/run".to_owned(),
-                bytes: 64 << 10,
-                mode: 0o755,
-            },
-            Tmpfs {
-                target: "/dev".to_owned(),
-                bytes: 1 << 20,
-                mode: 0o755,
-            },
-            Tmpfs {
-                target: "/tmp".to_owned(),
-                bytes: bwrap::TMP_BYTES,
-                mode: 0o1777,
-            },
-            Tmpfs {
-                target: "/dev/shm".to_owned(),
-                bytes: bwrap::SHM_BYTES,
-                mode: 0o1777,
-            },
-        ],
+        tmpfs: fixed_tmpfs().into_iter().chain(masks).collect(),
         symlinks,
         dirs,
         workdir: bwrap::RUNTIME.to_owned(),
@@ -337,9 +419,10 @@ pub(crate) fn preflight() -> Result<bwrap::Bwrap, bwrap::Unusable> {
 /// not dumpable, so `/proc/<pid>/ns/pid_for_children` is unreadable): the endpoint check
 /// then leaves that comparison to the parent and `NSpid` checks.
 pub(crate) fn started_line(reaper: i32, inner: Option<(i32, u64)>, ended: bool) -> String {
+    use std::fmt::Write as _;
     let mut line = format!("{{\"child-pid\":{reaper}");
     if let Some((inner, start)) = inner {
-        line.push_str(&format!(",\"inner-pid\":{inner},\"inner-start\":{start}"));
+        let _ = write!(line, ",\"inner-pid\":{inner},\"inner-start\":{start}");
     }
     if ended {
         line.push_str(",\"ended\":true");
@@ -369,7 +452,7 @@ pub(crate) fn started(line: &str) -> Option<bwrap::Started> {
     })
 }
 
-/// The closure's steps in the order it runs them; the marker is the last, right before the
+/// The closure's steps in the order it runs them (the names of `steps`); the marker is the last, right before the
 /// exec, so nothing that fails after it can be a sandbox failure and nothing that fails
 /// before it can come with a marker.
 #[cfg(test)]
@@ -385,9 +468,9 @@ pub(crate) const STEP_ORDER: [&str; 9] = [
     "marker",
 ];
 
-/// One step of the closure: the exit code of its failure and what it does.
+/// One step of the closure: its name, the exit code of its failure and what it does.
 #[cfg(any(test, feature = "sandbox-hakoniwa"))]
-pub(crate) type Step<'a> = (i32, Box<dyn Fn() -> Result<(), String> + 'a>);
+pub(crate) type Step<'a> = (&'static str, i32, Box<dyn Fn() -> Result<(), String> + 'a>);
 
 /// Runs `steps` in order and stops at the first failure with its code and reason: later
 /// steps (the marker among them) do not run.
@@ -397,8 +480,8 @@ pub(crate) type Step<'a> = (i32, Box<dyn Fn() -> Result<(), String> + 'a>);
 /// The failing step's code and reason.
 #[cfg(any(test, feature = "sandbox-hakoniwa"))]
 pub(crate) fn run_steps(steps: Vec<Step<'_>>) -> Result<(), (i32, String)> {
-    for (code, step) in steps {
-        step().map_err(|why| (code, why))?;
+    for (name, code, step) in steps {
+        step().map_err(|why| (code, format!("{name}: {why}")))?;
     }
     Ok(())
 }
@@ -500,7 +583,11 @@ mod run {
                 "tmpfs",
                 &tmpfs.target,
                 "tmpfs",
-                MountOptions::NOSUID | MountOptions::NODEV,
+                if tmpfs.read_only {
+                    MountOptions::NOSUID | MountOptions::NODEV | MountOptions::RDONLY
+                } else {
+                    MountOptions::NOSUID | MountOptions::NODEV
+                },
                 Some(format!("size={},mode={:o}", tmpfs.bytes, tmpfs.mode)),
             );
         }
@@ -567,11 +654,16 @@ mod run {
     /// The closure's steps over `plan`, in [`STEP_ORDER`]; `umask` is the runner's own,
     /// restored before the exec.
     pub(crate) fn steps(plan: &Plan, umask: rustix::fs::Mode) -> Vec<super::Step<'_>> {
-        fn step<'a>(code: i32, run: Box<dyn Fn() -> Result<(), String> + 'a>) -> super::Step<'a> {
-            (code, run)
+        fn step<'a>(
+            name: &'static str,
+            code: i32,
+            run: Box<dyn Fn() -> Result<(), String> + 'a>,
+        ) -> super::Step<'a> {
+            (name, code, run)
         }
         vec![
             step(
+                "session",
                 exit::SESSION,
                 Box::new(|| {
                     rustix::process::setsid()
@@ -580,6 +672,7 @@ mod run {
                 }),
             ),
             step(
+                "identity",
                 exit::IDENTITY,
                 Box::new(|| match identity_mismatch(&plan.binds, mounted) {
                     Some(bind) => Err(format!("{} is not the verified object", bind.target)),
@@ -587,6 +680,7 @@ mod run {
                 }),
             ),
             step(
+                "capabilities",
                 exit::CAPABILITIES,
                 Box::new(|| {
                     drop_bounding_set()?;
@@ -602,6 +696,7 @@ mod run {
                 }),
             ),
             step(
+                "seccomp",
                 exit::SECCOMP,
                 Box::new(|| {
                     seccomp::install(&seccomp::program(seccomp::Profile::Sandbox))
@@ -609,6 +704,7 @@ mod run {
                 }),
             ),
             step(
+                "marker-descriptor",
                 exit::DESCRIPTORS,
                 Box::new(|| {
                     // SAFETY: descriptor 0 is the marker pipe's write end, handed over by the
@@ -627,14 +723,20 @@ mod run {
                 }),
             ),
             step(
+                "stdin",
                 exit::DESCRIPTORS,
                 Box::new(|| {
                     let null = std::fs::File::open("/dev/null").map_err(|e| e.to_string())?;
                     rustix::stdio::dup2_stdin(&null).map_err(|error| error.to_string())
                 }),
             ),
-            step(exit::DESCRIPTORS, Box::new(|| close_above(MARKER_FD))),
             step(
+                "descriptors",
+                exit::DESCRIPTORS,
+                Box::new(|| close_above(MARKER_FD)),
+            ),
+            step(
+                "umask",
                 exit::SPEC,
                 Box::new(move || {
                     rustix::process::umask(umask);
@@ -642,6 +744,7 @@ mod run {
                 }),
             ),
             step(
+                "marker",
                 exit::MARKER,
                 Box::new(|| {
                     // SAFETY: the marker descriptor moved here by the step above and kept by

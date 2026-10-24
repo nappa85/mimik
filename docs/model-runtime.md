@@ -271,9 +271,15 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
   `fork`, so the sandbox holds one process. The runner does not report the PID namespace's
   number (the reaper is not dumpable); the endpoint check then leaves that comparison to
   the parent and `NSpid` checks (`endpoint::NAMESPACE_UNREPORTED`). The runner reports the
-  server's own host PID (`inner-pid`) too, and Mimik holds a pidfd on it: a forced stop kills
-  and waits for the server first, then the reaper, and publishes the exit only then, because
-  the reaper can end before the server has released its memory.
+  server's own host PID and start time (`inner-pid`, `inner-start`) too, and Mimik holds a
+  pidfd on it: a forced stop kills and waits for the server first, then the reaper, and
+  publishes the exit only then, because the reaper can end before the server has released its
+  memory. The runner does not reap the reaper (a zombie can still be pinned) until Mimik has
+  pinned both and said so on an acknowledgement pipe (a closed pipe makes it end the sandbox);
+  each handle is attached to the failed-start guard the moment it is opened. A server whose
+  pid is gone, or reused (another start time), has ended and is never pinned or signalled; a
+  sandbox that ended before the report says so (`ended`, the reaper reaped after the server's
+  own exit status), and the marker then classifies the exit.
 - There is no shim. The closure runs in the program's process after the setup, in this
   order (`hako::STEP_ORDER`): a new session (no controlling terminal), the identity check, the
   bounding set dropped capability by capability (up to the kernel's last one) and the other
@@ -287,8 +293,10 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
   server does or exits with afterwards, is the server's. No exit code or output of the
   server can count as a sandbox failure
   (`live_no_exit_code_of_the_server_counts_as_a_sandbox_failure`).
-- Mount flags: each bind is non-recursive (a mount under a bound directory shows as an empty
-  directory, so no submount can stay writable under a read-only bind), `nosuid` and (but
+- Mount flags: each bind is non-recursive, and a mount under a read-only bound directory
+  (read from the host's mount table at the start) is masked by an empty read-only tmpfs, so
+  no submount can stay writable under a read-only bind and the files the directory holds
+  underneath it do not show; `nosuid` and (but
   device nodes) `nodev`, plus `noexec` when its source mount has it, given up front, because
   the kernel refuses an unprivileged remount that drops a locked flag and Hakoniwa's fallback
   for that refusal silently drops read-only; the fallback is not enabled, so a mount that
