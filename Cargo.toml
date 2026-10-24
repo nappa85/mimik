@@ -19,7 +19,7 @@ auth-test-support = []
 dev-endpoint = []
 # Level-1 sandbox through the Hakoniwa library instead of bubblewrap (comparison spike; bwrap
 # stays the default, ASSIST-48). LGPL-3.0 with the linking exception (DEP-24).
-sandbox-hakoniwa = ["dep:hakoniwa", "dep:caps"]
+sandbox-hakoniwa = ["dep:hakoniwa", "dep:caps", "dep:landlock"]
 
 [dependencies]
 async-trait = "0.1"
@@ -87,6 +87,9 @@ libc = "0.2"
 hakoniwa = { version = "=1.8.0", default-features = false, optional = true }
 # The capability sets dropped inside the Hakoniwa sandbox (already in the tree through it).
 caps = { version = "=0.5.6", optional = true }
+# The Landlock layer inside the Hakoniwa sandbox (DEP-25): Hakoniwa's own `landlock` feature fixes
+# ABI 5 as a hard requirement and reports no status, so the crate is used directly.
+landlock = { version = "=0.4.7", optional = true }
 
 [dev-dependencies]
 rqrr = { version = "=0.11.0", default-features = false }
