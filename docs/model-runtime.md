@@ -297,6 +297,33 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
   server does or exits with afterwards, is the server's. No exit code or output of the
   server can count as a sandbox failure
   (`live_no_exit_code_of_the_server_counts_as_a_sandbox_failure`).
+- Landlock (ASSIST-49, DEP-25): after the capabilities and before seccomp, the closure
+  restricts the server further with the `landlock` crate, best effort. Handled: the ABI 6
+  filesystem rights, TCP bind and connect (no rule, so both are denied: `EACCES`, beyond the
+  empty network namespace) and the abstract-Unix-socket and signal scopes. The rules come from
+  the plan (`hako::landlock_rules`): read, list and execute on every read-only bind (runtime,
+  system libraries, GPU data) but the model (read only, never executed); read and write
+  (create, remove, sockets, no execute, no device nodes) on the socket directory, `/tmp`,
+  `/dev/shm` and `/run`; listing on `/dev`, the runtime's directory (ggml looks for its
+  backends there) and the GPU path's `/sys` scaffolding; `/proc` read; the five device nodes
+  and the render node as devices (read, write, `ioctl`). What the mounts alone allow and the
+  rules do not (a file in the writable `/dev` tmpfs, a write in `/proc`, listing `/`, `/etc`
+  or `/sys`) is denied. The step's result (`full` with the kernel's ABI, `partial`, or `none`
+  when the kernel has no Landlock) is appended to the marker line on the marker pipe, in the
+  same write (`exec\n{"landlock":"full","abi":11}\n`): the runner cannot know it (Hakoniwa
+  closes its descriptors above 2, and its own status line is written before the closure
+  finishes) and the server cannot forge it (it never holds the descriptor).
+  Readiness waits up to the bounded marker-reader deadline for a report; a missing or
+  unreadable report fails the attempt rather than silently omitting the layer's status.
+  The report reaches `Status.landlock` and the Confinement section of `/admin/assistant` ("Landlock: full (ABI
+  n)", "partial (ABI n)" or "not available", with a note that the namespaces alone confine
+  the server then, as with bubblewrap) and the `ready` log line. A kernel without Landlock
+  never fails the start; a ruleset that cannot be built or applied on a kernel that has it
+  does (exit 117, before the marker, a sandbox failure). The seccomp program installs after
+  it and does not touch the Landlock calls; the exec of the server needs only the execute
+  right on the runtime's binds.
+  Starting a new session clears the previous report before preflight and namespace probing,
+  so a failed restart never presents the stopped generation's protection as current.
 - Mount flags: each bind is non-recursive, and a mount under a read-only bound directory
   (read from the host's mount table at the start) is masked by an empty read-only tmpfs, so
   no submount can stay writable under a read-only bind and the files the directory holds
@@ -319,8 +346,9 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
 path (template `apparmor/mimik`, also for distribution packages); when the sandbox cannot
 start and Ubuntu's restriction is on, the assistant page's message gives that command with
 the `tee` and `apparmor_parser -r` steps. Not tested: Ubuntu's AppArmor restriction of
-unprivileged user namespaces and that profile (it needs an Ubuntu 24.04 VM); Landlock as an extra layer inside the
-namespaces (the dev kernel has none); a real GPU. `results.md` has the comparison.
+unprivileged user namespaces and that profile (it needs an Ubuntu 24.04 VM); the Landlock layer on a kernel
+below ABI 6 (only a simulated kernel without Landlock is tested, with a seccomp filter answering `ENOSYS` to its
+calls); a real GPU under Landlock. `results.md` has the comparison.
 
 ## Device (GPU path)
 

@@ -5,6 +5,30 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Landlock inside Hakoniwa namespaces (comparison build, 2026-10-24)
+
+Scope: one Gentoo dev host, kernel `7.3.0-gentoo`, Landlock ABI 11; Hakoniwa 1.8.0,
+`landlock` 0.4.7 targeting ABI 6, pinned llama.cpp b11609 CPU build and the synthetic
+`stories260K` model. The seccomp, endpoint, runner and live suite passed 54/54 checks in
+each of three configurations: bubblewrap with the libtest runner, Hakoniwa with the libtest
+runner, and Hakoniwa with the rebuilt single-threaded Mimik runner. All used two test
+threads; real-GPU tests were excluded, three fake-GPU tests were included. This is
+containment evidence for the comparison build, not an adoption or release verdict.
+
+The Hakoniwa closure reports full enforcement on this kernel. The adversary's filesystem
+and TCP operations forbidden by Landlock return `EACCES`, while permitted temporary-file,
+device and system-data operations remain usable. A separate helper confirms abstract-socket
+and signal scoping against an outside peer, with inside-domain controls. A seccomp filter
+returning `ENOSYS` for the three Landlock calls simulates a kernel without Landlock: the
+server still serves inside the namespace sandbox and reports the layer unavailable.
+Bubblewrap reports no Landlock layer. Child-local bounded raw capture checks that the
+request marker reaches neither output stream; overflow fails the check.
+
+Limits: no real older-ABI or boot-disabled kernel, real GPU under Landlock, Ubuntu AppArmor
+VM or other distribution was tested here. The `ENOSYS` simulation is not older-ABI evidence.
+The existing `atomic-polyfill` advisory remains unresolved; an offline audit attempt could
+not load the container's advisory database, so it provides no fresh audit verdict.
+
 ## Hakoniwa level-1 sandbox against bubblewrap (prototype tier, 2026-10-23)
 
 Scope: Hakoniwa 1.8.0 (`seccomp` feature off; Mimik's seccompiler program installed in its

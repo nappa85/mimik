@@ -248,6 +248,7 @@ fn closure_exit_codes_are_distinct_and_only_the_exec_is_after_the_marker() {
         exit::SESSION,
         exit::IDENTITY,
         exit::CAPABILITIES,
+        exit::LANDLOCK,
         exit::SECCOMP,
         exit::MARKER,
         exit::DESCRIPTORS,
@@ -1069,4 +1070,190 @@ fn a_process_replaced_after_it_was_pinned_is_not_the_server_and_one_ended_after_
     };
     assert_eq!(find_child(&ended, 7), Ok(None));
     assert_eq!(ended.calls(), [("open", 11), ("stat", 11), ("exited", 11)]);
+}
+
+fn rule<'a>(rules: &'a [Rule], path: &str) -> Option<&'a Rule> {
+    rules.iter().find(|rule| rule.path == path)
+}
+
+#[test]
+fn the_landlock_rules_grant_what_the_plan_binds_and_nothing_more() {
+    let render = gpu();
+    let mut inputs = inputs(Some(&render), &["llama-server", "libllama.so.0"]);
+    inputs.extra = vec![(
+        PathBuf::from("/data/mimik"),
+        "/opt/probe/mimik".to_owned(),
+        (7, 400),
+    )];
+    let plan = plan(&inputs);
+    let rules = landlock_rules(&plan);
+    let grant = |path: &str| {
+        rule(&rules, path)
+            .unwrap_or_else(|| panic!("no rule for {path}: {rules:?}"))
+            .grant
+    };
+    // Read and execute: the server and its libraries, the probe's executable, the system
+    // libraries and the GPU's system data.
+    for path in [
+        "/opt/llama/llama-server",
+        "/opt/llama/libllama.so.0",
+        "/opt/probe/mimik",
+        "/usr/share/vulkan",
+    ] {
+        assert_eq!(grant(path), Grant::ReadExec, "{path}");
+    }
+    // The model is read, never executed.
+    assert_eq!(grant(bwrap::MODEL), Grant::ReadFile);
+    // Read and write: the socket directory and the three writable tmpfs mounts.
+    for path in [bwrap::SOCKET_DIR, "/tmp", "/dev/shm", "/run"] {
+        assert_eq!(grant(path), Grant::ReadWrite, "{path}");
+    }
+    // `/dev` is listed and `/proc` read; the five nodes and the render node are devices.
+    assert_eq!(grant("/dev"), Grant::List);
+    assert_eq!(grant("/proc"), Grant::Read);
+    // The runtime's directory is listed (ggml looks for its backends there), not written.
+    assert_eq!(grant(bwrap::RUNTIME), Grant::List);
+    for device in DEVICES {
+        assert_eq!(grant(&format!("/dev/{device}")), Grant::Device);
+    }
+    assert_eq!(grant("/dev/dri/renderD128"), Grant::Device);
+    // Nothing else: no rule for a path the plan does not bind, and no read-write rule on a
+    // read-only bind.
+    for rule in &rules {
+        let bound = plan.binds.iter().find(|bind| bind.target == rule.path);
+        let fixed = ["/proc", "/dev", "/tmp", "/dev/shm", "/run", bwrap::RUNTIME]
+            .contains(&rule.path.as_str())
+            || (rule.grant == Grant::List && plan.dirs.contains(&rule.path));
+        assert!(bound.is_some() || fixed, "{rule:?} is not in the plan");
+        if let Some(bind) = bound
+            && bind.access == Access::ReadOnly
+        {
+            assert!(
+                matches!(rule.grant, Grant::ReadExec | Grant::ReadFile),
+                "{rule:?}"
+            );
+        }
+    }
+    // `/home`, `/etc` and `/sys` have no rule of their own (only their binds do), and `/` has
+    // none at all.
+    assert!(rule(&rules, "/").is_none());
+    assert!(rule(&rules, "/etc").is_none());
+    assert!(rule(&rules, "/sys").is_none());
+}
+
+#[test]
+fn the_landlock_report_travels_after_the_marker_and_only_as_a_report() {
+    for landlock in [
+        Landlock::Full { abi: 11 },
+        Landlock::Partial { abi: 3 },
+        Landlock::Unavailable,
+    ] {
+        let line = landlock.line();
+        assert!(line.ends_with('\n'));
+        assert!(line.len() < 64, "{line}: the marker pipe reads 128 bytes");
+        assert_eq!(Landlock::parse(line.as_bytes()), Some(landlock));
+    }
+    for bad in [
+        &b""[..],
+        b"\n",
+        b"{}\n",
+        b"{\"landlock\":\"full\"}\n",
+        b"{\"landlock\":\"strong\",\"abi\":3}\n",
+        b"{\"landlock\":\"full\",\"abi\":999}\n",
+        b"landlock full\n",
+    ] {
+        assert_eq!(Landlock::parse(bad), None, "{bad:?}");
+    }
+    assert_eq!(Landlock::Full { abi: 11 }.describe(), "full (ABI 11)");
+    assert_eq!(Landlock::Partial { abi: 3 }.describe(), "partial (ABI 3)");
+    assert_eq!(Landlock::Unavailable.describe(), "not available");
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn the_landlock_rights_never_let_written_files_run_or_make_device_nodes() {
+    use landlock::AccessFs;
+    let write = access(Grant::ReadWrite);
+    for denied in [
+        AccessFs::Execute,
+        AccessFs::MakeChar,
+        AccessFs::MakeBlock,
+        AccessFs::Refer,
+        AccessFs::IoctlDev,
+    ] {
+        assert!(!write.contains(denied), "{denied:?}");
+    }
+    assert!(write.contains(AccessFs::WriteFile | AccessFs::MakeSock | AccessFs::Truncate));
+    for grant in [Grant::ReadFile, Grant::Read, Grant::List, Grant::ReadExec] {
+        let rights = access(grant);
+        assert!(!rights.contains(AccessFs::WriteFile), "{grant:?}");
+        assert!(!rights.contains(AccessFs::MakeReg), "{grant:?}");
+    }
+    assert!(!access(Grant::ReadFile).contains(AccessFs::Execute));
+    assert!(access(Grant::ReadExec).contains(AccessFs::Execute));
+    // A device node: read, write and ioctl, nothing else (no execute, no create).
+    let device = access(Grant::Device);
+    assert!(device.contains(AccessFs::ReadFile | AccessFs::WriteFile | AccessFs::IoctlDev));
+    assert!(!device.contains(AccessFs::Execute));
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn the_crates_status_is_reported_as_full_partial_or_not_available() {
+    use landlock::{ABI, LandlockStatus, RulesetStatus};
+    let available = |effective_abi, kernel_abi| LandlockStatus::Available {
+        effective_abi,
+        kernel_abi,
+    };
+    // The kernel's own ABI, also above the crate's newest.
+    assert_eq!(
+        classify(&RulesetStatus::FullyEnforced, &available(ABI::V9, Some(11))),
+        Landlock::Full { abi: 11 }
+    );
+    assert_eq!(
+        classify(&RulesetStatus::FullyEnforced, &available(ABI::V6, None)),
+        Landlock::Full { abi: 6 }
+    );
+    assert_eq!(
+        classify(&RulesetStatus::PartiallyEnforced, &available(ABI::V3, None)),
+        Landlock::Partial { abi: 3 }
+    );
+    for status in [LandlockStatus::NotImplemented, LandlockStatus::NotEnabled] {
+        assert_eq!(
+            classify(&RulesetStatus::NotEnforced, &status),
+            Landlock::Unavailable
+        );
+    }
+}
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn a_landlock_path_error_stops_the_real_step_before_the_marker() {
+    let missing = tempfile::tempdir().unwrap();
+    let mut plan = plan(&inputs(None, &["llama-server"]));
+    plan.binds.push(Bind {
+        source: String::new(),
+        target: missing.path().join("absent").to_str().unwrap().to_owned(),
+        access: Access::ReadOnly,
+        identity: None,
+    });
+    let step = steps(&plan, rustix::fs::Mode::empty())
+        .into_iter()
+        .find(|step| step.0 == "landlock")
+        .unwrap();
+    let marked = std::cell::Cell::new(false);
+    let result = run_steps(vec![
+        step,
+        (
+            "marker",
+            exit::MARKER,
+            Box::new(|| {
+                marked.set(true);
+                Ok(())
+            }),
+        ),
+    ]);
+    let (code, why) = result.unwrap_err();
+    assert_eq!(code, exit::LANDLOCK);
+    assert!(why.starts_with("landlock:"), "{why}");
+    assert!(!marked.get());
 }

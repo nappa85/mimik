@@ -19,6 +19,7 @@
 <section class="panel"><h2>Confinement</h2>
 {% if let Some(level) = view.level %}<p><strong>Level {{ level.number }}: {{ level.name }}</strong> — {{ level.text }}</p>{% else %}<p>No level is active.</p>{% endif %}
 {% for note in view.notes %}<p>{{ note }}</p>{% endfor %}
+{% if let Some(landlock) = view.landlock %}<p>Landlock: <strong>{{ landlock.state }}</strong>{% if let Some(note) = landlock.note %} — {{ note }}{% endif %}</p>{% endif %}
 {% if !view.skipped.is_empty() %}<h3>Levels not used</h3><ul>{% for skipped in view.skipped %}<li>Level {{ skipped.0 }}: {{ skipped.1 }}</li>{% endfor %}</ul>{% endif %}</section>
 <section class="panel"><h2>Budgets</h2>
 {% if let Some(budgets) = view.budgets %}<p>Request bound B {{ budgets.bytes }} bytes and N(B) {{ budgets.tokens }} tokens · run deadline R {{ budgets.run }} s · queue D {{ budgets.depth }}, wait Q {{ budgets.queue_wait }} s · after a deadline cancel the next job waits {{ budgets.busy }} s.</p>

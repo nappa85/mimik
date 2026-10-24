@@ -69,9 +69,42 @@ pub(crate) fn classify(line: &str) -> Option<Output> {
         .map(Output::Build)
 }
 
-/// Live tests read the child's lines here (the marker check); nothing else ever does.
+/// Bounded, child-local raw output capture for live confidentiality checks. A full capture
+/// fails the check rather than silently discarding evidence.
 #[cfg(test)]
-pub(crate) static TAP: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+#[derive(Debug, Default)]
+pub(crate) struct Capture {
+    pub bytes: [Vec<u8>; 2],
+    pub overflow: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn captured<R: Read>(
+    name: &str,
+    reader: R,
+    capture: &std::sync::Arc<std::sync::Mutex<Capture>>,
+) -> impl Read + use<R> {
+    struct Captured<R> {
+        reader: R,
+        capture: std::sync::Arc<std::sync::Mutex<Capture>>,
+        stream: usize,
+    }
+    impl<R: Read> Read for Captured<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.reader.read(buffer)?;
+            let mut capture = self.capture.lock().unwrap();
+            let kept = read.min((1_usize << 20).saturating_sub(capture.bytes[self.stream].len()));
+            capture.bytes[self.stream].extend_from_slice(&buffer[..kept]);
+            capture.overflow |= kept != read;
+            Ok(read)
+        }
+    }
+    Captured {
+        reader,
+        capture: std::sync::Arc::clone(capture),
+        stream: usize::from(name == "stderr"),
+    }
+}
 
 /// Reads `reader` to its end, cutting lines at [`LINE_BOUND`], and calls `event` for each
 /// line that signals something. Memory stays bounded whatever the child writes.
@@ -80,14 +113,6 @@ pub(crate) fn drain(mut reader: impl Read, mut event: impl FnMut(Output)) {
     let mut skipping = false;
     let mut chunk = [0_u8; 8192];
     let finish = |line: &mut Vec<u8>, event: &mut dyn FnMut(Output)| {
-        #[cfg(test)]
-        if let Some(tap) = TAP
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_mut()
-        {
-            tap.push(String::from_utf8_lossy(line).into_owned());
-        }
         if let Some(found) = classify(&String::from_utf8_lossy(line)) {
             event(found);
         }
@@ -173,6 +198,44 @@ pub(crate) fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_children_and_streams_cannot_erase_or_split_captured_evidence() {
+        use std::sync::{Arc, Mutex};
+        let first = Arc::new(Mutex::new(Capture::default()));
+        let mut stdout = captured("stdout", &b"secret-marker"[..], &first);
+        let mut buffer = [0; 7];
+        assert_eq!(stdout.read(&mut buffer).unwrap(), 7);
+        let second = Arc::new(Mutex::new(Capture::default()));
+        drain(captured("stderr", &b"unrelated\n"[..], &second), |_| {});
+        drain(captured("stderr", &b"noise\n"[..], &first), |_| {});
+        drain(stdout, |_| {});
+        let first = first.lock().unwrap();
+        assert_eq!(first.bytes[0], b"secret-marker");
+        assert_eq!(first.bytes[1], b"noise\n");
+        assert!(!first.overflow);
+        assert_eq!(second.lock().unwrap().bytes[1], b"unrelated\n");
+    }
+
+    #[test]
+    fn a_capture_that_cannot_keep_all_evidence_reports_overflow() {
+        use std::sync::{Arc, Mutex};
+        let capture = Arc::new(Mutex::new(Capture::default()));
+        drain(
+            captured(
+                "stdout",
+                Endless {
+                    left: (1 << 20) + 1,
+                    byte: b'x',
+                },
+                &capture,
+            ),
+            |_| {},
+        );
+        let capture = capture.lock().unwrap();
+        assert_eq!(capture.bytes[0].len(), 1 << 20);
+        assert!(capture.overflow);
+    }
 
     #[test]
     fn request_text_in_the_output_at_any_verbosity_reaches_nothing_but_the_fixed_summary() {

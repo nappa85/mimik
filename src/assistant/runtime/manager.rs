@@ -70,6 +70,11 @@ pub(crate) trait Child: Send + Sync {
     fn notes(&self) -> Vec<String> {
         Vec::new()
     }
+    /// What the Landlock layer inside the Hakoniwa sandbox did, as its closure reported it
+    /// (`None`: no such layer, as with bubblewrap).
+    fn landlock(&self) -> Option<super::hako::Landlock> {
+        None
+    }
     /// After `/health`: on the GPU path every layer must be on the GPU (the offload line),
     /// otherwise the attempt is a GPU failure.
     async fn loaded(&self) -> Result<(), String> {
@@ -139,6 +144,8 @@ pub(crate) struct Status {
     pub calibration: Option<Calibration>,
     pub budgets: Option<Budgets>,
     pub notes: Vec<String>,
+    /// The Landlock layer of the Hakoniwa sandbox (DEP-25); `None` with bubblewrap.
+    pub landlock: Option<super::hako::Landlock>,
     /// A Restart is being carried out.
     pub restarting: bool,
     /// The GPU path is wanted (`--assistant-device` is not `cpu`).
@@ -168,6 +175,7 @@ impl Status {
             calibration: None,
             budgets: None,
             notes: Vec::new(),
+            landlock: None,
             restarting: false,
         }
     }
@@ -557,6 +565,7 @@ impl Manager {
             status.level = Some(level);
             status.generation = generation;
             status.notes.clear();
+            status.landlock = None;
         });
         generation
     }
@@ -620,6 +629,7 @@ impl Manager {
             status.last_failure = None;
             status.level = None;
             status.gpu_note = note;
+            status.landlock = None;
         });
         if let Err(next) = self.preflight().await {
             return next;
@@ -815,6 +825,7 @@ impl Manager {
     ) -> Ended {
         let interpreter = child.server().interpreter();
         let notes = child.notes();
+        let landlock = child.landlock();
         // Signals from an earlier generation are stale.
         while self.signals.try_recv().is_ok() {}
         self.assistant.event(RuntimeEvent::Ready {
@@ -824,7 +835,11 @@ impl Manager {
         });
         let level = self.status().level.map_or(0, Level::number);
         log(&format!(
-            "ready: generation {generation}, level {level}; {}",
+            "ready: generation {generation}, level {level}{}; {}",
+            landlock.map_or_else(String::new, |landlock| format!(
+                ", landlock {}",
+                landlock.describe()
+            )),
             measured(&calibration, Some(&budgets))
         ));
         self.update(|status| {
@@ -834,6 +849,7 @@ impl Manager {
             status.calibration = Some(calibration);
             status.budgets = Some(budgets);
             status.notes = notes;
+            status.landlock = landlock;
         });
         let ready_at = Instant::now();
         let mut reset_pending = true;

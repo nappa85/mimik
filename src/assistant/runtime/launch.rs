@@ -2112,12 +2112,50 @@ enum Marker {
     Unknown,
 }
 
-/// The marker pipe's outcome, set once by its reader.
-struct MarkerState(std::sync::atomic::AtomicU8);
+/// The marker pipe's outcome, set once by its reader, and the Landlock report that followed
+/// the marker (Hakoniwa only).
+struct MarkerState(
+    std::sync::atomic::AtomicU8,
+    Mutex<Option<super::hako::Landlock>>,
+);
 
 impl MarkerState {
+    async fn require_landlock(&self, within: Duration) -> Result<(), String> {
+        tokio::time::timeout(within, async {
+            loop {
+                // The reader publishes the report before completion. Observe completion
+                // first, so a publication between the two reads cannot look like a missing
+                // report from a finished reader.
+                let completed = self.0.load(Ordering::SeqCst) != 0;
+                if self.landlock().is_some() {
+                    return Ok(());
+                }
+                if completed {
+                    return Err("the sandbox did not report its Landlock status".to_owned());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| Err("the sandbox's Landlock report timed out".to_owned()))
+    }
+
     fn new() -> Arc<Self> {
-        Arc::new(Self(std::sync::atomic::AtomicU8::new(0)))
+        Arc::new(Self(std::sync::atomic::AtomicU8::new(0), Mutex::new(None)))
+    }
+
+    fn set_landlock(&self, landlock: Option<super::hako::Landlock>) {
+        *self
+            .1
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = landlock;
+    }
+
+    fn landlock(&self) -> Option<super::hako::Landlock> {
+        *self
+            .1
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn set(&self, marker: Marker) {
@@ -2139,13 +2177,23 @@ impl MarkerState {
     }
 }
 
-/// Reads the marker pipe to its end (64 bytes at most).
-fn marker_outcome(mut pipe: impl Read) -> Marker {
+/// Reads the marker pipe to its end (128 bytes at most).
+#[cfg(test)]
+fn marker_outcome(pipe: impl Read) -> Marker {
+    marker_report(pipe).0
+}
+
+/// [`marker_outcome`] and, after the marker, the Landlock report the Hakoniwa closure appends
+/// (`None` for bubblewrap's shim, a closure without one, or text that is not a report).
+fn marker_report(mut pipe: impl Read) -> (Marker, Option<super::hako::Landlock>) {
     let mut text = Vec::new();
-    match pipe.by_ref().take(64).read_to_end(&mut text) {
-        Ok(_) if text.starts_with(super::probe::MARKER) => Marker::Executed,
-        Ok(0) => Marker::Absent,
-        _ => Marker::Unknown,
+    match pipe.by_ref().take(128).read_to_end(&mut text) {
+        Ok(_) if text.starts_with(super::probe::MARKER) => (
+            Marker::Executed,
+            super::hako::Landlock::parse(&text[super::probe::MARKER.len()..]),
+        ),
+        Ok(0) => (Marker::Absent, None),
+        _ => (Marker::Unknown, None),
     }
 }
 
@@ -2205,6 +2253,8 @@ pub(crate) struct RealChild {
     /// The launcher's runtime directory (a test's key for the drain gate).
     #[cfg(test)]
     runtime_dir: PathBuf,
+    #[cfg(test)]
+    capture: Arc<Mutex<drain::Capture>>,
 }
 
 impl RealChild {
@@ -2287,7 +2337,14 @@ impl Child for RealChild {
         self.notes.clone()
     }
 
+    fn landlock(&self) -> Option<super::hako::Landlock> {
+        self.marker.landlock()
+    }
+
     async fn loaded(&self) -> Result<(), String> {
+        if self.level == Level::Bubblewrap && self.backend == Backend::Hakoniwa {
+            self.marker.require_landlock(READERS_WITHIN).await?;
+        }
         if self.path == Path::Cpu {
             return Ok(());
         }
@@ -2485,7 +2542,9 @@ fn read_marker(pipe: OwnedFd, marker: &Arc<MarkerState>, readers: &Arc<Readers>)
     let spawned = std::thread::Builder::new()
         .name("assistant-marker".into())
         .spawn(move || {
-            seen.set(marker_outcome(std::fs::File::from(pipe)));
+            let (outcome, landlock) = marker_report(std::fs::File::from(pipe));
+            seen.set_landlock(landlock);
+            seen.set(outcome);
             ended.end();
         });
     if spawned.is_err() {
@@ -2529,6 +2588,8 @@ impl Real {
         let (mut child, ticket) = child.hand_over();
         let pid = i32::try_from(child.id()).unwrap_or(0);
         let summary = Arc::new(Mutex::new(Summary::default()));
+        #[cfg(test)]
+        let capture = Arc::new(Mutex::new(drain::Capture::default()));
         let marker_state = MarkerState::new();
         let readers = Readers::new(2 + usize::from(marker.is_some()));
         for (name, stream) in [
@@ -2548,6 +2609,8 @@ impl Real {
             ),
         ] {
             let ended = Arc::clone(&readers);
+            #[cfg(test)]
+            let stream = stream.map(|stream| drain::captured(name, stream, &capture));
             let spawned =
                 stream.map(|stream| drain::spawn(name, stream, &summary, move || ended.end()));
             if !matches!(spawned, Some(Ok(_))) {
@@ -2558,12 +2621,7 @@ impl Real {
             read_marker(marker, &marker_state, &readers);
         }
         if let Some(rest) = status_rest {
-            // Later status lines (`exit-code`) are read and dropped: exit is seen by pidfd.
-            let _ = std::thread::Builder::new()
-                .name("assistant-status".into())
-                .spawn(move || {
-                    let _ = std::io::copy(&mut rest.take(64 * 1024), &mut std::io::sink());
-                });
+            drain_status(rest);
         }
         let (exit_sender, exit) = watch::channel(None);
         let launcher = Arc::clone(self);
@@ -2578,13 +2636,7 @@ impl Real {
             token.expose(),
             &self.settings.alias,
         ));
-        let mut notes = Vec::new();
-        if level == Level::Bubblewrap && bwrap.is_some_and(|bwrap| !bwrap.size) {
-            notes.push(
-                "temporary space unbounded: this bubblewrap cannot size /tmp and /dev/shm, so only the 64 MiB per-file limit holds"
-                    .into(),
-            );
-        }
+        let notes = temporary_notes(level, bwrap);
         #[cfg(not(test))]
         drop(connector);
         Ok(Arc::new(RealChild {
@@ -2607,8 +2659,28 @@ impl Real {
             notes,
             #[cfg(test)]
             runtime_dir: self.settings.runtime_dir.clone(),
+            #[cfg(test)]
+            capture,
         }))
     }
+}
+
+/// Warnings for a sandbox that cannot bound its temporary mounts.
+fn temporary_notes(level: Level, bwrap: Option<&bwrap::Bwrap>) -> Vec<String> {
+    if level == Level::Bubblewrap && bwrap.is_some_and(|bwrap| !bwrap.size) {
+        vec!["temporary space unbounded: this bubblewrap cannot size /tmp and /dev/shm, so only the 64 MiB per-file limit holds".into()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Later status lines (`exit-code`) are discarded: exit is seen by pidfd.
+fn drain_status(rest: impl Read + Send + 'static) {
+    let _ = std::thread::Builder::new()
+        .name("assistant-status".into())
+        .spawn(move || {
+            let _ = std::io::copy(&mut rest.take(64 * 1024), &mut std::io::sink());
+        });
 }
 
 /// The real launcher behind an `Arc`, so its children can clear the pidfile.

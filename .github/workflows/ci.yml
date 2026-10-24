@@ -312,6 +312,7 @@ jobs:
             --data-dir target/probe-data
       - name: Confinement, endpoint and live tests against the unpacked runtime
         env:
+          MIMIK_LIVE_LANDLOCK: any
           MIMIK_LIVE_RUNTIME: ${{ github.workspace }}/target/rel/llama
           MIMIK_LIVE_MODELS: ${{ github.workspace }}/target/models
           MIMIK_LIVE_SCRATCH: ${{ github.workspace }}/target/scratch
@@ -335,6 +336,7 @@ jobs:
       # libtest binary; the start-time probe with it exits 0 only at level 1.
       - name: Hakoniwa sandbox, start-time probe and the whole live suite
         env:
+          MIMIK_LIVE_LANDLOCK: any
           MIMIK_LIVE_RUNTIME: ${{ github.workspace }}/target/rel/llama
           MIMIK_LIVE_MODELS: ${{ github.workspace }}/target/models
           MIMIK_LIVE_SCRATCH: ${{ github.workspace }}/target/scratch

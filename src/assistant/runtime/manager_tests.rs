@@ -22,6 +22,7 @@ struct Behaviour {
     gate: Option<Arc<tokio::sync::Semaphore>>,
     /// What `loaded` answers (the GPU offload check).
     loaded: Result<(), String>,
+    landlock: Option<super::super::hako::Landlock>,
     /// A malfunction of the fake server, if any.
     fault: Fault,
 }
@@ -47,6 +48,7 @@ impl Default for Behaviour {
             g: 0.01,
             gate: None,
             loaded: Ok(()),
+            landlock: None,
             fault: Fault::None,
         }
     }
@@ -126,6 +128,10 @@ struct FakeChild {
 
 #[async_trait]
 impl Child for FakeChild {
+    fn landlock(&self) -> Option<super::super::hako::Landlock> {
+        self.server.behaviour.landlock
+    }
+
     fn server(&self) -> Arc<dyn Server> {
         Arc::clone(&self.server) as Arc<dyn Server>
     }
@@ -380,6 +386,32 @@ async fn a_start_reaches_ready_after_health_priming_and_calibration() {
     assert_eq!(assistant.budgets(), Some(budgets));
     assert!(status.calibration.is_some());
     assert_eq!(launcher.primed.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_restart_never_shows_the_previous_generations_landlock_report() {
+    for fail_preflight in [true, false] {
+        let report = Some(super::super::hako::Landlock::Full { abi: 11 });
+        let launcher = FakeLauncher::scripted([Start::Ok(Behaviour {
+            landlock: report,
+            ..Behaviour::default()
+        })]);
+        let (assistant, handle) = manager(&launcher);
+        ready(&assistant).await;
+        assert_eq!(handle.status().landlock, report);
+        if fail_preflight {
+            *launcher.preflight.lock().unwrap() = Some("runtime inaccessible".into());
+        } else {
+            *launcher.probe.lock().unwrap() =
+                Some(vec![(Level::Bubblewrap, Err("namespaces disabled".into()))]);
+        }
+        assert_eq!(handle.restart(), Restart::Accepted);
+        unavailable(&handle).await;
+        let status = handle.status();
+        assert_eq!(status.level, None);
+        assert_eq!(status.landlock, None);
+        handle.shutdown().await;
+    }
 }
 
 #[tokio::test(start_paused = true)]

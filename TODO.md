@@ -6,6 +6,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Current work
 
+- **Hakoniwa Landlock change** (`hakoniwa-spike`, ASSIST-49): implementation and local live
+  checks in place; completion blocked on the required Sonnet review and older-ABI evidence.
+  Adoption also needs the dependency-audit resolution and Ubuntu AppArmor VM check.
+
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1, 2c-2a (the CPU
   runtime at level 1 only, ASSIST-43, `docs/model-runtime.md`) and the Rust 1.99.1 / rig-core
   0.45.0 upgrade are merged into master, and so is 2c-2b-1 (the GPU path, live-verified on the
@@ -41,9 +45,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    bubblewrap stays the default until then). Built on branch `hakoniwa-spike` behind the
    `sandbox-hakoniwa` feature (DEP-24, `docs/model-runtime.md`, `docs/results.md`): the whole live
    suite passes on both backends on the dev host. Open: the Ubuntu 24.04 VM check of the AppArmor
-   profile `apparmor/mimik` (after the KVM reboot), the Landlock layer inside the namespaces
-   (Landlock kernel, 7.3.0), the lock file's RUSTSEC-2023-0089 (atomic-polyfill via Hakoniwa's
-   postcard; needs a patched Hakoniwa or an approved ignore), an independent review, then the adoption decision.
+   profile `apparmor/mimik`, older-ABI Landlock evidence, the lock file's RUSTSEC-2023-0089
+   (atomic-polyfill via Hakoniwa's postcard; needs a patched Hakoniwa or an approved ignore),
+   the required Sonnet review, then the adoption decision.
 4. Owed measurements: the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks
    at each llama.cpp pin change (`tools/assist_gpu_live.py`); a trace of the GPU path on another
    driver (AMDVLK, Intel, NVIDIA) for ASSIST-L44/L45; the superseding-job (cancel) timings on CPU and GPU with the fixed
@@ -59,7 +63,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Blockers
 
-- None.
+- Hakoniwa: Sonnet's weekly quota prevents the required review (reset reported as October 28,
+  21:00 Europe/Rome). External code review is approved by the user. The third-reviewer chain
+  was exhausted; retry Sonnet when available. Older-ABI Landlock behavior remains unverified.
+  `atomic-polyfill` advisory unresolved; the offline CI container has no advisory database,
+  so a fresh audit could not run.
 
 ## Pending user questions
 
@@ -73,6 +81,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   situation input, first-release features, games after the POC.
 
 ## Other next actions
+
+- Review helper: `external_review.py`'s short-output unavailable heuristic can reject a real
+  successful verdict that discusses "unavailable" status. Add a regression and narrow the
+  classification; direct sanitized Astra follow-up was needed to read the actual verdict.
 
 - macOS and Windows model runtime (ASSIST-34): not verifiable from this host.
 - **GPU back in service (2026-10-20, after the re-paste):** at 143 W for 5 min with the fan

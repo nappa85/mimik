@@ -238,6 +238,25 @@ pub(crate) fn program(profile: Profile) -> BpfProgram {
     program
 }
 
+/// A program that makes the kernel look as if it had no Landlock: the three Landlock calls
+/// answer `ENOSYS` (what a kernel built without it answers). Tests only: the live fallback
+/// test installs it in the runner.
+#[cfg(test)]
+pub(crate) fn program_without_landlock() -> BpfProgram {
+    const LANDLOCK_CALLS: [i64; 3] = [444, 445, 446];
+    let filter = SeccompFilter::new(
+        LANDLOCK_CALLS
+            .iter()
+            .map(|number| (*number, Vec::new()))
+            .collect(),
+        SeccompAction::Allow,
+        SeccompAction::Errno(ENOSYS),
+        TargetArch::x86_64,
+    )
+    .expect("allow and refuse differ");
+    filter.try_into().expect("the program compiles")
+}
+
 /// The program as bubblewrap's `--seccomp` reads it: the instructions' bytes, native endian.
 pub(crate) fn bytes(program: &[sock_filter]) -> Vec<u8> {
     let mut out = Vec::with_capacity(program.len() * 8);

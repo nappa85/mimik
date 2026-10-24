@@ -132,9 +132,34 @@ struct View {
     breaker: String,
     level: Option<LevelView>,
     notes: Vec<String>,
+    /// The Landlock layer of the Hakoniwa sandbox: how far it is in force (none with bubblewrap).
+    landlock: Option<LandlockLine>,
     skipped: Vec<(u8, String)>,
     budgets: Option<BudgetsView>,
     calibration: Option<CalibrationView>,
+}
+
+/// The Landlock line of the Confinement section.
+struct LandlockLine {
+    state: String,
+    /// Said when Landlock is not in full force.
+    note: Option<&'static str>,
+}
+
+fn landlock_line(landlock: crate::assistant::runtime::hako::Landlock) -> LandlockLine {
+    use crate::assistant::runtime::hako::Landlock;
+    LandlockLine {
+        state: landlock.describe(),
+        note: match landlock {
+            Landlock::Full { .. } => None,
+            Landlock::Partial { .. } => Some(
+                "This kernel's Landlock lacks part of what Mimik asks for; the private namespaces still confine the model server, as with bubblewrap.",
+            ),
+            Landlock::Unavailable => Some(
+                "This kernel has no Landlock (or it is not enabled); the private namespaces still confine the model server, as with bubblewrap.",
+            ),
+        },
+    }
 }
 
 fn seconds(ms: f64) -> String {
@@ -189,6 +214,7 @@ fn view(status: Status, breaker: String) -> View {
         breaker,
         level: status.level.map(level_view),
         notes: status.notes,
+        landlock: status.landlock.map(landlock_line),
         skipped: status
             .skipped
             .into_iter()
@@ -289,4 +315,23 @@ async fn try_gpu(
         TryGpu::NotApplicable => "gpu-not-applicable",
     };
     Ok(Redirect::to(&format!("/admin/assistant?notice={notice}")).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::landlock_line;
+    use crate::assistant::runtime::hako::Landlock;
+
+    #[test]
+    fn the_page_says_how_far_landlock_is_in_force_and_what_stands_alone_otherwise() {
+        let full = landlock_line(Landlock::Full { abi: 11 });
+        assert_eq!(full.state, "full (ABI 11)");
+        assert!(full.note.is_none());
+        let partial = landlock_line(Landlock::Partial { abi: 3 });
+        assert_eq!(partial.state, "partial (ABI 3)");
+        assert!(partial.note.is_some_and(|note| note.contains("namespaces")));
+        let none = landlock_line(Landlock::Unavailable);
+        assert_eq!(none.state, "not available");
+        assert!(none.note.is_some_and(|note| note.contains("bubblewrap")));
+    }
 }

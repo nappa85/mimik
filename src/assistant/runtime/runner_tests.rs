@@ -145,7 +145,14 @@ fn helper() {
         return;
     };
     match mode.as_str() {
-        "runner" => std::process::exit(run(SPEC_FD)),
+        "runner" => {
+            // A kernel without Landlock, simulated: the three calls answer `ENOSYS`, in this
+            // thread and so in what it forks (the live fallback test).
+            if std::env::var_os("MIMIK_TEST_NO_LANDLOCK").is_some() {
+                seccomp::install(&seccomp::program_without_landlock()).unwrap();
+            }
+            std::process::exit(run(SPEC_FD))
+        }
         "report" => test_helper::print(&report()),
         "hold" => {
             test_helper::print(&report());

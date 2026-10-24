@@ -132,6 +132,8 @@ fn helper() {
             std::process::exit(0);
         }
         "adversary" => adversary(),
+        #[cfg(feature = "sandbox-hakoniwa")]
+        "landlock-scope" => landlock_scope(),
         "shim" => std::process::exit(super::super::probe::shim()),
         "mimik" => play_mimik(),
         "cwd-probe" => play_cwd_probe(),
@@ -273,6 +275,11 @@ fn adversary() {
                 .collect()
         })
         .unwrap_or_default();
+    // What the namespaces' mounts allow and the Landlock ruleset does not: a write in the
+    // writable `/dev` tmpfs and in `/proc`, listings of `/etc`, `/sys` and `/`, and a TCP
+    // bind (the empty network namespace alone fails it differently). The controls are
+    // what the ruleset allows.
+    let landlock = landlock_facts();
     let report = json!({
         "ok": true,
         "descriptors": descriptors,
@@ -293,9 +300,54 @@ fn adversary() {
         .as_object_mut()
         .unwrap()
         .extend(process_facts().as_object().unwrap().clone());
+    report
+        .as_object_mut()
+        .unwrap()
+        .extend(landlock.as_object().unwrap().clone());
     println!("{report}");
-    // Answer the endpoint check like the probe does.
     super::super::probe::inner(&["1".into()]);
+}
+
+fn landlock_facts() -> Value {
+    let abi = landlock_abi();
+    let write_open = |path: &str| {
+        errno_of(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(path),
+        )
+    };
+    json!({
+        "landlock_abi": abi,
+        "dev_create": write_open("/dev/mimik-landlock-probe"),
+        "proc_write": errno_of(std::fs::OpenOptions::new().write(true).open("/proc/self/oom_score_adj")),
+        "etc_list": errno_of(std::fs::read_dir("/etc")),
+        "sys_list": errno_of(std::fs::read_dir("/sys")),
+        "root_list": errno_of(std::fs::read_dir("/")),
+        "tcp_bind": errno_of(std::net::TcpListener::bind("127.0.0.1:0")),
+        "control_tmp_write": write_open("/tmp/mimik-landlock-probe"),
+        "control_shm_write": write_open("/dev/shm/mimik-landlock-probe"),
+        "control_null_write": write_open("/dev/null"),
+        "control_cpu_read": errno_of(std::fs::read_to_string("/sys/devices/system/cpu/online")),
+        "control_proc_read": errno_of(std::fs::read_to_string("/proc/self/status")),
+        "control_dev_list": errno_of(std::fs::read_dir("/dev")),
+    })
+}
+
+/// Independent capability query: do not decide which assertions to run from the report
+/// being tested. VERSION creates no ruleset and does not alter this process.
+fn landlock_abi() -> i64 {
+    // SAFETY: VERSION takes a null pointer and zero length, dereferencing no memory.
+    unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<u8>(),
+            0_usize,
+            1_u32,
+        )
+    }
 }
 
 /// Plays Mimik for the SIGKILL check: starts llama-server at level 1, reports the PIDs, waits.
@@ -483,7 +535,18 @@ fn short_request(max_tokens: u32) -> Value {
 
 /// The real server at `level`, ready.
 async fn started(scratch: &std::path::Path, level: Level) -> (Launch, Arc<RealChild>) {
-    let launch = Launch(real(settings(scratch, "probe-inner", Vec::new())));
+    started_with(scratch, level, |_| {}).await
+}
+
+/// [`started`] with `tweak` applied to the settings first.
+async fn started_with(
+    scratch: &std::path::Path,
+    level: Level,
+    tweak: impl FnOnce(&mut Settings),
+) -> (Launch, Arc<RealChild>) {
+    let mut settings = settings(scratch, "probe-inner", Vec::new());
+    tweak(&mut settings);
+    let launch = Launch(real(settings));
     launch.preflight(Path::Cpu).await.unwrap();
     let probing = Arc::clone(&launch.0);
     let probed = tokio::task::spawn_blocking(move || {
@@ -500,10 +563,15 @@ async fn started(scratch: &std::path::Path, level: Level) -> (Launch, Arc<RealCh
             Health::Refused(why) => panic!("{why}"),
             _ => {}
         }
-        assert!(std::time::Instant::now() < deadline, "no /health");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no /health; the server said {:?}",
+            child.capture.lock().unwrap()
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     child.answered_health();
+    child.loaded().await.unwrap();
     (launch, child)
 }
 
@@ -511,7 +579,6 @@ async fn started(scratch: &std::path::Path, level: Level) -> (Launch, Arc<RealCh
 #[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
 async fn live_level_1_serves_over_the_checked_socket_with_the_token_only() {
     let scratch = scratch();
-    *drain::TAP.lock().unwrap() = Some(Vec::new());
     let (_launch, child) = started(scratch.path(), Level::Bubblewrap).await;
     let real = &*child;
     // /health answered without a token (above); every other route needs it.
@@ -570,9 +637,15 @@ async fn live_level_1_serves_over_the_checked_socket_with_the_token_only() {
     // Nor does a sandbox root (Hakoniwa's mount points) outlive it.
     assert!(!scratch.path().join("data/run/1.root").exists());
     // The marker reached neither stream.
-    let lines = drain::TAP.lock().unwrap().take().unwrap();
-    assert_ne!(lines, Vec::<String>::new());
-    assert!(!lines.iter().any(|line| line.contains(marker)));
+    assert!(child.readers.all_ended(READERS_WITHIN).await);
+    let capture = child.capture.lock().unwrap();
+    assert!(!capture.overflow, "output capture overflowed");
+    assert!(capture.bytes.iter().any(|bytes| !bytes.is_empty()));
+    assert!(!capture.bytes.iter().any(|stream| {
+        stream
+            .windows(marker.len())
+            .any(|bytes| bytes == marker.as_bytes())
+    }));
     for pid in descendants(bwrap) {
         assert!(!alive(pid), "{pid} outlived the stop");
     }
@@ -667,6 +740,52 @@ fn assert_no_privilege_or_terminal(report: &Value) {
                 "{entry} is in /dev: {dev:?}"
             );
         }
+    }
+}
+
+/// Whether this run must find Landlock in full force under Hakoniwa: it must, unless
+/// `MIMIK_LIVE_LANDLOCK=any` says the host's kernel may lack it (a CI runner; DEP-25).
+fn landlock_required(abi: i64) -> bool {
+    live_backend() == Backend::Hakoniwa
+        && (abi >= 6 || std::env::var("MIMIK_LIVE_LANDLOCK").as_deref() != Ok("any"))
+}
+
+/// Under Hakoniwa with Landlock in force the ruleset refuses, with `EACCES`, what the mounts
+/// alone would allow, and still allows what the server needs (the controls). Containment
+/// checks only, like the others.
+fn assert_landlock_confines(report: &Value, lan: bool) {
+    if !landlock_required(report["landlock_abi"].as_i64().unwrap()) {
+        return;
+    }
+    let denied = json!(libc::EACCES);
+    for fact in [
+        // A writable mount (the sandbox's `/dev` tmpfs, `/proc`) that is not in the ruleset.
+        "dev_create",
+        "proc_write",
+        // Directories the mounts show but no rule lists.
+        "etc_list",
+        "sys_list",
+        "root_list",
+        // TCP: the empty network namespace is not what refuses these, Landlock is.
+        "tcp_host_listener",
+        "tcp_public",
+        "tcp_bind",
+    ] {
+        assert_eq!(report[fact], denied, "{fact}: {report}");
+    }
+    if lan {
+        assert_eq!(report["tcp_lan"], denied, "{report}");
+    }
+    // The server's own needs stay open.
+    for fact in [
+        "control_tmp_write",
+        "control_shm_write",
+        "control_null_write",
+        "control_cpu_read",
+        "control_proc_read",
+        "control_dev_list",
+    ] {
+        assert_eq!(report[fact], json!(0), "{fact}: {report}");
     }
 }
 
@@ -772,6 +891,7 @@ fn live_an_adversary_in_the_level_1_sandbox_reaches_nothing() {
     }
     assert_no_privilege_or_terminal(&report);
     assert_only_the_writable_mounts_are_writable(&report);
+    assert_landlock_confines(&report, !lan.is_empty());
     // Nothing reached the host's listeners.
     assert!(listener.accept().is_err());
     assert!(abstract_listener.accept().is_err());
@@ -1485,3 +1605,186 @@ async fn live_the_exit_is_published_only_once_hakoniwas_server_is_gone() {
 
 #[path = "live_gpu_tests.rs"]
 mod gpu;
+
+/// The Landlock report of a ready server under Hakoniwa (forced, whatever backend the run
+/// uses): full on a kernel with Landlock ABI 6 or newer, which the run requires unless
+/// `MIMIK_LIVE_LANDLOCK=any`.
+#[cfg(feature = "sandbox-hakoniwa")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+async fn live_the_hakoniwa_closure_reports_landlock_in_full_force() {
+    let scratch = scratch();
+    let (_launch, child) = started_with(scratch.path(), Level::Bubblewrap, |settings| {
+        settings.backend = Backend::Hakoniwa;
+    })
+    .await;
+    assert_landlock_report(
+        child.landlock(),
+        landlock_abi(),
+        std::env::var("MIMIK_LIVE_LANDLOCK").as_deref() == Ok("any"),
+    );
+    child.stop().await;
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+fn assert_landlock_report(reported: Option<super::super::hako::Landlock>, abi: i64, any: bool) {
+    if !any {
+        assert!(abi >= 6, "this run requires Landlock ABI >=6, found {abi}");
+    }
+    assert_eq!(reported, Some(expected_landlock(abi)));
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+fn expected_landlock(abi: i64) -> super::super::hako::Landlock {
+    use super::super::hako::Landlock;
+    if abi <= 0 {
+        Landlock::Unavailable
+    } else {
+        let number = u8::try_from(abi).expect("kernel ABI fits the report");
+        if abi >= 6 {
+            Landlock::Full { abi: number }
+        } else {
+            Landlock::Partial { abi: number }
+        }
+    }
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn compatibility_mode_cannot_accept_an_incorrect_landlock_report_on_a_capable_kernel() {
+    use super::super::hako::Landlock;
+    for wrong in [
+        None,
+        Some(Landlock::Unavailable),
+        Some(Landlock::Partial { abi: 11 }),
+        Some(Landlock::Full { abi: 6 }),
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| assert_landlock_report(wrong, 11, true)).is_err(),
+            "accepted {wrong:?}"
+        );
+    }
+    for abi in [-1, 0, 1, 3, 5, 6, 11] {
+        assert_landlock_report(Some(expected_landlock(abi)), abi, true);
+    }
+    assert_landlock_report(Some(Landlock::Full { abi: 11 }), 11, false);
+}
+
+/// Bubblewrap has no such layer: nothing is reported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+async fn live_bubblewrap_reports_no_landlock() {
+    let scratch = scratch();
+    let (_launch, child) = started_with(scratch.path(), Level::Bubblewrap, |settings| {
+        settings.backend = Backend::Bwrap;
+        // The shipped runner may be a Hakoniwa-only build; bubblewrap works under either.
+    })
+    .await;
+    assert_eq!(child.landlock(), None);
+    child.stop().await;
+}
+
+/// A kernel without Landlock, simulated by the runner's seccomp filter answering `ENOSYS` to
+/// the three Landlock calls (inherited by the sandbox's closure): the real crate sees "not
+/// implemented", the start goes on, the server serves and the report says "not available".
+/// The libtest runner is used whatever `MIMIK_LIVE_RUNNER` says (the filter is its helper's).
+#[cfg(feature = "sandbox-hakoniwa")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+async fn live_a_kernel_without_landlock_still_starts_and_is_reported_as_not_available() {
+    let scratch = scratch();
+    let (_launch, child) = started_with(scratch.path(), Level::Bubblewrap, |settings| {
+        settings.backend = Backend::Hakoniwa;
+        settings.runner = RunnerCommand {
+            program: std::env::current_exe().unwrap(),
+            args: helper_args(RUNNER).into_iter().map(Into::into).collect(),
+            env: vec![
+                (test_helper::VARIABLE.into(), "runner".into()),
+                ("MIMIK_TEST_NO_LANDLOCK".into(), "1".into()),
+            ],
+        };
+    })
+    .await;
+    assert_eq!(
+        child.landlock(),
+        Some(super::super::hako::Landlock::Unavailable)
+    );
+    // It serves: the token-checked route answers.
+    let (status, _) = raw(&child, "/v1/chat/completions", None, &short_request(4)).await;
+    assert_eq!(status, 401);
+    child.stop().await;
+}
+
+/// Scoping, with a peer outside the domain in the same network namespace (which the sandbox
+/// itself cannot offer: its only other process is Hakoniwa's reaper): this process listens on
+/// an abstract Unix socket and is the signal target; a re-executed copy of the test binary
+/// applies the very ruleset code the closure runs and tries both.
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+#[ignore = "live: Landlock in the kernel"]
+fn live_landlock_refuses_abstract_sockets_and_signals_outside_its_domain() {
+    use std::os::linux::net::SocketAddrExt;
+    let name = format!("mimik-landlock-scope-{}", std::process::id());
+    let listener = std::os::unix::net::UnixListener::bind_addr(
+        &std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).unwrap(),
+    )
+    .unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let output = test_helper::command(HELPER, "landlock-scope")
+        .env("MIMIK_SCOPE_ABSTRACT", &name)
+        .output()
+        .unwrap();
+    let report = test_helper::report(&output);
+    let status = report["status"].as_str().unwrap();
+    let abi = landlock_abi();
+    assert_eq!(status, expected_landlock(abi).describe());
+    if std::env::var("MIMIK_LIVE_LANDLOCK").as_deref() == Ok("any") && abi < 6 {
+        eprintln!("Landlock is {status} on this kernel: the scope assertions do not apply");
+        return;
+    }
+    assert!(status.starts_with("full"), "{report}");
+    assert_eq!(report["abstract_outside"], json!(libc::EPERM), "{report}");
+    assert_eq!(report["signal_outside"], json!(libc::EPERM), "{report}");
+    // Controls: a socket made inside the domain and the process itself stay reachable.
+    assert_eq!(report["abstract_inside"], json!(0), "{report}");
+    assert_eq!(report["signal_self"], json!(0), "{report}");
+    // Nothing reached this process's listener.
+    assert!(listener.accept().is_err());
+}
+
+/// The scope helper: applies the closure's ruleset to itself, then reports.
+#[cfg(feature = "sandbox-hakoniwa")]
+fn landlock_scope() {
+    use super::super::hako::{Grant, Rule, apply_landlock};
+    use std::os::linux::net::SocketAddrExt;
+    let rules = [
+        Rule {
+            path: "/proc".into(),
+            grant: Grant::Read,
+        },
+        Rule {
+            path: "/tmp".into(),
+            grant: Grant::ReadWrite,
+        },
+    ];
+    let applied = apply_landlock(&rules).unwrap();
+    let outside = std::env::var("MIMIK_SCOPE_ABSTRACT").unwrap();
+    let connect = |name: &str| {
+        let address = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+        errno_of(std::os::unix::net::UnixStream::connect_addr(&address))
+    };
+    let inside_name = format!("{outside}-inside");
+    let _inside = std::os::unix::net::UnixListener::bind_addr(
+        &std::os::unix::net::SocketAddr::from_abstract_name(inside_name.as_bytes()).unwrap(),
+    )
+    .unwrap();
+    // SAFETY: signal 0 only checks that the signal could be sent.
+    let signal = |pid: i32| test_helper::errno(i64::from(unsafe { libc::kill(pid, 0) }));
+    test_helper::print(&json!({
+        "status": applied.describe(),
+        "abstract_outside": connect(&outside),
+        "abstract_inside": connect(&inside_name),
+        "signal_outside": signal(rustix::process::getppid().map_or(1, |pid| pid.as_raw_nonzero().get())),
+        "signal_self": signal(std::process::id().try_into().unwrap()),
+    }));
+}

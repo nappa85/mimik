@@ -133,6 +133,133 @@ pub(crate) struct Inputs<'a> {
 /// The device nodes of the minimal `/dev`: no terminal, no `pts`, no `ptmx`.
 pub(crate) const DEVICES: &[&str] = &["null", "zero", "full", "random", "urandom"];
 
+/// What the Landlock layer inside the namespaces did, as the closure reports it on the marker
+/// pipe (the only channel that survives Hakoniwa closing every descriptor above 2, and one the
+/// server cannot write to: it never holds the descriptor). Best effort (DEP-25): a kernel
+/// without Landlock, or with an older ABI, leaves the namespace sandbox alone in force, as
+/// with bubblewrap; the page says which.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Landlock {
+    /// Everything asked for is enforced (filesystem, TCP bind and connect, scoping); `abi` is
+    /// the kernel's Landlock ABI.
+    Full { abi: u8 },
+    /// Landlock is there but the kernel's ABI lacks part of what was asked for.
+    Partial { abi: u8 },
+    /// No Landlock in this kernel (or it is not enabled): nothing was enforced.
+    Unavailable,
+}
+
+impl Landlock {
+    /// The line the closure appends to the marker.
+    #[cfg(any(test, feature = "sandbox-hakoniwa"))]
+    pub(crate) fn line(self) -> String {
+        match self {
+            Self::Full { abi } => format!("{{\"landlock\":\"full\",\"abi\":{abi}}}\n"),
+            Self::Partial { abi } => format!("{{\"landlock\":\"partial\",\"abi\":{abi}}}\n"),
+            Self::Unavailable => "{\"landlock\":\"none\"}\n".to_owned(),
+        }
+    }
+
+    /// The report in what followed the marker (`None`: absent or not understood).
+    pub(crate) fn parse(after_marker: &[u8]) -> Option<Self> {
+        let value: serde_json::Value =
+            serde_json::from_slice(after_marker.split(|byte| *byte == b'\n').next()?).ok()?;
+        let abi = || u8::try_from(value.get("abi")?.as_u64()?).ok();
+        match value.get("landlock")?.as_str()? {
+            "full" => Some(Self::Full { abi: abi()? }),
+            "partial" => Some(Self::Partial { abi: abi()? }),
+            "none" => Some(Self::Unavailable),
+            _ => None,
+        }
+    }
+
+    /// The assistant page's words.
+    pub(crate) fn describe(self) -> String {
+        match self {
+            Self::Full { abi } => format!("full (ABI {abi})"),
+            Self::Partial { abi } => format!("partial (ABI {abi})"),
+            Self::Unavailable => "not available".to_owned(),
+        }
+    }
+}
+
+/// What a path of the Landlock ruleset may be used for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(test, feature = "sandbox-hakoniwa"))]
+pub(crate) enum Grant {
+    /// Read, list and execute: the runtime, the system libraries and the GPU's system data.
+    ReadExec,
+    /// Read one file, never execute it: the model.
+    ReadFile,
+    /// Read and list: `/proc`.
+    Read,
+    /// List only: `/dev` itself (its nodes have their own rules).
+    List,
+    /// Read, write and create (regular files, directories, sockets, fifos, links) and
+    /// remove, never execute: the socket directory, `/tmp`, `/dev/shm`, `/run`.
+    ReadWrite,
+    /// A device node: read, write and ioctl.
+    Device,
+}
+
+/// One path of the Landlock ruleset.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(any(test, feature = "sandbox-hakoniwa"))]
+pub(crate) struct Rule {
+    pub path: String,
+    pub grant: Grant,
+}
+
+/// The tmpfs mounts the server writes in (the plan's own): the sandbox's `/tmp`, `/dev/shm`
+/// and `/run` (the token's file and the socket directory's bind).
+#[cfg(any(test, feature = "sandbox-hakoniwa"))]
+const WRITABLE_TMPFS: [&str; 3] = ["/tmp", "/dev/shm", "/run"];
+
+/// The Landlock ruleset of `plan`: what the namespace mounts give the server, narrowed to
+/// the paths and uses it needs. Read, list and execute on every read-only bind but the model
+/// (read only); read and write on the read-write binds and the three writable tmpfs mounts;
+/// listing on `/dev`, the runtime's directory and the GPU path's `/sys` scaffolding, `/proc`
+/// read; each device node as a device. Everything else the
+/// mounts make visible or writable (the other `/dev` entries, `/etc` and `/sys` outside their
+/// binds, a writable mount not listed) is denied.
+#[cfg(any(test, feature = "sandbox-hakoniwa"))]
+pub(crate) fn landlock_rules(plan: &Plan) -> Vec<Rule> {
+    let mut rules: Vec<Rule> = Vec::new();
+    let mut add = |path: &str, grant: Grant| {
+        let rule = Rule {
+            path: path.to_owned(),
+            grant,
+        };
+        if !rules.contains(&rule) {
+            rules.push(rule);
+        }
+    };
+    add("/proc", Grant::Read);
+    add("/dev", Grant::List);
+    // The runtime's directory holds only its bound files, but ggml lists it to find its
+    // backends.
+    add(bwrap::RUNTIME, Grant::List);
+    // The scaffolding directories of the GPU path's `/sys` links (not the top-level ones).
+    for dir in &plan.dirs {
+        if Path::new(dir).components().count() > 2 {
+            add(dir, Grant::List);
+        }
+    }
+    for path in WRITABLE_TMPFS {
+        add(path, Grant::ReadWrite);
+    }
+    for bind in &plan.binds {
+        let grant = match bind.access {
+            Access::ReadOnly if bind.target == bwrap::MODEL => Grant::ReadFile,
+            Access::ReadOnly => Grant::ReadExec,
+            Access::ReadWrite => Grant::ReadWrite,
+            Access::Device => Grant::Device,
+        };
+        add(&bind.target, grant);
+    }
+    rules
+}
+
 fn text(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -456,10 +583,11 @@ pub(crate) fn started(line: &str) -> Option<bwrap::Started> {
 /// exec, so nothing that fails after it can be a sandbox failure and nothing that fails
 /// before it can come with a marker.
 #[cfg(test)]
-pub(crate) const STEP_ORDER: [&str; 9] = [
+pub(crate) const STEP_ORDER: [&str; 10] = [
     "session",
     "identity",
     "capabilities",
+    "landlock",
     "seccomp",
     "marker-descriptor",
     "stdin",
@@ -497,6 +625,9 @@ pub(crate) mod exit {
     pub const MARKER: i32 = 114;
     pub const DESCRIPTORS: i32 = 115;
     pub const SPEC: i32 = 116;
+    /// A Landlock ruleset that could not be built or applied on a kernel that has Landlock
+    /// (a kernel without it is not a failure).
+    pub const LANDLOCK: i32 = 117;
     /// After the marker: the exec failed (counted as the server's failure).
     pub const EXEC: i32 = 127;
 }
@@ -514,19 +645,28 @@ pub(crate) fn identity_mismatch(
     })
 }
 
+#[cfg(all(test, feature = "sandbox-hakoniwa"))]
+pub(crate) use run::apply_landlock;
 #[cfg(feature = "sandbox-hakoniwa")]
 pub(crate) use run::run;
 #[cfg(all(test, feature = "sandbox-hakoniwa"))]
 pub(crate) use run::{
-    Procs, Reaper, after_end, find_child, options, run_guarded, setup_failed, single_threaded,
-    steps, supervise,
+    Procs, Reaper, access, after_end, classify, find_child, options, run_guarded, setup_failed,
+    single_threaded, steps, supervise,
 };
 
 #[cfg(feature = "sandbox-hakoniwa")]
 mod run {
-    use super::{Access, Bind, Plan, bwrap, exit, identity_mismatch, run_steps, started_line};
+    use super::{
+        Access, Bind, Grant, Landlock, Plan, Rule, bwrap, exit, identity_mismatch, landlock_rules,
+        run_steps, started_line,
+    };
     use crate::assistant::runtime::{probe, seccomp};
     use hakoniwa::{Container, MountOptions, Namespace, Stdio};
+    use landlock::{
+        ABI, Access as _, AccessFs, AccessNet, BitFlags, LandlockStatus, PathBeneath, PathFd,
+        Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus, Scope, make_bitflags,
+    };
     use std::io::Write;
     use std::os::fd::{FromRawFd, OwnedFd, RawFd};
     use std::os::unix::process::CommandExt;
@@ -557,6 +697,95 @@ mod run {
             options |= MountOptions::NOEXEC;
         }
         options
+    }
+
+    /// The ABI whose access sets Mimik asks for (DEP-25): ABI 6 has every filesystem right the
+    /// ruleset names (device `ioctl`, truncation, reparenting), TCP bind and connect (ABI 4) and
+    /// the abstract-socket and signal scopes. Newer rights are not asked for, so a kernel from
+    /// ABI 6 up reports "full".
+    const TARGET: ABI = ABI::V6;
+
+    /// The rights `grant` gives on a directory (a file gets the file ones among them, which
+    /// the caller masks).
+    pub(crate) fn access(grant: Grant) -> BitFlags<AccessFs> {
+        match grant {
+            Grant::ReadExec => make_bitflags!(AccessFs::{Execute | ReadFile | ReadDir}),
+            Grant::ReadFile => AccessFs::ReadFile.into(),
+            Grant::Read => make_bitflags!(AccessFs::{ReadFile | ReadDir}),
+            Grant::List => AccessFs::ReadDir.into(),
+            // No `Execute`, `MakeChar`, `MakeBlock` or `Refer`: nothing written here can be
+            // run, no node can be made and nothing is moved between directories.
+            Grant::ReadWrite => make_bitflags!(AccessFs::{
+                ReadFile | ReadDir | WriteFile | Truncate | RemoveFile | RemoveDir | MakeReg
+                    | MakeDir | MakeSock | MakeFifo | MakeSym
+            }),
+            Grant::Device => make_bitflags!(AccessFs::{ReadFile | WriteFile | Truncate | IoctlDev}),
+        }
+    }
+
+    /// What the crate says of the kernel and the ruleset, as Mimik reports it: `NotEnforced`
+    /// is "not available"; the ABI is the kernel's own (above the crate's newest when the
+    /// kernel is newer).
+    pub(crate) fn classify(ruleset: &RulesetStatus, landlock: &LandlockStatus) -> Landlock {
+        let abi = match landlock {
+            LandlockStatus::Available {
+                effective_abi,
+                kernel_abi,
+            } => kernel_abi
+                .and_then(|abi| u8::try_from(abi).ok())
+                .unwrap_or(*effective_abi as u8),
+            _ => 0,
+        };
+        match ruleset {
+            RulesetStatus::FullyEnforced => Landlock::Full { abi },
+            RulesetStatus::PartiallyEnforced => Landlock::Partial { abi },
+            RulesetStatus::NotEnforced => Landlock::Unavailable,
+        }
+    }
+
+    /// Restricts the calling thread (the closure is single-threaded) to `rules`, denies TCP
+    /// bind and connect and scopes abstract Unix sockets and signals to the new domain, best
+    /// effort: a kernel without Landlock, or with an older ABI, enforces what it has and the
+    /// answer says how much. An error is a ruleset that could not be built or applied on a
+    /// kernel that has Landlock, which fails the start (a bug or a path the mounts did not
+    /// make), never silently weaker.
+    ///
+    /// # Errors
+    ///
+    /// The path or call that failed.
+    pub(crate) fn apply_landlock(rules: &[Rule]) -> Result<Landlock, String> {
+        fn failed<E: std::fmt::Display>(what: &str) -> impl Fn(E) -> String + '_ {
+            move |error| format!("{what}: {error}")
+        }
+        let mut ruleset = Ruleset::default()
+            .handle_access(AccessFs::from_all(TARGET))
+            .map_err(failed("filesystem rights"))?
+            .handle_access(AccessNet::from_all(TARGET))
+            .map_err(failed("network rights"))?
+            .scope(Scope::from_all(TARGET))
+            .map_err(failed("scopes"))?
+            .create()
+            .map_err(failed("ruleset"))?;
+        for rule in rules {
+            let fd = PathFd::new(&rule.path).map_err(failed(&rule.path))?;
+            let mut rights = access(rule.grant);
+            // A file takes no directory right (the crate's helper does the same).
+            if !std::fs::metadata(&rule.path)
+                .map_err(failed(&rule.path))?
+                .is_dir()
+            {
+                rights &= AccessFs::from_file(TARGET);
+            }
+            ruleset = ruleset
+                .add_rule(PathBeneath::new(fd, rights))
+                .map_err(failed(&rule.path))?;
+        }
+        let status = ruleset.restrict_self().map_err(failed("restrict_self"))?;
+        let report = classify(&status.ruleset, &status.landlock);
+        if !matches!(report, Landlock::Full { .. }) {
+            eprintln!("mimik sandbox: landlock {status:?}");
+        }
+        Ok(report)
     }
 
     fn container(plan: &Plan) -> Container {
@@ -620,6 +849,20 @@ mod run {
     /// exec itself.
     const MARKER_FD: RawFd = 3;
 
+    fn write_marker(landlock: Option<Landlock>) -> Result<(), String> {
+        // SAFETY: the cleanup keeps this close-on-exec descriptor for this write only.
+        let marker = unsafe { std::os::fd::BorrowedFd::borrow_raw(MARKER_FD) };
+        let mut line = MARKER_LINE.to_vec();
+        if let Some(landlock) = landlock {
+            line.extend_from_slice(landlock.line().as_bytes());
+        }
+        match rustix::io::write(marker, &line) {
+            Ok(written) if written == line.len() => Ok(()),
+            Ok(_) => Err("the marker was written short".to_owned()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
     fn drop_bounding_set() -> Result<(), String> {
         for capability in 0..64 {
             // SAFETY: PR_CAPBSET_DROP takes a capability number and touches no memory; a
@@ -632,6 +875,19 @@ mod run {
                 }
                 return Err(format!("capability {capability}: {error}"));
             }
+        }
+        Ok(())
+    }
+
+    fn clear_capabilities() -> Result<(), String> {
+        drop_bounding_set()?;
+        for set in [
+            caps::CapSet::Ambient,
+            caps::CapSet::Inheritable,
+            caps::CapSet::Permitted,
+            caps::CapSet::Effective,
+        ] {
+            caps::clear(None, set).map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -664,6 +920,10 @@ mod run {
         ) -> super::Step<'a> {
             (name, code, run)
         }
+        // What the Landlock step found, for the marker step to report.
+        let landlock: std::rc::Rc<std::cell::Cell<Option<Landlock>>> =
+            std::rc::Rc::new(std::cell::Cell::new(None));
+        let (landlock_set, landlock_read) = (landlock.clone(), landlock);
         vec![
             step(
                 "session",
@@ -685,16 +945,16 @@ mod run {
             step(
                 "capabilities",
                 exit::CAPABILITIES,
-                Box::new(|| {
-                    drop_bounding_set()?;
-                    for set in [
-                        caps::CapSet::Ambient,
-                        caps::CapSet::Inheritable,
-                        caps::CapSet::Permitted,
-                        caps::CapSet::Effective,
-                    ] {
-                        caps::clear(None, set).map_err(|error| error.to_string())?;
-                    }
+                Box::new(clear_capabilities),
+            ),
+            // After the mounts and the identity check, before seccomp: best effort. A kernel
+            // without Landlock, or with an older ABI, leaves the namespaces alone in force and
+            // the report says so; an error on a kernel that has it fails the start.
+            step(
+                "landlock",
+                exit::LANDLOCK,
+                Box::new(move || {
+                    landlock_set.set(Some(apply_landlock(&landlock_rules(plan))?));
                     Ok(())
                 }),
             ),
@@ -749,16 +1009,7 @@ mod run {
             step(
                 "marker",
                 exit::MARKER,
-                Box::new(|| {
-                    // SAFETY: the marker descriptor moved here by the step above and kept by
-                    // the cleanup; it is close-on-exec and used only here.
-                    let marker = unsafe { std::os::fd::BorrowedFd::borrow_raw(MARKER_FD) };
-                    match rustix::io::write(marker, MARKER_LINE) {
-                        Ok(written) if written == MARKER_LINE.len() => Ok(()),
-                        Ok(_) => Err("the marker was written short".to_owned()),
-                        Err(error) => Err(error.to_string()),
-                    }
-                }),
+                Box::new(move || write_marker(landlock_read.get())),
             ),
         ]
     }

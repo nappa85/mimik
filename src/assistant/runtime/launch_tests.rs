@@ -471,6 +471,27 @@ fn only_a_clean_end_without_the_marker_is_absent() {
     assert_eq!(marker_outcome(&b""[..]), Marker::Absent);
     assert_eq!(marker_outcome(Failing), Marker::Unknown);
     assert_eq!(marker_outcome(&b"ex"[..]), Marker::Unknown);
+    // What follows the marker is the Hakoniwa closure's Landlock report, nothing else.
+    let hako = super::super::hako::Landlock::Full { abi: 11 };
+    let reported = format!("exec\n{}", hako.line());
+    assert_eq!(
+        marker_report(reported.as_bytes()),
+        (Marker::Executed, Some(hako))
+    );
+    assert_eq!(
+        marker_report(&b"exec\n"[..]),
+        (Marker::Executed, None),
+        "bubblewrap's shim writes none"
+    );
+    assert_eq!(
+        marker_report(&b"exec\nnot a report\n"[..]),
+        (Marker::Executed, None)
+    );
+    assert_eq!(
+        marker_report(&b"nope\n{\"landlock\":\"none\"}\n"[..]),
+        (Marker::Unknown, None),
+        "a report without the marker first counts for nothing"
+    );
 }
 
 #[tokio::test]
@@ -2089,4 +2110,54 @@ async fn a_missing_hakoniwa_reaper_fails_the_start_unless_the_runner_said_it_had
     tokio::time::timeout(Duration::from_secs(10), work.settle())
         .await
         .unwrap();
+}
+#[tokio::test]
+async fn a_delayed_marker_report_is_required_before_readiness() {
+    let marker = MarkerState::new();
+    let delayed = Arc::clone(&marker);
+    let publish = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        delayed.set_landlock(Some(super::super::hako::Landlock::Full { abi: 11 }));
+        delayed.set(Marker::Executed);
+    });
+    assert_eq!(
+        marker.require_landlock(Duration::from_secs(1)).await,
+        Ok(())
+    );
+    publish.await.unwrap();
+    assert_eq!(
+        marker.landlock(),
+        Some(super::super::hako::Landlock::Full { abi: 11 })
+    );
+    assert!(
+        MarkerState::new()
+            .require_landlock(Duration::from_millis(10))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn readiness_accepts_partial_and_unavailable_but_never_a_finished_missing_report() {
+    for report in [
+        super::super::hako::Landlock::Partial { abi: 3 },
+        super::super::hako::Landlock::Unavailable,
+    ] {
+        let marker = MarkerState::new();
+        marker.set_landlock(Some(report));
+        marker.set(Marker::Executed);
+        assert_eq!(
+            marker.require_landlock(Duration::from_secs(1)).await,
+            Ok(())
+        );
+    }
+    for outcome in [Marker::Absent, Marker::Unknown, Marker::Executed] {
+        let marker = MarkerState::new();
+        marker.set(outcome);
+        let error = marker
+            .require_landlock(Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(error.contains("did not report"), "{error}");
+    }
 }
