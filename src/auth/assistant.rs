@@ -151,7 +151,9 @@ fn landlock_line(landlock: crate::assistant::runtime::hako::Landlock) -> Landloc
     LandlockLine {
         state: landlock.describe(),
         note: match landlock {
-            Landlock::Full { .. } => None,
+            Landlock::Full { .. } => Some(
+                "Mimik asks for the ABI 6 rules. Newer rights, such as connecting to a Unix socket by path (ABI 9), are not asked for.",
+            ),
             Landlock::Partial { .. } => Some(
                 "This kernel's Landlock lacks part of what Mimik asks for; the private namespaces still confine the model server, as with bubblewrap.",
             ),
@@ -325,10 +327,11 @@ mod tests {
     #[test]
     fn the_page_says_how_far_landlock_is_in_force_and_what_stands_alone_otherwise() {
         let full = landlock_line(Landlock::Full { abi: 11 });
-        assert_eq!(full.state, "full (ABI 11)");
-        assert!(full.note.is_none());
+        assert_eq!(full.state, "full for the ABI 6 rules (kernel ABI 11)");
+        // Newer rights are not asked for, and the page says so.
+        assert!(full.note.is_some_and(|note| note.contains("ABI 9")));
         let partial = landlock_line(Landlock::Partial { abi: 3 });
-        assert_eq!(partial.state, "partial (ABI 3)");
+        assert_eq!(partial.state, "partial (kernel ABI 3)");
         assert!(partial.note.is_some_and(|note| note.contains("namespaces")));
         let none = landlock_line(Landlock::Unavailable);
         assert_eq!(none.state, "not available");

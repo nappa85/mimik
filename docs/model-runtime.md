@@ -301,12 +301,17 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
   restricts the server further with the `landlock` crate, best effort. Handled: the ABI 6
   filesystem rights, TCP bind and connect (no rule, so both are denied: `EACCES`, beyond the
   empty network namespace) and the abstract-Unix-socket and signal scopes. The rules come from
-  the plan (`hako::landlock_rules`): read, list and execute on every read-only bind (runtime,
-  system libraries, GPU data) but the model (read only, never executed); read and write
-  (create, remove, sockets, no execute, no device nodes) on the socket directory, `/tmp`,
-  `/dev/shm` and `/run`; listing on `/dev`, the runtime's directory (ggml looks for its
-  backends there) and the GPU path's `/sys` scaffolding; `/proc` read; the five device nodes
-  and the render node as devices (read, write, `ioctl`). What the mounts alone allow and the
+  the plan (`hako::landlock_rules`): execute only on the program the closure execs and the
+  system library directories (the kernel opens the ELF interpreter with the execute right;
+  the loader maps the runtime's libraries with `mmap`, which that right does not govern, so
+  they get read and list only, as do the GPU data, the sysfs binds and the probe's own
+  executable when it is not the program); the model read only; read and write (create,
+  remove, sockets, no execute, no device nodes) on the socket directory, `/tmp` and
+  `/dev/shm`; of `/run` only the token file, read; listing on `/dev`, `/dev/dri` (libdrm and
+  Mesa enumerate it), the runtime's directory (ggml looks for its backends there) and the GPU
+  path's `/sys` scaffolding; `/proc` read; the five device nodes and the render node as
+  devices (read, write, `ioctl`). Every tmpfs of the sandbox is also mounted `noexec`,
+  `nosuid` and `nodev`. What the mounts alone allow and the
   rules do not (a file in the writable `/dev` tmpfs, a write in `/proc`, listing `/`, `/etc`
   or `/sys`) is denied. The step's result (`full` with the kernel's ABI, `partial`, or `none`
   when the kernel has no Landlock) is appended to the marker line on the marker pipe, in the
@@ -315,13 +320,18 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
   finishes) and the server cannot forge it (it never holds the descriptor).
   Readiness waits up to the bounded marker-reader deadline for a report; a missing or
   unreadable report fails the attempt rather than silently omitting the layer's status.
-  The report reaches `Status.landlock` and the Confinement section of `/admin/assistant` ("Landlock: full (ABI
-  n)", "partial (ABI n)" or "not available", with a note that the namespaces alone confine
-  the server then, as with bubblewrap) and the `ready` log line. A kernel without Landlock
-  never fails the start; a ruleset that cannot be built or applied on a kernel that has it
-  does (exit 117, before the marker, a sandbox failure). The seccomp program installs after
-  it and does not touch the Landlock calls; the exec of the server needs only the execute
-  right on the runtime's binds.
+  The report reaches `Status.landlock` and the Confinement section of `/admin/assistant` ("Landlock: full for the ABI 6 rules (kernel ABI n)", "partial (kernel ABI n)" or "not
+  available", each with a note: the full one says that newer rights such as ABI 9's Unix-socket
+  connect are not asked for; the others say that the namespaces alone confine
+  the server then, as with bubblewrap) and the `ready` log line. "Not available" is exactly a
+  version probe (`landlock_create_ruleset` with the version flag) that fails with `ENOSYS`
+  (no Landlock in the kernel), `EOPNOTSUPP` (disabled at boot) or `EPERM` (a seccomp or
+  service-manager filter around Mimik refuses it); the start goes on. Any other probe
+  error, and every failure after a successful probe (a path that cannot be opened, a rule or
+  the restriction refused), fails the start (exit 117, before the marker, a sandbox failure).
+  The three "not available" errors are simulated with a seccomp filter in the live tests. The
+  seccomp program installs after it and does not touch the Landlock calls; the exec of the
+  server needs only the execute right on its file and the loader.
   Starting a new session clears the previous report before preflight and namespace probing,
   so a failed restart never presents the stopped generation's protection as current.
 - Mount flags: each bind is non-recursive, and a mount under a read-only bound directory

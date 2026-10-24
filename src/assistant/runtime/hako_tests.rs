@@ -1192,8 +1192,14 @@ fn the_landlock_report_travels_after_the_marker_and_only_as_a_report() {
     ] {
         assert_eq!(Landlock::parse(bad), None, "{bad:?}");
     }
-    assert_eq!(Landlock::Full { abi: 11 }.describe(), "full (ABI 11)");
-    assert_eq!(Landlock::Partial { abi: 3 }.describe(), "partial (ABI 3)");
+    assert_eq!(
+        Landlock::Full { abi: 11 }.describe(),
+        "full for the ABI 6 rules (kernel ABI 11)"
+    );
+    assert_eq!(
+        Landlock::Partial { abi: 3 }.describe(),
+        "partial (kernel ABI 3)"
+    );
     assert_eq!(Landlock::Unavailable.describe(), "not available");
 }
 

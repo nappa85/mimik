@@ -188,8 +188,8 @@ impl Landlock {
     /// The assistant page's words.
     pub(crate) fn describe(self) -> String {
         match self {
-            Self::Full { abi } => format!("full (ABI {abi})"),
-            Self::Partial { abi } => format!("partial (ABI {abi})"),
+            Self::Full { abi } => format!("full for the ABI 6 rules (kernel ABI {abi})"),
+            Self::Partial { abi } => format!("partial (kernel ABI {abi})"),
             Self::Unavailable => "not available".to_owned(),
         }
     }
