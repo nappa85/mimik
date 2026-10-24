@@ -1347,9 +1347,13 @@ fn killed_after(delay: Duration) {
         std::thread::sleep(Duration::from_micros(100));
     };
     // What was seen first is the runner, before any server's exec.
+    // (With bubblewrap the runner has already executed bwrap in place by then.)
     assert!(
-        first.values().any(|line| line.contains("runner::tests::helper")
-            || line.contains("assistant-runner")),
+        first
+            .values()
+            .any(|line| line.contains("runner::tests::helper")
+                || line.contains("assistant-runner")
+                || (live_backend() == Backend::Bwrap && line.contains("bwrap "))),
         "the first process seen is not the runner: {first:?}"
     );
     assert!(
