@@ -1676,14 +1676,21 @@ fn compatibility_mode_cannot_accept_an_incorrect_landlock_report_on_a_capable_ke
         Some(Landlock::Full { abi: 6 }),
     ] {
         assert!(
-            std::panic::catch_unwind(|| assert_landlock_report(wrong, 11, true)).is_err(),
+            std::panic::catch_unwind(|| assert_landlock_report(wrong, 11, false)).is_err(),
             "accepted {wrong:?}"
         );
     }
     for abi in [-1, 0, 1, 3, 5, 6, 11] {
-        assert_landlock_report(Some(expected_landlock(abi)), abi, true);
+        assert_landlock_report(Some(expected_landlock(abi)), abi, false);
     }
-    assert_landlock_report(Some(Landlock::Full { abi: 11 }), 11, false);
+    assert_landlock_report(Some(Landlock::Full { abi: 11 }), 11, true);
+    // A demanded run on an older kernel fails, whatever was reported.
+    assert!(
+        std::panic::catch_unwind(|| {
+            assert_landlock_report(Some(Landlock::Partial { abi: 4 }), 4, true);
+        })
+        .is_err()
+    );
 }
 
 /// Bubblewrap has no such layer: nothing is reported.
