@@ -69,6 +69,18 @@ class RefusalTests(unittest.TestCase):
         self.assertIn("not a short test", live.short_refusal([*short, "a::live_gpu_sustained"]))
         self.assertIn("not a short test", live.short_refusal(["bench::calibrate_loop"]))
 
+    def test_the_rust_tests_short_list_is_the_tools_list(self):
+        source = (
+            Path(__file__).parent.parent / "src/assistant/runtime/live_gpu_tests.rs"
+        ).read_text()
+        block = source.split("const SHORT_TESTS: [&str;")[1].split("];")[0]
+        rust = {
+            name.rsplit("::", 1)[-1]
+            for name in __import__("re").findall(r'"(live_gpu_\w+)"', block)
+        }
+        tool = {name.rsplit("::", 1)[-1] for name in live.SHORT_TESTS}
+        self.assertEqual(rust, tool)
+
     def test_short_is_never_the_default_and_reaches_the_tests_only_when_asked(self):
         def args(**more):
             return live.argparse.Namespace(

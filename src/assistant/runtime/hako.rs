@@ -151,7 +151,6 @@ pub(crate) enum Landlock {
 
 impl Landlock {
     /// The line the closure appends to the marker.
-    #[cfg(any(test, feature = "sandbox-hakoniwa"))]
     pub(crate) fn line(self) -> String {
         match self {
             Self::Full { abi } => format!("{{\"landlock\":\"full\",\"abi\":{abi}}}\n"),
@@ -169,20 +168,17 @@ impl Landlock {
             landlock: String,
             abi: Option<u8>,
         }
-        let line = after_marker.strip_suffix(b"\n")?;
-        if line.first().is_some_and(u8::is_ascii_whitespace)
-            || line.last().is_some_and(u8::is_ascii_whitespace)
-        {
-            return None;
-        }
-        let line: Line = serde_json::from_slice(line).ok()?;
+        let line: Line = serde_json::from_slice(after_marker.strip_suffix(b"\n")?).ok()?;
         // ABI 0 is "no Landlock", which the `none` report says without a number.
-        match (line.landlock.as_str(), line.abi) {
-            ("full", Some(abi @ 1..)) => Some(Self::Full { abi }),
-            ("partial", Some(abi @ 1..)) => Some(Self::Partial { abi }),
-            ("none", None) => Some(Self::Unavailable),
-            _ => None,
-        }
+        let parsed = match (line.landlock.as_str(), line.abi) {
+            ("full", Some(abi @ 1..)) => Self::Full { abi },
+            ("partial", Some(abi @ 1..)) => Self::Partial { abi },
+            ("none", None) => Self::Unavailable,
+            _ => return None,
+        };
+        // Only the exact wire form the closure writes (no other whitespace, key order or
+        // `null`): what it would write for this value is compared byte for byte.
+        (parsed.line().as_bytes() == after_marker).then_some(parsed)
     }
 
     /// The assistant page's words.
@@ -686,8 +682,8 @@ pub(crate) use run::apply_landlock;
 pub(crate) use run::run;
 #[cfg(all(test, feature = "sandbox-hakoniwa"))]
 pub(crate) use run::{
-    Procs, Reaper, access, after_end, apply_landlock_with, classify, find_child, options,
-    run_guarded, setup_failed, single_threaded, steps, supervise, tmpfs_options,
+    Procs, Reaper, access, after_end, apply_landlock_with, find_child, landlock_step, options,
+    report_for, run_guarded, setup_failed, single_threaded, steps, supervise, tmpfs_options,
 };
 
 #[cfg(feature = "sandbox-hakoniwa")]
@@ -699,8 +695,8 @@ mod run {
     use crate::assistant::runtime::{probe, seccomp};
     use hakoniwa::{Container, MountOptions, Namespace, Stdio};
     use landlock::{
-        ABI, Access as _, AccessFs, AccessNet, BitFlags, LandlockStatus, PathBeneath, PathFd,
-        Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus, Scope, make_bitflags,
+        ABI, Access as _, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, PathBeneath,
+        PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus, Scope, make_bitflags,
     };
     use std::io::Write;
     use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -772,26 +768,6 @@ mod run {
         }
     }
 
-    /// What the crate says of the kernel and the ruleset, as Mimik reports it: `NotEnforced`
-    /// is "not available"; the ABI is the kernel's own (above the crate's newest when the
-    /// kernel is newer).
-    pub(crate) fn classify(ruleset: &RulesetStatus, landlock: &LandlockStatus) -> Landlock {
-        let abi = match landlock {
-            LandlockStatus::Available {
-                effective_abi,
-                kernel_abi,
-            } => kernel_abi
-                .and_then(|abi| u8::try_from(abi).ok())
-                .unwrap_or(*effective_abi as u8),
-            _ => 0,
-        };
-        match ruleset {
-            RulesetStatus::FullyEnforced => Landlock::Full { abi },
-            RulesetStatus::PartiallyEnforced => Landlock::Partial { abi },
-            RulesetStatus::NotEnforced => Landlock::Unavailable,
-        }
-    }
-
     /// The kernel's Landlock ABI, by the version probe of `landlock_create_ruleset` (the
     /// crate's own probe lumps every error as "not implemented", which would hide a real
     /// failure).
@@ -830,8 +806,26 @@ mod run {
     /// # Errors
     ///
     /// The path or call that failed.
+    #[cfg(test)]
     pub(crate) fn apply_landlock(rules: &[Rule]) -> Result<Landlock, String> {
         apply_landlock_with(rules, probe_abi)
+    }
+
+    /// The closure's Landlock step over `rules` with the version probe given: the report goes
+    /// to `found` for the marker step, a failure is [`exit::LANDLOCK`].
+    pub(crate) fn landlock_step<'a>(
+        rules: Vec<Rule>,
+        found: std::rc::Rc<std::cell::Cell<Option<Landlock>>>,
+        probe: impl Fn() -> Result<i32, i32> + 'a,
+    ) -> super::Step<'a> {
+        (
+            "landlock",
+            exit::LANDLOCK,
+            Box::new(move || {
+                found.set(Some(apply_landlock_with(&rules, &probe)?));
+                Ok(())
+            }),
+        )
     }
 
     /// [`apply_landlock`] with the version probe given (tests simulate its errors).
@@ -846,40 +840,68 @@ mod run {
         fn failed<E: std::fmt::Display>(what: &str) -> impl Fn(E) -> String + '_ {
             move |error| format!("{what}: {error}")
         }
-        match probe() {
-            Ok(_) => {}
+        // The kernel's ABI from Mimik's own probe. From here on the kernel is known to have
+        // Landlock: the ruleset is built for exactly this ABI with every right required, and
+        // anything that then fails or is not fully enforced (the crate probing again and
+        // failing, a refused rule) is an error, never "not available".
+        let kernel = match probe() {
+            Ok(abi) if abi >= 1 => abi,
+            Ok(abi) => return Err(format!("probe: the kernel reports ABI {abi}")),
             Err(libc::ENOSYS | libc::EOPNOTSUPP | libc::EPERM) => return Ok(Landlock::Unavailable),
             Err(errno) => return Err(failed("probe")(std::io::Error::from_raw_os_error(errno))),
-        }
-        let mut ruleset = Ruleset::default()
-            .handle_access(AccessFs::from_all(TARGET))
-            .map_err(failed("filesystem rights"))?
-            .handle_access(AccessNet::from_all(TARGET))
-            .map_err(failed("network rights"))?
-            .scope(Scope::from_all(TARGET))
-            .map_err(failed("scopes"))?
-            .create()
-            .map_err(failed("ruleset"))?;
+        };
+        let used = ABI::from(kernel).min(TARGET);
+        // The paths first: opening them asks nothing of Landlock.
+        let mut opened = Vec::with_capacity(rules.len());
         for rule in rules {
             let fd = PathFd::new(&rule.path).map_err(failed(&rule.path))?;
-            let mut rights = access(rule.grant);
+            let mut rights = access(rule.grant) & AccessFs::from_all(used);
             // A file takes no directory right (the crate's helper does the same).
             if !std::fs::metadata(&rule.path)
                 .map_err(failed(&rule.path))?
                 .is_dir()
             {
-                rights &= AccessFs::from_file(TARGET);
+                rights &= AccessFs::from_file(used);
             }
+            opened.push((fd, rights));
+        }
+        let mut ruleset = Ruleset::default()
+            .set_compatibility(CompatLevel::HardRequirement)
+            .handle_access(AccessFs::from_all(used))
+            .map_err(failed("filesystem rights"))?;
+        if used >= ABI::V4 {
+            ruleset = ruleset
+                .handle_access(AccessNet::from_all(used))
+                .map_err(failed("network rights"))?;
+        }
+        if used >= ABI::V6 {
+            ruleset = ruleset
+                .scope(Scope::from_all(used))
+                .map_err(failed("scopes"))?;
+        }
+        let mut ruleset = ruleset.create().map_err(failed("ruleset"))?;
+        for ((fd, rights), rule) in opened.into_iter().zip(rules) {
             ruleset = ruleset
                 .add_rule(PathBeneath::new(fd, rights))
                 .map_err(failed(&rule.path))?;
         }
         let status = ruleset.restrict_self().map_err(failed("restrict_self"))?;
-        let report = classify(&status.ruleset, &status.landlock);
-        if !matches!(report, Landlock::Full { .. }) {
-            eprintln!("mimik sandbox: landlock {status:?}");
+        if status.ruleset != RulesetStatus::FullyEnforced {
+            return Err(format!("restrict_self: not fully enforced ({status:?})"));
         }
-        Ok(report)
+        // The kernel's own ABI (above the crate's newest when the kernel is newer).
+        let abi = u8::try_from(kernel).unwrap_or(u8::MAX);
+        Ok(report_for(abi))
+    }
+
+    /// What Mimik reports for a kernel of ABI `abi` whose ruleset was fully enforced: the
+    /// rights asked for (ABI 6) are all there from ABI 6 up; below, only a subset was asked.
+    pub(crate) fn report_for(abi: u8) -> Landlock {
+        if abi >= 6 {
+            Landlock::Full { abi }
+        } else {
+            Landlock::Partial { abi }
+        }
     }
 
     fn container(plan: &Plan) -> Container {
@@ -1040,14 +1062,7 @@ mod run {
             // After the mounts and the identity check, before seccomp: best effort. A kernel
             // without Landlock, or with an older ABI, leaves the namespaces alone in force and
             // the report says so; an error on a kernel that has it fails the start.
-            step(
-                "landlock",
-                exit::LANDLOCK,
-                Box::new(move || {
-                    landlock_set.set(Some(apply_landlock(&landlock_rules(plan))?));
-                    Ok(())
-                }),
-            ),
+            landlock_step(landlock_rules(plan), landlock_set, probe_abi),
             step(
                 "seccomp",
                 exit::SECCOMP,

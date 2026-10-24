@@ -154,18 +154,31 @@ async fn live_fake_gpu_no_render_node_runs_the_cpu_path() {
     handle.shutdown().await;
 }
 
+/// The tests that may run on the automatic fan (the same list as `SHORT_TESTS` in
+/// `tools/assist_gpu_live.py`, which a Python test compares with this one).
+const SHORT_TESTS: [&str; 4] = [
+    "live_gpu_the_rx6650_reaches_ready_with_gpu_budgets",
+    "live_gpu_killing_llama_server_mid_job_ends_the_job_neutral_and_runs_on_the_cpu",
+    "live_gpu_killing_the_whole_sandbox_ends_on_the_cpu_saying_why",
+    "live_gpu_landlock_the_rx6650_reaches_ready_under_hakoniwa",
+];
+
 /// Refuses unless the live GPU run was asked for and the amdgpu fan reads manual at 230 or
 /// more (the manual setting resets on every reboot; on the automatic curve the junction
 /// reached 85 °C in 22 s at a sustained 143 W, 2026-10-20). A short test run by the tool's
 /// short mode (`MIMIK_LIVE_GPU_SHORT=1`: automatic fan, the tool's 75 °C limit) needs no
 /// manual fan.
-fn gpu_allowed() {
+fn gpu_allowed(test: &str) {
     assert_eq!(
         std::env::var("MIMIK_LIVE_GPU").as_deref(),
         Ok("1"),
         "refusing: run the GPU checks only through tools/assist_gpu_live.py"
     );
     if std::env::var("MIMIK_LIVE_GPU_SHORT").as_deref() == Ok("1") {
+        assert!(
+            SHORT_TESTS.contains(&test),
+            "refusing: {test} is not on the short list (tools/assist_gpu_live.py SHORT_TESTS); it needs the manual fan"
+        );
         return;
     }
     let chip = std::fs::read_dir("/sys/class/hwmon")
@@ -246,7 +259,7 @@ fn report(status: &manager::Status) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live GPU: only through tools/assist_gpu_live.py (fan manual, schedule)"]
 async fn live_gpu_the_rx6650_reaches_ready_with_gpu_budgets() {
-    gpu_allowed();
+    gpu_allowed("live_gpu_the_rx6650_reaches_ready_with_gpu_budgets");
     let scratch = scratch();
     let real = real_gpu(scratch.path());
     let handle = run_until(&real, 352, |status| {
@@ -270,7 +283,7 @@ async fn live_gpu_the_rx6650_reaches_ready_with_gpu_budgets() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live GPU: only through tools/assist_gpu_live.py --short (schedule, thermal guard)"]
 async fn live_gpu_landlock_the_rx6650_reaches_ready_under_hakoniwa() {
-    gpu_allowed();
+    gpu_allowed("live_gpu_landlock_the_rx6650_reaches_ready_under_hakoniwa");
     let scratch = scratch();
     let real = real_gpu_on(scratch.path(), Backend::Hakoniwa);
     let handle = run_until(&real, 352, |status| {
@@ -396,7 +409,7 @@ fn assert_cpu_after_gpu_failure(status: &manager::Status) {
 #[ignore = "live GPU: only through tools/assist_gpu_live.py (fan manual, schedule)"]
 async fn live_gpu_killing_llama_server_mid_job_ends_the_job_neutral_and_runs_on_the_cpu() {
     use crate::assistant::jobs::{Answer, Poll};
-    gpu_allowed();
+    gpu_allowed("live_gpu_killing_llama_server_mid_job_ends_the_job_neutral_and_runs_on_the_cpu");
     let scratch = scratch();
     let real = real_gpu(scratch.path());
     let assistant = Assistant::new();
@@ -467,7 +480,7 @@ async fn live_gpu_killing_llama_server_mid_job_ends_the_job_neutral_and_runs_on_
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live GPU: only through tools/assist_gpu_live.py (fan manual, schedule)"]
 async fn live_gpu_killing_the_whole_sandbox_ends_on_the_cpu_saying_why() {
-    gpu_allowed();
+    gpu_allowed("live_gpu_killing_the_whole_sandbox_ends_on_the_cpu_saying_why");
     let scratch = scratch();
     let real = real_gpu(scratch.path());
     let handle = run_until(&real, 352, |status| status.state == State::Ready).await;

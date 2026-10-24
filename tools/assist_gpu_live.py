@@ -9,10 +9,10 @@ test process group when the junction reaches 85 °C, a sensor is unreadable, the
 manual, or the heavy window ends. It never reads input. The tests themselves refuse to run
 without `MIMIK_LIVE_GPU=1` and a manual fan, so the binary run by hand does nothing to the GPU.
 
-`--short` (explicit, never the default) is for the fixed list `SHORT_TESTS` only (the live GPU
-checks that last a minute or two; at most 44 °C was seen during them): the automatic fan is
-allowed, the junction limit is 75 °C, and the schedule check and the unreadable-sensor stop
-stay. Any selected test outside the list is refused in that mode. Long or sustained runs
+`--short` (explicit, never the default) sets `MIMIK_LIVE_GPU_SHORT=1` and is for the fixed list
+`SHORT_TESTS` only, the live GPU checks that last a minute or two. The Rust tests check their own
+name against the same list (a unit test compares the two). The automatic fan is allowed, the
+junction limit is 75 °C, and the schedule check and the unreadable-sensor stop stay. Any selected test outside the list is refused in that mode. Long or sustained runs
 (benchmarks, model screens, calibration loops, `assist_runtime_measure.py server`, the queue
 tooling) keep the manual fan and the 85 °C limit.
 

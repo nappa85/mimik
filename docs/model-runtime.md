@@ -328,7 +328,7 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
   (no Landlock in the kernel), `EOPNOTSUPP` (disabled at boot) or `EPERM` (a seccomp or
   service-manager filter around Mimik refuses it); the start goes on. Any other probe
   error, and every failure after a successful probe (a path that cannot be opened, a rule or
-  the restriction refused), fails the start (exit 117, before the marker, a sandbox failure).
+  the restriction refused, a ruleset not fully enforced), fails the start (exit 117, before the marker, a sandbox failure). After a successful probe the ruleset is built for exactly the probed ABI (capped at 6) with every right required, so the crate's own later detection failing is an error too.
   The three "not available" errors are simulated with a seccomp filter in the live tests. The
   seccomp program installs after it and does not touch the Landlock calls; the exec of the
   server needs only the execute right on its file and the loader.

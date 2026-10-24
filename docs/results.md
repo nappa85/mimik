@@ -847,3 +847,25 @@ decides.**
   missing evidence.
 - **Limitations:** no live retrieval was run, no PDF was compared visually, and no error rate
   was estimated.
+
+## Live GPU under Hakoniwa with Landlock, automatic fan (2026-10-24)
+
+- **Question:** do Vulkan discovery, the render node and the driver data work under the Landlock
+  rules and the `noexec` tmpfs mounts, and is the automatic fan acceptable for the short tests?
+- **Setup:** `assist_gpu_live.py --short` (75 °C guard, 1 s samples, automatic fan, idle 44 °C)
+  on the RX 6650 XT, Vulkan build, granite-4.2-3b Q4_K_M, feature-built test binary and `mimik`.
+  Four tests, one run (632 s), then the one failure alone.
+- **Numbers:** `live_gpu_landlock_the_rx6650_reaches_ready_under_hakoniwa` passed: path GPU,
+  RADV NAVI23, Landlock reported full, two calibration samples (about 8.1 s each). The two
+  bubblewrap GPU tests passed or failed as below. `live_gpu_killing_llama_server_mid_job_*`
+  (bubblewrap backend, no Landlock, no `noexec` change) failed once in the batch (120 s wait in
+  "calibrating" on a cold first start) and passed alone (309 s). A sampler beside the guard (2 s)
+  saw a junction of 76 °C once, a spike between two inference phases at 141 W, which the guard's
+  1 s samples did not catch; the other samples stayed at or below 72 °C.
+- **Conclusion:** the rule table and the `noexec` tmpfs mounts do not break ggml-vulkan or RADV
+  (shader cache included) on this host; the GPU path works under Landlock. The "at most 44 °C"
+  basis of ASSIST-50 is not borne out for a 10-minute batch: the junction reached 72–76 °C on the
+  automatic fan, right at the 75 °C guard.
+- **Limitations:** one host, one GPU, one run; the cold-start timeout was not reproduced; a
+  guard with 1 s samples can miss a short spike; raw output in
+  `/media/data/mimik/hakoniwa/live-gpu/`.

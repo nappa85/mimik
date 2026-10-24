@@ -351,8 +351,14 @@ jobs:
           # kernel below ABI 6; on one at 6 or above they are required, so a runner that
           # has Landlock can never pass with them skipped (and the suite's own check says
           # the report is "full" only from ABI 6).
-          abi=$(python3 -c "import ctypes; print(ctypes.CDLL(None).syscall(444, None, 0, 1))")
+          abi=$(python3 -c "import ctypes; print(ctypes.CDLL(None, use_errno=True).syscall(444, None, 0, 1))") || abi=-1
           echo "Landlock ABI found on this runner: $abi"
+          # A failed probe (python missing, an unexpected output) is an error; -1 from the
+          # syscall itself means "no Landlock" and is a valid answer.
+          case "$abi" in
+            -1 | [0-9] | [0-9][0-9]) ;;
+            *) echo "the Landlock ABI probe failed: '$abi'"; exit 1 ;;
+          esac
           if [ "$abi" -ge 6 ]; then
             unset MIMIK_LIVE_LANDLOCK
             echo "Landlock confinement assertions: required"

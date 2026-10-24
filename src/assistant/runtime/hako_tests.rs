@@ -1188,6 +1188,13 @@ fn the_landlock_report_travels_after_the_marker_and_only_as_a_report() {
         b"{\"landlock\":\"full\",\"abi\":6}\nmore",
         b"{\"landlock\":\"full\",\"abi\":6}\n{\"landlock\":\"none\"}\n",
         b"{\"landlock\":\"full\",\"abi\":6} \n",
+        // The exact wire form only: no interior whitespace or newline, no `null` for a key
+        // that must be absent (or present).
+        b"{\"landlock\": \"full\",\"abi\":6}\n",
+        b"{\"landlock\":\"full\",\n\"abi\":6}\n",
+        b"{\"landlock\":\"none\",\"abi\":null}\n",
+        b"{\"landlock\":\"full\",\"abi\":null}\n",
+        b"{\"abi\":6,\"landlock\":\"full\"}\n",
         b"{\"landlock\":\"full\",\"abi\":6}",
     ] {
         assert_eq!(Landlock::parse(bad), None, "{bad:?}");
@@ -1233,48 +1240,96 @@ fn the_landlock_rights_never_let_written_files_run_or_make_device_nodes() {
 
 #[cfg(feature = "sandbox-hakoniwa")]
 #[test]
-fn the_crates_status_is_reported_as_full_partial_or_not_available() {
-    use landlock::{ABI, LandlockStatus, RulesetStatus};
-    let available = |effective_abi, kernel_abi| LandlockStatus::Available {
-        effective_abi,
-        kernel_abi,
-    };
-    // The kernel's own ABI, also above the crate's newest.
-    assert_eq!(
-        classify(&RulesetStatus::FullyEnforced, &available(ABI::V9, Some(11))),
-        Landlock::Full { abi: 11 }
-    );
-    assert_eq!(
-        classify(&RulesetStatus::FullyEnforced, &available(ABI::V6, None)),
-        Landlock::Full { abi: 6 }
-    );
-    assert_eq!(
-        classify(&RulesetStatus::PartiallyEnforced, &available(ABI::V3, None)),
-        Landlock::Partial { abi: 3 }
-    );
-    for status in [LandlockStatus::NotImplemented, LandlockStatus::NotEnabled] {
-        assert_eq!(
-            classify(&RulesetStatus::NotEnforced, &status),
-            Landlock::Unavailable
-        );
-    }
+fn an_enforced_ruleset_is_full_from_abi_6_and_partial_below() {
+    assert_eq!(report_for(11), Landlock::Full { abi: 11 });
+    assert_eq!(report_for(6), Landlock::Full { abi: 6 });
+    assert_eq!(report_for(5), Landlock::Partial { abi: 5 });
+    assert_eq!(report_for(1), Landlock::Partial { abi: 1 });
 }
+
+/// Runs `body` on a thread whose Landlock calls fail with `EPERM` (a seccomp filter on that
+/// thread only), standing for a kernel whose later detection or enforcement fails after Mimik's
+/// own probe has succeeded.
+#[cfg(feature = "sandbox-hakoniwa")]
+fn with_failing_landlock<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::spawn(move || {
+        let errno = u32::try_from(libc::EPERM).unwrap();
+        crate::assistant::runtime::seccomp::install(
+            &crate::assistant::runtime::seccomp::program_without_landlock(errno),
+        )
+        .unwrap();
+        body()
+    })
+    .join()
+    .unwrap()
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn once_the_probe_succeeded_a_later_failure_is_never_taken_for_not_available() {
+    let result = with_failing_landlock(|| apply_landlock_with(&[], || Ok(6)));
+    let why = result.unwrap_err();
+    assert!(why.starts_with("filesystem rights:"), "{why}");
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+fn missing_rule() -> (tempfile::TempDir, Vec<Rule>) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("absent").to_str().unwrap().to_owned();
+    (
+        dir,
+        vec![Rule {
+            path,
+            grant: Grant::Read,
+        }],
+    )
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn a_path_error_is_found_before_the_kernel_is_asked_whatever_the_kernel() {
+    let (_dir, rules) = missing_rule();
+    let expected = rules[0].path.clone();
+    // Landlock calls fail on this thread: only the path check can produce the error.
+    let why = with_failing_landlock(move || apply_landlock_with(&rules, || Ok(6))).unwrap_err();
+    assert!(why.starts_with(&expected), "{why}");
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn an_unavailable_landlock_skips_the_paths_and_the_step_goes_on_to_the_marker() {
+    let (_dir, rules) = missing_rule();
+    assert_eq!(
+        apply_landlock_with(&rules, || Err(libc::ENOSYS)),
+        Ok(Landlock::Unavailable)
+    );
+    let found = std::rc::Rc::new(std::cell::Cell::new(None));
+    let marked = std::cell::Cell::new(false);
+    let step = landlock_step(rules.clone(), found.clone(), || Err(libc::ENOSYS));
+    run_steps(vec![
+        step,
+        (
+            "marker",
+            exit::MARKER,
+            Box::new(|| {
+                marked.set(true);
+                Ok(())
+            }),
+        ),
+    ])
+    .unwrap();
+    assert!(marked.get());
+    assert_eq!(found.get(), Some(Landlock::Unavailable));
+}
+
 #[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn a_landlock_path_error_stops_the_real_step_before_the_marker() {
-    let missing = tempfile::tempdir().unwrap();
-    let mut plan = plan(&inputs(None, &["llama-server"]));
-    plan.binds.push(Bind {
-        source: String::new(),
-        target: missing.path().join("absent").to_str().unwrap().to_owned(),
-        access: Access::ReadOnly,
-        identity: None,
-    });
-    let step = steps(&plan, rustix::fs::Mode::empty())
-        .into_iter()
-        .find(|step| step.0 == "landlock")
-        .unwrap();
+    let (_dir, rules) = missing_rule();
+    let found = std::rc::Rc::new(std::cell::Cell::new(None));
     let marked = std::cell::Cell::new(false);
+    // The probe is injected as successful, so the result does not depend on the host.
+    let step = landlock_step(rules, found.clone(), || Ok(6));
     let result = run_steps(vec![
         step,
         (
@@ -1290,83 +1345,7 @@ fn a_landlock_path_error_stops_the_real_step_before_the_marker() {
     assert_eq!(code, exit::LANDLOCK);
     assert!(why.starts_with("landlock:"), "{why}");
     assert!(!marked.get());
-}
-
-/// Everything the server opened under the GPU path in the earlier strace records
-/// (`live-gpu/strace`, the traced server inside the sandbox): `(path, lists a directory)`.
-/// Paths that did not exist there (`ENOENT`) are left out; a path that does not exist needs
-/// no rule.
-const GPU_TRACE: [(&str, bool); 24] = [
-    ("/dev/dri", true),
-    ("/dev/dri/renderD128", false),
-    ("/sys/devices/pci0000:00/0000:0c:00.0/vendor", false),
-    ("/sys/devices/pci0000:00/0000:0c:00.0/device", false),
-    (
-        "/sys/devices/pci0000:00/0000:0c:00.0/subsystem_vendor",
-        false,
-    ),
-    (
-        "/sys/devices/pci0000:00/0000:0c:00.0/subsystem_device",
-        false,
-    ),
-    ("/sys/devices/pci0000:00/0000:0c:00.0/uevent", false),
-    ("/sys/devices/pci0000:00/0000:0c:00.0/drm", true),
-    (
-        "/sys/devices/pci0000:00/0000:0c:00.0/drm/renderD128/device",
-        true,
-    ),
-    ("/sys/dev/char", true),
-    ("/sys/class/drm", true),
-    ("/sys/bus/pci", true),
-    ("/usr/share/vulkan/icd.d", true),
-    ("/usr/share/vulkan/icd.d/radeon_icd.x86_64.json", false),
-    ("/usr/share/vulkan/implicit_layer.d", true),
-    (
-        "/usr/share/vulkan/explicit_layer.d/VkLayer_MESA_overlay.json",
-        false,
-    ),
-    ("/usr/share/libdrm/amdgpu.ids", false),
-    ("/usr/share/drirc.d", true),
-    ("/usr/share/drirc.d/00-radv-defaults.conf", false),
-    ("/etc/vulkan/icd.d", true),
-    ("/tmp/.drirc", false),
-    ("/tmp/.config/vulkan/icd.d", true),
-    ("/proc/cpuinfo", false),
-    ("/proc/self/maps", false),
-];
-
-#[test]
-fn the_gpu_plans_landlock_rules_cover_every_path_the_traced_server_opened() {
-    let render = GpuBinds {
-        shared: bwrap::GPU_DATA.iter().map(PathBuf::from).collect(),
-        sysfs: PathBuf::from("/sys/devices/pci0000:00/0000:0c:00.0"),
-        ..gpu()
-    };
-    let plan = plan(&inputs(Some(&render), &["llama-server"]));
-    let rules = landlock_rules(&plan);
-    // A rule applies to the path and everything beneath it (Landlock's `PathBeneath`).
-    let granted = |path: &str| -> Vec<Grant> {
-        rules
-            .iter()
-            .filter(|rule| path == rule.path || path.starts_with(&format!("{}/", rule.path)))
-            .map(|rule| rule.grant)
-            .collect()
-    };
-    for (path, directory) in GPU_TRACE {
-        let grants = granted(path);
-        let allowed = grants.iter().any(|grant| match grant {
-            Grant::ReadExec | Grant::Read | Grant::ReadWrite => true,
-            Grant::List => directory,
-            Grant::ReadFile | Grant::Device => !directory,
-        });
-        assert!(allowed, "{path} (directory: {directory}) has {grants:?}");
-    }
-    // The render node's directory is listed by a rule of its own (libdrm and Mesa
-    // enumerate `/dev/dri`), not only through `/dev`'s.
-    assert_eq!(
-        rule(&rules, "/dev/dri").map(|rule| rule.grant),
-        Some(Grant::List)
-    );
+    assert_eq!(found.get(), None);
 }
 
 #[cfg(feature = "sandbox-hakoniwa")]
@@ -1410,8 +1389,10 @@ fn every_tmpfs_the_sandbox_mounts_is_noexec_nosuid_and_nodev() {
 }
 
 /// What the kernel does with a rule on a directory: it covers the directories and files
-/// beneath it, through mounts or not, and nothing beside it. Applied to a thread of this
-/// test process (Landlock restricts the calling thread), skipped on a kernel without it.
+/// beneath it and nothing beside it (the tree here is one mount; whether a rule crosses a
+/// mount point is not shown). Applied to a thread of this test process (Landlock restricts the
+/// calling thread). Rust has no runtime skip: on a kernel without Landlock the test prints
+/// "SKIPPED" and proves nothing.
 #[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn a_landlock_list_rule_covers_the_directories_beneath_it_and_no_file_in_them() {
@@ -1424,7 +1405,7 @@ fn a_landlock_list_rule_covers_the_directories_beneath_it_and_no_file_in_them() 
         path: root.to_str().unwrap().to_owned(),
         grant: Grant::List,
     }];
-    let (listed, other, file) = std::thread::spawn({
+    let result = std::thread::spawn({
         let (root, other) = (root.clone(), dir.path().join("other"));
         move || {
             if !matches!(
@@ -1441,8 +1422,11 @@ fn a_landlock_list_rule_covers_the_directories_beneath_it_and_no_file_in_them() 
         }
     })
     .join()
-    .unwrap()
-    .unwrap_or((true, false, false));
+    .unwrap();
+    let Some((listed, other, file)) = result else {
+        eprintln!("SKIPPED: this kernel has no Landlock; nothing was checked");
+        return;
+    };
     assert!(listed, "a list rule on /dev must list /dev/dri");
     assert!(!other);
     assert!(!file);
