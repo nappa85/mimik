@@ -1386,7 +1386,8 @@ fn killed_after(delay: Duration) {
             || (live_backend() == Backend::Bwrap && line.contains("bwrap ")),
         "the earliest process seen is not the runner: {line}"
     );
-    assert!(!line.contains("llama-server"), "{line}");
+    // Not the server's own command line (bubblewrap's names the server as a file to bind).
+    assert!(!line.contains("--api-key-file"), "{line}");
     std::thread::sleep(delay);
     mimik.kill().unwrap();
     mimik.wait().unwrap();
