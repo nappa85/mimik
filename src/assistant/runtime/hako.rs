@@ -160,15 +160,27 @@ impl Landlock {
         }
     }
 
-    /// The report in what followed the marker (`None`: absent or not understood).
+    /// The report in what followed the marker: exactly one JSON line with the known keys and
+    /// nothing after its newline (`None`: absent, not understood, or anything more or less).
     pub(crate) fn parse(after_marker: &[u8]) -> Option<Self> {
-        let value: serde_json::Value =
-            serde_json::from_slice(after_marker.split(|byte| *byte == b'\n').next()?).ok()?;
-        let abi = || u8::try_from(value.get("abi")?.as_u64()?).ok();
-        match value.get("landlock")?.as_str()? {
-            "full" => Some(Self::Full { abi: abi()? }),
-            "partial" => Some(Self::Partial { abi: abi()? }),
-            "none" => Some(Self::Unavailable),
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Line {
+            landlock: String,
+            abi: Option<u8>,
+        }
+        let line = after_marker.strip_suffix(b"\n")?;
+        if line.first().is_some_and(u8::is_ascii_whitespace)
+            || line.last().is_some_and(u8::is_ascii_whitespace)
+        {
+            return None;
+        }
+        let line: Line = serde_json::from_slice(line).ok()?;
+        // ABI 0 is "no Landlock", which the `none` report says without a number.
+        match (line.landlock.as_str(), line.abi) {
+            ("full", Some(abi @ 1..)) => Some(Self::Full { abi }),
+            ("partial", Some(abi @ 1..)) => Some(Self::Partial { abi }),
+            ("none", None) => Some(Self::Unavailable),
             _ => None,
         }
     }
@@ -187,16 +199,18 @@ impl Landlock {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg(any(test, feature = "sandbox-hakoniwa"))]
 pub(crate) enum Grant {
-    /// Read, list and execute: the runtime, the system libraries and the GPU's system data.
+    /// Read, list and execute: the program the closure execs and the system library
+    /// directories (which hold the ELF interpreter).
     ReadExec,
     /// Read one file, never execute it: the model.
     ReadFile,
-    /// Read and list: `/proc`.
+    /// Read and list, never execute: `/proc`, the runtime's libraries and the GPU's system
+    /// data.
     Read,
     /// List only: `/dev` itself (its nodes have their own rules).
     List,
     /// Read, write and create (regular files, directories, sockets, fifos, links) and
-    /// remove, never execute: the socket directory, `/tmp`, `/dev/shm`, `/run`.
+    /// remove, never execute: the socket directory, `/tmp`, `/dev/shm`.
     ReadWrite,
     /// A device node: read, write and ioctl.
     Device,
@@ -210,18 +224,23 @@ pub(crate) struct Rule {
     pub grant: Grant,
 }
 
-/// The tmpfs mounts the server writes in (the plan's own): the sandbox's `/tmp`, `/dev/shm`
-/// and `/run` (the token's file and the socket directory's bind).
+/// The tmpfs mounts the server writes in (the plan's own): the sandbox's `/tmp` and
+/// `/dev/shm`. `/run` holds the token file and the socket directory's bind, each with a rule
+/// of its own.
 #[cfg(any(test, feature = "sandbox-hakoniwa"))]
-const WRITABLE_TMPFS: [&str; 3] = ["/tmp", "/dev/shm", "/run"];
+const WRITABLE_TMPFS: [&str; 2] = ["/tmp", "/dev/shm"];
 
 /// The Landlock ruleset of `plan`: what the namespace mounts give the server, narrowed to
-/// the paths and uses it needs. Read, list and execute on every read-only bind but the model
-/// (read only); read and write on the read-write binds and the three writable tmpfs mounts;
-/// listing on `/dev`, the runtime's directory and the GPU path's `/sys` scaffolding, `/proc`
-/// read; each device node as a device. Everything else the
-/// mounts make visible or writable (the other `/dev` entries, `/etc` and `/sys` outside their
-/// binds, a writable mount not listed) is denied.
+/// the paths and uses it needs. Execute only on the program the closure execs (its first
+/// argument) and the system library directories (the kernel opens the ELF interpreter with the
+/// execute right; the loader maps libraries with `mmap`, which that right does not govern, so
+/// the runtime's libraries need read only); read and list on every other read-only bind, the
+/// model read only; read and write on the read-write binds and the two writable tmpfs mounts
+/// `/tmp` and `/dev/shm`; of `/run` only the token file (read) and the socket directory (its
+/// bind); listing on `/dev` and `/dev/dri` (libdrm and Mesa enumerate it), the runtime's
+/// directory and the GPU path's `/sys` scaffolding, `/proc` read; each device node as a device.
+/// Everything else the mounts make visible or writable (the other `/dev` entries, `/etc` and
+/// `/sys` outside their binds, a writable mount not listed) is denied.
 #[cfg(any(test, feature = "sandbox-hakoniwa"))]
 pub(crate) fn landlock_rules(plan: &Plan) -> Vec<Rule> {
     let mut rules: Vec<Rule> = Vec::new();
@@ -236,6 +255,8 @@ pub(crate) fn landlock_rules(plan: &Plan) -> Vec<Rule> {
     };
     add("/proc", Grant::Read);
     add("/dev", Grant::List);
+    // The token is read, never listed or written (the rest of `/run` has no rule).
+    add(bwrap::TOKEN, Grant::ReadFile);
     // The runtime's directory holds only its bound files, but ggml lists it to find its
     // backends.
     add(bwrap::RUNTIME, Grant::List);
@@ -249,11 +270,25 @@ pub(crate) fn landlock_rules(plan: &Plan) -> Vec<Rule> {
         add(path, Grant::ReadWrite);
     }
     for bind in &plan.binds {
+        let program = plan.argv.first().is_some_and(|argv0| *argv0 == bind.target);
         let grant = match bind.access {
             Access::ReadOnly if bind.target == bwrap::MODEL => Grant::ReadFile,
-            Access::ReadOnly => Grant::ReadExec,
+            Access::ReadOnly if program || bwrap::LIBRARY_DIRS.contains(&bind.target.as_str()) => {
+                Grant::ReadExec
+            }
+            Access::ReadOnly => Grant::Read,
             Access::ReadWrite => Grant::ReadWrite,
-            Access::Device => Grant::Device,
+            Access::Device => {
+                // The device's directory is listed by a rule of its own: libdrm and Mesa
+                // enumerate `/dev/dri` (the rule on `/dev` also reaches it, but the table
+                // does not lean on that).
+                if let Some(parent) = Path::new(&bind.target).parent().and_then(Path::to_str)
+                    && parent != "/"
+                {
+                    add(parent, Grant::List);
+                }
+                Grant::Device
+            }
         };
         add(&bind.target, grant);
     }
@@ -651,8 +686,8 @@ pub(crate) use run::apply_landlock;
 pub(crate) use run::run;
 #[cfg(all(test, feature = "sandbox-hakoniwa"))]
 pub(crate) use run::{
-    Procs, Reaper, access, after_end, classify, find_child, options, run_guarded, setup_failed,
-    single_threaded, steps, supervise,
+    Procs, Reaper, access, after_end, apply_landlock_with, classify, find_child, options,
+    run_guarded, setup_failed, single_threaded, steps, supervise, tmpfs_options,
 };
 
 #[cfg(feature = "sandbox-hakoniwa")]
@@ -713,13 +748,27 @@ mod run {
             Grant::ReadFile => AccessFs::ReadFile.into(),
             Grant::Read => make_bitflags!(AccessFs::{ReadFile | ReadDir}),
             Grant::List => AccessFs::ReadDir.into(),
-            // No `Execute`, `MakeChar`, `MakeBlock` or `Refer`: nothing written here can be
-            // run, no node can be made and nothing is moved between directories.
+            // No `Execute`, `MakeChar`, `MakeBlock` or `Refer`: no node can be made and
+            // nothing is moved between directories, and the right to `execve` a file written
+            // here is withheld (the tmpfs mounts are `noexec` as well, which also stops
+            // executable mappings of what is written).
             Grant::ReadWrite => make_bitflags!(AccessFs::{
                 ReadFile | ReadDir | WriteFile | Truncate | RemoveFile | RemoveDir | MakeReg
                     | MakeDir | MakeSock | MakeFifo | MakeSym
             }),
             Grant::Device => make_bitflags!(AccessFs::{ReadFile | WriteFile | Truncate | IoctlDev}),
+        }
+    }
+
+    /// The mount options of a tmpfs of the plan: never `exec`, `suid` or `dev` (the server
+    /// writes data there and nothing in it is to run; the CPU and Vulkan paths map no
+    /// executable memory from files there), read-only for a mask.
+    pub(crate) fn tmpfs_options(tmpfs: &super::Tmpfs) -> MountOptions {
+        let base = MountOptions::NOSUID | MountOptions::NODEV | MountOptions::NOEXEC;
+        if tmpfs.read_only {
+            base | MountOptions::RDONLY
+        } else {
+            base
         }
     }
 
@@ -743,19 +792,64 @@ mod run {
         }
     }
 
+    /// The kernel's Landlock ABI, by the version probe of `landlock_create_ruleset` (the
+    /// crate's own probe lumps every error as "not implemented", which would hide a real
+    /// failure).
+    fn probe_abi() -> Result<i32, i32> {
+        // SAFETY: the version flag takes a null attribute of size 0 and touches no memory.
+        let abi = unsafe {
+            libc::syscall(
+                libc::SYS_landlock_create_ruleset,
+                std::ptr::null::<libc::c_void>(),
+                0_usize,
+                1_u32, // LANDLOCK_CREATE_RULESET_VERSION
+            )
+        };
+        if abi < 0 {
+            Err(std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO))
+        } else {
+            i32::try_from(abi).map_err(|_| libc::EIO)
+        }
+    }
+
     /// Restricts the calling thread (the closure is single-threaded) to `rules`, denies TCP
     /// bind and connect and scopes abstract Unix sockets and signals to the new domain, best
     /// effort: a kernel without Landlock, or with an older ABI, enforces what it has and the
-    /// answer says how much. An error is a ruleset that could not be built or applied on a
-    /// kernel that has Landlock, which fails the start (a bug or a path the mounts did not
-    /// make), never silently weaker.
+    /// answer says how much.
+    ///
+    /// "Not available" (the start goes on with the namespaces alone) is exactly a version probe
+    /// that fails with `ENOSYS` (no Landlock in the kernel), `EOPNOTSUPP` (disabled at boot) or
+    /// `EPERM` (a seccomp or service-manager filter around Mimik refuses the call: the same
+    /// effect as no Landlock, and the layer is defence in depth). Any other probe error, and
+    /// every failure after a successful probe (a path that cannot be opened, a rule or the
+    /// restriction refused), fails the start with exit 117: a bug or a path the mounts did not
+    /// make, never silently weaker.
     ///
     /// # Errors
     ///
     /// The path or call that failed.
     pub(crate) fn apply_landlock(rules: &[Rule]) -> Result<Landlock, String> {
+        apply_landlock_with(rules, probe_abi)
+    }
+
+    /// [`apply_landlock`] with the version probe given (tests simulate its errors).
+    ///
+    /// # Errors
+    ///
+    /// As [`apply_landlock`].
+    pub(crate) fn apply_landlock_with(
+        rules: &[Rule],
+        probe: impl FnOnce() -> Result<i32, i32>,
+    ) -> Result<Landlock, String> {
         fn failed<E: std::fmt::Display>(what: &str) -> impl Fn(E) -> String + '_ {
             move |error| format!("{what}: {error}")
+        }
+        match probe() {
+            Ok(_) => {}
+            Err(libc::ENOSYS | libc::EOPNOTSUPP | libc::EPERM) => return Ok(Landlock::Unavailable),
+            Err(errno) => return Err(failed("probe")(std::io::Error::from_raw_os_error(errno))),
         }
         let mut ruleset = Ruleset::default()
             .handle_access(AccessFs::from_all(TARGET))
@@ -815,11 +909,7 @@ mod run {
                 "tmpfs",
                 &tmpfs.target,
                 "tmpfs",
-                if tmpfs.read_only {
-                    MountOptions::NOSUID | MountOptions::NODEV | MountOptions::RDONLY
-                } else {
-                    MountOptions::NOSUID | MountOptions::NODEV
-                },
+                tmpfs_options(tmpfs),
                 Some(format!("size={},mode={:o}", tmpfs.bytes, tmpfs.mode)),
             );
         }

@@ -1684,14 +1684,12 @@ async fn live_bubblewrap_reports_no_landlock() {
     child.stop().await;
 }
 
-/// A kernel without Landlock, simulated by the runner's seccomp filter answering `ENOSYS` to
-/// the three Landlock calls (inherited by the sandbox's closure): the real crate sees "not
-/// implemented", the start goes on, the server serves and the report says "not available".
-/// The libtest runner is used whatever `MIMIK_LIVE_RUNNER` says (the filter is its helper's).
+/// A kernel without Landlock, simulated by the runner's seccomp filter answering `errno` to
+/// the three Landlock calls (inherited by the sandbox's closure): the version probe fails,
+/// the start goes on, the server serves and the report says "not available". The libtest
+/// runner is used whatever `MIMIK_LIVE_RUNNER` says (the filter is its helper's).
 #[cfg(feature = "sandbox-hakoniwa")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
-async fn live_a_kernel_without_landlock_still_starts_and_is_reported_as_not_available() {
+async fn without_landlock_still_starts(errno: &str) {
     let scratch = scratch();
     let (_launch, child) = started_with(scratch.path(), Level::Bubblewrap, |settings| {
         settings.backend = Backend::Hakoniwa;
@@ -1700,7 +1698,7 @@ async fn live_a_kernel_without_landlock_still_starts_and_is_reported_as_not_avai
             args: helper_args(RUNNER).into_iter().map(Into::into).collect(),
             env: vec![
                 (test_helper::VARIABLE.into(), "runner".into()),
-                ("MIMIK_TEST_NO_LANDLOCK".into(), "1".into()),
+                ("MIMIK_TEST_NO_LANDLOCK".into(), errno.into()),
             ],
         };
     })
@@ -1713,6 +1711,30 @@ async fn live_a_kernel_without_landlock_still_starts_and_is_reported_as_not_avai
     let (status, _) = raw(&child, "/v1/chat/completions", None, &short_request(4)).await;
     assert_eq!(status, 401);
     child.stop().await;
+}
+
+/// `ENOSYS`: a kernel built without Landlock.
+#[cfg(feature = "sandbox-hakoniwa")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+async fn live_a_kernel_without_landlock_still_starts_and_is_reported_as_not_available() {
+    without_landlock_still_starts("ENOSYS").await;
+}
+
+/// `EOPNOTSUPP`: Landlock disabled at boot.
+#[cfg(feature = "sandbox-hakoniwa")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+async fn live_landlock_disabled_at_boot_still_starts_and_is_reported_as_not_available() {
+    without_landlock_still_starts("EOPNOTSUPP").await;
+}
+
+/// `EPERM`: a seccomp or service-manager filter around Mimik refuses the Landlock calls.
+#[cfg(feature = "sandbox-hakoniwa")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+async fn live_landlock_refused_by_a_filter_still_starts_and_is_reported_as_not_available() {
+    without_landlock_still_starts("EPERM").await;
 }
 
 /// Scoping, with a peer outside the domain in the same network namespace (which the sandbox

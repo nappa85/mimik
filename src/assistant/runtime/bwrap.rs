@@ -377,17 +377,21 @@ impl Item {
     }
 }
 
+/// The system library directories (they hold the ELF interpreter, which the kernel opens
+/// with the execute right).
+pub(crate) const LIBRARY_DIRS: [&str; 5] = [
+    "/usr/lib",
+    "/usr/lib64",
+    "/lib",
+    "/lib64",
+    "/usr/libexec/ld",
+];
+
 /// The system library directories, the dynamic loader's cache and the CPU topology, as
 /// binds or links.
 pub(crate) fn system_items() -> Vec<Item> {
     let mut items = Vec::new();
-    for dir in [
-        "/usr/lib",
-        "/usr/lib64",
-        "/lib",
-        "/lib64",
-        "/usr/libexec/ld",
-    ] {
+    for dir in LIBRARY_DIRS {
         let path = Path::new(dir);
         let Ok(metadata) = std::fs::symlink_metadata(path) else {
             continue;

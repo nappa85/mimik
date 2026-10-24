@@ -1092,22 +1092,32 @@ fn the_landlock_rules_grant_what_the_plan_binds_and_nothing_more() {
             .unwrap_or_else(|| panic!("no rule for {path}: {rules:?}"))
             .grant
     };
-    // Read and execute: the server and its libraries, the probe's executable, the system
-    // libraries and the GPU's system data.
+    // Execute: the file the closure execs (the first argument) and the system library
+    // directories (the kernel opens the ELF interpreter with the execute right).
+    assert_eq!(grant("/opt/llama/llama-server"), Grant::ReadExec);
+    for bind in &plan.binds {
+        if bwrap::LIBRARY_DIRS.contains(&bind.target.as_str()) {
+            assert_eq!(grant(&bind.target), Grant::ReadExec, "{bind:?}");
+        }
+    }
+    // Read, never execute: the runtime's libraries (the loader maps them, which Landlock's
+    // execute right does not govern), the probe's executable when it is not the program, the
+    // GPU's system data and the model.
     for path in [
-        "/opt/llama/llama-server",
         "/opt/llama/libllama.so.0",
         "/opt/probe/mimik",
         "/usr/share/vulkan",
     ] {
-        assert_eq!(grant(path), Grant::ReadExec, "{path}");
+        assert_eq!(grant(path), Grant::Read, "{path}");
     }
-    // The model is read, never executed.
     assert_eq!(grant(bwrap::MODEL), Grant::ReadFile);
-    // Read and write: the socket directory and the three writable tmpfs mounts.
-    for path in [bwrap::SOCKET_DIR, "/tmp", "/dev/shm", "/run"] {
+    // Read and write: the socket directory and the two writable tmpfs mounts; of `/run` only
+    // the token file (read) and the socket directory, never the directory as a whole.
+    for path in [bwrap::SOCKET_DIR, "/tmp", "/dev/shm"] {
         assert_eq!(grant(path), Grant::ReadWrite, "{path}");
     }
+    assert_eq!(grant(bwrap::TOKEN), Grant::ReadFile);
+    assert!(rule(&rules, "/run").is_none());
     // `/dev` is listed and `/proc` read; the five nodes and the render node are devices.
     assert_eq!(grant("/dev"), Grant::List);
     assert_eq!(grant("/proc"), Grant::Read);
@@ -1121,15 +1131,23 @@ fn the_landlock_rules_grant_what_the_plan_binds_and_nothing_more() {
     // read-only bind.
     for rule in &rules {
         let bound = plan.binds.iter().find(|bind| bind.target == rule.path);
-        let fixed = ["/proc", "/dev", "/tmp", "/dev/shm", "/run", bwrap::RUNTIME]
-            .contains(&rule.path.as_str())
+        let fixed = [
+            "/proc",
+            "/dev",
+            "/tmp",
+            "/dev/shm",
+            bwrap::TOKEN,
+            bwrap::RUNTIME,
+            "/dev/dri",
+        ]
+        .contains(&rule.path.as_str())
             || (rule.grant == Grant::List && plan.dirs.contains(&rule.path));
         assert!(bound.is_some() || fixed, "{rule:?} is not in the plan");
         if let Some(bind) = bound
             && bind.access == Access::ReadOnly
         {
             assert!(
-                matches!(rule.grant, Grant::ReadExec | Grant::ReadFile),
+                matches!(rule.grant, Grant::ReadExec | Grant::Read | Grant::ReadFile),
                 "{rule:?}"
             );
         }
@@ -1161,6 +1179,16 @@ fn the_landlock_report_travels_after_the_marker_and_only_as_a_report() {
         b"{\"landlock\":\"strong\",\"abi\":3}\n",
         b"{\"landlock\":\"full\",\"abi\":999}\n",
         b"landlock full\n",
+        // ABI 0 is no Landlock at all, never "full" or "partial".
+        b"{\"landlock\":\"full\",\"abi\":0}\n",
+        b"{\"landlock\":\"partial\",\"abi\":0}\n",
+        // Unknown keys, and anything after the report's line.
+        b"{\"landlock\":\"full\",\"abi\":6,\"extra\":1}\n",
+        b"{\"landlock\":\"none\",\"abi\":6}\n",
+        b"{\"landlock\":\"full\",\"abi\":6}\nmore",
+        b"{\"landlock\":\"full\",\"abi\":6}\n{\"landlock\":\"none\"}\n",
+        b"{\"landlock\":\"full\",\"abi\":6} \n",
+        b"{\"landlock\":\"full\",\"abi\":6}",
     ] {
         assert_eq!(Landlock::parse(bad), None, "{bad:?}");
     }
@@ -1256,4 +1284,160 @@ fn a_landlock_path_error_stops_the_real_step_before_the_marker() {
     assert_eq!(code, exit::LANDLOCK);
     assert!(why.starts_with("landlock:"), "{why}");
     assert!(!marked.get());
+}
+
+/// Everything the server opened under the GPU path in the earlier strace records
+/// (`live-gpu/strace`, the traced server inside the sandbox): `(path, lists a directory)`.
+/// Paths that did not exist there (`ENOENT`) are left out; a path that does not exist needs
+/// no rule.
+const GPU_TRACE: [(&str, bool); 24] = [
+    ("/dev/dri", true),
+    ("/dev/dri/renderD128", false),
+    ("/sys/devices/pci0000:00/0000:0c:00.0/vendor", false),
+    ("/sys/devices/pci0000:00/0000:0c:00.0/device", false),
+    (
+        "/sys/devices/pci0000:00/0000:0c:00.0/subsystem_vendor",
+        false,
+    ),
+    (
+        "/sys/devices/pci0000:00/0000:0c:00.0/subsystem_device",
+        false,
+    ),
+    ("/sys/devices/pci0000:00/0000:0c:00.0/uevent", false),
+    ("/sys/devices/pci0000:00/0000:0c:00.0/drm", true),
+    (
+        "/sys/devices/pci0000:00/0000:0c:00.0/drm/renderD128/device",
+        true,
+    ),
+    ("/sys/dev/char", true),
+    ("/sys/class/drm", true),
+    ("/sys/bus/pci", true),
+    ("/usr/share/vulkan/icd.d", true),
+    ("/usr/share/vulkan/icd.d/radeon_icd.x86_64.json", false),
+    ("/usr/share/vulkan/implicit_layer.d", true),
+    (
+        "/usr/share/vulkan/explicit_layer.d/VkLayer_MESA_overlay.json",
+        false,
+    ),
+    ("/usr/share/libdrm/amdgpu.ids", false),
+    ("/usr/share/drirc.d", true),
+    ("/usr/share/drirc.d/00-radv-defaults.conf", false),
+    ("/etc/vulkan/icd.d", true),
+    ("/tmp/.drirc", false),
+    ("/tmp/.config/vulkan/icd.d", true),
+    ("/proc/cpuinfo", false),
+    ("/proc/self/maps", false),
+];
+
+#[test]
+fn the_gpu_plans_landlock_rules_cover_every_path_the_traced_server_opened() {
+    let render = GpuBinds {
+        shared: bwrap::GPU_DATA.iter().map(PathBuf::from).collect(),
+        sysfs: PathBuf::from("/sys/devices/pci0000:00/0000:0c:00.0"),
+        ..gpu()
+    };
+    let plan = plan(&inputs(Some(&render), &["llama-server"]));
+    let rules = landlock_rules(&plan);
+    // A rule applies to the path and everything beneath it (Landlock's `PathBeneath`).
+    let granted = |path: &str| -> Vec<Grant> {
+        rules
+            .iter()
+            .filter(|rule| path == rule.path || path.starts_with(&format!("{}/", rule.path)))
+            .map(|rule| rule.grant)
+            .collect()
+    };
+    for (path, directory) in GPU_TRACE {
+        let grants = granted(path);
+        let allowed = grants.iter().any(|grant| match grant {
+            Grant::ReadExec | Grant::Read | Grant::ReadWrite => true,
+            Grant::List => directory,
+            Grant::ReadFile | Grant::Device => !directory,
+        });
+        assert!(allowed, "{path} (directory: {directory}) has {grants:?}");
+    }
+    // The render node's directory is listed by a rule of its own (libdrm and Mesa
+    // enumerate `/dev/dri`), not only through `/dev`'s.
+    assert_eq!(
+        rule(&rules, "/dev/dri").map(|rule| rule.grant),
+        Some(Grant::List)
+    );
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn the_landlock_probe_failing_as_not_available_continues_and_any_other_failure_stops() {
+    for errno in [libc::ENOSYS, libc::EOPNOTSUPP, libc::EPERM] {
+        assert_eq!(
+            apply_landlock_with(&[], || Err(errno)),
+            Ok(Landlock::Unavailable),
+            "errno {errno}"
+        );
+    }
+    for errno in [
+        libc::EINVAL,
+        libc::ENOMEM,
+        libc::EACCES,
+        libc::E2BIG,
+        libc::EFAULT,
+    ] {
+        let why = apply_landlock_with(&[], || Err(errno)).unwrap_err();
+        assert!(why.starts_with("probe:"), "{why}");
+    }
+}
+
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn every_tmpfs_the_sandbox_mounts_is_noexec_nosuid_and_nodev() {
+    use hakoniwa::MountOptions;
+    let plan = plan(&inputs(None, &["llama-server"]));
+    assert!(plan.tmpfs.len() >= 4);
+    for tmpfs in &plan.tmpfs {
+        let options = tmpfs_options(tmpfs);
+        for flag in [
+            MountOptions::NOEXEC,
+            MountOptions::NOSUID,
+            MountOptions::NODEV,
+        ] {
+            assert!(options.contains(flag), "{tmpfs:?} lacks {flag:?}");
+        }
+    }
+}
+
+/// What the kernel does with a rule on a directory: it covers the directories and files
+/// beneath it, through mounts or not, and nothing beside it. Applied to a thread of this
+/// test process (Landlock restricts the calling thread), skipped on a kernel without it.
+#[cfg(feature = "sandbox-hakoniwa")]
+#[test]
+fn a_landlock_list_rule_covers_the_directories_beneath_it_and_no_file_in_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("dev");
+    std::fs::create_dir_all(root.join("dri")).unwrap();
+    std::fs::write(root.join("dri/node"), b"x").unwrap();
+    std::fs::create_dir_all(dir.path().join("other")).unwrap();
+    let rules = vec![Rule {
+        path: root.to_str().unwrap().to_owned(),
+        grant: Grant::List,
+    }];
+    let (listed, other, file) = std::thread::spawn({
+        let (root, other) = (root.clone(), dir.path().join("other"));
+        move || {
+            if !matches!(
+                apply_landlock(&rules),
+                Ok(Landlock::Full { .. } | Landlock::Partial { .. })
+            ) {
+                return None;
+            }
+            Some((
+                std::fs::read_dir(root.join("dri")).is_ok(),
+                std::fs::read_dir(other).is_ok(),
+                std::fs::read(root.join("dri/node")).is_ok(),
+            ))
+        }
+    })
+    .join()
+    .unwrap()
+    .unwrap_or((true, false, false));
+    assert!(listed, "a list rule on /dev must list /dev/dri");
+    assert!(!other);
+    assert!(!file);
 }

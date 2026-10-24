@@ -146,10 +146,20 @@ fn helper() {
     };
     match mode.as_str() {
         "runner" => {
-            // A kernel without Landlock, simulated: the three calls answer `ENOSYS`, in this
-            // thread and so in what it forks (the live fallback test).
-            if std::env::var_os("MIMIK_TEST_NO_LANDLOCK").is_some() {
-                seccomp::install(&seccomp::program_without_landlock()).unwrap();
+            // A kernel without Landlock, simulated: the three calls answer the errno named
+            // (`ENOSYS`, `EOPNOTSUPP` or `EPERM`), in this thread and so in what it forks
+            // (the live fallback tests).
+            if let Ok(name) = std::env::var("MIMIK_TEST_NO_LANDLOCK") {
+                let errno = match name.as_str() {
+                    "ENOSYS" => libc::ENOSYS,
+                    "EOPNOTSUPP" => libc::EOPNOTSUPP,
+                    "EPERM" => libc::EPERM,
+                    other => panic!("unknown errno {other}"),
+                };
+                seccomp::install(&seccomp::program_without_landlock(
+                    u32::try_from(errno).unwrap(),
+                ))
+                .unwrap();
             }
             std::process::exit(run(SPEC_FD))
         }

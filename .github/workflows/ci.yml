@@ -346,6 +346,19 @@ jobs:
         run: |
           set -o pipefail
           chmod 0755 target/hakoniwa-binary/mimik
+          # The kernel's Landlock ABI (x86_64 landlock_create_ruleset, version flag; negative
+          # when absent). `MIMIK_LIVE_LANDLOCK=any` skips the confinement assertions on a
+          # kernel below ABI 6; on one at 6 or above they are required, so a runner that
+          # has Landlock can never pass with them skipped (and the suite's own check says
+          # the report is "full" only from ABI 6).
+          abi=$(python3 -c "import ctypes; print(ctypes.CDLL(None).syscall(444, None, 0, 1))")
+          echo "Landlock ABI found on this runner: $abi"
+          if [ "$abi" -ge 6 ]; then
+            unset MIMIK_LIVE_LANDLOCK
+            echo "Landlock confinement assertions: required"
+          else
+            echo "Landlock confinement assertions: SKIPPED (ABI below 6)"
+          fi
           target/hakoniwa-binary/mimik assistant-runner --probe --sandbox hakoniwa \
             --runtime target/rel/llama --models-dir target/models --model local:stories260K.gguf \
             --model-sha256 270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d \
