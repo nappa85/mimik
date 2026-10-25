@@ -236,6 +236,169 @@ with no status line, a transient endpoint error such as `EMFILE`, `ENOMEM` or `E
 tried again, three times in all. A level that stays inconclusive is kept for the real start to
 decide, but `--probe` reports it `"ok": false, "inconclusive": true`, never as reached.
 
+## Hakoniwa sandbox (comparison build)
+
+Builds with the `sandbox-hakoniwa` feature (off by default, DEP-24) can run level 1 through
+the Hakoniwa library instead of bubblewrap: `--assistant-sandbox hakoniwa` (also
+`assistant-runner --probe --sandbox hakoniwa`; the live tests take `MIMIK_LIVE_SANDBOX`).
+bubblewrap stays the default. Code: `src/assistant/runtime/hako.rs`; the runner's
+`Exec::Hakoniwa` in `runner.rs`.
+
+The runner (a fresh single-threaded process, checked before it forks) builds the container
+and stays as its supervisor: new user, mount, PID, IPC, UTS, cgroup and network namespaces
+(the network namespace stays empty: no interface, no DNS, no proxy), uid and gid mapped to
+Mimik's own with `setgroups` denied, the root a private directory made read-only, and the
+same allowlist as the bubblewrap profile (`bwrap::system_items` and `GpuBinds::items` feed both):
+`/proc`; a 1 MiB tmpfs `/dev` with only `null`, `zero`, `full`, `random`, `urandom`, the
+`fd` and standard-stream links and (GPU path) the one render node bound without `nodev`; no
+`tty`, `pts`, `ptmx` or `console`; `/tmp` (64 MiB) and `/dev/shm` (256 MiB) tmpfs; the
+generation's directory read-write at `/run/llama`; the runtime files, the model and the
+token file read-only. Differences from the bubblewrap profile, each with its reason:
+
+- Hakoniwa binds host paths and closes every descriptor above 2 in its child, so the
+  verified descriptors are not bound. Each bind carries the `(device, inode)` the launcher
+  verified (`files::Identity`); the closure compares what is mounted with it after the
+  mounts and just before the exec and refuses to go on on any difference (an unreadable
+  target counts as one). The descriptors never enter the sandbox.
+- The token is the content of a file the runner has Hakoniwa write at `/run/token` into the
+  sandbox's own `/run`, a 64 KiB tmpfs (memory) under the socket directory's bind. It reaches
+  the runner in the spec memory file only: never a file on the host, a command line or an
+  environment variable (a test scans the data and scratch directories for it). Unlike
+  bubblewrap's memory file it is an ordinary file inside the sandbox, which the server can
+  read (it needs to) and rewrite (harmless: it knows the token).
+- The program is PID 1 of its namespace; its reaper is the runner's child outside it, which
+  is the process the endpoint check pins (`child-pid`). The seccomp program already refuses
+  `fork`, so the sandbox holds one process. The runner does not report the PID namespace's
+  number (the reaper is not dumpable); the endpoint check then leaves that comparison to
+  the parent and `NSpid` checks (`endpoint::NAMESPACE_UNREPORTED`). The runner reports the
+  server's own host PID and start time (`inner-pid`, `inner-start`) too, and Mimik holds a
+  pidfd on it: a forced stop kills and waits for the server first, then the reaper, and
+  publishes the exit only then, because the reaper can end before the server has released its
+  memory. The runner does not reap the reaper (a zombie can still be pinned) until Mimik has
+  pinned both and said so on an acknowledgement pipe (a closed pipe makes it end the sandbox);
+  each handle is attached to the failed-start guard the moment it is opened. The runner finds
+  the server by pinning each candidate with a pidfd and reading its parent and start time from
+  one read of its `stat`, and takes it only while its pidfd still reads as running. A server
+  whose pid is gone, or reused (another start time), has ended and is never pinned or signalled;
+  one whose start time cannot be read for another reason (`EMFILE`, `EACCES`, a garbled line)
+  keeps its pidfd and is waited for until it exits, never signalled; a
+  sandbox that ended before the report says so (`ended`, the reaper reaped after the server's
+  own exit status), and the marker then classifies the exit.
+- There is no shim. The closure runs in the program's process after the setup, in this
+  order (`hako::STEP_ORDER`): a new session (no controlling terminal), the identity check, the
+  bounding set dropped capability by capability (up to the kernel's last one) and the other
+  sets cleared, Mimik's seccomp program installed (`no_new_privs` is already set by Hakoniwa),
+  the marker pipe's end (standard input) moved to descriptor 3 close-on-exec, `/dev/null`
+  put on descriptor 0, every descriptor above 3 closed, the runner's umask restored, and
+  the marker written on descriptor 3 as the very last step before the exec, which closes it.
+  A step that fails ends the closure at once, with no marker; so the marker proves that every
+  step passed, and nothing the program does can write it (it never holds the descriptor). A
+  failure before the marker is a sandbox failure; the exec itself failing, and anything the
+  server does or exits with afterwards, is the server's. No exit code or output of the
+  server can count as a sandbox failure
+  (`live_no_exit_code_of_the_server_counts_as_a_sandbox_failure`).
+- Landlock (ASSIST-49, DEP-25): after the capabilities and before seccomp, the closure
+  restricts the server further with the `landlock` crate, best effort. Handled: the ABI 6
+  filesystem rights, TCP bind and connect (no rule, so both are denied: `EACCES`, beyond the
+  empty network namespace) and the abstract-Unix-socket and signal scopes. The rules come from
+  the plan (`hako::landlock_rules`): execute only on the program the closure execs and the
+  system library directories (the kernel opens the ELF interpreter with the execute right;
+  the loader maps the runtime's libraries with `mmap`, which that right does not govern, so
+  they get read and list only, as do the GPU data, the sysfs binds and the probe's own
+  executable when it is not the program); the model read only; read and write (create,
+  remove, sockets, no execute, no device nodes) on the socket directory, `/tmp` and
+  `/dev/shm`; of `/run` only the token file, read; listing on `/dev`, `/dev/dri` (libdrm and
+  Mesa enumerate it), the runtime's directory (ggml looks for its backends there) and the GPU
+  path's `/sys` scaffolding; `/proc` read; the five device nodes and the render node as
+  devices (read, write, `ioctl`). Every tmpfs of the sandbox is also mounted `noexec`,
+  `nosuid` and `nodev`. What the mounts alone allow and the
+  rules do not (a file in the writable `/dev` tmpfs, a write in `/proc`, listing `/`, `/etc`
+  or `/sys`) is denied. The step's result (`full` with the kernel's ABI, `partial`, or `none`
+  when the kernel has no Landlock) is appended to the marker line on the marker pipe, in the
+  same write (`exec\n{"landlock":"full","abi":11}\n`): the runner cannot know it (Hakoniwa
+  closes its descriptors above 2, and its own status line is written before the closure
+  finishes) and the server cannot forge it (it never holds the descriptor).
+  Readiness waits up to the bounded marker-reader deadline for a report; a missing or
+  unreadable report fails the attempt rather than silently omitting the layer's status.
+  The report reaches `Status.landlock` and the Confinement section of `/admin/assistant` ("Landlock: full for the ABI 6 rules (kernel ABI n)", "partial (kernel ABI n)" or "not
+  available", each with a note: the full one says that newer rights such as ABI 9's Unix-socket
+  connect are not asked for; the others say that the namespaces alone confine
+  the server then, as with bubblewrap) and the `ready` log line. "Not available" is exactly a
+  version probe (`landlock_create_ruleset` with the version flag) that fails with `ENOSYS`
+  (no Landlock in the kernel), `EOPNOTSUPP` (disabled at boot) or `EPERM` (a seccomp or
+  service-manager filter around Mimik refuses it); the start goes on. Any other probe
+  error, and every failure after a successful probe (a path that cannot be opened, a rule or
+  the restriction refused, a ruleset not fully enforced), fails the start (exit 117, before the marker, a sandbox failure). After a successful probe the ruleset is built for exactly the probed ABI (capped at 6) with every right required, so the crate's own later detection failing is an error too.
+  The three "not available" errors are simulated with a seccomp filter in the live tests. The
+  seccomp program installs after it and does not touch the Landlock calls; the exec of the
+  server needs only the execute right on its file and the loader.
+  Starting a new session clears the previous report before preflight and namespace probing,
+  so a failed restart never presents the stopped generation's protection as current.
+- Missing libraries (a best-effort diagnostic, not the loader): before the sandbox starts, the
+  `DT_NEEDED` names are read from the ELF dynamic section of every ELF file of the runtime
+  build, the server, its libraries and the backends it loads with `dlopen` (`libggml-cpu-*.so`
+  link `libgomp.so.1`, `libggml-vulkan.so` links `libvulkan.so.1`), out of the descriptors the
+  runtime check opened and hashed (`libs.rs`, `object` crate, DEP-26); non-ELF files (the
+  licence) are skipped. A name is found when it is another file of the build, or a regular
+  file (a link must resolve) that is an ELF of the same class and machine in the folders the
+  sandbox binds: the loader's default folders (`/usr/lib`, `/lib64` and the multiarch folders
+  directly under them) or the path `ld.so.cache` gives (parsed read-only). A name found
+  nowhere in a complete search is advisory only: the sandboxed start is always attempted, and
+  the check changes no level, no confinement and nothing about whether the sandbox is required.
+  If that start then fails (no `/health`, an exit before ready, a GPU listing or start failure),
+  the failure's reason gets the hint "llama-server may need libgomp.so.1: install libgomp1
+  (Debian/Ubuntu) or your distribution's OpenMP runtime" (on the GPU path with the GPU to CPU
+  fallback reason, counted or not exactly as the failure itself); if the start succeeds nothing
+  shows. Nothing is executed on the host: no dynamic loader run, no host-side
+  process. The answer is "unknown", and the start goes on as it would without the check, when a
+  file is over 256 MiB, cannot be read or parsed, or names something that is not a plain library
+  name; when a name has candidates only in places the loader would not look; and when the search
+  was incomplete (its budget of entries, folders and depth was reached, a folder could not be
+  read, or the start was cancelled). Folders that are aliases of each other are walked once.
+  Candidates are opened without blocking and must be regular files (a FIFO or a link to one is
+  refused), and entries that are neither files, links nor folders are never opened. The
+  `ld.so.cache` read is bounded (64 MiB, opened without blocking and refused unless a regular
+  file; the container is checked: the new format at the start or after the old format's own
+  table, the declared entry and string tables inside the file, every string offset inside the
+  declared string table, each string at most 4 KiB, at most 100 000 entries, a total string
+  budget, cancellable); a cache that cannot be read or recognised (an old-format-only one, a
+  damaged one) is "unknown", which is not the same as a cache that parsed and is empty. The
+  parsed cache is kept for the process while the file does not change; a transient read error
+  (no descriptors, an I/O error) is not kept, a parse or a definite refusal is. Looking a name
+  up is bounded too: the loader's default folders come first and a hit ends the lookup; only
+  the names they do not settle go to the cache, indexed once by name with repeated paths
+  dropped; candidate opens, the cache scan and the enumeration of the default folders count
+  against budgets and watch for a cancel, and running out of either makes the answer "unknown".
+  The hint belongs to one attempt (cleared when a verification, a probe or a start begins) and
+  only decorates the failure of that attempt's start or `/health`, or of the GPU listing or
+  probe: not a probe's reason, the level 3 policy skip, or the exit of a server that was ready.
+- Mount flags: each bind is non-recursive, and a mount under a read-only bound directory
+  (read from the host's mount table at the start) is masked by an empty read-only tmpfs, so
+  no submount can stay writable under a read-only bind and the files the directory holds
+  underneath it do not show; `nosuid` and (but
+  device nodes) `nodev`, plus `noexec` when its source mount has it, given up front, because
+  the kernel refuses an unprivileged remount that drops a locked flag and Hakoniwa's fallback
+  for that refusal silently drops read-only; the fallback is not enabled, so a mount that
+  cannot be made as planned fails the start (the atime flags are not given: the library has no
+  option for them; `noatime` on `/` works on the dev host, other atime settings are untried,
+  HAKO-L4). A test lists the sandbox's mounts and requires read-only on all but the socket
+  directory, the temporary space, `/dev` and `/proc`.
+- A sandbox that ends at once (a mount refused, or a swapped file) is classified by the marker
+  instead of failing the start on a reaper that is already gone.
+- Parent death: the runner dies with Mimik (`PR_SET_PDEATHSIG` and a parent check), Hakoniwa
+  sets the signal in its two children right after their fork, so the whole tree dies with the
+  runner (`live_sigkill_of_mimik_*`, and a sweep of kill delays over a start). Hakoniwa does
+  not re-check its parent after setting the signal (HAKO-L5).
+
+`mimik assistant-apparmor-profile` prints the `AppArmor` profile for the running binary's own
+path (template `apparmor/mimik`, also for distribution packages); when the sandbox cannot
+start and Ubuntu's restriction is on, the assistant page's message gives that command with
+the `tee` and `apparmor_parser -r` steps. `--for <absolute path>` prints it for
+another binary (packagers, test setups). Ubuntu 24.04's restriction and the profile were checked in a VM
+(`results.md`; repeatable with `/media/data/mimik/ubuntu-vm/run.sh`). The Landlock layer on a kernel below ABI 6
+ran once on that VM (ABI 4); a kernel with Landlock disabled at boot is only simulated (a seccomp filter
+answering `ENOSYS`, `EOPNOTSUPP` or `EPERM` to its calls). `results.md` has the comparison.
+
 ## Device (GPU path)
 
 Render nodes come from sysfs: each `/sys/class/drm/renderD*` whose `device` resolves to a PCI

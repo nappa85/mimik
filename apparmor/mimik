@@ -1,0 +1,30 @@
+# AppArmor profile that lets Mimik create the private sandbox of its model server
+# (tested on Ubuntu 24.04, kernel 6.8; nothing installs it automatically).
+#
+# Why: Ubuntu 23.10 and later set kernel.apparmor_restrict_unprivileged_userns=1. A program
+# without an AppArmor profile that allows `userns` can still create a user namespace, but the
+# kernel strips its capabilities inside it, so Mimik's sandbox cannot mount anything and the
+# assistant stays unavailable. This profile does not confine Mimik (flags=(unconfined));
+# it only grants that one permission to Mimik's own binary, as Ubuntu ships for bubblewrap
+# (/etc/apparmor.d/bwrap-userns-restrict).
+#
+# This file is a template: the quoted path in the profile line below stands for the path of
+# Mimik's binary. Mimik fills it in for itself (the profile applies to that one file; the sandbox's helper is the same binary):
+#
+#   /path/to/mimik assistant-apparmor-profile | sudo tee /etc/apparmor.d/mimik
+#   sudo apparmor_parser -r /etc/apparmor.d/mimik
+#
+# A distribution package can instead substitute its install path for that word.
+#
+# Remove with:  sudo apparmor_parser -R /etc/apparmor.d/mimik && sudo rm /etc/apparmor.d/mimik
+#
+# Check (prints the setting; the assistant page's start-time probe is the real test):
+#   cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+abi <abi/4.0>,
+include <tunables/global>
+
+profile mimik "@MIMIK_EXE@" flags=(unconfined) {
+  userns,
+
+  include if exists <local/mimik>
+}

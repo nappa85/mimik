@@ -50,6 +50,16 @@ pub(crate) enum Exec {
     Bwrap { path: String, args: Vec<String> },
     /// The TCP levels: the descriptor `fd` (llama-server, or the probe), argv given whole.
     Server { fd: RawFd, argv: Vec<String> },
+    /// Level 1 through Hakoniwa (`hako.rs`): the runner builds the sandbox itself and stays
+    /// as its supervisor; `status` and `marker` are the handed-over descriptors.
+    Hakoniwa {
+        plan: Box<super::hako::Plan>,
+        status: RawFd,
+        marker: RawFd,
+        /// Mimik's acknowledgement that it has pinned the sandbox's processes: one byte,
+        /// or the pipe's closing (the start failed).
+        ack: RawFd,
+    },
 }
 
 /// The runner's whole input.
@@ -71,7 +81,11 @@ fn read_spec(fd: RawFd) -> Option<Spec> {
     // SAFETY: the spec descriptor is handed over by the parent and owned by this process
     // from here on; nothing else uses that number.
     let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
-    let mut text = String::new();
+    // The spec may hold the token (Hakoniwa): its buffers are wiped when dropped.
+    // Reserved up front so reading never reallocates (an unwiped old buffer).
+    let mut text = zeroize::Zeroizing::new(String::with_capacity(
+        usize::try_from(SPEC_BOUND).unwrap_or(1 << 20) + 1,
+    ));
     file.take(SPEC_BOUND).read_to_string(&mut text).ok()?;
     serde_json::from_str(&text).ok()
 }
@@ -231,6 +245,18 @@ pub(crate) fn run(spec_fd: RawFd) -> i32 {
             exit::EXEC
         }
         Exec::Server { fd, argv } => exec_server(fd, argv, spec.env, spec.chdir),
+        #[cfg(feature = "sandbox-hakoniwa")]
+        Exec::Hakoniwa {
+            plan,
+            status,
+            marker,
+            ack,
+        } => super::hako::run(*plan, status, marker, ack),
+        #[cfg(not(feature = "sandbox-hakoniwa"))]
+        Exec::Hakoniwa { .. } => {
+            eprintln!("mimik runner: this build has no Hakoniwa sandbox");
+            exit::EXEC
+        }
     }
 }
 
@@ -295,6 +321,46 @@ fn spawn_on_spawner(command: Command) -> std::io::Result<Child> {
         .map_err(|_| std::io::Error::other("the spawner thread has gone"))?
 }
 
+/// A writer into a buffer reserved to its limit that refuses what would pass it, so the
+/// buffer (which may hold the token) is never reallocated, leaving an unwiped copy behind.
+pub(crate) struct Bounded {
+    buffer: zeroize::Zeroizing<Vec<u8>>,
+    limit: usize,
+}
+
+impl Bounded {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            buffer: zeroize::Zeroizing::new(Vec::with_capacity(limit)),
+            limit,
+        }
+    }
+}
+
+impl std::io::Write for Bounded {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.buffer.len() + data.len() > self.limit {
+            return Err(std::io::Error::other(format!(
+                "the runner's spec is more than the {} bytes it reads",
+                self.limit
+            )));
+        }
+        self.buffer.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// `spec` as the runner reads it: JSON in a buffer that never reallocates, wiped when dropped.
+fn encode_spec(spec: &Spec, limit: usize) -> std::io::Result<zeroize::Zeroizing<Vec<u8>>> {
+    let mut writer = Bounded::new(limit);
+    serde_json::to_writer(&mut writer, spec).map_err(std::io::Error::other)?;
+    Ok(writer.buffer)
+}
+
 /// Starts the runner with `spec` on [`SPEC_FD`] and every handover at its target number;
 /// stdout and stderr are pipes for the drain.
 ///
@@ -306,7 +372,7 @@ pub(crate) fn launch(
     spec: &Spec,
     handover: &[Handover],
 ) -> std::io::Result<Child> {
-    let text = serde_json::to_vec(spec).map_err(std::io::Error::other)?;
+    let text = encode_spec(spec, usize::try_from(SPEC_BOUND).unwrap_or(1 << 20))?;
     if u64::try_from(text.len()).unwrap_or(u64::MAX) > SPEC_BOUND {
         return Err(std::io::Error::other(format!(
             "the runner's spec is {} bytes, more than the {SPEC_BOUND} it reads",

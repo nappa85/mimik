@@ -25,3 +25,9 @@ accepted = ["MPL-2.0"]
 # MIT No Attribution is AGPL-compatible; re-review version/source/license changes.
 [borrow-or-share]
 accepted = ["MIT-0"]
+
+# Hakoniwa 1.8.0 (DEP-24, optional `sandbox-hakoniwa` feature): LGPL-3.0-only with the
+# LGPL-3.0 linking exception, which lets a combined work link it statically without the
+# relinking duties (4d, 6a). AGPL-3.0 combines with LGPLv3 code. Preserve its notice.
+[hakoniwa]
+accepted = ["LGPL-3.0-only WITH LGPL-3.0-linking-exception"]

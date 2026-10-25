@@ -1,0 +1,10 @@
+# cargo-audit configuration (read by `cargo audit --deny warnings` in CI).
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0089, atomic-polyfill (unmaintained). User-approved exception, 2026-10-24
+    # (docs/decisions.md, DEP-24). Path: hakoniwa -> postcard (default features) -> heapless
+    # 0.7 -> atomic-polyfill. It is a target-conditional dependency that is not compiled for
+    # x86_64-unknown-linux-gnu; the lock file only lists it.
+    # Remove when hakoniwa drops postcard's default features.
+    "RUSTSEC-2023-0089",
+]

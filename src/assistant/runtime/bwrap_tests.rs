@@ -147,6 +147,37 @@ fn only_disabled_user_namespaces_veto_level_1_the_other_settings_explain_a_failu
     assert_eq!(namespace_hint(&proc), None);
 }
 
+#[test]
+fn the_settings_that_may_explain_a_failed_probe_are_told_apart() {
+    let dir = tempfile::tempdir().unwrap();
+    for (setting, value, cause) in [
+        (
+            "sys/kernel/unprivileged_userns_clone",
+            "0\n",
+            Cause::UsernsClone,
+        ),
+        (
+            "sys/kernel/apparmor_restrict_unprivileged_userns",
+            "1\n",
+            Cause::AppArmor,
+        ),
+    ] {
+        let case = tempfile::tempdir_in(dir.path()).unwrap();
+        let proc = proc_root(case.path(), &[(setting, value)]);
+        assert_eq!(namespace_cause(&proc), Some(cause), "{setting}");
+    }
+    // Neither set to its restrictive value: no cause is named.
+    let case = tempfile::tempdir_in(dir.path()).unwrap();
+    let proc = proc_root(
+        case.path(),
+        &[
+            ("sys/kernel/unprivileged_userns_clone", "1\n"),
+            ("sys/kernel/apparmor_restrict_unprivileged_userns", "0\n"),
+        ],
+    );
+    assert_eq!(namespace_cause(&proc), None);
+}
+
 fn profile(size: bool) -> Profile {
     Profile {
         size,
@@ -316,7 +347,10 @@ fn status_lines_from_the_installed_bwrap_shape() {
         started(line),
         Some(Started {
             child_pid: 3_183_140,
-            pid_namespace: 4_026_532_682
+            pid_namespace: 4_026_532_682,
+            inner_pid: None,
+            inner_start: None,
+            ended: false,
         })
     );
     assert_eq!(started(r#"{ "exit-code": 0 }"#), None);

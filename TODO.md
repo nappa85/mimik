@@ -17,6 +17,12 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   mimik-catalogue-target). Free-model reviews: never in parallel (`tools/external_review.py`
   locks and skips limited models, `~/.cache/mimik-review/limits.json`).
 
+- **Switch to Hakoniwa (ASSIST-51):** make Hakoniwa the Linux sandbox (no feature flag, no
+  `--assistant-sandbox`) and remove the bubblewrap backend, its docs and the `bwrap` host
+  requirement. One review of the switch, then merge.
+- Hakoniwa audit exception: check new Hakoniwa releases; when one drops postcard's default
+  features, remove the RUSTSEC-2023-0089 ignore from `.cargo/audit.toml` (DEP-24).
+
 ## Next steps
 
 0. llama.cpp versions (ASSIST-46): (a) a scheduled CI job that tries each new llama.cpp release
@@ -37,16 +43,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    false-confident count. Run it in a container with the `laya` package, since stock
    llama-server does not run it, and write the decision rule down before running. Shipping it
    would need its own runtime decision (ASSIST-29/33).
-3. A prototype-tier Hakoniwa comparison (user 2026-10-23). It now decides Linux level 1:
-   Hakoniwa or nothing (ASSIST-48); until adopted, bubblewrap stays. Its optional Landlock layer
-   inside the namespaces needs the user's Landlock-enabled kernel (7.3.0, landlock in CONFIG_LSM; check `/sys/kernel/security/lsm`
-   after the reboot). Hakoniwa is a Rust
-   library (LGPL-3.0 with linking exception) that does Linux isolation in-process, so the host
-   would not need `bwrap`. Run it in the runner process with its `seccomp` feature off, so there
-   is no libseccomp C dependency, and install Mimik's own seccompiler filter instead. Compare it
-   with the bwrap profile on the same live adversary checks. Use a stock Ubuntu 24.04 VM to see
-   whether its AppArmor user-namespace restriction blocks Mimik's binary where it allows `bwrap`.
-   If Hakoniwa holds up, adopting it is its own decision and review.
+3. Older-ABI Landlock evidence (below ABI 6; the Ubuntu VM has ABI 4 and fails the two
+   ABI-6 live checks, as documented).
 4. Owed measurements: the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks
    at each llama.cpp pin change (`tools/assist_gpu_live.py`); a trace of the GPU path on another
    driver (AMDVLK, Intel, NVIDIA) for ASSIST-L44/L45; the superseding-job (cancel) timings on CPU and GPU with the fixed
@@ -77,11 +75,16 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Other next actions
 
+- Review helper: `external_review.py`'s short-output unavailable heuristic can reject a real
+  successful verdict that discusses "unavailable" status. Add a regression and narrow the
+  classification; direct sanitized Astra follow-up was needed to read the actual verdict.
+
 - macOS and Windows model runtime (ASSIST-34): not verifiable from this host.
 - **GPU back in service (2026-10-20, after the re-paste):** at 143 W for 5 min with the fan
   on manual 255 and a room fan, the junction plateaus at 77–79 °C (max 83), edge 57 °C, gap
-  about 21 °C. On automatic fan it reaches 85 °C in 22 s, so GPU runs need the manual fan
-  after every reboot (the queue refuses otherwise). Switch the model tooling back from the
+  about 21 °C. On automatic fan it reaches 85 °C in 22 s, so long GPU runs need the manual fan
+  after every reboot (the queue refuses otherwise); the short live GPU tests (`assist_gpu_live.py
+  --short`, ASSIST-50) accept the automatic fan with a 75 °C stop. Switch the model tooling back from the
   CPU-only default (`tools/model_registry.py`, `tools/run_tool_loop_benchmark.sh`
   `DEVICE=cpu`). Diagnostic: `LIMIT=90 DUR=300 target/agent-tools/gpu_diag.sh`.
 - 2a module test gaps from the last review (Minor): no browser case for the `requestSubmit`

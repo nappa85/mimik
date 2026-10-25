@@ -22,6 +22,63 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn("Rust: 1.", script)
         self.assertNotIn("(Rust 1.", script)
 
+    def test_hakoniwa_notices_carry_the_linking_exception_text(self):
+        """DEP-24: cargo-about prints only the LGPL for `LGPL-3.0-only WITH
+        LGPL-3.0-linking-exception`; when the notices name hakoniwa the exception must follow."""
+        project = Path(__file__).resolve().parents[1]
+        license_path = project / "assets" / "hakoniwa-LICENSE"
+        text = package_release.hakoniwa_notice(
+            "## GNU Lesser General Public License v3.0 only\n\n- hakoniwa 1.8.0\n",
+            license_path,
+        )
+        self.assertIn("As a special exception to the GNU Lesser General Public License", text)
+        self.assertIn("GNU LESSER GENERAL PUBLIC LICENSE", text)
+        # Without hakoniwa in the build there is nothing to add.
+        self.assertEqual(package_release.hakoniwa_notice("## MIT\n- serde 1\n", license_path), "")
+        # A copy that lost the exception is refused.
+        with tempfile.TemporaryDirectory() as tmp:
+            stripped = Path(tmp) / "LICENSE"
+            stripped.write_text("GNU LESSER GENERAL PUBLIC LICENSE\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                package_release.hakoniwa_notice("- hakoniwa 1.8.0", stripped)
+        self.assertIn("assets/hakoniwa-LICENSE", REQUIRED)
+
+    def test_the_release_and_its_notices_are_built_with_the_same_features(self):
+        """DEP-24: the release binary and the generated notices must name the same features. The
+        comparison sandbox is off in the release (no `--features` or `--all-features` on its
+        build) and so is its LGPL notice; if the release ever gains `sandbox-hakoniwa`, the
+        notices must be generated with it and `hakoniwa_notice` appends the exception text."""
+        ci = (Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml").read_text()
+        lines = [line.strip() for line in ci.splitlines()]
+        release = [line for line in lines if line.startswith("cargo build --release")]
+        notices = [line for line in lines if line.startswith("cargo about generate")]
+        self.assertEqual(len(release), 1, release)
+        self.assertEqual(len(notices), 1, notices)
+
+        def features(line):
+            return sorted(
+                word
+                for word in line.split()
+                if word.startswith(("--features", "--all-features", "--no-default-features"))
+            )
+
+        self.assertEqual(features(release[0]), features(notices[0]))
+        self.assertEqual(features(release[0]), [], "the release gained features: see DEP-24")
+
+    def test_ci_runs_the_whole_live_suite_against_hakoniwa_with_a_real_runner(self):
+        """Both reviewers: the Hakoniwa live run must use a feature-built Mimik binary as the
+        runner (the single-threaded guard active), skip the GPU-only tests and count its tests."""
+        ci = (Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml").read_text()
+        self.assertIn("cargo build --locked --features sandbox-hakoniwa --bin mimik", ci)
+        step = ci[ci.index("Hakoniwa sandbox, start-time probe and the whole live suite") :]
+        step = step[: step.index("tee target/confinement-hakoniwa.log")]
+        self.assertIn("MIMIK_LIVE_SANDBOX: hakoniwa", step)
+        self.assertIn("MIMIK_LIVE_RUNNER:", step)
+        self.assertIn("--sandbox hakoniwa", step)
+        self.assertIn("assistant::runtime::launch::live_tests::", step)
+        self.assertIn("--skip live_gpu_", step)
+        self.assertIn("--include-ignored", step)
+
     def test_hierarchy_and_screen_regressions_are_required_source_members(self):
         members = [f"mimik/{name}" for name in REQUIRED]
         for name in (

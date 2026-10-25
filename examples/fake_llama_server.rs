@@ -4,7 +4,7 @@
 //! is given, and answers priming, calibration samples and streamed jobs with synthetic
 //! timings. `--alias fail-bind` makes it fail as a server that cannot bind its port does;
 //! `--alias forge-bwrap` prints bubblewrap's error lines and exits, as a compromised server
-//! trying to be restarted unconfined would. `--list-devices` prints the pinned build's
+//! trying to be restarted unconfined would; `--alias forge-exit-<n>` does so with exit code n. `--list-devices` prints the pinned build's
 //! listing of one RX 6650 XT when a render node is bound under `/dev/dri` and `(none)`
 //! otherwise; with `--n-gpu-layers 99` it prints the offload line (`--alias partial-offload`:
 //! 30 of 41 layers).
@@ -185,13 +185,22 @@ fn main() {
         eprintln!("srv    load_model: failed to load model, '{model}'");
         std::process::exit(1);
     }
-    if value_of(&args, "--alias").as_deref() == Some("forge-bwrap") {
-        // What a compromised server could print to look like a sandbox that failed to set up,
-        // once it has been running a moment (so its start went through).
+    let alias = value_of(&args, "--alias").unwrap_or_default();
+    if let Some(rest) = alias.strip_prefix("forge-") {
+        // What a compromised server could print and exit with to look like a sandbox that
+        // failed to set up (bubblewrap's or the Hakoniwa runner's lines; `forge-exit-<n>`
+        // exits with code n, which may be one the runner or its closure uses), once it has
+        // been running a moment (so its start went through).
+        let code = rest
+            .strip_prefix("exit-")
+            .and_then(|code| code.parse().ok())
+            .unwrap_or(1);
         std::thread::sleep(std::time::Duration::from_secs(1));
         eprintln!("bwrap: Can't mount proc on /newroot/proc: Operation not permitted");
+        eprintln!("mimik sandbox: the seccomp program cannot be installed");
+        eprintln!("hakoniwa: mount(\"proc\") => EPERM");
         println!("bwrap: setup failed");
-        std::process::exit(1);
+        std::process::exit(code);
     }
     if value_of(&args, "--n-gpu-layers").as_deref() == Some("99") {
         let layers = if value_of(&args, "--alias").as_deref() == Some("partial-offload") {

@@ -60,6 +60,10 @@ struct AssistantArgs {
     /// `cpu`, or a GPU's PCI address such as `0000:0c:00.0`.
     #[arg(long = "assistant-device")]
     device: Option<String>,
+    /// The level-1 sandbox: `bwrap` (default) or `hakoniwa` (builds with the
+    /// `sandbox-hakoniwa` feature; a comparison, not yet a supported choice).
+    #[arg(long = "assistant-sandbox", hide = true)]
+    sandbox: Option<String>,
     #[cfg(feature = "dev-endpoint")]
     #[command(flatten)]
     development: DevelopmentAssistant,
@@ -89,6 +93,17 @@ fn data_dir(database: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
             std::path::Path::to_path_buf,
         );
     std::path::absolute(folder)
+}
+
+/// Makes the data folder and its missing parents with an explicit mode of 0700, so the folders
+/// Mimik makes do not depend on the umask (Ubuntu's default 002 would make them group-writable).
+/// A folder that already exists keeps its mode.
+fn create_data_dir(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
 }
 
 /// The assistant `--assistant` asks for: the runtime manager over the data directory.
@@ -125,6 +140,7 @@ fn assistant(
         model_alias: args.assistant.model_alias.clone(),
         threads: args.assistant.threads,
         device: args.assistant.device.clone(),
+        sandbox: args.assistant.sandbox.clone(),
     })?;
     println!("Assistant on: the model server is starting (see /admin/assistant).");
     Ok(handle)
@@ -275,6 +291,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if raw.get(1).map(String::as_str) == Some("assistant-runner") {
         std::process::exit(mimik::assistant::runner_main(&raw[2..]));
     }
+    if raw.get(1).map(String::as_str) == Some("assistant-apparmor-profile") {
+        std::process::exit(mimik::assistant::apparmor_profile_main(&raw[2..]));
+    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -288,7 +307,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut options = server_options(&args, std::env::var("MIMIK_EXTERNAL_URL").ok())?;
     let path = database_path(args.database.clone(), std::env::var_os("MIMIK_DATABASE"));
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
+        create_data_dir(parent)?;
     }
     if args.assistant.on {
         options.assistant = Some(assistant(&args, &data_dir(&path)?)?);

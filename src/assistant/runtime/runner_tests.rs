@@ -145,7 +145,24 @@ fn helper() {
         return;
     };
     match mode.as_str() {
-        "runner" => std::process::exit(run(SPEC_FD)),
+        "runner" => {
+            // A kernel without Landlock, simulated: the three calls answer the errno named
+            // (`ENOSYS`, `EOPNOTSUPP` or `EPERM`), in this thread and so in what it forks
+            // (the live fallback tests).
+            if let Ok(name) = std::env::var("MIMIK_TEST_NO_LANDLOCK") {
+                let errno = match name.as_str() {
+                    "ENOSYS" => libc::ENOSYS,
+                    "EOPNOTSUPP" => libc::EOPNOTSUPP,
+                    "EPERM" => libc::EPERM,
+                    other => panic!("unknown errno {other}"),
+                };
+                seccomp::install(&seccomp::program_without_landlock(
+                    u32::try_from(errno).unwrap(),
+                ))
+                .unwrap();
+            }
+            std::process::exit(run(SPEC_FD))
+        }
         "report" => test_helper::print(&report()),
         "hold" => {
             test_helper::print(&report());
@@ -346,4 +363,56 @@ fn a_spec_or_handover_past_the_runners_bounds_is_refused() {
         error.to_string().contains("more than the runner's 64"),
         "{error}"
     );
+}
+
+#[test]
+fn an_oversized_spec_never_reallocates_the_buffer_that_holds_the_token() {
+    use std::io::Write;
+    // The writer's buffer is reserved to the limit: writing up to it moves nothing, and a write
+    // past it is refused instead of growing (which would leave an unwiped copy behind).
+    let mut writer = Bounded::new(64);
+    let before = writer.buffer.as_ptr();
+    writer.write_all(&[7; 64]).unwrap();
+    assert_eq!(writer.buffer.as_ptr(), before);
+    assert_eq!(writer.buffer.capacity(), 64);
+    assert!(writer.write_all(&[7; 1]).is_err());
+    assert_eq!(writer.buffer.as_ptr(), before);
+    assert_eq!(writer.buffer.capacity(), 64);
+    assert_eq!(writer.buffer.len(), 64);
+}
+
+#[test]
+fn a_spec_whose_secret_comes_before_the_overflowing_field_is_refused() {
+    use crate::assistant::runtime::hako::{Plan, Secret};
+    let plan = Plan {
+        root: "/r".into(),
+        token: Secret::new("token-first-in-the-document".into()),
+        binds: Vec::new(),
+        tmpfs: Vec::new(),
+        symlinks: Vec::new(),
+        dirs: Vec::new(),
+        workdir: "/w".into(),
+        argv: vec!["x".repeat(2000)],
+        env: Vec::new(),
+    };
+    let spec = Spec {
+        parent: 1,
+        keep: Vec::new(),
+        env: Vec::new(),
+        chdir: None,
+        exec: Exec::Hakoniwa {
+            plan: Box::new(plan),
+            status: 4,
+            marker: 12,
+            ack: 13,
+        },
+    };
+    // The token is serialized before the long argument that overflows a small limit: refused,
+    // by the bounded writer, with nothing grown.
+    let error = encode_spec(&spec, 256).unwrap_err();
+    assert!(
+        error.to_string().contains("more than the 256 bytes"),
+        "{error}"
+    );
+    assert!(encode_spec(&spec, 1 << 20).is_ok());
 }

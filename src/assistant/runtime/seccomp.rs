@@ -238,6 +238,29 @@ pub(crate) fn program(profile: Profile) -> BpfProgram {
     program
 }
 
+/// A program that makes the kernel look as if it had no Landlock: the three Landlock calls
+/// answer `errno` (`ENOSYS` for a kernel built without it, `EOPNOTSUPP` for one that disabled
+/// it at boot, `EPERM` for a filter around Mimik). Tests only: the live fallback tests install
+/// it in the runner.
+#[cfg(test)]
+pub(crate) fn program_without_landlock(errno: u32) -> BpfProgram {
+    // x86_64 syscall numbers (landlock_create_ruleset, landlock_add_rule,
+    // landlock_restrict_self), like the rest of this file's x86_64-only program: the
+    // simulation only runs where the shipped program does.
+    const LANDLOCK_CALLS: [i64; 3] = [444, 445, 446];
+    let filter = SeccompFilter::new(
+        LANDLOCK_CALLS
+            .iter()
+            .map(|number| (*number, Vec::new()))
+            .collect(),
+        SeccompAction::Allow,
+        SeccompAction::Errno(errno),
+        TargetArch::x86_64,
+    )
+    .expect("allow and refuse differ");
+    filter.try_into().expect("the program compiles")
+}
+
 /// The program as bubblewrap's `--seccomp` reads it: the instructions' bytes, native endian.
 pub(crate) fn bytes(program: &[sock_filter]) -> Vec<u8> {
     let mut out = Vec::with_capacity(program.len() * 8);

@@ -5,6 +5,70 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Landlock inside Hakoniwa namespaces (comparison build, 2026-10-24)
+
+Scope: one Gentoo dev host, kernel `7.3.0-gentoo`, Landlock ABI 11; Hakoniwa 1.8.0,
+`landlock` 0.4.7 targeting ABI 6, pinned llama.cpp b11609 CPU build and the synthetic
+`stories260K` model. The seccomp, endpoint, runner and live suite passed 54/54 checks in
+each of three configurations: bubblewrap with the libtest runner, Hakoniwa with the libtest
+runner, and Hakoniwa with the rebuilt single-threaded Mimik runner. All used two test
+threads; real-GPU tests were excluded, three fake-GPU tests were included. This is
+containment evidence for the comparison build, not an adoption or release verdict.
+
+The Hakoniwa closure reports full enforcement on this kernel. The adversary's filesystem
+and TCP operations forbidden by Landlock return `EACCES`, while permitted temporary-file,
+device and system-data operations remain usable. A separate helper confirms abstract-socket
+and signal scoping against an outside peer, with inside-domain controls. A seccomp filter
+returning `ENOSYS` for the three Landlock calls simulates a kernel without Landlock: the
+server still serves inside the namespace sandbox and reports the layer unavailable.
+Bubblewrap reports no Landlock layer. Child-local bounded raw capture checks that the
+request marker reaches neither output stream; overflow fails the check.
+
+Limits: no real older-ABI or boot-disabled kernel, real GPU under Landlock, Ubuntu AppArmor
+VM or other distribution was tested here. The `ENOSYS` simulation is not older-ABI evidence.
+The existing `atomic-polyfill` advisory remains unresolved; an offline audit attempt could
+not load the container's advisory database, so it provides no fresh audit verdict.
+
+## Hakoniwa level-1 sandbox against bubblewrap (prototype tier, 2026-10-23)
+
+Scope: Hakoniwa 1.8.0 (`seccomp` feature off; Mimik's seccompiler program installed in its
+closure) against bubblewrap 0.13.0 as level 1, one dev host (Gentoo, kernel 7.2.8, no
+AppArmor or Landlock in the kernel's LSM list, unprivileged user namespaces on, `/` mounted
+`noatime`), the pinned llama.cpp b11609 CPU build with the CI test model (`stories260K`) and
+Mimik's fake server (forged output, exec failure, swapped files, fake GPU nodes). One run per
+backend of the same suite (the seccomp, endpoint, runner and `launch::live_tests` tests that
+`MIMIK_LIVE_SANDBOX` parametrises; 45 tests, 3 of them force Hakoniwa) and ten start-time
+probes each. Not covered here (Ubuntu 24.04 and Landlock have their own sections below): a real GPU (only the fake render node), other kernels or
+distributions, load. Reviewers have not seen it; no product decision rests on it yet.
+
+- Every check passes on both backends: nothing but the Unix socket reachable (host TCP, LAN,
+  public TCP, UDP, abstract and host Unix sockets all refused; no network interface is
+  configured in the empty namespace), `/home` and the host root invisible, `fork` refused,
+  `/tmp` and `/dev/shm` bounded, no inherited descriptor above 2 (standard input is
+  `/dev/null`), every capability set empty (bounding included), `no_new_privs` and the seccomp
+  filter in force, no controlling terminal, `/dev/tty` unopenable and `TIOCSTI` refused on
+  descriptors 0 to 2, every mount read-only or `nosuid`/`nodev` as planned, the whole process
+  tree gone within 10 s of a SIGKILL of Mimik (during startup and when ready), forged
+  sandbox-failure lines and thirteen exit codes (110 to 137, those the runner and its closure
+  use among them) from the server count as the server's failure with the level kept, a server
+  file that cannot be executed is the server's failure, and the CPU path and the fake GPU
+  paths (listing, node binding, partial offload, no node) behave the same.
+- Hakoniwa-only checks pass: a model or server file replaced after verification (a new
+  inode with the same bytes, a link to a copy) is refused before the exec, as a sandbox
+  failure, and the server never runs; the token is in no file under the data and scratch
+  directories (it lives in the sandbox's own memory-backed `/run`).
+- Differences that are not bugs: the verified descriptors cannot be bound (path binds with an
+  identity check instead); the program is PID 1 with its reaper outside the namespace; no
+  shim, no helper binary, no seccomp descriptor; Mimik's PID-namespace-number comparison is
+  skipped (`HAKO-L2`). Hakoniwa's own fallback for a refused read-only remount drops
+  read-only, so Mimik gives the source's locked flags up front and does not enable it.
+- Start-time probe, ten runs each: bubblewrap 1.88 to 1.99 s, Hakoniwa 1.91 to 2.03 s: no
+  measurable difference at that resolution.
+- Cost side (DEP-24): `cargo audit --deny warnings` fails on `RUSTSEC-2023-0089`
+  (`atomic-polyfill` through `postcard` and `heapless`), `chrono` and `flate2` enter the tree
+  through Hakoniwa's `procfs` features, the project is young (one main author). Its source is 5.4k lines with 23 `unsafe` lines; Mimik's
+  adapter adds three justified `unsafe` blocks.
+
 ## Model runtime: idle CPU calibration and the GPU path (steps 2c-2a and 2c-2b-1, 2026-10-23)
 
 Granite 4.2 3B Q4_K_M, `max_tokens` 352, pinned llama.cpp b11609 (CPU and Vulkan builds),
@@ -781,3 +845,56 @@ decides.**
   missing evidence.
 - **Limitations:** no live retrieval was run, no PDF was compared visually, and no error rate
   was estimated.
+
+## Live GPU under Hakoniwa with Landlock, automatic fan (2026-10-24)
+
+- **Question:** do Vulkan discovery, the render node and the driver data work under the Landlock
+  rules and the `noexec` tmpfs mounts, and is the automatic fan acceptable for the short tests?
+- **Setup:** `assist_gpu_live.py --short` (75 °C guard, 1 s samples, automatic fan, idle 44 °C)
+  on the RX 6650 XT, Vulkan build, granite-4.2-3b Q4_K_M, feature-built test binary and `mimik`.
+  Four tests, one run (632 s), then the one failure alone.
+- **Numbers:** `live_gpu_landlock_the_rx6650_reaches_ready_under_hakoniwa` passed: path GPU,
+  RADV NAVI23, Landlock reported full, two calibration samples (about 8.1 s each). The two
+  bubblewrap GPU tests passed or failed as below. `live_gpu_killing_llama_server_mid_job_*`
+  (bubblewrap backend, no Landlock, no `noexec` change) failed once in the batch (120 s wait in
+  "calibrating" on a cold first start) and passed alone (309 s). A sampler beside the guard (2 s)
+  saw a junction of 76 °C once, a spike between two inference phases at 141 W, which the guard's
+  1 s samples did not catch; the other samples stayed at or below 72 °C.
+- **Conclusion:** the rule table and the `noexec` tmpfs mounts do not break ggml-vulkan or RADV
+  (shader cache included) on this host; the GPU path works under Landlock. The "at most 44 °C"
+  basis of ASSIST-50 is not borne out for a 10-minute batch: the junction reached 72–76 °C on the
+  automatic fan, right at the 75 °C guard.
+- **Rerun** after the Landlock ruleset was rebuilt for the probed ABI (commit 3f62e96): all four
+  tests passed in one run (828 s), sampled junction at most 71 °C.
+- **Limitations:** one host, one GPU, one run; the cold-start timeout was not reproduced; a
+  guard with 1 s samples can miss a short spike; raw output in
+  `/media/data/mimik/hakoniwa/live-gpu/`.
+
+## Hakoniwa sandbox on Ubuntu 24.04 (2026-10-24)
+
+- **Question:** does the generated AppArmor profile make Hakoniwa level 1 reachable on Ubuntu's
+  default restriction of unprivileged user namespaces, and how does the Landlock layer behave
+  on a kernel below ABI 6?
+- **Setup:** QEMU/KVM VM (4 vCPU, 8 GiB) booted from the official Ubuntu noble cloud image,
+  serial 20261017, checksum and GPG signature verified (key D2EB 4462 6FDD C30B 513D 5BB7 1A5D
+  6C4C 7DB8 7C81), kernel 6.8.0-147, Landlock ABI 4. Mimik release build with `sandbox-hakoniwa`,
+  the pinned llama.cpp b11609 CPU runtime, the stories260K model. Repeat with
+  `/media/data/mimik/ubuntu-vm/run.sh`; raw output in
+  `/media/data/mimik/ubuntu-vm/run/20261024-103115/`.
+- **Numbers:** without the profile the probe is refused with the page's AppArmor message; with
+  the generated profile level 1 is reached. A copy or a hard link of the binary at another path is
+  refused; a symbolic link to the original works. The live suite passed 55 of 57; the two
+  failures (`live_the_hakoniwa_closure_reports_landlock_in_full_force` and the scope test) need
+  ABI 6, and the status read "partial (kernel ABI 4)".
+- **Findings that changed the code:** a missing `libgomp.so.1` showed only as a server that never
+  answered `/health` (now named at start); `mkdir -p` and `scp` leave group-writable folders under
+  umask 002, which Mimik refuses (the page now gives the `chmod` fix); the ABI 6 tests now skip
+  below ABI 6 unless demanded.
+- **Limitations:** one image, one kernel, one run; no GPU in the VM; the profile was tried for a
+  binary in the user's home only.
+
+- **Later the same day (after a reboot):** three short GPU batches on the automatic fan were
+  stopped by the 75 °C guard (75, 77 and 77 °C, sampled peak 78 °C) before finishing, so the
+  GPU runs of the dependency-check change are not repeated; the pinned Vulkan server's
+  dependency check passed on this host and the fake-GPU live tests passed. The guard worked as
+  designed (ASSIST-50, HAKO-L9); the hotter junction after the reboot was not explained.

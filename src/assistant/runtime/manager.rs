@@ -31,6 +31,7 @@ use super::{Level, Path};
 use crate::assistant::jobs::{Assistant, Budgets, EndReason, RuntimeEvent, Signal};
 use async_trait::async_trait;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -70,6 +71,11 @@ pub(crate) trait Child: Send + Sync {
     fn notes(&self) -> Vec<String> {
         Vec::new()
     }
+    /// What the Landlock layer inside the Hakoniwa sandbox did, as its closure reported it
+    /// (`None`: no such layer, as with bubblewrap).
+    fn landlock(&self) -> Option<super::hako::Landlock> {
+        None
+    }
     /// After `/health`: on the GPU path every layer must be on the GPU (the offload line),
     /// otherwise the attempt is a GPU failure.
     async fn loaded(&self) -> Result<(), String> {
@@ -107,6 +113,11 @@ pub(crate) trait Launcher: Send + Sync {
         level: Level,
         path: Path,
     ) -> Result<Arc<dyn Child>, Fail>;
+    /// What an advisory check believes explains a failed start of `path` (a library the host
+    /// seems to lack): added to the failure's reason, never a reason to refuse a start.
+    fn failure_hint(&self, _path: Path) -> Option<String> {
+        None
+    }
     /// The GPU the last GPU probe selected.
     fn device(&self) -> Option<DeviceView> {
         None
@@ -139,6 +150,8 @@ pub(crate) struct Status {
     pub calibration: Option<Calibration>,
     pub budgets: Option<Budgets>,
     pub notes: Vec<String>,
+    /// The Landlock layer of the Hakoniwa sandbox (DEP-25); `None` with bubblewrap.
+    pub landlock: Option<super::hako::Landlock>,
     /// A Restart is being carried out.
     pub restarting: bool,
     /// The GPU path is wanted (`--assistant-device` is not `cpu`).
@@ -168,6 +181,7 @@ impl Status {
             calibration: None,
             budgets: None,
             notes: Vec::new(),
+            landlock: None,
             restarting: false,
         }
     }
@@ -347,6 +361,7 @@ pub(crate) fn spawn(
         generation: 0,
         failures: 0,
         gpu_failed: None,
+        health_answered: Arc::new(AtomicBool::new(false)),
     };
     tokio::spawn(manager.run());
     Handle { status, commands }
@@ -417,6 +432,9 @@ struct Manager {
     /// Why the GPU path failed: the CPU path is used until Mimik restarts or the owner
     /// presses "Try the GPU again" (a Restart keeps it).
     gpu_failed: Option<String>,
+    /// Whether `/health` answered in the current attempt: from then on a failure (priming,
+    /// calibration, the offload check) is not a library that failed to load.
+    health_answered: Arc<AtomicBool>,
 }
 
 impl Manager {
@@ -509,6 +527,19 @@ impl Manager {
         Err(next)
     }
 
+    /// `why`, a failure of an attempt to start or to reach `/health`, with the launcher's hint
+    /// for `path` when there is one and `why` lacks it. Only those failures: a probe's reasons,
+    /// a policy skip and the exit of a server that was ready are not explained by a library.
+    fn hinted(&self, path: Path, why: String) -> String {
+        if self.health_answered.load(Ordering::SeqCst) {
+            return why;
+        }
+        match self.launcher.failure_hint(path) {
+            Some(hint) if !why.contains(&hint) => format!("{why} ({hint})"),
+            _ => why,
+        }
+    }
+
     /// The levels that passed their probe and this manager may start, in order; the others
     /// are recorded as skipped.
     fn probed(&mut self, probed: Vec<(Level, Result<(), String>)>) -> Vec<Level> {
@@ -557,6 +588,7 @@ impl Manager {
             status.level = Some(level);
             status.generation = generation;
             status.notes.clear();
+            status.landlock = None;
         });
         generation
     }
@@ -620,6 +652,7 @@ impl Manager {
             status.last_failure = None;
             status.level = None;
             status.gpu_note = note;
+            status.landlock = None;
         });
         if let Err(next) = self.preflight().await {
             return next;
@@ -662,7 +695,8 @@ impl Manager {
                         .skipped
                         .first()
                         .map_or_else(|| "no confinement level".to_owned(), |(_, why)| why.clone());
-                    return PathEnd::GpuFailed(why);
+                    // The listing or the probe of the GPU failed: a library may explain it.
+                    return PathEnd::GpuFailed(self.hinted(path, why));
                 }
                 let why = self.no_level();
                 return PathEnd::Next(self.hold(why).await);
@@ -693,9 +727,11 @@ impl Manager {
                         }
                     }
                 }
-                Attempt::Failed(Fail::Sandbox(why) | Fail::Other(why)) | Attempt::TooSlow(why)
-                    if gpu =>
-                {
+                Attempt::Failed(Fail::Sandbox(why) | Fail::Other(why)) if gpu => {
+                    self.ended(generation, EndReason::Exited);
+                    return PathEnd::GpuFailed(self.hinted(path, why));
+                }
+                Attempt::TooSlow(why) if gpu => {
                     self.ended(generation, EndReason::Exited);
                     return PathEnd::GpuFailed(why);
                 }
@@ -707,6 +743,7 @@ impl Manager {
                 }
                 Attempt::Failed(Fail::Other(why)) => {
                     self.ended(generation, EndReason::Exited);
+                    let why = self.hinted(path, why);
                     self.failed(why);
                     if self.failures < MAX_FAILURES {
                         self.update(|status| {
@@ -763,6 +800,7 @@ impl Manager {
     /// attempt's child is gone when this returns.
     async fn attempt(&mut self, generation: u64, level: Level, path: Path) -> Attempt {
         let launcher = Arc::clone(&self.launcher);
+        self.health_answered.store(false, Ordering::SeqCst);
         let started = tokio::select! {
             started = launcher.start(generation, level, path) => started,
             command = self.commands.recv() => match command {
@@ -779,7 +817,13 @@ impl Manager {
             Err(fail) => return Attempt::Failed(fail),
         };
         let measured = {
-            let measure = measure(&child, path, self.config.max_tokens, &self.status);
+            let measure = measure(
+                &child,
+                path,
+                self.config.max_tokens,
+                &self.status,
+                &self.health_answered,
+            );
             tokio::select! {
                 result = measure => Some(result),
                 fail = child.exited() => Some(Err(Attempt::Failed(fail))),
@@ -815,6 +859,7 @@ impl Manager {
     ) -> Ended {
         let interpreter = child.server().interpreter();
         let notes = child.notes();
+        let landlock = child.landlock();
         // Signals from an earlier generation are stale.
         while self.signals.try_recv().is_ok() {}
         self.assistant.event(RuntimeEvent::Ready {
@@ -824,7 +869,11 @@ impl Manager {
         });
         let level = self.status().level.map_or(0, Level::number);
         log(&format!(
-            "ready: generation {generation}, level {level}; {}",
+            "ready: generation {generation}, level {level}{}; {}",
+            landlock.map_or_else(String::new, |landlock| format!(
+                ", landlock {}",
+                landlock.describe()
+            )),
             measured(&calibration, Some(&budgets))
         ));
         self.update(|status| {
@@ -834,6 +883,7 @@ impl Manager {
             status.calibration = Some(calibration);
             status.budgets = Some(budgets);
             status.notes = notes;
+            status.landlock = landlock;
         });
         let ready_at = Instant::now();
         let mut reset_pending = true;
@@ -917,6 +967,7 @@ async fn measure(
     path: Path,
     max_tokens: u32,
     status: &Arc<Mutex<Status>>,
+    health_answered: &AtomicBool,
 ) -> Result<(Calibration, Budgets), Attempt> {
     let phase = |phase: &'static str| {
         status
@@ -928,6 +979,7 @@ async fn measure(
     let began = Instant::now();
     phase("loading the model");
     healthy(child).await?;
+    health_answered.store(true, Ordering::SeqCst);
     log(&format!(
         "health after {:.1} s",
         began.elapsed().as_secs_f64()

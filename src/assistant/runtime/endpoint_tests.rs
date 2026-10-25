@@ -137,9 +137,17 @@ async fn the_childs_own_listener_is_reached_even_if_it_accepts_late() {
 
 #[tokio::test]
 async fn no_listener_yet_is_not_ready() {
-    let port = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .local_addr()
+    // A port that is bound but never listened on, and stays bound for the whole test: nothing
+    // else (another test's listener) can be given the port in between, and connecting is
+    // refused. (Binding a listener and dropping it left the port free to be reused.)
+    let held = rustix::net::socket(
+        rustix::net::AddressFamily::INET,
+        rustix::net::SocketType::STREAM,
+        None,
+    )
+    .unwrap();
+    rustix::net::bind(&held, &std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = std::net::SocketAddrV4::try_from(rustix::net::getsockname(&held).unwrap())
         .unwrap()
         .port();
     let error = Loopback {
@@ -151,6 +159,7 @@ async fn no_listener_yet_is_not_ready() {
     .err()
     .unwrap();
     assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+    drop(held);
 }
 
 #[tokio::test]
@@ -211,6 +220,7 @@ async fn a_peer_outside_the_sandbox_is_refused_even_with_mimiks_uid() {
     let sandbox = Arc::new(Sandbox {
         reaper: Watched::open(i32::try_from(reaper.child.id()).unwrap()).unwrap(),
         pid_namespace: own_namespace(),
+        inner: std::sync::OnceLock::new(),
     });
     let connector = SandboxSocket {
         directory: Arc::new(dir),
@@ -240,6 +250,7 @@ async fn a_child_of_the_reaper_outside_a_pid_namespace_is_refused() {
         sandbox: Arc::new(Sandbox {
             reaper: Watched::open(i32::try_from(std::process::id()).unwrap()).unwrap(),
             pid_namespace: own_namespace(),
+            inner: std::sync::OnceLock::new(),
         }),
     };
     let error = connector.connect().await.err().unwrap();
@@ -336,7 +347,11 @@ fn only_a_reaper_that_has_exited_counts_as_gone() {
     let error = open_reaper(pid, 1, 0).unwrap_err();
     assert!(is_gone(&error), "{error:?}");
     // A reaper that is alive but not the runner's child is refused, not gone.
-    let own = open_reaper(i32::try_from(std::process::id()).unwrap(), 1, 0).unwrap_err();
+    // The claimed runner is this very process: never its own parent, whatever started the
+    // tests (a runner of PID 1 made this test pass only when the test's parent was not
+    // PID 1, as under `docker run cargo`).
+    let me = i32::try_from(std::process::id()).unwrap();
+    let own = open_reaper(me, me, 0).unwrap_err();
     assert!(!is_gone(&own), "{own:?}");
     assert!(!is_gone(&refused(
         "the reported reaper is in another PID namespace"

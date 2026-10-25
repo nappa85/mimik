@@ -8,6 +8,8 @@ use super::device::{self, Candidate, Choice, Listed, Roots};
 use super::drain::{self, Summary};
 use super::endpoint::{self, Loopback, Sandbox, SandboxSocket, Watched};
 use super::files::{self, HashCache, Owners, Verified};
+use super::hako;
+use super::libs;
 use super::manager::{Child, DeviceView, Fail, Launcher};
 use super::manifest::{Build, MANIFEST};
 use super::rundir::{self, Entry, Generation, Pidfile, Swept};
@@ -15,7 +17,7 @@ use super::runner::{self, Exec, Handover, RunnerCommand, Spec};
 use super::seccomp;
 use super::server::{Llama, Server};
 use super::token::{self, Token};
-use super::{Level, Path};
+use super::{Backend, Level, Path};
 use crate::assistant::transport::{Bounded, Connect};
 use async_trait::async_trait;
 use std::io::{BufRead, Read};
@@ -59,6 +61,8 @@ mod fds {
     pub const BUILD_DIR: RawFd = 11;
     /// The shim's marker pipe at level 1.
     pub const MARKER: RawFd = 12;
+    /// Hakoniwa: the acknowledgement pipe the runner waits on.
+    pub const ACK: RawFd = 13;
     /// The first runtime file at level 1.
     pub const RUNTIME: RawFd = 16;
     /// Level 1's descriptors besides the runtime files: status, seccomp, token, socket
@@ -130,6 +134,8 @@ pub(crate) struct Settings {
     pub device: Choice,
     /// Where render nodes are found (`/sys`, `/dev/dri`; tests give fake trees).
     pub roots: Roots,
+    /// Which sandbox builds level 1.
+    pub backend: Backend,
 }
 
 #[derive(Default)]
@@ -154,6 +160,28 @@ struct Held {
 pub(crate) struct Selected {
     pub candidate: Candidate,
     pub binds: GpuBinds,
+}
+
+/// A refusal of a folder or file under `folder`, as the page says it, with the exact command
+/// when the owner can fix it (Ubuntu's default umask 002 makes `mkdir -p` and `scp` leave
+/// group-writable folders; Mimik never accepts them). `private` is the models folder, which
+/// must also be 0700; the runtime folder only has to be unwritable by group and others.
+fn refused(
+    what: &str,
+    folder: &std::path::Path,
+    private: bool,
+    refusal: &files::Refusal,
+) -> String {
+    let quoted = super::hako::shell_word(&folder.to_string_lossy());
+    match refusal {
+        files::Refusal::Writable(_) => {
+            format!("{what}: {refusal}; fix it with `chmod -R go-w {quoted}`")
+        }
+        files::Refusal::Mode(_) if private => {
+            format!("{what}: {refusal}; fix it with `chmod 700 {quoted}`")
+        }
+        _ => format!("{what}: {refusal}"),
+    }
 }
 
 /// Refuses executable paths with a newline: the pidfile holds one per line.
@@ -207,6 +235,9 @@ pub(crate) struct Real {
     /// Whether level 3 may be started (ASSIST-43: never in this release; only tests that keep
     /// its code from rotting set it, through [`Real::allowing_unconfined`]).
     unconfined: bool,
+    /// What the advisory library check last believed was missing for each path (CPU, GPU): a
+    /// hint added to a failed start, never a reason to refuse or change one.
+    library_hints: Mutex<[Option<String>; 2]>,
 }
 
 /// A count of running cleanups, waited on without polling: a spawn blocks until it is 0.
@@ -380,6 +411,7 @@ impl Real {
             pidfile: Arc::new(Mutex::new(None)),
             work: Work::new(),
             probes: AtomicU64::new(1),
+            library_hints: Mutex::new([None, None]),
             cleanups: Arc::new(Cleanups::default()),
             unconfined: false,
         }
@@ -481,8 +513,19 @@ impl Real {
         &self.work
     }
 
+    /// Sets (or, with `None`, clears) what the advisory library check believes about `path`.
+    fn set_library_hint(&self, path: Path, hint: Option<String>) {
+        self.library_hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)[usize::from(path == Path::Gpu)] =
+            hint;
+    }
+
     /// The model and the build's files, verified.
     fn verify(&self, path: Path, level: Level, ticket: &Ticket) -> Result<Checked, String> {
+        // The hint belongs to one attempt: whatever an earlier verification believed is gone
+        // before anything here can refuse.
+        self.set_library_hint(path, None);
         let stop = || ticket.cancelled();
         let build = self
             .build(path)
@@ -493,14 +536,43 @@ impl Real {
                 #[cfg(test)]
                 self.paused("runtime-opened");
             })
-            .map_err(|refusal| format!("the model runtime: {refusal}"))?;
+            .map_err(|refusal| {
+                refused(
+                    "the model runtime",
+                    &self.settings.runtime_dir,
+                    false,
+                    &refusal,
+                )
+            })?;
         let build_fd =
             files::open_dir_beneath(runtime.as_fd(), &build.directory, Owners::MineOrRoot, false)
-                .map_err(|refusal| format!("the model runtime: {refusal}"))?;
-        let files = files::runtime_until(build_fd.as_fd(), build, &self.cache, &stop)
-            .map_err(|refusal| format!("the model runtime: {refusal}"))?;
-        let models = files::open_dir(&self.settings.models_dir, Owners::Mine, true)
-            .map_err(|refusal| format!("the models folder: {refusal}"))?;
+                .map_err(|refusal| {
+                refused(
+                    "the model runtime",
+                    &self.settings.runtime_dir,
+                    false,
+                    &refusal,
+                )
+            })?;
+        let files = files::runtime_until(build_fd.as_fd(), build, &self.cache, &stop).map_err(
+            |refusal| {
+                refused(
+                    "the model runtime",
+                    &self.settings.runtime_dir,
+                    false,
+                    &refusal,
+                )
+            },
+        )?;
+        let models =
+            files::open_dir(&self.settings.models_dir, Owners::Mine, true).map_err(|refusal| {
+                refused(
+                    "the models folder",
+                    &self.settings.models_dir,
+                    true,
+                    &refusal,
+                )
+            })?;
         let model = files::model_until(
             models.as_fd(),
             &self.settings.model,
@@ -510,6 +582,10 @@ impl Real {
         )
         .map_err(|refusal| format!("the model: {refusal}"))?;
         let build_dir = real.join(&build.directory);
+        // Advisory only: a library the host seems to lack is remembered as a hint for a start
+        // that then fails. It never refuses a start, and nothing about the sandbox depends on it.
+        let hint = libs::explain(&files, self.server_name(path), &|| ticket.cancelled());
+        self.set_library_hint(path, hint);
         Ok(Checked {
             files,
             model,
@@ -590,6 +666,98 @@ impl Real {
     }
 }
 
+/// The sandbox for the endpoint check (`None` when it had ended), the pinned one the watcher
+/// waits for, and the connector.
+type Pinning = (Option<Arc<Sandbox>>, Option<Arc<Sandbox>>, Arc<dyn Connect>);
+
+/// Why the sandbox's processes could not be pinned.
+enum Pin {
+    /// The reaper does not exist any more (its pid was reaped).
+    Gone(std::io::Error),
+    Fail(Fail),
+}
+
+/// The sandbox's pinned processes.
+struct Pinned {
+    sandbox: Arc<Sandbox>,
+}
+
+/// Pins the reaper the launcher reported and attaches it to `child`'s guard at once, then
+/// the server (Hakoniwa: PID 1 of the sandbox, reported by the runner with its start time)
+/// the same way. A server that is gone (no such pid, or the pid reused) has ended, and its
+/// reaper, pinned and attached, is still waited for; one that is there is pinned whoever its
+/// parent now is. A Hakoniwa runner that reports no server fails the start.
+fn pin_sandbox(
+    child: &mut Owned,
+    started: &Started,
+    runner: i32,
+    hakoniwa: bool,
+) -> Result<Pinned, Pin> {
+    let reaper = endpoint::pin_reaper(started.child_pid, runner, started.pid_namespace).map_err(
+        |error| {
+            if endpoint::is_gone(&error) {
+                Pin::Gone(error)
+            } else {
+                Pin::Fail(Fail::Other(format!("the sandbox's reaper: {error}")))
+            }
+        },
+    )?;
+    let sandbox = Arc::new(Sandbox {
+        reaper,
+        pid_namespace: started.pid_namespace,
+        inner: std::sync::OnceLock::new(),
+    });
+    child.reaper = Some(Arc::clone(&sandbox));
+    match (started.inner_pid, started.inner_start) {
+        (Some(inner), Some(start)) => match endpoint::open_inner(inner, start) {
+            Ok(endpoint::Inner::Ours(watched)) => {
+                let _ = sandbox.inner.set(endpoint::InnerPin {
+                    watched,
+                    verified: true,
+                });
+            }
+            // Its start time could not be read: it may be the server, so it is waited on
+            // (never signalled) until it exits.
+            Ok(endpoint::Inner::Unverified(watched)) => {
+                let _ = sandbox.inner.set(endpoint::InnerPin {
+                    watched,
+                    verified: false,
+                });
+            }
+            // Gone (no such process, or the pid was reused): it has ended; its reaper, pinned
+            // above and attached, is still waited for.
+            Ok(endpoint::Inner::Gone) => {}
+            Err(error) => {
+                return Err(Pin::Fail(Fail::Other(format!(
+                    "the sandbox's server process: {error}"
+                ))));
+            }
+        },
+        _ if hakoniwa => {
+            return Err(Pin::Fail(Fail::Other(
+                "the sandbox's server process was not reported".into(),
+            )));
+        }
+        _ => {}
+    }
+    Ok(Pinned { sandbox })
+}
+
+/// The `(device, inode)` of a verified object, from its descriptor.
+fn identity_of(fd: &impl AsFd) -> Result<hako::Identity, Fail> {
+    rustix::fs::fstat(fd)
+        .map(|stat| (stat.st_dev, stat.st_ino))
+        .map_err(|_| Fail::Other("a verified object cannot be examined".into()))
+}
+
+/// What the Hakoniwa sandbox executes.
+struct HakoCommand {
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+    /// Read-only binds beside the allowlist: `(source, target, identity)`.
+    extra: Vec<(PathBuf, String, hako::Identity)>,
+}
+
 fn dup(fd: &impl AsFd) -> Result<OwnedFd, String> {
     fd.as_fd()
         .try_clone_to_owned()
@@ -618,8 +786,10 @@ struct Spawned {
     /// Killed and reaped if this is dropped before its watcher takes it.
     child: Owned,
     runner: Watched,
-    /// Level 1: bwrap's report and the reaper.
+    /// Level 1: bwrap's report and the reaper (`None` when it had ended before the check).
     sandbox: Option<Arc<Sandbox>>,
+    /// The sandbox's pinned processes, ended or not: what the watcher waits for.
+    pinned: Option<Arc<Sandbox>>,
     generation: Generation,
     connector: Arc<dyn Connect>,
     status_rest: Option<std::io::BufReader<std::fs::File>>,
@@ -806,6 +976,24 @@ impl Cleanup {
             }
         }
         if let Some(sandbox) = self.reaper.take() {
+            if let Some(inner) = sandbox.inner.get() {
+                let verified = inner.verified;
+                wait_exited(
+                    &|| inner.watched.alive(),
+                    &|| {
+                        if kill_reaper && verified {
+                            let _ = rustix::process::pidfd_send_signal(
+                                &inner.watched.pidfd,
+                                rustix::process::Signal::KILL,
+                            );
+                        }
+                    },
+                    REAPER_WITHIN,
+                    &mut || {
+                        eprintln!("assistant: a failed start's server has not exited yet; waiting");
+                    },
+                );
+            }
             let reaper = &sandbox.reaper;
             wait_exited(
                 &|| reaper.alive(),
@@ -1182,6 +1370,235 @@ impl Real {
         })
     }
 
+    /// What the Hakoniwa sandbox executes: argv and environment, and the probe's own
+    /// executable as an extra read-only bind with its identity.
+    fn hako_command(
+        &self,
+        path: Path,
+        command: &Command<'_>,
+        gpu: Option<&GpuBinds>,
+    ) -> Result<HakoCommand, Fail> {
+        let socket = format!("{}/{}", bwrap::SOCKET_DIR, endpoint::SOCKET);
+        let server = format!("{}/{}", bwrap::RUNTIME, self.server_name(path));
+        let mut env = sandbox_env(path);
+        let mut extra = Vec::new();
+        let argv = match command {
+            Command::Server { device } => {
+                let mut argv = vec![server];
+                argv.extend(self.server_args(bwrap::MODEL, &socket, None, bwrap::TOKEN, *device));
+                argv
+            }
+            Command::ListDevices => vec![server, "--list-devices".to_owned()],
+            Command::Probe => {
+                env.extend(self.settings.inner.probe_env.iter().cloned());
+                let exe = rustix::fs::open(
+                    &self.settings.inner.executable,
+                    rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::empty(),
+                )
+                .map_err(|_| Fail::Other("Mimik's own binary cannot be opened".into()))?;
+                extra.push((
+                    self.settings.inner.executable.clone(),
+                    SHIM_PATH.to_owned(),
+                    identity_of(&exe)?,
+                ));
+                let mut argv = vec![SHIM_PATH.to_owned()];
+                argv.extend(self.settings.inner.probe_args.iter().cloned());
+                argv.push("1".to_owned());
+                if let Some(gpu) = gpu {
+                    argv.extend([super::probe::RENDER.to_owned(), gpu.inside()]);
+                }
+                argv
+            }
+        };
+        Ok(HakoCommand { argv, env, extra })
+    }
+
+    /// The runner's spec and descriptors for the Hakoniwa sandbox: the plan (binds by path
+    /// with the verified identities), the token file in the generation's directory, and only
+    /// the status and marker descriptors handed over (no verified descriptor enters the
+    /// runner's sandbox: Hakoniwa closes them, and the closure checks identities instead).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one sandbox: what runs, with which verified files, on which device"
+    )]
+    fn hako_spec(
+        &self,
+        path: Path,
+        command: &Command<'_>,
+        gpu: Option<&GpuBinds>,
+        checked: (&[Verified], &Verified, &std::path::Path),
+        token: &Token,
+        generation: &Generation,
+        pipes: (OwnedFd, OwnedFd, Option<OwnedFd>),
+    ) -> Result<(Spec, Vec<Handover>), Fail> {
+        let (files, model, build_dir) = checked;
+        let run = self.run_dir().map_err(Fail::Other)?;
+        let run_path = std::fs::read_link(format!(
+            "/proc/self/fd/{}",
+            std::os::fd::AsRawFd::as_raw_fd(&*run)
+        ))
+        .map_err(|_| Fail::Other("the run directory's path cannot be read".into()))?;
+        let generation_path = run_path.join(generation.name());
+        generation
+            .create_root()
+            .map_err(|refusal| Fail::Other(format!("the sandbox root: {refusal}")))?;
+        let mut runtime = Vec::new();
+        for file in files {
+            runtime.push(hako::File {
+                name: file.name.clone(),
+                source: build_dir.join(&file.name),
+                identity: identity_of(&file.fd)?,
+            });
+        }
+        let HakoCommand { argv, env, extra } = self.hako_command(path, command, gpu)?;
+        let plan = hako::plan(&hako::Inputs {
+            root: run_path.join(generation.root_name()),
+            mountinfo: std::fs::read_to_string("/proc/self/mountinfo")
+                .map_err(|_| Fail::Other("the mount table cannot be read".into()))?,
+            runtime,
+            model: (
+                self.settings.models_dir.join(&model.name),
+                (model.identity.device, model.identity.inode),
+            ),
+            token: hako::Secret::new(String::from_utf8_lossy(&token.line()).into_owned()),
+            generation: (generation_path, identity_of(&generation.fd)?),
+            extra,
+            gpu,
+            env,
+            argv,
+        });
+        let (status, marker, ack) = pipes;
+        let mut handover = vec![
+            Handover {
+                fd: status,
+                target: fds::STATUS,
+            },
+            Handover {
+                fd: marker,
+                target: fds::MARKER,
+            },
+        ];
+        // The runner holds the sandbox's processes (their pids pinned or not) until Mimik has
+        // pinned them: one byte on this pipe says so, its closing without one says the start
+        // failed and the runner must end the sandbox.
+        let ack_target = ack.map(|fd| {
+            handover.push(Handover {
+                fd,
+                target: fds::ACK,
+            });
+            fds::ACK
+        });
+        let spec = Spec {
+            parent: std::process::id(),
+            keep: handover.iter().map(|h| h.target).collect(),
+            env: vec![
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("LANG".into(), "C.UTF-8".into()),
+            ],
+            chdir: None,
+            exec: Exec::Hakoniwa {
+                plan: Box::new(plan),
+                status: fds::STATUS,
+                marker: fds::MARKER,
+                ack: ack_target.ok_or_else(|| Fail::Other("no acknowledgement pipe".into()))?,
+            },
+        };
+        Ok((spec, handover))
+    }
+
+    /// The runner's spec and handover for the configured sandbox.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one sandbox: what runs, with which verified files, on which device"
+    )]
+    fn sandbox_parts(
+        &self,
+        bwrap: &Bwrap,
+        path: Path,
+        command: &Command<'_>,
+        gpu: Option<&GpuBinds>,
+        checked: (&[Verified], &Verified, &std::path::Path),
+        token: &Token,
+        generation: &Generation,
+        pipes: (OwnedFd, OwnedFd, Option<OwnedFd>),
+    ) -> Result<(Spec, Vec<Handover>), Fail> {
+        let (files, model, _) = checked;
+        if self.settings.backend == Backend::Hakoniwa {
+            return self.hako_spec(path, command, gpu, checked, token, generation, pipes);
+        }
+        let (status_write, marker_write, _) = pipes;
+        let seccomp = bytes_pipe(&seccomp::bytes(&seccomp::program(
+            seccomp::Profile::Sandbox,
+        )))
+        .map_err(Fail::Other)?;
+        let token_pipe = token.pipe().map_err(|_| Fail::Other("no pipe".into()))?;
+        let (mut handover, runtime) =
+            sandbox_handover(status_write, seccomp, token_pipe, generation, model, files)?;
+        handover.push(Handover {
+            fd: marker_write,
+            target: fds::MARKER,
+        });
+        let spec = self.sandbox_spec(bwrap, path, command, gpu, &mut handover, runtime)?;
+        Ok((spec, handover))
+    }
+
+    /// Pins the sandbox's processes (every handle attached to `child`'s guard the moment it is
+    /// opened) and says what became of them: the sandbox for the endpoint check (`None` when it
+    /// had ended), the pinned one for the watcher, and the connector.
+    fn pin_or_end(
+        &self,
+        child: &mut Owned,
+        started: &Started,
+        pid: i32,
+        command: &Command<'_>,
+        generation: &Generation,
+    ) -> Result<Pinning, Fail> {
+        let hakoniwa = self.settings.backend == Backend::Hakoniwa;
+        // Every handle is attached to the failed-start guard the moment it is opened, and a
+        // reaper that is gone is never taken for a server that is (the inner process is
+        // pinned, or proven gone, either way).
+        let ended_ok = hakoniwa || matches!(command, Command::ListDevices | Command::Probe);
+        let pinning: Pinning = match pin_sandbox(child, started, pid, hakoniwa) {
+            Ok(pinned) if pinned.sandbox.reaper.alive() => {
+                let connector: Arc<dyn Connect> = Arc::new(SandboxSocket {
+                    directory: Arc::new(dup(&generation.fd).map_err(Fail::Other)?),
+                    sandbox: Arc::clone(&pinned.sandbox),
+                });
+                (
+                    Some(Arc::clone(&pinned.sandbox)),
+                    Some(pinned.sandbox),
+                    connector,
+                )
+            }
+            // A device listing is over in moments and a probe that cannot start (an unopenable
+            // render node) ends at once: the sandbox may be gone before the reaper is checked,
+            // which tears down the whole PID namespace and needs no kill. The listing's exit
+            // and the probe's report then decide. With Hakoniwa a server's start can end as
+            // quickly (a bound object that is not the verified one refuses the exec at once):
+            // the marker then classifies the exit (absent: the sandbox; present: the server).
+            // The pinned processes stay with the guard and the watcher either way.
+            Ok(pinned) if ended_ok => (None, Some(pinned.sandbox), Arc::new(NoSocket)),
+            Ok(_) => {
+                return Err(Fail::Other(format!(
+                    "the sandbox's reaper: {}",
+                    endpoint::GONE_TEXT
+                )));
+            }
+            // The reaper is already reaped: for a listing or a probe the sandbox is over; with
+            // Hakoniwa only when the runner said it reaped it after the server's own exit
+            // status (`ended`), never because a reaper happens to be missing.
+            Err(Pin::Gone(_)) if (ended_ok && !hakoniwa) || (hakoniwa && started.ended) => {
+                (None, None, Arc::new(NoSocket))
+            }
+            Err(Pin::Gone(error)) => {
+                return Err(Fail::Other(format!("the sandbox's reaper: {error}")));
+            }
+            Err(Pin::Fail(fail)) => return Err(fail),
+        };
+        Ok(pinning)
+    }
+
     /// Starts level 1: bwrap with the profile (and on the GPU path the selected node's
     /// binds), then reads `child-pid` and `pid-namespace`.
     #[expect(
@@ -1197,38 +1614,45 @@ impl Real {
         token: &Token,
         command: &Command<'_>,
         gpu: Option<&GpuBinds>,
+        build_dir: &std::path::Path,
     ) -> Result<Spawned, Fail> {
+        let hakoniwa = self.settings.backend == Backend::Hakoniwa;
         let bwrap = self
             .held()
             .bwrap
             .clone()
-            .ok_or_else(|| Fail::Sandbox("bubblewrap did not pass the preflight".into()))?;
+            .ok_or_else(|| Fail::Sandbox("the sandbox did not pass the preflight".into()))?;
         // The pidfile names these, one per line: checked before anything is created or
         // spawned.
-        let executables = vec![
-            bwrap.path.display().to_string(),
-            self.settings.runner.program.display().to_string(),
-        ];
+        let mut executables = vec![self.settings.runner.program.display().to_string()];
+        if !hakoniwa {
+            executables.insert(0, bwrap.path.display().to_string());
+        }
         newline_free(&executables)?;
         let run = self.run_dir().map_err(Fail::Other)?;
         let generation = Generation::create(&run, &job.name)
             .map_err(|refusal| Fail::Other(format!("the socket directory: {refusal}")))?;
-        let seccomp = bytes_pipe(&seccomp::bytes(&seccomp::program(
-            seccomp::Profile::Sandbox,
-        )))
-        .map_err(Fail::Other)?;
         let (status_read, status_write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
             .map_err(|_| Fail::Other("no pipe".into()))?;
-        let token_pipe = token.pipe().map_err(|_| Fail::Other("no pipe".into()))?;
         let (marker_read, marker_write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
             .map_err(|_| Fail::Other("no pipe".into()))?;
-        let (mut handover, runtime) =
-            sandbox_handover(status_write, seccomp, token_pipe, &generation, model, files)?;
-        handover.push(Handover {
-            fd: marker_write,
-            target: fds::MARKER,
-        });
-        let spec = self.sandbox_spec(&bwrap, path, command, gpu, &mut handover, runtime)?;
+        let (ack_read, ack_write) = if hakoniwa {
+            let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
+                .map_err(|_| Fail::Other("no pipe".into()))?;
+            (Some(read), Some(write))
+        } else {
+            (None, None)
+        };
+        let (spec, handover) = self.sandbox_parts(
+            &bwrap,
+            path,
+            command,
+            gpu,
+            (files, model, build_dir),
+            token,
+            &generation,
+            (status_write, marker_write, ack_read),
+        )?;
         self.after_cleanups(job)?;
         pause_at!(self, "before-spawn");
         job.check()?;
@@ -1253,49 +1677,22 @@ impl Real {
         fault_at!(self, "recorded", child);
         // No status line: bwrap failed before it created the sandbox (nothing it started could
         // have written anything yet).
-        let (
-            Started {
-                child_pid,
-                pid_namespace,
-            },
-            rest,
-        ) = read_started(status_read, job)?;
+        let (started, rest) = read_started(status_read, job, self.settings.backend)?;
         fault_at!(self, "started", child);
         pause_at!(self, "before-reaper");
-        let (sandbox, connector): (Option<Arc<Sandbox>>, Arc<dyn Connect>) =
-            match endpoint::open_reaper(child_pid, pid, pid_namespace) {
-                Ok(reaper) => {
-                    let sandbox = Arc::new(Sandbox {
-                        reaper,
-                        pid_namespace,
-                    });
-                    child.reaper = Some(Arc::clone(&sandbox));
-                    let connector: Arc<dyn Connect> = Arc::new(SandboxSocket {
-                        directory: Arc::new(dup(&generation.fd).map_err(Fail::Other)?),
-                        sandbox: Arc::clone(&sandbox),
-                    });
-                    (Some(sandbox), connector)
-                }
-                // A device listing is over in moments and a probe that cannot start (an
-                // unopenable render node) ends at once: the sandbox may be gone before the
-                // reaper can be pinned, which tears down the whole PID namespace and needs no
-                // kill. The listing's exit and the probe's report then decide.
-                Err(error)
-                    if matches!(command, Command::ListDevices | Command::Probe)
-                        && endpoint::is_gone(&error) =>
-                {
-                    (None, Arc::new(NoSocket))
-                }
-                Err(error) => {
-                    return Err(Fail::Other(format!("the sandbox's reaper: {error}")));
-                }
-            };
+        let (sandbox, pinned, connector) =
+            self.pin_or_end(&mut child, &started, pid, command, &generation)?;
+        // Pinned and attached: the runner may go on (and reap the reaper when it ends).
+        if let Some(ack) = ack_write {
+            let _ = rustix::io::write(&ack, b"1");
+        }
         fault_at!(self, "connector", child);
         pause_at!(self, "spawned");
         Ok(Spawned {
             child,
             runner,
             sandbox,
+            pinned,
             generation,
             connector,
             status_rest: Some(rest),
@@ -1475,6 +1872,7 @@ impl Real {
             child,
             runner,
             sandbox: None,
+            pinned: None,
             generation,
             connector,
             status_rest: None,
@@ -1535,6 +1933,7 @@ fn sandbox_handover(
 fn read_started(
     status: OwnedFd,
     job: &Job,
+    backend: Backend,
 ) -> Result<(Started, std::io::BufReader<std::fs::File>), Fail> {
     let file = std::fs::File::from(status);
     let (lines, report) = std::sync::mpsc::channel();
@@ -1544,7 +1943,10 @@ fn read_started(
             let mut reader = std::io::BufReader::new(file.take(64 * 1024));
             let mut line = String::new();
             let started = match reader.read_line(&mut line) {
-                Ok(n) if n > 0 => bwrap::started(&line),
+                Ok(n) if n > 0 => match backend {
+                    Backend::Bwrap => bwrap::started(&line),
+                    Backend::Hakoniwa => hako::started(&line),
+                },
                 _ => None,
             };
             let rest = std::io::BufReader::new(reader.into_inner().into_inner());
@@ -1560,7 +1962,10 @@ fn read_started(
             ))
         })?;
     let started = started.ok_or_else(|| {
-        Fail::Sandbox("bubblewrap failed before starting the model server".into())
+        Fail::Sandbox(format!(
+            "{} failed before starting the model server",
+            backend.name()
+        ))
     })?;
     Ok((started, rest))
 }
@@ -1778,12 +2183,50 @@ enum Marker {
     Unknown,
 }
 
-/// The marker pipe's outcome, set once by its reader.
-struct MarkerState(std::sync::atomic::AtomicU8);
+/// The marker pipe's outcome, set once by its reader, and the Landlock report that followed
+/// the marker (Hakoniwa only).
+struct MarkerState(
+    std::sync::atomic::AtomicU8,
+    Mutex<Option<super::hako::Landlock>>,
+);
 
 impl MarkerState {
+    async fn require_landlock(&self, within: Duration) -> Result<(), String> {
+        tokio::time::timeout(within, async {
+            loop {
+                // The reader publishes the report before completion. Observe completion
+                // first, so a publication between the two reads cannot look like a missing
+                // report from a finished reader.
+                let completed = self.0.load(Ordering::SeqCst) != 0;
+                if self.landlock().is_some() {
+                    return Ok(());
+                }
+                if completed {
+                    return Err("the sandbox did not report its Landlock status".to_owned());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| Err("the sandbox's Landlock report timed out".to_owned()))
+    }
+
     fn new() -> Arc<Self> {
-        Arc::new(Self(std::sync::atomic::AtomicU8::new(0)))
+        Arc::new(Self(std::sync::atomic::AtomicU8::new(0), Mutex::new(None)))
+    }
+
+    fn set_landlock(&self, landlock: Option<super::hako::Landlock>) {
+        *self
+            .1
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = landlock;
+    }
+
+    fn landlock(&self) -> Option<super::hako::Landlock> {
+        *self
+            .1
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn set(&self, marker: Marker) {
@@ -1805,13 +2248,23 @@ impl MarkerState {
     }
 }
 
-/// Reads the marker pipe to its end (64 bytes at most).
-fn marker_outcome(mut pipe: impl Read) -> Marker {
+/// Reads the marker pipe to its end (128 bytes at most).
+#[cfg(test)]
+fn marker_outcome(pipe: impl Read) -> Marker {
+    marker_report(pipe).0
+}
+
+/// [`marker_outcome`] and, after the marker, the Landlock report the Hakoniwa closure appends
+/// (`None` for bubblewrap's shim, a closure without one, or text that is not a report).
+fn marker_report(mut pipe: impl Read) -> (Marker, Option<super::hako::Landlock>) {
     let mut text = Vec::new();
-    match pipe.by_ref().take(64).read_to_end(&mut text) {
-        Ok(_) if text.starts_with(super::probe::MARKER) => Marker::Executed,
-        Ok(0) => Marker::Absent,
-        _ => Marker::Unknown,
+    match pipe.by_ref().take(128).read_to_end(&mut text) {
+        Ok(_) if text.starts_with(super::probe::MARKER) => (
+            Marker::Executed,
+            super::hako::Landlock::parse(&text[super::probe::MARKER.len()..]),
+        ),
+        Ok(0) => (Marker::Absent, None),
+        _ => (Marker::Unknown, None),
     }
 }
 
@@ -1832,9 +2285,12 @@ const BIND_LISTENING: Duration = Duration::from_secs(10);
 /// Why a child ended: at level 1, a sandbox failure only when the marker pipe ended cleanly
 /// without the marker (nothing the executed command prints can make it one); an unknown
 /// outcome, like any other exit, is counted at the same level.
-fn classify(level: Level, marker: Marker, summary: Summary, why: &str) -> Fail {
+fn classify(level: Level, backend: Backend, marker: Marker, summary: Summary, why: &str) -> Fail {
     if level == Level::Bubblewrap && marker == Marker::Absent {
-        Fail::Sandbox(format!("bubblewrap could not set up the sandbox ({why})"))
+        Fail::Sandbox(format!(
+            "{} could not set up the sandbox ({why})",
+            backend.name()
+        ))
     } else if summary.failed.model_load {
         Fail::Other(format!("the model could not be loaded ({why})"))
     } else {
@@ -1862,11 +2318,14 @@ pub(crate) struct RealChild {
     healthy: AtomicBool,
     generation_dir: Mutex<Option<Generation>>,
     level: Level,
+    backend: Backend,
     path: Path,
     notes: Vec<String>,
     /// The launcher's runtime directory (a test's key for the drain gate).
     #[cfg(test)]
     runtime_dir: PathBuf,
+    #[cfg(test)]
+    capture: Arc<Mutex<drain::Capture>>,
 }
 
 impl RealChild {
@@ -1909,7 +2368,7 @@ impl Child for RealChild {
             }
         };
         let marker = settled_marker(&self.readers, &self.marker, READERS_WITHIN).await;
-        classify(self.level, marker, self.summary(), &why)
+        classify(self.level, self.backend, marker, self.summary(), &why)
     }
 
     async fn stop(&self) {
@@ -1949,7 +2408,14 @@ impl Child for RealChild {
         self.notes.clone()
     }
 
+    fn landlock(&self) -> Option<super::hako::Landlock> {
+        self.marker.landlock()
+    }
+
     async fn loaded(&self) -> Result<(), String> {
+        if self.level == Level::Bubblewrap && self.backend == Backend::Hakoniwa {
+            self.marker.require_landlock(READERS_WITHIN).await?;
+        }
         if self.path == Path::Cpu {
             return Ok(());
         }
@@ -2106,6 +2572,23 @@ async fn watch_exit(
     // The pidfd shows it exited, so this returns at once.
     let status = child.wait();
     if let Some(sandbox) = sandbox {
+        // The server first: it holds the memory, and its reaper (Hakoniwa) is outside its
+        // namespace and may end before it has finished dying.
+        if let Some(inner) = sandbox.inner.get() {
+            let pidfd = &inner.watched.pidfd;
+            // An unverified one may be another's process: waited for, never signalled.
+            let verified = inner.verified;
+            if verified && !endpoint::exited(pidfd) {
+                let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
+            }
+            until_gone(pidfd, STOP_GRACE, || {
+                if verified {
+                    let _ =
+                        rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
+                }
+            })
+            .await;
+        }
         let reaper = &sandbox.reaper.pidfd;
         if !endpoint::exited(reaper) {
             let _ = rustix::process::pidfd_send_signal(reaper, rustix::process::Signal::KILL);
@@ -2130,7 +2613,9 @@ fn read_marker(pipe: OwnedFd, marker: &Arc<MarkerState>, readers: &Arc<Readers>)
     let spawned = std::thread::Builder::new()
         .name("assistant-marker".into())
         .spawn(move || {
-            seen.set(marker_outcome(std::fs::File::from(pipe)));
+            let (outcome, landlock) = marker_report(std::fs::File::from(pipe));
+            seen.set_landlock(landlock);
+            seen.set(outcome);
             ended.end();
         });
     if spawned.is_err() {
@@ -2152,7 +2637,8 @@ impl Real {
         let Spawned {
             child,
             runner,
-            sandbox,
+            sandbox: _,
+            pinned,
             generation,
             connector,
             status_rest,
@@ -2173,6 +2659,8 @@ impl Real {
         let (mut child, ticket) = child.hand_over();
         let pid = i32::try_from(child.id()).unwrap_or(0);
         let summary = Arc::new(Mutex::new(Summary::default()));
+        #[cfg(test)]
+        let capture = Arc::new(Mutex::new(drain::Capture::default()));
         let marker_state = MarkerState::new();
         let readers = Readers::new(2 + usize::from(marker.is_some()));
         for (name, stream) in [
@@ -2192,6 +2680,8 @@ impl Real {
             ),
         ] {
             let ended = Arc::clone(&readers);
+            #[cfg(test)]
+            let stream = stream.map(|stream| drain::captured(name, stream, &capture));
             let spawned =
                 stream.map(|stream| drain::spawn(name, stream, &summary, move || ended.end()));
             if !matches!(spawned, Some(Ok(_))) {
@@ -2202,18 +2692,13 @@ impl Real {
             read_marker(marker, &marker_state, &readers);
         }
         if let Some(rest) = status_rest {
-            // Later status lines (`exit-code`) are read and dropped: exit is seen by pidfd.
-            let _ = std::thread::Builder::new()
-                .name("assistant-status".into())
-                .spawn(move || {
-                    let _ = std::io::copy(&mut rest.take(64 * 1024), &mut std::io::sink());
-                });
+            drain_status(rest);
         }
         let (exit_sender, exit) = watch::channel(None);
         let launcher = Arc::clone(self);
         // The watcher is in-flight work until the child is gone (a settle waits for it): it
         // keeps the start's ticket.
-        tokio::spawn(watch_exit(child, runner, sandbox, exit_sender, move || {
+        tokio::spawn(watch_exit(child, runner, pinned, exit_sender, move || {
             launcher.clear(key);
             drop(ticket);
         }));
@@ -2222,13 +2707,7 @@ impl Real {
             token.expose(),
             &self.settings.alias,
         ));
-        let mut notes = Vec::new();
-        if level == Level::Bubblewrap && bwrap.is_some_and(|bwrap| !bwrap.size) {
-            notes.push(
-                "temporary space unbounded: this bubblewrap cannot size /tmp and /dev/shm, so only the 64 MiB per-file limit holds"
-                    .into(),
-            );
-        }
+        let notes = temporary_notes(level, bwrap);
         #[cfg(not(test))]
         drop(connector);
         Ok(Arc::new(RealChild {
@@ -2246,12 +2725,33 @@ impl Real {
             healthy: AtomicBool::new(false),
             generation_dir: Mutex::new(Some(generation)),
             level,
+            backend: self.settings.backend,
             path,
             notes,
             #[cfg(test)]
             runtime_dir: self.settings.runtime_dir.clone(),
+            #[cfg(test)]
+            capture,
         }))
     }
+}
+
+/// Warnings for a sandbox that cannot bound its temporary mounts.
+fn temporary_notes(level: Level, bwrap: Option<&bwrap::Bwrap>) -> Vec<String> {
+    if level == Level::Bubblewrap && bwrap.is_some_and(|bwrap| !bwrap.size) {
+        vec!["temporary space unbounded: this bubblewrap cannot size /tmp and /dev/shm, so only the 64 MiB per-file limit holds".into()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Later status lines (`exit-code`) are discarded: exit is seen by pidfd.
+fn drain_status(rest: impl Read + Send + 'static) {
+    let _ = std::thread::Builder::new()
+        .name("assistant-status".into())
+        .spawn(move || {
+            let _ = std::io::copy(&mut rest.take(64 * 1024), &mut std::io::sink());
+        });
 }
 
 /// The real launcher behind an `Arc`, so its children can clear the pidfile.
@@ -2259,6 +2759,14 @@ pub(crate) struct Launch(pub Arc<Real>);
 
 #[async_trait]
 impl Launcher for Launch {
+    fn failure_hint(&self, path: Path) -> Option<String> {
+        self.0
+            .library_hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)[usize::from(path == Path::Gpu)]
+        .clone()
+    }
+
     async fn preflight(&self, path: Path) -> Result<(), String> {
         let real = &self.0;
         std::fs::create_dir_all(&real.settings.data_dir)
@@ -2379,6 +2887,7 @@ impl Launcher for Launch {
 
     async fn probe(&self, path: Path) -> Vec<(Level, Result<(), String>)> {
         let real = Arc::clone(&self.0);
+        real.set_library_hint(path, None);
         let ticket = real.work.enter();
         // Only level 1 is probed for the manager (ASSIST-43): no manager path runs level 3's
         // code, not even its probe. `--probe` still probes level 3 (`probe_levels`).
@@ -2413,6 +2922,7 @@ impl Launcher for Launch {
         level: Level,
         path: Path,
     ) -> Result<Arc<dyn Child>, Fail> {
+        self.0.set_library_hint(path, None);
         self.start_real(generation, level, path)
             .await
             .map(|child| child as Arc<dyn Child>)
@@ -2514,6 +3024,7 @@ impl Launch {
                         &token,
                         &Command::Server { device },
                         gpu.as_deref().map(|(binds, _)| binds),
+                        &build_dir,
                     )
                 }
                 Level::Unconfined => {
@@ -2572,7 +3083,10 @@ impl Launch {
 pub(crate) static NO_BWRAP: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 /// bwrap's preflight (a test may force it unusable for the launcher at `runtime_dir`).
-fn bwrap_preflight(runtime_dir: &std::path::Path) -> Result<Bwrap, bwrap::Unusable> {
+fn bwrap_preflight(
+    runtime_dir: &std::path::Path,
+    backend: Backend,
+) -> Result<Bwrap, bwrap::Unusable> {
     #[cfg(test)]
     if NO_BWRAP
         .lock()
@@ -2583,7 +3097,10 @@ fn bwrap_preflight(runtime_dir: &std::path::Path) -> Result<Bwrap, bwrap::Unusab
         return Err(bwrap::Unusable::Missing);
     }
     let _ = runtime_dir;
-    bwrap::preflight()
+    match backend {
+        Backend::Bwrap => bwrap::preflight(),
+        Backend::Hakoniwa => hako::preflight(),
+    }
 }
 
 /// Test-forced short listening deadline, keyed by runtime directory.
@@ -2868,11 +3385,24 @@ impl Real {
     /// The level's probe, tried again while inconclusive; a level that stays inconclusive is
     /// kept (the real start decides), never skipped on a timeout alone.
     fn probe_with_retries(self: &Arc<Self>, path: Path, level: Level, ticket: &Ticket) -> Probed {
-        let hinted =
-            |why: String| match (level, bwrap::namespace_hint(std::path::Path::new("/proc"))) {
-                (Level::Bubblewrap, Some(hint)) => format!("{why} ({hint})"),
-                _ => why,
-            };
+        let backend = self.settings.backend;
+        let exe = self.settings.inner.executable.clone();
+        let hinted = |why: String| {
+            if level != Level::Bubblewrap {
+                return why;
+            }
+            let proc = std::path::Path::new("/proc");
+            match (backend, bwrap::namespace_cause(proc)) {
+                (Backend::Hakoniwa, Some(cause)) => {
+                    format!("{why}. {}", hako::remedy(cause, &exe))
+                }
+                (Backend::Bwrap, Some(_)) => match bwrap::namespace_hint(proc) {
+                    Some(hint) => format!("{why} ({hint})"),
+                    None => why,
+                },
+                (_, None) => why,
+            }
+        };
         match retry_probe(
             level,
             Duration::from_secs(2),
@@ -2899,11 +3429,16 @@ impl Real {
         ticket: &Ticket,
     ) -> Result<Vec<Listed>, String> {
         if self.held().bwrap.is_none() {
-            let bwrap = bwrap_preflight(&self.settings.runtime_dir)
+            let bwrap = bwrap_preflight(&self.settings.runtime_dir, self.settings.backend)
                 .map_err(|unusable| unusable.to_string())?;
             self.held().bwrap = Some(bwrap);
         }
-        let Checked { files, model, .. } = self.verify(Path::Gpu, Level::Bubblewrap, ticket)?;
+        let Checked {
+            files,
+            model,
+            build_dir,
+            ..
+        } = self.verify(Path::Gpu, Level::Bubblewrap, ticket)?;
         let token = Token::new();
         let sequence = self.probes.fetch_add(1, Ordering::SeqCst);
         let job = Job {
@@ -2929,6 +3464,7 @@ impl Real {
                 &token,
                 &Command::ListDevices,
                 Some(&binds),
+                &build_dir,
             )
             .map_err(|(Fail::Sandbox(why) | Fail::Other(why))| why)?;
         let (out, err) = owned.child.as_mut().map_or((None, None), |child| {
@@ -3061,16 +3597,21 @@ impl Real {
         ticket: &Ticket,
     ) -> Result<(serde_json::Value, Probe), Probe> {
         if level == Level::Bubblewrap {
-            let bwrap = bwrap_preflight(&self.settings.runtime_dir)
+            let bwrap = bwrap_preflight(&self.settings.runtime_dir, self.settings.backend)
                 .map_err(|unusable| Probe::Failed(unusable.to_string()))?;
             self.held().bwrap = Some(bwrap);
         }
-        let Checked { files, model, .. } = self.verify(path, level, ticket).map_err(|why| {
-            if ticket.cancelled() {
-                Probe::Failed("cancelled".into())
+        let Checked {
+            files,
+            model,
+            build_dir,
+            ..
+        } = self.verify(path, level, ticket).map_err(|why| {
+            Probe::Failed(if ticket.cancelled() {
+                "cancelled".into()
             } else {
-                Probe::Failed(why)
-            }
+                why
+            })
         })?;
         let token = Token::new();
         let sequence = self.probes.fetch_add(1, Ordering::SeqCst);
@@ -3098,6 +3639,7 @@ impl Real {
                 &token,
                 &Command::Probe,
                 gpu.as_ref(),
+                &build_dir,
             )
             .map_err(failed)?
         } else {
@@ -3142,20 +3684,11 @@ impl Real {
                 Ok((report, verdict))
             }
             Some(None) => {
-                // The probe runs Mimik itself, never llama-server: its stderr (bwrap's and the
-                // shim's) is trusted here.
-                let mut text = String::new();
-                if let Some(mut stderr) = stderr {
-                    let _ = (&mut stderr).take(4096).read_to_string(&mut text);
-                }
-                let first = text
-                    .lines()
-                    .find(|line| line.starts_with("bwrap: "))
-                    .unwrap_or("");
+                // The probe runs Mimik itself, never llama-server: its stderr (the sandbox's
+                // own lines) is trusted here.
+                let first = first_sandbox_line(stderr);
                 Err(Probe::Inconclusive(
-                    format!("the probe did not start {}", first.trim())
-                        .trim()
-                        .to_owned(),
+                    format!("the probe did not start {first}").trim().to_owned(),
                 ))
             }
             None => Err(Probe::Inconclusive(format!(
@@ -3168,6 +3701,19 @@ impl Real {
         drop(generation);
         result
     }
+}
+
+/// The first line of the sandbox's own (bubblewrap's or the Hakoniwa runner's) error text.
+fn first_sandbox_line(stderr: Option<impl Read>) -> String {
+    let mut text = String::new();
+    if let Some(stderr) = stderr {
+        let _ = stderr.take(4096).read_to_string(&mut text);
+    }
+    text.lines()
+        .find(|line| line.starts_with("bwrap: ") || line.starts_with("mimik sandbox: "))
+        .unwrap_or("")
+        .trim()
+        .to_owned()
 }
 
 /// The first JSON line with "ok" (a test harness may print others first, even on the line).

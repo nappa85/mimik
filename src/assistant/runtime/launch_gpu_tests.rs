@@ -19,6 +19,7 @@ fn settings(dir: &std::path::Path, device: Choice, roots: Roots) -> Settings {
         inner: InnerCommand::mimik().unwrap(),
         device,
         roots,
+        backend: Backend::default(),
     }
 }
 

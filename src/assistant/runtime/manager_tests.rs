@@ -22,6 +22,7 @@ struct Behaviour {
     gate: Option<Arc<tokio::sync::Semaphore>>,
     /// What `loaded` answers (the GPU offload check).
     loaded: Result<(), String>,
+    landlock: Option<super::super::hako::Landlock>,
     /// A malfunction of the fake server, if any.
     fault: Fault,
 }
@@ -47,6 +48,7 @@ impl Default for Behaviour {
             g: 0.01,
             gate: None,
             loaded: Ok(()),
+            landlock: None,
             fault: Fault::None,
         }
     }
@@ -126,6 +128,10 @@ struct FakeChild {
 
 #[async_trait]
 impl Child for FakeChild {
+    fn landlock(&self) -> Option<super::super::hako::Landlock> {
+        self.server.behaviour.landlock
+    }
+
     fn server(&self) -> Arc<dyn Server> {
         Arc::clone(&self.server) as Arc<dyn Server>
     }
@@ -204,10 +210,16 @@ struct FakeLauncher {
     stops: Arc<AtomicUsize>,
     primed: Arc<AtomicUsize>,
     coexisted: AtomicBool,
+    /// What the advisory library check says per path (CPU, GPU).
+    hints: Mutex<[Option<String>; 2]>,
 }
 
 #[async_trait]
 impl Launcher for FakeLauncher {
+    fn failure_hint(&self, path: Path) -> Option<String> {
+        self.hints.lock().unwrap()[usize::from(path == Path::Gpu)].clone()
+    }
+
     async fn preflight(&self, _: Path) -> Result<(), String> {
         *self.preflights.lock().unwrap() += 1;
         let delay = *self.preflight_delay.lock().unwrap();
@@ -380,6 +392,32 @@ async fn a_start_reaches_ready_after_health_priming_and_calibration() {
     assert_eq!(assistant.budgets(), Some(budgets));
     assert!(status.calibration.is_some());
     assert_eq!(launcher.primed.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_restart_never_shows_the_previous_generations_landlock_report() {
+    for fail_preflight in [true, false] {
+        let report = Some(super::super::hako::Landlock::Full { abi: 11 });
+        let launcher = FakeLauncher::scripted([Start::Ok(Behaviour {
+            landlock: report,
+            ..Behaviour::default()
+        })]);
+        let (assistant, handle) = manager(&launcher);
+        ready(&assistant).await;
+        assert_eq!(handle.status().landlock, report);
+        if fail_preflight {
+            *launcher.preflight.lock().unwrap() = Some("runtime inaccessible".into());
+        } else {
+            *launcher.probe.lock().unwrap() =
+                Some(vec![(Level::Bubblewrap, Err("namespaces disabled".into()))]);
+        }
+        assert_eq!(handle.restart(), Restart::Accepted);
+        unavailable(&handle).await;
+        let status = handle.status();
+        assert_eq!(status.level, None);
+        assert_eq!(status.landlock, None);
+        handle.shutdown().await;
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -1088,4 +1126,160 @@ fn a_manager_whose_handles_are_all_dropped_while_ready_does_not_spin() {
         finished.recv_timeout(Duration::from_secs(30)).is_ok(),
         "the manager spun once its handles were gone"
     );
+}
+
+#[tokio::test]
+async fn a_failed_gpu_start_gets_the_libraries_hint_and_falls_back() {
+    let hint = "llama-server may need libvulkan.so.1: install libvulkan1 (Debian/Ubuntu) or your distribution's Vulkan loader";
+    let launcher = FakeLauncher::scripted([
+        Start::Other("the model server exited before it was ready"),
+        Start::Ok(Behaviour::default()),
+    ]);
+    launcher.hints.lock().unwrap()[1] = Some(hint.into());
+    *launcher.device.lock().unwrap() = Some(rx6650());
+    let (assistant, handle) = gpu_manager(&launcher);
+    ready(&assistant).await;
+    let status = handle.status();
+    // The GPU start was attempted, failed, and the reason names the library.
+    assert_eq!(*launcher.paths.lock().unwrap(), [Path::Gpu, Path::Cpu]);
+    let note = status.gpu_note.unwrap();
+    assert!(note.contains("exited before it was ready"), "{note}");
+    assert!(note.contains(hint), "{note}");
+    assert_eq!(status.path, Path::Cpu);
+    assert_eq!(status.level, Some(Level::Bubblewrap));
+}
+
+#[tokio::test]
+async fn a_hint_for_a_library_never_changes_a_start_that_succeeds() {
+    // A false "missing": the start works, and nothing of the hint shows.
+    let launcher = FakeLauncher::scripted([Start::Ok(Behaviour::default())]);
+    launcher.hints.lock().unwrap()[0] = Some("llama-server may need libgomp.so.1: x".into());
+    let (assistant, handle) = manager(&launcher);
+    ready(&assistant).await;
+    let status = handle.status();
+    assert_eq!(status.state, State::Ready);
+    assert_eq!(status.level, Some(Level::Bubblewrap));
+    assert_eq!(status.failures, 0);
+    assert_eq!(status.last_failure, None);
+    assert!(
+        status.skipped.is_empty()
+            || status
+                .skipped
+                .iter()
+                .all(|(_, why)| !why.contains("libgomp"))
+    );
+}
+
+#[tokio::test]
+async fn a_failed_cpu_start_is_counted_with_the_libraries_hint() {
+    let launcher = FakeLauncher::scripted([Start::Other("the model server did not answer")]);
+    launcher.hints.lock().unwrap()[0] =
+        Some("llama-server may need libgomp.so.1: install libgomp1".into());
+    let (_assistant, handle) = manager(&launcher);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let last = loop {
+        if let Some(last) = handle.status().last_failure {
+            break last;
+        }
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(last.contains("did not answer"), "{last}");
+    assert!(last.contains("may need libgomp.so.1"), "{last}");
+    handle.shutdown().await;
+}
+
+const GOMP_HINT: &str = "llama-server may need libgomp.so.1: install libgomp1 (Debian/Ubuntu) or your distribution's OpenMP runtime";
+
+#[tokio::test(start_paused = true)]
+async fn a_start_that_succeeds_shows_the_hint_nowhere_even_with_the_real_launchers_level_3_error() {
+    let launcher = FakeLauncher::scripted([]);
+    // What the real launcher answers for level 3 (`Launch::probe`).
+    *launcher.probe.lock().unwrap() = Some(vec![
+        (Level::Bubblewrap, Ok(())),
+        (
+            Level::Unconfined,
+            Err("not used in this release (ASSIST-43)".into()),
+        ),
+    ]);
+    launcher.hints.lock().unwrap()[0] = Some(GOMP_HINT.into());
+    let (assistant, handle) = manager(&launcher);
+    ready(&assistant).await;
+    let status = handle.status();
+    assert_eq!(status.state, State::Ready);
+    assert_eq!(status.skipped.len(), 1, "{status:?}");
+    assert!(
+        status
+            .skipped
+            .iter()
+            .all(|(_, why)| !why.contains("libgomp")),
+        "{status:?}"
+    );
+    assert_eq!(status.last_failure, None);
+    assert_eq!(status.gpu_note, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_exit_of_a_server_that_was_ready_carries_no_hint() {
+    // CPU: an exit after ready is counted, with its own reason only.
+    let launcher = FakeLauncher::scripted([]);
+    launcher.hints.lock().unwrap()[0] = Some(GOMP_HINT.into());
+    let (assistant, handle) = manager(&launcher);
+    ready(&assistant).await;
+    launcher.child(0).crash();
+    let probe = handle.clone();
+    until(Duration::from_mins(15), move || {
+        probe.status().last_failure.is_some()
+    })
+    .await;
+    let last = handle.status().last_failure.unwrap();
+    assert!(!last.contains("libgomp"), "{last}");
+    // GPU: the fallback after a ready GPU child's exit says nothing of libraries either.
+    let launcher = FakeLauncher::scripted([]);
+    launcher.hints.lock().unwrap()[1] = Some(GOMP_HINT.into());
+    let (assistant, handle) = gpu_manager(&launcher);
+    ready(&assistant).await;
+    launcher.child(0).crash();
+    let probe = handle.clone();
+    until(Duration::from_mins(15), move || {
+        probe.status().path == Path::Cpu
+    })
+    .await;
+    let note = handle.status().gpu_note.unwrap();
+    assert!(!note.contains("libgomp"), "{note}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failure_after_health_answered_carries_no_library_hint() {
+    // CPU: /health answered, then calibration fails (a timing is missing): the server loaded,
+    // so no library is missing and the hint would mislead.
+    let timing = Behaviour {
+        fault: Fault::MissingTiming,
+        ..Behaviour::default()
+    };
+    let launcher = FakeLauncher::scripted([Start::Ok(timing)]);
+    launcher.hints.lock().unwrap()[0] = Some(GOMP_HINT.into());
+    let (_assistant, handle) = manager(&launcher);
+    let probe = handle.clone();
+    until(Duration::from_mins(15), move || {
+        probe.status().last_failure.is_some()
+    })
+    .await;
+    let last = handle.status().last_failure.unwrap();
+    assert!(last.contains("timing is missing"), "{last}");
+    assert!(!last.contains("libgomp"), "{last}");
+    handle.shutdown().await;
+    // GPU: priming fails after /health: the fallback reason has no hint either.
+    let priming = Behaviour {
+        prime_fails: true,
+        ..Behaviour::default()
+    };
+    let launcher = FakeLauncher::scripted([Start::Ok(priming), Start::Ok(Behaviour::default())]);
+    *launcher.device.lock().unwrap() = Some(rx6650());
+    launcher.hints.lock().unwrap()[1] = Some(GOMP_HINT.into());
+    let (assistant, handle) = gpu_manager(&launcher);
+    ready(&assistant).await;
+    let note = handle.status().gpu_note.unwrap();
+    assert!(note.contains("priming failed"), "{note}");
+    assert!(!note.contains("libgomp"), "{note}");
 }

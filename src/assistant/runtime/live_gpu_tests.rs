@@ -7,9 +7,11 @@
 //! - `live_gpu_*` (the dev host's GPU): the pinned Vulkan build and the real model. They
 //!   (they use Mimik's release binary, `MIMIK_LIVE_MIMIK`, as runner, probe and shim) refuse to
 //!   run unless `MIMIK_LIVE_GPU=1` is set and the amdgpu fan reads manual
-//!   (`pwm1_enable` 1, `pwm1` at least 230): run them only through
-//!   `tools/assist_gpu_live.py`, which also enforces the machine schedule and the thermal
-//!   limits.
+//!   (`pwm1_enable` 1, `pwm1` at least 230), or `MIMIK_LIVE_GPU_SHORT=1` is set: run them
+//!   only through `tools/assist_gpu_live.py`, which also enforces the machine schedule and the
+//!   thermal limits, and sets the short variable only for its fixed list of short tests
+//!   (automatic fan allowed, junction limit 75 °C). `live_gpu_landlock_*` needs the
+//!   `MIMIK_LIVE_MIMIK` binary built with `sandbox-hakoniwa`.
 use super::super::super::device::tests::Tree;
 use super::super::super::manager::{self, State};
 use super::*;
@@ -17,6 +19,16 @@ use crate::assistant::jobs::Assistant;
 
 /// Both builds of the fake server, the device choice `auto` over `roots`.
 fn fake_gpu_build(scratch: &std::path::Path, alias: &str, roots: Roots) -> Arc<Real> {
+    fake_gpu_build_with(scratch, alias, roots, &[])
+}
+
+/// [`fake_gpu_build`] with `extra` files `(name, bytes)` in the Vulkan build too.
+fn fake_gpu_build_with(
+    scratch: &std::path::Path,
+    alias: &str,
+    roots: Roots,
+    extra: &[(&str, Vec<u8>)],
+) -> Arc<Real> {
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
     let cpu = fake_build(scratch, alias);
@@ -35,11 +47,27 @@ fn fake_gpu_build(scratch: &std::path::Path, alias: &str, roots: Roots) -> Arc<R
         size: server.len() as u64,
         mode: "0755".into(),
     };
+    let mut vulkan_files = vec![file.clone()];
+    for (name, bytes) in extra {
+        std::fs::write(vulkan.join(name), bytes).unwrap();
+        std::fs::set_permissions(vulkan.join(name), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        vulkan_files.push(super::super::super::manifest::File {
+            name: (*name).into(),
+            sha256: hex::encode(Sha256::digest(bytes)),
+            size: bytes.len() as u64,
+            mode: "0755".into(),
+        });
+    }
     let build = |path: &str| super::super::super::manifest::Build {
         path: path.into(),
         directory: path.into(),
         server: "llama-server".into(),
-        files: vec![file.clone()],
+        files: if path == "vulkan" {
+            vulkan_files.clone()
+        } else {
+            vec![file.clone()]
+        },
     };
     let mut settings = cpu.settings.clone();
     settings.device = Choice::Auto;
@@ -135,6 +163,40 @@ async fn live_fake_gpu_a_partial_offload_ends_on_the_cpu_saying_why() {
     handle.shutdown().await;
 }
 
+/// A Vulkan backend (not in the server's own dependencies: the real build loads
+/// `libggml-vulkan.so` at run time) that names a library the host lacks. The advisory check
+/// believes it missing, and it is wrong here (the fake server never loads it): the GPU start is
+/// still attempted, reaches ready on the GPU, and nothing of the belief shows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: bubblewrap, fake server (MIMIK_LIVE_*)"]
+async fn live_fake_gpu_a_believed_missing_library_does_not_stop_the_gpu_start() {
+    let scratch = scratch();
+    let tree = Tree::new(&[("0000:0c:00.0", 128, Some(8 << 30))]);
+    let backend = super::super::libs::tests::elf_needing(&["libvulkan-not-installed.so.1"]);
+    let real = fake_gpu_build_with(
+        scratch.path(),
+        "missing-vulkan",
+        tree.roots(),
+        &[("libggml-vulkan.so", backend)],
+    );
+    let handle = run_until(&real, 64, |status| {
+        status.state == State::Ready || matches!(status.state, State::Unavailable(_))
+    })
+    .await;
+    let status = handle.status();
+    assert_eq!(status.state, State::Ready, "{status:?}");
+    assert_eq!(status.path, Path::Gpu, "{status:?}");
+    assert_eq!(status.gpu_note, None, "{status:?}");
+    assert_eq!(status.level, Some(Level::Bubblewrap), "{status:?}");
+    // The belief is kept for a failure to explain; the successful start shows nothing.
+    let hint = Launcher::failure_hint(&Launch(Arc::clone(&real)), Path::Gpu).unwrap();
+    assert!(
+        hint.contains("may need libvulkan-not-installed.so.1"),
+        "{hint}"
+    );
+    handle.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: bubblewrap, fake server (MIMIK_LIVE_*)"]
 async fn live_fake_gpu_no_render_node_runs_the_cpu_path() {
@@ -152,15 +214,63 @@ async fn live_fake_gpu_no_render_node_runs_the_cpu_path() {
     handle.shutdown().await;
 }
 
+/// The tests that may run on the automatic fan (the same list as `SHORT_TESTS` in
+/// `tools/assist_gpu_live.py`, which a Python test compares with this one).
+const SHORT_TESTS: [&str; 4] = [
+    "live_gpu_the_rx6650_reaches_ready_with_gpu_budgets",
+    "live_gpu_killing_llama_server_mid_job_ends_the_job_neutral_and_runs_on_the_cpu",
+    "live_gpu_killing_the_whole_sandbox_ends_on_the_cpu_saying_why",
+    "live_gpu_landlock_the_rx6650_reaches_ready_under_hakoniwa",
+];
+
+/// Whether `test` runs in short mode (`short` is the variable's value): the automatic fan is
+/// then allowed, only for a test on the short list.
+///
+/// # Panics
+///
+/// Short mode was asked for and `test` is not on the short list.
+fn short_mode(short: Option<&str>, test: &str) -> bool {
+    if short != Some("1") {
+        return false;
+    }
+    assert!(
+        SHORT_TESTS.contains(&test),
+        "refusing: {test} is not on the short list (tools/assist_gpu_live.py SHORT_TESTS); it needs the manual fan"
+    );
+    true
+}
+
+#[test]
+fn short_mode_refuses_a_test_that_is_not_on_the_short_list() {
+    for name in SHORT_TESTS {
+        assert!(short_mode(Some("1"), name));
+        assert!(!short_mode(None, name));
+        assert!(!short_mode(Some("0"), name));
+    }
+    for name in ["live_gpu_a_sustained_benchmark", "live_fake_gpu_x", ""] {
+        assert!(
+            std::panic::catch_unwind(|| short_mode(Some("1"), name)).is_err(),
+            "{name}"
+        );
+        // Not in short mode the list does not matter (the manual fan is checked instead).
+        assert!(!short_mode(None, name));
+    }
+}
+
 /// Refuses unless the live GPU run was asked for and the amdgpu fan reads manual at 230 or
 /// more (the manual setting resets on every reboot; on the automatic curve the junction
-/// reached 85 °C in 22 s, 2026-10-20).
-fn gpu_allowed() {
+/// reached 85 °C in 22 s at a sustained 143 W, 2026-10-20). A short test run by the tool's
+/// short mode (`MIMIK_LIVE_GPU_SHORT=1`: automatic fan, the tool's 75 °C limit) needs no
+/// manual fan.
+fn gpu_allowed(test: &str) {
     assert_eq!(
         std::env::var("MIMIK_LIVE_GPU").as_deref(),
         Ok("1"),
         "refusing: run the GPU checks only through tools/assist_gpu_live.py"
     );
+    if short_mode(std::env::var("MIMIK_LIVE_GPU_SHORT").ok().as_deref(), test) {
+        return;
+    }
     let chip = std::fs::read_dir("/sys/class/hwmon")
         .unwrap()
         .filter_map(Result::ok)
@@ -184,6 +294,11 @@ fn gpu_allowed() {
 /// The real runtime (`MIMIK_LIVE_RUNTIME` with `cpu/` and `vulkan/`) and the default model
 /// (`MIMIK_LIVE_GPU_MODELS`, a 0700 folder holding it).
 fn real_gpu(scratch: &std::path::Path) -> Arc<Real> {
+    real_gpu_on(scratch, Backend::Bwrap)
+}
+
+/// [`real_gpu`] on `backend`.
+fn real_gpu_on(scratch: &std::path::Path, backend: Backend) -> Arc<Real> {
     let mut settings = settings(scratch, "probe-inner", Vec::new());
     settings.models_dir = env("MIMIK_LIVE_GPU_MODELS");
     settings.model = crate::assistant::model::local_name(crate::assistant::DEFAULT_MODEL)
@@ -196,6 +311,7 @@ fn real_gpu(scratch: &std::path::Path) -> Arc<Real> {
     // here); at 2 threads it is "too slow" (docs/results.md).
     settings.threads = 5;
     settings.device = Choice::Auto;
+    settings.backend = backend;
     settings.roots = Roots::default();
     // The real code path: Mimik's own binary as the runner, the probe and the shim (the test
     // binary cannot take the probe's `--render` option).
@@ -233,7 +349,7 @@ fn report(status: &manager::Status) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live GPU: only through tools/assist_gpu_live.py (fan manual, schedule)"]
 async fn live_gpu_the_rx6650_reaches_ready_with_gpu_budgets() {
-    gpu_allowed();
+    gpu_allowed("live_gpu_the_rx6650_reaches_ready_with_gpu_budgets");
     let scratch = scratch();
     let real = real_gpu(scratch.path());
     let handle = run_until(&real, 352, |status| {
@@ -247,6 +363,36 @@ async fn live_gpu_the_rx6650_reaches_ready_with_gpu_budgets() {
     assert!(!device::is_software(&device.description));
     let budgets = status.budgets.unwrap();
     assert!(budgets.run <= Duration::from_secs(60));
+    handle.shutdown().await;
+}
+
+/// The GPU under Hakoniwa with the Landlock layer in force (owed since ASSIST-49; the rule
+/// table is unit-tested, this shows that Vulkan discovery, the render node and the driver data
+/// work under it). A short test.
+#[cfg(feature = "sandbox-hakoniwa")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live GPU: only through tools/assist_gpu_live.py --short (schedule, thermal guard)"]
+async fn live_gpu_landlock_the_rx6650_reaches_ready_under_hakoniwa() {
+    gpu_allowed("live_gpu_landlock_the_rx6650_reaches_ready_under_hakoniwa");
+    let scratch = scratch();
+    let real = real_gpu_on(scratch.path(), Backend::Hakoniwa);
+    let handle = run_until(&real, 352, |status| {
+        status.state == State::Ready || matches!(status.state, State::Unavailable(_))
+    })
+    .await;
+    let status = handle.status();
+    report(&status);
+    assert_eq!(status.path, Path::Gpu, "{status:?}");
+    assert!(!device::is_software(
+        &status.device.clone().unwrap().description
+    ));
+    assert!(
+        matches!(
+            status.landlock,
+            Some(super::super::super::hako::Landlock::Full { .. })
+        ),
+        "{status:?}"
+    );
     handle.shutdown().await;
 }
 
@@ -353,7 +499,7 @@ fn assert_cpu_after_gpu_failure(status: &manager::Status) {
 #[ignore = "live GPU: only through tools/assist_gpu_live.py (fan manual, schedule)"]
 async fn live_gpu_killing_llama_server_mid_job_ends_the_job_neutral_and_runs_on_the_cpu() {
     use crate::assistant::jobs::{Answer, Poll};
-    gpu_allowed();
+    gpu_allowed("live_gpu_killing_llama_server_mid_job_ends_the_job_neutral_and_runs_on_the_cpu");
     let scratch = scratch();
     let real = real_gpu(scratch.path());
     let assistant = Assistant::new();
@@ -424,7 +570,7 @@ async fn live_gpu_killing_llama_server_mid_job_ends_the_job_neutral_and_runs_on_
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live GPU: only through tools/assist_gpu_live.py (fan manual, schedule)"]
 async fn live_gpu_killing_the_whole_sandbox_ends_on_the_cpu_saying_why() {
-    gpu_allowed();
+    gpu_allowed("live_gpu_killing_the_whole_sandbox_ends_on_the_cpu_saying_why");
     let scratch = scratch();
     let real = real_gpu(scratch.path());
     let handle = run_until(&real, 352, |status| status.state == State::Ready).await;

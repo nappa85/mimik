@@ -1,0 +1,984 @@
+use super::*;
+use std::os::fd::AsFd;
+
+/// A minimal but valid 64-bit little-endian ELF shared object with a dynamic section whose
+/// `DT_NEEDED` entries name `libraries` (built here, so the fixture is exact and small).
+pub(crate) fn elf_needing(libraries: &[&str]) -> Vec<u8> {
+    let mut dynstr = vec![0_u8];
+    let mut offsets = Vec::new();
+    for library in libraries {
+        offsets.push(dynstr.len() as u64);
+        dynstr.extend_from_slice(library.as_bytes());
+        dynstr.push(0);
+    }
+    // The dynamic entries are 8-byte aligned in the file.
+    while dynstr.len() % 8 != 0 {
+        dynstr.push(0);
+    }
+    let mut dynamic = Vec::new();
+    for offset in &offsets {
+        dynamic.extend_from_slice(&elf::DT_NEEDED.0.to_le_bytes());
+        dynamic.extend_from_slice(&offset.to_le_bytes());
+    }
+    dynamic.extend_from_slice(&[0; 16]);
+    let shstrtab = b"\0.dynstr\0.dynamic\0.shstrtab\0".to_vec();
+    let dynstr_at = 64_u64;
+    let dynamic_at = dynstr_at + dynstr.len() as u64;
+    let shstrtab_at = dynamic_at + dynamic.len() as u64;
+    let headers_at = (shstrtab_at + shstrtab.len() as u64).next_multiple_of(8);
+    let mut out = Vec::new();
+    out.extend_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    out.extend_from_slice(&3_u16.to_le_bytes()); // ET_DYN
+    out.extend_from_slice(&62_u16.to_le_bytes()); // x86-64
+    out.extend_from_slice(&1_u32.to_le_bytes());
+    out.extend_from_slice(&0_u64.to_le_bytes()); // entry
+    out.extend_from_slice(&0_u64.to_le_bytes()); // phoff
+    out.extend_from_slice(&headers_at.to_le_bytes()); // shoff
+    out.extend_from_slice(&0_u32.to_le_bytes()); // flags
+    out.extend_from_slice(&64_u16.to_le_bytes()); // ehsize
+    out.extend_from_slice(&0_u16.to_le_bytes()); // phentsize
+    out.extend_from_slice(&0_u16.to_le_bytes()); // phnum
+    out.extend_from_slice(&64_u16.to_le_bytes()); // shentsize
+    out.extend_from_slice(&4_u16.to_le_bytes()); // shnum
+    out.extend_from_slice(&3_u16.to_le_bytes()); // shstrndx
+    assert_eq!(out.len(), 64);
+    out.extend_from_slice(&dynstr);
+    out.extend_from_slice(&dynamic);
+    out.extend_from_slice(&shstrtab);
+    out.resize(usize::try_from(headers_at).unwrap(), 0);
+    // name, type, flags, addr, offset, size, link, info, addralign, entsize
+    let header = |name: u32, kind: u32, offset: u64, size: u64, link: u32, entsize: u64| {
+        let mut h = Vec::new();
+        h.extend_from_slice(&name.to_le_bytes());
+        h.extend_from_slice(&kind.to_le_bytes());
+        h.extend_from_slice(&0_u64.to_le_bytes());
+        h.extend_from_slice(&0_u64.to_le_bytes());
+        h.extend_from_slice(&offset.to_le_bytes());
+        h.extend_from_slice(&size.to_le_bytes());
+        h.extend_from_slice(&link.to_le_bytes());
+        h.extend_from_slice(&0_u32.to_le_bytes());
+        h.extend_from_slice(&1_u64.to_le_bytes());
+        h.extend_from_slice(&entsize.to_le_bytes());
+        h
+    };
+    out.extend_from_slice(&[0; 64]);
+    out.extend(header(1, 3, dynstr_at, dynstr.len() as u64, 0, 0));
+    out.extend(header(9, 6, dynamic_at, dynamic.len() as u64, 1, 16));
+    out.extend(header(18, 3, shstrtab_at, shstrtab.len() as u64, 0, 0));
+    out
+}
+
+/// The same as a 32-bit ELF (only the class byte differs: not usable by a 64-bit file).
+fn elf32_stub() -> Vec<u8> {
+    let mut data = elf_needing(&[]);
+    data[4] = 1;
+    data
+}
+
+/// A library folder holding `files` (name and bytes), and a host searching only there.
+struct Fixture {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+}
+
+impl Fixture {
+    fn new(files: &[(&str, Vec<u8>)]) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("lib");
+        std::fs::create_dir_all(&root).unwrap();
+        for (name, bytes) in files {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        Self { _dir: dir, root }
+    }
+
+    fn host<'a>(&self, cancelled: &'a dyn Fn() -> bool) -> Host<'a> {
+        self.host_with(cancelled, Stats::default())
+    }
+
+    fn host_with<'a>(&self, cancelled: &'a dyn Fn() -> bool, stats: Stats) -> Host<'a> {
+        Host {
+            standard: Vec::new(),
+            cache: Some(Vec::new()),
+            roots: vec![self.root.clone()],
+            budget: Budget::DEFAULT,
+            cancelled,
+            incomplete: false,
+            stats,
+        }
+        .with_multiarch()
+    }
+}
+
+fn runtime(files: &[(&str, Vec<u8>)]) -> (Vec<String>, impl Fn(&str) -> Option<Vec<u8>>) {
+    let names = files.iter().map(|file| file.0.to_owned()).collect();
+    let files: Vec<(String, Vec<u8>)> = files
+        .iter()
+        .map(|file| (file.0.to_owned(), file.1.clone()))
+        .collect();
+    (names, move |name: &str| {
+        files
+            .iter()
+            .find(|file| file.0 == name)
+            .map(|file| file.1.clone())
+    })
+}
+
+fn missing(runtime_files: &[(&str, Vec<u8>)], host: &Host<'_>) -> Option<Vec<String>> {
+    let (names, read) = runtime(runtime_files);
+    missing_from(&names, &read, host)
+}
+
+const NEVER: &dyn Fn() -> bool = &|| false;
+
+#[test]
+fn the_dt_needed_names_of_a_real_elf_are_read() {
+    assert_eq!(
+        needed(&elf_needing(&["libgomp.so.1", "libc.so.6"])).unwrap(),
+        ["libgomp.so.1", "libc.so.6"]
+    );
+    assert_eq!(needed(&elf_needing(&[])).unwrap().len(), 0);
+    assert_eq!(needed(b"not an elf at all"), None);
+    assert_eq!(needed(&[]), None);
+}
+
+#[test]
+fn a_backend_the_server_loads_with_dlopen_is_inspected_like_the_server() {
+    // The server's own graph is fine; the CPU backend variant, not in it, needs libgomp.
+    let fixture = Fixture::new(&[("libc.so.6", elf_needing(&[]))]);
+    let files = [
+        ("llama-server", elf_needing(&["libc.so.6", "libllama.so.0"])),
+        ("libllama.so.0", elf_needing(&["libc.so.6"])),
+        (
+            "libggml-cpu-haswell.so",
+            elf_needing(&["libgomp.so.1", "libc.so.6"]),
+        ),
+        ("libggml-vulkan.so", elf_needing(&["libvulkan.so.1"])),
+        ("LICENSE", b"MIT".to_vec()),
+    ];
+    assert_eq!(
+        missing(&files, &fixture.host(NEVER)).unwrap(),
+        ["libgomp.so.1", "libvulkan.so.1"]
+    );
+    let why = message(
+        "llama-server",
+        &missing(&files, &fixture.host(NEVER)).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        why.starts_with("llama-server may need libgomp.so.1: install libgomp1 (Debian/Ubuntu)"),
+        "{why}"
+    );
+    assert!(
+        why.contains("OpenMP runtime") && why.contains("also missing: libvulkan.so.1"),
+        "{why}"
+    );
+    assert_eq!(message("llama-server", &[]), None);
+    // Installed: nothing is missing, and the licence was no problem.
+    let complete = Fixture::new(&[
+        ("libc.so.6", elf_needing(&[])),
+        ("libgomp.so.1", elf_needing(&[])),
+        ("libvulkan.so.1", elf_needing(&[])),
+    ]);
+    assert_eq!(missing(&files, &complete.host(NEVER)).unwrap().len(), 0);
+}
+
+#[test]
+fn a_candidate_must_be_a_usable_library_not_just_a_name() {
+    let mut fixture = Fixture::new(&[
+        ("libstub.so.1", b"x".to_vec()),
+        ("lib32.so.1", elf32_stub()),
+        ("libgood.so.1", elf_needing(&[])),
+    ]);
+    std::os::unix::fs::symlink("libabsent.so.9", fixture.root.join("libdangling.so.1")).unwrap();
+    std::os::unix::fs::symlink("libgood.so.1", fixture.root.join("liblink.so.1")).unwrap();
+    std::fs::create_dir(fixture.root.join("libdir.so.1")).unwrap();
+    let files = [(
+        "llama-server",
+        elf_needing(&[
+            "libstub.so.1",
+            "lib32.so.1",
+            "libdangling.so.1",
+            "libdir.so.1",
+            "libgood.so.1",
+            "liblink.so.1",
+        ]),
+    )];
+    // A stub file, a 32-bit library, a dangling link and a folder do not count; a resolving
+    // link and a real library do.
+    let host = fixture.host(NEVER);
+    assert_eq!(
+        missing(&files, &host).unwrap(),
+        [
+            "lib32.so.1",
+            "libdangling.so.1",
+            "libdir.so.1",
+            "libstub.so.1"
+        ]
+    );
+    fixture.root.push("unused");
+}
+
+#[test]
+fn a_name_found_only_where_the_loader_would_not_look_is_unknown() {
+    // Deep in a folder that is neither a default folder nor in the cache: unknown, not missing
+    // and not found.
+    let fixture = Fixture::new(&[("vendor/deep/libodd.so.1", elf_needing(&[]))]);
+    let files = [("llama-server", elf_needing(&["libodd.so.1"]))];
+    assert_eq!(missing(&files, &fixture.host(NEVER)), None);
+    // The same name in the cache is found.
+    let mut host = fixture.host(NEVER);
+    host.cache = Some(vec![(
+        "libodd.so.1".into(),
+        fixture.root.join("vendor/deep/libodd.so.1"),
+    )]);
+    assert_eq!(missing(&files, &host).unwrap().len(), 0);
+    // A cache entry whose file is not usable does not count.
+    let mut host = fixture.host(NEVER);
+    host.cache = Some(vec![(
+        "libodd.so.1".into(),
+        fixture.root.join("vendor/absent.so"),
+    )]);
+    assert_eq!(missing(&files, &host), None);
+    // The default folders: the folder itself and a multiarch one directly under it.
+    let standard = Fixture::new(&[
+        ("libhere.so.1", elf_needing(&[])),
+        ("x86_64-linux-gnu/libmulti.so.1", elf_needing(&[])),
+    ]);
+    let files = [(
+        "llama-server",
+        elf_needing(&["libhere.so.1", "libmulti.so.1"]),
+    )];
+    assert_eq!(missing(&files, &standard.host(NEVER)).unwrap().len(), 0);
+}
+
+#[test]
+fn an_incomplete_search_is_unknown_never_missing() {
+    let files = [("llama-server", elf_needing(&["libabsent.so.1"]))];
+    let fixture = Fixture::new(&[
+        ("a/one", b"1".to_vec()),
+        ("a/two", b"2".to_vec()),
+        ("b/three", b"3".to_vec()),
+    ]);
+    // Complete: missing.
+    assert_eq!(
+        missing(&files, &fixture.host(NEVER)).unwrap(),
+        ["libabsent.so.1"]
+    );
+    // The entry budget.
+    let mut host = fixture.host(NEVER);
+    host.budget.entries = 2;
+    assert_eq!(missing(&files, &host), None);
+    // The folder budget.
+    let mut host = fixture.host(NEVER);
+    host.budget.dirs = 1;
+    assert_eq!(missing(&files, &host), None);
+    // The depth bound (folders below it were not looked at).
+    let deep = Fixture::new(&[("a/b/c/d/e", b"x".to_vec())]);
+    let mut host = deep.host(NEVER);
+    host.budget.depth = 2;
+    assert_eq!(missing(&files, &host), None);
+    // A cancel.
+    let cancelled: &dyn Fn() -> bool = &|| true;
+    assert_eq!(missing(&files, &fixture.host(cancelled)), None);
+}
+
+#[test]
+fn an_unreadable_folder_makes_the_search_incomplete() {
+    use std::os::unix::fs::PermissionsExt;
+    let files = [("llama-server", elf_needing(&["libabsent.so.1"]))];
+    let fixture = Fixture::new(&[("locked/file", b"x".to_vec()), ("open/file", b"x".to_vec())]);
+    let locked = fixture.root.join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let readable = std::fs::read_dir(&locked).is_ok();
+    let result = missing(&files, &fixture.host(NEVER));
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if readable {
+        eprintln!("SKIPPED: this user reads a folder of mode 000 (root)");
+        return;
+    }
+    assert_eq!(result, None);
+}
+
+#[test]
+fn a_folder_reached_twice_is_walked_once() {
+    // `/lib` and `/usr/lib` can be the same folder: the second root costs nothing.
+    let files = [("llama-server", elf_needing(&["libabsent.so.1"]))];
+    let fixture = Fixture::new(&[("a/one", b"1".to_vec()), ("a/two", b"2".to_vec())]);
+    let alias = fixture.root.with_file_name("alias");
+    std::os::unix::fs::symlink(&fixture.root, &alias).unwrap();
+    let mut host = fixture.host(NEVER);
+    host.roots.push(alias);
+    // lib: a (one, two) = 3 entries, 2 folders.
+    host.budget = Budget {
+        entries: 3,
+        dirs: 2,
+        depth: 6,
+        ..Budget::DEFAULT
+    };
+    assert_eq!(missing(&files, &host).unwrap(), ["libabsent.so.1"]);
+}
+
+#[test]
+fn anything_unreadable_or_not_a_plain_name_is_unknown_not_missing() {
+    let fixture = Fixture::new(&[]);
+    // A file that cannot be read, an ELF that cannot be parsed, a name with a path or markup.
+    assert_eq!(missing(&[], &fixture.host(NEVER)).unwrap().len(), 0);
+    let (names, _) = runtime(&[("llama-server", Vec::new())]);
+    assert_eq!(missing_from(&names, &|_| None, &fixture.host(NEVER)), None);
+    let broken = [b"\x7fELF\x02\x01\x01 truncated".to_vec()];
+    assert_eq!(
+        missing(&[("llama-server", broken[0].clone())], &fixture.host(NEVER)),
+        None
+    );
+    for bad in ["../evil.so", "<script>.so", "a b.so", ".hidden", ""] {
+        let files = [("llama-server", elf_needing(&[bad]))];
+        assert_eq!(missing(&files, &fixture.host(NEVER)), None, "{bad:?}");
+    }
+}
+
+#[test]
+fn inspection_reads_the_descriptor_not_the_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("llama-server");
+    let original = elf_needing(&["libreal-original.so.1"]);
+    std::fs::write(&path, &original).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // What verification holds: the descriptor and its size.
+    let file = std::fs::File::open(&path).unwrap();
+    let size = file.metadata().unwrap().len();
+    // The path is then swapped (a rename over it, as an ancestor or the file itself could be).
+    let other = dir.path().join("other");
+    std::fs::write(&other, elf_needing(&["libswapped.so.1"])).unwrap();
+    std::fs::rename(&other, &path).unwrap();
+    assert_eq!(
+        needed(&std::fs::read(&path).unwrap()).unwrap(),
+        ["libswapped.so.1"]
+    );
+    // The descriptor still shows the verified file.
+    let seen = read_fd(file.as_fd(), size).unwrap();
+    assert_eq!(seen, original);
+    assert_eq!(needed(&seen).unwrap(), ["libreal-original.so.1"]);
+    // A file over 256 MiB is not read (the answer is then "unknown").
+    assert_eq!(read_fd(file.as_fd(), MAX_BYTES + 1), None);
+}
+
+/// A glibc `ld.so.cache` (new format only) holding `entries`.
+fn cache_bytes(entries: &[(&str, &str)]) -> Vec<u8> {
+    let mut strings = Vec::new();
+    let mut table = Vec::new();
+    let base = 48 + entries.len() * 24;
+    for (name, path) in entries {
+        let key = base + strings.len();
+        strings.extend_from_slice(name.as_bytes());
+        strings.push(0);
+        let value = base + strings.len();
+        strings.extend_from_slice(path.as_bytes());
+        strings.push(0);
+        table.extend_from_slice(&0x0303_i32.to_le_bytes());
+        table.extend_from_slice(&u32::try_from(key).unwrap().to_le_bytes());
+        table.extend_from_slice(&u32::try_from(value).unwrap().to_le_bytes());
+        table.extend_from_slice(&[0; 4]);
+        table.extend_from_slice(&0_u64.to_le_bytes());
+    }
+    let mut out = b"glibc-ld.so.cache1.1".to_vec();
+    out.extend_from_slice(&u32::try_from(entries.len()).unwrap().to_le_bytes());
+    out.extend_from_slice(&u32::try_from(strings.len()).unwrap().to_le_bytes());
+    out.resize(48, 0);
+    out.extend(table);
+    out.extend(strings);
+    out
+}
+
+/// The old format's wrapper (`ld.so-1.7.0`, a count, 12-byte entries) followed, at the next
+/// 8-byte boundary, by the new cache.
+fn old_then_new(old_entries: u32, new: &[u8]) -> Vec<u8> {
+    let mut out = b"ld.so-1.7.0\0".to_vec();
+    out.extend_from_slice(&old_entries.to_le_bytes());
+    out.resize(16 + old_entries as usize * 12, 0);
+    while !out.len().is_multiple_of(8) {
+        out.push(0);
+    }
+    out.extend_from_slice(new);
+    out
+}
+
+#[test]
+fn the_loader_cache_is_parsed_read_only() {
+    let parsed = parse_cache(
+        &cache_bytes(&[
+            (
+                "libgomp.so.1",
+                "/usr/lib/gcc/x86_64-pc-linux-gnu/15/libgomp.so.1",
+            ),
+            ("libc.so.6", "/lib64/libc.so.6"),
+        ]),
+        NEVER,
+    )
+    .unwrap();
+    assert_eq!(parsed[0].0, "libgomp.so.1");
+    assert_eq!(
+        parsed[0].1,
+        PathBuf::from("/usr/lib/gcc/x86_64-pc-linux-gnu/15/libgomp.so.1")
+    );
+    assert_eq!(parsed[1].1, PathBuf::from("/lib64/libc.so.6"));
+    // Old format in front of the new one (the cache of most distributions).
+    let both = old_then_new(2, &cache_bytes(&[("liba.so.1", "/lib/liba.so.1")]));
+    assert_eq!(parse_cache(&both, NEVER).unwrap().len(), 1);
+    assert_eq!(parse_cache(b"junk", NEVER), None);
+    // A count or an offset beyond the file is not read.
+    let mut cut = cache_bytes(&[("liba.so.1", "/lib/liba.so.1")]);
+    cut.truncate(60);
+    assert_eq!(parse_cache(&cut, NEVER), None);
+    // This host's own cache, when it has one.
+    if let Ok(real) = std::fs::read("/etc/ld.so.cache") {
+        assert!(parse_cache(&real, NEVER).is_some_and(|entries| !entries.is_empty()));
+    }
+}
+
+/// The pinned builds on this host (`MIMIK_LIVE_RUNTIME`, the unpacked runtime): every file of
+/// the CPU and the Vulkan build is inspected (backends included) and nothing is missing.
+#[test]
+#[ignore = "live: the pinned runtime (MIMIK_LIVE_RUNTIME) and this host's libraries"]
+fn live_the_pinned_servers_report_nothing_missing_on_this_host() {
+    let runtime =
+        PathBuf::from(std::env::var_os("MIMIK_LIVE_RUNTIME").expect("MIMIK_LIVE_RUNTIME"));
+    for build in ["cpu", "vulkan"] {
+        // `Some(empty)` is "known, and nothing missing"; `None` would be "unknown".
+        assert_eq!(
+            explain_dir(&runtime.join(build)).map(|missing| missing.len()),
+            Some(0),
+            "{build}"
+        );
+    }
+}
+
+#[test]
+fn a_crafted_cache_is_unrecognised_not_amplified() {
+    let plain_cache = cache_bytes(&[("liba.so.1", "/lib/liba.so.1")]);
+    // Offsets into the entry table or the header (overlapping what they must not).
+    for at in [0_u32, 20, 48] {
+        let mut crafted = plain_cache.clone();
+        crafted[52..56].copy_from_slice(&at.to_le_bytes());
+        assert_eq!(parse_cache(&crafted, NEVER), None, "key offset {at}");
+        let mut crafted = plain_cache.clone();
+        crafted[56..60].copy_from_slice(&at.to_le_bytes());
+        assert_eq!(parse_cache(&crafted, NEVER), None, "value offset {at}");
+    }
+    // An offset past the end, and a count the file cannot hold.
+    let mut past = plain_cache.clone();
+    past[52..56].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(parse_cache(&past, NEVER), None);
+    let mut many = plain_cache.clone();
+    many[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(parse_cache(&many, NEVER), None);
+    // A string over the bound (no end within 4 KiB).
+    let long = "a".repeat(5000);
+    assert_eq!(
+        parse_cache(&cache_bytes(&[(&long, "/lib/x.so")]), NEVER),
+        None
+    );
+    // Amplification: many entries pointing at the same long string cost bounded work, and the
+    // parse gives up instead of reading it all.
+    let shared = "s".repeat(4000);
+    let mut amplified = cache_bytes(&[(&shared, "/lib/x.so")]);
+    let entries = 6000_usize;
+    let table_end = 48 + entries * 24;
+    let mut table = Vec::new();
+    for _ in 0..entries {
+        table.extend_from_slice(&0x0303_i32.to_le_bytes());
+        table.extend_from_slice(&u32::try_from(table_end).unwrap().to_le_bytes());
+        table.extend_from_slice(&u32::try_from(table_end).unwrap().to_le_bytes());
+        table.extend_from_slice(&[0; 12]);
+    }
+    amplified.clear();
+    amplified.extend_from_slice(b"glibc-ld.so.cache1.1");
+    amplified.extend_from_slice(&u32::try_from(entries).unwrap().to_le_bytes());
+    amplified.extend_from_slice(&4001_u32.to_le_bytes());
+    amplified.resize(48, 0);
+    amplified.extend(table);
+    amplified.extend_from_slice(shared.as_bytes());
+    amplified.push(0);
+    assert_eq!(parse_cache(&amplified, NEVER), None);
+    // A cancel is not an answer.
+    assert_eq!(parse_cache(&plain_cache, &|| true), None);
+}
+
+#[test]
+fn an_unrecognised_cache_is_unknown_and_an_empty_one_is_known() {
+    // The old format alone (no new-format section): not recognised.
+    let mut old = b"ld.so-1.7.0\0".to_vec();
+    old.extend_from_slice(&1_u32.to_le_bytes());
+    old.extend_from_slice(&[0; 24]);
+    assert_eq!(parse_cache(&old, NEVER), None);
+    // A cache that parsed and holds nothing.
+    assert_eq!(parse_cache(&cache_bytes(&[]), NEVER), Some(Vec::new()));
+    let files = [("llama-server", elf_needing(&["libabsent.so.1"]))];
+    let fixture = Fixture::new(&[("x", b"x".to_vec())]);
+    // Known empty cache and a complete search: missing. Unreadable cache: unknown.
+    assert_eq!(
+        missing(&files, &fixture.host(NEVER)).unwrap(),
+        ["libabsent.so.1"]
+    );
+    let mut host = fixture.host(NEVER);
+    host.cache = None;
+    assert_eq!(missing(&files, &host), None);
+}
+
+#[test]
+fn a_cache_entry_settles_a_name_with_no_standard_folders() {
+    let fixture = Fixture::new(&[("vendor/libodd.so.1", elf_needing(&[]))]);
+    let host = Host {
+        standard: Vec::new(),
+        cache: Some(vec![(
+            "libodd.so.1".into(),
+            fixture.root.join("vendor/libodd.so.1"),
+        )]),
+        roots: Vec::new(),
+        budget: Budget::DEFAULT,
+        cancelled: NEVER,
+        incomplete: false,
+        stats: Stats::default(),
+    };
+    let wanted = BTreeMap::from([(
+        "libodd.so.1".to_owned(),
+        kind_of(&elf_needing(&[])).unwrap(),
+    )]);
+    assert_eq!(host.find(&wanted)["libodd.so.1"], Found::Yes);
+}
+
+/// A FIFO named like a library, and a link to one: neither is ever blocked on. The check runs in
+/// a child process under a hard timeout, so a regression hangs the child, not the test run.
+#[test]
+fn a_fifo_or_a_link_to_one_never_hangs_the_search() {
+    use std::process::{Command, Stdio};
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "assistant::runtime::libs::tests::fifo_child",
+            "--nocapture",
+        ])
+        .env("MIMIK_TEST_FIFO_ROOT", dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("the search hung on a FIFO");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let mut out = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    assert!(status.success(), "{out}");
+    assert!(out.contains("fifo checked"), "{out}");
+}
+
+#[test]
+fn fifo_child() {
+    let Some(root) = std::env::var_os("MIMIK_TEST_FIFO_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root).join("lib");
+    std::fs::create_dir_all(&root).unwrap();
+    let fifo = root.join("libfifo.so.1");
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        &fifo,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::from_raw_mode(0o600),
+        0,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("libfifo.so.1", root.join("liblinkfifo.so.1")).unwrap();
+    let files = [(
+        "llama-server",
+        elf_needing(&["libfifo.so.1", "liblinkfifo.so.1"]),
+    )];
+    let host = Host {
+        standard: vec![root.clone()],
+        cache: Some(Vec::new()),
+        roots: vec![root],
+        budget: Budget::DEFAULT,
+        cancelled: NEVER,
+        incomplete: false,
+        stats: Stats::default(),
+    };
+    // Neither counts as a library; the walk skips the FIFO entry and the link is refused after
+    // a non-blocking open. (The names are then known to be nowhere usable.)
+    let found = missing(&files, &host);
+    assert_eq!(
+        found.as_deref(),
+        Some(&["libfifo.so.1".to_owned(), "liblinkfifo.so.1".to_owned()][..])
+    );
+    println!("fifo checked");
+}
+
+#[test]
+fn the_caches_container_and_string_table_are_checked() {
+    let entries = [("liba.so.1", "/lib/liba.so.1")];
+    let plain_cache = cache_bytes(&entries);
+    // A zero declared string length with the strings still there: every offset is outside the
+    // declared table.
+    let mut zero = plain_cache.clone();
+    zero[24..28].copy_from_slice(&0_u32.to_le_bytes());
+    assert_eq!(parse_cache(&zero, NEVER), None);
+    // A declared length that stops inside the second string.
+    let mut short = plain_cache.clone();
+    let declared = u32::from_le_bytes(short[24..28].try_into().unwrap()) - 5;
+    short[24..28].copy_from_slice(&declared.to_le_bytes());
+    assert_eq!(parse_cache(&short, NEVER), None);
+    // A declared length beyond the file.
+    let mut long = plain_cache.clone();
+    long[24..28].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(parse_cache(&long, NEVER), None);
+    // Junk in front of a plausible header is not searched for it.
+    let mut junk = b"JUNKJUNK".to_vec();
+    junk.extend_from_slice(&plain_cache);
+    assert_eq!(parse_cache(&junk, NEVER), None);
+    // The old wrapper locates the new cache by its declared size, and only there.
+    assert_eq!(
+        parse_cache(&old_then_new(3, &plain_cache), NEVER)
+            .unwrap()
+            .len(),
+        1
+    );
+    let mut misplaced = old_then_new(3, &plain_cache);
+    misplaced[12..16].copy_from_slice(&2_u32.to_le_bytes());
+    assert_eq!(parse_cache(&misplaced, NEVER), None);
+    let mut huge_old = old_then_new(1, &plain_cache);
+    huge_old[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(parse_cache(&huge_old, NEVER), None);
+    // More entries than a cache may declare, each valid and all sharing the same two valid
+    // strings: nothing but the entry cap refuses them.
+    let strings = b"liba.so.1\0/lib/liba.so.1\0";
+    let shared = |count: usize| {
+        let table_end = 48 + count * 24;
+        let mut cache = b"glibc-ld.so.cache1.1".to_vec();
+        cache.extend_from_slice(&u32::try_from(count).unwrap().to_le_bytes());
+        cache.extend_from_slice(&u32::try_from(strings.len()).unwrap().to_le_bytes());
+        cache.resize(48, 0);
+        for _ in 0..count {
+            cache.extend_from_slice(&1_i32.to_le_bytes());
+            cache.extend_from_slice(&u32::try_from(table_end).unwrap().to_le_bytes());
+            cache.extend_from_slice(&u32::try_from(table_end + 10).unwrap().to_le_bytes());
+            cache.extend_from_slice(&[0; 12]);
+        }
+        cache.extend_from_slice(strings);
+        cache
+    };
+    assert_eq!(
+        parse_cache(&shared(CACHE_ENTRIES), NEVER).unwrap().len(),
+        CACHE_ENTRIES
+    );
+    assert_eq!(parse_cache(&shared(CACHE_ENTRIES + 1), NEVER), None);
+}
+
+fn libgomp_wanted() -> BTreeMap<String, Kind> {
+    BTreeMap::from([(
+        "libgomp.so.1".to_owned(),
+        kind_of(&elf_needing(&[])).unwrap(),
+    )])
+}
+
+fn cached_host<'a>(
+    fixture: &Fixture,
+    paths: Vec<PathBuf>,
+    cancelled: &'a dyn Fn() -> bool,
+) -> Host<'a> {
+    let mut host = fixture.host(cancelled);
+    host.cache = Some(
+        paths
+            .into_iter()
+            .map(|path| ("libgomp.so.1".to_owned(), path))
+            .collect(),
+    );
+    host
+}
+
+#[test]
+fn the_same_candidate_listed_many_times_is_opened_once() {
+    let fixture = Fixture::new(&[("x", b"x".to_vec())]);
+    let gone = fixture.root.join("gone/libgomp.so.1");
+    let host = cached_host(&fixture, vec![gone; 50_000], NEVER);
+    assert_eq!(host.find(&libgomp_wanted())["libgomp.so.1"], Found::No);
+    // The default folders are probed once each, the one distinct cache path once: without
+    // deduplication it would be 50 000 more opens.
+    let probes = host.standard.len();
+    assert_eq!(host.stats.opens.get(), probes + 1);
+}
+
+#[test]
+fn the_cache_scan_checks_its_budget_on_every_entry() {
+    // An empty library folder, so the walk is complete and only the cache scan can be short.
+    let fixture = Fixture::new(&[]);
+    let paths = vec![
+        fixture.root.join("gone/libgomp.so.1"),
+        fixture.root.join("other/libgomp.so.1"),
+    ];
+    let mut host = cached_host(&fixture, paths, NEVER);
+    // Two entries against a budget of one: the scan must stop before the second, which is not
+    // a multiple of the interval at which the cancel flag is asked.
+    host.budget = Budget {
+        entries: 1,
+        ..Budget::DEFAULT
+    };
+    assert_eq!(
+        host.find(&libgomp_wanted())["libgomp.so.1"],
+        Found::Elsewhere
+    );
+    // The same cache with room for both is a complete search that finds nothing.
+    host.budget = Budget::DEFAULT;
+    assert_eq!(host.find(&libgomp_wanted())["libgomp.so.1"], Found::No);
+}
+
+#[test]
+fn running_out_of_opens_is_unknown_never_missing() {
+    let fixture = Fixture::new(&[("x", b"x".to_vec())]);
+    let paths: Vec<PathBuf> = (0..40)
+        .map(|n| fixture.root.join(format!("gone{n}/libgomp.so.1")))
+        .collect();
+    let mut host = cached_host(&fixture, paths, NEVER);
+    host.budget = Budget {
+        opens: 5,
+        ..Budget::DEFAULT
+    };
+    assert_eq!(
+        host.find(&libgomp_wanted())["libgomp.so.1"],
+        Found::Elsewhere
+    );
+}
+
+#[test]
+fn a_default_folder_hit_never_touches_the_cache() {
+    let fixture = Fixture::new(&[("libgomp.so.1", elf_needing(&[]))]);
+    // 100 000 bogus cache candidates that would each cost an open if they were looked at.
+    let bogus = vec![fixture.root.join("gone/libgomp.so.1"); 100_000];
+    let mut host = cached_host(&fixture, bogus, NEVER);
+    host.standard = vec![fixture.root.clone()];
+    assert_eq!(host.find(&libgomp_wanted())["libgomp.so.1"], Found::Yes);
+    // The cache was neither indexed nor scanned, and only the default folder was opened.
+    assert_eq!(host.stats.index_calls.get(), 0);
+    assert_eq!(host.stats.scanned.get(), 0);
+    assert_eq!(host.stats.opens.get(), 1);
+}
+
+#[test]
+fn a_cancel_in_any_phase_makes_the_answer_unknown() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let fixture = Fixture::new(&[("x", b"x".to_vec()), ("sub/y", b"y".to_vec())]);
+    let paths: Vec<PathBuf> = (0..3000)
+        .map(|n| fixture.root.join(format!("gone{n}/libgomp.so.1")))
+        .collect();
+    let mut tripped_at_least_once = false;
+    // The Nth question to the cancel flag is the first to say yes: every phase (the
+    // enumeration of the default folders, the default-folder probe, the cache scan, the cache
+    // opens, the walk) is cut at some N, and a cut search never says "missing".
+    for threshold in 0..40 {
+        let calls = AtomicUsize::new(0);
+        let tripped = AtomicUsize::new(0);
+        let cancelled = || {
+            let yes = calls.fetch_add(1, Ordering::SeqCst) >= threshold;
+            if yes {
+                tripped.store(1, Ordering::SeqCst);
+            }
+            yes
+        };
+        let host = cached_host(&fixture, paths.clone(), &cancelled).with_multiarch();
+        let found = host.find(&libgomp_wanted());
+        if tripped.load(Ordering::SeqCst) == 1 {
+            tripped_at_least_once = true;
+            assert_ne!(
+                found["libgomp.so.1"],
+                Found::No,
+                "cancelled from question {threshold}"
+            );
+        }
+    }
+    assert!(tripped_at_least_once);
+    // And a host whose enumeration of the default folders was cut is itself incomplete.
+    let host = cached_host(&fixture, Vec::new(), &|| true).with_multiarch();
+    assert!(host.incomplete);
+    assert_eq!(
+        host.find(&libgomp_wanted())["libgomp.so.1"],
+        Found::Elsewhere
+    );
+}
+
+/// A cancel flag that says yes from `target` onwards through the phases in the order the
+/// search runs them (`enumerate`, `probe`, `index`, `cache`, `walk`).
+fn cancelled_from(
+    phase: &std::rc::Rc<std::cell::Cell<&'static str>>,
+    target: &'static str,
+) -> impl Fn() -> bool {
+    const ORDER: [&str; 5] = ["enumerate", "probe", "index", "cache", "walk"];
+    let phase = phase.clone();
+    move || {
+        let at = ORDER.iter().position(|name| *name == phase.get());
+        let from = ORDER.iter().position(|name| *name == target);
+        matches!((at, from), (Some(at), Some(from)) if at >= from)
+    }
+}
+
+#[test]
+fn each_phase_honours_a_cancel_on_its_own_and_the_later_ones_do_no_work() {
+    // A multiarch child to enumerate, several folders to walk and a cache of distinct missing
+    // candidates: every phase has real work to do.
+    let fixture = Fixture::new(&[
+        ("x86_64-linux-gnu/y", b"y".to_vec()),
+        ("deep/z", b"z".to_vec()),
+    ]);
+    let paths: Vec<PathBuf> = (0..50)
+        .map(|n| fixture.root.join(format!("gone{n}/libgomp.so.1")))
+        .collect();
+    // (answer, default folders, incomplete host, opens, cache entries scanned, folders walked)
+    let run = |target: &'static str| {
+        let stats = Stats::default();
+        let cancelled = cancelled_from(&stats.phase, target);
+        let mut host = fixture.host_with(&cancelled, stats.clone());
+        host.cache = Some(
+            paths
+                .iter()
+                .map(|path| ("libgomp.so.1".to_owned(), path.clone()))
+                .collect(),
+        );
+        let found = host.find(&libgomp_wanted())["libgomp.so.1"];
+        (
+            found,
+            host.standard.len(),
+            host.incomplete,
+            host.stats.opens.get(),
+            host.stats.scanned.get(),
+            host.stats.walk_dirs.get(),
+        )
+    };
+    let whole = run("never");
+    assert_eq!(
+        whole.0,
+        Found::No,
+        "the uncancelled search is complete: {whole:?}"
+    );
+    let probes = whole.1;
+    assert!(probes >= 2, "the fixture has a multiarch child");
+    assert_eq!(whole.4, paths.len());
+    assert!(whole.5 >= 2, "the fixture has folders to walk: {whole:?}");
+    // The enumeration cancelled: the host is incomplete and nothing after it did any work.
+    let enumerate = run("enumerate");
+    assert_eq!(enumerate.0, Found::Elsewhere, "{enumerate:?}");
+    assert!(enumerate.2, "{enumerate:?}");
+    assert_eq!(
+        (enumerate.3, enumerate.4, enumerate.5),
+        (0, 0, 0),
+        "{enumerate:?}"
+    );
+    // Each later phase: the earlier ones ran in full, this one and the rest did no work.
+    let probe = run("probe");
+    assert_eq!(probe.0, Found::Elsewhere, "{probe:?}");
+    assert_eq!((probe.3, probe.4, probe.5), (0, 0, 0), "{probe:?}");
+    let index = run("index");
+    assert_eq!(index.0, Found::Elsewhere, "{index:?}");
+    assert_eq!((index.3, index.4, index.5), (probes, 0, 0), "{index:?}");
+    let cache = run("cache");
+    assert_eq!(cache.0, Found::Elsewhere, "{cache:?}");
+    assert_eq!(
+        (cache.3, cache.4, cache.5),
+        (probes, paths.len(), 0),
+        "{cache:?}"
+    );
+    let walk = run("walk");
+    assert_eq!(walk.0, Found::Elsewhere, "{walk:?}");
+    assert_eq!(
+        (walk.3, walk.4, walk.5),
+        (probes + paths.len(), paths.len(), 0),
+        "{walk:?}"
+    );
+}
+
+#[test]
+fn the_cache_read_is_fifo_safe_and_size_bounded() {
+    use std::sync::mpsc;
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("cache.fifo");
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        &fifo,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::from_raw_mode(0o600),
+        0,
+    )
+    .unwrap();
+    let link = dir.path().join("cache.link");
+    std::os::unix::fs::symlink(&fifo, &link).unwrap();
+    for path in [fifo, link] {
+        let (sender, receiver) = mpsc::channel();
+        let shown = path.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(read_bounded(&path, CACHE_MAX));
+        });
+        let got = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("the read blocked on {}", shown.display()));
+        assert_eq!(got, Slurp::Refused);
+    }
+    let big = dir.path().join("big");
+    std::fs::write(&big, vec![0_u8; 100]).unwrap();
+    assert_eq!(read_bounded(&big, 99), Slurp::Refused);
+    assert_eq!(read_bounded(&big, 100), Slurp::Data(vec![0_u8; 100]));
+    assert_eq!(read_bounded(&dir.path().join("absent"), 100), Slurp::Failed);
+}
+
+#[test]
+fn a_transient_read_error_is_not_remembered_but_a_definite_answer_is() {
+    use std::cell::Cell;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("ld.so.cache");
+    std::fs::write(&file, b"stamp").unwrap();
+    let good = cache_bytes(&[("liba.so.1", "/lib/liba.so.1")]);
+    let memo: Memo = std::sync::Mutex::new(None);
+    let reads = Cell::new(0);
+    let counted = |outcome: Slurp| {
+        let reads = &reads;
+        move |_: &Path| {
+            reads.set(reads.get() + 1);
+            outcome.clone()
+        }
+    };
+    // EMFILE or an I/O error: unknown now, and tried again next time.
+    assert_eq!(
+        cached_at(&file, &memo, &counted(Slurp::Failed), NEVER),
+        None
+    );
+    assert!(memo.lock().unwrap().is_none());
+    // The retry parses and is kept.
+    assert_eq!(
+        cached_at(&file, &memo, &counted(Slurp::Data(good)), NEVER).map(|e| e.len()),
+        Some(1)
+    );
+    assert!(memo.lock().unwrap().is_some());
+    let before = reads.get();
+    assert!(cached_at(&file, &memo, &counted(Slurp::Failed), NEVER).is_some());
+    assert_eq!(reads.get(), before, "a kept answer is not read again");
+    // A definite refusal (not a regular file, too large) is kept as unrecognised.
+    let memo: Memo = std::sync::Mutex::new(None);
+    assert_eq!(
+        cached_at(&file, &memo, &counted(Slurp::Refused), NEVER),
+        None
+    );
+    assert!(memo.lock().unwrap().is_some());
+}

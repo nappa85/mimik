@@ -75,6 +75,7 @@ jobs:
               cargo build --locked --example fake_llama_server
               cp target/debug/examples/fake_llama_server target/confinement/fake_llama_server
               cargo build --locked --features dev-endpoint --bin mimik --target-dir target/dev-endpoint
+              cargo build --locked --features sandbox-hakoniwa --bin mimik --target-dir target/hakoniwa
             '
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -104,6 +105,13 @@ jobs:
         with:
           name: dev-endpoint-binary
           path: target/dev-endpoint/debug/mimik
+          if-no-files-found: error
+      # A build with the comparison sandbox (DEP-24, `sandbox-hakoniwa`): the single-threaded
+      # runner of the Hakoniwa live run below, never packaged or released.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hakoniwa-binary
+          path: target/hakoniwa/debug/mimik
           if-no-files-found: error
 
   artifact-smoke:
@@ -238,6 +246,10 @@ jobs:
         with:
           name: confinement-tests
           path: target
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hakoniwa-binary
+          path: target/hakoniwa-binary
       - name: Verify and unpack the release, reapply the manifest's modes
         run: |
           (cd release && sha256sum --check SHA256SUMS)
@@ -317,6 +329,72 @@ jobs:
           if [ "${ran:-0}" -lt 40 ]; then
             echo "only ${ran:-0} confinement tests ran; expected at least 40"
             exit 1
+          fi
+      # The comparison sandbox (DEP-24): the same suite against Hakoniwa, with Mimik's own
+      # feature-built binary as the runner (single-threaded, its guard active), not the
+      # libtest binary; the start-time probe with it exits 0 only at level 1.
+      - name: Hakoniwa sandbox, start-time probe and the whole live suite
+        env:
+          MIMIK_LIVE_RUNTIME: ${{ github.workspace }}/target/rel/llama
+          MIMIK_LIVE_MODELS: ${{ github.workspace }}/target/models
+          MIMIK_LIVE_SCRATCH: ${{ github.workspace }}/target/scratch
+          MIMIK_LIVE_FAKE_SERVER: ${{ github.workspace }}/target/fake_llama_server
+          MIMIK_LIVE_SANDBOX: hakoniwa
+          MIMIK_LIVE_RUNNER: ${{ github.workspace }}/target/hakoniwa-binary/mimik
+        run: |
+          set -o pipefail
+          chmod 0755 target/hakoniwa-binary/mimik
+          # The kernel's Landlock ABI from the x86_64 `landlock_create_ruleset` version call. The
+          # snippet prints the ABI number, or `-1 <errno>` when the syscall itself fails (ENOSYS 38
+          # no Landlock, EOPNOTSUPP 95 disabled at boot, EPERM 1 filtered); that is a valid answer
+          # and the assertions then skip. Anything else, including python failing, fails the job.
+          probe=$(python3 -c "
+          import ctypes
+          libc = ctypes.CDLL(None, use_errno=True)
+          abi = libc.syscall(444, None, 0, 1)
+          print(abi if abi >= 0 else f'-1 {ctypes.get_errno()}')
+          ") || { echo "the Landlock ABI probe could not run"; exit 1; }
+          echo "Landlock probe on this runner: $probe"
+          case "$probe" in
+            -1\ 1 | -1\ 38 | -1\ 95) abi=-1 ;;
+            [0-9] | [0-9][0-9]) abi=$probe ;;
+            *) echo "the Landlock ABI probe gave an unexpected answer: '$probe'"; exit 1 ;;
+          esac
+          # From ABI 6 up the confinement assertions are demanded (`MIMIK_LIVE_LANDLOCK=require`),
+          # so a runner that has Landlock can never pass with them skipped; below 6 they skip
+          # with their reason.
+          if [ "$abi" -ge 6 ]; then
+            export MIMIK_LIVE_LANDLOCK=require
+            echo "Landlock confinement assertions: required"
+          else
+            echo "Landlock confinement assertions: SKIPPED (ABI below 6)"
+          fi
+          target/hakoniwa-binary/mimik assistant-runner --probe --sandbox hakoniwa \
+            --runtime target/rel/llama --models-dir target/models --model local:stories260K.gguf \
+            --model-sha256 270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d \
+            --data-dir target/probe-data-hakoniwa
+          target/confinement-tests --test-threads=2 --include-ignored \
+            assistant::runtime::seccomp:: assistant::runtime::endpoint:: \
+            assistant::runtime::runner:: assistant::runtime::launch::live_tests:: \
+            --skip live_gpu_ \
+            2>&1 | tee target/confinement-hakoniwa.log
+          ran=$(grep -oE '^test result: ok\. [0-9]+ passed; 0 failed; 0 ignored' target/confinement-hakoniwa.log | grep -oE '[0-9]+' | head -n 1)
+          if [ "${ran:-0}" -lt 40 ]; then
+            echo "only ${ran:-0} Hakoniwa confinement tests ran; expected at least 40"
+            exit 1
+          fi
+          # On a runner with Landlock the kernel-level check of the rule semantics (`hako::tests`,
+          # which the filters above leave out) runs with `require` set, and must have run: it
+          # prints SKIPPED when it checked nothing.
+          if [ "$abi" -ge 6 ]; then
+            target/confinement-tests --test-threads=1 --nocapture \
+              assistant::runtime::hako::tests::a_landlock_list_rule_covers_the_directories_beneath_it_and_no_file_in_them \
+              2>&1 | tee target/landlock-list-rule.log
+            grep -q '^test result: ok\. 1 passed; 0 failed' target/landlock-list-rule.log
+            if grep -q 'SKIPPED' target/landlock-list-rule.log; then
+              echo "the Landlock rule test skipped on a runner with Landlock ABI $abi"
+              exit 1
+            fi
           fi
 
   deployable:

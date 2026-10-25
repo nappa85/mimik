@@ -75,12 +75,16 @@ struct Setup {
 }
 
 fn setup(model: &[u8], alias: &str) -> Setup {
+    setup_with_server(model, alias, &std::fs::read(fake_server()).unwrap())
+}
+
+/// [`setup`] with the bytes of the runtime's `llama-server` given.
+fn setup_with_server(model: &[u8], alias: &str, server: &[u8]) -> Setup {
     let dir = scratch();
     let root = dir.path();
     let cpu = root.join("runtime/cpu");
     std::fs::create_dir_all(&cpu).unwrap();
-    let server = std::fs::read(fake_server()).unwrap();
-    std::fs::write(cpu.join("llama-server"), &server).unwrap();
+    std::fs::write(cpu.join("llama-server"), server).unwrap();
     std::fs::set_permissions(
         cpu.join("llama-server"),
         std::fs::Permissions::from_mode(0o755),
@@ -95,7 +99,7 @@ fn setup(model: &[u8], alias: &str) -> Setup {
         files: vec![
             Entry {
                 name: "llama-server".into(),
-                sha256: sha(&server),
+                sha256: sha(server),
                 size: server.len() as u64,
                 mode: "0755".into(),
             },
@@ -141,6 +145,7 @@ fn setup(model: &[u8], alias: &str) -> Setup {
         },
         device: device::Choice::Cpu,
         roots: device::Roots::default(),
+        backend: Backend::default(),
     };
     Setup {
         dir,
@@ -290,6 +295,126 @@ async fn changed_or_extra_runtime_files_refuse_the_start() {
 }
 
 #[tokio::test]
+async fn a_group_writable_runtime_folder_is_refused_with_the_exact_fix() {
+    use std::os::unix::fs::PermissionsExt;
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    // What Ubuntu's umask 002 gives a folder made with `mkdir -p`.
+    let runtime = setup.dir.path().join("runtime");
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let Err(Fail::Other(why)) = launch.start(1, Level::Unconfined, Path::Cpu).await else {
+        panic!("a group-writable runtime folder must refuse the start");
+    };
+    assert!(why.starts_with("the model runtime: "), "{why}");
+    assert!(why.contains("writable by group or others"), "{why}");
+    // The command that fixes it, with the folder's own path.
+    let fix = format!("chmod -R go-w {}", runtime.display());
+    assert!(why.contains(&fix), "{why}");
+    // Never relaxed: the same folder with the fix applied starts.
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!matches!(
+        launch.start(2, Level::Unconfined, Path::Cpu).await,
+        Err(Fail::Other(ref why)) if why.contains("writable")
+    ));
+}
+
+#[tokio::test]
+async fn a_library_the_check_believes_missing_never_refuses_the_start_and_leaves_a_hint() {
+    // The server (the fake) really runs; its ELF is replaced by one that names a library
+    // nobody has, so the advisory check believes it is missing. The start is still attempted
+    // (here the stand-in is not an executable server, so it fails after the attempt), the
+    // hint is remembered for the failure, and the verification itself no longer refuses.
+    let server = super::super::libs::tests::elf_needing(&["libgomp-not-installed.so.1"]);
+    let setup = setup_with_server(MODEL, "fake", &server);
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    let result = launch.start(1, Level::Unconfined, Path::Cpu).await;
+    if let Err(Fail::Other(why) | Fail::Sandbox(why)) = &result {
+        assert!(
+            !why.contains("may need"),
+            "the check refused the start: {why}"
+        );
+    }
+    let hint = Launcher::failure_hint(&launch, Path::Cpu).unwrap();
+    assert!(
+        hint.starts_with("llama-server may need libgomp-not-installed.so.1: "),
+        "{hint}"
+    );
+    // Nothing for the other path.
+    assert_eq!(Launcher::failure_hint(&launch, Path::Gpu), None);
+}
+
+#[tokio::test]
+async fn a_backend_loaded_with_dlopen_is_inspected_and_leaves_a_hint() {
+    // The server (the fake) is fine; a CPU backend variant of the build, which no `DT_NEEDED`
+    // of the server names, needs a library nobody has.
+    let mut setup = setup(MODEL, "fake");
+    let backend = super::super::libs::tests::elf_needing(&["libgomp-not-installed.so.1"]);
+    let path = setup.dir.path().join("runtime/cpu/libggml-cpu-haswell.so");
+    std::fs::write(&path, &backend).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    setup.build.files.push(Entry {
+        name: "libggml-cpu-haswell.so".into(),
+        sha256: sha(&backend),
+        size: backend.len() as u64,
+        mode: "0755".into(),
+    });
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    // The start is attempted and not refused for it.
+    let started = launch.start(1, Level::Unconfined, Path::Cpu).await;
+    if let Err(Fail::Other(why) | Fail::Sandbox(why)) = &started {
+        assert!(!why.contains("may need"), "{why}");
+    }
+    let hint = Launcher::failure_hint(&launch, Path::Cpu).unwrap();
+    assert!(
+        hint.starts_with("llama-server may need libgomp-not-installed.so.1: "),
+        "{hint}"
+    );
+}
+
+#[tokio::test]
+async fn the_models_folder_gets_the_chmod_700_advice_and_the_runtime_folder_does_not() {
+    use std::os::unix::fs::PermissionsExt;
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    std::fs::set_permissions(
+        &setup.settings.models_dir,
+        std::fs::Permissions::from_mode(0o770),
+    )
+    .unwrap();
+    let Err(Fail::Other(why)) = launch.start(1, Level::Unconfined, Path::Cpu).await else {
+        panic!("a models folder that is not 0700 must refuse the start");
+    };
+    assert!(why.starts_with("the models folder: "), "{why}");
+    assert!(
+        why.contains(&format!(
+            "chmod 700 {}",
+            setup.settings.models_dir.display()
+        )),
+        "{why}"
+    );
+    assert!(!why.contains("go-w"), "{why}");
+    // The runtime folder's refusal names `go-w`, never `chmod 700`.
+    std::fs::set_permissions(
+        &setup.settings.models_dir,
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &setup.settings.runtime_dir,
+        std::fs::Permissions::from_mode(0o775),
+    )
+    .unwrap();
+    let Err(Fail::Other(why)) = launch.start(2, Level::Unconfined, Path::Cpu).await else {
+        panic!("a group-writable runtime must refuse the start");
+    };
+    assert!(why.contains("go-w") && !why.contains("chmod 700"), "{why}");
+}
+
+#[tokio::test]
 async fn a_model_that_does_not_load_is_a_counted_exit() {
     let setup = setup(b"not a gguf model", "fake");
     let launch = launch(&setup);
@@ -403,6 +528,7 @@ fn only_a_missing_shim_marker_makes_a_level_1_exit_a_sandbox_failure() {
     assert!(matches!(
         classify(
             Level::Bubblewrap,
+            Backend::Bwrap,
             Marker::Absent,
             Summary::default(),
             "exit status: 1"
@@ -414,6 +540,7 @@ fn only_a_missing_shim_marker_makes_a_level_1_exit_a_sandbox_failure() {
     assert!(matches!(
         classify(
             Level::Bubblewrap,
+            Backend::Bwrap,
             Marker::Executed,
             Summary::default(),
             "exit status: 1"
@@ -421,13 +548,20 @@ fn only_a_missing_shim_marker_makes_a_level_1_exit_a_sandbox_failure() {
         Fail::Other(_)
     ));
     assert!(matches!(
-        classify(Level::Bubblewrap, Marker::Executed, loaded, "exit status: 1"),
+        classify(
+            Level::Bubblewrap,
+            Backend::Bwrap,
+            Marker::Executed,
+            loaded,
+            "exit status: 1"
+        ),
         Fail::Other(why) if why.starts_with("the model could not be loaded")
     ));
     // Not known (a read error, a reader still running): counted, the level kept.
     assert!(matches!(
         classify(
             Level::Bubblewrap,
+            Backend::Bwrap,
             Marker::Unknown,
             Summary::default(),
             "exit status: 1"
@@ -438,6 +572,7 @@ fn only_a_missing_shim_marker_makes_a_level_1_exit_a_sandbox_failure() {
     assert!(matches!(
         classify(
             Level::Unconfined,
+            Backend::Bwrap,
             Marker::Absent,
             Summary::default(),
             "exit status: 1"
@@ -460,6 +595,27 @@ fn only_a_clean_end_without_the_marker_is_absent() {
     assert_eq!(marker_outcome(&b""[..]), Marker::Absent);
     assert_eq!(marker_outcome(Failing), Marker::Unknown);
     assert_eq!(marker_outcome(&b"ex"[..]), Marker::Unknown);
+    // What follows the marker is the Hakoniwa closure's Landlock report, nothing else.
+    let hako = super::super::hako::Landlock::Full { abi: 11 };
+    let reported = format!("exec\n{}", hako.line());
+    assert_eq!(
+        marker_report(reported.as_bytes()),
+        (Marker::Executed, Some(hako))
+    );
+    assert_eq!(
+        marker_report(&b"exec\n"[..]),
+        (Marker::Executed, None),
+        "bubblewrap's shim writes none"
+    );
+    assert_eq!(
+        marker_report(&b"exec\nnot a report\n"[..]),
+        (Marker::Executed, None)
+    );
+    assert_eq!(
+        marker_report(&b"nope\n{\"landlock\":\"none\"}\n"[..]),
+        (Marker::Unknown, None),
+        "a report without the marker first counts for nothing"
+    );
 }
 
 #[tokio::test]
@@ -473,6 +629,7 @@ async fn a_marker_reader_still_running_is_unknown_and_keeps_the_level() {
     assert!(matches!(
         classify(
             Level::Bubblewrap,
+            Backend::Bwrap,
             outcome,
             Summary::default(),
             "exit status: 1"
@@ -839,6 +996,7 @@ async fn a_failed_starts_guard_kills_and_waits_for_the_reaper_too() {
     let sandbox = Arc::new(Sandbox {
         reaper: Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap(),
         pid_namespace: 0,
+        inner: std::sync::OnceLock::new(),
     });
     let work = Work::new();
     let mut owned = Owned::new(runner, work.enter());
@@ -849,6 +1007,105 @@ async fn a_failed_starts_guard_kills_and_waits_for_the_reaper_too() {
         .unwrap();
     assert!(endpoint::exited(&sandbox.reaper.pidfd));
     reaper_process.wait().unwrap();
+}
+
+/// Whether `pid` is a live process (a zombie is not).
+fn pid_alive(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        !stat
+            .rsplit(')')
+            .next()
+            .unwrap_or("")
+            .trim_start()
+            .starts_with('Z')
+    })
+}
+
+/// With Hakoniwa the reaper is outside the PID namespace and the server (PID 1 inside) holds
+/// the memory: a reaper that has gone says nothing about the server. A sandbox is gone only
+/// when its inner process is, and a forced stop kills that process first.
+#[tokio::test]
+async fn a_failed_starts_guard_kills_and_waits_for_the_inner_process_too() {
+    let runner = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    // The reaper is already gone; the server is not.
+    let mut reaper_process = std::process::Command::new("true").spawn().unwrap();
+    let mut inner_process = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let reaper_watch = Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap();
+    reaper_process.wait().unwrap();
+    let sandbox = Arc::new(Sandbox {
+        reaper: reaper_watch,
+        pid_namespace: 0,
+        inner: std::sync::OnceLock::from(endpoint::InnerPin {
+            watched: Watched::open(i32::try_from(inner_process.id()).unwrap()).unwrap(),
+            verified: true,
+        }),
+    });
+    let work = Work::new();
+    let mut owned = Owned::new(runner, work.enter());
+    owned.reaper = Some(Arc::clone(&sandbox));
+    drop(owned);
+    tokio::time::timeout(Duration::from_secs(10), work.settle())
+        .await
+        .unwrap();
+    assert!(endpoint::exited(
+        &sandbox.inner.get().unwrap().watched.pidfd
+    ));
+    inner_process.wait().unwrap();
+}
+
+#[tokio::test]
+async fn the_exit_is_published_only_once_the_inner_process_is_gone() {
+    let mut runner = std::process::Command::new("true").spawn().unwrap();
+    let runner_watch = Watched::open(i32::try_from(runner.id()).unwrap()).unwrap();
+    let mut reaper_process = std::process::Command::new("true").spawn().unwrap();
+    let inner_process = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let inner_pid = i32::try_from(inner_process.id()).unwrap();
+    let sandbox = Arc::new(Sandbox {
+        reaper: Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap(),
+        pid_namespace: 0,
+        inner: std::sync::OnceLock::from(endpoint::InnerPin {
+            watched: Watched::open(inner_pid).unwrap(),
+            verified: true,
+        }),
+    });
+    reaper_process.wait().unwrap();
+    let (sender, mut receiver) = watch::channel(None);
+    let sampled = Arc::new(Mutex::new(None));
+    let on_gone = {
+        let sampled = Arc::clone(&sampled);
+        move || {
+            // The instant the exit is about to be published: is the server still there?
+            *sampled.lock().unwrap() = Some(pid_alive(inner_pid));
+        }
+    };
+    let _ = runner.wait();
+    tokio::spawn(watch_exit(
+        runner,
+        runner_watch,
+        Some(sandbox),
+        sender,
+        on_gone,
+    ));
+    tokio::time::timeout(Duration::from_secs(10), receiver.wait_for(Option::is_some))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        *sampled.lock().unwrap(),
+        Some(false),
+        "the server outlived the exit"
+    );
+    let mut inner_process = inner_process;
+    let _ = inner_process.wait();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -872,6 +1129,7 @@ async fn a_reaper_that_outlives_the_wait_keeps_its_entry_and_blocks_the_settle()
     let sandbox = Arc::new(Sandbox {
         reaper: Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap(),
         pid_namespace: 0,
+        inner: std::sync::OnceLock::new(),
     });
     let mut owned = Owned::new(runner, launch.0.work().enter());
     owned.reaper = Some(Arc::clone(&sandbox));
@@ -1661,6 +1919,7 @@ async fn a_bwrap_path_with_a_newline_is_refused_before_any_directory_is_made() {
             &Token::new(),
             &Command::Server { device: None },
             None,
+            &checked.build_dir,
         )
         .err()
     })
@@ -1670,4 +1929,396 @@ async fn a_bwrap_path_with_a_newline_is_refused_before_any_directory_is_made() {
         matches!(&refused, Some(Fail::Other(why)) if why.starts_with("runtime path contains a newline")),
         "{refused:?}"
     );
+}
+
+/// A fake sandbox for the pin tests: the "reaper" is a shell (a child of this test, standing
+/// for the runner's child) that starts a `sleep` (its one child, the "server") and reports
+/// its pid.
+struct FakeSandbox {
+    reaper: std::process::Child,
+    inner_pid: i32,
+    inner_start: u64,
+}
+
+fn fake_sandbox() -> FakeSandbox {
+    use std::io::BufRead;
+    let mut reaper = std::process::Command::new("sh")
+        .args(["-c", "sleep 30 & echo $!; wait"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(reaper.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let inner_pid: i32 = line.trim().parse().unwrap();
+    let inner_start = rundir::start_time(inner_pid).unwrap();
+    FakeSandbox {
+        reaper,
+        inner_pid,
+        inner_start,
+    }
+}
+
+fn started_of(reaper: &std::process::Child, inner: (i32, u64)) -> Started {
+    Started {
+        child_pid: i32::try_from(reaper.id()).unwrap(),
+        pid_namespace: endpoint::NAMESPACE_UNREPORTED,
+        inner_pid: Some(inner.0),
+        inner_start: Some(inner.1),
+        ended: false,
+    }
+}
+
+/// Pins `started` for a guard over a stand-in runner, then drops the guard and waits for its
+/// cleanup: what the guard left standing afterwards is what it did not wait for or kill.
+async fn pinned_then_cleaned(started: &Started) -> Result<Arc<Sandbox>, String> {
+    let runner = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let work = Work::new();
+    let mut owned = Owned::new(runner, work.enter());
+    let me = i32::try_from(std::process::id()).unwrap();
+    let outcome = match pin_sandbox(&mut owned, started, me, true) {
+        Ok(pinned) => Ok(pinned.sandbox),
+        Err(Pin::Gone(error)) => Err(format!("gone: {error}")),
+        Err(Pin::Fail(Fail::Other(why) | Fail::Sandbox(why))) => Err(why),
+    };
+    drop(owned);
+    tokio::time::timeout(Duration::from_secs(10), work.settle())
+        .await
+        .unwrap();
+    outcome
+}
+
+/// Mimik pauses before it pins; the reaper is killed meanwhile (left unreaped, as the
+/// runner's child), and the server lives on, reparented. It is still pinned, by identity,
+/// and the cleanup waits for it.
+#[tokio::test]
+async fn a_server_that_outlives_its_killed_reaper_is_pinned_and_waited_for() {
+    let mut fake = fake_sandbox();
+    rustix::process::kill_process(
+        rustix::process::Pid::from_raw(i32::try_from(fake.reaper.id()).unwrap()).unwrap(),
+        rustix::process::Signal::KILL,
+    )
+    .unwrap();
+    // Give the kill time to land and the server to be reparented (not reaped: it is alive).
+    while pid_alive(i32::try_from(fake.reaper.id()).unwrap()) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(pid_alive(fake.inner_pid));
+    let started = started_of(&fake.reaper, (fake.inner_pid, fake.inner_start));
+    let sandbox = pinned_then_cleaned(&started).await.unwrap();
+    assert!(
+        sandbox.inner.get().is_some(),
+        "the server was not pinned although its reaper was gone"
+    );
+    assert!(
+        !pid_alive(fake.inner_pid),
+        "the cleanup left the server running"
+    );
+    let _ = fake.reaper.wait();
+}
+
+/// A server that is already gone (its pid reaped) pins nothing, and the reaper is still
+/// attached and waited for.
+#[tokio::test]
+async fn a_dead_server_pins_nothing_and_the_reaper_is_still_waited_for() {
+    let mut fake = fake_sandbox();
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    let gone_pid = i32::try_from(gone.id()).unwrap();
+    let gone_start = rundir::start_time(gone_pid).unwrap();
+    gone.wait().unwrap();
+    let started = started_of(&fake.reaper, (gone_pid, gone_start));
+    let sandbox = pinned_then_cleaned(&started).await.unwrap();
+    assert!(sandbox.inner.get().is_none());
+    assert!(
+        endpoint::exited(&sandbox.reaper.pidfd),
+        "the reaper was not waited for"
+    );
+    let _ = fake.reaper.wait();
+    // The real server of this fixture was never named: the cleanup of the reaper leaves it.
+    let _ = rustix::process::kill_process(
+        rustix::process::Pid::from_raw(fake.inner_pid).unwrap(),
+        rustix::process::Signal::KILL,
+    );
+}
+
+/// A pid that another process has now (the reported server's pid reused, so another start
+/// time) is not the server: it is not pinned, never killed, and the reaper is waited for.
+#[tokio::test]
+async fn a_reused_server_pid_is_never_pinned_or_killed() {
+    let mut fake = fake_sandbox();
+    let mut bystander = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let bystander_pid = i32::try_from(bystander.id()).unwrap();
+    let wrong_start = rundir::start_time(bystander_pid).unwrap() + 1;
+    let started = started_of(&fake.reaper, (bystander_pid, wrong_start));
+    let sandbox = pinned_then_cleaned(&started).await.unwrap();
+    assert!(sandbox.inner.get().is_none());
+    assert!(endpoint::exited(&sandbox.reaper.pidfd));
+    assert!(pid_alive(bystander_pid), "an unrelated process was killed");
+    bystander.kill().unwrap();
+    bystander.wait().unwrap();
+    let _ = fake.reaper.wait();
+    let _ = rustix::process::kill_process(
+        rustix::process::Pid::from_raw(fake.inner_pid).unwrap(),
+        rustix::process::Signal::KILL,
+    );
+}
+
+/// A Hakoniwa runner that names no server fails the start, the reaper attached and waited for.
+#[tokio::test]
+async fn a_start_without_a_reported_server_fails_with_the_reaper_waited_for() {
+    let mut fake = fake_sandbox();
+    let mut started = started_of(&fake.reaper, (0, 0));
+    started.inner_pid = None;
+    started.inner_start = None;
+    let error = pinned_then_cleaned(&started).await.unwrap_err();
+    assert!(error.contains("not reported"), "{error}");
+    let _ = fake.reaper.wait();
+    let _ = rustix::process::kill_process(
+        rustix::process::Pid::from_raw(fake.inner_pid).unwrap(),
+        rustix::process::Signal::KILL,
+    );
+}
+
+fn emfile() -> std::io::Error {
+    std::io::Error::from_raw_os_error(libc::EMFILE)
+}
+
+#[test]
+fn a_server_is_gone_only_when_it_is_proven_and_unverified_when_its_start_cannot_be_read() {
+    let mut sleeper = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let pid = i32::try_from(sleeper.id()).unwrap();
+    let start = rundir::start_time(pid).unwrap();
+    // The reported start time, read: ours.
+    assert!(matches!(
+        endpoint::open_inner_with(pid, start, |_| Ok(start)),
+        Ok(endpoint::Inner::Ours(_))
+    ));
+    // Another start time: the pid was reused, so the reported process is gone.
+    assert!(matches!(
+        endpoint::open_inner_with(pid, start, |_| Ok(start + 1)),
+        Ok(endpoint::Inner::Gone)
+    ));
+    // The process vanished under the read (`ENOENT`, `ESRCH`): gone.
+    for errno in [libc::ENOENT, libc::ESRCH] {
+        assert!(matches!(
+            endpoint::open_inner_with(pid, start, |_| Err(std::io::Error::from_raw_os_error(
+                errno
+            ))),
+            Ok(endpoint::Inner::Gone)
+        ));
+    }
+    // Any other failure (no descriptors, no permission, an unreadable line) proves nothing:
+    // the pidfd is kept, as unverified.
+    for error in [
+        emfile as fn() -> std::io::Error,
+        || std::io::Error::from_raw_os_error(libc::EACCES),
+        || std::io::Error::new(std::io::ErrorKind::InvalidData, "garbled"),
+    ] {
+        match endpoint::open_inner_with(pid, start, |_| Err(error())) {
+            Ok(endpoint::Inner::Unverified(watched)) => assert!(watched.alive()),
+            other => panic!("{other:?}"),
+        }
+    }
+    sleeper.kill().unwrap();
+    sleeper.wait().unwrap();
+}
+
+/// A live server whose start time could not be read is waited for, never signalled: no exit is
+/// published while it runs, and the watcher goes on once it ends by itself.
+#[tokio::test]
+async fn an_unverified_live_server_keeps_the_exit_unpublished_and_is_never_signalled() {
+    let mut runner = std::process::Command::new("true").spawn().unwrap();
+    let runner_watch = Watched::open(i32::try_from(runner.id()).unwrap()).unwrap();
+    let mut reaper_process = std::process::Command::new("true").spawn().unwrap();
+    let reaper_watch = Watched::open(i32::try_from(reaper_process.id()).unwrap()).unwrap();
+    let mut stranger = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let stranger_pid = i32::try_from(stranger.id()).unwrap();
+    let pinned = match endpoint::open_inner_with(stranger_pid, 1, |_| Err(emfile())).unwrap() {
+        endpoint::Inner::Unverified(watched) => watched,
+        other => panic!("{other:?}"),
+    };
+    let sandbox = Arc::new(Sandbox {
+        reaper: reaper_watch,
+        pid_namespace: 0,
+        inner: std::sync::OnceLock::from(endpoint::InnerPin {
+            watched: pinned,
+            verified: false,
+        }),
+    });
+    reaper_process.wait().unwrap();
+    let _ = runner.wait();
+    let (sender, mut receiver) = watch::channel(None);
+    tokio::spawn(watch_exit(
+        runner,
+        runner_watch,
+        Some(sandbox),
+        sender,
+        || {},
+    ));
+    // Past the grace in which a verified one would have been signalled (and then some).
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(
+        receiver.borrow().is_none(),
+        "the exit was published with the server running"
+    );
+    assert!(
+        pid_alive(stranger_pid),
+        "an unverified process was signalled"
+    );
+    // It ends by itself: now the exit is published.
+    stranger.kill().unwrap();
+    stranger.wait().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), receiver.wait_for(Option::is_some))
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// What `pin_or_end` makes of a reaper that no longer exists: for Hakoniwa only a runner that
+/// said it had ended (`ended`) makes that acceptable; a missing reaper is otherwise an error,
+/// never proof that the server is gone.
+#[tokio::test]
+async fn a_missing_hakoniwa_reaper_fails_the_start_unless_the_runner_said_it_had_ended() {
+    let mut setup = setup(MODEL, "fake");
+    setup.settings.backend = Backend::Hakoniwa;
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    let run = launch.0.run_dir().unwrap();
+    let generation = Generation::create(&run, "9").unwrap();
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    let reaper_pid = i32::try_from(gone.id()).unwrap();
+    gone.wait().unwrap();
+    let runner = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let work = Work::new();
+    let mut owned = Owned::new(runner, work.enter());
+    let me = i32::try_from(std::process::id()).unwrap();
+    let mut started = Started {
+        child_pid: reaper_pid,
+        pid_namespace: endpoint::NAMESPACE_UNREPORTED,
+        inner_pid: None,
+        inner_start: None,
+        ended: false,
+    };
+    let command = Command::Server { device: None };
+    let refused = launch
+        .0
+        .pin_or_end(&mut owned, &started, me, &command, &generation);
+    assert!(
+        matches!(&refused, Err(Fail::Other(why)) if why.contains("reaper")),
+        "{:?}",
+        refused.map(|_| ())
+    );
+    started.ended = true;
+    let (sandbox, pinned, _) = launch
+        .0
+        .pin_or_end(&mut owned, &started, me, &command, &generation)
+        .unwrap();
+    assert!(sandbox.is_none() && pinned.is_none());
+    drop(owned);
+    tokio::time::timeout(Duration::from_secs(10), work.settle())
+        .await
+        .unwrap();
+}
+#[tokio::test]
+async fn a_delayed_marker_report_is_required_before_readiness() {
+    let marker = MarkerState::new();
+    let delayed = Arc::clone(&marker);
+    let publish = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        delayed.set_landlock(Some(super::super::hako::Landlock::Full { abi: 11 }));
+        delayed.set(Marker::Executed);
+    });
+    assert_eq!(
+        marker.require_landlock(Duration::from_secs(1)).await,
+        Ok(())
+    );
+    publish.await.unwrap();
+    assert_eq!(
+        marker.landlock(),
+        Some(super::super::hako::Landlock::Full { abi: 11 })
+    );
+    assert!(
+        MarkerState::new()
+            .require_landlock(Duration::from_millis(10))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn readiness_accepts_partial_and_unavailable_but_never_a_finished_missing_report() {
+    for report in [
+        super::super::hako::Landlock::Partial { abi: 3 },
+        super::super::hako::Landlock::Unavailable,
+    ] {
+        let marker = MarkerState::new();
+        marker.set_landlock(Some(report));
+        marker.set(Marker::Executed);
+        assert_eq!(
+            marker.require_landlock(Duration::from_secs(1)).await,
+            Ok(())
+        );
+    }
+    for outcome in [Marker::Absent, Marker::Unknown, Marker::Executed] {
+        let marker = MarkerState::new();
+        marker.set(outcome);
+        let error = marker
+            .require_landlock(Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(error.contains("did not report"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn a_retry_that_fails_before_the_inspection_carries_no_earlier_hint() {
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    let old = "llama-server may need libgomp.so.1: from an earlier verification";
+    let set = |hint: Option<&str>| {
+        launch.0.library_hints.lock().unwrap()[0] = hint.map(str::to_owned);
+    };
+    // A start refused before any verification (level 3 is not started in this release).
+    set(Some(old));
+    let refused = Real::with_build(setup.settings.clone(), Some(setup.build.clone()));
+    let refused = Launch(Arc::new(refused));
+    refused.0.library_hints.lock().unwrap()[0] = Some(old.into());
+    let _ = refused.start(1, Level::Unconfined, Path::Cpu).await;
+    assert_eq!(refused.failure_hint(Path::Cpu), None);
+    // A verification that refuses the runtime folder before reaching the library check.
+    set(Some(old));
+    std::fs::set_permissions(
+        setup.dir.path().join("runtime"),
+        std::fs::Permissions::from_mode(0o775),
+    )
+    .unwrap();
+    let ticket = launch.0.work.enter();
+    assert!(
+        launch
+            .0
+            .verify(Path::Cpu, Level::Bubblewrap, &ticket)
+            .is_err()
+    );
+    assert_eq!(launch.failure_hint(Path::Cpu), None);
+    // A probe (the GPU listing and the level probes verify too) starts from nothing as well.
+    set(Some(old));
+    let _ = launch.probe(Path::Cpu).await;
+    assert_eq!(launch.failure_hint(Path::Cpu), None);
 }

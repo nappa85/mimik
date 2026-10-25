@@ -48,6 +48,9 @@ pub struct RuntimeConfig {
     /// `--assistant-device`: `auto` (the default: the best hardware GPU, else the CPU),
     /// `cpu`, or a GPU's PCI address.
     pub device: Option<String>,
+    /// `--assistant-sandbox`: `bwrap` (the default) or `hakoniwa` (builds with the
+    /// `sandbox-hakoniwa` feature; the comparison spike, DEP-24).
+    pub sandbox: Option<String>,
 }
 
 impl AssistantHandle {
@@ -95,6 +98,10 @@ impl AssistantHandle {
             None => runtime::device::Choice::Auto,
             Some(text) => runtime::device::Choice::parse(text)?,
         };
+        let backend = match config.sandbox.as_deref() {
+            None => runtime::Backend::default(),
+            Some(text) => runtime::Backend::parse(text)?,
+        };
         let path = runtime_path(&device);
         if config.threads == Some(0) {
             return Err("--assistant-threads must be at least 1".into());
@@ -126,6 +133,7 @@ impl AssistantHandle {
                 .map_err(|_| "Mimik's own path is unknown".to_owned())?,
             device,
             roots: runtime::device::Roots::default(),
+            backend,
         };
         Ok(Self::with_launcher(
             Arc::new(runtime::launch::Launch(Arc::new(
@@ -182,6 +190,23 @@ pub(crate) fn runtime_path(device: &runtime::device::Choice) -> runtime::Path {
 #[must_use]
 pub fn runner_main(args: &[String]) -> i32 {
     runtime::probe::main(args)
+}
+
+/// `mimik assistant-apparmor-profile [--for <path>]`: prints the `AppArmor` profile for this
+/// binary, or for `path` (the Hakoniwa sandbox needs it on Ubuntu 23.10 and later). Returns
+/// the exit code.
+#[must_use]
+pub fn apparmor_profile_main(args: &[String]) -> i32 {
+    match runtime::hako::apparmor_profile_for(args) {
+        Ok(profile) => {
+            print!("{profile}");
+            0
+        }
+        Err(why) => {
+            eprintln!("assistant-apparmor-profile: {why}");
+            1
+        }
+    }
 }
 
 #[cfg(feature = "dev-endpoint")]

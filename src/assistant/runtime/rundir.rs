@@ -108,6 +108,25 @@ impl Entry {
     }
 }
 
+/// `(parent, start time)` of a process from one read of `/proc/<pid>/stat` (the start time in
+/// clock ticks since boot): both belong to the same process. The error is the read's own, so
+/// a process that is gone (`ENOENT`, `ESRCH`) can be told from one that cannot be read.
+pub(crate) fn stat_of(pid: i32) -> std::io::Result<(i32, u64)> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    parse_stat(&text).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "an unreadable stat line")
+    })
+}
+
+/// `(parent, start time)` of a `stat` line: the fields after the parenthesised name.
+pub(crate) fn parse_stat(text: &str) -> Option<(i32, u64)> {
+    let rest = text.rsplit(')').next()?;
+    let mut fields = rest.split_whitespace();
+    let parent = fields.nth(1)?.parse().ok()?;
+    let start = fields.nth(17)?.parse().ok()?;
+    Some((parent, start))
+}
+
 /// A process's start time in clock ticks since boot.
 pub(crate) fn start_time(pid: i32) -> Option<u64> {
     procfs::process::Process::new(pid)
@@ -117,11 +136,31 @@ pub(crate) fn start_time(pid: i32) -> Option<u64> {
         .map(|stat| stat.starttime)
 }
 
+/// The executable of test process `pid`. A child just spawned can still show this test binary
+/// (its image before the exec is visible for a moment after `spawn` returns), which made the
+/// sweep tests flaky: a recorded identity that no longer matches reads as a reused PID. So a
+/// child of this process that still shows the test binary is polled until it has exec'd.
 #[cfg(test)]
 pub(crate) fn executable(pid: i32) -> Option<String> {
-    std::fs::read_link(format!("/proc/{pid}/exe"))
+    let read = || {
+        std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .map(|path| path.display().to_string())
+    };
+    let own = std::env::current_exe()
         .ok()
-        .map(|path| path.display().to_string())
+        .map(|path| path.display().to_string());
+    if u32::try_from(pid).is_ok_and(|pid| pid == std::process::id()) {
+        return read();
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let found = read();
+        if found != own || std::time::Instant::now() >= deadline {
+            return found;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
 }
 
 /// The locked pidfile.
@@ -362,10 +401,26 @@ pub(crate) fn sweep_generations(run: BorrowedFd<'_>) {
         if name == "." || name == ".." || name == PIDFILE {
             continue;
         }
-        if name.bytes().all(|b| b.is_ascii_digit()) || name.starts_with("probe") {
+        // A root first: a probe's is named `probe-…` too, and a generation's depth is shorter.
+        if name.ends_with(ROOT_SUFFIX) {
+            remove_root(run, &name);
+        } else if name.bytes().all(|b| b.is_ascii_digit()) || name.starts_with("probe") {
             remove_generation(run, &name);
         }
     }
+}
+
+/// The suffix of a generation's sandbox root (`run/<name>.root`, the Hakoniwa sandbox's
+/// mount points).
+pub(crate) const ROOT_SUFFIX: &str = ".root";
+
+/// The deepest tree a sandbox root may hold (mount points mirror host paths).
+const ROOT_DEPTH: usize = 32;
+
+/// Removes a sandbox root and everything in it, never following a link.
+pub(crate) fn remove_root(run: BorrowedFd<'_>, name: &str) {
+    empty(run, name, ROOT_DEPTH);
+    let _ = rustix::fs::unlinkat(run, name, AtFlags::REMOVEDIR);
 }
 
 /// Creates `run/<name>/` with mode 0700, opens it without following links and checks
@@ -434,11 +489,24 @@ impl Generation {
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
+
+    /// The name of this generation's sandbox root beside it in `run/`.
+    pub(crate) fn root_name(&self) -> String {
+        format!("{}{ROOT_SUFFIX}", self.name)
+    }
+
+    /// Creates the sandbox root `run/<name>.root` (mode 0700); it goes with the generation.
+    pub(crate) fn create_root(&self) -> Result<(), Refusal> {
+        let name = self.root_name();
+        rustix::fs::mkdirat(self.run.as_fd(), &name, Mode::from_raw_mode(0o700))
+            .map_err(|error| Refusal::Io(format!("run/{name} ({})", error.kind())))
+    }
 }
 
 impl Drop for Generation {
     fn drop(&mut self) {
         remove_generation(self.run.as_fd(), &self.name);
+        remove_root(self.run.as_fd(), &self.root_name());
     }
 }
 

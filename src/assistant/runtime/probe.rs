@@ -192,6 +192,7 @@ struct ProbeArgs {
     model: Option<String>,
     sha256: Option<String>,
     data: Option<String>,
+    sandbox: Option<String>,
 }
 
 fn parse(args: &[String]) -> Result<ProbeArgs, String> {
@@ -208,6 +209,7 @@ fn parse(args: &[String]) -> Result<ProbeArgs, String> {
             "--model" => parsed.model = Some(value),
             "--model-sha256" => parsed.sha256 = Some(value),
             "--data-dir" => parsed.data = Some(value),
+            "--sandbox" => parsed.sandbox = Some(value),
             other => return Err(format!("unknown option {other}")),
         }
     }
@@ -246,6 +248,14 @@ fn cli_probe(args: &[String]) -> i32 {
         },
         std::path::PathBuf::from,
     );
+    let backend = match parsed.sandbox.as_deref().map(super::Backend::parse) {
+        None => super::Backend::default(),
+        Some(Ok(backend)) => backend,
+        Some(Err(why)) => {
+            report(json!({"level": null, "error": why}));
+            return 2;
+        }
+    };
     let (Ok(runner), Ok(inner)) = (RunnerCommand::mimik(), InnerCommand::mimik()) else {
         report(json!({"level": null, "error": "Mimik's own binary cannot be found"}));
         return 2;
@@ -263,6 +273,7 @@ fn cli_probe(args: &[String]) -> i32 {
         inner,
         device: super::device::Choice::Cpu,
         roots: super::device::Roots::default(),
+        backend,
     };
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -379,13 +390,13 @@ pub(crate) fn shim() -> i32 {
 }
 
 /// `close_range(3, ~0, 0)`: every descriptor above the standard ones.
-fn close_range() -> bool {
+pub(crate) fn close_range() -> bool {
     // SAFETY: a plain system call closing descriptors this process no longer uses.
     unsafe { libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, 0_u32) == 0 }
 }
 
 /// The open descriptors, from `/proc/self/fd`.
-fn fd_listing() -> std::io::Result<Vec<i32>> {
+pub(crate) fn fd_listing() -> std::io::Result<Vec<i32>> {
     descriptors(
         std::fs::read_dir("/proc/self/fd")?
             .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())),

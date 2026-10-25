@@ -186,23 +186,40 @@ fn sysctl(root: &Path, name: &str) -> Option<u64> {
 }
 
 /// The one setting that rules user namespaces out for certain, read from `root`.
-fn namespaces(root: &Path) -> Result<(), Unusable> {
+pub(crate) fn namespaces(root: &Path) -> Result<(), Unusable> {
     if sysctl(root, "sys/user/max_user_namespaces") == Some(0) {
         return Err(Unusable::UserNamespaces("user.max_user_namespaces = 0"));
     }
     Ok(())
 }
 
-/// Settings that may explain a failed level-1 probe; they decide nothing (a distribution's
-/// `AppArmor` profile for `bwrap`, for example, may still allow it).
-pub(crate) fn namespace_hint(root: &Path) -> Option<String> {
+/// A setting that may explain a failed level-1 probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Cause {
+    /// `kernel.unprivileged_userns_clone = 0` (Debian's and some other kernels' switch).
+    UsernsClone,
+    /// Ubuntu's `AppArmor` restriction (`kernel.apparmor_restrict_unprivileged_userns = 1`).
+    AppArmor,
+}
+
+/// The setting under `root` that may explain a failed probe; it decides nothing (a
+/// distribution's `AppArmor` profile for `bwrap`, for example, may still allow it).
+pub(crate) fn namespace_cause(root: &Path) -> Option<Cause> {
     if sysctl(root, "sys/kernel/unprivileged_userns_clone") == Some(0) {
-        return Some("kernel.unprivileged_userns_clone = 0".into());
+        return Some(Cause::UsernsClone);
     }
     if sysctl(root, "sys/kernel/apparmor_restrict_unprivileged_userns") == Some(1) {
-        return Some(Unusable::AppArmor.to_string());
+        return Some(Cause::AppArmor);
     }
     None
+}
+
+/// [`namespace_cause`] as the text bubblewrap's reason carries.
+pub(crate) fn namespace_hint(root: &Path) -> Option<String> {
+    namespace_cause(root).map(|cause| match cause {
+        Cause::UsernsClone => "kernel.unprivileged_userns_clone = 0".to_owned(),
+        Cause::AppArmor => Unusable::AppArmor.to_string(),
+    })
 }
 
 /// The preflight over `candidates` with sysctls under `proc` (tests inject both).
@@ -300,72 +317,108 @@ impl GpuBinds {
         format!("/dev/dri/{}", self.name)
     }
 
-    fn arguments(&self) -> Vec<OsString> {
+    /// What the GPU path binds besides the render node itself, as typed items.
+    pub(crate) fn items(&self) -> Vec<Item> {
         let node = self.sysfs.join("drm").join(&self.name);
+        let mut items = vec![
+            Item::RoBind(self.sysfs.clone()),
+            Item::Symlink {
+                target: node.clone(),
+                at: format!("/sys/dev/char/{}:{}", self.rdev.0, self.rdev.1).into(),
+            },
+            Item::Symlink {
+                target: node,
+                at: format!("/sys/class/drm/{}", self.name).into(),
+            },
+            Item::Dir("/sys/bus/pci".into()),
+        ];
+        items.extend(self.shared.iter().cloned().map(Item::RoBind));
+        items
+    }
+
+    fn arguments(&self) -> Vec<OsString> {
         let mut args: Vec<OsString> = vec![
             "--dev-bind".into(),
             self.dev.clone().into_os_string(),
             self.inside().into(),
-            "--ro-bind".into(),
-            self.sysfs.clone().into_os_string(),
-            self.sysfs.clone().into_os_string(),
-            "--symlink".into(),
-            node.clone().into_os_string(),
-            format!("/sys/dev/char/{}:{}", self.rdev.0, self.rdev.1).into(),
-            "--symlink".into(),
-            node.into_os_string(),
-            format!("/sys/class/drm/{}", self.name).into(),
-            "--dir".into(),
-            "/sys/bus/pci".into(),
         ];
-        for path in &self.shared {
-            args.extend([
-                "--ro-bind".into(),
-                path.clone().into_os_string(),
-                path.clone().into_os_string(),
-            ]);
-        }
+        args.extend(self.items().iter().flat_map(Item::arguments));
         args
     }
 }
 
-/// The system library directories and the dynamic loader's cache, as binds or links.
-pub(crate) fn system_libraries() -> Vec<OsString> {
-    let mut args: Vec<OsString> = Vec::new();
-    for dir in [
-        "/usr/lib",
-        "/usr/lib64",
-        "/lib",
-        "/lib64",
-        "/usr/libexec/ld",
-    ] {
+/// One entry of the sandbox's allowlist, independent of the sandbox that builds it (bwrap's
+/// arguments and the Hakoniwa plan are both made from these).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Item {
+    /// A read-only bind of a host path at the same path inside.
+    RoBind(PathBuf),
+    /// A symbolic link `at` pointing to `target`.
+    Symlink { target: PathBuf, at: PathBuf },
+    /// An empty directory.
+    Dir(PathBuf),
+}
+
+impl Item {
+    fn arguments(&self) -> Vec<OsString> {
+        match self {
+            Self::RoBind(path) => vec![
+                "--ro-bind".into(),
+                path.clone().into_os_string(),
+                path.clone().into_os_string(),
+            ],
+            Self::Symlink { target, at } => vec![
+                "--symlink".into(),
+                target.clone().into_os_string(),
+                at.clone().into_os_string(),
+            ],
+            Self::Dir(path) => vec!["--dir".into(), path.clone().into_os_string()],
+        }
+    }
+}
+
+/// The system library directories (they hold the ELF interpreter, which the kernel opens
+/// with the execute right).
+pub(crate) const LIBRARY_DIRS: [&str; 5] = [
+    "/usr/lib",
+    "/usr/lib64",
+    "/lib",
+    "/lib64",
+    "/usr/libexec/ld",
+];
+
+/// The system library directories, the dynamic loader's cache and the CPU topology, as
+/// binds or links.
+pub(crate) fn system_items() -> Vec<Item> {
+    let mut items = Vec::new();
+    for dir in LIBRARY_DIRS {
         let path = Path::new(dir);
         let Ok(metadata) = std::fs::symlink_metadata(path) else {
             continue;
         };
         if metadata.file_type().is_symlink() {
             if let Ok(target) = std::fs::read_link(path) {
-                args.extend(["--symlink".into(), target.into_os_string(), dir.into()]);
+                items.push(Item::Symlink {
+                    target,
+                    at: path.to_path_buf(),
+                });
             }
         } else if metadata.is_dir() {
-            args.extend(["--ro-bind".into(), dir.into(), dir.into()]);
+            items.push(Item::RoBind(path.to_path_buf()));
         }
     }
     if Path::new("/etc/ld.so.cache").is_file() {
-        args.extend([
-            "--ro-bind".into(),
-            "/etc/ld.so.cache".into(),
-            "/etc/ld.so.cache".into(),
-        ]);
+        items.push(Item::RoBind("/etc/ld.so.cache".into()));
     }
     if Path::new("/sys/devices/system/cpu").is_dir() {
-        args.extend([
-            "--ro-bind".into(),
-            "/sys/devices/system/cpu".into(),
-            "/sys/devices/system/cpu".into(),
-        ]);
+        items.push(Item::RoBind("/sys/devices/system/cpu".into()));
     }
-    args
+    items
+}
+
+/// [`system_items`] as bwrap arguments.
+pub(crate) fn system_libraries() -> Vec<OsString> {
+    system_items().iter().flat_map(Item::arguments).collect()
 }
 
 impl Profile {
@@ -444,6 +497,15 @@ impl Profile {
 pub(crate) struct Started {
     pub child_pid: i32,
     pub pid_namespace: u64,
+    /// The sandbox's PID-1 process as seen from outside (Hakoniwa only: its reaper is not
+    /// inside the namespace, so the process that holds the memory must be watched itself).
+    pub inner_pid: Option<i32>,
+    /// Its start time (`/proc/<pid>/stat` field 22): with the pid it is the process's identity,
+    /// which a reused pid does not share.
+    pub inner_start: Option<u64>,
+    /// Hakoniwa: the sandbox had already ended when it was reported, its reaper reaped
+    /// after the server's own exit status: the server is proven gone.
+    pub ended: bool,
 }
 
 /// Reads one status line; `None` when it is not the start report.
@@ -452,6 +514,9 @@ pub(crate) fn started(line: &str) -> Option<Started> {
     Some(Started {
         child_pid: i32::try_from(value.get("child-pid")?.as_i64()?).ok()?,
         pid_namespace: value.get("pid-namespace")?.as_u64()?,
+        inner_pid: None,
+        inner_start: None,
+        ended: false,
     })
 }
 
