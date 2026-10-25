@@ -40,6 +40,8 @@ pub(crate) struct Budget {
     pub entries: usize,
     /// Folders opened.
     pub dirs: usize,
+    /// Candidate files opened to check them (from the default folders, the cache and the walk).
+    pub opens: usize,
     /// Folders down from a library directory (`/usr/lib/gcc/x86_64-pc-linux-gnu/15` is 4; the
     /// deepest on a full Gentoo `/usr/lib` is 12).
     pub depth: usize,
@@ -49,6 +51,7 @@ impl Budget {
     pub(crate) const DEFAULT: Self = Self {
         entries: 1_500_000,
         dirs: 100_000,
+        opens: 4_096,
         depth: 24,
     };
 }
@@ -139,38 +142,61 @@ const STRING_MAX: usize = 4096;
 /// The most string bytes looked at over one parse (entries may share or overlap strings, so
 /// this bounds the work a crafted cache can cause).
 const PARSE_WORK: usize = 16 << 20;
+/// The most entries a cache may declare (a real one has thousands; parsed entries cost memory,
+/// so a cache this large is not read).
+const CACHE_ENTRIES: usize = 100_000;
 
-/// `(name, path)` of each library in a glibc `ld.so.cache` (the new format, alone or after the
-/// old one). `None` when the cache is not one this recognises or is not sound: a bad header, an
-/// entry or string outside the table, a string over [`STRING_MAX`], more work than
-/// [`PARSE_WORK`], or a cancel. `Some` with no entries is a cache that parsed and is empty.
+/// `(name, path)` of each library in a glibc `ld.so.cache`. The container is checked: the new
+/// format at the start, or after the old format's own table (whose declared size locates it),
+/// and the new header's declared entry table and string table must lie inside the file. `None`
+/// when the cache is not one this recognises or is not sound: a bad container, an entry or
+/// string outside its table, a string over [`STRING_MAX`], more than [`CACHE_ENTRIES`] entries
+/// or [`PARSE_WORK`] of strings, or a cancel. `Some` with no entries is a cache that parsed and
+/// is empty.
 pub(crate) fn parse_cache(
     data: &[u8],
     cancelled: &dyn Fn() -> bool,
 ) -> Option<Vec<(String, PathBuf)>> {
+    const OLD: &[u8] = b"ld.so-1.7.0";
     const MAGIC: &[u8] = b"glibc-ld.so.cache1.1";
     const HEADER: usize = 48;
     const ENTRY: usize = 24;
-    let start = data
-        .windows(MAGIC.len())
-        .position(|window| window == MAGIC)?;
-    let cache = &data[start..];
+    let cache = if data.starts_with(MAGIC) {
+        data
+    } else if data.starts_with(OLD) {
+        // The old header (magic, padding, a count) and its 12-byte entries, then the new cache
+        // at the next 8-byte boundary.
+        let nlibs = u32::from_le_bytes(data.get(12..16)?.try_into().ok()?) as usize;
+        let end = nlibs.checked_mul(12)?.checked_add(16)?;
+        let rest = data.get(end.checked_add(7)? & !7..)?;
+        if !rest.starts_with(MAGIC) {
+            return None;
+        }
+        rest
+    } else {
+        return None;
+    };
     let word = |at: usize| -> Option<usize> {
         let bytes = cache.get(at..at.checked_add(4)?)?;
         Some(u32::from_le_bytes(bytes.try_into().ok()?) as usize)
     };
     let count = word(20)?;
+    let strings_len = word(24)?;
+    if count > CACHE_ENTRIES {
+        return None;
+    }
     let table_end = count.checked_mul(ENTRY)?.checked_add(HEADER)?;
-    if table_end > cache.len() {
+    let strings_end = table_end.checked_add(strings_len)?;
+    if strings_end > cache.len() {
         return None;
     }
     let mut spent = 0_usize;
-    // A string at `at` in the strings region (after the table), borrowed, bounded and counted.
+    // A string at `at` in the declared string table, borrowed, bounded and counted.
     let mut string = |at: usize| -> Option<&str> {
-        if at < table_end || at >= cache.len() {
+        if at < table_end || at >= strings_end {
             return None;
         }
-        let tail = &cache[at..cache.len().min(at + STRING_MAX + 1)];
+        let tail = &cache[at..strings_end.min(at + STRING_MAX + 1)];
         let end = tail.iter().position(|byte| *byte == 0)?;
         spent = spent.checked_add(end + 1)?;
         if spent > PARSE_WORK {
@@ -193,25 +219,70 @@ pub(crate) fn parse_cache(
     Some(found)
 }
 
-/// Reads at most `max` bytes of a regular file, never blocking (`None`: not a regular file,
-/// unreadable, or larger).
-fn read_bounded(path: &Path, max: u64) -> Option<Vec<u8>> {
-    let file = open_regular(path)?;
-    if file.metadata().ok()?.len() > max {
-        return None;
+/// What reading a bounded file gave.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Slurp {
+    Data(Vec<u8>),
+    /// Not a regular file, or larger than the bound: the same on every try.
+    Refused,
+    /// An open or read error (no descriptors left, an I/O error): it may pass.
+    Failed,
+}
+
+/// Reads at most `max` bytes of a regular file, never blocking (a FIFO, or a link to one, is
+/// opened without blocking and then refused).
+pub(crate) fn read_bounded(path: &Path, max: u64) -> Slurp {
+    use std::os::unix::fs::OpenOptionsExt;
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
+        .open(path)
+    else {
+        return Slurp::Failed;
+    };
+    let Ok(meta) = file.metadata() else {
+        return Slurp::Failed;
+    };
+    if !meta.is_file() || meta.len() > max {
+        return Slurp::Refused;
     }
     let mut data = Vec::new();
-    file.take(max + 1).read_to_end(&mut data).ok()?;
-    (data.len() as u64 <= max).then_some(data)
+    if file.take(max + 1).read_to_end(&mut data).is_err() {
+        return Slurp::Failed;
+    }
+    if data.len() as u64 > max {
+        Slurp::Refused
+    } else {
+        Slurp::Data(data)
+    }
 }
 
 /// The parsed `ld.so.cache`, kept for the process while the file does not change (its
 /// identity, size and modification time): every start would otherwise read and parse it again.
+/// Only a parsed cache or a definite refusal (not recognised, not sound, too large) is kept: a
+/// transient read error (no descriptors, an I/O error) and a cancelled parse are not.
 fn cached_entries(cancelled: &dyn Fn() -> bool) -> Option<Vec<(String, PathBuf)>> {
-    type CacheStamp = (u64, u64, u64, i64, i64);
-    type Entries = Option<Vec<(String, PathBuf)>>;
-    static MEMO: std::sync::Mutex<Option<(CacheStamp, Entries)>> = std::sync::Mutex::new(None);
-    let path = Path::new("/etc/ld.so.cache");
+    static MEMO: Memo = std::sync::Mutex::new(None);
+    cached_at(
+        Path::new("/etc/ld.so.cache"),
+        &MEMO,
+        &|path| read_bounded(path, CACHE_MAX),
+        cancelled,
+    )
+}
+
+type CacheStamp = (u64, u64, u64, i64, i64);
+type Entries = Option<Vec<(String, PathBuf)>>;
+/// The kept parse of a cache file and the stamp it is valid for.
+pub(crate) type Memo = std::sync::Mutex<Option<(CacheStamp, Entries)>>;
+
+/// [`cached_entries`] for `path`, with the memo and the reader given.
+pub(crate) fn cached_at(
+    path: &Path,
+    memo: &Memo,
+    read: &dyn Fn(&Path) -> Slurp,
+    cancelled: &dyn Fn() -> bool,
+) -> Entries {
     let meta = std::fs::metadata(path).ok()?;
     let stamp = (
         meta.dev(),
@@ -220,7 +291,7 @@ fn cached_entries(cancelled: &dyn Fn() -> bool) -> Option<Vec<(String, PathBuf)>
         meta.mtime(),
         meta.mtime_nsec(),
     );
-    if let Some((known, entries)) = MEMO
+    if let Some((known, entries)) = memo
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
@@ -228,10 +299,13 @@ fn cached_entries(cancelled: &dyn Fn() -> bool) -> Option<Vec<(String, PathBuf)>
     {
         return entries.clone();
     }
-    let parsed = read_bounded(path, CACHE_MAX).and_then(|data| parse_cache(&data, cancelled));
-    // A parse cut short by a cancel is not the cache's answer: not kept.
+    let parsed = match read(path) {
+        Slurp::Data(data) => parse_cache(&data, cancelled),
+        Slurp::Refused => None,
+        Slurp::Failed => return None,
+    };
     if !cancelled() {
-        *MEMO
+        *memo
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((stamp, parsed.clone()));
     }
@@ -260,6 +334,9 @@ pub(crate) struct Host<'a> {
     pub roots: Vec<PathBuf>,
     pub budget: Budget,
     pub cancelled: &'a dyn Fn() -> bool,
+    /// The enumeration of the default folders did not finish (a budget, a read error or a
+    /// cancel): the host's folders were not all seen, so nothing can be said to be missing.
+    pub incomplete: bool,
 }
 
 /// `(device, inode)` of a folder, following links.
@@ -295,15 +372,32 @@ impl Host<'_> {
             roots,
             budget: Budget::DEFAULT,
             cancelled,
+            incomplete: false,
         }
         .with_multiarch()
     }
 
-    /// `standard` as the roots plus their `*-linux-*` children.
+    /// `standard` as the roots plus their `*-linux-*` children. The enumeration counts against
+    /// the entry budget and watches for a cancel; if it does not finish, the host is marked
+    /// [`incomplete`](Host::incomplete).
     pub(crate) fn with_multiarch(mut self) -> Self {
         let mut standard = self.roots.clone();
-        for root in &self.roots {
-            for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let mut seen = 0_usize;
+        'roots: for root in &self.roots {
+            let Ok(entries) = std::fs::read_dir(root) else {
+                self.incomplete = true;
+                continue;
+            };
+            for entry in entries {
+                seen += 1;
+                if seen > self.budget.entries || (self.cancelled)() {
+                    self.incomplete = true;
+                    break 'roots;
+                }
+                let Ok(entry) = entry else {
+                    self.incomplete = true;
+                    continue 'roots;
+                };
                 if entry.file_name().to_string_lossy().contains("-linux-")
                     && entry.file_type().is_ok_and(|kind| kind.is_dir())
                 {
@@ -315,36 +409,65 @@ impl Host<'_> {
         self
     }
 
-    /// Where `wanted` (name and the kind of its dependant) can be had. One walk serves every
-    /// name that the default folders and the cache do not settle.
+    /// Where `wanted` (name and the kind of its dependant) can be had. The default folders are
+    /// asked first; only the names they do not settle go on to the cache, which is indexed once
+    /// by name with its repeated paths dropped; the names still open share one walk. Every phase
+    /// counts against the budgets and watches for a cancel: running out of either ends the
+    /// phase and, for the names not settled, the answer is "unknown".
     pub(crate) fn find(&self, wanted: &BTreeMap<String, Kind>) -> BTreeMap<String, Found> {
         let mut result = BTreeMap::new();
-        let mut open: BTreeMap<&String, Kind> = BTreeMap::new();
+        let mut pending: BTreeMap<&String, Kind> = BTreeMap::new();
+        let mut opens = 0_usize;
+        // Whether every phase that ran covered what it should.
+        let mut whole = !self.incomplete;
         for (name, kind) in wanted {
-            let in_standard = self
-                .standard
-                .iter()
-                .any(|dir| compatible(&dir.join(name), *kind));
-            let in_cache = self
-                .cache
-                .iter()
-                .flatten()
-                .any(|(cached, path)| cached == name && compatible(path, *kind));
-            if in_standard || in_cache {
+            let mut settled = false;
+            for dir in &self.standard {
+                if opens >= self.budget.opens || (self.cancelled)() {
+                    whole = false;
+                    break;
+                }
+                opens += 1;
+                if compatible(&dir.join(name), *kind) {
+                    settled = true;
+                    break;
+                }
+            }
+            if settled {
                 result.insert(name.clone(), Found::Yes);
             } else {
-                open.insert(name, *kind);
+                pending.insert(name, *kind);
             }
         }
-        if open.is_empty() {
+        if !pending.is_empty() {
+            let (index, indexed) = self.index(&pending);
+            whole &= indexed;
+            let names: Vec<&String> = pending.keys().copied().collect();
+            for name in names {
+                let kind = pending[name];
+                for path in index.get(name.as_str()).into_iter().flatten() {
+                    if opens >= self.budget.opens || (self.cancelled)() {
+                        whole = false;
+                        break;
+                    }
+                    opens += 1;
+                    if compatible(path, kind) {
+                        result.insert(name.clone(), Found::Yes);
+                        pending.remove(name);
+                        break;
+                    }
+                }
+            }
+        }
+        if pending.is_empty() {
             return result;
         }
-        let (elsewhere, complete) = self.walk(&open);
-        for (name, _) in open {
+        let (elsewhere, complete) = self.walk(&pending, opens);
+        for (name, _) in pending {
             let found = if elsewhere.contains(name) {
                 Found::Elsewhere
-            } else if complete && self.cache.is_some() {
-                // Only a complete search with a cache that was read can say "nowhere".
+            } else if complete && whole && self.cache.is_some() {
+                // Only complete phases and a cache that was read can say "nowhere".
                 Found::No
             } else {
                 Found::Elsewhere
@@ -354,13 +477,35 @@ impl Host<'_> {
         result
     }
 
+    /// The cache's distinct paths for each name of `pending`, and whether the scan finished.
+    #[allow(clippy::type_complexity, reason = "one local pair")]
+    fn index<'h>(
+        &'h self,
+        pending: &BTreeMap<&String, Kind>,
+    ) -> (BTreeMap<&'h str, BTreeSet<&'h Path>>, bool) {
+        let mut index: BTreeMap<&str, BTreeSet<&Path>> = BTreeMap::new();
+        for (scanned, (name, path)) in self.cache.iter().flatten().enumerate() {
+            if scanned % 1024 == 0 && (scanned >= self.budget.entries || (self.cancelled)()) {
+                return (index, false);
+            }
+            if pending.contains_key(name) {
+                index
+                    .entry(name.as_str())
+                    .or_default()
+                    .insert(path.as_path());
+            }
+        }
+        (index, true)
+    }
+
     /// The names of `open` with a compatible candidate anywhere under the roots, and whether the
     /// walk saw everything (a budget hit, an unreadable folder or a cancel makes it incomplete).
-    fn walk(&self, open: &BTreeMap<&String, Kind>) -> (BTreeSet<String>, bool) {
+    fn walk(&self, open: &BTreeMap<&String, Kind>, opened: usize) -> (BTreeSet<String>, bool) {
         struct State<'a> {
             open: &'a BTreeMap<&'a String, Kind>,
             found: BTreeSet<String>,
             entries: usize,
+            opens: usize,
             dirs: usize,
             seen: HashSet<(u64, u64)>,
             complete: bool,
@@ -414,10 +559,15 @@ impl Host<'_> {
                 } else if kind.is_file() || kind.is_symlink() {
                     // A FIFO, socket or device entry is never opened.
                     let name = entry.file_name().to_string_lossy().into_owned();
-                    if let Some(expected) = state.open.get(&name)
-                        && compatible(&entry.path(), *expected)
-                    {
-                        state.found.insert(name);
+                    if let Some(expected) = state.open.get(&name) {
+                        if state.opens >= host.budget.opens {
+                            state.complete = false;
+                            return;
+                        }
+                        state.opens += 1;
+                        if compatible(&entry.path(), *expected) {
+                            state.found.insert(name);
+                        }
                     }
                 }
             }
@@ -426,6 +576,7 @@ impl Host<'_> {
             open,
             found: BTreeSet::new(),
             entries: 0,
+            opens: opened,
             dirs: 0,
             seen: HashSet::new(),
             complete: true,

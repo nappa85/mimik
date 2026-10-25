@@ -534,7 +534,7 @@ impl Manager {
 
     /// The levels that passed their probe and this manager may start, in order; the others
     /// are recorded as skipped.
-    fn probed(&mut self, path: Path, probed: Vec<(Level, Result<(), String>)>) -> Vec<Level> {
+    fn probed(&mut self, probed: Vec<(Level, Result<(), String>)>) -> Vec<Level> {
         let mut levels = Vec::new();
         for (level, result) in probed {
             let why = match result {
@@ -609,7 +609,7 @@ impl Manager {
                 status.device_notes = notes;
             });
         }
-        Ok(self.probed(path, probed))
+        Ok(self.probed(probed))
     }
 
     /// The GPU path failed: the CPU path is used from now on, until Mimik restarts or the

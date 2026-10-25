@@ -357,10 +357,21 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
   read, or the start was cancelled). Folders that are aliases of each other are walked once.
   Candidates are opened without blocking and must be regular files (a FIFO or a link to one is
   refused), and entries that are neither files, links nor folders are never opened. The
-  `ld.so.cache` read is bounded (64 MiB; header and table checked, each string at most 4 KiB, a
-  total string budget, cancellable); a cache that cannot be read or recognised (an old-format-only
-  one, a damaged one) is "unknown", which is not the same as a cache that parsed and is empty. The
-  parsed cache is kept for the process while the file does not change.
+  `ld.so.cache` read is bounded (64 MiB, opened without blocking and refused unless a regular
+  file; the container is checked: the new format at the start or after the old format's own
+  table, the declared entry and string tables inside the file, every string offset inside the
+  declared string table, each string at most 4 KiB, at most 100 000 entries, a total string
+  budget, cancellable); a cache that cannot be read or recognised (an old-format-only one, a
+  damaged one) is "unknown", which is not the same as a cache that parsed and is empty. The
+  parsed cache is kept for the process while the file does not change; a transient read error
+  (no descriptors, an I/O error) is not kept, a parse or a definite refusal is. Looking a name
+  up is bounded too: the loader's default folders come first and a hit ends the lookup; only
+  the names they do not settle go to the cache, indexed once by name with repeated paths
+  dropped; candidate opens, the cache scan and the enumeration of the default folders count
+  against budgets and watch for a cancel, and running out of either makes the answer "unknown".
+  The hint belongs to one attempt (cleared when a verification, a probe or a start begins) and
+  only decorates the failure of that attempt's start or `/health`, or of the GPU listing or
+  probe: not a probe's reason, the level 3 policy skip, or the exit of a server that was ready.
 - Mount flags: each bind is non-recursive, and a mount under a read-only bound directory
   (read from the host's mount table at the start) is masked by an empty read-only tmpfs, so
   no submount can stay writable under a read-only bind and the files the directory holds
