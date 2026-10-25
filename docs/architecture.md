@@ -176,12 +176,12 @@ Runs on every push, pull request and manual dispatch, on `ubuntu-22.04` (`llama-
 5. **lan-smoke:** `lan_smoke.py` runs the unpacked binary on isolated container networks with
    separate clients, a denied subnet and an HTTPS reverse proxy.
 6. **llama-runtime** (needs llama-fetch and checks; host steps, since Docker's seccomp profile
-   refuses the namespaces bwrap needs; no Rust toolchain): verifies and unpacks the release,
-   reapplies the manifest's modes, installs bubblewrap (the 24.04 package, or the pinned
-   upstream 0.13.0 if it lacks an option), lifts the Ubuntu AppArmor user-namespace
+   refuses the namespaces the sandbox needs; no Rust toolchain): verifies and unpacks the release,
+   reapplies the manifest's modes, lifts the Ubuntu AppArmor user-namespace
    restriction for the job, checks `llama-server --version` and `--help` for every flag, runs
    `mimik assistant-runner --probe` (fails below level 1), then the confinement test binary's
-   seccomp, endpoint, runner and live tests against the unpacked runtime and the test model.
+   seccomp, endpoint, runner and live tests against the unpacked runtime and the test model,
+   with the release's own binary as the runner.
 7. **deployable:** always runs and fails unless all six jobs succeeded.
 
 What green means and what is not certified: [release-scope.md](release-scope.md).

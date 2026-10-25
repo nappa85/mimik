@@ -15,7 +15,7 @@ with the server is in [assisted-entry.md](assisted-entry.md), "Interpretation as
 | Verified descriptors (model, runtime files) | `src/assistant/runtime/files.rs` |
 | Runner, spawner thread | `src/assistant/runtime/runner.rs` |
 | Seccomp program | `src/assistant/runtime/seccomp.rs` |
-| bubblewrap preflight and profile | `src/assistant/runtime/bwrap.rs` |
+| Sandbox: allowlist, host check | `src/assistant/runtime/sandbox.rs`, `src/assistant/runtime/hako.rs` |
 | Start-time probe, `assistant-runner` entry | `src/assistant/runtime/probe.rs` |
 | Launcher (levels 1 and 3), the child's lifetime | `src/assistant/runtime/launch.rs` |
 | Endpoint check | `src/assistant/runtime/endpoint.rs`, transport in `src/assistant/transport.rs` |
@@ -105,7 +105,7 @@ the spawn (1 MiB at most; at most 64 descriptors, the spec's included, are moved
 pinned build's level 1 fits with room to spare). The runner sets `PR_SET_PDEATHSIG`
 (SIGKILL), exits if its parent is no longer Mimik, sets `RLIMIT_CORE` 0 and `RLIMIT_FSIZE`
 64 MiB (a larger write kills the server with `SIGXFSZ`), closes every descriptor it was not
-handed, and executes in place with only `PATH`, `LANG` and `HOME`: `bwrap` on level 1; on
+handed, and executes in place with only `PATH`, `LANG` and `HOME`: the sandbox on level 1 (the runner builds it and stays as its supervisor); on
 level 3 the verified llama-server descriptor, moved to number 1023 (close-on-exec) with
 `RLIMIT_NOFILE` set to 1023, after installing the seccomp program, by `execveat(1023, "",
 …, AT_EMPTY_PATH)`. Descriptors are moved to their numbers between fork and exec with
@@ -127,14 +127,14 @@ folder); and the current working directory. It is not governed by `LD_LIBRARY_PA
   purpose, and sets `LD_LIBRARY_PATH=/proc/self/fd/<n>` to it, so the loader opens the
   libraries by name beneath that descriptor (its inode), never a mutable pathname;
 - `fchdir`es the runner into that same descriptor before seccomp and the exec, at level 3 (the
-  current-directory search is that folder, never Mimik's own cwd); at level 1 bwrap does the
-  `chdir` into `/opt/llama`, and only the allowlisted binds are visible inside the sandbox;
+  current-directory search is that folder, never Mimik's own cwd); at level 1 the sandbox's working
+  directory is `/opt/llama`, and only the allowlisted binds are visible inside the sandbox;
 - clears the environment and never sets `GGML_BACKEND_PATH` or `GGML_BACKEND_DIR`.
 
 ## Confinement levels
 
 Mimik runs llama-server at level 1 or not at all (ASSIST-43, ASSIST-48; there is no level 2): when level 1 cannot be used, the
-assistant is unavailable and `/admin/assistant` says how to fix it (install bubblewrap, allow
+assistant is unavailable and `/admin/assistant` says how to fix it (allow
 unprivileged user namespaces, the AppArmor note), with level 1's own reason. Level 3 is built and
 unit-tested but switched off: no manager path probes or starts it, and `--probe` reports its
 result labelled "not used". It returns later as its own step behind an explicit owner opt-in. The launcher itself refuses
@@ -143,36 +143,22 @@ retried). This covers what Mimik starts (the manager,
 Restart, the routes and the start-time probe, which runs level 1 only); `--probe` is the one
 path that still runs level 3's probe, which starts Mimik's own probe child under seccomp,
 never llama-server; the private `assistant-runner` entry points
-(`--spec-fd`, `--shim`, `--probe-inner`) are an internal protocol between Mimik and its runner,
+(`--spec-fd`, `--probe-inner`) are an internal protocol between Mimik and its runner,
 not a privilege boundary (a local user who can run them can run llama-server directly).
 Why each level was not used is on the page and in the log.
 
-1. **bubblewrap.** `bwrap` from `/usr/bin/bwrap` or `/bin/bwrap` (never `PATH`), refused if
-   set-ID or carrying file capabilities; every option used is checked in its help text.
-   Only `user.max_user_namespaces = 0` rules the level out before its probe; the probe
-   decides otherwise, and a failed probe names `kernel.unprivileged_userns_clone = 0` or
-   `kernel.apparmor_restrict_unprivileged_userns = 1` as a possible cause (a distribution's
-   AppArmor profile for `bwrap` may still allow it). Profile:
-   `--unshare-all --die-with-parent --new-session --clearenv` with `PATH`, `LANG` and `HOME`
-   (`/tmp`), `--cap-drop ALL`; read-only binds of `/usr/lib`, `/usr/lib64`, `/lib`, `/lib64`
-   (or their links), `/etc/ld.so.cache` and `/sys/devices/system/cpu`; `--dev /dev`, `--proc
-   /proc`, `--tmpfs /tmp` (64 MiB) and `--tmpfs /dev/shm` (256 MiB) with `--size` when the
-   installed bwrap has it (otherwise the page says "temporary space unbounded"); the
-   generation's directory bound read-write by descriptor at `/run/llama`; each runtime file
-   bound read-only by descriptor under `/opt/llama`; the model by descriptor at
-   `/models/model.gguf`; the token by `--ro-bind-data` (mode 0400) at `/run/token`; the root
-   remounted read-only; the seccomp program by `--seccomp`; `--json-status-fd`, whose first
-   line gives the sandbox's PID-1 reaper (`child-pid`) and its PID namespace. Nothing else of
-   the host is visible. bwrap's reported reaper is accepted only as the runner's child in the
-   reported PID namespace, checked through its pidfd; when it cannot be verified the start
-   fails and bwrap is killed, which ends the sandbox only through `--die-with-parent` (every
-   profile has it). The command inside is Mimik's own binary
-   (bound by descriptor) as a shim: it writes a marker on a dedicated pipe, closes every
-   descriptor but 0–2 (`close_range`, else each one `/proc/self/fd` lists; when neither works
-   it executes nothing) and executes llama-server (or the probe); an exec failure is written
-   to stderr and exits 127 after the marker, so it counts at the same level. The server listens on `/run/llama/llama.sock`.
+1. **The Hakoniwa sandbox** (ASSIST-51; built as the next section describes). Only
+   `user.max_user_namespaces = 0` rules the level out before its probe; the probe decides
+   otherwise, and a failed probe names `kernel.unprivileged_userns_clone = 0` or
+   `kernel.apparmor_restrict_unprivileged_userns = 1` as a possible cause (the page then gives
+   the AppArmor profile command). Inside: no network, a minimal `/dev`, the read-only system
+   library folders (`/usr/lib`, `/usr/lib64`, `/lib`, `/lib64`, `/usr/libexec/ld`), the dynamic
+   loader cache and the CPU topology, `/proc`, `/tmp` (64 MiB) and `/dev/shm` (256 MiB), the
+   generation's directory read-write at `/run/llama`, each runtime file read-only under
+   `/opt/llama`, the model at `/models/model.gguf`, the token at `/run/token`. Nothing else of
+   the host is visible. The server listens on `/run/llama/llama.sock`.
    On the GPU path the profile also binds the selected render node read-write at
-   `/dev/dri/<node>` (`--dev-bind`, the only device bound; the CPU path binds none), its PCI
+   `/dev/dri/<node>` (the only device bound; the CPU path binds none), its PCI
    device's sysfs folder read-only at its own path, the links libdrm resolves to it
    (`/sys/dev/char/<major>:<minor>` and `/sys/class/drm/<node>`), an empty `/sys/bus/pci`, and
    read-only the Vulkan loader's and driver's data folders that exist (`/usr/share/vulkan`,
@@ -216,7 +202,7 @@ the new mount API, `pivot_root`, `unshare`, `setns`, module and `kexec` calls, a
 `execveat` is allowed only on descriptor 1023 with exactly `AT_EMPTY_PATH`: that descriptor is
 close-on-exec and no new descriptor can take its number (the limit is 1023 and an
 unprivileged process cannot raise it), so no exec is possible after the first, from any
-thread. Level 1 allows exec: the shim executes llama-server inside the sandbox, and anything
+thread. Level 1 allows exec: the closure executes llama-server inside the sandbox, and anything
 executed there reaches only what the sandbox holds. Seccomp sees no `connect()` address and is
 not network confinement.
 
@@ -230,30 +216,28 @@ assistant-runner --probe --runtime <dir> --models-dir <dir> --model local:<name>
 cleanup has ended (level 3's result with `"used": false`; the level reached is 1 or none) and
 exits 0 only
 when level 1's probe passed (the CI and owner check). A probe that fails for a definite cause
-(an unusable bwrap, a changed file, a refusal inside the level or by the endpoint check)
-skips its level; one that is only inconclusive (no report within 30 s, a failed spawn or bwrap
-with no status line, a transient endpoint error such as `EMFILE`, `ENOMEM` or `EAGAIN`) is
+(an unusable sandbox, a changed file, a refusal inside the level or by the endpoint check)
+skips its level; one that is only inconclusive (no report within 30 s, a failed spawn or a
+runner with no status line, a transient endpoint error such as `EMFILE`, `ENOMEM` or `EAGAIN`) is
 tried again, three times in all. A level that stays inconclusive is kept for the real start to
 decide, but `--probe` reports it `"ok": false, "inconclusive": true`, never as reached.
 
-## Hakoniwa sandbox (comparison build)
+## The sandbox (Hakoniwa)
 
-Builds with the `sandbox-hakoniwa` feature (off by default, DEP-24) can run level 1 through
-the Hakoniwa library instead of bubblewrap: `--assistant-sandbox hakoniwa` (also
-`assistant-runner --probe --sandbox hakoniwa`; the live tests take `MIMIK_LIVE_SANDBOX`).
-bubblewrap stays the default. Code: `src/assistant/runtime/hako.rs`; the runner's
-`Exec::Hakoniwa` in `runner.rs`.
+Level 1 is the Hakoniwa library's sandbox (ASSIST-51, DEP-24), built in the runner. Code:
+`src/assistant/runtime/hako.rs` (the plan, the closure, the Landlock layer) and
+`sandbox.rs` (the allowlist items, the host check); the runner's `Exec::Hakoniwa` in `runner.rs`.
 
 The runner (a fresh single-threaded process, checked before it forks) builds the container
 and stays as its supervisor: new user, mount, PID, IPC, UTS, cgroup and network namespaces
 (the network namespace stays empty: no interface, no DNS, no proxy), uid and gid mapped to
 Mimik's own with `setgroups` denied, the root a private directory made read-only, and the
-same allowlist as the bubblewrap profile (`bwrap::system_items` and `GpuBinds::items` feed both):
+allowlist of `sandbox::system_items` and `GpuBinds::items`:
 `/proc`; a 1 MiB tmpfs `/dev` with only `null`, `zero`, `full`, `random`, `urandom`, the
 `fd` and standard-stream links and (GPU path) the one render node bound without `nodev`; no
 `tty`, `pts`, `ptmx` or `console`; `/tmp` (64 MiB) and `/dev/shm` (256 MiB) tmpfs; the
 generation's directory read-write at `/run/llama`; the runtime files, the model and the
-token file read-only. Differences from the bubblewrap profile, each with its reason:
+token file read-only. How it is built, each point with its reason:
 
 - Hakoniwa binds host paths and closes every descriptor above 2 in its child, so the
   verified descriptors are not bound. Each bind carries the `(device, inode)` the launcher
@@ -263,9 +247,9 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
 - The token is the content of a file the runner has Hakoniwa write at `/run/token` into the
   sandbox's own `/run`, a 64 KiB tmpfs (memory) under the socket directory's bind. It reaches
   the runner in the spec memory file only: never a file on the host, a command line or an
-  environment variable (a test scans the data and scratch directories for it). Unlike
-  bubblewrap's memory file it is an ordinary file inside the sandbox, which the server can
-  read (it needs to) and rewrite (harmless: it knows the token).
+  environment variable (a test scans the data and scratch directories for it). It is an ordinary file
+  inside the sandbox, which the server can read (it needs to) and rewrite (harmless: it knows
+  the token).
 - The program is PID 1 of its namespace; its reaper is the runner's child outside it, which
   is the process the endpoint check pins (`child-pid`). The seccomp program already refuses
   `fork`, so the sandbox holds one process. The runner does not report the PID namespace's
@@ -322,8 +306,8 @@ token file read-only. Differences from the bubblewrap profile, each with its rea
   unreadable report fails the attempt rather than silently omitting the layer's status.
   The report reaches `Status.landlock` and the Confinement section of `/admin/assistant` ("Landlock: full for the ABI 6 rules (kernel ABI n)", "partial (kernel ABI n)" or "not
   available", each with a note: the full one says that newer rights such as ABI 9's Unix-socket
-  connect are not asked for; the others say that the namespaces alone confine
-  the server then, as with bubblewrap) and the `ready` log line. "Not available" is exactly a
+  connect are not asked for; the others say that the namespaces confine
+  the server then, and below ABI 6 the rights that ABI supports) and the `ready` log line. "Not available" is exactly a
   version probe (`landlock_create_ruleset` with the version flag) that fails with `ENOSYS`
   (no Landlock in the kernel), `EOPNOTSUPP` (disabled at boot) or `EPERM` (a seccomp or
   service-manager filter around Mimik refuses it); the start goes on. Any other probe
@@ -397,7 +381,7 @@ the `tee` and `apparmor_parser -r` steps. `--for <absolute path>` prints it for
 another binary (packagers, test setups). Ubuntu 24.04's restriction and the profile were checked in a VM
 (`results.md`; repeatable with `/media/data/mimik/ubuntu-vm/run.sh`). The Landlock layer on a kernel below ABI 6
 ran once on that VM (ABI 4); a kernel with Landlock disabled at boot is only simulated (a seccomp filter
-answering `ENOSYS`, `EOPNOTSUPP` or `EPERM` to its calls). `results.md` has the comparison.
+answering `ENOSYS`, `EOPNOTSUPP` or `EPERM` to its calls). `results.md` has the measurements.
 
 ## Device (GPU path)
 
@@ -452,8 +436,8 @@ line is ever kept, forwarded or logged, at any verbosity (a test feeds request-l
 with a marker phrase). The GPU path starts llama-server with `--verbosity 4` because the pinned
 build prints the offload line only from that level; in the live check a job's marker phrase
 appeared in neither stream at that level (`results.md`). Nothing the child prints can make
-an exit a sandbox failure: at level 1 that is decided only by the shim's marker pipe ending
-cleanly without the marker (bwrap failed before the exec). The marker's arrival, a read error,
+an exit a sandbox failure: at level 1 that is decided only by the marker pipe ending
+cleanly without the marker (the closure failed before the exec). The marker's arrival, a read error,
 unexpected bytes, or a reader still running after the readers' wait (5 s) all count the exit
 at the same level.
 
@@ -479,7 +463,7 @@ finds it gone. A child is owned from its spawn: any failure before the start com
 and reaps it, kills and waits for the sandbox's reaper (without a deadline, saying so in the
 log after 5 s), and clears the entry it recorded; the next spawn waits until that has ended. Every probe's and start's blocking part and every child's watcher is in-flight work:
 the owner's Restart or shutdown cancels it (it stops before spawning or recording anything;
-bwrap's status wait, the probe's report wait, the retry pause, the probe's endpoint check and
+the runner's status wait, the probe's report wait, the retry pause, the probe's endpoint check and
 hashing, every MiB, see the cancel within about 100 ms; a file read that stalls, on a slow or
 hung disk, holds it longer) and the manager waits until it has all
 finished, cleanup included, before the next session starts or the shutdown completes. The
@@ -488,7 +472,7 @@ a cleanup waits for the runner and the reaper to exit, however long, keeping the
 until then. Probe directories are
 `run/probe-<sequence>-<level>/`. One manager
 task serializes every transition, so two servers never coexist: a child is stopped with
-SIGTERM through the runner's pidfd (on level 1 to bwrap, which takes the sandbox down with
+SIGTERM through the runner's pidfd (on level 1 to the runner, which takes the sandbox down with
 it) and SIGKILL after 5 s, repeated until gone; it is gone, and its exit is published, only
 when the runner has exited and, on level 1, the reaper's pidfd shows it gone. Nothing stops a
 running child but a stop. On every
@@ -517,7 +501,7 @@ transitions:
 
 | Event | Action | Failure count |
 |---|---|---|
-| Sandbox-attributable failure (bwrap setup, no status before exec) | `unavailable` with the fix (level 1 is the only level used), at once | not counted |
+| Sandbox-attributable failure (sandbox setup, no status before exec) | `unavailable` with the fix (level 1 is the only level used), at once | not counted |
 | Any other failed attempt (model load, a changed file, an exit after exec, a refused endpoint, no `/health`, failed priming or calibration, invalid timings) | retry after 2 minutes at the same level | +1 |
 | Child exits while ready | restart now | +1 only within 10 minutes of `ready` |
 | Two consecutive run-deadline expiries without a completed exchange between | stop as hung, restart, measure again | as a child exit |

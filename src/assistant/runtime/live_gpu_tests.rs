@@ -10,8 +10,7 @@
 //!   (`pwm1_enable` 1, `pwm1` at least 230), or `MIMIK_LIVE_GPU_SHORT=1` is set: run them
 //!   only through `tools/assist_gpu_live.py`, which also enforces the machine schedule and the
 //!   thermal limits, and sets the short variable only for its fixed list of short tests
-//!   (automatic fan allowed, junction limit 75 °C). `live_gpu_landlock_*` needs the
-//!   `MIMIK_LIVE_MIMIK` binary built with `sandbox-hakoniwa`.
+//!   (automatic fan allowed, junction limit 75 °C).
 use super::super::super::device::tests::Tree;
 use super::super::super::manager::{self, State};
 use super::*;

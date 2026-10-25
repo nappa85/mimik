@@ -426,7 +426,7 @@ decides.**
   (measured in a container capped to 2 CPUs; a native child at 2 threads is not measured).
   Not exercised in 2b: llama-server `--api-key` auth and the Unix-socket transport. Not
   carried over: the network confinement; the container topology is dev and benchmark
-  evidence only, and production confinement comes from bubblewrap or
+  evidence only, and production confinement comes from the namespace sandbox or
   nothing (ASSIST-34, ASSIST-48), unmeasured until 2c-2. The GPU path is measured below.
 - **CPU-path budget, decided (ASSIST-31):** on a machine without a usable GPU only the fields
   related to the note are sent, the dynamic part is at most 1 KiB, and the run deadline may
@@ -877,7 +877,7 @@ decides.**
   on a kernel below ABI 6?
 - **Setup:** QEMU/KVM VM (4 vCPU, 8 GiB) booted from the official Ubuntu noble cloud image,
   serial 20261017, checksum and GPG signature verified (key D2EB 4462 6FDD C30B 513D 5BB7 1A5D
-  6C4C 7DB8 7C81), kernel 6.8.0-147, Landlock ABI 4. Mimik release build with `sandbox-hakoniwa`,
+  6C4C 7DB8 7C81), kernel 6.8.0-147, Landlock ABI 4. Mimik release build,
   the pinned llama.cpp b11609 CPU runtime, the stories260K model. Repeat with
   `/media/data/mimik/ubuntu-vm/run.sh`; raw output in
   `/media/data/mimik/ubuntu-vm/run/20261024-103115/`.
