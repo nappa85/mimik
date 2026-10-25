@@ -522,9 +522,9 @@ impl Manager {
         Err(next)
     }
 
-    /// The levels that passed their probe and this manager may start, in order; the others
-    /// are recorded as skipped.
-    /// `why` with the launcher's hint for `path`, when there is one and `why` lacks it.
+    /// `why`, a failure of an attempt to start or to reach `/health`, with the launcher's hint
+    /// for `path` when there is one and `why` lacks it. Only those failures: a probe's reasons,
+    /// a policy skip and the exit of a server that was ready are not explained by a library.
     fn hinted(&self, path: Path, why: String) -> String {
         match self.launcher.failure_hint(path) {
             Some(hint) if !why.contains(&hint) => format!("{why} ({hint})"),
@@ -532,6 +532,8 @@ impl Manager {
         }
     }
 
+    /// The levels that passed their probe and this manager may start, in order; the others
+    /// are recorded as skipped.
     fn probed(&mut self, path: Path, probed: Vec<(Level, Result<(), String>)>) -> Vec<Level> {
         let mut levels = Vec::new();
         for (level, result) in probed {
@@ -541,7 +543,7 @@ impl Manager {
                     continue;
                 }
                 Ok(()) => "not used in this release (ASSIST-43)".to_owned(),
-                Err(why) => self.hinted(path, why),
+                Err(why) => why,
             };
             log(&format!("level {} not used: {why}", level.number()));
             self.update(|status| status.skipped.push((level, why)));
@@ -613,7 +615,6 @@ impl Manager {
     /// The GPU path failed: the CPU path is used from now on, until Mimik restarts or the
     /// owner presses "Try the GPU again".
     fn gpu_fallback(&mut self, why: String) {
-        let why = self.hinted(Path::Gpu, why);
         log(&format!("GPU path not used, on the CPU path: {why}"));
         self.gpu_failed = Some(why.clone());
         self.update(|status| {
@@ -686,7 +687,8 @@ impl Manager {
                         .skipped
                         .first()
                         .map_or_else(|| "no confinement level".to_owned(), |(_, why)| why.clone());
-                    return PathEnd::GpuFailed(why);
+                    // The listing or the probe of the GPU failed: a library may explain it.
+                    return PathEnd::GpuFailed(self.hinted(path, why));
                 }
                 let why = self.no_level();
                 return PathEnd::Next(self.hold(why).await);
@@ -717,9 +719,11 @@ impl Manager {
                         }
                     }
                 }
-                Attempt::Failed(Fail::Sandbox(why) | Fail::Other(why)) | Attempt::TooSlow(why)
-                    if gpu =>
-                {
+                Attempt::Failed(Fail::Sandbox(why) | Fail::Other(why)) if gpu => {
+                    self.ended(generation, EndReason::Exited);
+                    return PathEnd::GpuFailed(self.hinted(path, why));
+                }
+                Attempt::TooSlow(why) if gpu => {
                     self.ended(generation, EndReason::Exited);
                     return PathEnd::GpuFailed(why);
                 }
@@ -731,6 +735,7 @@ impl Manager {
                 }
                 Attempt::Failed(Fail::Other(why)) => {
                     self.ended(generation, EndReason::Exited);
+                    let why = self.hinted(path, why);
                     self.failed(why);
                     if self.failures < MAX_FAILURES {
                         self.update(|status| {
@@ -774,7 +779,6 @@ impl Manager {
     }
 
     fn failed(&mut self, why: String) {
-        let why = self.hinted(self.status().path, why);
         log(&format!("attempt failed (counted): {why}"));
         self.failures += 1;
         let failures = self.failures;

@@ -2285,3 +2285,40 @@ async fn readiness_accepts_partial_and_unavailable_but_never_a_finished_missing_
         assert!(error.contains("did not report"), "{error}");
     }
 }
+
+#[tokio::test]
+async fn a_retry_that_fails_before_the_inspection_carries_no_earlier_hint() {
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    launch.preflight(Path::Cpu).await.unwrap();
+    let old = "llama-server may need libgomp.so.1: from an earlier verification";
+    let set = |hint: Option<&str>| {
+        launch.0.library_hints.lock().unwrap()[0] = hint.map(str::to_owned);
+    };
+    // A start refused before any verification (level 3 is not started in this release).
+    set(Some(old));
+    let refused = Real::with_build(setup.settings.clone(), Some(setup.build.clone()));
+    let refused = Launch(Arc::new(refused));
+    refused.0.library_hints.lock().unwrap()[0] = Some(old.into());
+    let _ = refused.start(1, Level::Unconfined, Path::Cpu).await;
+    assert_eq!(refused.failure_hint(Path::Cpu), None);
+    // A verification that refuses the runtime folder before reaching the library check.
+    set(Some(old));
+    std::fs::set_permissions(
+        setup.dir.path().join("runtime"),
+        std::fs::Permissions::from_mode(0o775),
+    )
+    .unwrap();
+    let ticket = launch.0.work.enter();
+    assert!(
+        launch
+            .0
+            .verify(Path::Cpu, Level::Bubblewrap, &ticket)
+            .is_err()
+    );
+    assert_eq!(launch.failure_hint(Path::Cpu), None);
+    // A probe (the GPU listing and the level probes verify too) starts from nothing as well.
+    set(Some(old));
+    let _ = launch.probe(Path::Cpu).await;
+    assert_eq!(launch.failure_hint(Path::Cpu), None);
+}

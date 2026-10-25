@@ -513,8 +513,19 @@ impl Real {
         &self.work
     }
 
+    /// Sets (or, with `None`, clears) what the advisory library check believes about `path`.
+    fn set_library_hint(&self, path: Path, hint: Option<String>) {
+        self.library_hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)[usize::from(path == Path::Gpu)] =
+            hint;
+    }
+
     /// The model and the build's files, verified.
     fn verify(&self, path: Path, level: Level, ticket: &Ticket) -> Result<Checked, String> {
+        // The hint belongs to one attempt: whatever an earlier verification believed is gone
+        // before anything here can refuse.
+        self.set_library_hint(path, None);
         let stop = || ticket.cancelled();
         let build = self
             .build(path)
@@ -574,10 +585,7 @@ impl Real {
         // Advisory only: a library the host seems to lack is remembered as a hint for a start
         // that then fails. It never refuses a start, and nothing about the sandbox depends on it.
         let hint = libs::explain(&files, self.server_name(path), &|| ticket.cancelled());
-        self.library_hints
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)[usize::from(path == Path::Gpu)] =
-            hint;
+        self.set_library_hint(path, hint);
         Ok(Checked {
             files,
             model,
@@ -2879,6 +2887,7 @@ impl Launcher for Launch {
 
     async fn probe(&self, path: Path) -> Vec<(Level, Result<(), String>)> {
         let real = Arc::clone(&self.0);
+        real.set_library_hint(path, None);
         let ticket = real.work.enter();
         // Only level 1 is probed for the manager (ASSIST-43): no manager path runs level 3's
         // code, not even its probe. `--probe` still probes level 3 (`probe_levels`).
@@ -2913,6 +2922,7 @@ impl Launcher for Launch {
         level: Level,
         path: Path,
     ) -> Result<Arc<dyn Child>, Fail> {
+        self.0.set_library_hint(path, None);
         self.start_real(generation, level, path)
             .await
             .map(|child| child as Arc<dyn Child>)
