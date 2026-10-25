@@ -136,11 +136,31 @@ pub(crate) fn start_time(pid: i32) -> Option<u64> {
         .map(|stat| stat.starttime)
 }
 
+/// The executable of test process `pid`. A child just spawned can still show this test binary
+/// (its image before the exec is visible for a moment after `spawn` returns), which made the
+/// sweep tests flaky: a recorded identity that no longer matches reads as a reused PID. So a
+/// child of this process that still shows the test binary is polled until it has exec'd.
 #[cfg(test)]
 pub(crate) fn executable(pid: i32) -> Option<String> {
-    std::fs::read_link(format!("/proc/{pid}/exe"))
+    let read = || {
+        std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .map(|path| path.display().to_string())
+    };
+    let own = std::env::current_exe()
         .ok()
-        .map(|path| path.display().to_string())
+        .map(|path| path.display().to_string());
+    if u32::try_from(pid).is_ok_and(|pid| pid == std::process::id()) {
+        return read();
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let found = read();
+        if found != own || std::time::Instant::now() >= deadline {
+            return found;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
 }
 
 /// The locked pidfile.
