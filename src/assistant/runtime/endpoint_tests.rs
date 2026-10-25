@@ -137,9 +137,17 @@ async fn the_childs_own_listener_is_reached_even_if_it_accepts_late() {
 
 #[tokio::test]
 async fn no_listener_yet_is_not_ready() {
-    let port = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .local_addr()
+    // A port that is bound but never listened on, and stays bound for the whole test: nothing
+    // else (another test's listener) can be given the port in between, and connecting is
+    // refused. (Binding a listener and dropping it left the port free to be reused.)
+    let held = rustix::net::socket(
+        rustix::net::AddressFamily::INET,
+        rustix::net::SocketType::STREAM,
+        None,
+    )
+    .unwrap();
+    rustix::net::bind(&held, &std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = std::net::SocketAddrV4::try_from(rustix::net::getsockname(&held).unwrap())
         .unwrap()
         .port();
     let error = Loopback {
@@ -151,6 +159,7 @@ async fn no_listener_yet_is_not_ready() {
     .err()
     .unwrap();
     assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+    drop(held);
 }
 
 #[tokio::test]
