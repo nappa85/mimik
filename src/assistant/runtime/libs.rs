@@ -13,15 +13,15 @@
 //! that cannot be parsed makes the answer "unknown".
 //!
 //! A name is found when it is another file of the build, or a library the sandbox could load
-//! from the folders it binds ([`bwrap::LIBRARY_DIRS`]): in the loader's own default folders
+//! from the folders it binds ([`sandbox::LIBRARY_DIRS`]): in the loader's own default folders
 //! (those folders and the multiarch ones directly under them), or at the path `ld.so.cache`
 //! gives for it (the cache is parsed read-only), and in each case a regular file (or a link that
 //! resolves) that is an ELF of the same class and machine as the file that needs it. A name that
 //! is found nowhere is reported, but only when the search was complete; a name whose only
 //! candidates lie in other places, or a search that hit its budget, met an unreadable folder or
 //! was cancelled, is "unknown", never "missing".
-use super::bwrap::LIBRARY_DIRS;
 use super::files::Verified;
+use super::sandbox::LIBRARY_DIRS;
 use object::read::elf::{Dyn, FileHeader};
 use object::{Endianness, elf};
 use std::collections::{BTreeMap, BTreeSet, HashSet};

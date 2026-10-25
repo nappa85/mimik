@@ -60,10 +60,6 @@ struct AssistantArgs {
     /// `cpu`, or a GPU's PCI address such as `0000:0c:00.0`.
     #[arg(long = "assistant-device")]
     device: Option<String>,
-    /// The level-1 sandbox: `bwrap` (default) or `hakoniwa` (builds with the
-    /// `sandbox-hakoniwa` feature; a comparison, not yet a supported choice).
-    #[arg(long = "assistant-sandbox", hide = true)]
-    sandbox: Option<String>,
     #[cfg(feature = "dev-endpoint")]
     #[command(flatten)]
     development: DevelopmentAssistant,
@@ -140,7 +136,6 @@ fn assistant(
         model_alias: args.assistant.model_alias.clone(),
         threads: args.assistant.threads,
         device: args.assistant.device.clone(),
-        sandbox: args.assistant.sandbox.clone(),
     })?;
     println!("Assistant on: the model server is starting (see /admin/assistant).");
     Ok(handle)

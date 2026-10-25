@@ -1,5 +1,5 @@
 //! The launcher's GPU path without a GPU: the flag vector, the check at the real start, the
-//! offload line, discovery over fake sysfs trees with bubblewrap forced unusable, and the
+//! offload line, discovery over fake sysfs trees with the sandbox forced unusable, and the
 //! levels the GPU path refuses. The live GPU checks are `live_tests.rs` (`live_gpu_*`, run
 //! only by `tools/assist_gpu_live.py`).
 use super::super::device::tests::Tree;
@@ -19,7 +19,6 @@ fn settings(dir: &std::path::Path, device: Choice, roots: Roots) -> Settings {
         inner: InnerCommand::mimik().unwrap(),
         device,
         roots,
-        backend: Backend::default(),
     }
 }
 
@@ -166,13 +165,19 @@ fn discovery_names_each_render_node_it_could_not_list() {
         ("0000:0d:00.0", 129, Some(8 << 30)),
     ]);
     let settings = settings(dir.path(), Choice::Auto, tree.roots());
-    NO_BWRAP.lock().unwrap().push(settings.runtime_dir.clone());
+    NO_SANDBOX
+        .lock()
+        .unwrap()
+        .push(settings.runtime_dir.clone());
     let real = Arc::new(Real::new(settings));
     let ticket = real.work().enter();
     let why = real.discover(&ticket).unwrap_err();
     assert!(why.contains("0000:0c:00.0 (renderD128)"), "{why}");
     assert!(why.contains("0000:0d:00.0 (renderD129)"), "{why}");
-    assert!(why.contains("bubblewrap is not installed"), "{why}");
+    assert!(
+        why.contains("unprivileged user namespaces are disabled"),
+        "{why}"
+    );
     assert_eq!(real.held().device_notes.len(), 2);
     assert!(real.held().gpu.is_none());
 }

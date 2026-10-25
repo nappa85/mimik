@@ -1,11 +1,11 @@
 //! The GPU path live.
 //!
-//! - `live_fake_gpu_*` (host, bubblewrap, no GPU): the fake server (`MIMIK_LIVE_FAKE_SERVER`)
+//! - `live_fake_gpu_*` (host, no GPU): the fake server (`MIMIK_LIVE_FAKE_SERVER`)
 //!   as both builds and `/dev/null` standing in for a render node of a fake sysfs tree, so
 //!   the sandbox wiring (one node bound per listing, the probe opening the node, `--device`
 //!   and the offload check, the fallback) runs without touching a GPU.
 //! - `live_gpu_*` (the dev host's GPU): the pinned Vulkan build and the real model. They
-//!   (they use Mimik's release binary, `MIMIK_LIVE_MIMIK`, as runner, probe and shim) refuse to
+//!   (they use Mimik's release binary, `MIMIK_LIVE_MIMIK`, as runner and probe) refuse to
 //!   run unless `MIMIK_LIVE_GPU=1` is set and the amdgpu fan reads manual
 //!   (`pwm1_enable` 1, `pwm1` at least 230), or `MIMIK_LIVE_GPU_SHORT=1` is set: run them
 //!   only through `tools/assist_gpu_live.py`, which also enforces the machine schedule and the
@@ -117,7 +117,7 @@ async fn run_with(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: bubblewrap, fake server (MIMIK_LIVE_*)"]
+#[ignore = "live: sandbox, fake server (MIMIK_LIVE_*)"]
 async fn live_fake_gpu_each_node_is_listed_alone_and_the_start_uses_the_listed_device() {
     let scratch = scratch();
     let tree = Tree::new(&[
@@ -136,12 +136,12 @@ async fn live_fake_gpu_each_node_is_listed_alone_and_the_start_uses_the_listed_d
     assert_eq!(device.pci, "0000:0c:00.0");
     assert_eq!(device.name, "Vulkan0");
     assert_eq!(status.budgets.unwrap().bounds.bytes, 4096);
-    assert_eq!(status.level, Some(Level::Bubblewrap));
+    assert_eq!(status.level, Some(Level::Sandbox));
     handle.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: bubblewrap, fake server (MIMIK_LIVE_*)"]
+#[ignore = "live: sandbox, fake server (MIMIK_LIVE_*)"]
 async fn live_fake_gpu_a_partial_offload_ends_on_the_cpu_saying_why() {
     let scratch = scratch();
     let tree = Tree::new(&[("0000:0c:00.0", 128, Some(8 << 30))]);
@@ -168,7 +168,7 @@ async fn live_fake_gpu_a_partial_offload_ends_on_the_cpu_saying_why() {
 /// believes it missing, and it is wrong here (the fake server never loads it): the GPU start is
 /// still attempted, reaches ready on the GPU, and nothing of the belief shows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: bubblewrap, fake server (MIMIK_LIVE_*)"]
+#[ignore = "live: sandbox, fake server (MIMIK_LIVE_*)"]
 async fn live_fake_gpu_a_believed_missing_library_does_not_stop_the_gpu_start() {
     let scratch = scratch();
     let tree = Tree::new(&[("0000:0c:00.0", 128, Some(8 << 30))]);
@@ -187,7 +187,7 @@ async fn live_fake_gpu_a_believed_missing_library_does_not_stop_the_gpu_start() 
     assert_eq!(status.state, State::Ready, "{status:?}");
     assert_eq!(status.path, Path::Gpu, "{status:?}");
     assert_eq!(status.gpu_note, None, "{status:?}");
-    assert_eq!(status.level, Some(Level::Bubblewrap), "{status:?}");
+    assert_eq!(status.level, Some(Level::Sandbox), "{status:?}");
     // The belief is kept for a failure to explain; the successful start shows nothing.
     let hint = Launcher::failure_hint(&Launch(Arc::clone(&real)), Path::Gpu).unwrap();
     assert!(
@@ -198,7 +198,7 @@ async fn live_fake_gpu_a_believed_missing_library_does_not_stop_the_gpu_start() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: bubblewrap, fake server (MIMIK_LIVE_*)"]
+#[ignore = "live: sandbox, fake server (MIMIK_LIVE_*)"]
 async fn live_fake_gpu_no_render_node_runs_the_cpu_path() {
     let scratch = scratch();
     let tree = Tree::new(&[]);
@@ -294,11 +294,11 @@ fn gpu_allowed(test: &str) {
 /// The real runtime (`MIMIK_LIVE_RUNTIME` with `cpu/` and `vulkan/`) and the default model
 /// (`MIMIK_LIVE_GPU_MODELS`, a 0700 folder holding it).
 fn real_gpu(scratch: &std::path::Path) -> Arc<Real> {
-    real_gpu_on(scratch, Backend::Bwrap)
+    real_gpu_on(scratch)
 }
 
-/// [`real_gpu`] on `backend`.
-fn real_gpu_on(scratch: &std::path::Path, backend: Backend) -> Arc<Real> {
+/// The real GPU build under the sandbox.
+fn real_gpu_on(scratch: &std::path::Path) -> Arc<Real> {
     let mut settings = settings(scratch, "probe-inner", Vec::new());
     settings.models_dir = env("MIMIK_LIVE_GPU_MODELS");
     settings.model = crate::assistant::model::local_name(crate::assistant::DEFAULT_MODEL)
@@ -311,9 +311,8 @@ fn real_gpu_on(scratch: &std::path::Path, backend: Backend) -> Arc<Real> {
     // here); at 2 threads it is "too slow" (docs/results.md).
     settings.threads = 5;
     settings.device = Choice::Auto;
-    settings.backend = backend;
     settings.roots = Roots::default();
-    // The real code path: Mimik's own binary as the runner, the probe and the shim (the test
+    // The real code path: Mimik's own binary as the runner, the probe (the test
     // binary cannot take the probe's `--render` option).
     let mimik = env("MIMIK_LIVE_MIMIK");
     settings.runner.program.clone_from(&mimik);
@@ -369,13 +368,12 @@ async fn live_gpu_the_rx6650_reaches_ready_with_gpu_budgets() {
 /// The GPU under Hakoniwa with the Landlock layer in force (owed since ASSIST-49; the rule
 /// table is unit-tested, this shows that Vulkan discovery, the render node and the driver data
 /// work under it). A short test.
-#[cfg(feature = "sandbox-hakoniwa")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live GPU: only through tools/assist_gpu_live.py --short (schedule, thermal guard)"]
 async fn live_gpu_landlock_the_rx6650_reaches_ready_under_hakoniwa() {
     gpu_allowed("live_gpu_landlock_the_rx6650_reaches_ready_under_hakoniwa");
     let scratch = scratch();
-    let real = real_gpu_on(scratch.path(), Backend::Hakoniwa);
+    let real = real_gpu(scratch.path());
     let handle = run_until(&real, 352, |status| {
         status.state == State::Ready || matches!(status.state, State::Unavailable(_))
     })
@@ -488,7 +486,7 @@ fn kill(pid: i32) {
 fn assert_cpu_after_gpu_failure(status: &manager::Status) {
     report(status);
     assert_eq!(status.path, Path::Cpu, "{status:?}");
-    assert_eq!(status.level, Some(Level::Bubblewrap), "{status:?}");
+    assert_eq!(status.level, Some(Level::Sandbox), "{status:?}");
     assert!(status.gpu_note.is_some(), "{status:?}");
     assert_eq!(status.failures, 0, "{status:?}");
     assert_eq!(status.device, None, "{status:?}");

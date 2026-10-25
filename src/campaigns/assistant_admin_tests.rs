@@ -244,12 +244,12 @@ impl Launcher for NoGpu {
     }
     async fn probe(&self, path: Path) -> Vec<(Level, Result<(), String>)> {
         if path == Path::Cpu {
-            return vec![(Level::Bubblewrap, Err("test: no bubblewrap".into()))];
+            return vec![(Level::Sandbox, Err("test: no sandbox".into()))];
         }
         if self.gpu_probes.fetch_add(1, Ordering::SeqCst) >= 1 {
             self.gate.acquire().await.unwrap().forget();
         }
-        vec![(Level::Bubblewrap, Err("test: no hardware GPU".into()))]
+        vec![(Level::Sandbox, Err("test: no hardware GPU".into()))]
     }
     async fn start(&self, _: u64, _: Level, _: Path) -> Result<Arc<dyn Child>, Fail> {
         Err(Fail::Other("never".into()))
@@ -266,7 +266,7 @@ impl Launcher for HangingGpu {
         Ok(())
     }
     async fn probe(&self, _: Path) -> Vec<(Level, Result<(), String>)> {
-        vec![(Level::Bubblewrap, Ok(()))]
+        vec![(Level::Sandbox, Ok(()))]
     }
     fn device(&self) -> Option<manager::DeviceView> {
         Some(manager::DeviceView {

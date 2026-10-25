@@ -48,9 +48,6 @@ pub struct RuntimeConfig {
     /// `--assistant-device`: `auto` (the default: the best hardware GPU, else the CPU),
     /// `cpu`, or a GPU's PCI address.
     pub device: Option<String>,
-    /// `--assistant-sandbox`: `bwrap` (the default) or `hakoniwa` (builds with the
-    /// `sandbox-hakoniwa` feature; the comparison spike, DEP-24).
-    pub sandbox: Option<String>,
 }
 
 impl AssistantHandle {
@@ -98,10 +95,6 @@ impl AssistantHandle {
             None => runtime::device::Choice::Auto,
             Some(text) => runtime::device::Choice::parse(text)?,
         };
-        let backend = match config.sandbox.as_deref() {
-            None => runtime::Backend::default(),
-            Some(text) => runtime::Backend::parse(text)?,
-        };
         let path = runtime_path(&device);
         if config.threads == Some(0) {
             return Err("--assistant-threads must be at least 1".into());
@@ -133,7 +126,6 @@ impl AssistantHandle {
                 .map_err(|_| "Mimik's own path is unknown".to_owned())?,
             device,
             roots: runtime::device::Roots::default(),
-            backend,
         };
         Ok(Self::with_launcher(
             Arc::new(runtime::launch::Launch(Arc::new(

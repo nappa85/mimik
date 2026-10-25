@@ -50,7 +50,7 @@ fn entries_round_trip() {
         generation: 3,
         pid: 42,
         start_time: 99,
-        executables: vec!["/usr/bin/bwrap".into(), "/opt/mimik/mimik".into()],
+        executables: vec!["/usr/bin/mimik-runner".into(), "/opt/mimik/mimik".into()],
     };
     pidfile.record(&entry).unwrap();
     assert_eq!(pidfile.leftover(), Some(entry));
@@ -89,12 +89,12 @@ fn a_leftover_is_killed_only_when_pid_start_time_and_path_match() {
     assert_eq!(pidfile.sweep(), Swept::Nothing);
     assert!(child.try_wait().unwrap().is_none());
     // Another executable.
-    let entry = Entry::of(1, pid, vec!["/usr/bin/bwrap".into()]).unwrap();
+    let entry = Entry::of(1, pid, vec!["/usr/bin/mimik-runner".into()]).unwrap();
     pidfile.record(&entry).unwrap();
     assert_eq!(pidfile.sweep(), Swept::Nothing);
     assert!(child.try_wait().unwrap().is_none());
     // All three match.
-    let entry = Entry::of(1, pid, vec!["/usr/bin/bwrap".into(), exe]).unwrap();
+    let entry = Entry::of(1, pid, vec!["/usr/bin/mimik-runner".into(), exe]).unwrap();
     pidfile.record(&entry).unwrap();
     assert_eq!(pidfile.sweep(), Swept::Killed);
     assert!(gone(&mut child));
@@ -390,7 +390,7 @@ fn a_record_interrupted_before_its_truncate_still_parses() {
         start_time: 99_999_999,
         executables: vec![
             "/a/very/long/path/to/the/runner".into(),
-            "/usr/bin/bwrap".into(),
+            "/usr/bin/mimik-runner".into(),
         ],
     };
     let short = Entry {

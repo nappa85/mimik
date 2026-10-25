@@ -48,7 +48,7 @@ pub(crate) const MAX_FAILURES: u32 = 4;
 /// Why an attempt failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Fail {
-    /// Attributable to the sandbox (a bwrap setup error, a status-descriptor failure before
+    /// Attributable to the sandbox (a sandbox setup error, a status-descriptor failure before
     /// exec, the level's preflight): not counted; the next allowed level is tried, and with
     /// none left (only level 1 is used, ASSIST-43) the assistant is unavailable.
     Sandbox(String),
@@ -72,7 +72,7 @@ pub(crate) trait Child: Send + Sync {
         Vec::new()
     }
     /// What the Landlock layer inside the Hakoniwa sandbox did, as its closure reported it
-    /// (`None`: no such layer, as with bubblewrap).
+    /// (`None`: not reported).
     fn landlock(&self) -> Option<super::hako::Landlock> {
         None
     }
@@ -150,7 +150,7 @@ pub(crate) struct Status {
     pub calibration: Option<Calibration>,
     pub budgets: Option<Budgets>,
     pub notes: Vec<String>,
-    /// The Landlock layer of the Hakoniwa sandbox (DEP-25); `None` with bubblewrap.
+    /// The Landlock layer of the Hakoniwa sandbox (DEP-25); `None` until it reports.
     pub landlock: Option<super::hako::Landlock>,
     /// A Restart is being carried out.
     pub restarting: bool,
@@ -285,15 +285,15 @@ pub(crate) struct Config {
 
 /// The levels Mimik starts llama-server at (ASSIST-43): level 1 or not at all. Level 3's code
 /// stays built but no manager path reaches it; it returns later behind an owner opt-in.
-pub(crate) const USED_LEVELS: &[Level] = &[Level::Bubblewrap];
+pub(crate) const USED_LEVELS: &[Level] = &[Level::Sandbox];
 
 /// Why the assistant is unavailable when level 1 cannot be used: how to fix it.
-pub(crate) const LEVEL_1_NEEDED: &str = "the model server runs only confined by bubblewrap \
-(level 1), which is not usable here. Install bubblewrap (/usr/bin/bwrap) and allow unprivileged \
-user namespaces: user.max_user_namespaces above 0, kernel.unprivileged_userns_clone = 1 where \
-the kernel has it, and on Ubuntu 24.04 kernel.apparmor_restrict_unprivileged_userns = 0 or an \
-AppArmor profile that lets bwrap create them. Then press Restart. Level 3 (unconfined) is not \
-used in this release";
+pub(crate) const LEVEL_1_NEEDED: &str = "the model server runs only inside Mimik's sandbox \
+(level 1), which is not usable here. Allow unprivileged user namespaces: \
+user.max_user_namespaces above 0, kernel.unprivileged_userns_clone = 1 where the kernel has \
+it, and on Ubuntu 24.04 kernel.apparmor_restrict_unprivileged_userns = 0 or the AppArmor \
+profile that `mimik assistant-apparmor-profile` prints. Then press Restart. Level 3 \
+(unconfined) is not used in this release";
 
 /// Answers a shutdown request once the child is gone.
 fn shut(reply: oneshot::Sender<()>) {
@@ -565,7 +565,7 @@ impl Manager {
             .status()
             .skipped
             .iter()
-            .find(|(level, _)| *level == Level::Bubblewrap)
+            .find(|(level, _)| *level == Level::Sandbox)
             .map(|(_, why)| why.clone());
         match level_1 {
             Some(why) => format!("{LEVEL_1_NEEDED} (level 1: {why})"),

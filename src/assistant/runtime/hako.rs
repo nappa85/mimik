@@ -1,10 +1,9 @@
-//! Level 1 through the Hakoniwa library instead of bubblewrap (comparison spike; ASSIST-48,
-//! DEP-24). Same sandbox properties, built in the runner process: new user, mount, PID, IPC,
-//! UTS, cgroup and network namespaces (no network at all: the namespace stays empty), a root
-//! of read-only binds and bounded tmpfs mounts, the same allowlist as `bwrap.rs`, our own
-//! seccomp program and the same marker.
+//! Level 1, the sandbox (ASSIST-51, DEP-24): the Hakoniwa library builds it in the runner
+//! process: new user, mount, PID, IPC, UTS, cgroup and network namespaces (no network at all:
+//! the namespace stays empty), a root of read-only binds and bounded tmpfs mounts (the
+//! allowlist of `sandbox.rs`), a Landlock layer, our own seccomp program and a marker.
 //!
-//! What differs from bubblewrap, and why it is safe:
+//! How it is built, and why it is safe:
 //!
 //! - Hakoniwa binds host *paths* and closes every descriptor above 2 in its child, so the
 //!   verified descriptors cannot be bound. Each bind carries the `(device, inode)` the
@@ -16,12 +15,12 @@
 //!   program already refuses `fork`.
 //! - The token is the content of a file the runner has Hakoniwa write into the sandbox's own
 //!   `/run` tmpfs (memory): never on the host's disk, a command line or an environment.
-//! - The shim is gone. The marker pipe's write end is the program's standard input until the
+//! - There is no shim. The marker pipe's write end is the program's standard input until the
 //!   closure writes the marker on it, replaces descriptor 0 with `/dev/null` and closes every
 //!   other descriptor, just before the exec: nothing the program does can write the marker.
 //!   Failures before the marker (a mount, the identity check, capabilities, seccomp) are
 //!   sandbox failures; failures after it (the exec itself) are the server's.
-use super::bwrap::{self, GpuBinds, Item};
+use super::sandbox::{self, GpuBinds, Item};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -70,7 +69,7 @@ pub(crate) struct Bind {
     pub target: String,
     pub access: Access,
     /// What the mounted object must be (device and inode); `None` for system paths, which
-    /// bubblewrap binds by path too.
+    /// are bound by path.
     pub identity: Option<Identity>,
 }
 
@@ -90,7 +89,7 @@ pub(crate) struct Plan {
     /// The root directory the sandbox is built in (Mimik's, a sibling of the generation's
     /// directory in `run/`, so its removal is the generation's).
     pub root: String,
-    /// The token file's content, written at [`bwrap::TOKEN`] into the sandbox's own `/run`
+    /// The token file's content, written at [`sandbox::TOKEN`] into the sandbox's own `/run`
     /// tmpfs (memory) by the runner: it is never in a file on the host, a command line or an
     /// environment variable.
     pub token: Secret,
@@ -104,7 +103,7 @@ pub(crate) struct Plan {
     pub env: Vec<(String, String)>,
 }
 
-/// A runtime file to bind: its name under [`bwrap::RUNTIME`], the host path it was verified
+/// A runtime file to bind: its name under [`sandbox::RUNTIME`], the host path it was verified
 /// at and its identity.
 #[derive(Clone, Debug)]
 pub(crate) struct File {
@@ -136,8 +135,8 @@ pub(crate) const DEVICES: &[&str] = &["null", "zero", "full", "random", "urandom
 /// What the Landlock layer inside the namespaces did, as the closure reports it on the marker
 /// pipe (the only channel that survives Hakoniwa closing every descriptor above 2, and one the
 /// server cannot write to: it never holds the descriptor). Best effort (DEP-25): a kernel
-/// without Landlock, or with an older ABI, leaves the namespace sandbox alone in force, as
-/// with bubblewrap; the page says which.
+/// without Landlock, or with an older ABI, leaves the namespace sandbox alone in force; the
+/// page says which.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Landlock {
     /// Everything asked for is enforced (filesystem, TCP bind and connect, scoping); `abi` is
@@ -193,7 +192,6 @@ impl Landlock {
 
 /// What a path of the Landlock ruleset may be used for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(any(test, feature = "sandbox-hakoniwa"))]
 pub(crate) enum Grant {
     /// Read, list and execute: the program the closure execs and the system library
     /// directories (which hold the ELF interpreter).
@@ -214,7 +212,6 @@ pub(crate) enum Grant {
 
 /// One path of the Landlock ruleset.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg(any(test, feature = "sandbox-hakoniwa"))]
 pub(crate) struct Rule {
     pub path: String,
     pub grant: Grant,
@@ -223,7 +220,6 @@ pub(crate) struct Rule {
 /// The tmpfs mounts the server writes in (the plan's own): the sandbox's `/tmp` and
 /// `/dev/shm`. `/run` holds the token file and the socket directory's bind, each with a rule
 /// of its own.
-#[cfg(any(test, feature = "sandbox-hakoniwa"))]
 const WRITABLE_TMPFS: [&str; 2] = ["/tmp", "/dev/shm"];
 
 /// The Landlock ruleset of `plan`: what the namespace mounts give the server, narrowed to
@@ -237,7 +233,6 @@ const WRITABLE_TMPFS: [&str; 2] = ["/tmp", "/dev/shm"];
 /// directory and the GPU path's `/sys` scaffolding, `/proc` read; each device node as a device.
 /// Everything else the mounts make visible or writable (the other `/dev` entries, `/etc` and
 /// `/sys` outside their binds, a writable mount not listed) is denied.
-#[cfg(any(test, feature = "sandbox-hakoniwa"))]
 pub(crate) fn landlock_rules(plan: &Plan) -> Vec<Rule> {
     let mut rules: Vec<Rule> = Vec::new();
     let mut add = |path: &str, grant: Grant| {
@@ -252,10 +247,10 @@ pub(crate) fn landlock_rules(plan: &Plan) -> Vec<Rule> {
     add("/proc", Grant::Read);
     add("/dev", Grant::List);
     // The token is read, never listed or written (the rest of `/run` has no rule).
-    add(bwrap::TOKEN, Grant::ReadFile);
+    add(sandbox::TOKEN, Grant::ReadFile);
     // The runtime's directory holds only its bound files, but ggml lists it to find its
     // backends.
-    add(bwrap::RUNTIME, Grant::List);
+    add(sandbox::RUNTIME, Grant::List);
     // The scaffolding directories of the GPU path's `/sys` links (not the top-level ones).
     for dir in &plan.dirs {
         if Path::new(dir).components().count() > 2 {
@@ -268,8 +263,10 @@ pub(crate) fn landlock_rules(plan: &Plan) -> Vec<Rule> {
     for bind in &plan.binds {
         let program = plan.argv.first().is_some_and(|argv0| *argv0 == bind.target);
         let grant = match bind.access {
-            Access::ReadOnly if bind.target == bwrap::MODEL => Grant::ReadFile,
-            Access::ReadOnly if program || bwrap::LIBRARY_DIRS.contains(&bind.target.as_str()) => {
+            Access::ReadOnly if bind.target == sandbox::MODEL => Grant::ReadFile,
+            Access::ReadOnly
+                if program || sandbox::LIBRARY_DIRS.contains(&bind.target.as_str()) =>
+            {
                 Grant::ReadExec
             }
             Access::ReadOnly => Grant::Read,
@@ -382,13 +379,13 @@ fn fixed_tmpfs() -> Vec<Tmpfs> {
         },
         Tmpfs {
             target: "/tmp".to_owned(),
-            bytes: bwrap::TMP_BYTES,
+            bytes: sandbox::TMP_BYTES,
             mode: 0o1777,
             read_only: false,
         },
         Tmpfs {
             target: "/dev/shm".to_owned(),
-            bytes: bwrap::SHM_BYTES,
+            bytes: sandbox::SHM_BYTES,
             mode: 0o1777,
             read_only: false,
         },
@@ -415,12 +412,12 @@ fn masks(binds: &[Bind], mountinfo: &str) -> Vec<Tmpfs> {
         .collect()
 }
 
-/// The plan for `inputs`: the same allowlist as bubblewrap's profile.
+/// The plan for `inputs`: the sandbox's allowlist.
 pub(crate) fn plan(inputs: &Inputs<'_>) -> Plan {
     let mut binds = Vec::new();
     let mut symlinks: Vec<(String, String)> = Vec::new();
     let mut dirs: Vec<String> = Vec::new();
-    let mut items = bwrap::system_items();
+    let mut items = sandbox::system_items();
     if let Some(gpu) = inputs.gpu {
         items.extend(gpu.items());
     }
@@ -451,17 +448,17 @@ pub(crate) fn plan(inputs: &Inputs<'_>) -> Plan {
     for file in &inputs.runtime {
         binds.push(ro(
             &file.source,
-            &format!("{}/{}", bwrap::RUNTIME, file.name),
+            &format!("{}/{}", sandbox::RUNTIME, file.name),
             Some(file.identity),
         ));
     }
-    binds.push(ro(&inputs.model.0, bwrap::MODEL, Some(inputs.model.1)));
+    binds.push(ro(&inputs.model.0, sandbox::MODEL, Some(inputs.model.1)));
     for (source, target, identity) in &inputs.extra {
         binds.push(ro(source, target, Some(*identity)));
     }
     binds.push(Bind {
         source: text(&inputs.generation.0),
-        target: bwrap::SOCKET_DIR.to_owned(),
+        target: sandbox::SOCKET_DIR.to_owned(),
         access: Access::ReadWrite,
         identity: Some(inputs.generation.1),
     });
@@ -486,7 +483,7 @@ pub(crate) fn plan(inputs: &Inputs<'_>) -> Plan {
         tmpfs: fixed_tmpfs().into_iter().chain(masks).collect(),
         symlinks,
         dirs,
-        workdir: bwrap::RUNTIME.to_owned(),
+        workdir: sandbox::RUNTIME.to_owned(),
         argv: inputs.argv.clone(),
         env: inputs.env.clone(),
     }
@@ -558,10 +555,10 @@ pub(crate) fn shell_word(text: &str) -> String {
 
 /// The page's remedy for a failed Hakoniwa start, by the one setting that may explain it
 /// (worded as a possibility: the probe's failure itself decides nothing).
-pub(crate) fn remedy(cause: bwrap::Cause, exe: &Path) -> String {
+pub(crate) fn remedy(cause: sandbox::Cause, exe: &Path) -> String {
     match cause {
-        bwrap::Cause::AppArmor => apparmor_message(exe),
-        bwrap::Cause::UsernsClone => "kernel.unprivileged_userns_clone = 0 may be why: it forbids the private sandbox of the model server. An administrator can allow it with `sudo sysctl kernel.unprivileged_userns_clone=1` (and keep it in a file under /etc/sysctl.d), then press Restart.".to_owned(),
+        sandbox::Cause::AppArmor => apparmor_message(exe),
+        sandbox::Cause::UsernsClone => "kernel.unprivileged_userns_clone = 0 may be why: it forbids the private sandbox of the model server. An administrator can allow it with `sudo sysctl kernel.unprivileged_userns_clone=1` (and keep it in a file under /etc/sysctl.d), then press Restart.".to_owned(),
     }
 }
 
@@ -579,17 +576,11 @@ pub(crate) fn apparmor_message(exe: &Path) -> String {
 /// What the Hakoniwa sandbox needs of the host before its probe: unprivileged user
 /// namespaces (the one setting that rules them out for certain; the probe decides otherwise).
 /// There is no helper program to find.
-pub(crate) fn preflight() -> Result<bwrap::Bwrap, bwrap::Unusable> {
-    bwrap::namespaces(Path::new("/proc"))?;
-    Ok(bwrap::Bwrap {
-        path: PathBuf::new(),
-        size: true,
-    })
+pub(crate) fn preflight() -> Result<(), sandbox::Unusable> {
+    sandbox::namespaces(Path::new("/proc"))
 }
 
-#[cfg(any(test, feature = "sandbox-hakoniwa"))]
-/// What the runner reports first on its status descriptor, the shape of bubblewrap's line:
-/// the reaper outside the PID namespace. The namespace number is not reported (the reaper is
+/// What the runner reports first on its status descriptor, the reaper outside the PID namespace. The namespace number is not reported (the reaper is
 /// not dumpable, so `/proc/<pid>/ns/pid_for_children` is unreadable): the endpoint check
 /// then leaves that comparison to the parent and `NSpid` checks.
 pub(crate) fn started_line(reaper: i32, inner: Option<(i32, u64)>, ended: bool) -> String {
@@ -606,9 +597,9 @@ pub(crate) fn started_line(reaper: i32, inner: Option<(i32, u64)>, ended: bool) 
 }
 
 /// Reads the runner's start report: only `child-pid`.
-pub(crate) fn started(line: &str) -> Option<bwrap::Started> {
+pub(crate) fn started(line: &str) -> Option<sandbox::Started> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    Some(bwrap::Started {
+    Some(sandbox::Started {
         child_pid: i32::try_from(value.get("child-pid")?.as_i64()?).ok()?,
         pid_namespace: super::endpoint::NAMESPACE_UNREPORTED,
         inner_pid: match value.get("inner-pid") {
@@ -644,7 +635,6 @@ pub(crate) const STEP_ORDER: [&str; 10] = [
 ];
 
 /// One step of the closure: its name, the exit code of its failure and what it does.
-#[cfg(any(test, feature = "sandbox-hakoniwa"))]
 pub(crate) type Step<'a> = (&'static str, i32, Box<dyn Fn() -> Result<(), String> + 'a>);
 
 /// Runs `steps` in order and stops at the first failure with its code and reason: later
@@ -653,7 +643,6 @@ pub(crate) type Step<'a> = (&'static str, i32, Box<dyn Fn() -> Result<(), String
 /// # Errors
 ///
 /// The failing step's code and reason.
-#[cfg(any(test, feature = "sandbox-hakoniwa"))]
 pub(crate) fn run_steps(steps: Vec<Step<'_>>) -> Result<(), (i32, String)> {
     for (name, code, step) in steps {
         step().map_err(|why| (code, format!("{name}: {why}")))?;
@@ -661,7 +650,6 @@ pub(crate) fn run_steps(steps: Vec<Step<'_>>) -> Result<(), (i32, String)> {
     Ok(())
 }
 
-#[cfg(any(test, feature = "sandbox-hakoniwa"))]
 /// The exit codes of the closure when it does not reach its exec. All but [`exit::EXEC`]
 /// come before the marker, so the launcher counts them as sandbox failures.
 pub(crate) mod exit {
@@ -679,7 +667,6 @@ pub(crate) mod exit {
     pub const EXEC: i32 = 127;
 }
 
-#[cfg(any(test, feature = "sandbox-hakoniwa"))]
 /// The first bind whose mounted object is not the verified one: `stat` gives the mounted
 /// target's identity (`None` when it cannot be read, which fails closed).
 pub(crate) fn identity_mismatch(
@@ -692,21 +679,19 @@ pub(crate) fn identity_mismatch(
     })
 }
 
-#[cfg(all(test, feature = "sandbox-hakoniwa"))]
+#[cfg(test)]
 pub(crate) use run::apply_landlock;
-#[cfg(feature = "sandbox-hakoniwa")]
 pub(crate) use run::run;
-#[cfg(all(test, feature = "sandbox-hakoniwa"))]
+#[cfg(test)]
 pub(crate) use run::{
     Procs, Reaper, access, after_end, apply_landlock_with, find_child, landlock_step, options,
     report_for, run_guarded, setup_failed, single_threaded, steps, supervise, tmpfs_options,
 };
 
-#[cfg(feature = "sandbox-hakoniwa")]
 mod run {
     use super::{
-        Access, Bind, Grant, Landlock, Plan, Rule, bwrap, exit, identity_mismatch, landlock_rules,
-        run_steps, started_line,
+        Access, Bind, Grant, Landlock, Plan, Rule, exit, identity_mismatch, landlock_rules,
+        run_steps, sandbox, started_line,
     };
     use crate::assistant::runtime::{probe, seccomp};
     use hakoniwa::{Container, MountOptions, Namespace, Stdio};
@@ -954,7 +939,7 @@ mod run {
         for dir in &plan.dirs {
             container.dir(dir, 0o755);
         }
-        container.file(bwrap::TOKEN, &plan.token.0);
+        container.file(sandbox::TOKEN, &plan.token.0);
         for (original, link) in &plan.symlinks {
             container.symlink(original, link);
         }
@@ -1209,8 +1194,8 @@ mod run {
             Err(error) => return refuse(exit::SPEC, &format!("hakoniwa: {error}")),
         };
         // A setup that Hakoniwa itself fails ends the reaper at once; a program that runs is
-        // still there after a moment. A setup failure of Hakoniwa's own is not reported (as
-        // bubblewrap reports nothing when it fails first); everything else is, with the
+        // still there after a moment. A setup failure of Hakoniwa's own is not reported (nothing
+        // is reported when it fails first); everything else is, with the
         // reaper's pid, and the marker tells whether the program got to its exec.
         let pidfd = i32::try_from(child.id())
             .ok()

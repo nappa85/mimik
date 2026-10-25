@@ -9,11 +9,11 @@
 //! Also the `mimik assistant-runner` entry: `--spec-fd 3` (the runner), `--probe-inner
 //! <level> …` (inside the level), and `--probe …` (the CI and owner check, which prints one
 //! JSON line and exits 0 only at level 1).
-use super::bwrap;
 use super::endpoint;
 use super::launch::{InnerCommand, Launch, Real, Settings};
 use super::manager::Launcher;
 use super::runner::{self, RunnerCommand};
+use super::sandbox;
 use super::{Level, Path};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -117,9 +117,9 @@ fn inner_to(args: &[String], out: &mut dyn Write) -> i32 {
                 [] => None,
                 _ => return 2,
             };
-            let model = model_ok(bwrap::MODEL);
-            let token = token_ok(bwrap::TOKEN);
-            let socket = format!("{}/{}", bwrap::SOCKET_DIR, endpoint::SOCKET);
+            let model = model_ok(sandbox::MODEL);
+            let token = token_ok(sandbox::TOKEN);
+            let socket = format!("{}/{}", sandbox::SOCKET_DIR, endpoint::SOCKET);
             let listener = std::os::unix::net::UnixListener::bind(&socket);
             let bound = listener
                 .as_ref()
@@ -192,7 +192,6 @@ struct ProbeArgs {
     model: Option<String>,
     sha256: Option<String>,
     data: Option<String>,
-    sandbox: Option<String>,
 }
 
 fn parse(args: &[String]) -> Result<ProbeArgs, String> {
@@ -209,7 +208,6 @@ fn parse(args: &[String]) -> Result<ProbeArgs, String> {
             "--model" => parsed.model = Some(value),
             "--model-sha256" => parsed.sha256 = Some(value),
             "--data-dir" => parsed.data = Some(value),
-            "--sandbox" => parsed.sandbox = Some(value),
             other => return Err(format!("unknown option {other}")),
         }
     }
@@ -248,14 +246,6 @@ fn cli_probe(args: &[String]) -> i32 {
         },
         std::path::PathBuf::from,
     );
-    let backend = match parsed.sandbox.as_deref().map(super::Backend::parse) {
-        None => super::Backend::default(),
-        Some(Ok(backend)) => backend,
-        Some(Err(why)) => {
-            report(json!({"level": null, "error": why}));
-            return 2;
-        }
-    };
     let (Ok(runner), Ok(inner)) = (RunnerCommand::mimik(), InnerCommand::mimik()) else {
         report(json!({"level": null, "error": "Mimik's own binary cannot be found"}));
         return 2;
@@ -273,7 +263,6 @@ fn cli_probe(args: &[String]) -> i32 {
         inner,
         device: super::device::Choice::Cpu,
         roots: super::device::Roots::default(),
-        backend,
     };
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -288,7 +277,7 @@ fn cli_probe(args: &[String]) -> i32 {
         }
         probe_and_settle(&launch).await
     });
-    let level_one = result["level"] == json!(Level::Bubblewrap.number());
+    let level_one = result["level"] == json!(Level::Sandbox.number());
     report(result);
     i32::from(!level_one)
 }
@@ -313,7 +302,7 @@ pub(crate) fn probe_report(levels: &[(Level, super::launch::Probed)]) -> Value {
     // none otherwise, whatever level 3's probe says.
     let reached = levels
         .iter()
-        .find(|(level, probed)| *level == Level::Bubblewrap && *probed == Probed::Passed)
+        .find(|(level, probed)| *level == Level::Sandbox && *probed == Probed::Passed)
         .map(|(level, _)| level.number());
     let detail: serde_json::Map<String, Value> = levels
         .iter()
@@ -338,62 +327,8 @@ pub(crate) fn probe_report(levels: &[(Level, super::launch::Probed)]) -> Value {
         "llama_cpp": super::manifest::MANIFEST.llama_cpp.tag})
 }
 
-/// The variable that carries the shim's spec into the sandbox.
-pub(crate) const SHIM_VARIABLE: &str = "MIMIK_SHIM";
-
-/// What the shim executes, and where it reports that it reached the exec.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct ShimSpec {
-    /// The inherited descriptor the marker is written to.
-    pub marker: i32,
-    pub argv: Vec<String>,
-    pub env: Vec<(String, String)>,
-}
-
 /// The marker written just before the exec.
 pub(crate) const MARKER: &[u8] = b"exec\n";
-
-/// Inside the level-1 sandbox, in place of the command: writes the marker on its
-/// descriptor, closes every descriptor but 0, 1 and 2 (bwrap's status, seccomp, token and
-/// directory descriptors included), then executes the command with exactly its environment.
-/// The marker is the only proof that the sandbox was set up: whatever the command prints or
-/// does later, a marked start is never a sandbox failure (it cannot unsend the marker).
-pub(crate) fn shim() -> i32 {
-    use std::os::unix::process::CommandExt;
-    let Some(spec) = std::env::var(SHIM_VARIABLE)
-        .ok()
-        .and_then(|text| serde_json::from_str::<ShimSpec>(&text).ok())
-    else {
-        return 2;
-    };
-    if spec.argv.is_empty() {
-        return 2;
-    }
-    // SAFETY: the marker descriptor is inherited and used only here, by number.
-    let marker = unsafe { std::os::fd::BorrowedFd::borrow_raw(spec.marker) };
-    if rustix::io::write(marker, MARKER).ok() != Some(MARKER.len()) {
-        return 3;
-    }
-    if !close_inherited(close_range, fd_listing) {
-        eprintln!("mimik shim: the inherited descriptors cannot be closed; not executing");
-        return 4;
-    }
-    let error = std::process::Command::new(&spec.argv[0])
-        .args(&spec.argv[1..])
-        .env_clear()
-        .envs(spec.env)
-        .exec();
-    // The marker went out already: this failure is counted at the same level, never a
-    // sandbox failure.
-    eprintln!("mimik shim: cannot execute {}: {error}", spec.argv[0]);
-    127
-}
-
-/// `close_range(3, ~0, 0)`: every descriptor above the standard ones.
-pub(crate) fn close_range() -> bool {
-    // SAFETY: a plain system call closing descriptors this process no longer uses.
-    unsafe { libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, 0_u32) == 0 }
-}
 
 /// The open descriptors, from `/proc/self/fd`.
 pub(crate) fn fd_listing() -> std::io::Result<Vec<i32>> {
@@ -418,28 +353,6 @@ pub(crate) fn descriptors(
         .collect()
 }
 
-/// Closes every descriptor but 0, 1 and 2: `close_range`, else each one `/proc/self/fd`
-/// lists. False when neither works: the shim then never executes anything.
-pub(crate) fn close_inherited(
-    close_range: impl FnOnce() -> bool,
-    listing: impl FnOnce() -> std::io::Result<Vec<i32>>,
-) -> bool {
-    if close_range() {
-        return true;
-    }
-    let Ok(listing) = listing() else {
-        return false;
-    };
-    for fd in listing {
-        if fd > 2 {
-            // SAFETY: closing every inherited descriptor but the standard ones before the exec;
-            // nothing in this process uses them afterwards.
-            unsafe { libc::close(fd) };
-        }
-    }
-    true
-}
-
 /// `mimik assistant-runner …`. Returns the exit code.
 pub fn main(args: &[String]) -> i32 {
     match args {
@@ -448,7 +361,6 @@ pub fn main(args: &[String]) -> i32 {
             _ => runner::exit::SPEC,
         },
         [flag, rest @ ..] if flag == "--probe-inner" => inner(rest),
-        [flag] if flag == "--shim" => shim(),
         [flag, rest @ ..] if flag == "--probe" => cli_probe(rest),
         _ => 2,
     }
@@ -462,7 +374,7 @@ mod tests {
     fn the_cli_reports_level_1_only_when_its_probe_passed() {
         use super::super::launch::Probed;
         let kept = probe_report(&[
-            (Level::Bubblewrap, Probed::Kept("no status line".into())),
+            (Level::Sandbox, Probed::Kept("no status line".into())),
             (Level::Unconfined, Probed::Passed),
         ]);
         // Level 3 passing is reported, labelled not used; the level reached stays none.
@@ -471,9 +383,9 @@ mod tests {
         assert_eq!(kept["levels"]["1"]["inconclusive"], json!(true));
         assert_eq!(kept["levels"]["3"]["ok"], json!(true));
         assert_eq!(kept["levels"]["3"]["used"], json!(false));
-        let none = probe_report(&[(Level::Bubblewrap, Probed::Kept("timeout".into()))]);
+        let none = probe_report(&[(Level::Sandbox, Probed::Kept("timeout".into()))]);
         assert_eq!(none["level"], Value::Null);
-        let passed = probe_report(&[(Level::Bubblewrap, Probed::Passed)]);
+        let passed = probe_report(&[(Level::Sandbox, Probed::Passed)]);
         assert_eq!(passed["level"], json!(1));
     }
 
@@ -490,28 +402,6 @@ mod tests {
             descriptors([Ok("3".to_owned()), Ok("12".to_owned())].into_iter()).unwrap(),
             [3, 12]
         );
-        // So the shim executes nothing.
-        let listing = [
-            Ok("3".to_owned()),
-            Err(std::io::Error::from_raw_os_error(libc::EIO)),
-        ];
-        assert!(!close_inherited(
-            || false,
-            || descriptors(listing.into_iter())
-        ));
-    }
-
-    #[test]
-    fn a_shim_that_cannot_close_its_descriptors_never_executes() {
-        assert!(!close_inherited(
-            || false,
-            || Err(std::io::Error::other("no /proc"))
-        ));
-        assert!(close_inherited(|| false, || Ok(Vec::new())));
-        assert!(close_inherited(
-            || true,
-            || unreachable!("close_range worked")
-        ));
     }
 
     #[test]

@@ -1,5 +1,4 @@
 use super::*;
-use crate::assistant::runtime::Backend;
 
 fn inputs<'a>(gpu: Option<&'a GpuBinds>, files: &[&str]) -> Inputs<'a> {
     Inputs {
@@ -49,21 +48,21 @@ fn the_plan_binds_the_runtime_model_and_one_writable_directory_by_identity() {
     };
     assert_eq!(bind("/opt/llama/llama-server").identity, Some((7, 100)));
     assert_eq!(bind("/opt/llama/libllama.so.0").identity, Some((7, 101)));
-    assert_eq!(bind(bwrap::MODEL).identity, Some((7, 200)));
-    assert_eq!(bind(bwrap::SOCKET_DIR).identity, Some((7, 300)));
+    assert_eq!(bind(sandbox::MODEL).identity, Some((7, 200)));
+    assert_eq!(bind(sandbox::SOCKET_DIR).identity, Some((7, 300)));
     let writable: Vec<_> = plan
         .binds
         .iter()
         .filter(|bind| bind.access == Access::ReadWrite)
         .map(|bind| bind.target.as_str())
         .collect();
-    assert_eq!(writable, [bwrap::SOCKET_DIR]);
+    assert_eq!(writable, [sandbox::SOCKET_DIR]);
     for bind in &plan.binds {
         if bind.access == Access::ReadOnly {
             continue;
         }
         assert!(
-            bind.target == bwrap::SOCKET_DIR || bind.target.starts_with("/dev/"),
+            bind.target == sandbox::SOCKET_DIR || bind.target.starts_with("/dev/"),
             "{bind:?}"
         );
     }
@@ -125,9 +124,9 @@ fn only_the_render_node_is_a_device_beside_the_five_safe_ones() {
 }
 
 #[test]
-fn the_plan_has_the_same_system_allowlist_as_the_bwrap_profile() {
+fn the_plan_has_the_system_allowlist() {
     let plan = plan(&inputs(Some(&gpu()), &[]));
-    let mut items = bwrap::system_items();
+    let mut items = sandbox::system_items();
     items.extend(gpu().items());
     for item in items {
         match item {
@@ -165,11 +164,11 @@ fn every_symlink_has_its_parent_directories() {
 fn temporary_space_is_bounded_and_dev_is_a_small_tmpfs() {
     let plan = plan(&inputs(None, &[]));
     let tmpfs = |target: &str| plan.tmpfs.iter().find(|t| t.target == target).unwrap();
-    assert_eq!(tmpfs("/tmp").bytes, bwrap::TMP_BYTES);
-    assert_eq!(tmpfs("/dev/shm").bytes, bwrap::SHM_BYTES);
+    assert_eq!(tmpfs("/tmp").bytes, sandbox::TMP_BYTES);
+    assert_eq!(tmpfs("/dev/shm").bytes, sandbox::SHM_BYTES);
     assert!(tmpfs("/dev").bytes <= 1 << 20);
     assert_eq!(plan.tmpfs.len(), 4);
-    assert_eq!(plan.workdir, bwrap::RUNTIME);
+    assert_eq!(plan.workdir, sandbox::RUNTIME);
 }
 
 #[test]
@@ -281,19 +280,6 @@ fn the_hakoniwa_exec_travels_in_the_runner_spec() {
 }
 
 #[test]
-fn the_backend_names_parse_and_unknown_ones_are_refused() {
-    assert_eq!(Backend::parse("bwrap"), Ok(Backend::Bwrap));
-    assert_eq!(Backend::parse("bubblewrap"), Ok(Backend::Bwrap));
-    assert!(Backend::parse("docker").unwrap_err().contains("docker"));
-    assert_eq!(Backend::default(), Backend::Bwrap);
-    #[cfg(feature = "sandbox-hakoniwa")]
-    assert_eq!(Backend::parse("hakoniwa"), Ok(Backend::Hakoniwa));
-    #[cfg(not(feature = "sandbox-hakoniwa"))]
-    assert!(Backend::parse("hakoniwa").is_err());
-}
-
-#[cfg(feature = "sandbox-hakoniwa")]
-#[test]
 fn a_process_with_another_thread_is_not_single_threaded() {
     // The runner forks and then allocates: that is only sound alone, and it checks.
     let (stop, hold) = std::sync::mpsc::channel::<()>();
@@ -308,7 +294,6 @@ fn a_process_with_another_thread_is_not_single_threaded() {
     other.join().unwrap();
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn only_a_failure_of_hakoniwa_itself_is_a_setup_failure() {
     let status = |code, exit_code| hakoniwa::ExitStatus {
@@ -342,7 +327,7 @@ fn the_token_is_in_the_plan_only_as_content_for_the_sandbox_own_tmpfs() {
     let plan = plan(&inputs(None, &[]));
     assert_eq!(plan.token, Secret::new("secret-token\n".into()));
     // Not a bind of a host file, and the /run it is written into is a bounded tmpfs.
-    assert!(!targets(&plan).contains(&bwrap::TOKEN));
+    assert!(!targets(&plan).contains(&sandbox::TOKEN));
     let run = plan.tmpfs.iter().find(|t| t.target == "/run").unwrap();
     assert!(run.bytes <= 1 << 20);
     // It never prints, in debug output or anywhere a plan is formatted.
@@ -457,7 +442,6 @@ fn the_marker_is_the_last_step_and_a_failure_of_any_step_gives_none() {
     }
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn the_real_closure_has_the_documented_steps_with_the_marker_last() {
     let plan = plan(&inputs(None, &[]));
@@ -471,7 +455,6 @@ fn the_real_closure_has_the_documented_steps_with_the_marker_last() {
     assert!(!codes.contains(&exit::EXEC));
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn binds_are_not_recursive_so_no_submount_can_stay_writable_under_a_read_only_bind() {
     use hakoniwa::MountOptions;
@@ -490,7 +473,6 @@ fn binds_are_not_recursive_so_no_submount_can_stay_writable_under_a_read_only_bi
     assert!(options(&bind(Access::ReadOnly)).contains(MountOptions::NODEV));
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn a_runner_with_another_thread_refuses_before_it_takes_or_spawns_anything() {
     let (read, write) = rustix::pipe::pipe().unwrap();
@@ -533,17 +515,16 @@ fn a_replaced_executable_gets_no_profile() {
 #[test]
 fn each_cause_gets_its_own_worded_as_possible_remedy() {
     let exe = Path::new("/opt/mimik/mimik");
-    let apparmor = remedy(bwrap::Cause::AppArmor, exe);
+    let apparmor = remedy(sandbox::Cause::AppArmor, exe);
     assert!(apparmor.contains("AppArmor") && apparmor.contains("may be why"));
     assert!(apparmor.contains("apparmor_parser"));
-    let clone = remedy(bwrap::Cause::UsernsClone, exe);
+    let clone = remedy(sandbox::Cause::UsernsClone, exe);
     assert!(clone.contains("unprivileged_userns_clone") && clone.contains("may be why"));
     // The AppArmor steps are never offered for the other setting, and the reverse.
     assert!(!clone.contains("apparmor_parser"));
     assert!(!apparmor.contains("sysctl"));
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn a_sandbox_that_ended_is_reported_only_when_the_program_ran() {
     let status = |code, exit_code| hakoniwa::ExitStatus {
@@ -612,14 +593,12 @@ fn the_topmost_mounts_under_a_directory_are_found_by_their_decoded_mount_point()
 }
 
 /// A stand-in for Hakoniwa's reaper process: scripted answers, and a log of what was done to it.
-#[cfg(feature = "sandbox-hakoniwa")]
 struct FakeReaper {
     log: std::sync::Arc<std::sync::Mutex<Vec<(&'static str, std::time::Instant)>>>,
     wait: Option<hakoniwa::ExitStatus>,
     try_wait: Option<hakoniwa::ExitStatus>,
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 fn ran(code: i32) -> hakoniwa::ExitStatus {
     hakoniwa::ExitStatus {
         code,
@@ -631,7 +610,6 @@ fn ran(code: i32) -> hakoniwa::ExitStatus {
     }
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 impl FakeReaper {
     fn new(wait: i32, try_wait: Option<i32>) -> Self {
         Self {
@@ -656,7 +634,6 @@ impl FakeReaper {
     }
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 impl Reaper for FakeReaper {
     fn wait(&mut self) -> Result<hakoniwa::ExitStatus, hakoniwa::Error> {
         self.note("wait");
@@ -673,7 +650,6 @@ impl Reaper for FakeReaper {
 
 /// Scripted `/proc`: `(pid, parent, start)`, with the pids whose pidfd reads as exited after
 /// the read, and the pids whose `stat` cannot be read.
-#[cfg(feature = "sandbox-hakoniwa")]
 #[derive(Default)]
 struct FakeProcs {
     table: Vec<(i32, i32, u64)>,
@@ -690,7 +666,6 @@ struct FakeProcs {
     calls: std::sync::Mutex<Vec<(&'static str, i32)>>,
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 impl FakeProcs {
     fn done(&self, what: &'static str, pid: i32) -> bool {
         self.calls.lock().unwrap().contains(&(what, pid))
@@ -700,7 +675,6 @@ impl FakeProcs {
     }
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 impl Procs for FakeProcs {
     fn pids(&self) -> Vec<i32> {
         self.table.iter().map(|(pid, _, _)| *pid).collect()
@@ -748,7 +722,6 @@ impl Procs for FakeProcs {
     }
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn the_server_is_the_live_child_identified_from_one_read_of_its_stat() {
     let procs = FakeProcs {
@@ -762,7 +735,6 @@ fn the_server_is_the_live_child_identified_from_one_read_of_its_stat() {
     assert_eq!(find_child(&procs, 99), Ok(None));
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn a_bystander_substituted_for_the_discovered_pid_is_never_the_server() {
     // The pid listed for the reaper's child is, by the time it is identified, another
@@ -796,12 +768,10 @@ fn a_bystander_substituted_for_the_discovered_pid_is_never_the_server() {
     assert_eq!(find_child(&two, 7), Err(()));
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 fn ack_pipe() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
     rustix::pipe::pipe().unwrap()
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 fn procs_with_one_child() -> FakeProcs {
     FakeProcs {
         table: vec![(11, 7, 6)],
@@ -809,10 +779,8 @@ fn procs_with_one_child() -> FakeProcs {
     }
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 const SHORT: std::time::Duration = std::time::Duration::from_millis(200);
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn a_reaper_that_ended_in_the_early_window_is_reaped_and_reported_as_ended() {
     let (ack, _keep) = ack_pipe();
@@ -835,7 +803,6 @@ fn a_reaper_that_ended_in_the_early_window_is_reaped_and_reported_as_ended() {
     assert_eq!(reaper.calls(), ["wait"]);
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn a_reaper_that_ended_between_the_early_poll_and_the_child_lookup_is_taken_as_ended() {
     let (ack, _keep) = ack_pipe();
@@ -859,7 +826,6 @@ fn a_reaper_that_ended_between_the_early_poll_and_the_child_lookup_is_taken_as_e
     assert_eq!(reaper.calls(), ["try_wait"]);
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn a_live_reaper_with_no_child_is_killed_reaped_and_refused() {
     let (ack, _keep) = ack_pipe();
@@ -879,7 +845,6 @@ fn a_live_reaper_with_no_child_is_killed_reaped_and_refused() {
     assert_eq!(reaper.calls(), ["try_wait", "kill", "wait"]);
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn the_reaper_is_not_reaped_until_the_launcher_acknowledges() {
     let (ack, send) = ack_pipe();
@@ -919,7 +884,6 @@ fn the_reaper_is_not_reaped_until_the_launcher_acknowledges() {
     assert!(log[0].1 >= acknowledged_at.lock().unwrap().unwrap());
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn a_launcher_that_closes_the_pipe_without_a_byte_gets_the_sandbox_ended() {
     let (ack, send) = ack_pipe();
@@ -939,7 +903,6 @@ fn a_launcher_that_closes_the_pipe_without_a_byte_gets_the_sandbox_ended() {
     assert_eq!(reaper.calls(), ["kill", "wait"]);
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn no_acknowledgement_within_the_time_ends_the_sandbox_in_bounded_time() {
     let (ack, _send) = ack_pipe();
@@ -960,7 +923,6 @@ fn no_acknowledgement_within_the_time_ends_the_sandbox_in_bounded_time() {
     assert_eq!(reaper.calls(), ["kill", "wait"]);
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn more_than_one_process_in_the_sandbox_ends_it() {
     let (ack, _keep) = ack_pipe();
@@ -1039,7 +1001,6 @@ fn a_mount_under_a_read_only_bound_directory_is_masked_whatever_the_host_has() {
     assert_eq!(super::masks(&[file], &info), Vec::<Tmpfs>::new());
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn the_child_is_pinned_then_read_once_then_checked_for_having_ended_in_that_order() {
     let procs = procs_with_one_child();
@@ -1047,7 +1008,6 @@ fn the_child_is_pinned_then_read_once_then_checked_for_having_ended_in_that_orde
     assert_eq!(procs.calls(), [("open", 11), ("stat", 11), ("exited", 11)]);
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn a_process_replaced_after_it_was_pinned_is_not_the_server_and_one_ended_after_the_read_is_skipped()
  {
@@ -1096,7 +1056,7 @@ fn the_landlock_rules_grant_what_the_plan_binds_and_nothing_more() {
     // directories (the kernel opens the ELF interpreter with the execute right).
     assert_eq!(grant("/opt/llama/llama-server"), Grant::ReadExec);
     for bind in &plan.binds {
-        if bwrap::LIBRARY_DIRS.contains(&bind.target.as_str()) {
+        if sandbox::LIBRARY_DIRS.contains(&bind.target.as_str()) {
             assert_eq!(grant(&bind.target), Grant::ReadExec, "{bind:?}");
         }
     }
@@ -1110,19 +1070,19 @@ fn the_landlock_rules_grant_what_the_plan_binds_and_nothing_more() {
     ] {
         assert_eq!(grant(path), Grant::Read, "{path}");
     }
-    assert_eq!(grant(bwrap::MODEL), Grant::ReadFile);
+    assert_eq!(grant(sandbox::MODEL), Grant::ReadFile);
     // Read and write: the socket directory and the two writable tmpfs mounts; of `/run` only
     // the token file (read) and the socket directory, never the directory as a whole.
-    for path in [bwrap::SOCKET_DIR, "/tmp", "/dev/shm"] {
+    for path in [sandbox::SOCKET_DIR, "/tmp", "/dev/shm"] {
         assert_eq!(grant(path), Grant::ReadWrite, "{path}");
     }
-    assert_eq!(grant(bwrap::TOKEN), Grant::ReadFile);
+    assert_eq!(grant(sandbox::TOKEN), Grant::ReadFile);
     assert!(rule(&rules, "/run").is_none());
     // `/dev` is listed and `/proc` read; the five nodes and the render node are devices.
     assert_eq!(grant("/dev"), Grant::List);
     assert_eq!(grant("/proc"), Grant::Read);
     // The runtime's directory is listed (ggml looks for its backends there), not written.
-    assert_eq!(grant(bwrap::RUNTIME), Grant::List);
+    assert_eq!(grant(sandbox::RUNTIME), Grant::List);
     for device in DEVICES {
         assert_eq!(grant(&format!("/dev/{device}")), Grant::Device);
     }
@@ -1136,8 +1096,8 @@ fn the_landlock_rules_grant_what_the_plan_binds_and_nothing_more() {
             "/dev",
             "/tmp",
             "/dev/shm",
-            bwrap::TOKEN,
-            bwrap::RUNTIME,
+            sandbox::TOKEN,
+            sandbox::RUNTIME,
             "/dev/dri",
         ]
         .contains(&rule.path.as_str())
@@ -1210,7 +1170,6 @@ fn the_landlock_report_travels_after_the_marker_and_only_as_a_report() {
     assert_eq!(Landlock::Unavailable.describe(), "not available");
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn the_landlock_rights_never_let_written_files_run_or_make_device_nodes() {
     use landlock::AccessFs;
@@ -1238,7 +1197,6 @@ fn the_landlock_rights_never_let_written_files_run_or_make_device_nodes() {
     assert!(!device.contains(AccessFs::Execute));
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn an_enforced_ruleset_is_full_from_abi_6_and_partial_below() {
     assert_eq!(report_for(11), Landlock::Full { abi: 11 });
@@ -1250,7 +1208,6 @@ fn an_enforced_ruleset_is_full_from_abi_6_and_partial_below() {
 /// Runs `body` on a thread whose Landlock calls fail with `EPERM` (a seccomp filter on that
 /// thread only), standing for a kernel whose later detection or enforcement fails after Mimik's
 /// own probe has succeeded.
-#[cfg(feature = "sandbox-hakoniwa")]
 fn with_failing_landlock<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::spawn(move || {
         let errno = u32::try_from(libc::EPERM).unwrap();
@@ -1264,7 +1221,6 @@ fn with_failing_landlock<T: Send + 'static>(body: impl FnOnce() -> T + Send + 's
     .unwrap()
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn once_the_probe_succeeded_a_later_failure_is_never_taken_for_not_available() {
     let result = with_failing_landlock(|| apply_landlock_with(&[], || Ok(6)));
@@ -1272,7 +1228,6 @@ fn once_the_probe_succeeded_a_later_failure_is_never_taken_for_not_available() {
     assert!(why.starts_with("filesystem rights:"), "{why}");
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 fn missing_rule() -> (tempfile::TempDir, Vec<Rule>) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("absent").to_str().unwrap().to_owned();
@@ -1285,7 +1240,6 @@ fn missing_rule() -> (tempfile::TempDir, Vec<Rule>) {
     )
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn a_path_error_is_found_before_the_kernel_is_asked_whatever_the_kernel() {
     let (_dir, rules) = missing_rule();
@@ -1295,7 +1249,6 @@ fn a_path_error_is_found_before_the_kernel_is_asked_whatever_the_kernel() {
     assert!(why.starts_with(&expected), "{why}");
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn an_unavailable_landlock_skips_the_paths_and_the_step_goes_on_to_the_marker() {
     let (_dir, rules) = missing_rule();
@@ -1322,7 +1275,6 @@ fn an_unavailable_landlock_skips_the_paths_and_the_step_goes_on_to_the_marker() 
     assert_eq!(found.get(), Some(Landlock::Unavailable));
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn a_landlock_path_error_stops_the_real_step_before_the_marker() {
     let (_dir, rules) = missing_rule();
@@ -1348,7 +1300,6 @@ fn a_landlock_path_error_stops_the_real_step_before_the_marker() {
     assert_eq!(found.get(), None);
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn the_landlock_probe_failing_as_not_available_continues_and_any_other_failure_stops() {
     for errno in [libc::ENOSYS, libc::EOPNOTSUPP, libc::EPERM] {
@@ -1370,7 +1321,6 @@ fn the_landlock_probe_failing_as_not_available_continues_and_any_other_failure_s
     }
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn every_tmpfs_the_sandbox_mounts_is_noexec_nosuid_and_nodev() {
     use hakoniwa::MountOptions;
@@ -1393,7 +1343,6 @@ fn every_tmpfs_the_sandbox_mounts_is_noexec_nosuid_and_nodev() {
 /// mount point is not shown). Applied to a thread of this test process (Landlock restricts the
 /// calling thread). Rust has no runtime skip: on a kernel without Landlock the test prints
 /// "SKIPPED" and proves nothing.
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn a_landlock_list_rule_covers_the_directories_beneath_it_and_no_file_in_them() {
     let dir = tempfile::tempdir().unwrap();
