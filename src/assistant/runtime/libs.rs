@@ -168,6 +168,8 @@ pub(crate) fn parse_cache(
         // at the next 8-byte boundary.
         let nlibs = u32::from_le_bytes(data.get(12..16)?.try_into().ok()?) as usize;
         let end = nlibs.checked_mul(12)?.checked_add(16)?;
+        // `struct cache_file_new` ends with a `file_entry_new`, which holds a `uint64_t`, so
+        // glibc's `ALIGN_CACHE` is 8, not 4.
         let rest = data.get(end.checked_add(7)? & !7..)?;
         if !rest.starts_with(MAGIC) {
             return None;
@@ -313,7 +315,7 @@ pub(crate) fn cached_at(
 }
 
 /// What the search of the host's library folders found for the names it was asked about.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Found {
     /// Resolvable by the loader's own rules.
     Yes,
@@ -321,6 +323,27 @@ pub(crate) enum Found {
     Elsewhere,
     /// Nowhere in a complete search.
     No,
+}
+
+/// What the search did, for the tests to observe directly (counters, and the phase the search
+/// is in, which a test's cancel flag can read to cut one phase on its own).
+#[derive(Clone, Default)]
+pub(crate) struct Stats {
+    pub phase: std::rc::Rc<std::cell::Cell<&'static str>>,
+    /// Candidates opened to check them, in every phase.
+    pub opens: std::cell::Cell<usize>,
+    /// Cache entries looked at by the index scan.
+    pub scanned: std::cell::Cell<usize>,
+    /// Folders read by the walk.
+    pub walk_dirs: std::cell::Cell<usize>,
+    /// Times the cache was indexed.
+    pub index_calls: std::cell::Cell<usize>,
+}
+
+impl Stats {
+    fn bump(counter: &std::cell::Cell<usize>) {
+        counter.set(counter.get() + 1);
+    }
 }
 
 /// The host side of the check: where to look, with the means to test and stop it.
@@ -337,6 +360,7 @@ pub(crate) struct Host<'a> {
     /// The enumeration of the default folders did not finish (a budget, a read error or a
     /// cancel): the host's folders were not all seen, so nothing can be said to be missing.
     pub incomplete: bool,
+    pub stats: Stats,
 }
 
 /// `(device, inode)` of a folder, following links.
@@ -373,6 +397,7 @@ impl Host<'_> {
             budget: Budget::DEFAULT,
             cancelled,
             incomplete: false,
+            stats: Stats::default(),
         }
         .with_multiarch()
     }
@@ -381,6 +406,7 @@ impl Host<'_> {
     /// the entry budget and watches for a cancel; if it does not finish, the host is marked
     /// [`incomplete`](Host::incomplete).
     pub(crate) fn with_multiarch(mut self) -> Self {
+        self.stats.phase.set("enumerate");
         let mut standard = self.roots.clone();
         let mut seen = 0_usize;
         'roots: for root in &self.roots {
@@ -409,12 +435,19 @@ impl Host<'_> {
         self
     }
 
+    /// Whether `path` is a usable library of `kind` (one counted open).
+    fn open(&self, path: &Path, kind: Kind) -> bool {
+        Stats::bump(&self.stats.opens);
+        compatible(path, kind)
+    }
+
     /// Where `wanted` (name and the kind of its dependant) can be had. The default folders are
     /// asked first; only the names they do not settle go on to the cache, which is indexed once
     /// by name with its repeated paths dropped; the names still open share one walk. Every phase
     /// counts against the budgets and watches for a cancel: running out of either ends the
     /// phase and, for the names not settled, the answer is "unknown".
     pub(crate) fn find(&self, wanted: &BTreeMap<String, Kind>) -> BTreeMap<String, Found> {
+        self.stats.phase.set("probe");
         let mut result = BTreeMap::new();
         let mut pending: BTreeMap<&String, Kind> = BTreeMap::new();
         let mut opens = 0_usize;
@@ -428,7 +461,7 @@ impl Host<'_> {
                     break;
                 }
                 opens += 1;
-                if compatible(&dir.join(name), *kind) {
+                if self.open(&dir.join(name), *kind) {
                     settled = true;
                     break;
                 }
@@ -440,7 +473,9 @@ impl Host<'_> {
             }
         }
         if !pending.is_empty() {
+            self.stats.phase.set("index");
             let (index, indexed) = self.index(&pending);
+            self.stats.phase.set("cache");
             whole &= indexed;
             let names: Vec<&String> = pending.keys().copied().collect();
             for name in names {
@@ -451,7 +486,7 @@ impl Host<'_> {
                         break;
                     }
                     opens += 1;
-                    if compatible(path, kind) {
+                    if self.open(path, kind) {
                         result.insert(name.clone(), Found::Yes);
                         pending.remove(name);
                         break;
@@ -462,6 +497,7 @@ impl Host<'_> {
         if pending.is_empty() {
             return result;
         }
+        self.stats.phase.set("walk");
         let (elsewhere, complete) = self.walk(&pending, opens);
         for (name, _) in pending {
             let found = if elsewhere.contains(name) {
@@ -483,11 +519,15 @@ impl Host<'_> {
         &'h self,
         pending: &BTreeMap<&String, Kind>,
     ) -> (BTreeMap<&'h str, BTreeSet<&'h Path>>, bool) {
+        Stats::bump(&self.stats.index_calls);
         let mut index: BTreeMap<&str, BTreeSet<&Path>> = BTreeMap::new();
         for (scanned, (name, path)) in self.cache.iter().flatten().enumerate() {
-            if scanned % 1024 == 0 && (scanned >= self.budget.entries || (self.cancelled)()) {
+            // The entry budget is checked on every entry (a cache that ends between the limit
+            // and the next sampled check is still over it); only the cancel flag is sampled.
+            if scanned >= self.budget.entries || (scanned % 1024 == 0 && (self.cancelled)()) {
                 return (index, false);
             }
+            Stats::bump(&self.stats.scanned);
             if pending.contains_key(name) {
                 index
                     .entry(name.as_str())
@@ -528,6 +568,7 @@ impl Host<'_> {
                 return;
             }
             state.dirs += 1;
+            Stats::bump(&host.stats.walk_dirs);
             let Ok(entries) = std::fs::read_dir(dir) else {
                 state.complete = false;
                 return;
@@ -565,7 +606,7 @@ impl Host<'_> {
                             return;
                         }
                         state.opens += 1;
-                        if compatible(&entry.path(), *expected) {
+                        if host.open(&entry.path(), *expected) {
                             state.found.insert(name);
                         }
                     }

@@ -31,6 +31,7 @@ use super::{Level, Path};
 use crate::assistant::jobs::{Assistant, Budgets, EndReason, RuntimeEvent, Signal};
 use async_trait::async_trait;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -360,6 +361,7 @@ pub(crate) fn spawn(
         generation: 0,
         failures: 0,
         gpu_failed: None,
+        health_answered: Arc::new(AtomicBool::new(false)),
     };
     tokio::spawn(manager.run());
     Handle { status, commands }
@@ -430,6 +432,9 @@ struct Manager {
     /// Why the GPU path failed: the CPU path is used until Mimik restarts or the owner
     /// presses "Try the GPU again" (a Restart keeps it).
     gpu_failed: Option<String>,
+    /// Whether `/health` answered in the current attempt: from then on a failure (priming,
+    /// calibration, the offload check) is not a library that failed to load.
+    health_answered: Arc<AtomicBool>,
 }
 
 impl Manager {
@@ -526,6 +531,9 @@ impl Manager {
     /// for `path` when there is one and `why` lacks it. Only those failures: a probe's reasons,
     /// a policy skip and the exit of a server that was ready are not explained by a library.
     fn hinted(&self, path: Path, why: String) -> String {
+        if self.health_answered.load(Ordering::SeqCst) {
+            return why;
+        }
         match self.launcher.failure_hint(path) {
             Some(hint) if !why.contains(&hint) => format!("{why} ({hint})"),
             _ => why,
@@ -792,6 +800,7 @@ impl Manager {
     /// attempt's child is gone when this returns.
     async fn attempt(&mut self, generation: u64, level: Level, path: Path) -> Attempt {
         let launcher = Arc::clone(&self.launcher);
+        self.health_answered.store(false, Ordering::SeqCst);
         let started = tokio::select! {
             started = launcher.start(generation, level, path) => started,
             command = self.commands.recv() => match command {
@@ -808,7 +817,13 @@ impl Manager {
             Err(fail) => return Attempt::Failed(fail),
         };
         let measured = {
-            let measure = measure(&child, path, self.config.max_tokens, &self.status);
+            let measure = measure(
+                &child,
+                path,
+                self.config.max_tokens,
+                &self.status,
+                &self.health_answered,
+            );
             tokio::select! {
                 result = measure => Some(result),
                 fail = child.exited() => Some(Err(Attempt::Failed(fail))),
@@ -952,6 +967,7 @@ async fn measure(
     path: Path,
     max_tokens: u32,
     status: &Arc<Mutex<Status>>,
+    health_answered: &AtomicBool,
 ) -> Result<(Calibration, Budgets), Attempt> {
     let phase = |phase: &'static str| {
         status
@@ -963,6 +979,7 @@ async fn measure(
     let began = Instant::now();
     phase("loading the model");
     healthy(child).await?;
+    health_answered.store(true, Ordering::SeqCst);
     log(&format!(
         "health after {:.1} s",
         began.elapsed().as_secs_f64()

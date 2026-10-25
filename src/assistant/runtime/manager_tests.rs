@@ -1248,3 +1248,38 @@ async fn the_exit_of_a_server_that_was_ready_carries_no_hint() {
     let note = handle.status().gpu_note.unwrap();
     assert!(!note.contains("libgomp"), "{note}");
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_failure_after_health_answered_carries_no_library_hint() {
+    // CPU: /health answered, then calibration fails (a timing is missing): the server loaded,
+    // so no library is missing and the hint would mislead.
+    let timing = Behaviour {
+        fault: Fault::MissingTiming,
+        ..Behaviour::default()
+    };
+    let launcher = FakeLauncher::scripted([Start::Ok(timing)]);
+    launcher.hints.lock().unwrap()[0] = Some(GOMP_HINT.into());
+    let (_assistant, handle) = manager(&launcher);
+    let probe = handle.clone();
+    until(Duration::from_mins(15), move || {
+        probe.status().last_failure.is_some()
+    })
+    .await;
+    let last = handle.status().last_failure.unwrap();
+    assert!(last.contains("timing is missing"), "{last}");
+    assert!(!last.contains("libgomp"), "{last}");
+    handle.shutdown().await;
+    // GPU: priming fails after /health: the fallback reason has no hint either.
+    let priming = Behaviour {
+        prime_fails: true,
+        ..Behaviour::default()
+    };
+    let launcher = FakeLauncher::scripted([Start::Ok(priming), Start::Ok(Behaviour::default())]);
+    *launcher.device.lock().unwrap() = Some(rx6650());
+    launcher.hints.lock().unwrap()[1] = Some(GOMP_HINT.into());
+    let (assistant, handle) = gpu_manager(&launcher);
+    ready(&assistant).await;
+    let note = handle.status().gpu_note.unwrap();
+    assert!(note.contains("priming failed"), "{note}");
+    assert!(!note.contains("libgomp"), "{note}");
+}

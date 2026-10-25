@@ -95,6 +95,10 @@ impl Fixture {
     }
 
     fn host<'a>(&self, cancelled: &'a dyn Fn() -> bool) -> Host<'a> {
+        self.host_with(cancelled, Stats::default())
+    }
+
+    fn host_with<'a>(&self, cancelled: &'a dyn Fn() -> bool, stats: Stats) -> Host<'a> {
         Host {
             standard: Vec::new(),
             cache: Some(Vec::new()),
@@ -102,6 +106,7 @@ impl Fixture {
             budget: Budget::DEFAULT,
             cancelled,
             incomplete: false,
+            stats,
         }
         .with_multiarch()
     }
@@ -536,6 +541,7 @@ fn a_cache_entry_settles_a_name_with_no_standard_folders() {
         budget: Budget::DEFAULT,
         cancelled: NEVER,
         incomplete: false,
+        stats: Stats::default(),
     };
     let wanted = BTreeMap::from([(
         "libodd.so.1".to_owned(),
@@ -612,6 +618,7 @@ fn fifo_child() {
         budget: Budget::DEFAULT,
         cancelled: NEVER,
         incomplete: false,
+        stats: Stats::default(),
     };
     // Neither counts as a library; the walk skips the FIFO entry and the link is refused after
     // a non-blocking open. (The names are then known to be nowhere usable.)
@@ -658,13 +665,29 @@ fn the_caches_container_and_string_table_are_checked() {
     let mut huge_old = old_then_new(1, &plain_cache);
     huge_old[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
     assert_eq!(parse_cache(&huge_old, NEVER), None);
-    // More entries than a cache may declare, in a file large enough to hold them.
-    let count = CACHE_ENTRIES + 1;
-    let mut many = b"glibc-ld.so.cache1.1".to_vec();
-    many.extend_from_slice(&u32::try_from(count).unwrap().to_le_bytes());
-    many.extend_from_slice(&0_u32.to_le_bytes());
-    many.resize(48 + count * 24, 0);
-    assert_eq!(parse_cache(&many, NEVER), None);
+    // More entries than a cache may declare, each valid and all sharing the same two valid
+    // strings: nothing but the entry cap refuses them.
+    let strings = b"liba.so.1\0/lib/liba.so.1\0";
+    let shared = |count: usize| {
+        let table_end = 48 + count * 24;
+        let mut cache = b"glibc-ld.so.cache1.1".to_vec();
+        cache.extend_from_slice(&u32::try_from(count).unwrap().to_le_bytes());
+        cache.extend_from_slice(&u32::try_from(strings.len()).unwrap().to_le_bytes());
+        cache.resize(48, 0);
+        for _ in 0..count {
+            cache.extend_from_slice(&1_i32.to_le_bytes());
+            cache.extend_from_slice(&u32::try_from(table_end).unwrap().to_le_bytes());
+            cache.extend_from_slice(&u32::try_from(table_end + 10).unwrap().to_le_bytes());
+            cache.extend_from_slice(&[0; 12]);
+        }
+        cache.extend_from_slice(strings);
+        cache
+    };
+    assert_eq!(
+        parse_cache(&shared(CACHE_ENTRIES), NEVER).unwrap().len(),
+        CACHE_ENTRIES
+    );
+    assert_eq!(parse_cache(&shared(CACHE_ENTRIES + 1), NEVER), None);
 }
 
 fn libgomp_wanted() -> BTreeMap<String, Kind> {
@@ -693,13 +716,35 @@ fn cached_host<'a>(
 fn the_same_candidate_listed_many_times_is_opened_once() {
     let fixture = Fixture::new(&[("x", b"x".to_vec())]);
     let gone = fixture.root.join("gone/libgomp.so.1");
-    let mut host = cached_host(&fixture, vec![gone; 50_000], NEVER);
-    // One open for the default folder and one for the one distinct path: a budget of three
-    // opens is enough only if the repeats are dropped.
+    let host = cached_host(&fixture, vec![gone; 50_000], NEVER);
+    assert_eq!(host.find(&libgomp_wanted())["libgomp.so.1"], Found::No);
+    // The default folders are probed once each, the one distinct cache path once: without
+    // deduplication it would be 50 000 more opens.
+    let probes = host.standard.len();
+    assert_eq!(host.stats.opens.get(), probes + 1);
+}
+
+#[test]
+fn the_cache_scan_checks_its_budget_on_every_entry() {
+    // An empty library folder, so the walk is complete and only the cache scan can be short.
+    let fixture = Fixture::new(&[]);
+    let paths = vec![
+        fixture.root.join("gone/libgomp.so.1"),
+        fixture.root.join("other/libgomp.so.1"),
+    ];
+    let mut host = cached_host(&fixture, paths, NEVER);
+    // Two entries against a budget of one: the scan must stop before the second, which is not
+    // a multiple of the interval at which the cancel flag is asked.
     host.budget = Budget {
-        opens: 3,
+        entries: 1,
         ..Budget::DEFAULT
     };
+    assert_eq!(
+        host.find(&libgomp_wanted())["libgomp.so.1"],
+        Found::Elsewhere
+    );
+    // The same cache with room for both is a complete search that finds nothing.
+    host.budget = Budget::DEFAULT;
     assert_eq!(host.find(&libgomp_wanted())["libgomp.so.1"], Found::No);
 }
 
@@ -722,25 +767,16 @@ fn running_out_of_opens_is_unknown_never_missing() {
 
 #[test]
 fn a_default_folder_hit_never_touches_the_cache() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     let fixture = Fixture::new(&[("libgomp.so.1", elf_needing(&[]))]);
-    let calls = AtomicUsize::new(0);
-    let cancelled = || {
-        calls.fetch_add(1, Ordering::SeqCst);
-        false
-    };
     // 100 000 bogus cache candidates that would each cost an open if they were looked at.
     let bogus = vec![fixture.root.join("gone/libgomp.so.1"); 100_000];
-    let mut host = cached_host(&fixture, bogus, &cancelled);
+    let mut host = cached_host(&fixture, bogus, NEVER);
     host.standard = vec![fixture.root.clone()];
-    let before = calls.load(Ordering::SeqCst);
-    host.budget = Budget {
-        opens: 1,
-        ..Budget::DEFAULT
-    };
     assert_eq!(host.find(&libgomp_wanted())["libgomp.so.1"], Found::Yes);
-    // Only the one default-folder probe asked whether to stop.
-    assert_eq!(calls.load(Ordering::SeqCst) - before, 1);
+    // The cache was neither indexed nor scanned, and only the default folder was opened.
+    assert_eq!(host.stats.index_calls.get(), 0);
+    assert_eq!(host.stats.scanned.get(), 0);
+    assert_eq!(host.stats.opens.get(), 1);
 }
 
 #[test]
@@ -782,6 +818,95 @@ fn a_cancel_in_any_phase_makes_the_answer_unknown() {
     assert_eq!(
         host.find(&libgomp_wanted())["libgomp.so.1"],
         Found::Elsewhere
+    );
+}
+
+/// A cancel flag that says yes from `target` onwards through the phases in the order the
+/// search runs them (`enumerate`, `probe`, `index`, `cache`, `walk`).
+fn cancelled_from(
+    phase: &std::rc::Rc<std::cell::Cell<&'static str>>,
+    target: &'static str,
+) -> impl Fn() -> bool {
+    const ORDER: [&str; 5] = ["enumerate", "probe", "index", "cache", "walk"];
+    let phase = phase.clone();
+    move || {
+        let at = ORDER.iter().position(|name| *name == phase.get());
+        let from = ORDER.iter().position(|name| *name == target);
+        matches!((at, from), (Some(at), Some(from)) if at >= from)
+    }
+}
+
+#[test]
+fn each_phase_honours_a_cancel_on_its_own_and_the_later_ones_do_no_work() {
+    // A multiarch child to enumerate, several folders to walk and a cache of distinct missing
+    // candidates: every phase has real work to do.
+    let fixture = Fixture::new(&[
+        ("x86_64-linux-gnu/y", b"y".to_vec()),
+        ("deep/z", b"z".to_vec()),
+    ]);
+    let paths: Vec<PathBuf> = (0..50)
+        .map(|n| fixture.root.join(format!("gone{n}/libgomp.so.1")))
+        .collect();
+    // (answer, default folders, incomplete host, opens, cache entries scanned, folders walked)
+    let run = |target: &'static str| {
+        let stats = Stats::default();
+        let cancelled = cancelled_from(&stats.phase, target);
+        let mut host = fixture.host_with(&cancelled, stats.clone());
+        host.cache = Some(
+            paths
+                .iter()
+                .map(|path| ("libgomp.so.1".to_owned(), path.clone()))
+                .collect(),
+        );
+        let found = host.find(&libgomp_wanted())["libgomp.so.1"];
+        (
+            found,
+            host.standard.len(),
+            host.incomplete,
+            host.stats.opens.get(),
+            host.stats.scanned.get(),
+            host.stats.walk_dirs.get(),
+        )
+    };
+    let whole = run("never");
+    assert_eq!(
+        whole.0,
+        Found::No,
+        "the uncancelled search is complete: {whole:?}"
+    );
+    let probes = whole.1;
+    assert!(probes >= 2, "the fixture has a multiarch child");
+    assert_eq!(whole.4, paths.len());
+    assert!(whole.5 >= 2, "the fixture has folders to walk: {whole:?}");
+    // The enumeration cancelled: the host is incomplete and nothing after it did any work.
+    let enumerate = run("enumerate");
+    assert_eq!(enumerate.0, Found::Elsewhere, "{enumerate:?}");
+    assert!(enumerate.2, "{enumerate:?}");
+    assert_eq!(
+        (enumerate.3, enumerate.4, enumerate.5),
+        (0, 0, 0),
+        "{enumerate:?}"
+    );
+    // Each later phase: the earlier ones ran in full, this one and the rest did no work.
+    let probe = run("probe");
+    assert_eq!(probe.0, Found::Elsewhere, "{probe:?}");
+    assert_eq!((probe.3, probe.4, probe.5), (0, 0, 0), "{probe:?}");
+    let index = run("index");
+    assert_eq!(index.0, Found::Elsewhere, "{index:?}");
+    assert_eq!((index.3, index.4, index.5), (probes, 0, 0), "{index:?}");
+    let cache = run("cache");
+    assert_eq!(cache.0, Found::Elsewhere, "{cache:?}");
+    assert_eq!(
+        (cache.3, cache.4, cache.5),
+        (probes, paths.len(), 0),
+        "{cache:?}"
+    );
+    let walk = run("walk");
+    assert_eq!(walk.0, Found::Elsewhere, "{walk:?}");
+    assert_eq!(
+        (walk.3, walk.4, walk.5),
+        (probes + paths.len(), paths.len(), 0),
+        "{walk:?}"
     );
 }
 
