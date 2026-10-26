@@ -1224,8 +1224,15 @@ def fieldref_summary(path):
     lines = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
     rows = [r for r in lines[1:] if r["event"] == "case" and r["pass"] == 1]
     cases = {c["id"]: c for c in load_cases(CASES_PATH_FIELDREF)["cases"]}
-    out = {"cases": len(cases), "completed": 0, "correct_ref": 0, "false_confident": 0,
-           "coincidence": 0, "abstained": 0, "by_case": {}}
+    out = {
+        "cases": len(cases),
+        "completed": 0,
+        "correct_ref": 0,
+        "false_confident": 0,
+        "coincidence": 0,
+        "abstained": 0,
+        "by_case": {},
+    }
     done = set()
     for r in rows:
         if r["status"] != "completed":
@@ -1291,7 +1298,11 @@ def check_cases(args):
         request = build_request(case, data["sheet"], contract=args.contract)
         if len(request["user"].encode()) > DYNAMIC_LIMIT:
             raise ValueError(case["id"])
-    print(json.dumps({"cases": len(data["cases"]), **contract_identity(args.contract, args.cases)}, indent=2))
+    print(
+        json.dumps(
+            {"cases": len(data["cases"]), **contract_identity(args.contract, args.cases)}, indent=2
+        )
+    )
 
 
 def main(argv=None):

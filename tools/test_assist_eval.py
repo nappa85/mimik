@@ -492,8 +492,14 @@ class ContractV2(unittest.TestCase):
         ):
             validated = ae.validate_reply(reply(expr), req)
             shown = ae.shown_values(validated)
-            row = {"event": "case", "case": case["id"], "pass": 1, "status": "completed",
-                   "shown": shown, "validated": validated}
+            row = {
+                "event": "case",
+                "case": case["id"],
+                "pass": 1,
+                "status": "completed",
+                "shown": shown,
+                "validated": validated,
+            }
             with tempfile.TemporaryDirectory() as tmp:
                 ledger = Path(tmp) / "l.jsonl"
                 ledger.write_text(json.dumps({"event": "header"}) + "\n" + json.dumps(row) + "\n")
