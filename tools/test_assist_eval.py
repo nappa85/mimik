@@ -319,10 +319,80 @@ class Files(unittest.TestCase):
         self.assertEqual(out["schema_valid"], "1/1")
 
 
-# The shipped prefix (v2-compact, ASSIST-52): the Rust copy's hash, in `contract_tests.rs` too.
-V2_PREFIX_SHA256 = "d2aadd679cd8a86685e7e487d803cc0a727031ccb06f2c885da3cdd93fef05ca"
-# The pre-ASSIST-52 prefix (v2-base): the field-reference screen's base arm.
+# The shipped prefix (v2-compact, ASSIST-52, with the ASSIST-53 literal rule): the Rust copy's hash, in `contract_tests.rs` too.
+V2_PREFIX_SHA256 = "d2b19743ac01407894b3fa0101ad464485e687db38d9cf48bc6cfed0aad3fd6c"
+# The pre-ASSIST-52 prefix (v2-base, digits-only literal rule): the field-reference screen's
+# base arm.
 V2_BASE_PREFIX_SHA256 = "7b0ba380d8687cc8dfe2a150bf99d684b3bb4f4d5a22e41b5d46a1b6bbd5fe84"
+
+
+class LiteralProvenanceAssist53(unittest.TestCase):
+    """ASSIST-53: number words count as their number; a redundant `* 1` or `/ 1` needs no 1."""
+
+    @staticmethod
+    def shown(node, phrase, target=84):
+        req = {
+            "phrase": phrase,
+            "target_value": target,
+            "supplied": {"t": target, "c1": 3},
+            "excluded": [],
+            "contract": "v2",
+        }
+        out = ae.validate_reply(
+            json.dumps({"kind": "options", "options": [{"expr": node, "explanation": "x"}]}), req
+        )
+        return ae.shown_values(out)
+
+    def test_number_words(self):
+        cases = {
+            "one lost for each day": [1],
+            "ten": [10],
+            "dieci": [10],
+            "TEN": [10],
+            "Venti danni": [20],
+            "a hundred": [100],
+            "cento": [100],
+            "uno una un": [1, 1, 1],
+            "un'ora": [1],
+            "un\u2019ora": [1],
+            "twenty-one": [20, 1],
+            "lost 5 and two": [2],
+            "someone": [],
+            "alone": [],
+            "ventuno": [],
+            "one5": [],
+            "a point": [],
+            "an arrow": [],
+            "": [],
+        }
+        for phrase, expected in cases.items():
+            self.assertEqual(ae.number_words(phrase), expected, phrase)
+        self.assertEqual(len(ae.NUMBER_WORDS), 59)
+
+    def test_lexer_counts_still_digits_only(self):
+        self.assertEqual(ae.phrase_numbers("ten"), [])
+
+    def test_a_word_number_is_a_literal(self):
+        days_one = op("sub", ref("t"), op("mul", ref("c1"), lit(1)))
+        self.assertEqual(self.shown(days_one, "one lost for each day"), [81])
+        self.assertEqual(self.shown(op("sub", ref("t"), lit(10)), "ten"), [74])
+        self.assertEqual(self.shown(op("sub", ref("t"), lit(10)), "dieci"), [74])
+        self.assertEqual(self.shown(op("sub", ref("t"), lit(1)), "someone hit me"), [])
+        self.assertEqual(self.shown(op("sub", ref("t"), lit(1)), "a point"), [])
+        self.assertEqual(self.shown(op("sub", ref("t"), lit(11)), "ten"), [])
+
+    def test_a_redundant_one_needs_no_one_in_the_note(self):
+        note = "lost them"
+        self.assertEqual(self.shown(op("mul", ref("t"), lit(1)), note), [84])
+        self.assertEqual(self.shown(op("mul", lit(1), ref("t")), note), [84])
+        self.assertEqual(self.shown(op("div", ref("t"), lit(1), rounding="exact"), note), [84])
+        self.assertEqual(self.shown(op("add", ref("t"), lit(1)), note), [])
+        self.assertEqual(self.shown(op("sub", ref("t"), lit(1)), note), [])
+        self.assertEqual(self.shown(op("div", lit(1), ref("t"), rounding="floor"), note), [])
+        self.assertEqual(self.shown(op("mul", ref("t"), lit(2)), note), [])
+        self.assertEqual(self.shown(op("mul", ref("t"), lit(-1)), note), [])
+        two = op("add", lit(1), lit(1))
+        self.assertEqual(self.shown(op("mul", ref("t"), two), note), [])
 
 
 class ContractV2(unittest.TestCase):
@@ -344,7 +414,9 @@ class ContractV2(unittest.TestCase):
         shipped, base = ae.contract_prefix("v2"), ae.contract_prefix("v2-base")
         self.assertEqual(shipped.count(ae.EX_COMPACT), 1)
         self.assertEqual(base.count(ae.EX_COMPACT), 0)
-        self.assertEqual(shipped.replace(ae.EX_COMPACT, "", 1), base)
+        legacy = shipped.replace(ae.LITERAL_RULE_ASSIST53, ae.LITERAL_RULE_DIGITS_ONLY, 1)
+        self.assertNotEqual(legacy, shipped)
+        self.assertEqual(legacy.replace(ae.EX_COMPACT, "", 1), base)
         self.assertEqual(hashlib.sha256(base.encode()).hexdigest(), V2_BASE_PREFIX_SHA256)
         self.assertIn(ae.EX_COMPACT + "Reply with one JSON object", shipped)
 
@@ -520,7 +592,11 @@ class ContractV2(unittest.TestCase):
         self.assertEqual(arm["user"], base["user"])
         self.assertEqual(arm["system"].count('{"ref": "f1"}'), 1)
         self.assertEqual(arm["system"].count('{"ref": "f2"}'), 1)
-        self.assertEqual(arm["system"].replace(ae.REFEX_LINES, "", 1), base["system"])
+        # Arm B keeps the pre-ASSIST-53 literal rule, as the ledgers were run.
+        base_system = base["system"].replace(
+            ae.LITERAL_RULE_ASSIST53, ae.LITERAL_RULE_DIGITS_ONLY, 1
+        )
+        self.assertEqual(arm["system"].replace(ae.REFEX_LINES, "", 1), base_system)
         self.assertIn("Cistern at 6", arm["system"])
 
     def test_refex_examples_use_a_different_sheet_than_every_case(self):
@@ -591,12 +667,15 @@ class ContractV2(unittest.TestCase):
         req = ae.build_request(case, data["sheet"], contract="v2")
         env = json.loads(case["rendered"]["user"].split("\n")[1])
         days = next(i["alias"] for i in env["context"] if i["id"] == "days")
-        # "one" is spelled out: the literal 1 has no provenance, so the option is dropped.
+        # ASSIST-53: "one" counts as 1, so this option is shown. A 1 the note does not spell
+        # (a plain 7 here) stays dropped, and the dropped-but-right count follows the screen.
         validated = ae.validate_reply(reply(op("sub", ref("t"), op("mul", ref(days), lit(1)))), req)
-        self.assertEqual(ae.shown_values(validated), [])
+        self.assertEqual(len(ae.shown_values(validated)), 1)
         accepted = set(case["expect"]["values"])
-        right, right_ref = ae.dropped_but_right(req, validated, accepted, {days})
-        self.assertEqual((right, right_ref), (True, True))
+        self.assertIn(ae.shown_values(validated)[0], accepted)
+        self.assertEqual(ae.dropped_but_right(req, validated, accepted, {days}), (False, False))
+        dropped = ae.validate_reply(reply(op("sub", ref("t"), op("mul", ref(days), lit(7)))), req)
+        self.assertEqual(ae.shown_values(dropped), [])
         other = ae.validate_reply(reply(op("sub", ref("t"), lit(7))), req)
         self.assertEqual(ae.dropped_but_right(req, other, accepted, {days}), (False, False))
 

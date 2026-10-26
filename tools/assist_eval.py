@@ -281,10 +281,23 @@ EX_EXAMPLES = (
 EX_COMPACT = "Reply with compact single-line JSON: no spaces or line breaks between tokens.\n"
 
 
+# The literal rule sentence before ASSIST-53 (digits only). The experiment contracts below keep
+# this text, so their prefixes (and the ledgers' prefix hashes) stay what they were.
+LITERAL_RULE_ASSIST53 = '- A literal must be a number written in the note: digits exactly as written, or a whole number word in English or Italian (zero to twenty, the tens up to ninety, hundred; one, ten, uno, una, dieci). No numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits ("took 15" gives 15; "ten damage" gives 10; "took 1,500" gives none).'
+LITERAL_RULE_DIGITS_ONLY = '- A literal must be a number written with digits in the note, exactly as written: no spelled-out numbers, no numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits ("took 15" gives 15; "took 1,500" gives none).'
+
+
+@functools.cache
+def legacy_instructions():
+    """The shipped instructions with the pre-ASSIST-53 literal rule (digits only)."""
+    return _replace_once(load_v2()[0], LITERAL_RULE_ASSIST53, LITERAL_RULE_DIGITS_ONLY)
+
+
 @functools.cache
 def base_instructions():
-    """The shipped instructions without the compact-reply sentence (the pre-ASSIST-52 text)."""
-    instructions = load_v2()[0]
+    """The shipped instructions without the compact-reply sentence and with the pre-ASSIST-53
+    literal rule (the pre-ASSIST-52 text)."""
+    instructions = legacy_instructions()
     assert instructions.count(EX_COMPACT) == 1, "the instructions lost the compact sentence"
     return instructions.replace(EX_COMPACT, "", 1)
 
@@ -412,7 +425,7 @@ def _replace_once(text, old, new):
 @functools.cache
 def refex_instructions():
     """Arm B: the shipped instructions plus two field-reference examples."""
-    return _replace_once(load_v2()[0], REFEX_ANCHOR, REFEX_LINES + REFEX_ANCHOR)
+    return _replace_once(legacy_instructions(), REFEX_ANCHOR, REFEX_LINES + REFEX_ANCHOR)
 
 
 @functools.cache
@@ -615,6 +628,52 @@ def fraction_divisors(phrase):
     if "%" in phrase or any(word in FRACTION_WORDS for word in words):
         return True
     return any(a == "per" and b == "cento" for a, b in zip(words, words[1:], strict=False))
+
+
+# Number words (ASSIST-53; the Rust copy is `NUMBER_WORDS` in src/assistant/lexer.rs): English
+# and Italian, zero to twenty, the tens to ninety and one hundred. Whole words only; "a" and
+# "an" are not here; "twenty-one" gives 20 and 1 and "ventuno" gives nothing.
+NUMBER_WORDS = {
+    **{
+        word: value
+        for value, word in enumerate(
+            "zero one two three four five six seven eight nine ten eleven twelve thirteen "
+            "fourteen fifteen sixteen seventeen eighteen nineteen twenty".split()
+        )
+    },
+    **{
+        word: value
+        for value, word in zip(
+            range(30, 100, 10),
+            "thirty forty fifty sixty seventy eighty ninety".split(),
+            strict=True,
+        )
+    },
+    "hundred": 100,
+    **{
+        word: value
+        for value, word in enumerate(
+            "zero uno due tre quattro cinque sei sette otto nove dieci undici dodici tredici "
+            "quattordici quindici sedici diciassette diciotto diciannove venti".split()
+        )
+    },
+    **{
+        word: value
+        for value, word in zip(
+            range(30, 100, 10),
+            "trenta quaranta cinquanta sessanta settanta ottanta novanta".split(),
+            strict=True,
+        )
+    },
+    "una": 1,
+    "un": 1,
+    "cento": 100,
+}
+
+
+def number_words(phrase):
+    """The numbers a phrase spells as words, in order (duplicates kept)."""
+    return [NUMBER_WORDS[word] for word in _words(fold(phrase)) if word in NUMBER_WORDS]
 
 
 # ---- request builder
@@ -857,6 +916,14 @@ def _checked(value, bounds=I128):
     return value
 
 
+def _operand(node, redundant_slot, request, allowed):
+    """A literal 1 that only multiplies or divides is redundant (ASSIST-53): in a factor slot
+    (either side of mul, the right of div) it needs no provenance; anywhere else it does."""
+    if redundant_slot and node.get("lit") == 1 and set(node) == {"lit"}:
+        return 1
+    return evaluate(node, request, allowed)
+
+
 def evaluate(node, request, allowed):
     if "lit" in node:
         if request.get("contract", "v1") != "v1" and not I64[0] <= node["lit"] <= I64[1]:
@@ -875,9 +942,9 @@ def evaluate(node, request, allowed):
         if value is None:
             raise Dropped("unknown_ref")
         return value
-    left = evaluate(node["l"], request, allowed)
-    right = evaluate(node["r"], request, allowed)
     op = node["op"]
+    left = _operand(node["l"], op == "mul", request, allowed)
+    right = _operand(node["r"], op in ("mul", "div"), request, allowed)
     if op == "add":
         return _checked(left + right)
     if op == "sub":
@@ -895,7 +962,7 @@ def evaluate(node, request, allowed):
 
 
 def allowed_literals(request):
-    allowed = set(phrase_numbers(request["phrase"]))
+    allowed = set(phrase_numbers(request["phrase"])) | set(number_words(request["phrase"]))
     if request["target_value"] is not None:
         allowed.add(abs(request["target_value"]))
     if fraction_divisors(request["phrase"]):

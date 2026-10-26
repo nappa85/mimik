@@ -178,10 +178,11 @@ fn text_fits(text: &str) -> bool {
     !text.is_empty() && text.chars().count() <= MAX_TEXT_CHARS
 }
 
-/// The literal magnitudes provenance admits: the phrase's numbers, the target's value,
-/// and with a fraction or percent word 2, 3, 4 and 100.
+/// The literal magnitudes provenance admits: the phrase's numbers and number words
+/// (ASSIST-53), the target's value, and with a fraction or percent word 2, 3, 4 and 100.
 fn allowed_literals(checks: &Checks) -> BTreeSet<u64> {
     let mut allowed: BTreeSet<u64> = lexer::phrase_numbers(&checks.phrase).into_iter().collect();
+    allowed.extend(lexer::number_words(&checks.phrase));
     if let Some(value) = checks.target_value {
         allowed.insert(value.unsigned_abs());
     }
@@ -226,13 +227,7 @@ fn evaluate(
     refs: &mut BTreeMap<String, Supplied>,
 ) -> Result<i128, Drop> {
     match node {
-        Node::Lit { lit } => {
-            if allowed.contains(&lit.unsigned_abs()) {
-                Ok(i128::from(*lit))
-            } else {
-                Err(Drop::Provenance)
-            }
-        }
+        Node::Lit { lit } => literal(*lit, allowed),
         Node::Ref { alias } => {
             let supplied = checks.supplied.get(alias).ok_or(Drop::UnsuppliedRef)?;
             if !supplied.integer {
@@ -243,8 +238,9 @@ fn evaluate(
             Ok(i128::from(value))
         }
         Node::Op { op, round, l, r } => {
-            let left = evaluate(l, checks, allowed, refs)?;
-            let right = evaluate(r, checks, allowed, refs)?;
+            let mul = matches!(op, BinOp::Mul);
+            let left = operand(l, mul, checks, allowed, refs)?;
+            let right = operand(r, mul || matches!(op, BinOp::Div), checks, allowed, refs)?;
             match (op, round) {
                 (BinOp::Add, None) => left.checked_add(right).ok_or(Drop::Overflow),
                 (BinOp::Sub, None) => left.checked_sub(right).ok_or(Drop::Overflow),
@@ -253,6 +249,30 @@ fn evaluate(
                 _ => Err(Drop::Shape),
             }
         }
+    }
+}
+
+/// An operand of an operator. A literal 1 that only multiplies or divides changes nothing
+/// (ASSIST-53): in a factor slot (either side of `*`, the right of `/`) it needs no
+/// provenance; anywhere else it does.
+fn operand(
+    node: &Node,
+    redundant_slot: bool,
+    checks: &Checks,
+    allowed: &BTreeSet<u64>,
+    refs: &mut BTreeMap<String, Supplied>,
+) -> Result<i128, Drop> {
+    match node {
+        Node::Lit { lit: 1 } if redundant_slot => Ok(1),
+        _ => evaluate(node, checks, allowed, refs),
+    }
+}
+
+fn literal(lit: i64, allowed: &BTreeSet<u64>) -> Result<i128, Drop> {
+    if allowed.contains(&lit.unsigned_abs()) {
+        Ok(i128::from(lit))
+    } else {
+        Err(Drop::Provenance)
     }
 }
 

@@ -164,6 +164,86 @@ pub(crate) fn has_fraction_word(phrase: &str) -> bool {
         || words.windows(2).any(|pair| pair == ["per", "cento"])
 }
 
+/// The number words (EN, IT) of ASSIST-53, after case and diacritic folding: zero to twenty,
+/// the tens to ninety and one hundred; `uno`, `una` and `un` (so also an elided `un'`) are 1.
+/// "a" and "an" are articles and are not here. Compound words ("ventuno") are not words of
+/// this list and give nothing; a hyphenated "twenty-one" gives its two parts, 20 and 1.
+const NUMBER_WORDS: [(&str, u64); 59] = [
+    ("zero", 0),
+    ("one", 1),
+    ("two", 2),
+    ("three", 3),
+    ("four", 4),
+    ("five", 5),
+    ("six", 6),
+    ("seven", 7),
+    ("eight", 8),
+    ("nine", 9),
+    ("ten", 10),
+    ("eleven", 11),
+    ("twelve", 12),
+    ("thirteen", 13),
+    ("fourteen", 14),
+    ("fifteen", 15),
+    ("sixteen", 16),
+    ("seventeen", 17),
+    ("eighteen", 18),
+    ("nineteen", 19),
+    ("twenty", 20),
+    ("thirty", 30),
+    ("forty", 40),
+    ("fifty", 50),
+    ("sixty", 60),
+    ("seventy", 70),
+    ("eighty", 80),
+    ("ninety", 90),
+    ("hundred", 100),
+    ("uno", 1),
+    ("una", 1),
+    ("un", 1),
+    ("due", 2),
+    ("tre", 3),
+    ("quattro", 4),
+    ("cinque", 5),
+    ("sei", 6),
+    ("sette", 7),
+    ("otto", 8),
+    ("nove", 9),
+    ("dieci", 10),
+    ("undici", 11),
+    ("dodici", 12),
+    ("tredici", 13),
+    ("quattordici", 14),
+    ("quindici", 15),
+    ("sedici", 16),
+    ("diciassette", 17),
+    ("diciotto", 18),
+    ("diciannove", 19),
+    ("venti", 20),
+    ("trenta", 30),
+    ("quaranta", 40),
+    ("cinquanta", 50),
+    ("sessanta", 60),
+    ("settanta", 70),
+    ("ottanta", 80),
+    ("novanta", 90),
+    ("cento", 100),
+];
+
+/// The numbers a phrase spells as words (ASSIST-53), in order, duplicates kept: whole words
+/// only (letters and digits form words, so "someone" and "one5" give nothing), any case.
+pub(crate) fn number_words(phrase: &str) -> Vec<u64> {
+    fold(phrase)
+        .split(|c: char| !(is_letter(c) || decimal(c).is_some()))
+        .filter_map(|word| {
+            NUMBER_WORDS
+                .iter()
+                .find(|(name, _)| *name == word)
+                .map(|&(_, value)| value)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 #[path = "lexer_tests.rs"]
 mod tests;

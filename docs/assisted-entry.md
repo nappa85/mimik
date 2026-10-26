@@ -472,10 +472,16 @@ expression tree of at most 3 operator levels and an explanation of at most 120 c
 must name a supplied integer item with a known value (an enum, unknown or unsupplied alias
 drops it); every literal's magnitude must be a number of the phrase (the phrase-number lexer:
 decimal digits folded to ASCII, a run not touching letters or other number characters, not
-part of a decimal or grouped number, no leading zero, at most 18 digits), the target's value,
-or 2, 3, 4 or 100 when a fraction or percent word is present (EN half, third, quarter,
-percent, `%`; IT metà/meta, mezzo, mezza, terzo, terza, quarto, quarta, percento, per cento;
-whole words after case and diacritic folding, ASSIST-38); a literal outside `i64` drops the
+part of a decimal or grouped number, no leading zero, at most 18 digits), a number word of
+the phrase (ASSIST-53: EN and IT, zero to twenty, the tens thirty to ninety and hundred/cento,
+`uno`, `una` and `un` for 1, also elided as `un'`; whole words after case and diacritic
+folding, so "someone" and "alone" give nothing; "a" and "an" are not numbers; a compound
+such as "ventuno" gives nothing and "twenty-one" gives its parts 20 and 1), the target's
+value, or 2, 3, 4 or 100 when a fraction or percent word is present (EN half, third,
+quarter, percent, `%`; IT metà/meta, mezzo, mezza, terzo, terza, quarto, quarta, percento,
+per cento; whole words after case and diacritic folding, ASSIST-38); a literal 1 that only
+multiplies or divides (either side of `×`, the right of `÷`) needs no provenance, since it
+changes nothing, and a 1 anywhere else does; a literal outside `i64` drops the
 option; evaluation is checked `i128` with an `i64` result, `div` rounds floor, ceil or exact
 (a remainder drops it), division by zero drops it. Shown: the current value, the expression
 with `−`, `×`, `÷` (references by label, `t` by its value) and the effect, labelled "the

@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 /// The adopted prefix quotes the schema with the alias enum abbreviated (v2-short, chosen
 /// after the 2c-1 screens) and asks for compact single-line JSON (v2-compact, ASSIST-52);
 /// `response_format` still carries the full pinned schema.
-const PREFIX_SHA256: &str = "d2aadd679cd8a86685e7e487d803cc0a727031ccb06f2c885da3cdd93fef05ca";
+const PREFIX_SHA256: &str = "d2b19743ac01407894b3fa0101ad464485e687db38d9cf48bc6cfed0aad3fd6c";
 
 fn validator() -> jsonschema::Validator {
     jsonschema::draft202012::options()
@@ -320,9 +320,15 @@ fn the_instructions_ask_for_compact_single_line_json_once_before_the_reply_shape
     assert!(INSTRUCTIONS.contains(&format!(
         "{SENTENCE}Reply with one JSON object and nothing else:\n"
     )));
-    // The screen's v2-short prefix is the same text without the sentence, so the sentence is
-    // the only difference from the prefix the 2c-1 screens measured.
-    let without = FIXED_PREFIX.replacen(SENTENCE, "", 1);
+    // The screen's v2-short prefix is the same text without the sentence and with the
+    // pre-ASSIST-53 literal rule (digits only), so these two are the only differences from the
+    // prefix the 2c-1 screens measured.
+    const RULE: &str = "- A literal must be a number written in the note: digits exactly as written, or a whole number word in English or Italian (zero to twenty, the tens up to ninety, hundred; one, ten, uno, una, dieci). No numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits (\"took 15\" gives 15; \"ten damage\" gives 10; \"took 1,500\" gives none).";
+    const DIGITS_ONLY: &str = "- A literal must be a number written with digits in the note, exactly as written: no spelled-out numbers, no numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits (\"took 15\" gives 15; \"took 1,500\" gives none).";
+    assert_eq!(FIXED_PREFIX.matches(RULE).count(), 1);
+    let without = FIXED_PREFIX
+        .replacen(SENTENCE, "", 1)
+        .replacen(RULE, DIGITS_ONLY, 1);
     assert_eq!(
         hex::encode(Sha256::digest(without.as_bytes())),
         "7b0ba380d8687cc8dfe2a150bf99d684b3bb4f4d5a22e41b5d46a1b6bbd5fe84"
