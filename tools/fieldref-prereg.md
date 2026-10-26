@@ -36,7 +36,7 @@ Nothing here is tuned on these cases; the rules below are fixed before the first
   false_confident at most 3 of 30. Passing means only "not rejected on this screen", not
   "reliable": with n = 30 the 95% Wilson intervals are 24/30 = 80% (63-90%) and 3/30 = 10%
   (3-26%). Failing rejects field references for the default model.
-- **If rejected:** the default model does not reference other fields. Options whose
+- **If rejected** (superseded by the owner on 2026-10-26: field references stay and the failure is a bug, ASSIST-L32; kept as written for provenance): the default model does not reference other fields. Options whose
   expression uses an alias other than `t` are not offered (treated as abstained), the
   assistant tells the player to enter such a value by hand, and ASSIST-L32 is rewritten as
   "field references unsupported by the default model; revisit with a larger model or
