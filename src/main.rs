@@ -36,7 +36,8 @@ struct AssistantArgs {
     /// llama-server as its child, confined where it can (see /admin/assistant).
     #[arg(long = "assistant", conflicts_with = "no_auth")]
     on: bool,
-    /// The model spec (`local:<name>.gguf`, a file in the models folder).
+    /// The model spec (`local:<name>.gguf`, a file in the models folder). Once the owner has
+    /// switched models on /admin/assistant, that stored setting replaces this flag.
     #[arg(long = "assistant-model", default_value = mimik::assistant::DEFAULT_MODEL)]
     model: String,
     /// The model file's SHA-256 (required for any file but the default).
