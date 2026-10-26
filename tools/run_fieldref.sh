@@ -7,7 +7,9 @@
 # Usage: tools/run_fieldref.sh [out-dir]   (default /media/data/mimik/fieldref/runs/<stamp>)
 # Refuses on a weekday from 09:00 to 18:00 and when the host is busy; no request starts at
 # or after the next weekday 09:00 (a request already running then finishes). Environment:
-# LOAD_MAX (1.0: limit for the 1- and 5-minute load averages, recorded in run.log).
+# LOAD_MAX (1.0: limit for the 1- and 5-minute load averages, recorded in run.log);
+# OWNER_WINDOW_OVERRIDE=<today's date, YYYY-MM-DD> lifts the weekday refusal for that day only
+# (an explicit owner exception, recorded in run.log).
 set -euo pipefail
 export TZ=:/etc/localtime
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -17,7 +19,9 @@ THREADS=5
 CPUS=0,1,2,3,4
 now=$(date +%s)
 day=$(date +%u); hour=$((10#$(date +%H)))
-if [ "$day" -le 5 ] && [ "$hour" -ge 9 ] && [ "$hour" -lt 18 ]; then
+override=""
+if [ "${OWNER_WINDOW_OVERRIDE:-}" = "$(date +%F)" ]; then override=" (owner window override $OWNER_WINDOW_OVERRIDE)"; fi
+if [ -z "$override" ] && [ "$day" -le 5 ] && [ "$hour" -ge 9 ] && [ "$hour" -lt 18 ]; then
   echo "weekday 09:00-18:00: no heavy runs" >&2; exit 2
 fi
 # The next weekday 09:00 after now (today's, if now is a weekday before 09:00).
@@ -35,7 +39,7 @@ fi
 if pgrep -x llama-server >/dev/null; then echo "a llama-server is running" >&2; exit 3; fi
 [ ! -e "$OUT" ] || { echo "$OUT exists" >&2; exit 2; }
 mkdir -p "$OUT"
-echo "$(date '+%F %T') start: load $l1 $l5 (max $LOAD_MAX), threads $THREADS, cpus $CPUS, deadline $(date -d "@$deadline" '+%F %T')" | tee -a "$OUT/run.log"
+echo "$(date '+%F %T') start: load $l1 $l5 (max $LOAD_MAX), threads $THREADS, cpus $CPUS, deadline $(date -d "@$deadline" '+%F %T')$override" | tee -a "$OUT/run.log"
 invalid=0
 for arm in base compact; do
   case $arm in base) contract=v2 ;; compact) contract=v2-compact ;; esac
