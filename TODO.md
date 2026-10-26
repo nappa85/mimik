@@ -79,6 +79,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   four examples use only `t` and literals), and the model mostly copied field values as
   literals. Next: add one or two reference examples unlike the screen's cases, check the
   cases for ambiguous phrasings (for example fr-11), and re-run the 30-case screen.
+  Walkthrough finding: in 4–5 abstained cases per arm, the dropped option reached the
+  expected value. In fr-08 the model was right (`t - f2*1`), but the spelled-out "one" is
+  not an allowed literal, so its option was dropped. The others mostly copied field values
+  as literals. Decide whether such numbers count (spelled-out numbers, or a redundant ×1).
 
 - Review helper: `external_review.py`'s short-output unavailable heuristic can reject a real
   successful verdict that discusses "unavailable" status. Add a regression and narrow the
