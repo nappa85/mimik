@@ -83,6 +83,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   expected value. In fr-08 the model was right (`t - f2*1`), but the spelled-out "one" is
   not an allowed literal, so its option was dropped. The others mostly copied field values
   as literals. Decide whether such numbers count (spelled-out numbers, or a redundant ×1).
+  Experiment 2 (prompt variants, `docs/results.md`): ids instead of aliases with no context
+  values (D) is the best arm, at 5/30 correct against 1/30. That is far from the bar, so the
+  next lead is a larger model on the same cases, for example Qwen3.5-9B on the GPU, with D's
+  prompt as a candidate.
 
 - Review helper: `external_review.py`'s short-output unavailable heuristic can reject a real
   successful verdict that discusses "unavailable" status. Add a regression and narrow the

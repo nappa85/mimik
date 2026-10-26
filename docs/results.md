@@ -26,6 +26,38 @@ request marker reaches neither output stream; overflow fails the check.
 Limits: no real older-ABI or boot-disabled kernel or other distribution was tested here
 (the real GPU and the Ubuntu VM are covered below). The `ENOSYS` simulation is not older-ABI evidence.
 
+## Field references, experiment 2: prompt variants (2026-10-26)
+
+The decision rule was written before the run: `tools/fieldref2-prereg.md`. This is a dev comparison: the same 30 `fr-*` cases as above, which had already been read. Model and settings are unchanged: Granite 4.2 3B, greedy, `max_tokens` 352, pass 1, 5 threads, primed, one run per arm, load limit 1.5. Run folder: `/media/data/mimik/fieldref/runs/20261026-2100-exp2`.
+
+The arms are cumulative:
+- **A**: the shipped v2-compact prompt.
+- **B**: A plus two field-reference examples.
+- **C**: B with the context sent without values.
+- **D**: C with fields referenced by id (`{"ref": "grit"}`) instead of by alias.
+
+C and D transform the Rust-rendered request in Python, so they are not the Rust builder's output.
+
+| Arm (30 cases) | correct_ref | false_confident | abstained | dropped but right | output tokens p50 | total p50 |
+|---|---|---|---|---|---|---|
+| A control | 1 | 11 | 18 | 4 | 79 | 15.8 s |
+| B + reference examples | 5 | 17 | 8 | 3 | 82 | 16.1 s |
+| C + no context values | 2 | 13 | 15 | 5 | 68 | 13.7 s |
+| D + ids instead of aliases | 5 | 8 | 17 | 2 | 66 | 14.2 s |
+
+All arms had 30/30 schema-valid replies, no truncation and no coincidences. A reproduced the earlier compact arm exactly.
+
+**Decision.**
+- **D is the candidate:** +4 correct_ref and −3 false_confident against A.
+- **B is excluded:** +6 false_confident. The examples make the model reference more often, but wrongly as often.
+- **C is under the margin.**
+
+D fails the screen test: 5/30 against at least 24 required.
+
+The prompt changes help a little but are not the main cause. In the typical failure the expression's structure is wrong, not just the field chosen. For example, fr-01 "a toll of 10 for each crew member" gave `t * 10` under D and `t * f2` under A, where `t - 10 * crew` was expected. The next lead is a larger model. Adopting D would need the Rust builder, a schema change, fresh held-out cases and review.
+
+**Dropped but right** is 2 to 5 per arm. It includes fr-08 in three arms: "one" spelled out has no provenance, so a correct `t - days * 1` is dropped.
+
 ## Field references: Granite arms and zero-shot Laya (2026-10-26)
 
 Decision rule written before the run: `tools/fieldref-prereg.md`. It was amended after review, still before any run.

@@ -210,7 +210,31 @@ SCHEMA_HEADING = "\nJSON schema of the reply:\n"
 # (the 2c-1 v2-short arm's prefix plus the compact sentence). v2-base is the prefix before
 # ASSIST-52, without the sentence (the field-reference screen's base arm). v2-full is the first
 # v2 prefix, quoting the full schema (2c-1 screen, superseded).
-CONTRACTS = ("v1", "v2", "v2-base", "v2-full", "v2-short", "v2-ex", "v2-compact")
+CONTRACTS = (
+    "v1",
+    "v2",
+    "v2-base",
+    "v2-full",
+    "v2-short",
+    "v2-ex",
+    "v2-compact",
+    "v2-refex",
+    "v2-novals",
+    "v2-ids",
+)
+# Field-reference experiment 2 (tools/fieldref2-prereg.md, prototype tier, not the Rust
+# builder's output): v2-refex adds two reference examples to the shipped instructions;
+# v2-novals also drops the context items' "value" key; v2-ids also names context items by
+# their id instead of an alias. All three are v2 on the wire (same reply schema).
+FIELDREF2_CONTRACTS = ("v2-refex", "v2-novals", "v2-ids")
+V2_CONTRACTS = (
+    "v2",
+    "v2-base",
+    "v2-full",
+    "v2-short",
+    "v2-ex",
+    "v2-compact",
+) + FIELDREF2_CONTRACTS
 # v2-ex (exploratory, not adopted): the v2-short prefix with compact JSON examples, one example
 # referencing a context alias and a sentence asking for compact single-line JSON.
 V2_EX_BASE = "v2-short"
@@ -232,6 +256,12 @@ def load_v2():
 
 def contract_schema(contract):
     return SCHEMA if contract == "v1" else load_v2()[1]
+
+
+SHORT_REF_IDS = {
+    "type": "string",
+    "description": "t for the target, or the id of a context item from the data",
+}
 
 
 EX_EXAMPLES = (
@@ -301,11 +331,180 @@ def contract_prefix(contract, variant=None):
         raise ValueError("prompt variants exist for v1 only")
     if contract in ("v2", "v2-short", "v2-compact"):
         return short_prefix()
+    if contract == "v2-refex":
+        return refex_prefix()
+    if contract == "v2-novals":
+        return novals_prefix()
+    if contract == "v2-ids":
+        return ids_prefix()
     if contract == "v2-base":
         return base_prefix()
     if contract == "v2-ex":
         return ex_prefix()
     return load_v2()[3]
+
+
+# ---- field-reference experiment 2 (tools/fieldref2-prereg.md): arms B, C, D
+
+# The two examples describe a lighthouse sheet; the cases use a road ledger and the screen a
+# character sheet, so neither the fields, the labels nor the phrasings recur there.
+REFEX_ANCHOR = 'note "4 again" ->'
+REFEX_LINES = (
+    'note "the cistern was emptied into the lantern", with f1 the field Cistern at 6 -> '
+    '{"kind": "options", "options": [{"expr": {"op": "add", "l": {"ref": "t"}, "r": '
+    '{"ref": "f1"}}, "explanation": "the cistern added to the lantern fuel"}]}\n'
+    'note "level with the tide mark", with f2 the field Tide mark at 12 -> '
+    '{"kind": "options", "options": [{"expr": {"ref": "f2"}, "explanation": '
+    '"set equal to the tide mark"}]}\n'
+)
+# Arm C and D: the model is not shown field values, so the example does not either.
+REFEX_LINES_NOVALS = REFEX_LINES.replace(" at 6 ->", " ->").replace(" at 12 ->", " ->")
+REFEX_LINES_IDS = (
+    REFEX_LINES_NOVALS.replace("with f1 the field Cistern", "with the field Cistern (id cistern)")
+    .replace("with f2 the field Tide mark", "with the field Tide mark (id tide)")
+    .replace('{"ref": "f1"}', '{"ref": "cistern"}')
+    .replace('{"ref": "f2"}', '{"ref": "tide"}')
+)
+assert REFEX_LINES_NOVALS != REFEX_LINES and REFEX_LINES_IDS != REFEX_LINES_NOVALS
+
+ALIAS_SENTENCE = (
+    'Every item has a short alias: "t" is the target, "f1", "f2"... are fields, "c1", "c2"... '
+    'are cells of the target\'s row. An item\'s "type" is "integer" or "enum"; a value of '
+    "null is unknown.\n"
+)
+NOVALS_ALIAS_SENTENCE = (
+    'Every item has a short alias: "t" is the target, "f1", "f2"... are fields, "c1", "c2"... '
+    'are cells of the target\'s row. An item\'s "type" is "integer" or "enum". Only the '
+    "target's value is given: the sheet works out the values of the other items itself.\n"
+)
+IDS_ALIAS_SENTENCE = (
+    'The target is called "t". Every other item is called by its "id". An item\'s "type" is '
+    '"integer" or "enum". Only the target\'s value is given: the sheet works out the values of '
+    "the other items itself.\n"
+)
+REF_LINE = (
+    '- {"ref": "<alias>"}: the current value of a supplied integer item, by its alias; "t" '
+    "means the target's current value. Use only aliases that appear in the data.\n"
+)
+IDS_REF_LINE = (
+    '- {"ref": "<id>"}: the current value of an integer item, by its id; "t" means the '
+    "target's current value. Use only ids that appear in the data.\n"
+)
+REF_RULE = (
+    '- Refer to other items with "ref" and their alias, never copy their values. Only integer '
+    "items with a known value can be referenced; enum items are for reading only.\n"
+)
+NOVALS_REF_RULE = (
+    '- Refer to other items with "ref" and their alias. Only integer items can be referenced; '
+    "enum items cannot.\n"
+)
+IDS_REF_RULE = (
+    '- Refer to other items with "ref" and their id. Only integer items can be referenced; '
+    "enum items cannot.\n"
+)
+
+
+def _replace_once(text, old, new):
+    assert text.count(old) == 1, f"the v2 instructions changed: {old[:40]!r}"
+    return text.replace(old, new, 1)
+
+
+@functools.cache
+def refex_instructions():
+    """Arm B: the shipped instructions plus two field-reference examples."""
+    return _replace_once(load_v2()[0], REFEX_ANCHOR, REFEX_LINES + REFEX_ANCHOR)
+
+
+@functools.cache
+def novals_instructions():
+    """Arm C: B, with the sentences about values changed (the data carries none)."""
+    text = refex_instructions()
+    text = _replace_once(text, ALIAS_SENTENCE, NOVALS_ALIAS_SENTENCE)
+    text = _replace_once(text, REF_RULE, NOVALS_REF_RULE)
+    return _replace_once(text, REFEX_LINES, REFEX_LINES_NOVALS)
+
+
+@functools.cache
+def ids_instructions():
+    """Arm D: C, with context items named by id."""
+    text = novals_instructions()
+    text = _replace_once(text, NOVALS_ALIAS_SENTENCE, IDS_ALIAS_SENTENCE)
+    text = _replace_once(text, REF_LINE, IDS_REF_LINE)
+    text = _replace_once(text, NOVALS_REF_RULE, IDS_REF_RULE)
+    return _replace_once(text, REFEX_LINES_NOVALS, REFEX_LINES_IDS)
+
+
+def _short_tail(ref_schema):
+    schema = json.loads(json.dumps(load_v2()[1]))
+    schema["$defs"]["ref"]["properties"]["ref"] = ref_schema
+    return SCHEMA_HEADING + json.dumps(schema, separators=(",", ":"))
+
+
+@functools.cache
+def refex_prefix():
+    return refex_instructions() + _short_tail(SHORT_REF)
+
+
+@functools.cache
+def novals_prefix():
+    return novals_instructions() + _short_tail(SHORT_REF)
+
+
+@functools.cache
+def ids_prefix():
+    return ids_instructions() + _short_tail(SHORT_REF_IDS)
+
+
+def _rendered_envelope(user):
+    return json.loads(user.split("\n")[1])
+
+
+def transform_fieldref2(request, contract):
+    """Arms C and D from the Rust-rendered (or Python-built) v2 request: context items lose
+    their "value" key (C, D); D also drops "alias" and sends the item's id, and the request
+    gets the per-request reply schema (ids as the ref enum) and the id -> alias map that maps
+    a reply back before the scorer. Arm B changes the instructions only."""
+    if contract == "v2-refex":
+        return request
+    payload = _rendered_envelope(request["user"])
+    ids = {}
+    for item in payload["context"]:
+        item.pop("value", None)
+        if contract == "v2-ids":
+            if item["id"] == "t" or item["id"] in ids:
+                raise ValueError("a context id collides with t or another id")
+            ids[item["id"]] = item.pop("alias")
+    request["user"] = _envelope(payload)
+    if contract == "v2-ids":
+        request["id_to_alias"] = ids
+        schema = json.loads(json.dumps(load_v2()[1]))
+        schema["$defs"]["ref"]["properties"]["ref"] = {"enum": ["t", *ids]}
+        request["schema"] = schema
+    return request
+
+
+def ids_to_aliases(node, id_to_alias):
+    """Replace every {"ref": <id>} of a reply tree by the item's alias; "t" stays. An
+    unknown id is left as is, so the scorer rejects it."""
+    if isinstance(node, list):
+        return [ids_to_aliases(item, id_to_alias) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out = {key: ids_to_aliases(value, id_to_alias) for key, value in node.items()}
+    if set(out) == {"ref"} and isinstance(out["ref"], str):
+        out["ref"] = id_to_alias.get(out["ref"], out["ref"])
+    return out
+
+
+def remap_reply(content, request):
+    """The reply text as the scorer sees it: ids mapped back to aliases for arm D."""
+    mapping = request.get("id_to_alias")
+    if mapping is None:
+        return content
+    try:
+        return json.dumps(ids_to_aliases(json.loads(content), mapping), ensure_ascii=False)
+    except (TypeError, ValueError):
+        return content
 
 
 @functools.cache
@@ -447,10 +646,12 @@ def build_request(case, sheet, variant=None, contract="v1"):
     Under v2, supplied and excluded are keyed by alias: "t" for the target, "f1"... for the
     context fields in order (the same order and drop rule as v1).
     """
-    if contract in ("v2", "v2-base", "v2-full", "v2-short", "v2-ex", "v2-compact"):
+    if contract in V2_CONTRACTS:
         request = _rendered_request(case) or _build_request_v2(case, sheet)
         request["system"] = contract_prefix(contract)
         request["contract"] = contract
+        if contract in FIELDREF2_CONTRACTS:
+            transform_fieldref2(request, contract)
         return request
     fields = case_sheet(case, sheet)
     by_id = {f["id"]: f for f in fields}
@@ -853,7 +1054,7 @@ def contract_identity(contract="v1", cases_path=CASES_PATH):
 
 
 def chat_body(request, max_tokens, seed=0):
-    schema = contract_schema(request.get("contract", "v1"))
+    schema = request.get("schema") or contract_schema(request.get("contract", "v1"))
     return {
         "model": "screen",
         "messages": [
@@ -957,7 +1158,7 @@ def run_llm(args):
                 content, timings, usage, finish, ttft, total = stream_chat(
                     args.endpoint, chat_body(request, args.max_tokens), args.request_timeout
                 )
-                validated = validate_reply(content, request, validator)
+                validated = validate_reply(remap_reply(content, request), request, validator)
                 shown = shown_values(validated)
                 row.update(
                     status="completed",
@@ -1214,6 +1415,31 @@ def _refs(node):
     return _refs(node["l"]) | _refs(node["r"]) if "l" in node else set()
 
 
+class _AnyLiteral:
+    """A literal allowance that accepts every number (the dropped-but-right diagnostic)."""
+
+    def __contains__(self, _):
+        return True
+
+
+def dropped_but_right(request, validated, accepted, wanted):
+    """Diagnostic: (right, right_ref) for a reply that showed nothing. right: a dropped
+    option evaluates to an accepted value once the literal-provenance rule is lifted.
+    right_ref: the same, and it uses a ``wanted`` alias."""
+    right = right_ref = False
+    for option in validated["options"]:
+        if "dropped" not in option:
+            continue
+        try:
+            value = evaluate(option["expr"], request, _AnyLiteral())
+        except Dropped:
+            continue
+        if value in accepted:
+            right = True
+            right_ref |= bool(_refs(option["expr"]) & wanted)
+    return right, right_ref
+
+
 def fieldref_summary(path):
     """Field-reference experiment metrics over a ledger's pass-1 rows. correct_ref: a shown
     option has an accepted value and its expression uses an alias of one of the case's
@@ -1231,6 +1457,9 @@ def fieldref_summary(path):
         "false_confident": 0,
         "coincidence": 0,
         "abstained": 0,
+        "dropped_but_right": 0,
+        "dropped_but_right_ref": 0,
+        "dropped_but_right_cases": [],
         "by_case": {},
     }
     done = set()
@@ -1249,6 +1478,12 @@ def fieldref_summary(path):
         ]
         if not r["shown"]:
             verdict = "abstained"
+            request = _rendered_request(case)
+            right, right_ref = dropped_but_right(request, r["validated"], accepted, wanted)
+            out["dropped_but_right"] += right
+            out["dropped_but_right_ref"] += right_ref
+            if right:
+                out["dropped_but_right_cases"].append(r["case"])
         elif any(_refs(o["expr"]) & wanted for o in shown):
             verdict = "correct_ref"
         else:
