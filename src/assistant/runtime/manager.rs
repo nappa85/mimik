@@ -289,6 +289,15 @@ struct Cancel {
     wake: Notify,
 }
 
+impl Cancel {
+    /// Records a Cancel for trial `number` and wakes the manager. Trial numbers only grow, so
+    /// an older Cancel never replaces a newer one.
+    fn publish(&self, number: u64) {
+        self.trial.fetch_max(number, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
+}
+
 /// Whether "Try the GPU again" was accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TryGpu {
@@ -423,21 +432,16 @@ impl Handle {
     /// The owner's Cancel of trial `shown`: stops it and brings the previous model back.
     pub(crate) fn cancel_trial(&self, shown: u64) -> CancelTrial {
         // Under the lock: the trial the page showed must be the one running now.
-        let running = match self.lock().trial {
-            Some(TrialState::Running { number, .. }) if number != shown => {
-                return CancelTrial::Stale;
+        // The guard is held through the publication, so a Cancel validated against one trial
+        // cannot publish after a newer trial's.
+        let status = self.lock();
+        match status.trial {
+            Some(TrialState::Running { number, .. }) if number != shown => CancelTrial::Stale,
+            Some(TrialState::Running { number, .. }) => {
+                self.cancel.publish(number);
+                CancelTrial::Done
             }
-            Some(TrialState::Running { number, .. }) => Some(number),
-            _ => None,
-        };
-        if let Some(number) = running {
-            self.cancel.trial.store(number, Ordering::SeqCst);
-            self.cancel.wake.notify_one();
-        }
-        if running.is_some() {
-            CancelTrial::Done
-        } else {
-            CancelTrial::NoTrial
+            _ => CancelTrial::NoTrial,
         }
     }
 

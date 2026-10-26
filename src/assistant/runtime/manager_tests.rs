@@ -1385,3 +1385,15 @@ async fn a_failure_after_health_answered_carries_no_library_hint() {
     assert!(note.contains("priming failed"), "{note}");
     assert!(!note.contains("libgomp"), "{note}");
 }
+
+#[test]
+fn an_older_cancel_never_replaces_a_newer_one() {
+    // Cancel A validated against trial 1 publishes after Cancel B for trial 2 (overlapping
+    // requests across trial turnover): trial 2's cancel must survive.
+    let cancel = Cancel::default();
+    cancel.publish(2);
+    cancel.publish(1);
+    assert_eq!(cancel.trial.load(Ordering::SeqCst), 2);
+    cancel.publish(3);
+    assert_eq!(cancel.trial.load(Ordering::SeqCst), 3);
+}

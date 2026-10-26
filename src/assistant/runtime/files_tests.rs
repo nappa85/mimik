@@ -375,3 +375,29 @@ fn a_runtime_linked_from_a_folder_others_can_write_is_used_at_its_real_path() {
     let (_, real) = runtime_folder(&alias.join("llama"), true, || {}).unwrap();
     assert_eq!(real, std::fs::canonicalize(safe.join("llama")).unwrap());
 }
+
+#[test]
+fn a_model_file_over_8_gib_or_empty_is_refused_before_it_is_hashed() {
+    let (dir, fd) = models();
+    let cache = HashCache::default();
+    // Sparse files: no disk is used. `stop` says stop at the first hashing step, so a file
+    // that was hashed would give Cancelled, never Size.
+    let stop = || true;
+    for (name, size, expected) in [
+        (
+            "huge.gguf",
+            (8_u64 << 30) + 1,
+            Refusal::Size("huge.gguf".into()),
+        ),
+        ("empty.gguf", 0, Refusal::Size("empty.gguf".into())),
+        ("exact.gguf", 8_u64 << 30, Refusal::Cancelled),
+    ] {
+        let file = std::fs::File::create(dir.path().join(name)).unwrap();
+        file.set_len(size).unwrap();
+        assert_eq!(
+            model_digest(fd.as_fd(), name, &cache, &stop).unwrap_err(),
+            expected,
+            "{name}"
+        );
+    }
+}
