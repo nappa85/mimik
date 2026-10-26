@@ -427,15 +427,15 @@
    "id": "fr-01",
    "class": "field_ref",
    "lang": "en",
-   "target": "stamina",
-   "phrase": "recover as much as my grit",
+   "target": "coin",
+   "phrase": "a toll of 10 for each crew member",
    "expect": {
     "values": [
-     17
+     45
     ]
    },
    "ref_fields": [
-    "grit"
+    "crew"
    ]
   },
   {
@@ -457,16 +457,19 @@
    "id": "fr-03",
    "class": "field_ref",
    "lang": "en",
-   "target": "stamina",
-   "phrase": "a night's rest brings me back to full",
+   "target": "days",
+   "phrase": "reset to the number of rations I hold",
    "expect": {
     "values": [
-     20
+     6
     ]
    },
    "ref_fields": [
-    "stamina_max"
-   ]
+    "rations"
+   ],
+   "values": {
+    "grit": 5
+   }
   },
   {
    "id": "fr-04",
@@ -582,7 +585,7 @@
    "class": "field_ref",
    "lang": "en",
    "target": "coin",
-   "phrase": "sold the mule for what the creditor was asking",
+   "phrase": "sold the mule for the full amount of my debt",
    "expect": {
     "values": [
      115
@@ -649,7 +652,8 @@
     ]
    },
    "values": {
-    "guile": 2
+    "guile": 2,
+    "wits": 6
    },
    "ref_fields": [
     "guile"
@@ -660,7 +664,7 @@
    "class": "field_ref",
    "lang": "en",
    "target": "ammo",
-   "phrase": "every crew member fired a volley",
+   "phrase": "the crew fired one round each",
    "expect": {
     "values": [
      14
@@ -728,7 +732,10 @@
    },
    "ref_fields": [
     "wits"
-   ]
+   ],
+   "values": {
+    "rations": 8
+   }
   },
   {
    "id": "fr-21",
@@ -742,7 +749,8 @@
     ]
    },
    "values": {
-    "renown": 10
+    "renown": 10,
+    "days": 11
    },
    "ref_fields": [
     "renown"
@@ -768,7 +776,7 @@
    "class": "field_ref",
    "lang": "en",
    "target": "days",
-   "phrase": "pushed on for the whole crew's count of days",
+   "phrase": "the ferry cost one extra day for every crew member",
    "expect": {
     "values": [
      13
@@ -791,7 +799,10 @@
    },
    "ref_fields": [
     "grit"
-   ]
+   ],
+   "values": {
+    "crew": 5
+   }
   },
   {
    "id": "fr-25",
@@ -806,7 +817,10 @@
    },
    "ref_fields": [
     "wits"
-   ]
+   ],
+   "values": {
+    "guile": 5
+   }
   },
   {
    "id": "fr-26",
@@ -820,10 +834,11 @@
     ]
    },
    "values": {
-    "guile": 2
+    "guile": 2,
+    "crew": 6
    },
    "ref_fields": [
-    "wits"
+    "guile"
    ]
   },
   {
@@ -875,15 +890,15 @@
    "id": "fr-30",
    "class": "field_ref",
    "lang": "it",
-   "target": "rations",
-   "phrase": "mangiato una razione a testa",
+   "target": "debt",
+   "phrase": "ho restituito due volte il salario giornaliero",
    "expect": {
     "values": [
-     2
+     16
     ]
    },
    "ref_fields": [
-    "crew"
+    "wage"
    ]
   }
  ]

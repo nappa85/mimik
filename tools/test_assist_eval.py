@@ -449,32 +449,51 @@ class ContractV2(unittest.TestCase):
             req = ae.build_request(case, data["sheet"], contract="v2")
             self.assertLessEqual(len(req["user"].encode()), 1024)
             self.assertEqual(req["user"], case["rendered"]["user"])
-        case = data["cases"][0]  # recover as much as my grit: hp 14 + f(grit) 3
+        case = data["cases"][0]  # fr-01: coin 85, 10 for each of the 4 crew
         req = ae.build_request(case, data["sheet"], contract="v2")
-        alias = next(a for a, v in req["supplied"].items() if a != "t" and v == 3)
-        reply_json = reply(op("add", ref("t"), ref(alias)))
-        self.assertEqual(ae.shown_values(ae.validate_reply(reply_json, req)), [17])
+        alias = next(a for a, v in req["supplied"].items() if a != "t" and v == 4)
+        reply_json = reply(op("sub", ref("t"), op("mul", ref(alias), lit(10))))
+        self.assertEqual(ae.shown_values(ae.validate_reply(reply_json, req)), [45])
 
-    def test_fieldref_summary_counts_a_referenced_answer_apart_from_a_coincidence(self):
+    def test_fieldref_ref_fields_are_in_the_context_and_no_wrong_alias_reaches_the_value(self):
+        path = Path(__file__).with_name("assist-eval") / "fieldref-cases.json"
+        for case in ae.load_cases(path)["cases"]:
+            env = json.loads(case["rendered"]["user"].split("\n")[1])
+            target = env["target"]["value"]
+            accepted = set(case["expect"]["values"])
+            ids = {item["id"] for item in env["context"]}
+            self.assertTrue(set(case["ref_fields"]) <= ids, case["id"])
+            for item in env["context"]:
+                if item["type"] != "integer" or item["id"] in case["ref_fields"]:
+                    continue
+                value = item["value"]
+                for reached in (target + value, target - value, value):
+                    self.assertNotIn(reached, accepted, (case["id"], item["id"]))
+
+    def test_fieldref_summary_needs_a_ref_fields_alias_and_all_cases(self):
         path = Path(__file__).with_name("assist-eval") / "fieldref-cases.json"
         data = ae.load_cases(path)
-        case = data["cases"][0]
+        case = data["cases"][0]  # fr-01: a toll of 10 for each crew member
         req = ae.build_request(case, data["sheet"], contract="v2")
-        alias = next(a for a, v in req["supplied"].items() if a != "t" and v == 3)
-        rows = [{"event": "header"}]
-        for exprs in (op("add", ref("t"), ref(alias)), op("add", ref("t"), lit(3))):
-            validated = ae.validate_reply(reply(exprs), req)
+        env = json.loads(case["rendered"]["user"].split("\n")[1])
+        alias = {i["id"]: i["alias"] for i in env["context"]}
+        wrong = next(a for i, a in alias.items() if i not in case["ref_fields"] and a != "t")
+        right = alias["crew"]
+        times = op("mul", ref(right), lit(10))
+        for expr, verdict in (
+            (op("sub", ref("t"), times), "correct_ref"),
+            (op("sub", ref("t"), op("mul", ref(wrong), lit(10))), "false_confident"),
+        ):
+            validated = ae.validate_reply(reply(expr), req)
             shown = ae.shown_values(validated)
-            rows.append({"event": "case", "case": case["id"], "pass": 1, "status": "completed",
-                         "shown": shown, "validated": validated,
-                         "score": ae.score(case["expect"], shown)})
-        with tempfile.TemporaryDirectory() as tmp:
-            for n, row in enumerate(rows[1:]):
-                ledger = Path(tmp) / f"{n}.jsonl"
-                ledger.write_text(json.dumps(rows[0]) + "\n" + json.dumps(row) + "\n")
+            row = {"event": "case", "case": case["id"], "pass": 1, "status": "completed",
+                   "shown": shown, "validated": validated}
+            with tempfile.TemporaryDirectory() as tmp:
+                ledger = Path(tmp) / "l.jsonl"
+                ledger.write_text(json.dumps({"event": "header"}) + "\n" + json.dumps(row) + "\n")
                 out = ae.fieldref_summary(ledger)
-                self.assertEqual(out["correct_ref"], 1 - n)
-                self.assertEqual(out["correct_noref"] + out["abstained"], n)
+            self.assertEqual(out["by_case"][case["id"]], verdict, expr)
+            self.assertEqual(out["status"], "INVALID")  # 1 of 30 cases
 
     def test_ex_prefix_is_compact_with_an_alias_example(self):
         req = ae.build_request(

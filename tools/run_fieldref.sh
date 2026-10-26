@@ -36,6 +36,7 @@ if pgrep -x llama-server >/dev/null; then echo "a llama-server is running" >&2; 
 [ ! -e "$OUT" ] || { echo "$OUT exists" >&2; exit 2; }
 mkdir -p "$OUT"
 echo "$(date '+%F %T') start: load $l1 $l5 (max $LOAD_MAX), threads $THREADS, cpus $CPUS, deadline $(date -d "@$deadline" '+%F %T')" | tee -a "$OUT/run.log"
+invalid=0
 for arm in base compact; do
   case $arm in base) contract=v2 ;; compact) contract=v2-compact ;; esac
   CONTRACT=$contract PRIME=1 PASSES=1 STRESS=0 COLD=1 COLD_ONLY='' THREADS=$THREADS CPUS=$CPUS \
@@ -46,7 +47,10 @@ for arm in base compact; do
     python3 -I "$ROOT/tools/assist_eval.py" summarize "$OUT/$arm/granite42-3b/screen.jsonl" \
       > "$OUT/summary-$arm.json" || echo "$arm: summary failed" | tee -a "$OUT/run.log"
     python3 -I "$ROOT/tools/assist_eval.py" fieldref-summary "$OUT/$arm/granite42-3b/screen.jsonl" \
-      > "$OUT/fieldref-$arm.json" || echo "$arm: fieldref summary failed" | tee -a "$OUT/run.log"
+      > "$OUT/fieldref-$arm.json" || { echo "$(date '+%F %T') $arm: INVALID run (not all 30 cases completed)" | tee -a "$OUT/run.log"; invalid=1; }
+  else
+    echo "$(date '+%F %T') $arm: INVALID run (no screen ledger)" | tee -a "$OUT/run.log"; invalid=1
   fi
 done
-echo "$(date '+%F %T') done; summaries: $OUT/summary-*.json" | tee -a "$OUT/run.log"
+[ "$invalid" = 0 ] || { echo "$(date '+%F %T') INVALID: repeat the whole run" | tee -a "$OUT/run.log"; exit 1; }
+echo "$(date '+%F %T') done; results: $OUT/fieldref-*.json" | tee -a "$OUT/run.log"

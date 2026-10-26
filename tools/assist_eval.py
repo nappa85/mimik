@@ -1210,32 +1210,42 @@ def _refs(node):
 
 
 def fieldref_summary(path):
-    """Field-reference experiment metrics over a ledger's completed pass-1 rows (every row
-    expects values). correct_ref: a shown option has an accepted value and its expression
-    uses a ref other than ``t``; correct_noref: accepted value without such a ref."""
+    """Field-reference experiment metrics over a ledger's pass-1 rows. correct_ref: a shown
+    option has an accepted value and its expression uses an alias of one of the case's
+    ``ref_fields`` (resolved through the rendered context). Any other shown outcome without
+    a correct_ref option is false_confident, a coincidence (an accepted value reached
+    without a ref_fields alias) included. abstained: no option shown. ``status`` is INVALID
+    unless every case of the cases file completed exactly once."""
     lines = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
     rows = [r for r in lines[1:] if r["event"] == "case" and r["pass"] == 1]
-    out = {"cases": len(rows), "completed": 0, "correct_ref": 0, "correct_noref": 0,
-           "false_confident": 0, "abstained": 0, "by_case": {}}
+    cases = {c["id"]: c for c in load_cases(CASES_PATH_FIELDREF)["cases"]}
+    out = {"cases": len(cases), "completed": 0, "correct_ref": 0, "false_confident": 0,
+           "coincidence": 0, "abstained": 0, "by_case": {}}
+    done = set()
     for r in rows:
         if r["status"] != "completed":
             out["by_case"][r["case"]] = "failed"
             continue
+        done.add(r["case"])
         out["completed"] += 1
+        case = cases[r["case"]]
+        accepted = set(case["expect"]["values"])
+        items = json.loads(case["rendered"]["user"].split("\n")[1])["context"]
+        wanted = {i["alias"] for i in items if i["id"] in case["ref_fields"]}
+        shown = [
+            o for o in r["validated"]["options"] if "dropped" not in o and o["value"] in accepted
+        ]
         if not r["shown"]:
             verdict = "abstained"
-        elif not r["score"]["correct"]:
-            verdict = "false_confident"
+        elif any(_refs(o["expr"]) & wanted for o in shown):
+            verdict = "correct_ref"
         else:
-            case = next(c for c in load_cases(CASES_PATH_FIELDREF)["cases"] if c["id"] == r["case"])
-            accepted = set(case["expect"]["values"])
-            with_ref = any(
-                "dropped" not in o and o["value"] in accepted and _refs(o["expr"]) - {"t"}
-                for o in r["validated"]["options"]
-            )
-            verdict = "correct_ref" if with_ref else "correct_noref"
+            verdict = "false_confident"
+            out["coincidence"] += bool(shown)
         out[verdict] += 1
         out["by_case"][r["case"]] = verdict
+    valid = done == set(cases) and out["completed"] == len(cases)
+    out["status"] = "valid" if valid else "INVALID"
     return out
 
 
@@ -1244,6 +1254,9 @@ def prime(args):
 
     Not a job and not scored; the product sends it at start, before admitting jobs.
     """
+    if args.deadline_epoch is not None and time.time() >= args.deadline_epoch:
+        print(json.dumps({"status": "not_run", "error": "past the deadline"}), flush=True)
+        return 1
     data = load_cases(args.cases)
     request = build_request(
         data.get("prime_case", PRIME_CASE), data["sheet"], args.variant, args.contract
@@ -1308,6 +1321,7 @@ def main(argv=None):
     primer.add_argument("--output", type=Path, required=True)
     primer.add_argument("--cases", type=Path, default=CASES_PATH)
     primer.add_argument("--timeout", type=float, default=600)
+    primer.add_argument("--deadline-epoch", type=float, default=None)
     primer.add_argument("--variant", choices=sorted(VARIANTS), default=None)
     primer.add_argument("--contract", choices=CONTRACTS, default="v1")
     fieldref = sub.add_parser("fieldref-summary")
@@ -1327,7 +1341,11 @@ def main(argv=None):
     elif args.command == "summarize":
         print(json.dumps([summarize_ledger(p) for p in args.ledgers], indent=2))
     elif args.command == "fieldref-summary":
-        print(json.dumps(fieldref_summary(args.ledger), indent=2))
+        summary = fieldref_summary(args.ledger)
+        print(json.dumps(summary, indent=2))
+        if summary["status"] != "valid":
+            print("INVALID: not all cases completed exactly once", file=sys.stderr)
+            return 1
     else:
         check_cases(args)
     return 0

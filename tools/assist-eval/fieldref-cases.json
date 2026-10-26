@@ -93,26 +93,28 @@
       "id": "fr-01",
       "class": "field_ref",
       "lang": "en",
-      "target": "stamina",
-      "phrase": "recover as much as my grit",
+      "target": "coin",
+      "phrase": "a toll of 10 for each crew member",
       "expect": {
         "values": [
-          17
+          45
         ]
       },
       "ref_fields": [
-        "grit"
+        "crew"
       ],
       "rendered": {
-        "user": "<data>\n{\"note\":\"recover as much as my grit\",\"target\":{\"alias\":\"t\",\"id\":\"stamina\",\"label\":\"Stamina\",\"value\":14},\"context\":[{\"alias\":\"f1\",\"id\":\"stamina_max\",\"label\":\"Maximum stamina\",\"type\":\"integer\",\"value\":20},{\"alias\":\"f2\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f3\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2}]}\n</data>",
+        "user": "<data>\n{\"note\":\"a toll of 10 for each crew member\",\"target\":{\"alias\":\"t\",\"id\":\"coin\",\"label\":\"Coin\",\"value\":85},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f3\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f4\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5},{\"alias\":\"f5\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7}]}\n</data>",
         "supplied": {
-          "f1": 20,
-          "f2": 3,
-          "f3": 2,
-          "t": 14
+          "f1": 3,
+          "f2": 4,
+          "f3": 30,
+          "f4": 5,
+          "f5": 7,
+          "t": 85
         },
         "excluded": [],
-        "target_value": 14
+        "target_value": 85
       }
     },
     {
@@ -145,26 +147,30 @@
       "id": "fr-03",
       "class": "field_ref",
       "lang": "en",
-      "target": "stamina",
-      "phrase": "a night's rest brings me back to full",
+      "target": "days",
+      "phrase": "reset to the number of rations I hold",
       "expect": {
         "values": [
-          20
+          6
         ]
       },
       "ref_fields": [
-        "stamina_max"
+        "rations"
       ],
+      "values": {
+        "grit": 5
+      },
       "rendered": {
-        "user": "<data>\n{\"note\":\"a night's rest brings me back to full\",\"target\":{\"alias\":\"t\",\"id\":\"stamina\",\"label\":\"Stamina\",\"value\":14},\"context\":[{\"alias\":\"f1\",\"id\":\"stamina_max\",\"label\":\"Maximum stamina\",\"type\":\"integer\",\"value\":20},{\"alias\":\"f2\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f3\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2}]}\n</data>",
+        "user": "<data>\n{\"note\":\"reset to the number of rations I hold\",\"target\":{\"alias\":\"t\",\"id\":\"days\",\"label\":\"Days on the road\",\"value\":9},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":5},{\"alias\":\"f2\",\"id\":\"rations\",\"label\":\"Rations\",\"type\":\"integer\",\"value\":6},{\"alias\":\"f3\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f4\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"type\":\"integer\",\"value\":18}]}\n</data>",
         "supplied": {
-          "f1": 20,
-          "f2": 3,
-          "f3": 2,
-          "t": 14
+          "f1": 5,
+          "f2": 6,
+          "f3": 4,
+          "f4": 18,
+          "t": 9
         },
         "excluded": [],
-        "target_value": 14
+        "target_value": 9
       }
     },
     {
@@ -359,7 +365,7 @@
       "class": "field_ref",
       "lang": "en",
       "target": "coin",
-      "phrase": "sold the mule for what the creditor was asking",
+      "phrase": "sold the mule for the full amount of my debt",
       "expect": {
         "values": [
           115
@@ -369,7 +375,7 @@
         "debt"
       ],
       "rendered": {
-        "user": "<data>\n{\"note\":\"sold the mule for what the creditor was asking\",\"target\":{\"alias\":\"t\",\"id\":\"coin\",\"label\":\"Coin\",\"value\":85},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f3\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f4\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5},{\"alias\":\"f5\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7}]}\n</data>",
+        "user": "<data>\n{\"note\":\"sold the mule for the full amount of my debt\",\"target\":{\"alias\":\"t\",\"id\":\"coin\",\"label\":\"Coin\",\"value\":85},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f3\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f4\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5},{\"alias\":\"f5\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7}]}\n</data>",
         "supplied": {
           "f1": 3,
           "f2": 4,
@@ -477,15 +483,16 @@
         ]
       },
       "values": {
-        "guile": 2
+        "guile": 2,
+        "wits": 6
       },
       "ref_fields": [
         "guile"
       ],
       "rendered": {
-        "user": "<data>\n{\"note\":\"shamed: lose as much as my guile\",\"target\":{\"alias\":\"t\",\"id\":\"renown\",\"label\":\"Renown\",\"value\":5},\"context\":[{\"alias\":\"f1\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f2\",\"id\":\"guile\",\"label\":\"Guile\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f3\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f4\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f5\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f6\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7}]}\n</data>",
+        "user": "<data>\n{\"note\":\"shamed: lose as much as my guile\",\"target\":{\"alias\":\"t\",\"id\":\"renown\",\"label\":\"Renown\",\"value\":5},\"context\":[{\"alias\":\"f1\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":6},{\"alias\":\"f2\",\"id\":\"guile\",\"label\":\"Guile\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f3\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f4\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f5\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f6\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7}]}\n</data>",
         "supplied": {
-          "f1": 2,
+          "f1": 6,
           "f2": 2,
           "f3": 4,
           "f4": 85,
@@ -502,7 +509,7 @@
       "class": "field_ref",
       "lang": "en",
       "target": "ammo",
-      "phrase": "every crew member fired a volley",
+      "phrase": "the crew fired one round each",
       "expect": {
         "values": [
           14
@@ -512,7 +519,7 @@
         "crew"
       ],
       "rendered": {
-        "user": "<data>\n{\"note\":\"every crew member fired a volley\",\"target\":{\"alias\":\"t\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"value\":18},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f3\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
+        "user": "<data>\n{\"note\":\"the crew fired one round each\",\"target\":{\"alias\":\"t\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"value\":18},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f3\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
         "supplied": {
           "f1": 3,
           "f2": 4,
@@ -615,14 +622,17 @@
       "ref_fields": [
         "wits"
       ],
+      "values": {
+        "rations": 8
+      },
       "rendered": {
-        "user": "<data>\n{\"note\":\"hired as many hands as I have wits\",\"target\":{\"alias\":\"t\",\"id\":\"crew\",\"label\":\"Crew\",\"value\":4},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f3\",\"id\":\"guile\",\"label\":\"Guile\",\"type\":\"integer\",\"value\":-1},{\"alias\":\"f4\",\"id\":\"rations\",\"label\":\"Rations\",\"type\":\"integer\",\"value\":6},{\"alias\":\"f5\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f6\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f7\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5},{\"alias\":\"f8\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"type\":\"integer\",\"value\":18},{\"alias\":\"f9\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7},{\"alias\":\"f10\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
+        "user": "<data>\n{\"note\":\"hired as many hands as I have wits\",\"target\":{\"alias\":\"t\",\"id\":\"crew\",\"label\":\"Crew\",\"value\":4},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f3\",\"id\":\"guile\",\"label\":\"Guile\",\"type\":\"integer\",\"value\":-1},{\"alias\":\"f4\",\"id\":\"rations\",\"label\":\"Rations\",\"type\":\"integer\",\"value\":8},{\"alias\":\"f5\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f6\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f7\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5},{\"alias\":\"f8\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"type\":\"integer\",\"value\":18},{\"alias\":\"f9\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7},{\"alias\":\"f10\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
         "supplied": {
           "f1": 3,
           "f10": 9,
           "f2": 2,
           "f3": -1,
-          "f4": 6,
+          "f4": 8,
           "f5": 85,
           "f6": 30,
           "f7": 5,
@@ -646,16 +656,17 @@
         ]
       },
       "values": {
-        "renown": 10
+        "renown": 10,
+        "days": 11
       },
       "ref_fields": [
         "renown"
       ],
       "rendered": {
-        "user": "<data>\n{\"note\":\"grew by half my renown\",\"target\":{\"alias\":\"t\",\"id\":\"crew\",\"label\":\"Crew\",\"value\":4},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f3\",\"id\":\"guile\",\"label\":\"Guile\",\"type\":\"integer\",\"value\":-1},{\"alias\":\"f4\",\"id\":\"rations\",\"label\":\"Rations\",\"type\":\"integer\",\"value\":6},{\"alias\":\"f5\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f6\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f7\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":10},{\"alias\":\"f8\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"type\":\"integer\",\"value\":18},{\"alias\":\"f9\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7},{\"alias\":\"f10\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
+        "user": "<data>\n{\"note\":\"grew by half my renown\",\"target\":{\"alias\":\"t\",\"id\":\"crew\",\"label\":\"Crew\",\"value\":4},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f3\",\"id\":\"guile\",\"label\":\"Guile\",\"type\":\"integer\",\"value\":-1},{\"alias\":\"f4\",\"id\":\"rations\",\"label\":\"Rations\",\"type\":\"integer\",\"value\":6},{\"alias\":\"f5\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f6\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f7\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":10},{\"alias\":\"f8\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"type\":\"integer\",\"value\":18},{\"alias\":\"f9\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7},{\"alias\":\"f10\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":11}]}\n</data>",
         "supplied": {
           "f1": 3,
-          "f10": 9,
+          "f10": 11,
           "f2": 2,
           "f3": -1,
           "f4": 6,
@@ -702,7 +713,7 @@
       "class": "field_ref",
       "lang": "en",
       "target": "days",
-      "phrase": "pushed on for the whole crew's count of days",
+      "phrase": "the ferry cost one extra day for every crew member",
       "expect": {
         "values": [
           13
@@ -712,7 +723,7 @@
         "crew"
       ],
       "rendered": {
-        "user": "<data>\n{\"note\":\"pushed on for the whole crew's count of days\",\"target\":{\"alias\":\"t\",\"id\":\"days\",\"label\":\"Days on the road\",\"value\":9},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"rations\",\"label\":\"Rations\",\"type\":\"integer\",\"value\":6},{\"alias\":\"f3\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f4\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"type\":\"integer\",\"value\":18}]}\n</data>",
+        "user": "<data>\n{\"note\":\"the ferry cost one extra day for every crew member\",\"target\":{\"alias\":\"t\",\"id\":\"days\",\"label\":\"Days on the road\",\"value\":9},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"rations\",\"label\":\"Rations\",\"type\":\"integer\",\"value\":6},{\"alias\":\"f3\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f4\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"type\":\"integer\",\"value\":18}]}\n</data>",
         "supplied": {
           "f1": 3,
           "f2": 6,
@@ -738,11 +749,14 @@
       "ref_fields": [
         "grit"
       ],
+      "values": {
+        "crew": 5
+      },
       "rendered": {
-        "user": "<data>\n{\"note\":\"now set equal to my grit\",\"target\":{\"alias\":\"t\",\"id\":\"wage\",\"label\":\"Daily wage\",\"value\":7},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f3\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f4\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f5\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5}]}\n</data>",
+        "user": "<data>\n{\"note\":\"now set equal to my grit\",\"target\":{\"alias\":\"t\",\"id\":\"wage\",\"label\":\"Daily wage\",\"value\":7},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":5},{\"alias\":\"f3\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f4\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f5\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5}]}\n</data>",
         "supplied": {
           "f1": 3,
-          "f2": 4,
+          "f2": 5,
           "f3": 85,
           "f4": 30,
           "f5": 5,
@@ -766,13 +780,16 @@
       "ref_fields": [
         "wits"
       ],
+      "values": {
+        "guile": 5
+      },
       "rendered": {
-        "user": "<data>\n{\"note\":\"matches my wits now\",\"target\":{\"alias\":\"t\",\"id\":\"grit\",\"label\":\"Grit\",\"value\":3},\"context\":[{\"alias\":\"f1\",\"id\":\"stamina\",\"label\":\"Stamina\",\"type\":\"integer\",\"value\":14},{\"alias\":\"f2\",\"id\":\"stamina_max\",\"label\":\"Maximum stamina\",\"type\":\"integer\",\"value\":20},{\"alias\":\"f3\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f4\",\"id\":\"guile\",\"label\":\"Guile\",\"type\":\"integer\",\"value\":-1},{\"alias\":\"f5\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f6\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f7\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"type\":\"integer\",\"value\":18},{\"alias\":\"f8\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7},{\"alias\":\"f9\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
+        "user": "<data>\n{\"note\":\"matches my wits now\",\"target\":{\"alias\":\"t\",\"id\":\"grit\",\"label\":\"Grit\",\"value\":3},\"context\":[{\"alias\":\"f1\",\"id\":\"stamina\",\"label\":\"Stamina\",\"type\":\"integer\",\"value\":14},{\"alias\":\"f2\",\"id\":\"stamina_max\",\"label\":\"Maximum stamina\",\"type\":\"integer\",\"value\":20},{\"alias\":\"f3\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f4\",\"id\":\"guile\",\"label\":\"Guile\",\"type\":\"integer\",\"value\":5},{\"alias\":\"f5\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f6\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f7\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"type\":\"integer\",\"value\":18},{\"alias\":\"f8\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7},{\"alias\":\"f9\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
         "supplied": {
           "f1": 14,
           "f2": 20,
           "f3": 2,
-          "f4": -1,
+          "f4": 5,
           "f5": 4,
           "f6": 85,
           "f7": 18,
@@ -796,19 +813,20 @@
         ]
       },
       "values": {
-        "guile": 2
+        "guile": 2,
+        "crew": 6
       },
       "ref_fields": [
-        "wits"
+        "guile"
       ],
       "rendered": {
-        "user": "<data>\n{\"note\":\"sharpened by my guile\",\"target\":{\"alias\":\"t\",\"id\":\"wits\",\"label\":\"Wits\",\"value\":2},\"context\":[{\"alias\":\"f1\",\"id\":\"stamina\",\"label\":\"Stamina\",\"type\":\"integer\",\"value\":14},{\"alias\":\"f2\",\"id\":\"stamina_max\",\"label\":\"Maximum stamina\",\"type\":\"integer\",\"value\":20},{\"alias\":\"f3\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f4\",\"id\":\"guile\",\"label\":\"Guile\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f5\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f6\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5}]}\n</data>",
+        "user": "<data>\n{\"note\":\"sharpened by my guile\",\"target\":{\"alias\":\"t\",\"id\":\"wits\",\"label\":\"Wits\",\"value\":2},\"context\":[{\"alias\":\"f1\",\"id\":\"stamina\",\"label\":\"Stamina\",\"type\":\"integer\",\"value\":14},{\"alias\":\"f2\",\"id\":\"stamina_max\",\"label\":\"Maximum stamina\",\"type\":\"integer\",\"value\":20},{\"alias\":\"f3\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f4\",\"id\":\"guile\",\"label\":\"Guile\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f5\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":6},{\"alias\":\"f6\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5}]}\n</data>",
         "supplied": {
           "f1": 14,
           "f2": 20,
           "f3": 3,
           "f4": 2,
-          "f5": 4,
+          "f5": 6,
           "f6": 5,
           "t": 2
         },
@@ -901,25 +919,27 @@
       "id": "fr-30",
       "class": "field_ref",
       "lang": "it",
-      "target": "rations",
-      "phrase": "mangiato una razione a testa",
+      "target": "debt",
+      "phrase": "ho restituito due volte il salario giornaliero",
       "expect": {
         "values": [
-          2
+          16
         ]
       },
       "ref_fields": [
-        "crew"
+        "wage"
       ],
       "rendered": {
-        "user": "<data>\n{\"note\":\"mangiato una razione a testa\",\"target\":{\"alias\":\"t\",\"id\":\"rations\",\"label\":\"Rations\",\"value\":6},\"context\":[{\"alias\":\"f1\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f2\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
+        "user": "<data>\n{\"note\":\"ho restituito due volte il salario giornaliero\",\"target\":{\"alias\":\"t\",\"id\":\"debt\",\"label\":\"Debt\",\"value\":30},\"context\":[{\"alias\":\"f1\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f2\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f3\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5},{\"alias\":\"f4\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7}]}\n</data>",
         "supplied": {
           "f1": 4,
-          "f2": 9,
-          "t": 6
+          "f2": 85,
+          "f3": 5,
+          "f4": 7,
+          "t": 30
         },
         "excluded": [],
-        "target_value": 6
+        "target_value": 30
       }
     }
   ]

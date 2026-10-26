@@ -118,7 +118,7 @@ prime() {  # prime <ledger name>: the priming request, not a case
     --mount type=bind,src="$ROOT/tools",dst=/tools,readonly \
     --mount type=bind,src="$ROOT/schemas",dst=/schemas,readonly --mount type=bind,src="$OUT",dst=/out \
     "$HARNESS_IMAGE" python3 /tools/assist_eval.py prime --endpoint http://server:8080/v1/chat/completions \
-    --output "/out/$1" "${EXTRA[@]}" >> "$OUT/harness.log" 2>&1
+    --output "/out/$1" --deadline-epoch "$DEADLINE_EPOCH" "${EXTRA[@]}" >> "$OUT/harness.log" 2>&1
 }
 
 harness() {  # harness <ledger name> <args...>
@@ -155,6 +155,7 @@ print('--threads-batch'); print('$THREADS'); print('--reasoning'); print('off')"
   log "$key: sha256 ok; server args: ${ARGS[*]}"
   mkdir -p "$OUT/$key"
   for i in $(seq 1 "$COLD"); do
+    [ "$(date +%s)" -lt "$DEADLINE_EPOCH" ] || { log "deadline reached before start $i of $key"; exit 0; }
     health=$(start_server "$model") || { log "$key: cold start $i failed"; continue 2; }
     log "$key: cold start $i health_seconds=$health"
     echo "{\"key\": \"$key\", \"cold_start\": $i, \"health_seconds\": $health}" >> "$OUT/$key/cold.jsonl"
