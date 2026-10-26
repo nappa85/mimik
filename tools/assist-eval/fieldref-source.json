@@ -1,0 +1,890 @@
+{
+ "schema": 1,
+ "about": "Fresh field-reference cases for the ASSIST-L32 experiment (tools/assist_eval.py --cases). Invented sheet and phrases, written without reference to the screen cases. This is the source; fieldref-cases.json is generated from it with each request rendered by the Rust builder at B = 1024 bytes (related fields only): cargo test --lib render_fieldref_cases -- --ignored.",
+ "sheet": {
+  "fields": [
+   {
+    "id": "stamina",
+    "label": "Stamina",
+    "type": "integer",
+    "value": 14
+   },
+   {
+    "id": "stamina_max",
+    "label": "Maximum stamina",
+    "type": "integer",
+    "value": 20
+   },
+   {
+    "id": "grit",
+    "label": "Grit",
+    "type": "integer",
+    "value": 3
+   },
+   {
+    "id": "wits",
+    "label": "Wits",
+    "type": "integer",
+    "value": 2
+   },
+   {
+    "id": "guile",
+    "label": "Guile",
+    "type": "integer",
+    "value": -1
+   },
+   {
+    "id": "rations",
+    "label": "Rations",
+    "type": "integer",
+    "value": 6
+   },
+   {
+    "id": "crew",
+    "label": "Crew",
+    "type": "integer",
+    "value": 4
+   },
+   {
+    "id": "coin",
+    "label": "Coin",
+    "type": "integer",
+    "value": 85
+   },
+   {
+    "id": "debt",
+    "label": "Debt",
+    "type": "integer",
+    "value": 30
+   },
+   {
+    "id": "renown",
+    "label": "Renown",
+    "type": "integer",
+    "value": 5
+   },
+   {
+    "id": "ammo",
+    "label": "Ammunition",
+    "type": "integer",
+    "value": 18
+   },
+   {
+    "id": "wage",
+    "label": "Daily wage",
+    "type": "integer",
+    "value": 7
+   },
+   {
+    "id": "days",
+    "label": "Days on the road",
+    "type": "integer",
+    "value": 9
+   }
+  ]
+ },
+ "prime_case": {
+  "id": "prime",
+  "target": "stamina",
+  "phrase": "prime"
+ },
+ "definition": {
+  "contract_version": 1,
+  "game_id": "synthetic-road",
+  "edition_id": "first",
+  "definition_id": "fieldref-sheet",
+  "title": "Synthetic road ledger",
+  "sources": [],
+  "fields": [
+   {
+    "id": "stamina",
+    "label": "Stamina",
+    "control": "integer",
+    "nullable": false,
+    "mapping": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "stamina_max",
+    "label": "Maximum stamina",
+    "control": "integer",
+    "nullable": false,
+    "mapping": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "grit",
+    "label": "Grit",
+    "control": "integer",
+    "nullable": false,
+    "mapping": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "wits",
+    "label": "Wits",
+    "control": "integer",
+    "nullable": false,
+    "mapping": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "guile",
+    "label": "Guile",
+    "control": "integer",
+    "nullable": false,
+    "mapping": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "rations",
+    "label": "Rations",
+    "control": "integer",
+    "nullable": false,
+    "mapping": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "crew",
+    "label": "Crew",
+    "control": "integer",
+    "nullable": false,
+    "mapping": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "coin",
+    "label": "Coin",
+    "control": "integer",
+    "nullable": false,
+    "mapping": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "debt",
+    "label": "Debt",
+    "control": "integer",
+    "nullable": false,
+    "mapping": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "renown",
+    "label": "Renown",
+    "control": "integer",
+    "nullable": false,
+    "mapping": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "ammo",
+    "label": "Ammunition",
+    "control": "integer",
+    "nullable": false,
+    "mapping": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "wage",
+    "label": "Daily wage",
+    "control": "integer",
+    "nullable": false,
+    "mapping": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "days",
+    "label": "Days on the road",
+    "control": "integer",
+    "nullable": false,
+    "mapping": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "calling",
+    "label": "Calling",
+    "control": "enum",
+    "nullable": false,
+    "mapping": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    },
+    "options": [
+     {
+      "id": "scout",
+      "label": "Scout"
+     },
+     {
+      "id": "cook",
+      "label": "Cook"
+     }
+    ]
+   }
+  ],
+  "groups": [
+   {
+    "id": "main",
+    "label": "Main",
+    "fields": [
+     "stamina",
+     "stamina_max",
+     "grit",
+     "wits",
+     "guile",
+     "rations",
+     "crew",
+     "coin",
+     "debt",
+     "renown",
+     "ammo",
+     "wage",
+     "days",
+     "calling"
+    ],
+    "column_hint": "main"
+   }
+  ],
+  "formula_profile": 1,
+  "constraints": [
+   {
+    "id": "c-stamina",
+    "expr": "stamina <= stamina_max && stamina + grit + wits > -99",
+    "rule_ids": [
+     "s-1"
+    ],
+    "message": "m",
+    "evidence": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "c-grit",
+    "expr": "grit + wits + stamina_max > -99",
+    "rule_ids": [
+     "s-1"
+    ],
+    "message": "m",
+    "evidence": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "c-wits",
+    "expr": "wits + guile + grit > -99",
+    "rule_ids": [
+     "s-1"
+    ],
+    "message": "m",
+    "evidence": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "c-rations",
+    "expr": "rations + crew + days > -99",
+    "rule_ids": [
+     "s-1"
+    ],
+    "message": "m",
+    "evidence": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "c-coin",
+    "expr": "coin + debt + crew + wage > -99",
+    "rule_ids": [
+     "s-1"
+    ],
+    "message": "m",
+    "evidence": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "c-debt",
+    "expr": "debt + renown + wage + coin > -99",
+    "rule_ids": [
+     "s-1"
+    ],
+    "message": "m",
+    "evidence": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "c-renown",
+    "expr": "renown + crew + guile > -99",
+    "rule_ids": [
+     "s-1"
+    ],
+    "message": "m",
+    "evidence": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "c-ammo",
+    "expr": "ammo + crew + grit + days > -99",
+    "rule_ids": [
+     "s-1"
+    ],
+    "message": "m",
+    "evidence": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "c-crew",
+    "expr": "crew + wits + renown > -99",
+    "rule_ids": [
+     "s-1"
+    ],
+    "message": "m",
+    "evidence": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "c-days",
+    "expr": "days + rations + crew > -99",
+    "rule_ids": [
+     "s-1"
+    ],
+    "message": "m",
+    "evidence": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   },
+   {
+    "id": "c-wage",
+    "expr": "wage + grit + coin > -99",
+    "rule_ids": [
+     "s-1"
+    ],
+    "message": "m",
+    "evidence": {
+     "state": "unresolved",
+     "reason": "Synthetic fixture"
+    }
+   }
+  ]
+ },
+ "data": {
+  "stamina": 14,
+  "stamina_max": 20,
+  "grit": 3,
+  "wits": 2,
+  "guile": -1,
+  "rations": 6,
+  "crew": 4,
+  "coin": 85,
+  "debt": 30,
+  "renown": 5,
+  "ammo": 18,
+  "wage": 7,
+  "days": 9,
+  "calling": "scout"
+ },
+ "cases": [
+  {
+   "id": "fr-01",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "stamina",
+   "phrase": "recover as much as my grit",
+   "expect": {
+    "values": [
+     17
+    ]
+   },
+   "ref_fields": [
+    "grit"
+   ]
+  },
+  {
+   "id": "fr-02",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "stamina",
+   "phrase": "winded, down by my wits",
+   "expect": {
+    "values": [
+     12
+    ]
+   },
+   "ref_fields": [
+    "wits"
+   ]
+  },
+  {
+   "id": "fr-03",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "stamina",
+   "phrase": "a night's rest brings me back to full",
+   "expect": {
+    "values": [
+     20
+    ]
+   },
+   "ref_fields": [
+    "stamina_max"
+   ]
+  },
+  {
+   "id": "fr-04",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "stamina",
+   "phrase": "the cold took twice my grit",
+   "expect": {
+    "values": [
+     8
+    ]
+   },
+   "ref_fields": [
+    "grit"
+   ]
+  },
+  {
+   "id": "fr-05",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "stamina",
+   "phrase": "gain grit plus 2",
+   "expect": {
+    "values": [
+     19
+    ]
+   },
+   "ref_fields": [
+    "grit"
+   ]
+  },
+  {
+   "id": "fr-06",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "rations",
+   "phrase": "one ration eaten per crew member",
+   "expect": {
+    "values": [
+     2
+    ]
+   },
+   "ref_fields": [
+    "crew"
+   ]
+  },
+  {
+   "id": "fr-07",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "rations",
+   "phrase": "found two rations for every hand in the crew",
+   "expect": {
+    "values": [
+     14
+    ]
+   },
+   "ref_fields": [
+    "crew"
+   ]
+  },
+  {
+   "id": "fr-08",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "rations",
+   "phrase": "spoiled, one lost for each day on the road",
+   "expect": {
+    "values": [
+     1
+    ]
+   },
+   "values": {
+    "days": 5
+   },
+   "ref_fields": [
+    "days"
+   ]
+  },
+  {
+   "id": "fr-09",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "coin",
+   "phrase": "paid each crew member a day's wage",
+   "expect": {
+    "values": [
+     57
+    ]
+   },
+   "ref_fields": [
+    "crew",
+    "wage"
+   ]
+  },
+  {
+   "id": "fr-10",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "coin",
+   "phrase": "settled what I owe",
+   "expect": {
+    "values": [
+     55
+    ]
+   },
+   "ref_fields": [
+    "debt"
+   ]
+  },
+  {
+   "id": "fr-11",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "coin",
+   "phrase": "sold the mule for what the creditor was asking",
+   "expect": {
+    "values": [
+     115
+    ]
+   },
+   "ref_fields": [
+    "debt"
+   ]
+  },
+  {
+   "id": "fr-12",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "debt",
+   "phrase": "paid down by four times my renown",
+   "expect": {
+    "values": [
+     10
+    ]
+   },
+   "ref_fields": [
+    "renown"
+   ]
+  },
+  {
+   "id": "fr-13",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "debt",
+   "phrase": "interest of one day's wage",
+   "expect": {
+    "values": [
+     37
+    ]
+   },
+   "ref_fields": [
+    "wage"
+   ]
+  },
+  {
+   "id": "fr-14",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "renown",
+   "phrase": "one more for each crew member after the raid",
+   "expect": {
+    "values": [
+     9
+    ]
+   },
+   "ref_fields": [
+    "crew"
+   ]
+  },
+  {
+   "id": "fr-15",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "renown",
+   "phrase": "shamed: lose as much as my guile",
+   "expect": {
+    "values": [
+     3
+    ]
+   },
+   "values": {
+    "guile": 2
+   },
+   "ref_fields": [
+    "guile"
+   ]
+  },
+  {
+   "id": "fr-16",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "ammo",
+   "phrase": "every crew member fired a volley",
+   "expect": {
+    "values": [
+     14
+    ]
+   },
+   "ref_fields": [
+    "crew"
+   ]
+  },
+  {
+   "id": "fr-17",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "ammo",
+   "phrase": "bought three rounds per crew member",
+   "expect": {
+    "values": [
+     30
+    ]
+   },
+   "ref_fields": [
+    "crew"
+   ]
+  },
+  {
+   "id": "fr-18",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "ammo",
+   "phrase": "burned as many rounds as my grit",
+   "expect": {
+    "values": [
+     15
+    ]
+   },
+   "ref_fields": [
+    "grit"
+   ]
+  },
+  {
+   "id": "fr-19",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "ammo",
+   "phrase": "a round spent for each day on the road",
+   "expect": {
+    "values": [
+     9
+    ]
+   },
+   "ref_fields": [
+    "days"
+   ]
+  },
+  {
+   "id": "fr-20",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "crew",
+   "phrase": "hired as many hands as I have wits",
+   "expect": {
+    "values": [
+     6
+    ]
+   },
+   "ref_fields": [
+    "wits"
+   ]
+  },
+  {
+   "id": "fr-21",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "crew",
+   "phrase": "grew by half my renown",
+   "expect": {
+    "values": [
+     9
+    ]
+   },
+   "values": {
+    "renown": 10
+   },
+   "ref_fields": [
+    "renown"
+   ]
+  },
+  {
+   "id": "fr-22",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "days",
+   "phrase": "the ferry skipped ahead by the number of rations I carry",
+   "expect": {
+    "values": [
+     15
+    ]
+   },
+   "ref_fields": [
+    "rations"
+   ]
+  },
+  {
+   "id": "fr-23",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "days",
+   "phrase": "pushed on for the whole crew's count of days",
+   "expect": {
+    "values": [
+     13
+    ]
+   },
+   "ref_fields": [
+    "crew"
+   ]
+  },
+  {
+   "id": "fr-24",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "wage",
+   "phrase": "now set equal to my grit",
+   "expect": {
+    "values": [
+     3
+    ]
+   },
+   "ref_fields": [
+    "grit"
+   ]
+  },
+  {
+   "id": "fr-25",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "grit",
+   "phrase": "matches my wits now",
+   "expect": {
+    "values": [
+     2
+    ]
+   },
+   "ref_fields": [
+    "wits"
+   ]
+  },
+  {
+   "id": "fr-26",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "wits",
+   "phrase": "sharpened by my guile",
+   "expect": {
+    "values": [
+     4
+    ]
+   },
+   "values": {
+    "guile": 2
+   },
+   "ref_fields": [
+    "wits"
+   ]
+  },
+  {
+   "id": "fr-27",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "guile",
+   "phrase": "dulled by my wits",
+   "expect": {
+    "values": [
+     -3
+    ]
+   },
+   "ref_fields": [
+    "wits"
+   ]
+  },
+  {
+   "id": "fr-28",
+   "class": "field_ref",
+   "lang": "en",
+   "target": "stamina_max",
+   "phrase": "raised by my grit",
+   "expect": {
+    "values": [
+     23
+    ]
+   },
+   "ref_fields": [
+    "grit"
+   ]
+  },
+  {
+   "id": "fr-29",
+   "class": "field_ref",
+   "lang": "it",
+   "target": "coin",
+   "phrase": "pagato metà del debito",
+   "expect": {
+    "values": [
+     70
+    ]
+   },
+   "ref_fields": [
+    "debt"
+   ]
+  },
+  {
+   "id": "fr-30",
+   "class": "field_ref",
+   "lang": "it",
+   "target": "rations",
+   "phrase": "mangiato una razione a testa",
+   "expect": {
+    "values": [
+     2
+    ]
+   },
+   "ref_fields": [
+    "crew"
+   ]
+  }
+ ]
+}

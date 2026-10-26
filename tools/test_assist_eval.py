@@ -433,6 +433,49 @@ class ContractV2(unittest.TestCase):
             ae.shown_values(ae.validate_reply(reply(op("add", ref("t"), lit(5))), req)), [25]
         )
 
+    def test_compact_prefix_is_short_plus_only_the_compact_sentence(self):
+        req = ae.build_request(
+            {"id": "t", "target": "hp", "phrase": "heal 5"}, SHEET, contract="v2-compact"
+        )
+        short = ae.contract_prefix("v2-short")
+        self.assertEqual(req["system"].replace(ae.EX_COMPACT, "", 1), short)
+        self.assertEqual(req["system"].count(ae.EX_COMPACT), 1)
+
+    def test_fieldref_cases_carry_rust_rendered_requests_that_score(self):
+        path = Path(__file__).with_name("assist-eval") / "fieldref-cases.json"
+        data = ae.load_cases(path)
+        self.assertEqual(len(data["cases"]), 30)
+        for case in data["cases"]:
+            req = ae.build_request(case, data["sheet"], contract="v2")
+            self.assertLessEqual(len(req["user"].encode()), 1024)
+            self.assertEqual(req["user"], case["rendered"]["user"])
+        case = data["cases"][0]  # recover as much as my grit: hp 14 + f(grit) 3
+        req = ae.build_request(case, data["sheet"], contract="v2")
+        alias = next(a for a, v in req["supplied"].items() if a != "t" and v == 3)
+        reply_json = reply(op("add", ref("t"), ref(alias)))
+        self.assertEqual(ae.shown_values(ae.validate_reply(reply_json, req)), [17])
+
+    def test_fieldref_summary_counts_a_referenced_answer_apart_from_a_coincidence(self):
+        path = Path(__file__).with_name("assist-eval") / "fieldref-cases.json"
+        data = ae.load_cases(path)
+        case = data["cases"][0]
+        req = ae.build_request(case, data["sheet"], contract="v2")
+        alias = next(a for a, v in req["supplied"].items() if a != "t" and v == 3)
+        rows = [{"event": "header"}]
+        for exprs in (op("add", ref("t"), ref(alias)), op("add", ref("t"), lit(3))):
+            validated = ae.validate_reply(reply(exprs), req)
+            shown = ae.shown_values(validated)
+            rows.append({"event": "case", "case": case["id"], "pass": 1, "status": "completed",
+                         "shown": shown, "validated": validated,
+                         "score": ae.score(case["expect"], shown)})
+        with tempfile.TemporaryDirectory() as tmp:
+            for n, row in enumerate(rows[1:]):
+                ledger = Path(tmp) / f"{n}.jsonl"
+                ledger.write_text(json.dumps(rows[0]) + "\n" + json.dumps(row) + "\n")
+                out = ae.fieldref_summary(ledger)
+                self.assertEqual(out["correct_ref"], 1 - n)
+                self.assertEqual(out["correct_noref"] + out["abstained"], n)
+
     def test_ex_prefix_is_compact_with_an_alias_example(self):
         req = ae.build_request(
             {"id": "t", "target": "hp", "phrase": "heal 5"}, SHEET, contract="v2-ex"

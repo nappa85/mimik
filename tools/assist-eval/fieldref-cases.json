@@ -1,0 +1,926 @@
+{
+  "schema": 1,
+  "about": "Fresh field-reference cases for the ASSIST-L32 experiment (tools/assist_eval.py --cases). Invented sheet and phrases, written without reference to the screen cases. This is the source; fieldref-cases.json is generated from it with each request rendered by the Rust builder at B = 1024 bytes (related fields only): cargo test --lib render_fieldref_cases -- --ignored.",
+  "sheet": {
+    "fields": [
+      {
+        "id": "stamina",
+        "label": "Stamina",
+        "type": "integer",
+        "value": 14
+      },
+      {
+        "id": "stamina_max",
+        "label": "Maximum stamina",
+        "type": "integer",
+        "value": 20
+      },
+      {
+        "id": "grit",
+        "label": "Grit",
+        "type": "integer",
+        "value": 3
+      },
+      {
+        "id": "wits",
+        "label": "Wits",
+        "type": "integer",
+        "value": 2
+      },
+      {
+        "id": "guile",
+        "label": "Guile",
+        "type": "integer",
+        "value": -1
+      },
+      {
+        "id": "rations",
+        "label": "Rations",
+        "type": "integer",
+        "value": 6
+      },
+      {
+        "id": "crew",
+        "label": "Crew",
+        "type": "integer",
+        "value": 4
+      },
+      {
+        "id": "coin",
+        "label": "Coin",
+        "type": "integer",
+        "value": 85
+      },
+      {
+        "id": "debt",
+        "label": "Debt",
+        "type": "integer",
+        "value": 30
+      },
+      {
+        "id": "renown",
+        "label": "Renown",
+        "type": "integer",
+        "value": 5
+      },
+      {
+        "id": "ammo",
+        "label": "Ammunition",
+        "type": "integer",
+        "value": 18
+      },
+      {
+        "id": "wage",
+        "label": "Daily wage",
+        "type": "integer",
+        "value": 7
+      },
+      {
+        "id": "days",
+        "label": "Days on the road",
+        "type": "integer",
+        "value": 9
+      }
+    ]
+  },
+  "prime_case": {
+    "id": "prime",
+    "target": "stamina",
+    "phrase": "prime"
+  },
+  "cases": [
+    {
+      "id": "fr-01",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "stamina",
+      "phrase": "recover as much as my grit",
+      "expect": {
+        "values": [
+          17
+        ]
+      },
+      "ref_fields": [
+        "grit"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"recover as much as my grit\",\"target\":{\"alias\":\"t\",\"id\":\"stamina\",\"label\":\"Stamina\",\"value\":14},\"context\":[{\"alias\":\"f1\",\"id\":\"stamina_max\",\"label\":\"Maximum stamina\",\"type\":\"integer\",\"value\":20},{\"alias\":\"f2\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f3\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2}]}\n</data>",
+        "supplied": {
+          "f1": 20,
+          "f2": 3,
+          "f3": 2,
+          "t": 14
+        },
+        "excluded": [],
+        "target_value": 14
+      }
+    },
+    {
+      "id": "fr-02",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "stamina",
+      "phrase": "winded, down by my wits",
+      "expect": {
+        "values": [
+          12
+        ]
+      },
+      "ref_fields": [
+        "wits"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"winded, down by my wits\",\"target\":{\"alias\":\"t\",\"id\":\"stamina\",\"label\":\"Stamina\",\"value\":14},\"context\":[{\"alias\":\"f1\",\"id\":\"stamina_max\",\"label\":\"Maximum stamina\",\"type\":\"integer\",\"value\":20},{\"alias\":\"f2\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f3\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2}]}\n</data>",
+        "supplied": {
+          "f1": 20,
+          "f2": 3,
+          "f3": 2,
+          "t": 14
+        },
+        "excluded": [],
+        "target_value": 14
+      }
+    },
+    {
+      "id": "fr-03",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "stamina",
+      "phrase": "a night's rest brings me back to full",
+      "expect": {
+        "values": [
+          20
+        ]
+      },
+      "ref_fields": [
+        "stamina_max"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"a night's rest brings me back to full\",\"target\":{\"alias\":\"t\",\"id\":\"stamina\",\"label\":\"Stamina\",\"value\":14},\"context\":[{\"alias\":\"f1\",\"id\":\"stamina_max\",\"label\":\"Maximum stamina\",\"type\":\"integer\",\"value\":20},{\"alias\":\"f2\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f3\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2}]}\n</data>",
+        "supplied": {
+          "f1": 20,
+          "f2": 3,
+          "f3": 2,
+          "t": 14
+        },
+        "excluded": [],
+        "target_value": 14
+      }
+    },
+    {
+      "id": "fr-04",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "stamina",
+      "phrase": "the cold took twice my grit",
+      "expect": {
+        "values": [
+          8
+        ]
+      },
+      "ref_fields": [
+        "grit"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"the cold took twice my grit\",\"target\":{\"alias\":\"t\",\"id\":\"stamina\",\"label\":\"Stamina\",\"value\":14},\"context\":[{\"alias\":\"f1\",\"id\":\"stamina_max\",\"label\":\"Maximum stamina\",\"type\":\"integer\",\"value\":20},{\"alias\":\"f2\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f3\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2}]}\n</data>",
+        "supplied": {
+          "f1": 20,
+          "f2": 3,
+          "f3": 2,
+          "t": 14
+        },
+        "excluded": [],
+        "target_value": 14
+      }
+    },
+    {
+      "id": "fr-05",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "stamina",
+      "phrase": "gain grit plus 2",
+      "expect": {
+        "values": [
+          19
+        ]
+      },
+      "ref_fields": [
+        "grit"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"gain grit plus 2\",\"target\":{\"alias\":\"t\",\"id\":\"stamina\",\"label\":\"Stamina\",\"value\":14},\"context\":[{\"alias\":\"f1\",\"id\":\"stamina_max\",\"label\":\"Maximum stamina\",\"type\":\"integer\",\"value\":20},{\"alias\":\"f2\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f3\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2}]}\n</data>",
+        "supplied": {
+          "f1": 20,
+          "f2": 3,
+          "f3": 2,
+          "t": 14
+        },
+        "excluded": [],
+        "target_value": 14
+      }
+    },
+    {
+      "id": "fr-06",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "rations",
+      "phrase": "one ration eaten per crew member",
+      "expect": {
+        "values": [
+          2
+        ]
+      },
+      "ref_fields": [
+        "crew"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"one ration eaten per crew member\",\"target\":{\"alias\":\"t\",\"id\":\"rations\",\"label\":\"Rations\",\"value\":6},\"context\":[{\"alias\":\"f1\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f2\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
+        "supplied": {
+          "f1": 4,
+          "f2": 9,
+          "t": 6
+        },
+        "excluded": [],
+        "target_value": 6
+      }
+    },
+    {
+      "id": "fr-07",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "rations",
+      "phrase": "found two rations for every hand in the crew",
+      "expect": {
+        "values": [
+          14
+        ]
+      },
+      "ref_fields": [
+        "crew"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"found two rations for every hand in the crew\",\"target\":{\"alias\":\"t\",\"id\":\"rations\",\"label\":\"Rations\",\"value\":6},\"context\":[{\"alias\":\"f1\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f2\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
+        "supplied": {
+          "f1": 4,
+          "f2": 9,
+          "t": 6
+        },
+        "excluded": [],
+        "target_value": 6
+      }
+    },
+    {
+      "id": "fr-08",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "rations",
+      "phrase": "spoiled, one lost for each day on the road",
+      "expect": {
+        "values": [
+          1
+        ]
+      },
+      "values": {
+        "days": 5
+      },
+      "ref_fields": [
+        "days"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"spoiled, one lost for each day on the road\",\"target\":{\"alias\":\"t\",\"id\":\"rations\",\"label\":\"Rations\",\"value\":6},\"context\":[{\"alias\":\"f1\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f2\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":5}]}\n</data>",
+        "supplied": {
+          "f1": 4,
+          "f2": 5,
+          "t": 6
+        },
+        "excluded": [],
+        "target_value": 6
+      }
+    },
+    {
+      "id": "fr-09",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "coin",
+      "phrase": "paid each crew member a day's wage",
+      "expect": {
+        "values": [
+          57
+        ]
+      },
+      "ref_fields": [
+        "crew",
+        "wage"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"paid each crew member a day's wage\",\"target\":{\"alias\":\"t\",\"id\":\"coin\",\"label\":\"Coin\",\"value\":85},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f3\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f4\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5},{\"alias\":\"f5\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7}]}\n</data>",
+        "supplied": {
+          "f1": 3,
+          "f2": 4,
+          "f3": 30,
+          "f4": 5,
+          "f5": 7,
+          "t": 85
+        },
+        "excluded": [],
+        "target_value": 85
+      }
+    },
+    {
+      "id": "fr-10",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "coin",
+      "phrase": "settled what I owe",
+      "expect": {
+        "values": [
+          55
+        ]
+      },
+      "ref_fields": [
+        "debt"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"settled what I owe\",\"target\":{\"alias\":\"t\",\"id\":\"coin\",\"label\":\"Coin\",\"value\":85},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f3\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f4\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5},{\"alias\":\"f5\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7}]}\n</data>",
+        "supplied": {
+          "f1": 3,
+          "f2": 4,
+          "f3": 30,
+          "f4": 5,
+          "f5": 7,
+          "t": 85
+        },
+        "excluded": [],
+        "target_value": 85
+      }
+    },
+    {
+      "id": "fr-11",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "coin",
+      "phrase": "sold the mule for what the creditor was asking",
+      "expect": {
+        "values": [
+          115
+        ]
+      },
+      "ref_fields": [
+        "debt"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"sold the mule for what the creditor was asking\",\"target\":{\"alias\":\"t\",\"id\":\"coin\",\"label\":\"Coin\",\"value\":85},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f3\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f4\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5},{\"alias\":\"f5\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7}]}\n</data>",
+        "supplied": {
+          "f1": 3,
+          "f2": 4,
+          "f3": 30,
+          "f4": 5,
+          "f5": 7,
+          "t": 85
+        },
+        "excluded": [],
+        "target_value": 85
+      }
+    },
+    {
+      "id": "fr-12",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "debt",
+      "phrase": "paid down by four times my renown",
+      "expect": {
+        "values": [
+          10
+        ]
+      },
+      "ref_fields": [
+        "renown"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"paid down by four times my renown\",\"target\":{\"alias\":\"t\",\"id\":\"debt\",\"label\":\"Debt\",\"value\":30},\"context\":[{\"alias\":\"f1\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f2\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f3\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5},{\"alias\":\"f4\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7}]}\n</data>",
+        "supplied": {
+          "f1": 4,
+          "f2": 85,
+          "f3": 5,
+          "f4": 7,
+          "t": 30
+        },
+        "excluded": [],
+        "target_value": 30
+      }
+    },
+    {
+      "id": "fr-13",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "debt",
+      "phrase": "interest of one day's wage",
+      "expect": {
+        "values": [
+          37
+        ]
+      },
+      "ref_fields": [
+        "wage"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"interest of one day's wage\",\"target\":{\"alias\":\"t\",\"id\":\"debt\",\"label\":\"Debt\",\"value\":30},\"context\":[{\"alias\":\"f1\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f2\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f3\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5},{\"alias\":\"f4\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7}]}\n</data>",
+        "supplied": {
+          "f1": 4,
+          "f2": 85,
+          "f3": 5,
+          "f4": 7,
+          "t": 30
+        },
+        "excluded": [],
+        "target_value": 30
+      }
+    },
+    {
+      "id": "fr-14",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "renown",
+      "phrase": "one more for each crew member after the raid",
+      "expect": {
+        "values": [
+          9
+        ]
+      },
+      "ref_fields": [
+        "crew"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"one more for each crew member after the raid\",\"target\":{\"alias\":\"t\",\"id\":\"renown\",\"label\":\"Renown\",\"value\":5},\"context\":[{\"alias\":\"f1\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f2\",\"id\":\"guile\",\"label\":\"Guile\",\"type\":\"integer\",\"value\":-1},{\"alias\":\"f3\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f4\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f5\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f6\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7}]}\n</data>",
+        "supplied": {
+          "f1": 2,
+          "f2": -1,
+          "f3": 4,
+          "f4": 85,
+          "f5": 30,
+          "f6": 7,
+          "t": 5
+        },
+        "excluded": [],
+        "target_value": 5
+      }
+    },
+    {
+      "id": "fr-15",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "renown",
+      "phrase": "shamed: lose as much as my guile",
+      "expect": {
+        "values": [
+          3
+        ]
+      },
+      "values": {
+        "guile": 2
+      },
+      "ref_fields": [
+        "guile"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"shamed: lose as much as my guile\",\"target\":{\"alias\":\"t\",\"id\":\"renown\",\"label\":\"Renown\",\"value\":5},\"context\":[{\"alias\":\"f1\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f2\",\"id\":\"guile\",\"label\":\"Guile\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f3\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f4\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f5\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f6\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7}]}\n</data>",
+        "supplied": {
+          "f1": 2,
+          "f2": 2,
+          "f3": 4,
+          "f4": 85,
+          "f5": 30,
+          "f6": 7,
+          "t": 5
+        },
+        "excluded": [],
+        "target_value": 5
+      }
+    },
+    {
+      "id": "fr-16",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "ammo",
+      "phrase": "every crew member fired a volley",
+      "expect": {
+        "values": [
+          14
+        ]
+      },
+      "ref_fields": [
+        "crew"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"every crew member fired a volley\",\"target\":{\"alias\":\"t\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"value\":18},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f3\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
+        "supplied": {
+          "f1": 3,
+          "f2": 4,
+          "f3": 9,
+          "t": 18
+        },
+        "excluded": [],
+        "target_value": 18
+      }
+    },
+    {
+      "id": "fr-17",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "ammo",
+      "phrase": "bought three rounds per crew member",
+      "expect": {
+        "values": [
+          30
+        ]
+      },
+      "ref_fields": [
+        "crew"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"bought three rounds per crew member\",\"target\":{\"alias\":\"t\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"value\":18},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f3\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
+        "supplied": {
+          "f1": 3,
+          "f2": 4,
+          "f3": 9,
+          "t": 18
+        },
+        "excluded": [],
+        "target_value": 18
+      }
+    },
+    {
+      "id": "fr-18",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "ammo",
+      "phrase": "burned as many rounds as my grit",
+      "expect": {
+        "values": [
+          15
+        ]
+      },
+      "ref_fields": [
+        "grit"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"burned as many rounds as my grit\",\"target\":{\"alias\":\"t\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"value\":18},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f3\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
+        "supplied": {
+          "f1": 3,
+          "f2": 4,
+          "f3": 9,
+          "t": 18
+        },
+        "excluded": [],
+        "target_value": 18
+      }
+    },
+    {
+      "id": "fr-19",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "ammo",
+      "phrase": "a round spent for each day on the road",
+      "expect": {
+        "values": [
+          9
+        ]
+      },
+      "ref_fields": [
+        "days"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"a round spent for each day on the road\",\"target\":{\"alias\":\"t\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"value\":18},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f3\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
+        "supplied": {
+          "f1": 3,
+          "f2": 4,
+          "f3": 9,
+          "t": 18
+        },
+        "excluded": [],
+        "target_value": 18
+      }
+    },
+    {
+      "id": "fr-20",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "crew",
+      "phrase": "hired as many hands as I have wits",
+      "expect": {
+        "values": [
+          6
+        ]
+      },
+      "ref_fields": [
+        "wits"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"hired as many hands as I have wits\",\"target\":{\"alias\":\"t\",\"id\":\"crew\",\"label\":\"Crew\",\"value\":4},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f3\",\"id\":\"guile\",\"label\":\"Guile\",\"type\":\"integer\",\"value\":-1},{\"alias\":\"f4\",\"id\":\"rations\",\"label\":\"Rations\",\"type\":\"integer\",\"value\":6},{\"alias\":\"f5\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f6\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f7\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5},{\"alias\":\"f8\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"type\":\"integer\",\"value\":18},{\"alias\":\"f9\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7},{\"alias\":\"f10\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
+        "supplied": {
+          "f1": 3,
+          "f10": 9,
+          "f2": 2,
+          "f3": -1,
+          "f4": 6,
+          "f5": 85,
+          "f6": 30,
+          "f7": 5,
+          "f8": 18,
+          "f9": 7,
+          "t": 4
+        },
+        "excluded": [],
+        "target_value": 4
+      }
+    },
+    {
+      "id": "fr-21",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "crew",
+      "phrase": "grew by half my renown",
+      "expect": {
+        "values": [
+          9
+        ]
+      },
+      "values": {
+        "renown": 10
+      },
+      "ref_fields": [
+        "renown"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"grew by half my renown\",\"target\":{\"alias\":\"t\",\"id\":\"crew\",\"label\":\"Crew\",\"value\":4},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f3\",\"id\":\"guile\",\"label\":\"Guile\",\"type\":\"integer\",\"value\":-1},{\"alias\":\"f4\",\"id\":\"rations\",\"label\":\"Rations\",\"type\":\"integer\",\"value\":6},{\"alias\":\"f5\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f6\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f7\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":10},{\"alias\":\"f8\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"type\":\"integer\",\"value\":18},{\"alias\":\"f9\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7},{\"alias\":\"f10\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
+        "supplied": {
+          "f1": 3,
+          "f10": 9,
+          "f2": 2,
+          "f3": -1,
+          "f4": 6,
+          "f5": 85,
+          "f6": 30,
+          "f7": 10,
+          "f8": 18,
+          "f9": 7,
+          "t": 4
+        },
+        "excluded": [],
+        "target_value": 4
+      }
+    },
+    {
+      "id": "fr-22",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "days",
+      "phrase": "the ferry skipped ahead by the number of rations I carry",
+      "expect": {
+        "values": [
+          15
+        ]
+      },
+      "ref_fields": [
+        "rations"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"the ferry skipped ahead by the number of rations I carry\",\"target\":{\"alias\":\"t\",\"id\":\"days\",\"label\":\"Days on the road\",\"value\":9},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"rations\",\"label\":\"Rations\",\"type\":\"integer\",\"value\":6},{\"alias\":\"f3\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f4\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"type\":\"integer\",\"value\":18}]}\n</data>",
+        "supplied": {
+          "f1": 3,
+          "f2": 6,
+          "f3": 4,
+          "f4": 18,
+          "t": 9
+        },
+        "excluded": [],
+        "target_value": 9
+      }
+    },
+    {
+      "id": "fr-23",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "days",
+      "phrase": "pushed on for the whole crew's count of days",
+      "expect": {
+        "values": [
+          13
+        ]
+      },
+      "ref_fields": [
+        "crew"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"pushed on for the whole crew's count of days\",\"target\":{\"alias\":\"t\",\"id\":\"days\",\"label\":\"Days on the road\",\"value\":9},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"rations\",\"label\":\"Rations\",\"type\":\"integer\",\"value\":6},{\"alias\":\"f3\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f4\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"type\":\"integer\",\"value\":18}]}\n</data>",
+        "supplied": {
+          "f1": 3,
+          "f2": 6,
+          "f3": 4,
+          "f4": 18,
+          "t": 9
+        },
+        "excluded": [],
+        "target_value": 9
+      }
+    },
+    {
+      "id": "fr-24",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "wage",
+      "phrase": "now set equal to my grit",
+      "expect": {
+        "values": [
+          3
+        ]
+      },
+      "ref_fields": [
+        "grit"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"now set equal to my grit\",\"target\":{\"alias\":\"t\",\"id\":\"wage\",\"label\":\"Daily wage\",\"value\":7},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f3\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f4\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f5\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5}]}\n</data>",
+        "supplied": {
+          "f1": 3,
+          "f2": 4,
+          "f3": 85,
+          "f4": 30,
+          "f5": 5,
+          "t": 7
+        },
+        "excluded": [],
+        "target_value": 7
+      }
+    },
+    {
+      "id": "fr-25",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "grit",
+      "phrase": "matches my wits now",
+      "expect": {
+        "values": [
+          2
+        ]
+      },
+      "ref_fields": [
+        "wits"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"matches my wits now\",\"target\":{\"alias\":\"t\",\"id\":\"grit\",\"label\":\"Grit\",\"value\":3},\"context\":[{\"alias\":\"f1\",\"id\":\"stamina\",\"label\":\"Stamina\",\"type\":\"integer\",\"value\":14},{\"alias\":\"f2\",\"id\":\"stamina_max\",\"label\":\"Maximum stamina\",\"type\":\"integer\",\"value\":20},{\"alias\":\"f3\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f4\",\"id\":\"guile\",\"label\":\"Guile\",\"type\":\"integer\",\"value\":-1},{\"alias\":\"f5\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f6\",\"id\":\"coin\",\"label\":\"Coin\",\"type\":\"integer\",\"value\":85},{\"alias\":\"f7\",\"id\":\"ammo\",\"label\":\"Ammunition\",\"type\":\"integer\",\"value\":18},{\"alias\":\"f8\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7},{\"alias\":\"f9\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
+        "supplied": {
+          "f1": 14,
+          "f2": 20,
+          "f3": 2,
+          "f4": -1,
+          "f5": 4,
+          "f6": 85,
+          "f7": 18,
+          "f8": 7,
+          "f9": 9,
+          "t": 3
+        },
+        "excluded": [],
+        "target_value": 3
+      }
+    },
+    {
+      "id": "fr-26",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "wits",
+      "phrase": "sharpened by my guile",
+      "expect": {
+        "values": [
+          4
+        ]
+      },
+      "values": {
+        "guile": 2
+      },
+      "ref_fields": [
+        "wits"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"sharpened by my guile\",\"target\":{\"alias\":\"t\",\"id\":\"wits\",\"label\":\"Wits\",\"value\":2},\"context\":[{\"alias\":\"f1\",\"id\":\"stamina\",\"label\":\"Stamina\",\"type\":\"integer\",\"value\":14},{\"alias\":\"f2\",\"id\":\"stamina_max\",\"label\":\"Maximum stamina\",\"type\":\"integer\",\"value\":20},{\"alias\":\"f3\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f4\",\"id\":\"guile\",\"label\":\"Guile\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f5\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f6\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5}]}\n</data>",
+        "supplied": {
+          "f1": 14,
+          "f2": 20,
+          "f3": 3,
+          "f4": 2,
+          "f5": 4,
+          "f6": 5,
+          "t": 2
+        },
+        "excluded": [],
+        "target_value": 2
+      }
+    },
+    {
+      "id": "fr-27",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "guile",
+      "phrase": "dulled by my wits",
+      "expect": {
+        "values": [
+          -3
+        ]
+      },
+      "ref_fields": [
+        "wits"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"dulled by my wits\",\"target\":{\"alias\":\"t\",\"id\":\"guile\",\"label\":\"Guile\",\"value\":-1},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2},{\"alias\":\"f3\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f4\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5}]}\n</data>",
+        "supplied": {
+          "f1": 3,
+          "f2": 2,
+          "f3": 4,
+          "f4": 5,
+          "t": -1
+        },
+        "excluded": [],
+        "target_value": -1
+      }
+    },
+    {
+      "id": "fr-28",
+      "class": "field_ref",
+      "lang": "en",
+      "target": "stamina_max",
+      "phrase": "raised by my grit",
+      "expect": {
+        "values": [
+          23
+        ]
+      },
+      "ref_fields": [
+        "grit"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"raised by my grit\",\"target\":{\"alias\":\"t\",\"id\":\"stamina_max\",\"label\":\"Maximum stamina\",\"value\":20},\"context\":[{\"alias\":\"f1\",\"id\":\"stamina\",\"label\":\"Stamina\",\"type\":\"integer\",\"value\":14},{\"alias\":\"f2\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f3\",\"id\":\"wits\",\"label\":\"Wits\",\"type\":\"integer\",\"value\":2}]}\n</data>",
+        "supplied": {
+          "f1": 14,
+          "f2": 3,
+          "f3": 2,
+          "t": 20
+        },
+        "excluded": [],
+        "target_value": 20
+      }
+    },
+    {
+      "id": "fr-29",
+      "class": "field_ref",
+      "lang": "it",
+      "target": "coin",
+      "phrase": "pagato metà del debito",
+      "expect": {
+        "values": [
+          70
+        ]
+      },
+      "ref_fields": [
+        "debt"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"pagato metà del debito\",\"target\":{\"alias\":\"t\",\"id\":\"coin\",\"label\":\"Coin\",\"value\":85},\"context\":[{\"alias\":\"f1\",\"id\":\"grit\",\"label\":\"Grit\",\"type\":\"integer\",\"value\":3},{\"alias\":\"f2\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f3\",\"id\":\"debt\",\"label\":\"Debt\",\"type\":\"integer\",\"value\":30},{\"alias\":\"f4\",\"id\":\"renown\",\"label\":\"Renown\",\"type\":\"integer\",\"value\":5},{\"alias\":\"f5\",\"id\":\"wage\",\"label\":\"Daily wage\",\"type\":\"integer\",\"value\":7}]}\n</data>",
+        "supplied": {
+          "f1": 3,
+          "f2": 4,
+          "f3": 30,
+          "f4": 5,
+          "f5": 7,
+          "t": 85
+        },
+        "excluded": [],
+        "target_value": 85
+      }
+    },
+    {
+      "id": "fr-30",
+      "class": "field_ref",
+      "lang": "it",
+      "target": "rations",
+      "phrase": "mangiato una razione a testa",
+      "expect": {
+        "values": [
+          2
+        ]
+      },
+      "ref_fields": [
+        "crew"
+      ],
+      "rendered": {
+        "user": "<data>\n{\"note\":\"mangiato una razione a testa\",\"target\":{\"alias\":\"t\",\"id\":\"rations\",\"label\":\"Rations\",\"value\":6},\"context\":[{\"alias\":\"f1\",\"id\":\"crew\",\"label\":\"Crew\",\"type\":\"integer\",\"value\":4},{\"alias\":\"f2\",\"id\":\"days\",\"label\":\"Days on the road\",\"type\":\"integer\",\"value\":9}]}\n</data>",
+        "supplied": {
+          "f1": 4,
+          "f2": 9,
+          "t": 6
+        },
+        "excluded": [],
+        "target_value": 6
+      }
+    }
+  ]
+}
