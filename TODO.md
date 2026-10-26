@@ -17,7 +17,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   mimik-catalogue-target). Free-model reviews: never in parallel (`tools/external_review.py`
   locks and skips limited models, `~/.cache/mimik-review/limits.json`).
 
-- **Switch to Hakoniwa (ASSIST-51)** (`hakoniwa-switch`): implemented; waiting for its one review, then merge.
 - Hakoniwa audit exception: check new Hakoniwa releases; when one drops postcard's default
   features, remove the RUSTSEC-2023-0089 ignore from `.cargo/audit.toml` (DEP-24).
 
