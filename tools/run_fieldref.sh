@@ -4,7 +4,10 @@
 # compact = the shipped v2, which adds the compact-reply sentence), pass 1 only, 5 threads (ASSIST-41 here), over the 30 cases of
 # tools/assist-eval/fieldref-cases.json. Unattended, never reads input.
 #
-# Usage: tools/run_fieldref.sh [out-dir]   (default /media/data/mimik/fieldref/runs/<stamp>)
+# Experiment 2 (tools/fieldref2-prereg.md): ARMS="control refex novals ids" runs the four arms
+# (control = shipped v2-compact, refex = v2-refex, novals = v2-novals, ids = v2-ids) in one run.
+#
+# Usage: [ARMS="base compact"] tools/run_fieldref.sh [out-dir]   (default /media/data/mimik/fieldref/runs/<stamp>)
 # Refuses on a weekday from 09:00 to 18:00 and when the host is busy; no request starts at
 # or after the next weekday 09:00 (a request already running then finishes). Environment:
 # LOAD_MAX (1.0: limit for the 1- and 5-minute load averages, recorded in run.log);
@@ -15,6 +18,7 @@ export TZ=:/etc/localtime
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${1:-/media/data/mimik/fieldref/runs/$(date +%Y%m%d-%H%M)}
 LOAD_MAX=${LOAD_MAX:-1.0}
+ARMS=${ARMS:-base compact}
 THREADS=5
 CPUS=0,1,2,3,4
 now=$(date +%s)
@@ -39,10 +43,17 @@ fi
 if pgrep -x llama-server >/dev/null; then echo "a llama-server is running" >&2; exit 3; fi
 [ ! -e "$OUT" ] || { echo "$OUT exists" >&2; exit 2; }
 mkdir -p "$OUT"
-echo "$(date '+%F %T') start: load $l1 $l5 (max $LOAD_MAX), threads $THREADS, cpus $CPUS, deadline $(date -d "@$deadline" '+%F %T')$override" | tee -a "$OUT/run.log"
+echo "$(date '+%F %T') start: arms $ARMS, load $l1 $l5 (max $LOAD_MAX), threads $THREADS, cpus $CPUS, deadline $(date -d "@$deadline" '+%F %T')$override" | tee -a "$OUT/run.log"
 invalid=0
-for arm in base compact; do
-  case $arm in base) contract=v2-base ;; compact) contract=v2 ;; esac
+for arm in $ARMS; do
+  case $arm in
+    base) contract=v2-base ;;
+    compact|control) contract=v2 ;;
+    refex) contract=v2-refex ;;
+    novals) contract=v2-novals ;;
+    ids) contract=v2-ids ;;
+    *) echo "unknown arm $arm" >&2; exit 2 ;;
+  esac
   CONTRACT=$contract PRIME=1 PASSES=1 STRESS=0 COLD=1 COLD_ONLY='' THREADS=$THREADS CPUS=$CPUS \
     CASES=assist-eval/fieldref-cases.json MAX_TOKENS=352 NAME=fieldref DEADLINE_EPOCH=$deadline \
     "$ROOT/tools/run_assist_screen.sh" "$OUT/$arm" granite42-3b </dev/null \

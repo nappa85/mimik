@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -506,6 +507,98 @@ class ContractV2(unittest.TestCase):
                 out = ae.fieldref_summary(ledger)
             self.assertEqual(out["by_case"][case["id"]], verdict, expr)
             self.assertEqual(out["status"], "INVALID")  # 1 of 30 cases
+
+    def _fr2_case(self, index=0):
+        path = Path(__file__).with_name("assist-eval") / "fieldref-cases.json"
+        data = ae.load_cases(path)
+        return data, data["cases"][index]
+
+    def test_refex_arm_adds_two_reference_examples_and_nothing_else(self):
+        data, case = self._fr2_case()
+        base = ae.build_request(case, data["sheet"], contract="v2")
+        arm = ae.build_request(case, data["sheet"], contract="v2-refex")
+        self.assertEqual(arm["user"], base["user"])
+        self.assertEqual(arm["system"].count('{"ref": "f1"}'), 1)
+        self.assertEqual(arm["system"].count('{"ref": "f2"}'), 1)
+        self.assertEqual(arm["system"].replace(ae.REFEX_LINES, "", 1), base["system"])
+        self.assertIn("Cistern at 6", arm["system"])
+
+    def test_refex_examples_use_a_different_sheet_than_every_case(self):
+        words = {"cistern", "lantern", "tide", "mark", "level", "emptied"}
+        for name in ("fieldref-cases.json", "cases.json"):
+            text = (Path(__file__).with_name("assist-eval") / name).read_text().lower()
+            for word in words:
+                self.assertIsNone(re.search(rf"\b{word}\b", text), (name, word))
+
+    def test_novals_arm_sends_no_context_values_and_keeps_the_target_value(self):
+        data, case = self._fr2_case()
+        base = ae.build_request(case, data["sheet"], contract="v2-refex")
+        arm = ae.build_request(case, data["sheet"], contract="v2-novals")
+        before = json.loads(base["user"].split("\n")[1])
+        after = json.loads(arm["user"].split("\n")[1])
+        self.assertEqual(after["target"], before["target"])
+        self.assertEqual(after["target"]["value"], 85)
+        self.assertEqual(len(after["context"]), len(before["context"]))
+        for old, new in zip(before["context"], after["context"], strict=True):
+            self.assertNotIn("value", new)
+            self.assertEqual(new, {k: v for k, v in old.items() if k != "value"})
+        self.assertNotIn('"value":3', arm["user"].replace('"value":85', ""))
+        self.assertNotIn("null is unknown", arm["system"])
+        self.assertNotIn("never copy their values", arm["system"])
+        self.assertNotIn("Cistern at 6", arm["system"])
+        self.assertEqual(arm["supplied"], base["supplied"])  # scoring still has the values
+        self.assertLessEqual(len(arm["user"].encode()), len(base["user"].encode()))
+
+    def test_ids_arm_names_context_items_by_id_and_maps_replies_back(self):
+        data, case = self._fr2_case()
+        base = ae.build_request(case, data["sheet"], contract="v2")
+        arm = ae.build_request(case, data["sheet"], contract="v2-ids")
+        env = json.loads(arm["user"].split("\n")[1])
+        self.assertEqual(env["target"]["alias"], "t")
+        for item in env["context"]:
+            self.assertEqual(set(item), {"id", "label", "type"})
+        ids = [item["id"] for item in env["context"]]
+        self.assertEqual(ids, [i["id"] for i in json.loads(base["user"].split("\n")[1])["context"]])
+        self.assertEqual(arm["id_to_alias"]["crew"], "f2")
+        enum = arm["schema"]["$defs"]["ref"]["properties"]["ref"]["enum"]
+        self.assertEqual(enum, ["t", *ids])
+        sent = ae.chat_body(arm, 352)["response_format"]["json_schema"]["schema"]
+        self.assertEqual(sent, arm["schema"])
+        self.assertIn('{"ref": "<id>"}', arm["system"])
+        # fr-01: coin 85, a toll of 10 for each of the 4 crew -> 45, replied with ids.
+        raw = reply(op("sub", ref("t"), op("mul", ref("crew"), lit(10))))
+        mapped = ae.remap_reply(raw, arm)
+        self.assertIn('"f2"', mapped)
+        self.assertNotIn('"crew"', mapped)
+        validated = ae.validate_reply(mapped, arm)
+        self.assertEqual(ae.shown_values(validated), [45])
+        self.assertEqual(ae.remap_reply("not json", arm), "not json")
+        self.assertEqual(ae.remap_reply(raw, base), raw)
+        # An id outside the context stays unmapped and the scorer rejects it.
+        bad = ae.validate_reply(ae.remap_reply(reply(ref("nope")), arm), arm)
+        self.assertEqual(ae.shown_values(bad), [])
+
+    def test_fieldref2_contracts_send_the_v2_reply_schema_and_prime(self):
+        data, _ = self._fr2_case()
+        for contract in ae.FIELDREF2_CONTRACTS:
+            self.assertIn(contract, ae.CONTRACTS)
+            req = ae.build_request(data["prime_case"], data["sheet"], contract=contract)
+            self.assertEqual(req["contract"], contract)
+            self.assertTrue(req["system"].startswith("You help a player"))
+
+    def test_dropped_but_right_counts_a_dropped_option_that_reaches_the_value(self):
+        data, case = self._fr2_case(7)  # fr-08: one lost for each day on the road
+        req = ae.build_request(case, data["sheet"], contract="v2")
+        env = json.loads(case["rendered"]["user"].split("\n")[1])
+        days = next(i["alias"] for i in env["context"] if i["id"] == "days")
+        # "one" is spelled out: the literal 1 has no provenance, so the option is dropped.
+        validated = ae.validate_reply(reply(op("sub", ref("t"), op("mul", ref(days), lit(1)))), req)
+        self.assertEqual(ae.shown_values(validated), [])
+        accepted = set(case["expect"]["values"])
+        right, right_ref = ae.dropped_but_right(req, validated, accepted, {days})
+        self.assertEqual((right, right_ref), (True, True))
+        other = ae.validate_reply(reply(op("sub", ref("t"), lit(7))), req)
+        self.assertEqual(ae.dropped_but_right(req, other, accepted, {days}), (False, False))
 
     def test_ex_prefix_is_compact_with_an_alias_example(self):
         req = ae.build_request(
