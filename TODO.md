@@ -85,8 +85,12 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   as literals. Decide whether such numbers count (spelled-out numbers, or a redundant ×1).
   Experiment 2 (prompt variants, `docs/results.md`): ids instead of aliases with no context
   values (D) is the best arm, at 5/30 correct against 1/30. That is far from the bar, so the
-  next lead is a larger model on the same cases, for example Qwen3.5-9B on the GPU, with D's
-  prompt as a candidate.
+  Experiment 3 (`docs/results.md`): Qwen3.5-9B on the GPU scores 14/30 with the shipped prompt
+  and 19/30 with D (4 false-confident). Better, but it still fails 24/30. Its dropped-but-right
+  count is 7–9, mostly the literal rule. Open:
+  - decide the literal rule (spelled-out numbers, a redundant `* 1`);
+  - Qwen3.6-35B-A3B with experts in RAM, stopped by the swap guard (free RAM first);
+  - whether the GPU default model becomes the 9B (2d-1 trial path).
 
 - Review helper: `external_review.py`'s short-output unavailable heuristic can reject a real
   successful verdict that discusses "unavailable" status. Add a regression and narrow the

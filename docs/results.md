@@ -26,6 +26,33 @@ request marker reaches neither output stream; overflow fails the check.
 Limits: no real older-ABI or boot-disabled kernel or other distribution was tested here
 (the real GPU and the Ubuntu VM are covered below). The `ENOSYS` simulation is not older-ABI evidence.
 
+## Field references, experiment 3: Qwen on the GPU (2026-10-26)
+
+Same 30 `fr-*` dev cases and settings as experiments 1 and 2: pass 1, greedy, `max_tokens` 352, primed, thinking off, ctx 8192, one run per arm.
+- Hardware: RX 6650 XT, fan on manual at 255, junction stop at 85 °C.
+- Run folder: `/media/data/mimik/fieldref/runs/20261026-2153-qwen`.
+
+| Model | Arm | correct_ref | false_confident | abstained | dropped but right | output tokens p50 | total p50 | peak junction |
+|---|---|---|---|---|---|---|---|---|
+| Qwen3.5-9B Q4_K_M, all layers on the GPU | A (shipped prompt) | 14 | 5 | 11 | 9 | 106.5 | 8.6 s | 56 °C |
+| Qwen3.5-9B Q4_K_M, all layers on the GPU | D (ids, no context values) | 19 | 4 | 7 | 7 | 81.5 | 6.6 s | 54 °C |
+
+Both arms scored 30/30 schema-valid, with no truncation and no coincidences.
+
+**The 9B is much better than Granite 3B** (A: 14 against 1). D helps again: +5 correct_ref and −1 false_confident.
+
+**Neither arm passes the screen.** D gets 19/30, short of the 24 needed, and 4 false_confident, above the 3 allowed.
+
+Its errors are now mostly the wrong operation listed first, with the right one as an alternative. For example, fr-13 "interest of one day's wage" got `t * wage` first and `t + wage` second.
+
+**Dropped but right is large here: 9 and 7.** These are mostly correct expressions rejected only by the literal rule (spelled-out numbers, a redundant `* 1`). Relaxing that rule would move several of them to correct_ref. This is a policy question, not a model one.
+
+**Qwen3.6-35B-A3B was not measured.**
+- Setup: experts in RAM with `--n-cpu-moe` 32 (VRAM about 6.95 GB).
+- The load from the magnetic disk took 745 s.
+- Swap grew by about 500 MB during the load and priming, so the run's swap guard stopped it. There was no retry.
+- Measuring it needs more free RAM (about 9.5 GB was in use by other processes) or an owner decision on swap.
+
 ## Field references, experiment 2: prompt variants (2026-10-26)
 
 The decision rule was written before the run: `tools/fieldref2-prereg.md`. This is a dev comparison: the same 30 `fr-*` cases as above, which had already been read. Model and settings are unchanged: Granite 4.2 3B, greedy, `max_tokens` 352, pass 1, 5 threads, primed, one run per arm, load limit 1.5. Run folder: `/media/data/mimik/fieldref/runs/20261026-2100-exp2`.
