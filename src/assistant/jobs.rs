@@ -37,6 +37,9 @@ pub(crate) struct Budgets {
     /// (the calibrated prompt term at B): the next job waits that long, and admission counts
     /// it.
     pub busy_after_expiry: Duration,
+    /// Whether the model may offer options that reference a field other than the target
+    /// (`false` for the default model, ASSIST-L32).
+    pub field_refs: bool,
 }
 
 /// What the worker tells the runtime manager about exchanges (plan §1.4a, "Transitions":
@@ -149,6 +152,9 @@ pub(crate) enum Answer {
     Readings(Vec<String>),
     /// A valid reply with no option left (or no option at all).
     Nothing,
+    /// The model's reply referenced a field other than the target, which the default model
+    /// may not offer (ASSIST-L32): the player enters the value by hand.
+    EnterByHand,
     /// The phrase and target alone exceed a bound.
     TooLong,
     /// The breaker is open, or the exchange failed.
@@ -1008,9 +1014,17 @@ async fn attempt(run: &Run) -> Result<Answer, Attempt> {
             Failure::Transport => Attempt::Transport,
             Failure::Status(_) => Attempt::Failed,
         })?;
-    Ok(match output::read(&completed.text, &rendered.checks) {
+    let mut checks = rendered.checks;
+    checks.field_refs = run.budgets.field_refs;
+    Ok(match output::read(&completed.text, &checks) {
         Err(_) => Answer::Nothing,
         Ok(Reading::Ambiguous(readings)) => Answer::Readings(readings),
+        // A model that may not offer field references abstains from the whole reply (the
+        // dropped option might have been the model's real reading): the player enters the
+        // value by hand.
+        Ok(Reading::Options { dropped, .. }) if dropped.contains(&output::Drop::FieldRef) => {
+            Answer::EnterByHand
+        }
         Ok(Reading::Options { shown, .. }) if shown.is_empty() => Answer::Nothing,
         Ok(Reading::Options { shown, .. }) => Answer::Options(
             shown

@@ -318,7 +318,10 @@ class Files(unittest.TestCase):
         self.assertEqual(out["schema_valid"], "1/1")
 
 
-V2_PREFIX_SHA256 = "7b0ba380d8687cc8dfe2a150bf99d684b3bb4f4d5a22e41b5d46a1b6bbd5fe84"
+# The shipped prefix (v2-compact, ASSIST-52): the Rust copy's hash, in `contract_tests.rs` too.
+V2_PREFIX_SHA256 = "d2aadd679cd8a86685e7e487d803cc0a727031ccb06f2c885da3cdd93fef05ca"
+# The pre-ASSIST-52 prefix (v2-base): the field-reference screen's base arm.
+V2_BASE_PREFIX_SHA256 = "7b0ba380d8687cc8dfe2a150bf99d684b3bb4f4d5a22e41b5d46a1b6bbd5fe84"
 
 
 class ContractV2(unittest.TestCase):
@@ -332,6 +335,17 @@ class ContractV2(unittest.TestCase):
         self.assertNotEqual(prefix, ae.contract_prefix("v1"))
         self.assertEqual(prefix, ae.contract_prefix("v2-short"))
         self.assertNotEqual(prefix, ae.contract_prefix("v2-full"))
+        self.assertEqual(prefix, ae.contract_prefix("v2-compact"))
+
+    def test_the_shipped_prefix_asks_for_compact_replies_and_the_base_does_not(self):
+        import hashlib
+
+        shipped, base = ae.contract_prefix("v2"), ae.contract_prefix("v2-base")
+        self.assertEqual(shipped.count(ae.EX_COMPACT), 1)
+        self.assertEqual(base.count(ae.EX_COMPACT), 0)
+        self.assertEqual(shipped.replace(ae.EX_COMPACT, "", 1), base)
+        self.assertEqual(hashlib.sha256(base.encode()).hexdigest(), V2_BASE_PREFIX_SHA256)
+        self.assertIn(ae.EX_COMPACT + "Reply with one JSON object", shipped)
 
     def test_request_uses_aliases(self):
         req = ae.build_request(
@@ -432,14 +446,6 @@ class ContractV2(unittest.TestCase):
         self.assertEqual(
             ae.shown_values(ae.validate_reply(reply(op("add", ref("t"), lit(5))), req)), [25]
         )
-
-    def test_compact_prefix_is_short_plus_only_the_compact_sentence(self):
-        req = ae.build_request(
-            {"id": "t", "target": "hp", "phrase": "heal 5"}, SHEET, contract="v2-compact"
-        )
-        short = ae.contract_prefix("v2-short")
-        self.assertEqual(req["system"].replace(ae.EX_COMPACT, "", 1), short)
-        self.assertEqual(req["system"].count(ae.EX_COMPACT), 1)
 
     def test_fieldref_cases_carry_rust_rendered_requests_that_score(self):
         path = Path(__file__).with_name("assist-eval") / "fieldref-cases.json"

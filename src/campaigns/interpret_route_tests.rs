@@ -27,6 +27,7 @@ fn budgets() -> Budgets {
         queue_wait: Duration::from_secs(35),
         max_tokens: 352,
         busy_after_expiry: Duration::ZERO,
+        field_refs: true,
     }
 }
 
@@ -285,6 +286,44 @@ async fn a_job_offers_the_reading_and_use_applies_it_with_a_confirmed_note() {
     .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
     assert_eq!(saved(setup, 1).await.1["hp"], 84);
+}
+
+#[tokio::test]
+async fn a_default_model_reply_that_references_a_field_tells_the_player_to_enter_it_by_hand() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    // Up to Max HP (f1, in the context): a field reference.
+    let to_max = r#"{"kind":"options","options":[{"expr":{"op":"sub","l":{"ref":"f1"},"r":{"ref":"t"}},"explanation":"up to max"}]}"#;
+    let mut setup = setup(&assist()).await;
+    created(&setup, &[]).await;
+    let stub = Arc::new(StubInterpreter::answering([Ok(to_max.to_owned())]));
+    let handle = AssistantHandle::ready_for_tests(
+        Arc::clone(&stub) as _,
+        Budgets {
+            field_refs: false,
+            ..budgets()
+        },
+    );
+    setup.app = crate::auth::app_with_options(
+        setup.store.clone(),
+        crate::auth::AuthOptions {
+            assistant: Some(handle),
+            ..crate::auth::AuthOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+    let key = scribble(&setup, "took 15 damage").await;
+    let (status, started) = start(&setup, &key).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+    let (_, done) = poll_done(&setup, started["job"].as_str().unwrap()).await;
+    assert_eq!(done["state"], "by_hand", "{done}");
+    assert!(
+        done["message"].as_str().unwrap().contains("by hand"),
+        "{done}"
+    );
+    assert!(done.get("options").is_none(), "{done}");
+    assert_eq!(saved(&setup, 1).await.1["hp"], 84, "nothing written");
 }
 
 #[tokio::test]

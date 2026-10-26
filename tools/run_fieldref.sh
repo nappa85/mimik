@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Field-reference experiment runner (prototype tier; decision rule: tools/fieldref-prereg.md).
-# Granite 4.2 3B Q4_K_M on the CPU, two arms (base = adopted v2 prefix, compact = v2 plus the
-# compact-reply sentence), pass 1 only, 5 threads (ASSIST-41 here), over the 30 cases of
+# Granite 4.2 3B Q4_K_M on the CPU, two arms (base = v2-base, the prefix before ASSIST-52,
+# compact = the shipped v2, which adds the compact-reply sentence), pass 1 only, 5 threads (ASSIST-41 here), over the 30 cases of
 # tools/assist-eval/fieldref-cases.json. Unattended, never reads input.
 #
 # Usage: tools/run_fieldref.sh [out-dir]   (default /media/data/mimik/fieldref/runs/<stamp>)
@@ -42,7 +42,7 @@ mkdir -p "$OUT"
 echo "$(date '+%F %T') start: load $l1 $l5 (max $LOAD_MAX), threads $THREADS, cpus $CPUS, deadline $(date -d "@$deadline" '+%F %T')$override" | tee -a "$OUT/run.log"
 invalid=0
 for arm in base compact; do
-  case $arm in base) contract=v2 ;; compact) contract=v2-compact ;; esac
+  case $arm in base) contract=v2-base ;; compact) contract=v2 ;; esac
   CONTRACT=$contract PRIME=1 PASSES=1 STRESS=0 COLD=1 COLD_ONLY='' THREADS=$THREADS CPUS=$CPUS \
     CASES=assist-eval/fieldref-cases.json MAX_TOKENS=352 NAME=fieldref DEADLINE_EPOCH=$deadline \
     "$ROOT/tools/run_assist_screen.sh" "$OUT/$arm" granite42-3b </dev/null \

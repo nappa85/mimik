@@ -204,12 +204,13 @@ PRIME_CASE = {"id": "prime", "target": "hp", "phrase": "prime"}
 
 SCHEMAS_DIR = Path(__file__).resolve().parent.parent / "schemas"
 SCHEMA_HEADING = "\nJSON schema of the reply:\n"
-# v2-short (exploratory, not adopted): the prefix quotes the schema with the ref alias enum
-# abbreviated to a description; response_format still sends the full pinned schema.
-# v2 is the adopted contract: its prefix quotes the schema without the alias enum (the
-# 2c-1 v2-short arm; "v2-short" is kept as a name for its ledgers). v2-full is the first v2
-# prefix, quoting the full schema (2c-1 screen, superseded).
-CONTRACTS = ("v1", "v2", "v2-full", "v2-short", "v2-ex", "v2-compact")
+# v2 is the shipped contract (ASSIST-52): its prefix is the instructions file, which asks for
+# compact single-line JSON, and quotes the schema without the alias enum; response_format
+# still sends the full pinned schema. "v2-short" and "v2-compact" are names for the same prefix
+# (the 2c-1 v2-short arm's prefix plus the compact sentence). v2-base is the prefix before
+# ASSIST-52, without the sentence (the field-reference screen's base arm). v2-full is the first
+# v2 prefix, quoting the full schema (2c-1 screen, superseded).
+CONTRACTS = ("v1", "v2", "v2-base", "v2-full", "v2-short", "v2-ex", "v2-compact")
 # v2-ex (exploratory, not adopted): the v2-short prefix with compact JSON examples, one example
 # referencing a context alias and a sentence asking for compact single-line JSON.
 V2_EX_BASE = "v2-short"
@@ -251,9 +252,17 @@ EX_COMPACT = "Reply with compact single-line JSON: no spaces or line breaks betw
 
 
 @functools.cache
+def base_instructions():
+    """The shipped instructions without the compact-reply sentence (the pre-ASSIST-52 text)."""
+    instructions = load_v2()[0]
+    assert instructions.count(EX_COMPACT) == 1, "the instructions lost the compact sentence"
+    return instructions.replace(EX_COMPACT, "", 1)
+
+
+@functools.cache
 def ex_instructions():
     """The v2 instructions with the v2-ex examples and the compact-reply sentence."""
-    instructions = load_v2()[0]
+    instructions = base_instructions()
     head, marker, _ = instructions.partition("Examples (target alias t, current value 9):\n")
     assert marker, "the v2 instructions changed"
     lead = "Reply with one JSON object and nothing else:\n"
@@ -263,13 +272,9 @@ def ex_instructions():
 
 
 @functools.cache
-def compact_prefix():
-    """v2-compact (field-reference experiment): the v2-short prefix plus only the
-    compact-reply sentence, at the position v2-ex puts it."""
-    instructions = load_v2()[0]
-    lead = "Reply with one JSON object and nothing else:\n"
-    assert lead in instructions
-    return instructions.replace(lead, EX_COMPACT + lead, 1) + short_prefix()[len(instructions) :]
+def base_prefix():
+    """v2-base: the short prefix before ASSIST-52, without the compact-reply sentence."""
+    return base_instructions() + short_prefix()[len(load_v2()[0]) :]
 
 
 @functools.cache
@@ -294,12 +299,12 @@ def contract_prefix(contract, variant=None):
         return system_prefix(variant)
     if variant is not None:
         raise ValueError("prompt variants exist for v1 only")
-    if contract in ("v2", "v2-short"):
+    if contract in ("v2", "v2-short", "v2-compact"):
         return short_prefix()
+    if contract == "v2-base":
+        return base_prefix()
     if contract == "v2-ex":
         return ex_prefix()
-    if contract == "v2-compact":
-        return compact_prefix()
     return load_v2()[3]
 
 
@@ -442,7 +447,7 @@ def build_request(case, sheet, variant=None, contract="v1"):
     Under v2, supplied and excluded are keyed by alias: "t" for the target, "f1"... for the
     context fields in order (the same order and drop rule as v1).
     """
-    if contract in ("v2", "v2-full", "v2-short", "v2-ex", "v2-compact"):
+    if contract in ("v2", "v2-base", "v2-full", "v2-short", "v2-ex", "v2-compact"):
         request = _rendered_request(case) or _build_request_v2(case, sheet)
         request["system"] = contract_prefix(contract)
         request["contract"] = contract

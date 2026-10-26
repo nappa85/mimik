@@ -77,6 +77,7 @@ impl Draft {
             phrase: self.phrase.clone(),
             target_value: self.target.value,
             supplied,
+            field_refs: true,
         }
     }
 

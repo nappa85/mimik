@@ -29,6 +29,7 @@ fn checks_at(phrase: &str, target: Option<i64>) -> Checks {
                 supplied("cell:gear/r1-1/weight", true, Some(3)),
             ),
         ]),
+        field_refs: true,
     }
 }
 
@@ -327,5 +328,35 @@ fn rendering_uses_display_symbols() {
     assert_eq!(
         render(&node, &name),
         "84 \u{2212} ((\u{2212}15 \u{d7} Max HP) \u{f7} 2 (rounded down))"
+    );
+}
+
+#[test]
+fn field_refs_off_drops_every_option_referencing_a_field_other_than_the_target() {
+    let mut refused = checks("lost 3");
+    refused.field_refs = false;
+    // The target stays referenceable; a literal from the phrase still works.
+    assert_eq!(one_with(sub(alias("t"), lit(3)), &refused), Ok(81));
+    assert_eq!(one_with(sub(alias("t"), alias("t")), &refused), Ok(0));
+    // A field, a same-row cell, an enum, an unknown and an unsupplied alias all drop, whatever
+    // the operation around them.
+    for other in ["f1", "f2", "f3", "c1", "f9"] {
+        assert_eq!(
+            one_with(sub(alias("t"), alias(other)), &refused),
+            Err(Drop::FieldRef),
+            "{other}"
+        );
+        assert_eq!(
+            one_with(alias(other), &refused),
+            Err(Drop::FieldRef),
+            "{other}"
+        );
+    }
+    // With the policy on (any other model) the same options are what they were.
+    let allowed = checks("lost 3");
+    assert_eq!(one_with(sub(alias("t"), alias("f1")), &allowed), Ok(0));
+    assert_eq!(
+        one_with(sub(alias("t"), alias("f2")), &allowed),
+        Err(Drop::EnumRef)
     );
 }
