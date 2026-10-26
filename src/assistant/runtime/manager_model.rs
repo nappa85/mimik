@@ -5,8 +5,8 @@
 //! previous (or, after a switch, the new) model starts next.
 use super::{
     Arc, AtomicBool, Attempt, Budgets, Child, Command, EndReason, Fail, Future, Instant, Launcher,
-    Level, Manager, Model, ModelCommand, Mutex, Next, NotCalibrated, Path, Record, State, Status,
-    TrialKey, TrialReport, TrialRequest, TrialState, calibrate_budgets, log, measured,
+    Level, Manager, Model, ModelCommand, Mutex, Next, NotCalibrated, Ordering, Path, Record, State,
+    Status, TrialKey, TrialReport, TrialRequest, TrialState, calibrate_budgets, log, measured,
     phrase_bound, trial, trial_bound, warm,
 };
 use crate::assistant::model::{default_alias, trial_max_tokens};
@@ -71,15 +71,27 @@ impl Manager {
         self.update(|status| status.model.note = Some(text));
     }
 
-    /// Runs `work` unless a command or the owner's Cancel comes first.
+    /// Whether the owner pressed Cancel for the trial being carried out.
+    fn cancelled(&self) -> bool {
+        self.cancel.trial.load(Ordering::SeqCst) == self.trial
+    }
+
+    /// Runs `work` unless a command or the owner's Cancel for this trial comes first.
     async fn guarded<T>(&mut self, work: impl Future<Output = T>) -> Result<T, Stopped> {
-        tokio::select! {
-            done = work => Ok(done),
-            command = self.commands.recv() => match command {
-                Some(command) => Err(Stopped::Command(command)),
-                None => std::future::pending().await,
-            },
-            () = self.cancel.notified() => Err(Stopped::Cancelled),
+        tokio::pin!(work);
+        loop {
+            if self.cancelled() {
+                return Err(Stopped::Cancelled);
+            }
+            tokio::select! {
+                done = &mut work => return Ok(done),
+                command = self.commands.recv() => match command {
+                    Some(command) => return Err(Stopped::Command(command)),
+                    None => std::future::pending().await,
+                },
+                // A wake-up for another trial changes nothing: look again.
+                () = self.cancel.wake.notified() => {}
+            }
         }
     }
 
@@ -121,12 +133,7 @@ impl Manager {
         } = request;
         // Nothing of the earlier session runs beside the candidate.
         self.launcher.settle().await;
-        // A Cancel pressed before this trial started is not for it.
-        tokio::select! {
-            biased;
-            () = self.cancel.notified() => {}
-            () = std::future::ready(()) => {}
-        }
+        self.trial = number;
         let path = self.status().path;
         // The whole trial, hashing included, is bounded.
         let deadline = Instant::now() + trial_bound(path);

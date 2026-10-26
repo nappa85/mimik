@@ -276,7 +276,16 @@ pub(crate) struct Handle {
     status: Arc<Mutex<Status>>,
     commands: mpsc::UnboundedSender<Command>,
     /// The owner's Cancel of a running trial.
-    cancel: Arc<Notify>,
+    cancel: Arc<Cancel>,
+}
+
+/// The owner's Cancel: which trial it is for, so a Cancel that arrives early, or late, never
+/// cancels another trial.
+#[derive(Default)]
+struct Cancel {
+    /// The number of the trial last asked to stop (0: none).
+    trial: std::sync::atomic::AtomicU64,
+    wake: Notify,
 }
 
 /// Whether "Try the GPU again" was accepted.
@@ -396,11 +405,15 @@ impl Handle {
     /// The owner's Cancel: stops a running trial and brings the previous model back. Whether
     /// a trial was running.
     pub(crate) fn cancel_trial(&self) -> bool {
-        let running = self.lock().trial.as_ref().is_some_and(TrialState::running);
-        if running {
-            self.cancel.notify_one();
+        let running = match self.lock().trial {
+            Some(TrialState::Running { number, .. }) => Some(number),
+            _ => None,
+        };
+        if let Some(number) = running {
+            self.cancel.trial.store(number, Ordering::SeqCst);
+            self.cancel.wake.notify_one();
         }
-        running
+        running.is_some()
     }
 
     /// The owner's "Switch": the latest finished trial, if `key` names it, becomes the active
@@ -560,7 +573,7 @@ pub(crate) fn spawn_with(
     let (commands, incoming) = mpsc::unbounded_channel();
     let (signal_sender, signals) = mpsc::unbounded_channel();
     assistant.subscribe(signal_sender);
-    let cancel = Arc::new(Notify::new());
+    let cancel = Arc::new(Cancel::default());
     let manager = Manager {
         assistant,
         launcher,
@@ -576,6 +589,7 @@ pub(crate) fn spawn_with(
         previous: models.previous,
         records: models.records,
         cancel: Arc::clone(&cancel),
+        trial: 0,
     };
     tokio::spawn(manager.run());
     Handle {
@@ -661,7 +675,9 @@ struct Manager {
     /// Where model changes are stored (none: the owner cannot change the model).
     records: Option<Arc<dyn Records>>,
     /// The owner's Cancel of a running trial.
-    cancel: Arc<Notify>,
+    cancel: Arc<Cancel>,
+    /// The trial being carried out (0: none).
+    trial: u64,
     /// Whether `/health` answered in the current attempt: from then on a failure (priming,
     /// calibration, the offload check) is not a library that failed to load.
     health_answered: Arc<AtomicBool>,

@@ -802,3 +802,34 @@ async fn the_default_model_serves_without_field_references_and_others_with() {
     assert!(!default.assistant.budgets().unwrap().field_refs);
     default.handle.shutdown().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_cancel_right_after_try_cancels_that_trial_and_never_the_next_one() {
+    let fixture = fixture([], CONFIG);
+    ready(&fixture.assistant).await;
+    // Cancel pressed before the manager has stopped the serving model for the trial.
+    assert_eq!(
+        fixture
+            .handle
+            .try_model(7, "local:other.gguf".into(), "other.gguf".into()),
+        TryModel::Accepted(1)
+    );
+    assert!(fixture.handle.cancel_trial());
+    let handle = fixture.handle.clone();
+    until(Duration::from_secs(600), move || {
+        handle.status().trial.is_some_and(|trial| !trial.running())
+    })
+    .await;
+    ready(&fixture.assistant).await;
+    let Some(TrialState::Cancelled { why, .. }) = fixture.handle.status().trial else {
+        panic!("{:?}", fixture.handle.status().trial)
+    };
+    assert_eq!(why, "cancelled by the owner");
+    assert!(
+        fixture.launcher.hashed.lock().unwrap().is_empty(),
+        "the cancelled trial never touched the file"
+    );
+    // That Cancel was for trial 1: trial 2 runs to its end.
+    let report = passed(fixture.try_and_wait("other.gguf").await);
+    assert_eq!(report.key.number, 2);
+}
