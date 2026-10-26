@@ -49,7 +49,7 @@ if pgrep -x llama-server >/dev/null; then echo "a llama-server is running" >&2; 
 [ ! -e "$OUT" ] || { echo "$OUT exists" >&2; exit 2; }
 mkdir -p "$OUT"
 echo "$(date '+%F %T') start: arms $ARMS, load $l1 $l5 (max $LOAD_MAX), threads $THREADS, cpus $CPUS, deadline $(date -d "@$deadline" '+%F %T')$override" | tee -a "$OUT/run.log"
-invalid=0
+invalid=0; failed=0
 for arm in $ARMS; do
   case $arm in
     base) contract=v2-base ;;
@@ -62,7 +62,7 @@ for arm in $ARMS; do
   CONTRACT=$contract PRIME=1 PASSES=1 STRESS=0 COLD=1 COLD_ONLY='' THREADS=$THREADS CPUS=$CPUS \
     CASES=assist-eval/fieldref-cases.json MAX_TOKENS=352 NAME=fieldref DEADLINE_EPOCH=$deadline \
     "$ROOT/tools/run_assist_screen.sh" "$OUT/$arm" "$MODEL" </dev/null \
-    || echo "$(date '+%F %T') $arm: runner exit $?" | tee -a "$OUT/run.log"
+    || { echo "$(date '+%F %T') $arm: runner exit $?" | tee -a "$OUT/run.log"; failed=1; }
   if [ -s "$OUT/$arm/$MODEL/screen.jsonl" ]; then
     python3 -I "$ROOT/tools/assist_eval.py" summarize "$OUT/$arm/$MODEL/screen.jsonl" \
       > "$OUT/summary-$arm.json" || echo "$arm: summary failed" | tee -a "$OUT/run.log"
@@ -71,6 +71,8 @@ for arm in $ARMS; do
   else
     echo "$(date '+%F %T') $arm: INVALID run (no screen ledger)" | tee -a "$OUT/run.log"; invalid=1
   fi
+  # An arm that failed or was incomplete ends the run: no next arm with the same model.
+  if [ "$failed" = 1 ] || [ "$invalid" = 1 ]; then echo "$(date '+%F %T') stopping after $arm" | tee -a "$OUT/run.log"; break; fi
 done
 [ "$invalid" = 0 ] || { echo "$(date '+%F %T') INVALID: repeat the whole run" | tee -a "$OUT/run.log"; exit 1; }
 echo "$(date '+%F %T') done; results: $OUT/fieldref-*.json" | tee -a "$OUT/run.log"

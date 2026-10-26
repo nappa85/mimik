@@ -23,6 +23,8 @@
 #   JUNCTION_STOP_C (90): the thermal guard's junction limit (assist_gpu_live.py keeps 85 for
 #   long runs). MIN_AVAIL_GB (0): refuse to start a model with less MemAvailable; the GPU guard
 #   also stops the run when swap use grows by more than 512 MB.
+#   MODELS_DIR (/media/data/mimik/models): where registry paths are resolved (a temporary copy).
+#   The swap stop is measured from the end of the model load (loose 2048 MB cap during the load).
 #   CASES (default: the 2b cases), PASSES (2), STRESS (4), COLD (3 cold starts; each runs the
 #   dh-01 request unless COLD_ONLY is empty), THREADS (2: server threads and cpu limit; CPUS
 #   must list at least that many cores), NAME (assist2b: container name stem).
@@ -74,20 +76,23 @@ if [ "$DEVICE" = gpu ]; then
     --group-add "$(stat -c %g /dev/dri/renderD128)" --group-add "$(stat -c %g /dev/dri/card0)")
   STOP="$OUT/thermal-stop"; rm -f "$STOP"
   swap_used() { awk '/^SwapTotal/{t=$2}/^SwapFree/{f=$2}END{print int((t-f)/1024)}' /proc/meminfo; }
-  SWAP0=$(swap_used)
+  # Swap baseline: set again after the model is loaded (start_server), so that page-cache
+  # pressure during a load does not count; until then a loose 2048 MB cap applies.
+  SWAP0=$(swap_used); echo "$SWAP0 2048" > "$OUT/swap-base"
   ( while :; do
       j=$(( $(cat "$HW/temp2_input" 2>/dev/null || echo 999000) / 1000 ))
       e=$(( $(cat "$HW/temp1_input" 2>/dev/null || echo 999000) / 1000 ))
       reason=""
       [ "$j" -ge "$JUNCTION_STOP_C" ] && reason="junction ${j} C"
       [ "$e" -ge 80 ] && reason="${reason:+$reason; }edge ${e} C"
-      [ "$(( $(swap_used) - SWAP0 ))" -gt 512 ] && reason="${reason:+$reason; }swap growing"
+      read -r sb sc < "$OUT/swap-base" || { sb=$SWAP0; sc=2048; }; sg=$(( $(swap_used) - sb ))
+      [ "$sg" -gt "$sc" ] && reason="${reason:+$reason; }swap growing (${sg} MB over baseline)"
       fan_ok || reason="${reason:+$reason; }fan left manual-high"
       if [ -n "$reason" ]; then
         echo "$(date '+%F %T') thermal stop: $reason" | tee -a "$OUT/run.log" > "$STOP"
         docker rm -f "$SRV" "$HARNESS" >/dev/null 2>&1; exit 0
       fi
-      echo "$(date '+%F %T') edge=$e junction=$j vram=$(cat /sys/class/drm/card0/device/mem_info_vram_used 2>/dev/null)" >> "$OUT/temps.log"
+      echo "$(date '+%F %T') edge=$e junction=$j vram=$(cat /sys/class/drm/card0/device/mem_info_vram_used 2>/dev/null) swapgrowth=$sg" >> "$OUT/temps.log"
       sleep 2
     done ) &
   GUARD=$!
@@ -114,7 +119,9 @@ start_server() {  # start_server <model-file>; echoes seconds to /health
     "${GPU_RUN[@]}" "$IMAGE" "${ARGS[@]}" >/dev/null
   for _ in $(seq 1 1800); do
     if docker exec "$SRV" curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1; then
-      now=$(date +%s.%N); python3 -c "print(round($now - $t0, 3))"; return 0
+      now=$(date +%s.%N)
+      [ "$DEVICE" = gpu ] && { echo "$(swap_used) 512" > "$OUT/swap-base.new" && mv "$OUT/swap-base.new" "$OUT/swap-base"; }
+      python3 -c "print(round($now - $t0, 3))"; return 0
     fi
     [ "$(docker inspect -f '{{.State.Running}}' "$SRV")" = true ] || { log "server exited"; return 1; }
     sleep 0.5
@@ -152,7 +159,7 @@ harness() {  # harness <ledger name> <args...>
 for key in "$@"; do
   [ "$(date +%s)" -lt "$DEADLINE_EPOCH" ] || { log "deadline reached before $key"; exit 0; }
   stopped && { log "thermal stop before $key"; exit 4; }
-  model=$(realpath -e "/media/data/mimik/models/$(reg "$key" "['path']")")
+  model=$(realpath -e "${MODELS_DIR:-/media/data/mimik/models}/$(reg "$key" "['path']")")
   SHA=$(reg "$key" "['sha256']"); LABEL_M=$(reg "$key" "['label']")
   IMAGE=$(reg "$key" "['server_image']")
   mapfile -t ARGS < <(cd "$ROOT/tools" && python3 -c "
