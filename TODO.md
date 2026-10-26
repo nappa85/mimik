@@ -32,8 +32,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 2. 2d-1 inputs from the field-reference screen (2026-10-26, `docs/results.md`):
    - the default model offers no option whose expression references a field other than `t`; the
      assistant tells the player to enter such a value by hand (ASSIST-L32);
-   - the screen chose the compact-output sentence (about 20% fewer output tokens, same quality).
-     Adopting it changes the shipped prefix and the 352-token cap, so the owner decides it in 2d-1.
+   - ship the v2-compact prefix (ASSIST-52), re-deriving the 352-token cap and the calibration.
 3. Older-ABI Landlock evidence (below ABI 6; the Ubuntu VM has ABI 4 and fails the two
    ABI-6 live checks, as documented).
 4. Owed measurements: the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks
