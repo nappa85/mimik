@@ -65,6 +65,17 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Other next actions
 
+- **Interactive walkthrough of the model tests (owner, 2026-10-26):** show the owner how the
+  interpretation screens work, using a few cases (for example from `tools/assist-eval/fieldref-cases.json`):
+  1. show the exact request (instructions plus the `<data>` JSON);
+  2. let the owner answer as if they were the model and score their answer the way the harness does;
+  3. show the real model's reply for the same case side by side, and why it scored the way it did.
+- **Field-reference bug (owner 2026-10-26: field references stay; the screen's 1/30 is a bug,
+  possibly in how we test).** Lead: the v2 instructions show no example of `{"ref": "fN"}` (all
+  four examples use only `t` and literals), and the model mostly copied field values as
+  literals. Next: add one or two reference examples unlike the screen's cases, check the
+  cases for ambiguous phrasings (for example fr-11), and re-run the 30-case screen.
+
 - Review helper: `external_review.py`'s short-output unavailable heuristic can reject a real
   successful verdict that discusses "unavailable" status. Add a regression and narrow the
   classification; direct sanitized Astra follow-up was needed to read the actual verdict.
