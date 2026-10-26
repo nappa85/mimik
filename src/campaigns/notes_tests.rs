@@ -1286,6 +1286,7 @@ async fn populated_schema19_upgrade_adds_the_note_table() {
             let history = rows(db)?;
             // Rewind to a genuine schema-19 shape.
             db.execute_batch(crate::campaigns::DROP_NOTES_SCHEMA)?;
+            db.execute_batch(crate::assistant::records::DROP_SCHEMA)?;
             db.execute_batch("PRAGMA user_version=19;")?;
             Ok(history)
         })
@@ -1313,7 +1314,7 @@ async fn populated_schema19_upgrade_adds_the_note_table() {
         .await
         .unwrap();
     assert_eq!(version, crate::SCHEMA_VERSION);
-    assert_eq!(version, 21);
+    assert_eq!(version, 22);
     assert_eq!(upgraded, history, "history kept byte for byte");
     assert_eq!(count, 0, "existing revisions have no notes");
     // Three triggers, the current-note index and the primary key's autoindex.

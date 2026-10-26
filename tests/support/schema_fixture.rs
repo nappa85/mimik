@@ -58,6 +58,9 @@ fn remove_empty_accounts(db: &rusqlite::Connection) {
         "catalogue_versions",
         "catalogues",
         "catalogue_drafts",
+        // The assistant's model setting (schema 22); the choice references the models.
+        "assistant_model_choice",
+        "assistant_models",
     ];
     // Collect every count before validating or dropping any table.
     let counts = tables.map(|table| {

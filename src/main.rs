@@ -103,9 +103,10 @@ fn create_data_dir(path: &std::path::Path) -> std::io::Result<()> {
 }
 
 /// The assistant `--assistant` asks for: the runtime manager over the data directory.
-fn assistant(
+async fn assistant(
     args: &Args,
     data_dir: &std::path::Path,
+    store: &Store,
 ) -> Result<mimik::assistant::AssistantHandle, Box<dyn std::error::Error>> {
     #[cfg(feature = "dev-endpoint")]
     if let Some(endpoint) = args.assistant.development.endpoint.clone() {
@@ -127,16 +128,20 @@ fn assistant(
         println!("DEVELOPMENT ONLY: assistant on, development endpoint (no endpoint check).");
         return Ok(handle);
     }
-    let handle = mimik::assistant::AssistantHandle::runtime(mimik::assistant::RuntimeConfig {
-        data_dir: data_dir.to_path_buf(),
-        models_dir: args.assistant.models_dir.clone(),
-        runtime_dir: args.assistant.runtime.clone(),
-        model: args.assistant.model.clone(),
-        model_sha256: args.assistant.model_sha256.clone(),
-        model_alias: args.assistant.model_alias.clone(),
-        threads: args.assistant.threads,
-        device: args.assistant.device.clone(),
-    })?;
+    let handle = mimik::assistant::AssistantHandle::runtime(
+        mimik::assistant::RuntimeConfig {
+            data_dir: data_dir.to_path_buf(),
+            models_dir: args.assistant.models_dir.clone(),
+            runtime_dir: args.assistant.runtime.clone(),
+            model: args.assistant.model.clone(),
+            model_sha256: args.assistant.model_sha256.clone(),
+            model_alias: args.assistant.model_alias.clone(),
+            threads: args.assistant.threads,
+            device: args.assistant.device.clone(),
+        },
+        store.clone(),
+    )
+    .await?;
     println!("Assistant on: the model server is starting (see /admin/assistant).");
     Ok(handle)
 }
@@ -304,10 +309,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         create_data_dir(parent)?;
     }
-    if args.assistant.on {
-        options.assistant = Some(assistant(&args, &data_dir(&path)?)?);
-    }
     let store = Store::open(&path)?;
+    if args.assistant.on {
+        options.assistant = Some(assistant(&args, &data_dir(&path)?, &store).await?);
+    }
     let unindexed = store.search_index_failures().await?;
     if unindexed > 0 {
         eprintln!(

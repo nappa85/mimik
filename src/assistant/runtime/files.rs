@@ -328,6 +328,26 @@ fn verified(
     })
 }
 
+/// The SHA-256 and size of the model `name` in the models folder, opened with the same
+/// checks as a load (the hash is remembered by the file's identity, so the load that
+/// follows does not read it again), stopping once `stop` says so.
+pub(crate) fn model_digest(
+    models: BorrowedFd<'_>,
+    name: &str,
+    cache: &HashCache,
+    stop: &dyn Fn() -> bool,
+) -> Result<([u8; 32], u64), Refusal> {
+    let file = verified(
+        models,
+        name,
+        Owners::Mine,
+        cache,
+        &format!("model/{name}"),
+        stop,
+    )?;
+    Ok((file.sha256, file.identity.size))
+}
+
 /// Opens and verifies the model `name` in the models folder against `sha256` (64 lowercase
 /// hex digits).
 #[cfg(test)]

@@ -11,13 +11,12 @@ bound, quick-add, the validity flag, the sheet module with save on leaving a fie
 interpretation assistant of development builds) is described
 in `docs/assisted-entry.md`; this plan only adds to it.
 
-Remaining, in order (2b measured and reviewed, `docs/results.md`; ASSIST-27 to ASSIST-42
+Remaining, in order (2b measured and reviewed, `docs/results.md`; ASSIST-27 to ASSIST-52
 decided; Rust 1.99.1 and `rig-core` 0.45.0 in place, ASSIST-39; 2c-1, interpretation against a
-hand-started local server, built, `docs/assisted-entry.md`; 2c-2a, the CPU runtime, and
-2c-2b-1, the GPU path, built, `docs/model-runtime.md`): **2c-2** the model runtime (process,
-token, confinement, budgets), **2d-1** the owner model setting with local models, **2d-2**
-model downloads, **3** bundles and reminders, **4** suggestions and "Which Sword?", **5** docs
-and gate; each sub-step has its own branch, tests and reviews. The model runs GPU-first with
+hand-started local server, built, `docs/assisted-entry.md`; 2c-2a, the CPU runtime, 2c-2b-1,
+the GPU path, and 2d-1, the owner model setting with local models, built,
+`docs/model-runtime.md`): **2d-2** model downloads, **3** bundles and reminders, **4**
+suggestions and "Which Sword?", **5** docs and gate; each sub-step has its own branch, tests and reviews. The model runs GPU-first with
 the CPU as the intended baseline (ASSIST-27; whether the default model meets the CPU caps at
 the ASSIST-41 thread default is set by the native calibration), as an official `llama-server` build that Mimik
 starts as a child and confines in the Hakoniwa sandbox where it can, never a container in production
@@ -62,10 +61,10 @@ steps add:
   with its reason, ready with B, N(B), R, D, Q); a child exit is never a breaker event. The
   owner's assistant page shows the runtime state and the breaker; priming, calibration and the
   2d trial are outside the breaker; only Restart and the app's start reset it.
-- **2d:** any model file but the default Granite one gets the 2d trial's `max_tokens` rule
-  (§1.4b), never below 256 (until then 256; the default Granite file has 352). From 2d-2 the binary contains TLS for downloads and
-  Cargo unifies `reqwest` features, so the model client's plain-HTTP property rests on its URL
-  guard, not on the dependency tree.
+- **2d-2:** from 2d-2 the binary contains TLS for downloads and Cargo unifies `reqwest`
+  features, so the model client's plain-HTTP property rests on its URL guard, not on the
+  dependency tree. (The `max_tokens` rule for tried models is built, `docs/model-runtime.md`,
+  "Owner model setting".)
 - **3:** catalogue entry text joins the context and is dropped first; reminder jobs have their
   own context (§1.5) and a low-priority slot on the same worker, after interpretations, one per
   account; the catalogue provenance extension (§1.5); bundles in the proposal freshness binding
@@ -240,8 +239,8 @@ natively for these tests (ASSIST-40).
      the whole filesystem readable by Mimik's user is readable by the model server".
   There is no level 2 (ASSIST-48). The assistant runs at level 1, and at level 3 only with the
   owner's explicit permission (ASSIST-43; hardening is "where available", ASSIST-30); the page
-  shows the level next to the assistant state and next to the 2d "Try" button (a downloaded
-  GGUF is untrusted input to llama-server, contained only by this).
+  shows the level next to the assistant state and in the Model section beside "Try" (a model
+  file is untrusted input to llama-server, contained only by this).
 - **Seccomp (every level):** pure Rust only, adding no runtime shared-library dependency to
   the shipped binary: `seccompiler` (pure Rust, it does not link `libseccomp`) or hand-written
   BPF; `libseccomp` is not an option. A 2c-2 fit check confirms `seccompiler` can express an
@@ -458,31 +457,27 @@ natively for these tests (ASSIST-40).
   and the native calibration at that setting decides. In 2c-2 these are formula fixtures,
   not evidence.
 
-### 1.4b Owner model setting (2d-1, 2d-2; ASSIST-28, ASSIST-35, ASSIST-36)
+### 1.4b Owner model setting (2d-2; ASSIST-28, ASSIST-35, ASSIST-36)
 
-- **Before 2d:** 2c reads the model from configuration: `--assistant-model` (the spec,
-  default `local:granite-4.2-3b-Q4_K_M.gguf` with its SHA-256 `e0406663…` compiled in, which
-  equals the Hub's LFS SHA-256 of that file at revision `c40945d…`), `--assistant-model-sha256`
-  (required for any other `local:` file) and `--assistant-model-alias` (the `--alias` the
-  runtime gives the server and the request's model name, default derived from the spec), so 2c does not depend on 2d. The file is placed in the models
-  folder by hand. From 2d-2 the default is the `hf:` spec below; a file already present with
-  that hash is used without a download.
-- **Page:** `/admin/assistant` (owner only; built in 2c-2 with the state, path, confinement
-  level, measurements, budgets, "Restart" and "Try the GPU again") gains one free-text field
-  "Model". Models folder: `<data dir>/models/` (`--models-dir`), mode 0700, owned by Mimik's
-  user.
-- **Grammar** (at most 512 bytes, ASCII, no surrounding white space; anything else is refused
-  naming the failed rule, and the field keeps the input):
-  - `hf:<org>/<repo>/<path>@<revision>` (2d-2): `org` and `repo` each 1 to 96 of
-    `[A-Za-z0-9._-]`, starting and ending alphanumeric, without `--` or `..`; `path` one or
-    more segments of 1 to 128 `[A-Za-z0-9._-]` joined by `/`, no segment `.` or `..`, ending
-    `.gguf` and not a split file (`-NNNNN-of-NNNNN.gguf`); `revision` exactly 40 lowercase hex
-    digits (a commit, never a branch or tag). URLs are built with path-segment encoding,
-    never by concatenation. In 2d-1 an `hf:` spec is refused ("downloads arrive later").
-  - `local:<name>.gguf` (2d-1): one name of 1 to 128 `[A-Za-z0-9._-]` ending `.gguf`, not
-    starting with `.`, not a Windows device name in any case (`CON`, `NUL`, `COM1`…).
-- **Model file handling (both forms):** as in §1.4a ("Model and runtime files"), built in
-  2c-2: the SHA-256 is recorded when the owner tries the model and checked before every load.
+Built in 2d-1 and described in [model-runtime.md](model-runtime.md), "Owner model setting": the
+"Model" field on `/admin/assistant` with the `local:<name>.gguf` form, the trial with its
+bounds and Cancel, Switch, Keep and Switch back, and migration 022 (the models and the
+active and previous choice). This section keeps what 2d-2 adds.
+
+- **Page:** the "Model" field also takes the `hf:` form below, shows the licence and download
+  progress, and lists downloaded models with a delete action for any that is not active.
+  Models folder: `<data dir>/models/` (`--models-dir`), mode 0700, owned by Mimik's user.
+- **Grammar** (`parse_spec` in `src/assistant/model.rs`; at most 512 bytes, ASCII, no
+  surrounding white space; a refusal names the failed rule and the field keeps the input):
+  `hf:<org>/<repo>/<path>@<revision>`: `org` and `repo` each 1 to 96 of
+  `[A-Za-z0-9._-]`, starting and ending alphanumeric, without `--` or `..`; `path` one or
+  more segments of 1 to 128 `[A-Za-z0-9._-]` joined by `/`, no segment `.` or `..`, ending
+  `.gguf` and not a split file (`-NNNNN-of-NNNNN.gguf`); `revision` exactly 40 lowercase hex
+  digits (a commit, never a branch or tag). URLs are built with path-segment encoding,
+  never by concatenation. Until 2d-2 an `hf:` spec is refused ("downloads arrive later").
+- **Model file handling:** as in §1.4a ("Model and runtime files"): the SHA-256 is recorded
+  when the owner tries the model and checked before every load. A download is tried like a
+  `local:` file; its stored name is its hash (`models/hf/<sha256>.gguf`).
 - **Download (`hf:`, 2d-2, owner-started only):** (1) metadata from the Hub API at that
   revision, JSON bounded at 1 MiB, admitted strictly: the returned commit equals the
   revision; the file is listed with LFS data; its SHA-256 is 64 lowercase hex and its size an
@@ -531,29 +526,6 @@ natively for these tests (ASSIST-40).
   observe the redirects of the default and suggested files at their pinned revisions, check
   Hugging Face's documentation, update the list and its tests, and note the change in the
   release notes.
-- **Trial and switch (2d-1; ASSIST-36):** "Try" verifies the model's hash, stops the current
-  child (players see "starting"), starts the candidate on the current device path and primes
-  it, then (1) sends 5 fixed synthetic phrases shipped with Mimik with the schema at
-  `max_tokens` 384 (the measurement cap): every reply must be schema-valid and untruncated;
-  (2) sets the model's `max_tokens` = min(384, max(256, round up to 32 of 1.25 × the largest
-  `predicted_n`)) (five phrases cannot measure a tail, hence the 256 floor; the default
-  Granite file, identified by its compiled-in SHA-256, keeps 352 from its 104-reply screen of the adopted prefix); (3) runs the calibration of §1.4a with that `max_tokens` and
-  derives the budgets. It passes when (1) and (3) succeed. Bounds: each phrase has twice the
-  path's run-deadline cap (180 s on the CPU path, 120 s on the GPU path), the whole trial
-  30 minutes on the CPU path and 20 on the GPU path (priming and calibration included; each
-  covers the worst case of priming 300 s, five phrases at their deadline and two calibration
-  samples at twice the cap); the
-  owner can Cancel at any time. Expiry, Cancel or failure stop the candidate and restore the
-  previous model automatically. Results are bound to a trial ID (the candidate's hash and the
-  generation it ran in), and "Switch" accepts only the latest finished trial's ID for that
-  hash. The page shows the device, priming
-  and calibration times, speeds, `max_tokens`, B, R, D and Q, and per phrase whether the
-  expected value was among the options (information only, D-D). "Switch" makes it active,
-  recording its hash, `max_tokens` and the final calibration; "Keep the current model"
-  restarts the previous one, as does a failed trial. "Switch back" restarts the previous
-  active model in one click. A load whose hash no longer matches makes the assistant
-  unavailable ("the model file changed") until the owner tries a model again. A non-active
-  downloaded model can be deleted.
 - **Default and suggestion (2d-2):** default
   `hf:ibm-granite/granite-4.2-3b-GGUF/granite-4.2-3b-Q4_K_M.gguf@c40945d71cd90f249a56985e8155551a9188dc30`;
   on the GPU path the page suggests
@@ -561,11 +533,9 @@ natively for these tests (ASSIST-40).
   (the 2b pins; it fits the GPU path on the RX 6650 XT, `docs/results.md`; other GPUs are
   unmeasured). A suggestion only fills the field.
 - **Security:** owner only (403 for others, as the other admin pages), CSRF and body bounds on
-  every action (Restart, "Try the GPU again", Try, Switch, Keep, Switch back, licence
-  confirmation, Cancel, Discard, Resume, delete); one download and one trial at a time; the
-  spec is configuration, never model output. Storage: migration 022 (models: spec, SHA-256,
-  size, licence and its confirmation, trial measurements, `max_tokens`; the active and
-  previous model).
+  every action (as 2d-1's, plus licence confirmation, Discard, Resume, delete); one download
+  and one trial at a time; the spec is configuration, never model output. Storage: a later
+  migration adds the licence and its confirmation to the models of migration 022.
 
 ### 1.5 Bundles and reminders (3)
 
@@ -695,30 +665,6 @@ checks run on the dev host with the GPU fan on manual, evening or weekend, throu
 - re-measure the superseding-job timings on both paths with the fixed helper, then the GPU-path
   checks at each llama.cpp pin change (`tools/assist_gpu_live.py`).
 
-### 2d-1 Owner model setting (local models)
-
-Scope: §1.4b without downloads: the "Model" field with the `local:` form (file handling is
-2c-2's), trial with its bounds and Cancel, Switch, Keep and Switch back, migration 022.
-Tests:
-- grammar: `local:../x.gguf`, `local:/etc/x.gguf`, `local:a/b.gguf`, `local:a\b.gguf`,
-  `local:.x.gguf`, `local:CON.gguf`, `local:nul.gguf`, a non-`.gguf` name, white space, a
-  non-ASCII character and 513 bytes refused with the rule named; an `hf:` spec refused
-  ("downloads arrive later"); the field keeps a refused input;
-- file handling (on top of 2c-2's): a `local:` file changed after its trial → unavailable "the
-  model file changed";
-- trial: a reply schema-invalid or truncated at 384 → fails and the previous model restarts;
-  `max_tokens` from the phrases' largest `predicted_n` with the 256 floor and the 384 cap; the
-  calibration uses that `max_tokens`; a model too slow for the caps → fails with the numbers;
-  a pass shows device, times, speeds, `max_tokens`, B, R, D and Q; players see "starting"
-  meanwhile; Switch, Keep and Switch back each restart and re-prime; the default Granite file
-  (by hash) keeps 352, and a different file with the same name does not; a phrase past its
-  deadline, the whole trial past its bound, and the owner's Cancel each stop the candidate and
-  restore the previous model; Switch with a stale trial ID (another hash, an older trial or an
-  older generation) → refused;
-- rights and routes: a non-owner → 403 on every action; missing or wrong CSRF; extra or
-  duplicate keys; body limits; a second trial while one runs → refused; session revoked during
-  a trial → its result is not applied.
-
 ### 2d-2 Model downloads
 
 Scope: §1.4b downloads: the `hf:` form, metadata admission, licence confirmation, the download
@@ -750,7 +696,8 @@ constructor unless stated):
   list and OS store, with no configuration knob;
 - suggestion: shown on the GPU path, not on the CPU path; filling the field starts nothing;
   a present file with the default's hash is used without a download;
-- rights and routes: as 2d-1 for licence confirmation, Cancel, Discard, Resume and delete;
+- rights and routes: as 2d-1's route tests (`src/campaigns/assistant_model_tests.rs`) for licence
+  confirmation, Cancel, Discard, Resume and delete;
 - live (reported separately, licence-checked per the project rules): the default Granite spec
   downloads and verifies against `e0406663…` and its redirect hosts are recorded for the host
   list; a Qwen3-4B trial on the GPU path at night or at a weekend.

@@ -85,7 +85,6 @@ async fn assisted() -> Assisted {
         Arc::new(Waiting(Arc::clone(&gate), Arc::clone(&preflights))),
         manager::Config {
             path: Path::Cpu,
-            max_tokens: 352,
             levels: manager::USED_LEVELS,
         },
     );
@@ -290,7 +289,6 @@ async fn the_gpu_state_says_sandboxed_with_graphics_driver_access_and_names_the_
         Arc::new(HangingGpu),
         manager::Config {
             path: Path::Gpu,
-            max_tokens: 352,
             levels: manager::USED_LEVELS,
         },
     );
@@ -347,7 +345,6 @@ async fn try_the_gpu_again_is_owner_only_csrf_checked_and_one_transition() {
         }),
         manager::Config {
             path: Path::Gpu,
-            max_tokens: 352,
             levels: manager::USED_LEVELS,
         },
     );

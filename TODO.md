@@ -9,8 +9,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1, 2c-2a (the CPU
   runtime at level 1 only, ASSIST-43, `docs/model-runtime.md`) and the Rust 1.99.1 / rig-core
   0.45.0 upgrade are merged into master, and so is 2c-2b-1 (the GPU path, live-verified on the
-  RX 6650 XT). There is no level 2 (ASSIST-48). Next: 2d-1. Level 3's return is its own later
-  step (plan, "Level 3 behind an owner opt-in").
+  RX 6650 XT). 2d-1 (the owner model setting with local models, ASSIST-L32 and the ASSIST-52
+  prefix) is built on branch `assist-2d1`, awaiting review. There is no level 2 (ASSIST-48).
+  Next: 2d-2. Level 3's return is its own later step (plan, "Level 3 behind an owner opt-in").
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
   target/agent-tools/ci.sh <cmd>`, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
@@ -26,13 +27,16 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    against the test suite (flags, output parsing, grammar conversion, the confinement suite),
    before the first release; (b) the system-llama.cpp mode with distribution packaging
    (compatibility checks instead of a version pin; its own design).
-1. 2d-1 owner model setting, 2d-2 downloads, 3 bundles and reminders, 4
-   suggestions, 5 docs and gate (includes the `docs/release-scope.md` update for schema 22 and the
-   assisted scope).
-2. 2d-1 inputs from the field-reference screen (2026-10-26, `docs/results.md`):
-   - the default model offers no option whose expression references a field other than `t`; the
-     assistant tells the player to enter such a value by hand (ASSIST-L32);
-   - ship the v2-compact prefix (ASSIST-52), re-deriving the 352-token cap and the calibration.
+1. 2d-2 downloads, 3 bundles and reminders, 4 suggestions, 5 docs and gate (includes the
+   `docs/release-scope.md` update for schema 22 and the assisted scope).
+2. Owed live measurement for the ASSIST-52 prefix (ASSIST-L47; CPU, 5 threads, outside
+   weekday 09:00-18:00): replay the 104-reply screen (`tools/run_assist_screen.sh`,
+   `CONTRACT=v2`, Granite 4.2 3B, `MAX_TOKENS=384`) and take the largest valid, untruncated
+   `predicted_n`; the default file's `max_tokens` is `min(384, round up to 32 of 1.25 ×
+   that)` (`DEFAULT_MAX_TOKENS` in `src/assistant/model.rs`, 352 until then); then re-run the idle
+   CPU calibration (`tools/assist_runtime_measure.py`) for the priming and the budgets. Also a
+   live trial of a second model through `/admin/assistant` (`local:`), CPU first, GPU at a
+   weekend.
 3. Older-ABI Landlock evidence (below ABI 6; the Ubuntu VM has ABI 4 and fails the two
    ABI-6 live checks, as documented).
 4. Owed measurements: the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks

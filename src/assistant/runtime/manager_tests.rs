@@ -1,6 +1,6 @@
 //! The transitions table, one test per row, with a fake launcher, fake children and Tokio's
 //! paused clock.
-use super::super::server::Timings;
+use super::super::server::{Structured, Timings};
 use super::*;
 use crate::assistant::interpreter::stub::StubInterpreter;
 use crate::assistant::interpreter::{Failure, Interpreter};
@@ -11,25 +11,29 @@ use tokio::sync::watch;
 
 /// How a fake server answers.
 #[derive(Clone)]
-struct Behaviour {
+pub(crate) struct Behaviour {
     /// `/health` answers before it is ready.
-    loading: usize,
-    prime_fails: bool,
+    pub(crate) loading: usize,
+    pub(crate) prime_fails: bool,
     /// Per-token prompt and generation seconds of the samples.
-    p: f64,
-    g: f64,
+    pub(crate) p: f64,
+    pub(crate) g: f64,
     /// Holds priming until a permit is added.
-    gate: Option<Arc<tokio::sync::Semaphore>>,
+    pub(crate) gate: Option<Arc<tokio::sync::Semaphore>>,
     /// What `loaded` answers (the GPU offload check).
-    loaded: Result<(), String>,
-    landlock: Option<super::super::hako::Landlock>,
+    pub(crate) loaded: Result<(), String>,
+    pub(crate) landlock: Option<super::super::hako::Landlock>,
     /// A malfunction of the fake server, if any.
-    fault: Fault,
+    pub(crate) fault: Fault,
+    /// Generated tokens of the trial phrases' replies, in order.
+    pub(crate) phrase_tokens: [f64; 5],
+    /// How long each trial phrase takes.
+    pub(crate) phrase_delay: Duration,
 }
 
 /// What a fake server gets wrong.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Fault {
+pub(crate) enum Fault {
     None,
     /// `/health` is refused by the endpoint check.
     RefuseHealth,
@@ -37,6 +41,10 @@ enum Fault {
     TokenizeFails,
     /// The samples come back without their prompt timing.
     MissingTiming,
+    /// The third trial phrase's reply stops at the measurement cap.
+    TruncatedPhrase,
+    /// The second trial phrase's reply is not valid against the schema.
+    InvalidPhrase,
 }
 
 impl Default for Behaviour {
@@ -50,12 +58,16 @@ impl Default for Behaviour {
             loaded: Ok(()),
             landlock: None,
             fault: Fault::None,
+            phrase_tokens: [60.0, 70.0, 80.0, 65.0, 75.0],
+            phrase_delay: Duration::from_millis(100),
         }
     }
 }
 
-struct FakeServer {
+pub(crate) struct FakeServer {
     behaviour: Behaviour,
+    /// Trial phrases answered so far.
+    phrases: AtomicUsize,
     health_calls: AtomicUsize,
     primed: Arc<AtomicUsize>,
     interpreter: Arc<StubInterpreter>,
@@ -113,17 +125,32 @@ impl Server for FakeServer {
         })
     }
 
+    async fn structured(&self, _: &str, max_tokens: u32) -> Result<Structured, Failure> {
+        assert_eq!(max_tokens, 384, "phrases go out at the measurement cap");
+        let n = self.phrases.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(self.behaviour.phrase_delay).await;
+        Ok(Structured {
+            text: if self.behaviour.fault == Fault::InvalidPhrase && n == 1 {
+                r#"{"kind":"nonsense"}"#.into()
+            } else {
+                r#"{"kind":"options","options":[]}"#.into()
+            },
+            truncated: self.behaviour.fault == Fault::TruncatedPhrase && n == 2,
+            predicted_n: Some(self.behaviour.phrase_tokens[n.min(4)]),
+        })
+    }
+
     fn interpreter(&self) -> Arc<dyn Interpreter> {
         Arc::clone(&self.interpreter) as Arc<dyn Interpreter>
     }
 }
 
-struct FakeChild {
-    server: Arc<FakeServer>,
-    exit: watch::Sender<Option<Fail>>,
-    stopped: AtomicBool,
-    alive: Arc<AtomicUsize>,
-    stops: Arc<AtomicUsize>,
+pub(crate) struct FakeChild {
+    pub(crate) server: Arc<FakeServer>,
+    pub(crate) exit: watch::Sender<Option<Fail>>,
+    pub(crate) stopped: AtomicBool,
+    pub(crate) alive: Arc<AtomicUsize>,
+    pub(crate) stops: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -176,7 +203,7 @@ impl FakeChild {
 }
 
 #[derive(Clone)]
-enum Start {
+pub(crate) enum Start {
     Ok(Behaviour),
     Sandbox(&'static str),
     Other(&'static str),
@@ -185,33 +212,42 @@ enum Start {
 type Probed = Vec<(Level, Result<(), String>)>;
 
 #[derive(Default)]
-struct FakeLauncher {
-    preflight: Mutex<Option<String>>,
-    preflight_delay: Mutex<Option<Duration>>,
-    preflights: Mutex<usize>,
+pub(crate) struct FakeLauncher {
+    pub(crate) preflight: Mutex<Option<String>>,
+    pub(crate) preflight_delay: Mutex<Option<Duration>>,
+    /// Delays of the next preflights, one each, before `preflight_delay` applies.
+    pub(crate) preflight_delays: Mutex<VecDeque<Duration>>,
+    pub(crate) preflights: Mutex<usize>,
     /// While set, `settle` waits (as for a blocking start still finishing).
-    unsettled: Mutex<Option<Arc<tokio::sync::Notify>>>,
-    cancels: AtomicUsize,
-    probe: Mutex<Option<Probed>>,
+    pub(crate) unsettled: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    pub(crate) cancels: AtomicUsize,
+    pub(crate) probe: Mutex<Option<Probed>>,
     /// The GPU path's probe (default: level 1 passes).
-    gpu_probe: Mutex<Option<Probed>>,
+    pub(crate) gpu_probe: Mutex<Option<Probed>>,
     /// The paths probed, in order.
-    probed: Mutex<Vec<Path>>,
+    pub(crate) probed: Mutex<Vec<Path>>,
     /// The path of each start, in order.
-    paths: Mutex<Vec<Path>>,
-    device: Mutex<Option<DeviceView>>,
-    device_notes: Mutex<Vec<String>>,
+    pub(crate) paths: Mutex<Vec<Path>>,
+    pub(crate) device: Mutex<Option<DeviceView>>,
+    pub(crate) device_notes: Mutex<Vec<String>>,
     /// Holds the CPU probe until notified.
-    cpu_probe_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
-    script: Mutex<VecDeque<Start>>,
-    starts: Mutex<Vec<(u64, Level, Instant)>>,
-    children: Mutex<Vec<Arc<FakeChild>>>,
-    alive: Arc<AtomicUsize>,
-    stops: Arc<AtomicUsize>,
-    primed: Arc<AtomicUsize>,
-    coexisted: AtomicBool,
+    pub(crate) cpu_probe_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    pub(crate) script: Mutex<VecDeque<Start>>,
+    pub(crate) starts: Mutex<Vec<(u64, Level, Instant)>>,
+    pub(crate) children: Mutex<Vec<Arc<FakeChild>>>,
+    pub(crate) alive: Arc<AtomicUsize>,
+    pub(crate) stops: Arc<AtomicUsize>,
+    pub(crate) primed: Arc<AtomicUsize>,
+    pub(crate) coexisted: AtomicBool,
     /// What the advisory library check says per path (CPU, GPU).
-    hints: Mutex<[Option<String>; 2]>,
+    pub(crate) hints: Mutex<[Option<String>; 2]>,
+    /// The models selected for each start, in order.
+    pub(crate) selected: Mutex<Vec<Model>>,
+    /// What hashing each model file gives.
+    pub(crate) files: Mutex<std::collections::BTreeMap<String, Result<ModelFile, String>>>,
+    /// The files hashed, in order.
+    pub(crate) hashed: Mutex<Vec<String>>,
+    pub(crate) hash_delay: Mutex<Option<Duration>>,
 }
 
 #[async_trait]
@@ -222,7 +258,8 @@ impl Launcher for FakeLauncher {
 
     async fn preflight(&self, _: Path) -> Result<(), String> {
         *self.preflights.lock().unwrap() += 1;
-        let delay = *self.preflight_delay.lock().unwrap();
+        let once = self.preflight_delays.lock().unwrap().pop_front();
+        let delay = once.or(*self.preflight_delay.lock().unwrap());
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
@@ -268,6 +305,24 @@ impl Launcher for FakeLauncher {
         self.device.lock().unwrap().clone()
     }
 
+    fn select(&self, model: &Model) {
+        self.selected.lock().unwrap().push(model.clone());
+    }
+
+    async fn hash_model(&self, name: &str) -> Result<ModelFile, String> {
+        self.hashed.lock().unwrap().push(name.to_owned());
+        let delay = *self.hash_delay.lock().unwrap();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        self.files
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Err(format!("the model: {name} is missing")))
+    }
+
     fn device_notes(&self) -> Vec<String> {
         self.device_notes.lock().unwrap().clone()
     }
@@ -301,6 +356,7 @@ impl Launcher for FakeLauncher {
         let child = Arc::new(FakeChild {
             server: Arc::new(FakeServer {
                 behaviour,
+                phrases: AtomicUsize::new(0),
                 health_calls: AtomicUsize::new(0),
                 primed: Arc::clone(&self.primed),
                 interpreter: Arc::new(StubInterpreter::default()),
@@ -316,14 +372,14 @@ impl Launcher for FakeLauncher {
 }
 
 impl FakeLauncher {
-    fn scripted(script: impl IntoIterator<Item = Start>) -> Arc<Self> {
+    pub(crate) fn scripted(script: impl IntoIterator<Item = Start>) -> Arc<Self> {
         Arc::new(Self {
             script: Mutex::new(script.into_iter().collect()),
             ..Self::default()
         })
     }
 
-    fn levels(&self) -> Vec<Level> {
+    pub(crate) fn levels(&self) -> Vec<Level> {
         self.starts
             .lock()
             .unwrap()
@@ -332,18 +388,17 @@ impl FakeLauncher {
             .collect()
     }
 
-    fn child(&self, n: usize) -> Arc<FakeChild> {
+    pub(crate) fn child(&self, n: usize) -> Arc<FakeChild> {
         Arc::clone(&self.children.lock().unwrap()[n])
     }
 }
 
-const CONFIG: Config = Config {
+pub(crate) const CONFIG: Config = Config {
     path: Path::Cpu,
-    max_tokens: 352,
     levels: USED_LEVELS,
 };
 
-fn manager(launcher: &Arc<FakeLauncher>) -> (Arc<Assistant>, Handle) {
+pub(crate) fn manager(launcher: &Arc<FakeLauncher>) -> (Arc<Assistant>, Handle) {
     let assistant = Assistant::new();
     let handle = spawn(
         Arc::clone(&assistant),
@@ -354,7 +409,7 @@ fn manager(launcher: &Arc<FakeLauncher>) -> (Arc<Assistant>, Handle) {
 }
 
 /// Lets the paused clock run until `done` holds (at most `limit` of virtual time).
-async fn until(limit: Duration, mut done: impl FnMut() -> bool) {
+pub(crate) async fn until(limit: Duration, mut done: impl FnMut() -> bool) {
     let end = Instant::now() + limit;
     while !done() {
         assert!(Instant::now() < end, "not reached within {limit:?}");
@@ -362,7 +417,7 @@ async fn until(limit: Duration, mut done: impl FnMut() -> bool) {
     }
 }
 
-async fn ready(assistant: &Arc<Assistant>) {
+pub(crate) async fn ready(assistant: &Arc<Assistant>) {
     let assistant = Arc::clone(assistant);
     until(Duration::from_secs(600), move || {
         assistant.state() == RuntimeState::Ready
@@ -439,7 +494,7 @@ async fn before_priming_and_calibration_complete_a_job_start_answers_starting() 
 }
 
 /// Waits until the assistant is unavailable; its reason.
-async fn unavailable(handle: &Handle) -> String {
+pub(crate) async fn unavailable(handle: &Handle) -> String {
     let probe = handle.clone();
     until(Duration::from_secs(60), move || {
         matches!(probe.status().state, State::Unavailable(_))
@@ -832,7 +887,6 @@ async fn a_restart_starts_the_next_session_only_after_the_launchers_work_settled
 
 const GPU_CONFIG: Config = Config {
     path: Path::Gpu,
-    max_tokens: 352,
     levels: USED_LEVELS,
 };
 

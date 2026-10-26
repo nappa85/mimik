@@ -1,14 +1,20 @@
-//! `/admin/assistant` (assisted sheet plan §1.4b, "Page"; step 2c-2a): the owner's view of
-//! the model runtime (state, path, confinement level, measurements, budgets, the breaker)
-//! and its Restart and "Try the GPU again". Owner only; both are CSRF-checked, and a second
-//! press while either runs starts no second transition.
-use super::{AuthResult, AuthState, csrf_admission, materials::html, owner_auth};
-use crate::assistant::runtime::manager::{Restart, State as Runtime, Status, TryGpu};
+//! `/admin/assistant` (`docs/model-runtime.md`; steps 2c-2a and 2d-1): the owner's
+//! view of the model runtime (state, path, confinement level, measurements, budgets, the
+//! breaker), its Restart and "Try the GPU again", and the "Model" setting: Try (the trial),
+//! Cancel, Switch, Keep and Switch back. Owner only; every action is CSRF-checked and
+//! body-bounded, and a second press while a transition or trial runs starts no second one.
+use super::materials::{TrustedDraft, html};
+use super::{AuthResult, AuthState, csrf_admission, owner_auth};
+use crate::assistant::model::{SpecError, parse_spec};
+use crate::assistant::runtime::manager::{
+    Chosen, Restart, State as Runtime, Status, TryGpu, TryModel,
+};
+use crate::assistant::runtime::models::{TrialKey, TrialReport, TrialState};
 use crate::assistant::runtime::{Level, Path};
 use askama::Template;
 use axum::{
     Router,
-    extract::{Form, Query, State},
+    extract::{DefaultBodyLimit, Form, Query, State},
     http::StatusCode,
     response::{IntoResponse, Redirect},
     routing::{get, post},
@@ -21,7 +27,31 @@ pub(super) fn routes() -> Router<AuthState> {
         .route("/admin/assistant", get(page))
         .route("/admin/assistant/restart", post(restart))
         .route("/admin/assistant/try-gpu", post(try_gpu))
+        .route(
+            "/admin/assistant/model/try",
+            post(try_model).layer(DefaultBodyLimit::max(MODEL_FORM_BYTES)),
+        )
+        .route(
+            "/admin/assistant/model/cancel",
+            post(cancel_trial).layer(DefaultBodyLimit::max(MODEL_FORM_BYTES)),
+        )
+        .route(
+            "/admin/assistant/model/switch",
+            post(switch).layer(DefaultBodyLimit::max(MODEL_FORM_BYTES)),
+        )
+        .route(
+            "/admin/assistant/model/keep",
+            post(keep).layer(DefaultBodyLimit::max(MODEL_FORM_BYTES)),
+        )
+        .route(
+            "/admin/assistant/model/switch-back",
+            post(switch_back).layer(DefaultBodyLimit::max(MODEL_FORM_BYTES)),
+        )
 }
+
+/// The model forms are a CSRF token and at most a 512-byte spec or a trial key of 100
+/// characters, escaped: 4 KiB is far more than they need.
+const MODEL_FORM_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -30,6 +60,17 @@ enum Notice {
     AlreadyRestarting,
     TryingGpu,
     GpuNotApplicable,
+    TryingModel,
+    TrialRunning,
+    ModelUnsupported,
+    TrialCancelled,
+    NoTrialRunning,
+    Switching,
+    SwitchingBack,
+    TrialStale,
+    NoPreviousModel,
+    Kept,
+    NothingToKeep,
 }
 
 impl Notice {
@@ -43,6 +84,29 @@ impl Notice {
             Self::GpuNotApplicable => {
                 "Nothing to try: the GPU is in use, or the CPU was chosen with --assistant-device cpu."
             }
+            Self::TryingModel => {
+                "Trying the model: the current model server stopped, so the assistant is starting until the trial ends. Reload this page to follow it."
+            }
+            Self::TrialRunning => "A trial is already running; nothing else was started.",
+            Self::ModelUnsupported => {
+                "This assistant keeps no model setting (a development endpoint is in use)."
+            }
+            Self::TrialCancelled => {
+                "Cancelling the trial: the candidate stops and the previous model starts again."
+            }
+            Self::NoTrialRunning => "No trial is running.",
+            Self::Switching => {
+                "Switching: the model server restarts with the new model and is measured again."
+            }
+            Self::SwitchingBack => {
+                "Switching back: the model server restarts with the previous model and is measured again."
+            }
+            Self::TrialStale => {
+                "That trial is not the latest finished one, so nothing changed. Try the model again."
+            }
+            Self::NoPreviousModel => "There is no previous model to switch back to.",
+            Self::Kept => "Kept the current model; the trial result is dismissed.",
+            Self::NothingToKeep => "There is no trial result to dismiss.",
         }
     }
 }
@@ -137,6 +201,177 @@ struct View {
     skipped: Vec<(u8, String)>,
     budgets: Option<BudgetsView>,
     calibration: Option<CalibrationView>,
+    model: ModelView,
+}
+
+/// The Model section: the active and previous model, the latest trial and the field.
+struct ModelView {
+    /// The owner can try and switch models.
+    switchable: bool,
+    active: ModelLine,
+    /// Where the active model comes from.
+    source: &'static str,
+    previous: Option<ModelLine>,
+    note: Option<String>,
+    trial: Option<TrialView>,
+    /// The field's content: the refused input is kept.
+    input: String,
+    /// Why the input was refused.
+    error: Option<String>,
+}
+
+struct ModelLine {
+    spec: String,
+    sha256: String,
+    max_tokens: u32,
+}
+
+fn model_line(model: &crate::assistant::runtime::models::Model) -> ModelLine {
+    ModelLine {
+        spec: if model.spec.is_empty() {
+            "(not named)".to_owned()
+        } else {
+            model.spec.clone()
+        },
+        sha256: if model.sha256.is_empty() {
+            "(not recorded)".to_owned()
+        } else {
+            model.sha256.clone()
+        },
+        max_tokens: model.max_tokens,
+    }
+}
+
+struct TrialView {
+    number: u64,
+    spec: String,
+    running: bool,
+    /// The phase of a running trial, or why a trial failed or was cancelled.
+    detail: String,
+    outcome: &'static str,
+    report: Option<ReportView>,
+}
+
+struct ReportView {
+    /// The trial key the "Switch" form carries.
+    key: String,
+    device: &'static str,
+    total: String,
+    priming: String,
+    prefix_tokens: String,
+    max_tokens: u32,
+    largest: u32,
+    budgets: BudgetsView,
+    speeds: Vec<SpeedView>,
+    phrases: Vec<PhraseView>,
+    field_refs: bool,
+}
+
+struct SpeedView {
+    prompt: String,
+    generation: String,
+    wall: String,
+}
+
+struct PhraseView {
+    note: &'static str,
+    tokens: String,
+    seconds: String,
+    offered: &'static str,
+}
+
+fn rate(count: f64, ms: f64) -> String {
+    if count.is_finite() && ms.is_finite() && ms > 0.0 {
+        format!("{:.1} tokens/s", count / (ms / 1000.0))
+    } else {
+        "unknown".to_owned()
+    }
+}
+
+fn report_view(report: &TrialReport) -> ReportView {
+    let b = &report.budgets;
+    ReportView {
+        key: report.key.to_string(),
+        device: match report.path {
+            Path::Cpu => "CPU",
+            Path::Gpu => "GPU",
+        },
+        total: format!("{:.0} s", report.elapsed.as_secs_f64()),
+        priming: format!("{:.1} s", report.priming.as_secs_f64()),
+        prefix_tokens: count(report.calibration.prefix_tokens),
+        max_tokens: report.model.max_tokens,
+        largest: report.largest_predicted,
+        budgets: BudgetsView {
+            bytes: b.bounds.bytes,
+            tokens: b.bounds.tokens,
+            run: b.run.as_secs(),
+            depth: b.depth,
+            queue_wait: b.queue_wait.as_secs(),
+            busy: b.busy_after_expiry.as_secs(),
+        },
+        speeds: report
+            .calibration
+            .samples
+            .iter()
+            .map(|s| SpeedView {
+                prompt: rate(s.prompt_n, s.prompt_ms),
+                generation: rate(s.predicted_n, s.predicted_ms),
+                wall: seconds(s.wall_ms),
+            })
+            .collect(),
+        phrases: report
+            .phrases
+            .iter()
+            .map(|p| PhraseView {
+                note: p.note,
+                tokens: count(p.predicted_n),
+                seconds: format!("{:.1} s", p.seconds),
+                offered: if p.expected_offered { "yes" } else { "no" },
+            })
+            .collect(),
+        field_refs: report.model.field_refs(),
+    }
+}
+
+fn trial_view(trial: TrialState) -> TrialView {
+    match trial {
+        TrialState::Running {
+            number,
+            spec,
+            phase,
+        } => TrialView {
+            number,
+            spec,
+            running: true,
+            detail: phase.to_owned(),
+            outcome: "running",
+            report: None,
+        },
+        TrialState::Passed(report) => TrialView {
+            number: report.key.number,
+            spec: report.model.spec.clone(),
+            running: false,
+            detail: String::new(),
+            outcome: "passed",
+            report: Some(report_view(&report)),
+        },
+        TrialState::Failed { number, spec, why } => TrialView {
+            number,
+            spec,
+            running: false,
+            detail: why,
+            outcome: "failed",
+            report: None,
+        },
+        TrialState::Cancelled { number, spec, why } => TrialView {
+            number,
+            spec,
+            running: false,
+            detail: why.to_owned(),
+            outcome: "cancelled",
+            report: None,
+        },
+    }
 }
 
 /// The Landlock line of the Confinement section.
@@ -172,14 +407,29 @@ fn count(n: f64) -> String {
     format!("{n:.0}")
 }
 
-fn view(status: Status, breaker: String) -> View {
+fn view(status: Status, breaker: String, input: String, error: Option<String>) -> View {
     let (state, reason) = match status.state {
         Runtime::Starting(phase) => ("Starting", phase.to_owned()),
         Runtime::Ready => ("Ready", String::new()),
         Runtime::Unavailable(why) => ("Unavailable", why),
     };
     let pinned = &crate::assistant::runtime::manifest::MANIFEST.llama_cpp;
+    let model = ModelView {
+        switchable: status.model.switchable,
+        active: model_line(&status.model.active),
+        source: if status.model.from_owner_setting {
+            "the owner's stored setting (the start flags are ignored)"
+        } else {
+            "the start flags"
+        },
+        previous: status.model.previous.as_ref().map(model_line),
+        note: status.model.note,
+        trial: status.trial.map(trial_view),
+        input,
+        error,
+    };
     View {
+        model,
         llama: format!(
             "llama.cpp {} (commit {})",
             pinned.tag,
@@ -258,24 +508,44 @@ struct Page {
     view: Option<View>,
 }
 
+/// The page, with the Model field holding `input` and `error` beside it when it was refused.
+async fn render(
+    state: &AuthState,
+    session: &Session,
+    notice: &'static str,
+    input: &str,
+    error: Option<String>,
+) -> AuthResult {
+    let csrf = super::token(session).await?.ok_or(StatusCode::FORBIDDEN)?;
+    let view = state.options.assistant.as_ref().and_then(|handle| {
+        handle.runtime.as_ref().map(|runtime| {
+            view(
+                runtime.status(),
+                handle.assistant.breaker_state(),
+                input.to_owned(),
+                error,
+            )
+        })
+    });
+    html(&Page { csrf, notice, view })
+}
+
 async fn page(
     State(state): State<AuthState>,
     session: Session,
     Query(query): Query<Query_>,
 ) -> AuthResult {
     owner_auth(&state, &session).await?;
-    let csrf = super::token(&session).await?.ok_or(StatusCode::FORBIDDEN)?;
-    let view = state.options.assistant.as_ref().and_then(|handle| {
-        handle
-            .runtime
-            .as_ref()
-            .map(|runtime| view(runtime.status(), handle.assistant.breaker_state()))
-    });
-    html(&Page {
-        csrf,
-        notice: query.notice.map_or("", Notice::text),
-        view,
-    })
+    let notice = query.notice.map_or("", Notice::text);
+    // The field starts with the active model's spec.
+    let input = state
+        .options
+        .assistant
+        .as_ref()
+        .and_then(|handle| handle.runtime.as_ref())
+        .map(|runtime| runtime.status().model.active.spec)
+        .unwrap_or_default();
+    render(&state, &session, notice, &input, None).await
 }
 
 async fn restart(
@@ -317,6 +587,135 @@ async fn try_gpu(
         TryGpu::NotApplicable => "gpu-not-applicable",
     };
     Ok(Redirect::to(&format!("/admin/assistant?notice={notice}")).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TryForm {
+    csrf: String,
+    model: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SwitchForm {
+    csrf: String,
+    trial: String,
+}
+
+fn redirect(notice: &str) -> axum::response::Response {
+    Redirect::to(&format!("/admin/assistant?notice={notice}")).into_response()
+}
+
+fn runtime_of(
+    state: &AuthState,
+) -> Result<&crate::assistant::runtime::manager::Handle, StatusCode> {
+    state
+        .options
+        .assistant
+        .as_ref()
+        .and_then(|handle| handle.runtime.as_ref())
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// "Try": the field's spec by the grammar, then the trial. A refused spec shows the page
+/// again with the rule named and the input kept.
+async fn try_model(
+    State(state): State<AuthState>,
+    session: Session,
+    Form(form): Form<TryForm>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    csrf_admission(&session, &form.csrf).await?;
+    let runtime = runtime_of(&state)?;
+    let spec = match parse_spec(&form.model) {
+        Ok(spec) => spec,
+        Err(refused) => return refused_spec(&state, &session, &form.model, refused).await,
+    };
+    let crate::assistant::model::Spec::Local(name) = spec;
+    Ok(redirect(
+        match runtime.try_model(auth.account.id, form.model, name) {
+            TryModel::Accepted(_) => "trying-model",
+            TryModel::Busy => "trial-running",
+            TryModel::Unsupported => "model-unsupported",
+        },
+    ))
+}
+
+async fn refused_spec(
+    state: &AuthState,
+    session: &Session,
+    input: &str,
+    refused: SpecError,
+) -> AuthResult {
+    let mut response = render(state, session, "", input, Some(refused.to_string())).await?;
+    *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+    response.extensions_mut().insert(TrustedDraft);
+    Ok(response)
+}
+
+async fn cancel_trial(
+    State(state): State<AuthState>,
+    session: Session,
+    Form(form): Form<RestartForm>,
+) -> AuthResult {
+    owner_auth(&state, &session).await?;
+    csrf_admission(&session, &form.csrf).await?;
+    let runtime = runtime_of(&state)?;
+    Ok(redirect(if runtime.cancel_trial() {
+        "trial-cancelled"
+    } else {
+        "no-trial-running"
+    }))
+}
+
+async fn switch(
+    State(state): State<AuthState>,
+    session: Session,
+    Form(form): Form<SwitchForm>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    csrf_admission(&session, &form.csrf).await?;
+    let runtime = runtime_of(&state)?;
+    // A key that does not parse names no trial: stale, nothing changes.
+    let Ok(key) = form.trial.parse::<TrialKey>() else {
+        return Ok(redirect("trial-stale"));
+    };
+    Ok(redirect(match runtime.switch(auth.account.id, &key) {
+        Chosen::Accepted => "switching",
+        Chosen::Busy => "trial-running",
+        Chosen::Stale | Chosen::NoPrevious => "trial-stale",
+    }))
+}
+
+async fn keep(
+    State(state): State<AuthState>,
+    session: Session,
+    Form(form): Form<RestartForm>,
+) -> AuthResult {
+    owner_auth(&state, &session).await?;
+    csrf_admission(&session, &form.csrf).await?;
+    let runtime = runtime_of(&state)?;
+    Ok(redirect(match runtime.keep() {
+        Chosen::Accepted => "kept",
+        Chosen::Busy => "trial-running",
+        Chosen::Stale | Chosen::NoPrevious => "nothing-to-keep",
+    }))
+}
+
+async fn switch_back(
+    State(state): State<AuthState>,
+    session: Session,
+    Form(form): Form<RestartForm>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    csrf_admission(&session, &form.csrf).await?;
+    let runtime = runtime_of(&state)?;
+    Ok(redirect(match runtime.switch_back(auth.account.id) {
+        Chosen::Accepted => "switching-back",
+        Chosen::Busy => "trial-running",
+        Chosen::Stale | Chosen::NoPrevious => "no-previous-model",
+    }))
 }
 
 #[cfg(test)]

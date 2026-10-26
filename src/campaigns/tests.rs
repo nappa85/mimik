@@ -24,6 +24,8 @@ mod administration_tests;
 mod assist_tests;
 #[path = "assistant_admin_tests.rs"]
 mod assistant_admin_tests;
+#[path = "assistant_model_tests.rs"]
+mod assistant_model_tests;
 #[path = "catalogue_tests.rs"]
 mod catalogue_tests;
 #[path = "cell_tests.rs"]
@@ -2594,7 +2596,7 @@ async fn populated_schema12_upgrade_preserves_owner_development_records_and_sess
                     .unwrap(),
             )?;
             crate::sources::search::drop_schema(db)?;
-            db.execute_batch(crate::catalogues::DROP_SCHEMA)?;db.execute_batch(crate::campaigns::DROP_NOTES_SCHEMA)?;
+            db.execute_batch(crate::catalogues::DROP_SCHEMA)?;db.execute_batch(crate::campaigns::DROP_NOTES_SCHEMA)?;db.execute_batch(crate::assistant::records::DROP_SCHEMA)?;
             db.execute_batch("PRAGMA user_version=12;")?;
             Ok(())
         })

@@ -1199,6 +1199,7 @@ async fn schema_20_upgrades_to_21_keeping_every_note() {
                 |r| r.get(0),
             )?;
             db.execute_batch("DROP TRIGGER private_sheet_notes_insert; INSERT INTO private_sheet_notes SELECT * FROM kept; DROP TABLE kept;")?;
+            db.execute_batch(crate::assistant::records::DROP_SCHEMA)?;
             db.execute_batch(&format!("{trigger};"))?;
             assert_eq!(
                 db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
@@ -1228,7 +1229,7 @@ async fn schema_20_upgrades_to_21_keeping_every_note() {
         .await
         .unwrap();
     assert_eq!(version, crate::SCHEMA_VERSION);
-    assert_eq!(version, 21);
+    assert_eq!(version, 22);
     assert_eq!(after, before, "notes kept byte for byte");
     assert_eq!(objects, 5, "three triggers, the index and the primary key");
     let app = crate::auth::app(reopened.clone()).await.unwrap();

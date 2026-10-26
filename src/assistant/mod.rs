@@ -12,6 +12,7 @@ pub(crate) mod jobs;
 pub(crate) mod lexer;
 pub mod model;
 pub(crate) mod output;
+pub(crate) mod records;
 pub(crate) mod request;
 pub(crate) mod runtime;
 pub(crate) mod transport;
@@ -59,7 +60,9 @@ impl AssistantHandle {
         })
     }
 
-    /// The worker and a runtime manager over `launcher`. Call from inside the Tokio runtime.
+    /// The worker and a runtime manager over `launcher` with a fixed model (tests). Call from
+    /// inside the Tokio runtime.
+    #[cfg(test)]
     pub(crate) fn with_launcher(
         launcher: Arc<dyn runtime::manager::Launcher>,
         config: runtime::manager::Config,
@@ -73,15 +76,32 @@ impl AssistantHandle {
         }
     }
 
+    /// [`Self::with_launcher`] with the owner's model setting.
+    pub(crate) fn with_models(
+        launcher: Arc<dyn runtime::manager::Launcher>,
+        config: runtime::manager::Config,
+        models: runtime::manager::ModelSetup,
+    ) -> Self {
+        let assistant = jobs::Assistant::new();
+        tokio::spawn(Arc::clone(&assistant).work());
+        let runtime =
+            runtime::manager::spawn_with(Arc::clone(&assistant), launcher, config, models);
+        Self {
+            assistant,
+            runtime: Some(runtime),
+        }
+    }
+
     /// Starts the assistant with the model runtime: the pinned llama-server as Mimik's child
     /// at the highest confinement level that works, primed and calibrated before it takes
     /// jobs. Call from inside the Tokio runtime.
     ///
     /// # Errors
     ///
-    /// A refused model spec or thread count, or Mimik's own path unknown, by message.
-    pub fn runtime(config: RuntimeConfig) -> Result<Self, String> {
-        let name = model::local_name(&config.model)?.to_owned();
+    /// A refused model spec or thread count, an unreadable model setting, or Mimik's own path
+    /// unknown, by message.
+    pub async fn runtime(config: RuntimeConfig, store: crate::Store) -> Result<Self, String> {
+        let name = model::local_name(&config.model)?;
         let max_tokens = model::max_tokens(&config.model, config.model_sha256.as_deref())?;
         let sha256 = config
             .model_sha256
@@ -90,6 +110,22 @@ impl AssistantHandle {
         let alias = match config.model_alias {
             Some(alias) => alias,
             None => model::default_alias(&config.model)?,
+        };
+        let flags = runtime::models::Model {
+            spec: config.model.clone(),
+            name: name.clone(),
+            sha256: sha256.clone(),
+            alias: alias.clone(),
+            max_tokens,
+            size: None,
+        };
+        let records = records::SqlRecords(store);
+        // The owner's stored setting beats the start flags.
+        let stored = records.load().await?;
+        let from_owner_setting = stored.active.is_some();
+        let (active, previous) = match stored.active {
+            Some(active) => (active.model, stored.previous.map(|record| record.model)),
+            None => (flags, None),
         };
         let device = match config.device.as_deref() {
             None => runtime::device::Choice::Auto,
@@ -113,9 +149,9 @@ impl AssistantHandle {
                 .unwrap_or_else(|| config.data_dir.join("models")),
             data_dir: config.data_dir,
             runtime_dir,
-            model: name,
-            model_sha256: sha256,
-            alias,
+            model: active.name.clone(),
+            model_sha256: active.sha256.clone(),
+            alias: active.alias.clone(),
             threads: config
                 .threads
                 .unwrap_or_else(runtime::threads::default_threads),
@@ -127,14 +163,19 @@ impl AssistantHandle {
             device,
             roots: runtime::device::Roots::default(),
         };
-        Ok(Self::with_launcher(
+        Ok(Self::with_models(
             Arc::new(runtime::launch::Launch(Arc::new(
                 runtime::launch::Real::new(settings),
             ))),
             runtime::manager::Config {
                 path,
-                max_tokens,
                 levels: runtime::manager::USED_LEVELS,
+            },
+            runtime::manager::ModelSetup {
+                active,
+                previous,
+                records: Some(Arc::new(records)),
+                from_owner_setting,
             },
         ))
     }

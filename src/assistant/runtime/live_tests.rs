@@ -1020,7 +1020,6 @@ async fn failed_start_keeps_level_1(real: Arc<Real>, reasons: &[&str]) {
         Arc::new(Launch(Arc::clone(&real))),
         manager::Config {
             path: Path::Cpu,
-            max_tokens: 64,
             levels: manager::USED_LEVELS,
         },
     );

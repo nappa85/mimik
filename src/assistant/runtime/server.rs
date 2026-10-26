@@ -49,6 +49,16 @@ impl Timings {
     }
 }
 
+/// A schema-constrained completion, as the model trial reads it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Structured {
+    pub text: String,
+    /// The reply stopped at `max_tokens` (`finish_reason` is `length`), or did not say why it
+    /// stopped.
+    pub truncated: bool,
+    pub predicted_n: Option<f64>,
+}
+
 #[async_trait]
 pub(crate) trait Server: Send + Sync {
     async fn health(&self) -> Health;
@@ -62,6 +72,9 @@ pub(crate) trait Server: Send + Sync {
         max_tokens: u32,
         ignore_eos: bool,
     ) -> Result<Timings, Failure>;
+    /// One non-streamed interpretation request as a job sends it (the fixed prefix, the
+    /// pinned schema as `response_format`, greedy), for the model trial's phrases.
+    async fn structured(&self, user: &str, max_tokens: u32) -> Result<Structured, Failure>;
     /// The interpretation client over the same transport.
     fn interpreter(&self) -> Arc<dyn Interpreter>;
 }
@@ -107,6 +120,40 @@ impl Llama {
         let body = response.into_body().await.map_err(|_| Failure::Transport)?;
         serde_json::from_slice(&body).map_err(|_| Failure::Transport)
     }
+}
+
+/// The body of a trial phrase: the job's request, non-streamed.
+fn structured_body(model: &str, user: &str, max_tokens: u32) -> Value {
+    let mut body = json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": [{"type": "text", "text": FIXED_PREFIX.as_str()}]},
+            {"role": "user", "content": [{"type": "text", "text": user}]},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.0,
+        "stream": false,
+    });
+    if let (Some(object), Value::Object(extra)) = (
+        body.as_object_mut(),
+        crate::assistant::interpreter::additional_params(),
+    ) {
+        object.extend(extra);
+    }
+    body
+}
+
+/// The reply's text, whether it was cut off, and its generated tokens.
+fn read_structured(value: &Value) -> Result<Structured, Failure> {
+    let choice = &value["choices"][0];
+    Ok(Structured {
+        text: choice["message"]["content"]
+            .as_str()
+            .ok_or(Failure::Transport)?
+            .to_owned(),
+        truncated: choice["finish_reason"].as_str() != Some("stop"),
+        predicted_n: Timings::from_body(value).predicted_n,
+    })
 }
 
 fn failure(error: &http_client::Error) -> Failure {
@@ -199,7 +246,56 @@ impl Server for Llama {
         Ok(Timings::from_body(&value))
     }
 
+    async fn structured(&self, user: &str, max_tokens: u32) -> Result<Structured, Failure> {
+        let body = structured_body(&self.model, user, max_tokens);
+        let value = self.post("/v1/chat/completions", &body).await?;
+        read_structured(&value)
+    }
+
     fn interpreter(&self) -> Arc<dyn Interpreter> {
         Arc::clone(&self.interpreter) as Arc<dyn Interpreter>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_trial_phrase_is_a_job_request_without_streaming() {
+        let body = structured_body("granite", "<data>x</data>", 384);
+        assert_eq!(body["model"], "granite");
+        assert_eq!(body["max_tokens"], 384);
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["top_k"], 1);
+        assert_eq!(body["seed"], 0);
+        assert_eq!(body["temperature"], 0.0);
+        assert_eq!(
+            body["messages"][0]["content"][0]["text"],
+            FIXED_PREFIX.as_str()
+        );
+        assert_eq!(body["messages"][1]["content"][0]["text"], "<data>x</data>");
+        // The pinned schema, as every job sends it.
+        let format = &body["response_format"]["json_schema"];
+        assert_eq!(format["strict"], true);
+        assert_eq!(format["schema"], *crate::assistant::contract::SCHEMA);
+    }
+
+    #[test]
+    fn a_reply_is_truncated_unless_the_server_says_it_stopped() {
+        let reply = |finish: Value| {
+            json!({
+                "choices": [{"message": {"content": "{}"}, "finish_reason": finish}],
+                "timings": {"predicted_n": 12.0},
+            })
+        };
+        let stopped = read_structured(&reply(json!("stop"))).unwrap();
+        assert_eq!(stopped.text, "{}");
+        assert!(!stopped.truncated);
+        assert_eq!(stopped.predicted_n, Some(12.0));
+        for cut in [json!("length"), json!(null), json!("tool_calls")] {
+            assert!(read_structured(&reply(cut)).unwrap().truncated);
+        }
+        assert_eq!(read_structured(&json!({})), Err(Failure::Transport));
     }
 }

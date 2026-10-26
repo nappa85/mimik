@@ -10,6 +10,36 @@
 <p>Circuit breaker: {{ view.breaker }}</p>
 <form method="post" action="/admin/assistant/restart"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Restart</button></form>
 <p>Restart stops the model server, starts it again from the highest confinement level, measures it again and resets the breaker and the failure count; after a GPU failure it stays on the CPU. Number entry, notes and Undo work meanwhile.</p></section>
+<section class="panel"><h2>Model</h2>
+<p>Active: <strong>{{ view.model.active.spec }}</strong> · SHA-256 <code>{{ view.model.active.sha256 }}</code> · <code>max_tokens</code> {{ view.model.active.max_tokens }} · from {{ view.model.source }}.</p>
+{% if let Some(note) = view.model.note %}<p class="form-error" role="alert">{{ note }}</p>{% endif %}
+{% if view.model.switchable %}
+{% if let Some(previous) = view.model.previous %}<p>Previous: <strong>{{ previous.spec }}</strong> · SHA-256 <code>{{ previous.sha256 }}</code> · <code>max_tokens</code> {{ previous.max_tokens }}.</p>
+<form method="post" action="/admin/assistant/model/switch-back"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Switch back</button></form>{% endif %}
+<form method="post" action="/admin/assistant/model/try"><input type="hidden" name="csrf" value="{{ csrf }}">
+<label for="model-spec">Model</label> <input id="model-spec" name="model" value="{{ view.model.input }}" maxlength="512" size="60" autocomplete="off" spellcheck="false" required{% if view.model.error.is_some() %} aria-invalid="true" aria-describedby="model-error"{% endif %}> <button{% if view.restarting && view.model.trial.is_none() %} disabled{% endif %}>Try</button>
+{% if let Some(error) = view.model.error %}<p id="model-error" class="form-error" role="alert">{{ error }}</p>{% endif %}</form>
+<p>A model is a file already in the models folder: <code>local:&lt;name&gt;.gguf</code> (place it there by hand; downloads arrive later). Trying it stops the model server while the trial runs, so the assistant shows as starting meanwhile: the file is hashed, loaded, primed, tried on five synthetic phrases and measured. Nothing changes until you press Switch, and Switch back returns to the previous model.</p>
+{% if let Some(level) = view.level %}<p>A model file is untrusted input to the model server, contained only by its confinement: level {{ level.number }} ({{ level.name }}).</p>{% endif %}
+{% if let Some(trial) = view.model.trial %}<h3>Trial {{ trial.number }} of {{ trial.spec }}: {{ trial.outcome }}</h3>
+{% if trial.running %}<p>Now: {{ trial.detail }}. Bounded to 30 minutes on the CPU and 20 on the GPU, with 2 × the run deadline per phrase; reload this page to follow it.</p>
+<form method="post" action="/admin/assistant/model/cancel"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Cancel</button></form>
+{% else if !trial.detail.is_empty() %}<p class="form-error" role="alert">{{ trial.detail }}. The previous model is running again.</p>
+<form method="post" action="/admin/assistant/model/keep"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Dismiss</button></form>{% endif %}
+{% if let Some(report) = trial.report %}<p>Passed on the {{ report.device }} in {{ report.total }}. Priming {{ report.priming }} ({{ report.prefix_tokens }} prompt tokens). The largest reply of the five phrases was {{ report.largest }} tokens, so <code>max_tokens</code> is <strong>{{ report.max_tokens }}</strong>.</p>
+<p>Request bound B {{ report.budgets.bytes }} bytes and N(B) {{ report.budgets.tokens }} tokens · run deadline R {{ report.budgets.run }} s · queue D {{ report.budgets.depth }}, wait Q {{ report.budgets.queue_wait }} s.</p>
+<table><thead><tr><th>Sample</th><th>Prompt speed</th><th>Generation speed</th><th>Wall time</th></tr></thead><tbody>
+{% for speed in report.speeds %}<tr><td>{{ loop.index }}</td><td>{{ speed.prompt }}</td><td>{{ speed.generation }}</td><td>{{ speed.wall }}</td></tr>{% endfor %}
+</tbody></table>
+<table><thead><tr><th>Phrase</th><th>Reply tokens</th><th>Time</th><th>Expected value offered</th></tr></thead><tbody>
+{% for phrase in report.phrases %}<tr><td>{{ phrase.note }}</td><td>{{ phrase.tokens }}</td><td>{{ phrase.seconds }}</td><td>{{ phrase.offered }}</td></tr>{% endfor %}
+</tbody></table>
+<p>Whether the expected value was among the options is information only; it does not decide anything.{% if !report.field_refs %} This is the default model, which does not offer options that use another field.{% endif %}</p>
+<form method="post" action="/admin/assistant/model/switch"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="trial" value="{{ report.key }}"><button>Switch</button></form>
+<form method="post" action="/admin/assistant/model/keep"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Keep the current model</button></form>
+<p>The current model is already running again; Keep dismisses this result. Switch restarts the model server with this model and measures it again.</p>{% endif %}
+{% endif %}
+{% else %}<p>The model cannot be changed here: a development endpoint is in use.</p>{% endif %}</section>
 <section class="panel"><h2>Device</h2>
 {% if view.cpu_chosen %}<p>The CPU only: Mimik was started with <code>--assistant-device cpu</code>, so no GPU is listed or used.</p>{% endif %}
 {% if let Some(device) = view.device %}<p>GPU: <strong>{{ device.description }}</strong> ({{ device.name }} in its sandbox, PCI {{ device.pci }}, render node {{ device.node }}, {{ device.total_mib }} MiB).</p><p class="gpu-exposure"><strong>Sandboxed, with graphics-driver access:</strong> the model server runs in the level-1 sandbox: no network, no other processes and no access to the user's files. Besides the runtime and the model it reads read-only system libraries, system driver data (Vulkan ICD manifests, libdrm and drirc data), the card's sysfs attributes and the CPU topology, and it can issue any ioctl on its one render node, so its exposure to the kernel's graphics driver is wider than on the CPU path. Start Mimik with <code>--assistant-device cpu</code> to run it on the CPU instead.</p>{% endif %}
