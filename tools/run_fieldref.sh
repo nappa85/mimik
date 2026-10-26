@@ -7,6 +7,10 @@
 # Experiment 2 (tools/fieldref2-prereg.md): ARMS="control refex novals ids" runs the four arms
 # (control = shipped v2-compact, refex = v2-refex, novals = v2-novals, ids = v2-ids) in one run.
 #
+# Other models (experiment 3, GPU): MODEL=<registry key> DEVICE=gpu [N_CPU_MOE=n MEMORY=22g
+# MIN_AVAIL_GB=n JUNCTION_STOP_C=85 THREADS=6 CPUS=0,1,2,3,4,5]; arms A and D are "control ids".
+# The settings reach tools/run_assist_screen.sh through the environment.
+#
 # Usage: [ARMS="base compact"] tools/run_fieldref.sh [out-dir]   (default /media/data/mimik/fieldref/runs/<stamp>)
 # Refuses on a weekday from 09:00 to 18:00 and when the host is busy; no request starts at
 # or after the next weekday 09:00 (a request already running then finishes). Environment:
@@ -19,8 +23,9 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${1:-/media/data/mimik/fieldref/runs/$(date +%Y%m%d-%H%M)}
 LOAD_MAX=${LOAD_MAX:-1.0}
 ARMS=${ARMS:-base compact}
-THREADS=5
-CPUS=0,1,2,3,4
+MODEL=${MODEL:-granite42-3b}
+THREADS=${THREADS:-5}
+CPUS=${CPUS:-0,1,2,3,4}
 now=$(date +%s)
 day=$(date +%u); hour=$((10#$(date +%H)))
 override=""
@@ -56,12 +61,12 @@ for arm in $ARMS; do
   esac
   CONTRACT=$contract PRIME=1 PASSES=1 STRESS=0 COLD=1 COLD_ONLY='' THREADS=$THREADS CPUS=$CPUS \
     CASES=assist-eval/fieldref-cases.json MAX_TOKENS=352 NAME=fieldref DEADLINE_EPOCH=$deadline \
-    "$ROOT/tools/run_assist_screen.sh" "$OUT/$arm" granite42-3b </dev/null \
+    "$ROOT/tools/run_assist_screen.sh" "$OUT/$arm" "$MODEL" </dev/null \
     || echo "$(date '+%F %T') $arm: runner exit $?" | tee -a "$OUT/run.log"
-  if [ -s "$OUT/$arm/granite42-3b/screen.jsonl" ]; then
-    python3 -I "$ROOT/tools/assist_eval.py" summarize "$OUT/$arm/granite42-3b/screen.jsonl" \
+  if [ -s "$OUT/$arm/$MODEL/screen.jsonl" ]; then
+    python3 -I "$ROOT/tools/assist_eval.py" summarize "$OUT/$arm/$MODEL/screen.jsonl" \
       > "$OUT/summary-$arm.json" || echo "$arm: summary failed" | tee -a "$OUT/run.log"
-    python3 -I "$ROOT/tools/assist_eval.py" fieldref-summary "$OUT/$arm/granite42-3b/screen.jsonl" \
+    python3 -I "$ROOT/tools/assist_eval.py" fieldref-summary "$OUT/$arm/$MODEL/screen.jsonl" \
       > "$OUT/fieldref-$arm.json" || { echo "$(date '+%F %T') $arm: INVALID run (not all 30 cases completed)" | tee -a "$OUT/run.log"; invalid=1; }
   else
     echo "$(date '+%F %T') $arm: INVALID run (no screen ledger)" | tee -a "$OUT/run.log"; invalid=1

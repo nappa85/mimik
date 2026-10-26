@@ -18,6 +18,11 @@
 #   manual-high; the weekday 09:00-18:00 window is the caller's DEADLINE_EPOCH to set.
 # The model network is internal with inhibit_ipv4 (no address on the host side); an existing
 # network without both is refused.
+#   N_CPU_MOE (registry value): llama.cpp --n-cpu-moe for a GPU run of a MoE model. MEMORY (6g):
+#   the server container's RAM limit (no swap), for models whose experts stay in RAM.
+#   JUNCTION_STOP_C (90): the thermal guard's junction limit (assist_gpu_live.py keeps 85 for
+#   long runs). MIN_AVAIL_GB (0): refuse to start a model with less MemAvailable; the GPU guard
+#   also stops the run when swap use grows by more than 512 MB.
 #   CASES (default: the 2b cases), PASSES (2), STRESS (4), COLD (3 cold starts; each runs the
 #   dh-01 request unless COLD_ONLY is empty), THREADS (2: server threads and cpu limit; CPUS
 #   must list at least that many cores), NAME (assist2b: container name stem).
@@ -34,6 +39,10 @@ MAX_TOKENS=${MAX_TOKENS:-384}
 VARIANT=${VARIANT:-}
 PRIME=${PRIME:-0}
 DEVICE=${DEVICE:-cpu}
+N_CPU_MOE=${N_CPU_MOE:-}
+MEMORY=${MEMORY:-6g}
+JUNCTION_STOP_C=${JUNCTION_STOP_C:-90}
+MIN_AVAIL_GB=${MIN_AVAIL_GB:-0}
 CONTRACT=${CONTRACT:-v1}
 CASES=${CASES:-assist-eval/cases.json}
 PASSES=${PASSES:-2}
@@ -64,18 +73,21 @@ if [ "$DEVICE" = gpu ]; then
   GPU_RUN=(--device /dev/dri/renderD128 --device /dev/dri/card0
     --group-add "$(stat -c %g /dev/dri/renderD128)" --group-add "$(stat -c %g /dev/dri/card0)")
   STOP="$OUT/thermal-stop"; rm -f "$STOP"
+  swap_used() { awk '/^SwapTotal/{t=$2}/^SwapFree/{f=$2}END{print int((t-f)/1024)}' /proc/meminfo; }
+  SWAP0=$(swap_used)
   ( while :; do
       j=$(( $(cat "$HW/temp2_input" 2>/dev/null || echo 999000) / 1000 ))
       e=$(( $(cat "$HW/temp1_input" 2>/dev/null || echo 999000) / 1000 ))
       reason=""
-      [ "$j" -ge 90 ] && reason="junction ${j} C"
+      [ "$j" -ge "$JUNCTION_STOP_C" ] && reason="junction ${j} C"
       [ "$e" -ge 80 ] && reason="${reason:+$reason; }edge ${e} C"
+      [ "$(( $(swap_used) - SWAP0 ))" -gt 512 ] && reason="${reason:+$reason; }swap growing"
       fan_ok || reason="${reason:+$reason; }fan left manual-high"
       if [ -n "$reason" ]; then
         echo "$(date '+%F %T') thermal stop: $reason" | tee -a "$OUT/run.log" > "$STOP"
         docker rm -f "$SRV" "$HARNESS" >/dev/null 2>&1; exit 0
       fi
-      echo "$(date '+%F %T') edge=$e junction=$j" >> "$OUT/temps.log"
+      echo "$(date '+%F %T') edge=$e junction=$j vram=$(cat /sys/class/drm/card0/device/mem_info_vram_used 2>/dev/null)" >> "$OUT/temps.log"
       sleep 2
     done ) &
   GUARD=$!
@@ -97,7 +109,7 @@ start_server() {  # start_server <model-file>; echoes seconds to /health
   t0=$(date +%s.%N)
   docker run -d --init --pull never --name "$SRV" --label "$LABEL" --network "$NET" \
     --network-alias server --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges \
-    --read-only --tmpfs /tmp --memory 6g --memory-swap 6g --cpus "$THREADS" --cpuset-cpus "$CPUS" \
+    --read-only --tmpfs /tmp --memory "$MEMORY" --memory-swap "$MEMORY" --cpus "$THREADS" --cpuset-cpus "$CPUS" \
     --pids-limit 256 --mount type=bind,src="$model",dst=/models/model.gguf,readonly \
     "${GPU_RUN[@]}" "$IMAGE" "${ARGS[@]}" >/dev/null
   for _ in $(seq 1 1800); do
@@ -146,9 +158,11 @@ for key in "$@"; do
   mapfile -t ARGS < <(cd "$ROOT/tools" && python3 -c "
 import model_registry as m
 d = m.load(); e = m.model(d, '$key')
-for a in m.server_args(e, 8192, device='$DEVICE', threads=$THREADS): print(a)
+for a in m.server_args(e, 8192, n_cpu_moe=int('$N_CPU_MOE') if '$N_CPU_MOE' else None, device='$DEVICE', threads=$THREADS): print(a)
 print('--threads-batch'); print('$THREADS'); print('--reasoning'); print('off')")
-  log "$key: hashing $model"
+  avail=$(awk '/^MemAvailable/{print int($2/1048576)}' /proc/meminfo)
+  [ "$avail" -ge "$MIN_AVAIL_GB" ] || { log "$key: MemAvailable ${avail} GB < $MIN_AVAIL_GB GB; refusing"; exit 6; }
+  log "$key: hashing $model (MemAvailable ${avail} GB)"
   actual=$(docker run --rm --network none --user 1000:1000 --cap-drop ALL --read-only --memory 256m \
     --mount type=bind,src="$model",dst=/m.gguf,readonly "$CHECK_IMAGE" sha256sum /m.gguf | cut -d' ' -f1)
   [ "$actual" = "$SHA" ] || { log "$key: sha256 mismatch $actual"; exit 5; }
