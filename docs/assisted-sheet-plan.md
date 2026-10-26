@@ -20,7 +20,7 @@ model downloads, **3** bundles and reminders, **4** suggestions and "Which Sword
 and gate; each sub-step has its own branch, tests and reviews. The model runs GPU-first with
 the CPU as the intended baseline (ASSIST-27; whether the default model meets the CPU caps at
 the ASSIST-41 thread default is set by the native calibration), as an official `llama-server` build that Mimik
-starts as a child and confines with bubblewrap where it can, never a container in production
+starts as a child and confines in the Hakoniwa sandbox where it can, never a container in production
 (ASSIST-29, ASSIST-30, ASSIST-34); budgets come from a measurement at each start within fixed
 caps (ASSIST-31, ASSIST-32). Linux x86_64 is the platform built and verified now.
 
@@ -52,7 +52,7 @@ context with formula read sets, the runtime event interface, jobs, admission, th
 map, the breaker, the start, poll and apply routes, the note key, and the module's flow. Later
 steps add:
 
-- **2c-2:** the runtime paths of the client policy: on the bubblewrap path the destination is
+- **2c-2:** the runtime paths of the client policy: on the sandbox path the destination is
   the current generation's socket path and nothing else; on the TCP paths the URL host must be
   the IP literal `127.0.0.1` (`::1` stays accepted only by the development endpoint) and the
   port the current child's; every connection is checked to reach the current child before its
@@ -172,15 +172,10 @@ natively for these tests (ASSIST-40).
   - a new required job `llama-runtime` with `needs: [llama-fetch, checks]` (so there is no
     cycle: `checks` never waits for `llama-runtime`), on a runner pinned by label
     (`ubuntu-24.04`), with `timeout-minutes: 30`, as host steps, not inside the `mimik-ci`
-    container (Docker's default seccomp profile refuses the namespace flags `bwrap
-    --unshare-all` needs). It uses no Rust toolchain. It verifies the `linux-release` tarball
+    container (Docker's default seccomp profile refuses the namespaces the sandbox
+    needs). It uses no Rust toolchain. It verifies the `linux-release` tarball
     against `SHA256SUMS`, unpacks it under `target/`, reapplies the manifest's modes, and runs
-    everything from that unpacked release. It installs `bubblewrap` from the 24.04 package and
-    records its version; if that package lacks any option the probe needs, the job builds a
-    pinned upstream bubblewrap release (tarball SHA-256 and the meson and ninja build
-    dependencies pinned in the workflow) and installs it to `/usr/bin` with `sudo`, so the
-    fixed-path rule holds and no release-capable override exists. If
-    `kernel.apparmor_restrict_unprivileged_userns` exists it logs its value and lifts it with
+    everything from that unpacked release. If `kernel.apparmor_restrict_unprivileged_userns` exists it logs its value and lifts it with
     `sudo sysctl` for the job's duration only (an absent key is logged and skipped). It then
     runs:
     - the flag check;
@@ -220,48 +215,26 @@ natively for these tests (ASSIST-40).
   `LANG`, `HOME` pointing at an empty private directory, the token variable when that channel
   is used); keeps only the descriptors it was handed (Rust opens everything close-on-exec; the
   hand-over descriptors are listed by number); then executes the confinement level's command
-  in place (`execve` of bwrap on level 1, `execveat` of the verified llama-server descriptor on
+  in place (the Hakoniwa sandbox built in the runner on level 1, `execveat` of the verified llama-server descriptor on
   level 3; either way the parent-death signal stays set). On level 3 the runner sets
   `PR_SET_PDEATHSIG` and `PR_SET_NO_NEW_PRIVS` before it installs the seccomp filter, and the
   filter refuses any later `prctl(PR_SET_PDEATHSIG)` and `prctl(PR_SET_NO_NEW_PRIVS)` call,
-  so a compromised server cannot clear the signal; level 1 keeps bubblewrap's own setup
-  sequence (its `--die-with-parent` and the PID namespace contain the tree). The preflight refuses a `bwrap`
-  that is set-user-ID or set-group-ID (that exec would clear the signal, and it is not the
-  unprivileged setup this design assumes).
+  so a compromised server cannot clear the signal; on level 1 the runner stays as the sandbox's
+  supervisor, and the PID namespace contains the tree.
 - **Confinement levels (ASSIST-34), tried in order; the active level and the reason for each
   skipped level are shown on the assistant page and logged:**
-  1. **bubblewrap**: `bwrap` from a fixed absolute path (`/usr/bin/bwrap`, `/bin/bwrap`; never
-     `PATH`), unprivileged (user namespaces). Arguments: `--unshare-all` (user, network, PID,
-     IPC, UTS, cgroup; no `--share-net`), `--die-with-parent`, `--new-session`, `--clearenv`
-     plus the minimal environment, `--cap-drop ALL`; `--ro-bind` of the system library
-     directories, `/etc/ld.so.cache`, the Vulkan loader and driver files (`/usr/share/vulkan`,
-     `/etc/vulkan` where present) and the read-only parts of `/sys` the driver enumerates; the
-     runtime files and the model bound read-only from their verified descriptors; `--dev /dev`
-     (a new minimal `/dev`), on the GPU path plus `--dev-bind` of the selected device's render
-     node only (read-write, as Mesa needs); private `--tmpfs /dev/shm` and `--tmpfs /tmp`
-     (read-write, each with `--size`, 256 MiB and 64 MiB, when the probe finds the option;
-     otherwise bounded only by `RLIMIT_FSIZE` per file, shown on the page); `--proc /proc`; the
-     socket directory bound read-write; no bind of the host `/`; the token through
-     `--ro-bind-data <fd>`; the seccomp program through `--seccomp <fd>`; `--json-status-fd
-     <fd>`, which reports `child-pid` (bwrap's PID-1 reaper inside the new PID namespace) and
-     `pid-namespace`, and later the `exit-code`. The exact path list is fixed by the 2c-2 tests
-     on both paths (CPU and GPU reach `ready`) and listed in the reference doc; nothing outside
-     it is visible. The child has only its own loopback interface, so it listens on a Unix
-     socket at `/run/llama/llama.sock` inside the sandbox, a bind of a per-generation
-     directory in Mimik's own data directory (`<data dir>/run/<generation>/`), created with
-     `mkdir` mode 0700 and opened with `O_NOFOLLOW | O_DIRECTORY`, then `fstat` must show a
-     directory owned by Mimik's user with mode 0700, or the start is refused; removed when the
-     generation stops. Only the socket is expected there, but a compromised server can write
-     files into it, each bounded by `RLIMIT_FSIZE` but not in number, so exhaustion would hit
-     Mimik's data disk, not the user's session (ASSIST-L26). Mimik connects through `/proc/self/fd/<dir fd>/llama.sock`, so the
-     host path's length never meets the 108-byte `sun_path` limit. A pathname socket is found
-     by the inode its path resolves to, not by the `sun_path` string it was bound with, so the
-     host-side path through the directory descriptor reaches the socket the child bound as
-     `/run/llama/llama.sock`; the `llama-runtime` job performs that real connect against the
-     pinned binary. Abstract Unix sockets are
-     per network namespace and pathname sockets are limited to what is bound in, so the child
-     reaches no host service. OpenFirma's bubblewrap setup is the reference; no code is copied
-     and `firma-run` is not a dependency.
+  1. **Hakoniwa** (ASSIST-51), unprivileged (user namespaces): the runner builds new user,
+     mount, PID, IPC, UTS, cgroup and network namespaces (an empty network namespace: no
+     network at all), a root of read-only binds of the system library directories, the Vulkan
+     loader and driver files and the runtime files and model (each checked against the
+     identity the launcher verified), bounded tmpfs mounts, a minimal `/dev` (on the GPU path
+     plus the selected render node only), the token in the sandbox's memory-backed `/run`, a
+     Landlock layer (ASSIST-49) and the seccomp program; the child listens on a Unix socket at
+     `/run/llama/llama.sock`, a bind of a per-generation directory in Mimik's data directory
+     (`<data dir>/run/<generation>/`, mode 0700, opened with `O_NOFOLLOW | O_DIRECTORY`),
+     which Mimik reaches through `/proc/self/fd/<dir fd>/llama.sock`. A compromised server can
+     write files into that directory, each bounded by `RLIMIT_FSIZE` but not in number
+     (ASSIST-L26). The exact list and the reasons are in [model-runtime.md](model-runtime.md).
   3. **Unconfined** (seccomp only, TCP on `127.0.0.1`), used only when the owner has
      explicitly allowed it (ASSIST-43; not in 2c-2a): "not confined: TCP egress allowed, and
      the whole filesystem readable by Mimik's user is readable by the model server".
@@ -303,13 +276,8 @@ natively for these tests (ASSIST-40).
   dev host uses `strace` in a container on the GPU path (no dependency on the kernel log or
   root); calls the Vulkan driver needs are decided before 2c-2 completes.
   `SECCOMP_FILTER_FLAG_LOG` is optional.
-- **Preflight** (every start, before level 1): bwrap present at a fixed path, not set-ID; its
-  support for every option used above is probed (no remembered minimum version: bubblewrap
-  0.13.0 on the dev host has `--unshare-all`, `--clearenv`, `--bind-fd`/`--ro-bind-fd`,
-  `--bind-data`/`--ro-bind-data`, `--perms`, `--seccomp` and `--die-with-parent`, checked
-  2026-10-22); every option the profile uses is probed, including `--json-status-fd`,
-  `--dev-bind`, `--tmpfs` with `--size`, `--proc`, `--new-session` and `--cap-drop`; then a
-  real probe run, `mimik assistant-runner --probe`: the Mimik binary re-executed under the
+- **Preflight** (every start, before level 1): the host check (unprivileged user namespaces not
+  disabled); then a real probe run, `mimik assistant-runner --probe`: the Mimik binary re-executed under the
   full level profile (the same binds, descriptors, seccomp program and token channel as a real
   start, plus Mimik's own libraries bound) exercising each resource once: open the model
   through its descriptor path (including `--ro-bind-fd` of a regular-file descriptor), bind
@@ -319,8 +287,7 @@ natively for these tests (ASSIST-40).
   llama-server's own system calls; the real server start does (CI with the test model, the dev
   host with the real model). It runs once for the CPU build and once for the GPU build (a
   level may work for one and not the other; each path uses the highest level its own build
-  passed). A failure names its cause where it can be told: bwrap
-  missing, set-ID or lacking an option (named), user namespaces disabled
+  passed). A failure names its cause where it can be told: user namespaces disabled
   (`user.max_user_namespaces`, `kernel.unprivileged_userns_clone`), the Ubuntu AppArmor
   restriction on unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns`),
   or the probe's own error. Then level 3 is probed only if the owner has explicitly allowed it (ASSIST-43). A level that
@@ -340,13 +307,11 @@ natively for these tests (ASSIST-40).
   of the pinned build; every other request carries it.
 - **Endpoint check, per connection, before its first byte:** level 1: `SO_PEERCRED` on the
   connected Unix socket (the kernel reports the peer PID in Mimik's PID namespace) must give
-  Mimik's UID and a PID that is either the `child-pid` bwrap reported for this generation or
-  a process whose `PPid` (from `/proc/<pid>/status`) is that `child-pid`: with `--unshare-all`
-  bwrap 0.13.0 on this host reports its PID-1 reaper as `child-pid` and runs the command as
-  its child, while a bwrap whose sandbox init executes the command in place gives the other
-  shape; the preflight asserts which shape the installed bwrap has. In both shapes the
+  Mimik's UID and a PID that is either the `child-pid` the runner reported for this generation
+  (the sandbox's reaper) or the server inside, whose `PPid` or reported start time ties it to
+  the sandbox. The
   namespace test must pass: the `st_ino` of `/proc/<pid>/ns/pid` equals the `pid-namespace`
-  number bwrap reported, cross-checked by `NSpid` in `/proc/<pid>/status` (two entries, the
+  number reported (where readable), cross-checked by `NSpid` in `/proc/<pid>/status` (two entries, the
   inner one small); where `ns/pid` is not readable (it needs ptrace-read access, which a
   non-dumpable process denies), the `NSpid` and `PPid` tests decide. Mimik holds a pidfd on
   `child-pid` so its PID cannot be reused during the generation. A UID-only match is never
@@ -372,7 +337,7 @@ natively for these tests (ASSIST-40).
   entry, the endpoint check, jobs and every exit or timeout event carry it, and an event from an
   older generation is ignored. One manager task serializes transitions: a child is stopped
   (SIGTERM, SIGKILL after 5 s) and the next one starts only after it is gone: on level 1 when
-  bwrap's status descriptor reports `exit-code` and a pidfd on the reaper signals exit (the PID
+  the runner's pidfd and the server's start-time identity show it exited (the PID
   namespace, and with it every process and its GPU memory, is gone); on level 3 when a
   pidfd on the child signals exit. So two model servers never coexist (a GPU → CPU fallback and
   a trial included). On every generation change, every queued and running job ends with "the
@@ -393,8 +358,8 @@ natively for these tests (ASSIST-40).
   `/sys/class/drm` entries, or selects by PCI address inside the sandbox. Level 3 cannot isolate nodes (it
   does not restrict device opens at all): the GPU is used there only if exactly one hardware
   GPU is visible, counted from sysfs (`/sys/class/drm/renderD*` with their PCI devices), not
-  from `--list-devices`, otherwise the CPU path is used with a page note (multi-GPU without
-  bubblewrap is a limitation, ASSIST-L25). The node's PCI address (sysfs) is its stable
+  from `--list-devices`, otherwise the CPU path is used with a page note (multi-GPU outside
+  the sandbox is a limitation, ASSIST-L25). The node's PCI address (sysfs) is its stable
   identity across restarts and distinguishes two identical cards. Ranking (`auto`, level 1):
   a device counts as dedicated when sysfs shows `mem_info_vram_total` above 0 (amdgpu) or its
   PCI class and `boot_vga` mark a discrete card where available; dedicated devices rank before
@@ -412,7 +377,7 @@ natively for these tests (ASSIST-40).
   | Event | Action | Failure count |
   |---|---|---|
   | Attempt fails on the GPU path (budgets that do not derive included), or the GPU child exits, or is stopped as hung | stop and wait until gone, start on the CPU path at the same level at once, showing the reason; CPU until Mimik restarts or the owner presses "Try the GPU again" | not counted |
-  | Attempt on the CPU path fails with a sandbox-attributable failure at level 1 (a bwrap setup error, a status-descriptor failure before exec, the level's preflight failing) | next attempt at once on level 3 if the owner has explicitly allowed it and it passed its probe (ASSIST-43); none left: `unavailable` with the fix; the skipped level and its reason are recorded and shown | not counted |
+  | Attempt on the CPU path fails with a sandbox-attributable failure at level 1 (a sandbox setup error, a status-descriptor failure before exec, the level's preflight failing) | next attempt at once on level 3 if the owner has explicitly allowed it and it passed its probe (ASSIST-43); none left: `unavailable` with the fix; the skipped level and its reason are recorded and shown | not counted |
   | Attempt fails on the CPU path, otherwise (model-load errors, hash mismatches, exits after exec keep the level) | retry after 2 minutes | +1 |
   | Child exits while ready (CPU path) | restart now | +1 only within 10 minutes of `ready` |
   | Two consecutive run-deadline expiries with no completed exchange between | stop as hung, wait until gone, restart, re-measure (whatever `/health` says); expiries never count toward the breaker | as a child exit |
@@ -669,19 +634,19 @@ request and inside every write transaction. Limits: raw ≤ 200, notes ≤ 256 p
 dynamic prompt ≤ 4 KiB on the GPU path and ≤ 1 KiB (related fields only) on the CPU path, the
 measured job budgets within their caps and the record caps, the breaker, the suggest bounds.
 The model client talks plain HTTP only to its own child: through the generation's Unix socket
-(bubblewrap) or a loopback IP literal, every connection checked to reach the child before its
+(the sandbox) or a loopback IP literal, every connection checked to reach the child before its
 first byte (the peer in the child's PID namespace under the reaper; the port's listener in
 the child), with a per-launch token that never appears on a command line; it follows no
 redirects and ignores proxy settings. The one exception is the development endpoint of 2c-1,
 which has no endpoint check and exists only in builds with the `dev-endpoint` feature, never
 in a release. The model server is a pinned official llama.cpp build and a model file, both
 hash-verified and loaded from the verified descriptors on every level. Its confinement is one
-of these levels, shown on the assistant page: bubblewrap (private namespaces, so it has no
+of these levels, shown on the assistant page: the Hakoniwa sandbox (private namespaces, so it has no
 network beyond its own loopback and sees only an allowlist of read-only paths plus the GPU
 node; seccomp), or, only with the owner's explicit permission, unconfined (TCP egress allowed and
 the user's whole filesystem readable). On every level seccomp refuses new processes and
 non-TCP sockets; it is never described as network confinement. So Mimik sends player text
-only to its child, but below the bubblewrap level a compromised model server (for example
+only to its child, but below the sandbox level a compromised model server (for example
 through a malicious GGUF) could send it on. Model downloads are owner-started, HTTPS to an
 enumerated list of Hugging Face hosts, bounded, licence-confirmed and hash-verified, and carry
 no sheet or player text. No prompts, player text, presigned URLs or token in logs; no secrets.
@@ -695,7 +660,7 @@ not used, ASSIST-43) and
 **2c-2b** (the GPU path, 2c-2b-1; there is no level 2, ASSIST-48), each with its own branch and reviews; the machinery of
 2c-2a is path-aware, so 2c-2b only adds to it.
 
-#### 2c-2a CPU path, bubblewrap (level 3 built, not used: ASSIST-43)
+#### 2c-2a CPU path, sandbox (level 3 built, not used: ASSIST-43)
 
 Built (branch `assist-2c2`; reference [model-runtime.md](model-runtime.md)). Remaining before
 it is marked complete:
@@ -844,7 +809,7 @@ dangling key shows no link; p95 measured.
   evidence, never part of the CI gate except the `llama-runtime` job): on this host the CPU
   path at 2 threads and at the ASSIST-41 default (5 of 6 physical cores; evening or weekend)
   and the GPU path (Vulkan, RX 6650 XT, night or weekend), each from a native
-  child under bubblewrap: start to `ready`, priming and calibration samples, derived budgets,
+  child in the sandbox: start to `ready`, priming and calibration samples, derived budgets,
   token refusal, cancellation, the GPU → CPU fallback, shutdown and orphan cleanup, the
   confinement tests with the adversarial helper. The AppArmor preflight on an Ubuntu VM;
   until run, labelled unverified. macOS (Metal) and Windows (Vulkan): deferred, not claimed.
@@ -884,12 +849,11 @@ and confirmation are the safeguard); reminder prompts carry catalogue text (cont
 prevented); one revision per Enter makes history long (no-ops write nothing, no cap; D-U);
 `rig-core` is pre-1.0 with frequent breaking releases (pinned); HTTP client defaults
 (proxies, redirects, retries) could send player text off the machine or repeat it, hence the
-client policy and its tests. Runtime: bubblewrap needs unprivileged user namespaces, which
-some distributions disable or restrict (Ubuntu's AppArmor rule), and older distributions'
-bubblewrap may lack an option the probe needs; those machines run no assistant unless the owner explicitly allows
+client policy and its tests. Runtime: the sandbox needs unprivileged user namespaces, which
+some distributions disable or restrict (Ubuntu's AppArmor rule); those machines run no assistant unless the owner explicitly allows
 unconfined (ASSIST-43), as shown on the page; a malicious GGUF exploiting llama-server is contained only as far as the active level
 goes; the official Linux builds link against a distribution's glibc and Vulkan loader, which
-may not match the host; the bubblewrap path list is driver-specific (Mesa on AMD measured;
+may not match the host; the sandbox's path list is driver-specific (Mesa on AMD measured;
 other drivers may need more paths, and then fall back to the CPU); other applications can take
 the GPU's memory mid-use (the fallback moves to the CPU); budgets are estimates from two
 samples per start, so throttling later shows up as deadline expiries and restarts; the 2b GPU

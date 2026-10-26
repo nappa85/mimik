@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 /// Where the program is installed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Profile {
-    /// Level 1: bubblewrap installs it just before it executes llama-server inside the
+    /// Level 1: the sandbox's closure installs it just before it executes llama-server inside the
     /// sandbox, so exec stays allowed (the PID namespace contains whatever runs there).
     Sandbox,
     /// Level 3: the runner installs it, then executes the verified llama-server
@@ -259,18 +259,6 @@ pub(crate) fn program_without_landlock(errno: u32) -> BpfProgram {
     )
     .expect("allow and refuse differ");
     filter.try_into().expect("the program compiles")
-}
-
-/// The program as bubblewrap's `--seccomp` reads it: the instructions' bytes, native endian.
-pub(crate) fn bytes(program: &[sock_filter]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(program.len() * 8);
-    for instruction in program {
-        out.extend_from_slice(&instruction.code.to_ne_bytes());
-        out.push(instruction.jt);
-        out.push(instruction.jf);
-        out.extend_from_slice(&instruction.k.to_ne_bytes());
-    }
-    out
 }
 
 /// Installs `program` on the calling thread (and sets `no_new_privs`, which seccomp needs).

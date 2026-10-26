@@ -20,8 +20,6 @@ fn the_program_checks_the_architecture_then_x32_then_clone3() {
     // The kernel's limit is 4,096 instructions.
     assert!(sandbox.len() < 4096);
     assert!(program(Profile::Tcp { exec_fd: 1023 }).len() < 4096);
-    assert_eq!(bytes(&sandbox).len(), sandbox.len() * 8);
-    assert_eq!(&bytes(&sandbox)[..8], &[0x20, 0, 0, 0, 4, 0, 0, 0]);
 }
 
 fn raw(number: i64, args: [i64; 5]) -> i64 {

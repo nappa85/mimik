@@ -67,9 +67,9 @@ struct LevelView {
 
 fn level_view(level: Level) -> LevelView {
     match level {
-        Level::Bubblewrap => LevelView {
+        Level::Sandbox => LevelView {
             number: 1,
-            name: "bubblewrap",
+            name: "Hakoniwa",
             text: "private namespaces, so the model server has no network beyond its own loopback and sees only an allowlist of read-only paths; seccomp; it is killed with Mimik. Mimik reaches it only through its socket, checked to be this sandbox's process.",
         },
         Level::Unconfined => LevelView {
@@ -132,7 +132,7 @@ struct View {
     breaker: String,
     level: Option<LevelView>,
     notes: Vec<String>,
-    /// The Landlock layer of the Hakoniwa sandbox: how far it is in force (none with bubblewrap).
+    /// The Landlock layer of the Hakoniwa sandbox: how far it is in force (none until it reports).
     landlock: Option<LandlockLine>,
     skipped: Vec<(u8, String)>,
     budgets: Option<BudgetsView>,
@@ -155,10 +155,10 @@ fn landlock_line(landlock: crate::assistant::runtime::hako::Landlock) -> Landloc
                 "Mimik asks for the ABI 6 rules. Newer rights, such as connecting to a Unix socket by path (ABI 9), are not asked for.",
             ),
             Landlock::Partial { .. } => Some(
-                "This kernel's Landlock lacks part of what Mimik asks for; the private namespaces still confine the model server, as with bubblewrap.",
+                "This kernel's Landlock lacks part of what Mimik asks for; the private namespaces still confine the model server.",
             ),
             Landlock::Unavailable => Some(
-                "This kernel has no Landlock (or it is not enabled); the private namespaces still confine the model server, as with bubblewrap.",
+                "This kernel has no Landlock (or it is not enabled); the private namespaces still confine the model server.",
             ),
         },
     }
@@ -335,6 +335,6 @@ mod tests {
         assert!(partial.note.is_some_and(|note| note.contains("namespaces")));
         let none = landlock_line(Landlock::Unavailable);
         assert_eq!(none.state, "not available");
-        assert!(none.note.is_some_and(|note| note.contains("bubblewrap")));
+        assert!(none.note.is_some_and(|note| note.contains("namespaces")));
     }
 }

@@ -251,7 +251,7 @@ impl Launcher for FakeLauncher {
                 .lock()
                 .unwrap()
                 .clone()
-                .unwrap_or_else(|| vec![(Level::Bubblewrap, Ok(())), (Level::Unconfined, Ok(()))]);
+                .unwrap_or_else(|| vec![(Level::Sandbox, Ok(())), (Level::Unconfined, Ok(()))]);
         }
         let gate = self.cpu_probe_gate.lock().unwrap().clone();
         if let Some(gate) = gate {
@@ -261,7 +261,7 @@ impl Launcher for FakeLauncher {
             .lock()
             .unwrap()
             .clone()
-            .unwrap_or_else(|| vec![(Level::Bubblewrap, Ok(())), (Level::Unconfined, Ok(()))])
+            .unwrap_or_else(|| vec![(Level::Sandbox, Ok(())), (Level::Unconfined, Ok(()))])
     }
 
     fn device(&self) -> Option<DeviceView> {
@@ -377,7 +377,7 @@ async fn a_start_reaches_ready_after_health_priming_and_calibration() {
     ready(&assistant).await;
     let status = handle.status();
     assert_eq!(status.state, State::Ready);
-    assert_eq!(status.level, Some(Level::Bubblewrap));
+    assert_eq!(status.level, Some(Level::Sandbox));
     assert_eq!(status.generation, 1);
     assert_eq!(
         status.skipped,
@@ -409,7 +409,7 @@ async fn a_failed_restart_never_shows_the_previous_generations_landlock_report()
             *launcher.preflight.lock().unwrap() = Some("runtime inaccessible".into());
         } else {
             *launcher.probe.lock().unwrap() =
-                Some(vec![(Level::Bubblewrap, Err("namespaces disabled".into()))]);
+                Some(vec![(Level::Sandbox, Err("namespaces disabled".into()))]);
         }
         assert_eq!(handle.restart(), Restart::Accepted);
         unavailable(&handle).await;
@@ -453,19 +453,19 @@ async fn unavailable(handle: &Handle) -> String {
 
 #[tokio::test(start_paused = true)]
 async fn a_level_1_sandbox_failure_makes_the_assistant_unavailable_never_level_3() {
-    let launcher = FakeLauncher::scripted([Start::Sandbox("bwrap: setup failed")]);
+    let launcher = FakeLauncher::scripted([Start::Sandbox("mimik sandbox: setup failed")]);
     let (_assistant, handle) = manager(&launcher);
     let why = unavailable(&handle).await;
     // Level 3 passed its (fake) probe, but it is never started (ASSIST-43).
-    assert_eq!(launcher.levels(), [Level::Bubblewrap]);
+    assert_eq!(launcher.levels(), [Level::Sandbox]);
     assert!(why.starts_with(LEVEL_1_NEEDED), "{why}");
-    assert!(why.contains("bwrap: setup failed"), "{why}");
+    assert!(why.contains("mimik sandbox: setup failed"), "{why}");
     let status = handle.status();
     assert_eq!(status.failures, 0);
     assert!(
         status
             .skipped
-            .contains(&(Level::Bubblewrap, "bwrap: setup failed".into()))
+            .contains(&(Level::Sandbox, "mimik sandbox: setup failed".into()))
     );
 }
 
@@ -473,21 +473,18 @@ async fn a_level_1_sandbox_failure_makes_the_assistant_unavailable_never_level_3
 async fn a_level_1_probe_failure_starts_nothing_and_says_how_to_fix_it() {
     let launcher = FakeLauncher::scripted([]);
     *launcher.probe.lock().unwrap() = Some(vec![
-        (
-            Level::Bubblewrap,
-            Err("user namespaces are disabled".into()),
-        ),
+        (Level::Sandbox, Err("user namespaces are disabled".into())),
         (Level::Unconfined, Ok(())),
     ]);
     let (_assistant, handle) = manager(&launcher);
     let why = unavailable(&handle).await;
     assert_eq!(launcher.levels(), Vec::<Level>::new());
-    assert!(why.contains("Install bubblewrap"), "{why}");
+    assert!(why.contains("assistant-apparmor-profile"), "{why}");
     assert!(why.contains("user namespaces are disabled"), "{why}");
     assert_eq!(
         handle.status().skipped,
         vec![
-            (Level::Bubblewrap, "user namespaces are disabled".to_owned()),
+            (Level::Sandbox, "user namespaces are disabled".to_owned()),
             (
                 Level::Unconfined,
                 "not used in this release (ASSIST-43)".to_owned()
@@ -519,7 +516,7 @@ async fn other_failures_retry_after_two_minutes_and_four_make_the_assistant_unav
             "{gap:?}"
         );
         // The level is kept.
-        assert_eq!(pair[1].1, Level::Bubblewrap);
+        assert_eq!(pair[1].1, Level::Sandbox);
     }
     let status = handle.status();
     assert_eq!(status.failures, 4);
@@ -720,10 +717,10 @@ async fn restart_resets_count_and_breaker_and_returns_to_level_1() {
     assert_eq!(handle.restart(), Restart::AlreadyRunning);
     ready(&assistant).await;
     let status = handle.status();
-    assert_eq!(status.level, Some(Level::Bubblewrap));
+    assert_eq!(status.level, Some(Level::Sandbox));
     assert_eq!(status.failures, 0);
     assert!(!status.restarting);
-    assert_eq!(launcher.levels(), [Level::Bubblewrap, Level::Bubblewrap]);
+    assert_eq!(launcher.levels(), [Level::Sandbox, Level::Sandbox]);
     assert!(!launcher.coexisted.load(Ordering::SeqCst));
     assert!(assistant.breaker_closed());
 }
@@ -867,7 +864,7 @@ async fn the_gpu_path_reaches_ready_with_gpu_budgets() {
     ready(&assistant).await;
     let status = handle.status();
     assert_eq!(status.path, Path::Gpu);
-    assert_eq!(status.level, Some(Level::Bubblewrap));
+    assert_eq!(status.level, Some(Level::Sandbox));
     assert_eq!(status.device, Some(rx6650()));
     assert_eq!(status.gpu_note, None);
     let budgets = status.budgets.unwrap();
@@ -932,8 +929,8 @@ async fn a_gpu_failure_at_each_phase_moves_to_the_cpu_at_once_uncounted() {
             "the model could not be loaded",
         ),
         (
-            Start::Sandbox("bubblewrap could not set up the sandbox"),
-            "bubblewrap could not set up",
+            Start::Sandbox("hakoniwa could not set up the sandbox"),
+            "hakoniwa could not set up",
         ),
         (Start::Ok(not_loaded), "only 30 of 41 layers"),
         (Start::Ok(no_priming), "priming failed"),
@@ -962,7 +959,7 @@ async fn a_gpu_failure_at_each_phase_moves_to_the_cpu_at_once_uncounted() {
         assert_eq!(status.path, Path::Cpu, "{why}");
         assert_eq!(status.device, None, "{why}: the page shows no GPU in use");
         assert_eq!(status.failures, 0, "{why}");
-        assert_eq!(status.level, Some(Level::Bubblewrap), "{why}");
+        assert_eq!(status.level, Some(Level::Sandbox), "{why}");
         assert!(
             status
                 .gpu_note
@@ -1044,7 +1041,7 @@ async fn no_usable_gpu_level_runs_the_cpu_path_at_its_own_level() {
     // refused); the CPU build's passes: each path at its own level.
     let launcher = FakeLauncher::scripted([]);
     *launcher.gpu_probe.lock().unwrap() = Some(vec![(
-        Level::Bubblewrap,
+        Level::Sandbox,
         Err("no hardware GPU is listed (software renderers are not used)".into()),
     )]);
     let (assistant, handle) = gpu_manager(&launcher);
@@ -1053,7 +1050,7 @@ async fn no_usable_gpu_level_runs_the_cpu_path_at_its_own_level() {
     assert_eq!(*launcher.paths.lock().unwrap(), [Path::Cpu]);
     assert_eq!(*launcher.probed.lock().unwrap(), [Path::Gpu, Path::Cpu]);
     assert_eq!(status.path, Path::Cpu);
-    assert_eq!(status.level, Some(Level::Bubblewrap));
+    assert_eq!(status.level, Some(Level::Sandbox));
     assert!(status.gpu_note.unwrap().contains("no hardware GPU"));
 }
 
@@ -1146,7 +1143,7 @@ async fn a_failed_gpu_start_gets_the_libraries_hint_and_falls_back() {
     assert!(note.contains("exited before it was ready"), "{note}");
     assert!(note.contains(hint), "{note}");
     assert_eq!(status.path, Path::Cpu);
-    assert_eq!(status.level, Some(Level::Bubblewrap));
+    assert_eq!(status.level, Some(Level::Sandbox));
 }
 
 #[tokio::test]
@@ -1158,7 +1155,7 @@ async fn a_hint_for_a_library_never_changes_a_start_that_succeeds() {
     ready(&assistant).await;
     let status = handle.status();
     assert_eq!(status.state, State::Ready);
-    assert_eq!(status.level, Some(Level::Bubblewrap));
+    assert_eq!(status.level, Some(Level::Sandbox));
     assert_eq!(status.failures, 0);
     assert_eq!(status.last_failure, None);
     assert!(
@@ -1196,7 +1193,7 @@ async fn a_start_that_succeeds_shows_the_hint_nowhere_even_with_the_real_launche
     let launcher = FakeLauncher::scripted([]);
     // What the real launcher answers for level 3 (`Launch::probe`).
     *launcher.probe.lock().unwrap() = Some(vec![
-        (Level::Bubblewrap, Ok(())),
+        (Level::Sandbox, Ok(())),
         (
             Level::Unconfined,
             Err("not used in this release (ASSIST-43)".into()),

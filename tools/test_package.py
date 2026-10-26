@@ -45,9 +45,8 @@ class PackageTests(unittest.TestCase):
 
     def test_the_release_and_its_notices_are_built_with_the_same_features(self):
         """DEP-24: the release binary and the generated notices must name the same features. The
-        comparison sandbox is off in the release (no `--features` or `--all-features` on its
-        build) and so is its LGPL notice; if the release ever gains `sandbox-hakoniwa`, the
-        notices must be generated with it and `hakoniwa_notice` appends the exception text."""
+        sandbox is in the default build (Hakoniwa, ASSIST-51): the release has no `--features`
+        and `hakoniwa_notice` appends the exception text to its notices."""
         ci = (Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml").read_text()
         lines = [line.strip() for line in ci.splitlines()]
         release = [line for line in lines if line.startswith("cargo build --release")]
@@ -65,19 +64,18 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(features(release[0]), features(notices[0]))
         self.assertEqual(features(release[0]), [], "the release gained features: see DEP-24")
 
-    def test_ci_runs_the_whole_live_suite_against_hakoniwa_with_a_real_runner(self):
-        """Both reviewers: the Hakoniwa live run must use a feature-built Mimik binary as the
-        runner (the single-threaded guard active), skip the GPU-only tests and count its tests."""
+    def test_ci_runs_the_whole_live_suite_with_the_releases_own_runner(self):
+        """The live run must use the release's Mimik binary as the runner (the single-threaded
+        guard active), skip the GPU-only tests and count its tests; no bubblewrap is installed."""
         ci = (Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml").read_text()
-        self.assertIn("cargo build --locked --features sandbox-hakoniwa --bin mimik", ci)
-        step = ci[ci.index("Hakoniwa sandbox, start-time probe and the whole live suite") :]
-        step = step[: step.index("tee target/confinement-hakoniwa.log")]
-        self.assertIn("MIMIK_LIVE_SANDBOX: hakoniwa", step)
-        self.assertIn("MIMIK_LIVE_RUNNER:", step)
-        self.assertIn("--sandbox hakoniwa", step)
+        step = ci[ci.index("Start-time probe and the whole live suite") :]
+        step = step[: step.index("tee target/confinement.log")]
+        self.assertIn("MIMIK_LIVE_RUNNER: ${{ github.workspace }}/target/rel/mimik", step)
         self.assertIn("assistant::runtime::launch::live_tests::", step)
         self.assertIn("--skip live_gpu_", step)
         self.assertIn("--include-ignored", step)
+        self.assertNotIn("bubblewrap", ci.lower())
+        self.assertNotIn("sandbox-hakoniwa", ci)
 
     def test_hierarchy_and_screen_regressions_are_required_source_members(self):
         members = [f"mimik/{name}" for name in REQUIRED]

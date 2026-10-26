@@ -1,9 +1,8 @@
 //! The real launcher (assisted sheet plan §1.4a): verified files, the generation's
 //! directory and token, the runner with the level's command, the endpoint check's connector,
-//! the output drain and the child's lifetime. Level 1 runs llama-server under bubblewrap on
-//! a Unix socket; level 3 executes it unconfined but for seccomp on `127.0.0.1`. The GPU path runs the Vulkan build at level 1 with the
+//! the output drain and the child's lifetime. Level 1 runs llama-server in the Hakoniwa
+//! sandbox on a Unix socket; level 3 executes it unconfined but for seccomp on `127.0.0.1`. The GPU path runs the Vulkan build at level 1 with the
 //! selected render node bound and `--device` named from the in-sandbox listing.
-use super::bwrap::{self, Bwrap, GpuBinds, Profile, Started};
 use super::device::{self, Candidate, Choice, Listed, Roots};
 use super::drain::{self, Summary};
 use super::endpoint::{self, Loopback, Sandbox, SandboxSocket, Watched};
@@ -14,10 +13,10 @@ use super::manager::{Child, DeviceView, Fail, Launcher};
 use super::manifest::{Build, MANIFEST};
 use super::rundir::{self, Entry, Generation, Pidfile, Swept};
 use super::runner::{self, Exec, Handover, RunnerCommand, Spec};
-use super::seccomp;
+use super::sandbox::{self, GpuBinds, Started};
 use super::server::{Llama, Server};
 use super::token::{self, Token};
-use super::{Backend, Level, Path};
+use super::{Level, Path};
 use crate::assistant::transport::{Bounded, Connect};
 use async_trait::async_trait;
 use std::io::{BufRead, Read};
@@ -30,7 +29,7 @@ use tokio::sync::watch;
 
 /// `--ctx-size` (plan §1.4a, "Flag vector"; measurement-relevant).
 pub(crate) const CTX_SIZE: u32 = 8192;
-/// How long bwrap may take to report the sandbox's PID.
+/// How long the runner may take to report the sandbox's PID.
 const STATUS_WITHIN: Duration = Duration::from_secs(30);
 /// SIGTERM, then SIGKILL after this long.
 const STOP_GRACE: Duration = Duration::from_secs(5);
@@ -49,30 +48,19 @@ const OFFLOAD_WITHIN: Duration = Duration::from_secs(5);
 mod fds {
     use std::os::fd::RawFd;
     pub const STATUS: RawFd = 4;
-    pub const SECCOMP: RawFd = 5;
-    pub const TOKEN: RawFd = 6;
-    pub const SOCKET_DIR: RawFd = 7;
     pub const MODEL: RawFd = 8;
     /// The executable on the TCP levels (moved to `runner::EXEC_FD` by the runner).
     pub const SERVER: RawFd = 9;
-    /// Mimik's own executable at level 1: the shim (and the probe).
-    pub const SHIM: RawFd = 10;
     /// Level 3: the checked build folder, to chdir into.
     pub const BUILD_DIR: RawFd = 11;
-    /// The shim's marker pipe at level 1.
+    /// The marker pipe at level 1.
     pub const MARKER: RawFd = 12;
-    /// Hakoniwa: the acknowledgement pipe the runner waits on.
+    /// The acknowledgement pipe the runner waits on.
     pub const ACK: RawFd = 13;
-    /// The first runtime file at level 1.
-    pub const RUNTIME: RawFd = 16;
-    /// Level 1's descriptors besides the runtime files: status, seccomp, token, socket
-    /// directory, model, shim and marker.
-    #[cfg(test)]
-    pub const FIXED: usize = 7;
 }
 
-/// Mimik's own binary inside the levels: the probe (in place of llama-server) and, at level
-/// 1, the shim that marks the exec (the test binary in tests).
+/// Mimik's own binary inside the levels: the probe (in place of llama-server; the test binary
+/// in tests).
 #[derive(Clone, Debug)]
 pub(crate) struct InnerCommand {
     pub executable: PathBuf,
@@ -80,10 +68,6 @@ pub(crate) struct InnerCommand {
     pub probe_args: Vec<String>,
     /// Variables the probe gets beside the minimal environment (none in production).
     pub probe_env: Vec<(String, String)>,
-    /// The shim's arguments after argv[0].
-    pub shim_args: Vec<String>,
-    /// Variables the shim gets beside its spec (none in production).
-    pub shim_env: Vec<(String, String)>,
 }
 
 impl InnerCommand {
@@ -92,14 +76,12 @@ impl InnerCommand {
             executable: std::env::current_exe()?,
             probe_args: vec!["assistant-runner".into(), "--probe-inner".into()],
             probe_env: Vec::new(),
-            shim_args: vec!["assistant-runner".into(), "--shim".into()],
-            shim_env: Vec::new(),
         })
     }
 }
 
-/// The level-1 sandbox's own executable path for Mimik's binary.
-const SHIM_PATH: &str = "/opt/mimik/mimik";
+/// Where Mimik's own binary (the probe) is bound inside the sandbox.
+const PROBE_PATH: &str = "/opt/mimik/mimik";
 
 /// The minimal environment inside the sandbox; on the GPU path Mesa's shader cache is off
 /// (the sandbox's `/tmp` is private to one launch and bounded, so a cache could only fill it).
@@ -134,8 +116,6 @@ pub(crate) struct Settings {
     pub device: Choice,
     /// Where render nodes are found (`/sys`, `/dev/dri`; tests give fake trees).
     pub roots: Roots,
-    /// Which sandbox builds level 1.
-    pub backend: Backend,
 }
 
 #[derive(Default)]
@@ -145,7 +125,8 @@ struct Held {
     swept: bool,
     /// The sweep runs (it holds the pidfile meanwhile).
     sweeping: bool,
-    bwrap: Option<Bwrap>,
+    /// The sandbox's host check passed.
+    preflighted: bool,
     /// The GPU this Mimik uses, from the last discovery.
     gpu: Option<Selected>,
     /// The PCI address chosen last: kept while that card is listed (two identical cards are
@@ -683,16 +664,11 @@ struct Pinned {
 }
 
 /// Pins the reaper the launcher reported and attaches it to `child`'s guard at once, then
-/// the server (Hakoniwa: PID 1 of the sandbox, reported by the runner with its start time)
+/// the server (PID 1 of the sandbox, reported by the runner with its start time)
 /// the same way. A server that is gone (no such pid, or the pid reused) has ended, and its
 /// reaper, pinned and attached, is still waited for; one that is there is pinned whoever its
-/// parent now is. A Hakoniwa runner that reports no server fails the start.
-fn pin_sandbox(
-    child: &mut Owned,
-    started: &Started,
-    runner: i32,
-    hakoniwa: bool,
-) -> Result<Pinned, Pin> {
+/// parent now is. A runner that reports no server fails the start.
+fn pin_sandbox(child: &mut Owned, started: &Started, runner: i32) -> Result<Pinned, Pin> {
     let reaper = endpoint::pin_reaper(started.child_pid, runner, started.pid_namespace).map_err(
         |error| {
             if endpoint::is_gone(&error) {
@@ -733,12 +709,11 @@ fn pin_sandbox(
                 ))));
             }
         },
-        _ if hakoniwa => {
+        _ => {
             return Err(Pin::Fail(Fail::Other(
                 "the sandbox's server process was not reported".into(),
             )));
         }
-        _ => {}
     }
     Ok(Pinned { sandbox })
 }
@@ -764,14 +739,6 @@ fn dup(fd: &impl AsFd) -> Result<OwnedFd, String> {
         .map_err(|_| "a descriptor cannot be duplicated".to_owned())
 }
 
-fn bytes_pipe(bytes: &[u8]) -> Result<OwnedFd, String> {
-    let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
-        .map_err(|_| "no pipe".to_owned())?;
-    let mut writer = std::fs::File::from(write);
-    std::io::Write::write_all(&mut writer, bytes).map_err(|_| "the pipe is full".to_owned())?;
-    Ok(read)
-}
-
 fn mem_available() -> Option<u64> {
     let text = std::fs::read_to_string("/proc/meminfo").ok()?;
     let line = text
@@ -786,14 +753,14 @@ struct Spawned {
     /// Killed and reaped if this is dropped before its watcher takes it.
     child: Owned,
     runner: Watched,
-    /// Level 1: bwrap's report and the reaper (`None` when it had ended before the check).
+    /// Level 1: the runner's report and the reaper (`None` when it had ended before the check).
     sandbox: Option<Arc<Sandbox>>,
     /// The sandbox's pinned processes, ended or not: what the watcher waits for.
     pinned: Option<Arc<Sandbox>>,
     generation: Generation,
     connector: Arc<dyn Connect>,
     status_rest: Option<std::io::BufReader<std::fs::File>>,
-    /// Level 1: the read end of the shim's marker pipe.
+    /// Level 1: the read end of the marker pipe.
     marker: Option<OwnedFd>,
     /// The start's ticket, released last (after every field above is cleaned up), so an
     /// abandoned result still counts until then.
@@ -1257,9 +1224,6 @@ fn sweep_leftover(pidfile: &mut Pidfile, data_dir: &std::path::Path) -> Swept {
     pidfile.sweep()
 }
 
-/// The shim's arguments and environment.
-type ShimCommand = (Vec<String>, Vec<(String, String)>);
-
 /// The command run in the child: llama-server (on `device` when the GPU path names one),
 /// its device listing, or the probe.
 enum Command<'a> {
@@ -1269,108 +1233,7 @@ enum Command<'a> {
 }
 
 impl Real {
-    /// The sandbox's command: the shim (Mimik's own binary, bound by descriptor), which marks
-    /// the exec and executes llama-server from the bound runtime or the probe.
-    fn sandbox_command(
-        &self,
-        path: Path,
-        command: &Command<'_>,
-        gpu: Option<&GpuBinds>,
-        handover: &mut Vec<Handover>,
-        extra: &mut Vec<(RawFd, String)>,
-    ) -> Result<ShimCommand, Fail> {
-        let socket = format!("{}/{}", bwrap::SOCKET_DIR, endpoint::SOCKET);
-        let exe = rustix::fs::open(
-            &self.settings.inner.executable,
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-        )
-        .map_err(|_| Fail::Other("Mimik's own binary cannot be opened".into()))?;
-        handover.push(Handover {
-            fd: exe,
-            target: fds::SHIM,
-        });
-        extra.push((fds::SHIM, SHIM_PATH.to_owned()));
-        let mut env = sandbox_env(path);
-        let server = format!("{}/{}", bwrap::RUNTIME, self.server_name(path));
-        let argv = match command {
-            Command::Server { device } => {
-                let mut argv = vec![server];
-                argv.extend(self.server_args(bwrap::MODEL, &socket, None, bwrap::TOKEN, *device));
-                argv
-            }
-            Command::ListDevices => vec![server, "--list-devices".to_owned()],
-            Command::Probe => {
-                env.extend(self.settings.inner.probe_env.iter().cloned());
-                let mut argv = vec![SHIM_PATH.to_owned()];
-                argv.extend(self.settings.inner.probe_args.iter().cloned());
-                argv.push("1".to_owned());
-                if let Some(gpu) = gpu {
-                    argv.extend([super::probe::RENDER.to_owned(), gpu.inside()]);
-                }
-                argv
-            }
-        };
-        let spec = super::probe::ShimSpec {
-            marker: fds::MARKER,
-            argv,
-            env,
-        };
-        let mut shim_env = self.settings.inner.shim_env.clone();
-        shim_env.push((
-            super::probe::SHIM_VARIABLE.to_owned(),
-            serde_json::to_string(&spec).map_err(|_| Fail::Other("no shim spec".into()))?,
-        ));
-        let mut program = vec![SHIM_PATH.to_owned()];
-        program.extend(self.settings.inner.shim_args.iter().cloned());
-        Ok((program, shim_env))
-    }
-
-    /// The runner's spec for bwrap with the full profile around the shim.
-    fn sandbox_spec(
-        &self,
-        bwrap: &Bwrap,
-        path: Path,
-        command: &Command<'_>,
-        gpu: Option<&GpuBinds>,
-        handover: &mut Vec<Handover>,
-        runtime: Binds,
-    ) -> Result<Spec, Fail> {
-        let mut extra = Vec::new();
-        let (program, env) = self.sandbox_command(path, command, gpu, handover, &mut extra)?;
-        let profile = Profile {
-            size: bwrap.size,
-            status_fd: fds::STATUS,
-            seccomp_fd: fds::SECCOMP,
-            token_fd: fds::TOKEN,
-            socket_dir_fd: fds::SOCKET_DIR,
-            model_fd: fds::MODEL,
-            runtime,
-            extra,
-            env,
-            command: program,
-            gpu: gpu.cloned(),
-        }
-        .arguments();
-        Ok(Spec {
-            parent: std::process::id(),
-            keep: handover.iter().map(|h| h.target).collect(),
-            env: vec![
-                ("PATH".into(), "/usr/bin:/bin".into()),
-                ("LANG".into(), "C.UTF-8".into()),
-            ],
-            chdir: None,
-            exec: Exec::Bwrap {
-                path: bwrap.path.display().to_string(),
-                args: profile
-                    .iter()
-                    .map(|arg| arg.to_string_lossy().into_owned())
-                    .collect(),
-            },
-        })
-    }
-
-    /// What the Hakoniwa sandbox executes: argv and environment, and the probe's own
+    /// What the sandbox executes: argv and environment, and the probe's own
     /// executable as an extra read-only bind with its identity.
     fn hako_command(
         &self,
@@ -1378,14 +1241,20 @@ impl Real {
         command: &Command<'_>,
         gpu: Option<&GpuBinds>,
     ) -> Result<HakoCommand, Fail> {
-        let socket = format!("{}/{}", bwrap::SOCKET_DIR, endpoint::SOCKET);
-        let server = format!("{}/{}", bwrap::RUNTIME, self.server_name(path));
+        let socket = format!("{}/{}", sandbox::SOCKET_DIR, endpoint::SOCKET);
+        let server = format!("{}/{}", sandbox::RUNTIME, self.server_name(path));
         let mut env = sandbox_env(path);
         let mut extra = Vec::new();
         let argv = match command {
             Command::Server { device } => {
                 let mut argv = vec![server];
-                argv.extend(self.server_args(bwrap::MODEL, &socket, None, bwrap::TOKEN, *device));
+                argv.extend(self.server_args(
+                    sandbox::MODEL,
+                    &socket,
+                    None,
+                    sandbox::TOKEN,
+                    *device,
+                ));
                 argv
             }
             Command::ListDevices => vec![server, "--list-devices".to_owned()],
@@ -1399,10 +1268,10 @@ impl Real {
                 .map_err(|_| Fail::Other("Mimik's own binary cannot be opened".into()))?;
                 extra.push((
                     self.settings.inner.executable.clone(),
-                    SHIM_PATH.to_owned(),
+                    PROBE_PATH.to_owned(),
                     identity_of(&exe)?,
                 ));
-                let mut argv = vec![SHIM_PATH.to_owned()];
+                let mut argv = vec![PROBE_PATH.to_owned()];
                 argv.extend(self.settings.inner.probe_args.iter().cloned());
                 argv.push("1".to_owned());
                 if let Some(gpu) = gpu {
@@ -1507,59 +1376,19 @@ impl Real {
         Ok((spec, handover))
     }
 
-    /// The runner's spec and handover for the configured sandbox.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one sandbox: what runs, with which verified files, on which device"
-    )]
-    fn sandbox_parts(
-        &self,
-        bwrap: &Bwrap,
-        path: Path,
-        command: &Command<'_>,
-        gpu: Option<&GpuBinds>,
-        checked: (&[Verified], &Verified, &std::path::Path),
-        token: &Token,
-        generation: &Generation,
-        pipes: (OwnedFd, OwnedFd, Option<OwnedFd>),
-    ) -> Result<(Spec, Vec<Handover>), Fail> {
-        let (files, model, _) = checked;
-        if self.settings.backend == Backend::Hakoniwa {
-            return self.hako_spec(path, command, gpu, checked, token, generation, pipes);
-        }
-        let (status_write, marker_write, _) = pipes;
-        let seccomp = bytes_pipe(&seccomp::bytes(&seccomp::program(
-            seccomp::Profile::Sandbox,
-        )))
-        .map_err(Fail::Other)?;
-        let token_pipe = token.pipe().map_err(|_| Fail::Other("no pipe".into()))?;
-        let (mut handover, runtime) =
-            sandbox_handover(status_write, seccomp, token_pipe, generation, model, files)?;
-        handover.push(Handover {
-            fd: marker_write,
-            target: fds::MARKER,
-        });
-        let spec = self.sandbox_spec(bwrap, path, command, gpu, &mut handover, runtime)?;
-        Ok((spec, handover))
-    }
-
     /// Pins the sandbox's processes (every handle attached to `child`'s guard the moment it is
     /// opened) and says what became of them: the sandbox for the endpoint check (`None` when it
     /// had ended), the pinned one for the watcher, and the connector.
     fn pin_or_end(
-        &self,
         child: &mut Owned,
         started: &Started,
         pid: i32,
-        command: &Command<'_>,
         generation: &Generation,
     ) -> Result<Pinning, Fail> {
-        let hakoniwa = self.settings.backend == Backend::Hakoniwa;
         // Every handle is attached to the failed-start guard the moment it is opened, and a
         // reaper that is gone is never taken for a server that is (the inner process is
         // pinned, or proven gone, either way).
-        let ended_ok = hakoniwa || matches!(command, Command::ListDevices | Command::Probe);
-        let pinning: Pinning = match pin_sandbox(child, started, pid, hakoniwa) {
+        let pinning: Pinning = match pin_sandbox(child, started, pid) {
             Ok(pinned) if pinned.sandbox.reaper.alive() => {
                 let connector: Arc<dyn Connect> = Arc::new(SandboxSocket {
                     directory: Arc::new(dup(&generation.fd).map_err(Fail::Other)?),
@@ -1574,23 +1403,14 @@ impl Real {
             // A device listing is over in moments and a probe that cannot start (an unopenable
             // render node) ends at once: the sandbox may be gone before the reaper is checked,
             // which tears down the whole PID namespace and needs no kill. The listing's exit
-            // and the probe's report then decide. With Hakoniwa a server's start can end as
-            // quickly (a bound object that is not the verified one refuses the exec at once):
+            // and the probe's report then decide. A server's start can end as quickly (a
+            // bound object that is not the verified one refuses the exec at once):
             // the marker then classifies the exit (absent: the sandbox; present: the server).
             // The pinned processes stay with the guard and the watcher either way.
-            Ok(pinned) if ended_ok => (None, Some(pinned.sandbox), Arc::new(NoSocket)),
-            Ok(_) => {
-                return Err(Fail::Other(format!(
-                    "the sandbox's reaper: {}",
-                    endpoint::GONE_TEXT
-                )));
-            }
-            // The reaper is already reaped: for a listing or a probe the sandbox is over; with
-            // Hakoniwa only when the runner said it reaped it after the server's own exit
-            // status (`ended`), never because a reaper happens to be missing.
-            Err(Pin::Gone(_)) if (ended_ok && !hakoniwa) || (hakoniwa && started.ended) => {
-                (None, None, Arc::new(NoSocket))
-            }
+            Ok(pinned) => (None, Some(pinned.sandbox), Arc::new(NoSocket)),
+            // The reaper is already reaped: only when the runner said it reaped it after the
+            // server's own exit status (`ended`), never because a reaper happens to be missing.
+            Err(Pin::Gone(_)) if started.ended => (None, None, Arc::new(NoSocket)),
             Err(Pin::Gone(error)) => {
                 return Err(Fail::Other(format!("the sandbox's reaper: {error}")));
             }
@@ -1599,8 +1419,8 @@ impl Real {
         Ok(pinning)
     }
 
-    /// Starts level 1: bwrap with the profile (and on the GPU path the selected node's
-    /// binds), then reads `child-pid` and `pid-namespace`.
+    /// Starts level 1: the runner builds the sandbox (and on the GPU path binds the selected
+    /// node), then reports the reaper's and the server's processes.
     #[expect(
         clippy::too_many_arguments,
         reason = "one sandbox start: what runs, with which files, on which device"
@@ -1616,18 +1436,14 @@ impl Real {
         gpu: Option<&GpuBinds>,
         build_dir: &std::path::Path,
     ) -> Result<Spawned, Fail> {
-        let hakoniwa = self.settings.backend == Backend::Hakoniwa;
-        let bwrap = self
-            .held()
-            .bwrap
-            .clone()
-            .ok_or_else(|| Fail::Sandbox("the sandbox did not pass the preflight".into()))?;
+        if !self.held().preflighted {
+            return Err(Fail::Sandbox(
+                "the sandbox did not pass the preflight".into(),
+            ));
+        }
         // The pidfile names these, one per line: checked before anything is created or
         // spawned.
-        let mut executables = vec![self.settings.runner.program.display().to_string()];
-        if !hakoniwa {
-            executables.insert(0, bwrap.path.display().to_string());
-        }
+        let executables = vec![self.settings.runner.program.display().to_string()];
         newline_free(&executables)?;
         let run = self.run_dir().map_err(Fail::Other)?;
         let generation = Generation::create(&run, &job.name)
@@ -1636,22 +1452,16 @@ impl Real {
             .map_err(|_| Fail::Other("no pipe".into()))?;
         let (marker_read, marker_write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
             .map_err(|_| Fail::Other("no pipe".into()))?;
-        let (ack_read, ack_write) = if hakoniwa {
-            let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
-                .map_err(|_| Fail::Other("no pipe".into()))?;
-            (Some(read), Some(write))
-        } else {
-            (None, None)
-        };
-        let (spec, handover) = self.sandbox_parts(
-            &bwrap,
+        let (ack_read, ack_write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
+            .map_err(|_| Fail::Other("no pipe".into()))?;
+        let (spec, handover) = self.hako_spec(
             path,
             command,
             gpu,
             (files, model, build_dir),
             token,
             &generation,
-            (status_write, marker_write, ack_read),
+            (status_write, marker_write, Some(ack_read)),
         )?;
         self.after_cleanups(job)?;
         pause_at!(self, "before-spawn");
@@ -1675,17 +1485,15 @@ impl Real {
         job.check()?;
         self.record_child(job, pid, executables, &mut child)?;
         fault_at!(self, "recorded", child);
-        // No status line: bwrap failed before it created the sandbox (nothing it started could
+        // No status line: the runner failed before it created the sandbox (nothing it started could
         // have written anything yet).
-        let (started, rest) = read_started(status_read, job, self.settings.backend)?;
+        let (started, rest) = read_started(status_read, job)?;
         fault_at!(self, "started", child);
         pause_at!(self, "before-reaper");
         let (sandbox, pinned, connector) =
-            self.pin_or_end(&mut child, &started, pid, command, &generation)?;
+            Self::pin_or_end(&mut child, &started, pid, &generation)?;
         // Pinned and attached: the runner may go on (and reap the reaper when it ends).
-        if let Some(ack) = ack_write {
-            let _ = rustix::io::write(&ack, b"1");
-        }
+        let _ = rustix::io::write(&ack_write, b"1");
         fault_at!(self, "connector", child);
         pause_at!(self, "spawned");
         Ok(Spawned {
@@ -1882,58 +1690,11 @@ impl Real {
     }
 }
 
-/// Runtime files bound into the sandbox: descriptor number and name.
-type Binds = Vec<(RawFd, String)>;
-
-/// Level 1's descriptors at their numbers, and the runtime files' binds.
-fn sandbox_handover(
-    status: OwnedFd,
-    seccomp: OwnedFd,
-    token: OwnedFd,
-    generation: &Generation,
-    model: &Verified,
-    files: &[Verified],
-) -> Result<(Vec<Handover>, Binds), Fail> {
-    let mut handover = vec![
-        Handover {
-            fd: status,
-            target: fds::STATUS,
-        },
-        Handover {
-            fd: seccomp,
-            target: fds::SECCOMP,
-        },
-        Handover {
-            fd: token,
-            target: fds::TOKEN,
-        },
-        Handover {
-            fd: dup(&generation.fd).map_err(Fail::Other)?,
-            target: fds::SOCKET_DIR,
-        },
-        Handover {
-            fd: dup(&model.fd).map_err(Fail::Other)?,
-            target: fds::MODEL,
-        },
-    ];
-    let mut runtime = Vec::new();
-    for (n, file) in files.iter().enumerate() {
-        let target = fds::RUNTIME + RawFd::try_from(n).unwrap_or(0);
-        handover.push(Handover {
-            fd: dup(&file.fd).map_err(Fail::Other)?,
-            target,
-        });
-        runtime.push((target, file.name.clone()));
-    }
-    Ok((handover, runtime))
-}
-
-/// bwrap's first status line (the reaper's PID and the PID namespace), within
+/// The runner's first status line (the reaper's and the server's processes), within
 /// [`STATUS_WITHIN`], and the rest of the descriptor.
 fn read_started(
     status: OwnedFd,
     job: &Job,
-    backend: Backend,
 ) -> Result<(Started, std::io::BufReader<std::fs::File>), Fail> {
     let file = std::fs::File::from(status);
     let (lines, report) = std::sync::mpsc::channel();
@@ -1943,10 +1704,7 @@ fn read_started(
             let mut reader = std::io::BufReader::new(file.take(64 * 1024));
             let mut line = String::new();
             let started = match reader.read_line(&mut line) {
-                Ok(n) if n > 0 => match backend {
-                    Backend::Bwrap => bwrap::started(&line),
-                    Backend::Hakoniwa => hako::started(&line),
-                },
+                Ok(n) if n > 0 => hako::started(&line),
                 _ => None,
             };
             let rest = std::io::BufReader::new(reader.into_inner().into_inner());
@@ -1957,15 +1715,12 @@ fn read_started(
     let (started, rest) =
         recv_unless_cancelled(&report, STATUS_WITHIN, &job.ticket)?.ok_or_else(|| {
             Fail::Other(format!(
-                "bubblewrap did not report the sandbox within {} s",
+                "the sandbox did not report within {} s",
                 STATUS_WITHIN.as_secs()
             ))
         })?;
     let started = started.ok_or_else(|| {
-        Fail::Sandbox(format!(
-            "{} failed before starting the model server",
-            backend.name()
-        ))
+        Fail::Sandbox("hakoniwa failed before starting the model server".to_owned())
     })?;
     Ok((started, rest))
 }
@@ -2172,12 +1927,12 @@ impl Readers {
     }
 }
 
-/// What the shim's marker pipe showed.
+/// What the marker pipe showed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Marker {
     /// The marker arrived: the command was executed.
     Executed,
-    /// A clean end of the pipe without the marker: the shim never ran (bwrap failed first).
+    /// A clean end of the pipe without the marker: the runner never reached the exec.
     Absent,
     /// Not known (still being read, a read error, anything else): the level is kept.
     Unknown,
@@ -2255,7 +2010,7 @@ fn marker_outcome(pipe: impl Read) -> Marker {
 }
 
 /// [`marker_outcome`] and, after the marker, the Landlock report the Hakoniwa closure appends
-/// (`None` for bubblewrap's shim, a closure without one, or text that is not a report).
+/// (`None`: a closure without one, or text that is not a report).
 fn marker_report(mut pipe: impl Read) -> (Marker, Option<super::hako::Landlock>) {
     let mut text = Vec::new();
     match pipe.by_ref().take(128).read_to_end(&mut text) {
@@ -2285,12 +2040,9 @@ const BIND_LISTENING: Duration = Duration::from_secs(10);
 /// Why a child ended: at level 1, a sandbox failure only when the marker pipe ended cleanly
 /// without the marker (nothing the executed command prints can make it one); an unknown
 /// outcome, like any other exit, is counted at the same level.
-fn classify(level: Level, backend: Backend, marker: Marker, summary: Summary, why: &str) -> Fail {
-    if level == Level::Bubblewrap && marker == Marker::Absent {
-        Fail::Sandbox(format!(
-            "{} could not set up the sandbox ({why})",
-            backend.name()
-        ))
+fn classify(level: Level, marker: Marker, summary: Summary, why: &str) -> Fail {
+    if level == Level::Sandbox && marker == Marker::Absent {
+        Fail::Sandbox(format!("hakoniwa could not set up the sandbox ({why})"))
     } else if summary.failed.model_load {
         Fail::Other(format!("the model could not be loaded ({why})"))
     } else {
@@ -2312,13 +2064,12 @@ pub(crate) struct RealChild {
     /// The runner's pidfd: signals go to this process and no other.
     signal: OwnedFd,
     summary: Arc<Mutex<Summary>>,
-    /// Level 1: what the shim's marker pipe showed.
+    /// Level 1: what the marker pipe showed.
     marker: Arc<MarkerState>,
     readers: Arc<Readers>,
     healthy: AtomicBool,
     generation_dir: Mutex<Option<Generation>>,
     level: Level,
-    backend: Backend,
     path: Path,
     notes: Vec<String>,
     /// The launcher's runtime directory (a test's key for the drain gate).
@@ -2368,7 +2119,7 @@ impl Child for RealChild {
             }
         };
         let marker = settled_marker(&self.readers, &self.marker, READERS_WITHIN).await;
-        classify(self.level, self.backend, marker, self.summary(), &why)
+        classify(self.level, marker, self.summary(), &why)
     }
 
     async fn stop(&self) {
@@ -2413,7 +2164,7 @@ impl Child for RealChild {
     }
 
     async fn loaded(&self) -> Result<(), String> {
-        if self.level == Level::Bubblewrap && self.backend == Backend::Hakoniwa {
+        if self.level == Level::Sandbox {
             self.marker.require_landlock(READERS_WITHIN).await?;
         }
         if self.path == Path::Cpu {
@@ -2475,8 +2226,8 @@ fn refused_start(real: &Real, level: Level, path: Path) -> Result<(), Fail> {
         // ASSIST-43: level 3 is not started in this release.
         return Err(Fail::Sandbox("level 3 is not used in this release".into()));
     }
-    if path == Path::Gpu && level != Level::Bubblewrap {
-        // Without bubblewrap render nodes cannot be isolated (ASSIST-L25); the TCP levels'
+    if path == Path::Gpu && level != Level::Sandbox {
+        // The TCP levels cannot isolate render nodes (ASSIST-L25); their
         // single-GPU rule comes with level 3's return.
         return Err(Fail::Sandbox(
             "the GPU path runs only at level 1 in this release".into(),
@@ -2606,7 +2357,7 @@ async fn watch_exit(
     let _ = exit.send(Some(Exit { why }));
 }
 
-/// Reads the shim's marker pipe to its end on its own thread. Without a reader thread the
+/// Reads the marker pipe to its end on its own thread. Without a reader thread the
 /// outcome stays unknown (a failure then keeps the level).
 fn read_marker(pipe: OwnedFd, marker: &Arc<MarkerState>, readers: &Arc<Readers>) {
     let (seen, ended) = (Arc::clone(marker), Arc::clone(readers));
@@ -2631,7 +2382,6 @@ impl Real {
         level: Level,
         path: Path,
         token: &Token,
-        bwrap: Option<&Bwrap>,
         key: u64,
     ) -> Result<Arc<RealChild>, Fail> {
         let Spawned {
@@ -2707,7 +2457,7 @@ impl Real {
             token.expose(),
             &self.settings.alias,
         ));
-        let notes = temporary_notes(level, bwrap);
+        let notes = Vec::new();
         #[cfg(not(test))]
         drop(connector);
         Ok(Arc::new(RealChild {
@@ -2725,7 +2475,6 @@ impl Real {
             healthy: AtomicBool::new(false),
             generation_dir: Mutex::new(Some(generation)),
             level,
-            backend: self.settings.backend,
             path,
             notes,
             #[cfg(test)]
@@ -2733,15 +2482,6 @@ impl Real {
             #[cfg(test)]
             capture,
         }))
-    }
-}
-
-/// Warnings for a sandbox that cannot bound its temporary mounts.
-fn temporary_notes(level: Level, bwrap: Option<&bwrap::Bwrap>) -> Vec<String> {
-    if level == Level::Bubblewrap && bwrap.is_some_and(|bwrap| !bwrap.size) {
-        vec!["temporary space unbounded: this bubblewrap cannot size /tmp and /dev/shm, so only the 64 MiB per-file limit holds".into()]
-    } else {
-        Vec::new()
     }
 }
 
@@ -2900,12 +2640,12 @@ impl Launcher for Launch {
             };
             let level_1 = match found {
                 Ok(()) => real
-                    .probe_with_retries(path, Level::Bubblewrap, &ticket)
+                    .probe_with_retries(path, Level::Sandbox, &ticket)
                     .eligible(),
                 Err(why) => Err(why),
             };
             vec![
-                (Level::Bubblewrap, level_1),
+                (Level::Sandbox, level_1),
                 (
                     Level::Unconfined,
                     Err("not used in this release (ASSIST-43)".into()),
@@ -2993,10 +2733,9 @@ impl Launch {
         let build_dir = Arc::new(build_dir);
         let build_fd = Arc::new(build_fd);
         let token = Arc::new(Token::new());
-        let bwrap = real.held().bwrap.clone();
         let files = Arc::new(files);
         let model = Arc::new(model);
-        // The spawn blocks (bwrap's status line, up to 30 s): off the async runtime. A start
+        // The spawn blocks (the runner's status line, up to 30 s): off the async runtime. A start
         // dropped meanwhile drops its result, whose guard kills the child.
         let spawn = |port: u16| {
             let (real, files, model, token, build_dir, build_fd, gpu) = (
@@ -3014,7 +2753,7 @@ impl Launch {
                 ticket: ticket.clone(),
             };
             tokio::task::spawn_blocking(move || match level {
-                Level::Bubblewrap => {
+                Level::Sandbox => {
                     let device = gpu.as_deref().map(|(_, name)| name.as_str());
                     real.spawn_sandbox(
                         &job,
@@ -3053,7 +2792,7 @@ impl Launch {
         };
         if level != Level::Unconfined {
             let spawned = joined(spawn(0).await)?;
-            return real.child(spawned, level, path, &token, bwrap.as_ref(), generation);
+            return real.child(spawned, level, path, &token, generation);
         }
         // A child that cannot bind its port exits; a new port is tried, at most 3.
         let mut tries = 0;
@@ -3061,7 +2800,7 @@ impl Launch {
             tries += 1;
             let port = pick_port(&real.settings.runtime_dir)?;
             let spawned = joined(spawn(port).await)?;
-            let child = real.child(spawned, level, path, &token, None, generation)?;
+            let child = real.child(spawned, level, path, &token, generation)?;
             match bind_outcome(&child, port, &ticket, &real.settings.runtime_dir).await {
                 // Bound, or exited for some other reason (its `exited()` reports that): kept.
                 Bind::Bound | Bind::OtherExit => return Ok(child),
@@ -3078,29 +2817,23 @@ impl Launch {
     }
 }
 
-/// Test-forced "bwrap unusable", keyed by runtime directory.
+/// Test-forced "sandbox unusable", keyed by runtime directory.
 #[cfg(test)]
-pub(crate) static NO_BWRAP: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+pub(crate) static NO_SANDBOX: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-/// bwrap's preflight (a test may force it unusable for the launcher at `runtime_dir`).
-fn bwrap_preflight(
-    runtime_dir: &std::path::Path,
-    backend: Backend,
-) -> Result<Bwrap, bwrap::Unusable> {
+/// The sandbox's host check (a test may force it unusable for the launcher at `runtime_dir`).
+fn sandbox_preflight(runtime_dir: &std::path::Path) -> Result<(), sandbox::Unusable> {
     #[cfg(test)]
-    if NO_BWRAP
+    if NO_SANDBOX
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .any(|dir| dir == runtime_dir)
     {
-        return Err(bwrap::Unusable::Missing);
+        return Err(sandbox::Unusable::UserNamespaces("forced by a test"));
     }
     let _ = runtime_dir;
-    match backend {
-        Backend::Bwrap => bwrap::preflight(),
-        Backend::Hakoniwa => hako::preflight(),
-    }
+    hako::preflight()
 }
 
 /// Test-forced short listening deadline, keyed by runtime directory.
@@ -3385,22 +3118,15 @@ impl Real {
     /// The level's probe, tried again while inconclusive; a level that stays inconclusive is
     /// kept (the real start decides), never skipped on a timeout alone.
     fn probe_with_retries(self: &Arc<Self>, path: Path, level: Level, ticket: &Ticket) -> Probed {
-        let backend = self.settings.backend;
         let exe = self.settings.inner.executable.clone();
         let hinted = |why: String| {
-            if level != Level::Bubblewrap {
+            if level != Level::Sandbox {
                 return why;
             }
             let proc = std::path::Path::new("/proc");
-            match (backend, bwrap::namespace_cause(proc)) {
-                (Backend::Hakoniwa, Some(cause)) => {
-                    format!("{why}. {}", hako::remedy(cause, &exe))
-                }
-                (Backend::Bwrap, Some(_)) => match bwrap::namespace_hint(proc) {
-                    Some(hint) => format!("{why} ({hint})"),
-                    None => why,
-                },
-                (_, None) => why,
+            match sandbox::namespace_cause(proc) {
+                Some(cause) => format!("{why}. {}", hako::remedy(cause, &exe)),
+                None => why,
             }
         };
         match retry_probe(
@@ -3428,17 +3154,17 @@ impl Real {
         node: &device::Node,
         ticket: &Ticket,
     ) -> Result<Vec<Listed>, String> {
-        if self.held().bwrap.is_none() {
-            let bwrap = bwrap_preflight(&self.settings.runtime_dir, self.settings.backend)
+        if !self.held().preflighted {
+            sandbox_preflight(&self.settings.runtime_dir)
                 .map_err(|unusable| unusable.to_string())?;
-            self.held().bwrap = Some(bwrap);
+            self.held().preflighted = true;
         }
         let Checked {
             files,
             model,
             build_dir,
             ..
-        } = self.verify(Path::Gpu, Level::Bubblewrap, ticket)?;
+        } = self.verify(Path::Gpu, Level::Sandbox, ticket)?;
         let token = Token::new();
         let sequence = self.probes.fetch_add(1, Ordering::SeqCst);
         let job = Job {
@@ -3451,7 +3177,7 @@ impl Real {
             child: mut owned,
             generation,
             marker: _marker,
-            // Held until the listing's process has ended: bubblewrap writes the sandbox's exit
+            // Held until the listing's process has ended: the runner writes the sandbox's exit
             // status to this pipe as its last act, and a closed read end kills it with SIGPIPE.
             status_rest: _status_rest,
             ..
@@ -3578,8 +3304,8 @@ impl Real {
     ) -> Vec<(Level, Probed)> {
         vec![
             (
-                Level::Bubblewrap,
-                self.probe_with_retries(path, Level::Bubblewrap, ticket),
+                Level::Sandbox,
+                self.probe_with_retries(path, Level::Sandbox, ticket),
             ),
             (
                 Level::Unconfined,
@@ -3596,10 +3322,10 @@ impl Real {
         level: Level,
         ticket: &Ticket,
     ) -> Result<(serde_json::Value, Probe), Probe> {
-        if level == Level::Bubblewrap {
-            let bwrap = bwrap_preflight(&self.settings.runtime_dir, self.settings.backend)
+        if level == Level::Sandbox {
+            sandbox_preflight(&self.settings.runtime_dir)
                 .map_err(|unusable| Probe::Failed(unusable.to_string()))?;
-            self.held().bwrap = Some(bwrap);
+            self.held().preflighted = true;
         }
         let Checked {
             files,
@@ -3624,12 +3350,12 @@ impl Real {
             .enable_all()
             .build()
             .map_err(|_| Probe::Inconclusive("no probe runtime".into()))?;
-        // A spawn that fails (bwrap with no status line included) proves nothing alone: it may
+        // A spawn that fails (no status line included) proves nothing alone: it may
         // be transient. Three of them keep the level for the real start to decide.
         let failed = |fail: Fail| match fail {
             Fail::Sandbox(why) | Fail::Other(why) => Probe::Inconclusive(why),
         };
-        let spawned = if level == Level::Bubblewrap {
+        let spawned = if level == Level::Sandbox {
             let gpu = self.selected_binds(path)?;
             self.spawn_sandbox(
                 &job,
@@ -3673,7 +3399,7 @@ impl Real {
             Some(Some(report)) => {
                 let verdict = if report["ok"] != serde_json::json!(true) {
                     report_verdict(&report)
-                } else if level == Level::Bubblewrap && sandbox.is_none() {
+                } else if level == Level::Sandbox && sandbox.is_none() {
                     // An ok report with no verified reaper can never pass at level 1: the
                     // sandbox ended before its check, so nothing was proven either way (level
                     // 3 has no sandbox and is checked by its port's listeners).
@@ -3703,14 +3429,14 @@ impl Real {
     }
 }
 
-/// The first line of the sandbox's own (bubblewrap's or the Hakoniwa runner's) error text.
+/// The first line of the sandbox's own (the Hakoniwa runner's) error text.
 fn first_sandbox_line(stderr: Option<impl Read>) -> String {
     let mut text = String::new();
     if let Some(stderr) = stderr {
         let _ = stderr.take(4096).read_to_string(&mut text);
     }
     text.lines()
-        .find(|line| line.starts_with("bwrap: ") || line.starts_with("mimik sandbox: "))
+        .find(|line| line.starts_with("mimik sandbox: "))
         .unwrap_or("")
         .trim()
         .to_owned()

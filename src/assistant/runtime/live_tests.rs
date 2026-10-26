@@ -1,6 +1,6 @@
 //! Live tests: the pinned official llama-server (CPU build) under the real profiles, with the
 //! CI test model (`stories260K.gguf`). Ignored in ordinary runs; run with `--ignored` where
-//! bubblewrap works (the dev host, the `llama-runtime` CI job) and with:
+//! the sandbox works (the dev host, the `llama-runtime` CI job) and with:
 //!
 //! - `MIMIK_LIVE_RUNTIME`: the runtime folder (holding `cpu/` with exactly the pinned files);
 //! - `MIMIK_LIVE_MODELS`: a 0700 models folder holding `stories260K.gguf`;
@@ -24,15 +24,6 @@ const RUNNER: &str = "assistant::runtime::runner::tests::helper";
 
 fn env(name: &str) -> PathBuf {
     PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("{name} is not set")))
-}
-
-/// The sandbox the live suite runs against: `MIMIK_LIVE_SANDBOX` (`bwrap`, the default, or
-/// `hakoniwa`); the same tests run against either.
-fn live_backend() -> Backend {
-    std::env::var("MIMIK_LIVE_SANDBOX").map_or_else(
-        |_| Backend::default(),
-        |name| Backend::parse(&name).unwrap(),
-    )
 }
 
 fn helper_args(test: &str) -> Vec<String> {
@@ -86,16 +77,9 @@ fn settings(scratch: &std::path::Path, inner: &str, inner_env: Vec<(String, Stri
             executable: exe,
             probe_args: args,
             probe_env: env_vars,
-            shim_args: {
-                let mut args = helper_args(HELPER);
-                args.push("shim".into());
-                args
-            },
-            shim_env: vec![(test_helper::VARIABLE.into(), "shim".into())],
         },
         device: device::Choice::Cpu,
         roots: device::Roots::default(),
-        backend: live_backend(),
     }
 }
 
@@ -132,9 +116,7 @@ fn helper() {
             std::process::exit(0);
         }
         "adversary" => adversary(),
-        #[cfg(feature = "sandbox-hakoniwa")]
         "landlock-scope" => landlock_scope(),
-        "shim" => std::process::exit(super::super::probe::shim()),
         "mimik" => play_mimik(),
         "cwd-probe" => play_cwd_probe(),
         other => panic!("unknown helper mode {other}"),
@@ -265,8 +247,7 @@ fn adversary() {
         }
         total
     };
-    // What the command inherits: the shim closed bwrap's status, seccomp, token, directory and
-    // marker descriptors before its exec.
+    // What the command inherits: the closure closed every descriptor above 2 before its exec.
     let descriptors: Vec<i64> = std::fs::read_dir("/proc/self/fd")
         .map(|listing| {
             listing
@@ -359,12 +340,12 @@ fn play_mimik() {
         launch.preflight(Path::Cpu).await.unwrap();
         let probing = Arc::clone(&launch.0);
         let probed = tokio::task::spawn_blocking(move || {
-            probing.probe_level(Path::Cpu, Level::Bubblewrap, &probing.work().enter())
+            probing.probe_level(Path::Cpu, Level::Sandbox, &probing.work().enter())
         })
         .await
         .unwrap();
         assert_eq!(probed, Probe::Passed);
-        let child = launch.start(1, Level::Bubblewrap, Path::Cpu).await.unwrap();
+        let child = launch.start(1, Level::Sandbox, Path::Cpu).await.unwrap();
         // "Ready" waits for /health; "starting" reports at once, while the server loads.
         if std::env::var("MIMIK_LIVE_KILL_AT").as_deref() != Ok("starting") {
             while child.server().health().await != Health::Ready {
@@ -373,8 +354,8 @@ fn play_mimik() {
         }
         let pidfile =
             std::fs::read_to_string(scratch.join("data/run").join(rundir::PIDFILE)).unwrap();
-        let bwrap: i32 = pidfile.lines().nth(1).unwrap().parse().unwrap();
-        test_helper::print(&json!({"bwrap": bwrap}));
+        let runner: i32 = pidfile.lines().nth(1).unwrap().parse().unwrap();
+        test_helper::print(&json!({"runner": runner}));
         tokio::time::sleep(Duration::from_secs(120)).await;
     });
 }
@@ -435,7 +416,7 @@ fn alive(pid: i32) -> bool {
 }
 
 #[test]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 fn live_the_probe_reaches_level_1_and_level_3() {
     let scratch = scratch();
     let real = real(settings(scratch.path(), "probe-inner", Vec::new()));
@@ -444,7 +425,7 @@ fn live_the_probe_reaches_level_1_and_level_3() {
         .block_on(Launch(Arc::clone(&real)).preflight(Path::Cpu))
         .unwrap();
     assert_eq!(
-        real.probe_level(Path::Cpu, Level::Bubblewrap, &real.work().enter()),
+        real.probe_level(Path::Cpu, Level::Sandbox, &real.work().enter()),
         Probe::Passed
     );
     assert_eq!(
@@ -474,7 +455,7 @@ fn probe_after_exit(mode: &str) -> Probe {
                 arrived,
                 release: wait,
             });
-            real.probe_level(Path::Cpu, Level::Bubblewrap, &real.work().enter())
+            real.probe_level(Path::Cpu, Level::Sandbox, &real.work().enter())
         })
     };
     reached.recv_timeout(Duration::from_secs(60)).unwrap();
@@ -485,7 +466,7 @@ fn probe_after_exit(mode: &str) -> Probe {
 }
 
 #[test]
-#[ignore = "live: bubblewrap, pinned runtime (MIMIK_LIVE_*)"]
+#[ignore = "live: sandbox, pinned runtime (MIMIK_LIVE_*)"]
 fn live_a_failing_probe_that_ended_before_its_reaper_was_pinned_still_reports_its_verdict() {
     match probe_after_exit("probe-negative-fast") {
         Probe::Failed(why) => assert!(why.contains("the render node cannot be opened"), "{why}"),
@@ -494,7 +475,7 @@ fn live_a_failing_probe_that_ended_before_its_reaper_was_pinned_still_reports_it
 }
 
 #[test]
-#[ignore = "live: bubblewrap, pinned runtime (MIMIK_LIVE_*)"]
+#[ignore = "live: sandbox, pinned runtime (MIMIK_LIVE_*)"]
 fn live_an_ok_probe_without_a_verified_reaper_can_never_pass() {
     match probe_after_exit("probe-ok-fast") {
         Probe::Inconclusive(why) => {
@@ -576,10 +557,10 @@ async fn started_with(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 async fn live_level_1_serves_over_the_checked_socket_with_the_token_only() {
     let scratch = scratch();
-    let (_launch, child) = started(scratch.path(), Level::Bubblewrap).await;
+    let (_launch, child) = started(scratch.path(), Level::Sandbox).await;
     let real = &*child;
     // /health answered without a token (above); every other route needs it.
     let (status, _) = raw(real, "/v1/chat/completions", None, &short_request(8)).await;
@@ -618,8 +599,8 @@ async fn live_level_1_serves_over_the_checked_socket_with_the_token_only() {
     // The token is in no command line of the sandbox's processes.
     let pidfile =
         std::fs::read_to_string(scratch.path().join("data/run").join(rundir::PIDFILE)).unwrap();
-    let bwrap: i32 = pidfile.lines().nth(1).unwrap().parse().unwrap();
-    for pid in std::iter::once(bwrap).chain(descendants(bwrap)) {
+    let runner: i32 = pidfile.lines().nth(1).unwrap().parse().unwrap();
+    for pid in std::iter::once(runner).chain(descendants(runner)) {
         let line = String::from_utf8_lossy(
             &std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default(),
         )
@@ -646,13 +627,13 @@ async fn live_level_1_serves_over_the_checked_socket_with_the_token_only() {
             .windows(marker.len())
             .any(|bytes| bytes == marker.as_bytes())
     }));
-    for pid in descendants(bwrap) {
+    for pid in descendants(runner) {
         assert!(!alive(pid), "{pid} outlived the stop");
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 async fn live_level_3_loads_the_model_through_proc_self_fd() {
     let scratch = scratch();
     let (_launch, child) = started(scratch.path(), Level::Unconfined).await;
@@ -703,8 +684,7 @@ fn assert_only_the_writable_mounts_are_writable(report: &Value) {
 /// Hakoniwa a `/dev` of the five safe nodes.
 fn assert_no_privilege_or_terminal(report: &Value) {
     let refused = |value: &Value| value.as_i64().is_some_and(|errno| errno != 0);
-    // No capability left in any set (the bounding set too: bubblewrap's `--cap-drop ALL` and
-    // the Hakoniwa closure both empty it), `no_new_privs` and the seccomp filter in force.
+    // No capability left in any set (the bounding set too: the closure empties it), `no_new_privs` and the seccomp filter in force.
     let zero = "0000000000000000";
     for set in ["inh", "prm", "eff", "bnd", "amb"] {
         assert_eq!(report["caps"][set], json!(zero), "{set}: {report}");
@@ -721,8 +701,8 @@ fn assert_no_privilege_or_terminal(report: &Value) {
     // The runner's own umask (027, set around the run) is back before the exec (it ran with
     // 077 while it built the sandbox).
     assert_eq!(report["umask"], json!("0027"), "{report}");
-    if live_backend() == Backend::Hakoniwa {
-        // Hakoniwa's /dev is built here: the five safe nodes and the links, no terminal node,
+    {
+        // The sandbox's /dev is built here: the five safe nodes and the links, no terminal node,
         // no pts, no ptmx.
         let dev: Vec<&str> = report["dev"]
             .as_array()
@@ -750,12 +730,9 @@ fn landlock_demanded() -> bool {
     std::env::var("MIMIK_LIVE_LANDLOCK").as_deref() == Ok("require")
 }
 
-/// Whether the confinement assertions apply: under Hakoniwa on a kernel of ABI 6 or more. A
+/// Whether the confinement assertions apply: on a kernel of ABI 6 or more. A
 /// demanded run on an older kernel fails; otherwise it skips and says why.
 fn landlock_required(abi: i64) -> bool {
-    if live_backend() != Backend::Hakoniwa {
-        return false;
-    }
     assert!(
         abi >= 6 || !landlock_demanded(),
         "this run requires Landlock ABI >=6, found {abi}"
@@ -806,7 +783,7 @@ fn assert_landlock_confines(report: &Value, lan: bool) {
 }
 
 #[test]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 fn live_an_adversary_in_the_level_1_sandbox_reaches_nothing() {
     let scratch = scratch();
     let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
@@ -846,7 +823,7 @@ fn live_an_adversary_in_the_level_1_sandbox_reaches_nothing() {
         .unwrap();
     // The runner inherits this process's umask: an explicit one, restored at once.
     let before = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o027));
-    let reported = real.inner_report(Path::Cpu, Level::Bubblewrap, &real.work().enter());
+    let reported = real.inner_report(Path::Cpu, Level::Sandbox, &real.work().enter());
     rustix::process::umask(before);
     let (report, verdict) = reported.unwrap();
     assert_eq!(verdict, Probe::Passed, "{report}");
@@ -878,14 +855,14 @@ fn live_an_adversary_in_the_level_1_sandbox_reaches_nothing() {
             "{inherited} is open: {descriptors:?}"
         );
     }
-    // Sized temporary space, when this bubblewrap has --size.
-    if real.held().bwrap.as_ref().is_some_and(|bwrap| bwrap.size) {
+    // Sized temporary space.
+    {
         assert!(
-            report["tmp_filled"].as_u64().unwrap() <= bwrap::TMP_BYTES,
+            report["tmp_filled"].as_u64().unwrap() <= sandbox::TMP_BYTES,
             "{report}"
         );
         assert!(
-            report["shm_filled"].as_u64().unwrap() <= bwrap::SHM_BYTES,
+            report["shm_filled"].as_u64().unwrap() <= sandbox::SHM_BYTES,
             "{report}"
         );
     }
@@ -923,7 +900,7 @@ fn sigkill_of_mimik_ends_the_sandbox(kill_at: &str) {
         .spawn()
         .unwrap();
     let mut reader = std::io::BufReader::new(mimik.stdout.take().unwrap());
-    let bwrap = loop {
+    let runner = loop {
         let mut line = String::new();
         assert!(
             std::io::BufRead::read_line(&mut reader, &mut line).unwrap() > 0,
@@ -931,10 +908,10 @@ fn sigkill_of_mimik_ends_the_sandbox(kill_at: &str) {
         );
         if let Some(at) = line.find("HELPER ") {
             let value: Value = serde_json::from_str(&line[at + 7..]).unwrap();
-            break i32::try_from(value["bwrap"].as_i64().unwrap()).unwrap();
+            break i32::try_from(value["runner"].as_i64().unwrap()).unwrap();
         }
     };
-    let tree: Vec<i32> = std::iter::once(bwrap).chain(descendants(bwrap)).collect();
+    let tree: Vec<i32> = std::iter::once(runner).chain(descendants(runner)).collect();
     assert_ne!(tree, Vec::<i32>::new());
     mimik.kill().unwrap();
     mimik.wait().unwrap();
@@ -949,19 +926,19 @@ fn sigkill_of_mimik_ends_the_sandbox(kill_at: &str) {
 }
 
 #[test]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 fn live_sigkill_of_mimik_kills_the_whole_sandbox() {
     sigkill_of_mimik_ends_the_sandbox("ready");
 }
 
 #[test]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 fn live_sigkill_of_mimik_during_startup_kills_the_whole_sandbox() {
     sigkill_of_mimik_ends_the_sandbox("starting");
 }
 
 /// A fake build in `scratch`: the fake llama-server (`MIMIK_LIVE_FAKE_SERVER`) as the only
-/// executable, a fake model, the test binary as runner and shim.
+/// executable, a fake model, the test binary as runner.
 fn fake_build(scratch: &std::path::Path, alias: &str) -> Arc<Real> {
     let server = std::fs::read(env("MIMIK_LIVE_FAKE_SERVER")).unwrap();
     fake_build_with(scratch, alias, &server)
@@ -1059,12 +1036,12 @@ async fn failed_start_keeps_level_1(real: Arc<Real>, reasons: &[&str]) {
     let status = handle.status();
     // The forged lines did not count as a sandbox failure: the level is kept, the failure
     // counted, no unconfined start.
-    assert_eq!(status.level, Some(Level::Bubblewrap), "{status:?}");
+    assert_eq!(status.level, Some(Level::Sandbox), "{status:?}");
     assert!(
         !status
             .skipped
             .iter()
-            .any(|(level, _)| *level == Level::Bubblewrap),
+            .any(|(level, _)| *level == Level::Sandbox),
         "{status:?}"
     );
     assert!(matches!(&status.state, State::Starting(_)), "{status:?}");
@@ -1079,15 +1056,15 @@ async fn failed_start_keeps_level_1(real: Arc<Real>, reasons: &[&str]) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
-async fn live_a_server_that_forges_bubblewraps_errors_keeps_level_1() {
-    forged_failure_keeps_level_1("forge-bwrap").await;
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
+async fn live_a_server_that_forges_sandbox_errors_keeps_level_1() {
+    forged_failure_keeps_level_1("forge-sandbox").await;
 }
 
 /// A server file that cannot be executed (not an executable format) fails at the exec itself,
 /// after the marker: the server's failure, counted, never a sandbox failure.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 async fn live_a_server_that_cannot_be_executed_is_the_servers_failure() {
     let scratch = scratch();
     let real = fake_build_with(scratch.path(), "no-exec", b"this is not a program\n");
@@ -1104,21 +1081,18 @@ async fn live_a_server_that_cannot_be_executed_is_the_servers_failure() {
 }
 
 /// What a start of the Hakoniwa sandbox does when the object at a bound path is no longer the
-/// one that was verified (the path binds' (device, inode) check; bubblewrap binds the
-/// verified descriptors, so it has no such race).
-#[cfg(feature = "sandbox-hakoniwa")]
+/// one that was verified (the path binds' (device, inode) check).
 async fn swapped_before_the_spawn(swap: impl FnOnce(&std::path::Path)) -> Fail {
     let scratch = scratch();
     let real = fake_build(scratch.path(), "swapped");
-    let mut settings = real.settings.clone();
-    settings.backend = Backend::Hakoniwa;
+    let settings = real.settings.clone();
     let build = real.cpu.clone();
     let real = Arc::new(Real::with_build(settings, build));
     let launch = Launch(Arc::clone(&real));
     launch.preflight(Path::Cpu).await.unwrap();
     let probing = Arc::clone(&real);
     let probed = tokio::task::spawn_blocking(move || {
-        probing.probe_level(Path::Cpu, Level::Bubblewrap, &probing.work().enter())
+        probing.probe_level(Path::Cpu, Level::Sandbox, &probing.work().enter())
     })
     .await
     .unwrap();
@@ -1133,7 +1107,7 @@ async fn swapped_before_the_spawn(swap: impl FnOnce(&std::path::Path)) -> Fail {
     });
     let starting = tokio::spawn({
         let launch = Launch(Arc::clone(&real));
-        async move { launch.start_real(1, Level::Bubblewrap, Path::Cpu).await }
+        async move { launch.start_real(1, Level::Sandbox, Path::Cpu).await }
     });
     tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(60)))
         .await
@@ -1152,7 +1126,6 @@ async fn swapped_before_the_spawn(swap: impl FnOnce(&std::path::Path)) -> Fail {
     failure
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 fn replace_file(path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
     let bytes = std::fs::read(path).unwrap();
@@ -1162,9 +1135,8 @@ fn replace_file(path: &std::path::Path) {
     std::fs::rename(&other, path).unwrap();
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 async fn live_a_model_swapped_after_verification_is_never_run_by_hakoniwa() {
     let failure = swapped_before_the_spawn(|scratch| {
         // The same bytes under a new inode: only the identity check can tell.
@@ -1177,9 +1149,8 @@ async fn live_a_model_swapped_after_verification_is_never_run_by_hakoniwa() {
     );
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 async fn live_a_server_swapped_after_verification_is_never_run_by_hakoniwa() {
     let failure = swapped_before_the_spawn(|scratch| {
         replace_file(&scratch.join("runtime/cpu/llama-server"));
@@ -1191,9 +1162,8 @@ async fn live_a_server_swapped_after_verification_is_never_run_by_hakoniwa() {
     );
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 async fn live_a_model_replaced_by_a_link_to_another_file_is_never_run_by_hakoniwa() {
     let failure = swapped_before_the_spawn(|scratch| {
         let model = scratch.join("models/m.gguf");
@@ -1212,7 +1182,7 @@ async fn live_a_model_replaced_by_a_link_to_another_file_is_never_run_by_hakoniw
 /// Nothing the executed server exits with can count as a sandbox failure, whatever code the
 /// runner or its closure use for one (or the signal-like codes above 128).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 async fn live_no_exit_code_of_the_server_counts_as_a_sandbox_failure() {
     for code in [110, 111, 112, 113, 114, 115, 116, 120, 125, 126, 127, 137] {
         forged_failure_keeps_level_1(&format!("forge-exit-{code}")).await;
@@ -1220,10 +1190,10 @@ async fn live_no_exit_code_of_the_server_counts_as_a_sandbox_failure() {
 }
 
 #[tokio::test]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 async fn live_a_failure_after_the_level_1_spawn_leaves_no_process_behind() {
     let scratch = scratch();
-    // The alias is in the command lines of bwrap, its reaper and the server: a unique one
+    // The alias is in the command lines of the runner, its reaper and the server: a unique one
     // finds this test's processes and no other's.
     let alias = format!(
         "fake-{}",
@@ -1237,7 +1207,7 @@ async fn live_a_failure_after_the_level_1_spawn_leaves_no_process_behind() {
     launch.preflight(Path::Cpu).await.unwrap();
     let probing = Arc::clone(&real);
     let probed = tokio::task::spawn_blocking(move || {
-        probing.probe_level(Path::Cpu, Level::Bubblewrap, &probing.work().enter())
+        probing.probe_level(Path::Cpu, Level::Sandbox, &probing.work().enter())
     })
     .await
     .unwrap();
@@ -1250,7 +1220,7 @@ async fn live_a_failure_after_the_level_1_spawn_leaves_no_process_behind() {
         (4, "connector"),
     ] {
         *FAULT.lock().unwrap() = Some((real.settings.runtime_dir.clone(), step));
-        let result = launch.start(generation, Level::Bubblewrap, Path::Cpu).await;
+        let result = launch.start(generation, Level::Sandbox, Path::Cpu).await;
         assert!(result.is_err(), "{step}");
         launch.settle().await;
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -1308,7 +1278,7 @@ fn marker_backend(dir: &std::path::Path, marker: &std::path::Path) -> Option<()>
 }
 
 #[test]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 fn live_level_3_does_not_load_a_backend_from_an_attacker_writable_cwd() {
     let scratch = scratch();
     let attacker = scratch.path().join("attacker-cwd");
@@ -1498,7 +1468,7 @@ fn killed_after(delay: Duration) {
     }
     // The earliest process of the run that shows a command line (the smallest start time) is
     // the runner, before any server's exec. A process caught between its exit and its reaping
-    // shows none, and bubblewrap's own `--help` probe at the start is not the run's.
+    // shows none, and a `--help` probe at the start is not the run's.
     let line = loop {
         let seen = sweep.snapshot();
         let earliest = seen
@@ -1515,14 +1485,11 @@ fn killed_after(delay: Duration) {
         );
         std::thread::sleep(Duration::from_micros(200));
     };
-    // (With bubblewrap the runner has already executed bwrap in place by then.)
     assert!(
-        line.contains("runner::tests::helper")
-            || line.contains("assistant-runner")
-            || (live_backend() == Backend::Bwrap && line.contains("bwrap ")),
+        line.contains("runner::tests::helper") || line.contains("assistant-runner"),
         "the earliest process seen is not the runner: {line}"
     );
-    // Not the server's own command line (bubblewrap's names the server as a file to bind).
+    // Not the server's own command line.
     assert!(!line.contains("--api-key-file"), "{line}");
     std::thread::sleep(delay);
     mimik.kill().unwrap();
@@ -1538,7 +1505,7 @@ fn killed_after(delay: Duration) {
 /// The detector itself: a child that survives its parent is reported, and one that does not
 /// is not.
 #[test]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 fn live_the_survivor_detector_sees_a_child_that_outlives_its_parent() {
     let mut parent = std::process::Command::new("sh")
         .args(["-c", "sleep 60 & wait"])
@@ -1565,11 +1532,11 @@ fn live_the_survivor_detector_sees_a_child_that_outlives_its_parent() {
 }
 
 #[test]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 fn live_killing_mimik_at_any_moment_of_a_start_leaves_no_process_of_the_run() {
     // Hakoniwa sets the parent-death signal itself in its two children after their fork and
     // does not re-check its parent, so a parent that dies between the fork and that call
-    // leaves a child behind (HAKO-L5); the delays sweep that window (and bubblewrap's).
+    // leaves a child behind (HAKO-L5); the delays sweep that window.
     let delays_ms = [0_u64, 1, 2, 3, 5, 8, 12, 20, 35, 60];
     for round in 0..3 {
         for (n, delay) in delays_ms.iter().enumerate() {
@@ -1581,24 +1548,22 @@ fn live_killing_mimik_at_any_moment_of_a_start_leaves_no_process_of_the_run() {
 
 /// With Hakoniwa the reaper is outside the namespace: a forced stop is over only when the
 /// server (PID 1 inside) is gone, sampled at the instant the exit is published.
-#[cfg(feature = "sandbox-hakoniwa")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 async fn live_the_exit_is_published_only_once_hakoniwas_server_is_gone() {
     let scratch = scratch();
-    let mut settings = settings(scratch.path(), "probe-inner", Vec::new());
-    settings.backend = Backend::Hakoniwa;
+    let settings = settings(scratch.path(), "probe-inner", Vec::new());
     let launch = Launch(real(settings));
     launch.preflight(Path::Cpu).await.unwrap();
     let probing = Arc::clone(&launch.0);
     let probed = tokio::task::spawn_blocking(move || {
-        probing.probe_level(Path::Cpu, Level::Bubblewrap, &probing.work().enter())
+        probing.probe_level(Path::Cpu, Level::Sandbox, &probing.work().enter())
     })
     .await
     .unwrap();
     assert_eq!(probed, Probe::Passed);
     let child = launch
-        .start_real(1, Level::Bubblewrap, Path::Cpu)
+        .start_real(1, Level::Sandbox, Path::Cpu)
         .await
         .unwrap();
     let runner = child.pid;
@@ -1622,23 +1587,17 @@ async fn live_the_exit_is_published_only_once_hakoniwas_server_is_gone() {
 #[path = "live_gpu_tests.rs"]
 mod gpu;
 
-/// The Landlock report of a ready server under Hakoniwa (forced, whatever backend the run
-/// uses): full on a kernel with Landlock ABI 6 or newer, which the run requires unless
-/// `MIMIK_LIVE_LANDLOCK=any`.
-#[cfg(feature = "sandbox-hakoniwa")]
+/// The Landlock report of a ready server: full on a kernel with Landlock ABI 6 or newer, which a run with
+/// `MIMIK_LIVE_LANDLOCK=require` demands.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 async fn live_the_hakoniwa_closure_reports_landlock_in_full_force() {
     let scratch = scratch();
-    let (_launch, child) = started_with(scratch.path(), Level::Bubblewrap, |settings| {
-        settings.backend = Backend::Hakoniwa;
-    })
-    .await;
+    let (_launch, child) = started_with(scratch.path(), Level::Sandbox, |_| {}).await;
     assert_landlock_report(child.landlock(), landlock_abi(), landlock_demanded());
     child.stop().await;
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 fn assert_landlock_report(
     reported: Option<super::super::hako::Landlock>,
     abi: i64,
@@ -1650,7 +1609,6 @@ fn assert_landlock_report(
     assert_eq!(reported, Some(expected_landlock(abi)));
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 fn expected_landlock(abi: i64) -> super::super::hako::Landlock {
     use super::super::hako::Landlock;
     if abi <= 0 {
@@ -1665,7 +1623,6 @@ fn expected_landlock(abi: i64) -> super::super::hako::Landlock {
     }
 }
 
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 fn compatibility_mode_cannot_accept_an_incorrect_landlock_report_on_a_capable_kernel() {
     use super::super::hako::Landlock;
@@ -1693,29 +1650,13 @@ fn compatibility_mode_cannot_accept_an_incorrect_landlock_report_on_a_capable_ke
     );
 }
 
-/// Bubblewrap has no such layer: nothing is reported.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
-async fn live_bubblewrap_reports_no_landlock() {
-    let scratch = scratch();
-    let (_launch, child) = started_with(scratch.path(), Level::Bubblewrap, |settings| {
-        settings.backend = Backend::Bwrap;
-        // The shipped runner may be a Hakoniwa-only build; bubblewrap works under either.
-    })
-    .await;
-    assert_eq!(child.landlock(), None);
-    child.stop().await;
-}
-
 /// A kernel without Landlock, simulated by the runner's seccomp filter answering `errno` to
 /// the three Landlock calls (inherited by the sandbox's closure): the version probe fails,
 /// the start goes on, the server serves and the report says "not available". The libtest
 /// runner is used whatever `MIMIK_LIVE_RUNNER` says (the filter is its helper's).
-#[cfg(feature = "sandbox-hakoniwa")]
 async fn without_landlock_still_starts(errno: &str) {
     let scratch = scratch();
-    let (_launch, child) = started_with(scratch.path(), Level::Bubblewrap, |settings| {
-        settings.backend = Backend::Hakoniwa;
+    let (_launch, child) = started_with(scratch.path(), Level::Sandbox, |settings| {
         settings.runner = RunnerCommand {
             program: std::env::current_exe().unwrap(),
             args: helper_args(RUNNER).into_iter().map(Into::into).collect(),
@@ -1737,25 +1678,22 @@ async fn without_landlock_still_starts(errno: &str) {
 }
 
 /// `ENOSYS`: a kernel built without Landlock.
-#[cfg(feature = "sandbox-hakoniwa")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 async fn live_a_kernel_without_landlock_still_starts_and_is_reported_as_not_available() {
     without_landlock_still_starts("ENOSYS").await;
 }
 
 /// `EOPNOTSUPP`: Landlock disabled at boot.
-#[cfg(feature = "sandbox-hakoniwa")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 async fn live_landlock_disabled_at_boot_still_starts_and_is_reported_as_not_available() {
     without_landlock_still_starts("EOPNOTSUPP").await;
 }
 
 /// `EPERM`: a seccomp or service-manager filter around Mimik refuses the Landlock calls.
-#[cfg(feature = "sandbox-hakoniwa")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: pinned llama-server, bubblewrap, test model (MIMIK_LIVE_*)"]
+#[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 async fn live_landlock_refused_by_a_filter_still_starts_and_is_reported_as_not_available() {
     without_landlock_still_starts("EPERM").await;
 }
@@ -1764,7 +1702,6 @@ async fn live_landlock_refused_by_a_filter_still_starts_and_is_reported_as_not_a
 /// itself cannot offer: its only other process is Hakoniwa's reaper): this process listens on
 /// an abstract Unix socket and is the signal target; a re-executed copy of the test binary
 /// applies the very ruleset code the closure runs and tries both.
-#[cfg(feature = "sandbox-hakoniwa")]
 #[test]
 #[ignore = "live: Landlock in the kernel"]
 fn live_landlock_refuses_abstract_sockets_and_signals_outside_its_domain() {
@@ -1802,7 +1739,6 @@ fn live_landlock_refuses_abstract_sockets_and_signals_outside_its_domain() {
 }
 
 /// The scope helper: applies the closure's ruleset to itself, then reports.
-#[cfg(feature = "sandbox-hakoniwa")]
 fn landlock_scope() {
     use super::super::hako::{Grant, Rule, apply_landlock};
     use std::os::linux::net::SocketAddrExt;

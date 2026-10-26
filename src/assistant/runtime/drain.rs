@@ -281,9 +281,9 @@ mod tests {
             classify("0.03.067.149 I slot print_timing: id  0 | task 0 | prompt eval time"),
             None
         );
-        // The child's output never says the sandbox failed: that is the shim's marker alone.
+        // The child's output never says the sandbox failed: that is the marker alone.
         assert_eq!(
-            classify("bwrap: Can't find source path /nonexistent: No such file or directory"),
+            classify("mimik sandbox: cannot bind /nonexistent: No such file or directory"),
             None
         );
         assert_eq!(

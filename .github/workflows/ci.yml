@@ -75,7 +75,6 @@ jobs:
               cargo build --locked --example fake_llama_server
               cp target/debug/examples/fake_llama_server target/confinement/fake_llama_server
               cargo build --locked --features dev-endpoint --bin mimik --target-dir target/dev-endpoint
-              cargo build --locked --features sandbox-hakoniwa --bin mimik --target-dir target/hakoniwa
             '
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -105,13 +104,6 @@ jobs:
         with:
           name: dev-endpoint-binary
           path: target/dev-endpoint/debug/mimik
-          if-no-files-found: error
-      # A build with the comparison sandbox (DEP-24, `sandbox-hakoniwa`): the single-threaded
-      # runner of the Hakoniwa live run below, never packaged or released.
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: hakoniwa-binary
-          path: target/hakoniwa/debug/mimik
           if-no-files-found: error
 
   artifact-smoke:
@@ -225,7 +217,7 @@ jobs:
         run: python3 tools/lan_smoke.py --binary release/mimik-0.1.0-linux-x86_64/mimik --source-root release/lan-source/mimik-0.1.0 --source-fixture smoke-source
 
   # The pinned llama-server under the real profiles, from the unpacked release, as host steps
-  # (Docker's seccomp profile refuses the namespaces bwrap needs). No Rust toolchain.
+  # (Docker's seccomp profile refuses the namespaces the sandbox needs). No Rust toolchain.
   llama-runtime:
     needs: [llama-fetch, checks]
     runs-on: ubuntu-24.04
@@ -246,10 +238,6 @@ jobs:
         with:
           name: confinement-tests
           path: target
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: hakoniwa-binary
-          path: target/hakoniwa-binary
       - name: Verify and unpack the release, reapply the manifest's modes
         run: |
           (cd release && sha256sum --check SHA256SUMS)
@@ -258,24 +246,6 @@ jobs:
           cp fetched/models/* target/models/
           python3 tools/llama_runtime.py verify --dir target/rel/llama --models target/models
           chmod 0755 target/rel/mimik target/confinement-tests target/fake_llama_server
-      - name: Install bubblewrap (a pinned upstream release if the package lacks an option)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap
-          bwrap --version
-          missing=""
-          for option in --unshare-all --die-with-parent --new-session --clearenv --setenv --cap-drop --ro-bind --bind-fd --ro-bind-fd --ro-bind-data --perms --dev --dev-bind --proc --tmpfs --dir --symlink --remount-ro --seccomp --json-status-fd --chdir --size; do
-            bwrap --help 2>&1 | grep -q -- "$option " || missing="$missing $option"
-          done
-          if [ -n "$missing" ]; then
-            echo "bubblewrap lacks:$missing; building the pinned upstream 0.13.0"
-            sudo apt-get install -y meson ninja-build libcap-dev pkg-config
-            curl -fsSL -o bwrap.tar.xz https://github.com/containers/bubblewrap/releases/download/v0.13.0/bubblewrap-0.13.0.tar.xz
-            echo "4734237473c0e5d695e4e9034a34e43b2dbf5164655bd13fa59ae376b2b7a765  bwrap.tar.xz" | sha256sum --check
-            tar -xJf bwrap.tar.xz
-            (cd bubblewrap-0.13.0 && meson setup build --prefix=/usr -Dman=disabled -Dtests=false && ninja -C build && sudo ninja -C build install)
-            bwrap --version
-          fi
       # Recorded, not gated: what the probe reaches with the runner's AppArmor user-namespace
       # restriction as shipped (level 1 is certified only with it switched off, below).
       - name: Start-time probe with the AppArmor restriction as shipped (recorded)
@@ -310,40 +280,18 @@ jobs:
             --models-dir target/models --model local:stories260K.gguf \
             --model-sha256 270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d \
             --data-dir target/probe-data
-      - name: Confinement, endpoint and live tests against the unpacked runtime
+      # The whole live suite, with the release's own binary as the runner (single-threaded, its
+      # guard active), not the libtest binary; the start-time probe with it exits 0 only at
+      # level 1.
+      - name: Start-time probe and the whole live suite
         env:
           MIMIK_LIVE_RUNTIME: ${{ github.workspace }}/target/rel/llama
           MIMIK_LIVE_MODELS: ${{ github.workspace }}/target/models
           MIMIK_LIVE_SCRATCH: ${{ github.workspace }}/target/scratch
           MIMIK_LIVE_FAKE_SERVER: ${{ github.workspace }}/target/fake_llama_server
+          MIMIK_LIVE_RUNNER: ${{ github.workspace }}/target/rel/mimik
         run: |
           set -o pipefail
-          target/confinement-tests --include-ignored --test-threads=2 \
-            assistant::runtime::seccomp:: assistant::runtime::endpoint:: \
-            assistant::runtime::runner:: assistant::runtime::launch::live_tests:: \
-            --skip live_gpu_ \
-            2>&1 | tee target/confinement.log
-          # A filter that matches too little must not pass: at least the 40 tests of this
-          # revision ran, none failed or was ignored.
-          ran=$(grep -oE '^test result: ok\. [0-9]+ passed; 0 failed; 0 ignored' target/confinement.log | grep -oE '[0-9]+' | head -n 1)
-          if [ "${ran:-0}" -lt 40 ]; then
-            echo "only ${ran:-0} confinement tests ran; expected at least 40"
-            exit 1
-          fi
-      # The comparison sandbox (DEP-24): the same suite against Hakoniwa, with Mimik's own
-      # feature-built binary as the runner (single-threaded, its guard active), not the
-      # libtest binary; the start-time probe with it exits 0 only at level 1.
-      - name: Hakoniwa sandbox, start-time probe and the whole live suite
-        env:
-          MIMIK_LIVE_RUNTIME: ${{ github.workspace }}/target/rel/llama
-          MIMIK_LIVE_MODELS: ${{ github.workspace }}/target/models
-          MIMIK_LIVE_SCRATCH: ${{ github.workspace }}/target/scratch
-          MIMIK_LIVE_FAKE_SERVER: ${{ github.workspace }}/target/fake_llama_server
-          MIMIK_LIVE_SANDBOX: hakoniwa
-          MIMIK_LIVE_RUNNER: ${{ github.workspace }}/target/hakoniwa-binary/mimik
-        run: |
-          set -o pipefail
-          chmod 0755 target/hakoniwa-binary/mimik
           # The kernel's Landlock ABI from the x86_64 `landlock_create_ruleset` version call. The
           # snippet prints the ABI number, or `-1 <errno>` when the syscall itself fails (ENOSYS 38
           # no Landlock, EOPNOTSUPP 95 disabled at boot, EPERM 1 filtered); that is a valid answer
@@ -369,18 +317,18 @@ jobs:
           else
             echo "Landlock confinement assertions: SKIPPED (ABI below 6)"
           fi
-          target/hakoniwa-binary/mimik assistant-runner --probe --sandbox hakoniwa \
+          target/rel/mimik assistant-runner --probe \
             --runtime target/rel/llama --models-dir target/models --model local:stories260K.gguf \
             --model-sha256 270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d \
-            --data-dir target/probe-data-hakoniwa
+            --data-dir target/probe-data-live
           target/confinement-tests --test-threads=2 --include-ignored \
             assistant::runtime::seccomp:: assistant::runtime::endpoint:: \
             assistant::runtime::runner:: assistant::runtime::launch::live_tests:: \
             --skip live_gpu_ \
-            2>&1 | tee target/confinement-hakoniwa.log
-          ran=$(grep -oE '^test result: ok\. [0-9]+ passed; 0 failed; 0 ignored' target/confinement-hakoniwa.log | grep -oE '[0-9]+' | head -n 1)
+            2>&1 | tee target/confinement.log
+          ran=$(grep -oE '^test result: ok\. [0-9]+ passed; 0 failed; 0 ignored' target/confinement.log | grep -oE '[0-9]+' | head -n 1)
           if [ "${ran:-0}" -lt 40 ]; then
-            echo "only ${ran:-0} Hakoniwa confinement tests ran; expected at least 40"
+            echo "only ${ran:-0} confinement tests ran; expected at least 40"
             exit 1
           fi
           # On a runner with Landlock the kernel-level check of the rule semantics (`hako::tests`,

@@ -36,7 +36,7 @@ No language model file is part of this release. The archive carries the pinned o
 llama.cpp CPU and Vulkan builds (`llama/`, b11609, MIT; pinned and hash-checked, its source is at the upstream commit named in `SOURCE.txt`) for the
 optional interpretation assistant, which is off unless started with `--assistant` and proposes
 readings the player must confirm; it never applies sheet changes on its own. Its scope is
-Linux `x86_64` on the CPU: the model server runs only confined by bubblewrap, where the
+Linux `x86_64` on the CPU: the model server runs only inside Mimik's own sandbox (Hakoniwa, built into the binary: nothing to install), where the
 start-time probe shows unprivileged user namespaces work; otherwise the assistant stays off and
 `/admin/assistant` says how to enable them (it never runs the model server unconfined). Level 1 is verified on Ubuntu 24.04 with
 `kernel.apparmor_restrict_unprivileged_userns` switched off (the CI runner) and on the dev host
@@ -99,8 +99,7 @@ Assistant requirements on the host:
   The folders Mimik makes itself (`data/`, `data/run/` and its generations) are 0700 whatever
   the umask, and so are the intermediate folders it creates for a `--database` path that did
   not exist.
-- Ubuntu 23.10 and later restrict unprivileged user namespaces: with `--assistant-sandbox
-  hakoniwa`, run `./mimik assistant-apparmor-profile` (or `--for <absolute path>` for another
+- Ubuntu 23.10 and later restrict unprivileged user namespaces: run `./mimik assistant-apparmor-profile` (or `--for <absolute path>` for another
   location) and install the profile as the assistant page says. Checked on Ubuntu 24.04, where
   the profile covers that one binary path only: a copy or hard link elsewhere is refused, a
   symbolic link to it works.
@@ -137,7 +136,7 @@ holding exactly the pinned files);
 - **llama-runtime:** on Ubuntu 24.04 from the unpacked archive, with the AppArmor user-namespace
   restriction switched off for the job (the probe's outcome with it on is recorded first, not
   gated): the bundled llama-server's version and flags, the release binary's start-time probe
-  reaching bubblewrap, and the confinement tests, run from the test build of the same revision
+  reaching level 1, and the confinement tests, run from the test build of the same revision
   against the unpacked `llama/` (seccomp, endpoint check, runner, and the server under the real
   profiles with the test model: token refusal, socket and peer checks, an adversary in the
   sandbox reaching nothing, forged sandbox errors keeping level 1, SIGKILL of Mimik ending the

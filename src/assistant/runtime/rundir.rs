@@ -35,7 +35,7 @@ pub(crate) struct Entry {
     /// The process's start time (`/proc/<pid>/stat` field 22), so a reused PID is told apart.
     pub start_time: u64,
     /// What `/proc/<pid>/exe` may show: the runner (Mimik itself, before its exec) or the
-    /// command it executes (bwrap, or llama-server on the TCP levels).
+    /// command it executes (the runner, or llama-server on the TCP levels).
     pub executables: Vec<String>,
 }
 

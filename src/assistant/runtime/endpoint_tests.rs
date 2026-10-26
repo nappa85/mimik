@@ -1,6 +1,6 @@
 //! The endpoint check against processes Mimik does not control: helper processes (the test
 //! binary re-executed) as squatters, second listeners and impostor peers. The accepted
-//! level-1 shape needs a real bubblewrap sandbox and is a live test (`live_tests.rs`).
+//! level-1 shape needs a real sandbox and is a live test (`live_tests.rs`).
 use super::super::{files, test_helper};
 use super::*;
 use serde_json::{Value, json};
@@ -326,7 +326,7 @@ fn the_reported_reaper_must_be_the_runners_child_in_the_reported_namespace() {
     assert!(open_reaper(pid, me, namespace).is_ok());
     let error = open_reaper(pid, 1, namespace).unwrap_err();
     assert!(
-        error.to_string().contains("not bubblewrap's child"),
+        error.to_string().contains("not the runner's child"),
         "{error}"
     );
     let error = open_reaper(pid, me, namespace + 1).unwrap_err();

@@ -3,7 +3,7 @@
 //! everything else only with it (from `--api-key-file`), on the Unix socket or the port it
 //! is given, and answers priming, calibration samples and streamed jobs with synthetic
 //! timings. `--alias fail-bind` makes it fail as a server that cannot bind its port does;
-//! `--alias forge-bwrap` prints bubblewrap's error lines and exits, as a compromised server
+//! `--alias forge-sandbox` prints the sandbox's error lines and exits, as a compromised server
 //! trying to be restarted unconfined would; `--alias forge-exit-<n>` does so with exit code n. `--list-devices` prints the pinned build's
 //! listing of one RX 6650 XT when a render node is bound under `/dev/dri` and `(none)`
 //! otherwise; with `--n-gpu-layers 99` it prints the offload line (`--alias partial-offload`:
@@ -157,7 +157,7 @@ fn list_devices() {
         .and_then(|mut entries| entries.next())
         .is_some();
     // A real driver takes a moment: the listing's sandbox outlives its parent's reads of the
-    // sandbox's status pipe (bubblewrap writes the exit status to it as the last thing).
+    // sandbox's status pipe (the runner writes the exit status to it as the last thing).
     std::thread::sleep(std::time::Duration::from_millis(300));
     println!("Available devices:");
     if node {
@@ -188,7 +188,7 @@ fn main() {
     let alias = value_of(&args, "--alias").unwrap_or_default();
     if let Some(rest) = alias.strip_prefix("forge-") {
         // What a compromised server could print and exit with to look like a sandbox that
-        // failed to set up (bubblewrap's or the Hakoniwa runner's lines; `forge-exit-<n>`
+        // failed to set up (the sandbox runner's lines; `forge-exit-<n>`
         // exits with code n, which may be one the runner or its closure uses), once it has
         // been running a moment (so its start went through).
         let code = rest
@@ -196,10 +196,10 @@ fn main() {
             .and_then(|code| code.parse().ok())
             .unwrap_or(1);
         std::thread::sleep(std::time::Duration::from_secs(1));
-        eprintln!("bwrap: Can't mount proc on /newroot/proc: Operation not permitted");
+        eprintln!("mimik sandbox: cannot mount proc on /newroot/proc: Operation not permitted");
         eprintln!("mimik sandbox: the seccomp program cannot be installed");
         eprintln!("hakoniwa: mount(\"proc\") => EPERM");
-        println!("bwrap: setup failed");
+        println!("mimik sandbox: setup failed");
         std::process::exit(code);
     }
     if value_of(&args, "--n-gpu-layers").as_deref() == Some("99") {

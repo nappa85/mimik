@@ -4,7 +4,7 @@
 //! parent is still the Mimik PID it was given (the race before the signal is set); sets
 //! `RLIMIT_CORE` to 0 and `RLIMIT_FSIZE` to 64 MiB; keeps only the descriptors it was handed;
 //! and executes the level's command in place with exactly the environment it was given:
-//! `bwrap` on level 1, or on the TCP levels the verified llama-server descriptor with
+//! the Hakoniwa sandbox on level 1, or on the TCP levels the verified llama-server descriptor with
 //! `execveat` after installing the seccomp program (which keeps the parent-death signal and
 //! `no_new_privs` from being changed again).
 use super::seccomp;
@@ -27,8 +27,8 @@ pub(crate) const FSIZE: u64 = 64 << 20;
 /// The most bytes of a spec.
 const SPEC_BOUND: u64 = 1 << 20;
 /// The most descriptors (the spec's included) moved between fork and exec: a fixed array, as
-/// nothing may allocate there. Level 1 hands over the status, seccomp, token, directory,
-/// model, shim and marker descriptors and one per runtime file.
+/// nothing may allocate there. Level 1 hands over the status, marker and acknowledgement
+/// descriptors.
 pub(crate) const MAX_HANDOVER: usize = 64;
 
 /// The runner's exit codes when it does not reach its exec.
@@ -46,8 +46,6 @@ pub(crate) mod exit {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub(crate) enum Exec {
-    /// Level 1: bwrap at a fixed path with the profile's arguments.
-    Bwrap { path: String, args: Vec<String> },
     /// The TCP levels: the descriptor `fd` (llama-server, or the probe), argv given whole.
     Server { fd: RawFd, argv: Vec<String> },
     /// Level 1 through Hakoniwa (`hako.rs`): the runner builds the sandbox itself and stays
@@ -72,7 +70,7 @@ pub(crate) struct Spec {
     /// The exact environment of the exec.
     pub env: Vec<(String, String)>,
     /// The working directory to `fchdir` into before the exec (level 3's checked build
-    /// folder, so ggml's cwd search finds only it); `None` leaves bwrap to set its own.
+    /// folder, so ggml's cwd search finds only it); `None` leaves the sandbox to set its own.
     pub chdir: Option<RawFd>,
     pub exec: Exec,
 }
@@ -235,28 +233,13 @@ pub(crate) fn run(spec_fd: RawFd) -> i32 {
         return exit::DESCRIPTORS;
     }
     match spec.exec {
-        Exec::Bwrap { path, args } => {
-            let error = Command::new(path)
-                .args(args)
-                .env_clear()
-                .envs(spec.env)
-                .exec();
-            drop(error);
-            exit::EXEC
-        }
         Exec::Server { fd, argv } => exec_server(fd, argv, spec.env, spec.chdir),
-        #[cfg(feature = "sandbox-hakoniwa")]
         Exec::Hakoniwa {
             plan,
             status,
             marker,
             ack,
         } => super::hako::run(*plan, status, marker, ack),
-        #[cfg(not(feature = "sandbox-hakoniwa"))]
-        Exec::Hakoniwa { .. } => {
-            eprintln!("mimik runner: this build has no Hakoniwa sandbox");
-            exit::EXEC
-        }
     }
 }
 

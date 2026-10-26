@@ -72,7 +72,7 @@ Origin against the configured authority, and sets `Cache-Control: no-store`,
 | `auth/` | Sign-in, sessions, request admission, security headers, error pages; Owner pages `/admin` (accounts), `/admin/materials` (source review), `/admin/rulesets` (registry), `/admin/assistant` (model runtime) |
 | `accounts/` | Accounts, Owner binding, invitations, resets, disable, epochs; Argon2 hashing; protected credential files; browser transport |
 | `campaigns/` | Campaigns, membership and requests (`domain.rs`); private sheets (`sheets.rs`, `snapshots.rs` is the sole writer); value admission (`values.rs`, `transport.rs`); routes (`web.rs`); advisory formulas view (`formulas.rs`); history change summary (`history_diff.rs`); catalogue reading through a sheet (`catalogue.rs`, `catalogue_web.rs`); assisted entry: lenient numbers (`entry.rs`), change notes (`notes.rs`), switch and Undo (`assist.rs`, `assist_web.rs`), per-field save (`unit.rs`, `unit_web.rs`, list units `rows.rs`), quick-add reading (`quick.rs`), interpretation context, routes and apply (`interpret.rs`, `interpret_web.rs`) |
-| `assistant/` | Interpretation assistant: schema v2, instructions and fixed prefix (`contract.rs`), phrase lexer (`lexer.rs`), reply validation (`output.rs`), request bounds (`request.rs`), `rig-core` client and bounded transport (`interpreter.rs`, `transport.rs`), jobs and runtime events (`jobs.rs`), breaker (`breaker.rs`), model spec (`model.rs`), the model runtime (`runtime/`: manifest, verified files, runner, seccomp, bubblewrap, probe, launcher, endpoint check, token, generations, drain, calibration, budgets, manager; [model-runtime.md](model-runtime.md)), development endpoint for tests (`development.rs`) |
+| `assistant/` | Interpretation assistant: schema v2, instructions and fixed prefix (`contract.rs`), phrase lexer (`lexer.rs`), reply validation (`output.rs`), request bounds (`request.rs`), `rig-core` client and bounded transport (`interpreter.rs`, `transport.rs`), jobs and runtime events (`jobs.rs`), breaker (`breaker.rs`), model spec (`model.rs`), the model runtime (`runtime/`: manifest, verified files, runner, seccomp, sandbox (`hako.rs`, `sandbox.rs`), probe, launcher, endpoint check, token, generations, drain, calibration, budgets, manager; [model-runtime.md](model-runtime.md)), development endpoint for tests (`development.rs`) |
 | `definitions/` | Declarative game definitions: strict decode, JSON Schema admission, revisioned drafts, immutable publication and withdrawal, private pins; CEL formula engine (`formula/`) and its admission |
 | `catalogues/` | Read-only game catalogues: decode, admission, drafts, sealed publication with projections and name index, read-only lookups |
 | `sources/` | Prepared-source import, page/unit review evidence, FTS5 lexical search, region previews, Owner material operations, prototype source routes |
@@ -176,12 +176,12 @@ Runs on every push, pull request and manual dispatch, on `ubuntu-22.04` (`llama-
 5. **lan-smoke:** `lan_smoke.py` runs the unpacked binary on isolated container networks with
    separate clients, a denied subnet and an HTTPS reverse proxy.
 6. **llama-runtime** (needs llama-fetch and checks; host steps, since Docker's seccomp profile
-   refuses the namespaces bwrap needs; no Rust toolchain): verifies and unpacks the release,
-   reapplies the manifest's modes, installs bubblewrap (the 24.04 package, or the pinned
-   upstream 0.13.0 if it lacks an option), lifts the Ubuntu AppArmor user-namespace
+   refuses the namespaces the sandbox needs; no Rust toolchain): verifies and unpacks the release,
+   reapplies the manifest's modes, lifts the Ubuntu AppArmor user-namespace
    restriction for the job, checks `llama-server --version` and `--help` for every flag, runs
    `mimik assistant-runner --probe` (fails below level 1), then the confinement test binary's
-   seccomp, endpoint, runner and live tests against the unpacked runtime and the test model.
+   seccomp, endpoint, runner and live tests against the unpacked runtime and the test model,
+   with the release's own binary as the runner.
 7. **deployable:** always runs and fails unless all six jobs succeeded.
 
 What green means and what is not certified: [release-scope.md](release-scope.md).

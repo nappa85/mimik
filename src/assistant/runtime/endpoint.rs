@@ -2,10 +2,10 @@
 //! model server is checked to reach the current generation's child before its first byte,
 //! and the token goes only there.
 //!
-//! - Level 1 (bubblewrap, a Unix socket in the generation's directory): `SO_PEERCRED` must
-//!   give Mimik's UID and a PID that is bwrap's reported `child-pid` (the PID-1 reaper of
+//! - Level 1 (the Hakoniwa sandbox, a Unix socket in the generation's directory): `SO_PEERCRED`
+//!   must give Mimik's UID and a PID that is the reported `child-pid` (the PID-1 reaper of
 //!   the sandbox) or a process whose `PPid` is it; the peer's PID namespace must be the one
-//!   bwrap reported (`/proc/<pid>/ns/pid`), cross-checked by `NSpid` (two entries, the inner
+//!   reported (`/proc/<pid>/ns/pid`), cross-checked by `NSpid` (two entries, the inner
 //!   one small). A UID-only match is never accepted. Mimik connects through
 //!   `/proc/self/fd/<directory descriptor>/llama.sock`, so the host path's length never meets
 //!   the 108-byte `sun_path` limit, and the reaper's pidfd tells when it has gone.
@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 /// The socket's name in the generation's directory.
 pub(crate) const SOCKET: &str = "llama.sock";
-/// The largest PID a process of a fresh sandbox has inside it (bwrap's reaper is 1 and the
-/// server 2; a margin for whatever bwrap starts first).
+/// The largest PID a process of a fresh sandbox has inside it (the reaper is 1 and the
+/// server 2; a margin for whatever starts first).
 const INNER_PID_MAX: i32 = 64;
 
 /// A process of this generation, held by a pidfd so its exit is seen.
@@ -62,15 +62,13 @@ fn refused(what: &'static str) -> io::Error {
 }
 
 const GONE: &str = "the sandbox's reaper has gone";
-/// [`GONE`] for messages built elsewhere.
-pub(crate) const GONE_TEXT: &str = GONE;
 
 /// `pid_namespace` when the sandbox's launcher could not read the namespace number (Hakoniwa's
 /// reaper is not dumpable): the namespace comparison is then left to the parent and `NSpid`
 /// checks. No real namespace has inode 0.
 pub(crate) const NAMESPACE_UNREPORTED: u64 = 0;
 
-/// What bwrap reported for this generation's sandbox.
+/// What the runner reported for this generation's sandbox.
 #[derive(Debug)]
 pub(crate) struct Sandbox {
     /// `child-pid`: the sandbox's PID-1 reaper, in Mimik's PID namespace.
@@ -131,7 +129,7 @@ fn status(pid: i32) -> io::Result<Status> {
 pub(crate) fn pin_reaper(pid: i32, runner: i32, namespace: u64) -> io::Result<Watched> {
     let watched = Watched::open(pid)?;
     if status(pid)?.ppid != runner {
-        return Err(refused("the reported reaper is not bubblewrap's child"));
+        return Err(refused("the reported reaper is not the runner's child"));
     }
     match rustix::fs::stat(format!("/proc/{pid}/ns/pid")) {
         _ if namespace == NAMESPACE_UNREPORTED => {}

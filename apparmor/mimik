@@ -5,8 +5,8 @@
 # without an AppArmor profile that allows `userns` can still create a user namespace, but the
 # kernel strips its capabilities inside it, so Mimik's sandbox cannot mount anything and the
 # assistant stays unavailable. This profile does not confine Mimik (flags=(unconfined));
-# it only grants that one permission to Mimik's own binary, as Ubuntu ships for bubblewrap
-# (/etc/apparmor.d/bwrap-userns-restrict).
+# it only grants that one permission to Mimik's own binary, as Ubuntu ships for other unprivileged
+# sandboxes (for example /etc/apparmor.d/bwrap-userns-restrict).
 #
 # This file is a template: the quoted path in the profile line below stands for the path of
 # Mimik's binary. Mimik fills it in for itself (the profile applies to that one file; the sandbox's helper is the same binary):

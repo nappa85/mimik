@@ -5,7 +5,7 @@
 //! generation's 0700 directory, deleted once `/health` answers.
 use base64::Engine;
 use std::io::Write;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd};
 use zeroize::Zeroizing;
 
 /// The token file's name in the generation's directory (TCP levels).
@@ -41,16 +41,6 @@ impl Token {
         line
     }
 
-    /// A pipe whose read end holds the token (it fits the pipe buffer, so the write end is
-    /// written and closed at once).
-    pub(crate) fn pipe(&self) -> std::io::Result<OwnedFd> {
-        let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
-        let mut writer = std::fs::File::from(write);
-        writer.write_all(&self.line())?;
-        drop(writer);
-        Ok(read)
-    }
-
     /// Writes the token file into the generation's directory: created exclusively, mode
     /// 0600, never following a link.
     pub(crate) fn write_file(&self, directory: BorrowedFd<'_>) -> std::io::Result<()> {
@@ -75,7 +65,6 @@ pub(crate) fn remove_file(directory: &impl AsFd) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -93,13 +82,8 @@ mod tests {
     }
 
     #[test]
-    fn the_pipe_and_the_file_hold_the_key_line() {
+    fn the_file_holds_the_key_line() {
         let token = Token::new();
-        let mut read = String::new();
-        std::fs::File::from(token.pipe().unwrap())
-            .read_to_string(&mut read)
-            .unwrap();
-        assert_eq!(read, format!("{}\n", token.expose()));
         let dir = tempfile::tempdir().unwrap();
         let fd = rustix::fs::open(
             dir.path(),

@@ -1,6 +1,6 @@
 //! The real launcher at level 3 against a fake llama-server (`examples/fake_llama_server.rs`,
 //! built by `cargo test --all-targets`), the test binary as the runner and as the probe.
-//! Level 1 needs bubblewrap and the pinned build and runs in `live_tests.rs`.
+//! Level 1 needs the sandbox and the pinned build and runs in `live_tests.rs`.
 use super::super::drain::Failed;
 use super::super::manager::{self, State};
 use super::super::manifest::File as Entry;
@@ -18,7 +18,6 @@ const RUNNER: &str = "assistant::runtime::runner::tests::helper";
 fn helper() {
     match test_helper::mode().as_deref() {
         Some("probe-inner") => {}
-        Some("shim") => std::process::exit(super::super::probe::shim()),
         _ => return,
     }
     let args: Vec<String> = std::env::args().collect();
@@ -136,16 +135,9 @@ fn setup_with_server(model: &[u8], alias: &str, server: &[u8]) -> Setup {
             executable: exe,
             probe_args: inner_args,
             probe_env: vec![(test_helper::VARIABLE.into(), "probe-inner".into())],
-            shim_args: {
-                let mut args = helper_args(HELPER);
-                args.push("shim".into());
-                args
-            },
-            shim_env: vec![(test_helper::VARIABLE.into(), "shim".into())],
         },
         device: device::Choice::Cpu,
         roots: device::Roots::default(),
-        backend: Backend::default(),
     };
     Setup {
         dir,
@@ -162,12 +154,6 @@ fn launch(setup: &Setup) -> Launch {
 }
 
 const MODEL: &[u8] = b"GGUF a synthetic model";
-
-fn bwrap_installed() -> bool {
-    bwrap::PATHS
-        .iter()
-        .any(|path| std::path::Path::new(path).exists())
-}
 
 #[tokio::test]
 async fn the_manager_probe_runs_level_1_only_and_the_cli_still_probes_level_3() {
@@ -189,15 +175,6 @@ async fn the_manager_probe_runs_level_1_only_and_the_cli_still_probes_level_3() 
         ),
         "{levels:?}"
     );
-    if !bwrap_installed() {
-        assert_eq!(
-            levels[0],
-            (
-                Level::Bubblewrap,
-                Err("bubblewrap is not installed (/usr/bin/bwrap or /bin/bwrap)".into())
-            )
-        );
-    }
     // `--probe` (probe_levels) still probes level 3, so its code keeps working.
     let real = Arc::clone(&launch.0);
     let all = tokio::task::spawn_blocking(move || {
@@ -217,10 +194,10 @@ async fn the_manager_probe_runs_level_1_only_and_the_cli_still_probes_level_3() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn without_bubblewrap_the_real_manager_is_unavailable_and_starts_nothing() {
+async fn without_a_usable_sandbox_the_real_manager_is_unavailable_and_starts_nothing() {
     let setup = setup(MODEL, "fake");
-    // bwrap is unusable for this launcher, wherever the test runs.
-    NO_BWRAP
+    // The sandbox is unusable for this launcher, wherever the test runs.
+    NO_SANDBOX
         .lock()
         .unwrap()
         .push(setup.settings.runtime_dir.clone());
@@ -516,7 +493,7 @@ async fn a_model_larger_than_available_memory_is_refused() {
 }
 
 #[test]
-fn only_a_missing_shim_marker_makes_a_level_1_exit_a_sandbox_failure() {
+fn only_a_missing_marker_makes_a_level_1_exit_a_sandbox_failure() {
     let loaded = Summary {
         failed: Failed {
             model_load: true,
@@ -524,23 +501,21 @@ fn only_a_missing_shim_marker_makes_a_level_1_exit_a_sandbox_failure() {
         },
         ..Summary::default()
     };
-    // The shim never reached its exec: the sandbox was not set up.
+    // The closure never reached its exec: the sandbox was not set up.
     assert!(matches!(
         classify(
-            Level::Bubblewrap,
-            Backend::Bwrap,
+            Level::Sandbox,
             Marker::Absent,
             Summary::default(),
             "exit status: 1"
         ),
         Fail::Sandbox(_)
     ));
-    // After the marker, whatever the server printed (a forged "bwrap:" line included, which
+    // After the marker, whatever the server printed (a forged "mimik sandbox:" line included, which
     // the drain no longer even recognises) it is a counted failure that keeps the level.
     assert!(matches!(
         classify(
-            Level::Bubblewrap,
-            Backend::Bwrap,
+            Level::Sandbox,
             Marker::Executed,
             Summary::default(),
             "exit status: 1"
@@ -549,8 +524,7 @@ fn only_a_missing_shim_marker_makes_a_level_1_exit_a_sandbox_failure() {
     ));
     assert!(matches!(
         classify(
-            Level::Bubblewrap,
-            Backend::Bwrap,
+            Level::Sandbox,
             Marker::Executed,
             loaded,
             "exit status: 1"
@@ -560,8 +534,7 @@ fn only_a_missing_shim_marker_makes_a_level_1_exit_a_sandbox_failure() {
     // Not known (a read error, a reader still running): counted, the level kept.
     assert!(matches!(
         classify(
-            Level::Bubblewrap,
-            Backend::Bwrap,
+            Level::Sandbox,
             Marker::Unknown,
             Summary::default(),
             "exit status: 1"
@@ -572,7 +545,6 @@ fn only_a_missing_shim_marker_makes_a_level_1_exit_a_sandbox_failure() {
     assert!(matches!(
         classify(
             Level::Unconfined,
-            Backend::Bwrap,
             Marker::Absent,
             Summary::default(),
             "exit status: 1"
@@ -605,7 +577,7 @@ fn only_a_clean_end_without_the_marker_is_absent() {
     assert_eq!(
         marker_report(&b"exec\n"[..]),
         (Marker::Executed, None),
-        "bubblewrap's shim writes none"
+        "a closure that writes no report"
     );
     assert_eq!(
         marker_report(&b"exec\nnot a report\n"[..]),
@@ -628,8 +600,7 @@ async fn a_marker_reader_still_running_is_unknown_and_keeps_the_level() {
     assert_eq!(outcome, Marker::Unknown);
     assert!(matches!(
         classify(
-            Level::Bubblewrap,
-            Backend::Bwrap,
+            Level::Sandbox,
             outcome,
             Summary::default(),
             "exit status: 1"
@@ -793,7 +764,7 @@ async fn a_child_dropped_by_an_interrupted_start_is_killed() {
 #[test]
 fn a_probe_that_only_times_out_is_retried_and_never_skips_its_level() {
     let mut calls = 0;
-    let kept = retry_probe(Level::Bubblewrap, Duration::ZERO, &|| false, || {
+    let kept = retry_probe(Level::Sandbox, Duration::ZERO, &|| false, || {
         calls += 1;
         Probe::Inconclusive("did not report within 30 s".into())
     });
@@ -811,13 +782,13 @@ fn a_probe_that_only_times_out_is_retried_and_never_skips_its_level() {
     });
     assert_eq!((passed, calls), (Probed::Passed, 2));
     let mut calls = 0;
-    let failed = retry_probe(Level::Bubblewrap, Duration::ZERO, &|| false, || {
+    let failed = retry_probe(Level::Sandbox, Duration::ZERO, &|| false, || {
         calls += 1;
-        Probe::Failed("bwrap: setup failed".into())
+        Probe::Failed("mimik sandbox: setup failed".into())
     });
     assert_eq!(
         (failed, calls),
-        (Probed::Failed("bwrap: setup failed".into()), 1)
+        (Probed::Failed("mimik sandbox: setup failed".into()), 1)
     );
 }
 
@@ -843,33 +814,6 @@ fn a_transient_endpoint_error_is_inconclusive_a_refusal_is_not() {
         endpoint_verdict(&std::io::Error::from_raw_os_error(libc::ECONNREFUSED)),
         Probe::Failed(_)
     ));
-}
-
-#[test]
-fn a_shim_whose_exec_fails_says_why_after_its_marker() {
-    let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::empty()).unwrap();
-    let spec = super::super::probe::ShimSpec {
-        marker: std::os::fd::AsRawFd::as_raw_fd(&write),
-        argv: vec!["/nonexistent/llama-server".into()],
-        env: Vec::new(),
-    };
-    let output = test_helper::command("assistant::runtime::launch::tests::helper", "shim")
-        .env(
-            super::super::probe::SHIM_VARIABLE,
-            serde_json::to_string(&spec).unwrap(),
-        )
-        .output()
-        .unwrap();
-    drop(write);
-    assert_eq!(output.status.code(), Some(127));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("mimik shim: cannot execute /nonexistent/llama-server"),
-        "{stderr}"
-    );
-    let mut marker = [0_u8; 5];
-    std::fs::File::from(read).read_exact(&mut marker).unwrap();
-    assert_eq!(&marker, super::super::probe::MARKER);
 }
 
 #[tokio::test]
@@ -1152,16 +1096,6 @@ async fn a_reaper_that_outlives_the_wait_keeps_its_entry_and_blocks_the_settle()
     assert_eq!(pidfile_text(&setup), "");
 }
 
-#[test]
-fn the_pinned_build_fits_the_runners_descriptor_bound() {
-    // The spec's descriptor, level 1's fixed ones and one per runtime file.
-    let files = MANIFEST.build(Path::Cpu).unwrap().files.len();
-    assert!(
-        1 + fds::FIXED + files <= runner::MAX_HANDOVER,
-        "{files} runtime files"
-    );
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_abandoned_spawn_counts_until_its_cleanup_ends() {
     let setup = setup(MODEL, "fake");
@@ -1295,7 +1229,7 @@ fn a_cancel_ends_the_retry_pause_at_once() {
     let cancelled = std::sync::atomic::AtomicBool::new(false);
     let started = std::time::Instant::now();
     let probed = retry_probe(
-        Level::Bubblewrap,
+        Level::Sandbox,
         Duration::from_secs(30),
         &|| cancelled.load(Ordering::SeqCst),
         || {
@@ -1892,20 +1826,18 @@ async fn level_3_is_refused_unless_explicitly_allowed() {
 }
 
 #[tokio::test]
-async fn a_bwrap_path_with_a_newline_is_refused_before_any_directory_is_made() {
-    let setup = setup(MODEL, "fake");
+async fn a_runner_path_with_a_newline_is_refused_before_any_directory_is_made() {
+    let mut setup = setup(MODEL, "fake");
+    setup.settings.runner.program = PathBuf::from("/usr/bin/mim\nik");
     let launch = launch(&setup);
     launch.preflight(Path::Cpu).await.unwrap();
     let real = Arc::clone(&launch.0);
-    real.held().bwrap = Some(Bwrap {
-        path: PathBuf::from("/usr/bin/bw\nrap"),
-        size: true,
-    });
+    real.held().preflighted = true;
     // run/1 already there: a generation directory made before the check would fail on it.
     std::fs::create_dir(setup.settings.data_dir.join("run/1")).unwrap();
     let refused = tokio::task::spawn_blocking(move || {
         let ticket = real.work().enter();
-        let checked = real.verify(Path::Cpu, Level::Bubblewrap, &ticket).unwrap();
+        let checked = real.verify(Path::Cpu, Level::Sandbox, &ticket).unwrap();
         let job = Job {
             name: "1".into(),
             key: 1,
@@ -1980,7 +1912,7 @@ async fn pinned_then_cleaned(started: &Started) -> Result<Arc<Sandbox>, String> 
     let work = Work::new();
     let mut owned = Owned::new(runner, work.enter());
     let me = i32::try_from(std::process::id()).unwrap();
-    let outcome = match pin_sandbox(&mut owned, started, me, true) {
+    let outcome = match pin_sandbox(&mut owned, started, me) {
         Ok(pinned) => Ok(pinned.sandbox),
         Err(Pin::Gone(error)) => Err(format!("gone: {error}")),
         Err(Pin::Fail(Fail::Other(why) | Fail::Sandbox(why))) => Err(why),
@@ -2187,13 +2119,12 @@ async fn an_unverified_live_server_keeps_the_exit_unpublished_and_is_never_signa
         .unwrap();
 }
 
-/// What `pin_or_end` makes of a reaper that no longer exists: for Hakoniwa only a runner that
+/// What `pin_or_end` makes of a reaper that no longer exists: only a runner that
 /// said it had ended (`ended`) makes that acceptable; a missing reaper is otherwise an error,
 /// never proof that the server is gone.
 #[tokio::test]
-async fn a_missing_hakoniwa_reaper_fails_the_start_unless_the_runner_said_it_had_ended() {
-    let mut setup = setup(MODEL, "fake");
-    setup.settings.backend = Backend::Hakoniwa;
+async fn a_missing_reaper_fails_the_start_unless_the_runner_said_it_had_ended() {
+    let setup = setup(MODEL, "fake");
     let launch = launch(&setup);
     launch.preflight(Path::Cpu).await.unwrap();
     let run = launch.0.run_dir().unwrap();
@@ -2215,20 +2146,14 @@ async fn a_missing_hakoniwa_reaper_fails_the_start_unless_the_runner_said_it_had
         inner_start: None,
         ended: false,
     };
-    let command = Command::Server { device: None };
-    let refused = launch
-        .0
-        .pin_or_end(&mut owned, &started, me, &command, &generation);
+    let refused = Real::pin_or_end(&mut owned, &started, me, &generation);
     assert!(
         matches!(&refused, Err(Fail::Other(why)) if why.contains("reaper")),
         "{:?}",
         refused.map(|_| ())
     );
     started.ended = true;
-    let (sandbox, pinned, _) = launch
-        .0
-        .pin_or_end(&mut owned, &started, me, &command, &generation)
-        .unwrap();
+    let (sandbox, pinned, _) = Real::pin_or_end(&mut owned, &started, me, &generation).unwrap();
     assert!(sandbox.is_none() && pinned.is_none());
     drop(owned);
     tokio::time::timeout(Duration::from_secs(10), work.settle())
@@ -2310,12 +2235,7 @@ async fn a_retry_that_fails_before_the_inspection_carries_no_earlier_hint() {
     )
     .unwrap();
     let ticket = launch.0.work.enter();
-    assert!(
-        launch
-            .0
-            .verify(Path::Cpu, Level::Bubblewrap, &ticket)
-            .is_err()
-    );
+    assert!(launch.0.verify(Path::Cpu, Level::Sandbox, &ticket).is_err());
     assert_eq!(launch.failure_hint(Path::Cpu), None);
     // A probe (the GPU listing and the level probes verify too) starts from nothing as well.
     set(Some(old));

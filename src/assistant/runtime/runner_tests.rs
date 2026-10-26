@@ -1,4 +1,4 @@
-//! The runner on the TCP level's exec path (level 1 runs bwrap and is a live test): the test
+//! The runner on the TCP level's exec path (level 1 runs the Hakoniwa sandbox and is a live test): the test
 //! binary plays the runner and the executed server.
 use super::super::test_helper;
 use super::*;
