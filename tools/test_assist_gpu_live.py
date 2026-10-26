@@ -472,7 +472,7 @@ class CiTests(unittest.TestCase):
         """The CI confinement step selects `launch::live_tests::` with `--include-ignored`; the
         GPU-only `live_gpu_*` tests (they refuse without the fan check) must be skipped there."""
         ci = (Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml").read_text()
-        step = ci[ci.index("target/confinement-tests --include-ignored") :]
+        step = ci[ci.index("target/confinement-tests --test-threads=2 --include-ignored") :]
         step = step[: step.index("tee target/confinement.log")]
         self.assertIn("--skip live_gpu_", step)
 
