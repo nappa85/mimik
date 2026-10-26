@@ -18,7 +18,11 @@
 #   manual-high; the weekday 09:00-18:00 window is the caller's DEADLINE_EPOCH to set.
 # The model network is internal with inhibit_ipv4 (no address on the host side); an existing
 # network without both is refused.
-# Small CPU models at 2 cores are allowed at any hour (AGENTS.md), so no weekday window applies.
+#   CASES (default: the 2b cases), PASSES (2), STRESS (4), COLD (3 cold starts; each runs the
+#   dh-01 request unless COLD_ONLY is empty), THREADS (2: server threads and cpu limit; CPUS
+#   must list at least that many cores), NAME (assist2b: container name stem).
+# Small CPU models at 2 cores are allowed at any hour (AGENTS.md), so no weekday window applies
+# here; tools/run_fieldref.sh adds its own window and idle checks.
 set -euo pipefail
 export TZ=:/etc/localtime
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -31,15 +35,22 @@ VARIANT=${VARIANT:-}
 PRIME=${PRIME:-0}
 DEVICE=${DEVICE:-cpu}
 CONTRACT=${CONTRACT:-v1}
+CASES=${CASES:-assist-eval/cases.json}
+PASSES=${PASSES:-2}
+STRESS=${STRESS:-4}
+COLD=${COLD:-3}
+COLD_ONLY=${COLD_ONLY-dh-01}
+THREADS=${THREADS:-2}
+NAME=${NAME:-assist2b}
 [ "$DEVICE" = cpu ] || [ "$DEVICE" = gpu ] || { echo "DEVICE must be cpu or gpu"; exit 2; }
 EXTRA=()
 [ -n "$VARIANT" ] && EXTRA=(--variant "$VARIANT")
-EXTRA+=(--contract "$CONTRACT")
+EXTRA+=(--contract "$CONTRACT" --cases "/tools/$CASES")
 CHECK_IMAGE=sha256:9578747a34f5e02cb7561c8e2a8903b75100b96ce1b0587d5fa4b687be0d3a9f
 HARNESS_IMAGE=sha256:8477ff915533b4a21a9727d2804acd06bae15b93e95d60627f8e127cd7025a7d
 NET=mimik-assist2b-net
-SRV=mimik-assist2b-srv
-HARNESS=mimik-assist2b-harness
+SRV=mimik-$NAME-srv
+HARNESS=mimik-$NAME-harness
 LABEL=mimik.assist2b=screen
 mkdir -p "$OUT"
 log() { echo "$(date '+%F %T') $*" | tee -a "$OUT/run.log"; }
@@ -86,7 +97,7 @@ start_server() {  # start_server <model-file>; echoes seconds to /health
   t0=$(date +%s.%N)
   docker run -d --init --pull never --name "$SRV" --label "$LABEL" --network "$NET" \
     --network-alias server --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges \
-    --read-only --tmpfs /tmp --memory 6g --memory-swap 6g --cpus 2 --cpuset-cpus "$CPUS" \
+    --read-only --tmpfs /tmp --memory 6g --memory-swap 6g --cpus "$THREADS" --cpuset-cpus "$CPUS" \
     --pids-limit 256 --mount type=bind,src="$model",dst=/models/model.gguf,readonly \
     "${GPU_RUN[@]}" "$IMAGE" "${ARGS[@]}" >/dev/null
   for _ in $(seq 1 1800); do
@@ -107,7 +118,7 @@ prime() {  # prime <ledger name>: the priming request, not a case
     --mount type=bind,src="$ROOT/tools",dst=/tools,readonly \
     --mount type=bind,src="$ROOT/schemas",dst=/schemas,readonly --mount type=bind,src="$OUT",dst=/out \
     "$HARNESS_IMAGE" python3 /tools/assist_eval.py prime --endpoint http://server:8080/v1/chat/completions \
-    --output "/out/$1" "${EXTRA[@]}" >> "$OUT/harness.log" 2>&1
+    --output "/out/$1" --deadline-epoch "$DEADLINE_EPOCH" "${EXTRA[@]}" >> "$OUT/harness.log" 2>&1
 }
 
 harness() {  # harness <ledger name> <args...>
@@ -135,15 +146,16 @@ for key in "$@"; do
   mapfile -t ARGS < <(cd "$ROOT/tools" && python3 -c "
 import model_registry as m
 d = m.load(); e = m.model(d, '$key')
-for a in m.server_args(e, 8192, device='$DEVICE', threads=2): print(a)
-print('--threads-batch'); print('2'); print('--reasoning'); print('off')")
+for a in m.server_args(e, 8192, device='$DEVICE', threads=$THREADS): print(a)
+print('--threads-batch'); print('$THREADS'); print('--reasoning'); print('off')")
   log "$key: hashing $model"
   actual=$(docker run --rm --network none --user 1000:1000 --cap-drop ALL --read-only --memory 256m \
     --mount type=bind,src="$model",dst=/m.gguf,readonly "$CHECK_IMAGE" sha256sum /m.gguf | cut -d' ' -f1)
   [ "$actual" = "$SHA" ] || { log "$key: sha256 mismatch $actual"; exit 5; }
   log "$key: sha256 ok; server args: ${ARGS[*]}"
   mkdir -p "$OUT/$key"
-  for i in 1 2 3; do
+  for i in $(seq 1 "$COLD"); do
+    [ "$(date +%s)" -lt "$DEADLINE_EPOCH" ] || { log "deadline reached before start $i of $key"; exit 0; }
     health=$(start_server "$model") || { log "$key: cold start $i failed"; continue 2; }
     log "$key: cold start $i health_seconds=$health"
     echo "{\"key\": \"$key\", \"cold_start\": $i, \"health_seconds\": $health}" >> "$OUT/$key/cold.jsonl"
@@ -151,12 +163,14 @@ print('--threads-batch'); print('2'); print('--reasoning'); print('off')")
       prime "$key/prime-$i.jsonl" || { log "$key: priming $i failed"; continue 2; }
       log "$key: primed $i"
     fi
-    harness "$key/cold-$i.jsonl" --passes 1 --only dh-01 || log "$key: cold request $i failed"
-    if [ "$i" -lt 3 ]; then docker rm -f "$SRV" >/dev/null; fi
+    if [ -n "$COLD_ONLY" ]; then
+      harness "$key/cold-$i.jsonl" --passes 1 --only "$COLD_ONLY" || log "$key: cold request $i failed"
+    fi
+    if [ "$i" -lt "$COLD" ]; then docker rm -f "$SRV" >/dev/null; fi
   done
   stopped && { log "thermal stop during $key cold starts"; exit 4; }
   log "$key: warm screen"
-  harness "$key/screen.jsonl" --passes 2 --stress 4 || log "$key: harness exit $?"
+  harness "$key/screen.jsonl" --passes "$PASSES" --stress "$STRESS" || log "$key: harness exit $?"
   docker logs "$SRV" > "$OUT/$key/server.log" 2>&1 || true
   docker rm -f "$SRV" >/dev/null
   stopped && { log "thermal stop during $key"; exit 4; }

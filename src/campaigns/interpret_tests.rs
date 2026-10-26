@@ -282,3 +282,74 @@ async fn related_items_count_towards_b_and_drop_from_the_end() {
     assert!(fewer.checks.supplied.contains_key("f1"));
     assert!(!fewer.checks.supplied.contains_key("f4"));
 }
+
+/// Prototype tooling, not a check: renders the field-reference experiment's requests with
+/// the real builder at B = 1,024 bytes (related fields only) and writes them next to their
+/// cases. Run with `cargo test --lib render_fieldref_cases -- --ignored`; set
+/// `FIELDREF_DIR` to the directory holding `fieldref-source.json` (default
+/// `tools/assist-eval`). Writes `fieldref-cases.json` there.
+#[tokio::test]
+#[ignore = "regenerates tools/assist-eval/fieldref-cases.json"]
+async fn render_fieldref_cases() {
+    let dir = std::env::var("FIELDREF_DIR")
+        .unwrap_or_else(|_| format!("{}/tools/assist-eval", env!("CARGO_MANIFEST_DIR")));
+    let source: Value =
+        serde_json::from_slice(&std::fs::read(format!("{dir}/fieldref-source.json")).unwrap())
+            .unwrap();
+    let definition: Definition = serde_json::from_value(source["definition"].clone()).unwrap();
+    let compiled = crate::definitions::compiled_for_tests(&definition);
+    let stub = StubInterpreter::default();
+    let mut out = source.clone();
+    out.as_object_mut().unwrap().remove("definition");
+    out.as_object_mut().unwrap().remove("data");
+    for case in out["cases"].as_array_mut().unwrap() {
+        let mut data = source["data"].clone();
+        for (id, value) in case["values"].as_object().into_iter().flatten() {
+            data[id] = value.clone();
+        }
+        let id = case["target"].as_str().unwrap().to_owned();
+        let draft = super::draft(
+            &definition,
+            compiled.as_ref(),
+            &data,
+            (
+                Target::Field(field(&definition, &id)),
+                &format!("field:{id}"),
+                &field(&definition, &id).label,
+            ),
+            case["phrase"].as_str().unwrap(),
+            RELATED_ONLY_BYTES,
+        );
+        let rendered = render(
+            &draft,
+            Bounds {
+                bytes: RELATED_ONLY_BYTES,
+                tokens: usize::MAX,
+            },
+            &stub,
+        )
+        .await
+        .unwrap();
+        let supplied: serde_json::Map<String, Value> = rendered
+            .checks
+            .supplied
+            .iter()
+            .filter(|(_, bound)| bound.integer)
+            .map(|(alias, bound)| (alias.clone(), json!(bound.value)))
+            .collect();
+        let excluded: Vec<&String> = rendered
+            .checks
+            .supplied
+            .iter()
+            .filter(|(_, bound)| !bound.integer)
+            .map(|(alias, _)| alias)
+            .collect();
+        case["rendered"] = json!({"user": rendered.dynamic, "supplied": supplied,
+            "excluded": excluded, "target_value": rendered.checks.target_value});
+    }
+    std::fs::write(
+        format!("{dir}/fieldref-cases.json"),
+        serde_json::to_string_pretty(&out).unwrap() + "\n",
+    )
+    .unwrap();
+}

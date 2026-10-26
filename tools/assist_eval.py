@@ -46,6 +46,7 @@ I64 = (-(2**63), 2**63 - 1)
 I128 = (-(2**127), 2**127 - 1)
 FIELD_ID_PATTERN = "^[a-z][a-z0-9_-]{0,63}$"
 CASES_PATH = Path(__file__).with_name("assist-eval") / "cases.json"
+CASES_PATH_FIELDREF = CASES_PATH.with_name("fieldref-cases.json")
 
 
 def _leaf_defs():
@@ -208,7 +209,7 @@ SCHEMA_HEADING = "\nJSON schema of the reply:\n"
 # v2 is the adopted contract: its prefix quotes the schema without the alias enum (the
 # 2c-1 v2-short arm; "v2-short" is kept as a name for its ledgers). v2-full is the first v2
 # prefix, quoting the full schema (2c-1 screen, superseded).
-CONTRACTS = ("v1", "v2", "v2-full", "v2-short", "v2-ex")
+CONTRACTS = ("v1", "v2", "v2-full", "v2-short", "v2-ex", "v2-compact")
 # v2-ex (exploratory, not adopted): the v2-short prefix with compact JSON examples, one example
 # referencing a context alias and a sentence asking for compact single-line JSON.
 V2_EX_BASE = "v2-short"
@@ -262,6 +263,16 @@ def ex_instructions():
 
 
 @functools.cache
+def compact_prefix():
+    """v2-compact (field-reference experiment): the v2-short prefix plus only the
+    compact-reply sentence, at the position v2-ex puts it."""
+    instructions = load_v2()[0]
+    lead = "Reply with one JSON object and nothing else:\n"
+    assert lead in instructions
+    return instructions.replace(lead, EX_COMPACT + lead, 1) + short_prefix()[len(instructions) :]
+
+
+@functools.cache
 def ex_prefix():
     instructions = ex_instructions()
     if V2_EX_BASE == "v2-short":
@@ -287,6 +298,8 @@ def contract_prefix(contract, variant=None):
         return short_prefix()
     if contract == "v2-ex":
         return ex_prefix()
+    if contract == "v2-compact":
+        return compact_prefix()
     return load_v2()[3]
 
 
@@ -429,8 +442,8 @@ def build_request(case, sheet, variant=None, contract="v1"):
     Under v2, supplied and excluded are keyed by alias: "t" for the target, "f1"... for the
     context fields in order (the same order and drop rule as v1).
     """
-    if contract in ("v2", "v2-full", "v2-short", "v2-ex"):
-        request = _build_request_v2(case, sheet)
+    if contract in ("v2", "v2-full", "v2-short", "v2-ex", "v2-compact"):
+        request = _rendered_request(case) or _build_request_v2(case, sheet)
         request["system"] = contract_prefix(contract)
         request["contract"] = contract
         return request
@@ -465,6 +478,23 @@ def build_request(case, sheet, variant=None, contract="v1"):
         "excluded": sorted(excluded),
         "target": target["id"],
         "target_value": target["value"],
+        "phrase": case["phrase"],
+    }
+
+
+def _rendered_request(case):
+    """A request already rendered by the Rust builder (``case["rendered"]``, written by the
+    ignored ``render_fieldref_cases`` test), or None."""
+    rendered = case.get("rendered")
+    if rendered is None:
+        return None
+    return {
+        "contract": "v2",
+        "user": rendered["user"],
+        "supplied": rendered["supplied"],
+        "excluded": rendered["excluded"],
+        "target": "t",
+        "target_value": rendered["target_value"],
         "phrase": case["phrase"],
     }
 
@@ -805,10 +835,10 @@ def file_sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def contract_identity(contract="v1"):
+def contract_identity(contract="v1", cases_path=CASES_PATH):
     return {
         "eval_sha256": file_sha256(__file__),
-        "cases_sha256": file_sha256(CASES_PATH),
+        "cases_sha256": file_sha256(cases_path),
         "contract": contract,
         "prefix_sha256": hashlib.sha256(contract_prefix(contract).encode()).hexdigest(),
     }
@@ -894,7 +924,7 @@ def run_llm(args):
         "passes": args.passes,
         "jsonschema": validator is not None,
         "started_unix": time.time(),
-        **contract_identity(args.contract),
+        **contract_identity(args.contract, args.cases),
     }
     with open(args.output, "x") as ledger:
         ledger.write(json.dumps(header) + "\n")
@@ -1173,13 +1203,64 @@ def summarize_ledger(path):
     return out
 
 
+def _refs(node):
+    if "ref" in node:
+        return {node["ref"]}
+    return _refs(node["l"]) | _refs(node["r"]) if "l" in node else set()
+
+
+def fieldref_summary(path):
+    """Field-reference experiment metrics over a ledger's pass-1 rows. correct_ref: a shown
+    option has an accepted value and its expression uses an alias of one of the case's
+    ``ref_fields`` (resolved through the rendered context). Any other shown outcome without
+    a correct_ref option is false_confident, a coincidence (an accepted value reached
+    without a ref_fields alias) included. abstained: no option shown. ``status`` is INVALID
+    unless every case of the cases file completed exactly once."""
+    lines = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    rows = [r for r in lines[1:] if r["event"] == "case" and r["pass"] == 1]
+    cases = {c["id"]: c for c in load_cases(CASES_PATH_FIELDREF)["cases"]}
+    out = {"cases": len(cases), "completed": 0, "correct_ref": 0, "false_confident": 0,
+           "coincidence": 0, "abstained": 0, "by_case": {}}
+    done = set()
+    for r in rows:
+        if r["status"] != "completed":
+            out["by_case"][r["case"]] = "failed"
+            continue
+        done.add(r["case"])
+        out["completed"] += 1
+        case = cases[r["case"]]
+        accepted = set(case["expect"]["values"])
+        items = json.loads(case["rendered"]["user"].split("\n")[1])["context"]
+        wanted = {i["alias"] for i in items if i["id"] in case["ref_fields"]}
+        shown = [
+            o for o in r["validated"]["options"] if "dropped" not in o and o["value"] in accepted
+        ]
+        if not r["shown"]:
+            verdict = "abstained"
+        elif any(_refs(o["expr"]) & wanted for o in shown):
+            verdict = "correct_ref"
+        else:
+            verdict = "false_confident"
+            out["coincidence"] += bool(shown)
+        out[verdict] += 1
+        out["by_case"][r["case"]] = verdict
+    valid = done == set(cases) and out["completed"] == len(cases)
+    out["status"] = "valid" if valid else "INVALID"
+    return out
+
+
 def prime(args):
     """One request carrying the full fixed prefix (fills the prompt cache), max_tokens 1.
 
     Not a job and not scored; the product sends it at start, before admitting jobs.
     """
+    if args.deadline_epoch is not None and time.time() >= args.deadline_epoch:
+        print(json.dumps({"status": "not_run", "error": "past the deadline"}), flush=True)
+        return 1
     data = load_cases(args.cases)
-    request = build_request(PRIME_CASE, data["sheet"], args.variant, args.contract)
+    request = build_request(
+        data.get("prime_case", PRIME_CASE), data["sheet"], args.variant, args.contract
+    )
     body = chat_body(request, 1)
     started = time.time()
     row = {
@@ -1205,7 +1286,7 @@ def check_cases(args):
         request = build_request(case, data["sheet"], contract=args.contract)
         if len(request["user"].encode()) > DYNAMIC_LIMIT:
             raise ValueError(case["id"])
-    print(json.dumps({"cases": len(data["cases"]), **contract_identity(args.contract)}, indent=2))
+    print(json.dumps({"cases": len(data["cases"]), **contract_identity(args.contract, args.cases)}, indent=2))
 
 
 def main(argv=None):
@@ -1240,8 +1321,11 @@ def main(argv=None):
     primer.add_argument("--output", type=Path, required=True)
     primer.add_argument("--cases", type=Path, default=CASES_PATH)
     primer.add_argument("--timeout", type=float, default=600)
+    primer.add_argument("--deadline-epoch", type=float, default=None)
     primer.add_argument("--variant", choices=sorted(VARIANTS), default=None)
     primer.add_argument("--contract", choices=CONTRACTS, default="v1")
+    fieldref = sub.add_parser("fieldref-summary")
+    fieldref.add_argument("ledger", type=Path)
     check = sub.add_parser("check-cases")
     check.add_argument("--cases", type=Path, default=CASES_PATH)
     check.add_argument("--contract", choices=CONTRACTS, default="v1")
@@ -1256,6 +1340,12 @@ def main(argv=None):
         return prime(args)
     elif args.command == "summarize":
         print(json.dumps([summarize_ledger(p) for p in args.ledgers], indent=2))
+    elif args.command == "fieldref-summary":
+        summary = fieldref_summary(args.ledger)
+        print(json.dumps(summary, indent=2))
+        if summary["status"] != "valid":
+            print("INVALID: not all cases completed exactly once", file=sys.stderr)
+            return 1
     else:
         check_cases(args)
     return 0

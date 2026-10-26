@@ -26,6 +26,40 @@ request marker reaches neither output stream; overflow fails the check.
 Limits: no real older-ABI or boot-disabled kernel or other distribution was tested here
 (the real GPU and the Ubuntu VM are covered below). The `ENOSYS` simulation is not older-ABI evidence.
 
+## Field references: Granite arms and zero-shot Laya (2026-10-26)
+
+Decision rule written before the run: `tools/fieldref-prereg.md`. It was amended after review, still before any run.
+
+Scope:
+- 30 fresh author-written cases, `fr-01` to `fr-30`, on a synthetic "road ledger" sheet. Each case is reachable only through a reference to a related field.
+- Requests come from the real Rust builder at B = 1,024 bytes.
+- Granite 4.2 3B Q4_K_M, greedy, `max_tokens` 352, primed, pass 1 only, 5 threads on cores 0-4, one run per arm.
+- Owner exception on 2026-10-26: run on a weekday morning with a load limit of 2.0 instead of 1.0, because the host was in light use. The load affects latency only, not replies.
+- Raw ledgers are in `/media/data/mimik/fieldref/runs/20261026-1018`.
+
+| Arm (30 cases each) | correct_ref | false_confident | abstained | output tokens p50 / p95 | total p50 |
+|---|---|---|---|---|---|
+| base (v2-short) | 1 | 10 | 19 | 99.5 / 167 | 19.6 s |
+| compact (v2-short + compact sentence) | 1 | 11 | 18 | 79 / 146 | 16.0 s |
+
+**Arm choice.** Neither arm is better by 3 or more cases on either measure. Compact's output-token p50 is 20.6% lower, so the rule chooses **compact**.
+
+**Screen test.** Compact gets 1/30 correct_ref against at least 24 required, and 11/30 false_confident against at most 3 allowed. Field references are **rejected** for the default model.
+
+How the replies fail:
+- Most abstentions are options built on an invented literal, which the provenance check drops (13 base, 12 compact).
+- The false-confident replies often reference the right field with the wrong operation. For example, fr-11 "sold the mule for what the creditor was asking" gives coin minus debt, and fr-24 "set equal" gives a subtraction.
+- Only fr-28 was right in both arms.
+
+Schema validity was 30/30 in both arms, with no truncation.
+
+**Laya 0.4.15, zero shot** (English 421M and multilingual 322M, revision `7b928d82`, CPU, 2 threads; `/media/data/mimik/laya/runs/full-2/laya-all.json`):
+- Field choice from the supplied aliases: English 27/30, multilingual 13/30. Chance is 8.1, the strict baseline 24 and the overlap baseline 26. The rule needed at least 24 and at least 6 above the stronger baseline.
+- Act versus ask on the 50 dev cases: English false_act 3/10 and wrong_ask 6/40; multilingual 6/10 and 16/40. The rule needed at most 1/10 and at most 8/40.
+- **Neither checkpoint passes.** Zero-shot Laya is not pursued for this use; fine-tuning would be its own decision.
+
+Limits: synthetic cases, one model, one sampler, one run per arm, and no should-abstain cases. The result rejects field references; it says nothing about other note classes.
+
 ## Model runtime: idle CPU calibration and the GPU path (steps 2c-2a and 2c-2b-1, 2026-10-23)
 
 Granite 4.2 3B Q4_K_M, `max_tokens` 352, pinned llama.cpp b11609 (CPU and Vulkan builds),
