@@ -89,7 +89,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   and 19/30 with D (4 false-confident). Better, but it still fails 24/30. Its dropped-but-right
   count is 7–9, mostly the literal rule. Open:
   - decide the literal rule (spelled-out numbers, a redundant `* 1`);
-  - Qwen3.6-35B-A3B with experts in RAM, stopped by the swap guard (free RAM first);
+  - Qwen3.6-35B-A3B (experts in RAM): 22/30 with D, 1 false-confident, the best so far but
+    still short; the load from the magnetic disk is slow (745 s) and needs about 26 GB of RAM;
   - whether the GPU default model becomes the 9B (2d-1 trial path).
 
 - Review helper: `external_review.py`'s short-output unavailable heuristic can reject a real

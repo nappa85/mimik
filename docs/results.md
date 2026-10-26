@@ -47,11 +47,20 @@ Its errors are now mostly the wrong operation listed first, with the right one a
 
 **Dropped but right is large here: 9 and 7.** These are mostly correct expressions rejected only by the literal rule (spelled-out numbers, a redundant `* 1`). Relaxing that rule would move several of them to correct_ref. This is a policy question, not a model one.
 
-**Qwen3.6-35B-A3B was not measured.**
-- Setup: experts in RAM with `--n-cpu-moe` 32 (VRAM about 6.95 GB).
-- The load from the magnetic disk took 745 s.
-- Swap grew by about 500 MB during the load and priming, so the run's swap guard stopped it. There was no retry.
-- Measuring it needs more free RAM (about 9.5 GB was in use by other processes) or an owner decision on swap.
+**Qwen3.6-35B-A3B Q4_K_M** (second attempt on 2026-10-26; run folder `/media/data/mimik/fieldref/runs/20261026-2253-qwen35b`).
+
+Setup: experts in RAM via `--n-cpu-moe` 32 (VRAM about 6.6 GB), 6 threads, a temporary hash-checked copy on the SSD, and the load limit at 2.5 for the copy's own I/O.
+
+| Arm | correct_ref | false_confident | abstained | dropped but right | output tokens p50 | total p50 | load (to /health) | peak junction |
+|---|---|---|---|---|---|---|---|---|
+| A (shipped prompt) | 20 | 3 | 7 | 4 | 61 | 8.7 s | 30.8 s | 42 °C |
+| D (ids, no context values) | 22 | 1 | 7 | 3 | 57 | 8.2 s | 7.2 s | 36 °C |
+
+Results:
+- Both arms: 30/30 schema-valid, no truncation, no coincidences, and swap grew by at most 20 MB.
+- **Neither arm passes**: D is at 22/30 against the 24 needed, while its false_confident of 1 is within the cap of 3.
+- It is the best model screened so far, and D helps again. For example, fr-06 `t - crew * days` was found under D, while A gave `t - f1 * f2`.
+- An earlier attempt the same evening, loading from the magnetic disk at about 22 GB free, took 745 s to load and was stopped by the swap guard.
 
 ## Field references, experiment 2: prompt variants (2026-10-26)
 
