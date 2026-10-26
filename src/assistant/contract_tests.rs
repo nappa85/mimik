@@ -6,8 +6,9 @@ use sha2::{Digest, Sha256};
 /// changes this hash and needs its own review (plan §1.4: schema v2 is reviewed before use),
 /// a new prefix measurement and the same hash in `tools/test_assist_eval.py`.
 /// The adopted prefix quotes the schema with the alias enum abbreviated (v2-short, chosen
-/// after the 2c-1 screens); `response_format` still carries the full pinned schema.
-const PREFIX_SHA256: &str = "7b0ba380d8687cc8dfe2a150bf99d684b3bb4f4d5a22e41b5d46a1b6bbd5fe84";
+/// after the 2c-1 screens) and asks for compact single-line JSON (v2-compact, ASSIST-52);
+/// `response_format` still carries the full pinned schema.
+const PREFIX_SHA256: &str = "d2aadd679cd8a86685e7e487d803cc0a727031ccb06f2c885da3cdd93fef05ca";
 
 fn validator() -> jsonschema::Validator {
     jsonschema::draft202012::options()
@@ -307,4 +308,23 @@ fn schema_accepts_alias_trees_and_refuses_the_rest() {
     for reply in &refused {
         assert!(!validator.is_valid(reply), "{reply}");
     }
+}
+
+#[test]
+fn the_instructions_ask_for_compact_single_line_json_once_before_the_reply_shape() {
+    // ASSIST-52: the v2-compact prefix, v2-short plus this sentence (about 20% fewer output
+    // tokens in the field-reference screen).
+    const SENTENCE: &str =
+        "Reply with compact single-line JSON: no spaces or line breaks between tokens.\n";
+    assert_eq!(FIXED_PREFIX.matches(SENTENCE).count(), 1);
+    assert!(INSTRUCTIONS.contains(&format!(
+        "{SENTENCE}Reply with one JSON object and nothing else:\n"
+    )));
+    // The screen's v2-short prefix is the same text without the sentence, so the sentence is
+    // the only difference from the prefix the 2c-1 screens measured.
+    let without = FIXED_PREFIX.replacen(SENTENCE, "", 1);
+    assert_eq!(
+        hex::encode(Sha256::digest(without.as_bytes())),
+        "7b0ba380d8687cc8dfe2a150bf99d684b3bb4f4d5a22e41b5d46a1b6bbd5fe84"
+    );
 }

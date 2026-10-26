@@ -5,8 +5,10 @@
 //! Compiled only with the `dev-endpoint` feature, which release builds never enable; it has no
 //! endpoint check, and the page says so.
 use super::AssistantHandle;
-use super::model::{default_alias, max_tokens};
+use super::DEFAULT_MODEL_SHA256;
+use super::model::{default_alias, local_name, max_tokens};
 use super::runtime::manager::{self, Child, Fail, Launcher};
+use super::runtime::models::Model;
 use super::runtime::server::{Llama, Server};
 use super::runtime::{Level, Path};
 use super::transport::{self, Bounded, Endpoint};
@@ -93,6 +95,7 @@ impl AssistantHandle {
     /// A refused endpoint or model spec, or an unreadable token file, by message.
     pub fn development(config: Config) -> Result<Self, String> {
         let max_tokens = max_tokens(&config.model, config.model_sha256.as_deref())?;
+        let name = local_name(&config.model)?;
         let alias = match config.model_alias {
             Some(alias) => alias,
             None => default_alias(&config.model)?,
@@ -109,13 +112,29 @@ impl AssistantHandle {
             &token,
             &alias,
         ));
-        Ok(Self::with_launcher(
+        // The model the hand-started server runs, by the flags; the owner cannot change it.
+        let model = Model {
+            spec: config.model,
+            name,
+            sha256: config
+                .model_sha256
+                .unwrap_or_else(|| DEFAULT_MODEL_SHA256.to_owned()),
+            alias,
+            max_tokens,
+            size: None,
+        };
+        Ok(Self::with_models(
             Arc::new(Development { server }),
             manager::Config {
                 path: Path::Cpu,
-                max_tokens,
                 // A hand-started external server, reported as level 3; nothing is started.
                 levels: &[Level::Unconfined],
+            },
+            manager::ModelSetup {
+                active: model,
+                previous: None,
+                records: None,
+                from_owner_setting: false,
             },
         ))
     }

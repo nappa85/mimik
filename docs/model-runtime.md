@@ -1,7 +1,7 @@
 # Model runtime
 
-The interpretation assistant's model server (steps 2c-2a and 2c-2b-1; ASSIST-27, ASSIST-29 to
-ASSIST-34, ASSIST-40 to ASSIST-42): with `--assistant`, Mimik starts the pinned official
+The interpretation assistant's model server (steps 2c-2a, 2c-2b-1 and 2d-1; ASSIST-27,
+ASSIST-28, ASSIST-29 to ASSIST-36, ASSIST-40 to ASSIST-42, ASSIST-52): with `--assistant`, Mimik starts the pinned official
 llama.cpp `llama-server` as its own child process, confined at the highest level that works,
 reaches it only through a checked endpoint with a per-launch token, and primes and calibrates
 it before any job runs. Linux `x86_64`: the GPU path (the Vulkan build on one hardware GPU)
@@ -24,6 +24,10 @@ with the server is in [assisted-entry.md](assisted-entry.md), "Interpretation as
 | Output drain | `src/assistant/runtime/drain.rs` |
 | Priming, calibration, budgets | `src/assistant/runtime/calibration.rs`, `server.rs`, `budgets.rs` |
 | Generations and transitions | `src/assistant/runtime/manager.rs` |
+| Model setting: model, trial key and report, bounds | `src/assistant/runtime/models.rs` |
+| Trial, Switch, Switch back | `src/assistant/runtime/manager_model.rs`, `src/assistant/runtime/trial.rs` |
+| Model spec grammar, `max_tokens` rules | `src/assistant/model.rs` |
+| Stored setting (migration 022) | `src/assistant/records.rs`, `migrations/022_assistant_models.sql` |
 | Thread count | `src/assistant/runtime/threads.rs` |
 | Device choice (render nodes, listing, ranking) | `src/assistant/runtime/device.rs` |
 | Owner page | `src/auth/assistant.rs`, `templates/admin_assistant.html` |
@@ -31,9 +35,11 @@ with the server is in [assisted-entry.md](assisted-entry.md), "Interpretation as
 ## Options
 
 `--assistant` turns it on (off by default: no child, no probe, no route, the page says
-"Off"). `--assistant-model` (`local:<name>.gguf`, default the Granite 4.2 3B `Q4_K_M` file
-with its SHA-256 compiled in), `--assistant-model-sha256` (required for any other file),
-`--assistant-model-alias` (default the file name without `.gguf`, lower case). `--models-dir`
+"Off"). `--assistant-model` (`local:<name>.gguf` by the grammar below, default the Granite 4.2
+3B `Q4_K_M` file with its SHA-256 compiled in), `--assistant-model-sha256` (required for any
+other file), `--assistant-model-alias` (default the file name without `.gguf`, lower case).
+These name the model of a database that has no stored setting; once the owner has switched
+models, the stored setting wins and the flags are ignored (the page says so). `--models-dir`
 (default `<data dir>/models`, mode 0700, owned by Mimik's user; the model is placed there by
 hand). `--assistant-runtime` (default `llama/` beside the binary; it must hold exactly the
 pinned files either way). `--assistant-threads` (default the usable physical cores minus one,
@@ -532,6 +538,66 @@ is superseded or cancelled, the next job waits the larger sample's prompt term a
 admission counts that wait, so one expiry no longer makes the next job miss its deadline too.
 The measurement and the budgets are on the page.
 
+## Owner model setting
+
+The owner picks the model on `/admin/assistant` (ASSIST-28, ASSIST-36); the start flags only
+name the first one. The field takes one spec, at most 512 bytes of ASCII without white space
+(`parse_spec` in `src/assistant/model.rs`; a refused spec names the broken rule and the field
+keeps the input):
+
+- `local:<name>.gguf`: one name of 1 to 128 characters from `[A-Za-z0-9._-]`, not starting
+  with `.`, ending `.gguf`, not a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to
+  `COM9`, `LPT1` to `LPT9`, in any case, with or without an extension). A `/` or `\` in the
+  name is its own refusal. The file is one already in the models folder.
+- `hf:` specs are refused ("downloads arrive later"; step 2d-2).
+
+**Trial.** "Try" (POST `/admin/assistant/model/try`) parses the spec, then the manager ends the
+running generation (players see "starting"; there is never a second model server) and:
+hashes the file (the SHA-256 it will be held to at every load, remembered by the file's
+identity so the load does not read it again); starts the candidate on the path the runtime is
+on (the GPU path unless it fell back or `--assistant-device cpu`; no fallback inside a trial)
+at level 1; primes it; sends five synthetic phrases shipped with Mimik (`trial.rs`; no sheet
+or player text) as a job would be sent, at `max_tokens` 384, each of which must be
+schema-valid and untruncated; sets `max_tokens` to `min(384, max(256, 1.25 × the largest
+predicted_n rounded up to a multiple of 32))`, except that the default Granite file,
+identified by its SHA-256 and never by name, keeps 352; and calibrates with that `max_tokens`
+and derives the budgets. It passes when the phrases and the calibration succeed ("too slow"
+fails with the numbers). Whether a phrase's expected value was among the options is shown and
+decides nothing (D-D). Bounds: each phrase 2 × the path's run-deadline cap (180 s CPU, 120 s
+GPU), the whole trial including hashing 30 minutes on the CPU path and 20 on the GPU; "Cancel"
+stops it at any time, and so do a Restart and Mimik's shutdown. A failed, expired or cancelled
+trial stops the candidate and the previous model starts again. A passed trial stops the
+candidate too and the previous model starts again at once, so players are not left waiting for
+the owner's decision: the page shows the result, with "Switch" and "Keep the current model"
+(which only dismisses the result). One trial at a time (a second "Try" answers "a trial is
+already running"); while it runs, Switch, Switch back and Keep are refused. Model changes
+are admitted one at a time: a Try, Switch or Switch back is refused ("a model change or a
+restart is already being carried out") while another is pending or a Restart is running, so a
+double click on Switch back swaps once. "Cancel" carries the number of the trial the page
+showed and is refused when another trial runs now. A file of 0 bytes or over 8 GiB (the
+stored size's limit) fails the trial naming why, before anything starts. An interrupted or
+expired trial stops its candidate, then settles the launcher's work; a hash in progress is
+cancelled at once, so it never delays the previous model. A model change does not reset the
+circuit breaker (only Restart and Mimik's start do). The start rejects an
+`--assistant-model-alias` outside 1 to 128 characters of `[A-Za-z0-9._-]` (the stored
+setting's limit).
+
+**Switch.** "Switch" carries the passed trial's key (`<number>.<generation>.<sha256>`), accepted
+only if it names the latest finished passed trial (another hash, an older trial or an older
+generation is refused as stale and nothing changes). The manager stores the model first
+(`assistant_models`: spec, file name, SHA-256, size, alias, `max_tokens`, the trial's
+measurements as JSON; `assistant_model_choice`: the active and the previous model, who and
+when), then starts a session with it: restart, priming, calibration with its recorded
+`max_tokens`. A store failure changes nothing and the page says why. "Switch back" swaps the
+active and the previous model in the same way and restarts with it. A model that fails to
+become ready after a switch can be switched away from the same way. All actions are
+owner-only, CSRF-checked, strict forms (an extra, duplicate or missing key is a 422) and
+bounded at 4 KiB.
+
+**Changed file.** A load whose file no longer has the recorded SHA-256 is not retried: the
+assistant is unavailable with "the model file changed", until the owner tries a model again,
+switches back or restarts after restoring the file.
+
 ## Owner page
 
 `/admin/assistant` (owner only): the state with its reason, the pinned build, path,
@@ -542,7 +608,12 @@ name, PCI address, render node and memory; render nodes not used, with why; "CPU
 measurements. Restart (POST, CSRF-checked) stops the server and starts again from level 1; "Try
 the GPU again" (POST `/admin/assistant/try-gpu`, CSRF-checked) is shown while the GPU is wanted
 and the CPU path runs; a second press of either while one runs starts nothing ("A restart is
-already running").
+already running"). The Model section shows the active model (spec, SHA-256, `max_tokens`, and
+whether it comes from the stored setting or the start flags), the previous model with "Switch
+back", the field with "Try" (the refusal and the kept input beside it), and the latest trial:
+its phase and Cancel while it runs; when it passed, the device, times, speeds, `max_tokens`,
+B, N(B), R, D and Q and each phrase; the reason when it failed or was cancelled. With the
+development endpoint the model cannot be changed and the page says so.
 
 ## Development endpoint
 

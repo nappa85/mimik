@@ -280,6 +280,9 @@ pub(crate) struct Assistant {
     /// Until when the server is presumed busy with a request cancelled at its deadline.
     busy_until: Mutex<Option<Instant>>,
     signals: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Signal>>>,
+    /// How often the breaker was reset (tests).
+    #[cfg(test)]
+    pub(crate) resets: std::sync::atomic::AtomicUsize,
 }
 
 impl Assistant {
@@ -293,6 +296,8 @@ impl Assistant {
             grace: Mutex::new(TRANSPORT_GRACE),
             busy_until: Mutex::new(None),
             signals: Mutex::new(None),
+            #[cfg(test)]
+            resets: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -403,6 +408,9 @@ impl Assistant {
 
     /// The owner's Restart or the app's start: the breaker is reset.
     pub(crate) fn reset_breaker(&self) {
+        #[cfg(test)]
+        self.resets
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.breaker().reset();
     }
 

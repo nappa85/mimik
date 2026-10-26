@@ -34,6 +34,8 @@ pub(crate) enum Refusal {
     Mode(String),
     /// Size or SHA-256 differ from the pinned value.
     Changed(String),
+    /// A model file of 0 bytes or over the size limit (checked before it is hashed).
+    Size(String),
     /// A file the manifest does not name, or one it names is missing.
     Extra(String),
     /// Something already exists where a fresh directory must be made.
@@ -55,6 +57,7 @@ impl std::fmt::Display for Refusal {
             Self::Writable(name) => write!(f, "{name} is writable by group or others"),
             Self::Mode(name) => write!(f, "{name} must have mode 0700"),
             Self::Changed(name) => write!(f, "{name} differs from the pinned file"),
+            Self::Size(name) => write!(f, "{name} is empty or larger than 8 GiB"),
             Self::Extra(name) => write!(f, "{name} is not part of the pinned build"),
             Self::Exists(name) => write!(f, "{name} already exists"),
             Self::Io(name) => write!(f, "{name} cannot be read"),
@@ -326,6 +329,25 @@ fn verified(
         identity,
         sha256,
     })
+}
+
+/// The SHA-256 and size of the model `name` in the models folder, opened with the same
+/// checks as a load (the hash is remembered by the file's identity, so the load that
+/// follows does not read it again), stopping once `stop` says so.
+pub(crate) fn model_digest(
+    models: BorrowedFd<'_>,
+    name: &str,
+    cache: &HashCache,
+    stop: &dyn Fn() -> bool,
+) -> Result<([u8; 32], u64), Refusal> {
+    let (fd, stat) = open_file(models, name, Owners::Mine)?;
+    let identity = Identity::of(&stat);
+    // Before the hash: a huge file is refused without reading it.
+    if identity.size == 0 || identity.size > crate::assistant::model::MAX_MODEL_BYTES {
+        return Err(Refusal::Size(name.to_owned()));
+    }
+    let sha256 = cache.hash(&format!("model/{name}"), fd.as_fd(), identity, stop)?;
+    Ok((sha256, identity.size))
 }
 
 /// Opens and verifies the model `name` in the models folder against `sha256` (64 lowercase

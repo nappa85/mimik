@@ -408,7 +408,8 @@ Without it there is no client, no worker, no child and no job route (the three p
 | Client and transport | `src/assistant/interpreter.rs`, `src/assistant/transport.rs` |
 | Jobs, admission, runtime events | `src/assistant/jobs.rs` |
 | Circuit breaker | `src/assistant/breaker.rs` |
-| Model spec and flags | `src/assistant/model.rs`, `src/main.rs` |
+| Model spec, flags and `max_tokens` rules | `src/assistant/model.rs`, `src/main.rs` |
+| Owner model setting (trial, Switch, stored choice) | `src/assistant/runtime/manager_model.rs`, `src/assistant/records.rs` ([model-runtime.md](model-runtime.md)) |
 | Model runtime | `src/assistant/runtime/` ([model-runtime.md](model-runtime.md)) |
 | Development endpoint (tests) | `src/assistant/development.rs` |
 | Context of a job | `src/campaigns/interpret.rs`, read sets in `src/definitions/formula/mod.rs` (`Compiled::read_sets`) |
@@ -420,9 +421,14 @@ Without it there is no client, no worker, no child and no job route (the three p
 and `--assistant-model-alias` (the request's model name and the server's `--alias`; default
 the file name without `.gguf`, lower case); the runtime's `--models-dir`,
 `--assistant-runtime` and `--assistant-threads` ([model-runtime.md](model-runtime.md),
-"Options"). `max_tokens` is 352 for the file whose SHA-256 is the compiled-in `e0406663…`
-(the 2b rule over the 2c-1 screen of the adopted prefix: largest `predicted_n` 263, × 1.25,
-rounded up to a multiple of 32, capped at 384) and 256 for any other. The budgets (B, N(B), R,
+"Options"). The owner's stored model setting, when there is one, replaces the model flags
+([model-runtime.md](model-runtime.md), "Owner model setting"). `max_tokens` is 352 for the file
+whose SHA-256 is the compiled-in `e0406663…` (the 2b rule over the 2c-1 screen of the v2-short
+prefix: largest `predicted_n` 263, × 1.25, rounded up to a multiple of 32, capped at 384; the
+shipped prefix asks for shorter replies, so 352 still holds, but re-deriving it from a screen
+of the shipped prefix is owed, `TODO.md`), 256 for any other file named by the flags, and for a
+model the owner tried, what the trial derived (`min(384, max(256, 1.25 × the five phrases'
+largest predicted_n, rounded up to a multiple of 32))`). The budgets (B, N(B), R,
 D, Q) come from each generation's calibration and arrive in its `ready` event (generation
 started, ended with its reason, ready with the budgets). Builds with the `dev-endpoint`
 feature (never a release; `smoke_release.py` checks the release binary has none) also take
@@ -433,7 +439,10 @@ calibrated the same way.
 reply:\n` and the schema's compact text with the alias enum replaced by a description ("an
 alias from the data: t, f<n> or c<n>"; `response_format`, which the grammar enforces, carries
 the full pinned schema), byte-identical across requests (SHA-256 pinned in Rust
-and `tools/test_assist_eval.py`), so llama-server reuses it from its prompt cache. User
+and `tools/test_assist_eval.py`), so llama-server reuses it from its prompt cache. The
+instructions ask for compact single-line JSON (the v2-compact prefix, ASSIST-52: about 20 %
+fewer output tokens at the same quality in the field-reference screen, `docs/results.md`);
+`tools/assist_eval.py` keeps the earlier prefix as `v2-base`. User
 message: the data envelope, `<data>\n{"note", "target": {alias "t", id, label?, value},
 "context": [{alias, id, label, type, value}]}\n</data>` with `<`, `>` and `&` escaped. Body
 members beside rig's own: `response_format` with the schema (`json_schema`, strict, the pinned

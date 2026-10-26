@@ -1,36 +1,141 @@
-//! The model spec of 2c (assisted sheet plan §1.4b, "Before 2d"): `--assistant-model`
-//! (`local:<name>.gguf`, default the Granite 4.2 3B file with its SHA-256 compiled in),
-//! `--assistant-model-sha256` (required for any other file) and `--assistant-model-alias`.
-/// The default model spec (§1.4b) and the SHA-256 compiled in for it: the Granite 4.2 3B
+//! The model spec (`docs/model-runtime.md`, "Owner model setting"): the grammar of `--assistant-model` and of the
+//! owner's "Model" field (`local:<name>.gguf`, default the Granite 4.2 3B file with its
+//! SHA-256 compiled in), `--assistant-model-sha256` (required for any other file) and
+//! `--assistant-model-alias`, and the `max_tokens` rules.
+/// The default model spec and the SHA-256 compiled in for it: the Granite 4.2 3B
 /// `Q4_K_M` file, equal to the Hub's LFS SHA-256 at revision `c40945d…`.
 pub const DEFAULT_MODEL: &str = "local:granite-4.2-3b-Q4_K_M.gguf";
 pub const DEFAULT_MODEL_SHA256: &str =
     "e0406663965846ae22a403456eb826ccce5f450840491f71952f18a7cb78e7d5";
-/// `max_tokens` of the default file under the adopted prefix, by the 2b rule (round up to a
-/// multiple of 32 of 1.25 × the largest `predicted_n` of a valid, untruncated reply, at most
-/// 384) over the 2c-1 screen of that prefix (v2-short): largest 263, 1.25 × 263 = 328.75, so
-/// 352.
+/// `max_tokens` of the default file, by the 2b rule (round up to a multiple of 32 of 1.25 ×
+/// the largest `predicted_n` of a valid, untruncated reply, at most 384) over the 2c-1
+/// screen of the v2-short prefix: largest 263, 1.25 × 263 = 328.75, so 352. The shipped
+/// v2-compact prefix (ASSIST-52) asks for shorter replies, so 352 still holds; re-deriving it
+/// from a screen of the shipped prefix is owed (`TODO.md`).
 pub(crate) const DEFAULT_MAX_TOKENS: u32 = 352;
-/// Any other file until the 2d trial measures it (never below 256, §1.4b).
+/// Any other file until the 2d trial measures it (never below 256).
 pub(crate) const OTHER_MAX_TOKENS: u32 = 256;
 
-/// The model's file name from a `local:` spec (the 2d-1 grammar's `local:` form).
-pub(crate) fn local_name(spec: &str) -> Result<&str, String> {
-    let name = spec
-        .strip_prefix("local:")
-        .ok_or("the model must be a local:<name>.gguf spec in this build")?;
-    let valid = (1..=128).contains(&name.len())
-        && name
-            .rsplit_once('.')
-            .is_some_and(|(_, extension)| extension == "gguf")
-        && !name.starts_with('.')
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
-    if valid {
-        Ok(name)
-    } else {
-        Err("the model spec is not local:<name>.gguf with [A-Za-z0-9._-] characters".into())
+/// A validated model spec. `hf:` specs (downloads, 2d-2) are refused for now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Spec {
+    /// `local:<name>.gguf`: a file already in the models folder.
+    Local(String),
+}
+
+/// The grammar rule a refused spec broke; `Display` names it for the
+/// owner, who keeps the input to correct it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rule {
+    TooLong,
+    NotAscii,
+    Whitespace,
+    /// An `hf:` spec: downloads arrive in a later step.
+    Download,
+    Form,
+    NameLength,
+    PathSeparator,
+    Charset,
+    LeadingDot,
+    Extension,
+    DeviceName,
+}
+
+/// A refused model spec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpecError {
+    pub rule: Rule,
+}
+
+impl std::fmt::Display for SpecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self.rule {
+            Rule::TooLong => "the model spec is longer than 512 bytes",
+            Rule::NotAscii => "the model spec must be ASCII",
+            Rule::Whitespace => "the model spec must not contain white space",
+            Rule::Download => "downloads arrive later: use local:<name>.gguf for a file already in the models folder",
+            Rule::Form => "the model spec must be local:<name>.gguf",
+            Rule::NameLength => "the model file name must be 1 to 128 characters",
+            Rule::PathSeparator => "the model file name must be one name, without / or \\",
+            Rule::Charset => "the model file name may use only letters, digits, '.', '_' and '-'",
+            Rule::LeadingDot => "the model file name must not start with '.'",
+            Rule::Extension => "the model file name must end with .gguf",
+            Rule::DeviceName => "the model file name must not be a Windows device name (CON, NUL, COM1 and so on)",
+        })
+    }
+}
+
+impl std::error::Error for SpecError {}
+
+/// Windows device names, refused in any case with or without an extension.
+fn device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || stem
+            .strip_prefix("COM")
+            .or_else(|| stem.strip_prefix("LPT"))
+            .is_some_and(|n| matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
+}
+
+/// Parses the owner's model spec by the grammar: at most 512 bytes, ASCII, no white
+/// space, and `local:<name>.gguf` with one name of 1 to 128 characters from `[A-Za-z0-9._-]`,
+/// not starting with `.`, not a Windows device name.
+///
+/// # Errors
+///
+/// The first rule the spec breaks.
+pub fn parse_spec(text: &str) -> Result<Spec, SpecError> {
+    let refuse = |rule| Err(SpecError { rule });
+    if text.len() > 512 {
+        return refuse(Rule::TooLong);
+    }
+    if !text.is_ascii() {
+        return refuse(Rule::NotAscii);
+    }
+    if text
+        .bytes()
+        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+    {
+        return refuse(Rule::Whitespace);
+    }
+    if text.starts_with("hf:") {
+        return refuse(Rule::Download);
+    }
+    let Some(name) = text.strip_prefix("local:") else {
+        return refuse(Rule::Form);
+    };
+    if !(1..=128).contains(&name.len()) {
+        return refuse(Rule::NameLength);
+    }
+    if name.contains(['/', '\\']) {
+        return refuse(Rule::PathSeparator);
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    {
+        return refuse(Rule::Charset);
+    }
+    if name.starts_with('.') {
+        return refuse(Rule::LeadingDot);
+    }
+    if std::path::Path::new(name)
+        .extension()
+        .is_none_or(|extension| extension != "gguf")
+    {
+        return refuse(Rule::Extension);
+    }
+    if device_name(name) {
+        return refuse(Rule::DeviceName);
+    }
+    Ok(Spec::Local(name.to_owned()))
+}
+
+/// The model's file name from a `local:` spec (the CLI flag and the owner's field share the
+/// grammar).
+pub(crate) fn local_name(spec: &str) -> Result<String, String> {
+    match parse_spec(spec).map_err(|error| error.to_string())? {
+        Spec::Local(name) => Ok(name),
     }
 }
 
@@ -45,15 +150,17 @@ pub fn default_alias(spec: &str) -> Result<String, String> {
     Ok(name.trim_end_matches(".gguf").to_ascii_lowercase())
 }
 
-/// The model's `max_tokens`: 352 for the default file by its SHA-256, 256 otherwise.
+/// A SHA-256 as the specs and records write it: 64 lowercase hex digits.
+pub(crate) fn valid_sha256(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The model's `max_tokens` from the flags, before any trial: 352 for the default file by its
+/// SHA-256, 256 otherwise.
 pub(crate) fn max_tokens(spec: &str, sha256: Option<&str>) -> Result<u32, String> {
     local_name(spec)?;
     let sha256 = match sha256 {
-        Some(sha)
-            if sha.len() == 64 && sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) =>
-        {
-            sha
-        }
+        Some(sha) if valid_sha256(sha) => sha,
         Some(_) => return Err("--assistant-model-sha256 must be 64 lowercase hex digits".into()),
         None if spec == DEFAULT_MODEL => DEFAULT_MODEL_SHA256,
         None => return Err("--assistant-model-sha256 is required for this model".into()),
@@ -65,37 +172,46 @@ pub(crate) fn max_tokens(spec: &str, sha256: Option<&str>) -> Result<u32, String
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// The largest model file a trial accepts (the stored size's limit, ASSIST-35).
+pub(crate) const MAX_MODEL_BYTES: u64 = 8 << 30;
 
-    #[test]
-    fn model_specs_aliases_and_max_tokens() {
-        assert_eq!(
-            default_alias(DEFAULT_MODEL).unwrap(),
-            "granite-4.2-3b-q4_k_m"
-        );
-        assert_eq!(max_tokens(DEFAULT_MODEL, None), Ok(352));
-        assert_eq!(
-            max_tokens(DEFAULT_MODEL, Some(DEFAULT_MODEL_SHA256)),
-            Ok(352)
-        );
-        // Whatever its name, another file is 256.
-        assert_eq!(max_tokens(DEFAULT_MODEL, Some(&"a".repeat(64))), Ok(256));
-        assert_eq!(
-            max_tokens("local:other.gguf", Some(DEFAULT_MODEL_SHA256)),
-            Ok(352)
-        );
-        assert!(max_tokens("local:other.gguf", None).is_err());
-        assert!(max_tokens("local:other.gguf", Some("ABC")).is_err());
-        for refused in [
-            "hf:x/y/z.gguf@0",
-            "local:.hidden.gguf",
-            "local:a/b.gguf",
-            "local:x.bin",
-            "local:",
-        ] {
-            assert!(default_alias(refused).is_err(), "{refused}");
-        }
+/// An alias the server and the stored setting accept: 1 to 128 characters from
+/// `[A-Za-z0-9._-]`.
+pub(crate) fn valid_alias(alias: &str) -> bool {
+    (1..=128).contains(&alias.len())
+        && alias
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// The `max_tokens` a trial's phrases are sent with (the measurement cap) and the most any
+/// model may have.
+pub(crate) const TRIAL_MEASURE_TOKENS: u32 = 384;
+/// The least a trial sets (five phrases cannot measure a tail).
+pub(crate) const MIN_TRIAL_TOKENS: u32 = 256;
+
+/// The trial's rule: `min(384, max(256, round up to 32 of 1.25 × the largest
+/// predicted_n))`, over the five phrases' replies. The default Granite file keeps
+/// [`DEFAULT_MAX_TOKENS`], identified by its SHA-256, never by name
+/// ([`trial_max_tokens`]).
+pub(crate) fn measured_max_tokens(largest_predicted_n: u32) -> u32 {
+    // 1.25 × n rounded up to a whole token, then to a multiple of 32.
+    let scaled = u64::from(largest_predicted_n) * 5;
+    let tokens = scaled.div_ceil(4);
+    let rounded = tokens.div_ceil(32) * 32;
+    let capped = rounded.clamp(u64::from(MIN_TRIAL_TOKENS), u64::from(TRIAL_MEASURE_TOKENS));
+    u32::try_from(capped).unwrap_or(TRIAL_MEASURE_TOKENS)
+}
+
+/// The `max_tokens` a passed trial of the file with `sha256` records.
+pub(crate) fn trial_max_tokens(sha256: &str, largest_predicted_n: u32) -> u32 {
+    if sha256 == DEFAULT_MODEL_SHA256 {
+        DEFAULT_MAX_TOKENS
+    } else {
+        measured_max_tokens(largest_predicted_n)
     }
 }
+
+#[cfg(test)]
+#[path = "model_tests.rs"]
+mod tests;

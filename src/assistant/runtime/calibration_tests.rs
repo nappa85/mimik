@@ -57,6 +57,14 @@ impl Server for Scripted {
         Ok(self.samples.lock().unwrap().remove(0))
     }
 
+    async fn structured(
+        &self,
+        _: &str,
+        _: u32,
+    ) -> Result<super::super::server::Structured, Failure> {
+        Err(Failure::Transport)
+    }
+
     fn interpreter(&self) -> Arc<dyn Interpreter> {
         Arc::new(crate::assistant::interpreter::stub::StubInterpreter::default())
     }

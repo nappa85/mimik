@@ -6,11 +6,12 @@
 use super::device::{self, Candidate, Choice, Listed, Roots};
 use super::drain::{self, Summary};
 use super::endpoint::{self, Loopback, Sandbox, SandboxSocket, Watched};
-use super::files::{self, HashCache, Owners, Verified};
+use super::files::{self, HashCache, Owners, Refusal, Verified};
 use super::hako;
 use super::libs;
-use super::manager::{Child, DeviceView, Fail, Launcher};
+use super::manager::{Child, DeviceView, Fail, Launcher, MODEL_CHANGED};
 use super::manifest::{Build, MANIFEST};
+use super::models::{Model, ModelFile};
 use super::rundir::{self, Entry, Generation, Pidfile, Swept};
 use super::runner::{self, Exec, Handover, RunnerCommand, Spec};
 use super::sandbox::{self, GpuBinds, Started};
@@ -196,9 +197,19 @@ pub(crate) struct ServerFile<'a> {
     pub build_fd: &'a OwnedFd,
 }
 
+/// The model the next start loads: set by the manager before each session and trial
+/// ([`Launcher::select`]); the start flags' model until then.
+#[derive(Clone, Debug)]
+pub(crate) struct Chosen {
+    pub name: String,
+    pub sha256: String,
+    pub alias: String,
+}
+
 /// The real launcher.
 pub(crate) struct Real {
     settings: Settings,
+    chosen: Mutex<Chosen>,
     /// The pinned CPU build (the embedded manifest's; tests give another).
     cpu: Option<Build>,
     /// The pinned GPU (Vulkan) build.
@@ -293,7 +304,7 @@ pub(crate) struct Work {
 }
 
 impl Work {
-    fn new() -> Arc<Self> {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             epoch: AtomicU64::new(0),
             running: watch::channel(0).0,
@@ -384,6 +395,11 @@ impl Real {
 
     pub(crate) fn with_builds(settings: Settings, cpu: Option<Build>, gpu: Option<Build>) -> Self {
         Self {
+            chosen: Mutex::new(Chosen {
+                name: settings.model.clone(),
+                sha256: settings.model_sha256.clone(),
+                alias: settings.alias.clone(),
+            }),
             settings,
             cpu,
             gpu,
@@ -396,6 +412,14 @@ impl Real {
             cleanups: Arc::new(Cleanups::default()),
             unconfined: false,
         }
+    }
+
+    /// The model the next start loads.
+    pub(crate) fn chosen(&self) -> Chosen {
+        self.chosen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Tests only: lets level 3 start, so its switched-off code stays exercised.
@@ -554,14 +578,21 @@ impl Real {
                     &refusal,
                 )
             })?;
+        let chosen = self.chosen();
         let model = files::model_until(
             models.as_fd(),
-            &self.settings.model,
-            &self.settings.model_sha256,
+            &chosen.name,
+            &chosen.sha256,
             &self.cache,
             &stop,
         )
-        .map_err(|refusal| format!("the model: {refusal}"))?;
+        .map_err(|refusal| match refusal {
+            // The file is not the one that was tried: not a start failure to retry.
+            Refusal::Changed(_) => format!(
+                "{MODEL_CHANGED}: it no longer has the SHA-256 recorded for it; try the model again from the Model field"
+            ),
+            other => format!("the model: {other}"),
+        })?;
         let build_dir = real.join(&build.directory);
         // Advisory only: a library the host seems to lack is remembered as a hint for a start
         // that then fails. It never refuses a start, and nothing about the sandbox depends on it.
@@ -590,7 +621,7 @@ impl Real {
             "--model".into(),
             model.into(),
             "--alias".into(),
-            self.settings.alias.clone(),
+            self.chosen().alias,
             "--host".into(),
             host.into(),
         ];
@@ -2455,7 +2486,7 @@ impl Real {
         let server: Arc<dyn Server> = Arc::new(Llama::new(
             Bounded::new(Arc::clone(&connector)),
             token.expose(),
-            &self.settings.alias,
+            &self.chosen().alias,
         ));
         let notes = Vec::new();
         #[cfg(not(test))]
@@ -2602,7 +2633,7 @@ impl Launcher for Launch {
         }
         let models = files::open_dir(&real.settings.models_dir, Owners::Mine, true)
             .map_err(|refusal| format!("the models folder: {refusal}"))?;
-        let (_, stat) = files::open_file(models.as_fd(), &real.settings.model, Owners::Mine)
+        let (_, stat) = files::open_file(models.as_fd(), &real.chosen().name, Owners::Mine)
             .map_err(|refusal| format!("the model: {refusal}"))?;
         let size = u64::try_from(stat.st_size).unwrap_or(u64::MAX);
         if let Some(available) = mem_available()
@@ -2680,6 +2711,36 @@ impl Launcher for Launch {
 
     fn device_notes(&self) -> Vec<String> {
         self.0.held().device_notes.clone()
+    }
+
+    fn select(&self, model: &Model) {
+        *self
+            .0
+            .chosen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Chosen {
+            name: model.name.clone(),
+            sha256: model.sha256.clone(),
+            alias: model.alias.clone(),
+        };
+    }
+
+    async fn hash_model(&self, name: &str) -> Result<ModelFile, String> {
+        let (real, name) = (Arc::clone(&self.0), name.to_owned());
+        let ticket = real.work.enter();
+        tokio::task::spawn_blocking(move || {
+            let models = files::open_dir(&real.settings.models_dir, Owners::Mine, true)
+                .map_err(|refusal| format!("the models folder: {refusal}"))?;
+            let (hash, size) =
+                files::model_digest(models.as_fd(), &name, &real.cache, &|| ticket.cancelled())
+                    .map_err(|refusal| format!("the model: {refusal}"))?;
+            Ok(ModelFile {
+                sha256: hex::encode(hash),
+                size,
+            })
+        })
+        .await
+        .map_err(|_| "the model file could not be examined".to_owned())?
     }
 }
 

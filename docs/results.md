@@ -44,7 +44,7 @@ Scope:
 
 **Arm choice.** Neither arm is better by 3 or more cases on either measure. Compact's output-token p50 is 20.6% lower, so the rule chooses **compact**.
 
-**Screen test.** Compact gets 1/30 correct_ref against at least 24 required, and 11/30 false_confident against at most 3 allowed. Field references are **rejected** for the default model.
+**Screen test.** Compact gets 1/30 correct_ref against at least 24 required, and 11/30 false_confident against at most 3 allowed. The screen **fails**. The preregistered consequence, withholding field-referencing options, was superseded by the owner on 2026-10-26: such options are still offered, and the failure is tracked as a bug (ASSIST-L32).
 
 How the replies fail:
 - Most abstentions are options built on an invented literal, which the provenance check drops (13 base, 12 compact).
@@ -58,7 +58,7 @@ Schema validity was 30/30 in both arms, with no truncation.
 - Act versus ask on the 50 dev cases: English false_act 3/10 and wrong_ask 6/40; multilingual 6/10 and 16/40. The rule needed at most 1/10 and at most 8/40.
 - **Neither checkpoint passes.** Zero-shot Laya is not pursued for this use; fine-tuning would be its own decision.
 
-Limits: synthetic cases, one model, one sampler, one run per arm, and no should-abstain cases. The result rejects field references; it says nothing about other note classes.
+Limits: synthetic cases, one model, one sampler, one run per arm, and no should-abstain cases. The result covers field references only, not other note classes.
 
 ## Model runtime: idle CPU calibration and the GPU path (steps 2c-2a and 2c-2b-1, 2026-10-23)
 

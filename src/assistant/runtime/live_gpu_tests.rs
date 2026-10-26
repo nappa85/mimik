@@ -94,14 +94,14 @@ async fn run_with(
     max_tokens: u32,
     done: impl Fn(&manager::Status) -> bool,
 ) -> manager::Handle {
-    let handle = manager::spawn(
+    let handle = manager::spawn_with(
         Arc::clone(assistant),
         Arc::new(Launch(Arc::clone(real))),
         manager::Config {
             path: Path::Gpu,
-            max_tokens,
             levels: manager::USED_LEVELS,
         },
+        manager::ModelSetup::fixed(max_tokens),
     );
     let deadline = std::time::Instant::now() + Duration::from_secs(120);
     while !done(&handle.status()) {
@@ -300,9 +300,7 @@ fn real_gpu(scratch: &std::path::Path) -> Arc<Real> {
 fn real_gpu_on(scratch: &std::path::Path) -> Arc<Real> {
     let mut settings = settings(scratch, "probe-inner", Vec::new());
     settings.models_dir = env("MIMIK_LIVE_GPU_MODELS");
-    settings.model = crate::assistant::model::local_name(crate::assistant::DEFAULT_MODEL)
-        .unwrap()
-        .to_owned();
+    settings.model = crate::assistant::model::local_name(crate::assistant::DEFAULT_MODEL).unwrap();
     settings.model_sha256 = crate::assistant::DEFAULT_MODEL_SHA256.to_owned();
     settings.alias = "granite".into();
     settings.ctx_size = CTX_SIZE;

@@ -211,7 +211,6 @@ async fn without_a_usable_sandbox_the_real_manager_is_unavailable_and_starts_not
         Arc::new(Launch(Arc::clone(&real))),
         manager::Config {
             path: Path::Cpu,
-            max_tokens: 64,
             levels: manager::USED_LEVELS,
         },
     );
@@ -2241,4 +2240,52 @@ async fn a_retry_that_fails_before_the_inspection_carries_no_earlier_hint() {
     set(Some(old));
     let _ = launch.probe(Path::Cpu).await;
     assert_eq!(launch.failure_hint(Path::Cpu), None);
+}
+
+#[tokio::test]
+async fn a_selected_model_is_hashed_and_verified_against_its_own_recorded_hash() {
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    // Hashing reports the file's SHA-256 and size (the trial records them).
+    let file = launch.hash_model("m.gguf").await.unwrap();
+    assert_eq!(file.sha256, sha(MODEL));
+    assert_eq!(file.size, MODEL.len() as u64);
+    let other: &[u8] = b"GGUF another synthetic model";
+    let path = setup.dir.path().join("models/n.gguf");
+    std::fs::write(&path, other).unwrap();
+    let recorded = launch.hash_model("n.gguf").await.unwrap();
+    assert_eq!(recorded.sha256, sha(other));
+    // Names that are not one file of the models folder cannot be hashed.
+    for refused in ["../m.gguf", "missing.gguf", "", "a/b.gguf"] {
+        assert!(launch.hash_model(refused).await.is_err(), "{refused:?}");
+    }
+    // The selected model, not the start flags' one, is what the next start verifies.
+    let candidate = crate::assistant::runtime::models::Model {
+        spec: "local:n.gguf".into(),
+        name: "n.gguf".into(),
+        sha256: recorded.sha256.clone(),
+        alias: "other".into(),
+        max_tokens: 256,
+        size: Some(recorded.size),
+    };
+    launch.select(&candidate);
+    assert_eq!(launch.0.chosen().alias, "other");
+    let ticket = launch.0.work().enter();
+    let checked = launch.0.verify(Path::Cpu, Level::Sandbox, &ticket).unwrap();
+    assert_eq!(checked.model.name, "n.gguf");
+    assert_eq!(hex::encode(checked.model.sha256), recorded.sha256);
+    // The file changes after its hash was recorded: the refusal is "the model file changed",
+    // which the manager does not retry.
+    std::fs::write(&path, b"GGUF swapped after the trial").unwrap();
+    let Err(why) = launch.0.verify(Path::Cpu, Level::Sandbox, &ticket) else {
+        panic!("a changed model file must refuse the start")
+    };
+    assert!(why.starts_with("the model file changed"), "{why}");
+    assert!(why.starts_with(manager::MODEL_CHANGED));
+    // Any other model failure keeps its own wording.
+    std::fs::remove_file(&path).unwrap();
+    let Err(why) = launch.0.verify(Path::Cpu, Level::Sandbox, &ticket) else {
+        panic!("a missing model file must refuse the start")
+    };
+    assert_eq!(why, "the model: n.gguf is missing");
 }

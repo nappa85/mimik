@@ -26,15 +26,19 @@
 //! Every timer is Tokio's, so tests drive the clock.
 use super::budgets::NoBudgets;
 use super::calibration::{self, Calibration};
+use super::models::{
+    Model, ModelFile, ModelStatus, TrialKey, TrialReport, TrialState, phrase_bound, trial_bound,
+};
 use super::server::{Health, Server};
-use super::{Level, Path};
+use super::{Level, Path, trial};
 use crate::assistant::jobs::{Assistant, Budgets, EndReason, RuntimeEvent, Signal};
+use crate::assistant::records::{Record, Records};
 use async_trait::async_trait;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::Instant;
 
 pub(crate) const HEALTH_WITHIN: Duration = Duration::from_secs(60);
@@ -126,7 +130,18 @@ pub(crate) trait Launcher: Send + Sync {
     fn device_notes(&self) -> Vec<String> {
         Vec::new()
     }
+    /// The model the next start loads (its file, the SHA-256 it must have and the alias).
+    fn select(&self, _model: &Model) {}
+    /// Hashes the model file `name` in the models folder (the trial records the hash it
+    /// then expects at every load). A launcher that starts nothing cannot.
+    async fn hash_model(&self, _name: &str) -> Result<ModelFile, String> {
+        Err("this assistant cannot examine model files".into())
+    }
 }
+
+/// A load whose hash differs from the one recorded fails with this (the page says the file
+/// changed): it is not retried, because the file will not change back by itself.
+pub(crate) const MODEL_CHANGED: &str = "the model file changed";
 
 /// The runtime's state as the page shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,11 +177,25 @@ pub(crate) struct Status {
     pub device: Option<DeviceView>,
     /// Why other render nodes were not used.
     pub device_notes: Vec<String>,
+    /// The owner's model setting.
+    pub model: ModelStatus,
+    /// The latest model trial.
+    pub trial: Option<TrialState>,
 }
 
 impl Status {
-    fn new(path: Path) -> Self {
+    fn new(path: Path, models: &ModelSetup) -> Self {
         Self {
+            model: ModelStatus {
+                active: models.active.clone(),
+                previous: models.previous.clone(),
+                from_owner_setting: models.from_owner_setting,
+                switchable: models.records.is_some(),
+                next_trial: 1,
+                pending: false,
+                note: None,
+            },
+            trial: None,
             gpu_wanted: path == Path::Gpu,
             gpu_note: None,
             device: None,
@@ -193,6 +222,53 @@ enum Command {
         gpu: bool,
     },
     Shutdown(oneshot::Sender<()>),
+    /// The owner's model setting: it ends the running generation like a Restart does.
+    Model(ModelCommand),
+}
+
+/// A model request: carried out after the running generation has ended.
+enum ModelCommand {
+    Trial(TrialRequest),
+    Switch { key: TrialKey, by: i64 },
+    SwitchBack { by: i64 },
+}
+
+/// The owner's "Try": the candidate file and who asked.
+struct TrialRequest {
+    number: u64,
+    by: i64,
+    spec: String,
+    name: String,
+}
+
+/// The model the manager starts with, and where its changes are stored.
+pub(crate) struct ModelSetup {
+    pub active: Model,
+    pub previous: Option<Model>,
+    /// Where `Switch` and `Switch back` are stored; without it the owner cannot try models.
+    pub records: Option<Arc<dyn Records>>,
+    /// The active model comes from the owner's stored setting, not from the start flags.
+    pub from_owner_setting: bool,
+}
+
+#[cfg(test)]
+impl ModelSetup {
+    /// A manager whose model is fixed: only `max_tokens` is known.
+    pub(crate) fn fixed(max_tokens: u32) -> Self {
+        Self {
+            active: Model {
+                spec: String::new(),
+                name: String::new(),
+                sha256: String::new(),
+                alias: String::new(),
+                max_tokens,
+                size: None,
+            },
+            previous: None,
+            records: None,
+            from_owner_setting: false,
+        }
+    }
 }
 
 /// What the rest of Mimik holds: the status and the owner's commands.
@@ -200,6 +276,26 @@ enum Command {
 pub(crate) struct Handle {
     status: Arc<Mutex<Status>>,
     commands: mpsc::UnboundedSender<Command>,
+    /// The owner's Cancel of a running trial.
+    cancel: Arc<Cancel>,
+}
+
+/// The owner's Cancel: which trial it is for, so a Cancel that arrives early, or late, never
+/// cancels another trial.
+#[derive(Default)]
+struct Cancel {
+    /// The number of the trial last asked to stop (0: none).
+    trial: std::sync::atomic::AtomicU64,
+    wake: Notify,
+}
+
+impl Cancel {
+    /// Records a Cancel for trial `number` and wakes the manager. Trial numbers only grow, so
+    /// an older Cancel never replaces a newer one.
+    fn publish(&self, number: u64) {
+        self.trial.fetch_max(number, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
 }
 
 /// Whether "Try the GPU again" was accepted.
@@ -218,6 +314,43 @@ pub(crate) enum Restart {
     Accepted,
     /// A Restart is already being carried out: no second transition.
     AlreadyRunning,
+}
+
+/// Whether a "Try" was accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TryModel {
+    /// The trial's number.
+    Accepted(u64),
+    /// A trial is already running: no second one.
+    Busy,
+    /// Another model change (a Switch, a Switch back) or a restart is being carried out.
+    Pending,
+    /// This assistant keeps no model setting (the development endpoint).
+    Unsupported,
+}
+
+/// What "Switch", "Switch back" and "Keep" answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Chosen {
+    Accepted,
+    /// A trial is running, or the model setting is not supported here.
+    Busy,
+    /// The trial is not the latest finished one (another hash, an older trial or an older
+    /// generation), or nothing passed: nothing was changed.
+    Stale,
+    /// There is no previous model.
+    NoPrevious,
+    /// Another model change or a restart is being carried out: nothing else is started.
+    Pending,
+}
+
+/// What the owner's Cancel did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CancelTrial {
+    Done,
+    NoTrial,
+    /// The trial shown to the owner is not the one running.
+    Stale,
 }
 
 impl Handle {
@@ -262,6 +395,125 @@ impl Handle {
         TryGpu::Accepted
     }
 
+    /// The owner's "Try": starts the trial of the model file `name` (spec `spec`) after the
+    /// running generation has stopped. One trial at a time.
+    pub(crate) fn try_model(&self, by: i64, spec: String, name: String) -> TryModel {
+        let mut status = self.lock();
+        if !status.model.switchable {
+            return TryModel::Unsupported;
+        }
+        if status.trial.as_ref().is_some_and(TrialState::running) {
+            return TryModel::Busy;
+        }
+        if status.model.pending || status.restarting {
+            return TryModel::Pending;
+        }
+        status.model.pending = true;
+        let number = status.model.next_trial;
+        status.model.next_trial += 1;
+        status.model.note = None;
+        status.trial = Some(TrialState::Running {
+            number,
+            spec: spec.clone(),
+            phase: "waiting for the model server to stop",
+        });
+        drop(status);
+        let _ = self
+            .commands
+            .send(Command::Model(ModelCommand::Trial(TrialRequest {
+                number,
+                by,
+                spec,
+                name,
+            })));
+        TryModel::Accepted(number)
+    }
+
+    /// The owner's Cancel of trial `shown`: stops it and brings the previous model back.
+    pub(crate) fn cancel_trial(&self, shown: u64) -> CancelTrial {
+        // Under the lock: the trial the page showed must be the one running now.
+        // The guard is held through the publication, so a Cancel validated against one trial
+        // cannot publish after a newer trial's.
+        let status = self.lock();
+        match status.trial {
+            Some(TrialState::Running { number, .. }) if number != shown => CancelTrial::Stale,
+            Some(TrialState::Running { number, .. }) => {
+                self.cancel.publish(number);
+                CancelTrial::Done
+            }
+            _ => CancelTrial::NoTrial,
+        }
+    }
+
+    /// The owner's "Switch": the latest finished trial, if `key` names it, becomes the active
+    /// model (stored first; the model server restarts with it).
+    pub(crate) fn switch(&self, by: i64, key: &TrialKey) -> Chosen {
+        let mut status = self.lock();
+        if !status.model.switchable || status.trial.as_ref().is_some_and(TrialState::running) {
+            return Chosen::Busy;
+        }
+        if status.model.pending || status.restarting {
+            return Chosen::Pending;
+        }
+        match &status.trial {
+            Some(TrialState::Passed(report)) if report.key == *key => {}
+            _ => return Chosen::Stale,
+        }
+        status.model.note = None;
+        status.model.pending = true;
+        status.restarting = true;
+        drop(status);
+        let _ = self.commands.send(Command::Model(ModelCommand::Switch {
+            key: key.clone(),
+            by,
+        }));
+        Chosen::Accepted
+    }
+
+    /// The owner's "Switch back": the previous model becomes the active one again.
+    pub(crate) fn switch_back(&self, by: i64) -> Chosen {
+        let mut status = self.lock();
+        if !status.model.switchable || status.trial.as_ref().is_some_and(TrialState::running) {
+            return Chosen::Busy;
+        }
+        if status.model.pending || status.restarting {
+            return Chosen::Pending;
+        }
+        if status.model.previous.is_none() {
+            return Chosen::NoPrevious;
+        }
+        status.model.note = None;
+        status.model.pending = true;
+        status.restarting = true;
+        drop(status);
+        let _ = self
+            .commands
+            .send(Command::Model(ModelCommand::SwitchBack { by }));
+        Chosen::Accepted
+    }
+
+    /// The owner's "Keep the current model": dismisses a finished trial. The previous model
+    /// already runs again (every trial ends by restarting it), so nothing restarts.
+    pub(crate) fn keep(&self) -> Chosen {
+        let mut status = self.lock();
+        if status.trial.as_ref().is_some_and(TrialState::running) {
+            return Chosen::Busy;
+        }
+        if status.model.pending {
+            return Chosen::Pending;
+        }
+        if status.trial.take().is_none() {
+            return Chosen::Stale;
+        }
+        Chosen::Accepted
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Status> {
+        self.status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Stops the child and the manager; resolves once the child is gone (or the manager
     /// has already ended).
     pub(crate) async fn shutdown(&self) {
@@ -276,7 +528,6 @@ impl Handle {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Config {
     pub path: Path,
-    pub max_tokens: u32,
     /// The levels this manager may start, in order. Mimik's own runtime uses
     /// [`USED_LEVELS`] (level 1 only, ASSIST-43); the development endpoint, which reaches a
     /// hand-started external server and starts nothing, reports that server as level 3.
@@ -341,16 +592,28 @@ fn measured(calibration: &Calibration, budgets: Option<&Budgets>) -> String {
     )
 }
 
-/// Starts the manager task for `assistant`.
+/// Starts the manager task for `assistant`, with a fixed model (tests).
+#[cfg(test)]
 pub(crate) fn spawn(
     assistant: Arc<Assistant>,
     launcher: Arc<dyn Launcher>,
     config: Config,
 ) -> Handle {
-    let status = Arc::new(Mutex::new(Status::new(config.path)));
+    spawn_with(assistant, launcher, config, ModelSetup::fixed(352))
+}
+
+/// Starts the manager task for `assistant` with `models` as the owner's model setting.
+pub(crate) fn spawn_with(
+    assistant: Arc<Assistant>,
+    launcher: Arc<dyn Launcher>,
+    config: Config,
+    models: ModelSetup,
+) -> Handle {
+    let status = Arc::new(Mutex::new(Status::new(config.path, &models)));
     let (commands, incoming) = mpsc::unbounded_channel();
     let (signal_sender, signals) = mpsc::unbounded_channel();
     assistant.subscribe(signal_sender);
+    let cancel = Arc::new(Cancel::default());
     let manager = Manager {
         assistant,
         launcher,
@@ -362,9 +625,18 @@ pub(crate) fn spawn(
         failures: 0,
         gpu_failed: None,
         health_answered: Arc::new(AtomicBool::new(false)),
+        active: models.active,
+        previous: models.previous,
+        records: models.records,
+        cancel: Arc::clone(&cancel),
+        trial: 0,
     };
     tokio::spawn(manager.run());
-    Handle { status, commands }
+    Handle {
+        status,
+        commands,
+        cancel,
+    }
 }
 
 /// How an attempt ended.
@@ -385,6 +657,7 @@ enum Ended {
     Restart {
         gpu: bool,
     },
+    Model(ModelCommand),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -394,6 +667,8 @@ enum Next {
     Fresh {
         gpu: bool,
     },
+    /// The owner's model request, carried out with no model server running.
+    Model(ModelCommand),
     Stop(oneshot::Sender<()>),
 }
 
@@ -407,6 +682,7 @@ enum PathEnd {
 /// What waiting for the owner gave.
 enum Wake {
     Restart { gpu: bool },
+    Model(ModelCommand),
     Shutdown(oneshot::Sender<()>),
     Timer,
 }
@@ -416,6 +692,7 @@ impl From<Command> for Next {
         match command {
             Command::Restart { gpu } => Next::Fresh { gpu },
             Command::Shutdown(reply) => Next::Stop(reply),
+            Command::Model(command) => Next::Model(command),
         }
     }
 }
@@ -432,6 +709,15 @@ struct Manager {
     /// Why the GPU path failed: the CPU path is used until Mimik restarts or the owner
     /// presses "Try the GPU again" (a Restart keeps it).
     gpu_failed: Option<String>,
+    /// The model the sessions run, and the one before it (for "Switch back").
+    active: Model,
+    previous: Option<Model>,
+    /// Where model changes are stored (none: the owner cannot change the model).
+    records: Option<Arc<dyn Records>>,
+    /// The owner's Cancel of a running trial.
+    cancel: Arc<Cancel>,
+    /// The trial being carried out (0: none).
+    trial: u64,
     /// Whether `/health` answered in the current attempt: from then on a failure (priming,
     /// calibration, the offload check) is not a library that failed to load.
     health_answered: Arc<AtomicBool>,
@@ -459,6 +745,7 @@ impl Manager {
             command = self.commands.recv() => match command {
                 Some(Command::Restart { gpu }) => Wake::Restart { gpu },
                 Some(Command::Shutdown(reply)) => Wake::Shutdown(reply),
+                Some(Command::Model(command)) => Wake::Model(command),
                 // Every handle is gone: nothing can wake it again.
                 None => std::future::pending().await,
             },
@@ -480,23 +767,36 @@ impl Manager {
     }
 
     async fn run(mut self) {
-        // Mimik's start counts as a Restart: from level 1, breaker and count reset.
+        // Mimik's start counts as a Restart: from level 1, breaker and count reset. Only a
+        // Restart does again; a model change starts its session with the breaker as it is.
+        let mut reset_breaker = true;
         loop {
-            match self.session().await {
-                Next::Stop(reply) => {
+            let mut next = Some(self.session(reset_breaker).await);
+            if let Some(Next::Model(command)) = next {
+                // The model server is gone; whatever the request does, a session starts
+                // next (with the previous model after a trial, the new one after a switch).
+                // A trial leaves Restart available: it ends the trial.
+                next = self.model_command(command).await;
+                self.update(|status| status.model.pending = false);
+            }
+            reset_breaker = false;
+            match next {
+                Some(Next::Stop(reply)) => {
                     self.launcher.cancel();
                     self.launcher.settle().await;
                     return shut(reply);
                 }
-                Next::Fresh { gpu } => {
+                Some(Next::Fresh { gpu }) => {
                     // Fresh always follows the owner's command: it stays "being carried out"
                     // until the session ends in `ready` or `unavailable`, even if one of them
                     // cleared the flag just before the command was taken.
                     self.update(|status| status.restarting = true);
+                    reset_breaker = true;
                     if gpu {
                         self.gpu_failed = None;
                     }
                 }
+                Some(Next::Model(_)) | None => {}
             }
         }
     }
@@ -507,6 +807,7 @@ impl Manager {
         match self.wait(None).await {
             Wake::Restart { gpu } => Next::Fresh { gpu },
             Wake::Timer => Next::Fresh { gpu: false },
+            Wake::Model(command) => Next::Model(command),
             Wake::Shutdown(reply) => Next::Stop(reply),
         }
     }
@@ -638,11 +939,17 @@ impl Manager {
 
     /// One start from level 1 until the owner's Restart (or shutdown) ends it: the GPU path
     /// first when it is wanted and has not failed, the CPU path after a GPU failure.
-    async fn session(&mut self) -> Next {
+    async fn session(&mut self, reset_breaker: bool) -> Next {
         // Nothing of an earlier session (a child's watcher, a cancelled probe) runs beside it.
         self.launcher.settle().await;
+        // A manager without a model setting (tests) leaves the launcher's own model alone.
+        if !self.active.name.is_empty() {
+            self.launcher.select(&self.active);
+        }
         self.failures = 0;
-        self.assistant.reset_breaker();
+        if reset_breaker {
+            self.assistant.reset_breaker();
+        }
         let gpu = self.config.path == Path::Gpu && self.gpu_failed.is_none();
         let note = self.gpu_failed.clone();
         self.update(|status| {
@@ -706,26 +1013,15 @@ impl Manager {
                 Attempt::Ready(child, calibration, budgets) => {
                     let ended = self.ready(generation, &child, *calibration, budgets).await;
                     child.stop().await;
-                    match ended {
-                        Ended::Exited { why, .. } if gpu => {
-                            self.ended(generation, EndReason::Exited);
-                            return PathEnd::GpuFailed(why);
-                        }
-                        Ended::Exited { counted, why } => {
-                            self.ended(generation, EndReason::Exited);
-                            if counted {
-                                self.failed(why);
-                            }
-                        }
-                        Ended::Restart { gpu } => {
-                            self.ended(generation, EndReason::Restart);
-                            return PathEnd::Next(Next::Fresh { gpu });
-                        }
-                        Ended::Shutdown(reply) => {
-                            self.ended(generation, EndReason::Exited);
-                            return PathEnd::Next(Next::Stop(reply));
-                        }
+                    if let Some(end) = self.after_ready(generation, ended, gpu) {
+                        return end;
                     }
+                }
+                // The model file no longer has the recorded hash: unavailable until the owner
+                // tries a model again, on either path (the CPU would only fail the same way).
+                Attempt::Failed(Fail::Other(why)) if why.starts_with(MODEL_CHANGED) => {
+                    self.ended(generation, EndReason::Exited);
+                    return PathEnd::Next(self.hold(why).await);
                 }
                 Attempt::Failed(Fail::Sandbox(why) | Fail::Other(why)) if gpu => {
                     self.ended(generation, EndReason::Exited);
@@ -752,6 +1048,7 @@ impl Manager {
                         match self.wait(Some(RETRY_AFTER)).await {
                             Wake::Timer => {}
                             Wake::Restart { gpu } => return PathEnd::Next(Next::Fresh { gpu }),
+                            Wake::Model(command) => return PathEnd::Next(Next::Model(command)),
                             Wake::Shutdown(reply) => return PathEnd::Next(Next::Stop(reply)),
                         }
                     }
@@ -769,6 +1066,35 @@ impl Manager {
                     );
                     return PathEnd::Next(Next::from(command));
                 }
+            }
+        }
+    }
+
+    /// What follows a ready phase: `None` starts the same level again (a counted exit).
+    fn after_ready(&mut self, generation: u64, ended: Ended, gpu: bool) -> Option<PathEnd> {
+        match ended {
+            Ended::Exited { why, .. } if gpu => {
+                self.ended(generation, EndReason::Exited);
+                Some(PathEnd::GpuFailed(why))
+            }
+            Ended::Exited { counted, why } => {
+                self.ended(generation, EndReason::Exited);
+                if counted {
+                    self.failed(why);
+                }
+                None
+            }
+            Ended::Restart { gpu } => {
+                self.ended(generation, EndReason::Restart);
+                Some(PathEnd::Next(Next::Fresh { gpu }))
+            }
+            Ended::Model(command) => {
+                self.ended(generation, EndReason::Restart);
+                Some(PathEnd::Next(Next::Model(command)))
+            }
+            Ended::Shutdown(reply) => {
+                self.ended(generation, EndReason::Exited);
+                Some(PathEnd::Next(Next::Stop(reply)))
             }
         }
     }
@@ -820,7 +1146,7 @@ impl Manager {
             let measure = measure(
                 &child,
                 path,
-                self.config.max_tokens,
+                self.active.max_tokens,
                 &self.status,
                 &self.health_answered,
             );
@@ -924,6 +1250,7 @@ impl Manager {
                 }
                 command = self.commands.recv(), if !closed => match command {
                     Some(Command::Restart { gpu }) => return Ended::Restart { gpu },
+                    Some(Command::Model(command)) => return Ended::Model(command),
                     Some(Command::Shutdown(reply)) => return Ended::Shutdown(reply),
                     // Every handle is gone: no command can come again (polling the closed
                     // channel again would spin).
@@ -961,20 +1288,13 @@ async fn healthy(child: &Arc<dyn Child>) -> Result<(), Attempt> {
     }
 }
 
-/// `/health`, priming and calibration within their limits.
-async fn measure(
+/// `/health`, the offload check and priming: the readiness gate. Returns priming's prompt
+/// tokens and how long priming took.
+async fn warm(
     child: &Arc<dyn Child>,
-    path: Path,
-    max_tokens: u32,
-    status: &Arc<Mutex<Status>>,
+    phase: &(dyn Fn(&'static str) + Sync),
     health_answered: &AtomicBool,
-) -> Result<(Calibration, Budgets), Attempt> {
-    let phase = |phase: &'static str| {
-        status
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .state = State::Starting(phase);
-    };
+) -> Result<(f64, Duration), Attempt> {
     let server = child.server();
     let began = Instant::now();
     phase("loading the model");
@@ -1009,13 +1329,29 @@ async fn measure(
         "primed in {:.1} s ({prefix} prompt tokens)",
         priming.elapsed().as_secs_f64()
     ));
-    phase("calibrating");
+    Ok((prefix, priming.elapsed()))
+}
+
+/// Why the calibration did not give budgets.
+enum NotCalibrated {
+    /// Too slow for the path's caps; the measurement, when the samples completed.
+    TooSlow(String, Option<Box<Calibration>>),
+    Failed(String),
+}
+
+/// The two calibration samples at `max_tokens` and the budgets they derive (after [`warm`]).
+async fn calibrate_budgets(
+    server: &dyn Server,
+    path: Path,
+    max_tokens: u32,
+    prefix: f64,
+) -> Result<(Calibration, Budgets), NotCalibrated> {
     // Each sample is held to the run cap; this bounds the whole (two samples, two
     // `/tokenize` calls).
     let within = Duration::from_secs(2 * path.run_cap() + 60);
     let calibration = match tokio::time::timeout(
         within,
-        calibration::calibrate(server.as_ref(), path, max_tokens, prefix),
+        calibration::calibrate(server, path, max_tokens, prefix),
     )
     .await
     {
@@ -1025,19 +1361,19 @@ async fn measure(
                 "too slow on this machine: a calibration sample took more than {cap_s} s, the cap is {cap_s} s"
             );
             log(&format!("measured: {why}"));
-            return Err(Attempt::TooSlow(why));
+            return Err(NotCalibrated::TooSlow(why, None));
         }
         Ok(Err(interrupted)) => {
-            return Err(Attempt::Failed(Fail::Other(format!(
+            return Err(NotCalibrated::Failed(format!(
                 "calibration failed ({})",
                 interrupted.describe()
-            ))));
+            )));
         }
         Err(_) => {
-            return Err(Attempt::Failed(Fail::Other(format!(
+            return Err(NotCalibrated::Failed(format!(
                 "calibration did not finish within {} s",
                 within.as_secs()
-            ))));
+            )));
         }
     };
     match &calibration.derived {
@@ -1050,17 +1386,46 @@ async fn measure(
                 "too slow on this machine: about {needed_s} s needed, the cap is {cap_s} s"
             );
             log(&format!("measured: {}", measured(&calibration, None)));
-            let calibration = calibration.clone();
-            status
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .calibration = Some(calibration);
-            Err(Attempt::TooSlow(why))
+            Err(NotCalibrated::TooSlow(why, Some(Box::new(calibration))))
         }
-        Err(NoBudgets::Invalid(why)) => Err(Attempt::Failed(Fail::Other((*why).to_owned()))),
+        Err(NoBudgets::Invalid(why)) => Err(NotCalibrated::Failed((*why).to_owned())),
     }
 }
 
+/// `/health`, priming and calibration within their limits.
+async fn measure(
+    child: &Arc<dyn Child>,
+    path: Path,
+    max_tokens: u32,
+    status: &Arc<Mutex<Status>>,
+    health_answered: &AtomicBool,
+) -> Result<(Calibration, Budgets), Attempt> {
+    let phase = |phase: &'static str| {
+        status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state = State::Starting(phase);
+    };
+    let (prefix, _) = warm(child, &phase, health_answered).await?;
+    phase("calibrating");
+    match calibrate_budgets(child.server().as_ref(), path, max_tokens, prefix).await {
+        Ok(measured) => Ok(measured),
+        Err(NotCalibrated::TooSlow(why, calibration)) => {
+            if let Some(calibration) = calibration {
+                status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .calibration = Some(*calibration);
+            }
+            Err(Attempt::TooSlow(why))
+        }
+        Err(NotCalibrated::Failed(why)) => Err(Attempt::Failed(Fail::Other(why))),
+    }
+}
+
+#[path = "manager_model.rs"]
+mod model_commands;
+
 #[cfg(test)]
 #[path = "manager_tests.rs"]
-mod tests;
+pub(crate) mod tests;
