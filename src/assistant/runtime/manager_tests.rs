@@ -248,6 +248,25 @@ pub(crate) struct FakeLauncher {
     /// The files hashed, in order.
     pub(crate) hashed: Mutex<Vec<String>>,
     pub(crate) hash_delay: Mutex<Option<Duration>>,
+    /// Blocking work that holds a ticket (the hash of a large file).
+    pub(crate) work: Tickets,
+    pub(crate) hash_probe: Mutex<Option<Arc<HashProbe>>>,
+}
+
+/// The launcher's in-flight work, as the real one keeps it.
+pub(crate) struct Tickets(pub(crate) Arc<super::super::launch::Work>);
+
+impl Default for Tickets {
+    fn default() -> Self {
+        Self(super::super::launch::Work::new())
+    }
+}
+
+/// What blocking hash work saw.
+#[derive(Default)]
+pub(crate) struct HashProbe {
+    pub(crate) cancelled_seen: AtomicBool,
+    pub(crate) timed_out: AtomicBool,
 }
 
 #[async_trait]
@@ -271,12 +290,25 @@ impl Launcher for FakeLauncher {
 
     fn cancel(&self) {
         self.cancels.fetch_add(1, Ordering::SeqCst);
+        self.work.0.cancel();
     }
 
+    /// As the real launcher's: waits for every ticket (blocking work) and for every child
+    /// to be gone (a child's exit watcher holds its ticket until then). A settle called
+    /// while a child still runs would wait forever, so it fails the test instead.
     async fn settle(&self) {
         let gate = self.unsettled.lock().unwrap().clone();
         if let Some(gate) = gate {
             gate.notified().await;
+        }
+        self.work.0.settle().await;
+        let began = Instant::now();
+        while self.alive.load(Ordering::SeqCst) != 0 {
+            assert!(
+                began.elapsed() < Duration::from_hours(1),
+                "settle deadlocked: a child is still running (stop it first)"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -311,6 +343,25 @@ impl Launcher for FakeLauncher {
 
     async fn hash_model(&self, name: &str) -> Result<ModelFile, String> {
         self.hashed.lock().unwrap().push(name.to_owned());
+        let probe = self.hash_probe.lock().unwrap().clone();
+        if let Some(probe) = probe {
+            // Blocking work holding a ticket, as hashing a large file does: it stops only
+            // when the launcher's work is cancelled.
+            let ticket = self.work.0.enter();
+            return tokio::task::spawn_blocking(move || {
+                for _ in 0..5000 {
+                    if ticket.cancelled() {
+                        probe.cancelled_seen.store(true, Ordering::SeqCst);
+                        return Err("cancelled".to_owned());
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                probe.timed_out.store(true, Ordering::SeqCst);
+                Err("the hash ran on".to_owned())
+            })
+            .await
+            .unwrap_or_else(|_| Err("hash task failed".into()));
+        }
         let delay = *self.hash_delay.lock().unwrap();
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;

@@ -111,6 +111,11 @@ impl AssistantHandle {
             Some(alias) => alias,
             None => model::default_alias(&config.model)?,
         };
+        if !model::valid_alias(&alias) {
+            return Err(
+                "--assistant-model-alias must be 1 to 128 characters from [A-Za-z0-9._-]".into(),
+            );
+        }
         let flags = runtime::models::Model {
             spec: config.model.clone(),
             name: name.clone(),

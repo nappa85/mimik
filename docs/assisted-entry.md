@@ -477,11 +477,7 @@ or 2, 3, 4 or 100 when a fraction or percent word is present (EN half, third, qu
 percent, `%`; IT metà/meta, mezzo, mezza, terzo, terza, quarto, quarta, percento, per cento;
 whole words after case and diacritic folding, ASSIST-38); a literal outside `i64` drops the
 option; evaluation is checked `i128` with an `i64` result, `div` rounds floor, ceil or exact
-(a remainder drops it), division by zero drops it. For the default Granite file (by its
-SHA-256) a `ref` to any alias but `t` also drops the option, and a reply with such an option is
-an abstention: the job ends "enter that value by hand" (`by_hand`, no options), with the
-breaker untouched (ASSIST-L32: the model got 1 of 30 field-reference cases right and was
-confidently wrong in 11); any other model may offer field references. Shown: the current value, the expression
+(a remainder drops it), division by zero drops it. Shown: the current value, the expression
 with `−`, `×`, `÷` (references by label, `t` by its value) and the effect, labelled "the
 assistant's reading".
 
@@ -530,7 +526,7 @@ layer's error page through `AssistantAnswer`):
 | Route | Keys | Answers |
 |---|---|---|
 | `POST /private-sheets/{id}/interpretations` | exactly `csrf`, `note` | 202 `{job, poll}` (200 for a repeat); 400 malformed or not an integer field or cell of the pin; 403 no edit rights; 409 not the current `unresolved` note; 429 busy; 503 starting, unavailable or breaker open; 413 over 8 KiB |
-| `GET /private-sheets/{id}/interpretations/{job}` | — | `thinking`, then `options` (`n`, `current`, `expression`, `value`, `effect`, `explanation`, `action`), `readings`, or a message (`nothing`, `by_hand`, `too_long`, `unavailable`, `ask_again`, `superseded`, `stale`); 404 "ask again" for an unknown, evicted, another account's or another sheet's job; 403 without edit rights |
+| `GET /private-sheets/{id}/interpretations/{job}` | — | `thinking`, then `options` (`n`, `current`, `expression`, `value`, `effect`, `explanation`, `action`), `readings`, or a message (`nothing`, `too_long`, `unavailable`, `ask_again`, `superseded`, `stale`); 404 "ask again" for an unknown, evicted, another account's or another sheet's job; 403 without edit rights |
 | `POST /private-sheets/{id}/proposals/{job}/{n}` | exactly `csrf` | 200 the unit's JSON save answer; 409 "Something this proposal used has changed: ask again."; 403; the styled busy 503 after the D-X3 wait |
 
 The `note` key is the one the JSON save answer now carries in `unit.note.key` whenever the

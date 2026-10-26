@@ -108,7 +108,6 @@ impl Phrase {
             phrase: self.note.to_owned(),
             target_value: Some(value),
             supplied,
-            field_refs: true,
         };
         (dynamic, checks)
     }

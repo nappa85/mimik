@@ -4,8 +4,8 @@
 //! servers never coexist; every trial ends by stopping its candidate, and a session with the
 //! previous (or, after a switch, the new) model starts next.
 use super::{
-    Arc, AtomicBool, Attempt, Budgets, Child, Command, EndReason, Fail, Future, Instant, Launcher,
-    Level, Manager, Model, ModelCommand, Mutex, Next, NotCalibrated, Ordering, Path, Record, State,
+    Arc, AtomicBool, Attempt, Child, Command, EndReason, Fail, Future, Instant, Launcher, Level,
+    Manager, Model, ModelCommand, Mutex, Next, NotCalibrated, Ordering, Path, Record, State,
     Status, TrialKey, TrialReport, TrialRequest, TrialState, calibrate_budgets, log, measured,
     phrase_bound, trial, trial_bound, warm,
 };
@@ -71,6 +71,13 @@ impl Manager {
         self.update(|status| status.model.note = Some(text));
     }
 
+    /// Stops the launcher's in-flight work (a blocking hash, a start) and waits until it has
+    /// ended, so it does not delay the next session.
+    async fn stop_work(&self) {
+        self.launcher.cancel();
+        self.launcher.settle().await;
+    }
+
     /// Whether the owner pressed Cancel for the trial being carried out.
     fn cancelled(&self) -> bool {
         self.cancel.trial.load(Ordering::SeqCst) == self.trial
@@ -100,10 +107,7 @@ impl Manager {
         let (why, next) = match stopped {
             Stopped::Cancelled => ("cancelled by the owner", None),
             Stopped::Command(Command::Restart { gpu }) => {
-                if gpu {
-                    self.gpu_failed = None;
-                }
-                ("ended by a Restart", None)
+                ("ended by a Restart", Some(Next::Fresh { gpu }))
             }
             Stopped::Command(Command::Shutdown(reply)) => {
                 ("ended by Mimik shutting down", Some(Next::Stop(reply)))
@@ -182,9 +186,23 @@ impl Manager {
         let file = match hashed {
             Ok(Ok(Ok(file))) => file,
             Ok(Ok(Err(why))) => return failed(self, why),
-            Ok(Err(_)) => return failed(self, too_long(spec, path)),
-            Err(stopped) => return Err(self.stopped(number, spec.to_owned(), stopped)),
+            Ok(Err(_)) => {
+                self.stop_work().await;
+                return failed(self, too_long(spec, path));
+            }
+            Err(stopped) => {
+                self.stop_work().await;
+                return Err(self.stopped(number, spec.to_owned(), stopped));
+            }
         };
+        if file.size == 0 || file.size > crate::assistant::model::MAX_MODEL_BYTES {
+            let what = if file.size == 0 {
+                "is empty".to_owned()
+            } else {
+                "is larger than 8 GiB, the most a model file may be".to_owned()
+            };
+            return failed(self, format!("{name} {what}"));
+        }
         match default_alias(spec) {
             Ok(alias) => Ok(Model {
                 spec: spec.to_owned(),
@@ -236,10 +254,10 @@ impl Manager {
             Arc::clone(&slot),
         );
         let outcome = self.guarded(tokio::time::timeout_at(deadline, work)).await;
-        if !matches!(outcome, Ok(Ok(_))) {
-            // The start or a probe may still be running: stop it before the candidate.
+        let interrupted = !matches!(outcome, Ok(Ok(_)));
+        if interrupted {
+            // The start or a probe may still be running: tell it to stop at its next check.
             launcher.cancel();
-            launcher.settle().await;
         }
         let child = slot
             .lock()
@@ -247,6 +265,11 @@ impl Manager {
             .take();
         if let Some(child) = child {
             child.stop().await;
+        }
+        if interrupted {
+            // Only now: the launcher's exit watcher holds its ticket until the child is gone,
+            // so settling before the stop would wait for a child nothing stops.
+            launcher.settle().await;
         }
         self.ended(generation, EndReason::Exited);
         match outcome {
@@ -315,7 +338,12 @@ impl Manager {
         }
         self.active = new;
         self.publish_models();
-        self.update(|status| status.trial = None);
+        // Only the trial this switch consumed.
+        self.update(|status| {
+            if matches!(&status.trial, Some(TrialState::Passed(r)) if r.key == *key) {
+                status.trial = None;
+            }
+        });
     }
 
     /// "Switch back": the previous model becomes the active one.
@@ -419,10 +447,6 @@ async fn measure_trial(
     let model = Model {
         max_tokens,
         ..plan.candidate.clone()
-    };
-    let budgets = Budgets {
-        field_refs: model.field_refs(),
-        ..budgets
     };
     Ok(TrialReport {
         key: TrialKey {

@@ -251,7 +251,7 @@ async fn every_model_action_is_owner_only_csrf_checked_strict_and_body_bounded()
             "try",
             vec![("csrf", csrf()), ("model", "local:other.gguf".into())],
         ),
-        ("cancel", vec![("csrf", csrf())]),
+        ("cancel", vec![("csrf", csrf()), ("trial", "1".into())]),
         ("switch", vec![("csrf", csrf()), ("trial", key)]),
         ("keep", vec![("csrf", csrf())]),
         ("switch-back", vec![("csrf", csrf())]),
@@ -478,8 +478,18 @@ async fn a_second_trial_while_one_runs_is_refused_and_cancel_restores_the_previo
         "{page}"
     );
     assert_eq!(*models.launcher.hashed.lock().unwrap(), ["other.gguf"]);
+    // A page that showed another trial cancels nothing.
     assert_eq!(
-        models.owner("cancel", &[("csrf", &csrf())]).await,
+        models
+            .owner("cancel", &[("csrf", &csrf()), ("trial", "99")])
+            .await,
+        "/admin/assistant?notice=cancel-stale"
+    );
+    assert!(models.handle.status().trial.is_some_and(|t| t.running()));
+    assert_eq!(
+        models
+            .owner("cancel", &[("csrf", &csrf()), ("trial", "1")])
+            .await,
         "/admin/assistant?notice=trial-cancelled"
     );
     models
@@ -491,7 +501,9 @@ async fn a_second_trial_while_one_runs_is_refused_and_cancel_restores_the_previo
         })
         .await;
     assert_eq!(
-        models.owner("cancel", &[("csrf", &csrf())]).await,
+        models
+            .owner("cancel", &[("csrf", &csrf()), ("trial", "1")])
+            .await,
         "/admin/assistant?notice=no-trial-running"
     );
     assert_eq!(
@@ -676,5 +688,33 @@ async fn the_stored_setting_beats_the_start_flags() {
     assert_eq!(status.model.previous, Some(granite()));
     assert!(status.model.from_owner_setting);
     assert!(status.model.switchable);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_alias_the_stored_setting_would_refuse_is_refused_at_start() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (dir, store, _auth, _clock) = fixture_with_owner(1).await;
+    let config = |alias: &str| crate::assistant::RuntimeConfig {
+        data_dir: dir.path().to_path_buf(),
+        models_dir: None,
+        runtime_dir: Some(dir.path().join("no-runtime")),
+        model: crate::assistant::DEFAULT_MODEL.to_owned(),
+        model_sha256: None,
+        model_alias: Some(alias.to_owned()),
+        threads: Some(1),
+        device: Some("cpu".into()),
+    };
+    // Migration 022 allows 1 to 128 of [A-Za-z0-9._-]; any other alias would make every
+    // Switch fail at its store.
+    for refused in ["a b", "", "a/b", "\u{e9}", &"a".repeat(129)] {
+        let Err(why) = AssistantHandle::runtime(config(refused), store.clone()).await else {
+            panic!("{refused:?} must be refused at start")
+        };
+        assert!(why.contains("--assistant-model-alias"), "{why}");
+    }
+    let handle = AssistantHandle::runtime(config("granite.v2_x-1"), store)
+        .await
+        .unwrap();
     handle.shutdown().await;
 }

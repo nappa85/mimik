@@ -172,6 +172,18 @@ pub(crate) fn max_tokens(spec: &str, sha256: Option<&str>) -> Result<u32, String
     })
 }
 
+/// The largest model file a trial accepts (the stored size's limit, ASSIST-35).
+pub(crate) const MAX_MODEL_BYTES: u64 = 8 << 30;
+
+/// An alias the server and the stored setting accept: 1 to 128 characters from
+/// `[A-Za-z0-9._-]`.
+pub(crate) fn valid_alias(alias: &str) -> bool {
+    (1..=128).contains(&alias.len())
+        && alias
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
 /// The `max_tokens` a trial's phrases are sent with (the measurement cap) and the most any
 /// model may have.
 pub(crate) const TRIAL_MEASURE_TOKENS: u32 = 384;

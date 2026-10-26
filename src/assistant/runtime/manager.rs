@@ -192,6 +192,7 @@ impl Status {
                 from_owner_setting: models.from_owner_setting,
                 switchable: models.records.is_some(),
                 next_trial: 1,
+                pending: false,
                 note: None,
             },
             trial: None,
@@ -313,6 +314,8 @@ pub(crate) enum TryModel {
     Accepted(u64),
     /// A trial is already running: no second one.
     Busy,
+    /// Another model change (a Switch, a Switch back) or a restart is being carried out.
+    Pending,
     /// This assistant keeps no model setting (the development endpoint).
     Unsupported,
 }
@@ -328,6 +331,17 @@ pub(crate) enum Chosen {
     Stale,
     /// There is no previous model.
     NoPrevious,
+    /// Another model change or a restart is being carried out: nothing else is started.
+    Pending,
+}
+
+/// What the owner's Cancel did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CancelTrial {
+    Done,
+    NoTrial,
+    /// The trial shown to the owner is not the one running.
+    Stale,
 }
 
 impl Handle {
@@ -382,6 +396,10 @@ impl Handle {
         if status.trial.as_ref().is_some_and(TrialState::running) {
             return TryModel::Busy;
         }
+        if status.model.pending || status.restarting {
+            return TryModel::Pending;
+        }
+        status.model.pending = true;
         let number = status.model.next_trial;
         status.model.next_trial += 1;
         status.model.note = None;
@@ -402,10 +420,13 @@ impl Handle {
         TryModel::Accepted(number)
     }
 
-    /// The owner's Cancel: stops a running trial and brings the previous model back. Whether
-    /// a trial was running.
-    pub(crate) fn cancel_trial(&self) -> bool {
+    /// The owner's Cancel of trial `shown`: stops it and brings the previous model back.
+    pub(crate) fn cancel_trial(&self, shown: u64) -> CancelTrial {
+        // Under the lock: the trial the page showed must be the one running now.
         let running = match self.lock().trial {
+            Some(TrialState::Running { number, .. }) if number != shown => {
+                return CancelTrial::Stale;
+            }
             Some(TrialState::Running { number, .. }) => Some(number),
             _ => None,
         };
@@ -413,7 +434,11 @@ impl Handle {
             self.cancel.trial.store(number, Ordering::SeqCst);
             self.cancel.wake.notify_one();
         }
-        running.is_some()
+        if running.is_some() {
+            CancelTrial::Done
+        } else {
+            CancelTrial::NoTrial
+        }
     }
 
     /// The owner's "Switch": the latest finished trial, if `key` names it, becomes the active
@@ -423,11 +448,15 @@ impl Handle {
         if !status.model.switchable || status.trial.as_ref().is_some_and(TrialState::running) {
             return Chosen::Busy;
         }
+        if status.model.pending || status.restarting {
+            return Chosen::Pending;
+        }
         match &status.trial {
             Some(TrialState::Passed(report)) if report.key == *key => {}
             _ => return Chosen::Stale,
         }
         status.model.note = None;
+        status.model.pending = true;
         status.restarting = true;
         drop(status);
         let _ = self.commands.send(Command::Model(ModelCommand::Switch {
@@ -443,10 +472,14 @@ impl Handle {
         if !status.model.switchable || status.trial.as_ref().is_some_and(TrialState::running) {
             return Chosen::Busy;
         }
+        if status.model.pending || status.restarting {
+            return Chosen::Pending;
+        }
         if status.model.previous.is_none() {
             return Chosen::NoPrevious;
         }
         status.model.note = None;
+        status.model.pending = true;
         status.restarting = true;
         drop(status);
         let _ = self
@@ -461,6 +494,9 @@ impl Handle {
         let mut status = self.lock();
         if status.trial.as_ref().is_some_and(TrialState::running) {
             return Chosen::Busy;
+        }
+        if status.model.pending {
+            return Chosen::Pending;
         }
         if status.trial.take().is_none() {
             return Chosen::Stale;
@@ -727,33 +763,36 @@ impl Manager {
     }
 
     async fn run(mut self) {
-        // Mimik's start counts as a Restart: from level 1, breaker and count reset.
+        // Mimik's start counts as a Restart: from level 1, breaker and count reset. Only a
+        // Restart does again; a model change starts its session with the breaker as it is.
+        let mut reset_breaker = true;
         loop {
-            match self.session().await {
-                Next::Stop(reply) => {
+            let mut next = Some(self.session(reset_breaker).await);
+            if let Some(Next::Model(command)) = next {
+                // The model server is gone; whatever the request does, a session starts
+                // next (with the previous model after a trial, the new one after a switch).
+                // A trial leaves Restart available: it ends the trial.
+                next = self.model_command(command).await;
+                self.update(|status| status.model.pending = false);
+            }
+            reset_breaker = false;
+            match next {
+                Some(Next::Stop(reply)) => {
                     self.launcher.cancel();
                     self.launcher.settle().await;
                     return shut(reply);
                 }
-                Next::Fresh { gpu } => {
+                Some(Next::Fresh { gpu }) => {
                     // Fresh always follows the owner's command: it stays "being carried out"
                     // until the session ends in `ready` or `unavailable`, even if one of them
                     // cleared the flag just before the command was taken.
                     self.update(|status| status.restarting = true);
+                    reset_breaker = true;
                     if gpu {
                         self.gpu_failed = None;
                     }
                 }
-                Next::Model(command) => {
-                    // The model server is gone; whatever the request does, a session starts
-                    // next (with the previous model after a trial, the new one after a switch).
-                    // A trial leaves Restart available: it ends the trial.
-                    if let Some(Next::Stop(reply)) = self.model_command(command).await {
-                        self.launcher.cancel();
-                        self.launcher.settle().await;
-                        return shut(reply);
-                    }
-                }
+                Some(Next::Model(_)) | None => {}
             }
         }
     }
@@ -896,7 +935,7 @@ impl Manager {
 
     /// One start from level 1 until the owner's Restart (or shutdown) ends it: the GPU path
     /// first when it is wanted and has not failed, the CPU path after a GPU failure.
-    async fn session(&mut self) -> Next {
+    async fn session(&mut self, reset_breaker: bool) -> Next {
         // Nothing of an earlier session (a child's watcher, a cancelled probe) runs beside it.
         self.launcher.settle().await;
         // A manager without a model setting (tests) leaves the launcher's own model alone.
@@ -904,7 +943,9 @@ impl Manager {
             self.launcher.select(&self.active);
         }
         self.failures = 0;
-        self.assistant.reset_breaker();
+        if reset_breaker {
+            self.assistant.reset_breaker();
+        }
         let gpu = self.config.path == Path::Gpu && self.gpu_failed.is_none();
         let note = self.gpu_failed.clone();
         self.update(|status| {
@@ -1138,10 +1179,6 @@ impl Manager {
         calibration: Calibration,
         budgets: Budgets,
     ) -> Ended {
-        let budgets = Budgets {
-            field_refs: self.active.field_refs(),
-            ..budgets
-        };
         let interpreter = child.server().interpreter();
         let notes = child.notes();
         let landlock = child.landlock();

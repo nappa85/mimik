@@ -279,10 +279,6 @@ fn done(sheet: i64, job: JobId, answer: &Answer) -> Value {
             "readings": readings,
         }),
         Answer::Nothing => message("nothing", "The assistant has no suggestion for this entry."),
-        Answer::EnterByHand => message(
-            "by_hand",
-            "The assistant cannot work out a value that depends on another field. Enter that value by hand.",
-        ),
         Answer::TooLong => message(
             "too_long",
             "This entry is too long for the assistant on this machine.",

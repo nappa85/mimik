@@ -9,7 +9,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1, 2c-2a (the CPU
   runtime at level 1 only, ASSIST-43, `docs/model-runtime.md`) and the Rust 1.99.1 / rig-core
   0.45.0 upgrade are merged into master, and so is 2c-2b-1 (the GPU path, live-verified on the
-  RX 6650 XT). 2d-1 (the owner model setting with local models, ASSIST-L32 and the ASSIST-52
+  RX 6650 XT). 2d-1 (the owner model setting with local models and the ASSIST-52
   prefix) is built on branch `assist-2d1`, awaiting review. There is no level 2 (ASSIST-48).
   Next: 2d-2. Level 3's return is its own later step (plan, "Level 3 behind an owner opt-in").
 

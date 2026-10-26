@@ -18,7 +18,6 @@ fn budgets() -> Budgets {
         queue_wait: Duration::from_secs(35),
         max_tokens: 352,
         busy_after_expiry: Duration::ZERO,
-        field_refs: true,
     }
 }
 
@@ -908,70 +907,4 @@ async fn a_job_superseded_as_its_deadline_fires_still_keeps_the_server_busy() {
     settle().await;
     assert_eq!(assistant.poll(1, 1, second), Poll::Queued);
     gate.add_permits(3);
-}
-
-/// Max HP as the context item `f1`, so a reply can reference it.
-fn draft_with_max_hp(phrase: &str) -> Draft {
-    let mut draft = draft(phrase);
-    draft.items.push((
-        super::super::contract::EnvelopeItem {
-            alias: "f1".into(),
-            id: "max_hp".into(),
-            label: "Max HP".into(),
-            kind: super::super::contract::ItemKind::Integer,
-            value: serde_json::json!(84),
-        },
-        super::super::output::Supplied {
-            address: "field:max_hp".into(),
-            integer: true,
-            value: Some(84),
-        },
-    ));
-    draft
-}
-
-const HEAL_TO_MAX: &str = r#"{"kind":"options","options":[{"expr":{"op":"sub","l":{"ref":"f1"},"r":{"ref":"t"}},"explanation":"up to Max HP"}]}"#;
-
-async fn answer_for(budgets: Budgets, reply: &str, phrase: &str) -> Answer {
-    let stub = Arc::new(StubInterpreter::answering([Ok(reply.to_owned())]));
-    let assistant = ready(stub, budgets);
-    let origin = origin(1, "field:hp", 5);
-    let registration = assistant.register(origin.sheet, origin.revision);
-    let (id, _) = assistant
-        .start(&registration, 1, origin, draft_with_max_hp(phrase))
-        .unwrap();
-    match until_done(&assistant, 1, 1, id).await {
-        Poll::Done(answer) => answer,
-        other => panic!("{other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn the_default_model_never_offers_a_field_reference_and_says_to_enter_it_by_hand() {
-    // The option references Max HP: with the policy off the whole reply is an abstention
-    // that tells the player to enter the value by hand, and the breaker stays closed.
-    let off = Budgets {
-        field_refs: false,
-        ..budgets()
-    };
-    assert_eq!(
-        answer_for(off, HEAL_TO_MAX, "heal to max").await,
-        Answer::EnterByHand
-    );
-    // Any other model keeps the option.
-    let Answer::Options(options) = answer_for(budgets(), HEAL_TO_MAX, "heal to max").await else {
-        panic!("a model allowed field references offers the option")
-    };
-    assert_eq!(options[0].candidate.value, 0);
-    // A reply that references only the target is offered as before, with the policy off.
-    let Answer::Options(options) = answer_for(off, HEAL, "heal 15").await else {
-        panic!("a target-only option is offered")
-    };
-    assert_eq!(options[0].candidate.value, 99);
-    // One field-referencing option abstains the whole reply, even beside a target-only one.
-    let mixed = r#"{"kind":"options","options":[{"expr":{"op":"add","l":{"ref":"t"},"r":{"lit":15}},"explanation":"heal 15"},{"expr":{"op":"sub","l":{"ref":"f1"},"r":{"ref":"t"}},"explanation":"up to Max HP"}]}"#;
-    assert_eq!(answer_for(off, mixed, "heal 15").await, Answer::EnterByHand);
-    // A drop for another reason stays "nothing".
-    let invented = r#"{"kind":"options","options":[{"expr":{"lit":915},"explanation":"x"}]}"#;
-    assert_eq!(answer_for(off, invented, "heal 15").await, Answer::Nothing);
 }

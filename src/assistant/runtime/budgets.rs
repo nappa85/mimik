@@ -231,8 +231,6 @@ pub(crate) fn derive(measured: &Measured) -> Result<Derived, NoBudgets> {
                 queue_wait: Duration::from_secs(queue),
                 max_tokens: measured.max_tokens,
                 busy_after_expiry: Duration::from_secs_f64(prompt_s.ceil()),
-                // The manager sets the model's policy; the measurement alone allows it.
-                field_refs: true,
             },
             estimate_s,
             prompt_s,

@@ -304,7 +304,7 @@ pub(crate) struct Work {
 }
 
 impl Work {
-    fn new() -> Arc<Self> {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             epoch: AtomicU64::new(0),
             running: watch::channel(0).0,

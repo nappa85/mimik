@@ -73,8 +73,6 @@ pub(crate) struct Checks {
     pub phrase: String,
     pub target_value: Option<i64>,
     pub supplied: BTreeMap<String, Supplied>,
-    /// Whether an option may reference an alias other than the target's (`t`).
-    pub field_refs: bool,
 }
 
 /// Why an option was dropped.
@@ -91,9 +89,6 @@ pub(crate) enum Drop {
     Overflow,
     DivisionByZero,
     Inexact,
-    /// A reference to a field other than the target, which the model may not offer
-    /// (ASSIST-L32).
-    FieldRef,
 }
 
 /// A validated option: its tree, explanation, value and the references it used.
@@ -239,9 +234,6 @@ fn evaluate(
             }
         }
         Node::Ref { alias } => {
-            if !checks.field_refs && alias != super::contract::TARGET_ALIAS {
-                return Err(Drop::FieldRef);
-            }
             let supplied = checks.supplied.get(alias).ok_or(Drop::UnsuppliedRef)?;
             if !supplied.integer {
                 return Err(Drop::EnumRef);

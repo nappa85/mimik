@@ -7,7 +7,7 @@ use super::materials::{TrustedDraft, html};
 use super::{AuthResult, AuthState, csrf_admission, owner_auth};
 use crate::assistant::model::{SpecError, parse_spec};
 use crate::assistant::runtime::manager::{
-    Chosen, Restart, State as Runtime, Status, TryGpu, TryModel,
+    CancelTrial, Chosen, Restart, State as Runtime, Status, TryGpu, TryModel,
 };
 use crate::assistant::runtime::models::{TrialKey, TrialReport, TrialState};
 use crate::assistant::runtime::{Level, Path};
@@ -71,6 +71,8 @@ enum Notice {
     NoPreviousModel,
     Kept,
     NothingToKeep,
+    ModelBusy,
+    CancelStale,
 }
 
 impl Notice {
@@ -107,6 +109,12 @@ impl Notice {
             Self::NoPreviousModel => "There is no previous model to switch back to.",
             Self::Kept => "Kept the current model; the trial result is dismissed.",
             Self::NothingToKeep => "There is no trial result to dismiss.",
+            Self::ModelBusy => {
+                "A model change or a restart is already being carried out; nothing else was started."
+            }
+            Self::CancelStale => {
+                "That page showed an older trial than the one running, so nothing was cancelled. Reload it."
+            }
         }
     }
 }
@@ -264,7 +272,6 @@ struct ReportView {
     budgets: BudgetsView,
     speeds: Vec<SpeedView>,
     phrases: Vec<PhraseView>,
-    field_refs: bool,
 }
 
 struct SpeedView {
@@ -329,7 +336,6 @@ fn report_view(report: &TrialReport) -> ReportView {
                 offered: if p.expected_offered { "yes" } else { "no" },
             })
             .collect(),
-        field_refs: report.model.field_refs(),
     }
 }
 
@@ -598,6 +604,14 @@ struct TryForm {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CancelForm {
+    csrf: String,
+    /// The number of the trial the page showed.
+    trial: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SwitchForm {
     csrf: String,
     trial: String,
@@ -637,6 +651,7 @@ async fn try_model(
         match runtime.try_model(auth.account.id, form.model, name) {
             TryModel::Accepted(_) => "trying-model",
             TryModel::Busy => "trial-running",
+            TryModel::Pending => "model-busy",
             TryModel::Unsupported => "model-unsupported",
         },
     ))
@@ -657,15 +672,15 @@ async fn refused_spec(
 async fn cancel_trial(
     State(state): State<AuthState>,
     session: Session,
-    Form(form): Form<RestartForm>,
+    Form(form): Form<CancelForm>,
 ) -> AuthResult {
     owner_auth(&state, &session).await?;
     csrf_admission(&session, &form.csrf).await?;
     let runtime = runtime_of(&state)?;
-    Ok(redirect(if runtime.cancel_trial() {
-        "trial-cancelled"
-    } else {
-        "no-trial-running"
+    Ok(redirect(match runtime.cancel_trial(form.trial) {
+        CancelTrial::Done => "trial-cancelled",
+        CancelTrial::NoTrial => "no-trial-running",
+        CancelTrial::Stale => "cancel-stale",
     }))
 }
 
@@ -684,6 +699,7 @@ async fn switch(
     Ok(redirect(match runtime.switch(auth.account.id, &key) {
         Chosen::Accepted => "switching",
         Chosen::Busy => "trial-running",
+        Chosen::Pending => "model-busy",
         Chosen::Stale | Chosen::NoPrevious => "trial-stale",
     }))
 }
@@ -699,6 +715,7 @@ async fn keep(
     Ok(redirect(match runtime.keep() {
         Chosen::Accepted => "kept",
         Chosen::Busy => "trial-running",
+        Chosen::Pending => "model-busy",
         Chosen::Stale | Chosen::NoPrevious => "nothing-to-keep",
     }))
 }
@@ -714,6 +731,7 @@ async fn switch_back(
     Ok(redirect(match runtime.switch_back(auth.account.id) {
         Chosen::Accepted => "switching-back",
         Chosen::Busy => "trial-running",
+        Chosen::Pending => "model-busy",
         Chosen::Stale | Chosen::NoPrevious => "no-previous-model",
     }))
 }

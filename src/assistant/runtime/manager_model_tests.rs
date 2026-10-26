@@ -5,8 +5,8 @@ use super::super::tests::{
     Behaviour, CONFIG, FakeLauncher, Fault, Start, ready, unavailable, until,
 };
 use super::super::{
-    Assistant, Chosen, Config, Handle, Launcher, ModelSetup, Records, Restart, State, TryModel,
-    spawn, spawn_with,
+    Assistant, CancelTrial, Chosen, Config, Handle, Launcher, ModelSetup, Records, Restart, State,
+    TryModel, spawn, spawn_with,
 };
 use super::*;
 use crate::assistant::DEFAULT_MODEL_SHA256;
@@ -152,7 +152,6 @@ async fn a_passing_trial_measures_the_candidate_and_brings_the_previous_model_ba
             .all(|s| tokens_are(s.predicted_n, 256))
     );
     assert_eq!(report.budgets.max_tokens, 256);
-    assert!(report.budgets.field_refs, "any model but the default");
     assert_eq!(report.model.spec, "local:other.gguf");
     assert_eq!(report.model.alias, "other");
     assert_eq!(report.model.size, Some(1 << 30));
@@ -262,10 +261,6 @@ async fn the_default_file_keeps_352_by_its_hash_and_a_file_with_its_name_does_no
             .iter()
             .all(|s| tokens_are(s.predicted_n, 352))
     );
-    assert!(
-        !report.budgets.field_refs,
-        "the default file offers no field references"
-    );
     renamed.handle.shutdown().await;
 
     // A different file with the default's name gets the measured value.
@@ -280,7 +275,6 @@ async fn the_default_file_keeps_352_by_its_hash_and_a_file_with_its_name_does_no
     let report = passed(impostor.try_and_wait("granite-4.2-3b-Q4_K_M.gguf").await);
     assert_eq!(report.model.max_tokens, 256);
     assert_eq!(report.model.sha256, sha('d'));
-    assert!(report.budgets.field_refs);
     impostor.handle.shutdown().await;
 }
 
@@ -419,7 +413,11 @@ async fn the_owners_cancel_stops_the_candidate_and_restores_the_previous_model()
         CONFIG,
     );
     ready(&fixture.assistant).await;
-    assert!(!fixture.handle.cancel_trial(), "no trial runs yet");
+    assert_eq!(
+        fixture.handle.cancel_trial(1),
+        CancelTrial::NoTrial,
+        "no trial runs yet"
+    );
     fixture
         .handle
         .try_model(7, "local:other.gguf".into(), "other.gguf".into());
@@ -434,7 +432,7 @@ async fn the_owners_cancel_stops_the_candidate_and_restores_the_previous_model()
         )
     })
     .await;
-    assert!(fixture.handle.cancel_trial());
+    assert_eq!(fixture.handle.cancel_trial(1), CancelTrial::Done);
     let handle = fixture.handle.clone();
     until(Duration::from_secs(600), move || {
         matches!(handle.status().trial, Some(TrialState::Cancelled { .. }))
@@ -452,7 +450,7 @@ async fn the_owners_cancel_stops_the_candidate_and_restores_the_previous_model()
     assert_eq!(fixture.launcher.alive.load(Ordering::SeqCst), 1);
     assert!(!fixture.launcher.coexisted.load(Ordering::SeqCst));
     // A late Cancel is not carried over into the next trial.
-    assert!(!fixture.handle.cancel_trial());
+    assert_eq!(fixture.handle.cancel_trial(1), CancelTrial::NoTrial);
     let report = passed(fixture.try_and_wait("other.gguf").await);
     assert_eq!(report.key.number, 2);
 }
@@ -602,7 +600,6 @@ async fn switch_stores_the_model_then_restarts_and_reprimes_with_it() {
     );
     assert_eq!(fixture.launcher.primed.load(Ordering::SeqCst), primed + 1);
     assert_eq!(fixture.assistant.budgets().unwrap().max_tokens, 256);
-    assert!(fixture.assistant.budgets().unwrap().field_refs);
     // The stored trial is the record of what was measured.
     let stored = fixture.records.stored.lock().unwrap().clone();
     let trial: serde_json::Value =
@@ -723,7 +720,6 @@ async fn switch_back_restores_the_previous_model_with_a_restart_and_a_priming() 
     );
     assert_eq!(fixture.launcher.primed.load(Ordering::SeqCst), primed + 1);
     assert_eq!(fixture.assistant.budgets().unwrap().max_tokens, 352);
-    assert!(!fixture.assistant.budgets().unwrap().field_refs);
     assert_eq!(
         fixture.records.log.lock().unwrap().last().unwrap(),
         "swap by 7"
@@ -796,14 +792,6 @@ async fn without_a_model_setting_the_owner_cannot_try_models() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn the_default_model_serves_without_field_references_and_others_with() {
-    let default = fixture([], CONFIG);
-    ready(&default.assistant).await;
-    assert!(!default.assistant.budgets().unwrap().field_refs);
-    default.handle.shutdown().await;
-}
-
-#[tokio::test(start_paused = true)]
 async fn a_cancel_right_after_try_cancels_that_trial_and_never_the_next_one() {
     let fixture = fixture([], CONFIG);
     ready(&fixture.assistant).await;
@@ -814,7 +802,7 @@ async fn a_cancel_right_after_try_cancels_that_trial_and_never_the_next_one() {
             .try_model(7, "local:other.gguf".into(), "other.gguf".into()),
         TryModel::Accepted(1)
     );
-    assert!(fixture.handle.cancel_trial());
+    assert_eq!(fixture.handle.cancel_trial(1), CancelTrial::Done);
     let handle = fixture.handle.clone();
     until(Duration::from_secs(600), move || {
         handle.status().trial.is_some_and(|trial| !trial.running())
@@ -832,4 +820,264 @@ async fn a_cancel_right_after_try_cancels_that_trial_and_never_the_next_one() {
     // That Cancel was for trial 1: trial 2 runs to its end.
     let report = passed(fixture.try_and_wait("other.gguf").await);
     assert_eq!(report.key.number, 2);
+}
+
+/// Waits until the first phrase of the running trial is being sent.
+async fn candidate_running(handle: &Handle) {
+    let handle = handle.clone();
+    until(Duration::from_secs(600), move || {
+        matches!(
+            handle.status().trial,
+            Some(TrialState::Running {
+                phase: "trial phrase 1 of 5",
+                ..
+            })
+        )
+    })
+    .await;
+}
+
+fn slow_phrases() -> [Start; 2] {
+    [
+        Start::Ok(Behaviour::default()),
+        Start::Ok(Behaviour {
+            phrase_delay: Duration::from_secs(100),
+            ..Behaviour::default()
+        }),
+    ]
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_interrupted_trial_stops_its_running_candidate_before_it_settles() {
+    // The launcher's settle waits for the child's exit watcher (as the real one does), so
+    // settling first would wait for a child nothing stops.
+    for trigger in ["cancel", "restart", "shutdown"] {
+        let fixture = fixture(slow_phrases(), CONFIG);
+        ready(&fixture.assistant).await;
+        fixture
+            .handle
+            .try_model(7, "local:other.gguf".into(), "other.gguf".into());
+        candidate_running(&fixture.handle).await;
+        match trigger {
+            "cancel" => assert_eq!(fixture.handle.cancel_trial(1), CancelTrial::Done),
+            "restart" => assert_eq!(fixture.handle.restart(), Restart::Accepted),
+            _ => fixture.handle.shutdown().await,
+        }
+        if trigger == "shutdown" {
+            assert_eq!(
+                fixture.launcher.alive.load(Ordering::SeqCst),
+                0,
+                "{trigger}"
+            );
+        } else {
+            let handle = fixture.handle.clone();
+            until(Duration::from_secs(600), move || {
+                handle.status().trial.is_some_and(|trial| !trial.running())
+            })
+            .await;
+            ready(&fixture.assistant).await;
+            assert_eq!(
+                fixture.launcher.alive.load(Ordering::SeqCst),
+                1,
+                "{trigger}"
+            );
+            fixture.handle.shutdown().await;
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_interrupted_or_expired_hash_stops_its_blocking_work_first() {
+    use super::super::tests::HashProbe;
+    for expire in [false, true] {
+        let fixture = fixture([], CONFIG);
+        let probe = Arc::new(HashProbe::default());
+        *fixture.launcher.hash_probe.lock().unwrap() = Some(Arc::clone(&probe));
+        ready(&fixture.assistant).await;
+        fixture
+            .handle
+            .try_model(7, "local:other.gguf".into(), "other.gguf".into());
+        // Yielding, not sleeping: a paused clock does not advance while blocking work runs.
+        while fixture.launcher.hashed.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        if expire {
+            // The trial's bound passes while the blocking work still runs.
+            tokio::time::advance(Duration::from_mins(31)).await;
+        } else {
+            assert_eq!(fixture.handle.cancel_trial(1), CancelTrial::Done);
+        }
+        let handle = fixture.handle.clone();
+        until(Duration::from_hours(1), move || {
+            handle.status().trial.is_some_and(|trial| !trial.running())
+        })
+        .await;
+        ready(&fixture.assistant).await;
+        // The blocking work saw the cancel; it did not run on to its own end, which the
+        // next session's settle would have waited for.
+        assert!(
+            probe.cancelled_seen.load(Ordering::SeqCst),
+            "expire {expire}"
+        );
+        assert!(!probe.timed_out.load(Ordering::SeqCst), "expire {expire}");
+        fixture.handle.shutdown().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn model_changes_are_admitted_one_at_a_time() {
+    let fixture = fixture([], CONFIG);
+    let report = passed(fixture.trial().await);
+    // A Switch, then everything else is refused while it is carried out.
+    assert_eq!(fixture.handle.switch(7, &report.key), Chosen::Accepted);
+    assert_eq!(fixture.handle.switch(7, &report.key), Chosen::Pending);
+    assert_eq!(fixture.handle.switch_back(7), Chosen::Pending);
+    assert_eq!(fixture.handle.keep(), Chosen::Pending);
+    assert_eq!(
+        fixture
+            .handle
+            .try_model(7, "local:third.gguf".into(), "third.gguf".into()),
+        TryModel::Pending
+    );
+    let handle = fixture.handle.clone();
+    until(Duration::from_secs(600), move || {
+        handle.status().model.active.spec == "local:other.gguf"
+            && handle.status().state == State::Ready
+    })
+    .await;
+    // A double-clicked Switch back swaps once, not twice.
+    assert_eq!(fixture.handle.switch_back(7), Chosen::Accepted);
+    assert_eq!(fixture.handle.switch_back(7), Chosen::Pending);
+    let handle = fixture.handle.clone();
+    until(Duration::from_secs(600), move || {
+        handle.status().model.active == granite() && handle.status().state == State::Ready
+    })
+    .await;
+    tokio::time::sleep(Duration::from_mins(5)).await;
+    assert_eq!(
+        fixture.handle.status().model.active,
+        granite(),
+        "not undone"
+    );
+    assert_eq!(
+        fixture.records.log.lock().unwrap().len(),
+        2,
+        "one switch, one swap"
+    );
+    // A Restart in progress holds model changes off too.
+    assert_eq!(fixture.handle.restart(), Restart::Accepted);
+    assert_eq!(
+        fixture
+            .handle
+            .try_model(7, "local:other.gguf".into(), "other.gguf".into()),
+        TryModel::Pending
+    );
+    assert_eq!(fixture.handle.switch_back(7), Chosen::Pending);
+    // Once it is over they are admitted again.
+    ready(&fixture.assistant).await;
+    let handle = fixture.handle.clone();
+    until(Duration::from_secs(600), move || {
+        !handle.status().restarting
+    })
+    .await;
+    assert!(matches!(
+        fixture
+            .handle
+            .try_model(7, "local:other.gguf".into(), "other.gguf".into()),
+        TryModel::Accepted(_)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cancel_from_a_page_showing_an_older_trial_cancels_nothing() {
+    let fixture = fixture(
+        [
+            Start::Ok(Behaviour::default()),
+            Start::Ok(Behaviour::default()),
+            Start::Ok(Behaviour::default()),
+            Start::Ok(Behaviour {
+                phrase_delay: Duration::from_secs(100),
+                ..Behaviour::default()
+            }),
+        ],
+        CONFIG,
+    );
+    passed(fixture.trial().await);
+    fixture
+        .handle
+        .try_model(7, "local:other.gguf".into(), "other.gguf".into());
+    candidate_running(&fixture.handle).await;
+    // The tab still shows trial 1.
+    assert_eq!(fixture.handle.cancel_trial(1), CancelTrial::Stale);
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert!(fixture.handle.status().trial.is_some_and(|t| t.running()));
+    let handle = fixture.handle.clone();
+    until(Duration::from_secs(3600), move || {
+        handle.status().trial.is_some_and(|trial| !trial.running())
+    })
+    .await;
+    assert!(matches!(
+        fixture.handle.status().trial,
+        Some(TrialState::Passed(_))
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_restart_and_the_apps_start_reset_the_breaker() {
+    let fixture = fixture([], CONFIG);
+    let report = passed(fixture.trial().await);
+    let resets = || fixture.assistant.resets.load(Ordering::SeqCst);
+    assert_eq!(resets(), 1, "the app's start");
+    fixture.handle.switch(7, &report.key);
+    let handle = fixture.handle.clone();
+    until(Duration::from_secs(600), move || {
+        handle.status().model.active.spec == "local:other.gguf"
+            && handle.status().state == State::Ready
+    })
+    .await;
+    assert_eq!(resets(), 1, "a trial and a Switch leave the breaker alone");
+    fixture.handle.switch_back(7);
+    let handle = fixture.handle.clone();
+    until(Duration::from_secs(600), move || {
+        handle.status().model.active == granite() && handle.status().state == State::Ready
+    })
+    .await;
+    assert_eq!(resets(), 1, "so does a Switch back");
+    assert_eq!(fixture.handle.restart(), Restart::Accepted);
+    let handle = fixture.handle.clone();
+    until(Duration::from_secs(600), move || {
+        !handle.status().restarting
+    })
+    .await;
+    assert_eq!(resets(), 2, "a Restart resets it");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_file_over_8_gib_or_empty_is_refused_with_its_reason_before_anything_starts() {
+    let fixture = fixture([], CONFIG);
+    for (name, size, reason) in [
+        ("huge.gguf", (8 << 30) + 1, "larger than 8 GiB"),
+        ("empty.gguf", 0, "is empty"),
+    ] {
+        fixture.launcher.files.lock().unwrap().insert(
+            name.into(),
+            Ok(ModelFile {
+                sha256: sha('e'),
+                size,
+            }),
+        );
+        ready(&fixture.assistant).await;
+        let why = failure(fixture.try_and_wait(name).await);
+        assert!(why.contains(reason), "{why}");
+    }
+    // Only the serving sessions started, never a candidate.
+    assert_eq!(fixture.launcher.starts.lock().unwrap().len(), 3);
+    fixture.launcher.files.lock().unwrap().insert(
+        "exact.gguf".into(),
+        Ok(ModelFile {
+            sha256: sha('f'),
+            size: 8 << 30,
+        }),
+    );
+    passed(fixture.try_and_wait("exact.gguf").await);
 }

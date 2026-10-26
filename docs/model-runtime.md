@@ -570,7 +570,17 @@ trial stops the candidate and the previous model starts again. A passed trial st
 candidate too and the previous model starts again at once, so players are not left waiting for
 the owner's decision: the page shows the result, with "Switch" and "Keep the current model"
 (which only dismisses the result). One trial at a time (a second "Try" answers "a trial is
-already running"); while it runs, Switch, Switch back and Keep are refused.
+already running"); while it runs, Switch, Switch back and Keep are refused. Model changes
+are admitted one at a time: a Try, Switch or Switch back is refused ("a model change or a
+restart is already being carried out") while another is pending or a Restart is running, so a
+double click on Switch back swaps once. "Cancel" carries the number of the trial the page
+showed and is refused when another trial runs now. A file of 0 bytes or over 8 GiB (the
+stored size's limit) fails the trial naming why, before anything starts. An interrupted or
+expired trial stops its candidate, then settles the launcher's work; a hash in progress is
+cancelled at once, so it never delays the previous model. A model change does not reset the
+circuit breaker (only Restart and Mimik's start do). The start rejects an
+`--assistant-model-alias` outside 1 to 128 characters of `[A-Za-z0-9._-]` (the stored
+setting's limit).
 
 **Switch.** "Switch" carries the passed trial's key (`<number>.<generation>.<sha256>`), accepted
 only if it names the latest finished passed trial (another hash, an older trial or an older
@@ -587,10 +597,6 @@ bounded at 4 KiB.
 **Changed file.** A load whose file no longer has the recorded SHA-256 is not retried: the
 assistant is unavailable with "the model file changed", until the owner tries a model again,
 switches back or restarts after restoring the file.
-
-**Field references (ASSIST-L32).** The runtime tells the job worker whether the active model
-may offer options that reference a field other than the target: not the default Granite
-file (by hash), any other model yes. See [assisted-entry.md](assisted-entry.md).
 
 ## Owner page
 

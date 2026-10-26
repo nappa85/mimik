@@ -2,7 +2,6 @@
 //! generation runs, the trial that measures a candidate, and what the page shows of both.
 use super::Path;
 use super::calibration::Calibration;
-use crate::assistant::DEFAULT_MODEL_SHA256;
 use crate::assistant::jobs::Budgets;
 use std::time::Duration;
 
@@ -20,15 +19,6 @@ pub(crate) struct Model {
     pub max_tokens: u32,
     /// The file's size when it was hashed.
     pub size: Option<u64>,
-}
-
-impl Model {
-    /// Whether the model may offer options that reference a field other than the target:
-    /// every model but the default Granite file, which got 1 of 30 field-reference cases right
-    /// (ASSIST-L32).
-    pub(crate) fn field_refs(&self) -> bool {
-        self.sha256 != DEFAULT_MODEL_SHA256
-    }
 }
 
 /// What the launcher learns of a file by hashing it.
@@ -146,6 +136,8 @@ pub(crate) struct ModelStatus {
     pub switchable: bool,
     /// The next trial's number.
     pub next_trial: u64,
+    /// A model change (a Try, a Switch, a Switch back) is admitted and not yet carried out.
+    pub pending: bool,
     /// What the last switch or switch back could not do.
     pub note: Option<String>,
 }
@@ -213,11 +205,5 @@ mod tests {
         assert_eq!(phrase_bound(Path::Gpu), Duration::from_mins(2));
         assert_eq!(trial_bound(Path::Cpu), Duration::from_mins(30));
         assert_eq!(trial_bound(Path::Gpu), Duration::from_mins(20));
-    }
-
-    #[test]
-    fn only_the_default_file_may_not_offer_field_references() {
-        assert!(!Model::test("x.gguf", DEFAULT_MODEL_SHA256, 352).field_refs());
-        assert!(Model::test("granite-4.2-3b-Q4_K_M.gguf", &"b".repeat(64), 352).field_refs());
     }
 }

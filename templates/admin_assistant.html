@@ -23,7 +23,7 @@
 {% if let Some(level) = view.level %}<p>A model file is untrusted input to the model server, contained only by its confinement: level {{ level.number }} ({{ level.name }}).</p>{% endif %}
 {% if let Some(trial) = view.model.trial %}<h3>Trial {{ trial.number }} of {{ trial.spec }}: {{ trial.outcome }}</h3>
 {% if trial.running %}<p>Now: {{ trial.detail }}. Bounded to 30 minutes on the CPU and 20 on the GPU, with 2 × the run deadline per phrase; reload this page to follow it.</p>
-<form method="post" action="/admin/assistant/model/cancel"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Cancel</button></form>
+<form method="post" action="/admin/assistant/model/cancel"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="trial" value="{{ trial.number }}"><button>Cancel</button></form>
 {% else if !trial.detail.is_empty() %}<p class="form-error" role="alert">{{ trial.detail }}. The previous model is running again.</p>
 <form method="post" action="/admin/assistant/model/keep"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Dismiss</button></form>{% endif %}
 {% if let Some(report) = trial.report %}<p>Passed on the {{ report.device }} in {{ report.total }}. Priming {{ report.priming }} ({{ report.prefix_tokens }} prompt tokens). The largest reply of the five phrases was {{ report.largest }} tokens, so <code>max_tokens</code> is <strong>{{ report.max_tokens }}</strong>.</p>
@@ -34,7 +34,7 @@
 <table><thead><tr><th>Phrase</th><th>Reply tokens</th><th>Time</th><th>Expected value offered</th></tr></thead><tbody>
 {% for phrase in report.phrases %}<tr><td>{{ phrase.note }}</td><td>{{ phrase.tokens }}</td><td>{{ phrase.seconds }}</td><td>{{ phrase.offered }}</td></tr>{% endfor %}
 </tbody></table>
-<p>Whether the expected value was among the options is information only; it does not decide anything.{% if !report.field_refs %} This is the default model, which does not offer options that use another field.{% endif %}</p>
+<p>Whether the expected value was among the options is information only; it does not decide anything.</p>
 <form method="post" action="/admin/assistant/model/switch"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="trial" value="{{ report.key }}"><button>Switch</button></form>
 <form method="post" action="/admin/assistant/model/keep"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Keep the current model</button></form>
 <p>The current model is already running again; Keep dismisses this result. Switch restarts the model server with this model and measures it again.</p>{% endif %}
