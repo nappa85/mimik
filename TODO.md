@@ -29,17 +29,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 1. 2d-1 owner model setting, 2d-2 downloads, 3 bundles and reminders, 4
    suggestions, 5 docs and gate (includes the `docs/release-scope.md` update for schema 22 and the
    assisted scope).
-2. Before 2d-1 chooses the default model (ASSIST-L32), a field-reference experiment, decision
-   rule written down before running: base the adopted v2 prefix (v2-short), plus one arm that
-   adds only the compact-output sentence; about 30 fresh field-reference cases written without
-   reusing screen cases; real 1 KiB related-context requests rendered by the Rust builder; an
-   idle host at the ASSIST-41 thread count; pass 1 only.
-   Alongside it (user 2026-10-23), a prototype-tier Laya experiment (Convai Innovations'
-   Apache-2.0 non-generative decision models, 322M/421M): choose the field from the supplied
-   aliases on the same fresh cases, and act-versus-ask on the 50 dev cases against Granite's
-   false-confident count. Run it in a container with the `laya` package, since stock
-   llama-server does not run it, and write the decision rule down before running. Shipping it
-   would need its own runtime decision (ASSIST-29/33).
+2. 2d-1 inputs from the field-reference screen (2026-10-26, `docs/results.md`):
+   - the default model offers no option whose expression references a field other than `t`; the
+     assistant tells the player to enter such a value by hand (ASSIST-L32);
+   - the screen chose the compact-output sentence (about 20% fewer output tokens, same quality).
+     Adopting it changes the shipped prefix and the 352-token cap, so the owner decides it in 2d-1.
 3. Older-ABI Landlock evidence (below ABI 6; the Ubuntu VM has ABI 4 and fails the two
    ABI-6 live checks, as documented).
 4. Owed measurements: the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks
