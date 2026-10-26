@@ -88,7 +88,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   Experiment 3 (`docs/results.md`): Qwen3.5-9B on the GPU scores 14/30 with the shipped prompt
   and 19/30 with D (4 false-confident). Better, but it still fails 24/30. Its dropped-but-right
   count is 7–9, mostly the literal rule. Open:
-  - decide the literal rule (spelled-out numbers, a redundant `* 1`);
+  - implement ASSIST-53 (number words and a redundant `* 1` count) in the Rust provenance check
+    and the v2 instructions, then re-score the screens; after tonight's 35B run, not during it
+    (RAM);
   - Qwen3.6-35B-A3B with experts in RAM, stopped by the swap guard (free RAM first);
   - whether the GPU default model becomes the 9B (2d-1 trial path).
 
