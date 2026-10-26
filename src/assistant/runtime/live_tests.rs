@@ -938,7 +938,7 @@ fn live_sigkill_of_mimik_during_startup_kills_the_whole_sandbox() {
 }
 
 /// A fake build in `scratch`: the fake llama-server (`MIMIK_LIVE_FAKE_SERVER`) as the only
-/// executable, a fake model, the test binary as runner and shim.
+/// executable, a fake model, the test binary as runner.
 fn fake_build(scratch: &std::path::Path, alias: &str) -> Arc<Real> {
     let server = std::fs::read(env("MIMIK_LIVE_FAKE_SERVER")).unwrap();
     fake_build_with(scratch, alias, &server)

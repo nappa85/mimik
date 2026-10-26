@@ -27,8 +27,8 @@ pub(crate) const FSIZE: u64 = 64 << 20;
 /// The most bytes of a spec.
 const SPEC_BOUND: u64 = 1 << 20;
 /// The most descriptors (the spec's included) moved between fork and exec: a fixed array, as
-/// nothing may allocate there. Level 1 hands over the status, seccomp, token, directory,
-/// model and marker descriptors and one per runtime file.
+/// nothing may allocate there. Level 1 hands over the status, marker and acknowledgement
+/// descriptors.
 pub(crate) const MAX_HANDOVER: usize = 64;
 
 /// The runner's exit codes when it does not reach its exec.
