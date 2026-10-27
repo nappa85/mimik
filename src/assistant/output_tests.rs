@@ -176,6 +176,112 @@ fn literal_provenance() {
     );
 }
 
+fn mul(l: Value, r: Value) -> Value {
+    node("mul", None, l, r)
+}
+
+#[test]
+fn number_words_are_literals_with_provenance() {
+    // ASSIST-53: "one" is 1, so `t - days * 1` has provenance (days is a cell at 3).
+    assert_eq!(
+        one(
+            sub(alias("t"), mul(alias("c1"), lit(1))),
+            "one lost for each day"
+        ),
+        Ok(81)
+    );
+    assert_eq!(one(sub(alias("t"), lit(10)), "ten"), Ok(74));
+    assert_eq!(one(sub(alias("t"), lit(10)), "dieci"), Ok(74));
+    assert_eq!(one(sub(alias("t"), lit(10)), "Ten damage"), Ok(74));
+    assert_eq!(
+        one(sub(alias("t"), lit(1)), "someone hit me"),
+        Err(Drop::Provenance)
+    );
+    assert_eq!(
+        one(sub(alias("t"), lit(1)), "alone in the dark"),
+        Err(Drop::Provenance)
+    );
+    assert_eq!(
+        one(sub(alias("t"), lit(1)), "a point"),
+        Err(Drop::Provenance)
+    );
+    // Only the words' own values: "ten" does not admit 11.
+    assert_eq!(one(sub(alias("t"), lit(11)), "ten"), Err(Drop::Provenance));
+}
+
+#[test]
+fn a_literal_one_as_multiplier_or_divisor_is_redundant() {
+    let phrase = "lost them";
+    assert_eq!(one(mul(alias("t"), lit(1)), phrase), Ok(84));
+    assert_eq!(one(mul(lit(1), alias("t")), phrase), Ok(84));
+    assert_eq!(one(div(alias("t"), lit(1), "exact"), phrase), Ok(84));
+    // Nested and combined with a phrase number.
+    assert_eq!(
+        one(sub(alias("t"), mul(lit(15), lit(1))), "lost 15"),
+        Ok(69)
+    );
+    // Anywhere else a 1 needs provenance.
+    assert_eq!(
+        one(json!({"op": "add", "l": alias("t"), "r": lit(1)}), phrase),
+        Err(Drop::Provenance)
+    );
+    assert_eq!(one(sub(alias("t"), lit(1)), phrase), Err(Drop::Provenance));
+    assert_eq!(
+        one(div(lit(1), alias("t"), "floor"), phrase),
+        Err(Drop::Provenance)
+    );
+    // Only 1: other multipliers and negative one are not redundant.
+    assert_eq!(one(mul(alias("t"), lit(2)), phrase), Err(Drop::Provenance));
+    assert_eq!(one(mul(alias("t"), lit(-1)), phrase), Err(Drop::Provenance));
+    // A 1 below a multiplier operand is still a plain literal.
+    assert_eq!(
+        one(
+            mul(alias("t"), json!({"op": "add", "l": lit(1), "r": lit(1)})),
+            phrase
+        ),
+        Err(Drop::Provenance)
+    );
+}
+
+#[test]
+fn two_redundant_ones_do_not_manufacture_a_one() {
+    // A 1 is exempt only beside an operand that is not a literal 1: `1 * 1` and `1 / 1`
+    // are checked like any literals, and so is everything built from them.
+    let phrase = "lost them";
+    let one_one = || mul(lit(1), lit(1));
+    let add = |l: Value, r: Value| json!({"op": "add", "l": l, "r": r});
+    let refused = [
+        one_one(),
+        sub(alias("t"), one_one()),
+        add(alias("t"), one_one()),
+        sub(alias("t"), div(lit(1), lit(1), "exact")),
+        add(alias("t"), add(one_one(), one_one())),
+        mul(lit(15), add(one_one(), one_one())),
+        mul(one_one(), lit(1)),
+        div(one_one(), lit(1), "exact"),
+        div(lit(1), lit(1), "exact"),
+    ];
+    for expr in refused {
+        assert_eq!(one(expr.clone(), phrase), Err(Drop::Provenance), "{expr}");
+    }
+    // With a 1 in the note they are plain literals again.
+    assert_eq!(one(sub(alias("t"), one_one()), "lost 1"), Ok(83));
+    // Beside a reference, a subexpression or a provenanced literal the 1 stays exempt.
+    assert_eq!(one(mul(alias("t"), lit(1)), phrase), Ok(84));
+    assert_eq!(one(mul(sub(alias("t"), lit(84)), lit(1)), phrase), Ok(0));
+    assert_eq!(
+        one(sub(alias("t"), mul(lit(15), lit(1))), "lost 15"),
+        Ok(69)
+    );
+    assert_eq!(
+        one(
+            sub(alias("t"), mul(alias("c1"), lit(1))),
+            "one lost for each day"
+        ),
+        Ok(81)
+    );
+}
+
 #[test]
 fn references() {
     assert_eq!(one(sub(alias("f1"), lit(15)), "15 below max"), Ok(69));
