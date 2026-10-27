@@ -10,7 +10,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   runtime at level 1 only, ASSIST-43, `docs/model-runtime.md`) and the Rust 1.99.1 / rig-core
   0.45.0 upgrade are merged into master, and so is 2c-2b-1 (the GPU path, live-verified on the
   RX 6650 XT). 2d-1 (the owner model setting with local models and the ASSIST-52
-  prefix) is built on branch `assist-2d1`, awaiting review. There is no level 2 (ASSIST-48).
+  prefix), ASSIST-53 and ASSIST-55 (Qwen3.5-9B default on the GPU) are merged. There is no level 2 (ASSIST-48).
   Next: 2d-2. Level 3's return is its own later step (plan, "Level 3 behind an owner opt-in").
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
