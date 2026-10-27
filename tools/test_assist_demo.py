@@ -88,6 +88,70 @@ class AccountInputTests(unittest.TestCase):
         self.assertEqual(remaining, [])
 
 
+class ResetPasswordTests(unittest.TestCase):
+    """A reset passes each account's id and epoch, and its inputs never outlive the CLI."""
+
+    ACCOUNTS = (
+        b'[{"id": 1, "login": "demo-owner", "epoch": 4},'
+        b' {"id": 2, "login": "demo-player", "epoch": 7}]'
+    )
+
+    def run_reset(self, fail_at=None, database=True):
+        calls = []
+
+        def cli(binary, directory, *arguments, secrets=None):
+            calls.append(arguments)
+            if arguments[0] == "list-accounts":
+                return self.ACCOUNTS
+            for flag in ("--password-file", "--token-file"):
+                if flag in arguments:
+                    path = Path(arguments[arguments.index(flag) + 1])
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            if "--token-output" in arguments:
+                assist_demo.write_private(
+                    Path(arguments[arguments.index("--token-output") + 1]), b"t" * 64
+                )
+            if arguments[0] == fail_at:
+                raise SyntheticCliFailure(arguments[0])
+            return b"{}"
+
+        with tempfile.TemporaryDirectory() as temp:
+            directory = assist_demo.fresh_directory(Path(temp) / "data")
+            if database:
+                (directory / "smoke.sqlite3").write_bytes(b"")
+            with patch.object(assist_demo, "registry_cli", cli):
+                if fail_at is None:
+                    passwords = assist_demo.reset_passwords(Path("mimik"), directory)
+                else:
+                    passwords = None
+                    with self.assertRaises(SyntheticCliFailure):
+                        assist_demo.reset_passwords(Path("mimik"), directory)
+            remaining = sorted(path.name for path in directory.iterdir())
+        return calls, remaining, passwords
+
+    def test_each_account_is_reset_with_its_id_and_epoch(self):
+        calls, remaining, passwords = self.run_reset()
+        issued = [call for call in calls if call[0] == "issue-account-reset"]
+        self.assertEqual(
+            [
+                (call[call.index("--id") + 1], call[call.index("--expected-epoch") + 1])
+                for call in issued
+            ],
+            [("1", "4"), ("2", "7")],
+        )
+        self.assertEqual(sum(call[0] == "complete-account-reset" for call in calls), 2)
+        self.assertEqual(set(passwords), {assist_demo.OWNER, assist_demo.PLAYER})
+        self.assertEqual(remaining, ["smoke.sqlite3"])
+
+    def test_inputs_removed_after_a_failure(self):
+        _, remaining, _ = self.run_reset(fail_at="complete-account-reset")
+        self.assertEqual(remaining, ["smoke.sqlite3"])
+
+    def test_refuses_a_directory_without_a_demo_database(self):
+        with self.assertRaises(AssertionError):
+            self.run_reset(database=False)
+
+
 class PrivateFileTests(unittest.TestCase):
     def test_private_and_never_overwritten(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -107,7 +171,13 @@ class PrivateFileTests(unittest.TestCase):
 
 class SheetFormTests(unittest.TestCase):
     def rendered(self, rows):
-        form = {"csrf": "c" * 64, "revision": "0", "name": "", "notes": "", "op": "add-4"}
+        form = {
+            "csrf": "c" * 64,
+            "revision": "0",
+            "name": "",
+            "notes": "",
+            "op": "add-4",
+        }
         for r in range(rows):
             form[f"id-4-{r}"] = ""
         return form

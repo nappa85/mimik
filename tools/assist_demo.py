@@ -9,6 +9,7 @@ environment.
 """
 
 import argparse
+import json
 import os
 import secrets
 import shutil
@@ -124,6 +125,53 @@ def enroll(binary, directory, private, passwords):
     )
 
 
+def reset_passwords(binary, directory):
+    """Gives both demo accounts of an existing demo directory new generated dummy passwords
+    (issue-account-reset, then complete-account-reset) and returns them. Their sessions end:
+    the reset advances each account's revocation epoch. The token and password files exist
+    only while the CLI reads them."""
+    require((directory / "smoke.sqlite3").is_file(), f"{directory} holds no demo database")
+    accounts = {
+        account["login"]: account
+        for account in json.loads(registry_cli(binary, directory, "list-accounts"))
+    }
+    passwords = demo_passwords()
+    require(set(passwords) <= set(accounts), f"{directory} lacks the demo accounts")
+    private = directory / "account-inputs"
+    private.mkdir(mode=0o700)
+    try:
+        hidden = tuple(passwords.values())
+        for login, password in passwords.items():
+            token = private / f"{login}-reset.token"
+            registry_cli(
+                binary,
+                directory,
+                "issue-account-reset",
+                "--id",
+                str(accounts[login]["id"]),
+                "--expected-epoch",
+                str(accounts[login]["epoch"]),
+                "--token-output",
+                str(token),
+                secrets=hidden,
+            )
+            file = private / f"{login}.password"
+            write_private(file, password)
+            registry_cli(
+                binary,
+                directory,
+                "complete-account-reset",
+                "--token-file",
+                str(token),
+                "--password-file",
+                str(file),
+                secrets=hidden,
+            )
+    finally:
+        shutil.rmtree(private)
+    return passwords
+
+
 def sheet_form(form):
     """The create form filled with the demo values; `form` holds the rendered rows."""
     values = dict(
@@ -201,8 +249,19 @@ def assistant_args(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path, help="A built mimik binary")
-    parser.add_argument("--fixture", type=Path, required=True, help="source_fixture output")
-    parser.add_argument("--data", type=Path, required=True, help="New, empty data directory")
+    parser.add_argument("--fixture", type=Path, help="source_fixture output (setup only)")
+    parser.add_argument(
+        "--data",
+        type=Path,
+        required=True,
+        help="New, empty data directory (with --reset-passwords: an existing demo directory)",
+    )
+    parser.add_argument(
+        "--reset-passwords",
+        action="store_true",
+        help="Give the demo accounts of an existing --data directory new dummy passwords, "
+        "print them and exit (signs both accounts out)",
+    )
     parser.add_argument(
         "--assistant-endpoint",
         help="Development builds only (dev-endpoint feature): a hand-started llama-server "
@@ -220,6 +279,14 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
     binary = args.binary.resolve(strict=True)
+    if args.reset_passwords:
+        directory = args.data.resolve(strict=True)
+        passwords = reset_passwords(binary, directory)
+        print("New dummy local passwords (both accounts were signed out):")
+        print(f"  Player:  {PLAYER} / {passwords[PLAYER].decode()}")
+        print(f"  Owner:   {OWNER} / {passwords[OWNER].decode()} (administration only)")
+        return
+    require(args.fixture is not None, "--fixture is required for a new demo")
     fixture = args.fixture.resolve(strict=True)
     try:
         request("/")

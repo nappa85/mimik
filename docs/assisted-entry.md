@@ -599,7 +599,7 @@ cargo run --locked --example source_fixture -- target/demo-source
 python3 tools/assist_demo.py target/release/mimik --fixture target/demo-source --data target/assist-demo
 ```
 
-`--exit-after-setup` stops once the sheet exists. The definition
+`--exit-after-setup` stops once the sheet exists. `--reset-passwords` (with `--data` naming an existing demo folder, no `--fixture`) gives both demo accounts new dummy passwords, prints them and signs both out. The definition
 (`tests/support/source_fixture.rs`, `assist_definition`): integers Current HP, Max HP,
 Armour modifier and nullable Luck; an Equipment list (Item name, Quantity, Weight, optional
 Broken boolean) with a quick-add line (name and quantity; try "3 torches"); derived Load = `sum(equipment.map(i, i.quantity * i.weight))`; the check
