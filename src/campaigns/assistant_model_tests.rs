@@ -732,9 +732,7 @@ async fn the_page_says_why_the_device_default_is_granite() {
     let models = models_with(Duration::from_millis(1), Path::Gpu, true, first()).await;
     let page = models.page().await;
     assert!(
-        page.contains(
-            "Qwen3.5-9B not found or not readable in the models folder; using Granite 4.2 3B."
-        ),
+        page.contains("Qwen3.5-9B not found or not readable in /srv/models; using Granite 4.2 3B."),
         "{page}"
     );
     assert!(page.contains("from the default for this device"), "{page}");

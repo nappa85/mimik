@@ -2725,6 +2725,10 @@ impl Launcher for Launch {
         };
     }
 
+    fn models_folder(&self) -> String {
+        self.0.settings.models_dir.display().to_string()
+    }
+
     async fn model_present(&self, name: &str) -> bool {
         let (real, name) = (Arc::clone(&self.0), name.to_owned());
         tokio::task::spawn_blocking(move || {

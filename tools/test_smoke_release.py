@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from smoke_release import (
+    DEFINITION_CONFLICT,
     FormFields,
     corrected_evidence,
     registry_cli,
@@ -26,7 +27,7 @@ class PublicationFailureTests(unittest.TestCase):
                 Path("/fake/work"),
                 "approve-definition",
                 success=False,
-                error="Conflict",
+                error=DEFINITION_CONFLICT,
             )
 
     def test_unrelated_failure_is_not_a_stale_ticket_rejection(self):
@@ -37,13 +38,13 @@ class PublicationFailureTests(unittest.TestCase):
             (1, b"Error: Configuration\n"),
             (1, b"panic: Conflict\n"),
             (1, b""),
-            (0, b"Error: Conflict\n"),
+            (0, f"Error: {DEFINITION_CONFLICT}\n".encode()),
         ]:
             with self.subTest(code=code, stderr=stderr), self.assertRaises(AssertionError):
                 self.invoke(code, stderr)
 
     def test_typed_conflict_is_accepted(self):
-        self.assertEqual(self.invoke(1, b"Error: Conflict\n"), b"")
+        self.assertEqual(self.invoke(1, f"Error: {DEFINITION_CONFLICT}\n".encode()), b"")
 
 
 class AccountFailureTests(unittest.TestCase):
@@ -95,13 +96,13 @@ class AccountFailureTests(unittest.TestCase):
     def test_unexpected_diagnostics_are_redacted_even_without_secret_guard(self):
         secret = b"synthetic unexpected secret"
         with self.assertRaises(AssertionError) as caught:
-            self.invoke(stderr=b"Error: " + secret, error="Conflict")
+            self.invoke(stderr=b"Error: " + secret, error=DEFINITION_CONFLICT)
         self.assertNotIn(secret.decode(), str(caught.exception))
 
     def test_exact_static_invalid_diagnostics(self):
         for error in (
-            'Invalid("Owner bootstrap has already occurred.")',
-            'Invalid("Credential is unavailable, expired or superseded.")',
+            "Owner bootstrap has already occurred.",
+            "Credential is unavailable, expired or superseded.",
         ):
             with self.subTest(error=error):
                 self.assertEqual(
@@ -111,7 +112,7 @@ class AccountFailureTests(unittest.TestCase):
                 for code, stdout, stderr in (
                     (2, b"", f"Error: {error}\n".encode()),
                     (1, b"unexpected", f"Error: {error}\n".encode()),
-                    (1, b"", b"Error: Conflict\n"),
+                    (1, b"", f"Error: {DEFINITION_CONFLICT}\n".encode()),
                     (1, b"", b"Error: Storage(Database(...))\n"),
                     (-11, b"", b""),
                 ):

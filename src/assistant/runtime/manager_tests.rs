@@ -343,6 +343,10 @@ impl Launcher for FakeLauncher {
         self.selected.lock().unwrap().push(model.clone());
     }
 
+    fn models_folder(&self) -> String {
+        "/srv/models".to_owned()
+    }
+
     async fn model_present(&self, name: &str) -> bool {
         !self.absent.lock().unwrap().iter().any(|n| n == name)
     }

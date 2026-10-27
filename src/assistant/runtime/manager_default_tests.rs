@@ -4,9 +4,7 @@ use super::tests::{Behaviour, CONFIG, FakeLauncher, Start, ready};
 use super::*;
 use crate::assistant::model::{DEFAULT_MODEL_SHA256, GPU_DEFAULT_MODEL, GPU_DEFAULT_MODEL_SHA256};
 use crate::assistant::records::tests::MemRecords;
-use crate::assistant::runtime::models::{
-    GPU_DEFAULT_MISMATCH, GPU_DEFAULT_MISSING, GPU_DEFAULT_ON_CPU,
-};
+use crate::assistant::runtime::models::GPU_DEFAULT_ON_CPU;
 
 const GPU_CONFIG: Config = Config {
     path: Path::Gpu,
@@ -80,7 +78,7 @@ async fn a_missing_9b_file_means_granite_with_the_reason_on_the_page() {
     assert_eq!(status.model.active.sha256, DEFAULT_MODEL_SHA256);
     assert_eq!(
         status.model.device_default.note(),
-        Some(GPU_DEFAULT_MISSING)
+        Some("Qwen3.5-9B not found or not readable in /srv/models; using Granite 4.2 3B")
     );
 }
 
@@ -203,7 +201,7 @@ async fn a_9b_file_with_the_wrong_hash_falls_back_to_granite_with_the_reason() {
     assert_eq!(status.model.active.sha256, DEFAULT_MODEL_SHA256);
     assert_eq!(
         status.model.device_default.note(),
-        Some(GPU_DEFAULT_MISMATCH)
+        Some("Qwen3.5-9B in /srv/models does not match its pinned hash; using Granite 4.2 3B")
     );
 }
 

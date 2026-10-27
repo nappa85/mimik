@@ -132,6 +132,10 @@ pub(crate) trait Launcher: Send + Sync {
     fn device_notes(&self) -> Vec<String> {
         Vec::new()
     }
+    /// The models folder as the page's notes name it (an absolute path).
+    fn models_folder(&self) -> String {
+        "the models folder".to_owned()
+    }
     /// The model the next start loads (its file, the SHA-256 it must have and the alias).
     fn select(&self, _model: &Model) {}
     /// Whether the model file `name` is in the models folder (a regular file the load would
@@ -960,16 +964,19 @@ impl Manager {
             } else {
                 NineB::Missing
             };
-            let (model, note) = default_model(gpu, self.config.path == Path::Gpu, file);
-            if let Some(note) = note {
+            let (model, note) = default_model(
+                gpu,
+                self.config.path == Path::Gpu,
+                file,
+                &self.launcher.models_folder(),
+            );
+            if let Some(note) = &note {
                 log(note);
             }
             self.active = model.clone();
             self.update(|status| {
                 status.model.active = model;
-                status.model.device_default = DeviceDefault::On {
-                    note: note.map(str::to_owned),
-                };
+                status.model.device_default = DeviceDefault::On { note: note.clone() };
             });
         }
         // A manager without a model setting (tests) leaves the launcher's own model alone.

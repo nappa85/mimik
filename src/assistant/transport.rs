@@ -48,6 +48,20 @@ pub(crate) enum Refused {
     Path,
 }
 
+#[cfg(feature = "dev-endpoint")]
+impl Refused {
+    /// The reason, as text for the operator.
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::NotHttp => "the URL must start with http://",
+            Self::Userinfo => "the URL must not carry a user name or password",
+            Self::Host => "the host must be 127.0.0.1 (or [::1])",
+            Self::Port => "the URL needs an explicit port from 1 to 65535",
+            Self::Path => "the URL must not have a path, query or fragment",
+        }
+    }
+}
+
 /// Checks a TCP endpoint URL (plan §1.4, "Client policy"): `http` only; the host an IP
 /// literal equal to `127.0.0.1` (or `[::1]` when `ipv6_loopback`, the 2c-1 development
 /// endpoint only), with no userinfo or zone ID; an explicit port; no path, query or

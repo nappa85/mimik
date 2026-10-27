@@ -969,7 +969,10 @@ async fn cli_failure_paths_are_redacted_and_publish_nothing() {
             rationale,
         ])
     };
-    failed(&publish(&id, &zeros, ACTOR, RATIONALE), "StaleComparison");
+    failed(
+        &publish(&id, &zeros, ACTOR, RATIONALE),
+        "comparison ticket is stale",
+    );
     failed(
         &publish(&id, "zqxkey", ACTOR, RATIONALE),
         "comparison-hash-format",
@@ -978,20 +981,20 @@ async fn cli_failure_paths_are_redacted_and_publish_nothing() {
         &publish(&id, &ticket.to_uppercase(), ACTOR, RATIONALE),
         "comparison-hash-format",
     );
-    failed(&publish(&id, &ticket, " ", RATIONALE), "Invalid");
+    failed(&publish(&id, &ticket, " ", RATIONALE), "Catalogue rejected");
     failed(
         &publish(&id, &ticket, &"zqxactor".repeat(20), RATIONALE),
-        "Invalid",
+        "Catalogue rejected",
     );
-    failed(&publish(&id, &ticket, ACTOR, ""), "Invalid");
-    failed(&publish("999", &ticket, ACTOR, RATIONALE), "NotFound");
+    failed(&publish(&id, &ticket, ACTOR, ""), "Catalogue rejected");
+    failed(&publish("999", &ticket, ACTOR, RATIONALE), "not found");
     failed(
         &publish("0", &ticket, ACTOR, RATIONALE),
         "positive-row-id-required",
     );
     failed(
         &fixture.cli(&["compare-catalogue", "--id", "999"]),
-        "NotFound",
+        "not found",
     );
     let show = |game: &str, catalogue: &str, version: &str| {
         fixture.cli(&[
@@ -1006,9 +1009,9 @@ async fn cli_failure_paths_are_redacted_and_publish_nothing() {
             version,
         ])
     };
-    failed(&show("synthetic-game", "spells", "1"), "NotFound");
+    failed(&show("synthetic-game", "spells", "1"), "not found");
     failed(&show("Zqxkey", "spells", "1"), "invalid-stable-id");
-    failed(&show("synthetic-game", "zqxkey", "1"), "NotFound");
+    failed(&show("synthetic-game", "zqxkey", "1"), "not found");
     failed(
         &show("synthetic-game", "spells", "0"),
         "positive-version-required",
@@ -1547,7 +1550,7 @@ async fn cross_process_publish_race_has_one_winner() {
         if !output.status.success() {
             // The loser sees the winner's version in its recomputed ticket; never a lock error.
             assert!(
-                String::from_utf8_lossy(&output.stderr).contains("StaleComparison"),
+                String::from_utf8_lossy(&output.stderr).contains("comparison ticket is stale"),
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
