@@ -665,6 +665,99 @@ checks run on the dev host with the GPU fan on manual, evening or weekend, throu
 - re-measure the superseding-job timings on both paths with the fixed helper, then the GPU-path
   checks at each llama.cpp pin change (`tools/assist_gpu_live.py`).
 
+### ASSIST-56 Prompt format D (before 2d-2)
+
+Ships the D53 format of `tools/assist_eval.py` (contract `v2-ids-53`) for every model. The
+shipped prefix must be byte-identical to the Python `ids53_prefix()`: Rust's `PREFIX_SHA256`
+becomes `ac46010c…e9453f` (already pinned in `tools/test_assist_eval.py`), so the instruction
+text needs no new wording review, only the port.
+
+**Request shape (follows D53 exactly).** Target stays `{"alias":"t","id","label?","value"}`:
+`t` is what experiments 4 and 5 measured, the target's value stays (the model needs it for
+"half" and the provenance rule), and an id equal to `t` is a collision (below). Context items
+become `{"id","label","type"}`: no `alias`, no `value`. `ref` carries `t` or a context item's
+id. The instructions file is replaced by the D53 text (`schemas/interpretation-v2-instructions.txt`);
+the prefix quotes the schema with `ref` as `SHORT_REF_IDS`. `EnvelopeItem` loses `alias`/`value`;
+values stay only in `Supplied` (the Rust side), `Node::Ref`'s field is renamed `id`. The caps
+`MAX_FIELD_ALIASES`/`MAX_CELL_ALIASES` and `field_alias`/`cell_alias` go; only the byte/token
+bound limits the item count.
+
+**Ids that do not fit.** Field ids are `[a-z][a-z0-9_-]{0,63}` and cell ids `[a-z][a-z0-9_]{0,63}`
+(definition validation), so long or odd-character ids cannot occur from valid definitions. The
+draft still checks each id against that pattern and drops a failing item (defence, tested).
+Collisions: an id equal to `t` drops the item (the target wins); a field and a same-row cell
+with the same id (a cell can share a field's id) keep the cell and drop the field (the row
+cell is the co-read, so the stronger context). Dropped items are not in the enum and a
+reference to them is invalid. Python's `ValueError` on collision stays as the prototype's
+guard. Recorded in `docs/limitations.md` (new ASSIST-L52).
+
+**Schema and `response_format`.** `schemas/interpretation-v2.json` stays the pinned template
+(hash `39da7936…` unchanged, so every Python arm keeps working); its `$defs.ref.properties.ref`
+enum (`f1…c31`) is replaced per request by `{"enum":["t", ...ids of the kept items]}`
+at the same key position (`contract::schema_for(ids)`), as Python's `transform_fieldref2`
+does. The enum is built in `request::render` for the shape that fits, so a dropped item is not
+in the grammar; `Rendered` carries the schema, `Completion` sends it, and the trial, the
+priming and the calibration fillers use the same function. Pins: the template hash, plus a
+golden hash of `schema_for(["t"... sample])` in Rust and Python. Reply validation uses a static
+copy with `ref` as a plain non-empty string; membership is `Checks.supplied` (an unknown id is
+`Drop::UnsuppliedRef` for that option, not an invalid reply). The grammar differs per request
+but the system prompt does not, so the prompt cache holds (a live check: `cached_tokens` on a
+second request with another enum).
+
+**Values.** `Draft` keeps each item's `Supplied {address, integer, value}` from the job's
+snapshot; the value is substituted when Mimik evaluates (`output::evaluate`) and re-read live
+at Use (`interpret_web::plan`, unchanged apart from keys being ids). Provenance (ASSIST-53) is
+unchanged: allowed literals are the note's numbers and words, the target's value and the
+fraction numbers; a context value is never a valid literal, so the model cannot copy one
+(ASSIST-L32's cause). The proposal hash covers refs by id; proposals are in memory only
+(`jobs.rs`), no table stores a ref, so there is no migration or stored-data impact (to be
+re-checked by grep at implementation).
+
+**Owner view.** The expression is rendered by Mimik with labels and values (`jobs::proposal`
+maps id to label; `t` to the target's value), unchanged for the owner. The model's explanation
+is free text: it can now name an id and cannot know a context value, so an explanation may
+omit or misstate one; the page already shows the computed expression and effect beside it.
+Recorded as a limit (L52); no filter is added (not measured).
+
+**Budgets.** B (1,024/4,096), N(B) and the 1 KiB related-only rule stay: they are latency
+bounds, not content rules. Without values and aliases items are shorter, so more fit under
+the same bound. Calibration fillers and the priming envelope are rebuilt in the new item shape
+(`calibration::filler`); the idle CPU calibration and L47's `max_tokens` re-derivation stay
+owed (live, outside weekday hours). The test of the exact 4,096-byte item count is rewritten.
+
+**2d-1 trial.** The five phrases keep their ids and notes; their envelopes lose alias/value,
+`Phrase::request` returns the per-request schema too, and `structured_body` takes it. No
+reference phrase is added (the trial gates schema validity and truncation only, D-D).
+
+**Python mirror.** `v2-ids-53` is the shipped contract name. `load_v2()`'s instructions file
+now equals `ids53_instructions()`, so the old compact text is frozen as
+`tools/fixtures/interpretation-v2-compact-instructions.txt` for the retained arms (`v2`, `v2-short`,
+`v2-compact`, `v2-base`, `v2-ids`, ... keep their pinned hashes). Tests in both languages: the
+prefix hash, the template hash, the schema golden, and one cross-language golden envelope
+(a Rust render checked against `transform_fieldref2` of the same case, byte for byte).
+`run_assist_screen.sh` and the demo default to `v2-ids-53`.
+
+**Docs.** `assisted-entry.md` (Request, Aliases, table), `model-runtime.md` (prefix, trial,
+priming), `decisions.md` (ASSIST-52 removed as superseded, ASSIST-56 reworded as built),
+`limitations.md` (L32 after Granite's D53 result, L47, L51, new L52), `TODO.md`; this section
+is deleted when it lands.
+
+**Failing-first tests.** (1) prefix hash `ac46010c…`; (2) envelope has no alias/value on
+context items and the target keeps them; (3) `schema_for` enum equals `["t", kept ids]`, and a
+dropped item leaves the enum; (4) a reply referencing an id is read and its value substituted,
+an alias-style `f1` is `UnsuppliedRef`; (5) id equal to `t`, field/cell collision (cell wins),
+invalid pattern; (6) apply recheck by id; (7) trial and priming bodies carry the per-request
+schema; (8) calibration filler is in the new shape and exactly the cap; (9) 4,096-byte item
+count; (10) Python: prefix, golden, remap, frozen compact hash.
+
+**Gate.** `mimik-ci` container `mimik-asst56-run` (CPUS=2 on weekdays and while the Granite
+run is on), fmt, strict pedantic Clippy, locked tests, Python helper tests, release build and
+unpacked smoke; no new dependency. Independent reviews per AGENTS.md before merge.
+
+**Not measured.** The general 104-reply screen with D, and Granite with D53 (running), are not
+part of this gate; the 9B has only the field-reference screen (experiment 4: A 20/8, D53 24/5).
+Results go to `docs/results.md`; no live inference is run by this step's tests (fake server).
+
 ### 2d-2 Model downloads
 
 Scope: §1.4b downloads: the `hf:` form, metadata admission, licence confirmation, the download
