@@ -261,6 +261,35 @@ rates below are pessimistic and no CPU-baseline conclusion is drawn from them.
   the 180 s limit: on a machine where each sample takes more than about 90 s nothing can fit
   anyway (R at B 512 is then above 90 s), so the limit only decides how that is reported.
 
+## Assisted interpretation: shipped prompt D on the 2b screen (ASSIST-56, 2026-10-27)
+
+Prototype tier, one run (`tools/run_assist_screen.sh`, `CONTRACT=v2-ids-53 PRIME=1
+MAX_TOKENS=384`, Granite 4.2 3B Q4_K_M, CPUs 0 and 1, 2 threads; ledgers under
+`/media/data/mimik/assist-2c1/runs/screen-v2ids53-20261027-2211/`). Same 50 cases × 2 passes
++ 4 stress as the v2-short run below. The prompt differs in two ways at once (format D and
+the ASSIST-53 instructions and literal rule), so the comparison does not separate them.
+
+| | v2-short (2026-10-22) | D (v2-ids-53) |
+|---|---|---|
+| Correct / false-confident / silent (pass 1, 50) | 37 / 6 / 7 | 37 / 8 / 5 |
+| Field references (6) correct / false-confident | 0 / 3 | 1 / 3 |
+| Schema-valid, truncated (at 384) | 100/100, 0 | 100/100, 0 |
+| Output tokens p50 / p95 / max (104 replies) | 97 / 145 / 263 | 56 / 109 / 173 |
+| Latency p50 / p95 / max (s) | 50.8 / 67.9 / 103.2 | 28.9 / 42.0 / 62.9 |
+| Priming, idle (s) | ~175 | 185, 191, 194 |
+
+- Changed cases (pass 1): rf-01 and ip-01 became correct; fv-04, fv-08 and ic-07 became
+  false-confident. ic-07 ("spent 10") followed a context label's "× 100" hint. fv-08 ("un po'
+  meglio", expected no option) offered −1 with the 1 admitted by the ASSIST-53 number word
+  "un", which is also the Italian indefinite article; fv-04 multiplied the target by a third
+  of itself.
+- Replies are shorter (compact single-line JSON from the ASSIST-52 sentence), hence the
+  lower latency; the host load of the two runs was not controlled, so no speed claim beyond
+  that.
+- The largest valid, untruncated `predicted_n` is 173 (dh-07): by the 2b rule `max_tokens`
+  would be 224, and by the trial rule (floor 256) 256. The default stays 352 until the
+  owner decides; the screen's ids are short, while L52 shows long ids lengthen replies.
+
 ## Assisted interpretation: schema v2 re-run of the 2b screen (step 2c-1, 2026-10-22)
 
 Prototype tier (`tools/assist_eval.py --contract`, `tools/run_assist_screen.sh`,
