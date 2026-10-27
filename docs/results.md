@@ -26,6 +26,30 @@ request marker reaches neither output stream; overflow fails the check.
 Limits: no real older-ABI or boot-disabled kernel or other distribution was tested here
 (the real GPU and the Ubuntu VM are covered below). The `ENOSYS` simulation is not older-ABI evidence.
 
+## Field references: re-score under ASSIST-53 (2026-10-27)
+
+The stored replies of experiments 1 to 3 were re-scored offline, with no new model runs, under the ASSIST-53 literal rule: number words in the note count, and a redundant `* 1` or `/ 1` is accepted (`fieldref-summary --literal-rule assist53`; summaries `fieldref-<arm>-asst53.json` next to the originals). The old rule reproduced every stored verdict before the re-score.
+
+| Model | Arm | correct_ref | false_confident | abstained |
+|---|---|---|---|---|
+| Granite 4.2 3B (exp 1) | base | 1 → 2 | 10 → 14 | 19 → 14 |
+| Granite 4.2 3B (exp 1) | compact | 1 → 4 | 11 → 16 | 18 → 10 |
+| Granite 4.2 3B (exp 2) | A | 1 → 4 | 11 → 16 | 18 → 10 |
+| Granite 4.2 3B (exp 2) | B (refex) | 5 → 6 | 17 → 18 | 8 → 6 |
+| Granite 4.2 3B (exp 2) | C (novals) | 2 → 6 | 13 → 15 | 15 → 9 |
+| Granite 4.2 3B (exp 2) | D (ids) | 5 → 7 | 8 → 12 | 17 → 11 |
+| Qwen3.5-9B (exp 3) | A | 14 → 20 | 5 → 7 | 11 → 3 |
+| Qwen3.5-9B (exp 3) | D | 19 → 25 | 4 → 4 | 7 → 1 |
+| Qwen3.6-35B-A3B (exp 3b) | A | 20 → 23 | 3 → 5 | 7 → 2 |
+| Qwen3.6-35B-A3B (exp 3b) | D | 22 → 24 | 1 → 2 | 7 → 4 |
+
+Results:
+- **Only Qwen3.6-35B-A3B with D meets the screen bar** (24/30 correct_ref, 2 false_confident). Qwen3.5-9B with D reaches 25 but has 4 false_confident, one above the cap.
+- For Granite the relaxation mostly moves options from abstained to false_confident.
+- The relaxation lets wrong options through as well as right ones: false_confident rises in 9 of 10 arms.
+
+Limits: the replies were produced under the digits-only instructions, so the model never saw the relaxed rule; this is a re-score, not a run of the shipped ASSIST-53 prompt. One run per arm, 30 dev cases. A live run with the new instructions is needed before any default-model decision.
+
 ## Field references, experiment 3: Qwen on the GPU (2026-10-26)
 
 Same 30 `fr-*` dev cases and settings as experiments 1 and 2: pass 1, greedy, `max_tokens` 352, primed, thinking off, ctx 8192, one run per arm.
@@ -45,7 +69,7 @@ Both arms scored 30/30 schema-valid, with no truncation and no coincidences.
 
 Its errors are now mostly the wrong operation listed first, with the right one as an alternative. For example, fr-13 "interest of one day's wage" got `t * wage` first and `t + wage` second.
 
-**Dropped but right is large here: 9 and 7.** These are mostly correct expressions rejected only by the literal rule (spelled-out numbers, a redundant `* 1`). Relaxing that rule would move several of them to correct_ref. This is a policy question, not a model one.
+**Dropped but right is large here: 9 and 7.** These are mostly correct expressions rejected only by the literal rule (spelled-out numbers, a redundant `* 1`). ASSIST-53 relaxed that rule; see the re-score above.
 
 **Qwen3.6-35B-A3B Q4_K_M** (second attempt on 2026-10-26; run folder `/media/data/mimik/fieldref/runs/20261026-2253-qwen35b`).
 

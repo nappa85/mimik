@@ -74,25 +74,15 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   1. show the exact request (instructions plus the `<data>` JSON);
   2. let the owner answer as if they were the model and score their answer the way the harness does;
   3. show the real model's reply for the same case side by side, and why it scored the way it did.
-- **Field-reference bug (owner 2026-10-26: field references stay; the screen's 1/30 is a bug,
-  possibly in how we test).** Lead: the v2 instructions show no example of `{"ref": "fN"}` (all
-  four examples use only `t` and literals), and the model mostly copied field values as
-  literals. Next: add one or two reference examples unlike the screen's cases, check the
-  cases for ambiguous phrasings (for example fr-11), and re-run the 30-case screen.
-  Walkthrough finding: in 4–5 abstained cases per arm, the dropped option reached the
-  expected value. In fr-08 the model was right (`t - f2*1`), but the spelled-out "one" is
-  not an allowed literal, so its option was dropped. The others mostly copied field values
-  as literals. Decide whether such numbers count (spelled-out numbers, or a redundant ×1).
-  Experiment 2 (prompt variants, `docs/results.md`): ids instead of aliases with no context
-  values (D) is the best arm, at 5/30 correct against 1/30. That is far from the bar, so the
-  Experiment 3 (`docs/results.md`): Qwen3.5-9B on the GPU scores 14/30 with the shipped prompt
-  and 19/30 with D (4 false-confident). Better, but it still fails 24/30. Its dropped-but-right
-  count is 7–9, mostly the literal rule. Open:
-  - implement ASSIST-53 (number words and a redundant `* 1` count) in the Rust provenance check
-    and the v2 instructions, then re-score the screens;
-  - Qwen3.6-35B-A3B (experts in RAM): 22/30 with D, 1 false-confident, the best so far but
-    still short; the load from the magnetic disk is slow (745 s) and needs about 26 GB of RAM;
-  - whether the GPU default model becomes the 9B (2d-1 trial path).
+- **Field references (owner 2026-10-26: they stay; wrong results are a bug).** Experiments 1-3
+  and the ASSIST-53 re-score are in `docs/results.md`. Re-scored offline, only Qwen3.6-35B-A3B
+  with prompt D meets the bar (24/30, 2 false-confident); Qwen3.5-9B with D has 25/30 but 4
+  false-confident; Granite 3B stays far off. Open:
+  - a live screen with the shipped ASSIST-53 instructions (the re-scored replies were produced
+    under the digits-only prompt): 9B and 35B, arms A and D (evening/weekend, fan manual);
+  - the default GPU model and prompt (D needs a Rust builder and schema change, fresh held-out
+    cases and a review); the 35B needs about 26 GB of RAM and loads slowly from the magnetic
+    disk (745 s).
 
 - Review helper: `external_review.py`'s short-output unavailable heuristic can reject a real
   successful verdict that discusses "unavailable" status. Add a regression and narrow the
