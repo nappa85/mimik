@@ -74,15 +74,12 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   1. show the exact request (instructions plus the `<data>` JSON);
   2. let the owner answer as if they were the model and score their answer the way the harness does;
   3. show the real model's reply for the same case side by side, and why it scored the way it did.
-- **Field references (owner 2026-10-26: they stay; wrong results are a bug).** Experiments 1-3
-  and the ASSIST-53 re-score are in `docs/results.md`. Re-scored offline, only Qwen3.6-35B-A3B
-  with prompt D meets the bar (24/30, 2 false-confident); Qwen3.5-9B with D has 25/30 but 4
-  false-confident; Granite 3B stays far off. Open:
-  - a live screen with the shipped ASSIST-53 instructions (the re-scored replies were produced
-    under the digits-only prompt): 9B and 35B, arms A and D (evening/weekend, fan manual);
-  - the default GPU model and prompt (D needs a Rust builder and schema change, fresh held-out
-    cases and a review); the 35B needs about 26 GB of RAM and loads slowly from the magnetic
-    disk (745 s).
+- **Field references (owner 2026-10-26: they stay; wrong results are a bug).** Experiments 1-4
+  in `docs/results.md`. Live with the ASSIST-53 instructions (experiment 4) no arm passes:
+  correct_ref reaches 24-25 but false_confident is 4-8 (cap 3); the errors are misreadings
+  (a factor added or dropped, the wrong sign, replace instead of add). Open (owner decision):
+  accept the 9B default with the owner's confirmation as the safeguard, change the bar, or try
+  further prompt work (for example examples of "per each" and of buying versus spending).
   - Qwen4 (announced, not released on 2026-10-27): screen it when it is out.
   - Engines (ASSIST-54): re-screen when mistral.rs gains Vulkan or vllm.cpp has stable releases.
 

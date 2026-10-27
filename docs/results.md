@@ -26,6 +26,25 @@ request marker reaches neither output stream; overflow fails the check.
 Limits: no real older-ABI or boot-disabled kernel or other distribution was tested here
 (the real GPU and the Ubuntu VM are covered below). The `ENOSYS` simulation is not older-ABI evidence.
 
+## Field references, experiment 4: live screen with the ASSIST-53 instructions (2026-10-27)
+
+Pre-registered in `tools/fieldref5-prereg.md`. Same 30 `fr-*` dev cases and settings as experiment 3 (greedy, `max_tokens` 352, primed, thinking off, ctx 8192, one run per arm), with the ASSIST-53 sentence in the prompt: A is the shipped v2-compact prefix, D53 is arm D (ids, no context values, reference examples) with that sentence. RX 6650 XT, fan on manual at 255. Run folders `/media/data/mimik/fieldref/runs/20261027-1800-fr5-qwen9b` and `…-fr5-qwen35b`.
+
+| Model | Arm | correct_ref | false_confident | abstained | dropped but right | total p50 | load (to /health) | peak junction |
+|---|---|---|---|---|---|---|---|---|
+| Qwen3.5-9B Q4_K_M, all layers on the GPU | A | 20 | 8 | 2 | 2 | 9.2 s | 5.4 s | 57 °C |
+| Qwen3.5-9B Q4_K_M, all layers on the GPU | D53 | 24 | 5 | 1 | 1 | 6.3 s | 5.0 s | 57 °C |
+| Qwen3.6-35B-A3B Q4_K_M, `--n-cpu-moe` 32, SSD copy | A | 25 | 4 | 1 | 1 | 8.9 s | 34.7 s | 36 °C |
+| Qwen3.6-35B-A3B Q4_K_M, `--n-cpu-moe` 32, SSD copy | D53 | 24 | 4 | 2 | 1 | 8.4 s | 7.0 s | 47 °C |
+
+All arms: 30/30 schema-valid, no truncation, no coincidences, swap growth at most 35 MB.
+
+Results:
+- **No arm passes the screen**: every arm has 4 or more false_confident against the cap of 3. Correct_ref reaches the bar of 24 in three arms.
+- The remaining errors are misreadings, not harness artefacts (checked case by case): a factor added or dropped ("one ration eaten per crew member" gives `t - crew * days`; "paid each crew member a day's wage" gives `t - wage`), the wrong sign (buying ammunition subtracted; "dulled by my wits" added), replacing instead of adding ("hired as many hands as I have wits" sets crew to wits), and the wrong field halved ("pagato metà del debito" halves coin).
+- For the 9B, D53 is clearly better than A (+4 correct_ref, −3 false_confident). For the 35B the two arms are level; the ASSIST-53 sentence lifted its A from 20 (experiment 3b) to 25.
+- The re-score of experiment 3 under ASSIST-53 predicted 9B D 25/4 and 35B D 24/2; the live runs are 24/5 and 24/4. One run per arm on 30 cases, so differences of one or two cases are within noise.
+
 ## Field references: re-score under ASSIST-53 (2026-10-27)
 
 The stored replies of experiments 1 to 3 were re-scored offline, with no new model runs, under the ASSIST-53 literal rule: number words in the note count, and a redundant `* 1` or `/ 1` is accepted (`fieldref-summary --literal-rule assist53`; summaries `fieldref-<arm>-asst53.json` next to the originals). The old rule reproduced every stored verdict before the re-score.
