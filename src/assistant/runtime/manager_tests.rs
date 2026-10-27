@@ -125,7 +125,12 @@ impl Server for FakeServer {
         })
     }
 
-    async fn structured(&self, _: &str, max_tokens: u32) -> Result<Structured, Failure> {
+    async fn structured(
+        &self,
+        _: &str,
+        _: &[String],
+        max_tokens: u32,
+    ) -> Result<Structured, Failure> {
         assert_eq!(max_tokens, 384, "phrases go out at the measurement cap");
         let n = self.phrases.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(self.behaviour.phrase_delay).await;

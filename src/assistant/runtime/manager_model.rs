@@ -5,9 +5,9 @@
 //! previous (or, after a switch, the new) model starts next.
 use super::{
     Arc, AtomicBool, Attempt, Child, Command, DeviceDefault, EndReason, Fail, Future, Instant,
-    Launcher, Level, Manager, Model, ModelCommand, Mutex, Next, NotCalibrated, Ordering, Path,
-    Record, State, Status, TrialKey, TrialReport, TrialRequest, TrialState, calibrate_budgets, log,
-    measured, phrase_bound, trial, trial_bound, warm,
+    Launcher, Level, Manager, Measurement, Model, ModelCommand, Mutex, Next, NotCalibrated,
+    Ordering, Path, Record, State, Status, TrialKey, TrialReport, TrialRequest, TrialState,
+    calibrate_budgets, log, measured, phrase_bound, trial, trial_bound, warm,
 };
 use crate::assistant::model::{default_alias, trial_max_tokens};
 
@@ -335,7 +335,10 @@ impl Manager {
         ));
         if !keeps_previous {
             self.previous = Some(old);
+            self.older_prompt.1 = self.older_prompt.0;
         }
+        // The trial this switch consumed ran under the current prompt.
+        self.older_prompt.0 = false;
         self.active = new;
         self.device_default = false;
         self.publish_models();
@@ -360,15 +363,18 @@ impl Manager {
         }
         log(&format!("model switched back to {}", previous.spec));
         self.previous = Some(std::mem::replace(&mut self.active, previous));
+        self.older_prompt = (self.older_prompt.1, self.older_prompt.0);
         self.device_default = false;
         self.publish_models();
     }
 
     fn publish_models(&self) {
         let (active, previous) = (self.active.clone(), self.previous.clone());
+        let older_prompt = self.older_prompt.0;
         self.update(|status| {
             status.model.active = active;
             status.model.previous = previous;
+            status.model.older_prompt = Measurement::of(older_prompt);
             status.model.from_owner_setting = true;
             status.model.device_default = DeviceDefault::Off;
         });
@@ -509,6 +515,7 @@ fn trial_json(report: &TrialReport) -> String {
         })
         .collect();
     serde_json::json!({
+        "prefix_sha256": crate::assistant::contract::prefix_sha256(),
         "trial": report.key.number,
         "generation": report.key.generation,
         "device": match report.path { Path::Cpu => "cpu", Path::Gpu => "gpu" },

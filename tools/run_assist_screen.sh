@@ -11,7 +11,8 @@
 #   MAX_TOKENS (384), VARIANT (exploratory prompt variant, empty = pre-registered prefix),
 #   PRIME (0): 1 sends the priming request (full fixed prefix, max_tokens 1) after every start,
 #   before any case, and records it as prime-<n>.jsonl.
-#   CONTRACT (v1): v2 is output schema v2 (step 2c-1, aliases), read from schemas/.
+#   CONTRACT (v1): v2 is output schema v2 (step 2c-1, aliases), read from schemas/; v2-ids-53 is the
+#     shipped prompt format (ASSIST-56: ids, no context values).
 #   DEVICE (cpu): gpu passes /dev/dri to the server and offloads all layers (Vulkan). A GPU run
 #   requires the fan in manual mode at pwm1 >= 230 and runs a thermal guard that removes the
 #   containers and stops the run at junction >= 90 C, edge >= 80 C, or the fan leaving

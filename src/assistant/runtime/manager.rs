@@ -27,8 +27,8 @@
 use super::budgets::NoBudgets;
 use super::calibration::{self, Calibration};
 use super::models::{
-    DeviceDefault, Model, ModelFile, ModelStatus, NineB, TrialKey, TrialReport, TrialState,
-    default_model, gpu_default_name, phrase_bound, trial_bound,
+    DeviceDefault, Measurement, Model, ModelFile, ModelStatus, NineB, TrialKey, TrialReport,
+    TrialState, default_model, gpu_default_name, phrase_bound, trial_bound,
 };
 use super::server::{Health, Server};
 use super::{Level, Path, trial};
@@ -200,6 +200,7 @@ impl Status {
             model: ModelStatus {
                 active: models.active.clone(),
                 previous: models.previous.clone(),
+                older_prompt: Measurement::of(models.older_prompt.0),
                 from_owner_setting: models.from_owner_setting,
                 switchable: models.records.is_some(),
                 next_trial: 1,
@@ -268,6 +269,9 @@ pub(crate) struct ModelSetup {
     /// Neither a start flag nor the stored setting names a model: `active` is a placeholder
     /// and each session picks the device default (ASSIST-55, `default_model`).
     pub device_default: bool,
+    /// Whether the stored trial of the active and of the previous model measured it with an
+    /// older prompt than the current one (ASSIST-56).
+    pub older_prompt: (bool, bool),
 }
 
 #[cfg(test)]
@@ -287,6 +291,7 @@ impl ModelSetup {
             records: None,
             from_owner_setting: false,
             device_default: false,
+            older_prompt: (false, false),
         }
     }
 }
@@ -649,6 +654,7 @@ pub(crate) fn spawn_with(
         device_default: models.device_default,
         nine_b_mismatch: false,
         previous: models.previous,
+        older_prompt: models.older_prompt,
         records: models.records,
         cancel: Arc::clone(&cancel),
         trial: 0,
@@ -740,6 +746,8 @@ struct Manager {
     /// "Try the GPU again" or Mimik's restart.
     nine_b_mismatch: bool,
     previous: Option<Model>,
+    /// Whether the active and the previous model were measured with an older prompt.
+    older_prompt: (bool, bool),
     /// Where model changes are stored (none: the owner cannot change the model).
     records: Option<Arc<dyn Records>>,
     /// The owner's Cancel of a running trial.

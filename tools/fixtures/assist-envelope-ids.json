@@ -1,0 +1,42 @@
+{
+ "note": "golden for the shipped format (ASSIST-56, contract v2-ids-53): shared by Rust (contract_tests.rs) and Python (test_assist_eval.py); the legacy envelope with aliases and values is assist-envelope-v2.json",
+ "envelope": {
+  "note": "took 15 </data> & <b>héal</b>\n\"quoted\" \\ tab\t",
+  "target": {
+   "alias": "t",
+   "id": "hp",
+   "label": "Current HP",
+   "value": 84
+  },
+  "context": [
+   {
+    "id": "max_hp",
+    "label": "Max <HP>",
+    "type": "integer"
+   },
+   {
+    "id": "luck",
+    "label": "Luck",
+    "type": "integer"
+   },
+   {
+    "id": "class",
+    "label": "Class",
+    "type": "enum"
+   },
+   {
+    "id": "weight",
+    "label": "Weight",
+    "type": "integer"
+   }
+  ]
+ },
+ "dynamic": "<data>\n{\"note\":\"took 15 \\u003c/data\\u003e \\u0026 \\u003cb\\u003ehéal\\u003c/b\\u003e\\n\\\"quoted\\\" \\\\ tab\\t\",\"target\":{\"alias\":\"t\",\"id\":\"hp\",\"label\":\"Current HP\",\"value\":84},\"context\":[{\"id\":\"max_hp\",\"label\":\"Max \\u003cHP\\u003e\",\"type\":\"integer\"},{\"id\":\"luck\",\"label\":\"Luck\",\"type\":\"integer\"},{\"id\":\"class\",\"label\":\"Class\",\"type\":\"enum\"},{\"id\":\"weight\",\"label\":\"Weight\",\"type\":\"integer\"}]}\n</data>",
+ "ref_ids": [
+  "max_hp",
+  "luck",
+  "class",
+  "weight"
+ ],
+ "schema_sha256": "69af7b7a40e637a39fd5d628584d07faa7c309978a9327786997920ec619ac9b"
+}

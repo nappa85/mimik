@@ -14,8 +14,8 @@ use crate::assistant::contract::{Envelope, EnvelopeTarget, TARGET_ALIAS, envelop
 use crate::assistant::interpreter::Failure;
 use serde_json::json;
 
-/// Labels and values of the shipped demo and 2b synthetic sheets (`tools/assist-eval`), the
-/// source of the filler's token density.
+/// IDs, labels and (unsent) values of the shipped demo and 2b synthetic sheets
+/// (`tools/assist-eval`), the source of the filler's token density.
 const FIELDS: &[(&str, &str, i64)] = &[
     ("hp", "Hit points", 20),
     ("max_hp", "Maximum hit points", 24),
@@ -42,14 +42,12 @@ pub(crate) fn priming_envelope() -> String {
 }
 
 fn item(n: usize, variant: usize, label_suffix: &str) -> String {
-    let (id, label, value) = FIELDS[(n + variant * 3) % FIELDS.len()];
-    let value = value + i64::try_from(n / FIELDS.len()).unwrap_or(0);
+    // A context item as a request carries it (ASSIST-56): ID, label and type, no value.
+    let (id, label, _) = FIELDS[(n + variant * 3) % FIELDS.len()];
     json!({
-        "alias": format!("f{}", n + 1),
         "id": format!("{id}_{}", n / FIELDS.len()),
         "label": format!("{label}{label_suffix}"),
         "type": "integer",
-        "value": value,
     })
     .to_string()
 }

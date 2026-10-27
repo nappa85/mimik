@@ -16,12 +16,9 @@ type Pairs = Vec<(String, String)>;
 
 const HEAL: &str = r#"{"kind":"options","options":[{"expr":{"op":"sub","l":{"ref":"t"},"r":{"lit":15}},"explanation":"took 15"}]}"#;
 
-fn budgets() -> Budgets {
+fn budgets_at(bytes: usize) -> Budgets {
     Budgets {
-        bounds: Bounds {
-            bytes: 1024,
-            tokens: 384,
-        },
+        bounds: Bounds { bytes, tokens: 384 },
         run: Duration::from_secs(85),
         depth: 1,
         queue_wait: Duration::from_secs(35),
@@ -39,12 +36,18 @@ struct Assisted {
 /// The assist sheet (HP 84, Max HP 84, one Equipment row `r1-1`) served with the assistant
 /// on over `stub`.
 async fn assisted(answers: &[&str]) -> Assisted {
+    assisted_at(answers, 1024).await
+}
+
+/// [`assisted`] with the dynamic part bounded at `bytes` (above 1,024 every integer field is
+/// sent, not only those read with the target).
+async fn assisted_at(answers: &[&str], bytes: usize) -> Assisted {
     let mut setup = setup(&assist()).await;
     created(&setup, &[]).await;
     let stub = Arc::new(StubInterpreter::answering(
         answers.iter().map(|answer| Ok((*answer).to_owned())),
     ));
-    let handle = AssistantHandle::ready_for_tests(Arc::clone(&stub) as _, budgets());
+    let handle = AssistantHandle::ready_for_tests(Arc::clone(&stub) as _, budgets_at(bytes));
     setup.app = crate::auth::app_with_options(
         setup.store.clone(),
         crate::auth::AuthOptions {
@@ -232,8 +235,13 @@ async fn a_job_offers_the_reading_and_use_applies_it_with_a_confirmed_note() {
     let sent = assisted.stub.requests.lock().unwrap()[0].dynamic.clone();
     assert!(sent.contains(r#""note":"took 15 damage""#), "{sent}");
     // B 1,024: only Max HP, read with HP by the check, is sent; Armour and Luck are not.
-    assert!(sent.contains(r#""alias":"f1","id":"max_hp""#), "{sent}");
+    assert!(sent.contains(r#"{"id":"max_hp","label":"#), "{sent}");
     assert!(!sent.contains("armour") && !sent.contains("luck"), "{sent}");
+    // Items are named by ID and carry no value, no alias (ASSIST-56).
+    assert!(
+        !sent.contains(r#""alias":"f"#) && !sent.contains(r#""value":84,"#),
+        "{sent}"
+    );
     let (status, answer) = apply(setup, &action, &[]).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(answer["status"], "saved");
@@ -417,7 +425,7 @@ async fn polls_and_applies_of_another_account_or_sheet_are_not_found() {
 async fn apply_is_refused_when_what_it_used_changed_and_kept_for_unrelated_changes() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
-    let below_max = r#"{"kind":"options","options":[{"expr":{"op":"sub","l":{"ref":"f1"},"r":{"lit":15}},"explanation":"15 below max"}]}"#;
+    let below_max = r#"{"kind":"options","options":[{"expr":{"op":"sub","l":{"ref":"max_hp"},"r":{"lit":15}},"explanation":"15 below max"}]}"#;
     let assisted = assisted(&[below_max, below_max]).await;
     let setup = &assisted.setup;
     let key = scribble(setup, "15 below max").await;
@@ -663,7 +671,7 @@ async fn row_action(setup: &Setup, r: usize, action: &str) {
     assert_eq!(status, StatusCode::SEE_OTHER);
 }
 
-const PLUS_WEIGHT: &str = r#"{"kind":"options","options":[{"expr":{"op":"add","l":{"ref":"t"},"r":{"ref":"c1"}},"explanation":"plus its weight"}]}"#;
+const PLUS_WEIGHT: &str = r#"{"kind":"options","options":[{"expr":{"op":"add","l":{"ref":"t"},"r":{"ref":"weight"}},"explanation":"plus its weight"}]}"#;
 
 #[tokio::test]
 async fn a_row_cell_job_sends_its_co_read_cell_and_follows_its_host() {
@@ -680,8 +688,8 @@ async fn a_row_cell_job_sends_its_co_read_cell_and_follows_its_host() {
     row_action(setup, 0, "down").await;
     let (action, done) = first_option(setup, &key).await;
     let sent = assisted.stub.requests.lock().unwrap()[0].dynamic.clone();
-    // Weight is read with Quantity in the load formula's iteration: sent as c1.
-    assert!(sent.contains(r#""alias":"c1","id":"weight""#), "{sent}");
+    // Weight is read with Quantity in the load formula's iteration: sent by its ID.
+    assert!(sent.contains(r#"{"id":"weight","label":"#), "{sent}");
     assert!(
         !sent.contains(r#""id":"name""#),
         "a text cell was sent: {sent}"
@@ -843,5 +851,58 @@ async fn a_save_whose_caller_is_cancelled_after_the_commit_still_makes_old_jobs_
     assert_eq!(saved(setup, 1).await.1["hp"], 50);
     let (_, answer, _) = send(setup, "GET", &poll, None, true).await;
     assert_eq!(answer["state"], "stale", "{answer}");
+    assert_eq!(apply(setup, &action, &[]).await.0, StatusCode::CONFLICT);
+}
+
+/// A reply whose explanation states a number that is not the field's value.
+const WRONG_NUMBER: &str = r#"{"kind":"options","options":[{"expr":{"op":"sub","l":{"ref":"t"},"r":{"ref":"max_hp"}},"explanation":"84 - 99: lost your Max HP"}]}"#;
+
+#[tokio::test]
+async fn a_reference_is_shown_with_mimiks_value_so_a_wrong_number_in_the_explanation_is_contradicted()
+ {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let assisted = assisted(&[WRONG_NUMBER]).await;
+    let setup = &assisted.setup;
+    let key = scribble(setup, "lose my max").await;
+    let (_, done) = first_option(setup, &key).await;
+    let option = &done["options"][0];
+    // The model never saw Max HP's value; Mimik substitutes it and shows it by its label.
+    assert_eq!(option["expression"], "84 \u{2212} Max HP (84)", "{option}");
+    assert_eq!(option["value"], "0");
+    assert_eq!(option["effect"], "84 \u{2192} 0");
+    // The model's words are shown as they are; the 99 in them is not Mimik's number.
+    assert_eq!(option["explanation"], "84 - 99: lost your Max HP");
+    assert!(!option["expression"].as_str().unwrap().contains("99"));
+}
+
+#[tokio::test]
+async fn use_rechecks_each_of_two_references_and_a_removed_row() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let both = r#"{"kind":"options","options":[{"expr":{"op":"add","l":{"op":"add","l":{"ref":"t"},"r":{"ref":"weight"}},"r":{"ref":"max_hp"}},"explanation":"plus both"}]}"#;
+    let assisted = assisted_at(&[both, both, both], 4096).await;
+    let setup = &assisted.setup;
+    let answer = save_quantity(setup, 0, "plus both").await;
+    let key = answer["unit"]["note"]["key"].as_str().unwrap().to_owned();
+    let (action, done) = first_option(setup, &key).await;
+    let sent = assisted.stub.requests.lock().unwrap()[0].dynamic.clone();
+    assert!(
+        sent.contains(r#""id":"weight""#) && sent.contains(r#""id":"max_hp""#),
+        "{sent}"
+    );
+    assert!(
+        done["options"][0]["expression"]
+            .as_str()
+            .unwrap()
+            .contains("Max HP (")
+    );
+    // The second reference changes while the first holds: refused, nothing written.
+    save_field(setup, "max_hp", "90").await;
+    assert_eq!(apply(setup, &action, &[]).await.0, StatusCode::CONFLICT);
+    save_field(setup, "max_hp", "84").await;
+    // The first reference's row is removed and a row with the same host ID cannot come
+    // back with the old value: a fresh job is needed, and the old action stays refused.
+    row_action(setup, 0, "remove").await;
     assert_eq!(apply(setup, &action, &[]).await.0, StatusCode::CONFLICT);
 }

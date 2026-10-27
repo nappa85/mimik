@@ -1,7 +1,7 @@
 //! The interpretation client (assisted sheet plan §1.4, "Shape" and "Crate"): an
 //! [`Interpreter`] trait, the rig-core adapter over Mimik's bounded transport, and a stub
 //! for tests. One request per call: nothing retries.
-use super::contract::{FIXED_PREFIX, SCHEMA, SCHEMA_NAME};
+use super::contract::{FIXED_PREFIX, SCHEMA_NAME, schema_for};
 use super::transport::Bounded;
 use async_trait::async_trait;
 use rig_core::completion::CompletionRequest;
@@ -10,11 +10,13 @@ use rig_core::providers::openai::OpenAI;
 use rig_core::providers::openai::wire::{LLAMACPP, OpenAIConfig};
 use serde_json::{Value, json};
 
-/// One interpretation request: the dynamic part (the data envelope) and the model's
-/// `max_tokens`. The fixed prefix and the schema are the same for every request.
+/// One interpretation request: the dynamic part (the data envelope), the IDs of its context
+/// items (the reply schema's `ref` enum) and the model's `max_tokens`. The fixed prefix is
+/// the same for every request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Completion {
     pub dynamic: String,
+    pub ref_ids: Vec<String>,
     pub max_tokens: u32,
 }
 
@@ -70,13 +72,14 @@ impl RigInterpreter {
     }
 }
 
-/// The body members beside rig's own (plan §1.4): the schema as `response_format`, the
-/// greedy sampler and `cache_prompt`. rig sets `stream: true` for a streamed call.
-pub(crate) fn additional_params() -> Value {
+/// The body members beside rig's own (plan §1.4): the schema of a request that supplies
+/// `ref_ids` as `response_format`, the greedy sampler and `cache_prompt`. rig sets
+/// `stream: true` for a streamed call.
+pub(crate) fn additional_params(ref_ids: &[String]) -> Value {
     json!({
         "response_format": {
             "type": "json_schema",
-            "json_schema": {"name": SCHEMA_NAME, "strict": true, "schema": &*SCHEMA},
+            "json_schema": {"name": SCHEMA_NAME, "strict": true, "schema": schema_for(ref_ids)},
         },
         "top_k": 1,
         "seed": 0,
@@ -132,7 +135,7 @@ impl Interpreter for RigInterpreter {
             .preamble(FIXED_PREFIX.as_str())
             .temperature(0.0)
             .max_tokens(u64::from(completion.max_tokens))
-            .additional_params(additional_params());
+            .additional_params(additional_params(&completion.ref_ids));
         let stream = self
             .client
             .chat(self.model.as_str())

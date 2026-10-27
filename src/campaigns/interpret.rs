@@ -9,9 +9,11 @@
 //! - Same-row cells, on every path, for a row-cell target: the integer and enum cells of
 //!   that row whose properties a read set reads in the same iteration as the target's.
 //! - Never derived, text, multiline, boolean, notes or list cells of other rows.
-use crate::assistant::contract::{
-    self, EnvelopeItem, EnvelopeTarget, ItemKind, MAX_CELL_ALIASES, MAX_FIELD_ALIASES,
-};
+//!
+//! Items are named by their IDs and carry no value (ASSIST-56); the value goes into the
+//! item's `Supplied` and is substituted when a reply is evaluated. An item whose ID cannot
+//! name it unambiguously is left out: see [`unambiguous`].
+use crate::assistant::contract::{self, EnvelopeItem, EnvelopeTarget, ItemKind};
 use crate::assistant::output::Supplied;
 use crate::assistant::request::Draft;
 use crate::definitions::{Control, Definition, Field, ItemProperty, formula::Compiled};
@@ -110,16 +112,14 @@ pub(crate) fn draft(
                 .as_ref()
                 .is_none_or(|related| related.contains(&field.id))
     });
-    for (n, field) in (1..=MAX_FIELD_ALIASES).zip(scalars) {
+    for field in scalars {
         let kind = context_kind(field.control).unwrap_or(ItemKind::Enum);
         let value = data.get(&field.id).cloned().unwrap_or(Value::Null);
         items.push((
             EnvelopeItem {
-                alias: contract::field_alias(n).unwrap_or_default(),
                 id: field.id.clone(),
                 label: field.label.clone(),
                 kind,
-                value: value.clone(),
             },
             Supplied {
                 address: super::notes::field_address(&field.id),
@@ -143,7 +143,7 @@ pub(crate) fn draft(
                 // An optional property that is not set has no value to read.
                 && item.is_some_and(|item| item.get(&other.id).is_some())
         });
-        for (n, other) in (1..=MAX_CELL_ALIASES).zip(cells) {
+        for other in cells {
             let kind = context_kind(other.control).unwrap_or(ItemKind::Enum);
             let value = item
                 .and_then(|item| item.get(&other.id))
@@ -151,11 +151,9 @@ pub(crate) fn draft(
                 .unwrap_or(Value::Null);
             items.push((
                 EnvelopeItem {
-                    alias: contract::cell_alias(n).unwrap_or_default(),
                     id: other.id.clone(),
                     label: other.label.clone(),
                     kind,
-                    value: value.clone(),
                 },
                 Supplied {
                     address: super::notes::cell_address(&list.id, host, &other.id),
@@ -165,6 +163,7 @@ pub(crate) fn draft(
             ));
         }
     }
+    let items = unambiguous(items, target_id);
     Draft {
         phrase: phrase.to_owned(),
         target: EnvelopeTarget {
@@ -176,6 +175,29 @@ pub(crate) fn draft(
         target_address: address.to_owned(),
         items,
     }
+}
+
+/// The items that an ID can name unambiguously (ASSIST-56, ASSIST-L52). An item whose ID is not
+/// a valid field ID, or is the target's ID or `t`, is left out; so are all items sharing an
+/// ID (a field and a cell of the target's row can). Nothing is picked as a winner: a
+/// reference to such an ID is then an unsupplied reference, which drops that option only.
+fn unambiguous(
+    items: Vec<(EnvelopeItem, Supplied)>,
+    target_id: &str,
+) -> Vec<(EnvelopeItem, Supplied)> {
+    let mut count = std::collections::BTreeMap::<&str, usize>::new();
+    for (item, _) in &items {
+        *count.entry(item.id.as_str()).or_default() += 1;
+    }
+    let unique: BTreeSet<String> = count
+        .into_iter()
+        .filter(|(id, n)| *n == 1 && contract::nameable(id, target_id))
+        .map(|(id, _)| id.to_owned())
+        .collect();
+    items
+        .into_iter()
+        .filter(|(item, _)| unique.contains(&item.id))
+        .collect()
 }
 
 /// The row with host ID `host` of `list` in `data`.

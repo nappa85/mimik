@@ -201,11 +201,37 @@ impl TrialState {
     }
 }
 
+/// Which prompt a model's stored measurement (its `max_tokens` and speeds) was made with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Measurement {
+    /// Under the prompt in force, or never measured (a model the start flags named).
+    Current,
+    /// Under an older prompt (ASSIST-56).
+    OlderPrompt,
+}
+
+impl Measurement {
+    pub(crate) fn of(older: bool) -> Self {
+        if older {
+            Self::OlderPrompt
+        } else {
+            Self::Current
+        }
+    }
+
+    pub(crate) fn is_older(self) -> bool {
+        self == Self::OlderPrompt
+    }
+}
+
 /// The model setting as the page shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelStatus {
     pub active: Model,
     pub previous: Option<Model>,
+    /// The active model's stored trial measured it with an older prompt than the current one
+    /// (ASSIST-56): the page says so and the owner may try it again.
+    pub older_prompt: Measurement,
     /// The active model comes from the owner's stored setting, not from the start flags.
     pub from_owner_setting: bool,
     /// The owner can try and switch models (not with the development endpoint).

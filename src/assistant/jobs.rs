@@ -1009,6 +1009,7 @@ async fn attempt(run: &Run) -> Result<Answer, Attempt> {
         .interpreter
         .complete(&Completion {
             dynamic: rendered.dynamic,
+            ref_ids: rendered.ref_ids,
             max_tokens: run.budgets.max_tokens,
         })
         .await
@@ -1039,15 +1040,20 @@ fn proposal(run: &Run, n: usize, candidate: Candidate) -> Proposal {
         .draft
         .items
         .iter()
-        .map(|(item, _)| (item.alias.as_str(), item.label.as_str()))
+        .map(|(item, _)| (item.id.as_str(), item.label.as_str()))
         .collect();
     let name = |alias: &str| {
         if alias == super::contract::TARGET_ALIAS {
             before.map_or_else(|| "?".to_owned(), |value| value.to_string())
         } else {
-            labels
+            // Mimik's own value beside the label (ASSIST-56): a number in the model's
+            // explanation that disagrees with it is visibly contradicted.
+            let label = labels.get(alias).copied().unwrap_or(alias);
+            candidate
+                .refs
                 .get(alias)
-                .map_or_else(|| alias.to_owned(), |label| (*label).to_owned())
+                .and_then(|supplied| supplied.value)
+                .map_or_else(|| label.to_owned(), |value| format!("{label} ({value})"))
         }
     };
     let shown = output::render(&candidate.expr, &name);

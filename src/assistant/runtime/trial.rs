@@ -1,6 +1,6 @@
 //! The five synthetic phrases of a model trial (`docs/model-runtime.md`, "Owner model
 //! setting"): shipped with Mimik, no sheet or player text. Each is sent as a job would be
-//! (the fixed prefix, the pinned schema, a data envelope) at the measurement cap, and its
+//! (the fixed prefix, the schema of its context IDs, a data envelope) at the measurement cap, and its
 //! reply must be schema-valid and untruncated; the largest `predicted_n` sets the model's
 //! `max_tokens`.
 use super::models::PhraseResult;
@@ -64,8 +64,9 @@ pub(crate) const PHRASES: [Phrase; 5] = [
 ];
 
 impl Phrase {
-    /// The dynamic part and what its reply is checked against.
-    pub(crate) fn request(&self) -> (String, Checks) {
+    /// The dynamic part, the IDs of its context items (the reply schema's `ref` enum) and
+    /// what its reply is checked against.
+    pub(crate) fn request(&self) -> (String, Vec<String>, Checks) {
         let (id, label, value) = self.target;
         let mut supplied = BTreeMap::from([(
             TARGET_ALIAS.to_owned(),
@@ -76,10 +77,9 @@ impl Phrase {
             },
         )]);
         let mut context = Vec::new();
-        for (n, &(id, label, value)) in self.context.iter().enumerate() {
-            let alias = format!("f{}", n + 1);
+        for &(id, label, value) in self.context {
             supplied.insert(
-                alias.clone(),
+                id.to_owned(),
                 Supplied {
                     address: format!("field:{id}"),
                     integer: true,
@@ -87,13 +87,12 @@ impl Phrase {
                 },
             );
             context.push(EnvelopeItem {
-                alias,
                 id: id.to_owned(),
                 label: label.to_owned(),
                 kind: ItemKind::Integer,
-                value: value.into(),
             });
         }
+        let ref_ids = context.iter().map(|item| item.id.clone()).collect();
         let dynamic = envelope(&Envelope {
             note: self.note.to_owned(),
             target: EnvelopeTarget {
@@ -109,7 +108,7 @@ impl Phrase {
             target_value: Some(value),
             supplied,
         };
-        (dynamic, checks)
+        (dynamic, ref_ids, checks)
     }
 }
 
@@ -158,18 +157,21 @@ pub(crate) async fn run(
     let mut results = Vec::with_capacity(PHRASES.len());
     for (n, phrase) in PHRASES.iter().enumerate() {
         progress(n + 1);
-        let (dynamic, checks) = phrase.request();
+        let (dynamic, ref_ids, checks) = phrase.request();
         let began = tokio::time::Instant::now();
-        let reply = tokio::time::timeout(bound, server.structured(&dynamic, TRIAL_MEASURE_TOKENS))
-            .await
-            .map_err(|_| PhraseFailure::Deadline {
-                note: phrase.note,
-                seconds: bound.as_secs(),
-            })?
-            .map_err(|failure| PhraseFailure::Exchange {
-                note: phrase.note,
-                what: describe_failure(failure),
-            })?;
+        let reply = tokio::time::timeout(
+            bound,
+            server.structured(&dynamic, &ref_ids, TRIAL_MEASURE_TOKENS),
+        )
+        .await
+        .map_err(|_| PhraseFailure::Deadline {
+            note: phrase.note,
+            seconds: bound.as_secs(),
+        })?
+        .map_err(|failure| PhraseFailure::Exchange {
+            note: phrase.note,
+            what: describe_failure(failure),
+        })?;
         let seconds = began.elapsed().as_secs_f64();
         if reply.truncated {
             return Err(PhraseFailure::Truncated { note: phrase.note });

@@ -1,7 +1,7 @@
 # Model runtime
 
 The interpretation assistant's model server (steps 2c-2a, 2c-2b-1 and 2d-1; ASSIST-27,
-ASSIST-28, ASSIST-29 to ASSIST-36, ASSIST-40 to ASSIST-42, ASSIST-52): with `--assistant`, Mimik starts the pinned official
+ASSIST-28, ASSIST-29 to ASSIST-36, ASSIST-40 to ASSIST-42, ASSIST-52, ASSIST-56): with `--assistant`, Mimik starts the pinned official
 llama.cpp `llama-server` as its own child process, confined at the highest level that works,
 reaches it only through a checked endpoint with a per-launch token, and primes and calibrates
 it before any job runs. Linux `x86_64`: the GPU path (the Vulkan build on one hardware GPU)
@@ -540,8 +540,8 @@ states, levels, reasons and measurements, never prompt text, URLs with tokens or
 Priming is the readiness gate: the fixed prefix with a minimal envelope and `max_tokens` 1
 fills the prompt cache before any job is admitted. Then two samples, non-streamed, `max_tokens`
 the model's, `ignore_eos`, no schema, each with a filler of exactly the path's byte cap (CPU
-1,024) made of context items shaped as requests carry them, from the labels and values of the
-shipped demo and 2b synthetic sheets (GPU 4,096; one opens with `[`, the other with `{`, so neither
+1,024) made of context items shaped as requests carry them (ID, label and type, no value),
+from the IDs and labels of the shipped demo and 2b synthetic sheets (GPU 4,096; one opens with `[`, the other with `{`, so neither
 reuses the other's cache), each counted by `/tokenize`. Timings must be present, finite and
 positive, `predicted_n` equal to `max_tokens`, the tail `prompt_n` − Nᵢ not negative and the
 cached tokens at least 75 % of priming's prompt tokens, or the attempt fails. The budgets
@@ -572,7 +572,8 @@ hashes the file (the SHA-256 it will be held to at every load, remembered by the
 identity so the load does not read it again); starts the candidate on the path the runtime is
 on (the GPU path unless it fell back or `--assistant-device cpu`; no fallback inside a trial)
 at level 1; primes it; sends five synthetic phrases shipped with Mimik (`trial.rs`; no sheet
-or player text) as a job would be sent, at `max_tokens` 384, each of which must be
+or player text) as a job would be sent (the reply schema limits `ref` to `t` and the phrase's
+context IDs), at `max_tokens` 384, each of which must be
 schema-valid and untruncated; sets `max_tokens` to `min(384, max(256, 1.25 × the largest
 predicted_n rounded up to a multiple of 32))`, except that the two default files (Granite and
 the Qwen3.5-9B), identified by their SHA-256 and never by name, keep 352; and calibrates with that `max_tokens`
@@ -601,9 +602,12 @@ setting's limit).
 only if it names the latest finished passed trial (another hash, an older trial or an older
 generation is refused as stale and nothing changes). The manager stores the model first
 (`assistant_models`: spec, file name, SHA-256, size, alias, `max_tokens`, the trial's
-measurements as JSON; `assistant_model_choice`: the active and the previous model, who and
+measurements as JSON, with the SHA-256 of the prompt prefix they ran under; `assistant_model_choice`: the active and the previous model, who and
 when), then starts a session with it: restart, priming, calibration with its recorded
-`max_tokens`. A store failure changes nothing and the page says why. "Switch back" swaps the
+`max_tokens`. A store failure changes nothing and the page says why. A stored model whose trial recorded
+another prompt prefix than the current one (or none, as before ASSIST-56) is shown with a
+line saying its `max_tokens` and speeds were measured with an older prompt and that trying it
+again measures it with the current one; nothing is blocked or re-tried by itself. "Switch back" swaps the
 active and the previous model in the same way and restarts with it. A model that fails to
 become ready after a switch can be switched away from the same way. All actions are
 owner-only, CSRF-checked, strict forms (an extra, duplicate or missing key is a 422) and

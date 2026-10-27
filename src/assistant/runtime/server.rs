@@ -74,7 +74,12 @@ pub(crate) trait Server: Send + Sync {
     ) -> Result<Timings, Failure>;
     /// One non-streamed interpretation request as a job sends it (the fixed prefix, the
     /// pinned schema as `response_format`, greedy), for the model trial's phrases.
-    async fn structured(&self, user: &str, max_tokens: u32) -> Result<Structured, Failure>;
+    async fn structured(
+        &self,
+        user: &str,
+        ref_ids: &[String],
+        max_tokens: u32,
+    ) -> Result<Structured, Failure>;
     /// The interpretation client over the same transport.
     fn interpreter(&self) -> Arc<dyn Interpreter>;
 }
@@ -123,7 +128,7 @@ impl Llama {
 }
 
 /// The body of a trial phrase: the job's request, non-streamed.
-fn structured_body(model: &str, user: &str, max_tokens: u32) -> Value {
+fn structured_body(model: &str, user: &str, ref_ids: &[String], max_tokens: u32) -> Value {
     let mut body = json!({
         "model": model,
         "messages": [
@@ -136,7 +141,7 @@ fn structured_body(model: &str, user: &str, max_tokens: u32) -> Value {
     });
     if let (Some(object), Value::Object(extra)) = (
         body.as_object_mut(),
-        crate::assistant::interpreter::additional_params(),
+        crate::assistant::interpreter::additional_params(ref_ids),
     ) {
         object.extend(extra);
     }
@@ -246,8 +251,13 @@ impl Server for Llama {
         Ok(Timings::from_body(&value))
     }
 
-    async fn structured(&self, user: &str, max_tokens: u32) -> Result<Structured, Failure> {
-        let body = structured_body(&self.model, user, max_tokens);
+    async fn structured(
+        &self,
+        user: &str,
+        ref_ids: &[String],
+        max_tokens: u32,
+    ) -> Result<Structured, Failure> {
+        let body = structured_body(&self.model, user, ref_ids, max_tokens);
         let value = self.post("/v1/chat/completions", &body).await?;
         read_structured(&value)
     }
@@ -263,7 +273,8 @@ mod tests {
 
     #[test]
     fn a_trial_phrase_is_a_job_request_without_streaming() {
-        let body = structured_body("granite", "<data>x</data>", 384);
+        let ids = vec!["max_hp".to_owned(), "silver".to_owned()];
+        let body = structured_body("granite", "<data>x</data>", &ids, 384);
         assert_eq!(body["model"], "granite");
         assert_eq!(body["max_tokens"], 384);
         assert_eq!(body["stream"], false);
@@ -275,10 +286,17 @@ mod tests {
             FIXED_PREFIX.as_str()
         );
         assert_eq!(body["messages"][1]["content"][0]["text"], "<data>x</data>");
-        // The pinned schema, as every job sends it.
+        // The schema of the phrase's IDs, as every job sends its own.
         let format = &body["response_format"]["json_schema"];
         assert_eq!(format["strict"], true);
-        assert_eq!(format["schema"], *crate::assistant::contract::SCHEMA);
+        assert_eq!(
+            format["schema"],
+            crate::assistant::contract::schema_for(&ids)
+        );
+        assert_eq!(
+            format["schema"]["$defs"]["ref"]["properties"]["ref"],
+            serde_json::json!({"enum": ["t", "max_hp", "silver"]})
+        );
     }
 
     #[test]

@@ -223,6 +223,8 @@ struct ModelView {
     note: Option<String>,
     /// Why the device default is not the 9B although the GPU is wanted.
     default_note: Option<String>,
+    /// The active model's measurement predates the current prompt (ASSIST-56).
+    older_prompt: bool,
     trial: Option<TrialView>,
     /// The field's content: the refused input is kept.
     input: String,
@@ -435,6 +437,7 @@ fn view(status: Status, breaker: String, input: String, error: Option<String>) -
         previous: status.model.previous.as_ref().map(model_line),
         note: status.model.note,
         default_note: status.model.device_default.note().map(str::to_owned),
+        older_prompt: status.model.older_prompt.is_older(),
         trial: status.trial.map(trial_view),
         input,
         error,

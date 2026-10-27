@@ -203,11 +203,15 @@ PRIME_CASE = {"id": "prime", "target": "hp", "phrase": "prime"}
 # A ``ref`` names a request-local alias ("t", "f1"..., "c1"...) instead of a field ID.
 
 SCHEMAS_DIR = Path(__file__).resolve().parent.parent / "schemas"
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 SCHEMA_HEADING = "\nJSON schema of the reply:\n"
-# v2 is the shipped contract (ASSIST-52): its prefix is the instructions file, which asks for
-# compact single-line JSON, and quotes the schema without the alias enum; response_format
-# still sends the full pinned schema. "v2-short" and "v2-compact" are names for the same prefix
-# (the 2c-1 v2-short arm's prefix plus the compact sentence). v2-base is the prefix before
+# v2-ids-53 is the shipped contract (ASSIST-56): its prefix is the instructions file under
+# schemas/ (context items by id, no context values, reference examples, the ASSIST-53 literal
+# sentence, compact single-line JSON), with the schema quoted without the ref enum;
+# response_format sends the pinned schema with the request's ids as the ref enum. "v2",
+# "v2-short" and "v2-compact" are names for the prefix shipped before ASSIST-56, read from the
+# frozen tools/fixtures/interpretation-v2-compact-instructions.txt (the 2c-1 v2-short arm's
+# prefix plus the compact sentence). v2-base is the prefix before
 # ASSIST-52, without the sentence (the field-reference screen's base arm). v2-full is the first
 # v2 prefix, quoting the full schema (2c-1 screen, superseded).
 CONTRACTS = (
@@ -248,7 +252,9 @@ SHORT_REF = {"type": "string", "description": "an alias from the data: t, f<n> o
 @functools.cache
 def load_v2():
     """(instructions, schema, schema_text, prefix) of schema v2, read from schemas/."""
-    instructions = (SCHEMAS_DIR / "interpretation-v2-instructions.txt").read_text()
+    # The frozen compact-alias instructions (the text shipped before ASSIST-56): every legacy
+    # contract below derives from it. The shipped text is `shipped_instructions()`.
+    instructions = (FIXTURES_DIR / "interpretation-v2-compact-instructions.txt").read_text()
     schema_text = (SCHEMAS_DIR / "interpretation-v2.json").read_text().rstrip("\n")
     return (
         instructions,
@@ -256,6 +262,11 @@ def load_v2():
         schema_text,
         (instructions + SCHEMA_HEADING + schema_text),
     )
+
+
+def shipped_instructions():
+    """The instructions Rust ships (schemas/, ASSIST-56): the D53 text."""
+    return (SCHEMAS_DIR / "interpretation-v2-instructions.txt").read_text()
 
 
 def contract_schema(contract):
@@ -455,9 +466,15 @@ def ids_instructions():
 
 
 @functools.cache
-def ids53_instructions():
-    """Arm D53: D on the shipped instruction text, i.e. with the ASSIST-53 literal sentence."""
+def ids53_chain_instructions():
+    """Arm D53 as the experiment derived it: D on the frozen compact text, with the ASSIST-53
+    literal sentence. The shipped file equals it (tested)."""
     return _replace_once(ids_instructions(), LITERAL_RULE_DIGITS_ONLY, LITERAL_RULE_ASSIST53)
+
+
+def ids53_instructions():
+    """Arm D53 and the shipped contract (ASSIST-56): the shipped instructions file itself."""
+    return shipped_instructions()
 
 
 def _short_tail(ref_schema):

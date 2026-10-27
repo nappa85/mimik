@@ -11,7 +11,7 @@ bound, quick-add, the validity flag, the sheet module with save on leaving a fie
 interpretation assistant of development builds) is described
 in `docs/assisted-entry.md`; this plan only adds to it.
 
-Remaining, in order (2b measured and reviewed, `docs/results.md`; ASSIST-27 to ASSIST-52
+Remaining, in order (2b measured and reviewed, `docs/results.md`; ASSIST-27 to ASSIST-56
 decided; Rust 1.99.1 and `rig-core` 0.45.0 in place, ASSIST-39; 2c-1, interpretation against a
 hand-started local server, built, `docs/assisted-entry.md`; 2c-2a, the CPU runtime, 2c-2b-1,
 the GPU path, and 2d-1, the owner model setting with local models, built,
@@ -664,91 +664,6 @@ checks run on the dev host with the GPU fan on manual, evening or weekend, throu
   Intel, NVIDIA) has been traced where one is available;
 - re-measure the superseding-job timings on both paths with the fixed helper, then the GPU-path
   checks at each llama.cpp pin change (`tools/assist_gpu_live.py`).
-
-### ASSIST-56 Prompt format D (before 2d-2)
-
-Ships the D53 format of `tools/assist_eval.py` (contract `v2-ids-53`) for every model. The
-shipped prefix is byte-identical to the Python `ids53_prefix()`: `PREFIX_SHA256` becomes
-`ac46010c…e9453f` (already pinned in `tools/test_assist_eval.py`), so the instruction text
-needs no new wording review, only the port.
-
-**Request shape (D53 exactly).** The target stays `{"alias":"t","id","label?","value"}`: `t` is
-what experiments 4 and 5 measured, and the target's value stays (needed for "half" and
-provenance). Context items become `{"id","label","type"}`: no alias, no value. `ref` carries
-`t` or a context item's id. `EnvelopeItem` loses `alias` and `value`; values live only in
-`Supplied`. `MAX_FIELD_ALIASES`, `MAX_CELL_ALIASES`, `field_alias`, `cell_alias` go; only the
-byte/token bound limits the item count.
-
-**Ids.** The one id grammar is `definitions::valid_field_id` (`-` and `_` allowed, 1 to 64
-bytes); an item whose id fails it is left out (defence: valid definitions cannot produce one).
-Collisions are refused, not resolved: when a context field and a row cell share an id, or an
-item's id equals the target's id or `t`, every colliding item is left out of the context, so a
-reference to that id is an unsupplied reference and drops only that option. `f1`, `c1`, `t1`
-and ids containing `t` are ordinary ids. Ids equal to a schema keyword (`lit`, `op`, `l`, `r`,
-`round`, `ref`) are legal and not reserved. Recorded in ASSIST-L52.
-
-**Schema.** `schemas/interpretation-v2.json` stays the pinned template (hash `39da7936…`
-unchanged). `contract::schema_for(ids)` replaces `$defs.ref.properties.ref` by
-`{"enum":["t", ...ids]}` in place; `request::render` builds the id list of the shape that fits
-(a budget-dropped item is not in the enum) and `Completion` carries it. Only the job requests
-and the 2d-1 trial phrases send this `response_format`; priming and calibration are
-unconstrained completions (no schema) and only their filler and envelope shape change to D.
-Reply validation uses a static copy with `ref` a non-empty string; membership is
-`Checks.supplied`, so an unknown id drops that option only. Pins: template hash and a golden
-hash of `schema_for` of a sample, in Rust and Python.
-
-**Prompt cache (assumption).** The system prompt is fixed and only the grammar differs per
-request, so the prefix's tokens should stay cached. Not guaranteed: `TODO.md` gets a live
-acceptance check before release (prime, a structured request, a request with another ref enum:
-`cached_tokens` covers the prefix; also the grammar-compilation time per request).
-
-**Values and provenance.** Each item's `Supplied.value` comes from the job's snapshot; Mimik
-substitutes it when evaluating and re-reads it live at Use (`interpret_web::plan`, keyed by id
-now). ASSIST-53 is unchanged. Context values are not in the request, but the model can still
-guess one, and a guess equal to a note number, the target's value or a fraction literal is
-admitted by provenance. Recorded in L52 (the lexer is not changed).
-
-**Owner view.** Each option's expression is shown with Mimik's own substituted values beside
-the labels (for example "Coin (85) − Wage (7) = 78"), so a wrong number in the model's
-explanation is visibly contradicted. The explanation stays free text and may name ids.
-
-**Budgets.** B (1,024/4,096), N(B) and the 1 KiB related-only rule stay (latency bounds).
-Items are shorter, so more fit under the same bound; the exact 4,096-byte count is re-derived.
-The idle CPU calibration and the L47 `max_tokens` re-derivation stay owed. A test checks that
-a worst-case reply (3 options, 8 leaves, 64-byte ids) fits the default `max_tokens`, or the
-bound is documented.
-
-**Stored data.** No migration: proposals are in memory (`jobs.rs`) and no table stores a ref.
-Stored models (migration 022) carry `max_tokens` and trial measurements made with an older
-prompt: the trial JSON now records the prefix hash it ran under; when a stored model's differs
-(or is absent) the page says the measurement was made with an older prompt and offers a
-re-trial (warn, do not block, no automatic re-trial).
-
-**2d-1 trial.** The five phrases keep their ids and notes; their envelopes lose alias and
-value; `Server::structured` takes the ref ids and `structured_body` sends `schema_for` of them.
-No reference phrase is added (the trial gates schema validity and truncation, D-D).
-
-**Python mirror.** `v2-ids-53` is the shipped contract name. The old compact instructions are
-frozen as `tools/fixtures/interpretation-v2-compact-instructions.txt`; every legacy chain and
-the `v2`, `v2-short`, `v2-compact` prefixes read the fixture (pinned hashes unchanged);
-`ids53_instructions()` is the shipped file itself, and a test shows the shipped file equals the
-old chain applied to the fixture. The Rust fixture producer (`render_fieldref_cases` in
-`interpret_tests.rs`) keeps producing the measured legacy input (aliases and values) for the
-experiment arms: it builds the legacy envelope itself, and a test pins its output.
-
-**Docs.** `assisted-entry.md`, `model-runtime.md`, `decisions.md` (ASSIST-52 removed,
-ASSIST-56 as built), `limitations.md` (L32, L47, L51, new L52), `results.md`, `TODO.md`; this
-section is deleted when it lands.
-
-**Not measured.** Rust now selects items under the smaller sizes, so more items fit than in
-the measured arm; the general 104-reply screen with D; Granite with D53 (running now), with
-the fallback if it regresses (ASSIST-L32); the cache and grammar-time check above. Results go
-to `docs/results.md`. No live inference runs in this step's tests (fake server).
-
-**Gate.** `mimik-ci` container `mimik-asst56-run`: fmt; Clippy `-D warnings` for all and
-default features separately after the last edit; `cargo test --locked --all-targets
---all-features` after the last edit; the Python suite (`CI=1`); ruff. Independent reviews per
-AGENTS.md before merge.
 
 ### 2d-2 Model downloads
 

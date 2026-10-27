@@ -427,7 +427,7 @@ fn plan(
         return None;
     }
     let mut now = std::collections::BTreeMap::new();
-    for (alias, supplied) in &proposal.candidate.refs {
+    for (id, supplied) in &proposal.candidate.refs {
         let at = assist::locate(definition, data, &supplied.address)?;
         let NoteValue::Int(value) = assist::value_at(&at, data)? else {
             return None;
@@ -435,11 +435,10 @@ fn plan(
         if Some(value) != supplied.value {
             return None;
         }
-        now.insert(alias.clone(), value);
+        now.insert(id.clone(), value);
     }
-    let value = crate::assistant::output::recompute(&proposal.candidate.expr, &|alias| {
-        now.get(alias).copied()
-    })?;
+    let value =
+        crate::assistant::output::recompute(&proposal.candidate.expr, &|id| now.get(id).copied())?;
     if value != proposal.candidate.value {
         return None;
     }

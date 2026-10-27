@@ -2,7 +2,7 @@
 //! (`jsonschema`), typed decoding, then per-option domain checks: references, literal
 //! provenance and checked `i128` evaluation with an `i64` result. A reply that fails the
 //! schema or decoding shows nothing; an option that fails a domain check is dropped alone.
-use super::contract::{MAX_DEPTH, MAX_OPTIONS, MAX_TEXT_CHARS, SCHEMA};
+use super::contract::{MAX_DEPTH, MAX_OPTIONS, MAX_TEXT_CHARS, VALIDATION_SCHEMA};
 use super::lexer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 static VALIDATOR: LazyLock<Result<jsonschema::Validator, ()>> = LazyLock::new(|| {
     jsonschema::draft202012::options()
         .offline()
-        .build(&SCHEMA)
+        .build(&VALIDATION_SCHEMA)
         .map_err(|_| ())
 });
 
@@ -43,8 +43,9 @@ pub(crate) enum Node {
         lit: i64,
     },
     Ref {
+        /// `t` or a context item's ID.
         #[serde(rename = "ref")]
-        alias: String,
+        id: String,
     },
     Op {
         op: BinOp,
@@ -55,7 +56,7 @@ pub(crate) enum Node {
     },
 }
 
-/// What a supplied alias stands for.
+/// What a supplied ID stands for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Supplied {
     /// The typed address (`field:<id>` or `cell:<list>/<host>/<property>`).
@@ -67,7 +68,7 @@ pub(crate) struct Supplied {
 }
 
 /// What a reply is checked against: the request's phrase, the target's value and the
-/// aliases it supplied (`t` included).
+/// IDs it supplied (`t` included).
 #[derive(Clone, Debug)]
 pub(crate) struct Checks {
     pub phrase: String,
@@ -97,7 +98,7 @@ pub(crate) struct Candidate {
     pub expr: Node,
     pub explanation: String,
     pub value: i64,
-    /// Each alias the tree referenced, once, with what it stands for.
+    /// Each ID the tree referenced, once, with what it stands for.
     pub refs: BTreeMap<String, Supplied>,
 }
 
@@ -228,13 +229,13 @@ fn evaluate(
 ) -> Result<i128, Drop> {
     match node {
         Node::Lit { lit } => literal(*lit, allowed),
-        Node::Ref { alias } => {
-            let supplied = checks.supplied.get(alias).ok_or(Drop::UnsuppliedRef)?;
+        Node::Ref { id } => {
+            let supplied = checks.supplied.get(id).ok_or(Drop::UnsuppliedRef)?;
             if !supplied.integer {
                 return Err(Drop::EnumRef);
             }
             let value = supplied.value.ok_or(Drop::UnknownRef)?;
-            refs.insert(alias.clone(), supplied.clone());
+            refs.insert(id.clone(), supplied.clone());
             Ok(i128::from(value))
         }
         Node::Op { op, round, l, r } => {
@@ -280,13 +281,13 @@ fn literal(lit: i64, allowed: &BTreeSet<u64>) -> Result<i128, Drop> {
     }
 }
 
-/// Re-evaluates a validated tree with the values `value` gives each alias now (the apply's
+/// Re-evaluates a validated tree with the values `value` gives each ID now (the apply's
 /// recheck): `None` when a value is missing or unknown, or the arithmetic fails.
 pub(crate) fn recompute(node: &Node, value: &dyn Fn(&str) -> Option<i64>) -> Option<i64> {
     fn inner(node: &Node, value: &dyn Fn(&str) -> Option<i64>) -> Option<i128> {
         match node {
             Node::Lit { lit } => Some(i128::from(*lit)),
-            Node::Ref { alias } => value(alias).map(i128::from),
+            Node::Ref { id } => value(id).map(i128::from),
             Node::Op { op, round, l, r } => {
                 let (left, right) = (inner(l, value)?, inner(r, value)?);
                 match (op, round) {
@@ -323,13 +324,13 @@ pub(crate) fn divide(left: i128, right: i128, round: Round) -> Result<i128, Drop
 }
 
 /// The expression as the page shows it, with `−`, `×` and `÷`, references by `name`
-/// (the label of what an alias stands for) and parentheses around nested operators.
+/// (the label of what an ID stands for) and parentheses around nested operators.
 pub(crate) fn render(node: &Node, name: &dyn Fn(&str) -> String) -> String {
     fn inner(node: &Node, name: &dyn Fn(&str) -> String, nested: bool) -> String {
         match node {
             Node::Lit { lit } if *lit < 0 => format!("\u{2212}{}", lit.unsigned_abs()),
             Node::Lit { lit } => lit.to_string(),
-            Node::Ref { alias } => name(alias),
+            Node::Ref { id } => name(id),
             Node::Op { op, round, l, r } => {
                 let symbol = match op {
                     BinOp::Add => "+",
