@@ -83,6 +83,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   - the default GPU model and prompt (D needs a Rust builder and schema change, fresh held-out
     cases and a review); the 35B needs about 26 GB of RAM and loads slowly from the magnetic
     disk (745 s).
+  - Qwen4 (announced, not released on 2026-10-27): screen it when it is out.
 
 - Review helper: `external_review.py`'s short-output unavailable heuristic can reject a real
   successful verdict that discusses "unavailable" status. Add a regression and narrow the
