@@ -221,12 +221,16 @@ CONTRACTS = (
     "v2-refex",
     "v2-novals",
     "v2-ids",
+    "v2-ids-53",
 )
 # Field-reference experiment 2 (tools/fieldref2-prereg.md, prototype tier, not the Rust
 # builder's output): v2-refex adds two reference examples to the shipped instructions;
 # v2-novals also drops the context items' "value" key; v2-ids also names context items by
 # their id instead of an alias. All three are v2 on the wire (same reply schema).
-FIELDREF2_CONTRACTS = ("v2-refex", "v2-novals", "v2-ids")
+FIELDREF2_CONTRACTS = ("v2-refex", "v2-novals", "v2-ids", "v2-ids-53")
+# Experiment 5 (tools/fieldref5-prereg.md): v2-ids-53 is v2-ids with the ASSIST-53 literal
+# sentence of the shipped instructions instead of the digits-only one.
+IDS_CONTRACTS = ("v2-ids", "v2-ids-53")
 V2_CONTRACTS = (
     "v2",
     "v2-base",
@@ -350,6 +354,8 @@ def contract_prefix(contract, variant=None):
         return novals_prefix()
     if contract == "v2-ids":
         return ids_prefix()
+    if contract == "v2-ids-53":
+        return ids53_prefix()
     if contract == "v2-base":
         return base_prefix()
     if contract == "v2-ex":
@@ -448,6 +454,12 @@ def ids_instructions():
     return _replace_once(text, REFEX_LINES_NOVALS, REFEX_LINES_IDS)
 
 
+@functools.cache
+def ids53_instructions():
+    """Arm D53: D on the shipped instruction text, i.e. with the ASSIST-53 literal sentence."""
+    return _replace_once(ids_instructions(), LITERAL_RULE_DIGITS_ONLY, LITERAL_RULE_ASSIST53)
+
+
 def _short_tail(ref_schema):
     schema = json.loads(json.dumps(load_v2()[1]))
     schema["$defs"]["ref"]["properties"]["ref"] = ref_schema
@@ -469,6 +481,11 @@ def ids_prefix():
     return ids_instructions() + _short_tail(SHORT_REF_IDS)
 
 
+@functools.cache
+def ids53_prefix():
+    return ids53_instructions() + _short_tail(SHORT_REF_IDS)
+
+
 def _rendered_envelope(user):
     return json.loads(user.split("\n")[1])
 
@@ -484,12 +501,12 @@ def transform_fieldref2(request, contract):
     ids = {}
     for item in payload["context"]:
         item.pop("value", None)
-        if contract == "v2-ids":
+        if contract in IDS_CONTRACTS:
             if item["id"] == "t" or item["id"] in ids:
                 raise ValueError("a context id collides with t or another id")
             ids[item["id"]] = item.pop("alias")
     request["user"] = _envelope(payload)
-    if contract == "v2-ids":
+    if contract in IDS_CONTRACTS:
         request["id_to_alias"] = ids
         schema = json.loads(json.dumps(load_v2()[1]))
         schema["$defs"]["ref"]["properties"]["ref"] = {"enum": ["t", *ids]}
@@ -678,7 +695,7 @@ LITERAL_RULES = ("assist53", "digits")
 # The contracts whose prefix carries the ASSIST-53 literal sentence validate under it by
 # default; every other contract (v1 and the experiment arms) keeps the digits-only rule its
 # ledgers were run under. ``literal_rule`` overrides either way (the offline re-score).
-ASSIST53_CONTRACTS = frozenset({"v2", "v2-short", "v2-compact", "v2-full"})
+ASSIST53_CONTRACTS = frozenset({"v2", "v2-short", "v2-compact", "v2-full", "v2-ids-53"})
 
 
 def literal_rule(request):

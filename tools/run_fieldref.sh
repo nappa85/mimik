@@ -9,6 +9,8 @@
 #
 # Other models (experiment 3, GPU): MODEL=<registry key> DEVICE=gpu [N_CPU_MOE=n MEMORY=22g
 # MIN_AVAIL_GB=n JUNCTION_STOP_C=85 THREADS=6 CPUS=0,1,2,3,4,5]; arms A and D are "control ids".
+# Experiment 5 (tools/fieldref5-prereg.md): ARMS="A D53" (A = shipped v2-compact, D53 = v2-ids-53:
+# ids, no context values, ASSIST-53 literal sentence); a 9B all on the GPU, then the 35B with N_CPU_MOE.
 # The settings reach tools/run_assist_screen.sh through the environment.
 #
 # Usage: [ARMS="base compact"] tools/run_fieldref.sh [out-dir]   (default /media/data/mimik/fieldref/runs/<stamp>)
@@ -57,6 +59,8 @@ for arm in $ARMS; do
     refex) contract=v2-refex ;;
     novals) contract=v2-novals ;;
     ids) contract=v2-ids ;;
+    A|v2-compact) contract=v2-compact ;;
+    D53|v2-ids-53) contract=v2-ids-53 ;;
     *) echo "unknown arm $arm" >&2; exit 2 ;;
   esac
   CONTRACT=$contract PRIME=1 PASSES=1 STRESS=0 COLD=1 COLD_ONLY='' THREADS=$THREADS CPUS=$CPUS \

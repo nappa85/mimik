@@ -324,6 +324,10 @@ V2_PREFIX_SHA256 = "3cf169f27365af587aacf611716605a46954b565124763ea447dfc1c98ad
 # The pre-ASSIST-52 prefix (v2-base, digits-only literal rule): the field-reference screen's
 # base arm.
 V2_BASE_PREFIX_SHA256 = "7b0ba380d8687cc8dfe2a150bf99d684b3bb4f4d5a22e41b5d46a1b6bbd5fe84"
+# Experiment 3's arm D (v2-ids, digits-only literal rule) and experiment 5's D53 (v2-ids-53,
+# the ASSIST-53 literal sentence): pinned so the experiment prefixes cannot drift.
+V2_IDS_PREFIX_SHA256 = "1326c1983146284acfb8930eb0897c9f4d67c852bb27862af0c2332b884bf3e1"
+V2_IDS_53_PREFIX_SHA256 = "ac46010cef3b18cfeee2a0e517c54571098174cdf783c5c7e7c01b3e18e9453f"
 
 
 class LiteralProvenanceAssist53(unittest.TestCase):
@@ -501,6 +505,31 @@ class ContractV2(unittest.TestCase):
         self.assertEqual(legacy.replace(ae.EX_COMPACT, "", 1), base)
         self.assertEqual(hashlib.sha256(base.encode()).hexdigest(), V2_BASE_PREFIX_SHA256)
         self.assertIn(ae.EX_COMPACT + "Reply with one JSON object", shipped)
+
+    def test_ids_53_differs_from_ids_only_in_the_literal_sentence(self):
+        import hashlib
+
+        ids, ids53 = ae.contract_prefix("v2-ids"), ae.contract_prefix("v2-ids-53")
+        self.assertEqual(hashlib.sha256(ids.encode()).hexdigest(), V2_IDS_PREFIX_SHA256)
+        self.assertEqual(hashlib.sha256(ids53.encode()).hexdigest(), V2_IDS_53_PREFIX_SHA256)
+        self.assertEqual(ids.count(ae.LITERAL_RULE_DIGITS_ONLY), 1)
+        self.assertEqual(ids53.count(ae.LITERAL_RULE_ASSIST53), 1)
+        self.assertEqual(ids53.count(ae.LITERAL_RULE_DIGITS_ONLY), 0)
+        self.assertEqual(
+            ids.replace(ae.LITERAL_RULE_DIGITS_ONLY, ae.LITERAL_RULE_ASSIST53, 1), ids53
+        )
+        # Still arm D otherwise: ids, not aliases, and the shipped compact sentence.
+        self.assertIn(ae.IDS_REF_LINE, ids53)
+        self.assertEqual(ids53.count(ae.EX_COMPACT), 1)
+
+    def test_ids_53_validates_under_assist53_by_default(self):
+        self.assertIn("v2-ids-53", ae.CONTRACTS)
+        self.assertIn("v2-ids-53", ae.FIELDREF2_CONTRACTS)
+        self.assertEqual(ae.literal_rule({"contract": "v2-ids-53"}), "assist53")
+        self.assertEqual(ae.literal_rule({"contract": "v2-ids"}), "digits")
+        self.assertEqual(
+            ae.literal_rule({"contract": "v2-ids-53", "literal_rule": "digits"}), "digits"
+        )
 
     def test_request_uses_aliases(self):
         req = ae.build_request(
@@ -735,6 +764,16 @@ class ContractV2(unittest.TestCase):
         # An id outside the context stays unmapped and the scorer rejects it.
         bad = ae.validate_reply(ae.remap_reply(reply(ref("nope")), arm), arm)
         self.assertEqual(ae.shown_values(bad), [])
+
+    def test_ids_53_request_is_the_ids_request_with_the_shipped_literal_sentence(self):
+        data, case = self._fr2_case()
+        ids = ae.build_request(case, data["sheet"], contract="v2-ids")
+        ids53 = ae.build_request(case, data["sheet"], contract="v2-ids-53")
+        self.assertEqual(ids53["contract"], "v2-ids-53")
+        for key in ("user", "supplied", "id_to_alias", "schema"):
+            self.assertEqual(ids53[key], ids[key], key)
+        self.assertNotEqual(ids53["system"], ids["system"])
+        self.assertNotIn("literal_rule", ids53)  # the contract default applies
 
     def test_fieldref2_contracts_send_the_v2_reply_schema_and_prime(self):
         data, _ = self._fr2_case()
