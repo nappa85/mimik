@@ -135,6 +135,7 @@ impl AssistantHandle {
                 previous: None,
                 records: None,
                 from_owner_setting: false,
+                device_default: false,
             },
         ))
     }

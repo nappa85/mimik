@@ -34,6 +34,30 @@ fn listed(name: &str, description: &str) -> Listed {
 const RX6650: &str = "AMD Radeon RX 6650 XT (RADV NAVI23)";
 
 #[test]
+fn thinking_is_off_for_every_model_including_the_qwen_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = Real::new(settings(dir.path(), Choice::Auto, Roots::default()));
+    let vector =
+        |real: &Real, device| real.server_args("/m.gguf", "/s.sock", None, "/token", device);
+    let granite = vector(&real, Some("Vulkan0"));
+    *real.chosen.lock().unwrap() = Chosen {
+        name: "Qwen3.5-9B-Q4_K_M.gguf".into(),
+        sha256: crate::assistant::GPU_DEFAULT_MODEL_SHA256.into(),
+        alias: "qwen3.5-9b-q4_k_m".into(),
+    };
+    for args in [vector(&real, Some("Vulkan0")), vector(&real, None)] {
+        assert!(
+            args.windows(2).any(|w| w == ["--reasoning", "off"]),
+            "{args:?}"
+        );
+    }
+    // Only the alias differs from the Granite vector: no per-model flag exists.
+    let qwen = vector(&real, Some("Vulkan0"));
+    let differing = granite.iter().zip(&qwen).filter(|(a, b)| a != b).count();
+    assert_eq!(differing, 1, "{granite:?} {qwen:?}");
+}
+
+#[test]
 fn the_gpu_flag_vector_offloads_every_layer_on_the_listed_device_and_the_cpu_names_none() {
     let dir = tempfile::tempdir().unwrap();
     let real = Real::new(settings(dir.path(), Choice::Auto, Roots::default()));

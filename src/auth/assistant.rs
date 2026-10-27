@@ -221,6 +221,8 @@ struct ModelView {
     source: &'static str,
     previous: Option<ModelLine>,
     note: Option<String>,
+    /// Why the device default is not the 9B although the GPU is wanted.
+    default_note: Option<String>,
     trial: Option<TrialView>,
     /// The field's content: the refused input is kept.
     input: String,
@@ -425,11 +427,14 @@ fn view(status: Status, breaker: String, input: String, error: Option<String>) -
         active: model_line(&status.model.active),
         source: if status.model.from_owner_setting {
             "the owner's stored setting (the start flags are ignored)"
+        } else if status.model.device_default.is_on() {
+            "the default for this device"
         } else {
             "the start flags"
         },
         previous: status.model.previous.as_ref().map(model_line),
         note: status.model.note,
+        default_note: status.model.device_default.note().map(str::to_owned),
         trial: status.trial.map(trial_view),
         input,
         error,

@@ -251,6 +251,8 @@ pub(crate) struct FakeLauncher {
     /// Blocking work that holds a ticket (the hash of a large file).
     pub(crate) work: Tickets,
     pub(crate) hash_probe: Mutex<Option<Arc<HashProbe>>>,
+    /// Model files missing from the models folder (all others are present).
+    pub(crate) absent: Mutex<Vec<String>>,
 }
 
 /// The launcher's in-flight work, as the real one keeps it.
@@ -339,6 +341,10 @@ impl Launcher for FakeLauncher {
 
     fn select(&self, model: &Model) {
         self.selected.lock().unwrap().push(model.clone());
+    }
+
+    async fn model_present(&self, name: &str) -> bool {
+        !self.absent.lock().unwrap().iter().any(|n| n == name)
     }
 
     async fn hash_model(&self, name: &str) -> Result<ModelFile, String> {

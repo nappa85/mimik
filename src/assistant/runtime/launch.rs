@@ -2725,6 +2725,17 @@ impl Launcher for Launch {
         };
     }
 
+    async fn model_present(&self, name: &str) -> bool {
+        let (real, name) = (Arc::clone(&self.0), name.to_owned());
+        tokio::task::spawn_blocking(move || {
+            files::open_dir(&real.settings.models_dir, Owners::Mine, true)
+                .and_then(|models| files::open_file(models.as_fd(), &name, Owners::Mine).map(drop))
+                .is_ok()
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     async fn hash_model(&self, name: &str) -> Result<ModelFile, String> {
         let (real, name) = (Arc::clone(&self.0), name.to_owned());
         let ticket = real.work.enter();

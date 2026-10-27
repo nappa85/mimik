@@ -13,6 +13,16 @@ pub const DEFAULT_MODEL_SHA256: &str =
 /// v2-compact prefix (ASSIST-52) asks for shorter replies, so 352 still holds; re-deriving it
 /// from a screen of the shipped prefix is owed (`TODO.md`).
 pub(crate) const DEFAULT_MAX_TOKENS: u32 = 352;
+/// The default model on the GPU path (ASSIST-55): the Qwen3.5-9B `Q4_K_M` file
+/// (unsloth/Qwen3.5-9B-GGUF at revision `3885219b`, Apache-2.0), 5 680 522 464 bytes, with
+/// its SHA-256 compiled in. The CPU path keeps [`DEFAULT_MODEL`].
+pub const GPU_DEFAULT_MODEL: &str = "local:Qwen3.5-9B-Q4_K_M.gguf";
+pub const GPU_DEFAULT_MODEL_SHA256: &str =
+    "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8";
+/// `max_tokens` of the 9B file: 352, from the 352-token field-reference screens, where no
+/// reply was truncated. A derivation by the 2b rule from a screen of the shipped
+/// v2-compact prefix is owed (ASSIST-L47), as for Granite.
+pub(crate) const GPU_DEFAULT_MAX_TOKENS: u32 = 352;
 /// Any other file until the 2d trial measures it (never below 256).
 pub(crate) const OTHER_MAX_TOKENS: u32 = 256;
 
@@ -155,7 +165,7 @@ pub(crate) fn valid_sha256(text: &str) -> bool {
     text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// The model's `max_tokens` from the flags, before any trial: 352 for the default file by its
+/// The model's `max_tokens` from the flags, before any trial: 352 for either default file by its
 /// SHA-256, 256 otherwise.
 pub(crate) fn max_tokens(spec: &str, sha256: Option<&str>) -> Result<u32, String> {
     local_name(spec)?;
@@ -163,13 +173,19 @@ pub(crate) fn max_tokens(spec: &str, sha256: Option<&str>) -> Result<u32, String
         Some(sha) if valid_sha256(sha) => sha,
         Some(_) => return Err("--assistant-model-sha256 must be 64 lowercase hex digits".into()),
         None if spec == DEFAULT_MODEL => DEFAULT_MODEL_SHA256,
+        None if spec == GPU_DEFAULT_MODEL => GPU_DEFAULT_MODEL_SHA256,
         None => return Err("--assistant-model-sha256 is required for this model".into()),
     };
-    Ok(if sha256 == DEFAULT_MODEL_SHA256 {
-        DEFAULT_MAX_TOKENS
-    } else {
-        OTHER_MAX_TOKENS
-    })
+    Ok(compiled_in_max_tokens(sha256).unwrap_or(OTHER_MAX_TOKENS))
+}
+
+/// The `max_tokens` of a file whose hash is compiled in (the two defaults), by its SHA-256.
+fn compiled_in_max_tokens(sha256: &str) -> Option<u32> {
+    match sha256 {
+        DEFAULT_MODEL_SHA256 => Some(DEFAULT_MAX_TOKENS),
+        GPU_DEFAULT_MODEL_SHA256 => Some(GPU_DEFAULT_MAX_TOKENS),
+        _ => None,
+    }
 }
 
 /// The largest model file a trial accepts (the stored size's limit, ASSIST-35).
@@ -205,11 +221,7 @@ pub(crate) fn measured_max_tokens(largest_predicted_n: u32) -> u32 {
 
 /// The `max_tokens` a passed trial of the file with `sha256` records.
 pub(crate) fn trial_max_tokens(sha256: &str, largest_predicted_n: u32) -> u32 {
-    if sha256 == DEFAULT_MODEL_SHA256 {
-        DEFAULT_MAX_TOKENS
-    } else {
-        measured_max_tokens(largest_predicted_n)
-    }
+    compiled_in_max_tokens(sha256).unwrap_or_else(|| measured_max_tokens(largest_predicted_n))
 }
 
 #[cfg(test)]

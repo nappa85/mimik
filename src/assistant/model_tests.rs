@@ -7,6 +7,19 @@ fn rule(text: &str) -> Rule {
 }
 
 #[test]
+fn the_gpu_default_has_its_hash_and_budget_compiled_in() {
+    assert!(valid_sha256(GPU_DEFAULT_MODEL_SHA256));
+    assert_eq!(max_tokens(GPU_DEFAULT_MODEL, None), Ok(352));
+    assert_eq!(trial_max_tokens(GPU_DEFAULT_MODEL_SHA256, 100), 352);
+    assert_eq!(
+        default_alias(GPU_DEFAULT_MODEL).unwrap(),
+        "qwen3.5-9b-q4_k_m"
+    );
+    // Another file under a similar name needs its own hash.
+    assert!(max_tokens("local:Qwen3.5-9B-Q4_K_M2.gguf", None).is_err());
+}
+
+#[test]
 fn local_specs_parse_to_their_file_name() {
     assert_eq!(
         parse_spec(DEFAULT_MODEL),
