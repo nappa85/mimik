@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 /// The adopted prefix quotes the schema with the alias enum abbreviated (v2-short, chosen
 /// after the 2c-1 screens) and asks for compact single-line JSON (v2-compact, ASSIST-52);
 /// `response_format` still carries the full pinned schema.
-const PREFIX_SHA256: &str = "9f47ce637da68f673d71012d9422a9192918f42078a275be05c74e388f0bde9a";
+const PREFIX_SHA256: &str = "3cf169f27365af587aacf611716605a46954b565124763ea447dfc1c98ad057e";
 
 fn validator() -> jsonschema::Validator {
     jsonschema::draft202012::options()
@@ -316,7 +316,7 @@ fn the_instructions_ask_for_compact_single_line_json_once_before_the_reply_shape
     // tokens in the field-reference screen).
     const SENTENCE: &str =
         "Reply with compact single-line JSON: no spaces or line breaks between tokens.\n";
-    const RULE: &str = "- A literal must be a number written in the note: digits exactly as written, or a whole number word in English or Italian (zero to twenty, the tens up to ninety, hundred; one, ten, uno, una, dieci). No numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits (\"took 15\" gives 15; \"ten damage\" gives 10; \"took 1,500\" gives none). A 1 used only to multiply or divide is always allowed.";
+    const RULE: &str = "- A literal must be a number written in the note: digits exactly as written, or a whole number word in English or Italian (zero to twenty, the tens up to ninety, hundred; one, ten, uno, una, dieci). No numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits (\"took 15\" gives 15; \"ten damage\" gives 10; \"took 1,500\" gives none). A 1 that multiplies or divides anything but another 1 is allowed.";
     const DIGITS_ONLY: &str = "- A literal must be a number written with digits in the note, exactly as written: no spelled-out numbers, no numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits (\"took 15\" gives 15; \"took 1,500\" gives none).";
     assert_eq!(FIXED_PREFIX.matches(SENTENCE).count(), 1);
     assert!(INSTRUCTIONS.contains(&format!(

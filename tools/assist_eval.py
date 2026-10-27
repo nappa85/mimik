@@ -283,7 +283,7 @@ EX_COMPACT = "Reply with compact single-line JSON: no spaces or line breaks betw
 
 # The literal rule sentence before ASSIST-53 (digits only). The experiment contracts below keep
 # this text, so their prefixes (and the ledgers' prefix hashes) stay what they were.
-LITERAL_RULE_ASSIST53 = '- A literal must be a number written in the note: digits exactly as written, or a whole number word in English or Italian (zero to twenty, the tens up to ninety, hundred; one, ten, uno, una, dieci). No numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits ("took 15" gives 15; "ten damage" gives 10; "took 1,500" gives none). A 1 used only to multiply or divide is always allowed.'
+LITERAL_RULE_ASSIST53 = '- A literal must be a number written in the note: digits exactly as written, or a whole number word in English or Italian (zero to twenty, the tens up to ninety, hundred; one, ten, uno, una, dieci). No numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits ("took 15" gives 15; "ten damage" gives 10; "took 1,500" gives none). A 1 that multiplies or divides anything but another 1 is allowed.'
 LITERAL_RULE_DIGITS_ONLY = '- A literal must be a number written with digits in the note, exactly as written: no spelled-out numbers, no numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits ("took 15" gives 15; "took 1,500" gives none).'
 
 

@@ -320,7 +320,7 @@ class Files(unittest.TestCase):
 
 
 # The shipped prefix (v2-compact, ASSIST-52, with the ASSIST-53 literal rule): the Rust copy's hash, in `contract_tests.rs` too.
-V2_PREFIX_SHA256 = "9f47ce637da68f673d71012d9422a9192918f42078a275be05c74e388f0bde9a"
+V2_PREFIX_SHA256 = "3cf169f27365af587aacf611716605a46954b565124763ea447dfc1c98ad057e"
 # The pre-ASSIST-52 prefix (v2-base, digits-only literal rule): the field-reference screen's
 # base arm.
 V2_BASE_PREFIX_SHA256 = "7b0ba380d8687cc8dfe2a150bf99d684b3bb4f4d5a22e41b5d46a1b6bbd5fe84"
