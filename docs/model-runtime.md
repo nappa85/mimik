@@ -235,7 +235,8 @@ assistant-runner --probe --runtime <dir> --models-dir <dir> --model local:<name>
 [--model-sha256 <hex>] [--data-dir <dir>]` prints the result as one JSON line once its probes'
 cleanup has ended (level 3's result with `"used": false`; the level reached is 1 or none) and
 exits 0 only
-when level 1's probe passed (the CI and owner check). A probe that fails for a definite cause
+when level 1's probe passed (the CI and owner check). `--model-sha256` may be left out only for
+the two compiled-in files (Granite 4.2 3B and Qwen3.5-9B); any other file is refused without it. A probe that fails for a definite cause
 (an unusable sandbox, a changed file, a refusal inside the level or by the endpoint check)
 skips its level; one that is only inconclusive (no report within 30 s, a failed spawn or a
 runner with no status line, a transient endpoint error such as `EMFILE`, `ENOMEM` or `EAGAIN`) is
