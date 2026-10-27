@@ -86,6 +86,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   - Qwen4 (announced, not released on 2026-10-27): screen it when it is out.
   - Engines (ASSIST-54): re-screen when mistral.rs gains Vulkan or vllm.cpp has stable releases.
 
+- ASSIST-55 test gaps (Minor): a plain Restart keeps the 9B hash-mismatch fallback after a real
+  mismatch; a trial or stored 9B while the device default was on.
 - Review helper: `external_review.py`'s short-output unavailable heuristic can reject a real
   successful verdict that discusses "unavailable" status. Add a regression and narrow the
   classification; direct sanitized Astra follow-up was needed to read the actual verdict.
