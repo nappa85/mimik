@@ -37,8 +37,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    that)` (`DEFAULT_MAX_TOKENS` in `src/assistant/model.rs`, 352 until then); then re-run the idle
    CPU calibration (`tools/assist_runtime_measure.py`) for the priming and the budgets. Also a
    live trial of a second model through `/admin/assistant` (`local:`), CPU first, GPU at a
-   weekend. Granite's field-reference screen with D53 is being run; the general 104-reply
-   screen with D is not run (ASSIST-L32).
+   weekend. The general 104-reply screen with D is not run (ASSIST-L32).
    Live acceptance check before release: prime, a structured request, then a request with a
    different `ref` enum (another context): the fixed prefix's tokens are reused
    (`cached_tokens` covers the prefix), plus the grammar-compilation time per request; and
