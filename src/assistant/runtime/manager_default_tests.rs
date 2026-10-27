@@ -4,7 +4,9 @@ use super::tests::{Behaviour, CONFIG, FakeLauncher, Start, ready};
 use super::*;
 use crate::assistant::model::{DEFAULT_MODEL_SHA256, GPU_DEFAULT_MODEL, GPU_DEFAULT_MODEL_SHA256};
 use crate::assistant::records::tests::MemRecords;
-use crate::assistant::runtime::models::{GPU_DEFAULT_MISSING, GPU_DEFAULT_ON_CPU};
+use crate::assistant::runtime::models::{
+    GPU_DEFAULT_MISMATCH, GPU_DEFAULT_MISSING, GPU_DEFAULT_ON_CPU,
+};
 
 const GPU_CONFIG: Config = Config {
     path: Path::Gpu,
@@ -181,5 +183,96 @@ async fn after_a_switch_the_device_default_no_longer_applies_and_switch_back_ret
     assert_eq!(
         handle.status().model.active.sha256,
         GPU_DEFAULT_MODEL_SHA256
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_9b_file_with_the_wrong_hash_falls_back_to_granite_with_the_reason() {
+    // The default 9B fails its hash check at the load: Granite runs instead, on the GPU path.
+    let launcher = FakeLauncher::scripted([
+        Start::Other("the model file changed: it no longer has the SHA-256 recorded for it"),
+        Start::Ok(Behaviour::default()),
+    ]);
+    let (assistant, handle) = spawn_default(&launcher, GPU_CONFIG, true, None);
+    ready(&assistant).await;
+    let status = handle.status();
+    assert_eq!(
+        selected_shas(&launcher),
+        [GPU_DEFAULT_MODEL_SHA256, DEFAULT_MODEL_SHA256]
+    );
+    assert_eq!(status.model.active.sha256, DEFAULT_MODEL_SHA256);
+    assert_eq!(
+        status.model.device_default.note(),
+        Some(GPU_DEFAULT_MISMATCH)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_explicit_9b_with_the_wrong_hash_stays_unavailable() {
+    let launcher = FakeLauncher::scripted([Start::Other(
+        "the model file changed: it no longer has the SHA-256 recorded for it",
+    )]);
+    let (_assistant, handle) = {
+        let assistant = Assistant::new();
+        let handle = spawn_with(
+            Arc::clone(&assistant),
+            Arc::clone(&launcher) as Arc<dyn Launcher>,
+            GPU_CONFIG,
+            ModelSetup {
+                active: Model::test("Qwen3.5-9B-Q4_K_M.gguf", GPU_DEFAULT_MODEL_SHA256, 352),
+                previous: None,
+                records: None,
+                from_owner_setting: false,
+                device_default: false,
+            },
+        );
+        (assistant, handle)
+    };
+    super::tests::until(Duration::from_mins(5), || {
+        matches!(handle.status().state, State::Unavailable(_))
+    })
+    .await;
+    assert_eq!(launcher.starts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_keeps_the_device_default_and_try_the_gpu_again_picks_the_9b_again() {
+    let launcher = FakeLauncher::scripted([
+        Start::Other("the model server exited before it was ready"),
+        Start::Ok(Behaviour::default()),
+        Start::Ok(Behaviour::default()),
+        Start::Ok(Behaviour::default()),
+    ]);
+    let (assistant, handle) = spawn_default(&launcher, GPU_CONFIG, true, None);
+    ready(&assistant).await;
+    // On the CPU after the GPU failure: a Restart keeps Granite and the default.
+    assert_eq!(handle.restart(), Restart::Accepted);
+    super::tests::until(Duration::from_mins(15), || {
+        launcher.starts.lock().unwrap().len() >= 3
+    })
+    .await;
+    ready(&assistant).await;
+    assert!(handle.status().model.device_default.is_on());
+    assert_eq!(handle.status().model.active.sha256, DEFAULT_MODEL_SHA256);
+    // "Try the GPU again": the 9B once more.
+    assert_eq!(handle.try_gpu(), TryGpu::Accepted);
+    super::tests::until(Duration::from_mins(15), || {
+        launcher.starts.lock().unwrap().len() >= 4
+    })
+    .await;
+    ready(&assistant).await;
+    assert_eq!(handle.status().path, Path::Gpu);
+    assert_eq!(
+        handle.status().model.active.sha256,
+        GPU_DEFAULT_MODEL_SHA256
+    );
+    assert_eq!(
+        selected_shas(&launcher),
+        [
+            GPU_DEFAULT_MODEL_SHA256,
+            DEFAULT_MODEL_SHA256,
+            DEFAULT_MODEL_SHA256,
+            GPU_DEFAULT_MODEL_SHA256
+        ]
     );
 }

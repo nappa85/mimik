@@ -68,19 +68,19 @@ struct Models {
 /// (hash `b…b`) and `third.gguf` (hash `c…c`) in the models folder; `slow` makes each trial
 /// phrase take that long.
 async fn models(slow: Duration) -> Models {
-    models_with(slow, Path::Cpu, false).await
+    models_with(slow, Path::Cpu, false, Start::Ok(quick())).await
 }
 
 /// [`models`] on `path`; with `device_default` the active model is the device default and the
 /// Qwen3.5-9B file is missing from the models folder.
-async fn models_with(slow: Duration, path: Path, device_default: bool) -> Models {
+async fn models_with(slow: Duration, path: Path, device_default: bool, first: Start) -> Models {
     let (dir, store, auth, _clock) = fixture_with_owner(1).await;
     let behaviour = |phrase_delay| Behaviour {
         phrase_delay,
         ..quick()
     };
     let launcher = FakeLauncher::scripted(
-        std::iter::once(Start::Ok(quick()))
+        std::iter::once(first)
             .chain((0..40).map(|_| Start::Ok(behaviour(slow))))
             .collect::<Vec<_>>(),
     );
@@ -706,15 +706,52 @@ async fn the_stored_setting_beats_the_start_flags() {
 }
 
 #[tokio::test]
+async fn an_explicit_9b_spec_without_a_hash_gets_the_9b_hash_not_granites() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (dir, store, _auth, _clock) = fixture_with_owner(1).await;
+    let handle = AssistantHandle::runtime(
+        default_config(dir.path(), Some(crate::assistant::GPU_DEFAULT_MODEL)),
+        store,
+    )
+    .await
+    .unwrap();
+    let status = handle.runtime.clone().unwrap().status();
+    assert!(!status.model.device_default.is_on());
+    assert_eq!(
+        status.model.active.sha256,
+        crate::assistant::GPU_DEFAULT_MODEL_SHA256
+    );
+    assert_eq!(status.model.active.max_tokens, 352);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn the_page_says_why_the_device_default_is_granite() {
     let _lock = crate::auth::test_resource_lock().await;
-    let models = models_with(Duration::from_millis(1), Path::Gpu, true).await;
+    let first = || Start::Ok(quick());
+    let models = models_with(Duration::from_millis(1), Path::Gpu, true, first()).await;
     let page = models.page().await;
     assert!(
-        page.contains("Qwen3.5-9B not found in the models folder; using Granite 4.2 3B."),
+        page.contains(
+            "Qwen3.5-9B not found or not readable in the models folder; using Granite 4.2 3B."
+        ),
         "{page}"
     );
     assert!(page.contains("from the default for this device"), "{page}");
+}
+
+#[tokio::test]
+async fn the_page_says_when_the_default_9b_gave_way_to_granite_on_the_cpu() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let failing = Start::Other("the model server exited before it was ready");
+    let models = models_with(Duration::from_millis(1), Path::Gpu, true, failing).await;
+    // The 9B file is present in this fixture's folder only if not marked absent; the GPU
+    // start failed, so Granite runs on the CPU and the page says so.
+    let page = models.page().await;
+    assert!(
+        page.contains("the GPU is not in use, so Granite 4.2 3B runs on the CPU."),
+        "{page}"
+    );
 }
 
 fn default_config(dir: &std::path::Path, model: Option<&str>) -> crate::assistant::RuntimeConfig {

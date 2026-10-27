@@ -27,12 +27,13 @@
 use super::budgets::NoBudgets;
 use super::calibration::{self, Calibration};
 use super::models::{
-    DeviceDefault, Model, ModelFile, ModelStatus, TrialKey, TrialReport, TrialState, default_model,
-    gpu_default_name, phrase_bound, trial_bound,
+    DeviceDefault, Model, ModelFile, ModelStatus, NineB, TrialKey, TrialReport, TrialState,
+    default_model, gpu_default_name, phrase_bound, trial_bound,
 };
 use super::server::{Health, Server};
 use super::{Level, Path, trial};
 use crate::assistant::jobs::{Assistant, Budgets, EndReason, RuntimeEvent, Signal};
+use crate::assistant::model::GPU_DEFAULT_MODEL_SHA256;
 use crate::assistant::records::{Record, Records};
 use async_trait::async_trait;
 use std::future::Future;
@@ -642,6 +643,7 @@ pub(crate) fn spawn_with(
         health_answered: Arc::new(AtomicBool::new(false)),
         active: models.active,
         device_default: models.device_default,
+        nine_b_mismatch: false,
         previous: models.previous,
         records: models.records,
         cancel: Arc::clone(&cancel),
@@ -730,6 +732,9 @@ struct Manager {
     /// The active model is the device default, picked per session; a Switch or Switch back
     /// ends that.
     device_default: bool,
+    /// The device default's 9B file failed its hash check at a load: Granite stands in until
+    /// "Try the GPU again" or Mimik's restart.
+    nine_b_mismatch: bool,
     previous: Option<Model>,
     /// Where model changes are stored (none: the owner cannot change the model).
     records: Option<Arc<dyn Records>>,
@@ -813,6 +818,7 @@ impl Manager {
                     reset_breaker = true;
                     if gpu {
                         self.gpu_failed = None;
+                        self.nine_b_mismatch = false;
                     }
                 }
                 Some(Next::Model(_)) | None => {}
@@ -945,8 +951,16 @@ impl Manager {
     /// Granite otherwise, with the note the page shows.
     async fn select_model(&mut self, gpu: bool) {
         if self.device_default {
-            let present = gpu && self.launcher.model_present(gpu_default_name()).await;
-            let (model, note) = default_model(gpu, self.config.path == Path::Gpu, present);
+            let file = if !gpu {
+                NineB::Missing
+            } else if self.nine_b_mismatch {
+                NineB::Mismatch
+            } else if self.launcher.model_present(&gpu_default_name()).await {
+                NineB::Present
+            } else {
+                NineB::Missing
+            };
+            let (model, note) = default_model(gpu, self.config.path == Path::Gpu, file);
             if let Some(note) = note {
                 log(note);
             }
@@ -1063,6 +1077,13 @@ impl Manager {
                 // tries a model again, on either path (the CPU would only fail the same way).
                 Attempt::Failed(Fail::Other(why)) if why.starts_with(MODEL_CHANGED) => {
                     self.ended(generation, EndReason::Exited);
+                    // The device default's 9B is not the pinned file: Granite runs instead,
+                    // with the reason on the page. An explicit or stored model is refused.
+                    if self.device_default && self.active.sha256 == GPU_DEFAULT_MODEL_SHA256 {
+                        log(&why);
+                        self.nine_b_mismatch = true;
+                        return PathEnd::Next(Next::Fresh { gpu: false });
+                    }
                     return PathEnd::Next(self.hold(why).await);
                 }
                 Attempt::Failed(Fail::Sandbox(why) | Fail::Other(why)) if gpu => {

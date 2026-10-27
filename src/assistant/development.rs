@@ -5,8 +5,7 @@
 //! Compiled only with the `dev-endpoint` feature, which release builds never enable; it has no
 //! endpoint check, and the page says so.
 use super::AssistantHandle;
-use super::DEFAULT_MODEL_SHA256;
-use super::model::{default_alias, local_name, max_tokens};
+use super::model::{default_alias, local_name, resolve};
 use super::runtime::manager::{self, Child, Fail, Launcher};
 use super::runtime::models::Model;
 use super::runtime::server::{Llama, Server};
@@ -94,7 +93,7 @@ impl AssistantHandle {
     ///
     /// A refused endpoint or model spec, or an unreadable token file, by message.
     pub fn development(config: Config) -> Result<Self, String> {
-        let max_tokens = max_tokens(&config.model, config.model_sha256.as_deref())?;
+        let (sha256, max_tokens) = resolve(&config.model, config.model_sha256.as_deref())?;
         let name = local_name(&config.model)?;
         let alias = match config.model_alias {
             Some(alias) => alias,
@@ -116,9 +115,7 @@ impl AssistantHandle {
         let model = Model {
             spec: config.model,
             name,
-            sha256: config
-                .model_sha256
-                .unwrap_or_else(|| DEFAULT_MODEL_SHA256.to_owned()),
+            sha256,
             alias,
             max_tokens,
             size: None,
@@ -164,5 +161,28 @@ mod tests {
         ] {
             assert!(endpoint(refused).is_err(), "{refused}");
         }
+    }
+}
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_9b_spec_gets_its_own_hash_not_granites() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_file = dir.path().join("token");
+        std::fs::write(&token_file, "dummy-token\n").unwrap();
+        let handle = AssistantHandle::development(Config {
+            endpoint: "http://127.0.0.1:9".into(),
+            token_file,
+            model: crate::assistant::GPU_DEFAULT_MODEL.into(),
+            model_sha256: None,
+            model_alias: None,
+        })
+        .unwrap();
+        let active = handle.runtime.clone().unwrap().status().model.active;
+        assert_eq!(active.sha256, crate::assistant::GPU_DEFAULT_MODEL_SHA256);
+        assert_eq!(active.max_tokens, 352);
     }
 }

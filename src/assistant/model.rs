@@ -165,9 +165,12 @@ pub(crate) fn valid_sha256(text: &str) -> bool {
     text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// The model's `max_tokens` from the flags, before any trial: 352 for either default file by its
-/// SHA-256, 256 otherwise.
-pub(crate) fn max_tokens(spec: &str, sha256: Option<&str>) -> Result<u32, String> {
+/// The SHA-256 and `max_tokens` a spec resolves to, before any trial: the hash given with
+/// `--assistant-model-sha256`, else the compiled-in hash of the spec's own default file (the
+/// Granite or the Qwen3.5-9B file); `max_tokens` 352 for either default file by its SHA-256,
+/// 256 otherwise. Every place that turns a spec into a model (the flags, the development
+/// endpoint, the probe) uses this.
+pub(crate) fn resolve(spec: &str, sha256: Option<&str>) -> Result<(String, u32), String> {
     local_name(spec)?;
     let sha256 = match sha256 {
         Some(sha) if valid_sha256(sha) => sha,
@@ -176,7 +179,8 @@ pub(crate) fn max_tokens(spec: &str, sha256: Option<&str>) -> Result<u32, String
         None if spec == GPU_DEFAULT_MODEL => GPU_DEFAULT_MODEL_SHA256,
         None => return Err("--assistant-model-sha256 is required for this model".into()),
     };
-    Ok(compiled_in_max_tokens(sha256).unwrap_or(OTHER_MAX_TOKENS))
+    let tokens = compiled_in_max_tokens(sha256).unwrap_or(OTHER_MAX_TOKENS);
+    Ok((sha256.to_owned(), tokens))
 }
 
 /// The `max_tokens` of a file whose hash is compiled in (the two defaults), by its SHA-256.

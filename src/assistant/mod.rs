@@ -121,11 +121,7 @@ impl AssistantHandle {
             );
         }
         let name = model::local_name(&spec)?;
-        let max_tokens = model::max_tokens(&spec, config.model_sha256.as_deref())?;
-        let sha256 = config
-            .model_sha256
-            .clone()
-            .unwrap_or_else(|| DEFAULT_MODEL_SHA256.to_owned());
+        let (sha256, max_tokens) = model::resolve(&spec, config.model_sha256.as_deref())?;
         let alias = match config.model_alias {
             Some(alias) => alias,
             None => model::default_alias(&spec)?,

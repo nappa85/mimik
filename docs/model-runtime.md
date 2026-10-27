@@ -43,8 +43,11 @@ setting wins and the flags are ignored (the page says so). **Default by device (
 without `--assistant-model` and without a stored setting, the manager picks the model at each
 start (`default_model` in `src/assistant/runtime/models.rs`): on the GPU path the Qwen3.5-9B
 `Q4_K_M` file (`Qwen3.5-9B-Q4_K_M.gguf`, Apache-2.0, SHA-256 and `max_tokens` 352 compiled in)
-when it is in the models folder, otherwise Granite 4.2 3B with "Qwen3.5-9B not found in the
-models folder; using Granite 4.2 3B" on `/admin/assistant` (a warning, not a block); on the CPU
+when it is in the models folder, otherwise Granite 4.2 3B with "Qwen3.5-9B not found or not
+readable in the models folder; using Granite 4.2 3B" on `/admin/assistant` (a warning, not a
+block); the same when the 9B file fails its pinned hash at the load ("does not match its pinned
+hash"; "Try the GPU again" or Mimik's restart tries the file again; an explicit or stored 9B is
+refused instead, as any model whose file changed); on the CPU
 path (`--assistant-device cpu`, no usable GPU, or a GPU start that fell back) Granite 4.2 3B
 (file `granite-4.2-3b-Q4_K_M.gguf`, SHA-256 and `max_tokens` 352 compiled in), with a note when
 the GPU was wanted. "Try the GPU again" picks again. An explicit flag or the stored setting is

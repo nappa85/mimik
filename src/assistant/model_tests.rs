@@ -6,6 +6,32 @@ fn rule(text: &str) -> Rule {
         .rule
 }
 
+fn max_tokens(spec: &str, sha256: Option<&str>) -> Result<u32, String> {
+    resolve(spec, sha256).map(|(_, tokens)| tokens)
+}
+
+#[test]
+fn each_compiled_in_file_resolves_to_its_own_hash_and_budget() {
+    assert_eq!(
+        resolve(DEFAULT_MODEL, None),
+        Ok((DEFAULT_MODEL_SHA256.to_owned(), 352))
+    );
+    assert_eq!(
+        resolve(GPU_DEFAULT_MODEL, None),
+        Ok((GPU_DEFAULT_MODEL_SHA256.to_owned(), 352))
+    );
+    // An explicit hash is kept, and a compiled-in one gives its budget under any name.
+    assert_eq!(
+        resolve("local:renamed.gguf", Some(GPU_DEFAULT_MODEL_SHA256)),
+        Ok((GPU_DEFAULT_MODEL_SHA256.to_owned(), 352))
+    );
+    assert_eq!(
+        resolve(GPU_DEFAULT_MODEL, Some(&"a".repeat(64))),
+        Ok(("a".repeat(64), 256))
+    );
+    assert!(resolve("local:other.gguf", None).is_err());
+}
+
 #[test]
 fn the_gpu_default_has_its_hash_and_budget_compiled_in() {
     assert!(valid_sha256(GPU_DEFAULT_MODEL_SHA256));
