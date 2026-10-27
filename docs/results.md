@@ -39,6 +39,8 @@ Pre-registered in `tools/fieldref5-prereg.md`. Same 30 `fr-*` dev cases and sett
 
 All arms: 30/30 schema-valid, no truncation, no coincidences, swap growth at most 35 MB.
 
+Granite 4.2 3B on the CPU (5 threads, run folder `…/20261027-1839-fr5-granite`), same cases and settings: A 2 correct_ref, 14 false_confident, 14 abstained (total p50 15.0 s); D53 6 correct_ref, 12 false_confident, 12 abstained (17.7 s). Both 30/30 schema-valid, no truncation. D53 is better than A for Granite as well, but far from the bar: field references on the CPU default stay a known weakness (ASSIST-L32).
+
 Results:
 - **No arm passes the screen**: every arm has 4 or more false_confident against the cap of 3. Correct_ref reaches the bar of 24 in three arms.
 - The remaining errors are misreadings, not harness artefacts (checked case by case): a factor added or dropped ("one ration eaten per crew member" gives `t - crew * days`; "paid each crew member a day's wage" gives `t - wage`), the wrong sign (buying ammunition subtracted; "dulled by my wits" added), replacing instead of adding ("hired as many hands as I have wits" sets crew to wits), and the wrong field halved ("pagato metà del debito" halves coin).
