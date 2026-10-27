@@ -27,11 +27,13 @@
 use super::budgets::NoBudgets;
 use super::calibration::{self, Calibration};
 use super::models::{
-    Model, ModelFile, ModelStatus, TrialKey, TrialReport, TrialState, phrase_bound, trial_bound,
+    DeviceDefault, Model, ModelFile, ModelStatus, NineB, TrialKey, TrialReport, TrialState,
+    default_model, gpu_default_name, phrase_bound, trial_bound,
 };
 use super::server::{Health, Server};
 use super::{Level, Path, trial};
 use crate::assistant::jobs::{Assistant, Budgets, EndReason, RuntimeEvent, Signal};
+use crate::assistant::model::GPU_DEFAULT_MODEL_SHA256;
 use crate::assistant::records::{Record, Records};
 use async_trait::async_trait;
 use std::future::Future;
@@ -132,6 +134,11 @@ pub(crate) trait Launcher: Send + Sync {
     }
     /// The model the next start loads (its file, the SHA-256 it must have and the alias).
     fn select(&self, _model: &Model) {}
+    /// Whether the model file `name` is in the models folder (a regular file the load would
+    /// accept to open; not hashed). A launcher that starts nothing says yes.
+    async fn model_present(&self, _name: &str) -> bool {
+        true
+    }
     /// Hashes the model file `name` in the models folder (the trial records the hash it
     /// then expects at every load). A launcher that starts nothing cannot.
     async fn hash_model(&self, _name: &str) -> Result<ModelFile, String> {
@@ -194,6 +201,11 @@ impl Status {
                 next_trial: 1,
                 pending: false,
                 note: None,
+                device_default: if models.device_default {
+                    DeviceDefault::On { note: None }
+                } else {
+                    DeviceDefault::Off
+                },
             },
             trial: None,
             gpu_wanted: path == Path::Gpu,
@@ -249,6 +261,9 @@ pub(crate) struct ModelSetup {
     pub records: Option<Arc<dyn Records>>,
     /// The active model comes from the owner's stored setting, not from the start flags.
     pub from_owner_setting: bool,
+    /// Neither a start flag nor the stored setting names a model: `active` is a placeholder
+    /// and each session picks the device default (ASSIST-55, `default_model`).
+    pub device_default: bool,
 }
 
 #[cfg(test)]
@@ -267,6 +282,7 @@ impl ModelSetup {
             previous: None,
             records: None,
             from_owner_setting: false,
+            device_default: false,
         }
     }
 }
@@ -626,6 +642,8 @@ pub(crate) fn spawn_with(
         gpu_failed: None,
         health_answered: Arc::new(AtomicBool::new(false)),
         active: models.active,
+        device_default: models.device_default,
+        nine_b_mismatch: false,
         previous: models.previous,
         records: models.records,
         cancel: Arc::clone(&cancel),
@@ -711,6 +729,12 @@ struct Manager {
     gpu_failed: Option<String>,
     /// The model the sessions run, and the one before it (for "Switch back").
     active: Model,
+    /// The active model is the device default, picked per session; a Switch or Switch back
+    /// ends that.
+    device_default: bool,
+    /// The device default's 9B file failed its hash check at a load: Granite stands in until
+    /// "Try the GPU again" or Mimik's restart.
+    nine_b_mismatch: bool,
     previous: Option<Model>,
     /// Where model changes are stored (none: the owner cannot change the model).
     records: Option<Arc<dyn Records>>,
@@ -794,6 +818,7 @@ impl Manager {
                     reset_breaker = true;
                     if gpu {
                         self.gpu_failed = None;
+                        self.nine_b_mismatch = false;
                     }
                 }
                 Some(Next::Model(_)) | None => {}
@@ -921,6 +946,38 @@ impl Manager {
         Ok(self.probed(probed))
     }
 
+    /// Hands the model the next start loads to the launcher. While the device default is in
+    /// force it is picked first (ASSIST-55): the 9B on the GPU path when its file is there,
+    /// Granite otherwise, with the note the page shows.
+    async fn select_model(&mut self, gpu: bool) {
+        if self.device_default {
+            let file = if !gpu {
+                NineB::Missing
+            } else if self.nine_b_mismatch {
+                NineB::Mismatch
+            } else if self.launcher.model_present(&gpu_default_name()).await {
+                NineB::Present
+            } else {
+                NineB::Missing
+            };
+            let (model, note) = default_model(gpu, self.config.path == Path::Gpu, file);
+            if let Some(note) = note {
+                log(note);
+            }
+            self.active = model.clone();
+            self.update(|status| {
+                status.model.active = model;
+                status.model.device_default = DeviceDefault::On {
+                    note: note.map(str::to_owned),
+                };
+            });
+        }
+        // A manager without a model setting (tests) leaves the launcher's own model alone.
+        if !self.active.name.is_empty() {
+            self.launcher.select(&self.active);
+        }
+    }
+
     /// The GPU path failed: the CPU path is used from now on, until Mimik restarts or the
     /// owner presses "Try the GPU again".
     fn gpu_fallback(&mut self, why: String) {
@@ -942,15 +999,12 @@ impl Manager {
     async fn session(&mut self, reset_breaker: bool) -> Next {
         // Nothing of an earlier session (a child's watcher, a cancelled probe) runs beside it.
         self.launcher.settle().await;
-        // A manager without a model setting (tests) leaves the launcher's own model alone.
-        if !self.active.name.is_empty() {
-            self.launcher.select(&self.active);
-        }
+        let gpu = self.config.path == Path::Gpu && self.gpu_failed.is_none();
+        self.select_model(gpu).await;
         self.failures = 0;
         if reset_breaker {
             self.assistant.reset_breaker();
         }
-        let gpu = self.config.path == Path::Gpu && self.gpu_failed.is_none();
         let note = self.gpu_failed.clone();
         self.update(|status| {
             status.state = State::Starting("checking");
@@ -974,6 +1028,8 @@ impl Manager {
                 PathEnd::Next(next) => return next,
                 PathEnd::GpuFailed(why) => {
                     self.gpu_fallback(why);
+                    // The device default is the CPU's now (Granite), not the 9B that failed.
+                    self.select_model(false).await;
                     path = Path::Cpu;
                 }
             }
@@ -1021,6 +1077,13 @@ impl Manager {
                 // tries a model again, on either path (the CPU would only fail the same way).
                 Attempt::Failed(Fail::Other(why)) if why.starts_with(MODEL_CHANGED) => {
                     self.ended(generation, EndReason::Exited);
+                    // The device default's 9B is not the pinned file: Granite runs instead,
+                    // with the reason on the page. An explicit or stored model is refused.
+                    if self.device_default && self.active.sha256 == GPU_DEFAULT_MODEL_SHA256 {
+                        log(&why);
+                        self.nine_b_mismatch = true;
+                        return PathEnd::Next(Next::Fresh { gpu: false });
+                    }
                     return PathEnd::Next(self.hold(why).await);
                 }
                 Attempt::Failed(Fail::Sandbox(why) | Fail::Other(why)) if gpu => {
@@ -1429,3 +1492,7 @@ mod model_commands;
 #[cfg(test)]
 #[path = "manager_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "manager_default_tests.rs"]
+mod default_tests;

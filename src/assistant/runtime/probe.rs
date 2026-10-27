@@ -235,9 +235,13 @@ fn cli_probe(args: &[String]) -> i32 {
         report(json!({"level": null, "error": "--model must be local:<name>.gguf"}));
         return 2;
     };
-    let sha256 = parsed
-        .sha256
-        .unwrap_or_else(|| crate::assistant::DEFAULT_MODEL_SHA256.to_owned());
+    let sha256 = match crate::assistant::model::resolve(&model, parsed.sha256.as_deref()) {
+        Ok((sha256, _)) => sha256,
+        Err(why) => {
+            report(json!({"level": null, "error": why}));
+            return 2;
+        }
+    };
     let data = parsed.data.map_or_else(
         || {
             std::path::PathBuf::from(&models)

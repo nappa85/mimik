@@ -21,6 +21,69 @@ pub(crate) struct Model {
     pub size: Option<u64>,
 }
 
+/// The page's note when the GPU path is chosen but the Qwen3.5-9B file is missing.
+pub(crate) const GPU_DEFAULT_MISSING: &str =
+    "Qwen3.5-9B not found or not readable in the models folder; using Granite 4.2 3B";
+/// The page's note when the 9B file is there but does not have its pinned hash.
+pub(crate) const GPU_DEFAULT_MISMATCH: &str =
+    "Qwen3.5-9B in the models folder does not match its pinned hash; using Granite 4.2 3B";
+/// The page's note when the GPU is wanted but the CPU path runs.
+pub(crate) const GPU_DEFAULT_ON_CPU: &str = "Qwen3.5-9B is the default on the GPU only; \
+     the GPU is not in use, so Granite 4.2 3B runs on the CPU";
+
+/// The GPU default's file in the models folder, as far as the manager could tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NineB {
+    Present,
+    /// Not there, or not openable as a model file.
+    Missing,
+    /// There, but without its pinned SHA-256.
+    Mismatch,
+}
+
+impl Model {
+    /// A compiled-in default (its spec resolves without a flag).
+    pub(crate) fn compiled(spec: &str) -> Self {
+        use crate::assistant::model::{default_alias, local_name, resolve};
+        let (sha256, max_tokens) = resolve(spec, None).unwrap_or_default();
+        Self {
+            spec: spec.to_owned(),
+            name: local_name(spec).unwrap_or_default(),
+            sha256,
+            alias: default_alias(spec).unwrap_or_default(),
+            max_tokens,
+            size: None,
+        }
+    }
+}
+
+/// The file name of the GPU default (the 9B) in the models folder.
+pub(crate) fn gpu_default_name() -> String {
+    crate::assistant::model::local_name(crate::assistant::model::GPU_DEFAULT_MODEL)
+        .unwrap_or_default()
+}
+
+/// The default model by device (ASSIST-55; used only while neither a start flag nor the
+/// owner's stored setting names a model): the Qwen3.5-9B on the GPU path when its file is in
+/// the models folder with its pinned hash, Granite 4.2 3B otherwise, with the note the page
+/// shows when the 9B is not what runs although the GPU is wanted. `gpu`: the path being
+/// started is the GPU's; `gpu_wanted`: the GPU path is the first choice (not
+/// `--assistant-device cpu`); `file`: the 9B file's state (read only when `gpu`).
+pub(crate) fn default_model(
+    gpu: bool,
+    gpu_wanted: bool,
+    file: NineB,
+) -> (Model, Option<&'static str>) {
+    use crate::assistant::model::{DEFAULT_MODEL, GPU_DEFAULT_MODEL};
+    match (gpu, gpu_wanted, file) {
+        (true, _, NineB::Present) => (Model::compiled(GPU_DEFAULT_MODEL), None),
+        (true, _, NineB::Missing) => (Model::compiled(DEFAULT_MODEL), Some(GPU_DEFAULT_MISSING)),
+        (true, _, NineB::Mismatch) => (Model::compiled(DEFAULT_MODEL), Some(GPU_DEFAULT_MISMATCH)),
+        (false, true, _) => (Model::compiled(DEFAULT_MODEL), Some(GPU_DEFAULT_ON_CPU)),
+        (false, false, _) => (Model::compiled(DEFAULT_MODEL), None),
+    }
+}
+
 /// What the launcher learns of a file by hashing it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelFile {
@@ -140,6 +203,31 @@ pub(crate) struct ModelStatus {
     pub pending: bool,
     /// What the last switch or switch back could not do.
     pub note: Option<String>,
+    /// Whether the active model is the device default (ASSIST-55).
+    pub device_default: DeviceDefault,
+}
+
+/// The device default (ASSIST-55) in the page's model status.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DeviceDefault {
+    /// The active model is a flag's or the owner's.
+    Off,
+    /// The manager picks the model at each start; `note` says why it is not the 9B although
+    /// the GPU is wanted.
+    On { note: Option<String> },
+}
+
+impl DeviceDefault {
+    pub(crate) fn is_on(&self) -> bool {
+        matches!(self, Self::On { .. })
+    }
+
+    pub(crate) fn note(&self) -> Option<&str> {
+        match self {
+            Self::On { note } => note.as_deref(),
+            Self::Off => None,
+        }
+    }
 }
 
 /// The whole trial may take this long: priming, five phrases at their deadline and two
@@ -174,6 +262,38 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_model_follows_the_device() {
+        use crate::assistant::model::{
+            DEFAULT_MODEL_SHA256, GPU_DEFAULT_MODEL, GPU_DEFAULT_MODEL_SHA256,
+        };
+        // GPU path, file there: the 9B with its compiled-in hash and 352 tokens.
+        let (model, note) = default_model(true, true, NineB::Present);
+        assert_eq!(model.spec, GPU_DEFAULT_MODEL);
+        assert_eq!(model.name, "Qwen3.5-9B-Q4_K_M.gguf");
+        assert_eq!(model.sha256, GPU_DEFAULT_MODEL_SHA256);
+        assert_eq!(
+            (model.alias.as_str(), model.max_tokens),
+            ("qwen3.5-9b-q4_k_m", 352)
+        );
+        assert_eq!(note, None);
+        // GPU path, file with another hash: Granite, and why.
+        let (model, note) = default_model(true, true, NineB::Mismatch);
+        assert_eq!(model.sha256, DEFAULT_MODEL_SHA256);
+        assert_eq!(note, Some(GPU_DEFAULT_MISMATCH));
+        // GPU path, file missing: Granite, and why.
+        let (model, note) = default_model(true, true, NineB::Missing);
+        assert_eq!(model.sha256, DEFAULT_MODEL_SHA256);
+        assert_eq!(note, Some(GPU_DEFAULT_MISSING));
+        // CPU path after a GPU failure: Granite, and why.
+        let (model, note) = default_model(false, true, NineB::Present);
+        assert_eq!(model.sha256, DEFAULT_MODEL_SHA256);
+        assert_eq!(note, Some(GPU_DEFAULT_ON_CPU));
+        // The CPU chosen: Granite, nothing to explain.
+        let (model, note) = default_model(false, false, NineB::Missing);
+        assert_eq!((model.sha256.as_str(), note), (DEFAULT_MODEL_SHA256, None));
+    }
 
     #[test]
     fn trial_keys_round_trip_and_refuse_anything_else() {

@@ -17,7 +17,7 @@ pub(crate) mod request;
 pub(crate) mod runtime;
 pub(crate) mod transport;
 
-pub use model::{DEFAULT_MODEL, DEFAULT_MODEL_SHA256};
+pub use model::{DEFAULT_MODEL, DEFAULT_MODEL_SHA256, GPU_DEFAULT_MODEL, GPU_DEFAULT_MODEL_SHA256};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -40,8 +40,9 @@ pub struct RuntimeConfig {
     /// `--assistant-runtime`, default `llama/` beside Mimik's binary; either way it must hold
     /// exactly the pinned files.
     pub runtime_dir: Option<PathBuf>,
-    /// `--assistant-model` (`local:<name>.gguf`).
-    pub model: String,
+    /// `--assistant-model` (`local:<name>.gguf`); `None` takes the default by device
+    /// (ASSIST-55: the Qwen3.5-9B on the GPU path, Granite 4.2 3B on the CPU path).
+    pub model: Option<String>,
     pub model_sha256: Option<String>,
     pub model_alias: Option<String>,
     /// `--assistant-threads`, default the physical cores minus one (ASSIST-41).
@@ -101,15 +102,29 @@ impl AssistantHandle {
     /// A refused model spec or thread count, an unreadable model setting, or Mimik's own path
     /// unknown, by message.
     pub async fn runtime(config: RuntimeConfig, store: crate::Store) -> Result<Self, String> {
-        let name = model::local_name(&config.model)?;
-        let max_tokens = model::max_tokens(&config.model, config.model_sha256.as_deref())?;
-        let sha256 = config
-            .model_sha256
+        let device = match config.device.as_deref() {
+            None => runtime::device::Choice::Auto,
+            Some(text) => runtime::device::Choice::parse(text)?,
+        };
+        let path = runtime_path(&device);
+        // Without a start flag the model is the device default, picked per start by the
+        // manager (ASSIST-55); the Granite spec stands in until then.
+        let device_default = config.model.is_none();
+        let spec = config
+            .model
             .clone()
-            .unwrap_or_else(|| DEFAULT_MODEL_SHA256.to_owned());
+            .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+        if device_default && (config.model_sha256.is_some() || config.model_alias.is_some()) {
+            return Err(
+                "--assistant-model-sha256 and --assistant-model-alias need --assistant-model"
+                    .into(),
+            );
+        }
+        let name = model::local_name(&spec)?;
+        let (sha256, max_tokens) = model::resolve(&spec, config.model_sha256.as_deref())?;
         let alias = match config.model_alias {
             Some(alias) => alias,
-            None => model::default_alias(&config.model)?,
+            None => model::default_alias(&spec)?,
         };
         if !model::valid_alias(&alias) {
             return Err(
@@ -117,7 +132,7 @@ impl AssistantHandle {
             );
         }
         let flags = runtime::models::Model {
-            spec: config.model.clone(),
+            spec,
             name: name.clone(),
             sha256: sha256.clone(),
             alias: alias.clone(),
@@ -128,15 +143,11 @@ impl AssistantHandle {
         // The owner's stored setting beats the start flags.
         let stored = records.load().await?;
         let from_owner_setting = stored.active.is_some();
+        let device_default = device_default && !from_owner_setting;
         let (active, previous) = match stored.active {
             Some(active) => (active.model, stored.previous.map(|record| record.model)),
             None => (flags, None),
         };
-        let device = match config.device.as_deref() {
-            None => runtime::device::Choice::Auto,
-            Some(text) => runtime::device::Choice::parse(text)?,
-        };
-        let path = runtime_path(&device);
         if config.threads == Some(0) {
             return Err("--assistant-threads must be at least 1".into());
         }
@@ -181,6 +192,7 @@ impl AssistantHandle {
                 previous,
                 records: Some(Arc::new(records)),
                 from_owner_setting,
+                device_default,
             },
         ))
     }

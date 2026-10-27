@@ -12,6 +12,7 @@
 <p>Restart stops the model server, starts it again from the highest confinement level, measures it again and resets the breaker and the failure count; after a GPU failure it stays on the CPU. Number entry, notes and Undo work meanwhile.</p></section>
 <section class="panel"><h2>Model</h2>
 <p>Active: <strong>{{ view.model.active.spec }}</strong> · SHA-256 <code>{{ view.model.active.sha256 }}</code> · <code>max_tokens</code> {{ view.model.active.max_tokens }} · from {{ view.model.source }}.</p>
+{% if let Some(note) = view.model.default_note %}<p>{{ note }}.</p>{% endif %}
 {% if let Some(note) = view.model.note %}<p class="form-error" role="alert">{{ note }}</p>{% endif %}
 {% if view.model.switchable %}
 {% if let Some(previous) = view.model.previous %}<p>Previous: <strong>{{ previous.spec }}</strong> · SHA-256 <code>{{ previous.sha256 }}</code> · <code>max_tokens</code> {{ previous.max_tokens }}.</p>

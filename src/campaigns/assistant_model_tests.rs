@@ -68,16 +68,29 @@ struct Models {
 /// (hash `b…b`) and `third.gguf` (hash `c…c`) in the models folder; `slow` makes each trial
 /// phrase take that long.
 async fn models(slow: Duration) -> Models {
+    models_with(slow, Path::Cpu, false, Start::Ok(quick())).await
+}
+
+/// [`models`] on `path`; with `device_default` the active model is the device default and the
+/// Qwen3.5-9B file is missing from the models folder.
+async fn models_with(slow: Duration, path: Path, device_default: bool, first: Start) -> Models {
     let (dir, store, auth, _clock) = fixture_with_owner(1).await;
     let behaviour = |phrase_delay| Behaviour {
         phrase_delay,
         ..quick()
     };
     let launcher = FakeLauncher::scripted(
-        std::iter::once(Start::Ok(quick()))
+        std::iter::once(first)
             .chain((0..40).map(|_| Start::Ok(behaviour(slow))))
             .collect::<Vec<_>>(),
     );
+    if device_default {
+        launcher
+            .absent
+            .lock()
+            .unwrap()
+            .push("Qwen3.5-9B-Q4_K_M.gguf".into());
+    }
     for (name, sha) in [("other.gguf", 'b'), ("third.gguf", 'c')] {
         launcher.files.lock().unwrap().insert(
             name.to_owned(),
@@ -90,7 +103,7 @@ async fn models(slow: Duration) -> Models {
     let handle = AssistantHandle::with_models(
         Arc::clone(&launcher) as Arc<dyn Launcher>,
         manager::Config {
-            path: Path::Cpu,
+            path,
             levels: manager::USED_LEVELS,
         },
         ModelSetup {
@@ -98,6 +111,7 @@ async fn models(slow: Duration) -> Models {
             previous: None,
             records: Some(Arc::new(SqlRecords(store.clone()))),
             from_owner_setting: false,
+            device_default,
         },
     );
     let runtime = handle.runtime.clone().unwrap();
@@ -673,7 +687,7 @@ async fn the_stored_setting_beats_the_start_flags() {
             data_dir: dir.path().to_path_buf(),
             models_dir: None,
             runtime_dir: Some(dir.path().join("no-runtime")),
-            model: crate::assistant::DEFAULT_MODEL.to_owned(),
+            model: Some(crate::assistant::DEFAULT_MODEL.to_owned()),
             model_sha256: None,
             model_alias: None,
             threads: Some(1),
@@ -692,6 +706,134 @@ async fn the_stored_setting_beats_the_start_flags() {
 }
 
 #[tokio::test]
+async fn an_explicit_9b_spec_without_a_hash_gets_the_9b_hash_not_granites() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (dir, store, _auth, _clock) = fixture_with_owner(1).await;
+    let handle = AssistantHandle::runtime(
+        default_config(dir.path(), Some(crate::assistant::GPU_DEFAULT_MODEL)),
+        store,
+    )
+    .await
+    .unwrap();
+    let status = handle.runtime.clone().unwrap().status();
+    assert!(!status.model.device_default.is_on());
+    assert_eq!(
+        status.model.active.sha256,
+        crate::assistant::GPU_DEFAULT_MODEL_SHA256
+    );
+    assert_eq!(status.model.active.max_tokens, 352);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_page_says_why_the_device_default_is_granite() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let first = || Start::Ok(quick());
+    let models = models_with(Duration::from_millis(1), Path::Gpu, true, first()).await;
+    let page = models.page().await;
+    assert!(
+        page.contains(
+            "Qwen3.5-9B not found or not readable in the models folder; using Granite 4.2 3B."
+        ),
+        "{page}"
+    );
+    assert!(page.contains("from the default for this device"), "{page}");
+}
+
+#[tokio::test]
+async fn the_page_says_when_the_default_9b_gave_way_to_granite_on_the_cpu() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let failing = Start::Other("the model server exited before it was ready");
+    let models = models_with(Duration::from_millis(1), Path::Gpu, true, failing).await;
+    // The 9B file is present in this fixture's folder only if not marked absent; the GPU
+    // start failed, so Granite runs on the CPU and the page says so.
+    let page = models.page().await;
+    assert!(
+        page.contains("the GPU is not in use, so Granite 4.2 3B runs on the CPU."),
+        "{page}"
+    );
+}
+
+fn default_config(dir: &std::path::Path, model: Option<&str>) -> crate::assistant::RuntimeConfig {
+    crate::assistant::RuntimeConfig {
+        data_dir: dir.to_path_buf(),
+        models_dir: None,
+        runtime_dir: Some(dir.join("no-runtime")),
+        model: model.map(str::to_owned),
+        model_sha256: None,
+        model_alias: None,
+        threads: Some(1),
+        device: Some("cpu".into()),
+    }
+}
+
+#[tokio::test]
+async fn only_the_absence_of_a_flag_and_of_a_stored_setting_leaves_the_device_default() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (dir, store, _auth, _clock) = fixture_with_owner(1).await;
+    // No flag, nothing stored: the device default.
+    let handle = AssistantHandle::runtime(default_config(dir.path(), None), store.clone())
+        .await
+        .unwrap();
+    assert!(
+        handle
+            .runtime
+            .clone()
+            .unwrap()
+            .status()
+            .model
+            .device_default
+            .is_on()
+    );
+    handle.shutdown().await;
+    // An explicit flag, even the Granite file itself, is never replaced.
+    let handle = AssistantHandle::runtime(
+        default_config(dir.path(), Some(crate::assistant::DEFAULT_MODEL)),
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let status = handle.runtime.clone().unwrap().status();
+    assert!(!status.model.device_default.is_on());
+    assert_eq!(status.model.active, granite());
+    handle.shutdown().await;
+    // A hash or alias without a model would be silently dropped: refused.
+    let mut config = default_config(dir.path(), None);
+    config.model_sha256 = Some("b".repeat(64));
+    let Err(why) = AssistantHandle::runtime(config, store.clone()).await else {
+        panic!("a hash without a model must be refused")
+    };
+    assert!(why.contains("need --assistant-model"), "{why}");
+    // The stored setting beats the default.
+    let other = Model {
+        spec: "local:other.gguf".into(),
+        name: "other.gguf".into(),
+        sha256: "b".repeat(64),
+        alias: "other".into(),
+        max_tokens: 320,
+        size: Some(1 << 30),
+    };
+    SqlRecords(store.clone())
+        .activate(
+            &crate::assistant::records::Record {
+                model: other.clone(),
+                trial: None,
+            },
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+    let handle = AssistantHandle::runtime(default_config(dir.path(), None), store)
+        .await
+        .unwrap();
+    let status = handle.runtime.clone().unwrap().status();
+    assert!(!status.model.device_default.is_on());
+    assert_eq!(status.model.active, other);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn an_alias_the_stored_setting_would_refuse_is_refused_at_start() {
     let _lock = crate::auth::test_resource_lock().await;
     let (dir, store, _auth, _clock) = fixture_with_owner(1).await;
@@ -699,7 +841,7 @@ async fn an_alias_the_stored_setting_would_refuse_is_refused_at_start() {
         data_dir: dir.path().to_path_buf(),
         models_dir: None,
         runtime_dir: Some(dir.path().join("no-runtime")),
-        model: crate::assistant::DEFAULT_MODEL.to_owned(),
+        model: Some(crate::assistant::DEFAULT_MODEL.to_owned()),
         model_sha256: None,
         model_alias: Some(alias.to_owned()),
         threads: Some(1),

@@ -69,6 +69,7 @@ fn fixture(script: impl IntoIterator<Item = Start>, config: Config) -> Fixture {
             previous: None,
             records: Some(Arc::clone(&records) as Arc<dyn Records>),
             from_owner_setting: false,
+            device_default: false,
         },
     );
     Fixture {

@@ -35,11 +35,25 @@ with the server is in [assisted-entry.md](assisted-entry.md), "Interpretation as
 ## Options
 
 `--assistant` turns it on (off by default: no child, no probe, no route, the page says
-"Off"). `--assistant-model` (`local:<name>.gguf` by the grammar below, default the Granite 4.2
-3B `Q4_K_M` file with its SHA-256 compiled in), `--assistant-model-sha256` (required for any
-other file), `--assistant-model-alias` (default the file name without `.gguf`, lower case).
-These name the model of a database that has no stored setting; once the owner has switched
-models, the stored setting wins and the flags are ignored (the page says so). `--models-dir`
+"Off"). `--assistant-model` (`local:<name>.gguf` by the grammar below), `--assistant-model-sha256`
+(required for any file but the two defaults; both it and the alias need `--assistant-model`),
+`--assistant-model-alias` (default the file name without `.gguf`, lower case). These name the
+model of a database that has no stored setting; once the owner has switched models, the stored
+setting wins and the flags are ignored (the page says so). **Default by device (ASSIST-55):**
+without `--assistant-model` and without a stored setting, the manager picks the model at each
+start (`default_model` in `src/assistant/runtime/models.rs`): on the GPU path the Qwen3.5-9B
+`Q4_K_M` file (`Qwen3.5-9B-Q4_K_M.gguf`, Apache-2.0, SHA-256 and `max_tokens` 352 compiled in)
+when it is in the models folder, otherwise Granite 4.2 3B with "Qwen3.5-9B not found or not
+readable in the models folder; using Granite 4.2 3B" on `/admin/assistant` (a warning, not a
+block); the same when the 9B file fails its pinned hash at the load ("does not match its pinned
+hash"; "Try the GPU again" or Mimik's restart tries the file again; an explicit or stored 9B is
+refused instead, as any model whose file changed); on the CPU
+path (`--assistant-device cpu`, no usable GPU, or a GPU start that fell back) Granite 4.2 3B
+(file `granite-4.2-3b-Q4_K_M.gguf`, SHA-256 and `max_tokens` 352 compiled in), with a note when
+the GPU was wanted. "Try the GPU again" picks again. An explicit flag or the stored setting is
+never replaced; a Switch or Switch back ends the default, and "Switch back" returns to the
+model that was running. `--reasoning off` is in every start's arguments, so Qwen3.5's thinking
+is off for the 9B as for any model (checked in the launch arguments; no live run). `--models-dir`
 (default `<data dir>/models`, mode 0700, owned by Mimik's user; the model is placed there by
 hand). `--assistant-runtime` (default `llama/` beside the binary; it must hold exactly the
 pinned files either way). `--assistant-threads` (default the usable physical cores minus one,
@@ -221,7 +235,8 @@ assistant-runner --probe --runtime <dir> --models-dir <dir> --model local:<name>
 [--model-sha256 <hex>] [--data-dir <dir>]` prints the result as one JSON line once its probes'
 cleanup has ended (level 3's result with `"used": false`; the level reached is 1 or none) and
 exits 0 only
-when level 1's probe passed (the CI and owner check). A probe that fails for a definite cause
+when level 1's probe passed (the CI and owner check). `--model-sha256` may be left out only for
+the two compiled-in files (Granite 4.2 3B and Qwen3.5-9B); any other file is refused without it. A probe that fails for a definite cause
 (an unusable sandbox, a changed file, a refusal inside the level or by the endpoint check)
 skips its level; one that is only inconclusive (no report within 30 s, a failed spawn or a
 runner with no status line, a transient endpoint error such as `EMFILE`, `ENOMEM` or `EAGAIN`) is
@@ -559,8 +574,8 @@ on (the GPU path unless it fell back or `--assistant-device cpu`; no fallback in
 at level 1; primes it; sends five synthetic phrases shipped with Mimik (`trial.rs`; no sheet
 or player text) as a job would be sent, at `max_tokens` 384, each of which must be
 schema-valid and untruncated; sets `max_tokens` to `min(384, max(256, 1.25 × the largest
-predicted_n rounded up to a multiple of 32))`, except that the default Granite file,
-identified by its SHA-256 and never by name, keeps 352; and calibrates with that `max_tokens`
+predicted_n rounded up to a multiple of 32))`, except that the two default files (Granite and
+the Qwen3.5-9B), identified by their SHA-256 and never by name, keep 352; and calibrates with that `max_tokens`
 and derives the budgets. It passes when the phrases and the calibration succeed ("too slow"
 fails with the numbers). Whether a phrase's expected value was among the options is shown and
 decides nothing (D-D). Bounds: each phrase 2 × the path's run-deadline cap (180 s CPU, 120 s

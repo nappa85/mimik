@@ -4,10 +4,10 @@
 //! servers never coexist; every trial ends by stopping its candidate, and a session with the
 //! previous (or, after a switch, the new) model starts next.
 use super::{
-    Arc, AtomicBool, Attempt, Child, Command, EndReason, Fail, Future, Instant, Launcher, Level,
-    Manager, Model, ModelCommand, Mutex, Next, NotCalibrated, Ordering, Path, Record, State,
-    Status, TrialKey, TrialReport, TrialRequest, TrialState, calibrate_budgets, log, measured,
-    phrase_bound, trial, trial_bound, warm,
+    Arc, AtomicBool, Attempt, Child, Command, DeviceDefault, EndReason, Fail, Future, Instant,
+    Launcher, Level, Manager, Model, ModelCommand, Mutex, Next, NotCalibrated, Ordering, Path,
+    Record, State, Status, TrialKey, TrialReport, TrialRequest, TrialState, calibrate_budgets, log,
+    measured, phrase_bound, trial, trial_bound, warm,
 };
 use crate::assistant::model::{default_alias, trial_max_tokens};
 
@@ -337,6 +337,7 @@ impl Manager {
             self.previous = Some(old);
         }
         self.active = new;
+        self.device_default = false;
         self.publish_models();
         // Only the trial this switch consumed.
         self.update(|status| {
@@ -359,6 +360,7 @@ impl Manager {
         }
         log(&format!("model switched back to {}", previous.spec));
         self.previous = Some(std::mem::replace(&mut self.active, previous));
+        self.device_default = false;
         self.publish_models();
     }
 
@@ -368,6 +370,7 @@ impl Manager {
             status.model.active = active;
             status.model.previous = previous;
             status.model.from_owner_setting = true;
+            status.model.device_default = DeviceDefault::Off;
         });
     }
 }

@@ -36,16 +36,18 @@ struct AssistantArgs {
     /// llama-server as its child, confined where it can (see /admin/assistant).
     #[arg(long = "assistant", conflicts_with = "no_auth")]
     on: bool,
-    /// The model spec (`local:<name>.gguf`, a file in the models folder). Once the owner has
-    /// switched models on /admin/assistant, that stored setting replaces this flag.
-    #[arg(long = "assistant-model", default_value = mimik::assistant::DEFAULT_MODEL)]
-    model: String,
-    /// The model file's SHA-256 (required for any file but the default).
-    #[arg(long = "assistant-model-sha256")]
+    /// The model spec (`local:<name>.gguf`, a file in the models folder). Without it the
+    /// default depends on the device: Qwen3.5-9B on the GPU path (Granite 4.2 3B if its file
+    /// is missing), Granite 4.2 3B on the CPU path. Once the owner has switched models on
+    /// /admin/assistant, that stored setting replaces this flag.
+    #[arg(long = "assistant-model")]
+    model: Option<String>,
+    /// The model file's SHA-256 (required for any file but the two defaults).
+    #[arg(long = "assistant-model-sha256", requires = "model")]
     model_sha256: Option<String>,
     /// The request's model name, given to the server as `--alias` (default: derived from
     /// the spec's file name).
-    #[arg(long = "assistant-model-alias")]
+    #[arg(long = "assistant-model-alias", requires = "model")]
     model_alias: Option<String>,
     /// The models folder (default: `models/` in the data directory; mode 0700).
     #[arg(long = "models-dir")]
@@ -121,7 +123,11 @@ async fn assistant(
             mimik::assistant::development::Config {
                 endpoint,
                 token_file,
-                model: args.assistant.model.clone(),
+                model: args
+                    .assistant
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| mimik::assistant::DEFAULT_MODEL.to_owned()),
                 model_sha256: args.assistant.model_sha256.clone(),
                 model_alias: args.assistant.model_alias.clone(),
             },

@@ -416,8 +416,11 @@ Without it there is no client, no worker, no child and no job route (the three p
 | Routes and apply | `src/campaigns/interpret_web.rs` |
 | Module flow | `assets/sheet-assist.js` (assistant part) |
 
-**Flags:** `--assistant`; `--assistant-model` (`local:<name>.gguf`, default
-`local:granite-4.2-3b-Q4_K_M.gguf`), `--assistant-model-sha256` (required for any other file)
+**Flags:** `--assistant`; `--assistant-model` (`local:<name>.gguf`; without it the default
+depends on the device, ASSIST-55: `local:Qwen3.5-9B-Q4_K_M.gguf` on the GPU path when the file is
+in the models folder, `local:granite-4.2-3b-Q4_K_M.gguf` on the CPU path and when the 9B file is
+missing, with the reason on `/admin/assistant`), `--assistant-model-sha256` (required for any
+file but the two defaults)
 and `--assistant-model-alias` (the request's model name and the server's `--alias`; default
 the file name without `.gguf`, lower case); the runtime's `--models-dir`,
 `--assistant-runtime` and `--assistant-threads` ([model-runtime.md](model-runtime.md),
@@ -426,7 +429,7 @@ the file name without `.gguf`, lower case); the runtime's `--models-dir`,
 whose SHA-256 is the compiled-in `e0406663…` (the 2b rule over the 2c-1 screen of the v2-short
 prefix: largest `predicted_n` 263, × 1.25, rounded up to a multiple of 32, capped at 384; the
 shipped prefix asks for shorter replies, so 352 still holds, but re-deriving it from a screen
-of the shipped prefix is owed, `TODO.md`), 256 for any other file named by the flags, and for a
+of the shipped prefix is owed, `TODO.md`; the Qwen3.5-9B default has 352 too, from the 352-token field-reference screens, ASSIST-L51), 256 for any other file named by the flags, and for a
 model the owner tried, what the trial derived (`min(384, max(256, 1.25 × the five phrases'
 largest predicted_n, rounded up to a multiple of 32))`). The budgets (B, N(B), R,
 D, Q) come from each generation's calibration and arrive in its `ready` event (generation
