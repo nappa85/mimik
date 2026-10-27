@@ -316,6 +316,8 @@ fn the_instructions_ask_for_compact_single_line_json_once_before_the_reply_shape
     // tokens in the field-reference screen).
     const SENTENCE: &str =
         "Reply with compact single-line JSON: no spaces or line breaks between tokens.\n";
+    const RULE: &str = "- A literal must be a number written in the note: digits exactly as written, or a whole number word in English or Italian (zero to twenty, the tens up to ninety, hundred; one, ten, uno, una, dieci). No numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits (\"took 15\" gives 15; \"ten damage\" gives 10; \"took 1,500\" gives none).";
+    const DIGITS_ONLY: &str = "- A literal must be a number written with digits in the note, exactly as written: no spelled-out numbers, no numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits (\"took 15\" gives 15; \"took 1,500\" gives none).";
     assert_eq!(FIXED_PREFIX.matches(SENTENCE).count(), 1);
     assert!(INSTRUCTIONS.contains(&format!(
         "{SENTENCE}Reply with one JSON object and nothing else:\n"
@@ -323,8 +325,6 @@ fn the_instructions_ask_for_compact_single_line_json_once_before_the_reply_shape
     // The screen's v2-short prefix is the same text without the sentence and with the
     // pre-ASSIST-53 literal rule (digits only), so these two are the only differences from the
     // prefix the 2c-1 screens measured.
-    const RULE: &str = "- A literal must be a number written in the note: digits exactly as written, or a whole number word in English or Italian (zero to twenty, the tens up to ninety, hundred; one, ten, uno, una, dieci). No numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits (\"took 15\" gives 15; \"ten damage\" gives 10; \"took 1,500\" gives none).";
-    const DIGITS_ONLY: &str = "- A literal must be a number written with digits in the note, exactly as written: no spelled-out numbers, no numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits (\"took 15\" gives 15; \"took 1,500\" gives none).";
     assert_eq!(FIXED_PREFIX.matches(RULE).count(), 1);
     let without = FIXED_PREFIX
         .replacen(SENTENCE, "", 1)
