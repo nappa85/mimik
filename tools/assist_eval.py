@@ -283,7 +283,7 @@ EX_COMPACT = "Reply with compact single-line JSON: no spaces or line breaks betw
 
 # The literal rule sentence before ASSIST-53 (digits only). The experiment contracts below keep
 # this text, so their prefixes (and the ledgers' prefix hashes) stay what they were.
-LITERAL_RULE_ASSIST53 = '- A literal must be a number written in the note: digits exactly as written, or a whole number word in English or Italian (zero to twenty, the tens up to ninety, hundred; one, ten, uno, una, dieci). No numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits ("took 15" gives 15; "ten damage" gives 10; "took 1,500" gives none).'
+LITERAL_RULE_ASSIST53 = '- A literal must be a number written in the note: digits exactly as written, or a whole number word in English or Italian (zero to twenty, the tens up to ninety, hundred; one, ten, uno, una, dieci). No numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits ("took 15" gives 15; "ten damage" gives 10; "took 1,500" gives none). A 1 used only to multiply or divide is always allowed.'
 LITERAL_RULE_DIGITS_ONLY = '- A literal must be a number written with digits in the note, exactly as written: no spelled-out numbers, no numbers inside a word, a decimal or dice such as 3d6, no grouping separators (1,000), no leading zeros, at most 18 digits ("took 15" gives 15; "took 1,500" gives none).'
 
 
@@ -424,7 +424,8 @@ def _replace_once(text, old, new):
 
 @functools.cache
 def refex_instructions():
-    """Arm B: the shipped instructions plus two field-reference examples."""
+    """Arm B: the pre-ASSIST-53 shipped instructions (digits-only literal rule) plus two
+    field-reference examples."""
     return _replace_once(legacy_instructions(), REFEX_ANCHOR, REFEX_LINES + REFEX_ANCHOR)
 
 
@@ -603,7 +604,9 @@ FRACTION_LITERALS = frozenset({2, 3, 4, 100})
 
 
 def fold(text):
-    decomposed = unicodedata.normalize("NFD", text.casefold())
+    """Lower case, decomposed, combining marks removed: the Rust `fold` (`lower`, not
+    `casefold`, so "\u017fei" stays unmatched in both)."""
+    decomposed = unicodedata.normalize("NFD", text.lower())
     return "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
 
 
@@ -669,6 +672,24 @@ NUMBER_WORDS = {
     "un": 1,
     "cento": 100,
 }
+
+
+LITERAL_RULES = ("assist53", "digits")
+# The contracts whose prefix carries the ASSIST-53 literal sentence validate under it by
+# default; every other contract (v1 and the experiment arms) keeps the digits-only rule its
+# ledgers were run under. ``literal_rule`` overrides either way (the offline re-score).
+ASSIST53_CONTRACTS = frozenset({"v2", "v2-short", "v2-compact", "v2-full"})
+
+
+def literal_rule(request):
+    """The literal rule a request is validated under: its ``literal_rule`` override, else
+    the contract's default."""
+    rule = request.get("literal_rule")
+    if rule is None:
+        rule = "assist53" if request.get("contract", "v1") in ASSIST53_CONTRACTS else "digits"
+    if rule not in LITERAL_RULES:
+        raise ValueError(f"unknown literal rule {rule!r}")
+    return rule
 
 
 def number_words(phrase):
@@ -918,8 +939,14 @@ def _checked(value, bounds=I128):
 
 def _operand(node, redundant_slot, request, allowed):
     """A literal 1 that only multiplies or divides is redundant (ASSIST-53): in a factor slot
-    (either side of mul, the right of div) it needs no provenance; anywhere else it does."""
-    if redundant_slot and node.get("lit") == 1 and set(node) == {"lit"}:
+    (either side of mul, the right of div), beside an operand that is not itself a literal 1,
+    it needs no provenance; anywhere else it does."""
+    if (
+        redundant_slot
+        and literal_rule(request) == "assist53"
+        and node.get("lit") == 1
+        and set(node) == {"lit"}
+    ):
         return 1
     return evaluate(node, request, allowed)
 
@@ -943,8 +970,9 @@ def evaluate(node, request, allowed):
             raise Dropped("unknown_ref")
         return value
     op = node["op"]
-    left = _operand(node["l"], op == "mul", request, allowed)
-    right = _operand(node["r"], op in ("mul", "div"), request, allowed)
+    both_ones = node["l"] == {"lit": 1} and node["r"] == {"lit": 1}
+    left = _operand(node["l"], op == "mul" and not both_ones, request, allowed)
+    right = _operand(node["r"], op in ("mul", "div") and not both_ones, request, allowed)
     if op == "add":
         return _checked(left + right)
     if op == "sub":
@@ -962,7 +990,9 @@ def evaluate(node, request, allowed):
 
 
 def allowed_literals(request):
-    allowed = set(phrase_numbers(request["phrase"])) | set(number_words(request["phrase"]))
+    allowed = set(phrase_numbers(request["phrase"]))
+    if literal_rule(request) == "assist53":
+        allowed |= set(number_words(request["phrase"]))
     if request["target_value"] is not None:
         allowed.add(abs(request["target_value"]))
     if fraction_divisors(request["phrase"]):
@@ -970,8 +1000,11 @@ def allowed_literals(request):
     return allowed
 
 
-def validate_reply(text, request, validator=None):
-    """Mirror of the 2c pipeline: JSON, schema, then per-option domain checks."""
+def validate_reply(text, request, validator=None, literal_rule=None):
+    """Mirror of the 2c pipeline: JSON, schema, then per-option domain checks, under the
+    contract's literal rule or ``literal_rule`` ("assist53" or "digits")."""
+    if literal_rule is not None:
+        request = {**request, "literal_rule": literal_rule}
     result = {"json": False, "schema_valid": False, "kind": None, "options": [], "readings": []}
     try:
         reply = json.loads(text)
@@ -1507,7 +1540,25 @@ def dropped_but_right(request, validated, accepted, wanted):
     return right, right_ref
 
 
-def fieldref_summary(path):
+def _revalidate(rows, header, literal_rule):
+    """The rows' replies validated again under ``literal_rule`` (offline: no model run)."""
+    data = load_cases(CASES_PATH_FIELDREF)
+    cases = {c["id"]: c for c in data["cases"]}
+    validator = None
+    out = []
+    for r in rows:
+        if r["event"] == "case" and r["pass"] == 1 and r["status"] == "completed":
+            request = build_request(
+                cases[r["case"]], data["sheet"], header.get("variant"), header["contract"]
+            )
+            content = remap_reply(r["content"], request)
+            validated = validate_reply(content, request, validator, literal_rule)
+            r = {**r, "validated": validated, "shown": shown_values(validated)}
+        out.append(r)
+    return out
+
+
+def fieldref_summary(path, literal_rule=None):
     """Field-reference experiment metrics over a ledger's pass-1 rows. correct_ref: a shown
     option has an accepted value and its expression uses an alias of one of the case's
     ``ref_fields`` (resolved through the rendered context). Any other shown outcome without
@@ -1516,6 +1567,8 @@ def fieldref_summary(path):
     unless every case of the cases file completed exactly once."""
     lines = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
     rows = [r for r in lines[1:] if r["event"] == "case" and r["pass"] == 1]
+    if literal_rule is not None:
+        rows = _revalidate(rows, lines[0], literal_rule)
     cases = {c["id"]: c for c in load_cases(CASES_PATH_FIELDREF)["cases"]}
     out = {
         "cases": len(cases),
@@ -1644,6 +1697,12 @@ def main(argv=None):
     primer.add_argument("--contract", choices=CONTRACTS, default="v1")
     fieldref = sub.add_parser("fieldref-summary")
     fieldref.add_argument("ledger", type=Path)
+    fieldref.add_argument(
+        "--literal-rule",
+        choices=LITERAL_RULES,
+        help="validate the stored replies again under this rule (offline re-score); "
+        "default: the validation stored in the ledger",
+    )
     check = sub.add_parser("check-cases")
     check.add_argument("--cases", type=Path, default=CASES_PATH)
     check.add_argument("--contract", choices=CONTRACTS, default="v1")
@@ -1659,7 +1718,7 @@ def main(argv=None):
     elif args.command == "summarize":
         print(json.dumps([summarize_ledger(p) for p in args.ledgers], indent=2))
     elif args.command == "fieldref-summary":
-        summary = fieldref_summary(args.ledger)
+        summary = fieldref_summary(args.ledger, args.literal_rule)
         print(json.dumps(summary, indent=2))
         if summary["status"] != "valid":
             print("INVALID: not all cases completed exactly once", file=sys.stderr)

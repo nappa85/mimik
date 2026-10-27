@@ -238,9 +238,13 @@ fn evaluate(
             Ok(i128::from(value))
         }
         Node::Op { op, round, l, r } => {
-            let mul = matches!(op, BinOp::Mul);
-            let left = operand(l, mul, checks, allowed, refs)?;
-            let right = operand(r, mul || matches!(op, BinOp::Div), checks, allowed, refs)?;
+            // Two literal 1s are never both exempt: each is the other's sibling, and a
+            // literal 1 beside a literal 1 is checked like any literal (`1 * 1` made a 1).
+            let both_ones = matches!((&**l, &**r), (Node::Lit { lit: 1 }, Node::Lit { lit: 1 }));
+            let factor = matches!(op, BinOp::Mul) && !both_ones;
+            let divisor = matches!(op, BinOp::Div) && !both_ones;
+            let left = operand(l, factor, checks, allowed, refs)?;
+            let right = operand(r, factor || divisor, checks, allowed, refs)?;
             match (op, round) {
                 (BinOp::Add, None) => left.checked_add(right).ok_or(Drop::Overflow),
                 (BinOp::Sub, None) => left.checked_sub(right).ok_or(Drop::Overflow),
@@ -253,8 +257,8 @@ fn evaluate(
 }
 
 /// An operand of an operator. A literal 1 that only multiplies or divides changes nothing
-/// (ASSIST-53): in a factor slot (either side of `*`, the right of `/`) it needs no
-/// provenance; anywhere else it does.
+/// (ASSIST-53): in a factor slot (either side of `*`, the right of `/`) beside an operand that
+/// is not itself a literal 1 it needs no provenance; anywhere else it does.
 fn operand(
     node: &Node,
     redundant_slot: bool,

@@ -244,6 +244,45 @@ fn a_literal_one_as_multiplier_or_divisor_is_redundant() {
 }
 
 #[test]
+fn two_redundant_ones_do_not_manufacture_a_one() {
+    // A 1 is exempt only beside an operand that is not a literal 1: `1 * 1` and `1 / 1`
+    // are checked like any literals, and so is everything built from them.
+    let phrase = "lost them";
+    let one_one = || mul(lit(1), lit(1));
+    let add = |l: Value, r: Value| json!({"op": "add", "l": l, "r": r});
+    let refused = [
+        one_one(),
+        sub(alias("t"), one_one()),
+        add(alias("t"), one_one()),
+        sub(alias("t"), div(lit(1), lit(1), "exact")),
+        add(alias("t"), add(one_one(), one_one())),
+        mul(lit(15), add(one_one(), one_one())),
+        mul(one_one(), lit(1)),
+        div(one_one(), lit(1), "exact"),
+        div(lit(1), lit(1), "exact"),
+    ];
+    for expr in refused {
+        assert_eq!(one(expr.clone(), phrase), Err(Drop::Provenance), "{expr}");
+    }
+    // With a 1 in the note they are plain literals again.
+    assert_eq!(one(sub(alias("t"), one_one()), "lost 1"), Ok(83));
+    // Beside a reference, a subexpression or a provenanced literal the 1 stays exempt.
+    assert_eq!(one(mul(alias("t"), lit(1)), phrase), Ok(84));
+    assert_eq!(one(mul(sub(alias("t"), lit(84)), lit(1)), phrase), Ok(0));
+    assert_eq!(
+        one(sub(alias("t"), mul(lit(15), lit(1))), "lost 15"),
+        Ok(69)
+    );
+    assert_eq!(
+        one(
+            sub(alias("t"), mul(alias("c1"), lit(1))),
+            "one lost for each day"
+        ),
+        Ok(81)
+    );
+}
+
+#[test]
 fn references() {
     assert_eq!(one(sub(alias("f1"), lit(15)), "15 below max"), Ok(69));
     assert_eq!(

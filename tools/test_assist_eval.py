@@ -320,7 +320,7 @@ class Files(unittest.TestCase):
 
 
 # The shipped prefix (v2-compact, ASSIST-52, with the ASSIST-53 literal rule): the Rust copy's hash, in `contract_tests.rs` too.
-V2_PREFIX_SHA256 = "d2b19743ac01407894b3fa0101ad464485e687db38d9cf48bc6cfed0aad3fd6c"
+V2_PREFIX_SHA256 = "9f47ce637da68f673d71012d9422a9192918f42078a275be05c74e388f0bde9a"
 # The pre-ASSIST-52 prefix (v2-base, digits-only literal rule): the field-reference screen's
 # base arm.
 V2_BASE_PREFIX_SHA256 = "7b0ba380d8687cc8dfe2a150bf99d684b3bb4f4d5a22e41b5d46a1b6bbd5fe84"
@@ -330,17 +330,16 @@ class LiteralProvenanceAssist53(unittest.TestCase):
     """ASSIST-53: number words count as their number; a redundant `* 1` or `/ 1` needs no 1."""
 
     @staticmethod
-    def shown(node, phrase, target=84):
+    def shown(node, phrase, target=84, contract="v2", literal_rule=None):
         req = {
             "phrase": phrase,
             "target_value": target,
             "supplied": {"t": target, "c1": 3},
             "excluded": [],
-            "contract": "v2",
+            "contract": contract,
         }
-        out = ae.validate_reply(
-            json.dumps({"kind": "options", "options": [{"expr": node, "explanation": "x"}]}), req
-        )
+        text = json.dumps({"kind": "options", "options": [{"expr": node, "explanation": "x"}]})
+        out = ae.validate_reply(text, req, literal_rule=literal_rule)
         return ae.shown_values(out)
 
     def test_number_words(self):
@@ -393,6 +392,89 @@ class LiteralProvenanceAssist53(unittest.TestCase):
         self.assertEqual(self.shown(op("mul", ref("t"), lit(-1)), note), [])
         two = op("add", lit(1), lit(1))
         self.assertEqual(self.shown(op("mul", ref("t"), two), note), [])
+
+    def test_two_redundant_ones_do_not_manufacture_a_one(self):
+        note = "lost them"
+        one_one = op("mul", lit(1), lit(1))
+        refused = [
+            one_one,
+            op("sub", ref("t"), one_one),
+            op("add", ref("t"), one_one),
+            op("sub", ref("t"), op("div", lit(1), lit(1), rounding="exact")),
+            op("add", ref("t"), op("add", one_one, one_one)),
+            op("mul", lit(15), op("add", one_one, one_one)),
+            op("mul", one_one, lit(1)),
+            op("div", one_one, lit(1), rounding="exact"),
+            op("div", lit(1), lit(1), rounding="exact"),
+        ]
+        for expr in refused:
+            self.assertEqual(self.shown(expr, note), [], expr)
+        self.assertEqual(self.shown(op("sub", ref("t"), one_one), "lost 1"), [83])
+        self.assertEqual(self.shown(op("mul", ref("t"), lit(1)), note), [84])
+        sub84 = op("sub", ref("t"), lit(84))
+        self.assertEqual(self.shown(op("mul", sub84, lit(1)), note), [0])
+        self.assertEqual(
+            self.shown(op("sub", ref("t"), op("mul", lit(15), lit(1))), "lost 15"), [69]
+        )
+
+    def test_number_words_fold_like_rust(self):
+        # Rust lowercases (no casefold): the long s stays, so "\u017fei" is not "sei".
+        self.assertEqual(ae.number_words("\u017fei"), [])
+        self.assertEqual(ae.number_words("SEI"), [6])
+        self.assertEqual(ae.number_words("tr\u00e9"), [3])
+        self.assertEqual(ae.number_words("Tr\u00e8 danni"), [3])
+        self.assertEqual(ae.number_words("di\u00e8ci"), [10])
+
+    def test_the_legacy_contracts_keep_the_digits_only_rule_by_default(self):
+        for contract in ("v1", "v2-base", "v2-ex", "v2-refex", "v2-novals", "v2-ids"):
+            self.assertEqual(ae.literal_rule({"contract": contract}), "digits", contract)
+            self.assertEqual(self.shown(op("sub", ref("t"), lit(10)), "ten", contract=contract), [])
+            mul1 = op("mul", ref("t"), lit(1))
+            self.assertEqual(self.shown(mul1, "lost them", contract=contract), [], contract)
+        for contract in ("v2", "v2-short", "v2-compact", "v2-full"):
+            self.assertEqual(ae.literal_rule({"contract": contract}), "assist53", contract)
+            self.assertEqual(
+                self.shown(op("sub", ref("t"), lit(10)), "ten", contract=contract), [74]
+            )
+
+    def test_the_literal_rule_can_be_overridden(self):
+        ten = op("sub", ref("t"), lit(10))
+        mul1 = op("mul", ref("t"), lit(1))
+        self.assertEqual(self.shown(ten, "ten", contract="v2-base", literal_rule="assist53"), [74])
+        self.assertEqual(self.shown(mul1, "x", contract="v2-base", literal_rule="assist53"), [84])
+        self.assertEqual(self.shown(ten, "ten", contract="v2", literal_rule="digits"), [])
+        self.assertEqual(self.shown(mul1, "x", contract="v2", literal_rule="digits"), [])
+        with self.assertRaises(ValueError):
+            self.shown(ten, "ten", literal_rule="other")
+
+    def test_fieldref_summary_rescores_a_ledger_under_the_chosen_rule(self):
+        path = Path(__file__).with_name("assist-eval") / "fieldref-cases.json"
+        data = ae.load_cases(path)
+        case = next(c for c in data["cases"] if c["id"] == "fr-08")
+        env = json.loads(case["rendered"]["user"].split("\n")[1])
+        days = next(i["alias"] for i in env["context"] if i["id"] == "days")
+        content = reply(op("sub", ref("t"), op("mul", ref(days), lit(1))))
+        req = ae.build_request(case, data["sheet"], contract="v2-base")
+        validated = ae.validate_reply(content, req)  # the legacy rule: dropped
+        self.assertEqual(ae.shown_values(validated), [])
+        row = {
+            "event": "case",
+            "case": "fr-08",
+            "pass": 1,
+            "status": "completed",
+            "content": content,
+            "shown": [],
+            "validated": validated,
+        }
+        header = {"event": "header", "contract": "v2-base"}
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / "l.jsonl"
+            ledger.write_text(json.dumps(header) + "\n" + json.dumps(row) + "\n")
+            as_run = ae.fieldref_summary(ledger)
+            rescored = ae.fieldref_summary(ledger, literal_rule="assist53")
+            self.assertEqual(ae.fieldref_summary(ledger, literal_rule="digits"), as_run)
+        self.assertEqual(as_run["by_case"]["fr-08"], "abstained")
+        self.assertEqual(rescored["by_case"]["fr-08"], "correct_ref")
 
 
 class ContractV2(unittest.TestCase):
@@ -676,6 +758,13 @@ class ContractV2(unittest.TestCase):
         self.assertEqual(ae.dropped_but_right(req, validated, accepted, {days}), (False, False))
         dropped = ae.validate_reply(reply(op("sub", ref("t"), op("mul", ref(days), lit(7)))), req)
         self.assertEqual(ae.shown_values(dropped), [])
+        # A dropped option that reaches the accepted value once provenance is lifted: `+ 0`
+        # has no provenance (the note spells no 0), so the reply shows nothing but is right.
+        zero = op("sub", ref("t"), op("add", ref(days), lit(0)))
+        lifted = ae.validate_reply(reply(zero), req)
+        self.assertEqual(ae.shown_values(lifted), [])
+        self.assertEqual(ae.dropped_but_right(req, lifted, accepted, {days}), (True, True))
+        self.assertEqual(ae.dropped_but_right(req, lifted, accepted, set()), (True, False))
         other = ae.validate_reply(reply(op("sub", ref("t"), lit(7))), req)
         self.assertEqual(ae.dropped_but_right(req, other, accepted, {days}), (False, False))
 

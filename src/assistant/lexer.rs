@@ -3,8 +3,10 @@
 //!
 //! Separate from number entry (`campaigns::entry::read` reads whole entries and is not
 //! changed): this finds the numbers a player's phrase spells, so a model's literal can be
-//! traced to one of them. It errs towards finding nothing: a false rejection only drops an
-//! option.
+//! traced to one of them. Digits err towards finding nothing: a false rejection only drops an
+//! option. Number words (ASSIST-53) err the other way: a homograph ("sei" is also "you are",
+//! "no one" is not 1) admits a number the player did not mean, so the option is shown and the
+//! owner confirms it (`docs/limitations.md`).
 use unicode_general_category::{GeneralCategory, get_general_category};
 use unicode_normalization::UnicodeNormalization;
 

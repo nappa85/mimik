@@ -133,6 +133,10 @@ fn number_words_count_as_their_number() {
         ("one5", &[]),
         ("a point", &[]),
         ("an arrow", &[]),
+        ("tr\u{e9}", &[3]),
+        ("Tr\u{e8} danni", &[3]),
+        ("di\u{e8}ci", &[10]),
+        ("\u{17f}ei", &[]),
         ("", &[]),
     ];
     for (phrase, expected) in cases {

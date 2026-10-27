@@ -481,7 +481,8 @@ value, or 2, 3, 4 or 100 when a fraction or percent word is present (EN half, th
 quarter, percent, `%`; IT metà/meta, mezzo, mezza, terzo, terza, quarto, quarta, percento,
 per cento; whole words after case and diacritic folding, ASSIST-38); a literal 1 that only
 multiplies or divides (either side of `×`, the right of `÷`) needs no provenance, since it
-changes nothing, and a 1 anywhere else does; a literal outside `i64` drops the
+changes nothing, unless its sibling operand is also a literal 1 (`1 × 1` and `1 ÷ 1` are checked
+like any literals), and a 1 anywhere else does; a literal outside `i64` drops the
 option; evaluation is checked `i128` with an `i64` result, `div` rounds floor, ceil or exact
 (a remainder drops it), division by zero drops it. Shown: the current value, the expression
 with `−`, `×`, `÷` (references by label, `t` by its value) and the effect, labelled "the
