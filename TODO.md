@@ -9,8 +9,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1, 2c-2a (the CPU
   runtime at level 1 only, ASSIST-43, `docs/model-runtime.md`) and the Rust 1.99.1 / rig-core
   0.45.0 upgrade are merged into master, and so is 2c-2b-1 (the GPU path, live-verified on the
-  RX 6650 XT). 2d-1 (the owner model setting with local models and the ASSIST-52
-  prefix), ASSIST-53 and ASSIST-55 (Qwen3.5-9B default on the GPU) are merged. There is no level 2 (ASSIST-48).
+  RX 6650 XT). 2d-1 (the owner model setting with local models), ASSIST-53 and ASSIST-55
+  (Qwen3.5-9B default on the GPU) are merged; ASSIST-56 (prompt format D: context by ID, no
+  values) is built on its branch, in review. There is no level 2 (ASSIST-48).
   Next: 2d-2. Level 3's return is its own later step (plan, "Level 3 behind an owner opt-in").
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
@@ -29,14 +30,20 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    (compatibility checks instead of a version pin; its own design).
 1. 2d-2 downloads, 3 bundles and reminders, 4 suggestions, 5 docs and gate (includes the
    `docs/release-scope.md` update for schema 22 and the assisted scope).
-2. Owed live measurement for the ASSIST-52 prefix (ASSIST-L47; CPU, 5 threads, outside
+2. Owed live measurement for the shipped prefix (ASSIST-56; ASSIST-L47; CPU, 5 threads, outside
    weekday 09:00-18:00): replay the 104-reply screen (`tools/run_assist_screen.sh`,
-   `CONTRACT=v2`, Granite 4.2 3B, `MAX_TOKENS=384`) and take the largest valid, untruncated
+   `CONTRACT=v2-ids-53`, Granite 4.2 3B, `MAX_TOKENS=384`) and take the largest valid, untruncated
    `predicted_n`; the default file's `max_tokens` is `min(384, round up to 32 of 1.25 ×
    that)` (`DEFAULT_MAX_TOKENS` in `src/assistant/model.rs`, 352 until then); then re-run the idle
    CPU calibration (`tools/assist_runtime_measure.py`) for the priming and the budgets. Also a
    live trial of a second model through `/admin/assistant` (`local:`), CPU first, GPU at a
-   weekend.
+   weekend. Granite's field-reference screen with D53 is being run; the general 104-reply
+   screen with D is not run (ASSIST-L32).
+   Live acceptance check before release: prime, a structured request, then a request with a
+   different `ref` enum (another context): the fixed prefix's tokens are reused
+   (`cached_tokens` covers the prefix), plus the grammar-compilation time per request; and
+   the token length of the largest schema-valid reply (3 options, 8 leaves, 64-character ids,
+   120-character explanations) with the model's tokenizer against `max_tokens` (ASSIST-L52).
 3. Older-ABI Landlock evidence (below ABI 6; the Ubuntu VM has ABI 4 and fails the two
    ABI-6 live checks, as documented).
 4. Owed measurements: the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks

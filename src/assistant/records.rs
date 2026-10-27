@@ -2,7 +2,7 @@
 //! the models the owner switched to with their trial measurements, and which one is active
 //! and which previous. The runtime manager is the only writer: it stores a switch before it
 //! applies it.
-use super::runtime::models::Model;
+use super::runtime::models::{Model, OlderPrompt};
 use crate::store::Store;
 use async_trait::async_trait;
 use rusqlite::{OptionalExtension, params};
@@ -15,11 +15,37 @@ pub(crate) struct Record {
     pub trial: Option<String>,
 }
 
+impl Record {
+    /// Whether the record's trial measured the model with a prompt other than the current one
+    /// (ASSIST-56): `max_tokens` and the speeds of such a model predate the prompt in force.
+    /// A record without a trial (a model the start flags named) is not flagged.
+    pub(crate) fn older_prompt(&self) -> bool {
+        self.trial.as_deref().is_some_and(|trial| {
+            serde_json::from_str::<serde_json::Value>(trial)
+                .ok()
+                .and_then(|trial| trial["prefix_sha256"].as_str().map(str::to_owned))
+                .as_deref()
+                != Some(super::contract::prefix_sha256())
+        })
+    }
+}
+
 /// The stored choice.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Stored {
     pub active: Option<Record>,
     pub previous: Option<Record>,
+}
+
+impl Stored {
+    /// Whether the active and the previous model were measured with an older prompt.
+    pub(crate) fn older_prompt(&self) -> OlderPrompt {
+        let older = |record: &Option<Record>| record.as_ref().is_some_and(Record::older_prompt);
+        OlderPrompt {
+            active: older(&self.active),
+            previous: older(&self.previous),
+        }
+    }
 }
 
 #[async_trait]

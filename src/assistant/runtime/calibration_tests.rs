@@ -60,6 +60,7 @@ impl Server for Scripted {
     async fn structured(
         &self,
         _: &str,
+        _: &[String],
         _: u32,
     ) -> Result<super::super::server::Structured, Failure> {
         Err(Failure::Transport)

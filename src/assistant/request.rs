@@ -9,12 +9,13 @@ use super::output::{Checks, Supplied};
 use std::collections::BTreeMap;
 
 /// Everything a request could carry, in the order it is sent: the phrase, the target, then
-/// the context items (aliases already assigned).
+/// the context items. Item IDs are unique and differ from the target's name and ID (the
+/// builder, `campaigns::interpret::draft`, leaves colliding items out).
 #[derive(Clone, Debug)]
 pub(crate) struct Draft {
     pub phrase: String,
     pub target: EnvelopeTarget,
-    /// The target's typed address, bound as alias `t`.
+    /// The target's typed address, bound as `t`.
     pub target_address: String,
     pub items: Vec<(EnvelopeItem, Supplied)>,
 }
@@ -28,10 +29,12 @@ pub(crate) struct Bounds {
     pub tokens: usize,
 }
 
-/// A rendered request: the dynamic part and what the reply is checked against.
+/// A rendered request: the dynamic part, the IDs of its context items (the reply schema's
+/// `ref` enum, [`super::contract::schema_for`]) and what the reply is checked against.
 #[derive(Clone, Debug)]
 pub(crate) struct Rendered {
     pub dynamic: String,
+    pub ref_ids: Vec<String>,
     pub checks: Checks,
 }
 
@@ -71,7 +74,7 @@ impl Draft {
             },
         )]);
         for (item, bound) in &self.items[..kept] {
-            supplied.insert(item.alias.clone(), bound.clone());
+            supplied.insert(item.id.clone(), bound.clone());
         }
         Checks {
             phrase: self.phrase.clone(),
@@ -110,6 +113,12 @@ pub(crate) async fn render(
         if tokens <= bounds.tokens {
             return Ok(Rendered {
                 dynamic,
+                // Enum items are context for reading; the schema lets a reply name integers.
+                ref_ids: draft.items[..kept]
+                    .iter()
+                    .filter(|(_, bound)| bound.integer)
+                    .map(|(item, _)| item.id.clone())
+                    .collect(),
                 checks: draft.checks(kept),
             });
         }

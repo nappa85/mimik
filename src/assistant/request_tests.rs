@@ -1,7 +1,6 @@
-use super::super::contract::{ItemKind, TARGET_ALIAS};
+use super::super::contract::{ItemKind, TARGET_ALIAS, schema_for};
 use super::super::interpreter::stub::StubInterpreter;
 use super::*;
-use serde_json::json;
 
 fn draft(items: usize, label: &str) -> Draft {
     Draft {
@@ -17,11 +16,9 @@ fn draft(items: usize, label: &str) -> Draft {
             .map(|n| {
                 (
                     EnvelopeItem {
-                        alias: format!("f{n}"),
                         id: format!("skill_{n:02}"),
                         label: format!("Skill number {n:02}"),
                         kind: ItemKind::Integer,
-                        value: json!(n),
                     },
                     Supplied {
                         address: format!("field:skill_{n:02}"),
@@ -166,16 +163,66 @@ async fn a_phrase_and_target_over_a_bound_are_too_long_without_a_completion() {
 }
 
 #[tokio::test]
-async fn aliases_are_request_local() {
+async fn a_request_supplies_its_items_by_id_and_the_schema_enum_matches() {
     let stub = StubInterpreter::default();
-    let mut first = draft(2, "Current HP");
-    let mut second = draft(2, "Current HP");
-    // The same field as the second item in one request and the first in another.
-    second.items.remove(0);
-    second.items[0].0.alias = "f1".into();
-    first.items.truncate(2);
-    let one = render(&first, wide(), &stub).await.unwrap();
-    let two = render(&second, wide(), &stub).await.unwrap();
-    assert_eq!(one.checks.supplied["f2"].address, "field:skill_02");
-    assert_eq!(two.checks.supplied["f1"].address, "field:skill_02");
+    let full = draft(4, "Current HP");
+    let all = render(&full, wide(), &stub).await.unwrap();
+    assert_eq!(
+        all.ref_ids,
+        ["skill_01", "skill_02", "skill_03", "skill_04"]
+    );
+    assert_eq!(all.checks.supplied["skill_02"].address, "field:skill_02");
+    assert_eq!(all.checks.supplied["skill_02"].value, Some(2));
+    assert!(all.checks.supplied.contains_key(TARGET_ALIAS));
+    // The values are bound for Mimik, not sent: the dynamic part names no context value.
+    assert!(!all.dynamic.contains("\"value\":2"));
+    assert!(
+        all.dynamic
+            .contains(r#"{"id":"skill_02","label":"Skill number 02","type":"integer"}"#)
+    );
+    // The enum of the reply schema is `t` and the supplied IDs, in the order sent.
+    assert_eq!(
+        schema_for(&all.ref_ids)["$defs"]["ref"]["properties"]["ref"]["enum"],
+        serde_json::json!(["t", "skill_01", "skill_02", "skill_03", "skill_04"])
+    );
+}
+
+#[tokio::test]
+async fn an_item_the_budget_dropped_is_not_in_the_enum_beside_one_that_is() {
+    let stub = StubInterpreter::default();
+    let full = draft(10, "Current HP");
+    let all = render(&full, wide(), &stub).await.unwrap();
+    // One byte under the full rendering: the last item goes, and only it.
+    let tight = Bounds {
+        bytes: all.dynamic.len() - 1,
+        tokens: usize::MAX,
+    };
+    let fewer = render(&full, tight, &stub).await.unwrap();
+    assert_eq!(fewer.ref_ids.len(), 9);
+    assert!(!fewer.ref_ids.contains(&"skill_10".to_owned()));
+    assert!(!fewer.checks.supplied.contains_key("skill_10"));
+    assert!(fewer.checks.supplied.contains_key("skill_09"));
+    let enum_ids = schema_for(&fewer.ref_ids)["$defs"]["ref"]["properties"]["ref"]["enum"].clone();
+    assert!(!enum_ids.to_string().contains("skill_10"));
+    assert!(enum_ids.to_string().contains("skill_09"));
+}
+
+#[tokio::test]
+async fn an_enum_item_is_context_only_and_not_in_the_reply_schemas_enum() {
+    let stub = StubInterpreter::default();
+    let mut full = draft(3, "Current HP");
+    // skill_02 becomes an enum item: shown to the model, never referenced.
+    full.items[1].0.kind = ItemKind::Enum;
+    full.items[1].1.integer = false;
+    full.items[1].1.value = None;
+    let rendered = render(&full, wide(), &stub).await.unwrap();
+    assert!(rendered.dynamic.contains(r#""id":"skill_02""#));
+    assert_eq!(rendered.ref_ids, ["skill_01", "skill_03"]);
+    assert!(
+        !schema_for(&rendered.ref_ids)
+            .to_string()
+            .contains("skill_02")
+    );
+    // Rust still holds it as supplied, so a reply naming it drops that option (EnumRef).
+    assert!(rendered.checks.supplied.contains_key("skill_02"));
 }

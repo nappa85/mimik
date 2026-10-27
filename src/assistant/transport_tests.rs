@@ -47,6 +47,7 @@ fn interpreter(endpoint: Endpoint) -> RigInterpreter {
 fn completion() -> Completion {
     Completion {
         dynamic: "<data>\n{}\n</data>".into(),
+        ref_ids: vec!["max_hp".into(), "luck".into()],
         max_tokens: 352,
     }
 }
@@ -69,8 +70,13 @@ async fn a_completion_carries_the_prefix_schema_and_token() {
     let seen = shared.seen();
     assert_eq!(seen.len(), 1);
     let raw = std::str::from_utf8(&seen[0].body).unwrap();
-    // The schema arrives byte-exact.
-    assert!(raw.contains(super::super::contract::SCHEMA_TEXT.trim_end()));
+    // The schema of this request's IDs arrives byte-exact (the pinned text with its `ref`
+    // enum replaced), and the pinned template's earlier names do not.
+    let sent =
+        serde_json::to_string(&super::super::contract::schema_for(&completion().ref_ids)).unwrap();
+    assert!(raw.contains(&sent));
+    assert!(sent.contains(r#"{"enum":["t","max_hp","luck"]}"#));
+    assert!(!raw.contains(r#""f64""#));
     let body: serde_json::Value = serde_json::from_slice(&seen[0].body).unwrap();
     assert_eq!(body["stream"], true);
     assert_eq!(body["cache_prompt"], true);
@@ -245,11 +251,9 @@ async fn the_unix_socket_connector_keeps_the_policy() {
     assert_eq!(completed.text, r#"{"kind":"options","options":[]}"#);
     let seen = shared.seen();
     assert_eq!(seen.len(), 1);
-    assert!(
-        std::str::from_utf8(&seen[0].body)
-            .unwrap()
-            .contains(super::super::contract::SCHEMA_TEXT.trim_end())
-    );
+    assert!(std::str::from_utf8(&seen[0].body).unwrap().contains(
+        &serde_json::to_string(&super::super::contract::schema_for(&completion().ref_ids)).unwrap()
+    ));
     assert_eq!(
         seen[0].headers.get("authorization").unwrap(),
         "Bearer dummy-token-not-a-secret"

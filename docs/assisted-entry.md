@@ -401,7 +401,7 @@ Without it there is no client, no worker, no child and no job route (the three p
 
 | Concern | Code |
 |---|---|
-| Schema v2, instructions, fixed prefix, data envelope | `schemas/interpretation-v2.json`, `schemas/interpretation-v2-instructions.txt`, `src/assistant/contract.rs` |
+| Schema v2 (template), instructions, fixed prefix, data envelope, per-request schema | `schemas/interpretation-v2.json`, `schemas/interpretation-v2-instructions.txt`, `src/assistant/contract.rs` |
 | Phrase numbers and fraction words | `src/assistant/lexer.rs` |
 | Reading a reply | `src/assistant/output.rs` |
 | Bounds of a request | `src/assistant/request.rs` |
@@ -427,9 +427,9 @@ the file name without `.gguf`, lower case); the runtime's `--models-dir`,
 "Options"). The owner's stored model setting, when there is one, replaces the model flags
 ([model-runtime.md](model-runtime.md), "Owner model setting"). `max_tokens` is 352 for the file
 whose SHA-256 is the compiled-in `e0406663…` (the 2b rule over the 2c-1 screen of the v2-short
-prefix: largest `predicted_n` 263, × 1.25, rounded up to a multiple of 32, capped at 384; the
-shipped prefix asks for shorter replies, so 352 still holds, but re-deriving it from a screen
-of the shipped prefix is owed, `TODO.md`; the Qwen3.5-9B default has 352 too, from the 352-token field-reference screens, ASSIST-L51), 256 for any other file named by the flags, and for a
+prefix: largest `predicted_n` 263, × 1.25, rounded up to a multiple of 32, capped at 384;
+re-deriving it from a screen of the shipped prefix is owed, ASSIST-L47; the Qwen3.5-9B default
+has 352 too, from the 352-token field-reference screens, ASSIST-L51), 256 for any other file named by the flags, and for a
 model the owner tried, what the trial derived (`min(384, max(256, 1.25 × the five phrases'
 largest predicted_n, rounded up to a multiple of 32))`). The budgets (B, N(B), R,
 D, Q) come from each generation's calibration and arrive in its `ready` event (generation
@@ -439,19 +439,21 @@ feature (never a release; `smoke_release.py` checks the release binary has none)
 calibrated the same way.
 
 **Request.** System message: the fixed prefix, the instructions, `\nJSON schema of the
-reply:\n` and the schema's compact text with the alias enum replaced by a description ("an
-alias from the data: t, f<n> or c<n>"; `response_format`, which the grammar enforces, carries
-the full pinned schema), byte-identical across requests (SHA-256 pinned in Rust
-and `tools/test_assist_eval.py`), so llama-server reuses it from its prompt cache. The
-instructions ask for compact single-line JSON (the v2-compact prefix, ASSIST-52: about 20 %
-fewer output tokens at the same quality in the field-reference screen, `docs/results.md`);
-`tools/assist_eval.py` keeps the earlier prefix as `v2-base`. User
-message: the data envelope, `<data>\n{"note", "target": {alias "t", id, label?, value},
-"context": [{alias, id, label, type, value}]}\n</data>` with `<`, `>` and `&` escaped. Body
-members beside rig's own: `response_format` with the schema (`json_schema`, strict, the pinned
-bytes in their key order; serde_json keeps document order, DEP-18), `temperature` 0, `top_k`
-1, `seed` 0, `cache_prompt` and `stream` true. The phrase is read from the stored note, never
-from the request.
+reply:\n` and the schema's compact text with the `ref` enum replaced by a description ("t for
+the target, or the id of a context item from the data"), byte-identical across requests
+(SHA-256 pinned in Rust and `tools/test_assist_eval.py`), so llama-server reuses it from its
+prompt cache. It is arm D53 of the field-reference experiments (ASSIST-56, `docs/results.md`):
+context items are named by their ID, the request carries no context values (Mimik substitutes
+them when it evaluates a reply), two reference examples, the ASSIST-53 literal sentence and
+the request for compact single-line JSON (ASSIST-52). `tools/assist_eval.py` keeps the earlier
+prefixes for the experiments (`v2-compact`, `v2-base`, ...). User message: the data envelope,
+`<data>\n{"note", "target": {alias "t", id, label?, value}, "context": [{id, label, type}]}\n</data>`
+with `<`, `>` and `&` escaped. Body members beside rig's own: `response_format` with the
+pinned schema in which `ref` is limited to `t` and this request's context IDs
+(`contract::schema_for`; `json_schema`, strict, the pinned bytes in their key order; serde_json
+keeps document order, DEP-18), `temperature` 0, `top_k` 1, `seed` 0, `cache_prompt` and
+`stream` true. Priming and calibration send no schema. The phrase is read from the stored note,
+never from the request.
 
 - **Context:** the other stored integer and enum fields in definition order; with B at most
   1,024 only the fields some read set contains with the target (for a row cell, with its
@@ -461,9 +463,14 @@ from the request.
   `gear.filter(i, …).map(j, …)`; two unchained iterations over a list are not co-reads;
   `has()` counts). Never derived,
   text, multiline, boolean, notes or other rows' cells; an optional cell not set is not sent.
-- **Aliases:** `t`, `f1`…`f64` (fields), `c1`…`c31` (cells of the target's row). The schema's
-  alias enum is this fixed superset; a request supplies some of them and Rust drops a
-  reference to any other. At 4,096 bytes at most 63 minimal items fit (tested).
+- **Names:** `t` is the target; every other item is called by its ID (a field ID, or the ID
+  of a property of the target's row). An item is left out of the context when its ID fails
+  `valid_field_id`, equals `t` or the target's ID, or is shared by two items (a field and a
+  cell of the row can share one): nothing is picked as a winner, so a reference to such an ID
+  is an unsupplied reference and drops that option only (ASSIST-L52). IDs equal to the schema's
+  keywords (`lit`, `op`, `l`, `r`, `round`, `ref`) and look-alikes (`f1`, `c1`, `t1`) are
+  ordinary IDs. At 4,096 bytes at most 108 minimal items fit (tested). The reply schema's `ref`
+  enum lists `t` and the integer items' IDs; enum items are context only.
 - **Bounds:** the envelope must hold B bytes and N(B) tokens (llama-server's `/tokenize`):
   whole items are dropped from the end, then the target's label; the phrase, the target's ID
   and its value never are. If they alone exceed a bound the job ends "too long for the
@@ -472,7 +479,7 @@ from the request.
 **Reply.** JSON, then schema v2 (`jsonschema`), then typed decoding: `options` (at most 3, an
 expression tree of at most 3 operator levels and an explanation of at most 120 characters) or
 `ambiguous` (1 to 3 readings of at most 120 characters, display only). Per option: a `ref`
-must name a supplied integer item with a known value (an enum, unknown or unsupplied alias
+must name a supplied integer item with a known value (an enum, unknown or unsupplied ID
 drops it); every literal's magnitude must be a number of the phrase (the phrase-number lexer:
 decimal digits folded to ASCII, a run not touching letters or other number characters, not
 part of a decimal or grouped number, no leading zero, at most 18 digits), a number word of
@@ -488,7 +495,7 @@ changes nothing, unless its sibling operand is also a literal 1 (`1 × 1` and `1
 like any literals), and a 1 anywhere else does; a literal outside `i64` drops the
 option; evaluation is checked `i128` with an `i64` result, `div` rounds floor, ceil or exact
 (a remainder drops it), division by zero drops it. Shown: the current value, the expression
-with `−`, `×`, `÷` (references by label, `t` by its value) and the effect, labelled "the
+with `−`, `×`, `÷` (every reference, the target included, as its label with Mimik's value) and the effect, labelled "the
 assistant's reading".
 
 **Jobs.** One worker, one job at a time. A start is admitted only after the origin note was

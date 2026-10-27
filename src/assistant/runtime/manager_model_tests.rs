@@ -12,7 +12,7 @@ use super::*;
 use crate::assistant::DEFAULT_MODEL_SHA256;
 use crate::assistant::jobs::RuntimeState;
 use crate::assistant::records::tests::MemRecords;
-use crate::assistant::runtime::models::ModelFile;
+use crate::assistant::runtime::models::{ModelFile, OlderPrompt};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -47,6 +47,30 @@ struct Fixture {
 /// A manager over a fake launcher whose `other.gguf` hashes to `b…b`; the default Granite
 /// file is active.
 fn fixture(script: impl IntoIterator<Item = Start>, config: Config) -> Fixture {
+    fixture_older(script, config, (false, false))
+}
+
+/// The same, with the stored trials of the active and the previous model flagged as
+/// measured with an older prompt (ASSIST-56).
+fn fixture_older(
+    script: impl IntoIterator<Item = Start>,
+    config: Config,
+    older_prompt: (bool, bool),
+) -> Fixture {
+    let older_prompt = OlderPrompt {
+        active: older_prompt.0,
+        previous: older_prompt.1,
+    };
+    fixture_models(script, config, (granite(), None), older_prompt)
+}
+
+/// The same with the models the manager starts with.
+fn fixture_models(
+    script: impl IntoIterator<Item = Start>,
+    config: Config,
+    (active, previous): (Model, Option<Model>),
+    older_prompt: OlderPrompt,
+) -> Fixture {
     let launcher = FakeLauncher::scripted(script);
     launcher
         .files
@@ -65,11 +89,12 @@ fn fixture(script: impl IntoIterator<Item = Start>, config: Config) -> Fixture {
         Arc::clone(&launcher) as Arc<dyn Launcher>,
         config,
         ModelSetup {
-            active: granite(),
-            previous: None,
+            active,
+            previous,
             records: Some(Arc::clone(&records) as Arc<dyn Records>),
             from_owner_setting: false,
             device_default: false,
+            older_prompt,
         },
     );
     Fixture {
@@ -606,6 +631,13 @@ async fn switch_stores_the_model_then_restarts_and_reprimes_with_it() {
     let trial: serde_json::Value =
         serde_json::from_str(stored.active.unwrap().trial.as_deref().unwrap()).unwrap();
     assert_eq!(trial["max_tokens"], 256);
+    // The prompt the trial ran under is recorded, and a trial under the current one is not
+    // flagged as older.
+    assert_eq!(
+        trial["prefix_sha256"],
+        crate::assistant::contract::prefix_sha256()
+    );
+    assert!(!status.model.older_prompt.is_older());
     assert_eq!(trial["device"], "cpu");
     assert_eq!(trial["phrases"].as_array().unwrap().len(), 5);
     assert_eq!(trial["budgets"]["bytes"], 1024);
@@ -1081,4 +1113,109 @@ async fn a_file_over_8_gib_or_empty_is_refused_with_its_reason_before_anything_s
         }),
     );
     passed(fixture.try_and_wait("exact.gguf").await);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_model_measured_with_an_older_prompt_is_flagged_until_a_new_trial_replaces_it() {
+    // The active model's stored trial predates the prompt in force; the previous one's too.
+    let fixture = fixture_older([], CONFIG, (true, true));
+    assert!(fixture.handle.status().model.older_prompt.is_older());
+    // A trial of another file runs under the current prompt; switching to it clears the flag
+    // and the old active model, now the previous one, keeps its own.
+    let report = passed(fixture.trial().await);
+    assert!(
+        fixture.handle.status().model.older_prompt.is_older(),
+        "a trial alone changes nothing"
+    );
+    fixture.handle.switch(7, &report.key);
+    let handle = fixture.handle.clone();
+    until(Duration::from_secs(600), move || {
+        handle.status().model.active.spec == "local:other.gguf"
+            && handle.status().state == State::Ready
+    })
+    .await;
+    assert!(!fixture.handle.status().model.older_prompt.is_older());
+    // Switching back returns to the model measured with the older prompt: flagged again.
+    let generation = fixture.handle.status().generation;
+    assert_eq!(fixture.handle.switch_back(7), Chosen::Accepted);
+    let handle = fixture.handle.clone();
+    until(Duration::from_secs(600), move || {
+        handle.status().generation > generation && handle.status().state == State::Ready
+    })
+    .await;
+    assert!(fixture.handle.status().model.older_prompt.is_older());
+    // And forward again to the model measured with the current one.
+    assert_eq!(fixture.handle.switch_back(7), Chosen::Accepted);
+    let handle = fixture.handle.clone();
+    until(Duration::from_secs(600), move || {
+        handle.status().model.active.spec == "local:other.gguf"
+            && handle.status().state == State::Ready
+    })
+    .await;
+    assert!(!fixture.handle.status().model.older_prompt.is_older());
+}
+
+fn other() -> Model {
+    Model::test("other.gguf", &sha('b'), 256)
+}
+
+#[tokio::test(start_paused = true)]
+async fn trying_the_active_file_again_keeps_the_previous_models_flag() {
+    // Active: other.gguf, measured under the current prompt; previous: Granite, measured
+    // under an older one. other.gguf's file hash is the active model's, so a new trial of it
+    // replaces the active model and keeps the previous one (no second previous is stored).
+    let older = OlderPrompt {
+        active: false,
+        previous: true,
+    };
+    let fixture = fixture_models([], CONFIG, (other(), Some(granite())), older);
+    let report = passed(fixture.trial().await);
+    fixture.handle.switch(7, &report.key);
+    let handle = fixture.handle.clone();
+    until(Duration::from_secs(600), move || {
+        handle.status().generation >= 4 && handle.status().state == State::Ready
+    })
+    .await;
+    assert_eq!(
+        *fixture.records.log.lock().unwrap(),
+        ["activate local:other.gguf (previous kept) by 7"]
+    );
+    let status = fixture.handle.status();
+    assert_eq!(status.model.previous, Some(granite()));
+    assert!(!status.model.older_prompt.is_older());
+    // The previous model is still the one measured with the older prompt.
+    let generation = status.generation;
+    assert_eq!(fixture.handle.switch_back(7), Chosen::Accepted);
+    let handle = fixture.handle.clone();
+    until(Duration::from_secs(600), move || {
+        handle.status().generation > generation && handle.status().state == State::Ready
+    })
+    .await;
+    assert_eq!(fixture.handle.status().model.active, granite());
+    assert!(fixture.handle.status().model.older_prompt.is_older());
+}
+
+#[tokio::test(start_paused = true)]
+async fn switching_back_moves_each_models_flag_with_it() {
+    // Active Granite is current, previous other.gguf is flagged; the other way round after
+    // one Switch back, and back again.
+    let older = OlderPrompt {
+        active: false,
+        previous: true,
+    };
+    let fixture = fixture_models([], CONFIG, (granite(), Some(other())), older);
+    ready(&fixture.assistant).await;
+    assert!(!fixture.handle.status().model.older_prompt.is_older());
+    for (flagged, spec) in [(true, "local:other.gguf"), (false, granite().spec.as_str())] {
+        let generation = fixture.handle.status().generation;
+        assert_eq!(fixture.handle.switch_back(7), Chosen::Accepted);
+        let handle = fixture.handle.clone();
+        until(Duration::from_secs(600), move || {
+            handle.status().generation > generation && handle.status().state == State::Ready
+        })
+        .await;
+        let status = fixture.handle.status();
+        assert_eq!(status.model.active.spec, spec);
+        assert_eq!(status.model.older_prompt.is_older(), flagged, "{spec}");
+    }
 }

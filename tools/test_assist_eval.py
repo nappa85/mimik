@@ -327,6 +327,8 @@ V2_BASE_PREFIX_SHA256 = "7b0ba380d8687cc8dfe2a150bf99d684b3bb4f4d5a22e41b5d46a1b
 # Experiment 3's arm D (v2-ids, digits-only literal rule) and experiment 5's D53 (v2-ids-53,
 # the ASSIST-53 literal sentence): pinned so the experiment prefixes cannot drift.
 V2_IDS_PREFIX_SHA256 = "1326c1983146284acfb8930eb0897c9f4d67c852bb27862af0c2332b884bf3e1"
+# ASSIST-56: the shipped prefix is arm D53 (the Rust copy pins the same hash in `contract_tests.rs`).
+SHIPPED_PREFIX_SHA256 = "ac46010cef3b18cfeee2a0e517c54571098174cdf783c5c7e7c01b3e18e9453f"
 V2_IDS_53_PREFIX_SHA256 = "ac46010cef3b18cfeee2a0e517c54571098174cdf783c5c7e7c01b3e18e9453f"
 
 
@@ -506,6 +508,21 @@ class ContractV2(unittest.TestCase):
         self.assertEqual(hashlib.sha256(base.encode()).hexdigest(), V2_BASE_PREFIX_SHA256)
         self.assertIn(ae.EX_COMPACT + "Reply with one JSON object", shipped)
 
+    def test_the_shipped_instructions_are_d53_and_the_legacy_arms_read_the_frozen_text(self):
+        import hashlib
+
+        fixture = (ae.FIXTURES_DIR / "interpretation-v2-compact-instructions.txt").read_text()
+        self.assertEqual(ae.load_v2()[0], fixture)
+        self.assertNotEqual(ae.shipped_instructions(), fixture)
+        # The experiment's derivation chain applied to the frozen text is the shipped file.
+        self.assertEqual(ae.ids53_chain_instructions(), ae.shipped_instructions())
+        self.assertEqual(ae.ids53_instructions(), ae.shipped_instructions())
+        self.assertEqual(
+            hashlib.sha256(ae.contract_prefix("v2-ids-53").encode()).hexdigest(),
+            V2_IDS_53_PREFIX_SHA256,
+        )
+        self.assertEqual(V2_IDS_53_PREFIX_SHA256, SHIPPED_PREFIX_SHA256)
+
     def test_ids_53_differs_from_ids_only_in_the_literal_sentence(self):
         import hashlib
 
@@ -559,6 +576,28 @@ class ContractV2(unittest.TestCase):
             (Path(ae.__file__).parent / "fixtures" / "assist-envelope-v2.json").read_text()
         )
         self.assertEqual(ae._envelope(golden["envelope"]), golden["dynamic"])
+
+    def test_shipped_golden_envelope_and_schema_match_the_rust_copy(self):
+        import hashlib
+
+        fixtures = Path(ae.__file__).parent / "fixtures"
+        golden = json.loads((fixtures / "assist-envelope-ids.json").read_text())
+        legacy = json.loads((fixtures / "assist-envelope-v2.json").read_text())
+        # The shipped envelope (contract_tests.rs renders it byte for byte) ...
+        self.assertEqual(ae._envelope(golden["envelope"]), golden["dynamic"])
+        # ... is arm D53's transform of the measured legacy envelope, ids and no values,
+        arm = ae.transform_fieldref2({"user": legacy["dynamic"]}, "v2-ids-53")
+        self.assertEqual(arm["user"], golden["dynamic"])
+        context = json.loads(arm["user"].split("\n")[1])["context"]
+        self.assertIn("enum", [i["type"] for i in context])
+        # ... and only the integer items are named in the schema's ref enum.
+        self.assertEqual([i["id"] for i in context if i["type"] == "integer"], golden["ref_ids"])
+        # ... and its reply schema is the pinned template with the ids as the ref enum.
+        text = json.dumps(arm["schema"], separators=(",", ":"))
+        self.assertEqual(hashlib.sha256(text.encode()).hexdigest(), golden["schema_sha256"])
+        self.assertEqual(
+            arm["schema"]["$defs"]["ref"]["properties"]["ref"], {"enum": ["t", *golden["ref_ids"]]}
+        )
 
     def test_a_literal_outside_i64_drops_the_option_as_in_rust(self):
         # Sol M2: target i64::MIN, "gain 1", 9223372036854775808 - 1 fits i64 but its

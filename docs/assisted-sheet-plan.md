@@ -11,7 +11,7 @@ bound, quick-add, the validity flag, the sheet module with save on leaving a fie
 interpretation assistant of development builds) is described
 in `docs/assisted-entry.md`; this plan only adds to it.
 
-Remaining, in order (2b measured and reviewed, `docs/results.md`; ASSIST-27 to ASSIST-52
+Remaining, in order (2b measured and reviewed, `docs/results.md`; ASSIST-27 to ASSIST-56
 decided; Rust 1.99.1 and `rig-core` 0.45.0 in place, ASSIST-39; 2c-1, interpretation against a
 hand-started local server, built, `docs/assisted-entry.md`; 2c-2a, the CPU runtime, 2c-2b-1,
 the GPU path, and 2d-1, the owner model setting with local models, built,

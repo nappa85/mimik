@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 struct Script {
     replies: Mutex<VecDeque<Result<Structured, Failure>>>,
     delay: Mutex<Option<Duration>>,
-    seen: Mutex<Vec<(String, u32)>>,
+    /// The dynamic part, the `ref` IDs and `max_tokens` of each phrase sent.
+    seen: Mutex<Vec<(String, Vec<String>, u32)>>,
 }
 
 #[async_trait::async_trait]
@@ -26,11 +27,16 @@ impl Server for Script {
         Err(Failure::Transport)
     }
 
-    async fn structured(&self, user: &str, max_tokens: u32) -> Result<Structured, Failure> {
+    async fn structured(
+        &self,
+        user: &str,
+        ref_ids: &[String],
+        max_tokens: u32,
+    ) -> Result<Structured, Failure> {
         self.seen
             .lock()
             .unwrap()
-            .push((user.to_owned(), max_tokens));
+            .push((user.to_owned(), ref_ids.to_vec(), max_tokens));
         let delay = *self.delay.lock().unwrap();
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
@@ -79,7 +85,18 @@ fn right_answers(predicted: [f64; 5]) -> VecDeque<Result<Structured, Failure>> {
 fn the_phrases_are_synthetic_small_and_have_reachable_expected_values() {
     assert_eq!(PHRASES.len(), 5);
     for phrase in &PHRASES {
-        let (dynamic, checks) = phrase.request();
+        let (dynamic, ref_ids, checks) = phrase.request();
+        // The reply schema allows `t` and exactly the IDs the phrase sends.
+        let sent: Vec<&str> = phrase.context.iter().map(|(id, _, _)| *id).collect();
+        assert_eq!(ref_ids, sent, "{}", phrase.note);
+        assert!(!dynamic.contains("\"value\":24"), "{}", phrase.note);
+        assert!(!dynamic.contains("\"alias\":\"f"), "{}", phrase.note);
+        assert!(
+            checks
+                .supplied
+                .keys()
+                .all(|name| name == "t" || sent.contains(&name.as_str()))
+        );
         // Every phrase fits the smallest bound of any path.
         assert!(dynamic.len() <= 1024, "{}: {}", phrase.note, dynamic.len());
         assert!(dynamic.starts_with("<data>\n") && dynamic.ends_with("\n</data>"));
@@ -116,7 +133,7 @@ async fn right_replies_pass_with_their_tokens_and_the_expected_value_offered() {
     assert_eq!(largest_predicted(&results), 90);
     // Every phrase went out at the measurement cap with its own dynamic part.
     let seen = script.seen.lock().unwrap();
-    assert!(seen.iter().all(|(_, max_tokens)| *max_tokens == 384));
+    assert!(seen.iter().all(|(_, _, max_tokens)| *max_tokens == 384));
     assert_eq!(seen.len(), 5);
 }
 

@@ -74,6 +74,17 @@ async fn models(slow: Duration) -> Models {
 /// [`models`] on `path`; with `device_default` the active model is the device default and the
 /// Qwen3.5-9B file is missing from the models folder.
 async fn models_with(slow: Duration, path: Path, device_default: bool, first: Start) -> Models {
+    models_older(slow, path, device_default, first, false).await
+}
+
+/// [`models_with`] whose active model's stored trial predates the prompt in force.
+async fn models_older(
+    slow: Duration,
+    path: Path,
+    device_default: bool,
+    first: Start,
+    older_prompt: bool,
+) -> Models {
     let (dir, store, auth, _clock) = fixture_with_owner(1).await;
     let behaviour = |phrase_delay| Behaviour {
         phrase_delay,
@@ -112,6 +123,10 @@ async fn models_with(slow: Duration, path: Path, device_default: bool, first: St
             records: Some(Arc::new(SqlRecords(store.clone()))),
             from_owner_setting: false,
             device_default,
+            older_prompt: crate::assistant::runtime::models::OlderPrompt {
+                active: older_prompt,
+                previous: false,
+            },
         },
     );
     let runtime = handle.runtime.clone().unwrap();
@@ -857,4 +872,69 @@ async fn an_alias_the_stored_setting_would_refuse_is_refused_at_start() {
         .await
         .unwrap();
     handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_page_says_when_the_measurement_predates_the_prompt() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let older = models_older(
+        Duration::from_millis(1),
+        Path::Cpu,
+        false,
+        Start::Ok(quick()),
+        true,
+    )
+    .await;
+    let page = older.page().await;
+    assert!(
+        page.contains("measured with an older prompt") && page.contains("Try the model again"),
+        "{page}"
+    );
+    // A model measured with the current prompt, or never, carries no such line.
+    let current = models(Duration::from_millis(1)).await;
+    assert!(!current.page().await.contains("older prompt"));
+}
+
+#[tokio::test]
+async fn a_stored_trial_is_flagged_unless_it_ran_under_the_current_prompt() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let other = || Model {
+        spec: "local:other.gguf".into(),
+        name: "other.gguf".into(),
+        sha256: "b".repeat(64),
+        alias: "other".into(),
+        max_tokens: 320,
+        size: Some(1 << 30),
+    };
+    let current = serde_json::json!({"prefix_sha256": crate::assistant::contract::prefix_sha256(), "trial": 1}).to_string();
+    // A trial that recorded no prompt (migration 022 rows before ASSIST-56) and one recorded
+    // under another prompt are older; one under the current prompt and none at all are not.
+    for (trial, older) in [
+        (Some(r#"{"trial":1}"#.to_owned()), true),
+        (
+            Some(format!(r#"{{"prefix_sha256":"{}"}}"#, "0".repeat(64))),
+            true,
+        ),
+        (Some(current), false),
+        (None, false),
+    ] {
+        let (dir, store, _auth, _clock) = fixture_with_owner(1).await;
+        SqlRecords(store.clone())
+            .activate(
+                &crate::assistant::records::Record {
+                    model: other(),
+                    trial: trial.clone(),
+                },
+                None,
+                1,
+            )
+            .await
+            .unwrap();
+        let handle = AssistantHandle::runtime(default_config(dir.path(), None), store)
+            .await
+            .unwrap();
+        let status = handle.runtime.clone().unwrap().status();
+        assert_eq!(status.model.older_prompt.is_older(), older, "{trial:?}");
+        handle.shutdown().await;
+    }
 }

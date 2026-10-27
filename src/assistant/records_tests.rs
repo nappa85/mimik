@@ -1,4 +1,5 @@
 use super::*;
+use crate::assistant::runtime::models::OlderPrompt;
 use std::sync::Mutex;
 
 /// Records in memory for the manager's tests: what was stored, and optionally a failure.
@@ -209,4 +210,74 @@ async fn the_tables_refuse_rows_the_runtime_would_never_write() {
         })
         .await
         .unwrap();
+}
+
+/// A trial as the manager stores it under the prompt in force, and one from before ASSIST-56.
+fn current_trial() -> String {
+    format!(
+        r#"{{"prefix_sha256":"{}","trial":9}}"#,
+        crate::assistant::contract::prefix_sha256()
+    )
+}
+
+const OLD_TRIAL: &str = r#"{"trial":1}"#;
+
+#[tokio::test]
+async fn the_older_prompt_flag_covers_the_active_and_the_previous_model_separately() {
+    let (_dir, store) = store();
+    let records = SqlRecords(store);
+    let old = record("old.gguf", 'a', 320, Some(OLD_TRIAL));
+    let current = record("new.gguf", 'b', 320, Some(&current_trial()));
+    // The previous model is the one measured with the older prompt...
+    records.activate(&current, Some(&old), 1).await.unwrap();
+    assert_eq!(
+        records.load().await.unwrap().older_prompt(),
+        OlderPrompt {
+            active: false,
+            previous: true
+        }
+    );
+    // ...and after the models change places, the active one is.
+    records.swap(1).await.unwrap();
+    assert_eq!(
+        records.load().await.unwrap().older_prompt(),
+        OlderPrompt {
+            active: true,
+            previous: false
+        }
+    );
+    // A stored choice with neither is flagged for neither.
+    assert_eq!(Stored::default().older_prompt(), OlderPrompt::default());
+}
+
+#[tokio::test]
+async fn the_older_prompt_flag_survives_switches_a_swap_and_a_retrial_in_the_database() {
+    let (_dir, store) = store();
+    let records = SqlRecords(store);
+    let flags = |stored: Stored| (stored.older_prompt(), stored);
+    // Load an old trial: the active model was measured before ASSIST-56.
+    let a_old = record("a.gguf", 'a', 320, Some(OLD_TRIAL));
+    records.activate(&a_old, None, 1).await.unwrap();
+    let (older, _) = flags(records.load().await.unwrap());
+    assert_eq!((older.active, older.previous), (true, false));
+    // Switch to B (tried under the current prompt). The manager stores the model it leaves
+    // with no trial; its row is found, so A keeps the trial it had.
+    let b = record("b.gguf", 'b', 320, Some(&current_trial()));
+    let a_left = record("a.gguf", 'a', 320, None);
+    records.activate(&b, Some(&a_left), 1).await.unwrap();
+    let (older, stored) = flags(records.load().await.unwrap());
+    assert_eq!((older.active, older.previous), (false, true));
+    assert_eq!(stored.previous.unwrap().model.name, "a.gguf");
+    // Switch back to A: it is the flagged one again, after a reload too.
+    records.swap(1).await.unwrap();
+    let (older, _) = flags(records.load().await.unwrap());
+    assert_eq!((older.active, older.previous), (true, false));
+    // Trying A again under the current prompt and switching to it (the active file, so no
+    // previous model is given): A is no longer flagged and B stays the previous model.
+    let a_again = record("a.gguf", 'a', 320, Some(&current_trial()));
+    records.activate(&a_again, None, 1).await.unwrap();
+    let (older, stored) = flags(records.load().await.unwrap());
+    assert_eq!((older.active, older.previous), (false, false));
+    assert_eq!(stored.active.unwrap().model.name, "a.gguf");
+    assert_eq!(stored.previous.unwrap().model.name, "b.gguf");
 }

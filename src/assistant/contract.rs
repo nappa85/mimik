@@ -22,6 +22,15 @@ pub(crate) const SCHEMA_NAME: &str = "mimik_interpretation_v2";
 /// Between the instructions and the schema in the fixed prefix.
 const SCHEMA_HEADING: &str = "\nJSON schema of the reply:\n";
 
+/// SHA-256 of [`FIXED_PREFIX`] in lower-case hex: which prompt a trial measured a model with
+/// (recorded in the trial, compared when it is read back).
+pub(crate) fn prefix_sha256() -> &'static str {
+    use sha2::{Digest, Sha256};
+    static HASH: LazyLock<String> =
+        LazyLock::new(|| hex::encode(Sha256::digest(FIXED_PREFIX.as_bytes())));
+    HASH.as_str()
+}
+
 /// The most options of a reply, and the most readings of an `ambiguous` reply.
 pub(crate) const MAX_OPTIONS: usize = 3;
 /// The most characters of an explanation or a reading.
@@ -32,22 +41,13 @@ pub(crate) const MAX_DEPTH: usize = 3;
 /// The largest dynamic bound B of any path (the GPU path's 4 KiB, plan §1.4a).
 pub(crate) const MAX_DYNAMIC_BYTES: usize = 4096;
 
-/// The target's alias.
+/// The target's name in `ref` and in the envelope (ASSIST-56): the target is called `t`,
+/// every other item by its ID.
 pub(crate) const TARGET_ALIAS: &str = "t";
-/// The most field aliases (`f1`…`f64`) the schema's alias enum lists. No request can supply
-/// more: at [`MAX_DYNAMIC_BYTES`] at most 63 of the smallest possible context items fit
-/// (tested at the exact boundary), so the enum never makes the builder drop an item. The
-/// schema is a superset of every request's aliases: Rust drops a reference to an alias the
-/// request did not supply.
-pub(crate) const MAX_FIELD_ALIASES: usize = 64;
-/// The most same-row cell aliases (`c1`…`c31`): a list item has at most 32 properties, one
-/// of which is the target.
-pub(crate) const MAX_CELL_ALIASES: usize = 31;
 
-/// What the prefix quotes in place of the alias enum: the grammar (`response_format`, the
-/// full pinned schema) enforces the enum, so the prompt copy need not repeat its 96 entries.
-pub(crate) const QUOTED_REF: &str =
-    r#"{"type":"string","description":"an alias from the data: t, f<n> or c<n>"}"#;
+/// What the prefix quotes in place of the ID enum: the grammar (`response_format`, the
+/// pinned schema with this request's IDs, [`schema_for`]) enforces the enum.
+pub(crate) const QUOTED_REF: &str = r#"{"type":"string","description":"t for the target, or the id of a context item from the data"}"#;
 
 /// The parsed schema, for `response_format` and for Rust's own validation.
 pub(crate) static SCHEMA: LazyLock<Value> = LazyLock::new(|| {
@@ -55,7 +55,7 @@ pub(crate) static SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 });
 
 /// The fixed prefix: the system message of every interpretation request: the
-/// instructions, the heading and the schema's compact text with the alias enum replaced by
+/// instructions, the heading and the schema's compact text with the ID enum replaced by
 /// [`QUOTED_REF`] (keys in the pinned order).
 pub(crate) static FIXED_PREFIX: LazyLock<String> = LazyLock::new(|| {
     let mut quoted = SCHEMA.clone();
@@ -69,16 +69,38 @@ pub(crate) static FIXED_PREFIX: LazyLock<String> = LazyLock::new(|| {
     prefix
 });
 
-/// The alias of the `n`-th supplied field (1-based), or `None` past the enum.
-pub(crate) fn field_alias(n: usize) -> Option<String> {
-    (1..=MAX_FIELD_ALIASES)
-        .contains(&n)
-        .then(|| format!("f{n}"))
+/// The reply schema of a request that supplies `ids` (context item IDs in envelope order):
+/// the pinned schema with `ref` limited to `t` and these IDs, at the same key position.
+pub(crate) fn schema_for(ids: &[String]) -> Value {
+    // The builder guarantees this (`campaigns::interpret::unambiguous`); a duplicate would make
+    // the grammar's enum ambiguous and an empty ID or `t` could never be a context item.
+    debug_assert!(
+        ids.iter()
+            .enumerate()
+            .all(|(n, id)| !id.is_empty() && id != TARGET_ALIAS && !ids[..n].contains(id)),
+        "reply schema ids must be unique, non-empty and not `t`: {ids:?}"
+    );
+    let mut schema = SCHEMA.clone();
+    let mut names = vec![Value::from(TARGET_ALIAS)];
+    names.extend(ids.iter().map(|id| Value::from(id.as_str())));
+    schema["$defs"]["ref"]["properties"]["ref"] = serde_json::json!({ "enum": names });
+    schema
 }
 
-/// The alias of the `n`-th supplied same-row cell (1-based), or `None` past the enum.
-pub(crate) fn cell_alias(n: usize) -> Option<String> {
-    (1..=MAX_CELL_ALIASES).contains(&n).then(|| format!("c{n}"))
+/// The schema replies are validated against: the pinned schema with `ref` any non-empty
+/// string. Which IDs a request supplied is checked per option (`output::read`), so an unknown
+/// ID drops that option and not the reply.
+pub(crate) static VALIDATION_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    let mut schema = SCHEMA.clone();
+    schema["$defs"]["ref"]["properties"]["ref"] =
+        serde_json::json!({"type": "string", "minLength": 1});
+    schema
+});
+
+/// Whether `id` can name a context item: a field or item-property ID (the one id grammar,
+/// `definitions::valid_field_id`) that is neither the target's name nor the target's ID.
+pub(crate) fn nameable(id: &str, target_id: &str) -> bool {
+    crate::definitions::valid_field_id(id) && id != TARGET_ALIAS && id != target_id
 }
 
 /// The target as the envelope shows it. `label` is the first thing dropped for the bound.
@@ -100,16 +122,14 @@ pub(crate) enum ItemKind {
     Enum,
 }
 
-/// One context item: a field (`f…`) or a same-row cell (`c…`).
+/// One context item: a field or a same-row cell, named by its ID. Its value is not sent;
+/// Mimik substitutes it when it evaluates a reply (`output::Supplied`).
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct EnvelopeItem {
-    pub alias: String,
     pub id: String,
     pub label: String,
     #[serde(rename = "type")]
     pub kind: ItemKind,
-    /// An integer, an enum option ID, or `null` for unknown.
-    pub value: Value,
 }
 
 /// The dynamic part's content, in this order: the note, the target, the context.

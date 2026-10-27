@@ -435,3 +435,114 @@ fn rendering_uses_display_symbols() {
         "84 \u{2212} ((\u{2212}15 \u{d7} Max HP) \u{f7} 2 (rounded down))"
     );
 }
+
+/// Target `hp` at 84 and context items named by their IDs, among them `f1`, `c1`, `t1` and
+/// `ta`, which are ordinary IDs (ASSIST-56).
+fn named(phrase: &str) -> Checks {
+    Checks {
+        phrase: phrase.into(),
+        target_value: Some(84),
+        supplied: BTreeMap::from([
+            ("t".into(), supplied("field:hp", true, Some(84))),
+            ("max_hp".into(), supplied("field:max_hp", true, Some(90))),
+            ("class".into(), supplied("field:class", false, None)),
+            ("luck".into(), supplied("field:luck", true, None)),
+            ("f1".into(), supplied("field:f1", true, Some(7))),
+            ("c1".into(), supplied("cell:gear/r1-1/c1", true, Some(3))),
+            ("t1".into(), supplied("field:t1", true, Some(11))),
+            ("ta".into(), supplied("field:ta", true, Some(13))),
+        ]),
+    }
+}
+
+#[test]
+fn a_reference_by_id_is_evaluated_with_the_value_bound_for_it() {
+    let c = named("lost 15");
+    assert_eq!(one_with(sub(alias("max_hp"), lit(15)), &c), Ok(75));
+    for (id, value) in [("f1", 7), ("c1", 3), ("t1", 11), ("ta", 13)] {
+        let reading = read(&options(&[sub(alias("t"), alias(id))]), &c).unwrap();
+        let Reading::Options { shown, dropped } = reading else {
+            panic!("options")
+        };
+        assert!(dropped.is_empty(), "{id}");
+        assert_eq!(shown[0].value, 84 - value, "{id}");
+        // The reference is kept by its ID with the value it was evaluated with.
+        assert_eq!(shown[0].refs[id].value, Some(value));
+    }
+}
+
+#[test]
+fn an_unsupplied_id_drops_only_its_option_not_the_reply() {
+    let c = named("lost 15");
+    // `weight` was never supplied (or was dropped by the budget or as ambiguous), `luck` is
+    // unknown, `class` is an enum, `f2` is not an ID of this request.
+    let first = options(&[
+        sub(alias("t"), alias("weight")),
+        sub(alias("t"), lit(15)),
+        sub(alias("t"), alias("luck")),
+    ]);
+    let Reading::Options { shown, dropped } = read(&first, &c).unwrap() else {
+        panic!("options")
+    };
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].value, 69);
+    assert_eq!(dropped, [Drop::UnsuppliedRef, Drop::UnknownRef]);
+    let second = options(&[
+        sub(alias("t"), alias("class")),
+        sub(alias("t"), alias("f2")),
+    ]);
+    let Reading::Options { shown, dropped } = read(&second, &c).unwrap() else {
+        panic!("options")
+    };
+    assert_eq!(shown, Vec::new());
+    assert_eq!(dropped, [Drop::EnumRef, Drop::UnsuppliedRef]);
+}
+
+/// ASSIST-L52: a context value the model guesses is checked like any literal, so a guess that
+/// equals a number of the note is admitted. The model is not shown the values, which makes
+/// such a guess unlikely but not impossible.
+#[test]
+fn a_guessed_context_value_equal_to_a_note_number_has_provenance() {
+    let c = named("heal 90");
+    // `max_hp` is 90 and the note says 90: `t + 90` has provenance by the note.
+    assert_eq!(
+        one_with(json!({"op": "add", "l": alias("t"), "r": lit(90)}), &c),
+        Ok(174)
+    );
+    // A guess that is not a number of the note is refused.
+    assert_eq!(
+        one_with(json!({"op": "add", "l": alias("t"), "r": lit(91)}), &c),
+        Err(Drop::Provenance)
+    );
+}
+
+/// ASSIST-56 puts IDs, up to 64 characters, in replies. The largest reply the schema admits
+/// (3 options of 8 leaves, 120-character explanations) with 64-character IDs is read whole;
+/// whatever `max_tokens` cuts of it is not JSON and shows nothing (ASSIST-L52). How many
+/// tokens that reply takes is not measured here (it needs the model's tokenizer; TODO).
+#[test]
+fn a_cut_off_reply_shows_nothing_and_the_largest_complete_one_is_read() {
+    let id = "a".repeat(64);
+    let mut supplied = BTreeMap::from([("t".into(), supplied("field:hp", true, Some(84)))]);
+    supplied.insert(id.clone(), self::supplied("field:a", true, Some(1)));
+    let c = Checks {
+        phrase: "lost 1".into(),
+        target_value: Some(84),
+        supplied,
+    };
+    let add = |l: Value, r: Value| json!({"op": "add", "l": l, "r": r});
+    let pair = || add(alias(&id), alias(&id));
+    let tree = add(add(pair(), pair()), add(pair(), pair()));
+    let option = json!({"expr": tree, "explanation": "x".repeat(120)});
+    let reply =
+        json!({"kind": "options", "options": [option.clone(), option.clone(), option]}).to_string();
+    // The most the schema admits is read whole...
+    let Ok(Reading::Options { shown, .. }) = read(&reply, &c) else {
+        panic!("the largest reply is valid")
+    };
+    assert_eq!(shown.len(), 3);
+    // ...and no cut of it, as the cap makes, is read as anything.
+    for end in (1..reply.len()).step_by(37) {
+        assert!(read(&reply[..end], &c).is_err(), "{end}");
+    }
+}

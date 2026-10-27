@@ -105,7 +105,7 @@ async fn a_job_runs_and_offers_its_option() {
     };
     assert_eq!(options[0].candidate.value, 99);
     assert_eq!(options[0].before, Some(84));
-    assert_eq!(options[0].shown, "84 + 15");
+    assert_eq!(options[0].shown, "Current HP (84) + 15");
     assert!(assistant.proposal(1, 1, id, 0).is_some());
     assert!(assistant.proposal(1, 1, id, 1).is_none());
     // Another account's or sheet's job is not found.

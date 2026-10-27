@@ -144,6 +144,7 @@ impl AssistantHandle {
         let stored = records.load().await?;
         let from_owner_setting = stored.active.is_some();
         let device_default = device_default && !from_owner_setting;
+        let older_prompt = stored.older_prompt();
         let (active, previous) = match stored.active {
             Some(active) => (active.model, stored.previous.map(|record| record.model)),
             None => (flags, None),
@@ -196,6 +197,7 @@ impl AssistantHandle {
                 records: Some(Arc::new(records)),
                 from_owner_setting,
                 device_default,
+                older_prompt,
             },
         ))
     }
