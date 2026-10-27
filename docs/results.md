@@ -47,7 +47,7 @@ Results:
 - For the 9B, D53 is clearly better than A (+4 correct_ref, −3 false_confident). For the 35B the two arms are level; the ASSIST-53 sentence lifted its A from 20 (experiment 3b) to 25.
 - The re-score of experiment 3 under ASSIST-53 predicted 9B D 25/4 and 35B D 24/2; the live runs are 24/5 and 24/4. One run per arm on 30 cases, so differences of one or two cases are within noise.
 
-Shipped as ASSIST-56 (arm D53 for every model). Not measured: the general 104-reply screen with this format; Granite with it (the Granite arms of experiment 5 are being run); the shipped request selects its items under the smaller sizes, so more items fit than in the measured arm.
+Shipped as ASSIST-56 (arm D53 for every model). Not measured: the general 104-reply screen with this format; the shipped request selects its items under the smaller sizes, so more items fit than in the measured arm.
 
 ## Field references: re-score under ASSIST-53 (2026-10-27)
 
