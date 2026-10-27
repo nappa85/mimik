@@ -70,8 +70,8 @@ pub(crate) fn gpu_default_name() -> String {
 /// the models folder with its pinned hash, Granite 4.2 3B otherwise, with the note the page
 /// shows when the 9B is not what runs although the GPU is wanted. `gpu`: the path being
 /// started is the GPU's; `gpu_wanted`: the GPU path is the first choice (not
-/// `--assistant-device cpu`); `file`: the 9B file's state (read only when `gpu`); `folder`: the models folder as the notes
-/// name it (its absolute path).
+/// `--assistant-device cpu`); `file`: the 9B file's state (read only when `gpu`); `folder`:
+/// the models folder as the notes name it (its absolute path).
 pub(crate) fn default_model(
     gpu: bool,
     gpu_wanted: bool,

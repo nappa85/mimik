@@ -27,7 +27,9 @@ admission), `migrations/010`, `011`, `013`, `014`.
   has been bootstrapped, and prints the `bootstrap-owner` command to run, naming the
   database by its absolute path. The check runs right after the database opens and
   before the assistant (the model server) starts, so a refused launch starts nothing.
-  Every startup error is printed to stderr as `Error: <message>` and exits with status 1.
+  Every error Mimik raises itself (startup or a subcommand) is printed to stderr as
+  `Error: <message>` and exits with status 1; command-line argument errors are clap's own
+  (exit status 2).
   The binding must exist; the Owner account need not be enabled for players to log in.
 - **Serving flags vs subcommands:** `--no-auth`, `--loopback`, `--dev-owner-play`,
   `--lan-address` and `--external-url` are rejected with any subcommand.

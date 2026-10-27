@@ -101,8 +101,8 @@ class AccountFailureTests(unittest.TestCase):
 
     def test_exact_static_invalid_diagnostics(self):
         for error in (
-            'Invalid("Owner bootstrap has already occurred.")',
-            'Invalid("Credential is unavailable, expired or superseded.")',
+            "Owner bootstrap has already occurred.",
+            "Credential is unavailable, expired or superseded.",
         ):
             with self.subTest(error=error):
                 self.assertEqual(

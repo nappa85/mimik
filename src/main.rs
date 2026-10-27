@@ -294,9 +294,23 @@ enum Command {
 fn main() {
     if let Err(error) = start() {
         // Display, not Debug: real line breaks, no quotes.
-        eprintln!("Error: {error}");
+        eprintln!("Error: {}", describe(error.as_ref()));
         std::process::exit(1);
     }
+}
+
+/// The error's message; for an I/O cause, the operating system's reason too (it names no
+/// path or content). Other causes (JSON, sheet data) can quote user text and stay out.
+fn describe(error: &(dyn std::error::Error + 'static)) -> String {
+    let message = error.to_string();
+    let mut cause = error.source();
+    while let Some(source) = cause {
+        if let Some(io) = source.downcast_ref::<std::io::Error>() {
+            return format!("{message}: {io}");
+        }
+        cause = source.source();
+    }
+    message
 }
 
 fn start() -> Result<(), Box<dyn std::error::Error>> {
@@ -320,7 +334,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     validate_serving_args(&args)?;
     let auth = !args.no_auth;
     let mut options = server_options(&args, std::env::var("MIMIK_EXTERNAL_URL").ok())?;
+    // Absolute once, so every message names the same file.
     let path = database_path(args.database.clone(), std::env::var_os("MIMIK_DATABASE"));
+    let path = std::path::absolute(&path).unwrap_or(path);
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         create_data_dir(parent)?;
     }
@@ -329,9 +345,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if auth && args.command.is_none() {
         require_owner(&store, &path).await?;
     }
-    if args.assistant.on {
-        options.assistant = Some(assistant(&args, &data_dir(&path)?, &store).await?);
-    }
+    // Every check that can end the launch comes before the model server starts.
     let unindexed = store.search_index_failures().await?;
     if unindexed > 0 {
         eprintln!(
@@ -340,6 +354,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(command) = args.command {
         return local_command(&store, command).await;
+    }
+    if args.assistant.on {
+        options.assistant = Some(assistant(&args, &data_dir(&path)?, &store).await?);
     }
     let assistant = options.assistant.clone();
     let served = serve(store, auth, options, &path).await;
@@ -501,11 +518,10 @@ async fn require_owner(
         .await
     {
         Ok(()) => Ok(()),
-        Err(mimik::AppError::Invalid(_)) => {
-            let shown = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        Err(mimik::AppError::Invalid(mimik::accounts::OWNER_BINDING_REQUIRED)) => {
             Err(format!(
                 "Owner setup is required for database {}.\nRun: mimik bootstrap-owner --login owner --display-name Owner --password-file private/owner.password\nUse the same --database or MIMIK_DATABASE setting as this launch. See docs/auth-and-sessions.md for preparing the private password file.",
-                shown.display()
+                path.display()
             )
             .into())
         }

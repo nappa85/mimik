@@ -27,6 +27,10 @@ pub struct Summary {
     pub owner: bool,
 }
 
+/// The refusal text when no Owner binding exists (the launcher maps exactly this to the
+/// owner-setup message).
+pub const OWNER_BINDING_REQUIRED: &str = "Auth mode requires a durable Owner binding.";
+
 /// Account operations share the application's existing connection manager.
 #[derive(Clone)]
 pub struct Accounts {
@@ -130,7 +134,7 @@ impl Accounts {
     /// Returns absent-binding or storage errors.
     pub async fn require_owner_binding(&self) -> Result<(), AppError> {
         self.store.run_bounded_auth(|db| {
-            if !db.query_row("SELECT EXISTS(SELECT 1 FROM account_owner o JOIN accounts a ON a.id=o.account_id WHERE o.singleton=1)",[],|r|r.get::<_,bool>(0))? { return Err(AppError::Invalid("Auth mode requires a durable Owner binding.")); }
+            if !db.query_row("SELECT EXISTS(SELECT 1 FROM account_owner o JOIN accounts a ON a.id=o.account_id WHERE o.singleton=1)",[],|r|r.get::<_,bool>(0))? { return Err(AppError::Invalid(OWNER_BINDING_REQUIRED)); }
             Ok(())
         }).await
     }

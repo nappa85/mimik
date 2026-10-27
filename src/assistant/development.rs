@@ -30,7 +30,9 @@ fn endpoint(raw: &str) -> Result<Endpoint, String> {
     if raw.starts_with("http") {
         return transport::tcp(raw, true)
             .map(Endpoint::Tcp)
-            .map_err(|refused| format!("the development endpoint is refused ({refused:?})"));
+            .map_err(|refused| {
+                format!("the development endpoint is refused: {}", refused.reason())
+            });
     }
     let path = PathBuf::from(raw);
     if path.is_absolute() {

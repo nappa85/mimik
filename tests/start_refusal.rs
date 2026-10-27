@@ -66,6 +66,32 @@ fn a_refused_launch_never_starts_the_assistant() {
 }
 
 #[test]
+fn an_unreadable_source_file_names_the_operating_system_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    private(dir.path());
+    let output = Command::new(env!("CARGO_BIN_EXE_mimik"))
+        .env_remove("MIMIK_DATABASE")
+        .arg("--database")
+        .arg(dir.path().join("cli.sqlite3"))
+        .args([
+            "import-definition-draft",
+            "--expected-revision",
+            "0",
+            "--file",
+        ])
+        .arg(dir.path().join("missing.json"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("No such file or directory (os error 2)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("missing.json"), "{stderr}");
+}
+
+#[test]
 fn a_subcommand_failure_prints_the_plain_message_not_the_debug_form() {
     let dir = tempfile::tempdir().unwrap();
     private(dir.path());
