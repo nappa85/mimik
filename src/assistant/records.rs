@@ -2,7 +2,7 @@
 //! the models the owner switched to with their trial measurements, and which one is active
 //! and which previous. The runtime manager is the only writer: it stores a switch before it
 //! applies it.
-use super::runtime::models::Model;
+use super::runtime::models::{Model, OlderPrompt};
 use crate::store::Store;
 use async_trait::async_trait;
 use rusqlite::{OptionalExtension, params};
@@ -39,9 +39,12 @@ pub(crate) struct Stored {
 
 impl Stored {
     /// Whether the active and the previous model were measured with an older prompt.
-    pub(crate) fn older_prompt(&self) -> (bool, bool) {
+    pub(crate) fn older_prompt(&self) -> OlderPrompt {
         let older = |record: &Option<Record>| record.as_ref().is_some_and(Record::older_prompt);
-        (older(&self.active), older(&self.previous))
+        OlderPrompt {
+            active: older(&self.active),
+            previous: older(&self.previous),
+        }
     }
 }
 

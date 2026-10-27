@@ -517,12 +517,11 @@ fn a_guessed_context_value_equal_to_a_note_number_has_provenance() {
 }
 
 /// ASSIST-56 puts IDs, up to 64 characters, in replies. The largest reply the schema admits
-/// (3 options of 8 leaves, 120-character explanations) with 64-character IDs is far longer
-/// than the default `max_tokens` allows, so such a reply is cut off; a cut-off reply is not
-/// JSON and shows nothing (documented in ASSIST-L52). Models answer with short expressions in
-/// practice (the experiments' replies are well under the cap); this pins the safe failure.
+/// (3 options of 8 leaves, 120-character explanations) with 64-character IDs is read whole;
+/// whatever `max_tokens` cuts of it is not JSON and shows nothing (ASSIST-L52). How many
+/// tokens that reply takes is not measured here (it needs the model's tokenizer; TODO).
 #[test]
-fn a_reply_cut_off_at_max_tokens_shows_nothing_and_a_complete_one_is_read() {
+fn a_cut_off_reply_shows_nothing_and_the_largest_complete_one_is_read() {
     let id = "a".repeat(64);
     let mut supplied = BTreeMap::from([("t".into(), supplied("field:hp", true, Some(84)))]);
     supplied.insert(id.clone(), self::supplied("field:a", true, Some(1)));
@@ -542,8 +541,6 @@ fn a_reply_cut_off_at_max_tokens_shows_nothing_and_a_complete_one_is_read() {
         panic!("the largest reply is valid")
     };
     assert_eq!(shown.len(), 3);
-    // ...is more than 352 tokens even at 4 bytes per token (about 2.8 KiB)...
-    assert!(reply.len() > 352 * 4, "{}", reply.len());
     // ...and no cut of it, as the cap makes, is read as anything.
     for end in (1..reply.len()).step_by(37) {
         assert!(read(&reply[..end], &c).is_err(), "{end}");

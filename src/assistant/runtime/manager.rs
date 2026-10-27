@@ -27,8 +27,8 @@
 use super::budgets::NoBudgets;
 use super::calibration::{self, Calibration};
 use super::models::{
-    DeviceDefault, Measurement, Model, ModelFile, ModelStatus, NineB, TrialKey, TrialReport,
-    TrialState, default_model, gpu_default_name, phrase_bound, trial_bound,
+    DeviceDefault, Measurement, Model, ModelFile, ModelStatus, NineB, OlderPrompt, TrialKey,
+    TrialReport, TrialState, default_model, gpu_default_name, phrase_bound, trial_bound,
 };
 use super::server::{Health, Server};
 use super::{Level, Path, trial};
@@ -200,7 +200,7 @@ impl Status {
             model: ModelStatus {
                 active: models.active.clone(),
                 previous: models.previous.clone(),
-                older_prompt: Measurement::of(models.older_prompt.0),
+                older_prompt: Measurement::of(models.older_prompt.active),
                 from_owner_setting: models.from_owner_setting,
                 switchable: models.records.is_some(),
                 next_trial: 1,
@@ -271,7 +271,7 @@ pub(crate) struct ModelSetup {
     pub device_default: bool,
     /// Whether the stored trial of the active and of the previous model measured it with an
     /// older prompt than the current one (ASSIST-56).
-    pub older_prompt: (bool, bool),
+    pub older_prompt: OlderPrompt,
 }
 
 #[cfg(test)]
@@ -291,7 +291,7 @@ impl ModelSetup {
             records: None,
             from_owner_setting: false,
             device_default: false,
-            older_prompt: (false, false),
+            older_prompt: OlderPrompt::default(),
         }
     }
 }
@@ -747,7 +747,7 @@ struct Manager {
     nine_b_mismatch: bool,
     previous: Option<Model>,
     /// Whether the active and the previous model were measured with an older prompt.
-    older_prompt: (bool, bool),
+    older_prompt: OlderPrompt,
     /// Where model changes are stored (none: the owner cannot change the model).
     records: Option<Arc<dyn Records>>,
     /// The owner's Cancel of a running trial.

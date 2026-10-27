@@ -206,3 +206,23 @@ async fn an_item_the_budget_dropped_is_not_in_the_enum_beside_one_that_is() {
     assert!(!enum_ids.to_string().contains("skill_10"));
     assert!(enum_ids.to_string().contains("skill_09"));
 }
+
+#[tokio::test]
+async fn an_enum_item_is_context_only_and_not_in_the_reply_schemas_enum() {
+    let stub = StubInterpreter::default();
+    let mut full = draft(3, "Current HP");
+    // skill_02 becomes an enum item: shown to the model, never referenced.
+    full.items[1].0.kind = ItemKind::Enum;
+    full.items[1].1.integer = false;
+    full.items[1].1.value = None;
+    let rendered = render(&full, wide(), &stub).await.unwrap();
+    assert!(rendered.dynamic.contains(r#""id":"skill_02""#));
+    assert_eq!(rendered.ref_ids, ["skill_01", "skill_03"]);
+    assert!(
+        !schema_for(&rendered.ref_ids)
+            .to_string()
+            .contains("skill_02")
+    );
+    // Rust still holds it as supplied, so a reply naming it drops that option (EnumRef).
+    assert!(rendered.checks.supplied.contains_key("skill_02"));
+}

@@ -228,7 +228,7 @@ async fn a_job_offers_the_reading_and_use_applies_it_with_a_confirmed_note() {
     let (action, done) = first_option(setup, &key).await;
     let option = &done["options"][0];
     assert_eq!(option["current"], "84");
-    assert_eq!(option["expression"], "84 \u{2212} 15");
+    assert_eq!(option["expression"], "Current HP (84) \u{2212} 15");
     assert_eq!(option["effect"], "84 \u{2192} 69");
     assert_eq!(option["value"], "69");
     // The phrase was read from the stored note, inside the data envelope.
@@ -868,7 +868,10 @@ async fn a_reference_is_shown_with_mimiks_value_so_a_wrong_number_in_the_explana
     let (_, done) = first_option(setup, &key).await;
     let option = &done["options"][0];
     // The model never saw Max HP's value; Mimik substitutes it and shows it by its label.
-    assert_eq!(option["expression"], "84 \u{2212} Max HP (84)", "{option}");
+    assert_eq!(
+        option["expression"], "Current HP (84) \u{2212} Max HP (84)",
+        "{option}"
+    );
     assert_eq!(option["value"], "0");
     assert_eq!(option["effect"], "84 \u{2192} 0");
     // The model's words are shown as they are; the 99 in them is not Mimik's number.

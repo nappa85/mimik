@@ -113,8 +113,10 @@ pub(crate) async fn render(
         if tokens <= bounds.tokens {
             return Ok(Rendered {
                 dynamic,
+                // Enum items are context for reading; the schema lets a reply name integers.
                 ref_ids: draft.items[..kept]
                     .iter()
+                    .filter(|(_, bound)| bound.integer)
                     .map(|(item, _)| item.id.clone())
                     .collect(),
                 checks: draft.checks(kept),

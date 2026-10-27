@@ -588,10 +588,10 @@ class ContractV2(unittest.TestCase):
         # ... is arm D53's transform of the measured legacy envelope, ids and no values,
         arm = ae.transform_fieldref2({"user": legacy["dynamic"]}, "v2-ids-53")
         self.assertEqual(arm["user"], golden["dynamic"])
-        self.assertEqual(
-            [i["id"] for i in json.loads(arm["user"].split("\n")[1])["context"]],
-            golden["ref_ids"],
-        )
+        context = json.loads(arm["user"].split("\n")[1])["context"]
+        self.assertIn("enum", [i["type"] for i in context])
+        # ... and only the integer items are named in the schema's ref enum.
+        self.assertEqual([i["id"] for i in context if i["type"] == "integer"], golden["ref_ids"])
         # ... and its reply schema is the pinned template with the ids as the ref enum.
         text = json.dumps(arm["schema"], separators=(",", ":"))
         self.assertEqual(hashlib.sha256(text.encode()).hexdigest(), golden["schema_sha256"])

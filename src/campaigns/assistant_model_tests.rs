@@ -123,7 +123,10 @@ async fn models_older(
             records: Some(Arc::new(SqlRecords(store.clone()))),
             from_owner_setting: false,
             device_default,
-            older_prompt: (older_prompt, false),
+            older_prompt: crate::assistant::runtime::models::OlderPrompt {
+                active: older_prompt,
+                previous: false,
+            },
         },
     );
     let runtime = handle.runtime.clone().unwrap();

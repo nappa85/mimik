@@ -335,10 +335,10 @@ impl Manager {
         ));
         if !keeps_previous {
             self.previous = Some(old);
-            self.older_prompt.1 = self.older_prompt.0;
+            self.older_prompt.previous = self.older_prompt.active;
         }
         // The trial this switch consumed ran under the current prompt.
-        self.older_prompt.0 = false;
+        self.older_prompt.active = false;
         self.active = new;
         self.device_default = false;
         self.publish_models();
@@ -363,14 +363,14 @@ impl Manager {
         }
         log(&format!("model switched back to {}", previous.spec));
         self.previous = Some(std::mem::replace(&mut self.active, previous));
-        self.older_prompt = (self.older_prompt.1, self.older_prompt.0);
+        self.older_prompt = self.older_prompt.swapped();
         self.device_default = false;
         self.publish_models();
     }
 
     fn publish_models(&self) {
         let (active, previous) = (self.active.clone(), self.previous.clone());
-        let older_prompt = self.older_prompt.0;
+        let older_prompt = self.older_prompt.active;
         self.update(|status| {
             status.model.active = active;
             status.model.previous = previous;

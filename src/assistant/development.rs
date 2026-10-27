@@ -135,7 +135,7 @@ impl AssistantHandle {
                 records: None,
                 from_owner_setting: false,
                 device_default: false,
-                older_prompt: (false, false),
+                older_prompt: crate::assistant::runtime::models::OlderPrompt::default(),
             },
         ))
     }

@@ -469,7 +469,8 @@ never from the request.
   cell of the row can share one): nothing is picked as a winner, so a reference to such an ID
   is an unsupplied reference and drops that option only (ASSIST-L52). IDs equal to the schema's
   keywords (`lit`, `op`, `l`, `r`, `round`, `ref`) and look-alikes (`f1`, `c1`, `t1`) are
-  ordinary IDs. At 4,096 bytes at most 108 minimal items fit (tested).
+  ordinary IDs. At 4,096 bytes at most 108 minimal items fit (tested). The reply schema's `ref`
+  enum lists `t` and the integer items' IDs; enum items are context only.
 - **Bounds:** the envelope must hold B bytes and N(B) tokens (llama-server's `/tokenize`):
   whole items are dropped from the end, then the target's label; the phrase, the target's ID
   and its value never are. If they alone exceed a bound the job ends "too long for the
@@ -494,7 +495,7 @@ changes nothing, unless its sibling operand is also a literal 1 (`1 × 1` and `1
 like any literals), and a 1 anywhere else does; a literal outside `i64` drops the
 option; evaluation is checked `i128` with an `i64` result, `div` rounds floor, ceil or exact
 (a remainder drops it), division by zero drops it. Shown: the current value, the expression
-with `−`, `×`, `÷` (references by label, `t` by its value) and the effect, labelled "the
+with `−`, `×`, `÷` (every reference, the target included, as its label with Mimik's value) and the effect, labelled "the
 assistant's reading".
 
 **Jobs.** One worker, one job at a time. A start is admitted only after the origin note was

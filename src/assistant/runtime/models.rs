@@ -224,6 +224,24 @@ impl Measurement {
     }
 }
 
+/// Whether the stored trials of the active and of the previous model were made with an older
+/// prompt than the current one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OlderPrompt {
+    pub active: bool,
+    pub previous: bool,
+}
+
+impl OlderPrompt {
+    /// The pair after "Switch back": the two models change places.
+    pub(crate) fn swapped(self) -> Self {
+        Self {
+            active: self.previous,
+            previous: self.active,
+        }
+    }
+}
+
 /// The model setting as the page shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelStatus {

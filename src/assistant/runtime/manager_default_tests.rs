@@ -32,7 +32,7 @@ fn spawn_default(
             records: records.map(|records| records as Arc<dyn Records>),
             from_owner_setting: false,
             device_default,
-            older_prompt: (false, false),
+            older_prompt: crate::assistant::runtime::models::OlderPrompt::default(),
         },
     );
     (assistant, handle)
@@ -223,7 +223,7 @@ async fn an_explicit_9b_with_the_wrong_hash_stays_unavailable() {
                 records: None,
                 from_owner_setting: false,
                 device_default: false,
-                older_prompt: (false, false),
+                older_prompt: crate::assistant::runtime::models::OlderPrompt::default(),
             },
         );
         (assistant, handle)

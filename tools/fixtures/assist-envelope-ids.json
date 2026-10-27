@@ -35,8 +35,7 @@
  "ref_ids": [
   "max_hp",
   "luck",
-  "class",
   "weight"
  ],
- "schema_sha256": "69af7b7a40e637a39fd5d628584d07faa7c309978a9327786997920ec619ac9b"
+ "schema_sha256": "837979aceb89aad36aa726326e13a8bcd25abfc463895d1047bdf2bd24f1b439"
 }

@@ -1042,9 +1042,16 @@ fn proposal(run: &Run, n: usize, candidate: Candidate) -> Proposal {
         .iter()
         .map(|(item, _)| (item.id.as_str(), item.label.as_str()))
         .collect();
+    let target_label = run.draft.target.label.clone().unwrap_or_default();
     let name = |alias: &str| {
         if alias == super::contract::TARGET_ALIAS {
-            before.map_or_else(|| "?".to_owned(), |value| value.to_string())
+            // The target as the other references: its label and Mimik's value.
+            let value = before.map_or_else(|| "?".to_owned(), |value| value.to_string());
+            if target_label.is_empty() {
+                value
+            } else {
+                format!("{target_label} ({value})")
+            }
         } else {
             // Mimik's own value beside the label (ASSIST-56): a number in the model's
             // explanation that disagrees with it is visibly contradicted.

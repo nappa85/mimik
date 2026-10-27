@@ -41,7 +41,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    screen with D is not run (ASSIST-L32).
    Live acceptance check before release: prime, a structured request, then a request with a
    different `ref` enum (another context): the fixed prefix's tokens are reused
-   (`cached_tokens` covers the prefix), plus the grammar-compilation time per request.
+   (`cached_tokens` covers the prefix), plus the grammar-compilation time per request; and
+   the token length of the largest schema-valid reply (3 options, 8 leaves, 64-character ids,
+   120-character explanations) with the model's tokenizer against `max_tokens` (ASSIST-L52).
 3. Older-ABI Landlock evidence (below ABI 6; the Ubuntu VM has ABI 4 and fails the two
    ABI-6 live checks, as documented).
 4. Owed measurements: the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks

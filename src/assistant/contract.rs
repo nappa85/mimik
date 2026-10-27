@@ -72,6 +72,14 @@ pub(crate) static FIXED_PREFIX: LazyLock<String> = LazyLock::new(|| {
 /// The reply schema of a request that supplies `ids` (context item IDs in envelope order):
 /// the pinned schema with `ref` limited to `t` and these IDs, at the same key position.
 pub(crate) fn schema_for(ids: &[String]) -> Value {
+    // The builder guarantees this (`campaigns::interpret::unambiguous`); a duplicate would make
+    // the grammar's enum ambiguous and an empty ID or `t` could never be a context item.
+    debug_assert!(
+        ids.iter()
+            .enumerate()
+            .all(|(n, id)| !id.is_empty() && id != TARGET_ALIAS && !ids[..n].contains(id)),
+        "reply schema ids must be unique, non-empty and not `t`: {ids:?}"
+    );
     let mut schema = SCHEMA.clone();
     let mut names = vec![Value::from(TARGET_ALIAS)];
     names.extend(ids.iter().map(|id| Value::from(id.as_str())));

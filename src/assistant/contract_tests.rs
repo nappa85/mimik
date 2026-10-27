@@ -394,3 +394,17 @@ fn the_instructions_ask_for_compact_single_line_json_once_before_the_reply_shape
     assert_eq!(FIXED_PREFIX.matches(RULE).count(), 1);
     assert_eq!(FIXED_PREFIX.matches(DIGITS_ONLY).count(), 0);
 }
+
+/// `schema_for` trusts its ids (the builder guarantees them); in a debug build a duplicate,
+/// an empty ID or `t` is caught.
+#[cfg(debug_assertions)]
+#[test]
+fn schema_for_catches_duplicate_empty_and_target_ids_in_debug_builds() {
+    for ids in [vec!["a", "a"], vec![""], vec!["t"], vec!["a", "b", "a"]] {
+        let ids: Vec<String> = ids.into_iter().map(str::to_owned).collect();
+        let caught = std::panic::catch_unwind(|| schema_for(&ids));
+        assert!(caught.is_err(), "{ids:?}");
+    }
+    let fine: Vec<String> = ["a", "b"].map(str::to_owned).into();
+    assert!(std::panic::catch_unwind(|| schema_for(&fine)).is_ok());
+}

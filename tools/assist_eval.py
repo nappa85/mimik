@@ -516,17 +516,23 @@ def transform_fieldref2(request, contract):
         return request
     payload = _rendered_envelope(request["user"])
     ids = {}
+    integer_ids = []
     for item in payload["context"]:
         item.pop("value", None)
         if contract in IDS_CONTRACTS:
             if item["id"] == "t" or item["id"] in ids:
                 raise ValueError("a context id collides with t or another id")
+            if item["type"] == "integer":
+                integer_ids.append(item["id"])
             ids[item["id"]] = item.pop("alias")
     request["user"] = _envelope(payload)
     if contract in IDS_CONTRACTS:
         request["id_to_alias"] = ids
         schema = json.loads(json.dumps(load_v2()[1]))
-        schema["$defs"]["ref"]["properties"]["ref"] = {"enum": ["t", *ids]}
+        # The measured arm D listed every context id; the shipped format (ASSIST-56, D53) lists
+        # the integer items only, since an enum item cannot be referenced.
+        named = integer_ids if contract == "v2-ids-53" else list(ids)
+        schema["$defs"]["ref"]["properties"]["ref"] = {"enum": ["t", *named]}
         request["schema"] = schema
     return request
 

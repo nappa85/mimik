@@ -13,9 +13,9 @@
 <section class="panel"><h2>Model</h2>
 <p>Active: <strong>{{ view.model.active.spec }}</strong> · SHA-256 <code>{{ view.model.active.sha256 }}</code> · <code>max_tokens</code> {{ view.model.active.max_tokens }} · from {{ view.model.source }}.</p>
 {% if let Some(note) = view.model.default_note %}<p>{{ note }}.</p>{% endif %}
-{% if view.model.older_prompt %}<p>This model was measured with an older prompt, so its reply limit and speeds may not hold. Try the model again below to measure it with the current one.</p>{% endif %}
 {% if let Some(note) = view.model.note %}<p class="form-error" role="alert">{{ note }}</p>{% endif %}
 {% if view.model.switchable %}
+{% if view.model.older_prompt %}<p>This model was measured with an older prompt, so its reply limit and speeds may not hold. Try the model again below to measure it with the current one.</p>{% endif %}
 {% if let Some(previous) = view.model.previous %}<p>Previous: <strong>{{ previous.spec }}</strong> · SHA-256 <code>{{ previous.sha256 }}</code> · <code>max_tokens</code> {{ previous.max_tokens }}.</p>
 <form method="post" action="/admin/assistant/model/switch-back"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Switch back</button></form>{% endif %}
 <form method="post" action="/admin/assistant/model/try"><input type="hidden" name="csrf" value="{{ csrf }}">
