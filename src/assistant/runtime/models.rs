@@ -22,11 +22,13 @@ pub(crate) struct Model {
 }
 
 /// The page's note when the GPU path is chosen but the Qwen3.5-9B file is missing.
-pub(crate) const GPU_DEFAULT_MISSING: &str =
-    "Qwen3.5-9B not found or not readable in the models folder; using Granite 4.2 3B";
+pub(crate) fn gpu_default_missing(folder: &str) -> String {
+    format!("Qwen3.5-9B not found or not readable in {folder}; using Granite 4.2 3B")
+}
 /// The page's note when the 9B file is there but does not have its pinned hash.
-pub(crate) const GPU_DEFAULT_MISMATCH: &str =
-    "Qwen3.5-9B in the models folder does not match its pinned hash; using Granite 4.2 3B";
+pub(crate) fn gpu_default_mismatch(folder: &str) -> String {
+    format!("Qwen3.5-9B in {folder} does not match its pinned hash; using Granite 4.2 3B")
+}
 /// The page's note when the GPU is wanted but the CPU path runs.
 pub(crate) const GPU_DEFAULT_ON_CPU: &str = "Qwen3.5-9B is the default on the GPU only; \
      the GPU is not in use, so Granite 4.2 3B runs on the CPU";
@@ -68,18 +70,29 @@ pub(crate) fn gpu_default_name() -> String {
 /// the models folder with its pinned hash, Granite 4.2 3B otherwise, with the note the page
 /// shows when the 9B is not what runs although the GPU is wanted. `gpu`: the path being
 /// started is the GPU's; `gpu_wanted`: the GPU path is the first choice (not
-/// `--assistant-device cpu`); `file`: the 9B file's state (read only when `gpu`).
+/// `--assistant-device cpu`); `file`: the 9B file's state (read only when `gpu`); `folder`: the models folder as the notes
+/// name it (its absolute path).
 pub(crate) fn default_model(
     gpu: bool,
     gpu_wanted: bool,
     file: NineB,
-) -> (Model, Option<&'static str>) {
+    folder: &str,
+) -> (Model, Option<String>) {
     use crate::assistant::model::{DEFAULT_MODEL, GPU_DEFAULT_MODEL};
     match (gpu, gpu_wanted, file) {
         (true, _, NineB::Present) => (Model::compiled(GPU_DEFAULT_MODEL), None),
-        (true, _, NineB::Missing) => (Model::compiled(DEFAULT_MODEL), Some(GPU_DEFAULT_MISSING)),
-        (true, _, NineB::Mismatch) => (Model::compiled(DEFAULT_MODEL), Some(GPU_DEFAULT_MISMATCH)),
-        (false, true, _) => (Model::compiled(DEFAULT_MODEL), Some(GPU_DEFAULT_ON_CPU)),
+        (true, _, NineB::Missing) => (
+            Model::compiled(DEFAULT_MODEL),
+            Some(gpu_default_missing(folder)),
+        ),
+        (true, _, NineB::Mismatch) => (
+            Model::compiled(DEFAULT_MODEL),
+            Some(gpu_default_mismatch(folder)),
+        ),
+        (false, true, _) => (
+            Model::compiled(DEFAULT_MODEL),
+            Some(GPU_DEFAULT_ON_CPU.to_owned()),
+        ),
         (false, false, _) => (Model::compiled(DEFAULT_MODEL), None),
     }
 }
@@ -269,7 +282,7 @@ mod tests {
             DEFAULT_MODEL_SHA256, GPU_DEFAULT_MODEL, GPU_DEFAULT_MODEL_SHA256,
         };
         // GPU path, file there: the 9B with its compiled-in hash and 352 tokens.
-        let (model, note) = default_model(true, true, NineB::Present);
+        let (model, note) = default_model(true, true, NineB::Present, "/m");
         assert_eq!(model.spec, GPU_DEFAULT_MODEL);
         assert_eq!(model.name, "Qwen3.5-9B-Q4_K_M.gguf");
         assert_eq!(model.sha256, GPU_DEFAULT_MODEL_SHA256);
@@ -279,19 +292,25 @@ mod tests {
         );
         assert_eq!(note, None);
         // GPU path, file with another hash: Granite, and why.
-        let (model, note) = default_model(true, true, NineB::Mismatch);
+        let (model, note) = default_model(true, true, NineB::Mismatch, "/m");
         assert_eq!(model.sha256, DEFAULT_MODEL_SHA256);
-        assert_eq!(note, Some(GPU_DEFAULT_MISMATCH));
+        assert_eq!(
+            note.as_deref(),
+            Some("Qwen3.5-9B in /m does not match its pinned hash; using Granite 4.2 3B")
+        );
         // GPU path, file missing: Granite, and why.
-        let (model, note) = default_model(true, true, NineB::Missing);
+        let (model, note) = default_model(true, true, NineB::Missing, "/m");
         assert_eq!(model.sha256, DEFAULT_MODEL_SHA256);
-        assert_eq!(note, Some(GPU_DEFAULT_MISSING));
+        assert_eq!(
+            note.as_deref(),
+            Some("Qwen3.5-9B not found or not readable in /m; using Granite 4.2 3B")
+        );
         // CPU path after a GPU failure: Granite, and why.
-        let (model, note) = default_model(false, true, NineB::Present);
+        let (model, note) = default_model(false, true, NineB::Present, "/m");
         assert_eq!(model.sha256, DEFAULT_MODEL_SHA256);
-        assert_eq!(note, Some(GPU_DEFAULT_ON_CPU));
+        assert_eq!(note, Some(GPU_DEFAULT_ON_CPU.to_owned()));
         // The CPU chosen: Granite, nothing to explain.
-        let (model, note) = default_model(false, false, NineB::Missing);
+        let (model, note) = default_model(false, false, NineB::Missing, "/m");
         assert_eq!((model.sha256.as_str(), note), (DEFAULT_MODEL_SHA256, None));
     }
 

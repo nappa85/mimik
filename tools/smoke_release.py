@@ -52,6 +52,15 @@ def require(condition, message):
         raise AssertionError(message)
 
 
+# The CLI prints the error enums' Display text (`Error: <message>`).
+ACCOUNT_CONFLICT = (
+    "This character was changed in another tab. Copy your edits, reload, and try again."
+)
+DEFINITION_CONFLICT = (
+    "Definition draft changed, or expected revision does not match. No changes saved."
+)
+
+
 def registry_cli(binary, directory, *arguments, success=True, error=None, secrets=None):
     result = subprocess.run(
         [str(binary), "--database", str(directory / "smoke.sqlite3"), *arguments],
@@ -158,9 +167,9 @@ def smoke_accounts(binary, directory):
         str(password_paths[0]),
     )
     owner = summary(cli(*bootstrap), "smoke-owner", "Synthetic Owner", "enabled", 1, True)
-    cli(*bootstrap, error='Invalid("Owner bootstrap has already occurred.")')
+    cli(*bootstrap, error="Owner bootstrap has already occurred.")
     show(owner)
-    unavailable = 'Invalid("Credential is unavailable, expired or superseded.")'
+    unavailable = "Credential is unavailable, expired or superseded."
     first_invite = token_output("invite-first.token")
     invite = (
         "invite-account",
@@ -250,7 +259,7 @@ def smoke_accounts(binary, directory):
     show(player)  # Issuance itself advances the epoch, before redemption.
     verify(player, 0, True)
     stale_reset = token_output("reset-stale.token")
-    reset(player, stale_reset, epoch=3, error="Conflict")
+    reset(player, stale_reset, epoch=3, error=ACCOUNT_CONFLICT)
     require(not stale_reset.exists(), "Stale reset produced a credential file")
     redeem("enroll-account", first_reset, error=unavailable)
     show(player)
@@ -290,7 +299,7 @@ def smoke_accounts(binary, directory):
     issued(final_reset)
     show(player)
     disable = ("disable-account", "--id", str(player["id"]), "--expected-epoch")
-    cli(*disable, "6", error="Conflict")
+    cli(*disable, "6", error=ACCOUNT_CONFLICT)
     show(player)
     player = summary(
         cli(*disable, "7"),
@@ -374,7 +383,7 @@ def prepare_definition_draft(binary, directory, fixture):
         created["status"] == "draft" and created["revision"] == 1,
         "Draft was not revision-one proposal",
     )
-    registry_cli(binary, directory, *command, success=False, error="Conflict")
+    registry_cli(binary, directory, *command, success=False, error=DEFINITION_CONFLICT)
     changed = json.loads((fixture / "definition.json").read_text(encoding="utf-8"))
     changed["title"] = "Updated synthetic draft"
     path = directory / "updated-definition.json"
@@ -385,7 +394,7 @@ def prepare_definition_draft(binary, directory, fixture):
         saved["id"] == created["id"] and saved["revision"] == 2 and saved["status"] == "draft",
         "Draft update identity/revision invalid",
     )
-    registry_cli(binary, directory, *update, success=False, error="Conflict")
+    registry_cli(binary, directory, *update, success=False, error=DEFINITION_CONFLICT)
     loaded = json.loads(
         registry_cli(binary, directory, "show-definition-draft", "--id", str(saved["id"]))
     )
@@ -506,7 +515,7 @@ def smoke_publication(binary, directory, fixture, draft):
             "Compared synthetic original page and mapped region",
             "--originals-compared",
             success=not stale,
-            error="Conflict" if stale else None,
+            error=DEFINITION_CONFLICT if stale else None,
         )
         return None if stale else json.loads(result)
 
@@ -538,7 +547,7 @@ def smoke_publication(binary, directory, fixture, draft):
             "--rationale",
             "Synthetic withdrawal",
             success=not stale,
-            error="Conflict" if stale else None,
+            error=DEFINITION_CONFLICT if stale else None,
         )
 
     def edit_review(action, **values):

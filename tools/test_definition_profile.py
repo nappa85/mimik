@@ -41,21 +41,17 @@ class RejectionMeasurementTests(unittest.TestCase):
 
     def test_wrong_or_disconnected_diagnostic_cannot_claim_nullable_type_rejection(self):
         for diagnostics in [
-            b'Diagnostic { path: "/fields/1/nullable", code: "type" }',
-            b'Diagnostic { path: "/fields/0/nullable", code: "required" }',
-            b'Diagnostic { path: "/fields/0/nullable", code: "required" }, Diagnostic { path: "/fields/1/nullable", code: "type" }',
+            b"/fields/1/nullable: type; ",
+            b"/fields/0/nullable: required; ",
+            b"/fields/0/nullable: required; /fields/1/nullable: type; ",
         ]:
-            stderr = (
-                b"Error: Invalid(ValidationReport { diagnostics: ["
-                + diagnostics
-                + b"], truncated: false })\n"
-            )
+            stderr = b"Error: Definition rejected: " + diagnostics + b"\n"
             with self.subTest(diagnostics=diagnostics), self.assertRaises(AssertionError):
                 self.invoke(1, stderr)
             self.assertEqual(self.last_output.getvalue(), "")
 
     def test_expected_top_level_report_is_measured(self):
-        stderr = b'Error: Invalid(ValidationReport { diagnostics: [Diagnostic { path: "/fields/0/nullable", code: "type" }], truncated: false })\n'
+        stderr = b"Error: Definition rejected: /fields/0/nullable: type; \n"
         self.assertIn('"accepted": false', self.invoke(1, stderr))
 
 

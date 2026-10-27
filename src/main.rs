@@ -291,7 +291,15 @@ enum Command {
     },
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
+    if let Err(error) = start() {
+        // Display, not Debug: real line breaks, no quotes.
+        eprintln!("Error: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn start() -> Result<(), Box<dyn std::error::Error>> {
     // The hidden runner runs before any thread or runtime starts (it sets the parent-death
     // signal and executes in place).
     let raw: Vec<String> = std::env::args().collect();
@@ -317,6 +325,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         create_data_dir(parent)?;
     }
     let store = Store::open(&path)?;
+    // A launch that owner setup refuses starts nothing, the model server included.
+    if auth && args.command.is_none() {
+        require_owner(&store, &path).await?;
+    }
     if args.assistant.on {
         options.assistant = Some(assistant(&args, &data_dir(&path)?, &store).await?);
     }
@@ -478,19 +490,35 @@ fn server_options(
     })
 }
 
+/// Refuses an authenticated launch whose database has no Owner binding, naming the database
+/// by its absolute path.
+async fn require_owner(
+    store: &Store,
+    path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match mimik::accounts::Accounts::new(store.clone())
+        .require_owner_binding()
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(mimik::AppError::Invalid(_)) => {
+            let shown = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+            Err(format!(
+                "Owner setup is required for database {}.\nRun: mimik bootstrap-owner --login owner --display-name Owner --password-file private/owner.password\nUse the same --database or MIMIK_DATABASE setting as this launch. See docs/auth-and-sessions.md for preparing the private password file.",
+                shown.display()
+            )
+            .into())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 async fn serve(
     store: Store,
     auth: bool,
     options: mimik::auth::AuthOptions,
     path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if auth {
-        match mimik::accounts::Accounts::new(store.clone()).require_owner_binding().await {
-            Ok(())=>{},
-            Err(mimik::AppError::Invalid(_))=>return Err(format!("Owner setup is required for database {}.\nRun: mimik bootstrap-owner --login owner --display-name Owner --password-file private/owner.password\nUse the same --database or MIMIK_DATABASE setting as this launch. See docs/auth-and-sessions.md for preparing the private password file.",path.display()).into()),
-            Err(error)=>return Err(error.into()),
-        }
-    }
     let listener = tokio::net::TcpListener::bind(options.network.bind_address()).await?;
     if auth {
         return mimik::auth::serve_with_options(listener, store, options).await;

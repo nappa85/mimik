@@ -24,8 +24,11 @@ admission), `migrations/010`, `011`, `013`, `014`.
   relative to the working directory. The parent directory is created if missing. Use
   the same setting for every command. `--database` is global (works with subcommands).
 - **Owner binding required.** Authenticated startup refuses to serve until an Owner
-  has been bootstrapped, and prints the `bootstrap-owner` command to run. The binding
-  must exist; the Owner account need not be enabled for players to log in.
+  has been bootstrapped, and prints the `bootstrap-owner` command to run, naming the
+  database by its absolute path. The check runs right after the database opens and
+  before the assistant (the model server) starts, so a refused launch starts nothing.
+  Every startup error is printed to stderr as `Error: <message>` and exits with status 1.
+  The binding must exist; the Owner account need not be enabled for players to log in.
 - **Serving flags vs subcommands:** `--no-auth`, `--loopback`, `--dev-owner-play`,
   `--lan-address` and `--external-url` are rejected with any subcommand.
   `MIMIK_EXTERNAL_URL` is ignored by subcommands.

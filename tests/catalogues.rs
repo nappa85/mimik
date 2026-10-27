@@ -432,7 +432,7 @@ async fn cross_process_create_has_one_winner() {
         if !output.status.success() {
             // The loser is a revision conflict, never a storage (lock) failure.
             assert!(
-                String::from_utf8_lossy(&output.stderr).contains("Conflict"),
+                String::from_utf8_lossy(&output.stderr).contains("Catalogue draft changed"),
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );

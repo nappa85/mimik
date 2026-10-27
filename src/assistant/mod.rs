@@ -159,10 +159,13 @@ impl AssistantHandle {
                 .map(|dir| dir.join("llama"))
                 .ok_or("Mimik's own folder is unknown")?,
         };
+        // Absolute, so the notes name the folder unambiguously.
+        let models_dir = config
+            .models_dir
+            .unwrap_or_else(|| config.data_dir.join("models"));
+        let models_dir = std::path::absolute(&models_dir).unwrap_or(models_dir);
         let settings = runtime::launch::Settings {
-            models_dir: config
-                .models_dir
-                .unwrap_or_else(|| config.data_dir.join("models")),
+            models_dir,
             data_dir: config.data_dir,
             runtime_dir,
             model: active.name.clone(),

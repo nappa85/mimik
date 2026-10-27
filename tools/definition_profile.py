@@ -24,14 +24,14 @@ def measured(binary, database, source, expected_success):
     if (result.returncode == 0) != expected_success:
         raise AssertionError("Admission outcome differs from profile expectation")
     if not expected_success:
-        # Deliberately coupled to this CLI's current Debug error representation.
+        # Deliberately coupled to this CLI's current Display error representation.
         # A format change must fail the probe rather than mislabel another failure.
         report = re.fullmatch(
-            rb"Error: Invalid\(ValidationReport \{ diagnostics: \[(.*?)\], truncated: (?:true|false) \}\)\s*",
+            rb"Error: Definition rejected: (.*?)\s*",
             result.stderr,
             flags=re.DOTALL,
         )
-        diagnostic = b'Diagnostic { path: "/fields/0/nullable", code: "type" }'
+        diagnostic = b"/fields/0/nullable: type;"
         if result.returncode != 1 or report is None or diagnostic not in report.group(1):
             raise AssertionError(
                 "Expected nullable/type validation report, not an unrelated failure"
