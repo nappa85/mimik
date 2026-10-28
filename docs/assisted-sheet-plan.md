@@ -37,7 +37,7 @@ boolean cells; notes and Undo for text cells; seals and note verification (D-T);
 records; Undo of creation, row add and moves; forced Undo; live preview; a keyed rate
 limiter; Gemma; changes to the native MÖRK BORG editor. Non-goals: legality rulings,
 automatic application of model output, chat, manual RAG, `catalogue_ref` membership checks,
-hosted providers, measuring or suggesting models above about 4B, gated or private Hugging Face
+hosted providers, suggesting models other than the two pinned defaults, gated or private Hugging Face
 repositories, split (multi-file) GGUF models.
 
 ## 1. Design for the remaining steps
@@ -474,10 +474,10 @@ active and previous choice). This section keeps what 2d-2 adds.
   more segments of 1 to 128 `[A-Za-z0-9._-]` joined by `/`, no segment `.` or `..`, ending
   `.gguf` and not a split file (`-NNNNN-of-NNNNN.gguf`); `revision` exactly 40 lowercase hex
   digits (a commit, never a branch or tag). URLs are built with path-segment encoding,
-  never by concatenation. Until 2d-2 an `hf:` spec is refused ("downloads arrive later").
+  never by concatenation. `parse_spec` refuses an `hf:` spec until 2d-2 builds `Spec::Hf`.
 - **Model file handling:** as in §1.4a ("Model and runtime files"): the SHA-256 is recorded
   when the owner tries the model and checked before every load. A download is tried like a
-  `local:` file; its stored name is its hash (`models/hf/<sha256>.gguf`).
+  `local:` file; its stored name is `models/hf-<sha256>.gguf` (flat, in the models folder), except the two pinned defaults (step 2d-2), which keep their `local:` names.
 - **Download (`hf:`, 2d-2, owner-started only):** (1) metadata from the Hub API at that
   revision, JSON bounded at 1 MiB, admitted strictly: the returned commit equals the
   revision; the file is listed with LFS data; its SHA-256 is 64 lowercase hex and its size an
@@ -499,8 +499,8 @@ active and previous choice). This section keeps what 2d-2 adds.
   with `Content-Range: bytes <offset>-<end>/<total>` where offset is the partial's length and
   total the expected size, or the partial restarts from zero once, then the download fails;
   the body is bounded by the expected size. Cancel, Discard, Resume and completion are
-  serialized in the download task. Completion: the SHA-256 must match, then `fsync`, an atomic
-  rename to `models/hf/<sha256>.gguf` (names never come from the spec) and an `fsync` of the
+  serialized in the download task. Completion: the SHA-256 must match, then `fsync`, an no-replace
+  link to `models/hf-<sha256>.gguf` (names never come from the spec) and an `fsync` of the
   directory; a mismatch deletes the file. Timeouts: connect 30 s, idle read 60 s, and a
   progress floor (at least 1 MiB per 5 minutes) after which the download stops and waits for
   Resume. After a restart a partial waits for Resume: nothing downloads without an owner
@@ -512,7 +512,7 @@ active and previous choice). This section keeps what 2d-2 adds.
   offsets and the size bound refer to the file's own bytes. API and `resolve` requests go to `huggingface.co` only;
   redirects are followed only from a `resolve` URL, at most 2 hops, each HTTPS to a host in an
   enumerated list of exact host names (no suffix or wildcard rule), checked on every hop. The
-  list is fixed in 2d-2 from Hugging Face's documentation and the observed redirects of the
+  list is fixed at the start of 2d-2 from Hugging Face's documentation and the observed redirects of the
   default and suggested files at their pinned revisions; candidates to confirm:
   `cdn-lfs.huggingface.co`, `cdn-lfs-us-1.huggingface.co`, `cdn-lfs-eu-1.huggingface.co`,
   `cdn-lfs.hf.co`, `cdn-lfs-us-1.hf.co`, `cdn-lfs-eu-1.hf.co`, `cas-bridge.xethub.hf.co`,
@@ -526,16 +526,15 @@ active and previous choice). This section keeps what 2d-2 adds.
   observe the redirects of the default and suggested files at their pinned revisions, check
   Hugging Face's documentation, update the list and its tests, and note the change in the
   release notes.
-- **Default and suggestion (2d-2):** default
+- **Defaults and pinned files (2d-2):** the defaults are ASSIST-55's: Qwen3.5-9B on the GPU path,
+  Granite 4.2 3B on the CPU path. The downloads fetch exactly those two pinned files (step
+  2d-2) so a fresh install can get them; there is no other suggestion. Granite:
   `hf:ibm-granite/granite-4.2-3b-GGUF/granite-4.2-3b-Q4_K_M.gguf@c40945d71cd90f249a56985e8155551a9188dc30`;
-  on the GPU path the page suggests
-  `hf:bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf@ae44f08e1392f39c0e474af10c3ff8355c8b6688`
-  (the 2b pins; it fits the GPU path on the RX 6650 XT, `docs/results.md`; other GPUs are
-  unmeasured). A suggestion only fills the field.
+  9B: `hf:unsloth/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf@3885219b6810b007914f3a7950a8d1b469d598a5`.
 - **Security:** owner only (403 for others, as the other admin pages), CSRF and body bounds on
   every action (as 2d-1's, plus licence confirmation, Discard, Resume, delete); one download
-  and one trial at a time; the spec is configuration, never model output. Storage: a later
-  migration adds the licence and its confirmation to the models of migration 022.
+  and one trial at a time; the spec is configuration, never model output. Storage: migration
+  023 adds the downloads with the licence and its confirmation.
 
 ### 1.5 Bundles and reminders (3)
 
@@ -667,40 +666,162 @@ checks run on the dev host with the GPU fan on manual, evening or weekend, throu
 
 ### 2d-2 Model downloads
 
-Scope: §1.4b downloads: the `hf:` form, metadata admission, licence confirmation, the download
-task, the download client and its host list, the `hf:` default and the GPU suggestion. Tests
-(fake Hugging Face server on loopback with a test CA through the download client's
-constructor unless stated):
-- grammar: the default and suggested specs accepted; `@main`, a short or upper-case revision,
-  no `@`, `..` or `.` segments, `%2e`, a backslash, a split file, a non-`.gguf` file refused;
+Scope: §1.4b downloads. Already built (2d-1, ASSIST-55, ASSIST-56): the `local:` field, the
+trial, Switch, Keep, Switch back, migration 022, the two compiled-in default files with their
+hashes (`src/assistant/model.rs`), `default_model` finding them by name in the models folder,
+and the prefix hash in the trial record. Not built: the `hf:` grammar (`parse_spec` refuses it)
+and everything below. A choice marked (default) is the coordinator's; the owner may change it.
+
+**What changed since the section was written.**
+- ASSIST-55: the GPU default is the local Qwen3.5-9B file (`unsloth/Qwen3.5-9B-GGUF` at
+  `3885219b6810b007914f3a7950a8d1b469d598a5`, 5,680,522,464 bytes, pinned SHA-256 in
+  `model.rs`), Granite 4.2 3B on the CPU; the old Qwen3-4B suggestion is dropped.
+- So the downloads must be able to fetch exactly those two pinned files, to give a fresh
+  install its default (default): the page shows a "Pinned defaults" panel listing those of the
+  two that are absent, the one the current path needs first, each with its `hf:` spec, size and
+  licence. They go through the same review, licence confirmation and download as any `hf:`
+  spec; in addition the metadata's SHA-256 and size must equal the compiled-in ones (a
+  `PINNED` table beside the constants), else "does not match the pinned file". A pinned download
+  is stored under its `local:` name (`Qwen3.5-9B-Q4_K_M.gguf`, `granite-4.2-3b-Q4_K_M.gguf`;
+  names from the table, never from a spec) so `default_model` and its notes work unchanged; an
+  existing file of that name is never replaced ("remove it by hand").
+- ASSIST-56: a downloaded model is tried like any file and its trial records the prefix hash;
+  the download path touches no prompt.
+- Storage becomes the flat `models/hf-<sha256>.gguf` instead of `models/hf/<sha256>.gguf`
+  (default): the launcher opens files by name in the models folder, so no launcher or sandbox
+  change.
+- `reqwest` is not in `Cargo.lock` (DEP-17, DEP-20) and `rig-core` has no transport feature, so
+  the download client is a new dependency.
+
+**HTTP client (default).** `reqwest` 0.13, pinned exactly (MIT or Apache-2.0, actively
+released, in the local registry cache), `default-features = false` with `rustls` (platform
+verifier; `rustls-no-provider` plus `ring` if `aws-lc-rs` needs a toolchain the CI image lacks)
+and no `cookies`, `gzip`, `brotli`, `deflate`, `http2` or `json` features (bodies are read
+with `chunk()`, JSON by `serde_json` over bounded bytes). It provides without custom code:
+`redirect::Policy::custom` (scheme, exact host and hop count per hop; the API client uses
+`Policy::none()`), the system proxy (environment, `NO_PROXY`; OS settings on macOS and
+Windows), per-request `Range`, no cookie jar, connect and read timeouts, `resolve()` and
+`add_root_certificate` for tests. Rejected: `ureq` 3 (blocking, a thread per download, no async
+cancel); `hyper-util` with `hyper-rustls` and `rustls-platform-verifier` (nearer the tree, but
+proxy, redirect and root handling would be hand-written, the reason DEP-20 limited hyper to
+the loopback client). The model client stays on hyper. A first sub-step records DEP-27: versions,
+licences (`aws-lc-rs` or `ring`, `webpki`, platform verifier) against `about.toml`, `cargo
+audit`, `cargo tree` growth and the release size delta, built on 2 cores. If a licence or audit
+check fails, the fallback is the hyper stack and the question returns to the owner.
+
+**Module layout.** `src/assistant/download/`: `client.rs` (constructor `Endpoints { api_base,
+hosts, roots }`, `Endpoints::shipped()`, the redirect policy, size, time and body bounds),
+`hub.rs` (strict admission of metadata and licence into typed structs; no network), `task.rs`
+(the single download actor), `store.rs` (rows, partial and final files, orphan sweep, free
+space, delete), `review.rs` (the in-memory review a confirmation must match). Routes in
+`src/campaigns/assistant_downloads.rs`; a "Downloads" panel in `templates/admin_assistant.html`.
+`model.rs` gains `Spec::Hf` and `PINNED`. The runtime manager changes only so that Try accepts a
+downloaded `hf:` spec through its completed row. Only `download/` imports reqwest.
+
+**Data (migration 023).** (a) `assistant_models` is rebuilt (SQLite table rebuild; `spec` now
+`local:` or `hf:`, other columns and rows unchanged, the choice table's references kept);
+(b) `assistant_downloads(id, spec UNIQUE, repo, revision, file_name, sha256, size,
+licence_id, licence_sha256 NULL, confirmed_by, confirmed_at, state IN ('confirmed','complete'),
+completed_at NULL)`, STRICT, CHECKs mirroring the grammar and bounds; `user_version=23`.
+Progress, cancelled and stalled are not stored: a `confirmed` row with a partial file is
+"waiting for Resume" and the partial's length is the progress.
+
+**Routes** (owner only, CSRF, strict forms of at most 4 KiB, as 2d-1's):
+- POST `/admin/assistant/model/review`: an `hf:` spec; fetches and admits metadata and the
+  licence file, keeps the review in memory under the key `<spec hash>.<file sha256>.<licence
+  sha256 or none>` for 30 minutes, shows it. Try with an undownloaded `hf:` spec answers the
+  same way and never downloads.
+- POST `.../download/confirm` (the key; refused unless it is the latest live review, so what is
+  recorded is what was shown; writes the row, starts the task); `.../cancel`, `.../resume`,
+  `.../discard` (with the download id); `.../model/delete` (a completed file; refused for the
+  active or previous model and during a trial).
+- GET `/admin/assistant/downloads.json` for polling: spec, bytes, total, state, a plain reason,
+  no URL. Completing a download never starts a trial; Try on a completed `hf:` spec runs the
+  2d-1 trial on its file.
+
+**Task lifecycle.** One actor owns the single task and every command (Cancel, Discard, Resume,
+completion, shutdown), so they serialise. States: idle, running(received, total),
+stopped(cancelled, stalled or failed(reason)); stopped keeps the partial.
+- Start: `models/.partial/` (0700, owner checked as `files::open_dir` does), the partial
+  `<sha256>` (0600, `O_NOFOLLOW`, no other partial at all), free space checked, GET of the
+  `resolve` URL under the redirect policy, 200 for a start from zero or 206 with the exact
+  `Content-Range` for a resume, body cut off at the expected size.
+- Completion: size equal, `fsync`, SHA-256 of the whole partial read back (so a resumed file is
+  covered) equal to the confirmed hash, hard-link to the final name (no replace), remove the
+  partial, `fsync` the folder, row to `complete`. A mismatch deletes the partial: "hash differs".
+- Restart: nothing resumes by itself; the start sweeps partials that match no confirmed row or
+  exceed its size. Mimik's shutdown stops the task and keeps the partial. A completed row whose
+  file is gone or has another size shows as missing (the trial's hash check stays the authority
+  at load).
+
+**Host allowlist, fixed.** `Endpoints::shipped()` holds `https://huggingface.co` and the exact
+redirect hosts in a `const` array. It is fixed in the first sub-step by `HEAD` requests (not
+followed, no body) to the `resolve` URLs of the two pinned files, reading only the `Location`
+host chain: the observed hosts plus those of the §1.4b candidates that Hugging Face's
+documentation names are kept, the rest dropped. One test asserts the shipped constructor uses
+the array, another compares it with a checked-in expectation, so a change is a deliberate edit
+of both plus a release note.
+
+**Licence flow.** Review shows repository, file, size, SHA-256, the card's licence ID, a link
+to the licence file at the revision, its text (bounded 1 MiB, fetched from `resolve` under the
+same rules), and the warnings for "none" and for third-party quantisations. Confirm records
+owner, time, licence ID and the licence file's SHA-256 (or none) in the row.
+
+**Tests** (fake Hugging Face server on loopback over TLS, test CA made at run time by a
+dev-dependency such as `rcgen`, host names mapped by `resolve()`; through the download client's
+constructor unless stated). Each prevents the failure named:
+- grammar (`model_tests.rs`): the two pinned specs accepted; `@main`, short or upper-case
+  revision, no `@`, `..` or `.` segments, `%2e`, backslash, split file, non-`.gguf` refused.
+  Prevents a branch, traversal or split file reaching a URL.
+- pinned: metadata hash and size equal the compiled-in; another hash for a pinned spec
+  refused; the file lands under its `local:` name and `default_model` then picks it; an existing
+  file of that name is not replaced. Prevents an unverified default and clobbering a user file.
 - metadata: a commit differing from the revision, a missing LFS entry, a malformed hash or
-  size, a size of 0 or over 8 GiB, JSON over 1 MiB → refused before any byte; 401 or 403 →
-  "download it by hand";
-- licence: no download before confirmation; the record holds the licence file's hash; the
-  licence file named by the card, else a root `LICENSE*`, is fetched under the same host rules
-  and bound (over 1 MiB → refused); none listed → "none"; a model without a stated licence
-  shows the warning and can be confirmed;
-- transfer: progress; Cancel keeps the partial and Resume sends `Range` and completes; a 200,
-  a wrong start, a wrong total or a malformed `Content-Range` → restart from zero once, then
-  failure; a body longer than the expected size is cut off and refused; a hash mismatch
-  deletes the file; a crash between write and rename leaves only a partial; a stalled server
-  below the progress floor → stopped, waiting for Resume; Cancel, Discard and Resume racing
-  completion → one serialized outcome; a second download asks to discard the existing
-  partial; a restart leaves a partial waiting; the stored name is the hash; the download never
-  holds the `JOBS` permit and the active model serves jobs throughout;
-- network: a redirect to a host off the list, to `http` or a third hop → stopped naming the
-  host; `HTTPS_PROXY` set → used by the download client and never by the model client;
-  requests carry no cookie, credential or `Referer` and send `Accept-Encoding: identity`; with a sheet holding a marker phrase, no
-  download request contains it; presigned redirect URLs appear in no log line; a certificate
-  not from the root store → refused; the shipped constructor uses the fixed base URL, host
-  list and OS store, with no configuration knob;
-- suggestion: shown on the GPU path, not on the CPU path; filling the field starts nothing;
-  a present file with the default's hash is used without a download;
-- rights and routes: as 2d-1's route tests (`src/campaigns/assistant_model_tests.rs`) for licence
-  confirmation, Cancel, Discard, Resume and delete;
-- live (reported separately, licence-checked per the project rules): the default Granite spec
-  downloads and verifies against `e0406663…` and its redirect hosts are recorded for the host
-  list; a Qwen3-4B trial on the GPU path at night or at a weekend.
+  size, a size of 0 or over 8 GiB, JSON over 1 MiB, each refused before any file byte; 401 or
+  403 gives "download it by hand". Prevents a moved tag or an unbounded read.
+- licence: no row and no `resolve` request before confirmation; a stale or different key
+  refused; the row holds the licence file's hash; the file named by the card, else a root
+  `LICENSE*`, fetched under host rules and bound (over 1 MiB refused); none gives "none" and the
+  warning and can be confirmed. Prevents recording a licence other than the one shown.
+- transfer: progress; Cancel keeps the partial and Resume sends `Range` and completes; a 200, a
+  wrong start, a wrong total or a malformed `Content-Range` restarts from zero once, then
+  fails; a body longer than expected is cut off; a hash mismatch deletes the file and leaves
+  no final name; a fault between write and link leaves only a partial; a stalled server below
+  the progress floor stops for Resume; Cancel, Discard and Resume racing completion give one
+  outcome; a second download asks to discard the partial; a restart leaves a partial waiting and
+  sweeps an orphan; low free space refused before any request; modes 0700 and 0600; the active
+  model serves jobs throughout and the download never holds the `JOBS` permit. Prevents corrupt,
+  truncated or duplicated models, lost user data and starved jobs.
+- network: a redirect off the list, to `http` or a third hop stops naming the host;
+  `HTTPS_PROXY` used by the download client and never by the model client; no cookie,
+  credential or `Referer`, `Accept-Encoding: identity`; with a sheet holding a marker phrase no
+  request contains it; presigned URLs in no log line or page; a certificate outside the supplied
+  root refused; the shipped constructor uses the fixed base URL, hosts and OS store, no knob;
+  the model client still refuses a non-loopback URL and `https` now that TLS is in the tree
+  (§1.4); only `download/` imports reqwest. Prevents exfiltration, downgrade and a TLS-capable
+  model client.
+- migration: 022 to 023 keeps rows and the choice table; an `hf:` spec is storable, other
+  schemes still fail the CHECK. Prevents losing the owner's models on upgrade.
+- routes (`assistant_download_tests.rs`, as `assistant_model_tests.rs`): non-owner 403, CSRF,
+  strict forms with an extra field 422 for review, confirm, cancel, resume, discard and delete;
+  delete refused for the active, previous or in-trial model; polling JSON holds no URL; the page
+  lists downloads and pinned defaults; completing starts no trial.
+- unpacked-artifact smoke (CI): the release binary starts with TLS linked, assistant off, no
+  network use.
+
+**Live checks owed** (reported separately, none in CI): (1) the `HEAD` redirect observation;
+(2) licence-checked real downloads of both pinned files into a scratch models folder under
+`/media/data/mimik`, resumed once by killing Mimik mid-way, verified against the compiled-in
+hashes, plus the Hub metadata shape (`blobs=true` LFS fields, `cardData.license`) recorded as
+the fake server's fixture; (3) a trial of the downloaded Granite on the CPU at 2 cores and of
+the 9B on the GPU at night or a weekend (the TODO's owed measurements ride on these);
+(4) `tools/assist_model_browser.py` extended to the Downloads panel at two viewports.
+Downloads need network and one hashing core, not the GPU, so they may run on weekdays.
+
+**Closing:** `model-runtime.md` loses its "refused" line, C1 in `limitations.md` is rewritten,
+DEP-27 and the pinned-defaults decision are added, this section and §1.4b's built parts are
+deleted; the plan gets an independent review before execution and the change set one before
+merge (Astra, a fresh Sonnet, then the third reviewer).
 
 ### 3 Bundles and reminders
 
@@ -834,6 +955,11 @@ choosing a fallback for unknown (L-U4).
 
 ## 5. Open questions for the user
 
-- None. The CPU-baseline question is settled by ASSIST-41 (threads default to the physical
+- 2d-2 (each has a default in the step; none blocks): (a) `reqwest` 0.13 as the download client
+  (DEP-27) rather than the smaller hyper-rustls path; (b) the "Pinned defaults" panel, the
+  pinned files stored under their `local:` names; (c) flat `hf-<sha256>.gguf` storage; (d)
+  hashing the whole partial at the end, a second read of up to 8 GiB from the slow disk;
+  (e) downloads allowed on weekdays, the 9B trial left to the allowed hours.
+- Settled: the CPU-baseline question is settled by ASSIST-41 (threads default to the physical
   cores minus one, and the native calibration at that default decides the CPU budgets); if
   the measurement still fits nothing, it comes back to the user.
