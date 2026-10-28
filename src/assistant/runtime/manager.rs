@@ -344,7 +344,8 @@ pub(crate) enum TryGpu {
     Accepted,
     /// A Restart (or another try) is already being carried out: no second transition.
     AlreadyRunning,
-    /// The GPU is in use, or not wanted (`--assistant-device cpu`): nothing to try.
+    /// Nothing to try: the GPU is not wanted (`--assistant-device cpu`), or it runs the device
+    /// default model without a fallback note.
     NotApplicable,
 }
 

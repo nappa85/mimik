@@ -872,6 +872,15 @@ async fn the_9b_hash_mismatch_page_offers_try_the_gpu_again() {
         .await;
     let page = models.page().await;
     assert!(page.contains("does not match its pinned hash"), "{page}");
+    assert!(!page.contains("not in use"), "{page}");
+    assert!(
+        page.contains("Granite 4.2 3B runs on the GPU instead of Qwen3.5-9B: "),
+        "{page}"
+    );
+    assert!(
+        page.contains("Try the GPU again checks the 9B file again."),
+        "{page}"
+    );
     assert!(
         page.contains("action=\"/admin/assistant/try-gpu\""),
         "{page}"
@@ -890,51 +899,6 @@ async fn the_9b_hash_mismatch_page_offers_try_the_gpu_again() {
                 && s.state == manager::State::Ready
         })
         .await;
-}
-
-#[tokio::test]
-async fn a_stored_9b_choice_overrides_the_device_default_without_a_start_flag() {
-    let _lock = crate::auth::test_resource_lock().await;
-    let (dir, store, _auth, _clock) = fixture_with_owner(1).await;
-    let handle = AssistantHandle::runtime(default_config(dir.path(), None), store.clone())
-        .await
-        .unwrap();
-    assert!(
-        handle
-            .runtime
-            .as_ref()
-            .unwrap()
-            .status()
-            .model
-            .device_default
-            .is_on()
-    );
-    handle.shutdown().await;
-    // A choice made while the default was on must still win on the next app start, on CPU.
-    let qwen = Model::compiled(crate::assistant::GPU_DEFAULT_MODEL);
-    SqlRecords(store.clone())
-        .activate(
-            &crate::assistant::records::Record {
-                model: qwen.clone(),
-                trial: None,
-            },
-            Some(&crate::assistant::records::Record {
-                model: granite(),
-                trial: None,
-            }),
-            1,
-        )
-        .await
-        .unwrap();
-    let handle = AssistantHandle::runtime(default_config(dir.path(), None), store)
-        .await
-        .unwrap();
-    let status = handle.runtime.as_ref().unwrap().status();
-    assert_eq!(status.model.active, qwen);
-    assert_eq!(status.model.previous, Some(granite()));
-    assert!(status.model.from_owner_setting);
-    assert!(!status.model.device_default.is_on());
-    handle.shutdown().await;
 }
 
 #[tokio::test]

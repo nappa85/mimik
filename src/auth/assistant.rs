@@ -190,8 +190,10 @@ struct View {
     state: &'static str,
     reason: String,
     path: &'static str,
-    /// Why the GPU path or its default model needs another try, with the retry button.
+    /// Why the CPU path runs although the GPU is wanted (shown with the retry button).
     gpu_note: Option<String>,
+    /// Why Granite runs on the GPU in place of the 9B default (shown with the retry button).
+    gpu_default_note: Option<String>,
     /// `--assistant-device cpu`.
     cpu_chosen: bool,
     /// A Restart or "Try the GPU again" is being carried out (the button is disabled).
@@ -418,7 +420,12 @@ fn count(n: f64) -> String {
 }
 
 fn view(status: Status, breaker: String, input: String, error: Option<String>) -> View {
-    let gpu_note = status.gpu_retry_note().map(str::to_owned);
+    let retry_note = status.gpu_retry_note().map(str::to_owned);
+    let (gpu_note, gpu_default_note) = if status.path == Path::Cpu {
+        (retry_note, None)
+    } else {
+        (None, retry_note)
+    };
     let (state, reason) = match status.state {
         Runtime::Starting(phase) => ("Starting", phase.to_owned()),
         Runtime::Ready => ("Ready", String::new()),
@@ -457,6 +464,7 @@ fn view(status: Status, breaker: String, input: String, error: Option<String>) -
             Path::Gpu => "GPU",
         },
         gpu_note,
+        gpu_default_note,
         cpu_chosen: !status.gpu_wanted,
         restarting: status.restarting || state == "Starting",
         device: status.device.map(|device| DeviceLine {

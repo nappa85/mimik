@@ -46,11 +46,11 @@ start (`default_model` in `src/assistant/runtime/models.rs`): on the GPU path th
 when it is in the models folder, otherwise Granite 4.2 3B with "Qwen3.5-9B not found or not
 readable in <absolute models folder>; using Granite 4.2 3B" on `/admin/assistant` (a warning,
 not a block); the same when the 9B file fails its pinned hash at the load ("Qwen3.5-9B in
-<absolute models folder> does not match its pinned hash"; a plain Restart keeps this fallback
-and its note. "Try the GPU again", available even while Granite runs on the GPU, or Mimik's
-restart tries the file again; an explicit or stored 9B is
-refused instead, as any model whose file changed); on the CPU
-path (`--assistant-device cpu`, no usable GPU, or a GPU start that fell back) Granite 4.2 3B
+<absolute models folder> does not match its pinned hash"). A plain Restart keeps this fallback
+and its note. "Try the GPU again" (even while Granite runs on the GPU) or Mimik's restart
+checks the 9B file again. An explicit or stored 9B is refused instead, as any model whose file
+changed. On the CPU path
+(`--assistant-device cpu`, no usable GPU, or a GPU start that fell back) Granite 4.2 3B
 (file `granite-4.2-3b-Q4_K_M.gguf`, SHA-256 and `max_tokens` 352 compiled in), with a note when
 the GPU was wanted. "Try the GPU again" picks again. An explicit flag or the stored setting is
 never replaced; a Switch or Switch back ends the default, and "Switch back" returns to the
@@ -517,7 +517,7 @@ failure on the GPU path, including those the CPU rows count or hold):
 |---|---|---|
 | The GPU probe finds no usable device or level, or a GPU attempt fails (start, the listing check, `/health`, the offload line, priming, calibration, budgets that do not derive), or the GPU child exits while ready or is stopped as hung | stop and wait until gone, then the CPU path at once (its own probe, from level 1), the reason on the page | not counted |
 | Restart | stop, start again from level 1, staying on the CPU path after a GPU failure | reset |
-| "Try the GPU again" (owner, CSRF-checked; only while the GPU is wanted and the CPU path runs) | as Restart, from the GPU path; a second press while it runs starts nothing | reset |
+| "Try the GPU again" (owner, CSRF-checked; only while the GPU is wanted and either the CPU path runs or the GPU device default shows a fallback note) | as Restart, from the GPU path; a second press while it runs starts nothing | reset |
 
 The CPU path stays until Mimik restarts or the owner presses "Try the GPU again". CPU
 transitions:
@@ -628,8 +628,8 @@ name, PCI address, render node and memory; render nodes not used, with why; "CPU
 `--assistant-device cpu`; why the GPU is not in use), the budgets, and the priming and sample
 measurements. Restart (POST, CSRF-checked) stops the server and starts again from level 1; "Try
 the GPU again" (POST `/admin/assistant/try-gpu`, CSRF-checked) is shown while the GPU is wanted
-and the CPU path runs; a second press of either while one runs starts nothing ("A restart is
-already running"). The Model section shows the active model (spec, SHA-256, `max_tokens`, and
+and either the CPU path runs or the GPU device default shows a fallback note; a second press of
+either while one runs starts nothing ("A restart is already running"). The Model section shows the active model (spec, SHA-256, `max_tokens`, and
 whether it comes from the stored setting or the start flags), the previous model with "Switch
 back", the field with "Try" (the refusal and the kept input beside it), and the latest trial:
 its phase and Cancel while it runs; when it passed, the device, times, speeds, `max_tokens`,
