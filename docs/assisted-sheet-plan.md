@@ -597,7 +597,6 @@ two main reviewers and the third before merge. Remaining, in this order:
   the GPU in the evening or at a weekend; (4) `tools/assist_model_browser.py` extended to the
   Downloads panel at two viewports; (5) the release binary refusing a certificate outside the
   system store on a clean machine (the unit tests cover the verifier with an isolated store);
-- the DEP-27 record of the release size delta once the release is built.
 
 ### 3 Bundles and reminders
 
