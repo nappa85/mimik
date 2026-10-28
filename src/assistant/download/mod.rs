@@ -1,4 +1,4 @@
-//! Model downloads (assisted sheet plan §1.4b, step 2d-2): the owner-started, hash-verified
+//! Model downloads (`docs/model-downloads.md`): the owner-started, hash-verified
 //! transfer of a Hugging Face file into the models folder. The only module that uses the HTTP
 //! client crate; it takes typed specs and knows nothing of sheets, accounts, campaigns or the
 //! database (its rows go through the `Downloads` trait).

@@ -1,6 +1,8 @@
 //! Trusted-LAN/proxy authentication boundary and request-scoped campaign admissions.
 mod administration;
 mod assistant;
+mod assistant_downloads;
+mod assistant_downloads_view;
 mod errors;
 mod materials;
 mod persistence;

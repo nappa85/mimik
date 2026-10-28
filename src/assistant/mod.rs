@@ -7,6 +7,7 @@ pub(crate) mod breaker;
 pub(crate) mod contract;
 pub(crate) mod download;
 pub(crate) mod download_rows;
+pub(crate) mod downloads;
 #[cfg(test)]
 pub(crate) mod fake_server;
 pub(crate) mod interpreter;
@@ -30,6 +31,10 @@ pub struct AssistantHandle {
     pub(crate) assistant: Arc<jobs::Assistant>,
     /// The runtime manager (absent only in route tests).
     pub(crate) runtime: Option<runtime::manager::Handle>,
+    /// The model downloads (step 2d-2); absent with the development endpoint, in most route
+    /// tests, or when they could not start (`downloads_note` says why).
+    pub(crate) downloads: Option<Arc<downloads::Downloads>>,
+    pub(crate) downloads_note: Option<String>,
 }
 
 /// The model runtime's configuration, from `--assistant-*` and the data directory.
@@ -55,6 +60,21 @@ pub struct RuntimeConfig {
 }
 
 impl AssistantHandle {
+    /// Attaches the model downloads, or the reason they could not start.
+    fn attach(&mut self, downloads: Result<downloads::Downloads, String>) {
+        match downloads {
+            Ok(downloads) => self.downloads = Some(Arc::new(downloads)),
+            Err(why) => self.downloads_note = Some(why),
+        }
+    }
+
+    /// This handle with the model downloads attached.
+    #[cfg(test)]
+    pub(crate) fn with_downloads(mut self, downloads: Arc<downloads::Downloads>) -> Self {
+        self.downloads = Some(downloads);
+        self
+    }
+
     /// The post-commit note hook the store calls after every save that wrote notes.
     pub(crate) fn note_hook(&self) -> crate::store::NoteHook {
         let assistant = Arc::clone(&self.assistant);
@@ -76,6 +96,8 @@ impl AssistantHandle {
         Self {
             assistant,
             runtime: Some(runtime),
+            downloads: None,
+            downloads_note: None,
         }
     }
 
@@ -92,6 +114,8 @@ impl AssistantHandle {
         Self {
             assistant,
             runtime: Some(runtime),
+            downloads: None,
+            downloads_note: None,
         }
     }
 
@@ -109,6 +133,7 @@ impl AssistantHandle {
             Some(text) => runtime::device::Choice::parse(text)?,
         };
         let path = runtime_path(&device);
+        let downloads = downloads::Downloads::start(&downloads_dir(&config), store.clone()).await;
         // Without a start flag the model is the device default, picked per start by the
         // manager (ASSIST-55); the Granite spec stands in until then.
         let device_default = config.model.is_none();
@@ -185,7 +210,7 @@ impl AssistantHandle {
             device,
             roots: runtime::device::Roots::default(),
         };
-        Ok(Self::with_models(
+        let mut handle = Self::with_models(
             Arc::new(runtime::launch::Launch(Arc::new(
                 runtime::launch::Real::new(settings),
             ))),
@@ -201,11 +226,17 @@ impl AssistantHandle {
                 device_default,
                 older_prompt,
             },
-        ))
+        );
+        handle.attach(downloads);
+        Ok(handle)
     }
 
-    /// Stops the model server (on Mimik's shutdown); resolves once it is gone.
+    /// Stops the model server and any download (on Mimik's shutdown); resolves once they are
+    /// gone. A partial download is kept.
     pub async fn shutdown(&self) {
+        if let Some(downloads) = &self.downloads {
+            downloads.downloader.shutdown().await;
+        }
         if let Some(runtime) = &self.runtime {
             runtime.shutdown().await;
         }
@@ -229,8 +260,19 @@ impl AssistantHandle {
         Self {
             assistant,
             runtime: None,
+            downloads: None,
+            downloads_note: None,
         }
     }
+}
+
+/// The models folder the downloads fill: `--models-dir`, else `<data dir>/models`, absolute.
+fn downloads_dir(config: &RuntimeConfig) -> PathBuf {
+    let dir = config
+        .models_dir
+        .clone()
+        .unwrap_or_else(|| config.data_dir.join("models"));
+    std::path::absolute(&dir).unwrap_or(dir)
 }
 
 /// The path the runtime tries first: the GPU unless the CPU was chosen (ASSIST-27); with

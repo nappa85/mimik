@@ -1,4 +1,4 @@
-//! The files of a download (assisted sheet plan §1.4b, step 2d-2): every operation is
+//! The files of a download (`docs/model-downloads.md`): every operation is
 //! descriptor-relative to the checked models folder and its `.partial` folder, blocking, and
 //! meant to run off the async executor. Nothing here follows a link, truncates a linked file,
 //! opens a FIFO blockingly, or replaces a file that exists.
@@ -178,7 +178,7 @@ impl Disk {
                 Ok(Some(Partial {
                     len: u64::try_from(stat.st_size).unwrap_or(0),
                     inode: stat.st_ino,
-                    links: u64::from(stat.st_nlink),
+                    links: stat.st_nlink,
                 }))
             }
             Err(rustix::io::Errno::NOENT) => Ok(None),
@@ -266,7 +266,7 @@ impl Disk {
                 Ok(Some(Partial {
                     len: u64::try_from(stat.st_size).unwrap_or(0),
                     inode: stat.st_ino,
-                    links: u64::from(stat.st_nlink),
+                    links: stat.st_nlink,
                 }))
             }
             Err(rustix::io::Errno::NOENT) => Ok(None),

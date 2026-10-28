@@ -1,4 +1,4 @@
-//! The download task (assisted sheet plan §1.4b, step 2d-2): one actor owns the single
+//! The download task (`docs/model-downloads.md`): one actor owns the single
 //! transfer and every command (Cancel, Discard, Resume, completion, shutdown), so they
 //! serialise. All blocking file work runs off the async executor and no lock is held across it;
 //! a Cancel is accepted at once even while a write or a hash is blocked.
@@ -140,6 +140,7 @@ impl Downloader {
     }
 
     /// Whether a transfer is running or verifying.
+    #[cfg(test)]
     pub(crate) fn busy(&self) -> bool {
         matches!(
             lock(&self.status).phase,
@@ -310,7 +311,7 @@ impl Actor {
     fn set(&self, id: i64, spec: &str, phase: Phase) {
         let mut status = lock(&self.status);
         status.id = Some(id);
-        status.spec = spec.to_owned();
+        spec.clone_into(&mut status.spec);
         status.phase = phase;
     }
 
@@ -429,12 +430,11 @@ impl Actor {
                 }
                 command = self.receiver.recv() => {
                     let interrupt = match command {
-                        Some(Command::Cancel) => Interrupt::Cancel,
+                        Some(Command::Cancel) | None => Interrupt::Cancel,
                         Some(Command::Discard(id, reply)) => Interrupt::Discard(id, reply),
                         Some(Command::Shutdown(reply)) => Interrupt::Shutdown(reply),
                         // A start or resume while one runs is dropped (its permit with it).
                         Some(Command::Start(..) | Command::Resume(..)) => continue,
-                        None => Interrupt::Cancel,
                     };
                     self.stop.store(true, Ordering::SeqCst);
                     self.pending = Some(tokio::spawn(async move {
@@ -453,9 +453,8 @@ impl Actor {
             return failed("the stored download is not an hf: spec");
         };
         match self.adopt(row).await {
-            Ok(Some(outcome)) => return outcome,
+            Ok(Some(outcome)) | Err(outcome) => return outcome,
             Ok(None) => {}
-            Err(outcome) => return outcome,
         }
         let (mut file, mut offset) = match self.prepare(row).await {
             Ok(prepared) => prepared,

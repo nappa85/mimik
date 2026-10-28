@@ -1,4 +1,4 @@
-//! The review before a download (assisted sheet plan §1.4b): metadata and licence fetched in
+//! The review before a download (`docs/model-downloads.md`): metadata and licence fetched in
 //! the background, admitted strictly, and kept as one immutable snapshot under a random token.
 //! Confirming a download carries the token, so what is recorded is exactly what was shown.
 //! At most one review is live at a time and its data is bounded.

@@ -178,9 +178,9 @@ fn the_link_fallback_leaves_a_recognisable_second_link_when_it_stops_midway() {
 
 #[test]
 fn a_failed_sync_or_read_is_reported_and_a_stop_during_hashing_is_a_cancel() {
-    for point in [Fault::FileFsyncError] {
+    {
         let dir = folder();
-        let disk = Disk::open(dir.path(), FailAt::new(point)).unwrap();
+        let disk = Disk::open(dir.path(), FailAt::new(Fault::FileFsyncError)).unwrap();
         let file = disk.create_partial("p").unwrap();
         assert!(disk.sync_file(&file).is_err());
         assert!(disk.sync_file(&file).is_ok(), "the fault fires once");

@@ -205,6 +205,7 @@ impl Status {
                 switchable: models.records.is_some(),
                 next_trial: 1,
                 pending: false,
+                work: false,
                 note: None,
                 device_default: if models.device_default {
                     DeviceDefault::On { note: None }
@@ -323,6 +324,23 @@ impl Cancel {
     }
 }
 
+/// The model-work gate is held, or a trial or a model change is under way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WorkBusy;
+
+/// Holds the model-work gate; dropping it releases the gate.
+pub(crate) struct WorkGuard(Arc<Mutex<Status>>);
+
+impl Drop for WorkGuard {
+    fn drop(&mut self) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .model
+            .work = false;
+    }
+}
+
 /// Whether "Try the GPU again" was accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TryGpu {
@@ -430,7 +448,7 @@ impl Handle {
         if status.trial.as_ref().is_some_and(TrialState::running) {
             return TryModel::Busy;
         }
-        if status.model.pending || status.restarting {
+        if status.model.pending || status.restarting || status.model.work {
             return TryModel::Pending;
         }
         status.model.pending = true;
@@ -477,7 +495,7 @@ impl Handle {
         if !status.model.switchable || status.trial.as_ref().is_some_and(TrialState::running) {
             return Chosen::Busy;
         }
-        if status.model.pending || status.restarting {
+        if status.model.pending || status.restarting || status.model.work {
             return Chosen::Pending;
         }
         match &status.trial {
@@ -501,7 +519,7 @@ impl Handle {
         if !status.model.switchable || status.trial.as_ref().is_some_and(TrialState::running) {
             return Chosen::Busy;
         }
-        if status.model.pending || status.restarting {
+        if status.model.pending || status.restarting || status.model.work {
             return Chosen::Pending;
         }
         if status.model.previous.is_none() {
@@ -531,6 +549,29 @@ impl Handle {
             return Chosen::Stale;
         }
         Chosen::Accepted
+    }
+
+    /// Takes the model-work gate for a download or a delete: one of these at a time, never
+    /// beside a trial, a Switch or a Switch back. The gate is released when the guard drops.
+    pub(crate) fn model_work(&self) -> Result<WorkGuard, WorkBusy> {
+        let mut status = self.lock();
+        if status.trial.as_ref().is_some_and(TrialState::running)
+            || status.model.pending
+            || status.model.work
+        {
+            return Err(WorkBusy);
+        }
+        status.model.work = true;
+        Ok(WorkGuard(Arc::clone(&self.status)))
+    }
+
+    /// The file names of the active and previous model (a delete must keep them).
+    pub(crate) fn model_files(&self) -> Vec<String> {
+        let status = self.lock();
+        std::iter::once(&status.model.active)
+            .chain(status.model.previous.as_ref())
+            .map(|model| model.name.clone())
+            .collect()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Status> {

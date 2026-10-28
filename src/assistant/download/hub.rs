@@ -1,5 +1,5 @@
-//! Strict admission of the Hugging Face API's answer for one file at one commit (assisted
-//! sheet plan §1.4b, step 2d-2). Pure: bytes in, typed facts out; nothing here touches the
+//! Strict admission of the Hugging Face API's answer for one file at one commit
+//! (`docs/model-downloads.md`). Pure: bytes in, typed facts out; nothing here touches the
 //! network. Anything missing or malformed refuses the review.
 use crate::assistant::model::{HfSpec, MAX_MODEL_BYTES};
 use serde_json::Value;
@@ -16,18 +16,6 @@ pub(crate) struct Refusal(pub String);
 
 fn refuse<T>(why: &str) -> Result<T, Refusal> {
     Err(Refusal(why.to_owned()))
-}
-
-/// Where the licence text comes from.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum LicenceSource {
-    /// A file of the repository at the pinned revision (repository-relative path, listed).
-    File(String),
-    /// The card names an external link: shown as text, never fetched. Root files are used when
-    /// listed, so this is only the note.
-    External(String),
-    /// Neither the card nor a root file names a licence file.
-    None,
 }
 
 /// What the Hub says of one file at one commit.

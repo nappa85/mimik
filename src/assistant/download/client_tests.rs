@@ -445,7 +445,7 @@ fn the_shipped_constructor_uses_the_fixed_values() {
 #[test]
 fn the_shipped_host_list_is_the_reviewed_one() {
     // A tripwire, not coverage: changing the list means editing this expectation too, and the
-    // release notes (plan §1.4b, checklist). Candidates until the live redirect observation.
+    // release notes (`docs/model-downloads.md`). Candidates until the live redirect observation.
     assert_eq!(
         SHIPPED_HOSTS,
         [

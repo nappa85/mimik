@@ -244,6 +244,10 @@ impl OlderPrompt {
 
 /// The model setting as the page shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent admission flags of one status snapshot"
+)]
 pub(crate) struct ModelStatus {
     pub active: Model,
     pub previous: Option<Model>,
@@ -258,6 +262,9 @@ pub(crate) struct ModelStatus {
     pub next_trial: u64,
     /// A model change (a Try, a Switch, a Switch back) is admitted and not yet carried out.
     pub pending: bool,
+    /// The model-work gate is held: a download or a delete of a downloaded file is in
+    /// progress. A Try, Switch, Switch back and a second holder wait (step 2d-2).
+    pub work: bool,
     /// What the last switch or switch back could not do.
     pub note: Option<String>,
     /// Whether the active model is the device default (ASSIST-55).

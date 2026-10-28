@@ -213,6 +213,14 @@ async fn finished(downloader: &Downloader) -> Phase {
     .phase
 }
 
+struct Guard(Arc<AtomicUsize>);
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 fn permit() -> Permit {
     Box::new(())
 }
@@ -229,7 +237,7 @@ async fn a_download_is_received_verified_published_and_recorded() {
     assert_eq!(rows[0].state, State::Complete);
     // One request, no Range, the redirect-free fake answered the whole file.
     assert_eq!(rig.hub.requests().len(), 1);
-    assert!(rig.range_requests().is_empty());
+    assert_eq!(rig.range_requests().len(), 0);
     // The files have the modes the plan names.
     let mode = std::fs::metadata(rig.model_file(&row)).unwrap();
     assert_eq!(std::os::unix::fs::MetadataExt::mode(&mode) & 0o022, 0);
@@ -249,12 +257,6 @@ async fn progress_is_visible_and_the_permit_is_released_at_the_end() {
         }
     });
     let counter = Arc::new(AtomicUsize::new(0));
-    struct Guard(Arc<AtomicUsize>);
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
-    }
     let row = rig.confirm().await;
     rig.downloader
         .start(row, Box::new(Guard(Arc::clone(&counter))));
@@ -323,7 +325,7 @@ async fn cancel_keeps_the_partial_and_resume_asks_for_the_rest_with_range() {
         .parse()
         .unwrap();
     assert!(
-        from <= kept && from % 1000 == 0 && kept - from <= 2000,
+        from <= kept && from.is_multiple_of(1000) && kept - from <= 2000,
         "{from} {kept}"
     );
 }
@@ -344,8 +346,7 @@ async fn a_server_that_does_not_honour_range_makes_the_download_restart_from_zer
         rig.hub.respond(move |seen| {
             let range = seen.headers.get("range").and_then(|v| v.to_str().ok());
             match (range, answer) {
-                (None, _) => Reply::file(&content, None),
-                (Some(_), "full") => Reply::file(&content, None),
+                (None, _) | (Some(_), "full") => Reply::file(&content, None),
                 (Some(_), "wrong-start") => Reply::Full {
                     status: 206,
                     headers: vec![("content-range", "bytes 0-5999/6000".into())],
@@ -587,7 +588,7 @@ async fn reconciliation_sweeps_before_any_command_and_keeps_what_a_download_owns
     names.sort();
     assert_eq!(
         names,
-        [other.sha256.clone()],
+        std::slice::from_ref(&other.sha256),
         "the orphan and the oversize partial went"
     );
 }
@@ -671,7 +672,7 @@ async fn discard_while_running_stops_it_and_removes_the_partial_and_the_row() {
     )
     .await;
     rig.downloader.discard(row.id).await.unwrap();
-    assert!(rig.rows.list().await.unwrap().is_empty());
+    assert_eq!(rig.rows.list().await.unwrap().len(), 0);
     assert!(!rig.partial_file(&row).exists());
     assert!(!rig.model_file(&row).exists());
     assert_eq!(rig.downloader.status().phase, Phase::Idle);
@@ -755,7 +756,7 @@ async fn an_unsafe_partial_stops_the_download_and_is_left_untouched() {
         Phase::Stopped(Stop::Failed(_))
     ));
     assert_eq!(std::fs::read(&target).unwrap(), b"precious");
-    assert!(rig.hub.requests().is_empty());
+    assert_eq!(rig.hub.requests().len(), 0);
 }
 
 #[tokio::test]
@@ -771,7 +772,7 @@ async fn a_file_that_already_has_the_hash_is_adopted_and_another_with_the_name_i
     .unwrap();
     rig.downloader.start(row.clone(), permit());
     assert_eq!(finished(&rig.downloader).await, Phase::Done);
-    assert!(rig.hub.requests().is_empty());
+    assert_eq!(rig.hub.requests().len(), 0);
     assert_eq!(rig.rows.list().await.unwrap()[0].state, State::Complete);
     // Other bytes of the same size, and another size: refused, the user's file untouched.
     for other in [vec![5u8; 4_000], vec![5u8; 10]] {
@@ -789,7 +790,7 @@ async fn a_file_that_already_has_the_hash_is_adopted_and_another_with_the_name_i
         };
         assert!(why.contains("remove it by hand"), "{why}");
         assert_eq!(std::fs::read(rig.model_file(&row)).unwrap(), other);
-        assert!(rig.hub.requests().is_empty());
+        assert_eq!(rig.hub.requests().len(), 0);
     }
 }
 
@@ -826,7 +827,7 @@ async fn delete_keeps_what_is_protected_in_use_or_shared_and_removes_the_rest() 
     rig.rows.complete(twin.id).await.unwrap();
     rig.downloader.delete(twin.id, &[]).await.unwrap();
     assert!(!rig.model_file(&row).exists());
-    assert!(rig.rows.list().await.unwrap().is_empty());
+    assert_eq!(rig.rows.list().await.unwrap().len(), 0);
 }
 
 #[tokio::test]

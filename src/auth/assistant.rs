@@ -47,6 +47,7 @@ pub(super) fn routes() -> Router<AuthState> {
             "/admin/assistant/model/switch-back",
             post(switch_back).layer(DefaultBodyLimit::max(MODEL_FORM_BYTES)),
         )
+        .merge(super::assistant_downloads::routes())
 }
 
 /// The model forms are a CSRF token and at most a 512-byte spec or a trial key of 100
@@ -73,6 +74,21 @@ enum Notice {
     NothingToKeep,
     ModelBusy,
     CancelStale,
+    Reviewing,
+    ReviewBusy,
+    ReviewStale,
+    DownloadsUnavailable,
+    NotADownload,
+    DownloadStarted,
+    DownloadFailed,
+    PartialExists,
+    AlreadyConfirmed,
+    DownloadCancelled,
+    DownloadResuming,
+    DownloadDiscarded,
+    NoSuchDownload,
+    FileDeleted,
+    FileKept,
 }
 
 impl Notice {
@@ -114,6 +130,29 @@ impl Notice {
             }
             Self::CancelStale => {
                 "That page showed an older trial than the one running, so nothing was cancelled. Reload it."
+            }
+            Self::Reviewing => {
+                "Reviewing the repository: the metadata and the licence are being fetched. Nothing downloads until you confirm."
+            }
+            Self::ReviewBusy => "A review is already running; nothing else was started.",
+            Self::ReviewStale => {
+                "That review is gone or was replaced, so nothing was confirmed. Review the model again."
+            }
+            Self::DownloadsUnavailable => "Downloads are not available with this assistant.",
+            Self::NotADownload => "That is not an hf: model.",
+            Self::DownloadStarted => "Confirmed: the download has started.",
+            Self::DownloadFailed => "The download could not be recorded or changed.",
+            Self::PartialExists => {
+                "A download is already waiting or partly fetched: resume it or discard it first."
+            }
+            Self::AlreadyConfirmed => "That model was already confirmed for download.",
+            Self::DownloadCancelled => "Cancelled: the partial file is kept; Resume continues it.",
+            Self::DownloadResuming => "Resuming the download.",
+            Self::DownloadDiscarded => "Discarded: the partial file and the record are removed.",
+            Self::NoSuchDownload => "There is no such waiting download.",
+            Self::FileDeleted => "Deleted the downloaded file.",
+            Self::FileKept => {
+                "The file was kept: it is in use, shared with another record, a pinned default, or not finished."
             }
         }
     }
@@ -520,6 +559,7 @@ struct Page {
     csrf: String,
     notice: &'static str,
     view: Option<View>,
+    downloads: Option<super::assistant_downloads_view::DownloadsView>,
 }
 
 /// The page, with the Model field holding `input` and `error` beside it when it was refused.
@@ -541,7 +581,23 @@ async fn render(
             )
         })
     });
-    html(&Page { csrf, notice, view })
+    let downloads = match state.options.assistant.as_ref() {
+        Some(handle) if handle.runtime.is_some() => {
+            let active = handle
+                .runtime
+                .as_ref()
+                .map(crate::assistant::runtime::manager::Handle::model_files)
+                .unwrap_or_default();
+            Some(super::assistant_downloads_view::view(handle, &active).await)
+        }
+        _ => None,
+    };
+    html(&Page {
+        csrf,
+        notice,
+        view,
+        downloads,
+    })
 }
 
 async fn page(
@@ -629,6 +685,15 @@ fn redirect(notice: &str) -> axum::response::Response {
     Redirect::to(&format!("/admin/assistant?notice={notice}")).into_response()
 }
 
+/// The runtime manager, if the assistant has one.
+pub(super) fn runtime(state: &AuthState) -> Option<&crate::assistant::runtime::manager::Handle> {
+    state
+        .options
+        .assistant
+        .as_ref()
+        .and_then(|handle| handle.runtime.as_ref())
+}
+
 fn runtime_of(
     state: &AuthState,
 ) -> Result<&crate::assistant::runtime::manager::Handle, StatusCode> {
@@ -657,7 +722,9 @@ async fn try_model(
     let name = match spec {
         crate::assistant::model::Spec::Local(name) => name,
         // Reviewed and downloaded by the Downloads panel (step 2d-2, routes below).
-        crate::assistant::model::Spec::Hf(hf) => return review_hf(&state, &session, &hf).await,
+        crate::assistant::model::Spec::Hf(hf) => {
+            return Ok(super::assistant_downloads::start_review(&state, hf));
+        }
     };
     Ok(redirect(
         match runtime.try_model(auth.account.id, form.model, name) {
@@ -667,14 +734,6 @@ async fn try_model(
             TryModel::Unsupported => "model-unsupported",
         },
     ))
-}
-
-async fn review_hf(
-    _state: &AuthState,
-    _session: &Session,
-    _hf: &crate::assistant::model::HfSpec,
-) -> AuthResult {
-    Ok(redirect("model-unsupported"))
 }
 
 async fn refused_spec(

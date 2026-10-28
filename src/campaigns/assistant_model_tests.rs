@@ -244,9 +244,10 @@ async fn the_model_field_refuses_bad_specs_naming_the_rule_and_keeps_the_input()
         ("local:a b.gguf", "white space"),
         ("local:\u{e9}.gguf", "must be ASCII"),
         (too_long.as_str(), "longer than 512 bytes"),
+        ("hf:org/repo/m.gguf@main", "40 lowercase hex digits"),
         (
-            "hf:org/repo/m.gguf@c40945d71cd90f249a56985e8155551a9188dc30",
-            "downloads arrive later",
+            "hf:org/m.gguf@c40945d71cd90f249a56985e8155551a9188dc30",
+            "must be hf:",
         ),
         ("model.gguf", "must be local:"),
     ] {

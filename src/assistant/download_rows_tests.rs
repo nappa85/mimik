@@ -27,7 +27,7 @@ fn store() -> (tempfile::TempDir, Store) {
 async fn rows_are_recorded_listed_completed_and_deleted() {
     let (_dir, store) = store();
     let rows = SqlRows(store);
-    assert!(rows.list().await.unwrap().is_empty());
+    assert_eq!(rows.list().await.unwrap().len(), 0);
     let first = rows
         .insert(new(SPEC, "Qwen3.5-9B-Q4_K_M.gguf"))
         .await
@@ -44,7 +44,7 @@ async fn rows_are_recorded_listed_completed_and_deleted() {
     assert_eq!(listed[0].state, State::Complete);
     assert!(listed[0].completed_at.is_some());
     rows.delete(first.id).await.unwrap();
-    assert!(rows.list().await.unwrap().is_empty());
+    assert_eq!(rows.list().await.unwrap().len(), 0);
 }
 
 #[tokio::test]

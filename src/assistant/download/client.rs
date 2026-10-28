@@ -1,4 +1,4 @@
-//! The download client (assisted sheet plan §1.4b, DEP-27): a `reqwest` client separate from
+//! The download client (`docs/model-downloads.md`, DEP-27): a `reqwest` client separate from
 //! the model client, HTTPS only, port 443 only, exact host list checked before every redirect
 //! hop is sent, a resolver that refuses local addresses, the system proxy for downloads only,
 //! no cookies, no `Referer`, identity encoding only, and errors that never carry a URL.
@@ -9,6 +9,7 @@ use reqwest::{
     header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_RANGE, HeaderMap, HeaderValue, RANGE},
     redirect::Policy,
 };
+#[cfg(test)]
 use rustls::pki_types::CertificateDer;
 use std::{
     collections::{HashMap, HashSet},
@@ -203,6 +204,7 @@ pub(crate) enum Roots {
     /// The operating system's trust store, through the platform verifier.
     Platform,
     /// Exactly these certificates and nothing else (tests).
+    #[cfg(test)]
     Only(Vec<CertificateDer<'static>>),
 }
 
@@ -212,8 +214,10 @@ pub(crate) enum ProxyMode {
     /// reqwest's system proxy (environment variables, `NO_PROXY`, OS settings).
     System,
     /// No proxy at all (tests are isolated from the ambient environment).
+    #[cfg(test)]
     Direct,
     /// This proxy (tests).
+    #[cfg(test)]
     Explicit(Box<reqwest::Proxy>),
 }
 
@@ -326,6 +330,7 @@ fn tls_config(roots: &Roots) -> Result<rustls::ClientConfig, Error> {
             .with_platform_verifier()
             .map_err(|_| Error::NoTrustStore)?
             .with_no_client_auth(),
+        #[cfg(test)]
         Roots::Only(certificates) => {
             let mut store = rustls::RootCertStore::empty();
             for certificate in certificates {
@@ -399,7 +404,9 @@ impl Client {
                 .dns_resolver(Arc::clone(&resolver));
             builder = match &endpoints.proxy {
                 ProxyMode::System => builder,
+                #[cfg(test)]
                 ProxyMode::Direct => builder.no_proxy(),
+                #[cfg(test)]
                 ProxyMode::Explicit(proxy) => builder.no_proxy().proxy((**proxy).clone()),
             };
             builder

@@ -253,11 +253,6 @@ impl FakeHub {
         }
     }
 
-    /// An absolute URL on this server under `host`.
-    pub(crate) fn url(&self, host: &str, path: &str) -> String {
-        format!("https://{host}:{}{path}", self.addr.port())
-    }
-
     pub(crate) fn requests(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
     }
