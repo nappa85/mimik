@@ -22,7 +22,9 @@ class Classify(unittest.TestCase):
         self.assertEqual(review.classify(0, "Approve with minor.\n" + LONG), "ok")
 
     def test_a_tool_trace_without_a_verdict_is_incomplete(self):
-        self.assertEqual(review.classify(0, "→ Read src/main.rs\n→ Read src/lib.rs\n"), "incomplete")
+        self.assertEqual(
+            review.classify(0, "→ Read src/main.rs\n→ Read src/lib.rs\n"), "incomplete"
+        )
 
 
 class Fallback(unittest.TestCase):

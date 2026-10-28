@@ -34,6 +34,7 @@
   - Main reviewers: OpenAI Astra (`openai/gpt-6-astra` via `tools/external_review.py --chain main`; replaced Sol, user decision 2026-10-22) and a fresh Sonnet subagent (`model: sonnet`; Fable was tried and dropped for token cost, user decision 2026-10-22), run in parallel.
   - Third reviewer: the first that works of MiniMax M3.1 Flash (formerly Space Bunny), DeepSeek v4.1 Flash, then Beam (`--chain third`; user decision 2026-10-22 after reviewer benchmark 2). Free models have daily limits: never run them in parallel. If none works, proceed with the two main reviews and record that.
   - Adjudicate Blocking findings against the code before acting on them.
+- **Implementers (user decision 2026-10-28):** Sol 6.1 (`openai/gpt-6.1-sol` through opencode), run by `tools/sol_agent.sh` in bubblewrap. It sees the worktree, the toolchain, a cache and the opencode login read-only; it cannot see secrets, other worktrees, git or the Docker socket; a system-call filter applies. The coordinator commits its work and answers its `ask` mailbox. Sonnet subagents are the fallback.
 - Resolve blocking findings before completion. If independence is unavailable or a blocker cannot be fixed, explicitly record it and keep the work blocked; do not call it production-ready or silently waive it. Review of review records themselves does not recurse.
 
 ### Prototype tier (user decision 2026-10-15)
