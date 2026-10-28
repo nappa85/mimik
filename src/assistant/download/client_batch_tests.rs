@@ -31,6 +31,11 @@ fn transition_and_embedded_ipv4_addresses_are_judged_by_the_address_inside() {
         "2002:a00:1::1",
         "2002:c0a8:101::1",
         // Site-local, IPv4-compatible, Teredo.
+        // The local-use NAT64 prefix (RFC 8215) carries the IPv4 address split around octet 8:
+        // 127.0.0.1, 10.0.0.1 and 192.168.1.1.
+        "64:ff9b:1:7f00:0:100::",
+        "64:ff9b:1:a00:0:100::",
+        "64:ff9b:1:c0a8:1:100::",
         "fec0::1",
         "::127.0.0.1",
         "::10.0.0.1",
@@ -39,7 +44,12 @@ fn transition_and_embedded_ipv4_addresses_are_judged_by_the_address_inside() {
         assert!(!public(bad.parse().unwrap()), "{bad}");
     }
     // The same transition forms around a public IPv4 are fine (NAT64, 6to4).
-    for good in ["64:ff9b::808:808", "2002:808:808::1"] {
+    // (The local-use form of 8.8.8.8 is 64:ff9b:1:808:8:800::.)
+    for good in [
+        "64:ff9b::808:808",
+        "2002:808:808::1",
+        "64:ff9b:1:808:8:800::",
+    ] {
         assert!(public(good.parse().unwrap()), "{good}");
     }
 }

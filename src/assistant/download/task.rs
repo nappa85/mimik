@@ -1,8 +1,10 @@
 //! The download task (`docs/model-downloads.md`): one actor owns the single
-//! transfer and every command (Cancel, Discard, Resume, Repair, completion, shutdown), so they
-//! serialise. All blocking file work runs off the async executor and no lock is held across it;
-//! a Cancel is accepted at once even while a connection, a write or a hash is pending. Only a
-//! command that names the running download interrupts it.
+//! transfer, the only writer of its status, and every command (Cancel, Discard, Resume, Repair,
+//! completion, shutdown), so they serialise. All blocking file work runs off the async executor
+//! and no lock is held across it; a Cancel is accepted at once even while a connection, a write
+//! or a hash is pending. Only a command that names the running download interrupts it. The
+//! model-work permit is held until the work an interrupt abandoned has finished and any
+//! discard has settled, so nothing changes the models folder outside the gate.
 use super::client::{Body, Client};
 use super::disk::{Disk, DiskError, Fault};
 use super::rows::{Row, Rows, State};
@@ -18,14 +20,42 @@ use std::{
 };
 use tokio::{
     sync::{mpsc, oneshot},
+    task::JoinHandle,
     time::Instant,
 };
 
 /// Held for the duration of a transfer and dropped at its end (the model-work gate).
-pub(crate) type Permit = Box<dyn std::any::Any + Send>;
+pub(crate) type Permit = Box<dyn std::any::Any + Send + Sync>;
 
-/// The answer to a command the actor accepts or refuses.
-type Reply = oneshot::Sender<Result<(), String>>;
+/// Why a command was not accepted.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum Refusal {
+    #[error("another download is running: wait for it, cancel it or discard it first")]
+    Busy,
+    #[error("the previous operation is still finishing: try again in a moment")]
+    Finishing,
+    #[error(
+        "another download's partial file exists: there is one partial at a time, discard it first"
+    )]
+    OtherPartial,
+    #[error("there is no such waiting download")]
+    NoSuchWaiting,
+    #[error("there is no such finished download")]
+    NoSuchFinished,
+    #[error("nothing to repair: the file is there")]
+    NothingToRepair,
+    #[error("the download records cannot be read or changed ({0})")]
+    Records(String),
+    #[error("{0}")]
+    Disk(String),
+    #[error("the download task has ended")]
+    Ended,
+}
+
+/// The answer to a command that starts a transfer.
+type Reply = oneshot::Sender<Result<(), Refusal>>;
+/// The answer to a Discard (the failure reason, in words).
+type TextReply = oneshot::Sender<Result<(), String>>;
 
 /// Tunables; tests shorten them.
 #[derive(Clone, Copy, Debug)]
@@ -85,9 +115,10 @@ enum Command {
     Resume(i64, Permit, Reply),
     /// A finished row whose file is gone: fetch it again (same provenance).
     Repair(i64, Permit, Reply),
-    /// Stop the download `id` (any when `None`); a stale id stops nothing.
-    Cancel(Option<i64>),
-    Discard(i64, Reply),
+    /// Stop the download `id` (any when `None`); answered `true` when it matched the running
+    /// transfer, `false` for a stale id or when nothing runs.
+    Cancel(Option<i64>, oneshot::Sender<bool>),
+    Discard(i64, TextReply),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -137,6 +168,7 @@ impl Downloader {
             receiver,
             stop: Arc::new(AtomicBool::new(false)),
             pending: None,
+            work: None,
             running: None,
             publishing: None,
         };
@@ -162,21 +194,21 @@ impl Downloader {
         )
     }
 
-    async fn ask(&self, build: impl FnOnce(Reply) -> Command) -> Result<(), String> {
+    async fn ask(&self, build: impl FnOnce(Reply) -> Command) -> Result<(), Refusal> {
         let (reply, answer) = oneshot::channel();
         self.commands
             .send(build(reply))
-            .map_err(|_| ENDED.to_owned())?;
-        answer.await.map_err(|_| ENDED.to_owned())?
+            .map_err(|_| Refusal::Ended)?;
+        answer.await.map_err(|_| Refusal::Ended)?
     }
 
     /// Starts the download of a freshly confirmed row; `permit` is dropped when it ends (or at
-    /// once, with the reason, when the task refuses).
+    /// once when the task refuses).
     ///
     /// # Errors
     ///
-    /// Why the task did not accept it (another download runs, or the task has ended).
-    pub(crate) async fn start(&self, row: Row, permit: Permit) -> Result<(), String> {
+    /// Why the task did not accept it.
+    pub(crate) async fn start(&self, row: Row, permit: Permit) -> Result<(), Refusal> {
         self.ask(|reply| Command::Start(row, permit, reply)).await
     }
 
@@ -185,7 +217,7 @@ impl Downloader {
     /// # Errors
     ///
     /// Why the task did not accept it.
-    pub(crate) async fn resume(&self, id: i64, permit: Permit) -> Result<(), String> {
+    pub(crate) async fn resume(&self, id: i64, permit: Permit) -> Result<(), Refusal> {
         self.ask(|reply| Command::Resume(id, permit, reply)).await
     }
 
@@ -195,23 +227,19 @@ impl Downloader {
     /// # Errors
     ///
     /// Why the task did not accept it (including "nothing to repair").
-    pub(crate) async fn repair(&self, id: i64, permit: Permit) -> Result<(), String> {
+    pub(crate) async fn repair(&self, id: i64, permit: Permit) -> Result<(), Refusal> {
         self.ask(|reply| Command::Repair(id, permit, reply)).await
     }
 
-    /// Stops the running download `id` (any when `None`), keeping its partial; accepted at
-    /// once. False when `id` is not the download shown as running (a stale page).
-    pub(crate) fn cancel(&self, id: Option<i64>) -> bool {
-        {
-            let mut status = lock(&self.status);
-            if id.is_some() && status.id != id {
-                return false;
-            }
-            if matches!(status.phase, Phase::Running { .. } | Phase::Verifying) {
-                status.phase = Phase::Stopped(Stop::Cancelled);
-            }
+    /// Stops the running download `id` (any when `None`), keeping its partial. True once the
+    /// task has matched it; false for a stale id or when nothing runs. The status changes when
+    /// the task has stopped the transfer, never before.
+    pub(crate) async fn cancel(&self, id: Option<i64>) -> bool {
+        let (reply, answer) = oneshot::channel();
+        if self.commands.send(Command::Cancel(id, reply)).is_err() {
+            return false;
         }
-        self.commands.send(Command::Cancel(id)).is_ok()
+        answer.await.unwrap_or(false)
     }
 
     /// Stops download `id` if it is the running one, deletes its partial and its row. Another
@@ -222,7 +250,11 @@ impl Downloader {
     /// A failure to remove the partial or the row, or a finished download (deleted, not
     /// discarded), by message.
     pub(crate) async fn discard(&self, id: i64) -> Result<(), String> {
-        self.ask(|reply| Command::Discard(id, reply)).await
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Discard(id, reply))
+            .map_err(|_| ENDED.to_owned())?;
+        answer.await.map_err(|_| ENDED.to_owned())?
     }
 
     /// Stops the task, keeping the partial; resolves once it has ended.
@@ -287,14 +319,14 @@ impl Downloader {
 enum Outcome {
     Done,
     Stopped(Stop),
-    Discard(i64, Reply),
+    Discard(i64, TextReply),
     Shutdown(oneshot::Sender<()>),
 }
 
 /// A command that interrupted the running transfer.
 enum Interrupt {
     Cancel,
-    Discard(i64, Reply),
+    Discard(i64, TextReply),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -319,9 +351,16 @@ fn disk_failed(error: &DiskError) -> Outcome {
     }
 }
 
-const BUSY: &str = "another download is running: wait for it, cancel it or discard it first";
 const NAME_TAKEN: &str =
     "a different file already has this name in the models folder: remove it by hand";
+
+/// What an interrupt left behind: blocking file work still running, the permit that keeps the
+/// models folder gated until it has finished, and the discards waiting for it.
+struct Work {
+    handle: Option<JoinHandle<()>>,
+    permit: Option<Permit>,
+    discards: Vec<(i64, TextReply)>,
+}
 
 struct Actor {
     client: Client,
@@ -332,11 +371,14 @@ struct Actor {
     receiver: mpsc::UnboundedReceiver<Command>,
     /// Asks a running hash to stop.
     stop: Arc<AtomicBool>,
-    /// Blocking work abandoned by an interrupt; awaited before the disk is touched again.
-    pending: Option<tokio::task::JoinHandle<()>>,
+    /// Blocking work abandoned by an interrupt during a transfer.
+    pending: Option<JoinHandle<()>>,
+    /// The abandoned work being waited for after the transfer ended.
+    work: Option<Work>,
     /// The row being transferred.
     running: Option<Row>,
-    /// The row whose publication may have happened (set before it, cleared when it settles).
+    /// The row whose publication this actor may have made (kept until the row is reconciled:
+    /// completed, or discarded together with the file).
     publishing: Option<i64>,
 }
 
@@ -353,77 +395,80 @@ impl Actor {
     }
 
     async fn run(mut self) {
-        while let Some(command) = self.receiver.recv().await {
-            let ended = match command {
-                Command::Start(row, permit, reply) => self.begin(row, permit, reply).await,
-                Command::Resume(id, permit, reply) => match self.waiting(id).await {
-                    Ok(row) => self.begin(row, permit, reply).await,
-                    Err(why) => {
-                        let _ = reply.send(Err(why));
-                        false
+        loop {
+            tokio::select! {
+                command = self.receiver.recv() => {
+                    let Some(command) = command else { return };
+                    if self.command(command).await {
+                        return;
                     }
-                },
-                Command::Repair(id, permit, reply) => match self.reopen(id).await {
-                    Ok(row) => self.begin(row, permit, reply).await,
-                    Err(why) => {
-                        let _ = reply.send(Err(why));
-                        false
-                    }
-                },
-                Command::Cancel(_) => false,
-                Command::Discard(id, reply) => {
-                    let _ = reply.send(self.discard(id).await);
-                    false
                 }
-                Command::Shutdown(reply) => {
-                    let _ = reply.send(());
-                    true
+                () = drained(&mut self.work), if self.work.is_some() => {
+                    self.finish_work().await;
                 }
-            };
-            if ended {
-                return;
             }
         }
     }
 
-    /// The waiting (confirmed) row `id`.
-    async fn waiting(&self, id: i64) -> Result<Row, String> {
-        self.rows
-            .list()
-            .await?
-            .into_iter()
-            .find(|row| row.id == id && row.state == State::Confirmed)
-            .ok_or_else(|| "there is no such waiting download".to_owned())
-    }
-
-    /// The finished row `id` made waiting again, if its file is gone or has another size.
-    async fn reopen(&self, id: i64) -> Result<Row, String> {
-        let row = self
-            .rows
-            .list()
-            .await?
-            .into_iter()
-            .find(|row| row.id == id && row.state == State::Complete)
-            .ok_or_else(|| "there is no such finished download".to_owned())?;
-        let (disk, name) = (Arc::clone(&self.disk), row.file_name.clone());
-        let present = tokio::task::spawn_blocking(move || disk.final_state(&name))
-            .await
-            .map_err(|_| "the file cannot be examined".to_owned())?
-            .map_err(|error| error.to_string())?;
-        if present.is_some_and(|file| file.len == row.size) {
-            return Err("nothing to repair: the file is there".to_owned());
+    /// Handles a command while no transfer runs; true when the task must end.
+    async fn command(&mut self, command: Command) -> bool {
+        match command {
+            Command::Cancel(_, reply) => {
+                let _ = reply.send(false);
+                false
+            }
+            Command::Shutdown(reply) => {
+                self.detach_work();
+                let _ = reply.send(());
+                true
+            }
+            Command::Discard(id, reply) => {
+                if let Some(work) = &mut self.work {
+                    work.discards.push((id, reply));
+                } else {
+                    let _ = reply.send(self.discard(id).await);
+                }
+                false
+            }
+            Command::Start(_, _, reply)
+            | Command::Resume(_, _, reply)
+            | Command::Repair(_, _, reply)
+                if self.work.is_some() =>
+            {
+                // Abandoned file work is still finishing: nothing new before it has.
+                let _ = reply.send(Err(Refusal::Finishing));
+                false
+            }
+            Command::Start(row, permit, reply) => self.accept(Ok(row), permit, reply).await,
+            Command::Resume(id, permit, reply) => {
+                let row = self.waiting(id).await;
+                self.accept(row, permit, reply).await
+            }
+            Command::Repair(id, permit, reply) => {
+                let row = self.reopen(id).await;
+                self.accept(row, permit, reply).await
+            }
         }
-        self.rows.reopen(id).await?;
-        Ok(Row {
-            state: State::Confirmed,
-            completed_at: None,
-            ..row
-        })
     }
 
-    /// Accepts `row`, answers, runs the transfer and records how it ended; true when the task
-    /// must end.
-    async fn begin(&mut self, row: Row, permit: Permit, reply: Reply) -> bool {
+    /// Accepts `row` (or answers why not), runs its transfer and settles how it ended; true
+    /// when the task must end.
+    async fn accept(&mut self, row: Result<Row, Refusal>, permit: Permit, reply: Reply) -> bool {
+        if self.work.is_some() {
+            let _ = reply.send(Err(Refusal::Finishing));
+            return false;
+        }
+        let row = match row {
+            Ok(row) => row,
+            Err(why) => {
+                let _ = reply.send(Err(why));
+                return false;
+            }
+        };
+        if let Err(why) = self.check_partial(&row).await {
+            let _ = reply.send(Err(why));
+            return false;
+        }
         self.set(
             row.id,
             &row.spec,
@@ -436,26 +481,82 @@ impl Actor {
         let _ = reply.send(Ok(()));
         let outcome = self.transfer(&row).await;
         self.running = None;
-        drop(permit);
-        self.settle(&row, outcome).await
+        self.settle(&row, outcome, permit).await
     }
 
-    /// Records an outcome; true when the task must end.
-    async fn settle(&mut self, row: &Row, outcome: Outcome) -> bool {
+    /// One partial at all: another download's refuses.
+    async fn check_partial(&self, row: &Row) -> Result<(), Refusal> {
+        let disk = Arc::clone(&self.disk);
+        let names = tokio::task::spawn_blocking(move || disk.partials())
+            .await
+            .map_err(|_| Refusal::Disk("the partial folder cannot be listed".into()))?
+            .map_err(|error| Refusal::Disk(error.to_string()))?;
+        if names.iter().any(|name| *name != row.sha256) {
+            return Err(Refusal::OtherPartial);
+        }
+        Ok(())
+    }
+
+    /// The waiting (confirmed) row `id`.
+    async fn waiting(&self, id: i64) -> Result<Row, Refusal> {
+        self.rows
+            .list()
+            .await
+            .map_err(Refusal::Records)?
+            .into_iter()
+            .find(|row| row.id == id && row.state == State::Confirmed)
+            .ok_or(Refusal::NoSuchWaiting)
+    }
+
+    /// The finished row `id` made waiting again, if its file is gone or has another size.
+    async fn reopen(&self, id: i64) -> Result<Row, Refusal> {
+        let row = self
+            .rows
+            .list()
+            .await
+            .map_err(Refusal::Records)?
+            .into_iter()
+            .find(|row| row.id == id && row.state == State::Complete)
+            .ok_or(Refusal::NoSuchFinished)?;
+        let (disk, name) = (Arc::clone(&self.disk), row.file_name.clone());
+        let present = tokio::task::spawn_blocking(move || disk.final_state(&name))
+            .await
+            .map_err(|_| Refusal::Disk("the file cannot be examined".into()))?
+            .map_err(|error| Refusal::Disk(error.to_string()))?;
+        if present.is_some_and(|file| file.len == row.size) {
+            return Err(Refusal::NothingToRepair);
+        }
+        self.rows.reopen(id).await.map_err(Refusal::Records)?;
+        Ok(Row {
+            state: State::Confirmed,
+            completed_at: None,
+            ..row
+        })
+    }
+
+    /// Records how a transfer ended and decides who holds the permit; true when the task must
+    /// end. The permit stays held while abandoned file work or a discard is still changing the
+    /// models folder.
+    async fn settle(&mut self, row: &Row, outcome: Outcome, permit: Permit) -> bool {
+        let pending = self.pending.take();
         match outcome {
             Outcome::Done => {
                 self.publishing = None;
                 self.set(row.id, &row.spec, Phase::Done);
+                drop(permit);
             }
             Outcome::Stopped(stop) => {
-                self.publishing = None;
                 self.set(row.id, &row.spec, Phase::Stopped(stop));
+                self.hold(pending, permit, Vec::new()).await;
             }
             Outcome::Discard(id, reply) => {
-                let _ = reply.send(self.discard(id).await);
+                // Not running any more; being discarded.
+                self.set(row.id, &row.spec, Phase::Stopped(Stop::Cancelled));
+                self.hold(pending, permit, vec![(id, reply)]).await;
             }
             Outcome::Shutdown(reply) => {
                 self.set(row.id, &row.spec, Phase::Stopped(Stop::Cancelled));
+                keep_gated(pending, Some(permit));
                 let _ = reply.send(());
                 return true;
             }
@@ -463,17 +564,66 @@ impl Actor {
         false
     }
 
-    async fn settle_pending(&mut self) {
-        if let Some(handle) = self.pending.take() {
-            let _ = handle.await;
+    /// Keeps `permit` until `pending` has finished and `discards` are done: at once when there
+    /// is no pending work, otherwise from the main loop.
+    async fn hold(
+        &mut self,
+        pending: Option<JoinHandle<()>>,
+        permit: Permit,
+        discards: Vec<(i64, TextReply)>,
+    ) {
+        if pending.is_none() {
+            for (id, reply) in discards {
+                let _ = reply.send(self.discard(id).await);
+            }
+            drop(permit);
+        } else {
+            self.work = Some(Work {
+                handle: pending,
+                permit: Some(permit),
+                discards,
+            });
         }
     }
 
-    /// Discards the download `id` while nothing of it runs (or after its transfer was stopped
-    /// by this very command).
+    /// The abandoned work has finished: run the waiting discards, then release the permit.
+    async fn finish_work(&mut self) {
+        let Some(work) = self.work.take() else { return };
+        for (id, reply) in work.discards {
+            let _ = reply.send(self.discard(id).await);
+        }
+        drop(work.permit);
+    }
+
+    /// On shutdown: the abandoned work keeps the permit until it has finished.
+    fn detach_work(&mut self) {
+        if let Some(work) = self.work.take() {
+            keep_gated(work.handle, work.permit);
+        }
+    }
+
+    /// Discards the download `id`, settling the status either way: idle when it worked, a
+    /// stopped status with the reason when it did not.
     async fn discard(&mut self, id: i64) -> Result<(), String> {
-        self.settle_pending().await;
-        let maybe_published = self.publishing.take() == Some(id);
+        let result = self.discard_inner(id).await;
+        let mut status = lock(&self.status);
+        if status.id == Some(id) {
+            match &result {
+                Ok(()) => {
+                    *status = Status {
+                        id: None,
+                        spec: String::new(),
+                        phase: Phase::Idle,
+                    };
+                }
+                Err(why) => status.phase = Phase::Stopped(Stop::Failed(why.clone())),
+            }
+        }
+        result
+    }
+
+    async fn discard_inner(&mut self, id: i64) -> Result<(), String> {
+        let owned = self.publishing.take() == Some(id);
         let rows = self.rows.list().await?;
         let Some(row) = rows.iter().find(|row| row.id == id) else {
             return Ok(());
@@ -491,10 +641,12 @@ impl Actor {
             row.size,
         );
         tokio::task::spawn_blocking(move || {
+            disk.fault(Fault::BeforeDiscard)?;
             disk.remove_partial(&sha)?;
-            // A publication that raced the discard left a file with no row: remove it when it
-            // is exactly this download's verified file and nothing else names it.
-            if maybe_published && !shared {
+            // A publication this actor made, cut short or raced by the discard, left a file
+            // with no row: remove it when it is exactly this download's verified file and
+            // nothing else names it.
+            if owned && !shared {
                 remove_if_verified(&disk, &name, &sha, size)?;
             }
             Ok::<(), DiskError>(())
@@ -502,16 +654,7 @@ impl Actor {
         .await
         .map_err(|_| "the partial cannot be removed".to_owned())?
         .map_err(|error| error.to_string())?;
-        self.rows.delete(id).await?;
-        let mut status = lock(&self.status);
-        if status.id == Some(id) {
-            *status = Status {
-                id: None,
-                spec: String::new(),
-                phase: Phase::Idle,
-            };
-        }
-        Ok(())
+        self.rows.delete(id).await
     }
 
     /// Discards a download other than the running one without touching the transfer: a
@@ -530,7 +673,7 @@ impl Actor {
             .as_ref()
             .is_some_and(|running| running.sha256 == row.sha256)
         {
-            return Err(BUSY.to_owned());
+            return Err(Refusal::Busy.to_string());
         }
         let (disk, sha) = (Arc::clone(&self.disk), row.sha256.clone());
         tokio::task::spawn_blocking(move || disk.remove_partial(&sha))
@@ -545,8 +688,11 @@ impl Actor {
     async fn react(&mut self, command: Option<Command>) -> Option<Interrupt> {
         let running = self.running.as_ref().map(|row| row.id);
         match command? {
-            Command::Cancel(id) if id.is_none() || id == running => Some(Interrupt::Cancel),
-            Command::Cancel(_) => None,
+            Command::Cancel(id, reply) => {
+                let matched = id.is_none() || id == running;
+                let _ = reply.send(matched);
+                matched.then_some(Interrupt::Cancel)
+            }
             Command::Discard(id, reply) if Some(id) == running => {
                 Some(Interrupt::Discard(id, reply))
             }
@@ -559,7 +705,7 @@ impl Actor {
             | Command::Resume(_, _, reply)
             | Command::Repair(_, _, reply) => {
                 // The permit goes with the command.
-                let _ = reply.send(Err(BUSY.to_owned()));
+                let _ = reply.send(Err(Refusal::Busy));
                 None
             }
         }
@@ -586,8 +732,8 @@ impl Actor {
     }
 
     /// Runs `work` off the executor, staying responsive to commands. A command that
-    /// interrupts: the work is left to finish on its own (awaited before the disk is touched
-    /// again) and a running hash is asked to stop.
+    /// interrupts: the work is left to finish on its own (kept in `pending`, so its permit
+    /// outlives it) and a running hash is asked to stop.
     async fn io<T: Send + 'static>(
         &mut self,
         work: impl FnOnce(&Disk) -> Result<T, DiskError> + Send + 'static,
@@ -608,7 +754,6 @@ impl Actor {
     }
 
     async fn transfer(&mut self, row: &Row) -> Outcome {
-        self.settle_pending().await;
         self.stop.store(false, Ordering::SeqCst);
         let Ok(Spec::Hf(spec)) = parse_spec(&row.spec) else {
             return failed("the stored download is not an hf: spec");
@@ -771,6 +916,23 @@ impl Actor {
         }
     }
 
+    /// Deletes a partial that cannot be trusted (a wrong size or hash). An interrupt during
+    /// the cleanup is honoured and returned, never dropped.
+    async fn clean_partial(&mut self, row: &Row) -> Result<(), Outcome> {
+        let sha = row.sha256.clone();
+        match self
+            .io(move |disk| {
+                disk.fault(Fault::BeforeCleanup)?;
+                disk.remove_partial(&sha)
+            })
+            .await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(disk_failed(&error)),
+            Err(interrupt) => Err(interrupt.into()),
+        }
+    }
+
     async fn flush(&mut self, file: &Arc<File>, at: u64, buffer: Vec<u8>) -> Result<(), Outcome> {
         let file = Arc::clone(file);
         match self.io(move |disk| disk.write_at(&file, at, &buffer)).await {
@@ -818,8 +980,7 @@ impl Actor {
                     let Some(chunk) = chunk else { break };
                     let have = written + buffer.len() as u64 + chunk.len() as u64;
                     if have > row.size {
-                        let sha = row.sha256.clone();
-                        let _ = self.io(move |disk| disk.remove_partial(&sha)).await;
+                        self.clean_partial(row).await?;
                         return Err(failed("the server sent more bytes than the file's size"));
                     }
                     window_bytes += chunk.len() as u64;
@@ -861,8 +1022,9 @@ impl Actor {
         match verified {
             Ok(Ok(sha)) if sha == row.sha256 => {}
             Ok(Ok(_)) => {
-                let sha = row.sha256.clone();
-                let _ = self.io(move |disk| disk.remove_partial(&sha)).await;
+                if let Err(outcome) = self.clean_partial(row).await {
+                    return outcome;
+                }
                 return failed(
                     "the downloaded file's SHA-256 differs from the one confirmed: it was deleted",
                 );
@@ -880,7 +1042,11 @@ impl Actor {
             .await;
         match published {
             Ok(Ok(())) => {}
-            Ok(Err(DiskError::Exists)) => return failed(NAME_TAKEN),
+            Ok(Err(DiskError::Exists)) => {
+                // The file under the name is not ours.
+                self.publishing = None;
+                return failed(NAME_TAKEN);
+            }
             Ok(Err(error)) => return disk_failed(&error),
             Err(interrupt) => return interrupt.into(),
         }
@@ -896,6 +1062,28 @@ impl Actor {
             )),
         }
     }
+}
+
+/// Resolves when the abandoned file work has finished (at once when there is none to wait for).
+async fn drained(work: &mut Option<Work>) {
+    if let Some(Work {
+        handle: Some(handle),
+        ..
+    }) = work
+    {
+        let _ = handle.await;
+        // Polled to completion: never poll it again.
+    }
+}
+
+/// Holds `permit` until `pending` has finished, on a task of its own (for a task that ends).
+fn keep_gated(pending: Option<JoinHandle<()>>, permit: Option<Permit>) {
+    tokio::spawn(async move {
+        if let Some(handle) = pending {
+            let _ = handle.await;
+        }
+        drop(permit);
+    });
 }
 
 /// Removes the final file `name` when it is exactly the verified file (`sha`, `size`).
@@ -960,10 +1148,11 @@ pub(crate) async fn reconcile(disk: &Arc<Disk>, rows: &dyn Rows) -> Result<(), S
     Ok(())
 }
 
-/// One confirmed row: true when its final file is in place, verified and durable.
+/// One confirmed row: true when its final file is in place, verified and durable. A probe that
+/// fails (a link, a FIFO, another owner where a file should be) is an error for this row.
 fn reconcile_row(disk: &Disk, row: &Row) -> Result<bool, DiskError> {
-    let published = disk.final_state(&row.file_name).ok().flatten();
-    let mut partial = disk.partial_state(&row.sha256).ok().flatten();
+    let published = disk.final_state(&row.file_name)?;
+    let mut partial = disk.partial_state(&row.sha256)?;
     // A `link` publication cut between the link and the unlink: the final name and the
     // partial name share an inode with two links. Remove the partial name first.
     if let (Some(done), Some(left)) = (published, partial)

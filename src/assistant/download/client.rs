@@ -129,6 +129,14 @@ fn public_v6(ip: Ipv6Addr) -> bool {
     if groups[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
         return public(IpAddr::V4(embedded(groups[6], groups[7])));
     }
+    // The local-use NAT64 prefix 64:ff9b:1::/48 (RFC 8215) with the /48 layout of RFC 6052:
+    // the IPv4 address is split around the reserved octet 8, in octets 6, 7, 9 and 10.
+    if groups[..3] == [0x64, 0xff9b, 0x1] {
+        let octets = ip.octets();
+        return public(IpAddr::V4(std::net::Ipv4Addr::new(
+            octets[6], octets[7], octets[9], octets[10],
+        )));
+    }
     if groups[0] == 0x2002 {
         return public(IpAddr::V4(embedded(groups[1], groups[2])));
     }

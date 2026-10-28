@@ -6,8 +6,10 @@
 -- length is the progress; nothing else is stored); `complete` is a verified file in the models
 -- folder. The models of migration 022 are untouched: a downloaded file is tried and recorded
 -- there as `local:<file_name>`.
+-- AUTOINCREMENT: an id is never reused, so a stale page's Cancel or Discard cannot hit a later
+-- download.
 CREATE TABLE assistant_downloads (
- id INTEGER PRIMARY KEY,
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
  spec TEXT NOT NULL UNIQUE CHECK(length(CAST(spec AS BLOB)) BETWEEN 10 AND 512 AND spec GLOB 'hf:?*/?*/?*@????????????????????????????????????????' AND spec GLOB '*.gguf@*' AND substr(spec,length(spec)-39) NOT GLOB '*[^0-9a-f]*' AND spec NOT GLOB '*[^A-Za-z0-9._@/:-]*'),
  file_name TEXT NOT NULL CHECK(length(file_name) BETWEEN 6 AND 128 AND file_name GLOB '*.gguf' AND file_name NOT GLOB '.*' AND file_name NOT GLOB '*[^A-Za-z0-9._-]*'),
  sha256 TEXT NOT NULL CHECK(length(sha256)=64 AND sha256 NOT GLOB '*[^0-9a-f]*'),

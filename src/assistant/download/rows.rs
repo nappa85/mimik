@@ -74,6 +74,9 @@ pub(crate) mod memory {
         next: AtomicI64,
         /// While set, `complete` fails (a database commit failure after the publication).
         pub fail_complete: AtomicBool,
+        /// While set, `list` and `delete` fail.
+        pub fail_list: AtomicBool,
+        pub fail_delete: AtomicBool,
         pub in_use: Mutex<Vec<String>>,
     }
 
@@ -92,6 +95,9 @@ pub(crate) mod memory {
     #[async_trait]
     impl Rows for Memory {
         async fn list(&self) -> Result<Vec<Row>, String> {
+            if self.fail_list.load(Ordering::SeqCst) {
+                return Err("the database refused the read".into());
+            }
             Ok(self.rows.lock().unwrap().clone())
         }
 
@@ -137,6 +143,9 @@ pub(crate) mod memory {
         }
 
         async fn delete(&self, id: i64) -> Result<(), String> {
+            if self.fail_delete.load(Ordering::SeqCst) {
+                return Err("the database refused the delete".into());
+            }
             self.rows.lock().unwrap().retain(|row| row.id != id);
             Ok(())
         }

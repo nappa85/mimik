@@ -5,7 +5,7 @@
 use super::{AuthState, csrf_admission, owner_auth};
 use crate::assistant::download::review::{Snapshot, State as ReviewState};
 use crate::assistant::download::rows::{New, Row, State as RowState};
-use crate::assistant::download::task::{Phase, Status, Stop};
+use crate::assistant::download::task::{Phase, Refusal, Status, Stop};
 use crate::assistant::downloads::Downloads;
 use crate::assistant::model::{HfSpec, pinned};
 use axum::{
@@ -57,6 +57,18 @@ pub(super) fn routes() -> Router<AuthState> {
                 )
             }),
         )
+}
+
+/// The notice for a command the download task refused.
+fn refusal_notice(why: &Refusal) -> &'static str {
+    match why {
+        Refusal::Busy | Refusal::Finishing => "model-busy",
+        Refusal::OtherPartial => "partial-exists",
+        Refusal::NoSuchWaiting | Refusal::NoSuchFinished => "no-such-download",
+        Refusal::NothingToRepair => "nothing-to-repair",
+        Refusal::Records(_) | Refusal::Disk(_) => "download-failed",
+        Refusal::Ended => "downloads-unavailable",
+    }
 }
 
 fn redirect(notice: &str) -> Response {
@@ -177,15 +189,10 @@ async fn confirm(
     };
     downloads.reviewer.clear();
     let id = row.id;
-    if downloads
-        .downloader
-        .start(row, Box::new(gate))
-        .await
-        .is_err()
-    {
+    if let Err(why) = downloads.downloader.start(row, Box::new(gate)).await {
         // The task refused: nothing was started, so nothing stays recorded.
         let _ = downloads.rows.delete(id).await;
-        return Ok(redirect("model-busy"));
+        return Ok(redirect(refusal_notice(&why)));
     }
     Ok(redirect("download-started"))
 }
@@ -201,7 +208,7 @@ async fn cancel(
         return Ok(redirect("downloads-unavailable"));
     };
     // The id the page showed: a stale page cannot cancel a newer transfer.
-    if !downloads.downloader.cancel(Some(form.id)) {
+    if !downloads.downloader.cancel(Some(form.id)).await {
         return Ok(redirect("stale-download"));
     }
     Ok(redirect("download-cancelled"))
@@ -233,7 +240,7 @@ async fn resume(
     Ok(redirect(
         match downloads.downloader.resume(row.id, Box::new(gate)).await {
             Ok(()) => "download-resuming",
-            Err(_) => "no-such-download",
+            Err(why) => refusal_notice(&why),
         },
     ))
 }
@@ -257,8 +264,7 @@ async fn repair(
     Ok(redirect(
         match downloads.downloader.repair(form.id, Box::new(gate)).await {
             Ok(()) => "download-started",
-            Err(why) if why.contains("nothing to repair") => "nothing-to-repair",
-            Err(_) => "no-such-download",
+            Err(why) => refusal_notice(&why),
         },
     ))
 }

@@ -217,3 +217,17 @@ async fn every_licence_path_the_hub_admits_is_one_the_table_accepts() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_download_id_is_never_reused_after_its_row_is_deleted() {
+    let (_dir, store) = store();
+    let rows = SqlRows(store);
+    let first = rows.insert(new(SPEC, "x.gguf")).await.unwrap();
+    rows.delete(first.id).await.unwrap();
+    // The deleted row held the largest id: a plain INTEGER PRIMARY KEY would hand it out again.
+    let second = rows.insert(new(SPEC, "x.gguf")).await.unwrap();
+    assert!(second.id > first.id, "{} then {}", first.id, second.id);
+    rows.delete(second.id).await.unwrap();
+    let third = rows.insert(new(SPEC, "x.gguf")).await.unwrap();
+    assert!(third.id > second.id);
+}

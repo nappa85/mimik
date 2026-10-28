@@ -1042,3 +1042,112 @@ async fn unreadable_download_records_are_reported_not_shown_as_empty() {
     let page = rig.page().await;
     assert!(page.contains("download records cannot be read"), "{page}");
 }
+
+#[tokio::test]
+async fn commands_of_a_discarded_download_do_not_reach_the_next_one() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let rig = rig().await;
+    rig.hub.respond({
+        let bytes = rig.bytes.clone();
+        move |seen| {
+            if seen.path.starts_with("/api/") {
+                Reply::json(&metadata("tiny.gguf", &bytes))
+            } else if seen.path.ends_with("/LICENSE") {
+                Reply::text(LICENCE)
+            } else {
+                Reply::Slow {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: bytes.clone(),
+                    piece: 1000,
+                    gap: Duration::from_millis(60),
+                }
+            }
+        }
+    });
+    let token = rig.review(SPEC).await;
+    rig.owner(
+        "/admin/assistant/download/confirm",
+        &[("csrf", &csrf()), ("token", &token)],
+    )
+    .await;
+    let old = rig.rows().await[0].id;
+    rig.until(|| rig.downloads.downloader.busy()).await;
+    assert!(rig.downloads.downloader.cancel(Some(old)).await);
+    rig.until(|| !rig.downloads.downloader.busy()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    rig.owner(
+        "/admin/assistant/download/discard",
+        &[("csrf", &csrf()), ("id", &old.to_string())],
+    )
+    .await;
+    // The same model again: a new download that must not answer to the old id.
+    let token = rig.review(SPEC).await;
+    rig.owner(
+        "/admin/assistant/download/confirm",
+        &[("csrf", &csrf()), ("token", &token)],
+    )
+    .await;
+    let new = rig.rows().await[0].id;
+    assert_ne!(old, new);
+    rig.until(|| rig.downloads.downloader.busy()).await;
+    // A stale page's Cancel and Discard touch nothing.
+    assert_eq!(
+        rig.owner(
+            "/admin/assistant/download/cancel",
+            &[("csrf", &csrf()), ("id", &old.to_string())]
+        )
+        .await,
+        "stale-download"
+    );
+    assert!(rig.downloads.downloader.busy());
+    rig.owner(
+        "/admin/assistant/download/discard",
+        &[("csrf", &csrf()), ("id", &old.to_string())],
+    )
+    .await;
+    assert_eq!(rig.rows().await.len(), 1);
+    assert!(rig.downloads.downloader.busy());
+}
+
+#[tokio::test]
+async fn a_resume_refused_for_another_partial_says_so() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let rig = rig().await;
+    // A waiting download, and the partial of a different one on disk.
+    let row = rig
+        .downloads
+        .rows
+        .insert(crate::assistant::download::rows::New {
+            spec: SPEC.to_owned(),
+            file_name: "hf-waiting.gguf".into(),
+            sha256: "e".repeat(64),
+            size: 1000,
+            licence_id: None,
+            licence_path: None,
+            licence_sha256: None,
+            confirmed_by: 1,
+        })
+        .await
+        .unwrap();
+    let other = rig.models.path().join(".partial").join("f".repeat(64));
+    std::fs::write(&other, b"not mine").unwrap();
+    std::fs::set_permissions(&other, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    assert_eq!(
+        rig.owner(
+            "/admin/assistant/download/resume",
+            &[("csrf", &csrf()), ("id", &row.id.to_string())]
+        )
+        .await,
+        "partial-exists"
+    );
+    // An id nobody has is a different notice.
+    assert_eq!(
+        rig.owner(
+            "/admin/assistant/download/resume",
+            &[("csrf", &csrf()), ("id", "9999")]
+        )
+        .await,
+        "no-such-download"
+    );
+}

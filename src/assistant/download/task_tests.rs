@@ -226,6 +226,19 @@ impl Drop for Guard {
     }
 }
 
+/// Resumes `row` once the abandoned file work of a cancel has finished (until then the task
+/// answers that it is still finishing).
+async fn resume_when_free(rig: &Rig, row: &Row) {
+    for _ in 0..400 {
+        match rig.downloader.resume(row.id, permit()).await {
+            Ok(()) => return,
+            Err(Refusal::Finishing) => tokio::time::sleep(Duration::from_millis(10)).await,
+            Err(other) => panic!("{other}"),
+        }
+    }
+    panic!("the task never finished");
+}
+
 fn permit() -> Permit {
     Box::new(())
 }
@@ -312,7 +325,7 @@ async fn cancel_keeps_the_partial_and_resume_asks_for_the_rest_with_range() {
         |phase| matches!(phase, Phase::Running { received, .. } if *received >= 5000),
     )
     .await;
-    rig.downloader.cancel(None);
+    rig.downloader.cancel(None).await;
     assert_eq!(
         finished(&rig.downloader).await,
         Phase::Stopped(Stop::Cancelled)
@@ -616,15 +629,14 @@ async fn a_blocked_disk_write_never_blocks_cancel_or_the_runtime() {
     })
     .await;
     assert!(ticks.is_ok());
-    rig.downloader.cancel(None);
-    assert_eq!(
-        rig.downloader.status().phase,
-        Phase::Stopped(Stop::Cancelled)
-    );
+    assert!(rig.downloader.cancel(None).await);
+    until(&rig.downloader, "cancelled", |phase| {
+        *phase == Phase::Stopped(Stop::Cancelled)
+    })
+    .await;
     // Once the disk answers again the abandoned write finishes and a resume completes.
     rig.script.release();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    rig.downloader.resume(row.id, permit()).await.unwrap();
+    resume_when_free(&rig, &row).await;
     assert_eq!(finished(&rig.downloader).await, Phase::Done);
     assert_eq!(std::fs::read(rig.model_file(&row)).unwrap(), *rig.content);
 }
@@ -639,11 +651,11 @@ async fn a_cancel_during_verification_stops_the_hash_and_keeps_the_whole_partial
         *phase == Phase::Verifying
     })
     .await;
-    rig.downloader.cancel(None);
-    assert_eq!(
-        rig.downloader.status().phase,
-        Phase::Stopped(Stop::Cancelled)
-    );
+    assert!(rig.downloader.cancel(None).await);
+    until(&rig.downloader, "cancelled", |phase| {
+        *phase == Phase::Stopped(Stop::Cancelled)
+    })
+    .await;
     rig.script.release();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!rig.model_file(&row).exists());
@@ -652,7 +664,7 @@ async fn a_cancel_during_verification_stops_the_hash_and_keeps_the_whole_partial
         10_000
     );
     let before = rig.hub.requests().len();
-    rig.downloader.resume(row.id, permit()).await.unwrap();
+    resume_when_free(&rig, &row).await;
     assert_eq!(finished(&rig.downloader).await, Phase::Done);
     assert_eq!(rig.hub.requests().len(), before, "verification only");
 }
@@ -866,3 +878,6 @@ async fn shutdown_stops_the_transfer_and_keeps_the_partial() {
 
 #[path = "fixes_tests.rs"]
 mod fixes_tests;
+
+#[path = "confirm_tests.rs"]
+mod confirm_tests;

@@ -82,7 +82,11 @@ Nothing resumes by itself.
 
 A download, a delete, a Try, a Switch and a Switch back take one model-work gate in the runtime
 manager: one at a time, never beside a trial (Restart does not touch model files and is not
-gated). The active model serves jobs during a download; Cancel releases the gate. Delete
+gated). The active model serves jobs during a download. The gate is held until the work an
+interrupt abandoned (a blocked write, a publication, a cleanup) has finished and any discard
+has settled, so nothing changes the models folder outside it; Cancel releases it only then.
+Meanwhile a new Start, Resume or Repair is refused ("still finishing"), a Discard waits, and a
+Shutdown ends the task at once, leaving the gate to the abandoned work. Delete
 removes a completed download's row and file unless another row names the file, the model
 setting (active or previous) uses it, it is the active or previous model, or it is a pinned
 default.
@@ -95,7 +99,11 @@ exactly against `SHIPPED_HOSTS` before a redirect hop is sent, at most two hops,
 through a proxy. The system proxy (environment, `NO_PROXY`) is for downloads only, with proxy
 credentials only on the CONNECT. The resolver refuses loopback, private, link-local, shared,
 multicast, unspecified and reserved addresses on direct connections (a proxy resolves for
-itself). Trust is the operating system's store through the platform verifier (a missing store
+itself). IPv6 transition forms are judged by the IPv4 address they carry, not rejected: NAT64
+(`64:ff9b::/96` and the local-use `64:ff9b:1::/48`, with the RFC 6052 layout) and 6to4
+(`2002::/16`) are how IPv6-only networks reach IPv4 hosts, so a public embedded address passes
+and a private or loopback one does not; site-local, IPv4-compatible, Teredo and documentation
+space are refused outright. Trust is the operating system's store through the platform verifier (a missing store
 is reported with the package to install); tests trust only their own CA. No cookies, no
 `Referer`, `Accept-Encoding: identity`, any other `Content-Encoding` rejected, no
 decompression. Errors pass through a type that never holds a URL; presigned URLs are never
@@ -116,5 +124,10 @@ download; a different file under the name is never replaced.
 Owner only, CSRF-checked, strict forms of at most 4 KiB: `POST /admin/assistant/model/review`,
 `/admin/assistant/download/{confirm,cancel,resume,discard,repair}`, `/admin/assistant/model/delete`;
 `GET /admin/assistant/downloads.json` (state for polling: no URL). Discard deletes the
-partial and the row, so a new download needs a fresh review. A second confirmation while a
+partial and the row, so a new download needs a fresh review. Download ids are never reused
+(`AUTOINCREMENT`), so a stale page's Cancel or Discard cannot reach a later download. Cancel
+is acknowledged once the task has matched the running download (a stale id, an idle task or a
+finished download does not match); the task is the only writer of the status. A refused
+Start, Resume or Repair has its own notice: busy or finishing, another partial exists, no such
+download, nothing to repair, or records that cannot be read. A second confirmation while a
 partial exists is refused before any row is written.

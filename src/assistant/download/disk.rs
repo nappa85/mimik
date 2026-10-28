@@ -43,6 +43,10 @@ pub(crate) enum Fault {
     AfterPublish,
     /// Immediately before the row is written.
     BeforeCommit,
+    /// Before an untrusted partial (wrong size or hash) is deleted.
+    BeforeCleanup,
+    /// Before a discard removes the partial.
+    BeforeDiscard,
 }
 
 /// The fault seam: production never fails.
