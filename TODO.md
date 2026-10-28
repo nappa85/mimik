@@ -39,8 +39,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    live trial of a second model through `/admin/assistant` (`local:`), CPU first, GPU at a
    weekend. The general 104-reply screen with D ran for Granite (`docs/results.md`, 2026-10-27: 37/8/5);
    the 9B's (GPU, fan manual) is not run. Open: Granite's `max_tokens` (largest reply 173:
-   224 by the 2b rule, 256 by the trial rule, 352 now), and whether the Italian articles
-   "un"/"una"/"uno" should count as the number word one (fv-08).
+   224 by the 2b rule, 256 by the trial rule, 352 now).
    Live acceptance check before release: prime, a structured request, then a request with a
    different `ref` enum (another context): the fixed prefix's tokens are reused
    (`cached_tokens` covers the prefix), plus the grammar-compilation time per request; and
