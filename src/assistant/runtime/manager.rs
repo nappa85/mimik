@@ -195,6 +195,21 @@ pub(crate) struct Status {
 }
 
 impl Status {
+    /// Why the owner can retry the GPU path or its default model file.
+    pub(crate) fn gpu_retry_note(&self) -> Option<&str> {
+        if !self.gpu_wanted {
+            None
+        } else if self.path == Path::Cpu {
+            Some(
+                self.gpu_note
+                    .as_deref()
+                    .unwrap_or("the GPU path has not been tried yet"),
+            )
+        } else {
+            self.model.device_default.note()
+        }
+    }
+
     fn new(path: Path, models: &ModelSetup) -> Self {
         Self {
             model: ModelStatus {
@@ -329,7 +344,8 @@ pub(crate) enum TryGpu {
     Accepted,
     /// A Restart (or another try) is already being carried out: no second transition.
     AlreadyRunning,
-    /// The GPU is in use, or not wanted (`--assistant-device cpu`): nothing to try.
+    /// Nothing to try: the GPU is not wanted (`--assistant-device cpu`), or it runs the device
+    /// default model without a fallback note.
     NotApplicable,
 }
 
@@ -402,7 +418,7 @@ impl Handle {
     }
 
     /// The owner's "Try the GPU again": a Restart that starts from the GPU path again. Only
-    /// while the GPU is wanted and the CPU path is in use.
+    /// while the GPU is wanted and its path or default model file needs another try.
     pub(crate) fn try_gpu(&self) -> TryGpu {
         let mut status = self
             .status
@@ -411,7 +427,7 @@ impl Handle {
         if status.restarting {
             return TryGpu::AlreadyRunning;
         }
-        if !status.gpu_wanted || status.path == Path::Gpu {
+        if status.gpu_retry_note().is_none() {
             return TryGpu::NotApplicable;
         }
         status.restarting = true;
