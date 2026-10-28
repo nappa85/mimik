@@ -654,7 +654,11 @@ async fn try_model(
         Ok(spec) => spec,
         Err(refused) => return refused_spec(&state, &session, &form.model, refused).await,
     };
-    let crate::assistant::model::Spec::Local(name) = spec;
+    let name = match spec {
+        crate::assistant::model::Spec::Local(name) => name,
+        // Reviewed and downloaded by the Downloads panel (step 2d-2, routes below).
+        crate::assistant::model::Spec::Hf(hf) => return review_hf(&state, &session, &hf).await,
+    };
     Ok(redirect(
         match runtime.try_model(auth.account.id, form.model, name) {
             TryModel::Accepted(_) => "trying-model",
@@ -663,6 +667,14 @@ async fn try_model(
             TryModel::Unsupported => "model-unsupported",
         },
     ))
+}
+
+async fn review_hf(
+    _state: &AuthState,
+    _session: &Session,
+    _hf: &crate::assistant::model::HfSpec,
+) -> AuthResult {
+    Ok(redirect("model-unsupported"))
 }
 
 async fn refused_spec(

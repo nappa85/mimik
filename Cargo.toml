@@ -105,6 +105,11 @@ scraper = { version = "=0.27.0", default-features = false }
 tower = { version = "0.5", features = ["util"] }
 # Property tests of the lenient number parser (assisted sheet slice 1.1), dev-only.
 proptest = { version = "=1.12.0", default-features = false, features = ["std"] }
+# The fake Hugging Face server of the download tests (step 2d-2, DEP-27): a test CA made at run
+# time, served over TLS by hyper's HTTP/1 server.
+rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "pem"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
+hyper = { version = "=1.12.0", default-features = false, features = ["server", "http1"] }
 
 [profile.release]
 lto = "thin"

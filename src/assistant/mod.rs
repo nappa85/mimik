@@ -5,6 +5,7 @@
 //! child (`runtime`), and jobs run against it once it is primed and calibrated.
 pub(crate) mod breaker;
 pub(crate) mod contract;
+pub(crate) mod download;
 #[cfg(test)]
 pub(crate) mod fake_server;
 pub(crate) mod interpreter;

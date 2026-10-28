@@ -111,17 +111,82 @@ fn refused_specs_name_the_rule_they_break() {
     assert_eq!(rule(&"a".repeat(513)), Rule::TooLong);
 }
 
+const GRANITE_HF: &str = "hf:ibm-granite/granite-4.2-3b-GGUF/granite-4.2-3b-Q4_K_M.gguf@c40945d71cd90f249a56985e8155551a9188dc30";
+const QWEN_HF: &str =
+    "hf:unsloth/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf@3885219b6810b007914f3a7950a8d1b469d598a5";
+
 #[test]
-fn an_hf_spec_says_downloads_arrive_later() {
-    let hf = "hf:ibm-granite/granite-4.2-3b-GGUF/granite-4.2-3b-Q4_K_M.gguf@c40945d71cd90f249a56985e8155551a9188dc30";
-    let error = parse_spec(hf).unwrap_err();
-    assert_eq!(error.rule, Rule::Download);
-    assert!(
-        error.to_string().contains("downloads arrive later"),
-        "{error}"
+fn the_two_pinned_hf_specs_are_accepted_and_keep_their_parts() {
+    for text in [GRANITE_HF, QWEN_HF] {
+        let Ok(Spec::Hf(hf)) = parse_spec(text) else {
+            panic!("{text} must parse as an hf spec");
+        };
+        assert_eq!(hf.canonical(), text);
+    }
+    let Ok(Spec::Hf(hf)) = parse_spec(QWEN_HF) else {
+        panic!()
+    };
+    assert_eq!(
+        (hf.org.as_str(), hf.repo.as_str()),
+        ("unsloth", "Qwen3.5-9B-GGUF")
     );
+    assert_eq!(hf.path, "Qwen3.5-9B-Q4_K_M.gguf");
+    // A nested path is allowed.
+    let nested = QWEN_HF.replace("/Qwen3.5-9B-Q4", "/dir/sub/Qwen3.5-9B-Q4");
+    assert!(parse_spec(&nested).is_ok(), "{nested}");
     // The other rules come first, as for any spec.
-    assert_eq!(rule(&format!("{hf} ")), Rule::Whitespace);
+    assert_eq!(rule(&format!("{GRANITE_HF} ")), Rule::Whitespace);
+}
+
+#[test]
+fn an_hf_spec_that_could_reach_another_url_is_refused_with_its_own_rule() {
+    let rev = "c40945d71cd90f249a56985e8155551a9188dc30";
+    let ok = |path: &str| format!("hf:org/repo/{path}@{rev}");
+    for (text, expected) in [
+        // A branch, tag, short or upper-case revision, or none.
+        ("hf:org/repo/m.gguf@main".to_owned(), Rule::HfRevision),
+        ("hf:org/repo/m.gguf@c40945d".to_owned(), Rule::HfRevision),
+        (
+            format!("hf:org/repo/m.gguf@{}", rev.to_uppercase()),
+            Rule::HfRevision,
+        ),
+        (format!("hf:org/repo/m.gguf@{rev}0"), Rule::HfRevision),
+        ("hf:org/repo/m.gguf".to_owned(), Rule::HfForm),
+        ("hf:org/m.gguf@".to_owned() + rev, Rule::HfForm),
+        ("hf:".to_owned(), Rule::HfForm),
+        // Traversal and encoding in the path.
+        (ok("../m.gguf"), Rule::HfPath),
+        (ok("./m.gguf"), Rule::HfPath),
+        (ok("a/../m.gguf"), Rule::HfPath),
+        (ok("%2e%2e/m.gguf"), Rule::HfPath),
+        (ok("a%2fb.gguf"), Rule::HfPath),
+        (ok("a\\b.gguf"), Rule::HfPath),
+        (ok("a//b.gguf"), Rule::HfPath),
+        (ok("/m.gguf"), Rule::HfPath),
+        (ok("m?x.gguf"), Rule::HfPath),
+        (ok("m#x.gguf"), Rule::HfPath),
+        // Not a single model file.
+        (ok("m.bin"), Rule::HfExtension),
+        (ok("m"), Rule::HfExtension),
+        (ok("m-00001-of-00003.gguf"), Rule::HfSplit),
+        // Owner and repository.
+        (format!("hf:../repo/m.gguf@{rev}"), Rule::HfOwner),
+        (format!("hf:-org/repo/m.gguf@{rev}"), Rule::HfOwner),
+        (format!("hf:or--g/repo/m.gguf@{rev}"), Rule::HfOwner),
+        (format!("hf:org/re..po/m.gguf@{rev}"), Rule::HfRepo),
+        (format!("hf:org/repo./m.gguf@{rev}"), Rule::HfRepo),
+        (
+            format!("hf:{}/repo/m.gguf@{rev}", "o".repeat(97)),
+            Rule::HfOwner,
+        ),
+    ] {
+        assert_eq!(rule(&text), expected, "{text}");
+    }
+    // Segment length and an overlong path.
+    assert_eq!(
+        rule(&ok(&format!("{}.gguf", "a".repeat(129)))),
+        Rule::HfPath
+    );
 }
 
 #[test]
@@ -130,7 +195,13 @@ fn every_rule_has_its_own_message() {
         Rule::TooLong,
         Rule::NotAscii,
         Rule::Whitespace,
-        Rule::Download,
+        Rule::HfForm,
+        Rule::HfOwner,
+        Rule::HfRepo,
+        Rule::HfPath,
+        Rule::HfExtension,
+        Rule::HfSplit,
+        Rule::HfRevision,
         Rule::Form,
         Rule::NameLength,
         Rule::PathSeparator,
