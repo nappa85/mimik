@@ -46,7 +46,9 @@ start (`default_model` in `src/assistant/runtime/models.rs`): on the GPU path th
 when it is in the models folder, otherwise Granite 4.2 3B with "Qwen3.5-9B not found or not
 readable in <absolute models folder>; using Granite 4.2 3B" on `/admin/assistant` (a warning,
 not a block); the same when the 9B file fails its pinned hash at the load ("Qwen3.5-9B in
-<absolute models folder> does not match its pinned hash"; "Try the GPU again" or Mimik's restart tries the file again; an explicit or stored 9B is
+<absolute models folder> does not match its pinned hash"; a plain Restart keeps this fallback
+and its note. "Try the GPU again", available even while Granite runs on the GPU, or Mimik's
+restart tries the file again; an explicit or stored 9B is
 refused instead, as any model whose file changed); on the CPU
 path (`--assistant-device cpu`, no usable GPU, or a GPU start that fell back) Granite 4.2 3B
 (file `granite-4.2-3b-Q4_K_M.gguf`, SHA-256 and `max_tokens` 352 compiled in), with a note when

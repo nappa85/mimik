@@ -190,7 +190,7 @@ struct View {
     state: &'static str,
     reason: String,
     path: &'static str,
-    /// The GPU is wanted but not in use: why, with the "Try the GPU again" button.
+    /// Why the GPU path or its default model needs another try, with the retry button.
     gpu_note: Option<String>,
     /// `--assistant-device cpu`.
     cpu_chosen: bool,
@@ -418,6 +418,7 @@ fn count(n: f64) -> String {
 }
 
 fn view(status: Status, breaker: String, input: String, error: Option<String>) -> View {
+    let gpu_note = status.gpu_retry_note().map(str::to_owned);
     let (state, reason) = match status.state {
         Runtime::Starting(phase) => ("Starting", phase.to_owned()),
         Runtime::Ready => ("Ready", String::new()),
@@ -455,15 +456,7 @@ fn view(status: Status, breaker: String, input: String, error: Option<String>) -
             Path::Cpu => "CPU",
             Path::Gpu => "GPU",
         },
-        gpu_note: if status.gpu_wanted && status.path == Path::Cpu {
-            Some(
-                status
-                    .gpu_note
-                    .unwrap_or_else(|| "the GPU path has not been tried yet".to_owned()),
-            )
-        } else {
-            None
-        },
+        gpu_note,
         cpu_chosen: !status.gpu_wanted,
         restarting: status.restarting || state == "Starting",
         device: status.device.map(|device| DeviceLine {

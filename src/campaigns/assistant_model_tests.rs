@@ -847,6 +847,97 @@ async fn only_the_absence_of_a_flag_and_of_a_stored_setting_leaves_the_device_de
 }
 
 #[tokio::test]
+async fn the_9b_hash_mismatch_page_offers_try_the_gpu_again() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let models = models_with(
+        Duration::from_millis(1),
+        Path::Gpu,
+        true,
+        Start::Ok(quick()),
+    )
+    .await;
+    models.launcher.absent.lock().unwrap().clear();
+    models
+        .launcher
+        .script
+        .lock()
+        .unwrap()
+        .push_front(Start::Other(
+            "the model file changed: it no longer has the SHA-256 recorded for it",
+        ));
+    let generation = models.handle.status().generation;
+    assert_eq!(models.handle.restart(), manager::Restart::Accepted);
+    models
+        .until(|s| s.generation >= generation + 2 && s.state == manager::State::Ready)
+        .await;
+    let page = models.page().await;
+    assert!(page.contains("does not match its pinned hash"), "{page}");
+    assert!(
+        page.contains("action=\"/admin/assistant/try-gpu\""),
+        "{page}"
+    );
+    let response = router_request(
+        &models.app,
+        &models.auth[0],
+        "/admin/assistant/try-gpu",
+        Some(form(&[("csrf", &csrf())])),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    models
+        .until(|s| {
+            s.model.active.sha256 == crate::assistant::GPU_DEFAULT_MODEL_SHA256
+                && s.state == manager::State::Ready
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn a_stored_9b_choice_overrides_the_device_default_without_a_start_flag() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (dir, store, _auth, _clock) = fixture_with_owner(1).await;
+    let handle = AssistantHandle::runtime(default_config(dir.path(), None), store.clone())
+        .await
+        .unwrap();
+    assert!(
+        handle
+            .runtime
+            .as_ref()
+            .unwrap()
+            .status()
+            .model
+            .device_default
+            .is_on()
+    );
+    handle.shutdown().await;
+    // A choice made while the default was on must still win on the next app start, on CPU.
+    let qwen = Model::compiled(crate::assistant::GPU_DEFAULT_MODEL);
+    SqlRecords(store.clone())
+        .activate(
+            &crate::assistant::records::Record {
+                model: qwen.clone(),
+                trial: None,
+            },
+            Some(&crate::assistant::records::Record {
+                model: granite(),
+                trial: None,
+            }),
+            1,
+        )
+        .await
+        .unwrap();
+    let handle = AssistantHandle::runtime(default_config(dir.path(), None), store)
+        .await
+        .unwrap();
+    let status = handle.runtime.as_ref().unwrap().status();
+    assert_eq!(status.model.active, qwen);
+    assert_eq!(status.model.previous, Some(granite()));
+    assert!(status.model.from_owner_setting);
+    assert!(!status.model.device_default.is_on());
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn an_alias_the_stored_setting_would_refuse_is_refused_at_start() {
     let _lock = crate::auth::test_resource_lock().await;
     let (dir, store, _auth, _clock) = fixture_with_owner(1).await;
