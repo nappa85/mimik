@@ -207,6 +207,161 @@ async fn a_9b_file_with_the_wrong_hash_falls_back_to_granite_with_the_reason() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_restart_keeps_the_9b_hash_mismatch_until_try_the_gpu_again() {
+    let launcher = FakeLauncher::scripted([
+        Start::Other("the model file changed: it no longer has the SHA-256 recorded for it"),
+        Start::Ok(Behaviour::default()),
+    ]);
+    let (assistant, handle) = spawn_default(&launcher, GPU_CONFIG, true, None);
+    ready(&assistant).await;
+    let note = "Qwen3.5-9B in /srv/models does not match its pinned hash; using Granite 4.2 3B";
+    assert_eq!(handle.status().model.device_default.note(), Some(note));
+    assert_eq!(handle.restart(), Restart::Accepted);
+    super::tests::until(Duration::from_mins(15), || {
+        launcher.starts.lock().unwrap().len() >= 3
+    })
+    .await;
+    ready(&assistant).await;
+    let status = handle.status();
+    assert!(!status.restarting);
+    assert_eq!(status.path, Path::Gpu);
+    assert!(status.model.device_default.is_on());
+    assert_eq!(status.model.active.sha256, DEFAULT_MODEL_SHA256);
+    assert_eq!(status.model.device_default.note(), Some(note));
+    assert_eq!(
+        selected_shas(&launcher),
+        [
+            GPU_DEFAULT_MODEL_SHA256,
+            DEFAULT_MODEL_SHA256,
+            DEFAULT_MODEL_SHA256
+        ]
+    );
+    // Only "Try the GPU again" clears the mismatch, even though the GPU never failed.
+    assert_eq!(handle.try_gpu(), TryGpu::Accepted);
+    super::tests::until(Duration::from_mins(15), || {
+        launcher.starts.lock().unwrap().len() >= 4
+    })
+    .await;
+    ready(&assistant).await;
+    assert_eq!(
+        handle.status().model.active.sha256,
+        GPU_DEFAULT_MODEL_SHA256
+    );
+    assert_eq!(handle.status().model.device_default.note(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn try_the_gpu_again_picks_up_a_9b_file_added_after_the_start() {
+    let launcher = FakeLauncher::scripted([]);
+    launcher
+        .absent
+        .lock()
+        .unwrap()
+        .push("Qwen3.5-9B-Q4_K_M.gguf".into());
+    let (assistant, handle) = spawn_default(&launcher, GPU_CONFIG, true, None);
+    ready(&assistant).await;
+    let status = handle.status();
+    assert!(!status.restarting);
+    assert_eq!(status.path, Path::Gpu);
+    assert_eq!(status.model.active.sha256, DEFAULT_MODEL_SHA256);
+    assert!(status.model.device_default.note().is_some());
+    let generation = status.generation;
+    // The owner adds the file, then presses the button; a second press is refused.
+    launcher.absent.lock().unwrap().clear();
+    assert_eq!(handle.try_gpu(), TryGpu::Accepted);
+    assert_eq!(handle.try_gpu(), TryGpu::AlreadyRunning);
+    super::tests::until(Duration::from_mins(15), || {
+        let status = handle.status();
+        status.generation > generation && !status.restarting && status.state == State::Ready
+    })
+    .await;
+    let status = handle.status();
+    assert_eq!(status.path, Path::Gpu);
+    assert_eq!(status.model.active.sha256, GPU_DEFAULT_MODEL_SHA256);
+    assert_eq!(status.model.device_default.note(), None);
+    assert!(launcher.absent.lock().unwrap().is_empty());
+    assert_eq!(
+        selected_shas(&launcher),
+        [DEFAULT_MODEL_SHA256, GPU_DEFAULT_MODEL_SHA256]
+    );
+    // The file is there and the GPU runs it: nothing left to try.
+    assert_eq!(handle.try_gpu(), TryGpu::NotApplicable);
+    handle.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_9b_trial_while_the_device_default_is_on_runs_the_candidate_and_stores_the_choice() {
+    // Only the CPU path starts from Granite with the 9B present; on the GPU path that file is the
+    // default, so a trial of it would not be a candidate apart from the active model.
+    let config = CONFIG;
+    let launcher = FakeLauncher::scripted([]);
+    launcher.files.lock().unwrap().insert(
+        "Qwen3.5-9B-Q4_K_M.gguf".into(),
+        Ok(ModelFile {
+            sha256: GPU_DEFAULT_MODEL_SHA256.into(),
+            size: 5_680_522_464,
+        }),
+    );
+    let records = Arc::new(MemRecords::default());
+    let (assistant, handle) = spawn_default(&launcher, config, true, Some(Arc::clone(&records)));
+    ready(&assistant).await;
+    let original = handle.status().model.active;
+    assert!(handle.status().model.device_default.is_on());
+    assert!(matches!(
+        handle.try_model(7, GPU_DEFAULT_MODEL.into(), "Qwen3.5-9B-Q4_K_M.gguf".into()),
+        TryModel::Accepted(_)
+    ));
+    super::tests::until(Duration::from_hours(1), || {
+        handle.status().trial.is_some_and(|trial| !trial.running())
+    })
+    .await;
+    ready(&assistant).await;
+    let Some(TrialState::Passed(report)) = handle.status().trial else {
+        panic!("{:?}", handle.status().trial)
+    };
+    assert_eq!(report.path, config.path);
+    assert_eq!(report.model.sha256, GPU_DEFAULT_MODEL_SHA256);
+    assert_eq!(report.model.max_tokens, 352);
+    assert_eq!(
+        selected_shas(&launcher),
+        [
+            original.sha256.clone(),
+            GPU_DEFAULT_MODEL_SHA256.to_owned(),
+            original.sha256.clone()
+        ]
+    );
+    assert_eq!(handle.status().model.active, original);
+    assert!(handle.status().model.device_default.is_on());
+    assert!(records.log.lock().unwrap().is_empty());
+    assert_eq!(handle.switch(7, &report.key), Chosen::Accepted);
+    super::tests::until(Duration::from_mins(15), || {
+        !handle.status().model.pending && handle.status().state == State::Ready
+    })
+    .await;
+    let status = handle.status();
+    assert_eq!(status.model.active, report.model);
+    assert!(!status.model.device_default.is_on());
+    assert_eq!(status.model.device_default.note(), None);
+    assert!(status.model.from_owner_setting);
+    assert_eq!(
+        records
+            .stored
+            .lock()
+            .unwrap()
+            .active
+            .as_ref()
+            .unwrap()
+            .model,
+        report.model
+    );
+    assert_eq!(
+        launcher.selected.lock().unwrap().last(),
+        Some(&report.model)
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_explicit_9b_with_the_wrong_hash_stays_unavailable() {
     let launcher = FakeLauncher::scripted([Start::Other(
         "the model file changed: it no longer has the SHA-256 recorded for it",

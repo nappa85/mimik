@@ -92,8 +92,9 @@
 <section class="panel"><h2>Device</h2>
 {% if view.cpu_chosen %}<p>The CPU only: Mimik was started with <code>--assistant-device cpu</code>, so no GPU is listed or used.</p>{% endif %}
 {% if let Some(device) = view.device %}<p>GPU: <strong>{{ device.description }}</strong> ({{ device.name }} in its sandbox, PCI {{ device.pci }}, render node {{ device.node }}, {{ device.total_mib }} MiB).</p><p class="gpu-exposure"><strong>Sandboxed, with graphics-driver access:</strong> the model server runs in the level-1 sandbox: no network, no other processes and no access to the user's files. Besides the runtime and the model it reads read-only system libraries, system driver data (Vulkan ICD manifests, libdrm and drirc data), the card's sysfs attributes and the CPU topology, and it can issue any ioctl on its one render node, so its exposure to the kernel's graphics driver is wider than on the CPU path. Start Mimik with <code>--assistant-device cpu</code> to run it on the CPU instead.</p>{% endif %}
-{% if let Some(note) = view.gpu_note %}<p>The GPU is not in use: {{ note }}. The CPU path runs until Mimik restarts or you try the GPU again.</p>
-<form method="post" action="/admin/assistant/try-gpu"><input type="hidden" name="csrf" value="{{ csrf }}"><button{% if view.restarting %} disabled{% endif %}>Try the GPU again</button></form>{% endif %}
+{% if let Some(note) = view.gpu_note %}<p>The GPU is not in use: {{ note }}. The CPU path runs until Mimik restarts or you try the GPU again.</p>{% endif %}
+{% if let Some(note) = view.gpu_default_note %}<p>Granite 4.2 3B runs on the GPU instead of Qwen3.5-9B: {{ note }}. Try the GPU again checks the 9B file again.</p>{% endif %}
+{% if view.gpu_note.is_some() || view.gpu_default_note.is_some() %}<form method="post" action="/admin/assistant/try-gpu"><input type="hidden" name="csrf" value="{{ csrf }}"><button{% if view.restarting %} disabled{% endif %}>Try the GPU again</button></form>{% endif %}
 {% if !view.device_notes.is_empty() %}<h3>Render nodes not used</h3><ul>{% for note in view.device_notes %}<li>{{ note }}</li>{% endfor %}</ul>{% endif %}</section>
 <section class="panel"><h2>Confinement</h2>
 {% if let Some(level) = view.level %}<p><strong>Level {{ level.number }}: {{ level.name }}</strong> — {{ level.text }}</p>{% else %}<p>No level is active.</p>{% endif %}

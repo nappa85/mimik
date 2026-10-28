@@ -150,7 +150,8 @@ def preflight(model, cwd, timeout=45, attempts=3, base_delay=10):
     return False
 
 
-VERDICT = re.compile(r"verdict", re.IGNORECASE)
+# A brief asks for a verdict line; reviewers often state it without the word "verdict".
+VERDICT = re.compile(r"verdict|\bapprove|changes required", re.IGNORECASE)
 # Free models have daily token limits and are throttled when several run at once; a throttled
 # run often opens a stream that never returns a byte instead of failing (2026-10-22).
 STATE_DIR = Path.home() / ".cache" / "mimik-review"
@@ -228,10 +229,12 @@ def classify(returncode, output):
     return "ok"
 
 
-def review_with_fallback(models, snap, prompt, total, idle):
+def review_with_fallback(models, snap, prompt, total, idle, incomplete=None):
     """Try each model in order; return (model, output) from the first usable review, or
-    (None, log) when every model is unavailable."""
+    (None, log) when every model is unavailable. Outputs judged incomplete are appended to
+    `incomplete` as (model, output), so a real review the heuristic missed is not lost."""
     attempts = []
+    incomplete = [] if incomplete is None else incomplete
     for model in models:
         if is_free(model) and limited_today(model):
             attempts.append(f"{model}: skipped (limited earlier today)")
@@ -261,6 +264,7 @@ def review_with_fallback(models, snap, prompt, total, idle):
         attempts.append(f"{model}: {state} (exit {code})")
         if state == "incomplete":
             print(f"{model}: output ended with:\n{output.strip()[-1500:]}", file=sys.stderr)
+            incomplete.append((model, output))
         print(f"{model}: {state} (exit {code}); trying the next model.", file=sys.stderr)
     return None, "\n".join(attempts)
 
@@ -300,9 +304,15 @@ def main():
             (snap / "REVIEW_DIFF.patch").write_text(diff)
             (snap / "REVIEW_STATUS.txt").write_text(status)
         prompt = args.prompt_file.read_text()
-        model, output = review_with_fallback(models, snap, prompt, args.timeout, args.idle_timeout)
+        incomplete = []
+        model, output = review_with_fallback(
+            models, snap, prompt, args.timeout, args.idle_timeout, incomplete
+        )
     if model is None:
-        args.output.write_text(f"no reviewer available:\n{output}\n")
+        kept = "".join(
+            f"\n--- incomplete output of {name} ---\n{text}\n" for name, text in incomplete
+        )
+        args.output.write_text(f"no reviewer available:\n{output}\n{kept}")
         print("No external reviewer available; continue without this review.", file=sys.stderr)
         return 3
     args.output.write_text(f"reviewer-model: {model}\n{output}")

@@ -93,8 +93,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   - Qwen4 (announced, not released on 2026-10-27): screen it when it is out.
   - Engines (ASSIST-54): re-screen when mistral.rs gains Vulkan or vllm.cpp has stable releases.
 
-- ASSIST-55 test gaps (Minor): a plain Restart keeps the 9B hash-mismatch fallback after a real
-  mismatch; a trial or stored 9B while the device default was on.
 - A launch refused for owner setup leaves a new, already migrated empty database (and its
   `data/` folder) behind: `create_data_dir` and `Store::open` run before the owner check.
 - Start-up order: no regression test that a failing search-index check exits without starting
