@@ -42,6 +42,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
@@ -244,21 +245,40 @@ class Proxy(threading.Thread):
         host, sep, port = target.rpartition(":")
         return bool(sep) and port == "443" and host.lower() in self.hosts
 
+    @staticmethod
+    def receive(client, deadline):
+        """One read that ends by `deadline` (time.monotonic()); b"" when time is up."""
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return b""
+        client.settimeout(left)
+        try:
+            return client.recv(4096)
+        except TimeoutError:
+            return b""
+
     def serve(self, client):
         with contextlib.closing(client):
-            client.settimeout(self.HEADER_SECONDS)
+            # Absolute deadlines: trickled bytes cannot hold a slot past them.
+            deadline = time.monotonic() + self.HEADER_SECONDS
             head = b""
-            while b"\r\n\r\n" not in head:
-                if len(head) > self.MAX_HEADER:
-                    client.sendall(b"HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n")
-                    return
-                chunk = client.recv(4096)
+            while b"\r\n\r\n" not in head and len(head) <= self.MAX_HEADER:
+                chunk = self.receive(client, deadline)
                 if not chunk:
                     return
                 head += chunk
+            if b"\r\n\r\n" not in head or head.index(b"\r\n\r\n") > self.MAX_HEADER:
+                client.sendall(b"HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n")
+                return
             head, rest = head.split(b"\r\n\r\n", 1)
-            parts = head.split(b"\r\n", 1)[0].decode("latin-1").split(" ")
-            if len(parts) != 3 or parts[0] != "CONNECT" or parts[2] not in {"HTTP/1.0", "HTTP/1.1"}:
+            request, *fields = head.decode("latin-1").split("\r\n")
+            parts = request.split(" ")
+            if (
+                len(parts) != 3
+                or parts[0] != "CONNECT"
+                or parts[2] not in {"HTTP/1.0", "HTTP/1.1"}
+                or any(":" not in field or field[0] in " \t" for field in fields)
+            ):
                 client.sendall(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
                 return
             target = parts[1]
@@ -272,8 +292,9 @@ class Proxy(threading.Thread):
             # The ClientHello comes after the 200, so it is read before any upstream byte.
             client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
             hello = rest
+            deadline = time.monotonic() + self.HEADER_SECONDS
             while client_hello_sni(hello) is None and len(hello) < 16384 + 5:
-                chunk = client.recv(4096)
+                chunk = self.receive(client, deadline)
                 if not chunk:
                     return
                 hello += chunk

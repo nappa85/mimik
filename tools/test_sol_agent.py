@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -128,6 +129,32 @@ class Egress(unittest.TestCase):
         )
         self.assertEqual(dialled, [("chatgpt.com", 443)])
 
+    def test_a_header_with_a_malformed_field_is_refused(self):
+        reply, dialled = self.tunnel(b"CONNECT chatgpt.com:443 HTTP/1.1\r\nno colon\r\n\r\n")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 405"))
+        self.assertEqual(dialled, [])
+
+    def test_a_trickling_client_is_dropped_at_the_absolute_deadline(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(agent.Proxy, "HEADER_SECONDS", 1),
+        ):
+            proxy = agent.Proxy(Path(tmp, "sock"), ["chatgpt.com"], False)
+            proxy.start()
+            client = socket.socket(socket.AF_UNIX)
+            client.settimeout(5)
+            client.connect(str(Path(tmp, "sock")))
+            started = time.monotonic()
+            try:
+                for byte in b"CONNECT chatgpt.com:443 HTTP/1.1\r\n":
+                    client.sendall(bytes([byte]))
+                    time.sleep(0.1)
+            except OSError:
+                pass
+            self.assertLess(time.monotonic() - started, 3.0)
+            client.close()
+            proxy.server.close()
+
     def test_an_oversized_or_malformed_request_is_refused_without_dialling(self):
         reply, dialled = self.tunnel(b"CONNECT chatgpt.com:443 HTTP/1.1\r\n" + b"X" * 9000)
         self.assertTrue(reply.startswith(b"HTTP/1.1 431"))
@@ -209,8 +236,14 @@ class StateDir(unittest.TestCase):
             (tree / ".git").write_text("gitdir: elsewhere\n")
             task = Path(tmp, "task.txt")
             task.write_text("t")
-            with mock.patch.object(agent, "AUTH", task), self.assertRaises(SystemExit):
+            with (
+                mock.patch.object(agent, "AUTH", task),
+                mock.patch.object(agent.shutil, "which", return_value="/usr/bin/true"),
+                mock.patch.object(agent, "fail", side_effect=SystemExit) as failed,
+                self.assertRaises(SystemExit),
+            ):
                 agent.run_agent([str(tree), str(task), str(tree / ".sol-state")])
+            self.assertIn("outside the worktree", failed.call_args.args[0])
 
     def test_a_target_link_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -247,6 +280,8 @@ class LiveSandbox(unittest.TestCase):
                 "         for l in [link(f)] if l and not l.startswith('/proc/')]\n"
                 "print('fds', extra)\n"
                 "print('secret', len(open('deep/target/.env').read()))\n"
+                "auth = os.path.expanduser('~/.local/share/opencode/auth.json')\n"
+                "print('auth', 'dummy' if open(auth).read() == '{}' else 'NOT-THE-DUMMY')\n"
                 "s = socket.socket(); s.settimeout(2)\n"
                 "print('loopback22', s.connect_ex(('127.0.0.1', 22)))\n"
                 "import ctypes\n"
@@ -257,10 +292,12 @@ class LiveSandbox(unittest.TestCase):
             env = dict(os.environ, CPUS="1", TIMEOUT="60")
             with mock.patch.dict(os.environ, env):
                 code = (
-                    "import sys, runpy; from pathlib import Path; "
-                    f"m = runpy.run_path({str(Path(agent.__file__))!r}); "
-                    f"m['AUTH'] = Path({str(auth)!r}); "
-                    "sys.exit(m['run_agent'](sys.argv[1:]))"
+                    "import importlib.util, sys; from pathlib import Path; "
+                    "spec = importlib.util.spec_from_file_location("
+                    f"'sol_agent', {str(Path(agent.__file__))!r}); "
+                    "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); "
+                    f"m.AUTH = Path({str(auth)!r}); "
+                    "sys.exit(m.run_agent(sys.argv[1:]))"
                 )
                 out = subprocess.run(
                     [
@@ -285,6 +322,8 @@ class LiveSandbox(unittest.TestCase):
             lines = dict(line.split(" ", 1) for line in out.stdout.splitlines())
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertEqual(lines["secret"], "0")
+            # Only a verdict leaves the sandbox, never file content.
+            self.assertEqual(lines["auth"], "dummy")
             self.assertNotEqual(lines["loopback22"], "0")
             self.assertEqual(lines["ptrace"], "-1 1")
             self.assertEqual(lines["fds"], "[]")  # nothing inherited beyond stdio
