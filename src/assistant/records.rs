@@ -57,10 +57,9 @@ pub(crate) trait Records: Send + Sync {
     async fn swap(&self, by: i64) -> Result<(), String>;
 }
 
-/// Drops migration 022's tables (tests that rewind the schema).
+/// Drops migration 022's and 023's tables (tests that rewind the schema).
 #[cfg(test)]
-pub(crate) const DROP_SCHEMA: &str =
-    "DROP TABLE assistant_model_choice; DROP TABLE assistant_models;";
+pub(crate) const DROP_SCHEMA: &str = "DROP TABLE assistant_downloads; DROP TABLE assistant_model_choice; DROP TABLE assistant_models;";
 
 /// The records in the application's database.
 #[derive(Clone)]

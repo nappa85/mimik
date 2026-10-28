@@ -6,6 +6,7 @@
 pub(crate) mod breaker;
 pub(crate) mod contract;
 pub(crate) mod download;
+pub(crate) mod download_rows;
 #[cfg(test)]
 pub(crate) mod fake_server;
 pub(crate) mod interpreter;

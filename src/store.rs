@@ -7,10 +7,10 @@ use std::{
 };
 
 /// Current database schema version; migration `N` sets `PRAGMA user_version=N`.
-pub const SCHEMA_VERSION: i64 = 22;
+pub const SCHEMA_VERSION: i64 = 23;
 
 /// Contiguous migrations in application order: index `N-1` holds migration `N`.
-const MIGRATIONS: [&str; 22] = [
+const MIGRATIONS: [&str; 23] = [
     include_str!("../migrations/001_characters.sql"),
     include_str!("../migrations/002_mork_borg.sql"),
     include_str!("../migrations/003_sources.sql"),
@@ -33,6 +33,7 @@ const MIGRATIONS: [&str; 22] = [
     include_str!("../migrations/020_sheet_notes.sql"),
     include_str!("../migrations/021_row_notes.sql"),
     include_str!("../migrations/022_assistant_models.sql"),
+    include_str!("../migrations/023_assistant_downloads.sql"),
 ];
 
 #[derive(Clone)]
