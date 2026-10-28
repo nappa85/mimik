@@ -784,7 +784,15 @@ error (`ENOSPC`, `EIO`) mid-transfer is a retryable `failed`.
   the verification-only path; a partial with no row, or larger than its row's size → swept; a
   `complete` row whose file is missing or of another size shows as missing (the trial's hash
   check stays the authority at load). Nothing resumes by itself; shutdown stops the task and
-  keeps the partial.
+  keeps the partial. The `linkat` fallback has fault points between the link and the unlink and
+  between the two directory `fsync`s; recovery recognises a publication-created second link
+  (final and partial share the inode, `nlink == 2`, the row in a known state) and removes the
+  partial name before the ordinary `nlink == 1` admission.
+- Blocking work: every blocking file operation (open, write, `fsync`, rename or link, directory
+  sync, unlink, hashing) runs off the async executor (`spawn_blocking` or a dedicated thread);
+  no manager or database lock is held across one. A read error, a file `fsync` error or a
+  directory `fsync` error never publishes or marks `complete`; Cancel and ordinary jobs stay
+  responsive while one blocks.
 - Pinned file whose local name already holds another file: never replaced; the panel shows
   "present, hash differs" (presence is judged by the compiled hash).
 
@@ -854,8 +862,16 @@ failure named:
   strict forms with an extra field 422 for every action; delete refused for the active,
   previous, effective-default, pinned, shared-hash or in-trial file and allowed otherwise;
   delete serialises with Switch back (two clicks act once); `downloads.json` holds no URL.
+- link fallback: a fault between link and unlink, and between the two directory `fsync`s, then
+  recovery with `nlink == 2` removes the partial name and completes; read, file-`fsync` and
+  directory-`fsync` errors publish nothing; a blocked seam leaves Cancel and an ordinary job
+  responsive. Prevents a stuck second link and a blocked executor.
+- isolation: the TLS tests set no-proxy explicitly in the constructor, so an ambient proxy
+  variable cannot change them; one test covers `NO_PROXY`.
 - unpacked-artifact smoke (CI): the release binary starts with TLS linked and the assistant
-  off, using no network.
+  off, using no network; a check that the shipped binary refuses a certificate outside an
+  isolated trust store (loopback fake server, offline) is part of it if the platform verifier
+  can be pointed at an isolated store, otherwise it is a live check.
 
 **Live checks owed** (reported separately, none in CI): (1) the real GET redirect chain of the
 two pinned files, observed by hand with bounded hops and without reading the body, which
