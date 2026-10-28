@@ -49,7 +49,7 @@
 <p>An <code>hf:&lt;org&gt;/&lt;repo&gt;/&lt;path&gt;.gguf@&lt;40-digit revision&gt;</code> model in the Model field is reviewed first: Mimik reads the repository's metadata and licence from huggingface.co, shows them, and downloads nothing until you confirm. The file is checked against its SHA-256 and kept in the models folder; the model in use keeps serving meanwhile, and a trial or a switch waits while a download runs.</p>
 {% if !d.pinned.is_empty() %}<h3>Pinned defaults</h3>
 <table><thead><tr><th>Model</th><th>File</th><th>Size</th><th>State</th><th></th></tr></thead><tbody>
-{% for pin in d.pinned %}<tr><td><code>{{ pin.hf }}</code></td><td><code>{{ pin.file_name }}</code></td><td>{{ pin.size }}</td><td>{{ pin.status }}</td><td>{% if pin.can_review %}<form method="post" action="/admin/assistant/model/review"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="model" value="{{ pin.hf }}"><button>Review</button></form>{% endif %}</td></tr>{% endfor %}
+{% for pin in d.pinned %}<tr><td><code>{{ pin.hf }}</code></td><td><code>{{ pin.file_name }}</code></td><td>{{ pin.size }}</td><td>{{ pin.status }}</td><td>{% if let Some(id) = pin.repair_id %}<form method="post" action="/admin/assistant/download/repair"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="id" value="{{ id }}"><button>Download again</button></form>{% endif %}{% if pin.can_review %}<form method="post" action="/admin/assistant/model/review"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="model" value="{{ pin.hf }}"><button>Review</button></form>{% endif %}</td></tr>{% endfor %}
 </tbody></table>
 <p>These are the two default files, checked against the SHA-256 and size compiled into Mimik. A file already in the models folder under that name is never replaced.</p>{% endif %}
 {% if let Some(review) = d.review %}<h3>Review of <code>{{ review.spec }}</code></h3>
@@ -74,13 +74,14 @@
 {% if !d.transfers.is_empty() %}<h3>Downloads in progress</h3>
 {% for transfer in d.transfers %}<p><code>{{ transfer.spec }}</code>: <strong>{{ transfer.state }}</strong>{% if !transfer.detail.is_empty() %} ({{ transfer.detail }}){% endif %}.
 <progress id="download-{{ transfer.id }}" max="{{ transfer.total }}" value="{{ transfer.received }}"></progress> {{ transfer.received }} of {{ transfer.total }} bytes</p>
-{% if transfer.running %}<form method="post" action="/admin/assistant/download/cancel"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Cancel</button></form>{% endif %}
+{% if transfer.running %}<form method="post" action="/admin/assistant/download/cancel"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="id" value="{{ transfer.id }}"><button>Cancel</button></form>{% endif %}
 {% if transfer.can_resume %}<form method="post" action="/admin/assistant/download/resume"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="id" value="{{ transfer.id }}"><button>Resume</button></form>{% endif %}
 <form method="post" action="/admin/assistant/download/discard"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="id" value="{{ transfer.id }}"><button>Discard</button></form>
 {% endfor %}{% endif %}
 {% if !d.files.is_empty() %}<h3>Downloaded models</h3>
 <table><thead><tr><th>Model</th><th>File</th><th>Size</th><th>Licence</th><th></th></tr></thead><tbody>
 {% for file in d.files %}<tr><td><code>{{ file.spec }}</code></td><td><code>{{ file.file_name }}</code>{% if !file.present %} (missing or changed){% endif %}</td><td>{{ file.size }}</td><td>{% if file.licence_id.is_empty() %}none stated{% else %}{{ file.licence_id }}{% endif %}</td><td>
+{% if !file.present %}<form method="post" action="/admin/assistant/download/repair"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="id" value="{{ file.id }}"><button>Download again</button></form>{% endif %}
 {% if file.present %}<form method="post" action="/admin/assistant/model/try"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="model" value="local:{{ file.file_name }}"><button>Try</button></form>{% endif %}
 {% if file.deletable %}<form method="post" action="/admin/assistant/model/delete"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="id" value="{{ file.id }}"><button>Delete</button></form>{% endif %}</td></tr>{% endfor %}
 </tbody></table>{% endif %}

@@ -45,9 +45,19 @@ pub(crate) enum Reply {
         status: u16,
         headers: Vec<(&'static str, String)>,
         first: Vec<u8>,
+        /// The `Content-Length` announced, if any.
+        declared: Option<u64>,
     },
-    /// `body` in `piece`-byte pieces, `gap` apart.
+    /// `body` in `piece`-byte pieces, `gap` apart, announcing its length.
     Slow {
+        status: u16,
+        headers: Vec<(&'static str, String)>,
+        body: Vec<u8>,
+        piece: usize,
+        gap: Duration,
+    },
+    /// Like [`Reply::Slow`] but chunked: the length is not announced.
+    Chunked {
         status: u16,
         headers: Vec<(&'static str, String)>,
         body: Vec<u8>,
@@ -309,9 +319,13 @@ async fn answer(
         } => build(status, &headers, boxed(body)),
         Reply::Stall {
             status,
-            headers,
+            mut headers,
             first,
+            declared,
         } => {
+            if let Some(length) = declared {
+                headers.push(("content-length", length.to_string()));
+            }
             let stream = futures_util::stream::once(async move {
                 Ok::<_, std::io::Error>(Frame::data(Bytes::from(first)))
             })
@@ -320,18 +334,37 @@ async fn answer(
         }
         Reply::Slow {
             status,
-            headers,
+            mut headers,
             body,
             piece,
             gap,
         } => {
-            let pieces: Vec<Vec<u8>> = body.chunks(piece).map(<[u8]>::to_vec).collect();
-            let stream = futures_util::stream::iter(pieces).then(move |piece| async move {
-                tokio::time::sleep(gap).await;
-                Ok::<_, std::io::Error>(Frame::data(Bytes::from(piece)))
-            });
-            build(status, &headers, BodyExt::boxed(StreamBody::new(stream)))
+            headers.push(("content-length", body.len().to_string()));
+            paced(status, &headers, &body, piece, gap)
         }
+        Reply::Chunked {
+            status,
+            headers,
+            body,
+            piece,
+            gap,
+        } => paced(status, &headers, &body, piece, gap),
         Reply::Delayed(..) => unreachable!("delays do not nest"),
     }
+}
+
+/// `body` in pieces with a pause before each.
+fn paced(
+    status: u16,
+    headers: &[(&'static str, String)],
+    body: &[u8],
+    piece: usize,
+    gap: Duration,
+) -> Response<BoxBody<Bytes, std::io::Error>> {
+    let pieces: Vec<Vec<u8>> = body.chunks(piece).map(<[u8]>::to_vec).collect();
+    let stream = futures_util::stream::iter(pieces).then(move |piece| async move {
+        tokio::time::sleep(gap).await;
+        Ok::<_, std::io::Error>(Frame::data(Bytes::from(piece)))
+    });
+    build(status, headers, BodyExt::boxed(StreamBody::new(stream)))
 }

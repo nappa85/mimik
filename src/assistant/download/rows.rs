@@ -50,6 +50,9 @@ pub(crate) trait Rows: Send + Sync {
     async fn insert(&self, new: New) -> Result<Row, String>;
     /// Marks the row `complete`.
     async fn complete(&self, id: i64) -> Result<(), String>;
+    /// Makes a `complete` row `confirmed` again (its file is gone and is fetched again; the
+    /// licence snapshot stays).
+    async fn reopen(&self, id: i64) -> Result<(), String>;
     /// Removes the row.
     async fn delete(&self, id: i64) -> Result<(), String>;
     /// Whether the stored model choice (the active or previous model) uses the file `name`.
@@ -72,6 +75,18 @@ pub(crate) mod memory {
         /// While set, `complete` fails (a database commit failure after the publication).
         pub fail_complete: AtomicBool,
         pub in_use: Mutex<Vec<String>>,
+    }
+
+    impl Memory {
+        /// Sets a row's state directly (a test of a row left behind by a crash).
+        pub(crate) fn set_state(&self, id: i64, state: State) {
+            for row in self.rows.lock().unwrap().iter_mut() {
+                if row.id == id {
+                    row.state = state;
+                    row.completed_at = (state == State::Complete).then_some(2);
+                }
+            }
+        }
     }
 
     #[async_trait]
@@ -113,6 +128,11 @@ pub(crate) mod memory {
                     row.completed_at = Some(2);
                 }
             }
+            Ok(())
+        }
+
+        async fn reopen(&self, id: i64) -> Result<(), String> {
+            self.set_state(id, State::Confirmed);
             Ok(())
         }
 

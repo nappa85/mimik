@@ -131,6 +131,18 @@ impl Reviewer {
     ///
     /// [`Busy`] while another review runs.
     pub(crate) fn start(&self, spec: HfSpec) -> Result<(), Busy> {
+        let client = self.client.clone();
+        let work_spec = spec.clone();
+        self.start_with(spec, async move { review(&client, &work_spec).await })
+    }
+
+    /// [`Self::start`] over any work that produces the snapshot (a panic in it ends the
+    /// review as failed, never leaves it running).
+    pub(crate) fn start_with(
+        &self,
+        spec: HfSpec,
+        work: impl std::future::Future<Output = Result<Snapshot, String>> + Send + 'static,
+    ) -> Result<(), Busy> {
         let serial = {
             let mut inner = lock(&self.inner);
             if matches!(inner.state, State::Running { .. }) {
@@ -143,9 +155,16 @@ impl Reviewer {
             };
             inner.serial
         };
-        let (client, inner, life) = (self.client.clone(), Arc::clone(&self.inner), self.life);
+        let (inner, life) = (Arc::clone(&self.inner), self.life);
+        let guard = Unfinished {
+            inner: Arc::clone(&inner),
+            serial,
+            spec: spec.canonical(),
+            armed: true,
+        };
         tokio::spawn(async move {
-            let outcome = review(&client, &spec).await;
+            let outcome = work.await;
+            guard.disarm();
             let mut inner = lock(&inner);
             if inner.serial != serial {
                 return;
@@ -164,6 +183,36 @@ impl Reviewer {
             }
         });
         Ok(())
+    }
+}
+
+/// Ends a review that never reached its outcome (the task panicked or was dropped) as failed.
+struct Unfinished {
+    inner: Arc<Mutex<Inner>>,
+    serial: u64,
+    spec: String,
+    armed: bool,
+}
+
+impl Unfinished {
+    /// The work reached its outcome: dropping does nothing.
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for Unfinished {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut inner = lock(&self.inner);
+        if inner.serial == self.serial && matches!(inner.state, State::Running { .. }) {
+            inner.state = State::Failed {
+                spec: std::mem::take(&mut self.spec),
+                reason: "the review stopped unexpectedly: try again".to_owned(),
+            };
+        }
     }
 }
 

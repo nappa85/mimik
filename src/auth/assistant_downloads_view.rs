@@ -60,6 +60,8 @@ pub(super) struct PinnedView {
     pub size: String,
     pub status: &'static str,
     pub can_review: bool,
+    /// A finished download of this default whose file is gone: fetch it again.
+    pub repair_id: Option<i64>,
 }
 
 pub(super) struct DownloadsView {
@@ -100,7 +102,9 @@ pub(super) async fn view(handle: &AssistantHandle, active: &[String]) -> Downloa
     };
     let review_state = downloads.reviewer.state();
     let status = downloads.downloader.status();
-    let rows = downloads.rows.list().await.unwrap_or_default();
+    let Ok(rows) = downloads.rows.list().await else {
+        return unavailable(Some("the download records cannot be read"));
+    };
     // The disk, off the executor: the sizes of the partials and of the final files.
     let probe = {
         let (disk, rows, names) = (
@@ -138,7 +142,11 @@ pub(super) async fn view(handle: &AssistantHandle, active: &[String]) -> Downloa
     for (index, row) in rows.iter().enumerate() {
         match row.state {
             RowState::Confirmed => {
-                transfers.push(transfer_view(row, &status, partials[index]));
+                transfers.push(transfer_view(
+                    row,
+                    &status,
+                    partials.get(index).copied().flatten(),
+                ));
             }
             RowState::Complete => files.push(FileView {
                 id: row.id,
@@ -146,7 +154,11 @@ pub(super) async fn view(handle: &AssistantHandle, active: &[String]) -> Downloa
                 file_name: row.file_name.clone(),
                 size: mib(row.size),
                 licence_id: row.licence_id.clone().unwrap_or_default(),
-                present: finals[index].is_some_and(|file| file.len == row.size),
+                present: finals
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|file| file.len == row.size),
                 deletable: !protect.contains(&row.file_name),
             }),
         }
@@ -171,16 +183,20 @@ fn pinned_views(rows: &[Row], found: Vec<Result<Option<Partial>, ()>>) -> Vec<Pi
         .iter()
         .zip(found)
         .map(|(pin, found)| {
-            let known = rows
+            let finished = rows
                 .iter()
-                .any(|row| row.spec == pin.hf && row.state == RowState::Complete);
+                .find(|row| row.spec == pin.hf && row.state == RowState::Complete);
             let (status, can_review) = match found {
+                // Only the size is known here; the hash is checked when the model loads.
                 Ok(Some(file)) if file.len == pin.size => {
-                    if known {
-                        ("downloaded and verified by Mimik", false)
+                    if finished.is_some() {
+                        (
+                            "downloaded by Mimik; the size matches (its hash is checked when the model loads)",
+                            false,
+                        )
                     } else {
                         (
-                            "present in the models folder (checked when it loads)",
+                            "a file of this name is there and the size matches; its hash is checked when the model loads",
                             false,
                         )
                     }
@@ -189,7 +205,15 @@ fn pinned_views(rows: &[Row], found: Vec<Result<Option<Partial>, ()>>) -> Vec<Pi
                     "a different file has this name: remove it by hand to download the pinned one",
                     false,
                 ),
+                Ok(None) if finished.is_some() => (
+                    "downloaded before, but the file is gone",
+                    false,
+                ),
                 Ok(None) => ("not downloaded", !rows.iter().any(|row| row.spec == pin.hf)),
+            };
+            let repair_id = match (&found, finished) {
+                (Ok(None), Some(row)) => Some(row.id),
+                _ => None,
             };
             PinnedView {
                 hf: pin.hf,
@@ -197,6 +221,7 @@ fn pinned_views(rows: &[Row], found: Vec<Result<Option<Partial>, ()>>) -> Vec<Pi
                 size: mib(pin.size),
                 status,
                 can_review,
+                repair_id,
             }
         })
         .collect()

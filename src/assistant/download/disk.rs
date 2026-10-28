@@ -69,6 +69,10 @@ pub(crate) enum DiskError {
     Exists,
     #[error("a disk operation failed ({0})")]
     Io(&'static str),
+    #[error(
+        "another download's partial file exists: there is one partial at a time, discard it first"
+    )]
+    OtherPartial,
     #[error("stopped")]
     Cancelled,
 }
@@ -335,6 +339,13 @@ impl Disk {
             return Err(error);
         }
         self.hit(Fault::AfterPublish)
+    }
+
+    /// Makes an already published file durable: the file, then both directories (so that a
+    /// removed second link is durable too).
+    pub(crate) fn sync_published(&self, file: &File) -> Result<(), DiskError> {
+        self.sync_file(file)?;
+        self.sync_directories()
     }
 
     fn sync_directories(&self) -> Result<(), DiskError> {

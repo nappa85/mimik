@@ -13,4 +13,6 @@ pub(crate) mod hub;
 mod net_tests;
 pub(crate) mod review;
 pub(crate) mod rows;
+#[cfg(test)]
+mod structure_tests;
 pub(crate) mod task;

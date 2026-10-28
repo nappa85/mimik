@@ -306,7 +306,7 @@ async fn an_answer_over_the_bound_is_refused_not_cut() {
         2000
     );
     // Without a Content-Length (a stream) the bound still holds.
-    hub.respond(|_| Reply::Slow {
+    hub.respond(|_| Reply::Chunked {
         status: 200,
         headers: Vec::new(),
         body: vec![b'x'; 2000],
@@ -322,6 +322,7 @@ async fn a_slow_loris_answer_is_cut_by_the_total_deadline() {
         status: 200,
         headers: Vec::new(),
         first: b"{".to_vec(),
+        declared: None,
     })
     .await;
     let client = client(&hub);
@@ -468,49 +469,4 @@ fn the_shipped_host_list_is_the_reviewed_one() {
         );
         assert_eq!(host, host.to_ascii_lowercase());
     }
-}
-
-#[test]
-fn only_the_download_module_uses_the_http_client_crate() {
-    // A source scan: `reqwest` appears nowhere outside src/assistant/download/, and the module
-    // imports no sheet, database or campaign type.
-    fn scan(dir: &std::path::Path, found: &mut Vec<String>, inside_download: bool) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if path.is_dir() {
-                scan(&path, found, inside_download || name == "download");
-            } else if path.extension().is_some_and(|extension| extension == "rs") {
-                let text = std::fs::read_to_string(&path).unwrap();
-                let mentions = text
-                    .lines()
-                    .filter(|line| !line.trim_start().starts_with("//"))
-                    .any(|line| line.contains("reqwest"));
-                if mentions && !inside_download {
-                    found.push(path.display().to_string());
-                }
-                if inside_download && !name.ends_with("_tests.rs") {
-                    for forbidden in [
-                        "crate::campaigns",
-                        "crate::auth",
-                        "crate::accounts",
-                        "crate::store",
-                        "crate::definitions",
-                        "rusqlite",
-                    ] {
-                        if text.contains(forbidden) {
-                            found.push(format!("{} imports {forbidden}", path.display()));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let mut found = Vec::new();
-    scan(
-        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-        &mut found,
-        false,
-    );
-    assert!(found.is_empty(), "{found:?}");
 }

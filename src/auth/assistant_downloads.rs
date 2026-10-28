@@ -39,6 +39,10 @@ pub(super) fn routes() -> Router<AuthState> {
             post(resume).layer(limit()),
         )
         .route(
+            "/admin/assistant/download/repair",
+            post(repair).layer(limit()),
+        )
+        .route(
             "/admin/assistant/download/discard",
             post(discard).layer(limit()),
         )
@@ -79,12 +83,6 @@ struct ReviewForm {
 struct ConfirmForm {
     csrf: String,
     token: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CsrfForm {
-    csrf: String,
 }
 
 #[derive(Deserialize)]
@@ -178,21 +176,34 @@ async fn confirm(
         return Ok(redirect("download-failed"));
     };
     downloads.reviewer.clear();
-    downloads.downloader.start(row, Box::new(gate));
+    let id = row.id;
+    if downloads
+        .downloader
+        .start(row, Box::new(gate))
+        .await
+        .is_err()
+    {
+        // The task refused: nothing was started, so nothing stays recorded.
+        let _ = downloads.rows.delete(id).await;
+        return Ok(redirect("model-busy"));
+    }
     Ok(redirect("download-started"))
 }
 
 async fn cancel(
     State(state): State<AuthState>,
     session: Session,
-    Form(form): Form<CsrfForm>,
+    Form(form): Form<IdForm>,
 ) -> Result<Response, StatusCode> {
     owner_auth(&state, &session).await?;
     csrf_admission(&session, &form.csrf).await?;
     let Some(downloads) = downloads(&state) else {
         return Ok(redirect("downloads-unavailable"));
     };
-    downloads.downloader.cancel();
+    // The id the page showed: a stale page cannot cancel a newer transfer.
+    if !downloads.downloader.cancel(Some(form.id)) {
+        return Ok(redirect("stale-download"));
+    }
     Ok(redirect("download-cancelled"))
 }
 
@@ -219,8 +230,37 @@ async fn resume(
     let Ok(gate) = runtime.model_work() else {
         return Ok(redirect("model-busy"));
     };
-    downloads.downloader.resume(&row, Box::new(gate));
-    Ok(redirect("download-resuming"))
+    Ok(redirect(
+        match downloads.downloader.resume(row.id, Box::new(gate)).await {
+            Ok(()) => "download-resuming",
+            Err(_) => "no-such-download",
+        },
+    ))
+}
+
+/// Fetches a finished download again because its file is gone or changed (the row keeps its
+/// licence snapshot; a different file under the name is never replaced).
+async fn repair(
+    State(state): State<AuthState>,
+    session: Session,
+    Form(form): Form<IdForm>,
+) -> Result<Response, StatusCode> {
+    owner_auth(&state, &session).await?;
+    csrf_admission(&session, &form.csrf).await?;
+    let (Some(downloads), Some(runtime)) = (downloads(&state), super::assistant::runtime(&state))
+    else {
+        return Ok(redirect("downloads-unavailable"));
+    };
+    let Ok(gate) = runtime.model_work() else {
+        return Ok(redirect("model-busy"));
+    };
+    Ok(redirect(
+        match downloads.downloader.repair(form.id, Box::new(gate)).await {
+            Ok(()) => "download-started",
+            Err(why) if why.contains("nothing to repair") => "nothing-to-repair",
+            Err(_) => "no-such-download",
+        },
+    ))
 }
 
 async fn discard(
@@ -308,11 +348,14 @@ async fn state_json(
         Phase::Running { received, total } => (*received, *total),
         _ => (0, 0),
     };
-    let rows: Vec<serde_json::Value> = downloads
-        .rows
-        .list()
-        .await
-        .unwrap_or_default()
+    let Ok(listed) = downloads.rows.list().await else {
+        return Ok(Json(json!({
+            "available": true,
+            "error": "the download records cannot be read",
+        }))
+        .into_response());
+    };
+    let rows: Vec<serde_json::Value> = listed
         .iter()
         .map(|row: &Row| {
             json!({

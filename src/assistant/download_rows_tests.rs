@@ -183,3 +183,37 @@ async fn migration_023_keeps_populated_022_tables_and_passes_the_foreign_key_che
         (23, 2, 1, 0, 0)
     );
 }
+
+#[tokio::test]
+async fn every_licence_path_the_hub_admits_is_one_the_table_accepts() {
+    use crate::assistant::download::hub::valid_repo_path;
+    let (_dir, store) = store();
+    let rows = SqlRows(store);
+    let corpus = [
+        "LICENSE",
+        "LICENSE.md",
+        "LICENSE..txt",
+        "a/b/LICENSE",
+        "a..b/LICENSE",
+        "docs/LICENSE.v2..final",
+        "x_y-z.1/NOTICE",
+        "..LICENSE",
+        "LICENSE..",
+        "a/..b",
+    ];
+    for (index, path) in corpus.iter().enumerate() {
+        let admitted = valid_repo_path(path);
+        let spec = SPEC.replace("Qwen3.5-9B-Q4_K_M", &format!("m{index}"));
+        let result = rows
+            .insert(New {
+                licence_path: Some((*path).to_owned()),
+                ..new(&spec, "x.gguf")
+            })
+            .await;
+        assert_eq!(
+            admitted,
+            result.is_ok(),
+            "{path}: the hub grammar and the table must agree"
+        );
+    }
+}

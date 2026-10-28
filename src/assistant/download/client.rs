@@ -6,7 +6,9 @@ use crate::assistant::model::HfSpec;
 use bytes::Bytes;
 use reqwest::{
     dns::{Addrs, Name, Resolve, Resolving},
-    header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_RANGE, HeaderMap, HeaderValue, RANGE},
+    header::{
+        ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_RANGE, HeaderMap, HeaderValue, LOCATION, RANGE,
+    },
     redirect::Policy,
 };
 #[cfg(test)]
@@ -16,7 +18,7 @@ use std::{
     future::Future,
     net::{IpAddr, Ipv6Addr, SocketAddr},
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Duration,
 };
 use url::Url;
@@ -117,14 +119,32 @@ fn public_v6(ip: Ipv6Addr) -> bool {
     if let Some(v4) = ip.to_ipv4_mapped() {
         return public(IpAddr::V4(v4));
     }
-    !(ip.is_loopback()
+    let groups = ip.segments();
+    // Transition forms carry an IPv4 address that decides: NAT64 (64:ff9b::/96) and 6to4
+    // (2002::/16, the address in the next two groups).
+    let embedded = |high: u16, low: u16| {
+        let (high, low) = (high.to_be_bytes(), low.to_be_bytes());
+        std::net::Ipv4Addr::new(high[0], high[1], low[0], low[1])
+    };
+    if groups[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        return public(IpAddr::V4(embedded(groups[6], groups[7])));
+    }
+    if groups[0] == 0x2002 {
+        return public(IpAddr::V4(embedded(groups[1], groups[2])));
+    }
+    let loopback_or_reserved = ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
         || ip.is_unique_local()
-        || ip.is_unicast_link_local()
-        // Documentation (2001:db8::/32) and the discard prefix.
-        || (ip.segments()[0] == 0x2001 && ip.segments()[1] == 0x0db8)
-        || ip.segments()[0] == 0x0100 && ip.segments()[1..4] == [0, 0, 0])
+        || ip.is_unicast_link_local();
+    // Site-local (fec0::/10, deprecated), IPv4-compatible (::a.b.c.d), Teredo (2001::/32),
+    // documentation (2001:db8::/32) and the discard prefix (100::/64).
+    let site_local = groups[0] & 0xffc0 == 0xfec0;
+    let ipv4_compatible = groups[..6] == [0, 0, 0, 0, 0, 0];
+    let teredo = groups[0] == 0x2001 && groups[1] == 0;
+    let documentation = groups[0] == 0x2001 && groups[1] == 0x0db8;
+    let discard = groups[0] == 0x0100 && groups[1..4] == [0, 0, 0];
+    !(loopback_or_reserved || site_local || ipv4_compatible || teredo || documentation || discard)
 }
 
 /// Whether `ip` is a public unicast address: not loopback, private, link-local, multicast,
@@ -297,7 +317,9 @@ pub(crate) struct Client {
     api: reqwest::Client,
     files: reqwest::Client,
     api_base: Url,
-    rejected: Arc<Mutex<Option<Rejection>>>,
+    /// The exact redirect hosts and the one port, to name why a redirect was not followed.
+    hosts: Arc<HashSet<String>>,
+    port: u16,
 }
 
 /// A transfer in progress: the response and what it says of itself.
@@ -366,18 +388,14 @@ impl Client {
             .iter()
             .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
             .collect();
-        let rejected = Arc::new(Mutex::new(None));
+        let hosts = Arc::new(hosts);
         let policy = {
-            let (hosts, port, rejected) = (hosts, endpoints.port, Arc::clone(&rejected));
+            let (hosts, port) = (Arc::clone(&hosts), endpoints.port);
             Policy::custom(move |attempt| {
                 match judge(attempt.url(), attempt.previous().len(), &hosts, port) {
                     Verdict::Follow => attempt.follow(),
-                    Verdict::Refuse(why) => {
-                        *rejected
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(why);
-                        attempt.stop()
-                    }
+                    // Not followed: the caller sees the 3xx and says why from its Location.
+                    Verdict::Refuse(_) => attempt.stop(),
                 }
             })
         };
@@ -417,7 +435,8 @@ impl Client {
             api: build(Policy::none())?,
             files: build(policy)?,
             api_base,
-            rejected,
+            hosts,
+            port: endpoints.port,
         })
     }
 
@@ -457,15 +476,23 @@ impl Client {
         self.url(&segments, None)
     }
 
-    fn take_rejection(&self) -> Error {
-        match self
-            .rejected
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            Some(Rejection::Host(host)) => Error::Redirect(host),
-            _ => Error::RedirectShape,
+    /// Why a 3xx answer was not followed, from the answer itself (nothing is shared between
+    /// requests): a followed kind of redirect with a destination the policy refuses names the
+    /// host or the shape; any other 3xx is just its status.
+    fn refused_redirect(&self, response: &reqwest::Response) -> Error {
+        let status = response.status().as_u16();
+        let target = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|location| response.url().join(location).ok());
+        match (matches!(status, 301 | 302 | 303 | 307 | 308), target) {
+            (true, Some(target)) => match judge(&target, 0, &self.hosts, self.port) {
+                Verdict::Refuse(Rejection::Host(host)) => Error::Redirect(host),
+                // Acceptable in itself: it was the third hop that was refused.
+                Verdict::Refuse(Rejection::Shape) | Verdict::Follow => Error::RedirectShape,
+            },
+            _ => Error::Status(status),
         }
     }
 
@@ -476,10 +503,6 @@ impl Client {
         range_from: Option<u64>,
     ) -> Result<reqwest::Response, Error> {
         let client = if files { &self.files } else { &self.api };
-        *self
-            .rejected
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         let mut request = client.get(url);
         if let Some(offset) = range_from {
             request = request.header(RANGE, format!("bytes={offset}-"));
@@ -489,7 +512,7 @@ impl Client {
         if status.is_redirection() {
             // From the files client: the policy stopped it. From the API client: refused.
             return Err(if files {
-                self.take_rejection()
+                self.refused_redirect(&response)
             } else {
                 Error::Status(status.as_u16())
             });
@@ -497,10 +520,15 @@ impl Client {
         if matches!(status.as_u16(), 401 | 403) {
             return Err(Error::Denied(status.as_u16()));
         }
-        if let Some(encoding) = response.headers().get(CONTENT_ENCODING)
-            && !encoding.as_bytes().eq_ignore_ascii_case(b"identity")
-        {
-            return Err(Error::Encoding);
+        // Every value of every Content-Encoding header must be `identity`.
+        for value in response.headers().get_all(CONTENT_ENCODING) {
+            let text = value.to_str().map_err(|_| Error::Encoding)?;
+            if text
+                .split(',')
+                .any(|token| !token.trim().eq_ignore_ascii_case("identity"))
+            {
+                return Err(Error::Encoding);
+            }
         }
         Ok(response)
     }
@@ -618,3 +646,7 @@ fn classify(error: reqwest::Error) -> Error {
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "client_batch_tests.rs"]
+mod batch_tests;

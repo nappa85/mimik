@@ -264,3 +264,22 @@ async fn a_repository_that_answers_the_metadata_but_denies_the_file_stops_the_re
     };
     assert!(reason.contains("by hand"), "{reason}");
 }
+
+#[tokio::test]
+async fn a_review_whose_task_panics_ends_as_failed_and_a_new_one_can_start() {
+    let hub = hub_with(
+        metadata(DEFAULT_MODEL_SHA256, GRANITE_SIZE),
+        Reply::text("licence"),
+    )
+    .await;
+    let reviewer = reviewer(&hub);
+    reviewer
+        .start_with(granite(), async { panic!("the review code failed") })
+        .unwrap();
+    let State::Failed { reason, .. } = finished(&reviewer).await else {
+        panic!("must not stay running")
+    };
+    assert!(reason.contains("unexpectedly"), "{reason}");
+    reviewer.start(granite()).unwrap();
+    assert!(matches!(finished(&reviewer).await, State::Ready(_)));
+}

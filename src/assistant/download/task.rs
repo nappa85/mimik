@@ -1,13 +1,15 @@
 //! The download task (`docs/model-downloads.md`): one actor owns the single
-//! transfer and every command (Cancel, Discard, Resume, completion, shutdown), so they
+//! transfer and every command (Cancel, Discard, Resume, Repair, completion, shutdown), so they
 //! serialise. All blocking file work runs off the async executor and no lock is held across it;
-//! a Cancel is accepted at once even while a write or a hash is blocked.
+//! a Cancel is accepted at once even while a connection, a write or a hash is pending. Only a
+//! command that names the running download interrupts it.
 use super::client::{Body, Client};
 use super::disk::{Disk, DiskError, Fault};
 use super::rows::{Row, Rows, State};
 use crate::assistant::model::{Spec, parse_spec};
 use std::{
     fs::File,
+    future::Future,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -21,6 +23,9 @@ use tokio::{
 
 /// Held for the duration of a transfer and dropped at its end (the model-work gate).
 pub(crate) type Permit = Box<dyn std::any::Any + Send>;
+
+/// The answer to a command the actor accepts or refuses.
+type Reply = oneshot::Sender<Result<(), String>>;
 
 /// Tunables; tests shorten them.
 #[derive(Clone, Copy, Debug)]
@@ -74,10 +79,15 @@ pub(crate) struct Status {
 }
 
 enum Command {
-    Start(Row, Permit),
-    Resume(i64, Permit),
-    Cancel,
-    Discard(i64, oneshot::Sender<Result<(), String>>),
+    /// A freshly confirmed row.
+    Start(Row, Permit, Reply),
+    /// A waiting (confirmed) row.
+    Resume(i64, Permit, Reply),
+    /// A finished row whose file is gone: fetch it again (same provenance).
+    Repair(i64, Permit, Reply),
+    /// Stop the download `id` (any when `None`); a stale id stops nothing.
+    Cancel(Option<i64>),
+    Discard(i64, Reply),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -96,13 +106,15 @@ fn lock(status: &Mutex<Status>) -> std::sync::MutexGuard<'_, Status> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+const ENDED: &str = "the download task has ended";
+
 impl Downloader {
     /// Reconciles the disk with the rows, then starts the actor. Nothing is accepted before
     /// the reconciliation is done.
     ///
     /// # Errors
     ///
-    /// A failure to read the rows or the disk, by message.
+    /// A failure to read the rows, by message (a row that cannot be reconciled is skipped).
     pub(crate) async fn spawn(
         client: Client,
         disk: Arc<Disk>,
@@ -125,6 +137,8 @@ impl Downloader {
             receiver,
             stop: Arc::new(AtomicBool::new(false)),
             pending: None,
+            running: None,
+            publishing: None,
         };
         tokio::spawn(actor.run());
         Ok(Self {
@@ -148,58 +162,67 @@ impl Downloader {
         )
     }
 
-    /// Starts the download of a freshly confirmed row; `permit` is dropped when it ends.
-    pub(crate) fn start(&self, row: Row, permit: Permit) {
-        {
-            let mut status = lock(&self.status);
-            status.id = Some(row.id);
-            status.spec.clone_from(&row.spec);
-            status.phase = Phase::Running {
-                received: 0,
-                total: row.size,
-            };
-        }
-        let _ = self.commands.send(Command::Start(row, permit));
+    async fn ask(&self, build: impl FnOnce(Reply) -> Command) -> Result<(), String> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(build(reply))
+            .map_err(|_| ENDED.to_owned())?;
+        answer.await.map_err(|_| ENDED.to_owned())?
     }
 
-    /// Resumes the stopped download `id`.
-    pub(crate) fn resume(&self, row: &Row, permit: Permit) {
-        {
-            let mut status = lock(&self.status);
-            status.id = Some(row.id);
-            status.spec.clone_from(&row.spec);
-            status.phase = Phase::Running {
-                received: 0,
-                total: row.size,
-            };
-        }
-        let _ = self.commands.send(Command::Resume(row.id, permit));
+    /// Starts the download of a freshly confirmed row; `permit` is dropped when it ends (or at
+    /// once, with the reason, when the task refuses).
+    ///
+    /// # Errors
+    ///
+    /// Why the task did not accept it (another download runs, or the task has ended).
+    pub(crate) async fn start(&self, row: Row, permit: Permit) -> Result<(), String> {
+        self.ask(|reply| Command::Start(row, permit, reply)).await
     }
 
-    /// Stops the running download, keeping its partial; accepted at once.
-    pub(crate) fn cancel(&self) {
+    /// Resumes the waiting download `id`.
+    ///
+    /// # Errors
+    ///
+    /// Why the task did not accept it.
+    pub(crate) async fn resume(&self, id: i64, permit: Permit) -> Result<(), String> {
+        self.ask(|reply| Command::Resume(id, permit, reply)).await
+    }
+
+    /// Fetches the finished download `id` again because its file is gone or changed; the row
+    /// keeps its licence snapshot. A different file under the name is never replaced.
+    ///
+    /// # Errors
+    ///
+    /// Why the task did not accept it (including "nothing to repair").
+    pub(crate) async fn repair(&self, id: i64, permit: Permit) -> Result<(), String> {
+        self.ask(|reply| Command::Repair(id, permit, reply)).await
+    }
+
+    /// Stops the running download `id` (any when `None`), keeping its partial; accepted at
+    /// once. False when `id` is not the download shown as running (a stale page).
+    pub(crate) fn cancel(&self, id: Option<i64>) -> bool {
         {
             let mut status = lock(&self.status);
+            if id.is_some() && status.id != id {
+                return false;
+            }
             if matches!(status.phase, Phase::Running { .. } | Phase::Verifying) {
                 status.phase = Phase::Stopped(Stop::Cancelled);
             }
         }
-        let _ = self.commands.send(Command::Cancel);
+        self.commands.send(Command::Cancel(id)).is_ok()
     }
 
-    /// Stops download `id` if it runs, deletes its partial and its row.
+    /// Stops download `id` if it is the running one, deletes its partial and its row. Another
+    /// id never touches the running download.
     ///
     /// # Errors
     ///
-    /// A failure to remove the partial or the row, by message.
+    /// A failure to remove the partial or the row, or a finished download (deleted, not
+    /// discarded), by message.
     pub(crate) async fn discard(&self, id: i64) -> Result<(), String> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(Command::Discard(id, reply))
-            .map_err(|_| "the download task has ended".to_owned())?;
-        answer
-            .await
-            .map_err(|_| "the download task has ended".to_owned())?
+        self.ask(|reply| Command::Discard(id, reply)).await
     }
 
     /// Stops the task, keeping the partial; resolves once it has ended.
@@ -224,7 +247,9 @@ impl Downloader {
     }
 
     /// Removes the completed download `id` and its file, unless something refers to the file.
-    /// `protect` names files that must stay (the pinned defaults and the effective model).
+    /// `protect` names files that must stay (the pinned defaults and the effective model). The
+    /// file goes first, then the row: a crash between them leaves a finished row without its
+    /// file, which the panel offers to download again.
     ///
     /// # Errors
     ///
@@ -262,14 +287,14 @@ impl Downloader {
 enum Outcome {
     Done,
     Stopped(Stop),
-    Discard(i64, oneshot::Sender<Result<(), String>>),
+    Discard(i64, Reply),
     Shutdown(oneshot::Sender<()>),
 }
 
-/// A command that interrupted blocking work.
+/// A command that interrupted the running transfer.
 enum Interrupt {
     Cancel,
-    Discard(i64, oneshot::Sender<Result<(), String>>),
+    Discard(i64, Reply),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -294,6 +319,10 @@ fn disk_failed(error: &DiskError) -> Outcome {
     }
 }
 
+const BUSY: &str = "another download is running: wait for it, cancel it or discard it first";
+const NAME_TAKEN: &str =
+    "a different file already has this name in the models folder: remove it by hand";
+
 struct Actor {
     client: Client,
     disk: Arc<Disk>,
@@ -305,6 +334,10 @@ struct Actor {
     stop: Arc<AtomicBool>,
     /// Blocking work abandoned by an interrupt; awaited before the disk is touched again.
     pending: Option<tokio::task::JoinHandle<()>>,
+    /// The row being transferred.
+    running: Option<Row>,
+    /// The row whose publication may have happened (set before it, cleared when it settles).
+    publishing: Option<i64>,
 }
 
 impl Actor {
@@ -321,58 +354,108 @@ impl Actor {
 
     async fn run(mut self) {
         while let Some(command) = self.receiver.recv().await {
-            match command {
-                Command::Start(row, permit) => {
-                    let outcome = self.transfer(&row).await;
-                    drop(permit);
-                    if self.settle(&row, outcome).await {
-                        return;
+            let ended = match command {
+                Command::Start(row, permit, reply) => self.begin(row, permit, reply).await,
+                Command::Resume(id, permit, reply) => match self.waiting(id).await {
+                    Ok(row) => self.begin(row, permit, reply).await,
+                    Err(why) => {
+                        let _ = reply.send(Err(why));
+                        false
                     }
-                }
-                Command::Resume(id, permit) => {
-                    let found = self
-                        .rows
-                        .list()
-                        .await
-                        .ok()
-                        .and_then(|rows| rows.into_iter().find(|row| row.id == id));
-                    if let Some(row) = found.filter(|row| row.state == State::Confirmed) {
-                        self.set(
-                            row.id,
-                            &row.spec,
-                            Phase::Running {
-                                received: 0,
-                                total: row.size,
-                            },
-                        );
-                        let outcome = self.transfer(&row).await;
-                        drop(permit);
-                        if self.settle(&row, outcome).await {
-                            return;
-                        }
+                },
+                Command::Repair(id, permit, reply) => match self.reopen(id).await {
+                    Ok(row) => self.begin(row, permit, reply).await,
+                    Err(why) => {
+                        let _ = reply.send(Err(why));
+                        false
                     }
-                }
-                Command::Cancel => {}
+                },
+                Command::Cancel(_) => false,
                 Command::Discard(id, reply) => {
                     let _ = reply.send(self.discard(id).await);
+                    false
                 }
                 Command::Shutdown(reply) => {
                     let _ = reply.send(());
-                    return;
+                    true
                 }
+            };
+            if ended {
+                return;
             }
         }
+    }
+
+    /// The waiting (confirmed) row `id`.
+    async fn waiting(&self, id: i64) -> Result<Row, String> {
+        self.rows
+            .list()
+            .await?
+            .into_iter()
+            .find(|row| row.id == id && row.state == State::Confirmed)
+            .ok_or_else(|| "there is no such waiting download".to_owned())
+    }
+
+    /// The finished row `id` made waiting again, if its file is gone or has another size.
+    async fn reopen(&self, id: i64) -> Result<Row, String> {
+        let row = self
+            .rows
+            .list()
+            .await?
+            .into_iter()
+            .find(|row| row.id == id && row.state == State::Complete)
+            .ok_or_else(|| "there is no such finished download".to_owned())?;
+        let (disk, name) = (Arc::clone(&self.disk), row.file_name.clone());
+        let present = tokio::task::spawn_blocking(move || disk.final_state(&name))
+            .await
+            .map_err(|_| "the file cannot be examined".to_owned())?
+            .map_err(|error| error.to_string())?;
+        if present.is_some_and(|file| file.len == row.size) {
+            return Err("nothing to repair: the file is there".to_owned());
+        }
+        self.rows.reopen(id).await?;
+        Ok(Row {
+            state: State::Confirmed,
+            completed_at: None,
+            ..row
+        })
+    }
+
+    /// Accepts `row`, answers, runs the transfer and records how it ended; true when the task
+    /// must end.
+    async fn begin(&mut self, row: Row, permit: Permit, reply: Reply) -> bool {
+        self.set(
+            row.id,
+            &row.spec,
+            Phase::Running {
+                received: 0,
+                total: row.size,
+            },
+        );
+        self.running = Some(row.clone());
+        let _ = reply.send(Ok(()));
+        let outcome = self.transfer(&row).await;
+        self.running = None;
+        drop(permit);
+        self.settle(&row, outcome).await
     }
 
     /// Records an outcome; true when the task must end.
     async fn settle(&mut self, row: &Row, outcome: Outcome) -> bool {
         match outcome {
-            Outcome::Done => self.set(row.id, &row.spec, Phase::Done),
-            Outcome::Stopped(stop) => self.set(row.id, &row.spec, Phase::Stopped(stop)),
+            Outcome::Done => {
+                self.publishing = None;
+                self.set(row.id, &row.spec, Phase::Done);
+            }
+            Outcome::Stopped(stop) => {
+                self.publishing = None;
+                self.set(row.id, &row.spec, Phase::Stopped(stop));
+            }
             Outcome::Discard(id, reply) => {
                 let _ = reply.send(self.discard(id).await);
             }
             Outcome::Shutdown(reply) => {
+                self.set(row.id, &row.spec, Phase::Stopped(Stop::Cancelled));
                 let _ = reply.send(());
                 return true;
             }
@@ -386,8 +469,11 @@ impl Actor {
         }
     }
 
+    /// Discards the download `id` while nothing of it runs (or after its transfer was stopped
+    /// by this very command).
     async fn discard(&mut self, id: i64) -> Result<(), String> {
         self.settle_pending().await;
+        let maybe_published = self.publishing.take() == Some(id);
         let rows = self.rows.list().await?;
         let Some(row) = rows.iter().find(|row| row.id == id) else {
             return Ok(());
@@ -395,13 +481,27 @@ impl Actor {
         if row.state == State::Complete {
             return Err("a finished download is deleted, not discarded".to_owned());
         }
-        {
-            let (disk, name) = (Arc::clone(&self.disk), row.sha256.clone());
-            tokio::task::spawn_blocking(move || disk.remove_partial(&name))
-                .await
-                .map_err(|_| "the partial cannot be removed".to_owned())?
-                .map_err(|error| error.to_string())?;
-        }
+        let shared = rows
+            .iter()
+            .any(|other| other.id != id && other.file_name == row.file_name);
+        let (disk, sha, name, size) = (
+            Arc::clone(&self.disk),
+            row.sha256.clone(),
+            row.file_name.clone(),
+            row.size,
+        );
+        tokio::task::spawn_blocking(move || {
+            disk.remove_partial(&sha)?;
+            // A publication that raced the discard left a file with no row: remove it when it
+            // is exactly this download's verified file and nothing else names it.
+            if maybe_published && !shared {
+                remove_if_verified(&disk, &name, &sha, size)?;
+            }
+            Ok::<(), DiskError>(())
+        })
+        .await
+        .map_err(|_| "the partial cannot be removed".to_owned())?
+        .map_err(|error| error.to_string())?;
         self.rows.delete(id).await?;
         let mut status = lock(&self.status);
         if status.id == Some(id) {
@@ -414,34 +514,95 @@ impl Actor {
         Ok(())
     }
 
-    /// Runs `work` off the executor, staying responsive to commands. A command that arrives
-    /// first interrupts: the work is left to finish on its own (awaited before the disk is
-    /// touched again) and a running hash is asked to stop.
+    /// Discards a download other than the running one without touching the transfer: a
+    /// finished or unknown id, or one that shares the running download's file, is refused or
+    /// ignored; a waiting one loses its partial and its row.
+    async fn discard_other(&self, id: i64) -> Result<(), String> {
+        let rows = self.rows.list().await?;
+        let Some(row) = rows.iter().find(|row| row.id == id) else {
+            return Ok(());
+        };
+        if row.state == State::Complete {
+            return Err("a finished download is deleted, not discarded".to_owned());
+        }
+        if self
+            .running
+            .as_ref()
+            .is_some_and(|running| running.sha256 == row.sha256)
+        {
+            return Err(BUSY.to_owned());
+        }
+        let (disk, sha) = (Arc::clone(&self.disk), row.sha256.clone());
+        tokio::task::spawn_blocking(move || disk.remove_partial(&sha))
+            .await
+            .map_err(|_| "the partial cannot be removed".to_owned())?
+            .map_err(|error| error.to_string())?;
+        self.rows.delete(id).await
+    }
+
+    /// Reacts to a command that arrives while a transfer runs. Only a command that names the
+    /// running download interrupts it (`Some`); everything else is answered at once.
+    async fn react(&mut self, command: Option<Command>) -> Option<Interrupt> {
+        let running = self.running.as_ref().map(|row| row.id);
+        match command? {
+            Command::Cancel(id) if id.is_none() || id == running => Some(Interrupt::Cancel),
+            Command::Cancel(_) => None,
+            Command::Discard(id, reply) if Some(id) == running => {
+                Some(Interrupt::Discard(id, reply))
+            }
+            Command::Discard(id, reply) => {
+                let _ = reply.send(self.discard_other(id).await);
+                None
+            }
+            Command::Shutdown(reply) => Some(Interrupt::Shutdown(reply)),
+            Command::Start(_, _, reply)
+            | Command::Resume(_, _, reply)
+            | Command::Repair(_, _, reply) => {
+                // The permit goes with the command.
+                let _ = reply.send(Err(BUSY.to_owned()));
+                None
+            }
+        }
+    }
+
+    /// Waits for `work`, staying responsive to commands: a command that interrupts wins and
+    /// `work` is dropped.
+    async fn raced<T>(&mut self, work: impl Future<Output = T>) -> Result<T, Interrupt> {
+        tokio::pin!(work);
+        loop {
+            tokio::select! {
+                out = &mut work => return Ok(out),
+                command = self.receiver.recv() => {
+                    let closed = command.is_none();
+                    if let Some(interrupt) = self.react(command).await {
+                        return Err(interrupt);
+                    }
+                    if closed {
+                        return Err(Interrupt::Cancel);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Runs `work` off the executor, staying responsive to commands. A command that
+    /// interrupts: the work is left to finish on its own (awaited before the disk is touched
+    /// again) and a running hash is asked to stop.
     async fn io<T: Send + 'static>(
         &mut self,
         work: impl FnOnce(&Disk) -> Result<T, DiskError> + Send + 'static,
     ) -> Result<Result<T, DiskError>, Interrupt> {
         let disk = Arc::clone(&self.disk);
         let mut handle = tokio::task::spawn_blocking(move || work(&disk));
-        loop {
-            tokio::select! {
-                done = &mut handle => {
-                    return Ok(done.unwrap_or(Err(DiskError::Io("the disk work panicked"))));
-                }
-                command = self.receiver.recv() => {
-                    let interrupt = match command {
-                        Some(Command::Cancel) | None => Interrupt::Cancel,
-                        Some(Command::Discard(id, reply)) => Interrupt::Discard(id, reply),
-                        Some(Command::Shutdown(reply)) => Interrupt::Shutdown(reply),
-                        // A start or resume while one runs is dropped (its permit with it).
-                        Some(Command::Start(..) | Command::Resume(..)) => continue,
-                    };
-                    self.stop.store(true, Ordering::SeqCst);
-                    self.pending = Some(tokio::spawn(async move {
-                        let _ = handle.await;
-                    }));
-                    return Err(interrupt);
-                }
+        let waited = self.raced(async { (&mut handle).await }).await;
+        match waited {
+            Ok(done) => Ok(done.unwrap_or(Err(DiskError::Io("the disk work panicked")))),
+            Err(interrupt) => {
+                self.stop.store(true, Ordering::SeqCst);
+                self.pending = Some(tokio::spawn(async move {
+                    let _ = handle.await;
+                }));
+                Err(interrupt)
             }
         }
     }
@@ -464,17 +625,19 @@ impl Actor {
             let url = self.client.resolve_url(&spec, &spec.path);
             let mut restarted = false;
             let mut body = loop {
-                self.set(
-                    row.id,
-                    &row.spec,
-                    Phase::Running {
-                        received: offset,
-                        total: row.size,
-                    },
-                );
-                let opened = match self.client.open(url.clone(), offset).await {
-                    Ok(body) => body,
-                    Err(error) => return failed(error.to_string()),
+                self.phase(Phase::Running {
+                    received: offset,
+                    total: row.size,
+                });
+                let client = self.client.clone();
+                let target = url.clone();
+                let opened = match self
+                    .raced(async move { client.open(target, offset).await })
+                    .await
+                {
+                    Ok(Ok(body)) => body,
+                    Ok(Err(error)) => return failed(error.to_string()),
+                    Err(interrupt) => return interrupt.into(),
                 };
                 match check_answer(&opened, offset, row.size) {
                     Answer::Good => break opened,
@@ -495,9 +658,8 @@ impl Actor {
                     }
                 }
             };
-            match self.receive(row, &file, &mut body, offset).await {
-                Ok(()) => {}
-                Err(outcome) => return outcome,
+            if let Err(outcome) = self.receive(row, &file, &mut body, offset).await {
+                return outcome;
             }
         }
         self.finish(row, file).await
@@ -516,9 +678,7 @@ impl Actor {
             return Ok(None);
         };
         if state.len != row.size {
-            return Err(failed(
-                "a different file already has this name in the models folder: remove it by hand",
-            ));
+            return Err(failed(NAME_TAKEN));
         }
         self.phase(Phase::Verifying);
         let (name, stop) = (row.file_name.clone(), Arc::clone(&self.stop));
@@ -530,11 +690,7 @@ impl Actor {
             .await;
         match hashed {
             Ok(Ok(sha)) if sha == row.sha256 => {}
-            Ok(Ok(_)) => {
-                return Err(failed(
-                    "a different file already has this name in the models folder: remove it by hand",
-                ));
-            }
+            Ok(Ok(_)) => return Err(failed(NAME_TAKEN)),
             Ok(Err(error)) => return Err(disk_failed(&error)),
             Err(interrupt) => return Err(interrupt.into()),
         }
@@ -551,10 +707,14 @@ impl Actor {
     }
 
     /// Opens or creates the partial and checks the free space; returns it with its length.
+    /// Another download's partial refuses: there is one partial at all.
     async fn prepare(&mut self, row: &Row) -> Result<(Arc<File>, u64), Outcome> {
         let (sha, size, chunk) = (row.sha256.clone(), row.size, self.config.chunk);
         let opened = self
             .io(move |disk| {
+                if disk.partials()?.iter().any(|name| *name != sha) {
+                    return Err(DiskError::OtherPartial);
+                }
                 let state = disk.partial_state(&sha)?;
                 let (file, len) = match state {
                     Some(partial) if partial.len > size => {
@@ -635,11 +795,12 @@ impl Actor {
         loop {
             tokio::select! {
                 command = self.receiver.recv() => {
-                    match command {
-                        Some(Command::Cancel) | None => return Err(Outcome::Stopped(Stop::Cancelled)),
-                        Some(Command::Discard(id, reply)) => return Err(Outcome::Discard(id, reply)),
-                        Some(Command::Shutdown(reply)) => return Err(Outcome::Shutdown(reply)),
-                        Some(Command::Start(..) | Command::Resume(..)) => {}
+                    let closed = command.is_none();
+                    if let Some(interrupt) = self.react(command).await {
+                        return Err(interrupt.into());
+                    }
+                    if closed {
+                        return Err(Outcome::Stopped(Stop::Cancelled));
                     }
                 }
                 () = tokio::time::sleep_until(window_end) => {
@@ -710,6 +871,7 @@ impl Actor {
             Err(interrupt) => return interrupt.into(),
         }
         let (sha, name) = (row.sha256.clone(), row.file_name.clone());
+        self.publishing = Some(row.id);
         let published = self
             .io(move |disk| {
                 disk.fault(Fault::AfterVerify)?;
@@ -718,16 +880,14 @@ impl Actor {
             .await;
         match published {
             Ok(Ok(())) => {}
-            Ok(Err(DiskError::Exists)) => {
-                return failed(
-                    "a different file already has this name in the models folder: remove it by hand",
-                );
-            }
+            Ok(Err(DiskError::Exists)) => return failed(NAME_TAKEN),
             Ok(Err(error)) => return disk_failed(&error),
             Err(interrupt) => return interrupt.into(),
         }
-        if let Ok(Err(error)) = self.io(|disk| disk.fault(Fault::BeforeCommit)).await {
-            return disk_failed(&error);
+        match self.io(|disk| disk.fault(Fault::BeforeCommit)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return disk_failed(&error),
+            Err(interrupt) => return interrupt.into(),
         }
         match self.rows.complete(row.id).await {
             Ok(()) => Outcome::Done,
@@ -738,22 +898,38 @@ impl Actor {
     }
 }
 
+/// Removes the final file `name` when it is exactly the verified file (`sha`, `size`).
+fn remove_if_verified(disk: &Disk, name: &str, sha: &str, size: u64) -> Result<(), DiskError> {
+    let Some(state) = disk.final_state(name)? else {
+        return Ok(());
+    };
+    if state.len != size {
+        return Ok(());
+    }
+    let file = disk.open_final(name)?;
+    if disk.hash(&file, name, &|| false)? == sha {
+        disk.remove_final(name)?;
+    }
+    Ok(())
+}
+
 enum Answer {
     Good,
     Bad(String),
     Restart,
 }
 
-/// Checks the status and `Content-Range` of an answer against the offset asked for.
+/// Checks the status, size and `Content-Range` of an answer against the offset asked for.
 fn check_answer(body: &Body, offset: u64, size: u64) -> Answer {
     if offset == 0 {
         if body.status != 200 {
             return Answer::Bad("the server did not send the whole file".to_owned());
         }
-        if body.content_length.is_some_and(|length| length != size) {
-            return Answer::Bad("the file's size differs from the one confirmed".to_owned());
-        }
-        return Answer::Good;
+        return match body.content_length {
+            Some(length) if length == size => Answer::Good,
+            Some(_) => Answer::Bad("the file's size differs from the one confirmed".to_owned()),
+            None => Answer::Bad("the server did not announce the file's size".to_owned()),
+        };
     }
     let expected = format!("bytes {offset}-{}/{size}", size - 1);
     if body.status == 206 && body.content_range.as_deref() == Some(expected.as_str()) {
@@ -763,67 +939,90 @@ fn check_answer(body: &Body, offset: u64, size: u64) -> Answer {
     }
 }
 
-/// Reconciles the disk with the rows at start: a publication that was cut short is completed
-/// or cleaned up, stale partials are swept. Runs before any command is accepted.
+/// Reconciles the disk with the rows at start: a publication that was cut short is made
+/// durable and recorded, stale partials are swept. Runs before any command is accepted. A row
+/// or a file that cannot be reconciled is logged and skipped; it stays recoverable.
 ///
 /// # Errors
 ///
-/// A failure to read the rows or the disk, or to record a completed file, by message.
+/// A failure to read the rows, by message.
 pub(crate) async fn reconcile(disk: &Arc<Disk>, rows: &dyn Rows) -> Result<(), String> {
     let listed = rows.list().await?;
     let (disk, snapshot) = (Arc::clone(disk), listed);
     let verified = tokio::task::spawn_blocking(move || sweep(&disk, &snapshot))
         .await
-        .map_err(|_| "reconciliation failed".to_owned())?
-        .map_err(|error| error.to_string())?;
+        .map_err(|_| "reconciliation failed".to_owned())?;
     for id in verified {
-        rows.complete(id).await?;
+        if let Err(why) = rows.complete(id).await {
+            eprintln!("assistant downloads: download {id} cannot be recorded: {why}");
+        }
     }
     Ok(())
 }
 
-/// The blocking part of [`reconcile`]: returns the confirmed rows whose final file is in place
-/// and verified (to be recorded as complete).
-fn sweep(disk: &Disk, rows: &[Row]) -> Result<Vec<i64>, DiskError> {
+/// One confirmed row: true when its final file is in place, verified and durable.
+fn reconcile_row(disk: &Disk, row: &Row) -> Result<bool, DiskError> {
+    let published = disk.final_state(&row.file_name).ok().flatten();
+    let mut partial = disk.partial_state(&row.sha256).ok().flatten();
+    // A `link` publication cut between the link and the unlink: the final name and the
+    // partial name share an inode with two links. Remove the partial name first.
+    if let (Some(done), Some(left)) = (published, partial)
+        && done.inode == left.inode
+        && left.links == 2
+    {
+        disk.remove_partial(&row.sha256)?;
+        partial = None;
+    }
+    if published.is_some_and(|done| done.len == row.size) {
+        let file = disk.open_final(&row.file_name)?;
+        let sha = disk.hash(&file, &row.file_name, &|| false)?;
+        if sha == row.sha256 {
+            disk.remove_partial(&row.sha256)?;
+            // Durable before it is recorded: the file, then the directories (the unlink too).
+            disk.sync_published(&file)?;
+            return Ok(true);
+        }
+    }
+    if partial.is_some_and(|left| left.len > row.size) {
+        disk.remove_partial(&row.sha256)?;
+    }
+    Ok(false)
+}
+
+/// The blocking part of [`reconcile`]: returns the confirmed rows whose final file is in place,
+/// verified and durable (to be recorded as complete).
+fn sweep(disk: &Disk, rows: &[Row]) -> Vec<i64> {
     let mut complete = Vec::new();
     for row in rows.iter().filter(|row| row.state == State::Confirmed) {
-        let published = disk.final_state(&row.file_name).ok().flatten();
-        let mut partial = disk.partial_state(&row.sha256).ok().flatten();
-        // A `link` publication cut between the link and the unlink: the final name and the
-        // partial name share an inode with two links. Remove the partial name first.
-        if let (Some(done), Some(left)) = (published, partial)
-            && done.inode == left.inode
-            && left.links == 2
-        {
-            disk.remove_partial(&row.sha256)?;
-            partial = None;
-        }
-        if published.is_some_and(|done| done.len == row.size) {
-            let file = disk.open_final(&row.file_name)?;
-            let sha = disk.hash(&file, &row.file_name, &|| false)?;
-            if sha == row.sha256 {
-                disk.remove_partial(&row.sha256)?;
-                complete.push(row.id);
-                continue;
-            }
-        }
-        if partial.is_some_and(|left| left.len > row.size) {
-            disk.remove_partial(&row.sha256)?;
+        match reconcile_row(disk, row) {
+            Ok(true) => complete.push(row.id),
+            Ok(false) => {}
+            Err(why) => eprintln!(
+                "assistant downloads: download {} cannot be reconciled yet: {why}",
+                row.id
+            ),
         }
     }
     // Partials no confirmed download owns (a discarded download, a leftover) go.
-    for name in disk.partials()? {
+    let names = match disk.partials() {
+        Ok(names) => names,
+        Err(why) => {
+            eprintln!("assistant downloads: the partial folder cannot be listed: {why}");
+            return complete;
+        }
+    };
+    for name in names {
         let owned = rows
             .iter()
             .any(|row| row.state == State::Confirmed && row.sha256 == name)
             && !complete
                 .iter()
                 .any(|id| rows.iter().any(|row| row.id == *id && row.sha256 == name));
-        if !owned {
-            disk.remove_partial(&name)?;
+        if !owned && let Err(why) = disk.remove_partial(&name) {
+            eprintln!("assistant downloads: a stale partial cannot be removed: {why}");
         }
     }
-    Ok(complete)
+    complete
 }
 
 #[cfg(test)]

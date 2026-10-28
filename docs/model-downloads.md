@@ -62,12 +62,21 @@ the last byte: `fsync`, a visible `verifying` state hashing the whole file (canc
 publication by `renameat2(RENAME_NOREPLACE)` (or `link` then `unlink` where unsupported), `fsync`
 of both directories, and the row set `complete`. A failed directory sync undoes the
 publication. Every blocking file operation runs off the async executor; Cancel is accepted at
-once even while a write or a hash is blocked.
+once even while a connection, a write or a hash is pending. Only a command naming the running
+download interrupts it: a Cancel carries the id the page showed (a stale page cancels nothing),
+a Discard of another id is answered without touching the transfer, and a second Start, Resume
+or Repair is answered "another download is running". A body whose size is not announced, or
+differs from the confirmed one, is refused before any byte is kept; a resume is refused while
+another download's partial exists.
 
 At start, before any command, the task reconciles the disk with the rows: a publication cut
 short is completed (final file present with the right size and hash), a second link left by
 the `link` fallback is removed, a fully received partial verifies without a request, and
-partials no confirmed download owns are swept. Nothing resumes by itself.
+partials no confirmed download owns are swept. A recovered publication is made durable (the file
+and both directories are synced) before it is recorded; a row that cannot be reconciled is
+logged and left recoverable, never aborting the start. A Discard that races a publication
+removes the file when it is exactly that download's verified file and nothing else names it.
+Nothing resumes by itself.
 
 ## Gate and delete
 
@@ -93,10 +102,19 @@ decompression. Errors pass through a type that never holds a URL; presigned URLs
 shown or logged. The host list holds candidates until the real redirect chain of the two
 pinned files has been observed by hand (`limitations.md`).
 
+## Pinned panel and repair
+
+The Pinned defaults panel judges a file under a pinned name by its size only (a hash of up to
+5 GB is not computed on a page load): "the size matches; its hash is checked when the model
+loads", or "a different file has this name". A finished download whose file is gone or has
+another size shows "Download again" (`POST /admin/assistant/download/repair`): the row is made
+waiting again, keeps its licence snapshot, and the file is fetched and verified like any
+download; a different file under the name is never replaced.
+
 ## Routes
 
 Owner only, CSRF-checked, strict forms of at most 4 KiB: `POST /admin/assistant/model/review`,
-`/admin/assistant/download/{confirm,cancel,resume,discard}`, `/admin/assistant/model/delete`;
+`/admin/assistant/download/{confirm,cancel,resume,discard,repair}`, `/admin/assistant/model/delete`;
 `GET /admin/assistant/downloads.json` (state for polling: no URL). Discard deletes the
 partial and the row, so a new download needs a fresh review. A second confirmation while a
 partial exists is refused before any row is written.

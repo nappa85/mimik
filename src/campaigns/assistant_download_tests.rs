@@ -416,8 +416,11 @@ async fn the_active_model_serves_during_a_download_and_a_trial_waits_for_it() {
     assert_eq!(rig.rows().await.len(), 1);
     // Cancel releases the gate: a Try is accepted again.
     assert_eq!(
-        rig.owner("/admin/assistant/download/cancel", &[("csrf", &csrf())])
-            .await,
+        rig.owner(
+            "/admin/assistant/download/cancel",
+            &[("csrf", &csrf()), ("id", "1")],
+        )
+        .await,
         "download-cancelled"
     );
     rig.until(|| !rig.downloads.downloader.busy()).await;
@@ -532,8 +535,11 @@ async fn a_second_download_asks_to_discard_the_partial_before_any_row_is_written
         )
     })
     .await;
-    rig.owner("/admin/assistant/download/cancel", &[("csrf", &csrf())])
-        .await;
+    rig.owner(
+        "/admin/assistant/download/cancel",
+        &[("csrf", &csrf()), ("id", "1")],
+    )
+    .await;
     rig.until(|| !rig.downloads.downloader.busy()).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     // A different model: its confirmation is refused while the partial exists.
@@ -784,7 +790,7 @@ async fn the_panel_lists_the_pinned_defaults_and_a_foreign_file_under_a_pinned_n
 async fn every_download_action_is_owner_only_csrf_checked_strict_and_bounded() {
     let _lock = crate::auth::test_resource_lock().await;
     let rig = rig().await;
-    let actions: [(&str, Vec<(&str, String)>); 6] = [
+    let actions: [(&str, Vec<(&str, String)>); 7] = [
         (
             "/admin/assistant/model/review",
             vec![("csrf", csrf()), ("model", SPEC.into())],
@@ -793,7 +799,14 @@ async fn every_download_action_is_owner_only_csrf_checked_strict_and_bounded() {
             "/admin/assistant/download/confirm",
             vec![("csrf", csrf()), ("token", "0".repeat(32))],
         ),
-        ("/admin/assistant/download/cancel", vec![("csrf", csrf())]),
+        (
+            "/admin/assistant/download/cancel",
+            vec![("csrf", csrf()), ("id", "1".into())],
+        ),
+        (
+            "/admin/assistant/download/repair",
+            vec![("csrf", csrf()), ("id", "1".into())],
+        ),
         (
             "/admin/assistant/download/resume",
             vec![("csrf", csrf()), ("id", "1".into())],
@@ -870,4 +883,162 @@ async fn every_download_action_is_owner_only_csrf_checked_strict_and_bounded() {
         let response = router_request(&rig.app, &rig.auth[0], path, None).await;
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{path}");
     }
+}
+
+#[tokio::test]
+async fn a_finished_download_whose_file_is_gone_can_be_downloaded_again_without_a_new_review() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let rig = rig().await;
+    let token = rig.review(SPEC).await;
+    rig.confirmed_and_done(&token).await;
+    let before = rig.rows().await;
+    std::fs::remove_file(rig.file()).unwrap();
+    // The panel says the file is gone and offers the repair.
+    let page = rig.page().await;
+    assert!(page.contains("missing or changed"), "{page}");
+    assert!(page.contains("/admin/assistant/download/repair"), "{page}");
+    let id = before[0].id.to_string();
+    assert_eq!(
+        rig.owner(
+            "/admin/assistant/download/repair",
+            &[("csrf", &csrf()), ("id", &id)]
+        )
+        .await,
+        "download-started"
+    );
+    rig.until(|| {
+        rig.downloads.downloader.status().phase == crate::assistant::download::task::Phase::Done
+    })
+    .await;
+    assert_eq!(std::fs::read(rig.file()).unwrap(), rig.bytes);
+    // The provenance is the confirmed one: same row, same licence snapshot.
+    let after = rig.rows().await;
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].id, before[0].id);
+    assert_eq!(after[0].licence_sha256, before[0].licence_sha256);
+    assert_eq!(after[0].confirmed_by, before[0].confirmed_by);
+    // A file that is there is not downloaded again, and a different file is never replaced.
+    assert_eq!(
+        rig.owner(
+            "/admin/assistant/download/repair",
+            &[("csrf", &csrf()), ("id", &id)]
+        )
+        .await,
+        "nothing-to-repair"
+    );
+}
+
+#[tokio::test]
+async fn a_repair_never_replaces_a_different_file_under_the_name() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let rig = rig().await;
+    let token = rig.review(SPEC).await;
+    rig.confirmed_and_done(&token).await;
+    let id = rig.rows().await[0].id.to_string();
+    std::fs::write(rig.file(), b"someone else's file").unwrap();
+    let notice = rig
+        .owner(
+            "/admin/assistant/download/repair",
+            &[("csrf", &csrf()), ("id", &id)],
+        )
+        .await;
+    assert!(
+        notice == "download-started" || notice == "nothing-to-repair",
+        "{notice}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(std::fs::read(rig.file()).unwrap(), b"someone else's file");
+}
+
+#[tokio::test]
+async fn the_pinned_panel_does_not_claim_more_than_a_size_check_shows() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let rig = rig().await;
+    // A sparse file of the pinned Granite size: only the size can be said to match.
+    let path = rig.models.path().join("granite-4.2-3b-Q4_K_M.gguf");
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len(crate::assistant::model::GRANITE_SIZE).unwrap();
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    let page = rig.page().await;
+    assert!(page.contains("the size matches"), "{page}");
+    assert!(
+        page.contains("hash is checked when the model loads"),
+        "{page}"
+    );
+    assert!(!page.contains("verified by Mimik"), "{page}");
+    assert!(!page.contains("present in the models folder"), "{page}");
+}
+
+#[tokio::test]
+async fn cancel_names_the_download_it_was_shown_for() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let rig = rig().await;
+    let token = rig.review(SPEC).await;
+    rig.hub.respond({
+        let bytes = rig.bytes.clone();
+        move |seen| {
+            if seen.path.starts_with("/api/") {
+                Reply::json(&metadata("tiny.gguf", &bytes))
+            } else if seen.path.ends_with("/LICENSE") {
+                Reply::text(LICENCE)
+            } else {
+                Reply::Slow {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: bytes.clone(),
+                    piece: 2000,
+                    gap: Duration::from_millis(60),
+                }
+            }
+        }
+    });
+    rig.owner(
+        "/admin/assistant/download/confirm",
+        &[("csrf", &csrf()), ("token", &token)],
+    )
+    .await;
+    // A stale page (another download's id) cancels nothing.
+    assert_eq!(
+        rig.owner(
+            "/admin/assistant/download/cancel",
+            &[("csrf", &csrf()), ("id", "9999")]
+        )
+        .await,
+        "stale-download"
+    );
+    assert!(rig.downloads.downloader.busy());
+    let id = rig.rows().await[0].id.to_string();
+    assert_eq!(
+        rig.owner(
+            "/admin/assistant/download/cancel",
+            &[("csrf", &csrf()), ("id", &id)]
+        )
+        .await,
+        "download-cancelled"
+    );
+}
+
+#[tokio::test]
+async fn unreadable_download_records_are_reported_not_shown_as_empty() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let rig = rig().await;
+    rig.store
+        .run(|db| {
+            db.execute_batch(
+                "ALTER TABLE assistant_downloads RENAME TO assistant_downloads_gone;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let state = rig.json().await;
+    assert_eq!(state["available"], true);
+    assert!(
+        state["error"]
+            .as_str()
+            .is_some_and(|text| text.contains("records")),
+        "{state}"
+    );
+    let page = rig.page().await;
+    assert!(page.contains("download records cannot be read"), "{page}");
 }

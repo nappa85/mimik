@@ -37,8 +37,9 @@ pub(crate) struct Facts {
 /// Root file names tried when the card names no repository file.
 const ROOT_LICENCES: [&str; 3] = ["LICENSE", "LICENSE.md", "LICENSE.txt"];
 
-/// The grammar of a repository-relative path: segments of 1 to 128 `[A-Za-z0-9._-]`, none `.`
-/// or `..`, joined by `/` (the spec path's rule).
+/// The grammar of a repository-relative licence path: segments of 1 to 128 `[A-Za-z0-9._-]`,
+/// none `.` or `..`, joined by `/`, and no `..` anywhere (the stored row's table check is the
+/// same rule).
 pub(crate) fn valid_repo_path(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= 512
@@ -48,7 +49,7 @@ pub(crate) fn valid_repo_path(path: &str) -> bool {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
                 && segment != "."
-                && segment != ".."
+                && !segment.contains("..")
         })
 }
 

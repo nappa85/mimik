@@ -181,8 +181,13 @@ impl Rig {
     /// A restart: the old task ends, the disk is reopened without faults, and the new task
     /// reconciles before accepting anything.
     async fn restart(&mut self) {
+        self.restart_with(Arc::new(NoFaults)).await;
+    }
+
+    /// [`Self::restart`] over a disk with `faults`.
+    async fn restart_with(&mut self, faults: Arc<dyn Faults>) {
         self.downloader.shutdown().await;
-        self.disk = Arc::new(Disk::open(self.dir.path(), Arc::new(NoFaults)).unwrap());
+        self.disk = Arc::new(Disk::open(self.dir.path(), faults).unwrap());
         self.downloader = Downloader::spawn(
             Client::new(&self.hub.endpoints()).unwrap(),
             Arc::clone(&self.disk),
@@ -229,7 +234,7 @@ fn permit() -> Permit {
 async fn a_download_is_received_verified_published_and_recorded() {
     let rig = Rig::new(10_000).await;
     let row = rig.confirm().await;
-    rig.downloader.start(row.clone(), permit());
+    rig.downloader.start(row.clone(), permit()).await.unwrap();
     assert_eq!(finished(&rig.downloader).await, Phase::Done);
     assert_eq!(std::fs::read(rig.model_file(&row)).unwrap(), *rig.content);
     assert!(!rig.partial_file(&row).exists());
@@ -259,7 +264,9 @@ async fn progress_is_visible_and_the_permit_is_released_at_the_end() {
     let counter = Arc::new(AtomicUsize::new(0));
     let row = rig.confirm().await;
     rig.downloader
-        .start(row, Box::new(Guard(Arc::clone(&counter))));
+        .start(row, Box::new(Guard(Arc::clone(&counter))))
+        .await
+        .unwrap();
     let middle = until(
         &rig.downloader,
         "some bytes",
@@ -298,21 +305,21 @@ async fn cancel_keeps_the_partial_and_resume_asks_for_the_rest_with_range() {
             }
         }
     });
-    rig.downloader.start(row.clone(), permit());
+    rig.downloader.start(row.clone(), permit()).await.unwrap();
     until(
         &rig.downloader,
         "5000 bytes",
         |phase| matches!(phase, Phase::Running { received, .. } if *received >= 5000),
     )
     .await;
-    rig.downloader.cancel();
+    rig.downloader.cancel(None);
     assert_eq!(
         finished(&rig.downloader).await,
         Phase::Stopped(Stop::Cancelled)
     );
     let kept = std::fs::metadata(rig.partial_file(&row)).unwrap().len();
     assert!(kept > 0 && kept < 20_000, "{kept}");
-    rig.downloader.resume(&row, permit());
+    rig.downloader.resume(row.id, permit()).await.unwrap();
     assert_eq!(finished(&rig.downloader).await, Phase::Done);
     assert_eq!(std::fs::read(rig.model_file(&row)).unwrap(), *rig.content);
     // The resume asked for bytes from the partial's length, cut back by one chunk of 1000.
@@ -364,7 +371,7 @@ async fn a_server_that_does_not_honour_range_makes_the_download_restart_from_zer
                 },
             }
         });
-        rig.downloader.start(row.clone(), permit());
+        rig.downloader.start(row.clone(), permit()).await.unwrap();
         assert_eq!(finished(&rig.downloader).await, Phase::Done, "{answer}");
         assert_eq!(
             std::fs::read(rig.model_file(&row)).unwrap(),
@@ -390,21 +397,21 @@ async fn a_body_longer_than_the_size_fails_and_never_becomes_a_model() {
         piece: 700,
         gap: Duration::from_millis(1),
     });
-    rig.downloader.start(row.clone(), permit());
+    rig.downloader.start(row.clone(), permit()).await.unwrap();
     let Phase::Stopped(Stop::Failed(why)) = finished(&rig.downloader).await else {
         panic!("must fail")
     };
-    assert!(why.contains("more bytes"), "{why}");
+    assert!(why.contains("size differs"), "{why}");
     assert!(!rig.model_file(&row).exists());
     assert!(
-        !rig.partial_file(&row).exists(),
-        "the tainted partial is deleted"
+        std::fs::metadata(rig.partial_file(&row)).is_ok_and(|m| m.len() == 0),
+        "no byte of a wrong-sized answer is kept"
     );
     // A size announced larger than the confirmed one is refused before any byte is written.
     let rig = Rig::new(5_000).await;
     let row = rig.confirm().await;
     rig.hub.respond(|_| Reply::file(&vec![1u8; 9_000], None));
-    rig.downloader.start(row.clone(), permit());
+    rig.downloader.start(row.clone(), permit()).await.unwrap();
     assert!(matches!(
         finished(&rig.downloader).await,
         Phase::Stopped(Stop::Failed(_))
@@ -418,7 +425,7 @@ async fn a_hash_mismatch_deletes_the_file_and_leaves_no_model() {
     let mut row = rig.confirm().await;
     // The server sends other bytes of the right size.
     rig.hub.respond(|_| Reply::file(&vec![9u8; 5_000], None));
-    rig.downloader.start(row.clone(), permit());
+    rig.downloader.start(row.clone(), permit()).await.unwrap();
     let Phase::Stopped(Stop::Failed(why)) = finished(&rig.downloader).await else {
         panic!("must fail")
     };
@@ -436,7 +443,7 @@ async fn crashed_at(point: Fault, forced_link: bool) -> (Rig, Row, Phase) {
     rig.disk.no_rename2.store(forced_link, Ordering::SeqCst);
     let row = rig.confirm().await;
     rig.script.fail_at(point);
-    rig.downloader.start(row.clone(), permit());
+    rig.downloader.start(row.clone(), permit()).await.unwrap();
     let phase = finished(&rig.downloader).await;
     rig.restart().await;
     (rig, row, phase)
@@ -470,7 +477,7 @@ async fn a_crash_before_the_file_is_published_leaves_a_partial_that_verifies_wit
             "{point:?}: the whole partial is kept"
         );
         let before = rig.hub.requests().len();
-        rig.downloader.resume(&row, permit());
+        rig.downloader.resume(row.id, permit()).await.unwrap();
         assert_eq!(finished(&rig.downloader).await, Phase::Done, "{point:?}");
         assert_eq!(
             rig.hub.requests().len(),
@@ -531,7 +538,7 @@ async fn a_database_failure_after_publication_is_reported_and_healed_at_restart(
     let mut rig = Rig::new(3_000).await;
     let row = rig.confirm().await;
     rig.rows.fail_complete.store(true, Ordering::SeqCst);
-    rig.downloader.start(row.clone(), permit());
+    rig.downloader.start(row.clone(), permit()).await.unwrap();
     let Phase::Stopped(Stop::Failed(why)) = finished(&rig.downloader).await else {
         panic!("must report")
     };
@@ -598,7 +605,7 @@ async fn a_blocked_disk_write_never_blocks_cancel_or_the_runtime() {
     let rig = Rig::new(10_000).await;
     let row = rig.confirm().await;
     rig.script.block_at(Fault::BeforeWrite);
-    rig.downloader.start(row.clone(), permit());
+    rig.downloader.start(row.clone(), permit()).await.unwrap();
     until(&rig.downloader, "a write in flight", |_| {
         rig.script.hit_count(Fault::BeforeWrite) > 0
     })
@@ -609,7 +616,7 @@ async fn a_blocked_disk_write_never_blocks_cancel_or_the_runtime() {
     })
     .await;
     assert!(ticks.is_ok());
-    rig.downloader.cancel();
+    rig.downloader.cancel(None);
     assert_eq!(
         rig.downloader.status().phase,
         Phase::Stopped(Stop::Cancelled)
@@ -617,7 +624,7 @@ async fn a_blocked_disk_write_never_blocks_cancel_or_the_runtime() {
     // Once the disk answers again the abandoned write finishes and a resume completes.
     rig.script.release();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    rig.downloader.resume(&row, permit());
+    rig.downloader.resume(row.id, permit()).await.unwrap();
     assert_eq!(finished(&rig.downloader).await, Phase::Done);
     assert_eq!(std::fs::read(rig.model_file(&row)).unwrap(), *rig.content);
 }
@@ -627,12 +634,12 @@ async fn a_cancel_during_verification_stops_the_hash_and_keeps_the_whole_partial
     let rig = Rig::new(10_000).await;
     let row = rig.confirm().await;
     rig.script.block_at(Fault::ReadError);
-    rig.downloader.start(row.clone(), permit());
+    rig.downloader.start(row.clone(), permit()).await.unwrap();
     until(&rig.downloader, "verifying", |phase| {
         *phase == Phase::Verifying
     })
     .await;
-    rig.downloader.cancel();
+    rig.downloader.cancel(None);
     assert_eq!(
         rig.downloader.status().phase,
         Phase::Stopped(Stop::Cancelled)
@@ -645,7 +652,7 @@ async fn a_cancel_during_verification_stops_the_hash_and_keeps_the_whole_partial
         10_000
     );
     let before = rig.hub.requests().len();
-    rig.downloader.resume(&row, permit());
+    rig.downloader.resume(row.id, permit()).await.unwrap();
     assert_eq!(finished(&rig.downloader).await, Phase::Done);
     assert_eq!(rig.hub.requests().len(), before, "verification only");
 }
@@ -664,7 +671,7 @@ async fn discard_while_running_stops_it_and_removes_the_partial_and_the_row() {
             gap: Duration::from_millis(30),
         }
     });
-    rig.downloader.start(row.clone(), permit());
+    rig.downloader.start(row.clone(), permit()).await.unwrap();
     until(
         &rig.downloader,
         "bytes",
@@ -679,7 +686,7 @@ async fn discard_while_running_stops_it_and_removes_the_partial_and_the_row() {
     // A finished download is deleted, not discarded.
     let rig = Rig::new(2_000).await;
     let row = rig.confirm().await;
-    rig.downloader.start(row.clone(), permit());
+    rig.downloader.start(row.clone(), permit()).await.unwrap();
     assert_eq!(finished(&rig.downloader).await, Phase::Done);
     assert!(rig.downloader.discard(row.id).await.is_err());
     assert!(rig.model_file(&row).exists());
@@ -698,8 +705,9 @@ async fn a_stalled_server_below_the_floor_stops_the_download_for_a_resume() {
         status: 200,
         headers: Vec::new(),
         first: vec![0; 10],
+        declared: Some(20_000),
     });
-    rig.downloader.start(row.clone(), permit());
+    rig.downloader.start(row.clone(), permit()).await.unwrap();
     assert_eq!(
         finished(&rig.downloader).await,
         Phase::Stopped(Stop::Stalled)
@@ -729,7 +737,7 @@ async fn free_space_is_checked_before_any_request_and_again_on_resume() {
         .await
         .unwrap();
         let row = rig.confirm().await;
-        downloader.start(row.clone(), permit());
+        downloader.start(row.clone(), permit()).await.unwrap();
         low = finished(&downloader).await;
         // A failed start leaves the row and a partial for a retry.
         rows = rig.rows.list().await.unwrap()[0].state;
@@ -750,7 +758,7 @@ async fn an_unsafe_partial_stops_the_download_and_is_left_untouched() {
     let target = rig.dir.path().join("precious");
     std::fs::write(&target, b"precious").unwrap();
     std::os::unix::fs::symlink(&target, rig.partial_file(&row)).unwrap();
-    rig.downloader.start(row.clone(), permit());
+    rig.downloader.start(row.clone(), permit()).await.unwrap();
     assert!(matches!(
         finished(&rig.downloader).await,
         Phase::Stopped(Stop::Failed(_))
@@ -770,7 +778,7 @@ async fn a_file_that_already_has_the_hash_is_adopted_and_another_with_the_name_i
         std::os::unix::fs::PermissionsExt::from_mode(0o600),
     )
     .unwrap();
-    rig.downloader.start(row.clone(), permit());
+    rig.downloader.start(row.clone(), permit()).await.unwrap();
     assert_eq!(finished(&rig.downloader).await, Phase::Done);
     assert_eq!(rig.hub.requests().len(), 0);
     assert_eq!(rig.rows.list().await.unwrap()[0].state, State::Complete);
@@ -784,7 +792,7 @@ async fn a_file_that_already_has_the_hash_is_adopted_and_another_with_the_name_i
             std::os::unix::fs::PermissionsExt::from_mode(0o600),
         )
         .unwrap();
-        rig.downloader.start(row.clone(), permit());
+        rig.downloader.start(row.clone(), permit()).await.unwrap();
         let Phase::Stopped(Stop::Failed(why)) = finished(&rig.downloader).await else {
             panic!("must refuse")
         };
@@ -798,7 +806,7 @@ async fn a_file_that_already_has_the_hash_is_adopted_and_another_with_the_name_i
 async fn delete_keeps_what_is_protected_in_use_or_shared_and_removes_the_rest() {
     let rig = Rig::new(2_000).await;
     let row = rig.confirm().await;
-    rig.downloader.start(row.clone(), permit());
+    rig.downloader.start(row.clone(), permit()).await.unwrap();
     assert_eq!(finished(&rig.downloader).await, Phase::Done);
     // Protected (a pinned default or the effective model), then in the stored choice.
     let protect = vec![row.file_name.clone()];
@@ -844,7 +852,7 @@ async fn shutdown_stops_the_transfer_and_keeps_the_partial() {
             gap: Duration::from_millis(30),
         }
     });
-    rig.downloader.start(row.clone(), permit());
+    rig.downloader.start(row.clone(), permit()).await.unwrap();
     until(
         &rig.downloader,
         "bytes",
@@ -855,3 +863,6 @@ async fn shutdown_stops_the_transfer_and_keeps_the_partial() {
     assert!(rig.partial_file(&row).exists());
     assert!(!rig.model_file(&row).exists());
 }
+
+#[path = "fixes_tests.rs"]
+mod fixes_tests;

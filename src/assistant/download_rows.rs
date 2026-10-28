@@ -97,6 +97,20 @@ impl Rows for SqlRows {
         )
     }
 
+    async fn reopen(&self, id: i64) -> Result<(), String> {
+        failed(
+            self.0
+                .run(move |db| {
+                    db.execute(
+                        "UPDATE assistant_downloads SET state='confirmed',completed_at=NULL WHERE id=?1",
+                        [id],
+                    )?;
+                    Ok(())
+                })
+                .await,
+        )
+    }
+
     async fn delete(&self, id: i64) -> Result<(), String> {
         failed(
             self.0
