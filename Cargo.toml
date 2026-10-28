@@ -72,6 +72,12 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "=1.12.0", default-features = false, features = ["client", "http1"] }
 hyper-util = { version = "=0.1.21", default-features = false, features = ["tokio"] }
 http-body-util = "=0.1.5"
+# Model downloads (step 2d-2, DEP-27): the download client only (`src/assistant/download/`).
+# TLS is rustls with the `ring` provider and the platform verifier; no cookies, compression,
+# HTTP/2 or JSON features. The model client stays on hyper and never uses it.
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider", "system-proxy"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier = "=0.7.1"
 # The model server's seccomp program, compiled in pure Rust (no libseccomp).
 seccompiler = { version = "=0.5.0", default-features = false }
 # `/proc` reads of the endpoint check and the pidfile (no default features: no chrono, no flate2).
