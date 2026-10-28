@@ -290,6 +290,17 @@ the ASSIST-53 instructions and literal rule), so the comparison does not separat
   would be 224, and by the trial rule (floor 256) 256. The default stays 352 until the
   owner decides; the screen's ids are short, while L52 shows long ids lengthen replies.
 
+**Qwen3.5-9B on the GPU** (2026-10-28, same screen and prompt; RX 6650 XT, all layers on
+the GPU, 6 threads, fan on manual; `screen-v2ids53-qwen9b-20261028-0722/`): 42 correct,
+4 false-confident, 4 silent (pass 1, 50); field references 5 of 6 correct, 1
+false-confident; 100/100 schema-valid, none truncated, both passes agree on all 50. Latency
+p50 / p95 / max 4.1 / 9.6 / 13.8 s (first token about 1 s); priming about 12 s after a cold
+start; junction at most 58 °C. Output tokens p50 / p95 / max 45 / 121 / 178. The
+false-confident cases: dh-10 ("curato di 3", subtracted), rf-05 (set to toughness instead of
+adding it), ns-04 ("remember to buy rope", offered the unchanged value) and fv-06 (10 percent
+written as `t − t × 10`, -1080, while the explanation says 120 − 12; Mimik shows its own
+value). No earlier 9B run of this screen exists to compare with.
+
 ## Assisted interpretation: schema v2 re-run of the 2b screen (step 2c-1, 2026-10-22)
 
 Prototype tier (`tools/assist_eval.py --contract`, `tools/run_assist_screen.sh`,
