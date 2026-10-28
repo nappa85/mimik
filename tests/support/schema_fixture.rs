@@ -58,7 +58,8 @@ fn remove_empty_accounts(db: &rusqlite::Connection) {
         "catalogue_versions",
         "catalogues",
         "catalogue_drafts",
-        // The assistant's model setting (schema 22); the choice references the models.
+        // The assistant's model setting (schema 22) and downloads (schema 23); the choice references the models.
+        "assistant_downloads",
         "assistant_model_choice",
         "assistant_models",
     ];

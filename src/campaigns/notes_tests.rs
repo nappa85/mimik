@@ -1314,7 +1314,6 @@ async fn populated_schema19_upgrade_adds_the_note_table() {
         .await
         .unwrap();
     assert_eq!(version, crate::SCHEMA_VERSION);
-    assert_eq!(version, 22);
     assert_eq!(upgraded, history, "history kept byte for byte");
     assert_eq!(count, 0, "existing revisions have no notes");
     // Three triggers, the current-note index and the primary key's autoindex.
