@@ -55,7 +55,29 @@ pub(crate) enum Refusal {
 /// The answer to a command that starts a transfer.
 type Reply = oneshot::Sender<Result<(), Refusal>>;
 /// The answer to a Discard (the failure reason, in words).
-type TextReply = oneshot::Sender<Result<(), String>>;
+type TextReply = oneshot::Sender<Result<Discarded, String>>;
+
+/// What a discard did with the file of the download.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Discarded {
+    /// The record and the partial went; there was no file under the final name.
+    Clean,
+    /// The record, the partial and this download's verified file went.
+    FileRemoved,
+    /// The record and the partial went; a file under the final name was left in place because
+    /// it is shared, in use, a pinned default, or not exactly this download's verified file.
+    FileKept,
+}
+
+/// A Discard: the download, the files that must stay (the pinned defaults and the model
+/// setting's), and the model-work permit the route took for it (none for the running
+/// download, which reuses the transfer's).
+struct Discard {
+    id: i64,
+    protect: Vec<String>,
+    permit: Option<Permit>,
+    reply: TextReply,
+}
 
 /// Tunables; tests shorten them.
 #[derive(Clone, Copy, Debug)]
@@ -118,7 +140,7 @@ enum Command {
     /// Stop the download `id` (any when `None`); answered `true` when it matched the running
     /// transfer, `false` for a stale id or when nothing runs.
     Cancel(Option<i64>, oneshot::Sender<bool>),
-    Discard(i64, TextReply),
+    Discard(Box<Discard>),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -138,6 +160,20 @@ fn lock(status: &Mutex<Status>) -> std::sync::MutexGuard<'_, Status> {
 }
 
 const ENDED: &str = "the download task has ended";
+
+/// The answer to a command. Tests bound the wait, so a task that stops answering fails a test
+/// instead of hanging it.
+#[cfg(not(test))]
+async fn wait<T>(answer: oneshot::Receiver<T>) -> Result<T, oneshot::error::RecvError> {
+    answer.await
+}
+
+#[cfg(test)]
+async fn wait<T>(answer: oneshot::Receiver<T>) -> Result<T, oneshot::error::RecvError> {
+    tokio::time::timeout(Duration::from_secs(20), answer)
+        .await
+        .expect("the download task did not answer within 20 s")
+}
 
 impl Downloader {
     /// Reconciles the disk with the rows, then starts the actor. Nothing is accepted before
@@ -170,7 +206,6 @@ impl Downloader {
             pending: None,
             work: None,
             running: None,
-            publishing: None,
         };
         tokio::spawn(actor.run());
         Ok(Self {
@@ -199,7 +234,7 @@ impl Downloader {
         self.commands
             .send(build(reply))
             .map_err(|_| Refusal::Ended)?;
-        answer.await.map_err(|_| Refusal::Ended)?
+        wait(answer).await.map_err(|_| Refusal::Ended)?
     }
 
     /// Starts the download of a freshly confirmed row; `permit` is dropped when it ends (or at
@@ -239,22 +274,35 @@ impl Downloader {
         if self.commands.send(Command::Cancel(id, reply)).is_err() {
             return false;
         }
-        answer.await.unwrap_or(false)
+        wait(answer).await.unwrap_or(false)
     }
 
-    /// Stops download `id` if it is the running one, deletes its partial and its row. Another
-    /// id never touches the running download.
+    /// Discards download `id`: stops it if it is the running one, deletes its partial and its
+    /// row, and removes its file when the file is exactly this download's verified file and
+    /// nothing else needs it (`protect` names the files that must stay). `permit` is the
+    /// model-work gate the caller took (none for the running download); it is held until the
+    /// discard has finished. Another id never touches the running download.
     ///
     /// # Errors
     ///
-    /// A failure to remove the partial or the row, or a finished download (deleted, not
-    /// discarded), by message.
-    pub(crate) async fn discard(&self, id: i64) -> Result<(), String> {
+    /// A failure to remove the partial, the file or the row, or a finished download (deleted,
+    /// not discarded), by message.
+    pub(crate) async fn discard(
+        &self,
+        id: i64,
+        protect: Vec<String>,
+        permit: Option<Permit>,
+    ) -> Result<Discarded, String> {
         let (reply, answer) = oneshot::channel();
         self.commands
-            .send(Command::Discard(id, reply))
+            .send(Command::Discard(Box::new(Discard {
+                id,
+                protect,
+                permit,
+                reply,
+            })))
             .map_err(|_| ENDED.to_owned())?;
-        answer.await.map_err(|_| ENDED.to_owned())?
+        wait(answer).await.map_err(|_| ENDED.to_owned())?
     }
 
     /// Stops the task, keeping the partial; resolves once it has ended.
@@ -319,14 +367,14 @@ impl Downloader {
 enum Outcome {
     Done,
     Stopped(Stop),
-    Discard(i64, TextReply),
+    Discard(Box<Discard>),
     Shutdown(oneshot::Sender<()>),
 }
 
 /// A command that interrupted the running transfer.
 enum Interrupt {
     Cancel,
-    Discard(i64, TextReply),
+    Discard(Box<Discard>),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -334,7 +382,7 @@ impl From<Interrupt> for Outcome {
     fn from(interrupt: Interrupt) -> Self {
         match interrupt {
             Interrupt::Cancel => Self::Stopped(Stop::Cancelled),
-            Interrupt::Discard(id, reply) => Self::Discard(id, reply),
+            Interrupt::Discard(discard) => Self::Discard(discard),
             Interrupt::Shutdown(reply) => Self::Shutdown(reply),
         }
     }
@@ -354,12 +402,23 @@ fn disk_failed(error: &DiskError) -> Outcome {
 const NAME_TAKEN: &str =
     "a different file already has this name in the models folder: remove it by hand";
 
-/// What an interrupt left behind: blocking file work still running, the permit that keeps the
-/// models folder gated until it has finished, and the discards waiting for it.
-struct Work {
-    handle: Option<JoinHandle<()>>,
+/// A discard whose cleanup is running as tracked work.
+struct Job {
+    handle: JoinHandle<Result<Discarded, String>>,
+    id: i64,
     permit: Option<Permit>,
-    discards: Vec<(i64, TextReply)>,
+    reply: TextReply,
+}
+
+/// What keeps the models folder busy after a transfer ends or a discard arrives: blocking file
+/// work an interrupt abandoned, the permit that keeps the folder gated until it has finished,
+/// the discard being cleaned up, and the discards waiting for their turn. The task polls it
+/// beside commands, so it never stops answering.
+struct Work {
+    abandoned: Option<JoinHandle<()>>,
+    permit: Option<Permit>,
+    job: Option<Job>,
+    queue: Vec<Discard>,
 }
 
 struct Actor {
@@ -373,13 +432,10 @@ struct Actor {
     stop: Arc<AtomicBool>,
     /// Blocking work abandoned by an interrupt during a transfer.
     pending: Option<JoinHandle<()>>,
-    /// The abandoned work being waited for after the transfer ended.
+    /// The work being waited for after the transfer ended or a discard arrived.
     work: Option<Work>,
     /// The row being transferred.
     running: Option<Row>,
-    /// The row whose publication this actor may have made (kept until the row is reconciled:
-    /// completed, or discarded together with the file).
-    publishing: Option<i64>,
 }
 
 impl Actor {
@@ -403,8 +459,8 @@ impl Actor {
                         return;
                     }
                 }
-                () = drained(&mut self.work), if self.work.is_some() => {
-                    self.finish_work().await;
+                progress = progressed(&mut self.work), if self.work.is_some() => {
+                    self.advance(progress);
                 }
             }
         }
@@ -422,12 +478,8 @@ impl Actor {
                 let _ = reply.send(());
                 true
             }
-            Command::Discard(id, reply) => {
-                if let Some(work) = &mut self.work {
-                    work.discards.push((id, reply));
-                } else {
-                    let _ = reply.send(self.discard(id).await);
-                }
+            Command::Discard(discard) => {
+                self.queue(*discard);
                 false
             }
             Command::Start(_, _, reply)
@@ -481,7 +533,7 @@ impl Actor {
         let _ = reply.send(Ok(()));
         let outcome = self.transfer(&row).await;
         self.running = None;
-        self.settle(&row, outcome, permit).await
+        self.settle(&row, outcome, permit)
     }
 
     /// One partial at all: another download's refuses.
@@ -537,26 +589,30 @@ impl Actor {
     /// Records how a transfer ended and decides who holds the permit; true when the task must
     /// end. The permit stays held while abandoned file work or a discard is still changing the
     /// models folder.
-    async fn settle(&mut self, row: &Row, outcome: Outcome, permit: Permit) -> bool {
+    fn settle(&mut self, row: &Row, outcome: Outcome, permit: Permit) -> bool {
         let pending = self.pending.take();
         match outcome {
             Outcome::Done => {
-                self.publishing = None;
                 self.set(row.id, &row.spec, Phase::Done);
                 drop(permit);
             }
             Outcome::Stopped(stop) => {
                 self.set(row.id, &row.spec, Phase::Stopped(stop));
-                self.hold(pending, permit, Vec::new()).await;
+                self.hold(pending, permit, None);
             }
-            Outcome::Discard(id, reply) => {
+            Outcome::Discard(discard) => {
                 // Not running any more; being discarded.
                 self.set(row.id, &row.spec, Phase::Stopped(Stop::Cancelled));
-                self.hold(pending, permit, vec![(id, reply)]).await;
+                self.hold(pending, permit, Some(*discard));
             }
             Outcome::Shutdown(reply) => {
                 self.set(row.id, &row.spec, Phase::Stopped(Stop::Cancelled));
-                keep_gated(pending, Some(permit));
+                keep_gated(Work {
+                    abandoned: pending,
+                    permit: Some(permit),
+                    job: None,
+                    queue: Vec::new(),
+                });
                 let _ = reply.send(());
                 return true;
             }
@@ -564,106 +620,116 @@ impl Actor {
         false
     }
 
-    /// Keeps `permit` until `pending` has finished and `discards` are done: at once when there
-    /// is no pending work, otherwise from the main loop.
-    async fn hold(
-        &mut self,
-        pending: Option<JoinHandle<()>>,
-        permit: Permit,
-        discards: Vec<(i64, TextReply)>,
-    ) {
-        if pending.is_none() {
-            for (id, reply) in discards {
-                let _ = reply.send(self.discard(id).await);
-            }
+    /// Keeps `permit` until `pending` has finished and the discard (if any) is done.
+    fn hold(&mut self, pending: Option<JoinHandle<()>>, permit: Permit, discard: Option<Discard>) {
+        if pending.is_none() && discard.is_none() {
             drop(permit);
-        } else {
-            self.work = Some(Work {
-                handle: pending,
-                permit: Some(permit),
-                discards,
-            });
+            return;
+        }
+        self.work = Some(Work {
+            abandoned: pending,
+            permit: Some(permit),
+            job: None,
+            queue: Vec::new(),
+        });
+        if let Some(discard) = discard {
+            self.queue(discard);
         }
     }
 
-    /// The abandoned work has finished: run the waiting discards, then release the permit.
-    async fn finish_work(&mut self) {
-        let Some(work) = self.work.take() else { return };
-        for (id, reply) in work.discards {
-            let _ = reply.send(self.discard(id).await);
-        }
-        drop(work.permit);
+    /// Queues a discard behind the work in progress (starting it at once when the task is
+    /// idle).
+    fn queue(&mut self, discard: Discard) {
+        let work = self.work.get_or_insert_with(|| Work {
+            abandoned: None,
+            permit: None,
+            job: None,
+            queue: Vec::new(),
+        });
+        work.queue.push(discard);
+        self.start_job();
     }
 
-    /// On shutdown: the abandoned work keeps the permit until it has finished.
+    /// Starts the next waiting discard as tracked work, if nothing else is in the way.
+    fn start_job(&mut self) {
+        let Some(work) = &mut self.work else { return };
+        if work.abandoned.is_some() || work.job.is_some() || work.queue.is_empty() {
+            return;
+        }
+        let Discard {
+            id,
+            protect,
+            permit,
+            reply,
+        } = work.queue.remove(0);
+        let (rows, disk) = (Arc::clone(&self.rows), Arc::clone(&self.disk));
+        work.job = Some(Job {
+            handle: tokio::spawn(run_discard(rows, disk, id, protect)),
+            id,
+            permit,
+            reply,
+        });
+    }
+
+    /// Something the work was waiting for has happened.
+    fn advance(&mut self, progress: Progress) {
+        let Some(work) = &mut self.work else { return };
+        match progress {
+            Progress::Abandoned => work.abandoned = None,
+            Progress::Job(result) => {
+                if let Some(job) = work.job.take() {
+                    self.finish_job(job, result);
+                }
+            }
+        }
+        self.start_job();
+        if let Some(work) = &self.work
+            && work.abandoned.is_none()
+            && work.job.is_none()
+            && work.queue.is_empty()
+        {
+            // Nothing left: the permit goes.
+            self.work = None;
+        }
+    }
+
+    /// Answers a finished discard and settles the status either way: idle when it worked, a
+    /// stopped status with the reason when it did not. Its own permit goes now.
+    fn finish_job(&self, job: Job, result: Result<Discarded, String>) {
+        {
+            let mut status = lock(&self.status);
+            if status.id == Some(job.id) {
+                match &result {
+                    Ok(_) => {
+                        *status = Status {
+                            id: None,
+                            spec: String::new(),
+                            phase: Phase::Idle,
+                        };
+                    }
+                    Err(why) => status.phase = Phase::Stopped(Stop::Failed(why.clone())),
+                }
+            }
+        }
+        let _ = job.reply.send(result);
+        drop(job.permit);
+    }
+
+    /// On shutdown: the work keeps its permits until it has finished, on a task of its own;
+    /// waiting discards are answered "ended".
     fn detach_work(&mut self) {
         if let Some(work) = self.work.take() {
-            keep_gated(work.handle, work.permit);
+            keep_gated(work);
         }
-    }
-
-    /// Discards the download `id`, settling the status either way: idle when it worked, a
-    /// stopped status with the reason when it did not.
-    async fn discard(&mut self, id: i64) -> Result<(), String> {
-        let result = self.discard_inner(id).await;
-        let mut status = lock(&self.status);
-        if status.id == Some(id) {
-            match &result {
-                Ok(()) => {
-                    *status = Status {
-                        id: None,
-                        spec: String::new(),
-                        phase: Phase::Idle,
-                    };
-                }
-                Err(why) => status.phase = Phase::Stopped(Stop::Failed(why.clone())),
-            }
-        }
-        result
-    }
-
-    async fn discard_inner(&mut self, id: i64) -> Result<(), String> {
-        let owned = self.publishing.take() == Some(id);
-        let rows = self.rows.list().await?;
-        let Some(row) = rows.iter().find(|row| row.id == id) else {
-            return Ok(());
-        };
-        if row.state == State::Complete {
-            return Err("a finished download is deleted, not discarded".to_owned());
-        }
-        let shared = rows
-            .iter()
-            .any(|other| other.id != id && other.file_name == row.file_name);
-        let (disk, sha, name, size) = (
-            Arc::clone(&self.disk),
-            row.sha256.clone(),
-            row.file_name.clone(),
-            row.size,
-        );
-        tokio::task::spawn_blocking(move || {
-            disk.fault(Fault::BeforeDiscard)?;
-            disk.remove_partial(&sha)?;
-            // A publication this actor made, cut short or raced by the discard, left a file
-            // with no row: remove it when it is exactly this download's verified file and
-            // nothing else names it.
-            if owned && !shared {
-                remove_if_verified(&disk, &name, &sha, size)?;
-            }
-            Ok::<(), DiskError>(())
-        })
-        .await
-        .map_err(|_| "the partial cannot be removed".to_owned())?
-        .map_err(|error| error.to_string())?;
-        self.rows.delete(id).await
     }
 
     /// Discards a download other than the running one without touching the transfer: a
     /// finished or unknown id, or one that shares the running download's file, is refused or
     /// ignored; a waiting one loses its partial and its row.
-    async fn discard_other(&self, id: i64) -> Result<(), String> {
+    async fn discard_other(&self, id: i64) -> Result<Discarded, String> {
         let rows = self.rows.list().await?;
         let Some(row) = rows.iter().find(|row| row.id == id) else {
-            return Ok(());
+            return Ok(Discarded::Clean);
         };
         if row.state == State::Complete {
             return Err("a finished download is deleted, not discarded".to_owned());
@@ -680,7 +746,8 @@ impl Actor {
             .await
             .map_err(|_| "the partial cannot be removed".to_owned())?
             .map_err(|error| error.to_string())?;
-        self.rows.delete(id).await
+        self.rows.delete(id).await?;
+        Ok(Discarded::Clean)
     }
 
     /// Reacts to a command that arrives while a transfer runs. Only a command that names the
@@ -693,11 +760,13 @@ impl Actor {
                 let _ = reply.send(matched);
                 matched.then_some(Interrupt::Cancel)
             }
-            Command::Discard(id, reply) if Some(id) == running => {
-                Some(Interrupt::Discard(id, reply))
+            Command::Discard(discard) if Some(discard.id) == running => {
+                Some(Interrupt::Discard(discard))
             }
-            Command::Discard(id, reply) => {
-                let _ = reply.send(self.discard_other(id).await);
+            Command::Discard(discard) => {
+                // Another download (a stale or unknown id included): its partial and record
+                // only; the transfer is not touched and keeps its own permit.
+                let _ = discard.reply.send(self.discard_other(discard.id).await);
                 None
             }
             Command::Shutdown(reply) => Some(Interrupt::Shutdown(reply)),
@@ -1033,7 +1102,6 @@ impl Actor {
             Err(interrupt) => return interrupt.into(),
         }
         let (sha, name) = (row.sha256.clone(), row.file_name.clone());
-        self.publishing = Some(row.id);
         let published = self
             .io(move |disk| {
                 disk.fault(Fault::AfterVerify)?;
@@ -1042,11 +1110,7 @@ impl Actor {
             .await;
         match published {
             Ok(Ok(())) => {}
-            Ok(Err(DiskError::Exists)) => {
-                // The file under the name is not ours.
-                self.publishing = None;
-                return failed(NAME_TAKEN);
-            }
+            Ok(Err(DiskError::Exists)) => return failed(NAME_TAKEN),
             Ok(Err(error)) => return disk_failed(&error),
             Err(interrupt) => return interrupt.into(),
         }
@@ -1064,41 +1128,116 @@ impl Actor {
     }
 }
 
-/// Resolves when the abandoned file work has finished (at once when there is none to wait for).
-async fn drained(work: &mut Option<Work>) {
-    if let Some(Work {
-        handle: Some(handle),
-        ..
-    }) = work
-    {
-        let _ = handle.await;
-        // Polled to completion: never poll it again.
-    }
+/// What a piece of work has been waiting for.
+enum Progress {
+    /// The blocking work an interrupt abandoned has finished.
+    Abandoned,
+    /// The discard being cleaned up has finished.
+    Job(Result<Discarded, String>),
 }
 
-/// Holds `permit` until `pending` has finished, on a task of its own (for a task that ends).
-fn keep_gated(pending: Option<JoinHandle<()>>, permit: Option<Permit>) {
+/// Resolves when the work has something new: first the abandoned file work, then the discard
+/// in progress. Never polls a finished handle again.
+async fn progressed(work: &mut Option<Work>) -> Progress {
+    let Some(work) = work else {
+        return std::future::pending().await;
+    };
+    if let Some(handle) = &mut work.abandoned {
+        let _ = handle.await;
+        return Progress::Abandoned;
+    }
+    if let Some(job) = &mut work.job {
+        return Progress::Job(
+            (&mut job.handle)
+                .await
+                .unwrap_or_else(|_| Err("the discard stopped unexpectedly".to_owned())),
+        );
+    }
+    std::future::pending().await
+}
+
+/// Holds the work's permits until it has finished, on a task of its own (for a task that ends):
+/// the abandoned work, then the discard in progress, whose caller is still answered. Waiting
+/// discards are not started; their callers are told the task has ended.
+fn keep_gated(work: Work) {
     tokio::spawn(async move {
-        if let Some(handle) = pending {
+        let Work {
+            abandoned,
+            permit,
+            job,
+            queue,
+        } = work;
+        drop(queue);
+        if let Some(handle) = abandoned {
             let _ = handle.await;
+        }
+        if let Some(job) = job {
+            let result = job
+                .handle
+                .await
+                .unwrap_or_else(|_| Err("the discard stopped unexpectedly".to_owned()));
+            let _ = job.reply.send(result);
+            drop(job.permit);
         }
         drop(permit);
     });
 }
 
-/// Removes the final file `name` when it is exactly the verified file (`sha`, `size`).
-fn remove_if_verified(disk: &Disk, name: &str, sha: &str, size: u64) -> Result<(), DiskError> {
-    let Some(state) = disk.final_state(name)? else {
-        return Ok(());
+/// The discard of download `id`: its partial goes, then its file when the file is durably this
+/// download's own (see [`own_file`]), then its record.
+async fn run_discard(
+    rows: Arc<dyn Rows>,
+    disk: Arc<Disk>,
+    id: i64,
+    protect: Vec<String>,
+) -> Result<Discarded, String> {
+    let listed = rows.list().await?;
+    let Some(row) = listed.iter().find(|row| row.id == id) else {
+        return Ok(Discarded::Clean);
     };
-    if state.len != size {
-        return Ok(());
+    if row.state == State::Complete {
+        return Err("a finished download is deleted, not discarded".to_owned());
+    }
+    let shared = listed
+        .iter()
+        .any(|other| other.id != id && other.file_name == row.file_name);
+    let keep = shared || protect.contains(&row.file_name) || rows.in_use(&row.file_name).await?;
+    let (sha, name, size) = (row.sha256.clone(), row.file_name.clone(), row.size);
+    let outcome = tokio::task::spawn_blocking(move || {
+        disk.fault(Fault::BeforeDiscard)?;
+        disk.remove_partial(&sha)?;
+        own_file(&disk, &name, &sha, size, keep)
+    })
+    .await
+    .map_err(|_| "the discard stopped unexpectedly".to_owned())?
+    .map_err(|error| error.to_string())?;
+    rows.delete(id).await?;
+    Ok(outcome)
+}
+
+/// Removes the final file `name` when, and only when, it is durably this download's own: it
+/// exists, its size matches, its hash equals the download's, and `keep` (shared with another
+/// record, in use by the model setting, or a pinned default) does not apply. Nothing is
+/// remembered in memory: a retried or late discard reaches the same answer.
+fn own_file(
+    disk: &Disk,
+    name: &str,
+    sha: &str,
+    size: u64,
+    keep: bool,
+) -> Result<Discarded, DiskError> {
+    let Some(state) = disk.final_state(name)? else {
+        return Ok(Discarded::Clean);
+    };
+    if keep || state.len != size {
+        return Ok(Discarded::FileKept);
     }
     let file = disk.open_final(name)?;
-    if disk.hash(&file, name, &|| false)? == sha {
-        disk.remove_final(name)?;
+    if disk.hash(&file, name, &|| false)? != sha {
+        return Ok(Discarded::FileKept);
     }
-    Ok(())
+    disk.remove_final(name)?;
+    Ok(Discarded::FileRemoved)
 }
 
 enum Answer {

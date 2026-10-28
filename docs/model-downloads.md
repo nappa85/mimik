@@ -74,19 +74,27 @@ short is completed (final file present with the right size and hash), a second l
 the `link` fallback is removed, a fully received partial verifies without a request, and
 partials no confirmed download owns are swept. A recovered publication is made durable (the file
 and both directories are synced) before it is recorded; a row that cannot be reconciled is
-logged and left recoverable, never aborting the start. A Discard that races a publication
-removes the file when it is exactly that download's verified file and nothing else names it.
-Nothing resumes by itself.
+logged and left recoverable, never aborting the start. Nothing is remembered in memory about a publication: a Discard decides about the file from
+what is on disk and in the records. The file under the download's name is removed with the
+record only when it exists, has the confirmed size, hashes to the confirmed SHA-256, is named
+by no other record, is not used by the model setting (active or previous), and is not a pinned
+default; otherwise it is left and the notice says so. A retried or late Discard therefore reaches
+the same answer. Nothing resumes by itself.
 
 ## Gate and delete
 
-A download, a delete, a Try, a Switch and a Switch back take one model-work gate in the runtime
+A download, a delete, a discard of anything but the running download, a Try, a Switch and a
+Switch back take one model-work gate in the runtime
 manager: one at a time, never beside a trial (Restart does not touch model files and is not
-gated). The active model serves jobs during a download. The gate is held until the work an
+gated). The running download is discarded under the permit of its own transfer. The active
+model serves jobs during a download. The gate is held until the work an
 interrupt abandoned (a blocked write, a publication, a cleanup) has finished and any discard
 has settled, so nothing changes the models folder outside it; Cancel releases it only then.
-Meanwhile a new Start, Resume or Repair is refused ("still finishing"), a Discard waits, and a
-Shutdown ends the task at once, leaving the gate to the abandoned work. Delete
+Meanwhile a new Start, Resume or Repair is refused ("still finishing"), a Discard waits its
+turn, and a Shutdown ends the task at once, leaving the gate to the abandoned work. A discard's
+cleanup is tracked work the task polls beside commands, holding its permit and its caller's
+answer until it settles; a Shutdown detaches it and tells only the callers still waiting that the
+task has ended. Delete
 removes a completed download's row and file unless another row names the file, the model
 setting (active or previous) uses it, it is the active or previous model, or it is a pinned
 default.

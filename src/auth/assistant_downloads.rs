@@ -5,7 +5,7 @@
 use super::{AuthState, csrf_admission, owner_auth};
 use crate::assistant::download::review::{Snapshot, State as ReviewState};
 use crate::assistant::download::rows::{New, Row, State as RowState};
-use crate::assistant::download::task::{Phase, Refusal, Status, Stop};
+use crate::assistant::download::task::{Discarded, Permit, Phase, Refusal, Status, Stop};
 use crate::assistant::downloads::Downloads;
 use crate::assistant::model::{HfSpec, pinned};
 use axum::{
@@ -276,12 +276,27 @@ async fn discard(
 ) -> Result<Response, StatusCode> {
     owner_auth(&state, &session).await?;
     csrf_admission(&session, &form.csrf).await?;
-    let Some(downloads) = downloads(&state) else {
+    let (Some(downloads), Some(runtime)) = (downloads(&state), super::assistant::runtime(&state))
+    else {
         return Ok(redirect("downloads-unavailable"));
     };
+    // A discard changes files, so it takes the model-work gate like Delete. The one exception
+    // is the running download, whose transfer already holds the gate and which the task
+    // discards under that permit.
+    let permit: Option<Permit> = match runtime.model_work() {
+        Ok(gate) => Some(Box::new(gate)),
+        Err(_) if running(&downloads.downloader.status(), form.id) => None,
+        Err(_) => return Ok(redirect("model-busy")),
+    };
+    let mut protect: Vec<String> = pinned()
+        .iter()
+        .map(|pin| pin.file_name().to_owned())
+        .collect();
+    protect.extend(runtime.model_files());
     Ok(redirect(
-        match downloads.downloader.discard(form.id).await {
-            Ok(()) => "download-discarded",
+        match downloads.downloader.discard(form.id, protect, permit).await {
+            Ok(Discarded::FileKept) => "download-discarded-file-kept",
+            Ok(_) => "download-discarded",
             Err(_) => "download-failed",
         },
     ))
@@ -312,6 +327,11 @@ async fn delete(
             Err(_) => "file-kept",
         },
     ))
+}
+
+/// Whether download `id` is the one transferring now (not merely the last one that ran).
+fn running(status: &Status, id: i64) -> bool {
+    status.id == Some(id) && matches!(status.phase, Phase::Running { .. } | Phase::Verifying)
 }
 
 fn phase_word(phase: &Phase) -> &'static str {

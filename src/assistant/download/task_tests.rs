@@ -19,14 +19,26 @@ struct Script {
     hits: Mutex<Vec<Fault>>,
 }
 
+/// Releases a blocked fault point when dropped.
+struct Release(Arc<Script>);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
 impl Script {
     fn fail_at(&self, point: Fault) {
         *self.fail.lock().unwrap() = Some(point);
     }
 
-    fn block_at(&self, point: Fault) {
+    /// Blocks at `point` until released. The guard releases when dropped, so a test that
+    /// fails before its own release does not leave a disk thread blocked forever.
+    fn block_at(self: &Arc<Self>, point: Fault) -> Release {
         *self.block.lock().unwrap() = Some(point);
         *self.open.lock().unwrap() = false;
+        Release(Arc::clone(self))
     }
 
     fn release(&self) {
@@ -617,7 +629,7 @@ async fn reconciliation_sweeps_before_any_command_and_keeps_what_a_download_owns
 async fn a_blocked_disk_write_never_blocks_cancel_or_the_runtime() {
     let rig = Rig::new(10_000).await;
     let row = rig.confirm().await;
-    rig.script.block_at(Fault::BeforeWrite);
+    let _release = rig.script.block_at(Fault::BeforeWrite);
     rig.downloader.start(row.clone(), permit()).await.unwrap();
     until(&rig.downloader, "a write in flight", |_| {
         rig.script.hit_count(Fault::BeforeWrite) > 0
@@ -645,7 +657,7 @@ async fn a_blocked_disk_write_never_blocks_cancel_or_the_runtime() {
 async fn a_cancel_during_verification_stops_the_hash_and_keeps_the_whole_partial() {
     let rig = Rig::new(10_000).await;
     let row = rig.confirm().await;
-    rig.script.block_at(Fault::ReadError);
+    let _release = rig.script.block_at(Fault::ReadError);
     rig.downloader.start(row.clone(), permit()).await.unwrap();
     until(&rig.downloader, "verifying", |phase| {
         *phase == Phase::Verifying
@@ -690,7 +702,10 @@ async fn discard_while_running_stops_it_and_removes_the_partial_and_the_row() {
         |phase| matches!(phase, Phase::Running { received, .. } if *received >= 3000),
     )
     .await;
-    rig.downloader.discard(row.id).await.unwrap();
+    rig.downloader
+        .discard(row.id, Vec::new(), None)
+        .await
+        .unwrap();
     assert_eq!(rig.rows.list().await.unwrap().len(), 0);
     assert!(!rig.partial_file(&row).exists());
     assert!(!rig.model_file(&row).exists());
@@ -700,7 +715,12 @@ async fn discard_while_running_stops_it_and_removes_the_partial_and_the_row() {
     let row = rig.confirm().await;
     rig.downloader.start(row.clone(), permit()).await.unwrap();
     assert_eq!(finished(&rig.downloader).await, Phase::Done);
-    assert!(rig.downloader.discard(row.id).await.is_err());
+    assert!(
+        rig.downloader
+            .discard(row.id, Vec::new(), None)
+            .await
+            .is_err()
+    );
     assert!(rig.model_file(&row).exists());
 }
 
@@ -881,3 +901,6 @@ mod fixes_tests;
 
 #[path = "confirm_tests.rs"]
 mod confirm_tests;
+
+#[path = "final_tests.rs"]
+mod final_tests;

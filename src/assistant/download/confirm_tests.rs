@@ -32,7 +32,7 @@ async fn mismatching(len: usize) -> (Rig, Row) {
 async fn a_cancel_during_the_cleanup_of_a_bad_download_is_honoured() {
     let (rig, row) = mismatching(5_000).await;
     let (released, permit) = counter();
-    rig.script.block_at(Fault::BeforeCleanup);
+    let _release = rig.script.block_at(Fault::BeforeCleanup);
     rig.downloader.start(row.clone(), permit()).await.unwrap();
     wait_for("the cleanup", || {
         rig.script.hit_count(Fault::BeforeCleanup) > 0
@@ -55,7 +55,7 @@ async fn a_cancel_during_the_cleanup_of_a_bad_download_is_honoured() {
 async fn a_discard_during_the_cleanup_of_a_bad_download_removes_the_row() {
     let (rig, row) = mismatching(5_000).await;
     let (released, permit) = counter();
-    rig.script.block_at(Fault::BeforeCleanup);
+    let _release = rig.script.block_at(Fault::BeforeCleanup);
     rig.downloader.start(row.clone(), permit()).await.unwrap();
     wait_for("the cleanup", || {
         rig.script.hit_count(Fault::BeforeCleanup) > 0
@@ -63,7 +63,7 @@ async fn a_discard_during_the_cleanup_of_a_bad_download_removes_the_row() {
     .await;
     let discard = {
         let (downloader, id) = (rig.downloader.clone(), row.id);
-        tokio::spawn(async move { downloader.discard(id).await })
+        tokio::spawn(async move { downloader.discard(id, Vec::new(), None).await })
     };
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
@@ -83,7 +83,7 @@ async fn a_discard_during_the_cleanup_of_a_bad_download_removes_the_row() {
 async fn a_shutdown_during_the_cleanup_of_a_bad_download_ends_the_task() {
     let (rig, row) = mismatching(5_000).await;
     let (released, permit) = counter();
-    rig.script.block_at(Fault::BeforeCleanup);
+    let _release = rig.script.block_at(Fault::BeforeCleanup);
     rig.downloader.start(row.clone(), permit()).await.unwrap();
     wait_for("the cleanup", || {
         rig.script.hit_count(Fault::BeforeCleanup) > 0
@@ -101,7 +101,12 @@ async fn a_shutdown_during_the_cleanup_of_a_bad_download_ends_the_task() {
     rig.script.release();
     wait_for("the permit", || released.load(Ordering::SeqCst) == 1).await;
     // The actor has really ended: nothing answers any more.
-    assert!(rig.downloader.discard(row.id).await.is_err());
+    assert!(
+        rig.downloader
+            .discard(row.id, Vec::new(), None)
+            .await
+            .is_err()
+    );
     assert!(!rig.downloader.cancel(None).await);
 }
 
@@ -110,7 +115,7 @@ async fn the_gate_is_held_while_a_cancelled_publication_is_still_in_flight() {
     let rig = Rig::new(6_000).await;
     let row = rig.confirm().await;
     let (released, permit) = counter();
-    rig.script.block_at(Fault::AfterVerify);
+    let _release = rig.script.block_at(Fault::AfterVerify);
     rig.downloader.start(row.clone(), permit()).await.unwrap();
     wait_for("verified", || rig.script.hit_count(Fault::AfterVerify) > 0).await;
     assert!(rig.downloader.cancel(None).await);
@@ -136,12 +141,12 @@ async fn the_gate_is_held_until_a_discard_has_removed_what_the_publication_made(
     let rig = Rig::new(6_000).await;
     let row = rig.confirm().await;
     let (released, permit) = counter();
-    rig.script.block_at(Fault::AfterVerify);
+    let _release = rig.script.block_at(Fault::AfterVerify);
     rig.downloader.start(row.clone(), permit()).await.unwrap();
     wait_for("verified", || rig.script.hit_count(Fault::AfterVerify) > 0).await;
     let discard = {
         let (downloader, id) = (rig.downloader.clone(), row.id);
-        tokio::spawn(async move { downloader.discard(id).await })
+        tokio::spawn(async move { downloader.discard(id, Vec::new(), None).await })
     };
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(released.load(Ordering::SeqCst), 0);
@@ -158,7 +163,7 @@ async fn the_task_stays_responsive_when_a_resume_follows_a_cancel_over_a_blocked
     let rig = Rig::new(10_000).await;
     let row = rig.confirm().await;
     let (released, permit) = counter();
-    rig.script.block_at(Fault::BeforeWrite);
+    let _release = rig.script.block_at(Fault::BeforeWrite);
     rig.downloader.start(row.clone(), permit()).await.unwrap();
     wait_for("a write", || rig.script.hit_count(Fault::BeforeWrite) > 0).await;
     assert!(rig.downloader.cancel(None).await);
@@ -183,7 +188,7 @@ async fn a_discard_after_a_cancelled_publication_leaves_no_orphan_file() {
     let rig = Rig::new(6_000).await;
     let row = rig.confirm().await;
     let (released, permit) = counter();
-    rig.script.block_at(Fault::AfterVerify);
+    let _release = rig.script.block_at(Fault::AfterVerify);
     rig.downloader.start(row.clone(), permit()).await.unwrap();
     wait_for("verified", || rig.script.hit_count(Fault::AfterVerify) > 0).await;
     assert!(rig.downloader.cancel(None).await);
@@ -193,7 +198,10 @@ async fn a_discard_after_a_cancelled_publication_leaves_no_orphan_file() {
         rig.model_file(&row).exists(),
         "the abandoned publication succeeded"
     );
-    rig.downloader.discard(row.id).await.unwrap();
+    rig.downloader
+        .discard(row.id, Vec::new(), None)
+        .await
+        .unwrap();
     assert_eq!(rig.rows.list().await.unwrap().len(), 0);
     assert!(!rig.model_file(&row).exists(), "an unreferenced final file");
 }
@@ -219,12 +227,12 @@ async fn a_failed_discard_of_the_running_download_leaves_it_stopped_with_the_rea
         let row = rig.confirm().await;
         let (released, permit) = counter();
         // Blocked after verification, so the publication (and the hash of the discard) count.
-        rig.script.block_at(Fault::AfterVerify);
+        let _release = rig.script.block_at(Fault::AfterVerify);
         rig.downloader.start(row.clone(), permit()).await.unwrap();
         wait_for("verified", || rig.script.hit_count(Fault::AfterVerify) > 0).await;
         let discard = {
             let (downloader, id) = (rig.downloader.clone(), row.id);
-            tokio::spawn(async move { downloader.discard(id).await })
+            tokio::spawn(async move { downloader.discard(id, Vec::new(), None).await })
         };
         tokio::time::sleep(Duration::from_millis(50)).await;
         match failure {
@@ -250,12 +258,12 @@ async fn a_discard_of_a_row_that_is_already_gone_leaves_the_status_idle() {
     let rig = Rig::new(6_000).await;
     let row = rig.confirm().await;
     let (released, permit) = counter();
-    rig.script.block_at(Fault::BeforeWrite);
+    let _release = rig.script.block_at(Fault::BeforeWrite);
     rig.downloader.start(row.clone(), permit()).await.unwrap();
     wait_for("a write", || rig.script.hit_count(Fault::BeforeWrite) > 0).await;
     let discard = {
         let (downloader, id) = (rig.downloader.clone(), row.id);
-        tokio::spawn(async move { downloader.discard(id).await })
+        tokio::spawn(async move { downloader.discard(id, Vec::new(), None).await })
     };
     tokio::time::sleep(Duration::from_millis(50)).await;
     rig.rows.rows.lock().unwrap().clear();
@@ -359,7 +367,7 @@ async fn a_shutdown_at_the_last_step_is_accepted_while_blocked_and_the_row_heals
     let mut rig = Rig::new(3_000).await;
     let row = rig.confirm().await;
     let (released, permit) = counter();
-    rig.script.block_at(Fault::BeforeCommit);
+    let _release = rig.script.block_at(Fault::BeforeCommit);
     rig.downloader.start(row.clone(), permit()).await.unwrap();
     wait_for("the last step", || {
         rig.script.hit_count(Fault::BeforeCommit) > 0

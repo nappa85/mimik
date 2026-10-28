@@ -45,9 +45,14 @@ async fn a_discard_of_another_id_never_touches_the_running_transfer() {
     )
     .await;
     // Nonexistent, completed, and unrelated waiting ids: handled without a stop.
-    assert!(rig.downloader.discard(9999).await.is_ok());
+    assert!(rig.downloader.discard(9999, Vec::new(), None).await.is_ok());
     let finished_row = other_row(&rig, false).await;
-    assert!(rig.downloader.discard(finished_row.id).await.is_err());
+    assert!(
+        rig.downloader
+            .discard(finished_row.id, Vec::new(), None)
+            .await
+            .is_err()
+    );
     let waiting = rig
         .rows
         .insert(New {
@@ -59,7 +64,12 @@ async fn a_discard_of_another_id_never_touches_the_running_transfer() {
         })
         .await
         .unwrap();
-    assert!(rig.downloader.discard(waiting.id).await.is_ok());
+    assert!(
+        rig.downloader
+            .discard(waiting.id, Vec::new(), None)
+            .await
+            .is_ok()
+    );
     let status = rig.downloader.status();
     assert_eq!(status.id, Some(row.id));
     assert!(matches!(status.phase, Phase::Running { .. }), "{status:?}");
@@ -81,13 +91,13 @@ async fn a_discard_of_another_id_never_touches_the_running_transfer() {
 async fn a_discard_of_another_id_during_blocking_disk_work_does_not_cancel_it() {
     let rig = Rig::new(10_000).await;
     let row = rig.confirm().await;
-    rig.script.block_at(Fault::BeforeWrite);
+    let _release = rig.script.block_at(Fault::BeforeWrite);
     rig.downloader.start(row.clone(), permit()).await.unwrap();
     until(&rig.downloader, "a write in flight", |_| {
         rig.script.hit_count(Fault::BeforeWrite) > 0
     })
     .await;
-    assert!(rig.downloader.discard(9999).await.is_ok());
+    assert!(rig.downloader.discard(9999, Vec::new(), None).await.is_ok());
     assert!(matches!(
         rig.downloader.status().phase,
         Phase::Running { .. }
@@ -223,7 +233,7 @@ async fn a_resume_cannot_start_a_second_partial() {
 async fn an_interrupt_at_the_last_step_is_honoured_and_a_shutdown_there_ends_the_task() {
     let rig = Rig::new(3_000).await;
     let row = rig.confirm().await;
-    rig.script.block_at(Fault::BeforeCommit);
+    let _release = rig.script.block_at(Fault::BeforeCommit);
     rig.downloader.start(row.clone(), permit()).await.unwrap();
     until(&rig.downloader, "the last step", |_| {
         rig.script.hit_count(Fault::BeforeCommit) > 0
@@ -253,7 +263,7 @@ async fn a_resume_of_a_missing_row_leaves_the_status_alone() {
 async fn a_discard_racing_the_publication_leaves_no_orphan_file() {
     let rig = Rig::new(6_000).await;
     let row = rig.confirm().await;
-    rig.script.block_at(Fault::AfterVerify);
+    let _release = rig.script.block_at(Fault::AfterVerify);
     rig.downloader.start(row.clone(), permit()).await.unwrap();
     until(&rig.downloader, "verified", |_| {
         rig.script.hit_count(Fault::AfterVerify) > 0
@@ -262,7 +272,7 @@ async fn a_discard_racing_the_publication_leaves_no_orphan_file() {
     let discard = {
         let downloader = rig.downloader.clone();
         let id = row.id;
-        tokio::spawn(async move { downloader.discard(id).await })
+        tokio::spawn(async move { downloader.discard(id, Vec::new(), None).await })
     };
     tokio::time::sleep(Duration::from_millis(100)).await;
     rig.script.release();

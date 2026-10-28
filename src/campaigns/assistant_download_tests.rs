@@ -1151,3 +1151,103 @@ async fn a_resume_refused_for_another_partial_says_so() {
         "no-such-download"
     );
 }
+
+fn slow_server(rig: &Rig) {
+    rig.hub.respond({
+        let bytes = rig.bytes.clone();
+        move |seen| {
+            if seen.path.starts_with("/api/") {
+                Reply::json(&metadata("tiny.gguf", &bytes))
+            } else if seen.path.ends_with("/LICENSE") {
+                Reply::text(LICENCE)
+            } else {
+                Reply::Slow {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: bytes.clone(),
+                    piece: 1000,
+                    gap: Duration::from_millis(60),
+                }
+            }
+        }
+    });
+}
+
+#[tokio::test]
+async fn a_discard_takes_the_model_work_gate_unless_it_is_the_running_download() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let rig = rig().await;
+    slow_server(&rig);
+    let token = rig.review(SPEC).await;
+    rig.owner(
+        "/admin/assistant/download/confirm",
+        &[("csrf", &csrf()), ("token", &token)],
+    )
+    .await;
+    let id = rig.rows().await[0].id;
+    rig.until(|| rig.downloads.downloader.busy()).await;
+    assert!(rig.downloads.downloader.cancel(Some(id)).await);
+    rig.until(|| !rig.downloads.downloader.busy()).await;
+    // A waiting download: its discard changes files, so it needs the gate.
+    let mut gate = None;
+    for _ in 0..200 {
+        if let Ok(taken) = rig.handle.model_work() {
+            gate = Some(taken);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let gate = gate.expect("the cancelled transfer released the gate");
+    assert_eq!(
+        rig.owner(
+            "/admin/assistant/download/discard",
+            &[("csrf", &csrf()), ("id", &id.to_string())]
+        )
+        .await,
+        "model-busy"
+    );
+    assert_eq!(
+        rig.rows().await.len(),
+        1,
+        "nothing was discarded without the gate"
+    );
+    // With the gate free again the same discard goes through.
+    drop(gate);
+    assert_eq!(
+        rig.owner(
+            "/admin/assistant/download/discard",
+            &[("csrf", &csrf()), ("id", &id.to_string())]
+        )
+        .await,
+        "download-discarded"
+    );
+    assert_eq!(rig.rows().await.len(), 0);
+    // The running download is discarded under the transfer's own permit.
+    let token = rig.review(SPEC).await;
+    rig.owner(
+        "/admin/assistant/download/confirm",
+        &[("csrf", &csrf()), ("token", &token)],
+    )
+    .await;
+    let running = rig.rows().await[0].id;
+    rig.until(|| rig.downloads.downloader.busy()).await;
+    assert_eq!(
+        rig.owner(
+            "/admin/assistant/download/discard",
+            &[("csrf", &csrf()), ("id", &running.to_string())]
+        )
+        .await,
+        "download-discarded"
+    );
+    assert_eq!(rig.rows().await.len(), 0);
+    // And the gate is free again afterwards.
+    let mut freed = false;
+    for _ in 0..200 {
+        if rig.handle.model_work().is_ok() {
+            freed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(freed, "the discard released the gate");
+}

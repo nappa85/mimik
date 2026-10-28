@@ -91,6 +91,7 @@ enum Notice {
     FileKept,
     StaleDownload,
     NothingToRepair,
+    DownloadDiscardedFileKept,
 }
 
 impl Notice {
@@ -153,6 +154,9 @@ impl Notice {
             Self::DownloadDiscarded => "Discarded: the partial file and the record are removed.",
             Self::NoSuchDownload => "There is no such waiting download.",
             Self::FileDeleted => "Deleted the downloaded file.",
+            Self::DownloadDiscardedFileKept => {
+                "Discarded: the partial file and the record are removed. A file under the download's name was left in place because it is shared, in use, a pinned default, or not exactly this download's verified file."
+            }
             Self::StaleDownload => {
                 "That page showed another download than the one running, so nothing was cancelled. Reload it."
             }
