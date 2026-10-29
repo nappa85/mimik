@@ -11,9 +11,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   0.45.0 upgrade are merged into master, and so is 2c-2b-1 (the GPU path, live-verified on the
   RX 6650 XT). 2d-1 (the owner model setting with local models), ASSIST-53 and ASSIST-55
   (Qwen3.5-9B default on the GPU) are merged; ASSIST-56 (prompt format D: context by ID, no
-  values) is built on its branch, in review. There is no level 2 (ASSIST-48).
-  2d-2 (model downloads, `docs/model-downloads.md`) is built on its branch, awaiting the
-  reviewers; its live checks are owed (`docs/assisted-sheet-plan.md`, "2d-2"). Next: 3. Level 3's return is its own later step (plan, "Level 3 behind an owner opt-in").
+  values) is merged too, and so is 2d-2 (model downloads, `docs/model-downloads.md`). There is
+  no level 2 (ASSIST-48). Owed for 2d-2, with the owner's go-ahead: the live checks against the
+  real Hub (`docs/assisted-sheet-plan.md`, "2d-2"; ASSIST-L58). Next: 3. Level 3's return is its
+  own later step (plan, "Level 3 behind an owner opt-in").
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
   target/agent-tools/ci.sh <cmd>`, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
@@ -73,6 +74,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - M4 default Q5 (drafts over 1 MiB are not echoed back), applied without an answer: confirm or
   change.
 - Precedence or errata policy between the MÖRK BORG IT 2025 and EN 2019 sources (SRC-9).
+- 2d-2: Restart is outside the model-work gate (it touches no model files, and waiting behind a
+  long download seemed wrong); keep it so, or gate it?
 - Exact editions for D&D, Pathfinder (remaster or not), Vampire and MÖRK BORG.
 - When that work starts: print/export priorities, UI and answer languages, acceptable latency,
   situation input, first-release features, games after the POC.
