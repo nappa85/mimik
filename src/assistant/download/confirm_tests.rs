@@ -199,7 +199,7 @@ async fn a_discard_after_a_cancelled_publication_leaves_no_orphan_file() {
         "the abandoned publication succeeded"
     );
     rig.downloader
-        .discard(row.id, Vec::new(), None)
+        .discard(row.id, Vec::new(), Some(permit()))
         .await
         .unwrap();
     assert_eq!(rig.rows.list().await.unwrap().len(), 0);

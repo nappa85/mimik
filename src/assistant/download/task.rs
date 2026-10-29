@@ -54,8 +54,8 @@ pub(crate) enum Refusal {
 
 /// The answer to a command that starts a transfer.
 type Reply = oneshot::Sender<Result<(), Refusal>>;
-/// The answer to a Discard (the failure reason, in words).
-type TextReply = oneshot::Sender<Result<Discarded, String>>;
+/// The answer to a Discard.
+type TextReply = oneshot::Sender<Result<Discarded, Refusal>>;
 
 /// What a discard did with the file of the download.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,8 +158,6 @@ fn lock(status: &Mutex<Status>) -> std::sync::MutexGuard<'_, Status> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
-
-const ENDED: &str = "the download task has ended";
 
 /// The answer to a command. Tests bound the wait, so a task that stops answering fails a test
 /// instead of hanging it.
@@ -285,14 +283,14 @@ impl Downloader {
     ///
     /// # Errors
     ///
-    /// A failure to remove the partial, the file or the row, or a finished download (deleted,
-    /// not discarded), by message.
+    /// A missing model-work permit, a failure to remove the partial, the file or the row,
+    /// or a finished download (deleted, not discarded).
     pub(crate) async fn discard(
         &self,
         id: i64,
         protect: Vec<String>,
         permit: Option<Permit>,
-    ) -> Result<Discarded, String> {
+    ) -> Result<Discarded, Refusal> {
         let (reply, answer) = oneshot::channel();
         self.commands
             .send(Command::Discard(Box::new(Discard {
@@ -301,8 +299,8 @@ impl Downloader {
                 permit,
                 reply,
             })))
-            .map_err(|_| ENDED.to_owned())?;
-        wait(answer).await.map_err(|_| ENDED.to_owned())?
+            .map_err(|_| Refusal::Ended)?;
+        wait(answer).await.map_err(|_| Refusal::Ended)?
     }
 
     /// Stops the task, keeping the partial; resolves once it has ended.
@@ -416,7 +414,7 @@ struct Job {
 /// beside commands, so it never stops answering.
 struct Work {
     abandoned: Option<JoinHandle<()>>,
-    permit: Option<Permit>,
+    permit: Option<(i64, Permit)>,
     job: Option<Job>,
     queue: Vec<Discard>,
 }
@@ -598,18 +596,18 @@ impl Actor {
             }
             Outcome::Stopped(stop) => {
                 self.set(row.id, &row.spec, Phase::Stopped(stop));
-                self.hold(pending, permit, None);
+                self.hold(row.id, pending, permit, None);
             }
             Outcome::Discard(discard) => {
                 // Not running any more; being discarded.
                 self.set(row.id, &row.spec, Phase::Stopped(Stop::Cancelled));
-                self.hold(pending, permit, Some(*discard));
+                self.hold(row.id, pending, permit, Some(*discard));
             }
             Outcome::Shutdown(reply) => {
                 self.set(row.id, &row.spec, Phase::Stopped(Stop::Cancelled));
                 keep_gated(Work {
                     abandoned: pending,
-                    permit: Some(permit),
+                    permit: Some((row.id, permit)),
                     job: None,
                     queue: Vec::new(),
                 });
@@ -621,14 +619,20 @@ impl Actor {
     }
 
     /// Keeps `permit` until `pending` has finished and the discard (if any) is done.
-    fn hold(&mut self, pending: Option<JoinHandle<()>>, permit: Permit, discard: Option<Discard>) {
+    fn hold(
+        &mut self,
+        id: i64,
+        pending: Option<JoinHandle<()>>,
+        permit: Permit,
+        discard: Option<Discard>,
+    ) {
         if pending.is_none() && discard.is_none() {
             drop(permit);
             return;
         }
         self.work = Some(Work {
             abandoned: pending,
-            permit: Some(permit),
+            permit: Some((id, permit)),
             job: None,
             queue: Vec::new(),
         });
@@ -640,6 +644,16 @@ impl Actor {
     /// Queues a discard behind the work in progress (starting it at once when the task is
     /// idle).
     fn queue(&mut self, discard: Discard) {
+        if discard.permit.is_none()
+            && !self.work.as_ref().is_some_and(|work| {
+                work.permit
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == discard.id)
+            })
+        {
+            let _ = discard.reply.send(Err(Refusal::Busy));
+            return;
+        }
         let work = self.work.get_or_insert_with(|| Work {
             abandoned: None,
             permit: None,
@@ -711,7 +725,7 @@ impl Actor {
                 }
             }
         }
-        let _ = job.reply.send(result);
+        let _ = job.reply.send(result.map_err(Refusal::Disk));
         drop(job.permit);
     }
 
@@ -763,10 +777,15 @@ impl Actor {
             Command::Discard(discard) if Some(discard.id) == running => {
                 Some(Interrupt::Discard(discard))
             }
+            Command::Discard(discard) if discard.permit.is_none() => {
+                let _ = discard.reply.send(Err(Refusal::Busy));
+                None
+            }
             Command::Discard(discard) => {
-                // Another download (a stale or unknown id included): its partial and record
-                // only; the transfer is not touched and keeps its own permit.
-                let _ = discard.reply.send(self.discard_other(discard.id).await);
+                // Another download with its own permit: its partial and record only.
+                let _ = discard
+                    .reply
+                    .send(self.discard_other(discard.id).await.map_err(Refusal::Disk));
                 None
             }
             Command::Shutdown(reply) => Some(Interrupt::Shutdown(reply)),
@@ -1176,7 +1195,7 @@ fn keep_gated(work: Work) {
                 .handle
                 .await
                 .unwrap_or_else(|_| Err("the discard stopped unexpectedly".to_owned()));
-            let _ = job.reply.send(result);
+            let _ = job.reply.send(result.map_err(Refusal::Disk));
             drop(job.permit);
         }
         drop(permit);

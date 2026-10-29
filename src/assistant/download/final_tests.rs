@@ -36,13 +36,95 @@ async fn published_not_recorded(rig: &Rig) -> Row {
 }
 
 #[tokio::test]
+async fn a_queued_permitless_discard_is_busy_after_the_transfer_releases_its_permit() {
+    let rig = Rig::new(6_000).await;
+    let row = rig.confirm().await;
+    tokio::time::timeout(Duration::from_secs(2), rig.downloader.shutdown())
+        .await
+        .unwrap();
+    let (commands, receiver) = mpsc::unbounded_channel();
+    let mut actor = Actor {
+        client: Client::new(&rig.hub.endpoints()).unwrap(),
+        disk: Arc::clone(&rig.disk),
+        rows: rig.rows.clone(),
+        config: config(),
+        status: Arc::clone(&rig.downloader.status),
+        receiver,
+        stop: Arc::new(AtomicBool::new(false)),
+        pending: None,
+        work: None,
+        running: None,
+    };
+    let gate = Arc::new(tokio::sync::Semaphore::new(1));
+    let permit = Arc::clone(&gate).try_acquire_owned().unwrap();
+    let release = rig.script.block_at(Fault::BeforeWrite);
+    let (reply, started) = oneshot::channel();
+    let transfer = {
+        let row = row.clone();
+        tokio::spawn(async move {
+            assert!(!actor.accept(Ok(row), Box::new(permit), reply).await);
+            actor
+        })
+    };
+    wait(started).await.unwrap().unwrap();
+    wait_for("a write", || rig.script.hit_count(Fault::BeforeWrite) > 0).await;
+    // Admit both while running, then stop polling commands after Cancel wins. This fixes
+    // the ordering without relying on the actor's select choosing one ready branch.
+    let (reply, cancelled) = oneshot::channel();
+    commands.send(Command::Cancel(Some(row.id), reply)).unwrap();
+    let (reply, answer) = oneshot::channel();
+    commands
+        .send(Command::Discard(Box::new(Discard {
+            id: row.id,
+            protect: Vec::new(),
+            permit: None,
+            reply,
+        })))
+        .unwrap();
+    assert!(wait(cancelled).await.unwrap());
+    let mut actor = tokio::time::timeout(Duration::from_secs(2), transfer)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        gate.try_acquire().is_err(),
+        "the abandoned write stays gated"
+    );
+    drop(release);
+    let progress = tokio::time::timeout(Duration::from_secs(2), progressed(&mut actor.work))
+        .await
+        .unwrap();
+    actor.advance(progress);
+    let _other_holder = Arc::clone(&gate).try_acquire_owned().unwrap();
+    let partial = std::fs::read(rig.partial_file(&row)).unwrap();
+    let before = rig.rows.list().await.unwrap();
+    let command = actor.receiver.try_recv().unwrap();
+    assert!(!actor.command(command).await);
+    if actor.work.is_some() {
+        let progress = tokio::time::timeout(Duration::from_secs(2), progressed(&mut actor.work))
+            .await
+            .unwrap();
+        actor.advance(progress);
+    }
+    let result = wait(answer).await.unwrap();
+    assert_eq!(
+        rig.script.hit_count(Fault::BeforeDiscard),
+        0,
+        "cleanup ran without a model-work permit"
+    );
+    assert_eq!(std::fs::read(rig.partial_file(&row)).unwrap(), partial);
+    assert_eq!(rig.rows.list().await.unwrap(), before);
+    assert_eq!(result, Err(Refusal::Busy));
+}
+
+#[tokio::test]
 async fn a_retry_after_a_failed_discard_still_removes_the_downloads_own_file() {
     let rig = Rig::new(6_000).await;
     let row = published_not_recorded(&rig).await;
     rig.script.fail_at(Fault::BeforeDiscard);
     assert!(
         rig.downloader
-            .discard(row.id, Vec::new(), None)
+            .discard(row.id, Vec::new(), Some(permit()))
             .await
             .is_err()
     );
@@ -50,7 +132,9 @@ async fn a_retry_after_a_failed_discard_still_removes_the_downloads_own_file() {
     assert!(rig.model_file(&row).exists());
     assert_eq!(rig.rows.list().await.unwrap().len(), 1);
     assert_eq!(
-        rig.downloader.discard(row.id, Vec::new(), None).await,
+        rig.downloader
+            .discard(row.id, Vec::new(), Some(permit()))
+            .await,
         Ok(Discarded::FileRemoved)
     );
     assert!(!rig.model_file(&row).exists());
@@ -63,7 +147,9 @@ async fn an_unrelated_discard_first_does_not_forget_which_file_is_whose() {
     let row = published_not_recorded(&rig).await;
     // A nonexistent id, and another waiting download, are discarded first.
     assert_eq!(
-        rig.downloader.discard(9999, Vec::new(), None).await,
+        rig.downloader
+            .discard(9999, Vec::new(), Some(permit()))
+            .await,
         Ok(Discarded::Clean)
     );
     let other = rig
@@ -79,12 +165,14 @@ async fn an_unrelated_discard_first_does_not_forget_which_file_is_whose() {
         .unwrap();
     assert!(
         rig.downloader
-            .discard(other.id, Vec::new(), None)
+            .discard(other.id, Vec::new(), Some(permit()))
             .await
             .is_ok()
     );
     assert_eq!(
-        rig.downloader.discard(row.id, Vec::new(), None).await,
+        rig.downloader
+            .discard(row.id, Vec::new(), Some(permit()))
+            .await,
         Ok(Discarded::FileRemoved)
     );
     assert!(!rig.model_file(&row).exists());
@@ -123,7 +211,9 @@ async fn another_download_completing_first_does_not_orphan_the_file_of_the_first
         .unwrap();
     assert_eq!(finished(&rig.downloader).await, Phase::Done);
     assert_eq!(
-        rig.downloader.discard(first.id, Vec::new(), None).await,
+        rig.downloader
+            .discard(first.id, Vec::new(), Some(permit()))
+            .await,
         Ok(Discarded::FileRemoved)
     );
     assert!(!rig.model_file(&first).exists());
@@ -146,7 +236,9 @@ async fn a_file_that_is_shared_in_use_protected_or_not_verified_is_left_and_said
         .await
         .unwrap();
     assert_eq!(
-        rig.downloader.discard(row.id, Vec::new(), None).await,
+        rig.downloader
+            .discard(row.id, Vec::new(), Some(permit()))
+            .await,
         Ok(Discarded::FileKept)
     );
     assert!(rig.model_file(&row).exists());
@@ -155,7 +247,9 @@ async fn a_file_that_is_shared_in_use_protected_or_not_verified_is_left_and_said
     let row = published_not_recorded(&rig).await;
     rig.rows.in_use.lock().unwrap().push(row.file_name.clone());
     assert_eq!(
-        rig.downloader.discard(row.id, Vec::new(), None).await,
+        rig.downloader
+            .discard(row.id, Vec::new(), Some(permit()))
+            .await,
         Ok(Discarded::FileKept)
     );
     assert!(rig.model_file(&row).exists());
@@ -164,7 +258,7 @@ async fn a_file_that_is_shared_in_use_protected_or_not_verified_is_left_and_said
     let row = published_not_recorded(&rig).await;
     assert_eq!(
         rig.downloader
-            .discard(row.id, vec![row.file_name.clone()], None)
+            .discard(row.id, vec![row.file_name.clone()], Some(permit()))
             .await,
         Ok(Discarded::FileKept)
     );
@@ -180,7 +274,9 @@ async fn a_file_that_is_shared_in_use_protected_or_not_verified_is_left_and_said
         )
         .unwrap();
         assert_eq!(
-            rig.downloader.discard(row.id, Vec::new(), None).await,
+            rig.downloader
+                .discard(row.id, Vec::new(), Some(permit()))
+                .await,
             Ok(Discarded::FileKept)
         );
         assert_eq!(std::fs::read(rig.model_file(&row)).unwrap(), other);

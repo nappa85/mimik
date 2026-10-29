@@ -297,7 +297,7 @@ async fn discard(
         match downloads.downloader.discard(form.id, protect, permit).await {
             Ok(Discarded::FileKept) => "download-discarded-file-kept",
             Ok(_) => "download-discarded",
-            Err(_) => "download-failed",
+            Err(why) => refusal_notice(&why),
         },
     ))
 }

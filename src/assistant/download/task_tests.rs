@@ -717,7 +717,7 @@ async fn discard_while_running_stops_it_and_removes_the_partial_and_the_row() {
     assert_eq!(finished(&rig.downloader).await, Phase::Done);
     assert!(
         rig.downloader
-            .discard(row.id, Vec::new(), None)
+            .discard(row.id, Vec::new(), Some(permit()))
             .await
             .is_err()
     );

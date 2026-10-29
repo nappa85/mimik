@@ -45,11 +45,14 @@ async fn a_discard_of_another_id_never_touches_the_running_transfer() {
     )
     .await;
     // Nonexistent, completed, and unrelated waiting ids: handled without a stop.
-    assert!(rig.downloader.discard(9999, Vec::new(), None).await.is_ok());
+    assert_eq!(
+        rig.downloader.discard(9999, Vec::new(), None).await,
+        Err(Refusal::Busy)
+    );
     let finished_row = other_row(&rig, false).await;
     assert!(
         rig.downloader
-            .discard(finished_row.id, Vec::new(), None)
+            .discard(finished_row.id, Vec::new(), Some(permit()))
             .await
             .is_err()
     );
@@ -66,7 +69,7 @@ async fn a_discard_of_another_id_never_touches_the_running_transfer() {
         .unwrap();
     assert!(
         rig.downloader
-            .discard(waiting.id, Vec::new(), None)
+            .discard(waiting.id, Vec::new(), Some(permit()))
             .await
             .is_ok()
     );
@@ -97,7 +100,10 @@ async fn a_discard_of_another_id_during_blocking_disk_work_does_not_cancel_it() 
         rig.script.hit_count(Fault::BeforeWrite) > 0
     })
     .await;
-    assert!(rig.downloader.discard(9999, Vec::new(), None).await.is_ok());
+    assert_eq!(
+        rig.downloader.discard(9999, Vec::new(), None).await,
+        Err(Refusal::Busy)
+    );
     assert!(matches!(
         rig.downloader.status().phase,
         Phase::Running { .. }
