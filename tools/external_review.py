@@ -22,13 +22,13 @@ import tempfile
 import time
 from pathlib import Path
 
-# User decision 2026-10-22: Astra and a Sonnet subagent are the main reviewers. The third
-# reviewer is the first of these that works; if none works, the review proceeds with two.
-MAIN_MODEL = "openai/gpt-6-astra"
+# User decision 2026-10-29: Sol and an Opus subagent are the main reviewers. The optional
+# third reviewer is DeepSeek, or Muse Spark (unlisted by opencode since 2026-10-22; its
+# preflight fails fast while it is gone). If neither works, the review proceeds with two.
+MAIN_MODEL = "openai/gpt-6.1-sol"
 THIRD_REVIEWER_CHAIN = (
-    "opencode/minimax-m3.1-flash-free",
     "opencode/deepseek-v4.1-flash-free",
-    "opencode/beam-free",
+    "opencode/muse-spark-1.3-contributor-free",
 )
 CHAINS = {"main": (MAIN_MODEL,), "third": THIRD_REVIEWER_CHAIN}
 EXCLUDES = (
