@@ -5,6 +5,33 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Extractor screen on MÖRK BORG IT art pages: Marker versus Docling (2026-10-29)
+
+`mork-borg-core-it-2025` PDF pages 22–39 (printed 18–35: creation, weapons, armour,
+equipment, abilities, HP, combat, omens, powers, scrolls), both on the PDF text layer with OCR
+off, in network-less containers. Marker 2.0.0 (`mimik-extraction`, fast mode) against Docling
+2.139.0 (`containers/docling-screen.Dockerfile`; code MIT, layout models Apache-2.0, table
+model CDLA-Permissive-2.0), with text inside pictures kept (`traverse_pictures=True`). Judged
+by eye against the original page images, on pages 24, 25, 28, 29 and 30. One run each; one
+manual.
+
+| Page | Marker | Docling |
+|---|---|---|
+| 24–27, the weapons table drawn over illustrations | page 25: no unit at all (one empty Picture); 24, 26, 27 partial | every label on all four pages, each with its own box; label and dice often separate items |
+| 28, armour | list items with text from different rows merged | the same kind of merge |
+| 29, equipment and services | tables with cells holding text of another table (wrong content) | 160 single-cell items (name and price apart), correct content, no table structure |
+| 30, abilities and tests | the difficulty list split from its heading | heading, list and modifier table in order; some items carry BEL (`\x07`) characters from the PDF glyphs |
+
+Speed: Docling 33 s for the 18 pages on 6 cores. Docling also keeps the shadowed duplicates of
+the text layer ("(d6 se inizi con a pergamena)" twice) and the buyer watermark as items.
+
+**Conclusion:** on these art-heavy pages Docling recovers text Marker drops and does not invent
+wrong table cells; neither gives review-ready rows for page 28 or the scattered weapon labels,
+so a reviewed source still needs corrections that merge fragments. Marker's forced OCR could not
+be tried (surya 0.22's recognition needs a llama.cpp binary absent from the image; its OCR
+error model is CC BY-NC-SA 4.0). Not screened: other manuals, Docling's OCR, the importer side
+(the bundle contract and `mimik import-source` accept only Marker's tree).
+
 ## Model trials of the downloaded default files (2d-2 live check 3, 2026-10-29)
 
 Both pinned files as downloaded through the app from the real Hub (2d-2 live check 2), tried
