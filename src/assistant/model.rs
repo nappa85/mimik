@@ -26,11 +26,80 @@ pub(crate) const GPU_DEFAULT_MAX_TOKENS: u32 = 352;
 /// Any other file until the 2d trial measures it (never below 256).
 pub(crate) const OTHER_MAX_TOKENS: u32 = 256;
 
-/// A validated model spec. `hf:` specs (downloads, 2d-2) are refused for now.
+/// The Hugging Face spec and size of the Granite default file (ASSIST-55): the downloads fetch
+/// exactly this file, checked against [`DEFAULT_MODEL_SHA256`].
+pub(crate) const GRANITE_HF: &str = "hf:ibm-granite/granite-4.2-3b-GGUF/granite-4.2-3b-Q4_K_M.gguf@c40945d71cd90f249a56985e8155551a9188dc30";
+pub(crate) const GRANITE_SIZE: u64 = 2_244_011_552;
+/// The same for the Qwen3.5-9B default file, checked against [`GPU_DEFAULT_MODEL_SHA256`].
+pub(crate) const QWEN_HF: &str =
+    "hf:unsloth/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf@3885219b6810b007914f3a7950a8d1b469d598a5";
+pub(crate) const QWEN_SIZE: u64 = 5_680_522_464;
+
+/// A default file the downloads can fetch: its `hf:` spec, the `local:` name it is stored
+/// under, and the SHA-256 and size compiled into Mimik. Built from the existing constants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Pinned {
+    pub hf: &'static str,
+    pub local: &'static str,
+    pub sha256: &'static str,
+    pub size: u64,
+}
+
+/// The two pinned default files, the CPU path's first.
+pub(crate) fn pinned() -> [Pinned; 2] {
+    [
+        Pinned {
+            hf: GRANITE_HF,
+            local: DEFAULT_MODEL,
+            sha256: DEFAULT_MODEL_SHA256,
+            size: GRANITE_SIZE,
+        },
+        Pinned {
+            hf: QWEN_HF,
+            local: GPU_DEFAULT_MODEL,
+            sha256: GPU_DEFAULT_MODEL_SHA256,
+            size: QWEN_SIZE,
+        },
+    ]
+}
+
+impl Pinned {
+    /// The file name inside the models folder (the `local:` spec without its prefix).
+    pub(crate) fn file_name(&self) -> &'static str {
+        self.local.strip_prefix("local:").unwrap_or(self.local)
+    }
+}
+
+/// A validated `hf:<org>/<repo>/<path>@<revision>` spec: a file at an exact commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HfSpec {
+    pub org: String,
+    pub repo: String,
+    /// One or more `/`-joined segments, ending `.gguf`.
+    pub path: String,
+    /// Exactly 40 lowercase hex digits.
+    pub revision: String,
+}
+
+impl HfSpec {
+    /// The spec as the owner writes it.
+    #[must_use]
+    pub fn canonical(&self) -> String {
+        format!(
+            "hf:{}/{}/{}@{}",
+            self.org, self.repo, self.path, self.revision
+        )
+    }
+}
+
+/// A validated model spec.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Spec {
     /// `local:<name>.gguf`: a file already in the models folder.
     Local(String),
+    /// `hf:<org>/<repo>/<path>@<revision>`: a file to download (step 2d-2). The model table
+    /// never holds it: a downloaded file is `local:hf-<sha256>.gguf`.
+    Hf(HfSpec),
 }
 
 /// The grammar rule a refused spec broke; `Display` names it for the
@@ -40,8 +109,14 @@ pub enum Rule {
     TooLong,
     NotAscii,
     Whitespace,
-    /// An `hf:` spec: downloads arrive in a later step.
-    Download,
+    /// An `hf:` spec that is not `hf:<org>/<repo>/<path>@<revision>`.
+    HfForm,
+    HfOwner,
+    HfRepo,
+    HfPath,
+    HfExtension,
+    HfSplit,
+    HfRevision,
     Form,
     NameLength,
     PathSeparator,
@@ -63,7 +138,13 @@ impl std::fmt::Display for SpecError {
             Rule::TooLong => "the model spec is longer than 512 bytes",
             Rule::NotAscii => "the model spec must be ASCII",
             Rule::Whitespace => "the model spec must not contain white space",
-            Rule::Download => "downloads arrive later: use local:<name>.gguf for a file already in the models folder",
+            Rule::HfForm => "an hf: spec must be hf:<org>/<repo>/<path>.gguf@<40-digit revision>",
+            Rule::HfOwner => "the owner must be 1 to 96 of letters, digits, '.', '_' and '-', starting and ending with a letter or digit, without '--' or '..'",
+            Rule::HfRepo => "the repository must be 1 to 96 of letters, digits, '.', '_' and '-', starting and ending with a letter or digit, without '--' or '..'",
+            Rule::HfPath => "the file path must be segments of 1 to 128 of letters, digits, '.', '_' and '-', joined by '/', none '.' or '..'",
+            Rule::HfExtension => "the file must end with .gguf",
+            Rule::HfSplit => "a split model file (-00001-of-00002.gguf) is not supported",
+            Rule::HfRevision => "the revision must be exactly 40 lowercase hex digits (a commit, not a branch or tag)",
             Rule::Form => "the model spec must be local:<name>.gguf",
             Rule::NameLength => "the model file name must be 1 to 128 characters",
             Rule::PathSeparator => "the model file name must be one name, without / or \\",
@@ -108,8 +189,8 @@ pub fn parse_spec(text: &str) -> Result<Spec, SpecError> {
     {
         return refuse(Rule::Whitespace);
     }
-    if text.starts_with("hf:") {
-        return refuse(Rule::Download);
+    if let Some(rest) = text.strip_prefix("hf:") {
+        return parse_hf(rest).map(Spec::Hf);
     }
     let Some(name) = text.strip_prefix("local:") else {
         return refuse(Rule::Form);
@@ -141,11 +222,91 @@ pub fn parse_spec(text: &str) -> Result<Spec, SpecError> {
     Ok(Spec::Local(name.to_owned()))
 }
 
+fn name_part(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    (1..=96).contains(&bytes.len())
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && !text.contains("--")
+        && !text.contains("..")
+}
+
+fn path_segment(text: &str) -> bool {
+    (1..=128).contains(&text.len())
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && text != "."
+        && text != ".."
+}
+
+/// `-NNNNN-of-NNNNN.gguf` at the end of a file name.
+fn split_file(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".gguf") else {
+        return false;
+    };
+    let bytes = stem.as_bytes();
+    let Some(tail) = bytes.len().checked_sub(15).map(|start| &bytes[start..]) else {
+        return false;
+    };
+    tail[0] == b'-'
+        && tail[1..6].iter().all(u8::is_ascii_digit)
+        && &tail[6..10] == b"-of-"
+        && tail[10..].iter().all(u8::is_ascii_digit)
+}
+
+fn parse_hf(rest: &str) -> Result<HfSpec, SpecError> {
+    let refuse = |rule| Err(SpecError { rule });
+    let Some((location, revision)) = rest.rsplit_once('@') else {
+        return refuse(Rule::HfForm);
+    };
+    let mut parts = location.splitn(3, '/');
+    let (Some(org), Some(repo), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
+        return refuse(Rule::HfForm);
+    };
+    if revision.len() != 40
+        || !revision
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return refuse(Rule::HfRevision);
+    }
+    if !name_part(org) {
+        return refuse(Rule::HfOwner);
+    }
+    if !name_part(repo) {
+        return refuse(Rule::HfRepo);
+    }
+    if !path.split('/').all(path_segment) {
+        return refuse(Rule::HfPath);
+    }
+    let file = path.rsplit('/').next().unwrap_or(path);
+    if file.strip_suffix(".gguf").is_none_or(str::is_empty) {
+        return refuse(Rule::HfExtension);
+    }
+    if split_file(file) {
+        return refuse(Rule::HfSplit);
+    }
+    Ok(HfSpec {
+        org: org.to_owned(),
+        repo: repo.to_owned(),
+        path: path.to_owned(),
+        revision: revision.to_owned(),
+    })
+}
+
 /// The model's file name from a `local:` spec (the CLI flag and the owner's field share the
 /// grammar).
 pub(crate) fn local_name(spec: &str) -> Result<String, String> {
     match parse_spec(spec).map_err(|error| error.to_string())? {
         Spec::Local(name) => Ok(name),
+        Spec::Hf(_) => Err(
+            "an hf: spec names a download, not a file in the models folder; use local:<name>.gguf here"
+                .to_owned(),
+        ),
     }
 }
 

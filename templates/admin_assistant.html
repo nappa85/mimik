@@ -21,7 +21,7 @@
 <form method="post" action="/admin/assistant/model/try"><input type="hidden" name="csrf" value="{{ csrf }}">
 <label for="model-spec">Model</label> <input id="model-spec" name="model" value="{{ view.model.input }}" maxlength="512" size="60" autocomplete="off" spellcheck="false" required{% if view.model.error.is_some() %} aria-invalid="true" aria-describedby="model-error"{% endif %}> <button{% if view.restarting && view.model.trial.is_none() %} disabled{% endif %}>Try</button>
 {% if let Some(error) = view.model.error %}<p id="model-error" class="form-error" role="alert">{{ error }}</p>{% endif %}</form>
-<p>A model is a file already in the models folder: <code>local:&lt;name&gt;.gguf</code> (place it there by hand; downloads arrive later). Trying it stops the model server while the trial runs, so the assistant shows as starting meanwhile: the file is hashed, loaded, primed, tried on five synthetic phrases and measured. Nothing changes until you press Switch, and Switch back returns to the previous model.</p>
+<p>A model is a file already in the models folder: <code>local:&lt;name&gt;.gguf</code> (place it there by hand), or <code>hf:&lt;org&gt;/&lt;repo&gt;/&lt;path&gt;.gguf@&lt;revision&gt;</code> to review and download it (see Downloads below). Trying it stops the model server while the trial runs, so the assistant shows as starting meanwhile: the file is hashed, loaded, primed, tried on five synthetic phrases and measured. Nothing changes until you press Switch, and Switch back returns to the previous model.</p>
 {% if let Some(level) = view.level %}<p>A model file is untrusted input to the model server, contained only by its confinement: level {{ level.number }} ({{ level.name }}).</p>{% endif %}
 {% if let Some(trial) = view.model.trial %}<h3>Trial {{ trial.number }} of {{ trial.spec }}: {{ trial.outcome }}</h3>
 {% if trial.running %}<p>Now: {{ trial.detail }}. Bounded to 30 minutes on the CPU and 20 on the GPU, with 2 × the run deadline per phrase; reload this page to follow it.</p>
@@ -42,6 +42,53 @@
 <p>The current model is already running again; Keep dismisses this result. Switch restarts the model server with this model and measures it again.</p>{% endif %}
 {% endif %}
 {% else %}<p>The model cannot be changed here: a development endpoint is in use.</p>{% endif %}</section>
+{% if let Some(d) = downloads %}
+<section class="panel" id="downloads" data-signature="{{ d.signature }}"{% if d.polling %} data-poll="1"{% endif %}><h2>Downloads</h2>
+{% if let Some(why) = d.unavailable %}<p>Downloads are unavailable: {{ why }}.</p>
+{% else %}
+<p>An <code>hf:&lt;org&gt;/&lt;repo&gt;/&lt;path&gt;.gguf@&lt;40-digit revision&gt;</code> model in the Model field is reviewed first: Mimik reads the repository's metadata and licence from huggingface.co, shows them, and downloads nothing until you confirm. The file is checked against its SHA-256 and kept in the models folder; the model in use keeps serving meanwhile, and a trial or a switch waits while a download runs.</p>
+{% if !d.pinned.is_empty() %}<h3>Pinned defaults</h3>
+<table><thead><tr><th>Model</th><th>File</th><th>Size</th><th>State</th><th></th></tr></thead><tbody>
+{% for pin in d.pinned %}<tr><td><code>{{ pin.hf }}</code></td><td><code>{{ pin.file_name }}</code></td><td>{{ pin.size }}</td><td>{{ pin.status }}</td><td>{% if let Some(id) = pin.repair_id %}<form method="post" action="/admin/assistant/download/repair"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="id" value="{{ id }}"><button>Download again</button></form>{% endif %}{% if pin.can_review %}<form method="post" action="/admin/assistant/model/review"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="model" value="{{ pin.hf }}"><button>Review</button></form>{% endif %}</td></tr>{% endfor %}
+</tbody></table>
+<p>These are the two default files, checked against the SHA-256 and size compiled into Mimik. A file already in the models folder under that name is never replaced.</p>{% endif %}
+{% if let Some(review) = d.review %}<h3>Review of <code>{{ review.spec }}</code></h3>
+{% if review.state == "running" %}<p>Reviewing: fetching the repository's metadata and licence. This page updates itself.</p>{% endif %}
+{% if review.state == "failed" %}<p class="form-error" role="alert">Refused: {{ review.reason }}</p>{% endif %}
+{% if let Some(ready) = review.ready %}<table><tbody>
+<tr><th>Repository</th><td>{{ ready.repo }}</td></tr>
+<tr><th>File</th><td>{{ ready.file }}</td></tr>
+<tr><th>Revision</th><td><code>{{ ready.revision }}</code></td></tr>
+<tr><th>Size</th><td>{{ ready.size }}</td></tr>
+<tr><th>SHA-256</th><td><code>{{ ready.sha256 }}</code></td></tr>
+<tr><th>Hash source</th><td>{{ ready.trust }}</td></tr>
+<tr><th>Licence</th><td>{% if ready.licence_id.is_empty() %}none stated{% else %}{{ ready.licence_id }}{% endif %}</td></tr>
+{% if !ready.licence_path.is_empty() %}<tr><th>Licence file</th><td><code>{{ ready.licence_path }}</code> at this revision (SHA-256 <code>{{ ready.licence_sha256 }}</code>)</td></tr>{% endif %}
+{% if !ready.licence_link.is_empty() %}<tr><th>Link in the model card</th><td>{{ ready.licence_link }} (shown as text, never fetched)</td></tr>{% endif %}
+</tbody></table>
+{% if ready.no_licence %}<p class="form-error" role="alert">This model states no licence file. You may still confirm, but check its terms yourself.</p>{% endif %}
+<p>A third-party quantisation's licence can differ from the upstream model's.</p>
+{% if !ready.licence_text.is_empty() %}<details><summary>Licence text</summary><pre>{{ ready.licence_text }}</pre></details>{% endif %}
+<form method="post" action="/admin/assistant/download/confirm"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="token" value="{{ ready.token }}"><button>Confirm and download</button></form>
+{% endif %}{% endif %}
+{% if !d.transfers.is_empty() %}<h3>Downloads in progress</h3>
+{% for transfer in d.transfers %}<p><code>{{ transfer.spec }}</code>: <strong>{{ transfer.state }}</strong>{% if !transfer.detail.is_empty() %} ({{ transfer.detail }}){% endif %}.
+<progress id="download-{{ transfer.id }}" max="{{ transfer.total }}" value="{{ transfer.received }}"></progress> {{ transfer.received }} of {{ transfer.total }} bytes</p>
+{% if transfer.running %}<form method="post" action="/admin/assistant/download/cancel"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="id" value="{{ transfer.id }}"><button>Cancel</button></form>{% endif %}
+{% if transfer.can_resume %}<form method="post" action="/admin/assistant/download/resume"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="id" value="{{ transfer.id }}"><button>Resume</button></form>{% endif %}
+<form method="post" action="/admin/assistant/download/discard"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="id" value="{{ transfer.id }}"><button>Discard</button></form>
+{% endfor %}{% endif %}
+{% if !d.files.is_empty() %}<h3>Downloaded models</h3>
+<table><thead><tr><th>Model</th><th>File</th><th>Size</th><th>Licence</th><th></th></tr></thead><tbody>
+{% for file in d.files %}<tr><td><code>{{ file.spec }}</code></td><td><code>{{ file.file_name }}</code>{% if !file.present %} (missing or changed){% endif %}</td><td>{{ file.size }}</td><td>{% if file.licence_id.is_empty() %}none stated{% else %}{{ file.licence_id }}{% endif %}</td><td>
+{% if !file.present %}<form method="post" action="/admin/assistant/download/repair"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="id" value="{{ file.id }}"><button>Download again</button></form>{% endif %}
+{% if file.present %}<form method="post" action="/admin/assistant/model/try"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="model" value="local:{{ file.file_name }}"><button>Try</button></form>{% endif %}
+{% if file.deletable %}<form method="post" action="/admin/assistant/model/delete"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="id" value="{{ file.id }}"><button>Delete</button></form>{% endif %}</td></tr>{% endfor %}
+</tbody></table>{% endif %}
+{% endif %}
+</section>
+<script src="/assets/assistant-downloads.js" defer></script>
+{% endif %}
 <section class="panel"><h2>Device</h2>
 {% if view.cpu_chosen %}<p>The CPU only: Mimik was started with <code>--assistant-device cpu</code>, so no GPU is listed or used.</p>{% endif %}
 {% if let Some(device) = view.device %}<p>GPU: <strong>{{ device.description }}</strong> ({{ device.name }} in its sandbox, PCI {{ device.pci }}, render node {{ device.node }}, {{ device.total_mib }} MiB).</p><p class="gpu-exposure"><strong>Sandboxed, with graphics-driver access:</strong> the model server runs in the level-1 sandbox: no network, no other processes and no access to the user's files. Besides the runtime and the model it reads read-only system libraries, system driver data (Vulkan ICD manifests, libdrm and drirc data), the card's sysfs attributes and the CPU topology, and it can issue any ioctl on its one render node, so its exposure to the kernel's graphics driver is wider than on the CPU path. Start Mimik with <code>--assistant-device cpu</code> to run it on the CPU instead.</p>{% endif %}

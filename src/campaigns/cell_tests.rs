@@ -1229,7 +1229,6 @@ async fn schema_20_upgrades_to_21_keeping_every_note() {
         .await
         .unwrap();
     assert_eq!(version, crate::SCHEMA_VERSION);
-    assert_eq!(version, 22);
     assert_eq!(after, before, "notes kept byte for byte");
     assert_eq!(objects, 5, "three triggers, the index and the primary key");
     let app = crate::auth::app(reopened.clone()).await.unwrap();

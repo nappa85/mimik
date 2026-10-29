@@ -12,7 +12,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   RX 6650 XT). 2d-1 (the owner model setting with local models), ASSIST-53 and ASSIST-55
   (Qwen3.5-9B default on the GPU) are merged; ASSIST-56 (prompt format D: context by ID, no
   values) is built on its branch, in review. There is no level 2 (ASSIST-48).
-  Next: 2d-2. Level 3's return is its own later step (plan, "Level 3 behind an owner opt-in").
+  2d-2 (model downloads, `docs/model-downloads.md`) is built on its branch, awaiting the
+  reviewers; its live checks are owed (`docs/assisted-sheet-plan.md`, "2d-2"). Next: 3. Level 3's return is its own later step (plan, "Level 3 behind an owner opt-in").
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
   target/agent-tools/ci.sh <cmd>`, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
@@ -28,8 +29,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    against the test suite (flags, output parsing, grammar conversion, the confinement suite),
    before the first release; (b) the system-llama.cpp mode with distribution packaging
    (compatibility checks instead of a version pin; its own design).
-1. 2d-2 downloads, 3 bundles and reminders, 4 suggestions, 5 docs and gate (includes the
-   `docs/release-scope.md` update for schema 22 and the assisted scope).
+1. 3 bundles and reminders, 4 suggestions, 5 docs and gate (includes the
+   `docs/release-scope.md` update for schema 23, the assisted scope and the system CA store
+   requirement of the downloads).
 2. Owed live measurement for the shipped prefix (ASSIST-56; ASSIST-L47; CPU, 5 threads, outside
    weekday 09:00-18:00): replay the 104-reply screen (`tools/run_assist_screen.sh`,
    `CONTRACT=v2-ids-53`, Granite 4.2 3B, `MAX_TOKENS=384`) and take the largest valid, untruncated

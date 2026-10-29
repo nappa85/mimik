@@ -24,6 +24,8 @@ mod administration_tests;
 mod assist_tests;
 #[path = "assistant_admin_tests.rs"]
 mod assistant_admin_tests;
+#[path = "assistant_download_tests.rs"]
+mod assistant_download_tests;
 #[path = "assistant_model_tests.rs"]
 mod assistant_model_tests;
 #[path = "catalogue_tests.rs"]

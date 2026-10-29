@@ -31,6 +31,7 @@ with the server is in [assisted-entry.md](assisted-entry.md), "Interpretation as
 | Thread count | `src/assistant/runtime/threads.rs` |
 | Device choice (render nodes, listing, ranking) | `src/assistant/runtime/device.rs` |
 | Owner page | `src/auth/assistant.rs`, `templates/admin_assistant.html` |
+| Model downloads (step 2d-2) | [model-downloads.md](model-downloads.md) |
 
 ## Options
 
@@ -566,7 +567,9 @@ keeps the input):
   with `.`, ending `.gguf`, not a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to
   `COM9`, `LPT1` to `LPT9`, in any case, with or without an extension). A `/` or `\` in the
   name is its own refusal. The file is one already in the models folder.
-- `hf:` specs are refused ("downloads arrive later"; step 2d-2).
+- `hf:<org>/<repo>/<path>@<revision>`: a file to review and download first
+  ([model-downloads.md](model-downloads.md)); a downloaded file is tried and stored as
+  `local:hf-<sha256>.gguf`. The `--assistant-model` flag takes `local:` only.
 
 **Trial.** "Try" (POST `/admin/assistant/model/try`) parses the spec, then the manager ends the
 running generation (players see "starting"; there is never a second model server) and:
@@ -634,7 +637,9 @@ whether it comes from the stored setting or the start flags), the previous model
 back", the field with "Try" (the refusal and the kept input beside it), and the latest trial:
 its phase and Cancel while it runs; when it passed, the device, times, speeds, `max_tokens`,
 B, N(B), R, D and Q and each phrase; the reason when it failed or was cancelled. With the
-development endpoint the model cannot be changed and the page says so.
+development endpoint the model cannot be changed and the page says so. The Downloads
+section (review, progress, pinned defaults, downloaded models) is described in
+[model-downloads.md](model-downloads.md).
 
 ## Development endpoint
 
