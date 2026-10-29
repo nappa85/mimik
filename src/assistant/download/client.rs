@@ -35,13 +35,15 @@ pub(crate) const LICENCE_DEADLINE: Duration = Duration::from_secs(30);
 /// The only API and `resolve` host.
 pub(crate) const API_BASE: &str = "https://huggingface.co";
 
-/// Exact host names a `resolve` redirect may reach (no suffix or wildcard rule). Fixed from
-/// Hugging Face's documentation; the full real redirect chain of the two pinned files is
-/// still to be observed by hand and this list reduced to what it shows (plan, "Live checks
-/// owed"), so these are candidates until then. `tests::the_shipped_host_list_is_the_reviewed_one`
-/// is a tripwire: changing the list is a deliberate edit of both.
-pub(crate) const SHIPPED_HOSTS: [&str; 9] = [
+/// Exact host names a `resolve` redirect may reach (no suffix or wildcard rule): the hosts the
+/// real GET chain of both pinned files showed on 2026-10-29 (`huggingface.co`, one 302 to
+/// `us.aws.cdn.hf.co`, then 206), plus the hosts Hugging Face documents for LFS and Xet
+/// storage. A host outside the list is refused by name, and the list is then updated by hand.
+/// `tests::the_shipped_host_list_is_the_reviewed_one` is a tripwire: changing the list is a
+/// deliberate edit of both.
+pub(crate) const SHIPPED_HOSTS: [&str; 10] = [
     "huggingface.co",
+    "us.aws.cdn.hf.co",
     "cdn-lfs.huggingface.co",
     "cdn-lfs-us-1.huggingface.co",
     "cdn-lfs-eu-1.huggingface.co",

@@ -446,11 +446,13 @@ fn the_shipped_constructor_uses_the_fixed_values() {
 #[test]
 fn the_shipped_host_list_is_the_reviewed_one() {
     // A tripwire, not coverage: changing the list means editing this expectation too, and the
-    // release notes (`docs/model-downloads.md`). Candidates until the live redirect observation.
+    // reference (`docs/model-downloads.md`). The first two were observed on the real chain on
+    // 2026-10-29; the rest are documented by Hugging Face.
     assert_eq!(
         SHIPPED_HOSTS,
         [
             "huggingface.co",
+            "us.aws.cdn.hf.co",
             "cdn-lfs.huggingface.co",
             "cdn-lfs-us-1.huggingface.co",
             "cdn-lfs-eu-1.huggingface.co",

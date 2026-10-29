@@ -585,12 +585,9 @@ checks run on the dev host with the GPU fan on manual, evening or weekend, throu
 
 ### 2d-2 Model downloads
 
-Built (reference [model-downloads.md](model-downloads.md)); its change set still needs the
-two main reviewers and the third before merge. Remaining, in this order:
+Merged (reference [model-downloads.md](model-downloads.md)). Remaining, in this order:
 
-- the live checks, none in CI: (1) the real GET redirect chain of the two pinned files, by hand
-  with bounded hops and without reading the body, then `SHIPPED_HOSTS` reduced to what it shows
-  plus what Hugging Face documents (ASSIST-L58); (2) licence-checked downloads of both pinned
+- the live checks, none in CI: (2) licence-checked downloads of both pinned
   files into a scratch models folder under `/media/data/mimik`, killed and resumed once,
   verified against the compiled-in hashes, with the Hub metadata shape recorded as the fake
   server's fixture; (3) a trial of the downloaded Granite on the CPU at 2 cores and of the 9B on

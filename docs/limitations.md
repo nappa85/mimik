@@ -161,7 +161,7 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 ## Models and evaluation
 
 - **C1** [models] The release ships the model runtime but no model file: the owner downloads the two pinned defaults or another `hf:` model from `/admin/assistant` (`model-downloads.md`) or places a GGUF file in the models folder by hand (`local:`); there is no tool loop.
-- **ASSIST-L58** [downloads] The list of download hosts (`SHIPPED_HOSTS`) holds the documented candidates; the real redirect chain of the two pinned files has not been observed, so a host Hugging Face really redirects to may be missing (the download then stops naming it) and a listed one may be unused. Closed by the live check in `TODO.md`.
+- **ASSIST-L58** [downloads] The download hosts are the real redirect chain observed on 2026-10-29 from Italy (`huggingface.co`, `us.aws.cdn.hf.co`) plus Hugging Face's documented LFS and Xet hosts; another region's CDN host or a later CDN change is refused by name until the list is updated by hand.
 - **ASSIST-L59** [downloads] Behind a proxy the proxy resolves the origin, so the address filter (local, private, reserved addresses) does not apply to proxied connections; the host list and the TLS root store still do.
 - **ASSIST-L60** [downloads] The platform verifier needs the operating system's CA store; without one downloads are unavailable and the page names the package to install. Gated and private repositories, split GGUF files and other suggestions are not supported.
 - **ASSIST-L62** [downloads] Delete removes the file and then the record; a crash between them leaves a finished record without its file, which the panel offers to download again (the file's removal is not undone).

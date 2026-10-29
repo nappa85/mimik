@@ -115,8 +115,10 @@ space are refused outright. Trust is the operating system's store through the pl
 is reported with the package to install); tests trust only their own CA. No cookies, no
 `Referer`, `Accept-Encoding: identity`, any other `Content-Encoding` rejected, no
 decompression. Errors pass through a type that never holds a URL; presigned URLs are never
-shown or logged. The host list holds candidates until the real redirect chain of the two
-pinned files has been observed by hand (`limitations.md`).
+shown or logged. The host list is what the real GET chain of both pinned files showed on
+2026-10-29 (`huggingface.co`, one 302 to `us.aws.cdn.hf.co`, then 206) plus the LFS and Xet
+hosts Hugging Face documents; any other host is refused by name (`limitations.md`,
+ASSIST-L58).
 
 ## Pinned panel and repair
 
