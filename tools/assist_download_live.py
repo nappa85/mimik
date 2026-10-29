@@ -233,6 +233,10 @@ def threads_allowed(threads, now=None):
     return threads > 0 and (threads <= 2 or trial_allowed("qwen", now))
 
 
+def check_device(device):
+    require(device == "cpu" or trial_allowed("qwen"), "The GPU is forbidden during weekday 09:00–18:00")
+
+
 def check_threads(threads):
     require(threads > 0, "Assistant threads must be positive")
     require(threads_allowed(threads), "More than 2 threads forbidden during weekday 09:00–18:00")
@@ -251,6 +255,7 @@ class Live:
     def launch(self):
         self.remaining()
         check_threads(self.args.threads)
+        check_device(self.args.device)
         self.process, self.log = start(
             self.args.binary,
             self.directory,
@@ -261,7 +266,7 @@ class Live:
                 str(self.args.models),
                 *(("--assistant-runtime", str(self.args.runtime)) if self.args.runtime else ()),
                 "--assistant-device",
-                "cpu",
+                self.args.device,
                 "--assistant-threads",
                 str(self.args.threads),
             ),
@@ -466,6 +471,9 @@ def main(argv=None):
         help="Pinned llama.cpp runtime dir (default: llama/ beside the binary)",
     )
     parser.add_argument("--threads", type=int, default=2, help="Assistant CPU threads (default: 2)")
+    parser.add_argument(
+        "--device", default="cpu", help="--assistant-device for Mimik (default: cpu)"
+    )
     parser.add_argument("--try", dest="try_model", action="store_true")
     parser.add_argument(
         "--timeout", type=float, default=3 * 60 * 60, help="Total poll budget, seconds"
@@ -476,6 +484,7 @@ def main(argv=None):
             math.isfinite(args.timeout) and args.timeout > 0, "Timeout must be positive and finite"
         )
         check_threads(args.threads)
+        check_device(args.device)
         args.binary = args.binary.resolve(strict=True)
         args.models = args.models.resolve(strict=True)
         require(

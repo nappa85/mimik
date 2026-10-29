@@ -5,6 +5,33 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Model trials of the downloaded default files (2d-2 live check 3, 2026-10-29)
+
+Both pinned files as downloaded through the app from the real Hub (2d-2 live check 2), tried
+through `/admin/assistant` by `tools/assist_download_live.py`'s trial path on the release
+binary, pinned llama.cpp b11609, level 1, this host (Ryzen 5 1600, 6 cores / 12 threads, Zen 1;
+RX 6650 XT with Mesa RADV, fan on manual 255), evening, with the owner's desktop in use. One
+host, one run per row unless stated.
+
+| File, path | Threads | Result | Priming | Samples W (prompt, generated 352) | Budgets |
+|---|---|---|---|---|---|
+| Granite 4.2 3B, CPU | 2 | too slow (a sample over the 90 s cap) | | | |
+| Granite 4.2 3B, CPU | 5 | 1 of 3 runs too slow; 2 passed | 70.3 s, 70.8 s | 58.4 to 61.2 s (11.4 to 12.4 s; 46.7 to 48.7 s) | B 1,024, N(B) 280, R 75 to 80 s, D 1 |
+| Granite 4.2 3B, CPU | 6 | passed | | | |
+| Qwen3.5-9B, GPU | 6 | passed in 114 s | 11.8 s (1,961 tokens) | 37.7 s, 37.8 s (110 tok/s; 12.9 tok/s) | B 4,096, N(B) 1,128, R 50 s, D 1 |
+
+Phrase replies: Granite at most 97 tokens and 9B at most 107 (so `max_tokens` stays 352 for
+both by their hashes); the expected value was offered for all five phrases in every passed run.
+
+**Conclusion:** both default files work end to end after a real download. On this 6-core
+Zen 1 CPU the Granite CPU path at 5 threads has about 30 s of headroom under the 90 s sample
+cap when the desktop is quiet, and it can exceed the cap when the desktop is busy (the failed
+run; a later `top` showed the browser at about 3 cores; that it caused the failure is
+inferred, not observed). It does not fit at 2 threads. A cold page cache (the file evicted
+with `POSIX_FADV_DONTNEED`) did not reproduce the failure. The pinned server alone, outside
+Mimik, at 5, 6 and 12 threads on a 4 KiB prompt (not the CPU path's 1 KiB): 106, 87.5 and
+106 s, so hyperthreads slow generation (7.6, 9.2 and 5.4 tok/s).
+
 ## Landlock inside Hakoniwa namespaces (2026-10-24)
 
 Scope: one Gentoo dev host, kernel `7.3.0-gentoo`, Landlock ABI 11; Hakoniwa 1.8.0,

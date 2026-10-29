@@ -272,7 +272,7 @@ class OutputTests(unittest.TestCase):
 class WorkflowTests(unittest.TestCase):
     def runner(self):
         pin = live.parse_pin((live.ROOT / "src/assistant/model.rs").read_text(), "granite")
-        args = SimpleNamespace(timeout=10, kill_at_bytes=None, pinned="granite", threads=2)
+        args = SimpleNamespace(timeout=10, kill_at_bytes=None, pinned="granite", threads=2, device="cpu")
         return live.Live(args, pin, Path("unused"), b"dummy")
 
     def test_main_launch_options_and_models_permissions(self):
@@ -370,6 +370,32 @@ class WorkflowTests(unittest.TestCase):
                     expected += ("--assistant-runtime", str(runtime))
                 expected += ("--assistant-device", "cpu", "--assistant-threads", str(threads))
                 self.assertEqual(extra, expected)
+
+    def test_gpu_device_is_passed_and_refused_in_weekday_hours(self):
+        thursday = datetime(2026, 10, 29, 10, 0).astimezone()
+        evening = datetime(2026, 10, 29, 19, 0).astimezone()
+        self.assertFalse(live.trial_allowed("qwen", thursday))
+        runner = self.runner()
+        runner.args.binary = Path("mimik")
+        runner.args.models = Path("models")
+        runner.args.runtime = None
+        runner.args.device = "auto"
+        with patch.object(live, "trial_allowed", return_value=False):
+            with patch.object(live, "start") as start:
+                with self.assertRaisesRegex(AssertionError, "GPU"):
+                    runner.launch()
+                start.assert_not_called()
+        self.assertTrue(live.trial_allowed("qwen", evening))
+        with (
+            patch.object(live, "trial_allowed", return_value=True),
+            patch.object(live, "start", return_value=(Mock(), Mock())) as start,
+            patch.object(live, "auth_request", return_value=(303, {"location": "/auth/session"}, "")),
+            patch.object(live, "auth_cookie", return_value="cookie"),
+            patch.object(live, "auth_fields", return_value={}),
+        ):
+            runner.launch()
+        extra = start.call_args.kwargs["extra"]
+        self.assertEqual(extra[extra.index("--assistant-device") + 1], "auto")
 
     def test_trial_stops_when_thread_window_closes(self):
         runner = self.runner()

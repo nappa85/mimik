@@ -587,13 +587,9 @@ checks run on the dev host with the GPU fan on manual, evening or weekend, throu
 
 Merged (reference [model-downloads.md](model-downloads.md)). Remaining, in this order:
 
-- the live checks, none in CI: (2) licence-checked downloads of both pinned
-  files into a scratch models folder under `/media/data/mimik`, killed and resumed once,
-  verified against the compiled-in hashes, with the Hub metadata shape recorded as the fake
-  server's fixture; (3) a trial of the downloaded Granite on the CPU at 2 cores and of the 9B on
-  the GPU in the evening or at a weekend; (4) `tools/assist_model_browser.py` extended to the
-  Downloads panel at two viewports; (5) the release binary refusing a certificate outside the
-  system store on a clean machine (the unit tests cover the verifier with an isolated store);
+- the live checks, none in CI: (4) `tools/assist_model_browser.py` extended to the Downloads
+  panel at two viewports; (5) the release binary refusing a certificate outside the system
+  store on a clean machine (the unit tests cover the verifier with an isolated store).
 
 ### 3 Bundles and reminders
 

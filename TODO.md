@@ -12,8 +12,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   RX 6650 XT). 2d-1 (the owner model setting with local models), ASSIST-53 and ASSIST-55
   (Qwen3.5-9B default on the GPU) are merged; ASSIST-56 (prompt format D: context by ID, no
   values) is merged too, and so is 2d-2 (model downloads, `docs/model-downloads.md`). There is
-  no level 2 (ASSIST-48). Owed for 2d-2, with the owner's go-ahead: the live checks against the
-  real Hub (`docs/assisted-sheet-plan.md`, "2d-2"; ASSIST-L58). Next: 3. Level 3's return is its
+  no level 2 (ASSIST-48). Owed for 2d-2: live checks 4 (browser, Downloads panel) and 5 (certificate
+  outside the system store, clean machine) (`docs/assisted-sheet-plan.md`, "2d-2"). Checks 1-3
+  ran (`docs/results.md`). Next: 3. Level 3's return is its
   own later step (plan, "Level 3 behind an owner opt-in").
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
