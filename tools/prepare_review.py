@@ -15,6 +15,14 @@ KINDS = set(json.loads((SCHEMAS / "source-kinds.json").read_text(encoding="utf-8
 LEAF_KINDS = set(json.loads((SCHEMAS / "source-leaf-kinds.json").read_text(encoding="utf-8")))
 
 
+def extractor_settings(manifest):
+    """The extraction's Marker config plus its OCR server record, which the bundle carries."""
+    settings = dict(manifest["config"])
+    if manifest.get("ocr"):
+        settings["ocr"] = manifest["ocr"]
+    return settings
+
+
 def units(node):
     result = []
     children = node.get("children") or []
@@ -122,7 +130,7 @@ def main():
         "extractor": {
             "name": manifest["extractor"],
             "version": manifest["extractor_version"],
-            "settings": manifest["config"],
+            "settings": extractor_settings(manifest),
         },
         "renderer": {
             "name": "mutool",

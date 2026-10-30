@@ -12,6 +12,12 @@ from source_bundle import verify_bundle, write_json
 
 
 class PrepareSnapshotTests(unittest.TestCase):
+    def test_the_bundle_carries_the_ocr_record_with_the_config(self):
+        ocr = {"server": "http://ocr:8080", "server_reported": {"served_model": ["m"]}}
+        settings = prepare_review.extractor_settings({"config": {"mode": "fast"}, "ocr": ocr})
+        self.assertEqual(settings, {"mode": "fast", "ocr": ocr})
+        self.assertEqual(prepare_review.extractor_settings({"config": {}, "ocr": None}), {})
+
     def test_a_list_group_is_a_unit_only_without_children(self):
         box = [[0, 0], [1, 0], [1, 1], [0, 1]]
         leaf = {
