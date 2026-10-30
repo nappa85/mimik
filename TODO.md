@@ -26,6 +26,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   `/admin/materials`, then the prompt tests use it. The page 29 footnote on armour grades is in
   no unit (L-SRC-1).
 
+- **Source import plan** (`docs/source-import-plan.md`, reviewed, SRC-11 to SRC-14): next is
+  step 1 (schema: documents, primary per page, owner units, suggestions), then step 2's own
+  plan (review screen). Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
+  (`~/temp/`, tagged, clean text layer) through the prototype tools.
+
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
   target/agent-tools/ci.sh <cmd>`, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
   mimik-catalogue-target). Free-model reviews: never in parallel (`tools/external_review.py`
