@@ -28,8 +28,12 @@ class CrosscheckTests(unittest.TestCase):
         words = [word for word, _ in page_words(page)]
         self.assertEqual(words, ["Spada", "Corta", "Spada"])
 
+    def test_a_close_repeat_of_another_size_is_not_a_shadow(self):
+        page = layer_page(char_span("d4", 10, 10), char_span("d4", 11, 11, width=12.0))
+        self.assertEqual([word for word, _ in page_words(page)], ["d4", "d4"])
+
     def test_near_twins_take_the_text_layer_spelling_in_ocr_order(self):
-        fixed, repairs, unread = compare(
+        fixed, repairs, unread, _ = compare(
             ["3.", "Spada", "Conta", "(d4)"], ["3.", "Spada", "Corta", "(d4)"]
         )
         self.assertEqual(fixed, ["3.", "Spada", "Corta", "(d4)"])
@@ -37,19 +41,40 @@ class CrosscheckTests(unittest.TestCase):
         self.assertEqual(unread, [])
 
     def test_unlike_words_are_not_replaced_but_reported_unread(self):
-        fixed, repairs, unread = compare(["Bevuta", "1a"], ["Notte", "1a"])
+        fixed, repairs, unread, _ = compare(["Bevuta", "1a"], ["Notte", "1a"])
         self.assertEqual(fixed, ["Bevuta", "1a"])
         self.assertEqual(repairs, [])
         self.assertEqual(unread, ["Notte"])
 
     def test_skipped_lines_are_unread_and_order_differences_are_not(self):
-        _, _, unread = compare(
+        _, _, unread, _ = compare(
             ["Grado", "da", "1", "a", "2", "25a"],
             ["Grado", "da", "1", "a", "2", "25a", "Non", "è", "possibile", "portare"],
         )
         self.assertEqual(unread, ["Non", "è", "possibile", "portare"])
-        _, _, unread = compare(["(d6)", "Martello", "d'Arme"], ["Martello", "d'Arme", "(d6)"])
+        _, _, unread, _ = compare(["(d6)", "Martello", "d'Arme"], ["Martello", "d'Arme", "(d6)"])
         self.assertEqual(unread, [])
+
+    def test_repeated_words_count_each_occurrence(self):
+        _, _, unread, _ = compare(["ha"], ["ha", "ha", "ha", "ha"])
+        self.assertEqual(unread, ["ha", "ha", "ha"])
+
+    def test_digits_dice_signs_and_markers_are_differences_not_spellings(self):
+        for ocr, layer in (
+            ("100a", "10a"),
+            ("(d6)", "(d8)"),
+            ("armatura*", "armatura"),
+            ("-d4", "+d4"),
+            ("ARMI*", "ARMI"),
+        ):
+            with self.subTest(ocr=ocr, layer=layer):
+                fixed, repairs, _, differences = compare(["x", ocr], ["x", layer])
+                self.assertEqual(fixed, ["x", ocr])
+                self.assertEqual(repairs, [])
+                self.assertEqual(differences, [[ocr, layer]])
+        fixed, repairs, _, _ = compare(["un'arma", "1-2"], ["un’arma", "1–2"])
+        self.assertEqual(fixed, ["un’arma", "1–2"])
+        self.assertEqual(len(repairs), 2)
 
     def test_word_centres_decide_membership(self):
         self.assertTrue(inside([10, 10, 20, 20], [0, 0, 15, 15]))
@@ -101,21 +126,39 @@ class OcrOptionTests(unittest.TestCase):
         with patch.object(extract_manual.importlib.metadata, "version", return_value="0.22.1"):
             ocr = extract_manual.ocr_provenance("force", "http://ocr:8080/", self.fetch)
         self.assertEqual(ocr["server"], "http://ocr:8080")
-        self.assertEqual(ocr["served_model"], ["datalab-to/surya-ocr-2"])
-        self.assertEqual(ocr["model_path"], "/m/surya-2.gguf")
-        self.assertEqual(ocr["build_info"], "b11609")
+        reported = ocr["server_reported"]
+        self.assertEqual(reported["served_model"], ["datalab-to/surya-ocr-2"])
+        self.assertEqual(reported["model_path"], "/m/surya-2.gguf")
+        self.assertEqual(reported["build_info"], "b11609")
         self.assertEqual(ocr["surya_version"], "0.22.1")
 
-    def test_ocr_failure_warnings_are_counted(self):
+    def test_an_incomplete_or_foreign_server_report_is_refused(self):
+        def fetch_with(props, models):
+            return lambda url: props if url.endswith("/props") else {"data": models}
+
+        good = {"model_path": "/m/surya-2.gguf", "build_info": "b11609"}
+        for props, models in (
+            (good, []),
+            (good, [{"id": "other-model"}]),
+            (good, [{"id": "datalab-to/surya-ocr-2"}, {"id": "other-model"}]),
+            ({"build_info": "b11609"}, [{"id": "datalab-to/surya-ocr-2"}]),
+            ({"model_path": "/m/surya-2.gguf"}, [{"id": "datalab-to/surya-ocr-2"}]),
+        ):
+            with self.subTest(props=props, models=models), self.assertRaises(ValueError):
+                extract_manual.ocr_provenance("force", "http://ocr:8080", fetch_with(props, models))
+
+    def test_ocr_failure_warnings_from_marker_reach_the_root_handler(self):
+        # As in main(): the handler is on the root logger; Marker logs to "marker" (propagates).
         failures = extract_manual.OcrFailures()
-        logger = logging.getLogger("marker-test")
-        logger.addHandler(failures)
+        logging.getLogger().addHandler(failures)
         try:
-            logger.warning("OCR failed for a SectionHeader block on page 38")
-            logger.warning("Table processing stats")
+            marker = logging.getLogger("marker")
+            marker.warning("OCR failed for a SectionHeader block on page 38")
+            marker.warning("Table OCR failed for block /page/1/Table/2")
+            marker.warning("Table processing stats")
         finally:
-            logger.removeHandler(failures)
-        self.assertEqual(failures.count, 1)
+            logging.getLogger().removeHandler(failures)
+        self.assertEqual(failures.count, 2)
 
 
 if __name__ == "__main__":

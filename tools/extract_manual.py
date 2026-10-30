@@ -126,6 +126,9 @@ def main():
     )
 
 
+SURYA_MODEL = "datalab-to/surya-ocr-2"
+
+
 class OcrFailures(logging.Handler):
     """Counts Marker's "OCR failed" warnings: Marker keeps going with the block's text missing."""
 
@@ -139,7 +142,11 @@ class OcrFailures(logging.Handler):
 
 
 def ocr_provenance(mode, server, fetch=None):
-    """The OCR server's identity for the manifest, or None when OCR is disabled."""
+    """The OCR server's identity for the manifest, or None when OCR is disabled.
+
+    It is what the server reports about itself, not a hash of its weights: the weights are
+    hash-checked by tools/ocr_server.sh when it starts the server.
+    """
     if mode == "disabled":
         if server:
             raise ValueError("--ocr-server needs OCR enabled.")
@@ -152,13 +159,19 @@ def ocr_provenance(mode, server, fetch=None):
     server = server.rstrip("/")
     fetch = fetch or (lambda url: json.load(urlopen(url, timeout=30)))
     props = fetch(server + "/props")
-    models = fetch(server + "/v1/models")
+    served = [model.get("id") for model in fetch(server + "/v1/models").get("data", [])]
+    reported = {
+        "served_model": served,
+        "model_path": props.get("model_path"),
+        "build_info": props.get("build_info"),
+    }
+    if served != [SURYA_MODEL] or not reported["model_path"] or not reported["build_info"]:
+        raise ValueError(f"The OCR server must serve only {SURYA_MODEL} and report its build.")
     return {
         "server": server,
         "backend": "llamacpp",
-        "served_model": [model.get("id") for model in models.get("data", [])],
-        "model_path": props.get("model_path"),
-        "build_info": props.get("build_info"),
+        "server_reported": reported,
+        "weights_checked_by": "tools/ocr_server.sh (SHA-256 before start)",
         "surya_version": importlib.metadata.version("surya-ocr"),
     }
 

@@ -3,10 +3,11 @@
 #
 # Runs the pinned llama.cpp llama-server (b11609, the build Mimik ships) in a container on
 # the internal Docker network mimik-ocr-net (no outside access), with surya-ocr-2 at a pinned
-# revision, hash-checked before start. DEVICE=gpu uses the Vulkan build (GPU rules apply:
-# evenings and weekends, fan on manual); the image encoder stays on the CPU there, because
-# the container's Mesa 25.0.7 RADV lost the device on it (2026-10-29). DEVICE=cpu is the
-# default.
+# revision, hash-checked before start. DEVICE=gpu uses the Vulkan build and is refused on
+# weekdays 09:00-18:00 (the machine schedule; the fan must be on manual); the image encoder
+# stays on the CPU there, because the container's Mesa 25.0.7 RADV lost the device on it
+# (2026-10-29). DEVICE=cpu is the default: 2 cores on weekdays 09:00-18:00, else CPUS
+# (default 6). The server does not stop itself: run "stop" after the extraction.
 #
 # usage: tools/ocr_server.sh start|stop
 #   LLAMA_DIR: the verified runtime's llama/ directory (cpu/ and vulkan/)
@@ -40,8 +41,27 @@ check() {
 check surya-2.gguf "$MODEL_SHA256"
 check surya-2-mmproj.gguf "$MMPROJ_SHA256"
 
-docker network inspect "$NETWORK" >/dev/null 2>&1 || docker network create --internal "$NETWORK" >/dev/null
+# Weekdays 09:00-18:00: no GPU, at most 2 cores.
+day=$(date +%u)
+hour=$(date +%H)
+working_hours=false
+if [ "$day" -le 5 ] && [ "${hour#0}" -ge 9 ] && [ "${hour#0}" -lt 18 ]; then
+    working_hours=true
+fi
+cpus=${CPUS:-6}
+if [ "$working_hours" = true ]; then
+    [ "${DEVICE:-cpu}" = gpu ] && { echo "no GPU on weekdays 09:00-18:00" >&2; exit 1; }
+    cpus=2
+fi
+
+if docker network inspect "$NETWORK" >/dev/null 2>&1; then
+    internal=$(docker network inspect --format '{{.Internal}}' "$NETWORK")
+    [ "$internal" = true ] || { echo "$NETWORK exists but is not internal" >&2; exit 1; }
+else
+    docker network create --internal "$NETWORK" >/dev/null
+fi
 set -- --network "$NETWORK" --cap-drop=ALL --security-opt no-new-privileges \
+    --cpus "$cpus" --memory 8g --pids-limit 256 \
     --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$MODEL_DIR:/m:ro"
 if [ "${DEVICE:-cpu}" = gpu ]; then
     set -- "$@" --device /dev/dri --group-add "$(getent group video | cut -d: -f3)" \
@@ -54,6 +74,6 @@ else
 fi
 # shellcheck disable=SC2086 # offload holds separate flags
 docker run -d --name "$NAME" "$@" --entrypoint /llama/llama-server "$IMAGE" \
-    -m /m/surya-2.gguf --mmproj /m/surya-2-mmproj.gguf $offload --host 0.0.0.0 --port 8080 \
+    -m /m/surya-2.gguf --mmproj /m/surya-2-mmproj.gguf $offload -t "$cpus" --host 0.0.0.0 --port 8080 \
     --parallel 4 --ctx-size 49152 --alias datalab-to/surya-ocr-2 --jinja >/dev/null
 echo "OCR server $NAME on $NETWORK: pass --ocr-server http://$NAME:8080 and --network $NETWORK"

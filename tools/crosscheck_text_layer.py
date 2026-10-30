@@ -6,8 +6,11 @@ unit's box are collected (a shadow duplicate, the same word drawn again within 3
 dropped) and aligned with the unit's OCR words. Two kinds of suggestion result:
 
 - spelling: an OCR word with a near-identical text-layer twin (similarity at least 0.6, not
-  equal) takes the twin's spelling; the suggested correction is the unit's text with every
-  such word replaced, in the OCR's word order.
+  equal, same digits and same non-letter characters apart from apostrophes and dashes) takes
+  the twin's spelling; the suggested correction is the unit's text with every such word
+  replaced, in the OCR's word order.
+- difference: a near twin that differs in digits, dice, signs or markers (100/10, d6/d8,
+  armatura*/armatura): either reading may be the misprint, so no correction is suggested.
 - unread: three or more text-layer words inside the box that the OCR text does not contain,
   a sign of skipped lines (or of overlapping boxes); no correction is suggested.
 
@@ -18,6 +21,7 @@ usage: crosscheck_text_layer.py BUNDLE --pdf FILE
 """
 
 import argparse
+import collections
 import difflib
 import html
 import json
@@ -63,10 +67,10 @@ def page_words(page):
                     words.append((current, box))
     kept = []
     for text, box in words:
+        # A shadow repeats the word with the same box shifted by under 3 points.
         shadow = any(
             seen == text
-            and abs(other[0] - box[0]) < SHADOW_POINTS
-            and abs(other[1] - box[1]) < SHADOW_POINTS
+            and all(abs(a - b) < SHADOW_POINTS for a, b in zip(other, box, strict=True))
             for seen, other in kept
         )
         if not shadow:
@@ -89,30 +93,50 @@ def bounding(polygon):
     return [min(xs), min(ys), max(xs), max(ys)]
 
 
+TYPOGRAPHIC = str.maketrans({"’": "'", "‘": "'", "–": "-", "—": "-", "−": "-"})
+
+
+def significant(word):
+    """Digits and non-letter characters, typographic apostrophes and dashes folded."""
+    return [c for c in word.translate(TYPOGRAPHIC) if not c.isalpha()]
+
+
 def bare(word):
     return word.lower().strip(".,;:()*")
 
 
 def compare(ocr_words, layer_words):
-    """(OCR words with text-layer spellings, [[ocr, layer], ...], unread layer words)."""
-    out, repairs, unread = [], [], []
+    """(OCR words with text-layer spellings, [[ocr, layer], ...], unread layer words,
+    [[ocr, layer], ...] differences in digits, dice, signs or markers)."""
+    out, repairs, unread, differences = [], [], [], []
+    # OCR words the alignment left unpaired: they may still be read, in another order.
+    spare = collections.Counter()
     matcher = difflib.SequenceMatcher(None, ocr_words, layer_words, autojunk=False)
     for op, a0, a1, b0, b1 in matcher.get_opcodes():
         if op == "equal":
             out += ocr_words[a0:a1]
         elif op == "replace" and a1 - a0 == b1 - b0:
             for ocr, layer in zip(ocr_words[a0:a1], layer_words[b0:b1], strict=True):
-                if difflib.SequenceMatcher(None, ocr.lower(), layer.lower()).ratio() >= SIMILAR:
-                    out.append(layer)
-                    repairs.append([ocr, layer])
-                else:
-                    out.append(ocr)
+                out.append(ocr)
+                if difflib.SequenceMatcher(None, ocr.lower(), layer.lower()).ratio() < SIMILAR:
+                    spare[bare(ocr)] += 1
                     unread.append(layer)
+                elif significant(ocr) != significant(layer):
+                    differences.append([ocr, layer])
+                else:
+                    out[-1] = layer
+                    repairs.append([ocr, layer])
         else:
             out += ocr_words[a0:a1]
+            spare.update(bare(word) for word in ocr_words[a0:a1])
             unread += layer_words[b0:b1]
-    seen = {bare(word) for word in ocr_words}
-    return out, repairs, [word for word in unread if bare(word) not in seen]
+    missing = []
+    for word in unread:
+        if spare[bare(word)] > 0:
+            spare[bare(word)] -= 1
+        else:
+            missing.append(word)
+    return out, repairs, missing, differences
 
 
 def issues_for(units, words):
@@ -121,7 +145,7 @@ def issues_for(units, words):
         text = plain(unit["html"])
         rect = bounding(unit["polygon"])
         layer = [word for word, box in words if inside(box, rect)]
-        fixed, repairs, unread = compare(text.split(), layer)
+        fixed, repairs, unread, differences = compare(text.split(), layer)
         if repairs:
             changes = ", ".join(f"{ocr!r} -> {layer!r}" for ocr, layer in repairs)
             issues.append(
@@ -130,6 +154,18 @@ def issues_for(units, words):
                     "kind": "text-layer-spelling",
                     "description": f"The PDF text layer inside this block spells: {changes}.",
                     "suggested_correction": " ".join(fixed),
+                }
+            )
+        if differences:
+            changes = ", ".join(f"OCR {ocr!r}, text layer {layer!r}" for ocr, layer in differences)
+            issues.append(
+                {
+                    "block_id": unit["id"],
+                    "kind": "text-layer-difference",
+                    "description": "Digits, dice, signs or markers differ; check the page image: "
+                    + changes
+                    + ".",
+                    "suggested_correction": None,
                 }
             )
         if len(unread) >= UNREAD_MIN:
