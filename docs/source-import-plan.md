@@ -7,117 +7,154 @@ JSON files the review page never shows (`docs/sources-and-retrieval.md`).
 
 What stays: units start `unreviewed`; every accept, correction, rejection and page completion is
 an explicit owner decision with actor, rationale and revision (SRC-4, SRC-5); raw extraction
-text is immutable; model and tool output is a suggestion only (SRC-6); manuals stay local
-except on a route the owner explicitly sends out (route C); weaker sandboxing only with an
-owner opt-in (ASSIST-44).
+text is immutable; a source is one finalized run (SRC-2, migration 007); model and tool output is
+a suggestion or an unreviewed reading, never a decision (SRC-6); manuals stay local except on a
+route the owner explicitly sends out (route C); weaker sandboxing only with an owner opt-in
+(ASSIST-44).
+
+This is the umbrella plan. Steps 2, 3, 5 and 6 each get their own plan and plan review before
+work starts; steps 1 and 4 are specified here.
 
 ## Decisions this plan needs (owner)
 
 Changes to decisions in force:
 
-- **SRC-1** (no browser uploads): the Owner may upload a PDF from `/admin/materials` (bounded
-  size, stored like today's imports). `import-source` stays for prepared bundles.
-- **SRC-3** (Mimik never renders PDFs at run time): Mimik renders the selected pages to PNG
-  itself, in a sandboxed child process (step 2), because the reader routes need page images.
-- **ASSIST-58** (downloads go only to Hugging Face): route B downloads uv and a standalone Python
-  from GitHub releases and wheels from PyPI (`files.pythonhosted.org`), each pinned by hash.
+- **SRC-1** (no browser uploads): the Owner may upload a PDF from `/admin/materials` (step 3).
+  `import-source` stays for prepared bundles.
+- **SRC-3** (Mimik never renders PDFs at run time): Mimik renders selected pages itself, in a
+  sandboxed child (step 3).
+- **ASSIST-28, ASSIST-35, ASSIST-58** (downloads only from Hugging Face): route B also downloads
+  from GitHub releases (uv, the standalone Python), PyPI (`pypi.org`, `files.pythonhosted.org`),
+  `download.pytorch.org` (CPU PyTorch; PyPI's Linux wheels pull several GB of CUDA wheels) and
+  the hosts Marker and surya fetch their layout weights from (to be verified in step 6; possibly
+  `models.datalab.to`), each artifact pinned by hash.
+- **AGENTS.md** ("Rust is the shipping language", "model runtimes in containers"): route B is a
+  Mimik-managed Python runtime downloaded at the owner's request, never shipped in the release.
+- **REL-2** (shipped binaries come with their source): settled by the renderer choice in step 3
+  (MuPDF built from source keeps REL-2; prebuilt PDFium would be a new exception).
 
 New decisions:
 
-- **Reading routes** (owner 2026-10-30): four routes, chosen per import, all producing the same
-  unreviewed units: A, the PDF's own text; B, local layout and OCR (Marker); C, an online vision
-  model with the owner's key; D, text the owner supplies. A route whose requirements are missing
-  is shown disabled with what it needs.
-- **Route B runtime** (owner 2026-10-30): Mimik downloads a pinned `uv` binary, which installs a
-  pinned standalone Python and a hash-locked environment in Mimik's data folder; no system
-  Python is used. Marker runs inside the Hakoniwa sandbox.
-- **Owner-added units:** the owner can draw a box on the page image and enter text the reader
-  missed (the page 29 footnote case, L-SRC-1). It is stored apart from the raw extraction, marked
-  as owner-entered, with actor and rationale, and is reviewed like any other unit.
+- **Reading routes** (owner 2026-10-30): four routes, chosen per import, each producing an
+  unreviewed source: A, the PDF's own text; B, local layout and OCR (Marker); C, an online vision
+  model with the owner's key; D, text the owner supplies. Route B and C output are raw unreviewed
+  units on the same footing as Marker's machine-learning output today, with provider, model,
+  versions and prompt hash recorded as provenance. A route whose requirements are missing is
+  shown disabled with what it needs. Route B needs Hakoniwa, so it is Linux-only for now.
+- **Route B runtime** (owner 2026-10-30): a pinned `uv` installs a pinned standalone Python and a
+  hash-locked environment in Mimik's data folder; no system Python.
+- **Documents and readings:** a source stays one finalized run. Several runs of one PDF are
+  several sources sharing a new `source_documents` row (the PDF stored once, keyed by hash). One
+  source per document and page range is **primary**; lookup and coverage use primary sources
+  only, so readings are never returned twice. Changing the primary source is an explicit owner
+  decision with actor and rationale; it changes which reviewed units are used, not their state.
+- **Owner-added units:** text the reader missed, entered by the owner on a box drawn on the page
+  image. They are rows of `source_units` with `origin = 'owner'` (raw extracted units are
+  `origin = 'extracted'`), so review history, completeness, the revision cascade, search and
+  citations cover them unchanged. The 007 triggers are rewritten to allow inserting an
+  owner unit into a finalized source and nothing else; raw-leaf equality applies to extracted
+  units only. Adding one resets page completeness. Entering it is the owner's decision (it is
+  stored `corrected`, with the actor and rationale of the entry); nothing else can create one.
+- **Suggestions:** stored apart from units, bound to the exact source (bundle hash) they were
+  made for; a report for another bundle is refused. Each targets one unit, several units (merge)
+  or a page region (missing text). Accepting maps to existing decisions: a correction records
+  `corrected`; a merge is one atomic decision correcting the first unit and rejecting the others,
+  with one rationale and every expected revision; a missing-region suggestion pre-fills an
+  owner-added unit; a reject suggestion records `rejected`. Dismissing a suggestion is not a
+  decision on the unit. A suggestion made on an older unit revision is shown as stale. Open
+  suggestions do not block page completion.
 
 Open questions:
 
-1. **Batch accept of agreeing readings:** where two independent readings of a unit agree word for
-   word, may the owner accept all of them in one action (still their decision, per page,
-   listed)? Or one decision per unit, as now?
-2. **Route C provider:** which providers to offer first (through rig-core, D-H), and whether
-   to black out a user-drawn region (a buyer watermark) on every image before sending.
-3. **Route D evidence:** owner text has no page image to compare against. Is it allowed as
-   evidence (marked "owner-supplied text", attested by the owner), or only as a cross-check
-   reading next to a PDF route?
-4. **Dev host and route B:** Mimik installing a Python environment in its own data folder is a
-   Mimik-managed runtime, like the llama-server of ASSIST-40. May the dev host run it natively
-   for the route-B tests, or must they run in a container?
-
-## Common model (step 1)
-
-- **Reading:** one run of one route over selected pages of one stored PDF, with route,
-  versions, settings and hashes recorded. A source can hold several readings of the same pages;
-  each is its own set of units (runs are never merged, SRC-2).
-- **Primary reading:** the one whose units the owner reviews. Other readings, the text-layer
-  cross-check and review reports attach to the primary reading's units as **suggestions**:
-  stored apart, with origin and kind (spelling, difference, unread words, merge, missing
-  region, reject), never applied.
-- **Bundle contract v3:** a reader-neutral raw format (`mimik-reading-v1`: pages, blocks with
-  kind, polygon, sanitised HTML, reading order and parent), so routes A, C and D need no
-  Marker-shaped JSON. Marker output is converted by the same rules as SRC-10's eligibility.
-  v1 and v2 bundles keep importing as now.
+1. **Batch accept of agreeing readings** (step 8): where two readings agree, may the owner accept
+   them in one action (still their decision, per page, listed)? Or one decision per unit?
+2. **Route C provider:** which providers first, and whether to offer blacking out a region (a
+   buyer watermark); if offered, the same region is removed from the text hints too.
+3. **Route D evidence:** owner text has no page image. Is it evidence of its own (marked
+   "owner-supplied text", attested by the owner), or only a cross-check reading next to a PDF
+   source?
+4. **Dev host and route B:** may the dev host run Mimik's route-B runtime natively for its tests,
+   as ASSIST-40 allows for llama-server, or must those tests run in a container?
 
 ## Steps
 
-1. **Review screen with suggestions.** Store suggestions (migration and import of the existing
-   report shape). On `/admin/materials/pages/{id}`: the page image beside the units; each
-   suggestion as an inline difference with Accept (records `corrected` with the suggested text),
-   Edit and Reject; keyboard navigation; the effective text of the page shown in place, so no
-   Markdown preview. Owner-added units by drawing a box. Tested with the existing MÖRK BORG IT
-   bundle and its two reports.
-2. **Upload, rendering and the job runner.** Upload a PDF, pick pages, choose a route; Mimik
-   checks it (`lopdf`, today's limits), renders the selected pages in a sandboxed child process
-   (MuPDF, AGPL like Mimik, or PDFium; selection recorded as a DEP decision) and runs the reading
-   as one background job with progress and cancel, through the same import transaction as
-   `import-source`. A malformed PDF fails the job, never the server.
-3. **Route A: the PDF's own text.** Blocks, lines and boxes from the text layer, and the tag
-   structure (headings, lists, tables) when the PDF is tagged. Pure Rust plus the step-2
-   renderer; no models. A quality probe (words per page against image area, fonts without
-   Unicode maps, undecodable glyphs) recommends a route before the owner chooses. Measured on
-   MÖRK BORG Bare Bones EN (tagged, text layer complete) against a hand-checked reference, and on
-   the IT pages against the existing 161-row reference, where it should score like Marker without
-   OCR (140/161) and the probe should recommend route B or C.
-4. **Route C: online vision model.** The owner's key (stored like other owner secrets, never
-   shown back), the provider through rig-core, an explicit per-import confirmation listing pages
-   and provider, the optional blacked-out region, a cost estimate before sending. The model reads
-   each page image with the text layer as a hint and returns `mimik-reading-v1` blocks, validated
-   (schema, polygons inside the page, bounded sizes); invalid output fails that page. Used as the
-   primary reading or as suggestions on another reading. Measured on the 161-row reference.
-5. **Route B: Marker through uv.** A runtime manifest like `schemas/llama-runtime-v1.json`: uv
-   (pinned version and hash per platform), the standalone Python build, `uv.lock` with hashes
-   (Marker 2.0.0, surya 0.22.1, CPU PyTorch), the layout model files (pinned revisions, hashes)
-   and surya's OCR model served by the existing llama-server runtime. An owner-started setup on
-   `/admin/materials` (size shown, about 2 GB, progress, cancel). Marker runs in Hakoniwa with no
-   network except a private loopback shared with its llama-server (both in one sandbox), read-only
-   environment and models, the rendered pages and an output folder only; a seccomp profile for
-   Python and PyTorch. Missing or failed setup disables the route with the reason. The extraction
-   prototype's checks (OCR failures fail the run, coverage) move into the job.
-6. **Route D: owner text.** Markdown or HTML pasted or uploaded, split into blocks; per question
-   3, either a source of its own or a cross-check reading for a PDF source.
-7. **Agreement view.** Where a page has two readings, units are marked agree / differ; per
-   question 1, batch accept or not.
-8. **Docs and gate.** `docs/sources-and-retrieval.md` rewritten for the routes,
-   `docs/release-scope.md`, licences and notices (uv, the Python build and every locked wheel
-   for route B, which are downloaded, not shipped), the prototype tools retired or kept as
-   developer tools, limitations updated.
+1. **Schema.** One migration: `source_documents` (PDF once, hash), the primary flag and its
+   decision events, `origin` on `source_units` with the rewritten 007 and 009 triggers, the
+   suggestion tables. Existing sources become one document each and primary; their ids, reviews
+   and hashes are unchanged (tested on a copy of a database with a reviewed source). Lookup
+   (`match_sql`, coverage counts) filters to primary sources. Regression tests: completion
+   refused with an unreviewed owner unit; adding an owner unit to a complete page resets it;
+   an owner unit is searchable after review; extracted-unit insertion into a finalized source is
+   still refused; a second reading is not returned by lookup until made primary.
+2. **Review screen** (own plan). Report import bound to the bundle hash (the existing report
+   shape, plus targets for several units and page regions). On the page: the image beside the
+   units, zoom and region highlight; each suggestion as an inline difference with Accept, Edit,
+   Dismiss; merges as one decision; drawing a box for owner-added text; the page's effective text
+   in place; keyboard navigation; drafts kept on 409/422. Browser checks for all of these on a
+   synthetic fixture; the MÖRK BORG IT bundle and its two reports as the local live check.
+3. **Sandboxed PDF work, upload and jobs** (own plan). First the runner generalisation: launch
+   kinds besides llama-server (a re-exec of `mimik` as the PDF worker), each with its own
+   seccomp, Landlock, rlimits and wall-clock limit. Every parse of an uploaded PDF (the `lopdf`
+   checks, page enumeration, rendering, route A's text) runs in the worker, which returns
+   bounded, validated results; the server never parses the uploaded PDF. Renderer: MuPDF through
+   a maintained crate, built from source (selection, CI build cost and REL-2 recorded as a DEP
+   decision). Upload: its own route with a streaming 128 MiB limit, Owner, CSRF and REL-5 checks,
+   spooled to a private file, a staging table outside 007 with cleanup of abandoned uploads, one
+   upload and one job at a time. Jobs: progress, cancel (kills the worker tree), and a clean
+   failure across a restart. A hostile-PDF corpus (deep nesting, decompression bomb, xref loop,
+   huge page count) fails the job, never the server.
+4. **Route A: the PDF's own text.** MuPDF structured text (blocks, lines, glyph boxes) and the tag
+   structure when the PDF is tagged, in the step-3 worker. Units are derived from the raw reading
+   by one function that the tests pin (the "units equal raw leaves" check becomes that function's
+   contract, contract v3, `mimik-reading-v1`). A probe (words per page against image area, fonts
+   without Unicode maps, undecodable glyphs) recommends a route. Bars, set before measuring:
+   - MÖRK BORG Bare Bones EN (local, licence and hash recorded in the corpus table): a
+     hand-checked reference of the weapons, armour, equipment and character-creation pages (rows
+     counted as in the IT reference); at least 98% of rows intact in one unit, no digit, dice or
+     sign error.
+   - MÖRK BORG IT pages 22–39: the probe recommends route B or C on every art-heavy page (all
+     18), and route A's scores are reported, with no bar.
+   - Ten synthetic hostile or odd PDFs (rotated, no text layer, broken tags): no crash, correct
+     probe result.
+5. **Route C: online vision model** (own plan). Key storage (a 0600 file outside the database and
+   backups, never shown back, replace and delete) and an HTTPS transport for rig-core (a DEP
+   decision; DEP-27's rustls stack, redirects refused, bounded responses, keys redacted from
+   logs); verify the pinned rig-core sends images and the structured output, else stop and ask
+   (D-H). Each send shows a preview of exactly what goes out (pages, hints, provider, model), and
+   the confirmation is bound to the payload hashes; the PDF itself is never sent. Optional blacked
+   out region applied to images and hints alike. Output validated (schema, polygons, sizes);
+   invalid output fails that page. Bar: on the IT 161-row reference, at least the 145 rows of the
+   current best route, with no digit, dice or sign error; cost per page reported.
+6. **Route B: Marker through uv** (own plan). A manifest of every artifact (uv per platform, the
+   Python build, wheels, layout weights, surya's OCR model and its projector), each pinned by
+   hash. Setup is owner-started (size shown, progress, cancel), runs confined with network only to
+   the listed hosts, installs offline from verified files with `uv sync --frozen --no-build`, and
+   publishes the environment atomically. Runtime auto-downloads off; the CC BY-NC-SA error model is
+   never fetched. Marker runs in its own sandbox kind (threads and processes allowed as PyTorch
+   needs, no network); the OCR llama-server runs in the existing sandbox kind on its Unix socket,
+   bind-mounted into Marker's (or the minimal change if surya cannot use a socket), and takes
+   turns with the assistant's server through the model-work gate. Code licences of Marker and
+   surya re-verified before setup shows them. The prototype's checks (OCR failures fail the run,
+   coverage) move into the job. Bar: the IT reference scores of the prototype route (145/161 with
+   the text-layer cross-check).
+7. **Route D: owner text** (per question 3).
+8. **Agreement view** (per question 1): the alignment rule across readings (region overlap and
+   normalised text) defined in its own plan; both readings stay unreviewed until the owner
+   decides.
+9. **Docs and gate.** `docs/sources-and-retrieval.md` rewritten for the routes,
+   `docs/release-scope.md` (route B Linux-only), notices, the prototype tools retired or kept as
+   developer tools, limitations updated; migration, browser, hostile-input and unpacked-release
+   checks in the gate. Manual-derived fixtures stay local; CI uses synthetic ones.
 
-Order: 1, 2, 3 first (they unblock the prompt tests with Bare Bones), then 4, 5, 6, 7. Each
-step is its own reviewed change; steps 4 and 5 each get their own plan review before work starts.
+Order: 1, 2, 3, 4 first (Bare Bones then needs no prototype tools), then 5, 6, 7, 8. Each step is
+its own reviewed change. Results that drive a product decision get an independent review.
 
 ## Risks
 
-- **Rendering and parsing untrusted PDFs** is the largest new attack surface: the renderer and
-  route A's parser run in the sandbox, with bounded time, memory and output.
-- **Route B's environment** is about 2 GB of third-party code; its licences (Marker's and surya's
-  weights under modified OpenRAIL-M, surya's OCR error model CC BY-NC-SA 4.0, not loaded) must be
-  shown before setup; PyTorch under the sandbox's seccomp filter is untested.
-- **Route C** sends manual pages to a third party; the owner confirms each send, and nothing is
-  sent by default.
-- **Owner-added units** change the "units equal the raw leaf nodes" invariant: they are a
-  separate kind with their own table, never mixed into raw extraction.
+- **Untrusted PDFs** are the largest new attack surface: all parsing moves to the sandboxed
+  worker, with bounded time, memory and output.
+- **Route B's environment** is about 2 GB of third-party code under the owner's control; Python
+  and PyTorch under a seccomp filter are untested.
+- **Route C** sends manual pages to a third party; nothing is sent without a confirmed preview.
+- **Owner-added units** relax 007's frozen membership by exactly one kind of insert; the rewritten
+  triggers are the boundary and get their own tests.
