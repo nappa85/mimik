@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
     && pip install --no-cache-dir -c /tmp/constraints.txt marker-pdf==2.0.0 jsonschema==4.25.1 \
     && pip freeze > /runtime-requirements.txt
 COPY tools/*.py /tools/
-COPY schemas/source-kinds.json /schemas/source-kinds.json
+COPY schemas/source-kinds.json schemas/source-leaf-kinds.json /schemas/
 ENV TORCH_DEVICE=cpu HF_HOME=/cache/huggingface XDG_CACHE_HOME=/cache \
     FONT_DIR=/cache/fonts FONT_PATH=/cache/fonts/GoNotoCurrent-Regular.ttf
 WORKDIR /tools

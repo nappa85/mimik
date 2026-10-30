@@ -195,7 +195,7 @@ fn collect_units(
         return Err(invalid());
     }
     let children = node.children.as_deref().unwrap_or_default();
-    let eligible = super::review_kind(&node.block_type)?;
+    let eligible = super::review_kind(&node.block_type, !children.is_empty())?;
     if eligible {
         if !children.is_empty() || node.html.contains("<content-ref") || node.html.len() > 64 * 1024
         {

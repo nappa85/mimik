@@ -9,15 +9,23 @@ pub(crate) mod web;
 
 use serde::Deserialize;
 
-pub(crate) fn review_kind(kind: &str) -> Result<bool, crate::AppError> {
-    static KINDS: std::sync::LazyLock<Result<Vec<String>, serde_json::Error>> =
-        std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../schemas/source-kinds.json"))
-        });
-    let kinds = KINDS
-        .as_ref()
-        .map_err(|_| crate::AppError::Invalid("Embedded source-kind schema is invalid."))?;
-    Ok(kinds.iter().any(|candidate| candidate == kind))
+/// Whether a raw node is a review unit: a kind in `schemas/source-kinds.json`, or a kind in
+/// `schemas/source-leaf-kinds.json` without children (Marker's OCR output gives a whole list
+/// as one `ListGroup`; from the text layer the same group holds `ListItem` units).
+pub(crate) fn review_kind(kind: &str, has_children: bool) -> Result<bool, crate::AppError> {
+    type Kinds = Result<Vec<String>, serde_json::Error>;
+    static KINDS: std::sync::LazyLock<Kinds> = std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!("../../schemas/source-kinds.json"))
+    });
+    static LEAF_KINDS: std::sync::LazyLock<Kinds> = std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!("../../schemas/source-leaf-kinds.json"))
+    });
+    let invalid =
+        |_: &serde_json::Error| crate::AppError::Invalid("Embedded source-kind schema is invalid.");
+    let kinds = KINDS.as_ref().map_err(invalid)?;
+    let leaf_kinds = LEAF_KINDS.as_ref().map_err(invalid)?;
+    Ok(kinds.iter().any(|candidate| candidate == kind)
+        || (!has_children && leaf_kinds.iter().any(|candidate| candidate == kind)))
 }
 
 pub struct SourceSummary {
