@@ -112,6 +112,12 @@ pub(super) fn set_primary(
         }
         let covered: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM source_document_members m JOIN source_pages p ON p.source_id=m.source_id JOIN sources s ON s.id=m.source_id JOIN source_documents d ON d.id=m.document_id AND d.pdf_sha256=s.pdf_hash JOIN source_finalizations f ON f.source_id=s.id WHERE m.document_id=?1 AND m.source_id=?2 AND p.pdf_page=?3)",params![document,source,page.pdf_page],|r|r.get(0))?;
         if !covered {
+            let unfinalized: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM source_document_members m JOIN source_pages p ON p.source_id=m.source_id WHERE m.document_id=?1 AND m.source_id=?2 AND p.pdf_page=?3 AND NOT EXISTS(SELECT 1 FROM source_finalizations f WHERE f.source_id=m.source_id))",params![document,source,page.pdf_page],|r|r.get(0))?;
+            if unfinalized {
+                return Err(AppError::Invalid(
+                    "The source must be finalized before it can be chosen as primary.",
+                ));
+            }
             return Err(AppError::NotFound);
         }
         if primary_state(tx, document, page.pdf_page)? != *page {
@@ -174,7 +180,8 @@ impl Store {
     /// with this PDF hash, against the current selection state, as actor `operator:cli`.
     ///
     /// # Errors
-    /// Invalid hash/pages/rationale, unknown document, a source that does not cover a page, or
+    /// Invalid hash/pages/rationale or an unfinalized source, unknown document, a source that does
+    /// not cover a page, or
     /// database failures.
     pub async fn operator_set_primary_source(
         &self,
