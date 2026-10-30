@@ -35,26 +35,31 @@ Changes to decisions in force:
 
 New decisions:
 
-- **Reading routes** (owner 2026-10-30): four routes, chosen per import, each producing an
-  unreviewed source: A, the PDF's own text; B, local layout and OCR (Marker); C, an online vision
-  model with the owner's key; D, text the owner supplies. Route B and C output are raw unreviewed
+- **Reading routes** (owner 2026-10-30): four routes, chosen per import: A, the PDF's own
+  text; B, local layout and OCR (Marker); C, an online vision model with the owner's key, each
+  producing an unreviewed source; D, text the owner supplies, producing suggestions only. Route B and C output are raw unreviewed
   units on the same footing as Marker's machine-learning output today, with provider, model,
   versions and prompt hash recorded as provenance. A route whose requirements are missing is
   shown disabled with what it needs. Route B needs Hakoniwa, so it is Linux-only for now.
 - **Route B runtime** (owner 2026-10-30): a pinned `uv` installs a pinned standalone Python and a
   hash-locked environment in Mimik's data folder; no system Python.
 - **Documents and readings:** a source stays one finalized run. Several runs of one PDF are
-  several sources sharing a new `source_documents` row (the PDF stored once, keyed by hash). One
-  source per document and page range is **primary**; lookup and coverage use primary sources
-  only, so readings are never returned twice. Changing the primary source is an explicit owner
-  decision with actor and rationale; it changes which reviewed units are used, not their state.
+  several sources sharing a new `source_documents` row (the PDF stored once, keyed by hash). Primary
+  is chosen **per document page**: each page of a document has at most one primary source, so
+  overlapping ranges never return the same page twice; lookup and coverage use only the primary
+  source of each page. Changing it is an explicit owner decision with actor, rationale and an
+  authenticated sidecar like review events; it changes which reviewed units are used, not their
+  state.
 - **Owner-added units:** text the reader missed, entered by the owner on a box drawn on the page
   image. They are rows of `source_units` with `origin = 'owner'` (raw extracted units are
   `origin = 'extracted'`), so review history, completeness, the revision cascade, search and
   citations cover them unchanged. The 007 triggers are rewritten to allow inserting an
   owner unit into a finalized source and nothing else; raw-leaf equality applies to extracted
-  units only. Adding one resets page completeness. Entering it is the owner's decision (it is
-  stored `corrected`, with the actor and rationale of the entry); nothing else can create one.
+  units only. Adding one resets page completeness. Entering it is the owner's decision, in one
+  transaction: the unit is inserted `unreviewed` with its search projection (017 refuses
+  inserting reviewed units), then corrected through the normal revision, event and sidecar path,
+  so its history starts like any other unit's. Nothing else can create one; `origin` never
+  changes, and extracted identities cannot be inserted or replaced this way.
 - **Suggestions:** stored apart from units, bound to the exact source (bundle hash) they were
   made for; a report for another bundle is refused. Each targets one unit, several units (merge)
   or a page region (missing text). Accepting maps to existing decisions: a correction records
@@ -67,14 +72,22 @@ New decisions:
 - **Watermark exclusion** (owner 2026-10-30): at import the owner can exclude a buyer watermark
   easily. Mimik proposes one when the same text appears at the same place on most selected pages
   (for example a name and order number in the margin), shown highlighted on a page; the owner
-  confirms it, adjusts the box or draws one, once for all pages. The exclusion is an owner
-  decision with actor and rationale: text inside it is left out of every reading, units wholly
-  inside it are recorded `rejected` with that decision as rationale (listed, undoable per unit),
-  and it is blacked out on every image and text hint sent to route C. Stored page images stay
+  confirms it, adjusts the box or draws one, once for all pages. The exclusion is recorded
+  with actor, rationale, pages and geometry, and has three effects. Raw output is never filtered:
+  extracted units wholly inside the box stay in the reading and are rejected through attributed
+  owner decisions citing the exclusion (listed, each undoable); a unit crossing the box's edge is
+  left unreviewed and flagged. Route A and B's text hints and every image and hint sent to route
+  C are blacked out inside the box before any reading, and that redaction is recorded with the
+  reading's provenance (content the provider never saw gets no rejected-unit history). Stored page images stay
   the original renders (evidence); the review screen shows the region masked.
 - **Batch accept** (owner 2026-10-30): where two readings agree (step 8's alignment rule), the
   owner may accept all agreeing units of a page in one action; each is recorded as its own
   decision and listed. Disagreements stay one by one.
+- **Multi-unit decisions** (merge, exclusion, batch accept): one transaction checks every expected
+  revision first, then for each unit writes the update, its `source_review_events` row and its
+  `source_web_events` sidecar in turn (015 attributes only the latest event), all sharing one
+  operation id and rationale. Any stale revision or attribution failure rolls back all of it;
+  tests cover both.
 - **Route C providers** (owner 2026-10-30): Anthropic and OpenAI first, through rig-core.
 - **Route D** (owner 2026-10-30): owner-supplied text is a cross-check only: it produces
   suggestions on a PDF reading and is never evidence of its own.
@@ -85,7 +98,10 @@ New decisions:
 
 1. **Schema.** One migration: `source_documents` (PDF once, hash), the primary flag and its
    decision events, `origin` on `source_units` with the rewritten 007 and 009 triggers, the
-   suggestion tables. Existing sources become one document each and primary; their ids, reviews
+   suggestion tables. Existing sources are grouped into documents by PDF hash; where
+   legacy sources of one PDF overlap on a page, the migration picks none as primary for that page
+   and the page is shown as needing the owner's choice, so reviewed evidence selection never
+   changes silently; their ids, reviews
    and hashes are unchanged (tested on a copy of a database with a reviewed source). Lookup
    (`match_sql`, coverage counts) filters to primary sources. Regression tests: completion
    refused with an unreviewed owner unit; adding an owner unit to a complete page resets it;
@@ -144,7 +160,8 @@ New decisions:
    coverage) move into the job. Bar: the IT reference scores of the prototype route (145/161 with
    the text-layer cross-check).
 7. **Route D: owner text.** Markdown or HTML split into blocks, aligned to a PDF reading by the
-   step-8 rule, giving suggestions only.
+   step-8 rule, giving suggestions only, bound to the
+   target source's bundle hash and unit revisions, with the same stale and decision rules.
 8. **Agreement view and batch accept:** the alignment rule across readings (region overlap and
    normalised text) defined in its own plan; both readings stay unreviewed until the owner
    decides.
