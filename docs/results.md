@@ -916,7 +916,7 @@ decides.**
 - **Setup:** harness v3, C0 settings (thinking off, temperature 0.1, top_p 0.95, 8 turns,
   max_tokens 4096, ctx 24576), dev subset `dev-screen-40` (40 cases, 16 at-risk), seed 17,
   pack rev3 (`cases-dev` c10113c2), frozen commit `82a1ca5`, llama.cpp b11610, GPU, Q4_K_M.
-  The 35B ran with f16 KV cache and no flash attention, the three 8B models with q8_0 KV and
+  The 35B ran with f16 KV cache and the flash-attention flag not set, the three 8B models with q8_0 KV and
   flash attention. G0 (rule frozen 2026-10-16 in `tools/queues/g0-qwen36-35b-a3b.json`): one
   3-case smoke per `--n-cpu-moe` in 40/36/32/28/24, picking the lowest server s/token with
   VRAM at most 7.5 GB and no swap growth. Case ids prefixed `ho-` in the dev subset are dev
@@ -940,12 +940,14 @@ decides.**
   | Granite 4.2 8B | 14 (0.22–0.50) | 19 | 18 | 13/16 | 2/15 | 3 | 13.8 |
   | Ministral 3 8B | 13 (0.20–0.48) | 25 | 22 | 10/16 | 6/15 | 0 | 7.4 |
   | Llama 3.1 8B | 6 (0.07–0.29) | 6 | 0 | 0/16 | 0/15 | 2 | 6.8 |
-  | Qwen3.5-9B (2026-10-30) | 22 (0.40–0.69) | 26 | 9 | 5/16 | 2/15 | 2 | 45.8 |
+  | Qwen3.5-9B (2026-10-30) | 22 (0.40–0.69) | 26 | 9 | 5/16 | 2/15 | 2 (+1 no outcome at turn 8) | 45.8 |
 
-  All arms: 40 of 40 episodes, 0 errors, no truncation, no thermal stop (peak junction 76–80 °C).
+  All arms: 40 of 40 episodes, 0 errors, no truncation, no thermal stop (recorded peak junction:
+  8B arms 76–78 °C, 35B 37 °C with most experts on the CPU, 9B 59 °C).
   The Qwen3.5-9B arm ran on 2026-10-30 (queue `screen-qwen35-9b-s40`, frozen commit `5895bed`)
-  with the same runner, registry, cases file, pack hashes and llama.cpp image, f16 KV cache and
-  default flash attention like the 35B; 40 of 40 episodes, 0 errors, peak junction 59 °C.
+  with the same runner, registry, cases file, pack hashes and llama.cpp image, and the same server
+  arguments as the 35B apart from `--n-cpu-moe` (f16 KV cache, flash-attention flag not set; the
+  effective setting under b11610's default was not recorded for either).
 - **Conclusion:** `--n-cpu-moe 40` is the G0 choice by the pre-registered rule; decoding was
   not faster with more experts on the GPU, and 40, 36 and 32 differ within noise. The 35B
   scores highest on correct (22), but its false support (12/40, 10/16 at-risk) is not low, and
@@ -959,14 +961,14 @@ decides.**
   difference between them is established. Against the 8B models, Holm-corrected over the four
   comparisons per metric: more correct than Llama (17 versus 1 discordant, p < 0.001; versus
   Ministral p = 0.035 and Granite p = 0.08 uncorrected, not significant after correction); less
-  false support than Ministral (p = 0.001) and Granite (p = 0.02), more than Llama (p = 0.004,
-  Llama rarely commits to anything). The 9B runs fully on the GPU at a median time similar to
+  false support than Ministral (Holm p = 0.004) and Granite (Holm p = 0.045, marginal), more than
+  Llama (Holm p = 0.012; Llama rarely commits to anything). The 9B runs fully on the GPU at a median time similar to
   the 35B (45.8 versus 42.8 s).
 - **Limitations:** one seed, 40 cases; the CPU references used the pre-rev3 pack and an older
   harness. The 9B arm is ten days later on a later commit whose harness files are unchanged.
   The 35B differs from the 8B models in KV quantisation and flash attention. G0 measured
   decode speed on 3 smoke cases only. Turn-limit episodes count as incorrect. Numbers verified
-  by an independent results review (2026-10-22); the 9B row and comparisons are under review.
+  by an independent results review (2026-10-22); the 9B row and comparisons by another (2026-10-30).
 
 ## Decision router SYS-R: raw-readout routers on dev (2026-10-17/18)
 
