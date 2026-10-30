@@ -131,7 +131,7 @@ pub(super) fn set_primary(
         }
         let covered: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM source_document_members m JOIN source_pages p ON p.source_id=m.source_id JOIN sources s ON s.id=m.source_id JOIN source_documents d ON d.id=m.document_id AND d.pdf_sha256=s.pdf_hash JOIN source_finalizations f ON f.source_id=s.id WHERE m.document_id=?1 AND m.source_id=?2 AND p.pdf_page=?3)",params![document,source,page.pdf_page],|r|r.get(0))?;
         if !covered {
-            return Err(AppError::NotFound);
+            return Err(AppError::SourceNotFound);
         }
         if primary_state(tx, document, page.pdf_page)? != *page {
             return Err(AppError::Conflict);
@@ -158,7 +158,7 @@ impl Store {
     ) -> Result<Vec<PrimaryPageState>, AppError> {
         self.run(move |db| {
             let tx=db.transaction()?;
-            if !tx.query_row("SELECT EXISTS(SELECT 1 FROM source_documents WHERE id=?1)",[document],|r|r.get::<_,bool>(0))? {return Err(AppError::NotFound);}
+            if !tx.query_row("SELECT EXISTS(SELECT 1 FROM source_documents WHERE id=?1)",[document],|r|r.get::<_,bool>(0))? {return Err(AppError::SourceNotFound);}
             let pages={let mut q=tx.prepare("SELECT DISTINCT p.pdf_page FROM source_pages p JOIN source_document_members m ON m.source_id=p.source_id WHERE m.document_id=?1 ORDER BY p.pdf_page")?; q.query_map([document],|r|r.get::<_,i64>(0))?.collect::<Result<Vec<_>,_>>()?};
             let states=pages.into_iter().map(|page|primary_state(&tx,document,page)).collect::<Result<_,_>>()?;
             tx.commit()?;
@@ -220,7 +220,7 @@ impl Store {
                     |r| r.get(0),
                 )
                 .optional()?
-                .ok_or(AppError::NotFound)?;
+                .ok_or(AppError::SourceNotFound)?;
             let states = pages
                 .iter()
                 .map(|page| primary_state(&tx, document, *page))
@@ -317,12 +317,25 @@ pub(super) fn validate_polygon(
     page: i64,
     polygon: &[[f64; 2]; 4],
 ) -> Result<(), AppError> {
+    let (width, height) = polygon_bounds(db, page)?;
+    validate_polygon_bounds(width, height, polygon)
+}
+
+pub(super) fn polygon_bounds(db: &Connection, page: i64) -> Result<(f64, f64), AppError> {
     let bounds: Option<(Option<f64>,Option<f64>)>=db.query_row("SELECT CASE WHEN json_type(g.value,'$.width_points') IN ('integer','real') THEN json_extract(g.value,'$.width_points') END,CASE WHEN json_type(g.value,'$.height_points') IN ('integer','real') THEN json_extract(g.value,'$.height_points') END FROM source_pages p JOIN sources s ON s.id=p.source_id,json_each(CASE WHEN length(s.prepared_json)<=8388608 AND json_valid(s.prepared_json) THEN s.prepared_json ELSE '{}' END,'$.pages') g WHERE p.id=?1 AND json_extract(g.value,'$.pdf_page')=p.pdf_page",[page],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     let (Some(width), Some(height)) =
         bounds.ok_or(AppError::Invalid("Page geometry is missing or invalid."))?
     else {
         return Err(AppError::Invalid("Page geometry is missing or invalid."));
     };
+    Ok((width, height))
+}
+
+pub(super) fn validate_polygon_bounds(
+    width: f64,
+    height: f64,
+    polygon: &[[f64; 2]; 4],
+) -> Result<(), AppError> {
     let mut turns = [0.0; 4];
     for i in 0..4 {
         let [x, y] = polygon[i];
@@ -359,7 +372,7 @@ pub(super) fn add_owner(
             |r| r.get::<_, i64>(0),
         )
         .optional()?
-        .ok_or(AppError::NotFound)?;
+        .ok_or(AppError::SourceNotFound)?;
     if revision != unit.revision {
         return Err(AppError::Conflict);
     }
@@ -427,7 +440,7 @@ pub(super) fn review_batch(
                 |r| r.get::<_, i64>(0),
             )
             .optional()?
-            .ok_or(AppError::NotFound)?;
+            .ok_or(AppError::SourceNotFound)?;
         if current != decision.review.revision {
             return Err(AppError::Conflict);
         }

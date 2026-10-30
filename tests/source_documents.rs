@@ -1127,7 +1127,7 @@ async fn coverage_counters_follow_primary_pages_across_split_readings_and_overla
         store
             .set_primary_source(document, state, 2, "owner".into(), "Second reading".into())
             .await,
-        Err(mimik::AppError::NotFound)
+        Err(mimik::AppError::SourceNotFound)
     ));
     assert_eq!(counters(&registered("gamma", None).await), (2, 0, 1, 1));
 }

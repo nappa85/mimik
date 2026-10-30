@@ -33,6 +33,10 @@ async fn context_with_second_page(second_page: bool) -> Context {
 }
 
 async fn context_with_polygon(second_page: bool, polygon: Option<Value>) -> Context {
+    context_with_units(second_page, polygon, 2).await
+}
+
+async fn context_with_units(second_page: bool, polygon: Option<Value>, units: usize) -> Context {
     let dir = tempfile::tempdir().unwrap();
     let (bundle, pdf) = fixture::fixture(dir.path()).unwrap();
     // Add a container and another extracted unit, retaining the shared fixture's validated shapes.
@@ -59,6 +63,30 @@ async fn context_with_polygon(second_page: bool, polygon: Option<Value>) -> Cont
         .as_array_mut()
         .unwrap()
         .push(second);
+    for index in 3..=units {
+        let id = format!("/page/0/Text/{index}");
+        let html = format!(
+            "<p>{}</p>",
+            "Synthetic extraction text with values +8 and d6. ".repeat(20)
+        );
+        let mut raw_unit = raw["children"][0]["children"][0]["children"][0].clone();
+        raw_unit["id"] = json!(id);
+        raw_unit["html"] = json!(html);
+        raw["children"][0]["children"][0]["children"]
+            .as_array_mut()
+            .unwrap()
+            .push(raw_unit);
+        let mut unit = prepared["pages"][0]["units"][0].clone();
+        unit["id"] = json!(id);
+        unit["html"] = json!(html);
+        prepared["pages"][0]["units"]
+            .as_array_mut()
+            .unwrap()
+            .push(unit);
+    }
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    fs::write(bundle.join("source.json"), &bytes).unwrap();
+    prepared["extraction_sha256"] = json!(fixture::hash(&bytes));
     if second_page {
         let mut document = lopdf::Document::load(&pdf).unwrap();
         let first = document.get_pages()[&1];
@@ -327,7 +355,7 @@ async fn report_refuses_bad_bindings_pages_citations_rationales_and_closed_field
         import(&c, &bad).await,
         Err(AppError::SuggestionReportIssue {
             page: 1,
-            index: 0,
+            index: 1,
             ..
         })
     ));
@@ -453,15 +481,24 @@ async fn limits_regular_files_and_five_thousand_issue_transaction() {
             .await
             .is_err()
     );
-    fs::write(&c.report, vec![b' '; 4 * 1024 * 1024 + 1]).unwrap();
-    assert!(
-        c.store
-            .import_suggestion_report(1, &c.report)
-            .await
-            .is_err()
-    );
+    let mut oversized = report(&c, 1, vec![]);
+    oversized["pages"][0]["findings"]["summary"] = json!("x".repeat(4 * 1024 * 1024));
+    assert!(matches!(
+        import(&c, &oversized).await,
+        Err(AppError::Invalid("Local input exceeds its byte limit."))
+    ));
     fs::remove_file(&c.report).unwrap();
-    std::os::unix::fs::symlink(c.bundle.join("bundle.json"), &c.report).unwrap();
+    let valid_path = c.dir.path().join("valid-report.json");
+    fs::write(
+        &valid_path,
+        serde_json::to_vec(&report(&c, 1, vec![])).unwrap(),
+    )
+    .unwrap();
+    c.store
+        .import_suggestion_report(1, &valid_path)
+        .await
+        .unwrap();
+    std::os::unix::fs::symlink(&valid_path, &c.report).unwrap();
     assert!(
         c.store
             .import_suggestion_report(1, &c.report)
@@ -790,7 +827,7 @@ async fn merge_application_requires_batch_rejections_and_its_new_owner_unit() {
         .insert_source_suggestion(advice(&c, "merge", SuggestionTarget::Units { targets }))
         .await
         .unwrap();
-    c.db.execute("INSERT INTO source_units(page_id,block_id,kind,polygon,raw_html,raw_text,origin) VALUES(1,'owner:1','Text','[[1,1],[100,1],[100,40],[1,40]]','<p>Advice</p>','Advice','owner')",[]).unwrap();
+    c.db.execute("INSERT INTO source_units(page_id,block_id,kind,polygon,raw_html,raw_text,origin) SELECT 1,'owner:1','Text',polygon,'<p>Advice</p>','Advice','owner' FROM source_units WHERE id=1",[]).unwrap();
     let decisions = (1..=3)
         .rev()
         .map(|unit| UnitDecision {
@@ -839,7 +876,7 @@ async fn merge_application_requires_batch_rejections_and_its_new_owner_unit() {
     let app = SuggestionApplication {
         operation_id: Some(operation),
         owner_unit_id: Some(3),
-        edited: true,
+        edited: false,
         ..application(id, event)
     };
     c.store
@@ -1013,7 +1050,7 @@ async fn report_origin_and_dismissal_bounds_and_citation_page_are_enforced() {
         import(&c, &wrong_page).await,
         Err(AppError::SuggestionReportIssue {
             page: 1,
-            index: 0,
+            index: 1,
             ..
         })
     ));
@@ -1114,4 +1151,604 @@ async fn dismissal_preserves_complete_page_history_and_search() {
             .len(),
         2
     );
+}
+
+#[tokio::test]
+async fn competing_open_corrections_cannot_share_a_decision() {
+    let c = context().await;
+    let a = c
+        .store
+        .insert_source_suggestion(advice(&c, "correction", unit_target()))
+        .await
+        .unwrap();
+    let b = c
+        .store
+        .insert_source_suggestion(advice(&c, "correction", unit_target()))
+        .await
+        .unwrap();
+    let event = correction(&c).await;
+    c.store
+        .record_source_suggestion_application(application(a, event))
+        .await
+        .unwrap();
+    assert!(
+        c.store
+            .record_source_suggestion_application(application(b, event))
+            .await
+            .is_err()
+    );
+    assert_eq!(count(&c.db, "source_suggestion_applications"), 1);
+    assert_eq!(count(&c.db, "source_suggestion_dismissals"), 0);
+}
+
+#[tokio::test]
+async fn correction_application_requires_truthful_edited_flag() {
+    for (text, edited) in [("Advice", true), ("Different", false)] {
+        let c = context().await;
+        let mut suggestion = advice(&c, "correction", unit_target());
+        suggestion.suggested_text = Some(text.into());
+        let id = c.store.insert_source_suggestion(suggestion).await.unwrap();
+        let event = correction(&c).await;
+        let mut app = application(id, event);
+        app.edited = edited;
+        assert!(
+            c.store
+                .record_source_suggestion_application(app)
+                .await
+                .is_err(),
+            "text={text}, edited={edited}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn v1_empty_unit_text_is_a_note() {
+    let c = context().await;
+    for text in ["", " \t\n", "\u{2003}"] {
+        let summary = import(
+            &c,
+            &report(&c, 1, vec![issue(json!("/page/0/Text/1"), json!(text))]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.counts["note"], 1);
+        assert_eq!(summary.counts["correction"], 0);
+    }
+}
+
+#[tokio::test]
+async fn contradictory_v1_bundle_binding_cannot_fall_back_to_extraction() {
+    let c = context().await;
+    let mut value = report(&c, 1, vec![]);
+    value["bundle_sha256"] = json!("0".repeat(64));
+    value["artifact_sha256"] =
+        json!({"source.json":fixture::hash(&fs::read(c.bundle.join("source.json")).unwrap())});
+    assert!(import(&c, &value).await.is_err());
+}
+
+#[tokio::test]
+async fn report_timestamp_is_bounded_and_control_free() {
+    let c = context().await;
+    for timestamp in [
+        "x".repeat(65),
+        "é".repeat(33),
+        "now\n".into(),
+        "now\0".into(),
+    ] {
+        let mut value = report(&c, 1, vec![]);
+        value["created_at"] = json!(timestamp);
+        assert!(
+            import(&c, &value).await.is_err(),
+            "timestamp must be refused"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sql_report_timestamp_is_bounded_and_nul_free() {
+    let c = context().await;
+    for timestamp in ["x".repeat(65), "é".repeat(33), "now\0".into()] {
+        assert!(c.db.execute("INSERT INTO source_suggestion_reports(source_id,report_sha256,origin,schema_version,binding,created_at,correction,reject,merge,missing_text,note,failed_pages) VALUES(1,?1,'tool',1,'bundle',?2,0,0,0,0,0,0)", params!["a".repeat(64), timestamp]).is_err());
+    }
+}
+
+#[tokio::test]
+async fn report_tool_name_is_control_free() {
+    let c = context().await;
+    for tool in ["fixture\n", "fixture\t", "fixture\u{7f}"] {
+        let mut value = report(&c, 1, vec![]);
+        value["tool"] = json!(tool);
+        assert!(import(&c, &value).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn blank_dismissal_reason_is_null() {
+    let c = context().await;
+    for reason in ["", " \t\n", "\u{2003}"] {
+        let id = c
+            .store
+            .insert_source_suggestion(advice(&c, "note", unit_target()))
+            .await
+            .unwrap();
+        c.store
+            .dismiss_source_suggestion(id, "owner".into(), Some(reason.into()))
+            .await
+            .unwrap();
+        let reason: Option<String> =
+            c.db.query_row(
+                "SELECT reason FROM source_suggestion_dismissals WHERE suggestion_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, None);
+    }
+}
+
+#[tokio::test]
+async fn cli_unknown_source_names_source_and_prints_no_summary() {
+    let c = context().await;
+    fs::write(
+        &c.report,
+        serde_json::to_vec(&report(&c, 1, vec![])).unwrap(),
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mimik"))
+        .arg("--database")
+        .arg(c.dir.path().join("reports.sqlite3"))
+        .args(["import-suggestions", "--source", "999", "--report"])
+        .arg(&c.report)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(output.stdout, [] as [u8; 0]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Source") || stderr.contains("source"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("Character"));
+}
+
+#[tokio::test]
+async fn report_refusals_are_specific_and_issue_numbers_are_one_based() {
+    let c = context().await;
+    let base = report(&c, 1, vec![]);
+    for (field, expected) in [
+        (
+            "source_sha256",
+            "Suggestion report PDF hash does not match source.",
+        ),
+        (
+            "bundle_sha256",
+            "Suggestion report binding is missing or does not match source.",
+        ),
+    ] {
+        let mut bad = base.clone();
+        bad[field] = json!("0".repeat(64));
+        assert_eq!(import(&c, &bad).await.unwrap_err().to_string(), expected);
+    }
+    let mut bad = base.clone();
+    bad["pages"][0]["pdf_page"] = json!(99);
+    assert_eq!(
+        import(&c, &bad).await.unwrap_err().to_string(),
+        "Suggestion report page is outside source."
+    );
+    let mut bad = base.clone();
+    bad["pages"]
+        .as_array_mut()
+        .unwrap()
+        .push(base["pages"][0].clone());
+    assert_eq!(
+        import(&c, &bad).await.unwrap_err().to_string(),
+        "Suggestion report contains a duplicate page."
+    );
+    let bad = report(&c, 1, vec![issue(Value::Null, json!("x".repeat(20001)))]);
+    assert!(
+        import(&c, &bad)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("issue 1:")
+    );
+}
+
+#[tokio::test]
+async fn report_parse_error_names_location_without_echoing_content() {
+    let c = context().await;
+    fs::write(&c.report, b"{\n\"private-content\": true}").unwrap();
+    let error = c
+        .store
+        .import_suggestion_report(1, &c.report)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("schema/parse error")
+            && error.contains("line 2")
+            && error.contains("column"),
+        "{error}"
+    );
+    assert!(!error.contains("private-content"));
+}
+
+async fn merge_case(
+    polygon: &str,
+    raw_text: &str,
+    suggested: &str,
+) -> (Context, i64, SuggestionApplication) {
+    use mimik::sources::UnitDecision;
+    let c = context().await;
+    let targets = (1..=2)
+        .map(|unit| SuggestionUnit { unit, revision: 1 })
+        .collect();
+    let mut suggestion = advice(&c, "merge", SuggestionTarget::Units { targets });
+    suggestion.suggested_text = Some(suggested.into());
+    // Both alternatives exist while all target units are still at revision 1.
+    let competitor = c
+        .store
+        .insert_source_suggestion(suggestion.clone())
+        .await
+        .unwrap();
+    let id = c.store.insert_source_suggestion(suggestion).await.unwrap();
+    c.db.execute("INSERT INTO source_units(page_id,block_id,kind,polygon,raw_html,raw_text,origin) VALUES(1,'owner:1','Text',?1,'<p>Advice</p>',?2,'owner')", params![polygon, raw_text]).unwrap();
+    let decisions = (1..=3)
+        .map(|unit| UnitDecision {
+            page: 1,
+            unit,
+            review: UnitReview {
+                revision: 1,
+                state: if unit == 3 { "corrected" } else { "rejected" }.into(),
+                correction: if unit == 3 { "Advice" } else { "" }.into(),
+                actor: "owner".into(),
+                rationale: "Merge reading".into(),
+            },
+        })
+        .collect();
+    let events = c
+        .store
+        .review_units_atomic(decisions, "Merge reading".into(), |_, _| Ok(()))
+        .await
+        .unwrap();
+    let event = *events.last().unwrap();
+    let operation =
+        c.db.query_row(
+            "SELECT operation_id FROM source_review_events WHERE id=?1",
+            [event],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let app = SuggestionApplication {
+        operation_id: Some(operation),
+        owner_unit_id: Some(3),
+        ..application(id, event)
+    };
+    (c, competitor, app)
+}
+
+#[tokio::test]
+async fn merge_owner_must_match_target_bounding_rectangle() {
+    let (c, _, app) = merge_case("[[1,1],[100,1],[100,40],[1,40]]", "Advice", "Advice").await;
+    assert!(
+        c.store
+            .record_source_suggestion_application(app)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn merge_owner_text_must_equal_its_correction() {
+    let c = context().await;
+    // Use the exact target bounds so only the text check can reject this application.
+    let polygon: String =
+        c.db.query_row("SELECT polygon FROM source_units WHERE id=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let (c, _, app) = merge_case(&polygon, "Unrelated", "Advice").await;
+    assert!(
+        c.store
+            .record_source_suggestion_application(app)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn merge_application_requires_truthful_edited_flag() {
+    let c = context().await;
+    let polygon: String =
+        c.db.query_row("SELECT polygon FROM source_units WHERE id=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    for suggested in ["Advice", "Different"] {
+        let (c, _, mut app) = merge_case(&polygon, "Advice", suggested).await;
+        app.edited = suggested == "Advice";
+        assert!(
+            c.store
+                .record_source_suggestion_application(app)
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn competing_open_merges_cannot_share_event_or_owner() {
+    let c = context().await;
+    let polygon: String =
+        c.db.query_row("SELECT polygon FROM source_units WHERE id=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let (c, b, app) = merge_case(&polygon, "Advice", "Advice").await;
+    c.store
+        .record_source_suggestion_application(app.clone())
+        .await
+        .unwrap();
+    assert!(
+        c.store
+            .record_source_suggestion_application(SuggestionApplication {
+                suggestion_id: b,
+                ..app.clone()
+            })
+            .await
+            .is_err()
+    );
+    // A distinct latest event isolates owner uniqueness from event uniqueness.
+    let event = duplicate_latest_event(&c);
+    assert!(
+        c.store
+            .record_source_suggestion_application(SuggestionApplication {
+                suggestion_id: b,
+                event_id: event,
+                ..app
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(count(&c.db, "source_suggestion_applications"), 1);
+}
+
+fn duplicate_latest_event(c: &Context) -> i64 {
+    c.db.execute("INSERT INTO source_review_events(page_id,unit_id,previous_revision,state,correction,actor,rationale,operation_id) SELECT page_id,unit_id,previous_revision,state,correction,actor,rationale,operation_id FROM source_review_events ORDER BY id DESC LIMIT 1", []).unwrap();
+    c.db.last_insert_rowid()
+}
+
+#[tokio::test]
+async fn missing_text_requires_truthful_edited_flag() {
+    for suggested in ["Advice", "Different"] {
+        let c = context().await;
+        let polygon = [[1.0, 1.0], [20.0, 1.0], [20.0, 20.0], [1.0, 20.0]];
+        let mut suggestion = advice(
+            &c,
+            "missing_text",
+            SuggestionTarget::Region { page: 1, polygon },
+        );
+        suggestion.suggested_text = Some(suggested.into());
+        let id = c.store.insert_source_suggestion(suggestion).await.unwrap();
+        let event = c
+            .store
+            .add_owner_unit(
+                1,
+                OwnerUnit {
+                    revision: 1,
+                    polygon,
+                    text: "Advice".into(),
+                    actor: "owner".into(),
+                    rationale: "Image".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let app = SuggestionApplication {
+            owner_unit_id: Some(3),
+            edited: suggested == "Advice",
+            ..application(id, event)
+        };
+        assert!(
+            c.store
+                .record_source_suggestion_application(app)
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn competing_open_missing_text_cannot_share_owner_or_event() {
+    let c = context().await;
+    let polygon = [[1.0, 1.0], [20.0, 1.0], [20.0, 20.0], [1.0, 20.0]];
+    let a = c
+        .store
+        .insert_source_suggestion(advice(
+            &c,
+            "missing_text",
+            SuggestionTarget::Region { page: 1, polygon },
+        ))
+        .await
+        .unwrap();
+    let b = c
+        .store
+        .insert_source_suggestion(advice(
+            &c,
+            "missing_text",
+            SuggestionTarget::Region { page: 1, polygon },
+        ))
+        .await
+        .unwrap();
+    let event = c
+        .store
+        .add_owner_unit(
+            1,
+            OwnerUnit {
+                revision: 1,
+                polygon,
+                text: "Advice".into(),
+                actor: "owner".into(),
+                rationale: "Image".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let app = SuggestionApplication {
+        owner_unit_id: Some(3),
+        ..application(a, event)
+    };
+    c.store
+        .record_source_suggestion_application(app.clone())
+        .await
+        .unwrap();
+    assert!(
+        c.store
+            .record_source_suggestion_application(SuggestionApplication {
+                suggestion_id: b,
+                ..app.clone()
+            })
+            .await
+            .is_err()
+    );
+    let event = duplicate_latest_event(&c);
+    assert!(
+        c.store
+            .record_source_suggestion_application(SuggestionApplication {
+                suggestion_id: b,
+                event_id: event,
+                ..app
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(count(&c.db, "source_suggestion_applications"), 1);
+}
+
+#[tokio::test]
+async fn rejection_application_cannot_be_edited() {
+    let c = context().await;
+    let id = c
+        .store
+        .insert_source_suggestion(advice(&c, "reject", unit_target()))
+        .await
+        .unwrap();
+    c.store
+        .review_source_unit(
+            1,
+            1,
+            UnitReview {
+                revision: 1,
+                state: "rejected".into(),
+                correction: String::new(),
+                actor: "owner".into(),
+                rationale: "Image".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let event =
+        c.db.query_row("SELECT max(id) FROM source_review_events", [], |r| r.get(0))
+            .unwrap();
+    let app = SuggestionApplication {
+        edited: true,
+        ..application(id, event)
+    };
+    assert!(
+        c.store
+            .record_source_suggestion_application(app)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn worst_case_five_thousand_regions_and_merges_on_large_prepared_page() {
+    for action in ["missing_text", "merge"] {
+        let c = context_with_units(false, None, 300).await;
+        let prepared_bytes: i64 =
+            c.db.query_row("SELECT length(prepared_json) FROM sources", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(prepared_bytes > 300_000);
+        let mut i = issue(Value::Null, json!("Advice"));
+        i["action"] = json!(action);
+        if action == "merge" {
+            i["merge_block_ids"] = json!(["/page/0/Text/1", "/page/0/Text/2"]);
+        } else {
+            i["region"] = json!([[1, 1], [20, 1], [20, 20], [1, 20]]);
+        }
+        let value = report(&c, 2, vec![i; 5000]);
+        let start = std::time::Instant::now();
+        let summary = import(&c, &value).await.unwrap();
+        eprintln!(
+            "5,000 {action} issues; 300 units; prepared_json {prepared_bytes} bytes: {:?}",
+            start.elapsed()
+        );
+        assert_eq!(summary.counts[action], 5000);
+        assert_eq!(count(&c.db, "source_suggestions"), 5000);
+    }
+}
+
+#[tokio::test]
+async fn cached_region_bounds_cannot_diverge_from_unfinalized_source_or_page() {
+    let c = context().await;
+    c.db.execute_batch("DROP TRIGGER source_finalize_delete; DELETE FROM source_finalizations;")
+        .unwrap();
+    assert!(
+        c.db.execute("UPDATE sources SET prepared_json=x'7b7d' WHERE id=1", [])
+            .is_err()
+    );
+    assert!(
+        c.db.execute("UPDATE source_pages SET pdf_page=99 WHERE id=1", [])
+            .is_err()
+    );
+    assert!(
+        c.db.execute(
+            "UPDATE source_suggestion_page_bounds SET width=4000 WHERE page_id=1",
+            []
+        )
+        .is_err()
+    );
+    assert!(
+        c.db.execute(
+            "INSERT OR REPLACE INTO source_suggestion_page_bounds VALUES(1,4000,4000)",
+            []
+        )
+        .is_err()
+    );
+    assert!(
+        c.db.execute(
+            "DELETE FROM source_suggestion_page_bounds WHERE page_id=1",
+            []
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn oversized_source_extraction_is_not_reported_as_missing_source() {
+    let c = context().await;
+    c.db.execute_batch("DROP TRIGGER sources_finalized_update; UPDATE sources SET raw_json=zeroblob(33554433) WHERE id=1;").unwrap();
+    assert!(matches!(
+        import(&c, &report(&c, 1, vec![])).await,
+        Err(AppError::Invalid(
+            "Source extraction exceeds its byte limit."
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn report_target_database_errors_are_not_invalid_issues() {
+    let c = context().await;
+    c.db.execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE source_units;")
+        .unwrap();
+    let error = import(
+        &c,
+        &report(&c, 1, vec![issue(json!("/page/0/Text/1"), json!("Advice"))]),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AppError::Database(_)), "{error:?}");
 }

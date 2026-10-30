@@ -54,7 +54,7 @@ pub(super) fn routes() -> Router<AuthState> {
 }
 pub(super) fn error(e: &AppError) -> StatusCode {
     match e {
-        AppError::NotFound => StatusCode::FORBIDDEN,
+        AppError::NotFound | AppError::SourceNotFound => StatusCode::FORBIDDEN,
         AppError::Conflict => StatusCode::CONFLICT,
         AppError::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
         AppError::AuthStorageBusy => StatusCode::SERVICE_UNAVAILABLE,

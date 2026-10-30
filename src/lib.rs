@@ -126,6 +126,10 @@ pub enum AppError {
         index: usize,
         reason: &'static str,
     },
+    #[error("Suggestion report schema/parse error at line {line}, column {column}.")]
+    SuggestionReportParse { line: usize, column: usize },
+    #[error("Source not found.")]
+    SourceNotFound,
     #[error("Character not found.")]
     NotFound,
     #[error("This character was changed in another tab. Copy your edits, reload, and try again.")]

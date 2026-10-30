@@ -112,7 +112,8 @@ impl Report {
     fn binding(&self, bundle: &str, raw: &[u8]) -> Result<&'static str, AppError> {
         if self.bundle_sha256.as_deref() == Some(bundle) {
             Ok("bundle")
-        } else if self.schema_version == 1
+        } else if self.bundle_sha256.is_none()
+            && self.schema_version == 1
             && self
                 .artifact_sha256
                 .as_ref()
@@ -121,7 +122,9 @@ impl Report {
         {
             Ok("extraction")
         } else {
-            Err(invalid())
+            Err(AppError::Invalid(
+                "Suggestion report binding is missing or does not match source.",
+            ))
         }
     }
 
@@ -146,8 +149,10 @@ impl Report {
         };
         if !matches!(self.schema_version, 1 | 2)
             || origin.len() > 100
-            || origin.contains('\0')
+            || origin.chars().any(char::is_control)
             || self.created_at.is_empty()
+            || self.created_at.len() > 64
+            || self.created_at.chars().any(char::is_control)
             || !valid_hash(&self.source_sha256)
             || self.bundle_sha256.as_ref().is_some_and(|h| !valid_hash(h))
             || self.artifact_sha256.as_ref().is_some_and(|hashes| {
@@ -164,7 +169,7 @@ impl Report {
 
 // The raw tree was bounded and validated by source import. Keep its page ownership when
 // resolving citations; a matching id elsewhere in the document is insufficient.
-fn raw_ids(raw: &[u8], pdf_page: i64) -> Result<BTreeSet<String>, AppError> {
+fn raw_ids(raw: &[u8]) -> Result<BTreeMap<i64, BTreeSet<String>>, AppError> {
     fn visit(node: &serde_json::Value, ids: &mut BTreeSet<String>) {
         if let Some(id) = node["id"].as_str() {
             ids.insert(id.into());
@@ -176,17 +181,17 @@ fn raw_ids(raw: &[u8], pdf_page: i64) -> Result<BTreeSet<String>, AppError> {
         }
     }
     let document: serde_json::Value = serde_json::from_slice(raw)?;
-    let mut ids = BTreeSet::new();
-    let prefix = format!("/page/{}/Page/", pdf_page - 1);
+    let mut pages = BTreeMap::new();
     for page in document["children"].as_array().ok_or_else(invalid)? {
-        if page["id"]
+        let index = page["id"]
             .as_str()
-            .is_some_and(|id| id.starts_with(&prefix))
-        {
-            visit(page, &mut ids);
-        }
+            .and_then(|id| id.strip_prefix("/page/"))
+            .and_then(|id| id.split_once("/Page/"))
+            .and_then(|(index, _)| index.parse::<i64>().ok())
+            .ok_or_else(invalid)?;
+        visit(page, pages.entry(index + 1).or_default());
     }
-    Ok(ids)
+    Ok(pages)
 }
 
 fn unit(db: &Connection, page: i64, block: &str) -> Result<Option<SuggestionUnit>, AppError> {
@@ -232,7 +237,9 @@ fn target(
         if issue.action.is_some() || issue.merge_block_ids.is_some() || issue.region.is_some() {
             return Err(invalid());
         }
-        let action = if matches!(simple, SuggestionTarget::Unit { .. }) && text.is_some() {
+        let action = if matches!(simple, SuggestionTarget::Unit { .. })
+            && text.as_ref().is_some_and(|text| !text.trim().is_empty())
+        {
             "correction"
         } else {
             "note"
@@ -287,6 +294,44 @@ fn target(
     Ok((action.into(), target, text))
 }
 
+fn report_page<'a>(
+    db: &Connection,
+    source: i64,
+    state: &str,
+    page: &'a ReportPage,
+    pages: &mut BTreeSet<i64>,
+) -> Result<Option<(i64, &'a Findings)>, AppError> {
+    if !pages.insert(page.pdf_page) {
+        return Err(AppError::Invalid(
+            "Suggestion report contains a duplicate page.",
+        ));
+    }
+    let page_id = db
+        .query_row(
+            "SELECT id FROM source_pages WHERE source_id=?1 AND pdf_page=?2",
+            params![source, page.pdf_page],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or(AppError::Invalid(
+            "Suggestion report page is outside source.",
+        ))?;
+    if page.render_sha256.as_ref().is_some_and(|h| !valid_hash(h)) {
+        return Err(invalid());
+    }
+    // Provider metadata is retained by the report file, never treated as authority.
+    if page.state == "failed" {
+        if page.error.is_none() || page.findings.is_some() {
+            return Err(invalid());
+        }
+        return Ok(None);
+    }
+    if page.state != state || page.error.is_some() {
+        return Err(invalid());
+    }
+    Ok(Some((page_id, page.findings.as_ref().ok_or_else(invalid)?)))
+}
+
 fn import(
     db: &mut Connection,
     source: i64,
@@ -295,11 +340,17 @@ fn import(
 ) -> Result<SuggestionReportSummary, AppError> {
     let origin = report.origin()?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (pdf,bundle,raw): (String,String,Vec<u8>)=tx.query_row("SELECT pdf_hash,bundle_hash,raw_json FROM sources WHERE id=?1 AND length(raw_json)<=33554432",[source],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or(AppError::NotFound)?;
+    let (pdf,bundle,raw): (String,String,Option<Vec<u8>>)=tx.query_row("SELECT pdf_hash,bundle_hash,CASE WHEN length(raw_json)<=33554432 THEN raw_json END FROM sources WHERE id=?1",[source],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or(AppError::SourceNotFound)?;
+    let raw = raw.ok_or(AppError::Invalid(
+        "Source extraction exceeds its byte limit.",
+    ))?;
     if pdf != report.source_sha256 {
-        return Err(invalid());
+        return Err(AppError::Invalid(
+            "Suggestion report PDF hash does not match source.",
+        ));
     }
     let binding = report.binding(&bundle, &raw)?;
+    let page_ids = raw_ids(&raw)?;
     let mut summary = SuggestionReportSummary {
         binding: binding.into(),
         ..Default::default()
@@ -318,46 +369,38 @@ fn import(
     let mut pages = BTreeSet::new();
     let mut issue_count = 0;
     for page in &report.pages {
-        if !pages.insert(page.pdf_page) {
-            return Err(invalid());
-        }
-        let page_id: i64 = tx
-            .query_row(
-                "SELECT id FROM source_pages WHERE source_id=?1 AND pdf_page=?2",
-                params![source, page.pdf_page],
-                |r| r.get(0),
-            )
-            .optional()?
-            .ok_or_else(invalid)?;
-        if page.render_sha256.as_ref().is_some_and(|h| !valid_hash(h)) {
-            return Err(invalid());
-        }
-        // Provider metadata is retained by the report file, never treated as authority.
-        if page.state == "failed" {
-            if page.error.is_none() || page.findings.is_some() {
-                return Err(invalid());
-            }
+        let Some((page_id, findings)) = report_page(&tx, source, &report.state, page, &mut pages)?
+        else {
             summary.failed_pages += 1;
             continue;
-        }
-        if page.state != report.state || page.error.is_some() {
-            return Err(invalid());
-        }
-        let findings = page.findings.as_ref().ok_or_else(invalid)?;
+        };
         issue_count += findings.issues.len();
         if issue_count > 5000 {
             return Err(AppError::Invalid("Suggestion report exceeds 5,000 issues."));
         }
-        let ids = raw_ids(&raw, page.pdf_page)?;
+        let ids = page_ids.get(&page.pdf_page).ok_or_else(invalid)?;
+        let bounds = if findings
+            .issues
+            .iter()
+            .any(|issue| issue.action.as_deref() == Some("missing_text"))
+        {
+            Some(super::documents::polygon_bounds(&tx, page_id)?)
+        } else {
+            None
+        };
         for (index, issue) in findings.issues.iter().enumerate() {
             let issue_error = || AppError::SuggestionReportIssue {
                 page: page.pdf_page,
-                index,
+                index: index + 1,
                 reason: "invalid action, target, text or rationale",
             };
             let (kind, target, suggested_text) =
-                target(&tx, page_id, &ids, issue, report.schema_version)
-                    .map_err(|_| issue_error())?;
+                target(&tx, page_id, ids, issue, report.schema_version).map_err(
+                    |error| match error {
+                        AppError::Invalid(_) => issue_error(),
+                        other => other,
+                    },
+                )?;
             let suggestion = SourceSuggestion {
                 source,
                 bundle_hash: bundle.clone(),
@@ -368,7 +411,12 @@ fn import(
                 rationale: issue.description.clone(),
                 report_id: None,
             };
-            super::suggestions::validate(&tx, &suggestion).map_err(|_| issue_error())?;
+            super::suggestions::validate_with_bounds(&tx, &suggestion, bounds).map_err(
+                |error| match error {
+                    AppError::Invalid(_) => issue_error(),
+                    other => other,
+                },
+            )?;
             *summary.counts.get_mut(&kind).ok_or_else(issue_error)? += 1;
             suggestions.push(suggestion);
         }
@@ -382,7 +430,7 @@ fn import(
     summary.report_id = tx.last_insert_rowid();
     for mut suggestion in suggestions {
         suggestion.report_id = Some(summary.report_id);
-        super::suggestions::insert(&tx, &suggestion)?;
+        super::suggestions::insert_validated(&tx, &suggestion)?;
     }
     tx.commit()?;
     Ok(summary)
@@ -401,7 +449,12 @@ impl Store {
         let path = path.to_owned();
         let (report, digest) = tokio::task::spawn_blocking(move || {
             let bytes = crate::local_file::read_path(&path, 4 * 1024 * 1024)?;
-            let report: Report = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+            let report: Report = serde_json::from_slice(&bytes).map_err(|error| {
+                AppError::SuggestionReportParse {
+                    line: error.line(),
+                    column: error.column(),
+                }
+            })?;
             Ok::<_, AppError>((report, hash(&bytes)))
         })
         .await

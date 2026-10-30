@@ -1,10 +1,13 @@
+import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import review_extraction
 from review_extraction import resolve_api_key, v2_findings, validate_findings
 from source_bundle import digest, page_blocks, parse_pages, review_units, verify_bundle, write_json
 
@@ -241,6 +244,136 @@ class SourceReviewTests(unittest.TestCase):
             self.assertEqual(resolve_api_key(path), "dummy-specific-key")
             path.write_text('OPENAI_API_KEY="$(do-not-execute)"\n', encoding="utf-8")
             self.assertEqual(resolve_api_key(path), "$(do-not-execute)")
+
+    def test_empty_unit_correction_maps_to_note(self):
+        for text in ("", " \t\n", "\u2003"):
+            findings = {
+                "summary": "Fixture",
+                "needs_visual_review": True,
+                "issues": [
+                    {
+                        "block_id": "/page/29/Table/1",
+                        "kind": "text",
+                        "description": "Read image",
+                        "suggested_correction": text,
+                    }
+                ],
+            }
+            with self.subTest(text=text):
+                self.assertEqual(v2_findings(findings, self.page)["issues"][0]["action"], "note")
+
+    def test_v2_findings_refuse_schema_and_importer_bounds(self):
+        for field, value in (
+            ("description", ""),
+            ("description", "x" * 5001),
+            ("description", " \t"),
+            ("description", "x\0y"),
+            ("suggested_correction", "x" * 20001),
+            ("suggested_correction", "x\0y"),
+            ("block_id", "é" * 257),
+        ):
+            page = json.loads(json.dumps(self.page))
+            issue = {
+                "block_id": "/page/29/Table/1",
+                "kind": "text",
+                "description": "Read image",
+                "suggested_correction": "Advice",
+            }
+            issue[field] = value
+            if field == "block_id":
+                page["children"][0]["id"] = value
+            findings = {"summary": "Fixture", "needs_visual_review": True, "issues": [issue]}
+            with (
+                self.subTest(field=field, length=len(value)),
+                self.assertRaisesRegex(ValueError, field),
+            ):
+                v2_findings(findings, page)
+
+    def test_model_page_refuses_oversized_report_with_actionable_error(self):
+        findings = {"summary": "x" * (4 * 1024 * 1024), "issues": [], "needs_visual_review": True}
+        page = self.failed_model_page(findings)
+        self.assertIn("4 MiB", page["error"])
+
+    def test_invalid_model_metadata_fails_page_without_invalid_metadata(self):
+        findings = {"summary": "Fixture", "issues": [], "needs_visual_review": True}
+        for field, value, expected in (("model", True, "returned_model"), ("usage", [], "usage")):
+            with self.subTest(field=field):
+                page = self.failed_model_page(findings, **{field: value})
+                self.assertNotIn(expected, page)
+                self.assertIn(expected, page["error"])
+
+    def test_report_writer_refuses_overflow_including_failed_page_records(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "report.json"
+            report = {
+                "pages": [{"pdf_page": 1, "state": "failed", "error": "x" * (4 * 1024 * 1024)}]
+            }
+            with self.assertRaisesRegex(ValueError, "4 MiB"):
+                review_extraction.write_report(path, report)
+            self.assertFalse(path.exists())
+
+    def test_invalid_model_findings_fail_page_with_actionable_error(self):
+        for field, value in (
+            ("description", ""),
+            ("description", "x" * 5001),
+            ("suggested_correction", "x" * 20001),
+            ("block_id", "é" * 257),
+        ):
+            issue = {
+                "block_id": "/page/29/Table/1",
+                "kind": "text",
+                "description": "Read image",
+                "suggested_correction": "Advice",
+            }
+            issue[field] = value
+            findings = {"summary": "Fixture", "needs_visual_review": True, "issues": [issue]}
+            with self.subTest(field=field, length=len(value)):
+                self.assertIn(field, self.failed_model_page(findings)["error"])
+
+    def failed_model_page(self, findings, **metadata):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pdf = root / "fixture.pdf"
+            pdf.write_bytes(b"synthetic pdf")
+            write_json(root / "source.json", {"children": [self.page]})
+            write_json(
+                root / "bundle.json",
+                {"source_sha256": digest(pdf), "extraction_sha256": digest(root / "source.json")},
+            )
+            response = {"choices": [{"message": {"content": json.dumps(findings)}}], **metadata}
+            opener = MagicMock()
+            opener.open.return_value.__enter__.return_value = io.StringIO(json.dumps(response))
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "review",
+                        str(root),
+                        "--pdf",
+                        str(pdf),
+                        "--pages",
+                        "30",
+                        "--api-url",
+                        "https://example.invalid/v1",
+                        "--model",
+                        "fixture",
+                    ],
+                ),
+                patch.object(review_extraction, "resolve_api_key", return_value="dummy"),
+                patch.object(
+                    review_extraction.subprocess,
+                    "run",
+                    side_effect=lambda args, **kwargs: Path(args[6]).write_bytes(b"image"),
+                ),
+                patch.object(review_extraction.urllib.request, "build_opener", return_value=opener),
+            ):
+                with self.assertRaisesRegex(ValueError, "failed"):
+                    review_extraction.main()
+            report = json.loads(next(root.glob("api-review-*/report.json")).read_text())
+            self.assertEqual(report["pages"][0]["state"], "failed")
+            self.assertNotIn("findings", report["pages"][0])
+            return report["pages"][0]
 
 
 if __name__ == "__main__":

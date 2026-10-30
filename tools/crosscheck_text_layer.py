@@ -31,7 +31,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from source_bundle import digest, write_json
+from review_extraction import validate_report_append, validate_report_findings, write_report
+from source_bundle import digest
 
 SIMILAR = 0.6
 SHADOW_POINTS = 3
@@ -209,25 +210,32 @@ def main():
         "pages": [],
     }
     for page, text_layer in zip(pages, layer, strict=True):
-        issues = issues_for(page["units"], page_words(text_layer))
-        report["pages"].append(
-            {
-                "pdf_page": page["pdf_page"],
-                "state": "tool_suggestions_not_verified",
-                "findings": {
+        record = {"pdf_page": page["pdf_page"], "state": "failed"}
+        try:
+            issues = issues_for(page["units"], page_words(text_layer))
+            findings = validate_report_findings(
+                {
                     "summary": f"{len(issues)} text-layer suggestion(s) for {len(page['units'])} block(s).",
                     "issues": issues,
                     "needs_visual_review": True,
-                },
-            }
-        )
+                }
+            )
+            record.update(state="tool_suggestions_not_verified", findings=findings)
+            validate_report_append(report, record)
+        except ValueError as error:
+            record["state"] = "failed"
+            record.pop("findings", None)
+            record["error"] = str(error)
+        report["pages"].append(record)
     output = args.bundle / f"text-layer-check-{uuid.uuid4().hex}"
     output.mkdir(exist_ok=False)
-    write_json(output / "report.json", report)
-    total = sum(len(page["findings"]["issues"]) for page in report["pages"])
+    write_report(output / "report.json", report)
+    total = sum(len(page.get("findings", {}).get("issues", [])) for page in report["pages"])
     print(
         f"Text-layer report: {output / 'report.json'} ({total} suggestions). Nothing was applied."
     )
+    if any(page["state"] == "failed" for page in report["pages"]):
+        raise ValueError("One or more pages failed cross-check; see the local report.")
 
 
 if __name__ == "__main__":

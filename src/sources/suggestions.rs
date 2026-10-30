@@ -43,6 +43,14 @@ pub struct SourceSuggestion {
 }
 
 pub(super) fn validate(db: &Connection, suggestion: &SourceSuggestion) -> Result<(), AppError> {
+    validate_with_bounds(db, suggestion, None)
+}
+
+pub(super) fn validate_with_bounds(
+    db: &Connection,
+    suggestion: &SourceSuggestion,
+    bounds: Option<(f64, f64)>,
+) -> Result<(), AppError> {
     super::review_identity(&suggestion.origin, &suggestion.rationale)?;
     let text_present = suggestion
         .suggested_text
@@ -134,7 +142,11 @@ pub(super) fn validate(db: &Connection, suggestion: &SourceSuggestion) -> Result
                     "Suggestion region belongs to another source.",
                 ));
             }
-            super::documents::validate_polygon(db, *page, polygon)?;
+            if let Some((width, height)) = bounds {
+                super::documents::validate_polygon_bounds(width, height, polygon)?;
+            } else {
+                super::documents::validate_polygon(db, *page, polygon)?;
+            }
         }
     }
     Ok(())
@@ -203,6 +215,7 @@ impl Store {
                 "Dismissal reason exceeds 5,000 characters or contains NUL.",
             ));
         }
+        let reason = reason.filter(|text| !text.trim().is_empty());
         self.run(move |db| {
             let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             check_open(&tx,suggestion)?;
@@ -257,7 +270,7 @@ pub(super) fn record_application(
 }
 
 fn check_open(db: &Connection, suggestion: i64) -> Result<(), AppError> {
-    let closed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM source_suggestion_dismissals WHERE suggestion_id=s.id) OR EXISTS(SELECT 1 FROM source_suggestion_applications WHERE suggestion_id=s.id) FROM source_suggestions s WHERE s.id=?1",[suggestion],|r|r.get(0)).optional()?.ok_or(AppError::NotFound)?;
+    let closed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM source_suggestion_dismissals WHERE suggestion_id=s.id) OR EXISTS(SELECT 1 FROM source_suggestion_applications WHERE suggestion_id=s.id) FROM source_suggestions s WHERE s.id=?1",[suggestion],|r|r.get(0)).optional()?.ok_or(AppError::SourceNotFound)?;
     if closed {
         return Err(AppError::Conflict);
     }
@@ -266,6 +279,14 @@ fn check_open(db: &Connection, suggestion: i64) -> Result<(), AppError> {
 
 pub(super) fn insert(db: &Connection, suggestion: &SourceSuggestion) -> Result<i64, AppError> {
     validate(db, suggestion)?;
+    insert_validated(db, suggestion)
+}
+
+// Caller has validated the advice in this transaction; SQL still enforces the envelope.
+pub(super) fn insert_validated(
+    db: &Connection,
+    suggestion: &SourceSuggestion,
+) -> Result<i64, AppError> {
     let targets = serde_json::to_string(&suggestion.target)?;
     if targets.len() > 65536 {
         return Err(AppError::Invalid("Suggestion targets exceed 64 KiB."));

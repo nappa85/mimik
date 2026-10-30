@@ -423,7 +423,7 @@ impl AppError {
     pub(crate) fn status(&self) -> StatusCode {
         match self {
             Self::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::NotFound => StatusCode::NOT_FOUND,
+            Self::NotFound | Self::SourceNotFound => StatusCode::NOT_FOUND,
             Self::Conflict => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }

@@ -1,9 +1,13 @@
 import json
 import logging
+import sys
+import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import crosscheck_text_layer
 import extract_manual
 from crosscheck_text_layer import compare, inside, issues_for, page_words
 
@@ -21,6 +25,53 @@ def layer_page(*spans):
 
 
 class CrosscheckTests(unittest.TestCase):
+    def test_invalid_findings_fail_page_without_truncation(self):
+        from source_bundle import digest, write_json
+
+        for field, value in (
+            ("description", ""),
+            ("description", "x" * 5001),
+            ("suggested_correction", "x" * 20001),
+            ("block_id", "é" * 257),
+        ):
+            with (
+                self.subTest(field=field, length=len(value)),
+                tempfile.TemporaryDirectory() as temp,
+            ):
+                root = Path(temp)
+                pdf = root / "fixture.pdf"
+                pdf.write_bytes(b"synthetic pdf")
+                write_json(
+                    root / "bundle.json",
+                    {"source_sha256": digest(pdf), "pages": [{"pdf_page": 1, "units": []}]},
+                )
+                issue = {
+                    "action": "correction",
+                    "kind": "text",
+                    "block_id": "block",
+                    "description": "Read image",
+                    "suggested_correction": "Advice",
+                }
+                issue[field] = value
+                extraction = types.ModuleType("pdftext.extraction")
+                extraction.dictionary_output = lambda *args, **kwargs: [layer_page()]
+                with (
+                    patch.dict(
+                        sys.modules,
+                        {"pdftext": types.ModuleType("pdftext"), "pdftext.extraction": extraction},
+                    ),
+                    patch.object(sys, "argv", ["crosscheck", str(root), "--pdf", str(pdf)]),
+                    patch.object(crosscheck_text_layer, "issues_for", return_value=[issue]),
+                ):
+                    with self.assertRaisesRegex(ValueError, "failed"):
+                        crosscheck_text_layer.main()
+                reports = list(root.glob("text-layer-check-*/report.json"))
+                self.assertEqual(len(reports), 1)
+                page = json.loads(reports[0].read_text())["pages"][0]
+                self.assertEqual(page["state"], "failed")
+                self.assertNotIn("findings", page)
+                self.assertIn(field, page["error"])
+
     def test_shadow_duplicates_are_dropped_and_distant_repeats_kept(self):
         page = layer_page(
             char_span("Spada Corta", 10, 10),

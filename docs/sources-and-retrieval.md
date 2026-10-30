@@ -85,15 +85,22 @@ target shape and text, with at most 64 KiB of target JSON. Units/pages must belo
 a positive revision no newer than its current revision. Older revisions remain identifiable
 as stale. A page note can retain a raw-node `block_id` citation (≤512 UTF-8 bytes, no NUL).
 Region geometry has the same bounds as owner units, checked in SQL and Rust (page dimensions
-that are not numbers are `Invalid`). Advice and its nullable same-source `report_id` are immutable.
+that are not numbers are `Invalid`). SQL uses immutable per-page dimensions derived from the
+prepared source at migration/import, rather than parsing the entire bundle per suggestion.
+Prepared JSON and page identity cannot change once those bounds exist. Advice and its nullable
+same-source `report_id` are immutable.
 
 `dismiss_source_suggestion` uses an IMMEDIATE transaction to append actor, time and an optional
-reason (≤5,000 characters) to `source_suggestion_dismissals`. Repeat dismissal conflicts.
+reason (≤5,000 characters; blank/whitespace-only stored as NULL) to `source_suggestion_dismissals`. Repeat dismissal conflicts.
 `source_suggestion_web_events` is the authenticated sidecar, tied to the latest dismissal.
 `record_source_suggestion_application` records the latest matching review event, operation id
 for a merge, owner unit when created, and whether the text was edited. Its SQL guards check
 the decision kind, target unit/revision, page, and merge operation's rejections and initial owner
-correction on that same page. Applications and dismissals are insert-only and mutually exclusive. A unit revision
+correction on that same page. A merge owner polygon must be exactly the axis-aligned bounding
+rectangle of the targets, and its raw text must equal its first correction in the operation.
+One decision event applies at most one suggestion; an owner unit can be named by at most one
+application. `edited` equals whether the applied correction differs from the suggested text
+(always false for a rejection). Applications and dismissals are insert-only and mutually exclusive. A unit revision
 change alone never records an application. Neither suggestion insertion nor dismissal changes
 units, their history, the search index or page completeness. Browser suggestion controls are a
 separate review-screen step.
@@ -106,12 +113,15 @@ formats are `schemas/suggestion-report.v1.json` and `.v2.json`. Unknown fields, 
 empty rationales and out-of-source pages refuse the whole report. Failed pages carry an error,
 import no issues and are counted. Report and page states distinguish unverified model/tool advice
 from failed review. Origin is the report's claim, `tool:<name>` or `reviewer:<requested_model>`,
-at most 100 UTF-8 bytes; it is not authenticated provider identity.
+at most 100 UTF-8 bytes, without control characters; it is not authenticated provider identity.
+The report timestamp is nonempty, at most 64 UTF-8 bytes, without control characters.
 
 The PDF hash must equal the source's hash. v2 requires the exact stored `bundle_sha256`; v1
-also permits `artifact_sha256["source.json"]` equal to the hash of the stored raw extraction.
-When both match, bundle binding takes precedence. v1 actions come only from shape: an extracted
-unit with correction text becomes a correction, without it a unit note; a raw container/page
+also permits `artifact_sha256["source.json"]` equal to the hash of the stored raw extraction
+only when no bundle binding is declared. A contradictory declared bundle hash is refused.
+v1 actions come only from shape: an extracted
+unit with nonblank correction text becomes a correction; absent, empty or whitespace-only
+text makes it a unit note. A raw container/page
 citation or null block id becomes a page note retaining any quoted text. An unknown block id
 refuses import. Free-text `kind` never selects reject or merge. v2 requires `action` per issue;
 only merges carry `merge_block_ids` (2–1,024 distinct extracted units on one page, nonzero
@@ -122,6 +132,18 @@ One IMMEDIATE transaction writes immutable `source_suggestion_reports` metadata 
 source, origin, version, binding, report timestamp as given, import time, action and failed-page
 counts) and its suggestions. Re-importing identical report bytes for the same source is a no-op.
 The CLI prints a JSON summary with report id, counts by action, failed pages, binding and `repeat`.
+Refusals distinguish PDF-hash mismatch, missing/mismatching binding, out-of-source page,
+duplicate page and schema/parse errors (line and column, without report content). Issue errors
+use one-based numbers. Storage failures retain their storage error classification. Unknown
+source ids report `Source not found.` and print no summary; character routes retain their own message.
+
+Both Python report producers validate the closed emitted v2 findings subset and importer
+bounds before accepting each page: description 1–5,000 characters and nonblank, correction
+at most 20,000 characters, block id at most 512 UTF-8 bytes, no NUL, at most 5,000 issues per
+report and a 4 MiB serialized report. They use the v2 JSON Schema when `jsonschema` is
+available and explicit equivalent checks for their emitted correction/note subset otherwise.
+Invalid pages are marked failed with an actionable error; text is never silently truncated.
+Empty or whitespace-only model text proposals map to notes.
 
 ## Page images and region previews
 

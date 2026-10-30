@@ -162,7 +162,7 @@ impl Store {
         cursor(after)?;
         self.run_bounded_auth(move |db|{
             let tx=db.transaction()?;auth.recheck_owner(&tx)?;
-            if !tx.query_row("SELECT EXISTS(SELECT 1 FROM sources WHERE id=?1)",[source],|r|r.get::<_,bool>(0))?{return Err(AppError::NotFound);}
+            if !tx.query_row("SELECT EXISTS(SELECT 1 FROM sources WHERE id=?1)",[source],|r|r.get::<_,bool>(0))?{return Err(AppError::SourceNotFound);}
             let rows={let mut q=tx.prepare(&format!("SELECT id,pdf_page,complete,{} FROM source_pages WHERE source_id=?1 AND id>?2 ORDER BY id LIMIT 51",text("printed_label",200)))?;q.query_map(params![source,after],|r|Ok(PageSummary{id:r.get(0)?,pdf_page:r.get(1)?,complete:r.get(2)?,printed_label:read_text(r,3)?}))?.collect::<Result<Vec<_>,_>>()?};
             auth.recheck_owner(&tx)?;tx.commit()?;Ok(Listing::new(rows,|r|r.id))
         }).await
@@ -178,7 +178,7 @@ impl Store {
         cursor(history)?;
         self.run_bounded_auth(move|db|{
             let tx=db.transaction()?;auth.recheck_owner(&tx)?;
-            let mut page=tx.query_row(&format!("SELECT p.id,s.id,{},{},p.pdf_page,{},p.complete,p.revision FROM source_pages p JOIN sources s ON s.id=p.source_id WHERE p.id=?1",text("s.title",200),text("s.edition",400),text("p.printed_label",200)),[id],|r|Ok(PageView{id:r.get(0)?,source_id:r.get(1)?,title:read_text(r,2)?,edition:read_text(r,3)?,pdf_page:r.get(4)?,printed_label:read_text(r,5)?,complete:r.get(6)?,revision:r.get(7)?,units:Vec::new(),events:Vec::new()})).optional()?.ok_or(AppError::NotFound)?;
+            let mut page=tx.query_row(&format!("SELECT p.id,s.id,{},{},p.pdf_page,{},p.complete,p.revision FROM source_pages p JOIN sources s ON s.id=p.source_id WHERE p.id=?1",text("s.title",200),text("s.edition",400),text("p.printed_label",200)),[id],|r|Ok(PageView{id:r.get(0)?,source_id:r.get(1)?,title:read_text(r,2)?,edition:read_text(r,3)?,pdf_page:r.get(4)?,printed_label:read_text(r,5)?,complete:r.get(6)?,revision:r.get(7)?,units:Vec::new(),events:Vec::new()})).optional()?.ok_or(AppError::SourceNotFound)?;
             let rows={let mut q=tx.prepare(&format!("SELECT id,{},{},{},{},{},{},revision FROM source_units WHERE page_id=?1 AND id>?2 ORDER BY id LIMIT 51",text("block_id",512),text("kind",100),text("polygon",1024),text("raw_html",65536),text("state",32),text("correction",80000)))?;
                 q.query_map(params![id,units],|r|{let raw=read_text(r,4)?;let clean=sanitized(&raw).map_err(|e|rusqlite::Error::FromSqlConversionFailure(4,rusqlite::types::Type::Text,Box::new(e)))?;Ok(UnitView{id:r.get(0)?,block_id:read_text(r,1)?,kind:read_text(r,2)?,polygon:read_text(r,3)?,sanitized_html:clean,state:read_text(r,5)?,correction:read_text(r,6)?,revision:r.get(7)?})})?.collect::<Result<Vec<_>,_>>()?};
             let events={let mut q=tx.prepare(&format!("SELECT id,unit_id,{},{},{},{},{},previous_revision,operation_id FROM source_review_events WHERE page_id=?1 AND id>?2 ORDER BY id LIMIT 51",text("created_at",64),text("actor",400),text("state",32),text("rationale",20000),text("correction",80000)))?;
@@ -196,7 +196,7 @@ impl Store {
     ) -> Result<Vec<u8>, AppError> {
         self.run_bounded_auth(move|db|{
             let tx=db.transaction()?;auth.recheck_owner(&tx)?;
-            let bytes=tx.query_row("SELECT CASE WHEN typeof(png)='blob' AND length(png)<=16777216 THEN png END FROM source_pages WHERE id=?1",[id],|r|r.get::<_,Option<Vec<u8>>>(0)).optional()?.ok_or(AppError::NotFound)?.ok_or(AppError::Invalid("Original page image exceeds the supported byte limit."))?;
+            let bytes=tx.query_row("SELECT CASE WHEN typeof(png)='blob' AND length(png)<=16777216 THEN png END FROM source_pages WHERE id=?1",[id],|r|r.get::<_,Option<Vec<u8>>>(0)).optional()?.ok_or(AppError::SourceNotFound)?.ok_or(AppError::Invalid("Original page image exceeds the supported byte limit."))?;
             auth.recheck_owner(&tx)?;tx.commit()?;Ok(bytes)
         }).await
     }

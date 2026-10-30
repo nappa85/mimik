@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -27,34 +28,20 @@ description: string, suggested_correction: string or null}), and
 needs_visual_review (boolean). Return no other keys."""
 
 
-def validate_findings(findings, page):
-    from jsonschema import Draft202012Validator
+@lru_cache(maxsize=1)
+def findings_validator():
+    try:
+        from jsonschema import Draft202012Validator
+    except ImportError:
+        return None
+    schema = json.loads(
+        (Path(__file__).resolve().parents[1] / "schemas" / "suggestion-report.v2.json").read_text()
+    )
+    return Draft202012Validator({"$ref": "#/$defs/findings", "$defs": schema["$defs"]})
 
-    schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["summary", "issues", "needs_visual_review"],
-        "properties": {
-            "summary": {"type": "string"},
-            "needs_visual_review": {"type": "boolean"},
-            "issues": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["block_id", "kind", "description", "suggested_correction"],
-                    "properties": {
-                        "block_id": {"type": ["string", "null"]},
-                        "kind": {"type": "string"},
-                        "description": {"type": "string"},
-                        "suggested_correction": {"type": ["string", "null"]},
-                    },
-                },
-            },
-        },
-    }
-    if not Draft202012Validator(schema).is_valid(findings):
-        raise ValueError("Reviewer response does not match the expected closed schema.")
+
+def validate_findings(findings, page):
+    validate_report_findings(findings, actions=False)
     ids = set()
 
     def visit(block):
@@ -69,24 +56,113 @@ def validate_findings(findings, page):
     return findings
 
 
+def validate_report_findings(findings, *, actions=True):
+    """Closed emitted subset of suggestion-report.v2 plus Rust importer bounds.
+
+    Both producers emit only correction/note unit or page findings. Keep this
+    dependency-free for the pdftext runtime; other v2 actions are not generated here.
+    """
+    if (
+        not isinstance(findings, dict)
+        or set(findings) != {"summary", "issues", "needs_visual_review"}
+        or not isinstance(findings["summary"], str)
+        or not isinstance(findings["needs_visual_review"], bool)
+        or not isinstance(findings["issues"], list)
+    ):
+        raise ValueError("findings must match the closed report schema")
+    if len(findings["issues"]) > 5000:
+        raise ValueError("issues exceeds the 5,000 issue limit")
+    keys = {"block_id", "kind", "description", "suggested_correction"}
+    if actions:
+        keys = keys | {"action"}
+    for index, issue in enumerate(findings["issues"], 1):
+        if not isinstance(issue, dict) or set(issue) != keys:
+            raise ValueError(f"issue {index}: fields must match the closed report schema")
+        for field, limit, nullable in (
+            ("description", 5000, False),
+            ("suggested_correction", 20000, True),
+            ("block_id", 512, True),
+        ):
+            value = issue[field]
+            if nullable and value is None:
+                continue
+            if not isinstance(value, str):
+                raise ValueError(f"issue {index}: {field} must be text")
+            size = len(value.encode("utf-8")) if field == "block_id" else len(value)
+            if size > limit or "\0" in value or (field == "description" and not value.strip()):
+                raise ValueError(
+                    f"issue {index}: {field} must be nonblank where required, NUL-free and at most {limit} {'bytes' if field == 'block_id' else 'characters'}"
+                )
+        if not isinstance(issue["kind"], str):
+            raise ValueError(f"issue {index}: kind must be text")
+        if actions:
+            if issue["action"] not in ("correction", "note"):
+                raise ValueError(f"issue {index}: action is not emitted by this tool")
+            if issue["action"] == "correction" and (
+                issue["block_id"] is None or not (issue["suggested_correction"] or "").strip()
+            ):
+                raise ValueError(
+                    f"issue {index}: correction needs block_id and nonblank suggested_correction"
+                )
+    if actions and (validator := findings_validator()) is not None:
+        error = next(validator.iter_errors(findings), None)
+        if error is not None:
+            location = ".".join(str(part) for part in error.absolute_path)
+            raise ValueError(
+                f"findings.{location}: violates suggestion-report.v2 schema ({error.validator})"
+            )
+    return findings
+
+
 def v2_findings(findings, page):
     """Choose actions by validated target shape, never by a model's free-text kind."""
     validate_findings(findings, page)
     from prepare_review import units as prepared_units
 
     units = {unit["id"] for unit in prepared_units(page)}
-    return dict(
-        findings,
-        issues=[
-            dict(
-                issue,
-                action="correction"
-                if issue["block_id"] in units and issue["suggested_correction"] is not None
-                else "note",
-            )
-            for issue in findings["issues"]
-        ],
+    return validate_report_findings(
+        dict(
+            findings,
+            issues=[
+                dict(
+                    issue,
+                    action="correction"
+                    if issue["block_id"] in units and (issue["suggested_correction"] or "").strip()
+                    else "note",
+                )
+                for issue in findings["issues"]
+            ],
+        )
     )
+
+
+def validate_report_append(report, record):
+    """Apply whole-report importer limits before accepting a successful page."""
+    for field, expected in (("returned_model", str), ("usage", dict)):
+        if record.get(field) is not None and not isinstance(record[field], expected):
+            raise ValueError(f"{field} has the wrong type for suggestion-report.v2")
+    pages = report["pages"] + [record]
+    if sum(len(page.get("findings", {}).get("issues", [])) for page in pages) > 5000:
+        raise ValueError("issues exceeds the report's 5,000 issue limit")
+    candidate = dict(report, pages=pages)
+    if (
+        len((json.dumps(candidate, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+        > 4 * 1024 * 1024
+    ):
+        raise ValueError(
+            "Page would exceed the report's 4 MiB file limit; review fewer pages or shorter findings."
+        )
+
+
+def write_report(path, report):
+    # A failed-page record also consumes space: never overwrite the last valid
+    # report if even the failure metadata would exceed the importer's file cap.
+    if (
+        len((json.dumps(report, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+        > 4 * 1024 * 1024
+    ):
+        raise ValueError("Report exceeds the 4 MiB file limit; review fewer pages.")
+    write_json(path, report)
 
 
 def resolve_api_key(env_file):
@@ -157,7 +233,7 @@ def main():
         "created_at": datetime.now(timezone.utc).isoformat(),
         "pages": [],
     }
-    write_json(output / "report.json", report)
+    write_report(output / "report.json", report)
     print(
         f"Sending {len(pages)} selected page image(s) and their extracted blocks to {url.hostname}; provider charges/terms apply."
     )
@@ -231,12 +307,24 @@ def main():
                     "usage": result.get("usage"),
                 }
             )
+            validate_report_append(report, record)
         except urllib.error.HTTPError as error:
             record["error"] = f"Provider HTTP error {error.code}; response was not used."
+        except ValueError as error:
+            record["error"] = (
+                str(error)
+                if not isinstance(error, json.JSONDecodeError)
+                else "Reviewer response is not valid JSON."
+            )
         except Exception as error:
             record["error"] = f"{type(error).__name__}: review could not be completed."
+        if "error" in record:
+            record["state"] = "failed"
+            record.pop("findings", None)
+            record.pop("returned_model", None)
+            record.pop("usage", None)
         report["pages"].append(record)
-        write_json(output / "report.json", report)
+        write_report(output / "report.json", report)
     print(f"Review report: {output / 'report.json'}. No extraction review states were promoted.")
     if any(page["state"] == "failed" for page in report["pages"]):
         raise ValueError("One or more pages failed review; see the local report.")
