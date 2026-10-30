@@ -27,9 +27,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   no unit (L-SRC-1).
 
 - **Source import plan** (`docs/source-import-plan.md`, reviewed, SRC-11 to SRC-14): step 1
-  (schema) merged; step 2 (review screen, `docs/source-review-plan.md`, reviewed) in progress:
-  part 1 (migration 025, report import). `AppError::NotFound` displays "Character not found."
-  on source paths (CLI): give it a neutral message. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
+  (schema) merged; step 2 (review screen, `docs/source-review-plan.md`, reviewed): part 1
+  (migration 025, `mimik import-suggestions`) merged; part 2 (the screen) in progress, then part 3
+  (browser and live checks). Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
   (`~/temp/`, tagged, clean text layer) through the prototype tools.
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
