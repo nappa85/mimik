@@ -117,6 +117,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - Sources (SRC-10 review, Minor): no test runs `prepare_review.py`'s output for a childless
   `ListGroup` through `Store::import_source`; a shared fixture for both suites would catch the
   two rules drifting apart.
+- CSRF defence in depth (Opus, review screen confirmation, Minor): `src/registry_admin.rs`
+  (`owner_write`) and `src/accounts/mod.rs` recheck the CSRF admission without binding it to the
+  Owner's session and principal, as the material writes now do (`recheck_owner_write`). Not
+  exploitable today (both come from one request session).
 - Review helper: `external_review.py`'s short-output unavailable heuristic can reject a real
   successful verdict that discusses "unavailable" status. Add a regression and narrow the
   classification; direct sanitized Astra follow-up was needed to read the actual verdict.
