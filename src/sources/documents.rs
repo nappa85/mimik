@@ -5,6 +5,24 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 
 #[cfg(test)]
 pub(crate) fn rewind_schema(db: &Connection) -> Result<(), AppError> {
+    // Callers may already have selected an older migration fixture version.
+    let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let review: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='source_suggestion_reports')",
+        [],
+        |r| r.get(0),
+    )?;
+    if review {
+        db.execute_batch(include_str!("../../tests/support/source_review_rewind.sql"))?;
+        let sql = include_str!("../../migrations/024_source_documents.sql")
+            .split_once("CREATE TABLE source_suggestions (")
+            .ok_or(AppError::Invalid("Missing historical suggestion schema."))?
+            .1;
+        let (table, triggers) = sql
+            .split_once("CREATE INDEX source_suggestions_source")
+            .ok_or(AppError::Invalid("Missing historical suggestion guards."))?;
+        db.execute_batch(&format!("CREATE TABLE source_suggestions ({table} INSERT INTO source_suggestions SELECT * FROM legacy_suggestions; DROP TABLE legacy_suggestions; CREATE INDEX source_suggestions_source{triggers}"))?;
+    }
     let present: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('source_units') WHERE name='origin')",
         [],
@@ -15,6 +33,7 @@ pub(crate) fn rewind_schema(db: &Connection) -> Result<(), AppError> {
             "../../tests/support/source_documents_rewind.sql"
         ))?;
     }
+    db.pragma_update(None, "user_version", version)?;
     Ok(())
 }
 

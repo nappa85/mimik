@@ -1,5 +1,7 @@
+import json
 import logging
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import extract_manual
@@ -91,6 +93,7 @@ class CrosscheckTests(unittest.TestCase):
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0]["block_id"], unit["id"])
         self.assertEqual(issues[0]["kind"], "text-layer-spelling")
+        self.assertEqual(issues[0]["action"], "correction")
         self.assertEqual(issues[0]["suggested_correction"], "3. Spada Corta (d4)")
         self.assertEqual(unit["html"], "<p>3. Spada Conta (d4)</p>")
 
@@ -104,6 +107,46 @@ class CrosscheckTests(unittest.TestCase):
         issues = issues_for([unit], words)
         self.assertEqual([issue["kind"] for issue in issues], ["text-layer-unread"])
         self.assertIsNone(issues[0]["suggested_correction"])
+        self.assertEqual(issues[0]["action"], "note")
+
+    def test_crosscheck_v2_report_matches_closed_schema(self):
+        from jsonschema import Draft202012Validator
+
+        schema = json.loads(
+            (
+                Path(__file__).resolve().parents[1] / "schemas" / "suggestion-report.v2.json"
+            ).read_text()
+        )
+        unit = {
+            "id": "/page/0/Text/1",
+            "html": "<p>armatura*</p>",
+            "polygon": [[0, 0], [100, 0], [100, 30], [0, 30]],
+        }
+        issues = issues_for([unit], [("armatura", [1, 1, 30, 10])])
+        self.assertEqual(issues[0]["action"], "note")
+        report = {
+            "schema_version": 2,
+            "state": "tool_suggestions_not_verified",
+            "tool": "crosscheck_text_layer",
+            "source_sha256": "a" * 64,
+            "bundle_sha256": "b" * 64,
+            "created_at": "2026-10-30T00:00:00Z",
+            "pages": [
+                {
+                    "pdf_page": 1,
+                    "state": "tool_suggestions_not_verified",
+                    "findings": {
+                        "summary": "fixture",
+                        "needs_visual_review": True,
+                        "issues": issues,
+                    },
+                }
+            ],
+        }
+        validator = Draft202012Validator(schema)
+        validator.validate(report)
+        report["pages"][0]["findings"]["issues"][0]["region"] = None
+        self.assertFalse(validator.is_valid(report))
 
 
 class OcrOptionTests(unittest.TestCase):

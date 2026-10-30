@@ -152,6 +152,7 @@ def issues_for(units, words):
                 {
                     "block_id": unit["id"],
                     "kind": "text-layer-spelling",
+                    "action": "correction",
                     "description": f"The PDF text layer inside this block spells: {changes}.",
                     "suggested_correction": " ".join(fixed),
                 }
@@ -162,6 +163,7 @@ def issues_for(units, words):
                 {
                     "block_id": unit["id"],
                     "kind": "text-layer-difference",
+                    "action": "note",
                     "description": "Digits, dice, signs or markers differ; check the page image: "
                     + changes
                     + ".",
@@ -173,6 +175,7 @@ def issues_for(units, words):
                 {
                     "block_id": unit["id"],
                     "kind": "text-layer-unread",
+                    "action": "note",
                     "description": "Text-layer words inside this block that its text lacks: "
                     + " ".join(unread),
                     "suggested_correction": None,
@@ -197,7 +200,7 @@ def main():
         str(args.pdf), page_range=[page["pdf_page"] - 1 for page in pages], keep_chars=True
     )
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "state": "tool_suggestions_not_verified",
         "tool": "crosscheck_text_layer",
         "source_sha256": bundle["source_sha256"],

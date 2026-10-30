@@ -120,6 +120,12 @@ pub enum AppError {
     PasswordBusy,
     #[error("{0}")]
     Invalid(&'static str),
+    #[error("Suggestion report page {page}, issue {index}: {reason}.")]
+    SuggestionReportIssue {
+        page: i64,
+        index: usize,
+        reason: &'static str,
+    },
     #[error("Character not found.")]
     NotFound,
     #[error("This character was changed in another tab. Copy your edits, reload, and try again.")]

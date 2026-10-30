@@ -2,7 +2,7 @@
 
 A **source** is one prepared extraction run of a locally owned manual: the original PDF, the Marker structured extraction (`source.json`), the prepared manifest (`bundle.json`) and one original-page PNG per selected page. Sources are stored privately in SQLite and reviewed by the Owner. Reviewed units feed lexical lookup. Nothing in this workflow lets a model approve evidence or change sheets or rules.
 
-Code: `src/sources/`, `src/auth/materials.rs`, migrations `003`, `004`, `005`, `007`, `009`, `015`, `017`, `024`, `assets/source-regions.js`. Tests: `tests/source_*.rs`, `src/campaigns/material_tests.rs`, `tools/test_source_tools.py`.
+Code: `src/sources/`, `src/auth/materials.rs`, migrations `003`, `004`, `005`, `007`, `009`, `015`, `017`, `024`, `025`, `assets/source-regions.js`. Tests: `tests/source_*.rs`, `src/campaigns/material_tests.rs`, `tools/test_source_tools.py`.
 
 ## Import (`mimik import-source --bundle DIR --pdf FILE`)
 
@@ -79,13 +79,49 @@ States: `unreviewed`, `accepted`, `corrected` and `rejected` (a CHECK constraint
 the exact source and its bundle hash. Origin (tool/reviewer name) and kind are each 1–100
 characters; rationale is 1–5,000; suggested text is nullable and at most 20,000; text fields
 reject NUL. `kind` is one of `correction` (one unit, text), `merge` (2–1,024 distinct units on one page, text),
-`missing_text` (page region, text) or `reject` (one unit, no text); SQL enforces the pairing of kind,
+`missing_text` (page region, text), `reject` (one unit, no text), or `note` (one unit or page,
+nullable quoted text, no acceptance action); SQL enforces the pairing of kind,
 target shape and text, with at most 64 KiB of target JSON. Units/pages must belong to the source; every unit target records
 a positive revision no newer than its current revision. Older revisions remain identifiable
-as stale. Region geometry has the same bounds as owner units, checked in SQL and Rust (page dimensions that are not numbers are `Invalid`). Advice is immutable; the first
-`dismiss_source_suggestion` records actor and time, and repeat dismissal conflicts. Neither
-insertion nor dismissal changes units, their history, the search index or page completeness.
-Report-file import and browser suggestion controls are not exposed.
+as stale. A page note can retain a raw-node `block_id` citation (≤512 UTF-8 bytes, no NUL).
+Region geometry has the same bounds as owner units, checked in SQL and Rust (page dimensions
+that are not numbers are `Invalid`). Advice and its nullable same-source `report_id` are immutable.
+
+`dismiss_source_suggestion` uses an IMMEDIATE transaction to append actor, time and an optional
+reason (≤5,000 characters) to `source_suggestion_dismissals`. Repeat dismissal conflicts.
+`source_suggestion_web_events` is the authenticated sidecar, tied to the latest dismissal.
+`record_source_suggestion_application` records the latest matching review event, operation id
+for a merge, owner unit when created, and whether the text was edited. Its SQL guards check
+the decision kind, target unit/revision, page, and merge operation's rejections and initial owner
+correction on that same page. Applications and dismissals are insert-only and mutually exclusive. A unit revision
+change alone never records an application. Neither suggestion insertion nor dismissal changes
+units, their history, the search index or page completeness. Browser suggestion controls are a
+separate review-screen step.
+
+### Report import (`mimik import-suggestions --source ID --report FILE`)
+
+`Store::import_suggestion_report` reads a regular local file through `local_file::read_path`
+(final-component symlinks and special files refused), at most 4 MiB and 5,000 issues. The closed
+formats are `schemas/suggestion-report.v1.json` and `.v2.json`. Unknown fields, malformed targets,
+empty rationales and out-of-source pages refuse the whole report. Failed pages carry an error,
+import no issues and are counted. Report and page states distinguish unverified model/tool advice
+from failed review. Origin is the report's claim, `tool:<name>` or `reviewer:<requested_model>`,
+at most 100 UTF-8 bytes; it is not authenticated provider identity.
+
+The PDF hash must equal the source's hash. v2 requires the exact stored `bundle_sha256`; v1
+also permits `artifact_sha256["source.json"]` equal to the hash of the stored raw extraction.
+When both match, bundle binding takes precedence. v1 actions come only from shape: an extracted
+unit with correction text becomes a correction, without it a unit note; a raw container/page
+citation or null block id becomes a page note retaining any quoted text. An unknown block id
+refuses import. Free-text `kind` never selects reject or merge. v2 requires `action` per issue;
+only merges carry `merge_block_ids` (2–1,024 distinct extracted units on one page, nonzero
+bounding rectangle), and only missing text carries `region` (four PDF-point corners).
+All unit targets use revision 1, so advice about an already-decided unit is stale.
+
+One IMMEDIATE transaction writes immutable `source_suggestion_reports` metadata (report hash,
+source, origin, version, binding, report timestamp as given, import time, action and failed-page
+counts) and its suggestions. Re-importing identical report bytes for the same source is a no-op.
+The CLI prints a JSON summary with report id, counts by action, failed pages, binding and `repeat`.
 
 ## Page images and region previews
 
@@ -112,8 +148,8 @@ Optional Python; never shipped. `containers/extraction.Dockerfile`: digest-pinne
 - `tools/ocr_server.sh start|stop` serves surya's OCR model (`datalab-to/surya-ocr-2-gguf` at a pinned revision, hash-checked, modified OpenRAIL-M) with the pinned llama.cpp b11609 in a container on the internal network `mimik-ocr-net`; It refuses an existing `mimik-ocr-net` that is not internal, runs with CPU, memory and PID limits (2 cores on weekdays 09:00–18:00, `CPUS` otherwise) and refuses `DEVICE=gpu` (the Vulkan build, image encoder on the CPU) on weekdays 09:00–18:00. It does not stop itself: run `stop` after the extraction.
 - `tools/extract_manual.py PDF --source-id ID --pages 28,30-33 [--mode fast|balanced] [--ocr auto|force|disabled] [--ocr-server URL]`, run on `mimik-ocr-net` when OCR is on. One-based pages, converted for Marker; `use_llm=False`; headers and footers kept; JSON and Markdown from one build. OCR needs `--ocr-server` (surya attaches to it, never spawns or downloads); the manifest records what the server reports (served model, which must be surya-ocr-2 alone, model path and llama.cpp build) and the surya version, not a hash of the weights (those are checked by `ocr_server.sh` at start), and any "OCR failed" warning fails the run, since Marker would keep the block without its text. Forced OCR is the route for art-heavy manuals (`docs/results.md`, extractor screen). Writes `data/extractions/<id>-<uuid>/` (`source.json`, `reading.md`, metadata, `manifest.json` with hashes/config/versions/status, `review.json` all unreviewed). Mismatched coverage marks the run `failed`.
 - `tools/prepare_review.py EXTRACTION --pdf --title --system --edition --language` (can run with `--network=none`). Verifies the snapshots, renders the verified temporary PDF copy with `mutool draw -r 110` at original indexes, checks rotation, origin and size, and emits `review-ready-<uuid>/` (`bundle.json`, `source.json`, `page-N.png`). It writes **contract v1 only**.
-- `tools/crosscheck_text_layer.py BUNDLE --pdf FILE` aligns each unit's text with the PDF text-layer words inside its box and writes `text-layer-check-<uuid>/report.json` in the reviewer report's shape: spelling suggestions (an OCR word with a near-identical text-layer twin, same digits and non-letter characters), differences without a correction (a twin differing in digits, dice, signs or markers, where either may be the misprint) and unread-word hints (three or more text-layer words the unit's text lacks, each occurrence counted). Suggestions only; nothing is applied.
-- `tools/review_extraction.py`: an explicit, owner-billed call sending page images and blocks to an HTTPS OpenAI-compatible endpoint. Key from `MIMIK_REVIEW_API_KEY`/`OPENAI_API_KEY` (environment, then dotenv). Redirects refused, keys not stored, unknown citations rejected; findings are suggestions, never applied.
+- `tools/crosscheck_text_layer.py BUNDLE --pdf FILE` aligns each unit's text with the PDF text-layer words inside its box and writes `text-layer-check-<uuid>/report.json` as v2 with the bundle hash: spelling corrections (an OCR word with a near-identical text-layer twin, same digits and non-letter characters), difference notes (a twin differing in digits, dice, signs or markers, where either may be the misprint) and unread-word notes (three or more text-layer words the unit's text lacks, each occurrence counted). Suggestions only; nothing is applied.
+- `tools/review_extraction.py BUNDLE --pdf FILE --pages LIST --api-url URL --model MODEL`: an explicit, owner-billed call sending page images and blocks from a prepared bundle to an HTTPS OpenAI-compatible endpoint. Writes v2 with the prepared bundle hash; extracted-unit text proposals become corrections, other findings notes. Key from `MIMIK_REVIEW_API_KEY`/`OPENAI_API_KEY` (environment, then dotenv). Redirects refused, keys not stored, unknown citations rejected; findings are suggestions, never applied.
 - Helpers: `tools/source_bundle.py`; tests `tools/test_source_tools.py` (no Marker or provider run).
 
 ## Local corpus

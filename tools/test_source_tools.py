@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from review_extraction import resolve_api_key, validate_findings
+from review_extraction import resolve_api_key, v2_findings, validate_findings
 from source_bundle import digest, page_blocks, parse_pages, review_units, verify_bundle, write_json
 
 
@@ -107,6 +107,76 @@ class SourceReviewTests(unittest.TestCase):
         invalid["issues"][0]["unexpected"] = "not allowed"
         with self.assertRaises(ValueError):
             validate_findings(invalid, self.page)
+
+    def test_v2_actions_follow_prepared_unit_shape_not_model_kind(self):
+        page = json.loads(json.dumps(self.page))
+        page["children"].append(
+            {"id": "/page/29/Section/1", "block_type": "Section", "children": []}
+        )
+        findings = {
+            "summary": "Fixture",
+            "needs_visual_review": True,
+            "issues": [
+                {
+                    "block_id": block,
+                    "kind": "reject",
+                    "description": "Read the page",
+                    "suggested_correction": text,
+                }
+                for block, text in [
+                    ("/page/29/Table/1", "Advice"),
+                    ("/page/29/Table/1", None),
+                    ("/page/29/Section/1", "Quoted text"),
+                    (None, "Unlocated"),
+                ]
+            ],
+        }
+        converted = v2_findings(findings, page)
+        self.assertEqual(
+            [i["action"] for i in converted["issues"]], ["correction", "note", "note", "note"]
+        )
+        self.assertNotIn("action", findings["issues"][0])
+        report = {
+            "schema_version": 2,
+            "state": "model_suggestions_not_verified",
+            "source_sha256": "a" * 64,
+            "bundle_sha256": "b" * 64,
+            "endpoint": "https://example.invalid",
+            "requested_model": "fixture",
+            "created_at": "2026-10-30T00:00:00Z",
+            "pages": [
+                {"pdf_page": 30, "state": "model_suggestions_not_verified", "findings": converted},
+                {
+                    "pdf_page": 31,
+                    "state": "failed",
+                    "error": "Fixture failure",
+                    "render_sha256": "c" * 64,
+                    "returned_model": None,
+                    "usage": {"tokens": 1},
+                },
+            ],
+        }
+        from jsonschema import Draft202012Validator
+
+        schemas = Path(__file__).resolve().parents[1] / "schemas"
+        v2 = Draft202012Validator(json.loads((schemas / "suggestion-report.v2.json").read_text()))
+        v2.validate(report)
+        for field in ["bundle_sha256", "action"]:
+            bad = json.loads(json.dumps(report))
+            if field == "action":
+                del bad["pages"][0]["findings"]["issues"][0][field]
+            else:
+                del bad[field]
+            self.assertFalse(v2.is_valid(bad))
+        report["schema_version"] = 1
+        del report["bundle_sha256"]
+        report["artifact_sha256"] = {"source.json": "d" * 64, "reading.md": "e" * 64}
+        for issue in report["pages"][0]["findings"]["issues"]:
+            del issue["action"]
+        v1 = Draft202012Validator(json.loads((schemas / "suggestion-report.v1.json").read_text()))
+        v1.validate(report)
+        report["pages"][0]["unexpected"] = True
+        self.assertFalse(v1.is_valid(report))
 
     def test_changed_pdf_and_unsupported_manifest_identity_are_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
