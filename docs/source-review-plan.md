@@ -24,7 +24,7 @@ the agreement view and batch accept (step 8). The masked watermark display comes
   pages carrying `error`, `render_sha256`, `returned_model`, `usage`) and
   `tools/crosscheck_text_layer.py` (with `bundle_sha256`). v2 adds `bundle_sha256` as required
   and an explicit `action` per issue (`correction`, `reject`, `merge`, `missing_text`, `note`)
-  with `merge_block_ids` and `region` (four points, PDF points). Both tools move to v2. A v1
+  with `merge_block_ids` (merges) and `region` (four points, PDF points; `missing_text` only, refused on any other action). Both tools move to v2. A v1
   issue maps only by shape (below); its free-text `kind` never selects an action.
 - **A `note` suggestion kind**: advice that decides nothing, on one unit or on the page, with
   optional text shown as quoted (the reports' unread words, differences, needs-visual-review
@@ -39,7 +39,8 @@ the agreement view and batch accept (step 8). The masked watermark display comes
   target unit's revision has moved past the one it was made on). A revision change alone never
   makes a suggestion applied.
 - **Dismissal** needs no expected revision (it changes no evidence) and takes an optional reason
-  (≤5,000); it is recorded with actor, time and the authenticated sidecar.
+  (≤5,000); it is recorded with actor, time and the authenticated sidecar. Applied and dismissed
+  exclude each other, in SQL.
 
 ## Schema (migration 025)
 
@@ -48,19 +49,24 @@ must be covered by the update guard): create the new table, `INSERT … SELECT` 
 drop the old one, rename, and recreate the index and every trigger.
 - `kind` gains `note`. The envelope trigger allows a note on `{"type":"unit",…}` or
   `{"type":"page","page":<page id of this source>}`, with nullable text; all checks stay
-  fail-closed on missing or null JSON fields (step 1's `coalesce` rule). Dismissal reason column
-  (nullable, ≤5,000, no NUL), set only with the dismissal.
+  fail-closed on missing or null JSON fields (step 1's `coalesce` rule). A page target may name
+  an optional `block_id` (≤512 bytes, no NUL) for a report citation of a raw node that is no unit.
 - `report_id` (nullable): on insert it must name a report of the same source; immutable (in the
   update guard).
 - `source_suggestion_reports`: id, source, report SHA-256 (unique per source), origin, schema
   version, binding used (`bundle` or `extraction`), report `created_at` as given, imported time,
   counts (issues by action, failed pages). Immutable and undeletable.
+- `source_suggestion_dismissals`: insert-only (id, suggestion unique, actor, optional reason
+  ≤5,000, time). The rebuild moves the existing `dismissed_by`/`dismissed_at` values into it and
+  drops those columns. `source_suggestion_web_events` is its authenticated sidecar, bound to
+  `max(id)` of this table like 024's primary sidecar.
 - `source_suggestion_applications`: suggestion id (unique), the review event id or operation id
   that applied it, the owner unit id when one was created, whether the Owner edited the text.
-  Insert-only, and only in the same transaction as the decision it names (a trigger requires the
-  event to be the latest, as 015 and 024 do for sidecars).
-- `source_suggestion_web_events`: the authenticated sidecar for a dismissal, bound to the latest
-  dismissal like 024's primary sidecar.
+  Insert-only. Its trigger checks: the named event is the latest review event (as 015 and 024 do
+  for sidecars); for a correction or reject it is that unit's event; for a merge the latest event
+  carries the named `operation_id`, and the owner unit was inserted in that operation; for
+  missing text it is the correction event `add_owner_unit` records for the named owner unit.
+  It refuses a dismissed suggestion, and the dismissal insert refuses an applied one.
 - Tests: a schema-24 database with suggestions keeps every row and id (`report_id` NULL); the
   new envelope cases; report, application and sidecar immutability; a report of another source
   refused as `report_id`; the rewind helper.
@@ -79,10 +85,12 @@ drop the old one, rename, and recreate the index and every trigger.
   a `correction`; a unit without a correction is a unit `note`; a `block_id` naming a raw node
   that is not a unit (a container, the page) is a page `note` that names the block id; a null
   `block_id` is a page `note`, keeping any suggested text. A `block_id` not in the raw tree of that
-  page refuses the report. `description` becomes the rationale; an empty one refuses the report
+  page refuses the report. A v1 issue becomes a `correction` only by its shape: its `kind`
+  string, even "reject" or "merge", never selects an action. `description` becomes the rationale; an empty one refuses the report
   with the page and issue index.
 - **v2:** the `action` must agree with the target shape and text (the SQL envelope rules); merges
-  need 2–1,024 distinct units on one page; regions pass step 1's polygon rules.
+  need 2–1,024 distinct units on one page whose bounding rectangle has non-zero area (else the
+  report is refused); regions pass step 1's polygon rules.
 - Unit targets are recorded at revision 1, since a report is made on the raw extraction; a unit
   decided since then shows the suggestion as stale.
 - Origin is `tool:<name>` or `reviewer:<requested model>` from the report (≤100 bytes), shown as
@@ -109,13 +117,19 @@ Owner and CSRF in its IMMEDIATE transaction.
    `rejected`, and "not evidence yet" for `unreviewed`. A page panel lists the lookup text of the
    current card page in unit order (bundle order; owner-added units last), labelled as not
    evidence until the page is complete and, for a non-primary reading, as not used by lookup.
+   An owner unit created by a merge is listed at its first merged unit's position; other
+   owner-added units come last.
 3. **Suggestions on the card**, with their state, origin, report and rationale. For text, a
    word-level difference between the unit's current lookup text and the suggested text, with
    `similar` (licence and maintenance checked and recorded at selection; `TextDiff::configure().deadline(…)`, Unicode words; recorded as a
    DEP decision): plain text in, every segment escaped by the template, only fixed `<ins>`/`<del>`
-   markup out. Bounds: at most 20 suggestions per card and 100 differences per response, each
-   with a 50 ms deadline, computed off the async executor; past a bound or the deadline, both
-   texts are shown in full instead.
+   markup out. Bounds: suggestions are paged (20 per card, with a cursor link to a bounded
+   suggestion list for that unit; page notes 20 per page with their own cursor), at most 100
+   differences per response, each with a 50 ms deadline, computed off the async executor, and a
+   total budget of 2 MiB of suggestion and lookup text per response. Past a bound, the deadline or
+   the budget, a labelled preview of the first 2,000 characters of each text is shown, with a
+   link to an authenticated, bounded detail view of that suggestion (its full texts, ≤20,000 and
+   ≤256 KiB), so exhausting a budget never enlarges the response.
    - **Accept** posts to `POST /admin/materials/suggestions/{id}/accept` with the Owner's
      rationale (required; prefilled "Accepted suggestion #N (origin)", editable) and, from Edit,
      an optional edited text. In one IMMEDIATE transaction the server loads the suggestion,
@@ -132,7 +146,7 @@ Owner and CSRF in its IMMEDIATE transaction.
 4. **Merge** is shown on every merged unit's card, naming the others, with their boxes
    highlighted. Accept is one transaction: every target revision checked, one owner unit with
    the merged text and the bounding rectangle, every merged unit `rejected`, one operation id and
-   rationale.
+   rationale. A merge whose bounding rectangle has zero area gives 422.
 5. **Missing text and owner-added units.** A `missing_text` suggestion's region is drawn on the
    image; Accept (or Edit) adds the owner unit with its region and text. The "Add missing text"
    form takes a drawn box (pointer drag, arrow-key adjustable handles) or four corners in PDF
@@ -158,6 +172,13 @@ Rust (store and handlers, synthetic fixtures only):
   source refused; v1 mapping for unit, container, page and null block ids; an unknown block id
   and an empty description refused with the issue index; v2 actions; over-limit sizes; symlink
   and FIFO; repeat import a no-op; a free-text v1 `kind` of "reject" or "merge" stays a note.
+- Dismissal and application exclusion: dismissing an applied suggestion and applying a
+  dismissed one conflict, in Rust and in direct SQL; Accept racing Dismiss in IMMEDIATE
+  transactions leaves exactly one.
+- v1 binding by extraction (`artifact_sha256`) on a synthetic report; v1 correction text with a
+  `kind` of "reject" gives a correction, without text a note.
+- Response bounds: a page with 50 units and many long suggestions stays within the budget and
+  links the detail views.
 - Accept: Owner and CSRF; a stale suggestion refused even with a fresh unit revision in the form;
   a stale second merge target rolls back everything; a dismissed suggestion and a note refused;
   the stored text used, not a client value, unless edited (then recorded as edited); the
@@ -177,8 +198,10 @@ JavaScript):
   choosing a primary reading, `j`/`k`/`a` and the off switch, a 409 keeping each draft.
 - No horizontal scroll at 390 px; no CSP violations in the console.
 
-Local live check (not in CI): the MÖRK BORG IT bundle with its two reports (both carry its
-`bundle_sha256`) imported into a scratch database, a sample of pages reviewed through the
+Local live check (not in CI): the MÖRK BORG IT bundle with its two reports imported into a
+scratch database (both were written with `bundle_sha256`; the visual-review report is also
+imported a second time with that field removed, to exercise the extraction binding on real
+data, and each binding used is recorded), a sample of pages reviewed through the
 screen, and the imported counts per action in the merge message.
 
 ## Order

@@ -99,7 +99,7 @@ New decisions:
 Step 1, the schema (documents, readings, primary pages, owner units, suggestions), is done; it
 is described in `docs/sources-and-retrieval.md`. Numbering is kept so references stay valid.
 
-2. **Review screen** (own plan). Report import bound to the bundle hash (the existing report
+2. **Review screen** (own plan: `docs/source-review-plan.md`). Report import bound to the bundle hash (the existing report
    shape, plus targets for several units and page regions). On the page: the image beside the
    units, zoom and region highlight; each suggestion as an inline difference with Accept, Edit,
    Dismiss; merges as one decision; drawing a box for owner-added text; the page's effective text
