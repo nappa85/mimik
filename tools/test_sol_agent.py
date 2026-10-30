@@ -1,5 +1,6 @@
 import datetime as dt
 import importlib.util
+import json
 import os
 import shutil
 import socket
@@ -195,6 +196,15 @@ class Egress(unittest.TestCase):
             self.assertTrue(client.recv(64).startswith(b"HTTP/1.1 403"))
             client.close()
             proxy.server.close()
+
+
+class AgentConfig(unittest.TestCase):
+    def test_reads_outside_the_worktree_are_denied_not_asked(self):
+        # "ask" has no one to answer in `opencode run`: it is auto-rejected and ends the run
+        # (seen 2026-10-30, three times). "deny" returns an error and the agent goes on.
+        config = json.loads(Path(__file__).with_name("sol_opencode.json").read_text())
+        permission = config["agent"]["coder"]["permission"]
+        self.assertEqual(permission.get("external_directory"), "deny")
 
 
 class Sandbox(unittest.TestCase):

@@ -6,7 +6,7 @@
       "description": "Mimik implementer in bubblewrap (tools/sol_agent.sh): edits the worktree, runs cargo; asks the coordinator with `ask`.",
       "tools": { "write": true, "edit": true, "bash": true, "read": true, "glob": true, "grep": true, "list": true,
                  "webfetch": false, "websearch": false, "task": false, "skill": false },
-      "permission": { "edit": "allow", "bash": "allow", "webfetch": "deny" }
+      "permission": { "edit": "allow", "bash": "allow", "webfetch": "deny", "external_directory": "deny" }
     }
   }
 }
