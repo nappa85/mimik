@@ -19,7 +19,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 - **Real ruleset material for the prompt tests (owner, 2026-10-29):** MÖRK BORG IT PDF pages
   22–39 extracted with Marker and forced OCR (`docs/results.md`, extractor screen), bundle
-  `data/extractions/review-ready-166c3457f3a94f76ba97d6a7e3bfd25b` with two suggestion reports
+  `data/extractions/review-ready-dbb400754fb94e87af95cce347903ea8` with two suggestion reports
   (Claude's visual review, 64 suggestions; the text-layer cross-check) and a preview of the
   corrected text (`proposed-reading.md` there). Next: the owner imports it into the live
   database (`mimik import-source`, needs SRC-10) and reviews each unit in
