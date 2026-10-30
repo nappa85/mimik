@@ -33,6 +33,11 @@ class PrepareSnapshotTests(unittest.TestCase):
             leaf, html="<content-ref src='/page/0/ListItem/2'></content-ref>", children=[item]
         )
         self.assertEqual([u["kind"] for u in prepare_review.units(group)], ["ListItem"])
+        literal = dict(group, html="<ul><li>1-2 nulla</li></ul>")
+        self.assertEqual([u["kind"] for u in prepare_review.units(literal)], ["ListItem"])
+        self.assertEqual(len(prepare_review.units(dict(leaf, children=None))), 1)
+        with self.assertRaises(ValueError):
+            prepare_review.units(dict(leaf, html="<content-ref src='x'></content-ref>"))
 
     def test_verified_inputs_cannot_be_replaced_before_preparation(self):
         for replaced in ["source.json", "source.pdf"]:

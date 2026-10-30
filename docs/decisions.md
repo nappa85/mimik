@@ -254,6 +254,7 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 - **SRC-6** (2026-10-11) Output from models and the optional API reviewer is a suggestion only: it never promotes, corrects or approves evidence, and a no-issue response certifies nothing.
 - **SRC-7** (2026-10-11) Displayed extraction HTML passes the `ammonia` allowlist: text, list and table structure, bounded spans, no URLs, styles or scripts.
 - **SRC-8** (2026-10-12) Region previews are bounding-rectangle crops made with `png`, one process-wide job at a time, with the full page always offered; a preview is never evidence.
+- **SRC-10** (2026-10-30) A `ListGroup` without children is a review unit (`schemas/source-leaf-kinds.json`): Marker's OCR output gives whole lists that way. A bundle prepared earlier that left such a group out is refused with no compatibility path and must be prepared again (a new, unreviewed source); none was stored when this changed (live database empty).
 - **SRC-9** (2026-10-11) Disagreeing sources (MÖRK BORG IT and EN) are both recorded; precedence is decided explicitly, never by merging.
 - **EXT-1** (2026-10-11) Extraction is optional, containerised Python: Marker, keeping JSON blocks, polygons and table HTML; Markdown is a reading view only; generative `use_llm` repair is disabled.
 - **EXT-3** (2026-10-15) Scalable admission, not full human rereading: bounded frontier image/block review, then targeted human review of discrepancies and high-impact passages, then stratified checks; model review never counts as human approval.

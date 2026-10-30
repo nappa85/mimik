@@ -143,6 +143,7 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 - **L-SRC-2** [sources] Scalable whole-book admission is an open policy and design question: model-checked material cannot become verified lookup without human review, no automated-coverage policy exists, and book-wide hierarchy is not in the schema. Italian Pathfinder errata coverage is unknown.
 - **L-SRC-3** [sources] Imports accept only zero-rotation, zero-origin pages, reject nested table or form groups and `<content-ref`, and allow 64 pages and 20,000 units per run.
 - **L-SRC-4** [sources] `tools/prepare_review.py` writes contract v1 only; a v2 bundle must be written by hand.
+- **L-SRC-6** [sources] A text-layer `ListGroup` whose children are all ineligible kinds is not a unit and has no unit children, so its text reaches review only through the page image. The display sanitiser drops every attribute, so an ordered list's `start` number is lost on screen (the raw HTML keeps it).
 - **L-SRC-5** [sources] The extraction image lacks `python-dotenv`, so `review_extraction.py` reads its key only from the environment, not a mounted `--env-file`.
 - **C5** [sources] Every bundle stores the full PDF (up to 128 MiB) and `pdf_hash` is not unique, so a manual imported in several 64-page runs is stored several times. Store each PDF once per hash.
 - **C8** [sources] Page dimensions live only in `prepared_json`, so every region crop scans up to 24 MiB. Store them as columns.

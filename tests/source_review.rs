@@ -722,3 +722,60 @@ async fn a_bundle_that_omits_a_childless_list_group_is_refused() {
     assert!(store.import_source(&bundle, &pdf).await.is_err());
     assert!(store.sources().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn list_group_eligibility_follows_children_not_html() {
+    // A group with children but literal list HTML stays a container of its items.
+    let dir = tempfile::tempdir().unwrap();
+    let (bundle, pdf) = fixture(dir.path());
+    wrap_in_list_group(&bundle);
+    let raw_path = bundle.join("source.json");
+    let mut raw: serde_json::Value = serde_json::from_slice(&fs::read(&raw_path).unwrap()).unwrap();
+    raw["children"][0]["children"][0]["html"] = json!("<ul><li>1-2 nulla</li></ul>");
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    fs::write(&raw_path, &bytes).unwrap();
+    let path = bundle.join("bundle.json");
+    let mut prepared: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    prepared["extraction_sha256"] = json!(hash(&bytes));
+    fs::write(&path, serde_json::to_vec(&prepared).unwrap()).unwrap();
+    let store = Store::open(&dir.path().join("test.sqlite3")).unwrap();
+    store.import_source(&bundle, &pdf).await.unwrap();
+    let page_id = store.sources().await.unwrap()[0].pages[0].id;
+    assert_eq!(store.source_page(page_id).await.unwrap().units.len(), 1);
+
+    // A childless group pointing at other content is refused, like any eligible unit.
+    let dir = tempfile::tempdir().unwrap();
+    let (bundle, pdf) = fixture(dir.path());
+    replace_html(
+        &bundle,
+        "<content-ref src='/page/0/ListItem/2'></content-ref>",
+        "ListGroup",
+    );
+    let store = Store::open(&dir.path().join("test.sqlite3")).unwrap();
+    assert!(store.import_source(&bundle, &pdf).await.is_err());
+}
+
+#[tokio::test]
+async fn a_list_group_with_children_listed_as_a_unit_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bundle, pdf) = fixture(dir.path());
+    wrap_in_list_group(&bundle);
+    let raw: serde_json::Value =
+        serde_json::from_slice(&fs::read(bundle.join("source.json")).unwrap()).unwrap();
+    let group = &raw["children"][0]["children"][0];
+    let path = bundle.join("bundle.json");
+    let mut prepared: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut unit = prepared["pages"][0]["units"][0].clone();
+    unit["id"] = group["id"].clone();
+    unit["kind"] = json!("ListGroup");
+    unit["html"] = group["html"].clone();
+    prepared["pages"][0]["units"]
+        .as_array_mut()
+        .unwrap()
+        .push(unit);
+    fs::write(&path, serde_json::to_vec(&prepared).unwrap()).unwrap();
+    let store = Store::open(&dir.path().join("test.sqlite3")).unwrap();
+    assert!(store.import_source(&bundle, &pdf).await.is_err());
+}
