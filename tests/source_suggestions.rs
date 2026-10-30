@@ -533,13 +533,40 @@ async fn limits_regular_files_and_five_thousand_issue_transaction() {
 
 #[tokio::test]
 async fn migration_24_keeps_ids_dismissals_and_rewind_restores_original_guards() {
-    let c = context().await;
+    let c = context_with_second_page(true).await;
     schema_fixture::rewind_review(&c.db);
+    // This source and its pages genuinely originate under v24.
+    insert_unfinalized_source(
+        &c.db,
+        2,
+        &json!({"pages":[{"pdf_page":7,"width_points":123,"height_points":234}]}),
+    );
+    insert_unfinalized_page(&c.db, 30, 2, 7);
+    c.db.execute(
+        "UPDATE sources SET raw_json=?1 WHERE id=2",
+        [
+            serde_json::to_vec(&json!({"children":[{"id":"/page/6/Page/0","children":[]}]}))
+                .unwrap(),
+        ],
+    )
+    .unwrap();
     c.db.execute("INSERT INTO source_suggestions(id,source_id,bundle_hash,origin,kind,targets,suggested_text,rationale) SELECT 42,1,bundle_hash,'tool','correction',?1,'Advice','why' FROM sources WHERE id=1",[r#"{"type":"unit","target":{"unit":1,"revision":1}}"#]).unwrap();
     c.db.execute("INSERT INTO source_suggestions(id,source_id,bundle_hash,origin,kind,targets,rationale) SELECT 7,1,bundle_hash,'tool','reject',?1,'Other advice' FROM sources WHERE id=1",[r#"{"type":"unit","target":{"unit":2,"revision":1}}"#]).unwrap();
     c.db.execute("UPDATE source_suggestions SET dismissed_by='legacy',dismissed_at='2026-10-30 12:00:00' WHERE id=42",[]).unwrap();
+    let mut value = report(
+        &c,
+        2,
+        vec![
+            json!({"action":"missing_text","block_id":null,"kind":"omission","description":"Read image","suggested_correction":"Advice","region":[[1,1],[20,1],[20,20],[1,20]]}),
+        ],
+    );
     drop(c.store);
-    let _migrated = Store::open(&c.dir.path().join("reports.sqlite3")).unwrap();
+    let migrated = Store::open(&c.dir.path().join("reports.sqlite3")).unwrap();
+    assert_eq!(count(&c.db, "source_suggestion_page_bounds"), 3);
+    let mismatches: i64 = c.db.query_row(
+        "SELECT count(*) FROM source_pages p JOIN sources s ON s.id=p.source_id, json_each(s.prepared_json,'$.pages') g LEFT JOIN source_suggestion_page_bounds b ON b.source_id=p.source_id AND b.pdf_page=p.pdf_page WHERE json_extract(g.value,'$.pdf_page')=p.pdf_page AND (b.width IS NOT json_extract(g.value,'$.width_points') OR b.height IS NOT json_extract(g.value,'$.height_points'))",
+        [], |r| r.get(0)).unwrap();
+    assert_eq!(mismatches, 0);
     assert_eq!(count(&c.db, "source_suggestions"), 2);
     let open: (i64, Option<i64>, String, String) =
         c.db.query_row(
@@ -568,6 +595,103 @@ async fn migration_24_keeps_ids_dismissals_and_rewind_restores_original_guards()
         c.db.execute("UPDATE source_suggestions SET dismissed_by='again'", [])
             .is_err()
     );
+    drop(migrated);
+    let migrated = Store::open(&c.dir.path().join("reports.sqlite3")).unwrap();
+    value["pages"][0]["pdf_page"] = json!(7);
+    value["bundle_sha256"] = json!("b".repeat(64));
+    value["source_sha256"] = json!("a".repeat(64));
+    fs::write(&c.report, serde_json::to_vec(&value).unwrap()).unwrap();
+    let summary = migrated
+        .import_suggestion_report(2, &c.report)
+        .await
+        .unwrap();
+    assert_eq!(summary.counts["missing_text"], 1);
+}
+
+fn insert_unfinalized_source(db: &Connection, id: i64, prepared: &Value) {
+    db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json) VALUES(?1,?2,'synthetic','Synthetic','mork-borg','fixture','en',?3,x'00',x'7b7d',?4)",params![id, "b".repeat(64), "a".repeat(64), serde_json::to_vec(prepared).unwrap()]).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM source_finalizations WHERE source_id=?1",
+            [id],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+}
+
+fn insert_unfinalized_page(db: &Connection, id: i64, source: i64, page: i64) {
+    db.execute(
+        "INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(?1,?2,?3,x'00')",
+        params![id, source, page],
+    )
+    .unwrap();
+}
+
+fn insert_region(db: &Connection, source: i64, page: i64, extent: i64) -> rusqlite::Result<usize> {
+    let target = json!({"type":"region","page":page,"polygon":[[0,0],[extent,0],[extent,extent],[0,extent]]});
+    db.execute("INSERT INTO source_suggestions(source_id,bundle_hash,origin,kind,targets,suggested_text,rationale) SELECT id,bundle_hash,'tool:fixture','missing_text',?2,'Advice','Read image' FROM sources WHERE id=?1", params![source,target.to_string()])
+}
+
+#[test]
+fn unfinalized_bounds_survive_update_or_replace_page_id_collision() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.sqlite3");
+    let _store = Store::open(&path).unwrap();
+    let db = Connection::open(path).unwrap();
+    insert_unfinalized_source(
+        &db,
+        1,
+        &json!({"pages":[{"pdf_page":1,"width_points":200,"height_points":300}]}),
+    );
+    insert_unfinalized_page(&db, 10, 1, 1);
+    insert_unfinalized_page(&db, 20, 1, 2); // No prepared dimensions for B.
+    db.execute("UPDATE OR REPLACE source_pages SET id=10 WHERE id=20", [])
+        .unwrap();
+    assert!(
+        insert_region(&db, 1, 10, 20).is_err(),
+        "A's bounds must not describe B"
+    );
+}
+
+#[test]
+fn unfinalized_bounds_survive_insert_or_replace_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.sqlite3");
+    let _store = Store::open(&path).unwrap();
+    let db = Connection::open(path).unwrap();
+    insert_unfinalized_source(
+        &db,
+        1,
+        &json!({"pages":[{"pdf_page":1,"width_points":200,"height_points":300},{"pdf_page":2,"width_points":40,"height_points":50}]}),
+    );
+    insert_unfinalized_page(&db, 10, 1, 1);
+    db.execute(
+        "INSERT OR REPLACE INTO source_pages(id,source_id,pdf_page,png) VALUES(10,1,2,x'00')",
+        [],
+    )
+    .unwrap();
+    insert_region(&db, 1, 10, 30).unwrap();
+    assert!(insert_region(&db, 1, 10, 60).is_err());
+}
+
+#[test]
+fn unfinalized_bounds_populate_when_prepared_metadata_becomes_valid() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.sqlite3");
+    let _store = Store::open(&path).unwrap();
+    let db = Connection::open(path).unwrap();
+    insert_unfinalized_source(&db, 1, &json!({}));
+    insert_unfinalized_page(&db, 10, 1, 1);
+    assert!(insert_region(&db, 1, 10, 20).is_err());
+    let prepared =
+        serde_json::to_vec(&json!({"pages":[{"pdf_page":1,"width_points":40,"height_points":50}]}))
+            .unwrap();
+    db.execute("UPDATE sources SET prepared_json=?1 WHERE id=1", [prepared])
+        .unwrap();
+    insert_region(&db, 1, 10, 30).unwrap();
+    assert!(insert_region(&db, 1, 10, 60).is_err());
 }
 
 #[tokio::test]
@@ -1692,6 +1816,32 @@ async fn worst_case_five_thousand_regions_and_merges_on_large_prepared_page() {
 }
 
 #[tokio::test]
+async fn import_four_hundred_pages_near_prepared_json_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    // The public importer caps bundles at 64 pages. Measure the database write path
+    // in isolation for this requested 400-page stress case, with every guard active.
+    let prepared = json!({"pages":(1..=400).map(|page| json!({"pdf_page":page,"width_points":200,"height_points":300,"units":[{"html":"x".repeat(20_000)}]})).collect::<Vec<_>>()});
+    let bytes = serde_json::to_vec(&prepared).unwrap();
+    assert!((8_000_000..8_388_608).contains(&bytes.len()));
+    let path = dir.path().join("source.sqlite3");
+    let _store = Store::open(&path).unwrap();
+    let mut db = Connection::open(path).unwrap();
+    let start = std::time::Instant::now();
+    let tx = db.transaction().unwrap();
+    insert_unfinalized_source(&tx, 1, &prepared);
+    for page in 1..=400 {
+        insert_unfinalized_page(&tx, page, 1, page);
+    }
+    tx.commit().unwrap();
+    eprintln!(
+        "400-page source database import; prepared_json {} bytes: {:?}",
+        bytes.len(),
+        start.elapsed()
+    );
+    assert_eq!(count(&db, "source_suggestion_page_bounds"), 400);
+}
+
+#[tokio::test]
 async fn cached_region_bounds_cannot_diverge_from_unfinalized_source_or_page() {
     let c = context().await;
     c.db.execute_batch("DROP TRIGGER source_finalize_delete; DELETE FROM source_finalizations;")
@@ -1700,27 +1850,29 @@ async fn cached_region_bounds_cannot_diverge_from_unfinalized_source_or_page() {
         c.db.execute("UPDATE sources SET prepared_json=x'7b7d' WHERE id=1", [])
             .is_err()
     );
-    assert!(
-        c.db.execute("UPDATE source_pages SET pdf_page=99 WHERE id=1", [])
-            .is_err()
-    );
+    c.db.execute("UPDATE source_pages SET pdf_page=99 WHERE id=1", [])
+        .unwrap();
+    assert!(insert_region(&c.db, 1, 1, 20).is_err());
+    c.db.execute("UPDATE source_pages SET pdf_page=1 WHERE id=1", [])
+        .unwrap();
+    insert_region(&c.db, 1, 1, 20).unwrap();
     assert!(
         c.db.execute(
-            "UPDATE source_suggestion_page_bounds SET width=4000 WHERE page_id=1",
+            "UPDATE source_suggestion_page_bounds SET width=4000 WHERE source_id=1 AND pdf_page=1",
             []
         )
         .is_err()
     );
     assert!(
         c.db.execute(
-            "INSERT OR REPLACE INTO source_suggestion_page_bounds VALUES(1,4000,4000)",
+            "INSERT OR REPLACE INTO source_suggestion_page_bounds VALUES(1,1,4000,4000)",
             []
         )
         .is_err()
     );
     assert!(
         c.db.execute(
-            "DELETE FROM source_suggestion_page_bounds WHERE page_id=1",
+            "DELETE FROM source_suggestion_page_bounds WHERE source_id=1 AND pdf_page=1",
             []
         )
         .is_err()

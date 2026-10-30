@@ -1,22 +1,24 @@
--- Materialize only dimensions, once per page. Suggestion inserts must not parse the
+-- Materialize only dimensions, by prepared-source page. Suggestion inserts must not parse the
 -- complete (up to 8 MiB) immutable prepared bundle for every missing-text region.
 CREATE TABLE source_suggestion_page_bounds (
- page_id INTEGER PRIMARY KEY REFERENCES source_pages(id),
+ source_id INTEGER NOT NULL REFERENCES sources(id),
+ pdf_page INTEGER NOT NULL CHECK(pdf_page>0),
  width REAL NOT NULL CHECK(width BETWEEN 1 AND 4000),
- height REAL NOT NULL CHECK(height BETWEEN 1 AND 4000)
+ height REAL NOT NULL CHECK(height BETWEEN 1 AND 4000),
+ PRIMARY KEY(source_id,pdf_page)
 ) STRICT;
 INSERT INTO source_suggestion_page_bounds
- SELECT p.id,json_extract(g.value,'$.width_points'),json_extract(g.value,'$.height_points')
- FROM source_pages p JOIN sources s ON s.id=p.source_id,
+ SELECT s.id,json_extract(g.value,'$.pdf_page'),json_extract(g.value,'$.width_points'),json_extract(g.value,'$.height_points')
+ FROM sources s,
  json_each(CASE WHEN length(s.prepared_json)<=8388608 AND json_valid(s.prepared_json) THEN s.prepared_json ELSE '{}' END,'$.pages') g
- WHERE json_extract(g.value,'$.pdf_page')=p.pdf_page
+ WHERE json_type(g.value,'$.pdf_page')='integer' AND json_extract(g.value,'$.pdf_page')>0
  AND json_type(g.value,'$.width_points') IN ('integer','real') AND json_type(g.value,'$.height_points') IN ('integer','real')
  AND json_extract(g.value,'$.width_points') BETWEEN 1 AND 4000 AND json_extract(g.value,'$.height_points') BETWEEN 1 AND 4000;
 CREATE TRIGGER source_suggestion_page_bounds_insert BEFORE INSERT ON source_suggestion_page_bounds WHEN
- EXISTS(SELECT 1 FROM source_suggestion_page_bounds WHERE page_id=NEW.page_id) OR NOT EXISTS(
- SELECT 1 FROM source_pages p JOIN sources s ON s.id=p.source_id,
+ EXISTS(SELECT 1 FROM source_suggestion_page_bounds WHERE source_id=NEW.source_id AND pdf_page=NEW.pdf_page) OR NOT EXISTS(
+ SELECT 1 FROM sources s,
  json_each(CASE WHEN length(s.prepared_json)<=8388608 AND json_valid(s.prepared_json) THEN s.prepared_json ELSE '{}' END,'$.pages') g
- WHERE p.id=NEW.page_id AND json_extract(g.value,'$.pdf_page')=p.pdf_page
+ WHERE s.id=NEW.source_id AND json_type(g.value,'$.pdf_page')='integer' AND json_extract(g.value,'$.pdf_page')=NEW.pdf_page
  AND json_type(g.value,'$.width_points') IN ('integer','real') AND json_type(g.value,'$.height_points') IN ('integer','real')
  AND NEW.width=json_extract(g.value,'$.width_points') AND NEW.height=json_extract(g.value,'$.height_points'))
  BEGIN SELECT RAISE(ABORT,'Page bounds must match prepared source'); END;
@@ -24,18 +26,25 @@ CREATE TRIGGER source_suggestion_page_bounds_update BEFORE UPDATE ON source_sugg
 CREATE TRIGGER source_suggestion_page_bounds_delete BEFORE DELETE ON source_suggestion_page_bounds BEGIN SELECT RAISE(ABORT,'Page bounds are retained'); END;
 CREATE TRIGGER source_suggestion_bounds_source_update BEFORE UPDATE OF prepared_json ON sources
  WHEN NEW.prepared_json IS NOT OLD.prepared_json AND EXISTS(
- SELECT 1 FROM source_suggestion_page_bounds b JOIN source_pages p ON p.id=b.page_id WHERE p.source_id=OLD.id)
+  SELECT 1 FROM source_suggestion_page_bounds WHERE source_id=OLD.id)
  BEGIN SELECT RAISE(ABORT,'Prepared source with page bounds is immutable'); END;
-CREATE TRIGGER source_suggestion_bounds_page_update BEFORE UPDATE OF id,source_id,pdf_page ON source_pages
- WHEN (NEW.id IS NOT OLD.id OR NEW.source_id IS NOT OLD.source_id OR NEW.pdf_page IS NOT OLD.pdf_page)
- AND EXISTS(SELECT 1 FROM source_suggestion_page_bounds WHERE page_id=OLD.id)
- BEGIN SELECT RAISE(ABORT,'Page identity with bounds is immutable'); END;
-CREATE TRIGGER source_suggestion_page_bounds_populate AFTER INSERT ON source_pages
+CREATE TRIGGER source_suggestion_page_bounds_populate AFTER INSERT ON sources
  BEGIN
  INSERT INTO source_suggestion_page_bounds
- SELECT NEW.id,json_extract(g.value,'$.width_points'),json_extract(g.value,'$.height_points')
+  SELECT NEW.id,json_extract(g.value,'$.pdf_page'),json_extract(g.value,'$.width_points'),json_extract(g.value,'$.height_points')
  FROM sources s,json_each(CASE WHEN length(s.prepared_json)<=8388608 AND json_valid(s.prepared_json) THEN s.prepared_json ELSE '{}' END,'$.pages') g
- WHERE s.id=NEW.source_id AND json_extract(g.value,'$.pdf_page')=NEW.pdf_page
+  WHERE s.id=NEW.id AND json_type(g.value,'$.pdf_page')='integer' AND json_extract(g.value,'$.pdf_page')>0
+ AND json_type(g.value,'$.width_points') IN ('integer','real') AND json_type(g.value,'$.height_points') IN ('integer','real')
+ AND json_extract(g.value,'$.width_points') BETWEEN 1 AND 4000 AND json_extract(g.value,'$.height_points') BETWEEN 1 AND 4000;
+  END;
+CREATE TRIGGER source_suggestion_page_bounds_populate_update AFTER UPDATE OF prepared_json ON sources
+ WHEN NEW.prepared_json IS NOT OLD.prepared_json AND NOT EXISTS(
+ SELECT 1 FROM source_suggestion_page_bounds WHERE source_id=NEW.id)
+ BEGIN
+ INSERT INTO source_suggestion_page_bounds
+ SELECT NEW.id,json_extract(g.value,'$.pdf_page'),json_extract(g.value,'$.width_points'),json_extract(g.value,'$.height_points')
+ FROM json_each(CASE WHEN length(NEW.prepared_json)<=8388608 AND json_valid(NEW.prepared_json) THEN NEW.prepared_json ELSE '{}' END,'$.pages') g
+ WHERE json_type(g.value,'$.pdf_page')='integer' AND json_extract(g.value,'$.pdf_page')>0
  AND json_type(g.value,'$.width_points') IN ('integer','real') AND json_type(g.value,'$.height_points') IN ('integer','real')
  AND json_extract(g.value,'$.width_points') BETWEEN 1 AND 4000 AND json_extract(g.value,'$.height_points') BETWEEN 1 AND 4000;
  END;
@@ -126,8 +135,8 @@ BEGIN
  SELECT CASE WHEN json_extract(NEW.targets,'$.type')='region' AND NOT coalesce(json_type(NEW.targets,'$.polygon')='array' AND json_array_length(NEW.targets,'$.polygon')=4,0)
  THEN RAISE(ABORT,'Suggestion region needs four points') END;
  SELECT CASE WHEN json_extract(NEW.targets,'$.type')='region' AND NOT EXISTS(
- SELECT 1 FROM source_suggestion_page_bounds g
- WHERE g.page_id=json_extract(NEW.targets,'$.page')
+  SELECT 1 FROM source_pages p JOIN source_suggestion_page_bounds g ON g.source_id=p.source_id AND g.pdf_page=p.pdf_page
+  WHERE p.id=json_extract(NEW.targets,'$.page') AND p.source_id=NEW.source_id
  AND NOT EXISTS(SELECT 1 FROM json_each(NEW.targets,'$.polygon') v WHERE NOT coalesce(json_type(v.value)='array' AND json_array_length(v.value)=2
  AND json_type(v.value,'$[0]') IN ('integer','real') AND json_type(v.value,'$[1]') IN ('integer','real')
  AND json_extract(v.value,'$[0]') BETWEEN 0 AND g.width AND json_extract(v.value,'$[1]') BETWEEN 0 AND g.height,0)))

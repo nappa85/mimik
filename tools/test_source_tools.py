@@ -13,6 +13,49 @@ from source_bundle import digest, page_blocks, parse_pages, review_units, verify
 
 
 class SourceReviewTests(unittest.TestCase):
+    def test_model_origin_accepts_exact_importer_byte_boundary(self):
+        for name in ("x" * 91, "é" * 45 + "x"):
+            review_extraction.validate_report_origin("reviewer", name)
+
+    def test_invalid_model_origin_is_refused_before_credentials_or_requests(self):
+        for model in (
+            "x" * 92,
+            "x" * 95,
+            "é" * 46,
+            "bad\nname",
+            "bad\x7fname",
+            "bad\x85name",
+        ):
+            with (
+                self.subTest(model=model),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "review",
+                        "unused",
+                        "--pdf",
+                        "unused.pdf",
+                        "--pages",
+                        "1",
+                        "--api-url",
+                        "https://example.invalid",
+                        "--model",
+                        model,
+                    ],
+                ),
+                patch.object(
+                    review_extraction,
+                    "resolve_api_key",
+                    side_effect=AssertionError("credentials accessed"),
+                ) as key,
+                patch.object(review_extraction.urllib.request, "build_opener") as request,
+            ):
+                with self.assertRaisesRegex(ValueError, "origin"):
+                    review_extraction.main()
+                key.assert_not_called()
+                request.assert_not_called()
+
     def setUp(self):
         self.page = {
             "id": "/page/29/Page/0",

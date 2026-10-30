@@ -10,7 +10,7 @@ DROP TABLE source_suggestion_dismissals;
 DROP TABLE source_suggestions;
 DROP TABLE source_suggestion_reports;
 DROP TRIGGER source_suggestion_page_bounds_populate;
+DROP TRIGGER source_suggestion_page_bounds_populate_update;
 DROP TRIGGER source_suggestion_bounds_source_update;
-DROP TRIGGER source_suggestion_bounds_page_update;
 DROP TABLE source_suggestion_page_bounds;
 PRAGMA user_version=24;

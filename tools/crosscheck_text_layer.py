@@ -31,12 +31,18 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from review_extraction import validate_report_append, validate_report_findings, write_report
+from review_extraction import (
+    validate_report_append,
+    validate_report_findings,
+    validate_report_origin,
+    write_report,
+)
 from source_bundle import digest
 
 SIMILAR = 0.6
 SHADOW_POINTS = 3
 UNREAD_MIN = 3
+TOOL_NAME = "crosscheck_text_layer"
 
 
 def page_words(page):
@@ -190,6 +196,7 @@ def main():
     parser.add_argument("bundle", type=Path)
     parser.add_argument("--pdf", required=True, type=Path)
     args = parser.parse_args()
+    validate_report_origin("tool", TOOL_NAME)
     bundle_path = args.bundle / "bundle.json"
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
     if digest(args.pdf) != bundle["source_sha256"]:
@@ -203,7 +210,7 @@ def main():
     report = {
         "schema_version": 2,
         "state": "tool_suggestions_not_verified",
-        "tool": "crosscheck_text_layer",
+        "tool": TOOL_NAME,
         "source_sha256": bundle["source_sha256"],
         "bundle_sha256": digest(bundle_path),
         "created_at": datetime.now(timezone.utc).isoformat(),

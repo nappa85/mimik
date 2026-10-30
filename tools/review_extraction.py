@@ -154,6 +154,15 @@ def validate_report_append(report, record):
         )
 
 
+def validate_report_origin(prefix, name):
+    """Match the importer's UTF-8 byte and Unicode control-character limits."""
+    origin = f"{prefix}:{name}"
+    if len(origin.encode("utf-8")) > 100 or any(
+        ord(char) < 32 or 127 <= ord(char) <= 159 for char in origin
+    ):
+        raise ValueError("Report origin must be at most 100 UTF-8 bytes and control-free.")
+
+
 def write_report(path, report):
     # A failed-page record also consumes space: never overwrite the last valid
     # report if even the failure metadata would exceed the importer's file cap.
@@ -204,6 +213,7 @@ def main():
         help="Optional dotenv file (default: .env in the working directory)",
     )
     args = parser.parse_args()
+    validate_report_origin("reviewer", args.model)
     url = urlsplit(args.api_url)
     if url.scheme != "https" or not url.hostname or url.username or url.password:
         raise ValueError("Use an HTTPS API endpoint without embedded credentials.")

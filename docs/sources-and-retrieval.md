@@ -85,9 +85,13 @@ target shape and text, with at most 64 KiB of target JSON. Units/pages must belo
 a positive revision no newer than its current revision. Older revisions remain identifiable
 as stale. A page note can retain a raw-node `block_id` citation (≤512 UTF-8 bytes, no NUL).
 Region geometry has the same bounds as owner units, checked in SQL and Rust (page dimensions
-that are not numbers are `Invalid`). SQL uses immutable per-page dimensions derived from the
-prepared source at migration/import, rather than parsing the entire bundle per suggestion.
-Prepared JSON and page identity cannot change once those bounds exist. Advice and its nullable
+that are not numbers are `Invalid`). SQL uses `source_suggestion_page_bounds`, keyed by
+`(source_id, pdf_page)` from the prepared source, rather than by the mutable database page id.
+Migration backfills all prepared pages of existing sources; source insertion and a change to
+`prepared_json` while the source has no bounds fill the lookup. Once any bounds exist, prepared
+JSON is immutable. Region checks join the cited page through its source and PDF page number,
+so replacing or renumbering an unfinalized database page cannot transfer another page's bounds.
+Suggestion insertion does not parse the entire prepared bundle. Advice and its nullable
 same-source `report_id` are immutable.
 
 `dismiss_source_suggestion` uses an IMMEDIATE transaction to append actor, time and an optional

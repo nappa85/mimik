@@ -25,6 +25,28 @@ def layer_page(*spans):
 
 
 class CrosscheckTests(unittest.TestCase):
+    def test_invalid_tool_origin_is_refused_before_reading_inputs(self):
+        for name in ("x" * 96, "é" * 48, "bad\nname", "bad\x7fname", "bad\x85name"):
+            with (
+                self.subTest(name=name),
+                patch.object(crosscheck_text_layer, "TOOL_NAME", name),
+                patch.object(sys, "argv", ["crosscheck", "unused", "--pdf", "unused.pdf"]),
+                patch.object(
+                    Path, "read_text", side_effect=AssertionError("inputs accessed")
+                ) as read,
+            ):
+                with self.assertRaisesRegex(ValueError, "origin"):
+                    crosscheck_text_layer.main()
+                read.assert_not_called()
+
+    def test_tool_origin_bounds(self):
+        for name in ("x" * 96, "é" * 48, "bad\nname", "bad\x7fname", "bad\x85name"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, "origin"):
+                    crosscheck_text_layer.validate_report_origin("tool", name)
+        for name in ("x" * 95, "é" * 47 + "x", "crosscheck_text_layer"):
+            crosscheck_text_layer.validate_report_origin("tool", name)
+
     def test_invalid_findings_fail_page_without_truncation(self):
         from source_bundle import digest, write_json
 
