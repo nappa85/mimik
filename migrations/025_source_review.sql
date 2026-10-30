@@ -28,6 +28,17 @@ CREATE TRIGGER source_suggestion_bounds_source_update BEFORE UPDATE OF prepared_
  WHEN NEW.prepared_json IS NOT OLD.prepared_json AND EXISTS(
   SELECT 1 FROM source_suggestion_page_bounds WHERE source_id=OLD.id)
  BEGIN SELECT RAISE(ABORT,'Prepared source with page bounds is immutable'); END;
+-- OR REPLACE through either unique key (id, bundle_hash) would otherwise hand the old bounds to
+-- the replacement source.
+CREATE TRIGGER source_suggestion_bounds_source_replace BEFORE INSERT ON sources
+ WHEN EXISTS(SELECT 1 FROM source_suggestion_page_bounds b JOIN sources s ON s.id=b.source_id
+  WHERE s.id=NEW.id OR s.bundle_hash=NEW.bundle_hash)
+ BEGIN SELECT RAISE(ABORT,'Prepared source with page bounds is immutable'); END;
+CREATE TRIGGER source_suggestion_bounds_source_identity BEFORE UPDATE OF id,bundle_hash ON sources
+ WHEN (NEW.id IS NOT OLD.id OR NEW.bundle_hash IS NOT OLD.bundle_hash) AND EXISTS(
+  SELECT 1 FROM source_suggestion_page_bounds b JOIN sources s ON s.id=b.source_id
+  WHERE s.id IN (OLD.id,NEW.id) OR s.bundle_hash=NEW.bundle_hash)
+ BEGIN SELECT RAISE(ABORT,'Prepared source with page bounds is immutable'); END;
 CREATE TRIGGER source_suggestion_page_bounds_populate AFTER INSERT ON sources
  BEGIN
  INSERT INTO source_suggestion_page_bounds

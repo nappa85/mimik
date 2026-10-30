@@ -677,6 +677,39 @@ fn unfinalized_bounds_survive_insert_or_replace_page() {
 }
 
 #[test]
+fn unfinalized_bounds_survive_source_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.sqlite3");
+    let _store = Store::open(&path).unwrap();
+    let db = Connection::open(path).unwrap();
+    let prepared = json!({"pages":[{"pdf_page":1,"width_points":200,"height_points":300}]});
+    insert_unfinalized_source(&db, 1, &prepared);
+    insert_unfinalized_page(&db, 10, 1, 1);
+    // Replacing the source by id or by bundle hash, with metadata that has no pages, must not
+    // leave the old bounds describing the replacement.
+    for (id, bundle) in [
+        (1, "b".repeat(64)),
+        (2, "b".repeat(64)),
+        (1, "c".repeat(64)),
+    ] {
+        assert!(
+            db.execute("INSERT OR REPLACE INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json) VALUES(?1,?2,'synthetic','Synthetic','mork-borg','fixture','en',?3,x'00',x'7b7d',x'7b7d')", params![id, bundle, "a".repeat(64)]).is_err(),
+            "replacement {id} {bundle}"
+        );
+    }
+    db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json) VALUES(3,?1,'synthetic','Synthetic','mork-borg','fixture','en',?2,x'00',x'7b7d',x'7b7d')", params!["d".repeat(64), "a".repeat(64)]).unwrap();
+    assert!(
+        db.execute("UPDATE OR REPLACE sources SET id=1 WHERE id=3", [])
+            .is_err()
+    );
+    assert!(
+        db.execute("UPDATE sources SET id=4 WHERE id=1", [])
+            .is_err()
+    );
+    insert_region(&db, 1, 10, 150).unwrap();
+}
+
+#[test]
 fn unfinalized_bounds_populate_when_prepared_metadata_becomes_valid() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("source.sqlite3");
