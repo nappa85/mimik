@@ -26,9 +26,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   `/admin/materials`, then the prompt tests use it. The page 29 footnote on armour grades is in
   no unit (L-SRC-1).
 
-- **Source import plan** (`docs/source-import-plan.md`, reviewed, SRC-11 to SRC-14): next is
-  step 1's independent change-set review and sandbox-external test gate, then step 2's own
-  plan (review screen). Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
+- **Source import plan** (`docs/source-import-plan.md`, reviewed, SRC-11 to SRC-14): step 1
+  (schema) merged; next is step 2's own plan (review screen). Step 1 follow-ups (Opus Minor):
+  `set_primary` answers NotFound for an unfinalized source without saying why; the
+  `lookup_is_interrupted_past_its_time_budget` test drops `source_primary_events_insert`
+  instead of seeding a finalized reading. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
   (`~/temp/`, tagged, clean text layer) through the prototype tools.
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
