@@ -250,6 +250,14 @@ fn lookup_within(
     let needs_primary_choice = count(format!(
         "SELECT count(*) FROM (SELECT DISTINCT m.document_id,p.pdf_page FROM {from} JOIN source_document_members m ON m.source_id=s.id JOIN source_pages p ON p.source_id=s.id WHERE {predicate} AND NOT EXISTS(SELECT 1 FROM source_primary_pages v WHERE v.document_id=m.document_id AND v.pdf_page=p.pdf_page))"
     ))?;
+    let primary_choice_sources = {
+        let mut statement = db.prepare(&format!("SELECT DISTINCT s.id FROM {from} JOIN source_document_members m ON m.source_id=s.id JOIN source_pages p ON p.source_id=s.id WHERE {predicate} AND NOT EXISTS(SELECT 1 FROM source_primary_pages v WHERE v.document_id=m.document_id AND v.pdf_page=p.pdf_page) ORDER BY s.id LIMIT 50"))?;
+        statement
+            .query_map(params![system, edition], |r| r.get(0))
+            .map_err(interrupted)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(interrupted)?
+    };
     let mut statement = db.prepare(&match_sql(registered))?;
     let mut matches = statement
         .query_map(params![system, edition, expression, set], |row| {
@@ -281,6 +289,7 @@ fn lookup_within(
         partial_runs,
         unindexed_units,
         needs_primary_choice,
+        primary_choice_sources,
         truncated,
         matches,
     })

@@ -1,19 +1,27 @@
 //! Bounded review advice reads and authenticated, atomic application of stored advice.
 use super::{
     OwnerUnit, SuggestionApplication, SuggestionTarget, UnitReview,
-    materials::{read_text, text},
+    materials::{LOOKUP_TEXT, audit, read_text, text},
 };
 use crate::{
     AppError, Store,
     auth::{CsrfAdmission, RequestAuth, with_domain_request},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use std::time::{Duration, Instant};
+use std::{
+    fmt::Write,
+    time::{Duration, Instant},
+};
 
+type AdvicePage = (Vec<Advice>, Option<i64>);
+type ScreenAdvice = std::collections::BTreeMap<i64, AdvicePage>;
+
+#[derive(Clone)]
 pub(crate) struct Segment {
     pub kind: &'static str,
     pub text: String,
 }
+#[derive(Clone)]
 pub(crate) struct Difference {
     pub segments: Vec<Segment>,
     pub fallback: bool,
@@ -60,7 +68,9 @@ impl Budget {
         value[..end].to_owned()
     }
     pub(crate) fn difference(&mut self, old: &str, new: &str) -> Difference {
-        let size = old.len().saturating_add(new.len());
+        // HTML escaping can expand a byte to six bytes; every change also has
+        // a wrapper. Account for both, rather than budgeting only source text.
+        let size = old.len().saturating_add(new.len()).saturating_mul(20);
         // Leave room in the authenticated five-second request window for reads and
         // rendering even when every individual comparison exhausts its deadline.
         let deadline = *self
@@ -78,15 +88,15 @@ impl Budget {
             allowed.then(|| deadline.min(Instant::now() + Duration::from_millis(50))),
         );
         if result.fallback {
-            result.old = self.retain(&result.old, 1);
-            result.new = self.retain(&result.new, 1);
+            result.old = self.retain(&result.old, 6);
+            result.new = self.retain(&result.new, 6);
         } else {
             self.bytes += size;
         }
         result
     }
 }
-fn difference(old: &str, new: &str, deadline: Option<Instant>) -> Difference {
+pub(crate) fn difference(old: &str, new: &str, deadline: Option<Instant>) -> Difference {
     let mut result = Difference {
         segments: Vec::new(),
         fallback: true,
@@ -105,23 +115,28 @@ fn difference(old: &str, new: &str, deadline: Option<Instant>) -> Difference {
     if Instant::now() >= deadline {
         return result;
     }
-    result.segments = diff
-        .iter_all_changes()
-        .map(|change| Segment {
-            kind: match change.tag() {
-                similar::ChangeTag::Delete => "delete",
-                similar::ChangeTag::Insert => "insert",
-                similar::ChangeTag::Equal => "equal",
-            },
-            text: change.value().to_owned(),
-        })
-        .collect();
+    for change in diff.iter_all_changes() {
+        let kind = match change.tag() {
+            similar::ChangeTag::Delete => "delete",
+            similar::ChangeTag::Insert => "insert",
+            similar::ChangeTag::Equal => "equal",
+        };
+        if let Some(last) = result.segments.last_mut().filter(|last| last.kind == kind) {
+            last.text.push_str(change.value());
+        } else {
+            result.segments.push(Segment {
+                kind,
+                text: change.value().to_owned(),
+            });
+        }
+    }
     result.old.clear();
     result.new.clear();
     result.fallback = false;
     result
 }
 
+#[derive(Clone)]
 pub(crate) struct Advice {
     pub id: i64,
     pub page: i64,
@@ -139,8 +154,23 @@ pub(crate) struct Advice {
     pub lookup_truncated: bool,
     pub anchor: String,
     pub target_links: Vec<(i64, i64)>,
+    pub compact: bool,
+    pub compact_targets: String,
 }
 impl Advice {
+    fn write_back_link(&mut self, db: &Connection) -> Result<String, AppError> {
+        if let Some(unit) = targets(&self.target).first() {
+            self.cursor = db.query_row(
+                &format!(
+                    "{} SELECT position-1 FROM ordered WHERE id=?2",
+                    super::materials::ORDERED_UNITS
+                ),
+                params![self.page, unit.unit],
+                |r| r.get(0),
+            )?;
+        }
+        Ok(self.back_link())
+    }
     pub(crate) fn actionable(&self) -> bool {
         self.state == "open" && self.kind != "note"
     }
@@ -167,6 +197,24 @@ fn targets(target: &SuggestionTarget) -> Vec<super::SuggestionUnit> {
     }
 }
 fn load(db: &Connection, id: i64, preview: bool) -> Result<Advice, AppError> {
+    load_many(db, &[id], preview)?
+        .pop()
+        .ok_or(AppError::SourceNotFound)
+}
+struct StoredAdvice {
+    id: i64,
+    kind: String,
+    origin: String,
+    rationale: String,
+    json: String,
+    suggested: String,
+    report: Option<i64>,
+    applied: bool,
+    dismissed: bool,
+    source: i64,
+    suggested_truncated: bool,
+}
+fn load_many(db: &Connection, ids: &[i64], preview: bool) -> Result<Vec<Advice>, AppError> {
     let suggested_column = text("coalesce(suggested_text,'')", 80000);
     let suggested_column = if preview {
         format!("substr({suggested_column},1,2000)")
@@ -174,66 +222,98 @@ fn load(db: &Connection, id: i64, preview: bool) -> Result<Advice, AppError> {
         suggested_column
     };
     let sql = format!(
-        "SELECT {},{},{},{},{},report_id,EXISTS(SELECT 1 FROM source_suggestion_applications WHERE suggestion_id=s.id),EXISTS(SELECT 1 FROM source_suggestion_dismissals WHERE suggestion_id=s.id),source_id FROM source_suggestions s WHERE id=?1",
+        "SELECT {},{},{},{},{},report_id,EXISTS(SELECT 1 FROM source_suggestion_applications WHERE suggestion_id=s.id),EXISTS(SELECT 1 FROM source_suggestion_dismissals WHERE suggestion_id=s.id),source_id,id,length(coalesce(suggested_text,''))>{} FROM source_suggestions s WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY id",
         text("kind", 100),
         text("origin", 400),
-        text("rationale", 20000),
+        if preview {
+            format!("substr({},1,200)", text("rationale", 20000))
+        } else {
+            text("rationale", 20000)
+        },
         text("targets", 65536),
-        suggested_column
+        suggested_column,
+        if preview { 2000 } else { 20000 },
     );
-    let (kind, origin, rationale, json, suggested, report, applied, dismissed, source): (
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<i64>,
-        bool,
-        bool,
-        i64,
-    ) = db
-        .query_row(&sql, [id], |r| {
-            Ok((
-                read_text(r, 0)?,
-                read_text(r, 1)?,
-                read_text(r, 2)?,
-                read_text(r, 3)?,
-                read_text(r, 4)?,
-                r.get(5)?,
-                r.get(6)?,
-                r.get(7)?,
-                r.get(8)?,
-            ))
-        })
-        .optional()?
-        .ok_or(AppError::SourceNotFound)?;
+    let mut query = db.prepare(&sql)?;
+    let stored = query
+        .query_map([serde_json::to_string(ids)?], |r| {
+            Ok(StoredAdvice {
+                kind: read_text(r, 0)?,
+                origin: read_text(r, 1)?,
+                rationale: read_text(r, 2)?,
+                json: read_text(r, 3)?,
+                suggested: read_text(r, 4)?,
+                report: r.get(5)?,
+                applied: r.get(6)?,
+                dismissed: r.get(7)?,
+                source: r.get(8)?,
+                id: r.get(9)?,
+                suggested_truncated: r.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    stored
+        .into_iter()
+        .map(|row| load_evidence(db, row, preview))
+        .collect()
+}
+fn load_evidence(db: &Connection, stored: StoredAdvice, preview: bool) -> Result<Advice, AppError> {
+    let StoredAdvice {
+        id,
+        kind,
+        origin,
+        rationale,
+        json,
+        suggested,
+        report,
+        applied,
+        dismissed,
+        source,
+        suggested_truncated,
+    } = stored;
     let target: SuggestionTarget = serde_json::from_str(&json)?;
     let mut lookup = String::new();
     let mut stale = false;
-    let mut lookup_truncated = false;
+    let mut lookup_truncated = suggested_truncated;
     let limit: usize = if preview { 2000 } else { 20000 };
-    let mut length = 0;
-    let lookup_column = text(
-        "CASE u.state WHEN 'accepted' THEN coalesce(t.search_text,'') WHEN 'corrected' THEN u.correction ELSE '' END",
-        262_144,
-    );
+    let lookup_column = text(LOOKUP_TEXT, 262_144);
     let mut page = match &target {
         SuggestionTarget::Page { page, .. } | SuggestionTarget::Region { page, .. } => *page,
         _ => 0,
     };
-    for unit in targets(&target) {
-        let (p, revision, value, full_length): (i64,i64,String,usize) = db.query_row(&format!("SELECT u.page_id,u.revision,substr({lookup_column},1,?3),length({lookup_column}) FROM source_units u JOIN source_pages p ON p.id=u.page_id LEFT JOIN source_search_text t ON t.unit_id=u.id WHERE u.id=?1 AND p.source_id=?2"),params![unit.unit,source,limit],|r|Ok((r.get(0)?,r.get(1)?,read_text(r,2)?,r.get(3)?)))?;
-        page = p;
-        stale |= revision != unit.revision;
-        lookup_truncated |= length + full_length + usize::from(!lookup.is_empty()) > limit;
-        // A multi-target detail remains bounded, even for 1,024 accepted units.
-        if !lookup.is_empty() && length < limit {
-            lookup.push('\n');
-            length += 1;
+    let units = targets(&target);
+    if !units.is_empty() {
+        // One batch reads revisions and bounded text for the whole merge. SQLite
+        // computes offsets before substr: text past the aggregate limit never
+        // crosses the allocation boundary, even in preview mode.
+        let json = serde_json::to_string(&units)?;
+        let sql = format!(
+            "WITH wanted AS (SELECT CAST(key AS INTEGER) position,json_extract(value,'$.unit') unit,json_extract(value,'$.revision') expected FROM json_each(?1)), evidence AS (SELECT w.position,u.page_id,u.revision!=w.expected stale,{lookup_column} value FROM wanted w JOIN source_units u ON u.id=w.unit JOIN source_pages p ON p.id=u.page_id LEFT JOIN source_search_text t ON t.unit_id=u.id WHERE p.source_id=?2), measured AS (SELECT *,coalesce(sum(length(value)+1) OVER (ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),0) offset FROM evidence) SELECT max(page_id),max(stale),coalesce(group_concat(CASE WHEN offset<?3 THEN substr(value,1,?3-offset) END,char(10)),''),coalesce(sum(length(value)+1)-1,0)>?3,count(*),sum(value IS NULL) FROM measured"
+        );
+        let (p, is_stale, value, truncated, count, invalid): (
+            i64,
+            bool,
+            String,
+            bool,
+            usize,
+            usize,
+        ) = db.query_row(&sql, params![json, source, limit], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                read_text(r, 2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?;
+        if count != units.len() || invalid > 0 {
+            return Err(AppError::Invalid("Invalid suggestion target evidence."));
         }
-        let remaining = limit.saturating_sub(length);
-        lookup.extend(value.chars().take(remaining));
-        length += full_length.min(remaining);
+        page = p;
+        stale = is_stale;
+        lookup = value;
+        lookup_truncated |= truncated;
     }
     let belongs: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM source_pages WHERE id=?1 AND source_id=?2)",
@@ -243,11 +323,16 @@ fn load(db: &Connection, id: i64, preview: bool) -> Result<Advice, AppError> {
     if !belongs {
         return Err(AppError::SourceNotFound);
     }
-    let target_label = targets(&target)
+    let mut target_label = units
         .iter()
+        .take(8)
         .map(|t| format!("unit {} (revision {})", t.unit, t.revision))
         .collect::<Vec<_>>()
         .join(", ");
+    if units.len() > 8 {
+        write!(target_label, ", and {} more targets", units.len() - 8)
+            .expect("writing to a String cannot fail");
+    }
     Ok(Advice {
         id,
         page,
@@ -265,6 +350,13 @@ fn load(db: &Connection, id: i64, preview: bool) -> Result<Advice, AppError> {
         lookup_truncated,
         anchor: format!("suggestion-{id}"),
         target_links: Vec::new(),
+        compact: false,
+        compact_targets: units
+            .iter()
+            .take(8)
+            .map(|unit| unit.unit.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
     })
 }
 
@@ -296,16 +388,17 @@ pub(crate) struct Card {
     pub form_omitted: bool,
 }
 pub(crate) struct Screen {
+    pub geometry: bool,
     pub width: f64,
     pub height: f64,
     pub overlay: Vec<Overlay>,
     pub overlay_omitted: bool,
+    pub regions_omitted: bool,
     pub cards: Vec<Card>,
     pub notes: Vec<Advice>,
     pub notes_next: Option<i64>,
     pub next_unit: Option<(i64, i64)>,
     pub next_page: Option<i64>,
-    pub document: i64,
     pub primary: super::PrimaryPageState,
 }
 fn points(polygon: &[[f64; 2]; 4]) -> String {
@@ -325,30 +418,96 @@ fn advice_list(
     page: i64,
     unit: i64,
     after: i64,
-    budget: &mut Budget,
 ) -> Result<(Vec<Advice>, Option<i64>), AppError> {
     let mut ids = advice_ids(db, page, unit, after)?;
     let more = ids.len() > 20;
     ids.truncate(20);
     let next = more.then(|| *ids.last().expect("twenty advice ids"));
     let mut rows = Vec::new();
-    for id in ids {
-        let preview = !budget.comparison_available();
-        let mut row = load(db, id, preview)?;
-        row.anchor = format!("suggestion-{id}-unit-{unit}");
-        row.difference = if preview {
-            let mut result = difference(&row.lookup, &row.suggested, None);
-            result.old = budget.retain(&result.old, 1);
-            result.new = budget.retain(&result.new, 1);
-            result
-        } else {
-            budget.difference(&row.lookup, &row.suggested)
-        };
-        row.lookup.clear();
-        row.suggested.clear();
+    for mut row in load_many(db, &ids, true)? {
+        row.anchor = format!("suggestion-{}-unit-{unit}", row.id);
         rows.push(row);
     }
     Ok((rows, next))
+}
+
+fn screen_advice(
+    db: &Connection,
+    page: i64,
+    units: &[i64],
+    after: i64,
+) -> Result<ScreenAdvice, AppError> {
+    // Expand each stored target list once, rather than scanning the source's
+    // suggestion JSON separately for every card.
+    let mut selected = units.to_vec();
+    selected.push(0);
+    let mut query = db.prepare("WITH expanded AS MATERIALIZED (SELECT s.id,coalesce(json_extract(t.value,'$.unit'),json_extract(s.targets,'$.target.unit'),0) unit,json_extract(s.targets,'$.page') page FROM source_suggestions s LEFT JOIN json_each(s.targets,'$.targets') t WHERE s.source_id=(SELECT source_id FROM source_pages WHERE id=?1)), ranked AS (SELECT id,unit,row_number() OVER (PARTITION BY unit ORDER BY id) ordinal FROM expanded WHERE unit IN (SELECT value FROM json_each(?2)) AND (unit>0 OR (page=?1 AND id>?3))) SELECT unit,id FROM ranked WHERE ordinal<=21 ORDER BY unit,id")?;
+    let ids = query
+        .query_map(
+            params![page, serde_json::to_string(&selected)?, after],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let unique = ids
+        .iter()
+        .map(|(_, id)| *id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let cache = load_many(db, &unique, true)?
+        .into_iter()
+        .map(|row| (row.id, row))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut rows = std::collections::BTreeMap::new();
+    for (unit, id) in ids {
+        let entry = rows.entry(unit).or_insert_with(|| (Vec::new(), None));
+        if entry.0.len() == 20 {
+            entry.1 = entry.0.last().map(|row: &Advice| row.id);
+            continue;
+        }
+        let compact = !seen.insert(id);
+        let mut row = cache[&id].clone();
+        row.compact = compact;
+        if compact {
+            row.lookup.clear();
+            row.suggested.clear();
+            row.rationale.clear();
+            if let SuggestionTarget::Units { targets } = &mut row.target {
+                targets.clear();
+            }
+        }
+        row.anchor = format!("suggestion-{id}-unit-{unit}");
+        entry.0.push(row);
+    }
+    Ok(rows)
+}
+
+fn compare_screen(screen: &mut Screen, mut budget: Budget) {
+    for card in &mut screen.cards {
+        for row in &mut card.advice {
+            compare_card(row, &mut budget);
+        }
+    }
+    for row in &mut screen.notes {
+        compare_card(row, &mut budget);
+    }
+}
+
+fn compare_card(row: &mut Advice, budget: &mut Budget) {
+    row.rationale = budget.retain(&row.rationale.chars().take(200).collect::<String>(), 6);
+    row.difference = if row.compact {
+        difference("", "", None)
+    } else if row.lookup_truncated || !budget.comparison_available() {
+        let mut result = difference(&row.lookup, &row.suggested, None);
+        result.old = budget.retain(&result.old, 6);
+        result.new = budget.retain(&result.new, 6);
+        result
+    } else {
+        budget.difference(&row.lookup, &row.suggested)
+    };
+    row.lookup.clear();
+    row.suggested.clear();
 }
 
 impl Store {
@@ -362,15 +521,22 @@ impl Store {
         if notes_after < 0 {
             return Err(AppError::Invalid("Cursors must be nonnegative."));
         }
-        self.run_bounded_auth(move |db| {
+        let auth_for_recheck = auth.clone();
+        let (mut screen, budget) = self.run_bounded_auth(move |db| {
             let tx=db.transaction()?; auth.recheck_owner(&tx)?;
-            let (width,height)=super::documents::polygon_bounds(&tx,page).unwrap_or((1.0,1.0));
+            let bounds = match super::documents::polygon_bounds(&tx,page) {
+                Ok((width,height)) if width.is_finite() && height.is_finite() && (1.0..=4000.0).contains(&width) && (1.0..=4000.0).contains(&height) => Some((width,height)),
+                Ok(_) | Err(AppError::Invalid("Page geometry is missing or invalid.")) => None,
+                Err(error) => return Err(error),
+            };
+            let geometry = bounds.is_some();
+            let (width,height) = bounds.unwrap_or_default();
             let (document,pdf):(Option<i64>,i64)=tx.query_row("SELECT m.document_id,p.pdf_page FROM source_pages p LEFT JOIN source_document_members m ON m.source_id=p.source_id WHERE p.id=?1",[page],|r|Ok((r.get(0)?,r.get(1)?)))?;
             let document=document.unwrap_or(0);
             let primary=super::documents::primary_state(&tx,document,pdf)?;
             let count:i64=tx.query_row("SELECT count(*) FROM source_units WHERE page_id=?1",[page],|r|r.get(0))?;
             let mut overlay=Vec::new();
-            if count<=2000 {
+            if geometry && count<=2000 {
                 let mut q=tx.prepare(&format!("{} SELECT id,polygon,position-1 FROM ordered ORDER BY position LIMIT 2000",super::materials::ORDERED_UNITS))?;
                 for item in q.query_map([page],|r|Ok((r.get::<_,i64>(0)?,read_text(r,1)?,r.get(2)?)))? {
                     let (unit,json,cursor)=item?;
@@ -378,27 +544,44 @@ impl Store {
                 }
             }
             let mut budget=Budget::default();
+            let mut advice=screen_advice(&tx,page,&units,notes_after)?;
+            // Structural HTML, target labels, controls and bounded overlay data.
+            budget.reserve(512 * 1024);
             let mut cards=Vec::new();
             for unit in units {
-                let (lookup,correction_bytes):(String,usize)=tx.query_row(&format!("SELECT {},length(CAST(u.correction AS BLOB)) FROM source_units u LEFT JOIN source_search_text t ON t.unit_id=u.id WHERE u.id=?1 AND u.page_id=?2",text("CASE u.state WHEN 'accepted' THEN coalesce(t.search_text,'') WHEN 'corrected' THEN u.correction ELSE '' END",262_144)),params![unit,page],|r|Ok((read_text(r,0)?,r.get(1)?)))?;
+                let (lookup,correction_bytes):(String,usize)=tx.query_row(&format!("SELECT {},length(CAST(u.correction AS BLOB)) FROM source_units u LEFT JOIN source_search_text t ON t.unit_id=u.id WHERE u.id=?1 AND u.page_id=?2",text(LOOKUP_TEXT,262_144)),params![unit,page],|r|Ok((read_text(r,0)?,r.get(1)?)))?;
                 // A failed unit form is reloaded as the first card. Reserve the
                 // complete POST bound there so even an invalid draft fits intact.
                 let form_omitted = !budget.reserve(if cards.is_empty() {320 * 1024} else {correction_bytes});
                 let retained=budget.retain(&lookup,2);
                 let preview=retained.len()!=lookup.len();
-                let (advice,next)=advice_list(&tx,page,unit,0,&mut budget)?;
+                let (advice,next)=advice.remove(&unit).unwrap_or_default();
                 let cursor=tx.query_row(&format!("{} SELECT position-1 FROM ordered WHERE id=?2",super::materials::ORDERED_UNITS),params![page,unit],|r|r.get(0))?;
                 cards.push(Card{unit,cursor,lookup:retained,advice,next,preview,form_omitted});
             }
-            let (notes,notes_next)=advice_list(&tx,page,0,notes_after,&mut budget)?;
-            for row in &notes {
-                if let SuggestionTarget::Region { polygon, .. }=&row.target { overlay.push(Overlay{unit:0,cursor:0,points:points(polygon),suggestion:row.id}); }
+            let (notes,notes_next)=advice.remove(&0).unwrap_or_default();
+            let mut regions_omitted = false;
+            if geometry {
+                let mut query = tx.prepare(&format!("SELECT id,{} FROM source_suggestions WHERE source_id=(SELECT source_id FROM source_pages WHERE id=?1) AND kind='missing_text' AND json_extract(targets,'$.page')=?1 ORDER BY id LIMIT 2001",text("targets",65536)))?;
+                for (index, row) in query.query_map([page], |r| Ok((r.get::<_,i64>(0)?,read_text(r,1)?)))?.enumerate() {
+                    let (id,json) = row?;
+                    if index == 2000 { regions_omitted = true; break; }
+                    if let SuggestionTarget::Region { polygon, .. }=serde_json::from_str(&json)? { overlay.push(Overlay{unit:0,cursor:0,points:points(&polygon),suggestion:id}); }
+                }
             }
             let next_unit=tx.query_row(&format!("{} SELECT id,position-1 FROM ordered WHERE state='unreviewed' ORDER BY position LIMIT 1",super::materials::ORDERED_UNITS),[page],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
             let next_page=tx.query_row("SELECT p.id FROM source_pages p WHERE p.source_id=(SELECT source_id FROM source_pages WHERE id=?1) AND p.pdf_page>(SELECT pdf_page FROM source_pages WHERE id=?1) AND p.complete=0 ORDER BY p.pdf_page LIMIT 1",[page],|r|r.get(0)).optional()?;
             auth.recheck_owner(&tx)?; tx.commit()?;
-            Ok(Screen{width,height,overlay,overlay_omitted:count>2000,cards,notes,notes_next,next_unit,next_page,document,primary})
-        }).await
+            Ok((Screen{geometry,width,height,overlay,overlay_omitted:count>2000,regions_omitted,cards,notes,notes_next,next_unit,next_page,primary},budget))
+        }).await?;
+        screen = tokio::task::spawn_blocking(move || {
+            compare_screen(&mut screen, budget);
+            screen
+        })
+        .await
+        .map_err(|_| AppError::Worker)?;
+        self.material_recheck(auth_for_recheck).await?;
+        Ok(screen)
     }
     pub(crate) async fn material_advice_list(
         &self,
@@ -410,22 +593,31 @@ impl Store {
         if after < 0 {
             return Err(AppError::Invalid("Cursors must be nonnegative."));
         }
-        self.run_bounded_auth(move |db| {
-            let tx = db.transaction()?;
-            auth.recheck_owner(&tx)?;
-            let rows = advice_list(&tx, page, unit, after, &mut Budget::default())?;
-            auth.recheck_owner(&tx)?;
-            tx.commit()?;
-            Ok(rows)
+        let auth_for_recheck = auth.clone();
+        let (mut rows, next) = self
+            .run_bounded_auth(move |db| {
+                let tx = db.transaction()?;
+                auth.recheck_owner(&tx)?;
+                let rows = advice_list(&tx, page, unit, after)?;
+                auth.recheck_owner(&tx)?;
+                tx.commit()?;
+                Ok(rows)
+            })
+            .await?;
+        rows = tokio::task::spawn_blocking(move || {
+            let mut budget = Budget::default();
+            budget.reserve(128 * 1024);
+            for row in &mut rows {
+                compare_card(row, &mut budget);
+            }
+            rows
         })
         .await
+        .map_err(|_| AppError::Worker)?;
+        self.material_recheck(auth_for_recheck).await?;
+        Ok((rows, next))
     }
 }
-fn audit(tx: &Transaction<'_>, auth: &RequestAuth, event: i64) -> Result<(), AppError> {
-    tx.execute("INSERT INTO source_web_events(event_id,actor_id,actor_epoch,session_digest) VALUES(?1,?2,?3,?4)",params![event,auth.account_id(),auth.epoch(),auth.digest()])?;
-    Ok(())
-}
-
 impl Store {
     pub(crate) async fn material_advice(
         &self,
@@ -450,7 +642,8 @@ impl Store {
                     |r| r.get(0),
                 )?;
             }
-            advice.difference = Budget::default().difference(&advice.lookup, &advice.suggested);
+            // The HTTP renderer reserves full texts and the submitted draft
+            // before deciding whether a comparison fits, outside this mutex.
             auth.recheck_owner(&tx)?;
             tx.commit()?;
             Ok(advice)
@@ -464,13 +657,12 @@ impl Store {
         id: i64,
         rationale: String,
         edit: Option<String>,
-    ) -> Result<i64, AppError> {
+    ) -> Result<String, AppError> {
         self.run_bounded_auth(move |db| {
             with_domain_request(auth.clone(), || {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                auth.recheck_owner(&tx)?;
-                csrf.recheck(&tx)?;
-                let advice = load(&tx, id, false)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
+                let mut advice = load(&tx, id, false)?;
                 super::suggestions::check_open(&tx, id)?;
                 if advice.state == "stale" {
                     return Err(AppError::Conflict);
@@ -556,10 +748,10 @@ impl Store {
                     }
                 }
                 super::suggestions::record_application(&tx, &app)?;
-                auth.recheck_owner(&tx)?;
-                csrf.recheck(&tx)?;
+                let back_link = advice.write_back_link(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
                 tx.commit()?;
-                Ok(advice.page)
+                Ok(back_link)
             })
         })
         .await
@@ -570,16 +762,17 @@ impl Store {
         csrf: CsrfAdmission,
         id: i64,
         reason: String,
-    ) -> Result<i64, AppError> {
+    ) -> Result<String, AppError> {
         self.run_bounded_auth(move |db| with_domain_request(auth.clone(), || {
             let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            auth.recheck_owner(&tx)?; csrf.recheck(&tx)?;
+            csrf.recheck_owner_write(&tx, &auth)?;
             if reason.chars().count()>5000 || reason.contains('\0') { return Err(AppError::Invalid("Dismissal reason exceeds 5,000 characters or contains NUL.")); }
-            let advice=load(&tx,id,false)?; super::suggestions::check_open(&tx,id)?;
+            let mut advice=load(&tx,id,false)?; super::suggestions::check_open(&tx,id)?;
             tx.execute("INSERT INTO source_suggestion_dismissals(suggestion_id,actor,reason) VALUES(?1,?2,?3)",params![id,format!("account:{}",auth.account_id()),(!reason.trim().is_empty()).then_some(reason)])?;
             let event=tx.last_insert_rowid();
             tx.execute("INSERT INTO source_suggestion_web_events(event_id,actor_id,actor_epoch,session_digest) VALUES(?1,?2,?3,?4)",params![event,auth.account_id(),auth.epoch(),auth.digest()])?;
-            auth.recheck_owner(&tx)?; csrf.recheck(&tx)?; tx.commit()?; Ok(advice.page)
+            let back_link = advice.write_back_link(&tx)?;
+            csrf.recheck_owner_write(&tx, &auth)?; tx.commit()?; Ok(back_link)
         })).await
     }
 }
@@ -688,10 +881,18 @@ mod tests {
         let result = difference(&old, &new, Some(Instant::now()));
         assert!(result.fallback);
         assert_eq!(result.old.chars().count(), 2000);
-        let result = difference(&old, &new, Some(Instant::now() + Duration::from_millis(50)));
+        let mut expired = Budget {
+            deadline: Some(Instant::now()),
+            ..Budget::default()
+        };
+        let result = expired.difference(&old, &new);
         assert!(
             result.fallback,
-            "repetitive input must fall back at the live deadline"
+            "an exhausted comparison deadline must deterministically fall back"
+        );
+        assert_eq!(
+            expired.count, 0,
+            "expired work must not enter the comparison engine"
         );
         let mut budget = Budget::default();
         for _ in 0..100 {

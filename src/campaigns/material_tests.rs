@@ -28,6 +28,110 @@ fn suggestion_unit(unit: i64) -> crate::sources::SuggestionTarget {
 }
 
 #[tokio::test]
+async fn material_review_unreviewed_comparison_uses_extraction() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let id = suggestion_fixture(&store, "correction", suggestion_unit(1)).await;
+    let advice = store.material_advice(auth[0].clone(), id).await.unwrap();
+    assert_eq!(advice.lookup, "Fixture\n");
+}
+
+#[tokio::test]
+async fn material_review_truncated_lookup_forces_labelled_preview() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    store
+        .run(|db| {
+            replace_unit(db, "unit-1", &"x".repeat(21000))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    finalize_material(&store).await;
+    store
+        .material_review_unit(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            1,
+            1,
+            crate::sources::UnitReview {
+                revision: 1,
+                state: "accepted".into(),
+                correction: String::new(),
+                actor: String::new(),
+                rationale: "Checked".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let id = store
+        .insert_source_suggestion(crate::sources::SourceSuggestion {
+            source: 1,
+            bundle_hash: "a".repeat(64),
+            origin: "tool:fixture".into(),
+            kind: "correction".into(),
+            target: crate::sources::SuggestionTarget::Unit {
+                target: crate::sources::SuggestionUnit {
+                    unit: 1,
+                    revision: 2,
+                },
+            },
+            suggested_text: Some("x".repeat(20000)),
+            rationale: "Prefix only".into(),
+            report_id: None,
+        })
+        .await
+        .unwrap();
+    let advice = store.material_advice(auth[0].clone(), id).await.unwrap();
+    assert!(advice.lookup_truncated);
+    assert!(
+        advice.difference.fallback,
+        "a truncated prefix is not a complete difference"
+    );
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    assert!(html.contains("Comparison text truncated"));
+}
+
+#[tokio::test]
+async fn material_review_single_unit_has_no_batch_operation() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    store
+        .material_review_unit(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            1,
+            1,
+            crate::sources::UnitReview {
+                revision: 1,
+                state: "accepted".into(),
+                correction: String::new(),
+                actor: String::new(),
+                rationale: "Checked".into(),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .run(|db| {
+            let operation: Option<String> = db.query_row(
+                "SELECT operation_id FROM source_review_events WHERE unit_id=1",
+                [],
+                |r| r.get(0),
+            )?;
+            assert!(operation.is_none(), "single-unit review is not a batch");
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn material_suggestion_accept_stored_edit_stale_and_dismissal_exclusion() {
     let _lock = crate::auth::test_resource_lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
@@ -58,6 +162,19 @@ async fn material_suggestion_accept_stored_edit_stale_and_dismissal_exclusion() 
             )
             .await
             .is_err()
+    );
+    assert!(
+        store
+            .material_accept(
+                auth[0].clone(),
+                auth[1].csrf_fixture(),
+                first,
+                "Cross-session admission must be rejected".into(),
+                None,
+            )
+            .await
+            .is_err(),
+        "a valid CSRF admission from another session is not Owner authority"
     );
     store
         .material_accept(
@@ -298,7 +415,7 @@ async fn material_merge_long_decimal_rectangle_and_stale_second_target() {
 }
 
 #[tokio::test]
-async fn material_suggestion_accept_dismiss_race_has_one_winner() {
+async fn material_suggestion_accept_dismiss_serialized_store_calls_have_one_winner() {
     let _lock = crate::auth::test_resource_lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
     seed(&store).await;
@@ -412,6 +529,206 @@ async fn material_review_response_bounds_and_labels() {
         }
     }
     assert!(bytes <= 2 * 1024 * 1024, "{bytes}");
+}
+
+#[tokio::test]
+async fn material_review_worst_case_merge_response() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    store.run(|db| {
+        for id in 52..=1024 {
+            db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(?1,1,?2,'Text','[[1,1],[20,1],[20,20],[1,20]]','<p>Fixture</p>','Fixture')", params![id,format!("unit-{id}")])?;
+        }
+        crate::sources::search::ensure(db)?;
+        Ok(())
+    }).await.unwrap();
+    finalize_material(&store).await;
+    for _ in 0..20 {
+        store
+            .insert_source_suggestion(crate::sources::SourceSuggestion {
+                source: 1,
+                bundle_hash: "a".repeat(64),
+                origin: "tool:fixture".into(),
+                kind: "merge".into(),
+                target: crate::sources::SuggestionTarget::Units {
+                    targets: (1..=1024)
+                        .map(|unit| crate::sources::SuggestionUnit { unit, revision: 1 })
+                        .collect(),
+                },
+                suggested_text: Some("🦀".repeat(20000)),
+                rationale: "🦀".repeat(5000),
+                report_id: None,
+            })
+            .await
+            .unwrap();
+    }
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let start = std::time::Instant::now();
+    let response = router_get(&app, &auth[0], "/admin/materials/pages/1").await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "worst case must complete inside the request window"
+    );
+    let html = body(response).await;
+    let elapsed = start.elapsed();
+    eprintln!(
+        "worst-case merge: {:?}, {} rendered bytes",
+        elapsed,
+        html.len()
+    );
+    assert!(elapsed < std::time::Duration::from_secs(5));
+    assert!(
+        html.len() <= 2 * 1024 * 1024,
+        "{} rendered bytes",
+        html.len()
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        store.material_recheck(auth[0].clone()),
+    )
+    .await
+    .expect("store must be available immediately after rendering")
+    .unwrap();
+    check_large_merge_detail(app, store, auth).await;
+}
+
+async fn check_large_merge_detail(app: axum::Router, store: Store, auth: Vec<RequestAuth>) {
+    let detail = body(router_get(&app, &auth[0], "/admin/materials/suggestions/1").await).await;
+    eprintln!("1,024-target detail GET: {} bytes", detail.len());
+    assert!(detail.len() <= 256 * 1024);
+    let draft = "🦀".repeat(20000);
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/suggestions/1/accept",
+        review_form(&[("edit", "yes"), ("edited_text", &draft), ("rationale", "")]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let detail = body(response).await;
+    eprintln!("1,024-target detail 422: {} bytes", detail.len());
+    assert!(detail.len() <= 256 * 1024);
+    assert_eq!(
+        field_value(&detail, "[data-form=accept] textarea[name=edited_text]"),
+        draft
+    );
+    store
+        .material_review_unit(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            1,
+            1,
+            crate::sources::UnitReview {
+                revision: 1,
+                state: "accepted".into(),
+                correction: String::new(),
+                actor: String::new(),
+                rationale: "Checked".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/suggestions/1/accept",
+        review_form(&[
+            ("edit", "yes"),
+            ("edited_text", &draft),
+            ("rationale", "Checked"),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let detail = body(response).await;
+    eprintln!("1,024-target detail 409: {} bytes", detail.len());
+    assert!(detail.len() <= 256 * 1024);
+    assert_eq!(
+        field_value(&detail, "[data-form=accept] textarea[name=edited_text]"),
+        draft
+    );
+}
+
+#[tokio::test]
+async fn material_suggestion_detail_rendered_bound_and_intact_oversized_draft() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    store
+        .material_review_unit(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            1,
+            1,
+            crate::sources::UnitReview {
+                revision: 1,
+                state: "corrected".into(),
+                correction: "🦀".repeat(20000),
+                actor: String::new(),
+                rationale: "Checked".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let id = store
+        .insert_source_suggestion(crate::sources::SourceSuggestion {
+            source: 1,
+            bundle_hash: "a".repeat(64),
+            origin: "tool:fixture".into(),
+            kind: "correction".into(),
+            target: crate::sources::SuggestionTarget::Unit {
+                target: crate::sources::SuggestionUnit {
+                    unit: 1,
+                    revision: 2,
+                },
+            },
+            suggested_text: Some("🐙".repeat(20000)),
+            rationale: "🦀".repeat(5000),
+            report_id: None,
+        })
+        .await
+        .unwrap();
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(
+        router_get(
+            &app,
+            &auth[0],
+            &format!("/admin/materials/suggestions/{id}"),
+        )
+        .await,
+    )
+    .await;
+    eprintln!("detail GET: {} bytes", html.len());
+    assert!(html.len() <= 256 * 1024, "{} rendered bytes", html.len());
+    for draft in ["🦀".repeat(20000), "\"".repeat(100_000)] {
+        let response = document_at(
+            &app,
+            &auth[0],
+            &format!("/admin/materials/suggestions/{id}/accept"),
+            review_form(&[("edit", "yes"), ("edited_text", &draft), ("rationale", "")]),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let html = body(response).await;
+        let bound = if draft.len() > 80000 {
+            2 * 1024 * 1024
+        } else {
+            256 * 1024
+        };
+        eprintln!(
+            "detail 422: {} bytes (draft {} bytes)",
+            html.len(),
+            draft.len()
+        );
+        assert!(html.len() <= bound);
+        assert_eq!(
+            field_value(&html, "[data-form=accept] textarea[name=edited_text]"),
+            draft
+        );
+    }
 }
 
 #[tokio::test]
@@ -631,6 +948,7 @@ async fn material_primary_selection_list_drafts_keep_tokens_and_lf() {
     finalize_material(&store).await;
     let app = crate::auth::app(store.clone()).await.unwrap();
     for (token, rationale, expected, status) in [
+        ("0:0", "kept", "kept", StatusCode::CONFLICT),
         (
             "1:0",
             "\nkept\r\nprimary",
@@ -650,7 +968,146 @@ async fn material_primary_selection_list_drafts_keep_tokens_and_lf() {
         let html = body(response).await;
         assert_eq!(field_value(&html, "#primary-pages textarea"), expected);
         assert!(html.contains(&format!("value=\"{token}\" checked")));
+        assert!(
+            html.contains("this reading is primary"),
+            "submitted tokens must not replace current state"
+        );
     }
+}
+
+#[tokio::test]
+async fn material_card_links_preserve_unsaved_text() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    assert!(html.contains("href=\"#unit-1\">Next unreviewed unit"));
+}
+
+#[tokio::test]
+async fn material_progressive_controls_expose_keyboard_drawing_and_zoom_state() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let parsed = scraper::Html::parse_document(&html);
+    assert!(
+        parsed
+            .select(&scraper::Selector::parse("label[hidden] > #review-shortcuts").unwrap())
+            .next()
+            .is_some(),
+        "shortcut switch is unavailable until enhancement runs"
+    );
+    for button in parsed.select(&scraper::Selector::parse("[data-zoom]").unwrap()) {
+        assert!(button.value().attr("aria-pressed").is_some());
+    }
+    assert!(html.contains("id=\"keyboard-region\""));
+}
+
+#[tokio::test]
+async fn material_committed_suggestion_does_not_reload_detail() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let id = suggestion_fixture(&store, "correction", suggestion_unit(1)).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let path = dir.path().join("private.sqlite3");
+    *crate::sources::materials::AFTER_SUGGESTION_COMMIT
+        .lock()
+        .unwrap() = Some(Box::new(move || {
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute("DROP TABLE source_search_text", [])
+            .unwrap();
+    }));
+    let response = document_at(
+        &app,
+        &auth[0],
+        &format!("/admin/materials/suggestions/{id}/accept"),
+        review_form(&[("rationale", "Checked")]),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::SEE_OTHER,
+        "a committed decision cannot become a detail-read error"
+    );
+}
+
+#[tokio::test]
+async fn material_primary_write_does_not_load_unit_editor() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    store
+        .run(|db| {
+            replace_unit(db, "unit-1", &"x".repeat(65537))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    finalize_material(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/primary",
+        review_form(&[
+            ("source", "1"),
+            ("previous", "1"),
+            ("event", "1"),
+            ("rationale", "Checked"),
+        ]),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::SEE_OTHER,
+        "primary selection does not require rendering unit content"
+    );
+}
+
+#[tokio::test]
+async fn material_missing_geometry_omits_overlay_and_drawing() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    assert!(!html.contains("id=\"review-overlay\""));
+    assert!(!html.contains("id=\"draw-region\""));
+    assert!(html.contains("Page geometry unavailable"));
+}
+
+#[tokio::test]
+async fn material_region_overlay_includes_notes_beyond_current_notes_page() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let mut last = 0;
+    for _ in 0..21 {
+        last = suggestion_fixture(
+            &store,
+            "missing_text",
+            crate::sources::SuggestionTarget::Region {
+                page: 1,
+                polygon: [[1.0, 1.0], [10.0, 1.0], [10.0, 10.0], [1.0, 10.0]],
+            },
+        )
+        .await;
+    }
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    assert!(
+        html.contains(&format!("data-overlay-suggestion=\"{last}\"")),
+        "region geometry is independent of the 20-row notes cursor"
+    );
 }
 
 #[tokio::test]
@@ -689,13 +1146,15 @@ async fn material_suggestion_handler_drafts_authority_and_stored_text() {
         "\nkept acceptance"
     );
     assert!(html.contains("?units=50#unit-51"));
+    assert_missing_edit_choice_keeps_draft(&app, &auth[0], &path).await;
     let response = document_at(
         &app,
         &auth[0],
         &path,
         review_form(&[
             ("rationale", "Checked"),
-            ("edited_text", "ignored unless edit=yes"),
+            ("edit", "yes"),
+            ("edited_text", "Owner edit must be retained"),
         ]),
     )
     .await;
@@ -746,7 +1205,7 @@ async fn material_suggestion_handler_drafts_authority_and_stored_text() {
     assert!(body(response).await.contains("invalid\0reason"));
     assert_eq!(
         store.source_page(1).await.unwrap().units[50].correction,
-        "stored suggestion"
+        "Owner edit must be retained"
     );
 }
 
@@ -764,6 +1223,31 @@ async fn assert_suggestion_authority(app: &axum::Router, auth: &[RequestAuth], p
         .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
+}
+
+async fn assert_missing_edit_choice_keeps_draft(
+    app: &axum::Router,
+    auth: &RequestAuth,
+    path: &str,
+) {
+    let response = document_at(
+        app,
+        auth,
+        path,
+        review_form(&[
+            ("rationale", "Checked"),
+            ("edited_text", "Owner edit must be retained"),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        field_value(
+            &body(response).await,
+            "[data-form=accept] textarea[name=edited_text]"
+        ),
+        "Owner edit must be retained"
+    );
 }
 
 #[tokio::test]

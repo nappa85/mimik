@@ -226,7 +226,7 @@ async fn primary_pages(
                 for row in &mut listing.rows {
                     if let Some(expected) = pages.iter().find(|p| p.pdf_page == row.page.pdf_page) {
                         row.selected = true;
-                        row.primary = expected.clone();
+                        row.submitted = Some(expected.clone());
                     }
                 }
             }
@@ -263,6 +263,28 @@ struct Editor {
     primary_draft: Option<PrimaryDraft>,
 }
 impl Editor {
+    fn unit_link(&self, target: &(i64, i64)) -> String {
+        let (unit, cursor) = target;
+        if self.page.units.iter().any(|row| row.id == *unit) {
+            format!("#unit-{unit}")
+        } else {
+            format!("?units={cursor}#unit-{unit}")
+        }
+    }
+    fn region_link(&self, region: &crate::sources::review::Overlay) -> String {
+        if region.unit > 0 {
+            self.unit_link(&(region.unit, region.cursor))
+        } else if self
+            .screen
+            .notes
+            .iter()
+            .any(|row| row.id == region.suggestion)
+        {
+            format!("#suggestion-{}-unit-0", region.suggestion)
+        } else {
+            format!("/admin/materials/suggestions/{}", region.suggestion)
+        }
+    }
     fn draft_link(&self) -> String {
         let anchor = if self.draft.is_some() {
             format!("unit-{}", self.page.units.first().map_or(0, |unit| unit.id))
@@ -564,6 +586,51 @@ struct SuggestionEditor {
     advice: crate::sources::review::Advice,
     form: SuggestionDraft,
     message: String,
+    show_difference: bool,
+    text_preview: bool,
+}
+impl SuggestionEditor {
+    fn bounded_html(mut self) -> AuthResult {
+        const NORMAL: usize = 256 * 1024;
+        self.show_difference = false;
+        let mut rendered = self
+            .render()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if rendered.len() > NORMAL {
+            self.text_preview = true;
+            self.advice.lookup = self.advice.lookup.chars().take(2000).collect();
+            self.advice.suggested = self.advice.suggested.chars().take(2000).collect();
+            self.advice.rationale = self.advice.rationale.chars().take(2000).collect();
+            self.advice.target_links.truncate(8);
+            rendered = self
+                .render()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
+        // Reserve the entire escaped form, metadata and evidence first. A large
+        // invalid draft is retained intact and uses the explicit error bound.
+        if rendered.len() <= NORMAL && !self.text_preview {
+            let remaining = NORMAL - rendered.len();
+            let full = !self.advice.lookup_truncated
+                && (self.advice.lookup.len() + self.advice.suggested.len()).saturating_mul(20)
+                    <= remaining;
+            self.advice.difference = crate::sources::review::difference(
+                &self.advice.lookup,
+                &self.advice.suggested,
+                full.then(|| std::time::Instant::now() + std::time::Duration::from_millis(50)),
+            );
+            self.show_difference = true;
+            let candidate = self
+                .render()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            if candidate.len() <= NORMAL {
+                rendered = candidate;
+            }
+        }
+        if rendered.len() > 2 * 1024 * 1024 {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        Ok(Html(rendered).into_response())
+    }
 }
 async fn suggestion(
     State(state): State<AuthState>,
@@ -583,11 +650,14 @@ async fn suggestion(
         edited_text: advice.suggested.clone(),
         ..SuggestionDraft::default()
     };
-    html(&SuggestionEditor {
+    SuggestionEditor {
         advice,
         form,
         message: String::new(),
-    })
+        show_difference: false,
+        text_preview: false,
+    }
+    .bounded_html()
 }
 #[derive(Template)]
 #[template(path = "material_suggestions.html")]
@@ -656,6 +726,10 @@ async fn suggestion_write(
             .store
             .material_dismiss(auth.clone(), csrf, id, form.reason.clone())
             .await
+    } else if !form.edited_text.is_empty() && !matches!(form.edit.as_str(), "yes" | "suggested") {
+        Err(AppError::Invalid(
+            "Choose Accept my edit or Accept as suggested explicitly.",
+        ))
     } else {
         state
             .sessions
@@ -670,14 +744,16 @@ async fn suggestion_write(
             .await
     };
     match result {
-        Ok(_) => {
-            let advice = state
-                .sessions
-                .store
-                .material_advice(auth, id)
-                .await
-                .map_err(|e| error(&e))?;
-            Ok(Redirect::to(&advice.back_link()).into_response())
+        Ok(back_link) => {
+            #[cfg(test)]
+            if let Some(hook) = crate::sources::materials::AFTER_SUGGESTION_COMMIT
+                .lock()
+                .unwrap()
+                .take()
+            {
+                hook();
+            }
+            Ok(Redirect::to(&back_link).into_response())
         }
         Err(e @ (AppError::Invalid(_) | AppError::Conflict)) => {
             let advice = state
@@ -686,11 +762,14 @@ async fn suggestion_write(
                 .material_advice(auth, id)
                 .await
                 .map_err(|e| error(&e))?;
-            let mut response = html(&SuggestionEditor {
+            let mut response = SuggestionEditor {
                 advice,
                 form,
                 message: e.to_string(),
-            })?;
+                show_difference: false,
+                text_preview: false,
+            }
+            .bounded_html()?;
             *response.status_mut() = error(&e);
             response.extensions_mut().insert(TrustedDraft);
             Ok(response)
@@ -796,16 +875,21 @@ async fn primary(
 ) -> AuthResult {
     let auth = owner_auth(&state, &session).await?;
     let csrf = csrf_admission(&session, &form.csrf).await?;
-    let mut editor = reload_editor(&state, auth.clone(), page, form.csrf.clone()).await?;
+    let (document, pdf_page) = state
+        .sessions
+        .store
+        .material_primary_identity(auth.clone(), page)
+        .await
+        .map_err(|e| error(&e))?;
     let result = state
         .sessions
         .store
         .material_set_primary_source(
-            auth,
+            auth.clone(),
             csrf,
-            editor.screen.document,
+            document,
             vec![crate::sources::PrimaryPageState {
-                pdf_page: editor.page.pdf_page,
+                pdf_page,
                 source_id: (form.previous != 0).then_some(form.previous),
                 event_id: (form.event != 0).then_some(form.event),
             }],
@@ -818,6 +902,7 @@ async fn primary(
             Ok(Redirect::to(&format!("/admin/materials/pages/{page}#primary")).into_response())
         }
         Err(e @ (AppError::Invalid(_) | AppError::Conflict)) => {
+            let mut editor = reload_editor(&state, auth, page, form.csrf.clone()).await?;
             editor.message = e.to_string();
             editor.primary_draft = Some(form);
             trusted_editor(&editor, error(&e))

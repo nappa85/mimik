@@ -140,6 +140,8 @@ pub struct EvidenceSearch {
     pub unindexed_units: i64,
     /// Distinct document pages with readings but no primary: needs the owner's choice.
     pub needs_primary_choice: i64,
+    /// Up to 50 source page lists covering unresolved document pages.
+    pub primary_choice_sources: Vec<i64>,
     /// More than the returned 50 matches exist.
     pub truncated: bool,
     pub matches: Vec<Evidence>,

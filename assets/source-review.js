@@ -3,6 +3,7 @@
   const list = document.querySelector('#review-list');
   const toggle = document.querySelector('#review-shortcuts');
   if (toggle) {
+    toggle.closest('label').hidden = false;
     try { toggle.checked = localStorage.getItem('source-review-shortcuts') !== 'off'; } catch (_) { /* Storage is optional. */ }
     toggle.addEventListener('change', () => {
       try { localStorage.setItem('source-review-shortcuts', toggle.checked ? 'on' : 'off'); } catch (_) { /* Storage is optional. */ }
@@ -26,6 +27,7 @@
   if (!image || !svg) return;
   document.querySelector('.review-zoom-controls').hidden = false;
   document.querySelectorAll('[data-zoom]').forEach(button => button.addEventListener('click', () => {
+    document.querySelectorAll('[data-zoom]').forEach(control => control.setAttribute('aria-pressed', String(control === button)));
     image.classList.remove('zoom-one', 'zoom-two');
     const original = image.querySelector('img');
     original.removeAttribute('width');
@@ -43,7 +45,7 @@
     suggestion.addEventListener('focusout', () => highlight(suggestion, false));
   });
   function highlight(suggestion, enabled) {
-    const ids = [...(suggestion.dataset.targets || '').matchAll(/unit (\d+)/g)].map(match => match[1]);
+    const ids = (suggestion.dataset.targets || '').split(',');
     document.querySelectorAll('[data-overlay-unit]').forEach(box => {
       if (ids.includes(box.dataset.overlayUnit)) box.classList.toggle('highlight', enabled);
     });
@@ -53,6 +55,8 @@
   const rectangle = document.querySelector('#drawn-region');
   if (!draw || !input || !rectangle) return;
   draw.hidden = false;
+  const keyboard = document.querySelector('#keyboard-region');
+  keyboard.hidden = false;
   let drawing = false;
   let start = null;
   let corners = null;
@@ -69,6 +73,17 @@
     for (const [key,value] of Object.entries({x,y,width:right-x,height:bottom-y})) rectangle.setAttribute(key, String(value));
     document.querySelector('#region-handles').hidden = false;
   }
+  keyboard.addEventListener('click', () => {
+    const width = Number(image.dataset.width), height = Number(image.dataset.height);
+    let entered;
+    try { entered = JSON.parse(input.value); } catch (_) { /* An empty form gets a starter box. */ }
+    if (Array.isArray(entered) && entered.length === 4 && entered.every(p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite))) {
+      update(entered[0], entered[2]);
+    } else {
+      update([width / 4, height / 4], [width / 2, height / 2]);
+    }
+    document.querySelector('[data-corner="0"]').focus();
+  });
   draw.addEventListener('click', () => {
     drawing = !drawing;
     draw.setAttribute('aria-pressed', String(drawing));

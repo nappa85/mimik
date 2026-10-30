@@ -47,7 +47,8 @@ that selection but cannot be selected again until it is finalized. Migration
 leaves overlapping pages unresolved. It preserves existing source, page, unit and review ids,
 artefacts and hashes. `EvidenceSearch.needs_primary_choice` reports distinct unresolved document
 pages for the requested edition: these need the owner's choice. The search page shows them as
-their own state, apart from an unsupported source. The operator recovers them with
+their own state, apart from an unsupported source, with direct links to the first 50 affected
+source page lists (`/admin/materials/sources/{id}`). The operator recovers them with
 `mimik set-primary-source --document-pdf-sha256 HASH --pages 3,5-7 --source ID --rationale TEXT`
 (pages ascending and distinct, at most 1,024; actor `operator:cli`; the source must cover every
 page and be finalized).
@@ -61,6 +62,8 @@ attribution are retained and immutable. The Owner-bound store wrapper rechecks O
 CSRF before and after writing each decision and its sidecar. The Owner can select this reading
 for checked pages in `/admin/materials/sources/{id}`, or for one page in its review screen.
 Both forms carry the expected source and latest-event tokens and require a rationale.
+After a failed page-list submission, status labels describe the stored primary state;
+submitted source/event tokens remain separately in the checked form controls.
 
 ## Review
 
@@ -73,6 +76,15 @@ States: `unreviewed`, `accepted`, `corrected` and `rejected` (a CHECK constraint
 - **`--no-auth` loopback prototype** (`/sources`, `/sources/pages/{id}`, `/sources/search`, `/sources/setup`): free-text reviewer label, latest 100 events. Denied (403) in authenticated mode.
 - Display HTML is sanitised with `ammonia` (text, list, heading, table tags; only `colspan`/`rowspan` 1–100, other span values reject the unit; no URLs, styles or scripts).
 - Directories show selected pages against the PDF total, resolved or unresolved identity, and finalisation, which does not mean reviewed.
+
+Every authenticated material write binds its Owner and CSRF admissions to the same session
+id, exact expiry, account id and epoch, before and after the write. Independently valid
+admissions from different sessions are refused. The authenticated single-unit path retains
+`operation_id=NULL`, including a one-decision call to its atomic wrapper; multi-unit calls
+retain one shared operation id. The standalone `review_units_atomic` API remains an explicit
+batch API. Primary writes read only document/page identity before writing; they load the
+editor only for a failed form. Suggestion writes compute the matching return link before
+commit and redirect directly afterwards, without a post-commit detail read or difference.
 
 ## Stored suggestions
 
@@ -103,6 +115,12 @@ for a merge, owner unit when created, and whether the text was edited. Its SQL g
 the decision kind, target unit/revision, page, and merge operation's rejections and initial owner
 correction on that same page. A merge owner polygon must be exactly the axis-aligned bounding
 rectangle of the targets, and its raw text must equal its first correction in the operation.
+Consequently merge-created owner units retain that exact approved plain `raw_text`, rather
+than the width-120 html2text projection used for other owner units: migration 025 requires
+byte equality, including whitespace and wrapping. Their escaped HTML and search projection
+are derived normally, and effective lookup uses their correction. Unifying the historical
+raw projection would require changing that schema contract; no migration 026 is needed for
+the review-screen fixes.
 One decision event applies at most one suggestion; an owner unit can be named by at most one
 application. `edited` equals whether the applied correction differs from the suggested text
 (always false for a rejection). Applications and dismissals are insert-only and mutually exclusive. A unit revision
@@ -118,16 +136,27 @@ rejected units have none, and unreviewed units are labelled “not evidence yet�
 lists the current 50-card page in bundle order. A merge-created owner unit appears at its first
 target's position; other owner units come last. Incomplete pages and non-primary readings are
 explicitly labelled as excluded from lookup.
+Suggestion comparisons for unreviewed targets use the extraction's search projection and
+are labelled as extraction text, not approved evidence.
 
 The SVG uses the original page dimensions in PDF points. Every unit has a named, focusable link
 to its card, including cards beyond the current cursor. Above 2,000 units the unit overlay is
 omitted with a note. The full-size image and independent region crops remain available.
+Missing-text overlays include the first 2,000 regions of the entire page, independently of
+the 20-row notes cursor, with a note when more exist. Off-cursor regions link to their detail
+panel. Missing or invalid page geometry omits overlays and drawing with an explicit note;
+storage errors propagate instead of substituting fictitious dimensions.
 `source-review.js` adds fit-width/100%/200% zoom, merge-region highlighting, rectangular
 pointer drawing and arrow-key corner adjustments. Four polygon corners can also be entered
 directly in PDF points in the Add missing text form.
+Zoom buttons expose their pressed state. A keyboard-only box-creation button exposes the
+corner handles without a pointer drag; it uses entered corners or a starter rectangle.
 
 Cards show up to 20 suggestions, including merges on every target card. Each shows its state,
-claimed origin, report id and rationale. Additional suggestions have a cursor-paged list at
+claimed origin, report id and a labelled rationale preview of at most 200 characters.
+Repeated multi-target advice uses a compact detail link on additional cards. Labels and the
+compact comma-separated highlighting id list include at most eight targets, with the total
+remaining target count in the label. Additional suggestions have a cursor-paged list at
 `/admin/materials/pages/{page}/units/{unit}/suggestions`; page notes and missing-text suggestions
 have an independent 20-row cursor. Notes cannot be accepted. Stale suggestions cannot be
 accepted or edited, but may be dismissed; ordinary unit review stays available.
@@ -141,19 +170,41 @@ coordinates so application guards compare the exact same binary values. Zero-are
 are refused. Applications record whether the resulting text differs from the stored proposal.
 Dismissal records only advice state and optional reason. Every browser write uses an
 authenticated store wrapper, rechecking Owner and CSRF at both transaction boundaries.
+The detail form has separate **Accept as suggested** and **Accept my edit** submit buttons.
+A nonempty edit submitted without an explicit choice is refused with 422 and retained;
+card acceptance without an edit field still applies the stored suggestion.
 
 Unicode word differences use `similar` 3.2.0 (DEP-28), plain-text inputs and template-escaped
-segments with fixed `ins`/`del` markup. Work runs on the bounded blocking store worker, with
-at most 100 comparisons per response and a 50 ms deadline each. A shared 250 ms comparison
-window also leaves time for reads and rendering within the authenticated request deadline.
-Lookup and suggestion text share a 2 MiB response budget (both copies of the lookup panel text
-and the unit correction controls count, with headroom for a failed first-card form). When a
-correction control does not fit, a link opens that unit first on a card page with its full form;
-an editable value is never silently shortened. Exhausted comparison bounds show labelled previews of up to 2,000 characters; text
-is further shortened or omitted when the byte budget is exhausted. Every suggestion links to
-`/admin/materials/suggestions/{id}`, an authenticated detail/edit panel bounded to 20,000
-characters per text and below 256 KiB of plain text. A larger combined merge lookup is labelled
-as truncated and links to each target card. Budget fallback never expands the response.
+segments with fixed `ins`/`del` markup; adjacent changes of the same kind share one segment.
+Screen reads expand the page's target lists once and fetch the selected unique suggestions
+with one query. Each suggestion's target revisions and aggregate lookup are read as a batch;
+SQL computes staleness and limits aggregate lookup text before it crosses into Rust.
+Cards and suggestion lists read at most 2,000 characters per comparison side. A shortened
+side forces a labelled preview, never a purported complete difference. Rationale reads stop
+at their 200-character card preview. All comparisons run outside the store mutex; screen
+and list reads recheck Owner authority after comparison work. Limits remain 100 comparisons,
+50 ms each and a shared 250 ms comparison window. Tests inject an expired deadline instead
+of assuming a particular repetitive input always consumes 50 ms on every machine.
+
+Lookup and suggestion display work shares a 2 MiB budget, with 512 KiB reserved for screen
+structure (128 KiB on a suggestion list). Both lookup copies, correction controls, rationale
+previews and comparison output count; comparison charges conservatively include escaping
+and segment wrappers. Rich extraction and historical review events have their own existing
+row/byte bounds, so this is not a universal 2 MiB cap on the whole page editor. When a
+correction control does not fit, a link opens that unit first on a card page with its full
+form; an editable value is never silently shortened. Exhausted comparisons show labelled
+previews of up to 2,000 characters, further shortened or omitted at byte-budget exhaustion.
+
+Every suggestion links to `/admin/materials/suggestions/{id}`. Detail reads bound each text
+and the aggregate merge lookup to 20,000 characters. A shortened lookup is explicitly
+labelled; it cannot produce a complete difference against its prefix. The renderer reserves
+the entire escaped evidence, edit/draft, rationale, controls and target links before adding
+a difference. The normal detail bound is **256 KiB of complete rendered UTF-8 HTML**, for GET
+and ordinary 409/422 responses. If necessary it omits the difference and shows labelled
+2,000-character evidence/rationale previews and the first eight target links. The edit/draft
+value remains intact. An oversized invalid draft accepted under the 320 KiB POST limit uses
+an explicit **2 MiB complete rendered HTML bound** on 409/422 instead: a draft that by itself
+exceeds 256 KiB after escaping cannot simultaneously be intact and fit that normal bound.
 
 409 and 422 responses retain submitted values and expected tokens in the matching form or
 suggestion detail panel, with an alert and a cursor-aware return link. Reloading is an explicit
@@ -161,6 +212,9 @@ choice; a failed form never silently adopts newer revisions. Textarea CR LF is n
 LF before validation, and leading newlines survive HTML parsing. Stable `data-unit`,
 `data-suggestion`, `data-form`, `data-target`, `data-overlay-unit` and
 `data-overlay-suggestion` attributes identify review elements.
+In particular, a card Accept/Dismiss failure opens the suggestion detail panel, retaining
+the submitted draft there, rather than re-rendering it on the original card. This supplies
+one bounded edit/error form for multi-target advice and a matching-card return link.
 
 Navigation links lead to the next unreviewed unit and the next later incomplete page of the
 same reading. With the script, `j`/`k` focus adjacent cards and `a` focuses an acceptance
@@ -168,6 +222,12 @@ rationale without submitting. Shortcuts apply only inside the review list, outsi
 and editable elements, and can be disabled per browser in the help panel. Focus indicators are
 visible. Scripts are external `/assets` resources; the strict CSP has no inline-script or
 inline-style exception.
+Overlay and next-unit links use fragments when the target card is already on the current
+card page, preserving unsaved fields; off-cursor navigation still loads another card page.
+The shortcut preference switch stays hidden until the script runs. The acceptance/dismissal
+unit test named `material_suggestion_accept_dismiss_serialized_store_calls_have_one_winner`
+checks competing calls through the single-connection store mutex, not SQLite concurrency
+across independent connections; integration coverage separately races file-backed stores.
 
 ### Report import (`mimik import-suggestions --source ID --report FILE`)
 
