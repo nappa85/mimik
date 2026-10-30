@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "name": "screen-qwen35-9b-s40",
+  "description": "Qwen3.5-9B on the same 40-case rev3 dev screen and C0 settings as screen-candidates8b-s40 (GPU), so it can be compared with the 2026-10-20 GPU S40 arms. Exploratory: never a verdict arm.",
+  "defaults": {
+    "split": "dev",
+    "seeds": "17",
+    "arm": "S40-c0",
+    "cases_file": "tools/case-subsets/dev-screen-40.json",
+    "env": {
+      "CTX": 24576,
+      "MAX_TURNS": 8,
+      "MAX_TOKENS": 4096,
+      "THINKING": "off",
+      "TEMPERATURE": "0.1",
+      "TOP_P": "0.95",
+      "NUDGE": 1,
+      "TURNS_REMAINING": 0,
+      "SEARCH_NOTES": 0,
+      "SANITIZE_ECHO": 1,
+      "PENDING_CURRENT": 1,
+      "UNTRUSTED": 0
+    }
+  },
+  "preflight_case": "dev-001",
+  "quiet": true,
+  "max_consecutive_failures": 2,
+  "disk_checks": [
+    {
+      "path": "/var/lib/docker",
+      "min_free_gb": 10
+    },
+    {
+      "path": "/media/data",
+      "min_free_gb": 10
+    }
+  ],
+  "arms": [
+    {
+      "id": "s40-qwen35-9b",
+      "model": "qwen35-9b"
+    }
+  ]
+}
