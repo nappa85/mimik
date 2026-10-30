@@ -31,7 +31,22 @@ pub struct SourceSuggestion {
 
 fn validate(db: &Connection, suggestion: &SourceSuggestion) -> Result<(), AppError> {
     super::review_identity(&suggestion.origin, &suggestion.rationale)?;
-    super::review_identity(&suggestion.kind, &suggestion.rationale)?;
+    let text_present = suggestion
+        .suggested_text
+        .as_ref()
+        .is_some_and(|text| !text.trim().is_empty());
+    let shape_ok = match (suggestion.kind.as_str(), &suggestion.target) {
+        ("correction", SuggestionTarget::Unit { .. })
+        | ("missing_text", SuggestionTarget::Region { .. })
+        | ("merge", SuggestionTarget::Units { .. }) => text_present,
+        ("reject", SuggestionTarget::Unit { .. }) => suggestion.suggested_text.is_none(),
+        _ => false,
+    };
+    if !shape_ok {
+        return Err(AppError::Invalid(
+            "A suggestion is a correction (one unit, text), merge (2+ units on one page, text), missing_text (region, text) or reject (one unit, no text).",
+        ));
+    }
     if suggestion.bundle_hash.len() != 64
         || !suggestion
             .bundle_hash
@@ -67,6 +82,14 @@ fn validate(db: &Connection, suggestion: &SourceSuggestion) -> Result<(), AppErr
                 ));
             }
             validate_units(db, suggestion.source, targets)?;
+            let pages: i64 = db.query_row(
+                "SELECT count(DISTINCT page_id) FROM source_units WHERE id IN (SELECT value FROM json_each(?1))",
+                [serde_json::to_string(&targets.iter().map(|t| t.unit).collect::<Vec<_>>())?],
+                |r| r.get(0),
+            )?;
+            if pages != 1 {
+                return Err(AppError::Invalid("A merge suggestion stays on one page."));
+            }
         }
         SuggestionTarget::Region { page, polygon } => {
             let belongs: bool = db.query_row(

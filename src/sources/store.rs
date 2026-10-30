@@ -76,8 +76,8 @@ impl Store {
             let mut page = db.query_row("SELECT p.id,s.id,s.title,s.edition,p.pdf_page,p.printed_label,p.complete,p.revision FROM source_pages p JOIN sources s ON s.id=p.source_id WHERE p.id=?1", [id], |row| Ok(PageView { id: row.get(0)?, source_id: row.get(1)?, title: row.get(2)?, edition: row.get(3)?, pdf_page: row.get(4)?, printed_label: row.get(5)?, complete: row.get(6)?, revision: row.get(7)?, units: Vec::new(), events: Vec::new() })).optional()?.ok_or(AppError::NotFound)?;
             let mut query = db.prepare("SELECT id,block_id,kind,polygon,raw_html,state,correction,revision FROM source_units WHERE page_id=?1 ORDER BY id")?;
             page.units = query.query_map([id], |row| { let raw: String = row.get(4)?; let clean = sanitized(&raw).map_err(|error| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error)))?; Ok(UnitView { id: row.get(0)?, block_id: row.get(1)?, kind: row.get(2)?, polygon: row.get(3)?, sanitized_html: clean, state: row.get(5)?, correction: row.get(6)?, revision: row.get(7)? }) })?.collect::<Result<Vec<_>, _>>()?;
-            let mut history = db.prepare("SELECT unit_id,created_at,actor,state,rationale,correction,previous_revision FROM source_review_events WHERE page_id=?1 ORDER BY id DESC LIMIT 100")?;
-            page.events = history.query_map([id], |row| Ok(ReviewEvent { unit_id: row.get(0)?, created_at: row.get(1)?, actor: row.get(2)?, state: row.get(3)?, rationale: row.get(4)?, correction: row.get(5)?, previous_revision: row.get(6)? }))?.collect::<Result<Vec<_>, _>>()?;
+            let mut history = db.prepare("SELECT unit_id,created_at,actor,state,rationale,correction,previous_revision,operation_id FROM source_review_events WHERE page_id=?1 ORDER BY id DESC LIMIT 100")?;
+            page.events = history.query_map([id], |row| Ok(ReviewEvent { unit_id: row.get(0)?, created_at: row.get(1)?, actor: row.get(2)?, state: row.get(3)?, rationale: row.get(4)?, correction: row.get(5)?, previous_revision: row.get(6)?, operation_id: row.get(7)? }))?.collect::<Result<Vec<_>, _>>()?;
             Ok(page)
         }).await
     }

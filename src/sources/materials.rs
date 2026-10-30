@@ -54,8 +54,9 @@ fn cursor(after: i64) -> Result<(), AppError> {
 }
 
 impl Store {
-    // Store APIs for the next review-screen step; no routes expose these yet.
-    #[allow(dead_code, reason = "Authenticated store API for source-import step 2")]
+    // Authenticated wrappers for the review screens of the next step; only tests call them
+    // until its routes exist.
+    #[cfg(test)]
     pub(crate) async fn material_add_owner_unit(
         &self,
         auth: RequestAuth,
@@ -81,7 +82,7 @@ impl Store {
         .await
     }
 
-    #[allow(dead_code, reason = "Authenticated store API for source-import step 2")]
+    #[cfg(test)]
     pub(crate) async fn material_set_primary_source(
         &self,
         auth: RequestAuth,
@@ -105,19 +106,19 @@ impl Store {
         }).await
     }
 
-    #[allow(dead_code, reason = "Authenticated store API for source-import step 2")]
+    #[cfg(test)]
     pub(crate) async fn material_review_units_atomic(
         &self,
         auth: RequestAuth,
         csrf: CsrfAdmission,
         mut decisions: Vec<super::UnitDecision>,
-        operation: String,
         rationale: String,
     ) -> Result<Vec<i64>, AppError> {
         for decision in &mut decisions {
             decision.review.actor = format!("account:{}", auth.account_id());
         }
-        super::documents::validate_batch(&decisions, &operation, &rationale)?;
+        super::documents::validate_batch(&decisions, &rationale)?;
+        let operation = super::documents::new_operation_id();
         self.run_bounded_auth(move |db| {
             with_domain_request(auth.clone(), || {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -180,8 +181,8 @@ impl Store {
             let mut page=tx.query_row(&format!("SELECT p.id,s.id,{},{},p.pdf_page,{},p.complete,p.revision FROM source_pages p JOIN sources s ON s.id=p.source_id WHERE p.id=?1",text("s.title",200),text("s.edition",400),text("p.printed_label",200)),[id],|r|Ok(PageView{id:r.get(0)?,source_id:r.get(1)?,title:read_text(r,2)?,edition:read_text(r,3)?,pdf_page:r.get(4)?,printed_label:read_text(r,5)?,complete:r.get(6)?,revision:r.get(7)?,units:Vec::new(),events:Vec::new()})).optional()?.ok_or(AppError::NotFound)?;
             let rows={let mut q=tx.prepare(&format!("SELECT id,{},{},{},{},{},{},revision FROM source_units WHERE page_id=?1 AND id>?2 ORDER BY id LIMIT 51",text("block_id",512),text("kind",100),text("polygon",1024),text("raw_html",65536),text("state",32),text("correction",80000)))?;
                 q.query_map(params![id,units],|r|{let raw=read_text(r,4)?;let clean=sanitized(&raw).map_err(|e|rusqlite::Error::FromSqlConversionFailure(4,rusqlite::types::Type::Text,Box::new(e)))?;Ok(UnitView{id:r.get(0)?,block_id:read_text(r,1)?,kind:read_text(r,2)?,polygon:read_text(r,3)?,sanitized_html:clean,state:read_text(r,5)?,correction:read_text(r,6)?,revision:r.get(7)?})})?.collect::<Result<Vec<_>,_>>()?};
-            let events={let mut q=tx.prepare(&format!("SELECT id,unit_id,{},{},{},{},{},previous_revision FROM source_review_events WHERE page_id=?1 AND id>?2 ORDER BY id LIMIT 51",text("created_at",64),text("actor",400),text("state",32),text("rationale",20000),text("correction",80000)))?;
-                q.query_map(params![id,history],|r|Ok((r.get::<_,i64>(0)?,ReviewEvent{unit_id:r.get(1)?,created_at:read_text(r,2)?,actor:read_text(r,3)?,state:read_text(r,4)?,rationale:read_text(r,5)?,correction:read_text(r,6)?,previous_revision:r.get(7)?})))?.collect::<Result<Vec<_>,_>>()?};
+            let events={let mut q=tx.prepare(&format!("SELECT id,unit_id,{},{},{},{},{},previous_revision,operation_id FROM source_review_events WHERE page_id=?1 AND id>?2 ORDER BY id LIMIT 51",text("created_at",64),text("actor",400),text("state",32),text("rationale",20000),text("correction",80000)))?;
+                q.query_map(params![id,history],|r|Ok((r.get::<_,i64>(0)?,ReviewEvent{unit_id:r.get(1)?,created_at:read_text(r,2)?,actor:read_text(r,3)?,state:read_text(r,4)?,rationale:read_text(r,5)?,correction:read_text(r,6)?,previous_revision:r.get(7)?,operation_id:r.get(8)?})))?.collect::<Result<Vec<_>,_>>()?};
             auth.recheck_owner(&tx)?;tx.commit()?;
             let units=Listing::new(rows,|r|r.id);let events=Listing::new(events,|r|r.0);
             page.units=units.rows;page.events=events.rows.into_iter().map(|r|r.1).collect();

@@ -289,6 +289,21 @@ enum Command {
         #[arg(long)]
         pdf: std::path::PathBuf,
     },
+    /// Choose the primary reading for PDF pages (recovers pages left unresolved by overlapping
+    /// readings). Recorded as actor `operator:cli`.
+    SetPrimarySource {
+        /// SHA-256 of the original PDF (lowercase hex), as shown on the source.
+        #[arg(long)]
+        document_pdf_sha256: String,
+        /// PDF pages, for example `3,5-7`.
+        #[arg(long)]
+        pages: String,
+        /// The source (reading) to select; it must cover every page.
+        #[arg(long)]
+        source: i64,
+        #[arg(long)]
+        rationale: String,
+    },
 }
 
 fn main() {
@@ -405,6 +420,22 @@ async fn local_command(store: &Store, command: Command) -> Result<(), Box<dyn st
             println!(
                 "Registered source {id}. New imports are unreviewed; existing imports retain their review state. Open /sources."
             );
+        }
+        Command::SetPrimarySource {
+            document_pdf_sha256,
+            pages,
+            source,
+            rationale,
+        } => {
+            let events = store
+                .operator_set_primary_source(
+                    document_pdf_sha256,
+                    mimik::sources::parse_page_list(&pages)?,
+                    source,
+                    rationale,
+                )
+                .await?;
+            println!("Source {source} selected for {} page(s).", events.len());
         }
         Command::RegisterRuleset {
             game_id,

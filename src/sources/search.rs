@@ -236,9 +236,7 @@ fn lookup_within(
         db.query_row(&sql, params![system, edition], |row| row.get(0))
             .map_err(interrupted)
     };
-    let source_count = count(format!(
-        "SELECT count(*) FROM {from} WHERE {predicate} AND EXISTS(SELECT 1 FROM source_primary_pages v WHERE v.source_id=s.id)"
-    ))?;
+    let source_count = count(format!("SELECT count(*) FROM {from} WHERE {predicate}"))?;
     let primary = "JOIN source_primary_pages primary_page ON primary_page.source_id=s.id AND primary_page.pdf_page=p.pdf_page";
     let incomplete_pages = count(format!(
         "SELECT count(*) FROM {from} JOIN source_pages p ON p.source_id=s.id {primary} WHERE {predicate} AND p.complete=0"
@@ -423,6 +421,8 @@ mod tests {
             .unwrap();
         let result = rt.block_on(store.run(|db| {
             db.execute_batch("INSERT INTO sources (id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES (1,'b','s','t','mork-borg','e','it','00',x'00','{}','{}',1); INSERT INTO source_rulesets VALUES (1,'mork-borg','it-2025'); INSERT INTO source_pages (id,source_id,pdf_page,png,complete) VALUES (1,1,1,x'00',1);")?;
+            // Seeds an unfinalized legacy-style reading; new selections otherwise need finalization.
+            db.execute_batch("DROP TRIGGER source_primary_events_insert")?;
             super::super::documents::register_import(db, 1)?;
             for id in 1..=500 {
                 db.execute("INSERT INTO source_units (id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES (?1,1,?2,'Text','[]','<p>veleno comune</p>','')", params![id, format!("b{id}")])?;
@@ -521,6 +521,14 @@ mod tests {
             .unwrap();
         assert!(
             plan[0].starts_with("SCAN source_search_fts VIRTUAL TABLE"),
+            "{plan:?}"
+        );
+        // The selected-reading join uses the (document, page) primary key or the source index.
+        assert!(
+            plan.iter()
+                .any(|row| row.starts_with("SEARCH primary_page USING")
+                    && (row.contains("source_primary_pages_source")
+                        || row.contains("PRIMARY KEY"))),
             "{plan:?}"
         );
         for alias in ["u", "p", "s", "r", "t"] {

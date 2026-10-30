@@ -95,13 +95,13 @@ async fn material_atomic_batch_attributes_in_order_and_sidecar_failure_rolls_bac
             auth[0].clone(),
             auth[0].csrf_fixture(),
             decisions(1),
-            "batch-1".into(),
             "Checked both units".into(),
         )
         .await
         .unwrap();
     store.run(|db| {
-        assert_eq!(db.query_row("SELECT count(*) FROM source_web_events w JOIN source_review_events e ON e.id=w.event_id WHERE e.operation_id='batch-1' AND e.actor='account:1'",[],|r|r.get::<_,i64>(0))?,2);
+        assert_eq!(db.query_row("SELECT count(*) FROM source_web_events w JOIN source_review_events e ON e.id=w.event_id WHERE e.operation_id LIKE 'batch-%' AND e.actor='account:1'",[],|r|r.get::<_,i64>(0))?,2);
+        assert_eq!(db.query_row("SELECT count(DISTINCT operation_id) FROM source_review_events",[],|r|r.get::<_,i64>(0))?,1);
         db.execute_batch("CREATE TRIGGER second_batch_sidecar_fault BEFORE INSERT ON source_web_events WHEN (SELECT unit_id FROM source_review_events WHERE id=NEW.event_id)=2 BEGIN SELECT RAISE(ABORT,'fixture fault'); END;")?;
         Ok(())
     }).await.unwrap();
@@ -111,7 +111,6 @@ async fn material_atomic_batch_attributes_in_order_and_sidecar_failure_rolls_bac
                 auth[0].clone(),
                 auth[0].csrf_fixture(),
                 decisions(2),
-                "batch-2".into(),
                 "Recheck both".into()
             )
             .await

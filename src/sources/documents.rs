@@ -45,8 +45,43 @@ pub struct UnitDecision {
 pub(crate) fn register_import(db: &Connection, source: i64) -> Result<(), AppError> {
     db.execute("INSERT INTO source_documents(pdf_sha256) SELECT pdf_hash FROM sources WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM source_documents WHERE pdf_sha256=sources.pdf_hash)", [source])?;
     db.execute("INSERT INTO source_document_members SELECT s.id,d.id FROM sources s JOIN source_documents d ON d.pdf_sha256=s.pdf_hash WHERE s.id=?1", [source])?;
-    db.execute("INSERT INTO source_primary_events(document_id,pdf_page,source_id,actor,rationale) SELECT m.document_id,p.pdf_page,p.source_id,'import','First imported reading' FROM source_pages p JOIN source_document_members m ON m.source_id=p.source_id WHERE p.source_id=?1 AND NOT EXISTS(SELECT 1 FROM source_primary_pages v WHERE v.document_id=m.document_id AND v.pdf_page=p.pdf_page)", [source])?;
+    db.execute("INSERT INTO source_primary_events(document_id,pdf_page,source_id,actor,rationale) SELECT m.document_id,p.pdf_page,p.source_id,'import','First imported reading' FROM source_pages p JOIN source_document_members m ON m.source_id=p.source_id WHERE p.source_id=?1 AND NOT EXISTS(SELECT 1 FROM source_primary_pages v WHERE v.document_id=m.document_id AND v.pdf_page=p.pdf_page) AND NOT EXISTS(SELECT 1 FROM source_pages o JOIN source_document_members om ON om.source_id=o.source_id WHERE om.document_id=m.document_id AND o.pdf_page=p.pdf_page AND o.source_id<>p.source_id)", [source])?;
     Ok(())
+}
+
+/// Actor recorded for decisions made through the operator command line.
+pub const OPERATOR_ACTOR: &str = "operator:cli";
+
+/// Parse a page list such as `3,5-7` into distinct ascending PDF pages (at most 1,024).
+///
+/// # Errors
+/// Empty, malformed, non-positive, repeated or overlapping pages, or too many of them.
+pub fn parse_page_list(spec: &str) -> Result<Vec<i64>, AppError> {
+    const BAD: AppError =
+        AppError::Invalid("Pages look like 3,5-7: positive, ascending, distinct, at most 1,024.");
+    let mut pages = Vec::new();
+    for part in spec.split(',') {
+        let (first, last) = match part.trim().split_once('-') {
+            Some((a, b)) => (a.trim(), b.trim()),
+            None => (part.trim(), part.trim()),
+        };
+        let (first, last): (i64, i64) = (
+            first.parse().map_err(|_| BAD)?,
+            last.parse().map_err(|_| BAD)?,
+        );
+        if first <= 0
+            || last < first
+            || pages.last().is_some_and(|prev| *prev >= first)
+            || last - first >= 1024
+        {
+            return Err(BAD);
+        }
+        pages.extend(first..=last);
+        if pages.len() > 1024 {
+            return Err(BAD);
+        }
+    }
+    Ok(pages)
 }
 
 pub(super) fn primary_state(
@@ -75,7 +110,7 @@ pub(super) fn set_primary(
         if page.pdf_page <= 0 || !seen.insert(page.pdf_page) {
             return Err(AppError::Invalid("Choose distinct positive PDF pages."));
         }
-        let covered: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM source_document_members m JOIN source_pages p ON p.source_id=m.source_id WHERE m.document_id=?1 AND m.source_id=?2 AND p.pdf_page=?3)",params![document,source,page.pdf_page],|r|r.get(0))?;
+        let covered: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM source_document_members m JOIN source_pages p ON p.source_id=m.source_id JOIN sources s ON s.id=m.source_id JOIN source_documents d ON d.id=m.document_id AND d.pdf_sha256=s.pdf_hash JOIN source_finalizations f ON f.source_id=s.id WHERE m.document_id=?1 AND m.source_id=?2 AND p.pdf_page=?3)",params![document,source,page.pdf_page],|r|r.get(0))?;
         if !covered {
             return Err(AppError::NotFound);
         }
@@ -135,6 +170,57 @@ impl Store {
         .await
     }
 
+    /// Operator recovery path for unresolved pages: select `source` for `pages` of the document
+    /// with this PDF hash, against the current selection state, as actor `operator:cli`.
+    ///
+    /// # Errors
+    /// Invalid hash/pages/rationale, unknown document, a source that does not cover a page, or
+    /// database failures.
+    pub async fn operator_set_primary_source(
+        &self,
+        pdf_sha256: String,
+        pages: Vec<i64>,
+        source: i64,
+        rationale: String,
+    ) -> Result<Vec<i64>, AppError> {
+        if pdf_sha256.len() != 64
+            || !pdf_sha256
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err(AppError::Invalid(
+                "The document PDF hash is 64 lowercase hex digits.",
+            ));
+        }
+        self.run(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let document: i64 = tx
+                .query_row(
+                    "SELECT id FROM source_documents WHERE pdf_sha256=?1",
+                    [&pdf_sha256],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .ok_or(AppError::NotFound)?;
+            let states = pages
+                .iter()
+                .map(|page| primary_state(&tx, document, *page))
+                .collect::<Result<Vec<_>, _>>()?;
+            let events = set_primary(
+                &tx,
+                document,
+                &states,
+                source,
+                OPERATOR_ACTOR,
+                &rationale,
+                |_, _| Ok(()),
+            )?;
+            tx.commit()?;
+            Ok(events)
+        })
+        .await
+    }
+
     /// Insert an owner transcription and immediately record its correction decision.
     ///
     /// # Errors
@@ -150,7 +236,7 @@ impl Store {
         .await
     }
 
-    /// Apply a bounded batch with one operation id and rationale. The hook runs after each
+    /// Apply a bounded batch with a server-generated operation id and one rationale. The hook runs after each
     /// review event, before the next unit changes, so latest-event attribution remains valid.
     ///
     /// # Errors
@@ -158,14 +244,14 @@ impl Store {
     pub async fn review_units_atomic<F>(
         &self,
         decisions: Vec<UnitDecision>,
-        operation_id: String,
         rationale: String,
         sidecar: F,
     ) -> Result<Vec<i64>, AppError>
     where
         F: FnMut(&Transaction<'_>, i64) -> Result<(), AppError> + Send + 'static,
     {
-        validate_batch(&decisions, &operation_id, &rationale)?;
+        validate_batch(&decisions, &rationale)?;
+        let operation_id = new_operation_id();
         self.run(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let events = review_batch(&tx, &decisions, &operation_id, &rationale, sidecar)?;
@@ -212,9 +298,12 @@ pub(super) fn validate_polygon(
     page: i64,
     polygon: &[[f64; 2]; 4],
 ) -> Result<(), AppError> {
-    let bounds: Option<(f64,f64)>=db.query_row("SELECT json_extract(g.value,'$.width_points'),json_extract(g.value,'$.height_points') FROM source_pages p JOIN sources s ON s.id=p.source_id,json_each(CASE WHEN length(s.prepared_json)<=8388608 AND json_valid(s.prepared_json) THEN s.prepared_json ELSE '{}' END,'$.pages') g WHERE p.id=?1 AND json_extract(g.value,'$.pdf_page')=p.pdf_page",[page],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-    let (width, height) =
-        bounds.ok_or(AppError::Invalid("Page geometry is missing or invalid."))?;
+    let bounds: Option<(Option<f64>,Option<f64>)>=db.query_row("SELECT CASE WHEN json_type(g.value,'$.width_points') IN ('integer','real') THEN json_extract(g.value,'$.width_points') END,CASE WHEN json_type(g.value,'$.height_points') IN ('integer','real') THEN json_extract(g.value,'$.height_points') END FROM source_pages p JOIN sources s ON s.id=p.source_id,json_each(CASE WHEN length(s.prepared_json)<=8388608 AND json_valid(s.prepared_json) THEN s.prepared_json ELSE '{}' END,'$.pages') g WHERE p.id=?1 AND json_extract(g.value,'$.pdf_page')=p.pdf_page",[page],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let (Some(width), Some(height)) =
+        bounds.ok_or(AppError::Invalid("Page geometry is missing or invalid."))?
+    else {
+        return Err(AppError::Invalid("Page geometry is missing or invalid."));
+    };
     let mut turns = [0.0; 4];
     for i in 0..4 {
         let [x, y] = polygon[i];
@@ -280,12 +369,15 @@ pub(super) fn add_owner(
     super::store::review_unit(tx, page, id, &owner_review(unit))
 }
 
-pub(super) fn validate_batch(
-    decisions: &[UnitDecision],
-    operation: &str,
-    rationale: &str,
-) -> Result<(), AppError> {
-    review_identity(operation, rationale)?;
+/// A fresh 128-bit identifier naming one batch; callers cannot choose or reuse it.
+pub(super) fn new_operation_id() -> String {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).expect("the operating system provides randomness");
+    format!("batch-{}", hex::encode(bytes))
+}
+
+pub(super) fn validate_batch(decisions: &[UnitDecision], rationale: &str) -> Result<(), AppError> {
+    review_identity("batch", rationale)?;
     if decisions.is_empty() || decisions.len() > 1024 {
         return Err(AppError::Invalid("Choose 1–1,024 unit decisions."));
     }
@@ -336,4 +428,29 @@ pub(super) fn review_batch(
         events.push(event);
     }
     Ok(events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_numeric_page_dimensions_are_invalid_not_internal_errors() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let polygon = [[1.0, 1.0], [20.0, 1.0], [20.0, 20.0], [1.0, 20.0]];
+        for dims in [r#""wide""#, "null", "[1]", "true"] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(&dir.path().join("dims.sqlite3")).unwrap();
+            let outcome = rt.block_on(store.run(move |db| {
+                db.execute_batch(&format!("INSERT INTO sources (id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES (1,'b','s','t','mork-borg','e','it','aa',x'00','{{}}','{{\"pages\":[{{\"pdf_page\":1,\"width_points\":{dims},\"height_points\":300}}]}}',1); INSERT INTO source_pages (id,source_id,pdf_page,png) VALUES (1,1,1,x'00');"))?;
+                Ok(validate_polygon(db, 1, &polygon))
+            }));
+            assert!(
+                matches!(outcome, Ok(Err(AppError::Invalid(_)))),
+                "{dims}: {outcome:?}"
+            );
+        }
+    }
 }

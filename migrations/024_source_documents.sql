@@ -19,6 +19,13 @@ CREATE TRIGGER source_document_members_insert BEFORE INSERT ON source_document_m
 BEGIN SELECT RAISE(ABORT,'Invalid document membership'); END;
 CREATE TRIGGER source_document_members_update BEFORE UPDATE ON source_document_members BEGIN SELECT RAISE(ABORT,'Document membership is immutable'); END;
 CREATE TRIGGER source_document_members_delete BEFORE DELETE ON source_document_members BEGIN SELECT RAISE(ABORT,'Document membership is retained'); END;
+CREATE TRIGGER sources_registered_insert BEFORE INSERT ON sources WHEN EXISTS(SELECT 1 FROM source_document_members WHERE source_id=NEW.id)
+BEGIN SELECT RAISE(ABORT,'Registered source identity cannot be replaced'); END;
+CREATE TRIGGER sources_registered_update BEFORE UPDATE ON sources WHEN (NEW.id IS NOT OLD.id OR NEW.pdf_hash IS NOT OLD.pdf_hash)
+ AND (EXISTS(SELECT 1 FROM source_document_members WHERE source_id=OLD.id) OR EXISTS(SELECT 1 FROM source_document_members WHERE source_id=NEW.id))
+BEGIN SELECT RAISE(ABORT,'Registered source identity and PDF hash are immutable'); END;
+CREATE TRIGGER sources_registered_delete BEFORE DELETE ON sources WHEN EXISTS(SELECT 1 FROM source_document_members WHERE source_id=OLD.id)
+BEGIN SELECT RAISE(ABORT,'Registered sources are retained'); END;
 
 CREATE TABLE source_primary_pages (
  document_id INTEGER NOT NULL REFERENCES source_documents(id),
@@ -38,14 +45,6 @@ CREATE TABLE source_primary_events (
  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) STRICT;
 CREATE INDEX source_primary_history ON source_primary_events(document_id,pdf_page,id);
-CREATE TRIGGER source_primary_events_insert BEFORE INSERT ON source_primary_events
-BEGIN
- SELECT CASE WHEN EXISTS(SELECT 1 FROM source_primary_events WHERE id=NEW.id)
- OR NEW.previous_source_id IS NOT (SELECT source_id FROM source_primary_pages WHERE document_id=NEW.document_id AND pdf_page=NEW.pdf_page)
- OR NOT EXISTS(SELECT 1 FROM source_document_members m JOIN source_pages p ON p.source_id=m.source_id
- WHERE m.document_id=NEW.document_id AND m.source_id=NEW.source_id AND p.pdf_page=NEW.pdf_page)
- THEN RAISE(ABORT,'Invalid primary decision or previous state') END;
-END;
 CREATE TRIGGER source_primary_events_apply AFTER INSERT ON source_primary_events
 BEGIN
  INSERT INTO source_primary_pages VALUES(NEW.document_id,NEW.pdf_page,NEW.source_id)
@@ -67,6 +66,19 @@ INSERT INTO source_primary_events(document_id,pdf_page,source_id,actor,rationale
  SELECT m.document_id,p.pdf_page,min(p.source_id),'import','Unique legacy reading'
  FROM source_pages p JOIN source_document_members m ON m.source_id=p.source_id
  GROUP BY m.document_id,p.pdf_page HAVING count(*)=1;
+-- Created after the legacy backfill above, which may register unfinalized legacy readings that
+-- are the only coverage of a page. New selections need a finalized reading whose PDF hash is the
+-- document's hash; registered sources cannot change that hash (see sources_registered_*).
+CREATE TRIGGER source_primary_events_insert BEFORE INSERT ON source_primary_events
+BEGIN
+ SELECT CASE WHEN EXISTS(SELECT 1 FROM source_primary_events WHERE id=NEW.id)
+ OR NEW.previous_source_id IS NOT (SELECT source_id FROM source_primary_pages WHERE document_id=NEW.document_id AND pdf_page=NEW.pdf_page)
+ OR NOT EXISTS(SELECT 1 FROM source_document_members m JOIN source_pages p ON p.source_id=m.source_id
+ JOIN sources s ON s.id=m.source_id JOIN source_documents d ON d.id=m.document_id AND d.pdf_sha256=s.pdf_hash
+ JOIN source_finalizations f ON f.source_id=s.id
+ WHERE m.document_id=NEW.document_id AND m.source_id=NEW.source_id AND p.pdf_page=NEW.pdf_page)
+ THEN RAISE(ABORT,'Invalid primary decision or previous state') END;
+END;
 CREATE TABLE source_primary_web_events (
  event_id INTEGER PRIMARY KEY REFERENCES source_primary_events(id),
  actor_id INTEGER NOT NULL REFERENCES accounts(id) CHECK(actor_id>0),
@@ -86,13 +98,19 @@ CREATE TRIGGER source_primary_web_events_delete BEFORE DELETE ON source_primary_
 ALTER TABLE source_units ADD COLUMN origin TEXT NOT NULL DEFAULT 'extracted' CHECK(origin IN ('extracted','owner'));
 ALTER TABLE source_review_events ADD COLUMN operation_id TEXT CHECK(operation_id IS NULL OR (length(operation_id) BETWEEN 1 AND 100 AND instr(operation_id,char(0))=0));
 CREATE INDEX source_review_operation ON source_review_events(operation_id) WHERE operation_id IS NOT NULL;
+-- An operation id names one batch: unused, or shared only with the latest event's actor and rationale.
+CREATE TRIGGER source_review_operation_insert BEFORE INSERT ON source_review_events WHEN NEW.operation_id IS NOT NULL
+ AND EXISTS(SELECT 1 FROM source_review_events WHERE operation_id=NEW.operation_id)
+ AND NOT EXISTS(SELECT 1 FROM source_review_events e WHERE e.id=(SELECT max(id) FROM source_review_events)
+ AND e.operation_id=NEW.operation_id AND e.actor=NEW.actor AND e.rationale=NEW.rationale)
+BEGIN SELECT RAISE(ABORT,'Operation id belongs to another batch'); END;
 CREATE TRIGGER source_unit_origin_update BEFORE UPDATE ON source_units WHEN NEW.origin IS NOT OLD.origin
 BEGIN SELECT RAISE(ABORT,'Unit origin is immutable'); END;
 CREATE TRIGGER source_unit_origin_insert BEFORE INSERT ON source_units WHEN
  (NEW.origin='extracted' AND NEW.block_id GLOB 'owner:*') OR
- (NEW.origin='owner' AND (NEW.block_id NOT GLOB 'owner:[1-9]*' OR substr(NEW.block_id,7) GLOB '*[^0-9]*'
+ (NEW.origin='owner' AND (instr(NEW.block_id,char(0))<>0 OR NEW.block_id NOT GLOB 'owner:[1-9]*' OR substr(NEW.block_id,7) GLOB '*[^0-9]*'
  OR CAST(CAST(substr(NEW.block_id,7) AS INTEGER) AS TEXT) IS NOT substr(NEW.block_id,7)
- OR length(NEW.block_id)>25 OR NEW.state<>'unreviewed' OR NEW.correction<>'' OR NEW.revision<>1 OR NEW.kind<>'Text'
+ OR length(CAST(NEW.block_id AS BLOB))>25 OR NEW.state<>'unreviewed' OR NEW.correction<>'' OR NEW.revision<>1 OR NEW.kind<>'Text'
  OR NOT EXISTS(SELECT 1 FROM source_pages p JOIN source_finalizations f ON f.source_id=p.source_id WHERE p.id=NEW.page_id)))
 BEGIN SELECT RAISE(ABORT,'Invalid owner unit identity'); END;
 DROP TRIGGER units_finalized_insert;
@@ -130,12 +148,12 @@ CREATE TABLE source_suggestions (
  source_id INTEGER NOT NULL REFERENCES sources(id),
  bundle_hash TEXT NOT NULL,
  origin TEXT NOT NULL CHECK(length(origin) BETWEEN 1 AND 100 AND instr(origin,char(0))=0),
- kind TEXT NOT NULL CHECK(length(kind) BETWEEN 1 AND 100 AND instr(kind,char(0))=0),
+ kind TEXT NOT NULL CHECK(kind IN ('correction','merge','missing_text','reject')),
  targets TEXT NOT NULL CHECK(length(CAST(targets AS BLOB))<=65536 AND json_valid(targets)),
  suggested_text TEXT CHECK(suggested_text IS NULL OR (length(suggested_text)<=20000 AND instr(suggested_text,char(0))=0)),
  rationale TEXT NOT NULL CHECK(length(rationale) BETWEEN 1 AND 5000 AND instr(rationale,char(0))=0),
  dismissed_by TEXT CHECK(dismissed_by IS NULL OR (length(dismissed_by) BETWEEN 1 AND 100 AND instr(dismissed_by,char(0))=0)),
- dismissed_at TEXT,
+ dismissed_at TEXT CHECK(dismissed_at IS NULL OR datetime(dismissed_at) IS dismissed_at),
  CHECK((dismissed_by IS NULL)=(dismissed_at IS NULL))
 ) STRICT;
 CREATE INDEX source_suggestions_source ON source_suggestions(source_id,id);
@@ -143,6 +161,51 @@ CREATE TRIGGER source_suggestions_insert BEFORE INSERT ON source_suggestions WHE
  EXISTS(SELECT 1 FROM source_suggestions WHERE id=NEW.id) OR NEW.dismissed_by IS NOT NULL OR NEW.dismissed_at IS NOT NULL
  OR NOT EXISTS(SELECT 1 FROM sources WHERE id=NEW.source_id AND bundle_hash=NEW.bundle_hash)
 BEGIN SELECT RAISE(ABORT,'Suggestion bundle does not match source'); END;
+-- Target envelope: kind decides the target shape and text presence; units belong to the source and
+-- are distinct and not newer than current; regions use the owner-geometry rules on the source's page.
+CREATE TRIGGER source_suggestions_envelope BEFORE INSERT ON source_suggestions
+BEGIN
+ SELECT CASE WHEN NOT json_valid(NEW.targets) OR json_type(NEW.targets)<>'object' OR NEW.kind NOT IN ('correction','merge','missing_text','reject')
+ OR NOT (
+ (NEW.kind='correction' AND json_extract(NEW.targets,'$.type')='unit' AND length(trim(coalesce(NEW.suggested_text,'')))>0) OR
+ (NEW.kind='merge' AND json_extract(NEW.targets,'$.type')='units' AND length(trim(coalesce(NEW.suggested_text,'')))>0) OR
+ (NEW.kind='missing_text' AND json_extract(NEW.targets,'$.type')='region' AND length(trim(coalesce(NEW.suggested_text,'')))>0) OR
+ (NEW.kind='reject' AND json_extract(NEW.targets,'$.type')='unit' AND NEW.suggested_text IS NULL))
+ THEN RAISE(ABORT,'Suggestion kind, target shape and text do not agree') END;
+ SELECT CASE WHEN json_extract(NEW.targets,'$.type') IN ('unit','units') AND NOT (
+ WITH u AS (
+ SELECT json_type(NEW.targets,'$.target.unit') ut,json_type(NEW.targets,'$.target.revision') rt,json_extract(NEW.targets,'$.target.unit') unit,json_extract(NEW.targets,'$.target.revision') rev
+ WHERE json_extract(NEW.targets,'$.type')='unit'
+ UNION ALL
+ SELECT json_type(v.value,'$.unit'),json_type(v.value,'$.revision'),json_extract(v.value,'$.unit'),json_extract(v.value,'$.revision')
+ FROM json_each(NEW.targets,'$.targets') v WHERE json_extract(NEW.targets,'$.type')='units' AND json_type(NEW.targets,'$.targets')='array')
+ SELECT count(*) BETWEEN CASE json_extract(NEW.targets,'$.type') WHEN 'units' THEN 2 ELSE 1 END AND 1024
+ AND (json_extract(NEW.targets,'$.type')='unit' OR json_array_length(NEW.targets,'$.targets')=count(*))
+ AND count(*)=sum(ut='integer' AND rt='integer' AND rev>0) AND count(DISTINCT unit)=count(*)
+ AND (SELECT count(*) FROM u JOIN source_units su ON su.id=u.unit JOIN source_pages sp ON sp.id=su.page_id
+ WHERE sp.source_id=NEW.source_id AND u.rev<=su.revision)=count(*)
+ AND (NEW.kind<>'merge' OR (SELECT count(DISTINCT su.page_id) FROM u JOIN source_units su ON su.id=u.unit)=1) FROM u)
+ THEN RAISE(ABORT,'Suggestion units must be distinct current units of the source') END;
+ SELECT CASE WHEN json_extract(NEW.targets,'$.type')='region' AND (
+ json_type(NEW.targets,'$.page')<>'integer' OR json_type(NEW.targets,'$.polygon')<>'array' OR json_array_length(NEW.targets,'$.polygon')<>4
+ OR NOT EXISTS(SELECT 1 FROM source_pages WHERE id=json_extract(NEW.targets,'$.page') AND source_id=NEW.source_id))
+ THEN RAISE(ABORT,'Suggestion region must be a four point polygon on a page of the source') END;
+ SELECT CASE WHEN json_extract(NEW.targets,'$.type')='region' AND NOT EXISTS(
+ SELECT 1 FROM source_pages p JOIN sources s ON s.id=p.source_id,
+ json_each(CASE WHEN length(s.prepared_json)<=8388608 AND json_valid(s.prepared_json) THEN s.prepared_json ELSE '{}' END,'$.pages') g
+ WHERE p.id=json_extract(NEW.targets,'$.page') AND json_extract(g.value,'$.pdf_page')=p.pdf_page
+ AND json_extract(g.value,'$.width_points') BETWEEN 1 AND 4000 AND json_extract(g.value,'$.height_points') BETWEEN 1 AND 4000
+ AND NOT EXISTS(SELECT 1 FROM json_each(NEW.targets,'$.polygon') v WHERE json_type(v.value)<>'array' OR json_array_length(v.value)<>2
+ OR coalesce(json_type(v.value,'$[0]'),'null') NOT IN ('integer','real') OR coalesce(json_type(v.value,'$[1]'),'null') NOT IN ('integer','real')
+ OR json_extract(v.value,'$[0]') NOT BETWEEN 0 AND json_extract(g.value,'$.width_points')
+ OR json_extract(v.value,'$[1]') NOT BETWEEN 0 AND json_extract(g.value,'$.height_points')))
+ THEN RAISE(ABORT,'Suggestion region must be inside its page') END;
+ SELECT CASE WHEN json_extract(NEW.targets,'$.type')='region' AND NOT (
+ WITH points AS (SELECT CAST(key AS INTEGER) i,json_extract(value,'$[0]') x,json_extract(value,'$[1]') y FROM json_each(NEW.targets,'$.polygon')),
+ turns AS (SELECT (b.x-a.x)*(c.y-b.y)-(b.y-a.y)*(c.x-b.x) turn FROM points a JOIN points b ON b.i=(a.i+1)%4 JOIN points c ON c.i=(a.i+2)%4)
+ SELECT min(turn)>0 OR max(turn)<0 FROM turns)
+ THEN RAISE(ABORT,'Suggestion region must be nondegenerate and convex') END;
+END;
 CREATE TRIGGER source_suggestions_update BEFORE UPDATE ON source_suggestions WHEN
  NEW.id IS NOT OLD.id OR NEW.source_id IS NOT OLD.source_id OR NEW.bundle_hash IS NOT OLD.bundle_hash
  OR NEW.origin IS NOT OLD.origin OR NEW.kind IS NOT OLD.kind OR NEW.targets IS NOT OLD.targets
