@@ -64,17 +64,22 @@ New decisions:
   decision on the unit. A suggestion made on an older unit revision is shown as stale. Open
   suggestions do not block page completion.
 
-Open questions:
-
-1. **Batch accept of agreeing readings** (step 8): where two readings agree, may the owner accept
-   them in one action (still their decision, per page, listed)? Or one decision per unit?
-2. **Route C provider:** which providers first, and whether to offer blacking out a region (a
-   buyer watermark); if offered, the same region is removed from the text hints too.
-3. **Route D evidence:** owner text has no page image. Is it evidence of its own (marked
-   "owner-supplied text", attested by the owner), or only a cross-check reading next to a PDF
-   source?
-4. **Dev host and route B:** may the dev host run Mimik's route-B runtime natively for its tests,
-   as ASSIST-40 allows for llama-server, or must those tests run in a container?
+- **Watermark exclusion** (owner 2026-10-30): at import the owner can exclude a buyer watermark
+  easily. Mimik proposes one when the same text appears at the same place on most selected pages
+  (for example a name and order number in the margin), shown highlighted on a page; the owner
+  confirms it, adjusts the box or draws one, once for all pages. The exclusion is an owner
+  decision with actor and rationale: text inside it is left out of every reading, units wholly
+  inside it are recorded `rejected` with that decision as rationale (listed, undoable per unit),
+  and it is blacked out on every image and text hint sent to route C. Stored page images stay
+  the original renders (evidence); the review screen shows the region masked.
+- **Batch accept** (owner 2026-10-30): where two readings agree (step 8's alignment rule), the
+  owner may accept all agreeing units of a page in one action; each is recorded as its own
+  decision and listed. Disagreements stay one by one.
+- **Route C providers** (owner 2026-10-30): Anthropic and OpenAI first, through rig-core.
+- **Route D** (owner 2026-10-30): owner-supplied text is a cross-check only: it produces
+  suggestions on a PDF reading and is never evidence of its own.
+- **Dev host** (owner 2026-10-30): the dev host may run Mimik's route-B runtime natively, in
+  Mimik's data folder and sandbox, for its tests (as ASSIST-40 allows for llama-server).
 
 ## Steps
 
@@ -98,7 +103,8 @@ Open questions:
    checks, page enumeration, rendering, route A's text) runs in the worker, which returns
    bounded, validated results; the server never parses the uploaded PDF. Renderer: MuPDF through
    a maintained crate, built from source (selection, CI build cost and REL-2 recorded as a DEP
-   decision). Upload: its own route with a streaming 128 MiB limit, Owner, CSRF and REL-5 checks,
+   decision). The watermark proposal (repeated text at the same place) and the exclusion box are
+   part of the upload flow. Upload: its own route with a streaming 128 MiB limit, Owner, CSRF and REL-5 checks,
    spooled to a private file, a staging table outside 007 with cleanup of abandoned uploads, one
    upload and one job at a time. Jobs: progress, cancel (kills the worker tree), and a clean
    failure across a restart. A hostile-PDF corpus (deep nesting, decompression bomb, xref loop,
@@ -121,8 +127,8 @@ Open questions:
    decision; DEP-27's rustls stack, redirects refused, bounded responses, keys redacted from
    logs); verify the pinned rig-core sends images and the structured output, else stop and ask
    (D-H). Each send shows a preview of exactly what goes out (pages, hints, provider, model), and
-   the confirmation is bound to the payload hashes; the PDF itself is never sent. Optional blacked
-   out region applied to images and hints alike. Output validated (schema, polygons, sizes);
+   the confirmation is bound to the payload hashes; the PDF itself is never sent. The watermark exclusion is
+   applied to images and hints alike. Output validated (schema, polygons, sizes);
    invalid output fails that page. Bar: on the IT 161-row reference, at least the 145 rows of the
    current best route, with no digit, dice or sign error; cost per page reported.
 6. **Route B: Marker through uv** (own plan). A manifest of every artifact (uv per platform, the
@@ -137,8 +143,9 @@ Open questions:
    surya re-verified before setup shows them. The prototype's checks (OCR failures fail the run,
    coverage) move into the job. Bar: the IT reference scores of the prototype route (145/161 with
    the text-layer cross-check).
-7. **Route D: owner text** (per question 3).
-8. **Agreement view** (per question 1): the alignment rule across readings (region overlap and
+7. **Route D: owner text.** Markdown or HTML split into blocks, aligned to a PDF reading by the
+   step-8 rule, giving suggestions only.
+8. **Agreement view and batch accept:** the alignment rule across readings (region overlap and
    normalised text) defined in its own plan; both readings stay unreviewed until the owner
    decides.
 9. **Docs and gate.** `docs/sources-and-retrieval.md` rewritten for the routes,
