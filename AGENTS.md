@@ -11,7 +11,7 @@
 - Prefer existing maintained crates/libraries over reinventing infrastructure. Before custom implementation, check fit, license compatibility, maintenance, API/capability coverage, portability, and dependency/runtime cost. Record meaningful selection decisions; custom code should cover Mimik-specific behavior or demonstrated gaps.
 - Rust is the application/shipping language. Python is acceptable for extraction/evaluation prototypes. Keep optional prototype dependencies separate from the application.
 - Final provider support should use an established Rust abstraction, not hand-written vendor protocols. Vendor expansion is a roadmap item; keep provider capabilities and model roles explicit.
-- Recreate official sheet structure in adaptive HTML/CSS, retaining recognizable field grouping while allowing long text and mobile reflow. Canonical data is independent of layout.
+- Sheets follow the official paper sheet: values on the owner-uploaded template, positioned in its write-in areas; desktop and tablet first, phones zoom and pan (PROD-23). Long text never overflows silently. Canonical data is independent of layout.
 - Use deterministic, source-backed rules for calculations and state changes. Model output cannot establish legality or automatically alter sheets.
 - Preserve layout-aware extraction tables/regions/metadata and compare used evidence against original PDF images. API review is supplemental; no automatic approval from model confidence or remembered rules.
 - Manuals, extracted corpora, rendered source pages, databases, and secrets remain local and outside source releases. Do not print/read back .env contents or credentials; test with dummy secrets. Respect user-owned files.
