@@ -234,7 +234,9 @@ def threads_allowed(threads, now=None):
 
 
 def check_device(device):
-    require(device == "cpu" or trial_allowed("qwen"), "The GPU is forbidden during weekday 09:00–18:00")
+    require(
+        device == "cpu" or trial_allowed("qwen"), "The GPU is forbidden during weekday 09:00–18:00"
+    )
 
 
 def check_threads(threads):

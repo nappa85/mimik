@@ -272,7 +272,9 @@ class OutputTests(unittest.TestCase):
 class WorkflowTests(unittest.TestCase):
     def runner(self):
         pin = live.parse_pin((live.ROOT / "src/assistant/model.rs").read_text(), "granite")
-        args = SimpleNamespace(timeout=10, kill_at_bytes=None, pinned="granite", threads=2, device="cpu")
+        args = SimpleNamespace(
+            timeout=10, kill_at_bytes=None, pinned="granite", threads=2, device="cpu"
+        )
         return live.Live(args, pin, Path("unused"), b"dummy")
 
     def test_main_launch_options_and_models_permissions(self):
@@ -389,7 +391,9 @@ class WorkflowTests(unittest.TestCase):
         with (
             patch.object(live, "trial_allowed", return_value=True),
             patch.object(live, "start", return_value=(Mock(), Mock())) as start,
-            patch.object(live, "auth_request", return_value=(303, {"location": "/auth/session"}, "")),
+            patch.object(
+                live, "auth_request", return_value=(303, {"location": "/auth/session"}, "")
+            ),
             patch.object(live, "auth_cookie", return_value="cookie"),
             patch.object(live, "auth_fields", return_value={}),
         ):
