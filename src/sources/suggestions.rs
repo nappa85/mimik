@@ -269,7 +269,7 @@ pub(super) fn record_application(
     Ok(())
 }
 
-fn check_open(db: &Connection, suggestion: i64) -> Result<(), AppError> {
+pub(super) fn check_open(db: &Connection, suggestion: i64) -> Result<(), AppError> {
     let closed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM source_suggestion_dismissals WHERE suggestion_id=s.id) OR EXISTS(SELECT 1 FROM source_suggestion_applications WHERE suggestion_id=s.id) FROM source_suggestions s WHERE s.id=?1",[suggestion],|r|r.get(0)).optional()?.ok_or(AppError::SourceNotFound)?;
     if closed {
         return Err(AppError::Conflict);

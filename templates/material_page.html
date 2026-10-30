@@ -3,18 +3,27 @@
 <a href="/admin/materials/sources/{{ page.source_id }}">← Selected pages</a>
 <h1>{{ page.title }} — PDF page {{ page.pdf_page }}</h1>
 <p>{{ page.edition }} · stored printed label {{ page.printed_label }} · stored page revision {{ page.revision }} · {% if page.complete %}review complete{% else %}incomplete; excluded from lookup{% endif %}</p>
+<nav>{% if let Some(unit) = screen.next_unit %}<a href="?units={{ unit.1 }}#unit-{{ unit.0 }}">Next unreviewed unit</a>{% endif %} · {% if let Some(next) = screen.next_page %}<a href="/admin/materials/pages/{{ next }}">Next page needing work</a>{% endif %}</nav>
+<details><summary>Review keyboard help</summary><p>Within the review list, outside form fields: j / k focus the next / previous card; a focuses an acceptance rationale and never submits.</p><label><input type="checkbox" id="review-shortcuts" checked>Enable review keyboard shortcuts in this browser</label></details>
 {% if !message.is_empty() %}
-<div class="panel" role="alert"><p>{{ message }}</p><p>Your draft was not saved. Its submitted revision is preserved separately from current stored revisions. Copy your draft, <a href="/admin/materials/pages/{{ page.id }}">reload</a>, and reassess the original before submitting again.</p></div>
+<div class="panel" role="alert"><p>{{ message }}</p><p>Your draft was not saved. <a href="{{ self.draft_link() }}">Go to the matching draft form</a>. Its submitted revision is preserved separately from current stored revisions. Copy your draft, <a href="/admin/materials/pages/{{ page.id }}">reload</a>, and reassess the original before submitting again.</p></div>
 {% endif %}
 <div class="columns evidence-columns">
 <aside class="panel source-original">
 <h2>Original PDF render</h2>
 <a href="/admin/materials/pages/{{ page.id }}/image" target="_blank" rel="noopener">Open full-size image</a>
+<div class="review-zoom-controls" hidden><button type="button" data-zoom="fit">Fit width</button><button type="button" data-zoom="one">100%</button><button type="button" data-zoom="two">200%</button></div>
+{% if screen.overlay_omitted %}<p>Unit overlay omitted: more than 2,000 units on this page. Missing-text regions and drawing remain available.</p>{% endif %}
+<div class="review-image-scroll"><div class="review-image" id="review-image" data-width="{{ screen.width }}" data-height="{{ screen.height }}">
 <img src="/admin/materials/pages/{{ page.id }}/image" alt="Original rendered PDF page {{ page.pdf_page }} for comparison">
+<svg id="review-overlay" viewBox="0 0 {{ screen.width }} {{ screen.height }}" aria-label="Unit regions in PDF points" role="group">
+{% for region in screen.overlay %}{% if region.unit > 0 %}<a href="?units={{ region.cursor }}#unit-{{ region.unit }}" aria-label="Review unit {{ region.unit }}"><polygon points="{{ region.points }}" data-overlay-unit="{{ region.unit }}"/></a>{% else %}<a href="#suggestion-{{ region.suggestion }}-unit-0" aria-label="Missing text suggestion {{ region.suggestion }}"><polygon points="{{ region.points }}" data-overlay-suggestion="{{ region.suggestion }}"/></a>{% endif %}{% endfor %}
+<rect id="drawn-region" hidden x="0" y="0" width="0" height="0"/>
+</svg></div></div>
 </aside>
-<section>
+<section id="review-list" aria-label="Unit review cards">
 {% for unit in page.units %}
-<article class="panel">
+<article class="panel" id="unit-{{ unit.id }}" data-unit="{{ unit.id }}" tabindex="0">
 <h2>{{ unit.kind }} — {{ unit.state }}</h2><p>Stored unit revision {{ unit.revision }}</p>
 <figure class="source-region">
 <img src="/admin/materials/pages/{{ page.id }}/units/{{ unit.id }}/image" loading="lazy" alt="Original-page bounding-region preview for {{ unit.kind }}; inspect the full page for context">
@@ -24,14 +33,18 @@
 </figcaption></figure>
 <details><summary>Extraction identifier and coordinates</summary>{{ unit.block_id }} · {{ unit.polygon }}</details>
 <div class="source-extract">{{ unit.sanitized_html|safe }}</div>
-<form method="post" action="/admin/materials/pages/{{ page.id }}/units/{{ unit.id }}">
+<h3>Lookup text</h3>{% if unit.state == "unreviewed" %}<p>Not evidence yet.</p>{% else if unit.state == "rejected" %}<p>Rejected; no lookup text.</p>{% else %}{% for card in screen.cards %}{% if card.unit == unit.id %}{% if card.preview %}<p>Lookup text preview: response text budget reached. <a href="?units={{ card.cursor }}#unit-{{ unit.id }}">Read this unit first on a card page</a>.</p>{% endif %}<pre class="evidence-text">{{ "\n" }}{{ card.lookup }}</pre>{% endif %}{% endfor %}{% endif %}
+{% for card in screen.cards %}{% if card.unit == unit.id %}{% for advice in card.advice %}{% include "material_advice.html" %}{% endfor %}{% if let Some(next) = card.next %}<a href="/admin/materials/pages/{{ page.id }}/units/{{ unit.id }}/suggestions?after={{ next }}">More suggestions for this unit</a>{% endif %}{% endif %}{% endfor %}
+{% for card in screen.cards %}{% if card.unit == unit.id %}{% if card.form_omitted %}<p>Correction form omitted to keep the response text budget bounded. <a href="?units={{ card.cursor }}#unit-{{ unit.id }}">Open the full decision form for unit {{ unit.id }}</a>.</p>{% else %}
+<form method="post" action="/admin/materials/pages/{{ page.id }}/units/{{ unit.id }}" data-form="unit" data-target="{{ unit.id }}">
 <input type="hidden" name="csrf" value="{{ csrf }}">
-{% if loop.first %}{% if let Some(draft) = draft %}
+{% if card.cursor == units %}{% if let Some(draft) = draft %}
 <p>Submitted revision {{ draft.revision|truncate(64) }}</p><input type="hidden" name="revision" value="{{ draft.revision }}">
 {% else %}<input type="hidden" name="revision" value="{{ unit.revision }}">{% endif %}
 {% else %}<input type="hidden" name="revision" value="{{ unit.revision }}">{% endif %}
 <label>Decision after comparing original
 <select name="state" required><option value="">Choose explicitly</option>
+{% if unit.state != "accepted" && unit.state != "corrected" && unit.state != "rejected" && unit.state != "unreviewed" %}<option value="{{ unit.state }}" selected>Submitted invalid decision: {{ unit.state }}</option>{% endif %}
 <option value="accepted" {% if unit.state == "accepted" %}selected{% endif %}>Accepted as extracted</option>
 <option value="corrected" {% if unit.state == "corrected" %}selected{% endif %}>Corrected with source evidence</option>
 <option value="rejected" {% if unit.state == "rejected" %}selected{% endif %}>Rejected / not evidence</option>
@@ -41,15 +54,26 @@
 {{ unit.correction }}</textarea></label>
 <label>Rationale / what you checked (at most 5,000 Unicode characters)
 <textarea name="rationale" required>
-{% if loop.first %}{% if let Some(draft) = draft %}{{ draft.rationale }}{% endif %}{% endif %}</textarea></label>
+{% if card.cursor == units %}{% if let Some(draft) = draft %}{{ draft.rationale }}{% endif %}{% endif %}</textarea></label>
 <p>Reviewer identity is recorded from your signed-in Owner account.</p><button>Record decision</button>
-</form></article>
+</form>{% endif %}{% endif %}{% endfor %}</article>
 {% endfor %}
 {% if let Some(next) = units_next %}<a href="/admin/materials/pages/{{ page.id }}?units={{ next }}&amp;history={{ history }}">Next units</a>{% endif %} ·
 <a href="/admin/materials/pages/{{ page.id }}?history={{ history }}">First units</a>
-<section class="panel"><h2>Page completeness</h2>
+<section class="panel" id="lookup-panel"><h2>Lookup text — current card page</h2><p>{% if !page.complete %}Not evidence until this page is complete. {% endif %}{% if !self.is_primary() %}This reading is not used by lookup.{% endif %}</p>{% for card in screen.cards %}{% if card.preview %}<p>Lookup text preview for unit {{ card.unit }}: response text budget reached. <a href="?units={{ card.cursor }}#unit-{{ card.unit }}">Read this unit first on a card page</a>.</p>{% endif %}<pre class="evidence-text" data-lookup-unit="{{ card.unit }}">{{ "\n" }}{{ card.lookup }}</pre>{% endfor %}</section>
+<section class="panel" id="page-notes"><h2>Page notes and missing text</h2>{% for advice in screen.notes %}{% include "material_advice.html" %}{% endfor %}{% if let Some(next) = screen.notes_next %}<a href="?units={{ units }}&amp;notes={{ next }}#page-notes">Next 20 page notes</a>{% endif %}</section>
+<section class="panel" id="add-text"><h2>Add missing text</h2><p>Enter four corners in PDF points, clockwise or counterclockwise. With JavaScript, enable drawing then drag on the page. Use the corner handles and arrow keys to adjust.</p>
+<button type="button" id="draw-region" hidden>Draw a missing-text box</button>
+<div id="region-handles" hidden><button type="button" data-corner="0">Adjust top-left corner with arrow keys</button><button type="button" data-corner="2">Adjust bottom-right corner with arrow keys</button></div>
+<form method="post" action="/admin/materials/pages/{{ page.id }}/owner-units" data-form="owner" data-target="{{ page.id }}"><input type="hidden" name="csrf" value="{{ csrf }}">
+{% if let Some(form) = owner_draft %}<input type="hidden" name="revision" value="{{ form.revision }}"><label>Four corners (PDF points)<input id="owner-polygon" name="polygon" value="{{ form.polygon }}" required></label><label>Missing text<textarea name="text" required>{{ "\n" }}{{ form.text }}</textarea></label><label>Rationale<textarea name="rationale" required>{{ "\n" }}{{ form.rationale }}</textarea></label>
+{% else %}<input type="hidden" name="revision" value="{{ page.revision }}"><label>Four corners (PDF points)<input id="owner-polygon" name="polygon" placeholder="[[10,10],[100,10],[100,50],[10,50]]" required></label><label>Missing text<textarea name="text" required maxlength="20000"></textarea></label><label>Rationale<textarea name="rationale" required maxlength="5000"></textarea></label>{% endif %}<button>Add owner unit</button></form></section>
+<section class="panel" id="primary"><h2>Primary reading</h2><p>{% if self.is_primary() %}This reading is primary.{% else if let Some(source) = screen.primary.source_id %}Another reading (#{{ source }}) is primary.{% else %}Needs a choice.{% endif %}</p>
+<form method="post" action="/admin/materials/pages/{{ page.id }}/primary" data-form="primary" data-target="{{ page.id }}"><input type="hidden" name="csrf" value="{{ csrf }}">
+{% if let Some(form) = primary_draft %}<input type="hidden" name="source" value="{{ form.source }}"><input type="hidden" name="previous" value="{{ form.previous }}"><input type="hidden" name="event" value="{{ form.event }}"><label>Primary choice rationale<textarea name="rationale" required>{{ "\n" }}{{ form.rationale }}</textarea></label>{% else %}<input type="hidden" name="source" value="{{ page.source_id }}"><input type="hidden" name="previous" value="{{ screen.primary.source_id.unwrap_or(0) }}"><input type="hidden" name="event" value="{{ screen.primary.event_id.unwrap_or(0) }}"><label>Primary choice rationale<textarea name="rationale" required></textarea></label>{% endif %}<button>Use this reading for PDF page {{ page.pdf_page }}</button></form></section>
+<section class="panel" id="complete"><h2>Page completeness</h2>
 <p>Resolve every unit, including other unit pages, and inspect the entire original page for omitted rules, table rows, symbols, footnotes and exceptions. This explicit decision is separate from unit review; model suggestions cannot approve it.</p>
-<form method="post" action="/admin/materials/pages/{{ page.id }}"><input type="hidden" name="csrf" value="{{ csrf }}">
+<form method="post" action="/admin/materials/pages/{{ page.id }}" data-form="complete" data-target="{{ page.id }}"><input type="hidden" name="csrf" value="{{ csrf }}">
 {% if let Some(form) = completion %}
 <p>Submitted page revision {{ form.revision|truncate(64) }}</p><input type="hidden" name="revision" value="{{ form.revision }}">
 <label>Confirmed printed page label (or 'unnumbered', at most 50 Unicode characters)<input name="printed_label" value="{{ form.printed_label }}" required></label>

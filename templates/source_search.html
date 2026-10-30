@@ -11,7 +11,7 @@
 <button type="submit">Look up evidence</button></form>
 {% match result %}{% when Some with (result) %}
 {% if result.source_count == 0 %}<p class="badge">Unsupported source/edition: no matching local source registered.</p>{% else %}
-{% if result.needs_primary_choice > 0 %}<p class="badge">Primary reading not chosen: {{ result.needs_primary_choice }} page(s) are covered by overlapping readings of one PDF and are excluded until the owner chooses one (<code>mimik set-primary-source</code>).</p>{% endif %}
+{% if result.needs_primary_choice > 0 %}<p class="badge">Primary reading not chosen: {{ result.needs_primary_choice }} page(s) are covered by overlapping readings of one PDF and are excluded until the owner chooses one. <a href="/admin/materials">Open Owner materials to choose primary readings</a> in authenticated mode, or use <code>mimik set-primary-source</code>.</p>{% endif %}
 {% if result.incomplete_pages > 0 %}<p class="badge">Coverage incomplete: {{ result.incomplete_pages }} page(s) still excluded from lookup.</p>{% endif %}
 {% if result.unindexed_units > 0 %}<p class="badge">Search index gap: {{ result.unindexed_units }} accepted unit(s) on complete pages could not be normalised for search and are excluded; record a correction or rejection for them.</p>{% endif %}
 {% if result.partial_runs > 0 %}<p class="badge">Partial or unknown original-PDF coverage: {{ result.partial_runs }} extraction run(s) contain selected-page subsets or lack a confirmed original total.</p>{% endif %}

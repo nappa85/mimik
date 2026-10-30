@@ -2,6 +2,1010 @@
 use super::*;
 use axum::http::StatusCode;
 
+async fn suggestion_fixture(
+    store: &Store,
+    kind: &str,
+    target: crate::sources::SuggestionTarget,
+) -> i64 {
+    store
+        .insert_source_suggestion(crate::sources::SourceSuggestion {
+            source: 1,
+            bundle_hash: "a".repeat(64),
+            origin: "tool:fixture".into(),
+            kind: kind.into(),
+            target,
+            suggested_text: (kind != "reject").then(|| "stored suggestion".into()),
+            rationale: "Compare synthetic original".into(),
+            report_id: None,
+        })
+        .await
+        .unwrap()
+}
+fn suggestion_unit(unit: i64) -> crate::sources::SuggestionTarget {
+    crate::sources::SuggestionTarget::Unit {
+        target: crate::sources::SuggestionUnit { unit, revision: 1 },
+    }
+}
+
+#[tokio::test]
+async fn material_suggestion_accept_stored_edit_stale_and_dismissal_exclusion() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let first = suggestion_fixture(&store, "correction", suggestion_unit(1)).await;
+    let competing = suggestion_fixture(&store, "correction", suggestion_unit(1)).await;
+    assert!(
+        store
+            .material_accept(
+                auth[1].clone(),
+                auth[1].csrf_fixture(),
+                first,
+                "Checked".into(),
+                None
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .material_accept(
+                auth[0].clone(),
+                auth[0].stale_csrf_fixture(),
+                first,
+                "Checked".into(),
+                None
+            )
+            .await
+            .is_err()
+    );
+    store
+        .material_accept(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            first,
+            "Checked".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    let data = store.material_advice(auth[0].clone(), first).await.unwrap();
+    assert_eq!(data.state, "applied");
+    assert_eq!(
+        store
+            .material_advice(auth[0].clone(), competing)
+            .await
+            .unwrap()
+            .state,
+        "stale"
+    );
+    assert!(matches!(
+        store
+            .material_accept(
+                auth[0].clone(),
+                auth[0].csrf_fixture(),
+                competing,
+                "Fresh form revision cannot rescue old advice".into(),
+                None
+            )
+            .await,
+        Err(AppError::Conflict)
+    ));
+    assert!(matches!(
+        store
+            .material_dismiss(
+                auth[0].clone(),
+                auth[0].csrf_fixture(),
+                first,
+                String::new()
+            )
+            .await,
+        Err(AppError::Conflict)
+    ));
+    store
+        .run(|db| {
+            assert_eq!(
+                db.query_row("SELECT correction FROM source_units WHERE id=1", [], |r| {
+                    r.get::<_, String>(0)
+                })?,
+                "stored suggestion"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn material_suggestion_edits_dismissal_and_note() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let edited = suggestion_fixture(&store, "correction", suggestion_unit(2)).await;
+    store
+        .material_accept(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            edited,
+            "Checked edit".into(),
+            Some("owner edit".into()),
+        )
+        .await
+        .unwrap();
+    let dismissed = suggestion_fixture(&store, "correction", suggestion_unit(3)).await;
+    let before = store.source_page(1).await.unwrap();
+    store
+        .material_dismiss(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            dismissed,
+            "Advice unsupported".into(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .material_dismiss(
+                auth[0].clone(),
+                auth[0].csrf_fixture(),
+                dismissed,
+                String::new()
+            )
+            .await,
+        Err(AppError::Conflict)
+    ));
+    assert!(matches!(
+        store
+            .material_accept(
+                auth[0].clone(),
+                auth[0].csrf_fixture(),
+                dismissed,
+                "Checked".into(),
+                None
+            )
+            .await,
+        Err(AppError::Conflict)
+    ));
+    let after = store.source_page(1).await.unwrap();
+    assert_eq!(before.revision, after.revision);
+    assert_eq!(before.events.len(), after.events.len());
+    assert_eq!(before.complete, after.complete);
+    let note = suggestion_fixture(&store, "note", suggestion_unit(4)).await;
+    assert!(matches!(
+        store
+            .material_accept(
+                auth[0].clone(),
+                auth[0].csrf_fixture(),
+                note,
+                "Checked".into(),
+                None
+            )
+            .await,
+        Err(AppError::Invalid(_))
+    ));
+    store
+        .run(move |db| {
+            assert!(db.query_row(
+                "SELECT edited FROM source_suggestion_applications WHERE suggestion_id=?1",
+                [edited],
+                |r| r.get::<_, bool>(0)
+            )?);
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM source_web_events", [], |r| r
+                    .get::<_, i64>(0))?,
+                1
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM source_suggestion_web_events",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn material_merge_long_decimal_rectangle_and_stale_second_target() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    // Replace unreviewed fixture rows before finalization; artifacts are never mutated.
+    store.run(|db| {
+        db.execute("DELETE FROM source_units WHERE id IN (1,2)",[])?;
+        for id in 1..=2 {db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(?1,1,?2,'Text','[[1.2345678901234567,2.3456789012345678],[100.987654321098765,2.3456789012345678],[100.987654321098765,40.876543210987654],[1.2345678901234567,40.876543210987654]]','<p>Fixture</p>','Fixture')",params![id,format!("unit-{id}")])?;}
+        crate::sources::search::ensure(db)?;Ok(())
+    }).await.unwrap();
+    finalize_material(&store).await;
+    let target = crate::sources::SuggestionTarget::Units {
+        targets: (1..=2)
+            .map(|unit| crate::sources::SuggestionUnit { unit, revision: 1 })
+            .collect(),
+    };
+    let merge = suggestion_fixture(&store, "merge", target.clone()).await;
+    store
+        .material_accept(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            merge,
+            "Read combined original region".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .run(move |db| {
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM source_units WHERE origin='owner' AND state='corrected'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                1
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM source_web_events", [], |r| r
+                    .get::<_, i64>(0))?,
+                3
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(DISTINCT operation_id) FROM source_review_events",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let target = crate::sources::SuggestionTarget::Units {
+        targets: vec![
+            crate::sources::SuggestionUnit {
+                unit: 3,
+                revision: 1,
+            },
+            crate::sources::SuggestionUnit {
+                unit: 2,
+                revision: 1,
+            },
+        ],
+    };
+    let stale = suggestion_fixture(&store, "merge", target).await;
+    let before = store.source_page(1).await.unwrap();
+    assert!(matches!(
+        store
+            .material_accept(
+                auth[0].clone(),
+                auth[0].csrf_fixture(),
+                stale,
+                "Checked".into(),
+                None
+            )
+            .await,
+        Err(AppError::Conflict)
+    ));
+    let after = store.source_page(1).await.unwrap();
+    assert_eq!(before.units.len(), after.units.len());
+    assert_eq!(before.revision, after.revision);
+    assert_eq!(before.events.len(), after.events.len());
+}
+
+#[tokio::test]
+async fn material_suggestion_accept_dismiss_race_has_one_winner() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let id = suggestion_fixture(&store, "correction", suggestion_unit(1)).await;
+    let (accept, dismiss) = tokio::join!(
+        store.material_accept(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            id,
+            "Checked".into(),
+            None
+        ),
+        store.material_dismiss(auth[0].clone(), auth[0].csrf_fixture(), id, String::new())
+    );
+    assert_ne!(accept.is_ok(), dismiss.is_ok());
+    store.run(move|db| { assert_eq!(db.query_row("SELECT (SELECT count(*) FROM source_suggestion_applications WHERE suggestion_id=?1)+(SELECT count(*) FROM source_suggestion_dismissals WHERE suggestion_id=?1)",[id],|r|r.get::<_,i64>(0))?,1);Ok(()) }).await.unwrap();
+}
+
+#[tokio::test]
+async fn material_review_response_bounds_and_labels() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    for unit in 1..=50 {
+        store
+            .material_review_unit(
+                auth[0].clone(),
+                auth[0].csrf_fixture(),
+                1,
+                unit,
+                crate::sources::UnitReview {
+                    revision: 1,
+                    state: "corrected".into(),
+                    correction: "🦀".repeat(20000),
+                    actor: String::new(),
+                    rationale: "Checked original".into(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    for unit in 1..=50 {
+        for _ in 0..21 {
+            store
+                .insert_source_suggestion(crate::sources::SourceSuggestion {
+                    source: 1,
+                    bundle_hash: "a".repeat(64),
+                    origin: "tool:fixture".into(),
+                    kind: "correction".into(),
+                    target: crate::sources::SuggestionTarget::Unit {
+                        target: crate::sources::SuggestionUnit { unit, revision: 2 },
+                    },
+                    suggested_text: Some("界".repeat(20000)),
+                    rationale: "Compare original".into(),
+                    report_id: None,
+                })
+                .await
+                .unwrap();
+        }
+    }
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = router_get(&app, &auth[0], "/admin/materials/pages/1").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    let parsed = scraper::Html::parse_document(&html);
+    let differences = scraper::Selector::parse("[data-difference]").unwrap();
+    assert!(parsed.select(&differences).count() <= 100);
+    let corrections =
+        scraper::Selector::parse("[data-form=unit] textarea[name=correction]").unwrap();
+    let form_bytes: usize = parsed
+        .select(&corrections)
+        .map(|field| field.text().collect::<String>().len())
+        .sum();
+    assert!(
+        form_bytes <= 2 * 1024 * 1024,
+        "correction forms must also respect the text budget: {form_bytes}"
+    );
+    assert!(
+        html.contains("Lookup text preview"),
+        "budget truncation must be labelled"
+    );
+    assert!(html.contains("/admin/materials/suggestions/"));
+    let screen = store
+        .material_screen(auth[0].clone(), 1, (1..=50).collect(), 0)
+        .await
+        .unwrap();
+    let mut bytes = 0;
+    for card in screen.cards {
+        if card.preview {
+            assert!(
+                card.lookup.chars().count() <= 2000,
+                "lookup previews must stop at 2,000 characters"
+            );
+        }
+        bytes += card.lookup.len() * 2;
+        if !card.form_omitted {
+            bytes += 80000;
+        }
+        assert_eq!(card.advice.len(), 20);
+        assert!(card.next.is_some());
+        for advice in card.advice {
+            bytes += advice.difference.old.len() + advice.difference.new.len();
+            bytes += advice
+                .difference
+                .segments
+                .iter()
+                .map(|s| s.text.len())
+                .sum::<usize>();
+        }
+    }
+    assert!(bytes <= 2 * 1024 * 1024, "{bytes}");
+}
+
+#[tokio::test]
+async fn material_merge_cards_have_unique_anchors() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let merge = suggestion_fixture(
+        &store,
+        "merge",
+        crate::sources::SuggestionTarget::Units {
+            targets: vec![
+                crate::sources::SuggestionUnit {
+                    unit: 50,
+                    revision: 1,
+                },
+                crate::sources::SuggestionUnit {
+                    unit: 51,
+                    revision: 1,
+                },
+            ],
+        },
+    )
+    .await;
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1?units=49").await).await;
+    let parsed = scraper::Html::parse_document(&html);
+    let selector = scraper::Selector::parse(&format!("[data-suggestion='{merge}']")).unwrap();
+    let anchors: Vec<_> = parsed
+        .select(&selector)
+        .map(|e| e.value().id().unwrap().to_owned())
+        .collect();
+    assert_eq!(anchors.len(), 2);
+    assert_ne!(anchors[0], anchors[1], "merge cards need distinct DOM ids");
+}
+
+#[tokio::test]
+async fn material_suggestion_detail_labels_truncated_lookup_and_preserves_newlines() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    store
+        .material_review_unit(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            1,
+            1,
+            crate::sources::UnitReview {
+                revision: 1,
+                state: "corrected".into(),
+                correction: "x".repeat(20000),
+                actor: String::new(),
+                rationale: "Checked".into(),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .material_review_unit(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            1,
+            2,
+            crate::sources::UnitReview {
+                revision: 1,
+                state: "corrected".into(),
+                correction: "y".repeat(20000),
+                actor: String::new(),
+                rationale: "Checked".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let merge = suggestion_fixture(
+        &store,
+        "merge",
+        crate::sources::SuggestionTarget::Units {
+            targets: (1..=2)
+                .map(|unit| crate::sources::SuggestionUnit { unit, revision: 2 })
+                .collect(),
+        },
+    )
+    .await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(
+        router_get(
+            &app,
+            &auth[0],
+            &format!("/admin/materials/suggestions/{merge}"),
+        )
+        .await,
+    )
+    .await;
+    assert!(html.contains("Lookup text is truncated"));
+    let correction = suggestion_fixture(&store, "correction", suggestion_unit(3)).await;
+    let response = document_at(
+        &app,
+        &auth[0],
+        &format!("/admin/materials/suggestions/{correction}/accept"),
+        vec![
+            ("csrf".into(), "a".repeat(64)),
+            ("rationale".into(), "\nkept rationale".into()),
+            ("edit".into(), "yes".into()),
+            ("edited_text".into(), "\n".into()),
+        ],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html = body(response).await;
+    let parsed = scraper::Html::parse_document(&html);
+    for (name, expected) in [("rationale", "\nkept rationale"), ("edited_text", "\n")] {
+        let selector =
+            scraper::Selector::parse(&format!("#accept-{correction} textarea[name={name}]"))
+                .unwrap();
+        assert_eq!(
+            parsed
+                .select(&selector)
+                .next()
+                .unwrap()
+                .text()
+                .collect::<String>(),
+            expected
+        );
+    }
+}
+
+fn review_form(fields: &[(&str, &str)]) -> Vec<(String, String)> {
+    std::iter::once(("csrf".into(), "a".repeat(64)))
+        .chain(
+            fields
+                .iter()
+                .map(|(key, value)| ((*key).into(), (*value).into())),
+        )
+        .collect()
+}
+
+fn field_value(html: &str, selector: &str) -> String {
+    scraper::Html::parse_document(html)
+        .select(&scraper::Selector::parse(selector).unwrap())
+        .next()
+        .expect("draft field")
+        .text()
+        .collect()
+}
+
+#[tokio::test]
+async fn material_owner_and_primary_drafts_on_conflict_and_validation() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    for (revision, polygon, status) in [
+        ("0", "[[1,1],[20,1],[20,20],[1,20]]", StatusCode::CONFLICT),
+        ("1", "not a polygon", StatusCode::UNPROCESSABLE_ENTITY),
+    ] {
+        let response = document_at(
+            &app,
+            &auth[0],
+            "/admin/materials/pages/1/owner-units",
+            review_form(&[
+                ("revision", revision),
+                ("polygon", polygon),
+                ("text", "\n<owner draft>"),
+                ("rationale", "\nchecked original"),
+            ]),
+        )
+        .await;
+        assert_eq!(response.status(), status);
+        let html = body(response).await;
+        assert_eq!(
+            field_value(&html, "[data-form=owner] textarea[name=text]"),
+            "\n<owner draft>"
+        );
+        assert_eq!(
+            field_value(&html, "[data-form=owner] textarea[name=rationale]"),
+            "\nchecked original"
+        );
+        assert!(
+            html.contains("?units=0#add-text"),
+            "link to the matching draft panel"
+        );
+    }
+    for (event, rationale, status) in [
+        ("0", "\nprimary draft", StatusCode::CONFLICT),
+        ("1", "\n", StatusCode::UNPROCESSABLE_ENTITY),
+    ] {
+        let response = document_at(
+            &app,
+            &auth[0],
+            "/admin/materials/pages/1/primary",
+            review_form(&[
+                ("source", "1"),
+                ("previous", "1"),
+                ("event", event),
+                ("rationale", rationale),
+            ]),
+        )
+        .await;
+        assert_eq!(response.status(), status);
+        let html = body(response).await;
+        assert_eq!(
+            field_value(&html, "[data-form=primary] textarea"),
+            rationale
+        );
+        assert!(html.contains("?units=0#primary"));
+    }
+}
+
+#[tokio::test]
+async fn material_primary_selection_list_drafts_keep_tokens_and_lf() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    for (token, rationale, expected, status) in [
+        (
+            "1:0",
+            "\nkept\r\nprimary",
+            "\nkept\nprimary",
+            StatusCode::CONFLICT,
+        ),
+        ("1:1", "\n", "\n", StatusCode::UNPROCESSABLE_ENTITY),
+    ] {
+        let response = document_at(
+            &app,
+            &auth[0],
+            "/admin/materials/sources/1/primary",
+            review_form(&[("after", "0"), ("page_1", token), ("rationale", rationale)]),
+        )
+        .await;
+        assert_eq!(response.status(), status);
+        let html = body(response).await;
+        assert_eq!(field_value(&html, "#primary-pages textarea"), expected);
+        assert!(html.contains(&format!("value=\"{token}\" checked")));
+    }
+}
+
+#[tokio::test]
+async fn material_suggestion_handler_drafts_authority_and_stored_text() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let id = suggestion_fixture(&store, "correction", suggestion_unit(51)).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let path = format!("/admin/materials/suggestions/{id}/accept");
+    assert_suggestion_authority(&app, &auth, &path).await;
+    let response = document_at(
+        &app,
+        &auth[0],
+        &path,
+        review_form(&[("rationale", "Checked"), ("suggested_text", "forged")]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let response = document_at(
+        &app,
+        &auth[0],
+        &path,
+        review_form(&[
+            ("rationale", "\nkept acceptance"),
+            ("edit", "yes"),
+            ("edited_text", ""),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html = body(response).await;
+    assert_eq!(
+        field_value(&html, "[data-form=accept] textarea[name=rationale]"),
+        "\nkept acceptance"
+    );
+    assert!(html.contains("?units=50#unit-51"));
+    let response = document_at(
+        &app,
+        &auth[0],
+        &path,
+        review_form(&[
+            ("rationale", "Checked"),
+            ("edited_text", "ignored unless edit=yes"),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert!(
+        response.headers()["location"]
+            .to_str()
+            .unwrap()
+            .contains("?units=50#unit-51")
+    );
+    let response = document_at(
+        &app,
+        &auth[0],
+        &path,
+        review_form(&[("rationale", "\nconflict draft")]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        field_value(
+            &body(response).await,
+            "[data-form=accept] textarea[name=rationale]"
+        ),
+        "\nconflict draft"
+    );
+    let dismissal = format!("/admin/materials/suggestions/{id}/dismiss");
+    let response = document_at(
+        &app,
+        &auth[0],
+        &dismissal,
+        review_form(&[("reason", "\ndismiss conflict")]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        field_value(&body(response).await, "[data-form=dismiss] textarea"),
+        "\ndismiss conflict"
+    );
+    let id = suggestion_fixture(&store, "correction", suggestion_unit(1)).await;
+    let response = document_at(
+        &app,
+        &auth[0],
+        &format!("/admin/materials/suggestions/{id}/dismiss"),
+        review_form(&[("reason", "\ninvalid\0reason")]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body(response).await.contains("invalid\0reason"));
+    assert_eq!(
+        store.source_page(1).await.unwrap().units[50].correction,
+        "stored suggestion"
+    );
+}
+
+async fn assert_suggestion_authority(app: &axum::Router, auth: &[RequestAuth], path: &str) {
+    for (who, token) in [(&auth[1], "a".repeat(64)), (&auth[0], "wrong".into())] {
+        let response = document_at(
+            app,
+            who,
+            path,
+            vec![
+                ("csrf".into(), token),
+                ("rationale".into(), "Checked".into()),
+            ],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+}
+
+#[tokio::test]
+async fn material_page_notes_missing_text_and_rejection() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let missing = suggestion_fixture(
+        &store,
+        "missing_text",
+        crate::sources::SuggestionTarget::Region {
+            page: 1,
+            polygon: [[1.0, 1.0], [20.0, 1.0], [20.0, 20.0], [1.0, 20.0]],
+        },
+    )
+    .await;
+    for _ in 0..21 {
+        suggestion_fixture(
+            &store,
+            "note",
+            crate::sources::SuggestionTarget::Page {
+                page: 1,
+                block_id: Some("raw-container".into()),
+            },
+        )
+        .await;
+    }
+    let screen = store
+        .material_screen(auth[0].clone(), 1, vec![1], 0)
+        .await
+        .unwrap();
+    assert_eq!(screen.notes.len(), 20);
+    let next = screen.notes_next.unwrap();
+    assert!(
+        screen
+            .overlay
+            .iter()
+            .any(|region| region.suggestion == missing)
+    );
+    let screen = store
+        .material_screen(auth[0].clone(), 1, vec![1], next)
+        .await
+        .unwrap();
+    assert_eq!(screen.notes.len(), 2);
+    assert!(screen.notes_next.is_none());
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = document_at(
+        &app,
+        &auth[0],
+        &format!("/admin/materials/suggestions/{missing}/accept"),
+        review_form(&[("rationale", "Read omitted text")]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert!(
+        response.headers()["location"]
+            .to_str()
+            .unwrap()
+            .contains("notes=0#page-notes")
+    );
+    let advice = store
+        .material_advice(auth[0].clone(), missing)
+        .await
+        .unwrap();
+    assert_eq!(advice.state, "applied");
+    let reject = suggestion_fixture(&store, "reject", suggestion_unit(1)).await;
+    store
+        .material_accept(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            reject,
+            "Not evidence".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    let page = store
+        .material_page(auth[0].clone(), 1, 50, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.page.units.last().unwrap().correction,
+        "stored suggestion"
+    );
+    assert_eq!(
+        store.source_page(1).await.unwrap().units[0].state,
+        "rejected"
+    );
+    assert_review_counts(&store, 1, 2, 2).await;
+}
+
+#[tokio::test]
+async fn material_merge_drafts_stale_targets_and_zero_area() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    store
+        .run(|db| {
+            db.execute(
+                "UPDATE source_units SET polygon='[[1,1],[20,1],[20,20],[1,20]]' WHERE id IN (1,2)",
+                [],
+            )?;
+            db.execute(
+                "UPDATE source_units SET polygon='[[1,1],[1,1],[1,1],[1,1]]' WHERE id IN (3,4)",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    finalize_material(&store).await;
+    let merge_target = |first| crate::sources::SuggestionTarget::Units {
+        targets: (first..first + 2)
+            .map(|unit| crate::sources::SuggestionUnit { unit, revision: 1 })
+            .collect(),
+    };
+    let merge = suggestion_fixture(&store, "merge", merge_target(1)).await;
+    let zero = suggestion_fixture(&store, "merge", merge_target(3)).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = document_at(
+        &app,
+        &auth[0],
+        &format!("/admin/materials/suggestions/{merge}/accept"),
+        review_form(&[
+            ("rationale", "\n"),
+            ("edit", "yes"),
+            ("edited_text", "\nmerge draft"),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        field_value(
+            &body(response).await,
+            "[data-form=accept] textarea[name=edited_text]"
+        ),
+        "\nmerge draft"
+    );
+    let response = document_at(
+        &app,
+        &auth[0],
+        &format!("/admin/materials/suggestions/{zero}/accept"),
+        review_form(&[("rationale", "Zero area draft")]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body(response).await.contains("Zero area draft"));
+    store
+        .material_review_unit(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            1,
+            2,
+            crate::sources::UnitReview {
+                revision: 1,
+                state: "accepted".into(),
+                correction: String::new(),
+                actor: String::new(),
+                rationale: "Unrelated Owner decision".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let response = document_at(
+        &app,
+        &auth[0],
+        &format!("/admin/materials/suggestions/{merge}/accept"),
+        review_form(&[
+            ("rationale", "Retained merge rationale"),
+            ("edit", "yes"),
+            ("edited_text", "Retained merge text"),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let html = body(response).await;
+    assert!(html.contains("Retained merge rationale"));
+    assert_eq!(
+        field_value(&html, "[data-form=accept] textarea[name=edited_text]"),
+        "Retained merge text"
+    );
+    assert_review_counts(&store, 0, 1, 0).await;
+}
+
+async fn assert_review_counts(store: &Store, owners: i64, events: i64, applications: i64) {
+    store
+        .run(move |db| {
+            for (table, expected) in [
+                ("source_units WHERE origin='owner'", owners),
+                ("source_review_events", events),
+                ("source_web_events", events),
+                ("source_suggestion_applications", applications),
+            ] {
+                assert_eq!(
+                    db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                        .get::<_, i64>(0))?,
+                    expected,
+                    "{table}"
+                );
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn material_large_page_omits_unit_overlay_but_keeps_missing_regions_and_drawing() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    store.run(|db| {
+        db.execute_batch("WITH RECURSIVE ids(id) AS (VALUES(52) UNION ALL SELECT id+1 FROM ids WHERE id<2001) INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) SELECT id,1,'unit-'||id,'Text','[[1,1],[20,1],[20,20],[1,20]]','<p>Fixture</p>','Fixture' FROM ids;")?;
+        Ok(())
+    }).await.unwrap();
+    finalize_material(&store).await;
+    let missing = suggestion_fixture(
+        &store,
+        "missing_text",
+        crate::sources::SuggestionTarget::Region {
+            page: 1,
+            polygon: [[1.0, 1.0], [20.0, 1.0], [20.0, 20.0], [1.0, 20.0]],
+        },
+    )
+    .await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = router_get(&app, &auth[0], "/admin/materials/pages/1").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    let parsed = scraper::Html::parse_document(&html);
+    assert!(html.contains("Unit overlay omitted"));
+    assert_eq!(
+        parsed
+            .select(&scraper::Selector::parse("[data-overlay-unit]").unwrap())
+            .count(),
+        0
+    );
+    assert!(html.contains(&format!("data-overlay-suggestion=\"{missing}\"")));
+    assert!(html.contains("id=\"drawn-region\""));
+}
+
 async fn seed(store: &Store) {
     store.run(|db|{
         db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES(1,'fixture','fixture','Material <title>','mork-borg','Fixture edition','en',?1,x'',x'',x'',2)",["a".repeat(64)])?;
@@ -232,6 +1236,20 @@ async fn material_document_conflict_validation_and_nul_retain_escaped_drafts() {
                 || html.contains("&lt;unsaved correction&gt;")
         );
         assert!(html.contains("checked original"));
+        assert_eq!(
+            scraper::Html::parse_document(&html)
+                .select(
+                    &scraper::Selector::parse(
+                        "[data-form=unit] select[name=state] option[selected]"
+                    )
+                    .unwrap()
+                )
+                .next()
+                .expect("submitted decision state")
+                .value()
+                .attr("value"),
+            Some(state)
+        );
     }
     let mut form = decision(1);
     form[3].1 = "\0retained NUL correction".into();

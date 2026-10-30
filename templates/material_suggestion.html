@@ -1,0 +1,19 @@
+{% extends "material_base.html" %}
+{% block content %}
+<a href="{{ advice.back_link() }}">Back to matching card or panel</a>
+<h1>Suggestion #{{ advice.id }} — {{ advice.kind }} — {{ advice.state }}</h1>
+{% if !message.is_empty() %}<p role="alert">{{ message }} Your draft is retained below.</p>{% endif %}
+<p>Claimed origin: {{ advice.origin }} · {% if let Some(report) = advice.report %}report #{{ report }}{% endif %}</p><p>{{ advice.rationale }}</p><p>{{ advice.target_label }}</p>
+<ul>{% for target in advice.target_links %}<li><a href="/admin/materials/pages/{{ advice.page }}?units={{ target.1 }}#unit-{{ target.0 }}">Inspect target unit {{ target.0 }} and its lookup text</a></li>{% endfor %}</ul>
+{% include "material_difference.html" %}
+<details><summary>Full bounded texts</summary>{% if advice.lookup_truncated %}<p>Lookup text is truncated at 20,000 characters. Follow the target unit cards above to inspect every target's lookup text.</p>{% endif %}<h2>Current lookup text</h2><pre class="evidence-text">{{ "\n" }}{{ advice.lookup }}</pre><h2>Stored suggested text</h2><pre class="evidence-text">{{ "\n" }}{{ advice.suggested }}</pre></details>
+{% if advice.kind != "note" %}
+<form id="accept-{{ advice.id }}" method="post" action="/admin/materials/suggestions/{{ advice.id }}/accept" data-form="accept" data-target="{{ advice.id }}">
+<input type="hidden" name="csrf" value="{{ form.csrf }}">
+<label>Acceptance rationale<textarea name="rationale" required>{{ "\n" }}{{ form.rationale }}</textarea></label>
+{% if advice.kind != "reject" %}<details id="edit-{{ advice.id }}" open><summary>Edit suggested text{% if !advice.actionable() %} (disabled){% endif %}</summary>
+<label><input type="checkbox" name="edit" value="yes" {% if form.edit == "yes" %}checked{% endif %} {% if !advice.actionable() %}disabled{% endif %}>Use my edit</label>
+<label>Edited text (20,000 characters maximum)<textarea name="edited_text" maxlength="20000" {% if !advice.actionable() %}readonly{% endif %}>{{ "\n" }}{{ form.edited_text }}</textarea></label></details>{% endif %}
+<button {% if !advice.actionable() %}disabled{% endif %}>Accept suggestion #{{ advice.id }}</button></form>{% endif %}
+<form id="dismiss-{{ advice.id }}" method="post" action="/admin/materials/suggestions/{{ advice.id }}/dismiss" data-form="dismiss" data-target="{{ advice.id }}"><input type="hidden" name="csrf" value="{{ form.csrf }}"><label>Optional dismissal reason<textarea name="reason">{{ "\n" }}{{ form.reason }}</textarea></label><button {% if advice.state == "applied" || advice.state == "dismissed" %}disabled{% endif %}>Dismiss suggestion #{{ advice.id }}</button></form>
+{% endblock %}

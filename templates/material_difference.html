@@ -1,0 +1,7 @@
+{% if advice.difference.fallback %}
+<p>Bounded preview (up to the first 2,000 characters; difference limit, time deadline or text budget reached; text may be omitted when the response budget is exhausted).</p>
+<h4>Current lookup text</h4><pre class="evidence-text">{{ "\n" }}{{ advice.difference.old }}</pre>
+<h4>Suggested text</h4><pre class="evidence-text">{{ "\n" }}{{ advice.difference.new }}</pre>
+{% else %}<div class="evidence-text" data-difference>
+{% for segment in advice.difference.segments %}{% if segment.kind == "insert" %}<ins>{{ segment.text }}</ins>{% else if segment.kind == "delete" %}<del>{{ segment.text }}</del>{% else %}{{ segment.text }}{% endif %}{% endfor %}
+</div>{% endif %}

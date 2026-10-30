@@ -2,7 +2,7 @@
 
 A **source** is one prepared extraction run of a locally owned manual: the original PDF, the Marker structured extraction (`source.json`), the prepared manifest (`bundle.json`) and one original-page PNG per selected page. Sources are stored privately in SQLite and reviewed by the Owner. Reviewed units feed lexical lookup. Nothing in this workflow lets a model approve evidence or change sheets or rules.
 
-Code: `src/sources/`, `src/auth/materials.rs`, migrations `003`, `004`, `005`, `007`, `009`, `015`, `017`, `024`, `025`, `assets/source-regions.js`. Tests: `tests/source_*.rs`, `src/campaigns/material_tests.rs`, `tools/test_source_tools.py`.
+Code: `src/sources/`, `src/auth/materials.rs`, migrations `003`, `004`, `005`, `007`, `009`, `015`, `017`, `024`, `025`, `assets/source-regions.js`, `assets/source-review.js`. Tests: `tests/source_*.rs`, `src/campaigns/material_tests.rs`, `tools/test_source_tools.py`.
 
 ## Import (`mimik import-source --bundle DIR --pdf FILE`)
 
@@ -58,8 +58,9 @@ A → B → A changes. The chosen source must cover each requested page in the d
 transaction appends the actor, rationale, previous source and new source, then updates the
 selection through a trigger. Primary history and authenticated `source_primary_web_events`
 attribution are retained and immutable. The Owner-bound store wrapper rechecks Owner and
-CSRF before and after writing each decision and its sidecar; browser controls are a separate
-review-screen step.
+CSRF before and after writing each decision and its sidecar. The Owner can select this reading
+for checked pages in `/admin/materials/sources/{id}`, or for one page in its review screen.
+Both forms carry the expected source and latest-event tokens and require a rationale.
 
 ## Review
 
@@ -106,8 +107,67 @@ One decision event applies at most one suggestion; an owner unit can be named by
 application. `edited` equals whether the applied correction differs from the suggested text
 (always false for a rejection). Applications and dismissals are insert-only and mutually exclusive. A unit revision
 change alone never records an application. Neither suggestion insertion nor dismissal changes
-units, their history, the search index or page completeness. Browser suggestion controls are a
-separate review-screen step.
+units, their history, the search index or page completeness.
+
+### Owner review screen
+
+`/admin/materials/pages/{id}` is an Askama-rendered page usable without JavaScript. It shows
+the original image, sanitised rich extraction, separate lookup text and attributed review
+history. Accepted lookup text is the search projection; corrected text is the stored correction;
+rejected units have none, and unreviewed units are labelled “not evidence yet”. The lookup panel
+lists the current 50-card page in bundle order. A merge-created owner unit appears at its first
+target's position; other owner units come last. Incomplete pages and non-primary readings are
+explicitly labelled as excluded from lookup.
+
+The SVG uses the original page dimensions in PDF points. Every unit has a named, focusable link
+to its card, including cards beyond the current cursor. Above 2,000 units the unit overlay is
+omitted with a note. The full-size image and independent region crops remain available.
+`source-review.js` adds fit-width/100%/200% zoom, merge-region highlighting, rectangular
+pointer drawing and arrow-key corner adjustments. Four polygon corners can also be entered
+directly in PDF points in the Add missing text form.
+
+Cards show up to 20 suggestions, including merges on every target card. Each shows its state,
+claimed origin, report id and rationale. Additional suggestions have a cursor-paged list at
+`/admin/materials/pages/{page}/units/{unit}/suggestions`; page notes and missing-text suggestions
+have an independent 20-row cursor. Notes cannot be accepted. Stale suggestions cannot be
+accepted or edited, but may be dismissed; ordinary unit review stays available.
+
+Accept loads the stored suggestion inside an IMMEDIATE transaction, checks every stored target
+revision, and applies a correction, rejection, merge or missing-text insertion. The browser
+submits only the required Owner rationale and optionally an explicit edit, never the proposed
+text as authority. A merge creates one owner unit, rejects all targets, and attributes all events
+and sidecars to one operation and rationale. Its rectangle is computed from SQLite's JSON
+coordinates so application guards compare the exact same binary values. Zero-area rectangles
+are refused. Applications record whether the resulting text differs from the stored proposal.
+Dismissal records only advice state and optional reason. Every browser write uses an
+authenticated store wrapper, rechecking Owner and CSRF at both transaction boundaries.
+
+Unicode word differences use `similar` 3.2.0 (DEP-28), plain-text inputs and template-escaped
+segments with fixed `ins`/`del` markup. Work runs on the bounded blocking store worker, with
+at most 100 comparisons per response and a 50 ms deadline each. A shared 250 ms comparison
+window also leaves time for reads and rendering within the authenticated request deadline.
+Lookup and suggestion text share a 2 MiB response budget (both copies of the lookup panel text
+and the unit correction controls count, with headroom for a failed first-card form). When a
+correction control does not fit, a link opens that unit first on a card page with its full form;
+an editable value is never silently shortened. Exhausted comparison bounds show labelled previews of up to 2,000 characters; text
+is further shortened or omitted when the byte budget is exhausted. Every suggestion links to
+`/admin/materials/suggestions/{id}`, an authenticated detail/edit panel bounded to 20,000
+characters per text and below 256 KiB of plain text. A larger combined merge lookup is labelled
+as truncated and links to each target card. Budget fallback never expands the response.
+
+409 and 422 responses retain submitted values and expected tokens in the matching form or
+suggestion detail panel, with an alert and a cursor-aware return link. Reloading is an explicit
+choice; a failed form never silently adopts newer revisions. Textarea CR LF is normalised to
+LF before validation, and leading newlines survive HTML parsing. Stable `data-unit`,
+`data-suggestion`, `data-form`, `data-target`, `data-overlay-unit` and
+`data-overlay-suggestion` attributes identify review elements.
+
+Navigation links lead to the next unreviewed unit and the next later incomplete page of the
+same reading. With the script, `j`/`k` focus adjacent cards and `a` focuses an acceptance
+rationale without submitting. Shortcuts apply only inside the review list, outside form fields
+and editable elements, and can be disabled per browser in the help panel. Focus indicators are
+visible. Scripts are external `/assets` resources; the strict CSP has no inline-script or
+inline-style exception.
 
 ### Report import (`mimik import-suggestions --source ID --report FILE`)
 

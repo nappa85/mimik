@@ -8,6 +8,7 @@ pub use reports::SuggestionReportSummary;
 pub use suggestions::{SourceSuggestion, SuggestionApplication, SuggestionTarget, SuggestionUnit};
 pub(crate) mod materials;
 pub(crate) mod region;
+pub(crate) mod review;
 pub(crate) mod search;
 pub use search::SEARCH_SCHEMA;
 mod store;
