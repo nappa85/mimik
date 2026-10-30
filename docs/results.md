@@ -940,8 +940,12 @@ decides.**
   | Granite 4.2 8B | 14 (0.22–0.50) | 19 | 18 | 13/16 | 2/15 | 3 | 13.8 |
   | Ministral 3 8B | 13 (0.20–0.48) | 25 | 22 | 10/16 | 6/15 | 0 | 7.4 |
   | Llama 3.1 8B | 6 (0.07–0.29) | 6 | 0 | 0/16 | 0/15 | 2 | 6.8 |
+  | Qwen3.5-9B (2026-10-30) | 22 (0.40–0.69) | 26 | 9 | 5/16 | 2/15 | 2 | 45.8 |
 
   All arms: 40 of 40 episodes, 0 errors, no truncation, no thermal stop (peak junction 76–80 °C).
+  The Qwen3.5-9B arm ran on 2026-10-30 (queue `screen-qwen35-9b-s40`, frozen commit `5895bed`)
+  with the same runner, registry, cases file, pack hashes and llama.cpp image, f16 KV cache and
+  default flash attention like the 35B; 40 of 40 episodes, 0 errors, peak junction 59 °C.
 - **Conclusion:** `--n-cpu-moe 40` is the G0 choice by the pre-registered rule; decoding was
   not faster with more experts on the GPU, and 40, 36 and 32 differ within noise. The 35B
   scores highest on correct (22), but its false support (12/40, 10/16 at-risk) is not low, and
@@ -950,12 +954,19 @@ decides.**
   Ministral p = 1.0). Ministral decides the outcome kind about as well as the 35B (25 versus 24)
   but its proposals are often wrong. Llama's zero false support means it never proposes or
   answers (55 malformed tool calls; tool support unverified in the registry), not safety. No
-  ranking among the upper three is established, and no 35B-versus-9B conclusion is possible.
-- **Limitations:** one seed, 40 cases; the 9B (25/40) and CPU references used the pre-rev3
-  pack and an older harness, so a 35B-versus-9B comparison needs the 9B re-run on rev3 S40.
+  ranking among the upper three is established. The 9B equals the 35B on correct (22 each, 9
+  cases each way, paired exact p = 1.0) with fewer false supports (9 versus 12, p = 0.55): no
+  difference between them is established. Against the 8B models, Holm-corrected over the four
+  comparisons per metric: more correct than Llama (17 versus 1 discordant, p < 0.001; versus
+  Ministral p = 0.035 and Granite p = 0.08 uncorrected, not significant after correction); less
+  false support than Ministral (p = 0.001) and Granite (p = 0.02), more than Llama (p = 0.004,
+  Llama rarely commits to anything). The 9B runs fully on the GPU at a median time similar to
+  the 35B (45.8 versus 42.8 s).
+- **Limitations:** one seed, 40 cases; the CPU references used the pre-rev3 pack and an older
+  harness. The 9B arm is ten days later on a later commit whose harness files are unchanged.
   The 35B differs from the 8B models in KV quantisation and flash attention. G0 measured
   decode speed on 3 smoke cases only. Turn-limit episodes count as incorrect. Numbers verified
-  by an independent results review (2026-10-22).
+  by an independent results review (2026-10-22); the 9B row and comparisons are under review.
 
 ## Decision router SYS-R: raw-readout routers on dev (2026-10-17/18)
 

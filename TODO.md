@@ -69,7 +69,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 4. Owed measurements: the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks
    at each llama.cpp pin change (`tools/assist_gpu_live.py`); a trace of the GPU path on another
    driver (AMDVLK, Intel, NVIDIA) for ASSIST-L44/L45; the superseding-job (cancel) timings on CPU and GPU with the fixed
-   helper; the Qwen3.5-9B rev3 S40 re-run.
+   helper.
 5. 2c-2b-1 review leftovers (Minor): `tools/assist_runtime_measure.py` stop-reason race
    between the watchdog and `wait_healthy` (set the reason before killing), and `poll()`
    reaping the leader before `killpg`.
@@ -155,6 +155,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - Harness v3: re-review the pre-registered scoring variants S1–S4/lenient, the selection
   script and the manifest gate, then build them (`docs/evaluation-tooling.md`). H3 live smoke
   (needs inference).
-- GPU S40 screen reviewed (`docs/results.md`). Before any 35B-versus-9B claim, re-run the
-  Qwen3.5-9B on rev3 S40 (GPU, about 10–30 min; evening/weekend, fan manual). Then the v3 dev arms and the held-out verdict run. Before any thinking arm, verify thinking
+- GPU S40 screen with the Qwen3.5-9B re-run (`docs/results.md`, 2026-10-30: 9B equals the 35B on
+  correct, 22/40 each). Then the v3 dev arms and the held-out verdict run. Before any thinking arm, verify thinking
   support of Gemma 4 E4B, Ministral 3 8B and Llama 3.1 8B against their templates.
