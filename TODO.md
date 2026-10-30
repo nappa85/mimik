@@ -17,6 +17,15 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   ran (`docs/results.md`). Next: 3. Level 3's return is its
   own later step (plan, "Level 3 behind an owner opt-in").
 
+- **Real ruleset material for the prompt tests (owner, 2026-10-29):** MÖRK BORG IT PDF pages
+  22–39 extracted with Marker and forced OCR (`docs/results.md`, extractor screen), bundle
+  `data/extractions/review-ready-166c3457f3a94f76ba97d6a7e3bfd25b` with two suggestion reports
+  (Claude's visual review, 64 suggestions; the text-layer cross-check) and a preview of the
+  corrected text (`proposed-reading.md` there). Next: the owner imports it into the live
+  database (`mimik import-source`, needs SRC-10) and reviews each unit in
+  `/admin/materials`, then the prompt tests use it. The page 29 footnote on armour grades is in
+  no unit (L-SRC-1).
+
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
   target/agent-tools/ci.sh <cmd>`, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
   mimik-catalogue-target). Free-model reviews: never in parallel (`tools/external_review.py`
@@ -99,6 +108,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   `data/` folder) behind: `create_data_dir` and `Store::open` run before the owner check.
 - Start-up order: no regression test that a failing search-index check exits without starting
   the assistant (the assistant now starts last).
+- Sources (SRC-10 review, Minor): no test runs `prepare_review.py`'s output for a childless
+  `ListGroup` through `Store::import_source`; a shared fixture for both suites would catch the
+  two rules drifting apart.
 - Review helper: `external_review.py`'s short-output unavailable heuristic can reject a real
   successful verdict that discusses "unavailable" status. Add a regression and narrow the
   classification; direct sanitized Astra follow-up was needed to read the actual verdict.

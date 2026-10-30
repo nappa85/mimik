@@ -3,11 +3,15 @@
 import argparse
 import importlib.metadata
 import json
+import logging
+import os
 import re
 import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
+from urllib.request import urlopen
 
 from source_bundle import digest, page_blocks, parse_pages, review_units, write_json
 
@@ -20,12 +24,21 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("data/extractions"))
     parser.add_argument("--mode", choices=["fast", "balanced"], default="fast")
     parser.add_argument("--ocr", choices=["auto", "force", "disabled"], default="auto")
+    parser.add_argument(
+        "--ocr-server",
+        help="Running llama-server with surya's OCR model (http://host:port); required unless --ocr disabled",
+    )
     args = parser.parse_args()
     pages = parse_pages(args.pages)
+    ocr = ocr_provenance(args.ocr, args.ocr_server)
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,79}", args.source_id):
         raise ValueError("Source ID must be a short lowercase identifier.")
     if not args.pdf.is_file():
         raise ValueError("Source PDF does not exist.")
+    if ocr:
+        # surya reads these at import: attach to the given server, never spawn or download.
+        os.environ["SURYA_INFERENCE_URL"] = ocr["server"] + "/v1"
+        os.environ["SURYA_INFERENCE_BACKEND"] = "llamacpp"
     try:
         version = importlib.metadata.version("marker-pdf")
         from marker.converters.pdf import PdfConverter
@@ -59,6 +72,7 @@ def main():
         "extractor": "marker-pdf",
         "extractor_version": version,
         "config": config,
+        "ocr": ocr,
         "status": "extracting",
         "artifact_sha256": {},
     }
@@ -68,6 +82,8 @@ def main():
         manifest["runtime_requirements_sha256"] = digest(runtime_requirements)
         (output / "runtime-requirements.txt").write_bytes(runtime_requirements.read_bytes())
     print(f"Extracting selected pages into {output}")
+    failures = OcrFailures()
+    logging.getLogger().addHandler(failures)
     try:
         converter = PdfConverter(artifact_dict=create_model_dict(), config=config)
         # Extract/process once, then render both formats from the same block tree.
@@ -76,6 +92,10 @@ def main():
         markdown = converter.resolve_dependencies(MarkdownRenderer)(document)
         save_output(structured, str(output), "source")
         save_output(markdown, str(output), "reading")
+        if failures.count:
+            raise ValueError(
+                f"OCR failed for {failures.count} block(s); their text would be missing."
+            )
         raw = json.loads((output / "source.json").read_text(encoding="utf-8"))
         blocks = page_blocks(raw)
         if sorted(blocks) != pages:
@@ -104,6 +124,43 @@ def main():
     print(
         "Extraction complete; every page/block remains unreviewed. Compare with original PDF images."
     )
+
+
+class OcrFailures(logging.Handler):
+    """Counts Marker's "OCR failed" warnings: Marker keeps going with the block's text missing."""
+
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.count = 0
+
+    def emit(self, record):
+        if "OCR failed" in record.getMessage():
+            self.count += 1
+
+
+def ocr_provenance(mode, server, fetch=None):
+    """The OCR server's identity for the manifest, or None when OCR is disabled."""
+    if mode == "disabled":
+        if server:
+            raise ValueError("--ocr-server needs OCR enabled.")
+        return None
+    if not server:
+        raise ValueError("OCR needs --ocr-server (a running llama-server with surya's model).")
+    parts = urlsplit(server)
+    if parts.scheme not in {"http", "https"} or not parts.hostname or parts.path not in {"", "/"}:
+        raise ValueError("--ocr-server must be http(s)://host:port.")
+    server = server.rstrip("/")
+    fetch = fetch or (lambda url: json.load(urlopen(url, timeout=30)))
+    props = fetch(server + "/props")
+    models = fetch(server + "/v1/models")
+    return {
+        "server": server,
+        "backend": "llamacpp",
+        "served_model": [model.get("id") for model in models.get("data", [])],
+        "model_path": props.get("model_path"),
+        "build_info": props.get("build_info"),
+        "surya_version": importlib.metadata.version("surya-ocr"),
+    }
 
 
 if __name__ == "__main__":

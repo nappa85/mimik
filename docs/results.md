@@ -5,32 +5,59 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
-## Extractor screen on MÖRK BORG IT art pages: Marker versus Docling (2026-10-29)
+## Extractor screen on MÖRK BORG IT pages 22–39 (2026-10-29/30)
 
-`mork-borg-core-it-2025` PDF pages 22–39 (printed 18–35: creation, weapons, armour,
-equipment, abilities, HP, combat, omens, powers, scrolls), both on the PDF text layer with OCR
-off, in network-less containers. Marker 2.0.0 (`mimik-extraction`, fast mode) against Docling
-2.139.0 (`containers/docling-screen.Dockerfile`; code MIT, layout models Apache-2.0, table
-model CDLA-Permissive-2.0), with text inside pictures kept (`traverse_pictures=True`). Judged
-by eye against the original page images, on pages 24, 25, 28, 29 and 30. One run each; one
-manual.
+`mork-borg-core-it-2025`, PDF pages 22–39 (printed 18–35: creation, weapons, armour,
+equipment, abilities, HP, combat, rest, improvement, powers, scrolls), in network-less
+containers. Scored against a reference transcription made by eye from the page images of
+PDF pages 23–30 (161 rows, one fact each, kept local under `data/extractions/gold/`).
+"Intact" counts rows found whole inside one unit (ready to review as they are), "present"
+rows found in the page's text in reading order, "fuzzy" the mean best similarity. One run each
+(the Marker OCR run was repeated: same scores); one manual; scoring by a screening script,
+not shipped.
 
-| Page | Marker | Docling |
-|---|---|---|
-| 24–27, the weapons table drawn over illustrations | page 25: no unit at all (one empty Picture); 24, 26, 27 partial | every label on all four pages, each with its own box; label and dice often separate items |
-| 28, armour | list items with text from different rows merged | the same kind of merge |
-| 29, equipment and services | tables with cells holding text of another table (wrong content) | 160 single-cell items (name and price apart), correct content, no table structure |
-| 30, abilities and tests | the difficulty list split from its heading | heading, list and modifier table in order; some items carry BEL (`\x07`) characters from the PDF glyphs |
+| Extractor | Intact | Present | Fuzzy | Weapons (24–27) | Armour (28) |
+|---|---|---|---|---|---|
+| Marker 2.0.0 fast, OCR disabled (text layer) | 140 | 143 | 0.957 | 0/12 | 4/10 |
+| Marker, `--ocr auto` | 140 | 144 | 0.965 | 0/12 | 4/10 |
+| Marker, `--ocr force` (surya-ocr-2 on llama.cpp b11609) | 141 | 145 | 0.988 | 3/12 | 9/10 |
+| the same, plus text-layer spellings (`crosscheck_text_layer.py`) | 145 | 150 | 0.989 | 5/12 | 9/10 |
+| Marker `balanced`, `--ocr force` | 141 | 145 | 0.988 | 3/12 | 9/10 |
+| Docling 2.139.0, text layer with text inside pictures | 62 | 129 | 0.962 | 2/12 | 4/10 |
+| Docling, full-page RapidOCR (PP-OCRv5 Latin) | 53 | 121 | 0.958 | 1/12 | 5/10 |
+| PaddleOCR-VL-1.6 pipeline (PP-DocLayoutV3, VLM on llama.cpp) | 92 | 92 | 0.864 | 5/12 | 9/10 |
 
-Speed: Docling 33 s for the 18 pages on 6 cores. Docling also keeps the shadowed duplicates of
-the text layer ("(d6 se inizi con a pergamena)" twice) and the buyer watermark as items.
+- Without OCR, Marker drops text drawn over illustrations (page 25: no unit at all) and
+  keeps the text layer's drawing order (page 28: rows of the armour list mixed). `--ocr auto`
+  judges the text layer good and does not OCR. Forced OCR finds every weapon label as its own
+  block and reads page 28 in visual order; its errors are mostly gothic display letters
+  (Violenza read "Diolenza", Quanto "Duanto", Nove "Move", Servizi "Scrivizi"), which the PDF
+  text layer inside the same box spells right: the cross-check proposed 52 such repairs
+  (with typographic ones, ’ and –), none wrong on inspection except one that drops a printed
+  asterisk.
+- Forced OCR gives whole lists as one `ListGroup` block, which the importer then ignored
+  (9 blocks, 2,532 characters on these pages) until SRC-10.
+- What review must still do on the chosen route, from a full visual review of the 175 units
+  (64 suggestions, `review_extraction.py`'s report format): merge numbers, names and dice that
+  the art layout scatters (weapons, scrolls), fill gothic titles with no text (Punti Ferita,
+  Poteri), restore lost words (one row of the critical-hit armour track, "un Peccatore"), and
+  reject the OCR'd buyer watermark. One footnote (page 29) is in no unit and cannot enter
+  review.
+- PaddleOCR-VL lost most of page 29's equipment table and took 30 minutes (image encoder on
+  the CPU); Docling's picture text is complete but split into single cells (page 29: 160
+  items). GLM-OCR was not screened: it needs the same layout model as PaddleOCR and gives no
+  regions on its own. Marker's own forced OCR could not run in the image until surya's
+  llama.cpp server was supplied (`tools/ocr_server.sh`).
+- GPU: the pinned Vulkan llama-server in a container (Debian Mesa 25.0.7 RADV) lost the device
+  while encoding an image on the RX 6650 XT; with the image encoder on the CPU
+  (`--no-mmproj-offload`) both OCR models ran without errors. Host Mesa is 26.2.5.
+- Licences: surya-ocr-2 GGUF modified OpenRAIL-M, PaddleOCR-VL-1.6 and PP-DocLayoutV3
+  Apache-2.0, Docling MIT with Apache-2.0 and CDLA-Permissive-2.0 models, RapidOCR Apache-2.0.
+  surya's OCR error model is CC BY-NC-SA 4.0 (local prototype use only).
 
-**Conclusion:** on these art-heavy pages Docling recovers text Marker drops and does not invent
-wrong table cells; neither gives review-ready rows for page 28 or the scattered weapon labels,
-so a reviewed source still needs corrections that merge fragments. Marker's forced OCR could not
-be tried (surya 0.22's recognition needs a llama.cpp binary absent from the image; its OCR
-error model is CC BY-NC-SA 4.0). Not screened: other manuals, Docling's OCR, the importer side
-(the bundle contract and `mimik import-source` accept only Marker's tree).
+**Conclusion:** extract with Marker and forced OCR through `tools/ocr_server.sh`, cross-check
+against the text layer, then review every unit against the page image. Not measured: other
+manuals, other pages of this one, the time an owner needs to apply the suggestions.
 
 ## Model trials of the downloaded default files (2d-2 live check 3, 2026-10-29)
 
