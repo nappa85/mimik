@@ -12,7 +12,7 @@ use std::process::{Command, Output};
 #[path = "support/catalogue_fixture.rs"]
 mod catalogue_fixture;
 #[path = "support/schema_fixture.rs"]
-pub mod schema_fixture;
+mod schema_fixture;
 use catalogue_fixture::{
     DROP_CATALOGUE_SCHEMA, TEST_LOCK, assert_redacted, code, fixture, second_source,
 };
