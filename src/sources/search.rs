@@ -421,9 +421,12 @@ mod tests {
             .unwrap();
         let result = rt.block_on(store.run(|db| {
             db.execute_batch("INSERT INTO sources (id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES (1,'b','s','t','mork-borg','e','it','00',x'00','{}','{}',1); INSERT INTO source_rulesets VALUES (1,'mork-borg','it-2025'); INSERT INTO source_pages (id,source_id,pdf_page,png,complete) VALUES (1,1,1,x'00',1);")?;
-            // Seeds an unfinalized legacy-style reading; new selections otherwise need finalization.
+            // Seeds an unfinalized legacy-style reading; new selections otherwise need
+            // finalization, so the guard is lifted for the registration only and restored.
+            let guard: String = db.query_row("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='source_primary_events_insert'", [], |r| r.get(0))?;
             db.execute_batch("DROP TRIGGER source_primary_events_insert")?;
             super::super::documents::register_import(db, 1)?;
+            db.execute_batch(&guard)?;
             for id in 1..=500 {
                 db.execute("INSERT INTO source_units (id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES (?1,1,?2,'Text','[]','<p>veleno comune</p>','')", params![id, format!("b{id}")])?;
             }

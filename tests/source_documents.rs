@@ -885,6 +885,35 @@ async fn legacy_overlap(dir: &std::path::Path) -> (Store, std::path::PathBuf, st
 }
 
 #[tokio::test]
+async fn operator_command_says_an_unfinalized_source_must_be_finalized() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unfinalized.sqlite3");
+    drop(Store::open(&path).unwrap());
+    let hash = "a".repeat(64);
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch(&RAW_SOURCE.replace("'aa'", &format!("'{hash}'")))
+        .unwrap();
+    db.execute_batch(&format!("INSERT INTO source_pages (id,source_id,pdf_page,png) VALUES (1,1,1,x'00'); INSERT INTO source_documents(pdf_sha256) VALUES ('{hash}'); INSERT INTO source_document_members VALUES (1,1);")).unwrap();
+    drop(db);
+    let store = Store::open(&path).unwrap();
+    let result = store
+        .operator_set_primary_source(hash.clone(), vec![1], 1, "Choose".into())
+        .await;
+    assert!(
+        matches!(&result, Err(mimik::AppError::Invalid(message)) if message.contains("finalized")),
+        "{result:?}"
+    );
+    // A source outside the document is still simply not found.
+    let result = store
+        .operator_set_primary_source(hash, vec![1], 9, "Choose".into())
+        .await;
+    assert!(
+        matches!(result, Err(mimik::AppError::NotFound)),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
 async fn operator_command_resolves_unresolved_pages_with_its_own_actor() {
     let dir = tempfile::tempdir().unwrap();
     let (store, _bundle, _pdf) = legacy_overlap(dir.path()).await;
@@ -1124,7 +1153,7 @@ async fn coverage_counters_follow_primary_pages_across_split_readings_and_overla
         store
             .set_primary_source(document, state, 2, "owner".into(), "Second reading".into())
             .await,
-        Err(mimik::AppError::NotFound)
+        Err(mimik::AppError::Invalid(message)) if message.contains("finalized")
     ));
     assert_eq!(counters(&registered("gamma", None).await), (2, 0, 1, 1));
 }
