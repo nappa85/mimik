@@ -11,6 +11,8 @@ use std::process::{Command, Output};
 
 #[path = "support/catalogue_fixture.rs"]
 mod catalogue_fixture;
+#[path = "support/schema_fixture.rs"]
+mod schema_fixture;
 use catalogue_fixture::{
     DROP_CATALOGUE_SCHEMA, TEST_LOCK, assert_redacted, code, fixture, second_source,
 };
@@ -466,6 +468,7 @@ async fn populated_schema18_database_upgrades_to_19_atomically() {
     assert_eq!(before.0, 1);
     assert_eq!(before.2, 1);
     // Rewind to a genuine schema-18 shape.
+    schema_fixture::rewind_documents(&db);
     db.execute_batch(DROP_CATALOGUE_SCHEMA).unwrap();
     // Schema 20 (change notes) is newer than the rewind target too.
     db.execute_batch("DROP TABLE private_sheet_notes;").unwrap();
@@ -506,7 +509,7 @@ async fn populated_schema18_database_upgrades_to_19_atomically() {
     );
     // Schema 19 added the catalogues; schemas 20 (change notes), 21 (row notes), 22 (the
     // assistant's model setting) and 23 (the downloads) apply on the same upgrade.
-    assert_eq!(mimik::SCHEMA_VERSION, 23);
+    assert_eq!(mimik::SCHEMA_VERSION, 24);
     assert_eq!(counts(&db), before);
     let saved = reopened
         .save_catalogue_draft(serde_json::to_vec(&fixture.catalogue()).unwrap(), 0)

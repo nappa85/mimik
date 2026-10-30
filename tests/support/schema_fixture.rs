@@ -73,6 +73,7 @@ fn remove_empty_accounts(db: &rusqlite::Connection) {
     for (table, count) in tables.into_iter().zip(counts) {
         assert_eq!(count, 0, "Refusing populated account fixture table {table}");
     }
+    rewind_documents(db);
     db.execute_batch("DROP VIEW account_web_request; DROP VIEW campaign_request_auth;")
         .unwrap();
     db.execute_batch("DROP VIEW private_sheet_events_valid;")
@@ -92,6 +93,7 @@ fn remove_empty_accounts(db: &rusqlite::Connection) {
 /// Drop every `source_search_*` object listed in `sqlite_master` (derived search data;
 /// the next `Store::open` re-applies the migration and rebuilds it).
 pub fn drop_search_schema(db: &rusqlite::Connection) {
+    rewind_documents(db);
     let objects = |kind: &str| -> Vec<String> {
         db.prepare("SELECT name FROM sqlite_master WHERE type=?1 AND name GLOB 'source_search_*' AND sql IS NOT NULL ORDER BY sql LIKE 'CREATE VIRTUAL TABLE%' DESC, name")
             .unwrap()
@@ -194,9 +196,42 @@ fn rewind_finalization(db: &rusqlite::Connection, remigrate: bool) {
         .unwrap();
         db.execute_batch(include_str!("../../migrations/019_catalogues.sql"))
             .unwrap();
+        db.execute_batch(include_str!("../../migrations/024_source_documents.sql"))
+            .unwrap();
         // Search objects (017+) were kept intact for the live session, so the schema is
         // current again; derived rows need no re-application.
         db.pragma_update(None, "user_version", current_schema())
+            .unwrap();
+    }
+}
+
+/// Recreate a genuine pre-24 schema before historical migration fixtures.
+pub fn rewind_documents(db: &rusqlite::Connection) {
+    let present: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('source_units') WHERE name='origin')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    if present {
+        // ALTER reparses schema triggers on this standalone fixture connection. This
+        // closed dummy never authenticates a request; Store::open installs the real guard.
+        db.create_scalar_function(
+            "mimik_request_auth",
+            0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |_| Ok(Option::<String>::None),
+        )
+        .unwrap();
+        db.create_scalar_function(
+            "mimik_auth_now",
+            0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |_| Ok(0_i64),
+        )
+        .unwrap();
+        db.execute_batch(include_str!("source_documents_rewind.sql"))
             .unwrap();
     }
 }

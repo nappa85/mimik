@@ -153,6 +153,7 @@ async fn migration_023_keeps_populated_022_tables_and_passes_the_foreign_key_che
                     [],
                 )?;
                 // Rewind to a populated schema 22.
+                crate::sources::documents::rewind_schema(db)?;
                 db.execute_batch("DROP TABLE assistant_downloads; PRAGMA user_version=22;")?;
                 Ok(())
             })
@@ -180,7 +181,7 @@ async fn migration_023_keeps_populated_022_tables_and_passes_the_foreign_key_che
         .unwrap();
     assert_eq!(
         (version, models, choice, violations, downloads),
-        (23, 2, 1, 0, 0)
+        (crate::store::SCHEMA_VERSION, 2, 1, 0, 0)
     );
 }
 

@@ -56,7 +56,13 @@ async fn matching_completion_event_rejects_legacy_unreviewed_units() {
     db.execute_batch(include_str!("../migrations/007_source_finalization.sql"))
         .unwrap();
     assert!(db.execute("INSERT INTO source_review_events(page_id,actor,rationale,state,correction,previous_revision) VALUES (1,'fixture','Synthetic','page-complete','',1)", []).is_err());
-    assert!(store.source_page(1).await.unwrap().events.is_empty());
+    // The schema is rewound here, so read the history directly rather than through the current store.
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM source_review_events", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -315,10 +321,21 @@ async fn page_hash_ownership_completion_and_review_overflow_fail_atomically() {
             .await
             .is_err()
     );
-    let after = store.source_page(page.id).await.unwrap();
-    assert_eq!(after.units[0].revision, 1);
-    assert_eq!(after.units[0].state, "unreviewed");
-    assert!(after.events.is_empty());
+    // The schema is rewound here, so read the rows directly rather than through the current store.
+    let (revision, state): (i64, String) = db
+        .query_row(
+            "SELECT revision,state FROM source_units WHERE id=?1",
+            [page.units[0].id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((revision, state.as_str()), (1, "unreviewed"));
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM source_review_events", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]

@@ -370,7 +370,7 @@ fn verify_existing(db: &rusqlite::Connection, id: i64, data: &Import) -> Result<
             return Err(invalid());
         }
         let count: usize = db.query_row(
-            "SELECT count(*) FROM source_units WHERE page_id=?1",
+            "SELECT count(*) FROM source_units WHERE page_id=?1 AND origin='extracted'",
             [page_id],
             |row| row.get(0),
         )?;
@@ -378,7 +378,7 @@ fn verify_existing(db: &rusqlite::Connection, id: i64, data: &Import) -> Result<
             return Err(invalid());
         }
         for unit in units {
-            let matches: bool = db.query_row("SELECT kind=?3 AND polygon=?4 AND raw_html=?5 AND raw_text=?6 FROM source_units WHERE page_id=?1 AND block_id=?2", params![page_id,unit.block_id,unit.kind,unit.polygon,unit.html,unit.text], |row| row.get(0)).optional()?.ok_or_else(invalid)?;
+            let matches: bool = db.query_row("SELECT kind=?3 AND polygon=?4 AND raw_html=?5 AND raw_text=?6 FROM source_units WHERE page_id=?1 AND block_id=?2 AND origin='extracted'", params![page_id,unit.block_id,unit.kind,unit.polygon,unit.html,unit.text], |row| row.get(0)).optional()?.ok_or_else(invalid)?;
             if !matches {
                 return Err(invalid());
             }
@@ -568,6 +568,7 @@ impl Store {
                 }
             }
             finalize(&tx, id, &data)?;
+            super::documents::register_import(&tx, id)?;
             tx.commit()?;
             Ok(id)
         }).await

@@ -27,7 +27,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   no unit (L-SRC-1).
 
 - **Source import plan** (`docs/source-import-plan.md`, reviewed, SRC-11 to SRC-14): next is
-  step 1 (schema: documents, primary per page, owner units, suggestions), then step 2's own
+  step 1's independent change-set review and sandbox-external test gate, then step 2's own
   plan (review screen). Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
   (`~/temp/`, tagged, clean text layer) through the prototype tools.
 

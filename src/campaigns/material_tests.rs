@@ -12,6 +12,140 @@ async fn seed(store: &Store) {
         Ok(())
     }).await.unwrap();
 }
+
+async fn finalize_material(store: &Store) {
+    store.run(|db| {
+        let prepared=serde_json::json!({"contract_version":1,"extraction_sha256":"b".repeat(64),"pages":[{"pdf_page":1,"width_points":200,"height_points":300}]});
+        db.execute("UPDATE sources SET bundle_hash=?1,prepared_json=?2 WHERE id=1",params!["a".repeat(64),serde_json::to_vec(&prepared)?])?;
+        db.execute("INSERT INTO source_page_hashes VALUES(1,1,?1)",["c".repeat(64)])?;
+        db.execute("INSERT INTO source_finalizations VALUES(1,?1,?2)",params!["a".repeat(64),"b".repeat(64)])?;
+        crate::sources::documents::register_import(db,1)?;
+        Ok(())
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn material_owner_insert_and_primary_selection_have_authenticated_sidecars() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let unit = crate::sources::OwnerUnit {
+        revision: 1,
+        polygon: [[1.0, 1.0], [20.0, 1.0], [20.0, 20.0], [1.0, 20.0]],
+        text: "Owner transcription".into(),
+        actor: "forged".into(),
+        rationale: "Read original".into(),
+    };
+    let event = store
+        .material_add_owner_unit(auth[0].clone(), auth[0].csrf_fixture(), 1, unit.clone())
+        .await
+        .unwrap();
+    let primary = store
+        .material_set_primary_source(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            1,
+            store.source_primary_state(1).await.unwrap(),
+            1,
+            "Confirmed reading".into(),
+        )
+        .await
+        .unwrap()[0];
+    store.run(move |db| {
+        assert_eq!(db.query_row("SELECT e.actor,w.actor_id FROM source_review_events e JOIN source_web_events w ON w.event_id=e.id WHERE e.id=?1",[event],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?)))?,("account:1".into(),1));
+        assert_eq!(db.query_row("SELECT e.actor,w.actor_id FROM source_primary_events e JOIN source_primary_web_events w ON w.event_id=e.id WHERE e.id=?1",[primary],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?)))?,("account:1".into(),1));
+        db.execute_batch("CREATE TRIGGER owner_audit_fault BEFORE INSERT ON source_web_events BEGIN SELECT RAISE(ABORT,'fixture fault'); END;")?;
+        Ok(())
+    }).await.unwrap();
+    let mut unit = unit;
+    unit.revision = 3;
+    assert!(
+        store
+            .material_add_owner_unit(auth[0].clone(), auth[0].csrf_fixture(), 1, unit)
+            .await
+            .is_err()
+    );
+    assert_eq!(store.source_page(1).await.unwrap().units.len(), 52);
+    assert_eq!(store.source_page(1).await.unwrap().revision, 3);
+}
+
+#[tokio::test]
+async fn material_atomic_batch_attributes_in_order_and_sidecar_failure_rolls_back_all() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let decisions = |revision| {
+        (1..=2)
+            .map(|unit| crate::sources::UnitDecision {
+                page: 1,
+                unit,
+                review: crate::sources::UnitReview {
+                    revision,
+                    state: "accepted".into(),
+                    correction: String::new(),
+                    actor: "forged".into(),
+                    rationale: String::new(),
+                },
+            })
+            .collect()
+    };
+    store
+        .material_review_units_atomic(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            decisions(1),
+            "Checked both units".into(),
+        )
+        .await
+        .unwrap();
+    store.run(|db| {
+        assert_eq!(db.query_row("SELECT count(*) FROM source_web_events w JOIN source_review_events e ON e.id=w.event_id WHERE e.operation_id LIKE 'batch-%' AND e.actor='account:1'",[],|r|r.get::<_,i64>(0))?,2);
+        assert_eq!(db.query_row("SELECT count(DISTINCT operation_id) FROM source_review_events",[],|r|r.get::<_,i64>(0))?,1);
+        db.execute_batch("CREATE TRIGGER second_batch_sidecar_fault BEFORE INSERT ON source_web_events WHEN (SELECT unit_id FROM source_review_events WHERE id=NEW.event_id)=2 BEGIN SELECT RAISE(ABORT,'fixture fault'); END;")?;
+        Ok(())
+    }).await.unwrap();
+    assert!(
+        store
+            .material_review_units_atomic(
+                auth[0].clone(),
+                auth[0].csrf_fixture(),
+                decisions(2),
+                "Recheck both".into()
+            )
+            .await
+            .is_err()
+    );
+    store
+        .run(|db| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM source_review_events", [], |r| r
+                    .get::<_, i64>(0))?,
+                2
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM source_web_events", [], |r| r
+                    .get::<_, i64>(0))?,
+                2
+            );
+            assert_eq!(
+                db.query_row("SELECT revision FROM source_pages WHERE id=1", [], |r| r
+                    .get::<_, i64>(0))?,
+                3
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT sum(revision) FROM source_units WHERE id IN (1,2)",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                4
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
 /// Raw HTML is immutable (migration trigger); fixtures replace the unreviewed unit instead.
 fn replace_unit(db: &rusqlite::Connection, block: &str, html: &str) -> Result<(), AppError> {
     db.execute(

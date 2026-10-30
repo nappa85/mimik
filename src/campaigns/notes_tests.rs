@@ -1286,6 +1286,7 @@ async fn populated_schema19_upgrade_adds_the_note_table() {
             let history = rows(db)?;
             // Rewind to a genuine schema-19 shape.
             db.execute_batch(crate::campaigns::DROP_NOTES_SCHEMA)?;
+            crate::sources::documents::rewind_schema(db)?;
             db.execute_batch(crate::assistant::records::DROP_SCHEMA)?;
             db.execute_batch("PRAGMA user_version=19;")?;
             Ok(history)

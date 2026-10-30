@@ -181,6 +181,14 @@ async fn lookup_aggregates_canonical_alias_sources_and_excludes_other_edition_co
         changed["edition_id"] = edition_id.into();
         changed["edition"] = label.into();
         changed["title"] = title.into();
+        // These are separate manuals for edition/alias aggregation, not alternative
+        // readings of the same PDF (which now share one primary per page).
+        let pdf = dir.path().join("original.pdf");
+        let mut document = lopdf::Document::load(&pdf).unwrap();
+        let info = document.add_object(lopdf::dictionary! {"Title" => id});
+        document.trailer.set("Info", info);
+        document.save(&pdf).unwrap();
+        changed["source_sha256"] = fixture::hash(&std::fs::read(&pdf).unwrap()).into();
         std::fs::write(
             bundle.join("bundle.json"),
             serde_json::to_vec(&changed).unwrap(),
