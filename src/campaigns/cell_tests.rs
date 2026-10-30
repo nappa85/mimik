@@ -1199,6 +1199,7 @@ async fn schema_20_upgrades_to_21_keeping_every_note() {
                 |r| r.get(0),
             )?;
             db.execute_batch("DROP TRIGGER private_sheet_notes_insert; INSERT INTO private_sheet_notes SELECT * FROM kept; DROP TABLE kept;")?;
+            crate::sources::documents::rewind_schema(db)?;
             db.execute_batch(crate::assistant::records::DROP_SCHEMA)?;
             db.execute_batch(&format!("{trigger};"))?;
             assert_eq!(

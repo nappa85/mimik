@@ -1,5 +1,9 @@
 //! Local, source-bound review evidence. Models cannot approve these records.
+pub(crate) mod documents;
 mod import;
+mod suggestions;
+pub use documents::{OwnerUnit, PrimaryPageState, UnitDecision};
+pub use suggestions::{SourceSuggestion, SuggestionTarget, SuggestionUnit};
 pub(crate) mod materials;
 pub(crate) mod region;
 pub(crate) mod search;
@@ -129,6 +133,8 @@ pub struct EvidenceSearch {
     /// Accepted units on complete pages excluded because their text could not be
     /// normalised for search (record a correction or rejection to resolve).
     pub unindexed_units: i64,
+    /// Distinct document pages with readings but no primary: needs the owner's choice.
+    pub needs_primary_choice: i64,
     /// More than the returned 50 matches exist.
     pub truncated: bool,
     pub matches: Vec<Evidence>,

@@ -96,17 +96,9 @@ New decisions:
 
 ## Steps
 
-1. **Schema.** One migration: `source_documents` (PDF once, hash), the primary flag and its
-   decision events, `origin` on `source_units` with the rewritten 007 and 009 triggers, the
-   suggestion tables. Existing sources are grouped into documents by PDF hash; where
-   legacy sources of one PDF overlap on a page, the migration picks none as primary for that page
-   and the page is shown as needing the owner's choice, so reviewed evidence selection never
-   changes silently; their ids, reviews
-   and hashes are unchanged (tested on a copy of a database with a reviewed source). Lookup
-   (`match_sql`, coverage counts) filters to primary sources. Regression tests: completion
-   refused with an unreviewed owner unit; adding an owner unit to a complete page resets it;
-   an owner unit is searchable after review; extracted-unit insertion into a finalized source is
-   still refused; a second reading is not returned by lookup until made primary.
+1. **Schema gate.** Independent Sol/Opus change-set review and the remaining sandbox-external
+   checks must pass before this step is complete. Schema/store reference:
+   `docs/sources-and-retrieval.md`.
 2. **Review screen** (own plan). Report import bound to the bundle hash (the existing report
    shape, plus targets for several units and page regions). On the page: the image beside the
    units, zoom and region highlight; each suggestion as an inline difference with Accept, Edit,

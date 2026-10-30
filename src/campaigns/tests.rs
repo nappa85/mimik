@@ -2598,7 +2598,7 @@ async fn populated_schema12_upgrade_preserves_owner_development_records_and_sess
                     .unwrap(),
             )?;
             crate::sources::search::drop_schema(db)?;
-            db.execute_batch(crate::catalogues::DROP_SCHEMA)?;db.execute_batch(crate::campaigns::DROP_NOTES_SCHEMA)?;db.execute_batch(crate::assistant::records::DROP_SCHEMA)?;
+            crate::sources::documents::rewind_schema(db)?;db.execute_batch(crate::catalogues::DROP_SCHEMA)?;db.execute_batch(crate::campaigns::DROP_NOTES_SCHEMA)?;db.execute_batch(crate::assistant::records::DROP_SCHEMA)?;
             db.execute_batch("PRAGMA user_version=12;")?;
             Ok(())
         })

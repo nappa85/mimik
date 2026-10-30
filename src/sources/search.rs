@@ -155,6 +155,7 @@ pub(crate) fn match_sql(registered: bool) -> String {
         "SELECT u.id,{},{},{},u.revision,u.state,p.id,p.revision,s.id,{},p.pdf_page,{},CASE WHEN u.state='corrected' THEN {} ELSE {} END \
          FROM source_search_fts CROSS JOIN source_units u ON u.id=source_search_fts.rowid \
          CROSS JOIN source_pages p ON p.id=u.page_id CROSS JOIN sources s ON s.id=p.source_id \
+         CROSS JOIN source_primary_pages primary_page ON primary_page.source_id=s.id AND primary_page.pdf_page=p.pdf_page \
          LEFT JOIN source_rulesets r ON r.source_id=s.id \
          LEFT JOIN source_search_text t ON t.unit_id=u.id \
          WHERE source_search_fts MATCH ?3 AND {predicate} AND p.complete=1 AND u.state IN ('accepted','corrected') \
@@ -235,15 +236,21 @@ fn lookup_within(
         db.query_row(&sql, params![system, edition], |row| row.get(0))
             .map_err(interrupted)
     };
-    let source_count = count(format!("SELECT count(*) FROM {from} WHERE {predicate}"))?;
+    let source_count = count(format!(
+        "SELECT count(*) FROM {from} WHERE {predicate} AND EXISTS(SELECT 1 FROM source_primary_pages v WHERE v.source_id=s.id)"
+    ))?;
+    let primary = "JOIN source_primary_pages primary_page ON primary_page.source_id=s.id AND primary_page.pdf_page=p.pdf_page";
     let incomplete_pages = count(format!(
-        "SELECT count(*) FROM {from} JOIN source_pages p ON p.source_id=s.id WHERE {predicate} AND p.complete=0"
+        "SELECT count(*) FROM {from} JOIN source_pages p ON p.source_id=s.id {primary} WHERE {predicate} AND p.complete=0"
     ))?;
     let partial_runs = count(format!(
-        "SELECT count(*) FROM {from} WHERE {predicate} AND (s.total_pages=0 OR s.total_pages<>(SELECT count(*) FROM source_pages p WHERE p.source_id=s.id))"
+        "SELECT count(*) FROM (SELECT DISTINCT m.document_id FROM {from} JOIN source_document_members m ON m.source_id=s.id WHERE {predicate} AND EXISTS(SELECT 1 FROM source_primary_pages v WHERE v.source_id=s.id) AND (s.total_pages=0 OR s.total_pages<>(SELECT count(*) FROM source_primary_pages v JOIN sources s ON s.id=v.source_id LEFT JOIN source_rulesets r ON r.source_id=s.id WHERE v.document_id=m.document_id AND {predicate})))"
     ))?;
     let unindexed_units = count(format!(
-        "SELECT count(*) FROM {from} JOIN source_pages p ON p.source_id=s.id JOIN source_units u ON u.page_id=p.id WHERE {predicate} AND p.complete=1 AND u.state='accepted' AND NOT EXISTS(SELECT 1 FROM source_search_text t WHERE t.unit_id=u.id)"
+        "SELECT count(*) FROM {from} JOIN source_pages p ON p.source_id=s.id {primary} JOIN source_units u ON u.page_id=p.id WHERE {predicate} AND p.complete=1 AND u.state='accepted' AND NOT EXISTS(SELECT 1 FROM source_search_text t WHERE t.unit_id=u.id)"
+    ))?;
+    let needs_primary_choice = count(format!(
+        "SELECT count(*) FROM (SELECT DISTINCT m.document_id,p.pdf_page FROM {from} JOIN source_document_members m ON m.source_id=s.id JOIN source_pages p ON p.source_id=s.id WHERE {predicate} AND NOT EXISTS(SELECT 1 FROM source_primary_pages v WHERE v.document_id=m.document_id AND v.pdf_page=p.pdf_page))"
     ))?;
     let mut statement = db.prepare(&match_sql(registered))?;
     let mut matches = statement
@@ -275,6 +282,7 @@ fn lookup_within(
         incomplete_pages,
         partial_runs,
         unindexed_units,
+        needs_primary_choice,
         truncated,
         matches,
     })
@@ -372,6 +380,7 @@ pub(crate) fn ensure(db: &Connection) -> Result<i64, AppError> {
 /// Test support: drop every `source_search_*` object found in `sqlite_master`.
 #[cfg(test)]
 pub(crate) fn drop_schema(db: &Connection) -> Result<(), AppError> {
+    super::documents::rewind_schema(db)?;
     let objects = |kind: &str| -> Result<Vec<String>, AppError> {
         let mut query = db.prepare("SELECT name FROM sqlite_master WHERE type=?1 AND name GLOB 'source_search_*' AND sql IS NOT NULL ORDER BY sql LIKE 'CREATE VIRTUAL TABLE%' DESC, name")?;
         Ok(query
@@ -414,6 +423,7 @@ mod tests {
             .unwrap();
         let result = rt.block_on(store.run(|db| {
             db.execute_batch("INSERT INTO sources (id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES (1,'b','s','t','mork-borg','e','it','00',x'00','{}','{}',1); INSERT INTO source_rulesets VALUES (1,'mork-borg','it-2025'); INSERT INTO source_pages (id,source_id,pdf_page,png,complete) VALUES (1,1,1,x'00',1);")?;
+            super::super::documents::register_import(db, 1)?;
             for id in 1..=500 {
                 db.execute("INSERT INTO source_units (id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES (?1,1,?2,'Text','[]','<p>veleno comune</p>','')", params![id, format!("b{id}")])?;
             }

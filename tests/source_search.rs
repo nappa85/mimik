@@ -34,7 +34,7 @@ fn seed(
     pages: &[(i64, bool)],
     units: &[Unit],
 ) {
-    db.execute("INSERT INTO sources (id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES (?1,?2,'synthetic',?3,'mork-borg',?4,'it','00',x'00','{}','{}',?5)", params![source, format!("bundle-{source}"), format!("Synthetic {source}"), edition, i64::try_from(pages.len()).unwrap()]).unwrap();
+    db.execute("INSERT INTO sources (id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES (?1,?2,'synthetic',?3,'mork-borg',?4,'it',printf('synthetic-pdf-%d',?1),x'00','{}','{}',?5)", params![source, format!("bundle-{source}"), format!("Synthetic {source}"), edition, i64::try_from(pages.len()).unwrap()]).unwrap();
     if let Some(edition_id) = ruleset {
         db.execute(
             "INSERT INTO source_rulesets VALUES (?1,'mork-borg',?2)",
@@ -660,7 +660,7 @@ async fn backfill_streams_more_units_than_one_batch() {
 }
 
 #[tokio::test]
-async fn accepted_search_text_is_retained_and_unreviewed_sources_delete_cleanly() {
+async fn accepted_search_text_is_retained_and_unreviewed_units_delete_cleanly() {
     let dir = tempfile::tempdir().unwrap();
     let store = open_seeded(dir.path(), |db| {
         seed(
@@ -689,8 +689,11 @@ async fn accepted_search_text_is_retained_and_unreviewed_sources_delete_cleanly(
         db.execute("DELETE FROM source_search_text WHERE unit_id=2", [])
             .is_ok()
     );
-    // A non-finalized source without review history can be removed; derived rows follow.
-    db.execute_batch("DELETE FROM source_units WHERE page_id=1; DELETE FROM source_pages WHERE source_id=1; DELETE FROM sources WHERE id=1;").unwrap();
+    // Non-finalized units without history can be removed; derived rows follow. Document
+    // membership and primary decision history retain the source identity in schema 24.
+    db.execute_batch("DELETE FROM source_units WHERE page_id=1;")
+        .unwrap();
+    assert!(db.execute("DELETE FROM sources WHERE id=1", []).is_err());
     for table in [
         "source_search_text",
         "source_search_fts",

@@ -934,7 +934,9 @@ async fn schema9_retrofit_publication(provenance_present: bool) {
     }
     let retained = |db: &rusqlite::Connection| -> Vec<String> {
         ["definition_versions", "definition_approvals", "source_review_events", "source_pages", "source_units"].into_iter().map(|table| {
-            let columns: Vec<String> = db.prepare(&format!("PRAGMA table_info({table})")).unwrap().query_map([], |r| r.get(1)).unwrap().collect::<Result<_, _>>().unwrap();
+            // Compare every historical column across the upgrade; schema 24 adds
+            // defaulted origin/operation columns, checked separately below.
+            let columns: Vec<String> = db.prepare(&format!("PRAGMA table_info({table})")).unwrap().query_map([], |r| r.get(1)).unwrap().collect::<Result<Vec<_>, _>>().unwrap().into_iter().filter(|column: &String| !matches!(column.as_str(), "origin" | "operation_id")).collect();
             let values = columns.iter().map(|column| format!("CASE WHEN typeof({column})='blob' THEN hex({column}) ELSE {column} END")).collect::<Vec<_>>().join(",");
             db.query_row(&format!("SELECT json_group_array(json_array({values})) FROM (SELECT * FROM {table} ORDER BY id)"), [], |r| r.get(0)).unwrap()
         }).collect()
@@ -953,6 +955,24 @@ async fn schema9_retrofit_publication(provenance_present: bool) {
             "schema8 startup accepted invalid approval (old provenance present={provenance_present})"
         );
         assert_eq!(retained(&db), before);
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM source_units WHERE origin<>'extracted'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM source_review_events WHERE operation_id IS NOT NULL",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
         let current_page = reopened.source_page(page).await.unwrap();
         assert_eq!(current_page.revision, before_page.revision);
         assert_eq!(current_page.events.len(), before_page.events.len());

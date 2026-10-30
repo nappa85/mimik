@@ -276,6 +276,16 @@ pub(super) fn review_unit(
     unit: i64,
     review: &UnitReview,
 ) -> Result<i64, AppError> {
+    review_unit_operation(tx, page, unit, review, None)
+}
+
+pub(super) fn review_unit_operation(
+    tx: &rusqlite::Transaction<'_>,
+    page: i64,
+    unit: i64,
+    review: &UnitReview,
+    operation: Option<&str>,
+) -> Result<i64, AppError> {
     let current: i64 = tx
         .query_row(
             "SELECT revision FROM source_units WHERE id=?1 AND page_id=?2",
@@ -298,7 +308,7 @@ pub(super) fn review_unit(
         "UPDATE source_units SET state=?1,correction=?2,revision=?3 WHERE id=?4",
         params![review.state, review.correction, next_unit, unit],
     )?;
-    tx.execute("INSERT INTO source_review_events (page_id,unit_id,actor,rationale,state,correction,previous_revision) VALUES (?1,?2,?3,?4,?5,?6,?7)", params![page,unit,review.actor,review.rationale,review.state,review.correction,current])?;
+    tx.execute("INSERT INTO source_review_events (page_id,unit_id,actor,rationale,state,correction,previous_revision,operation_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![page,unit,review.actor,review.rationale,review.state,review.correction,current,operation])?;
     Ok(tx.last_insert_rowid())
 }
 
@@ -350,7 +360,7 @@ pub(super) fn complete_page(
     Ok(tx.last_insert_rowid())
 }
 
-fn next_revision(current: i64) -> Result<i64, AppError> {
+pub(super) fn next_revision(current: i64) -> Result<i64, AppError> {
     current
         .checked_add(1)
         .filter(|_| current > 0)

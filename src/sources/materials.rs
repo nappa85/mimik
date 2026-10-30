@@ -54,6 +54,91 @@ fn cursor(after: i64) -> Result<(), AppError> {
 }
 
 impl Store {
+    // Store APIs for the next review-screen step; no routes expose these yet.
+    #[allow(dead_code, reason = "Authenticated store API for source-import step 2")]
+    pub(crate) async fn material_add_owner_unit(
+        &self,
+        auth: RequestAuth,
+        csrf: CsrfAdmission,
+        page: i64,
+        mut unit: super::OwnerUnit,
+    ) -> Result<i64, AppError> {
+        unit.actor = format!("account:{}", auth.account_id());
+        super::documents::validate_owner(&unit)?;
+        self.run_bounded_auth(move |db| {
+            with_domain_request(auth.clone(), || {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                auth.recheck_owner(&tx)?;
+                csrf.recheck(&tx)?;
+                let event = super::documents::add_owner(&tx, page, &unit)?;
+                audit(&tx, &auth, event)?;
+                auth.recheck_owner(&tx)?;
+                csrf.recheck(&tx)?;
+                tx.commit()?;
+                Ok(event)
+            })
+        })
+        .await
+    }
+
+    #[allow(dead_code, reason = "Authenticated store API for source-import step 2")]
+    pub(crate) async fn material_set_primary_source(
+        &self,
+        auth: RequestAuth,
+        csrf: CsrfAdmission,
+        document: i64,
+        pages: Vec<super::PrimaryPageState>,
+        source: i64,
+        rationale: String,
+    ) -> Result<Vec<i64>, AppError> {
+        self.run_bounded_auth(move |db| {
+            with_domain_request(auth.clone(), || {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                auth.recheck_owner(&tx)?; csrf.recheck(&tx)?;
+                let events = super::documents::set_primary(&tx, document, &pages, source, &format!("account:{}",auth.account_id()), &rationale, |tx,event| {
+                    tx.execute("INSERT INTO source_primary_web_events(event_id,actor_id,actor_epoch,session_digest) VALUES(?1,?2,?3,?4)",params![event,auth.account_id(),auth.epoch(),auth.digest()])?;
+                    Ok(())
+                })?;
+                auth.recheck_owner(&tx)?; csrf.recheck(&tx)?;
+                tx.commit()?; Ok(events)
+            })
+        }).await
+    }
+
+    #[allow(dead_code, reason = "Authenticated store API for source-import step 2")]
+    pub(crate) async fn material_review_units_atomic(
+        &self,
+        auth: RequestAuth,
+        csrf: CsrfAdmission,
+        mut decisions: Vec<super::UnitDecision>,
+        operation: String,
+        rationale: String,
+    ) -> Result<Vec<i64>, AppError> {
+        for decision in &mut decisions {
+            decision.review.actor = format!("account:{}", auth.account_id());
+        }
+        super::documents::validate_batch(&decisions, &operation, &rationale)?;
+        self.run_bounded_auth(move |db| {
+            with_domain_request(auth.clone(), || {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                auth.recheck_owner(&tx)?;
+                csrf.recheck(&tx)?;
+                let events = super::documents::review_batch(
+                    &tx,
+                    &decisions,
+                    &operation,
+                    &rationale,
+                    |tx, event| audit(tx, &auth, event),
+                )?;
+                auth.recheck_owner(&tx)?;
+                csrf.recheck(&tx)?;
+                tx.commit()?;
+                Ok(events)
+            })
+        })
+        .await
+    }
+
     pub(crate) async fn material_sources(
         &self,
         auth: RequestAuth,
