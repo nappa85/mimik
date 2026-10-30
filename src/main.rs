@@ -289,6 +289,13 @@ enum Command {
         #[arg(long)]
         pdf: std::path::PathBuf,
     },
+    /// Import extraction advice; never changes evidence or review state.
+    ImportSuggestions {
+        #[arg(long)]
+        source: i64,
+        #[arg(long)]
+        report: std::path::PathBuf,
+    },
     /// Choose the primary reading for PDF pages (recovers pages left unresolved by overlapping
     /// readings). Recorded as actor `operator:cli`.
     SetPrimarySource {
@@ -383,8 +390,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 /// The local operator commands that print their results.
 async fn local_command(store: &Store, command: Command) -> Result<(), Box<dyn std::error::Error>> {
-    let store = store.clone();
-    let Some(command) = publication_command(&store, command).await? else {
+    let Some(command) = publication_command(store, command).await? else {
         return Ok(());
     };
     match command {
@@ -420,6 +426,10 @@ async fn local_command(store: &Store, command: Command) -> Result<(), Box<dyn st
             println!(
                 "Registered source {id}. New imports are unreviewed; existing imports retain their review state. Open /sources."
             );
+        }
+        Command::ImportSuggestions { source, report } => {
+            let summary = store.import_suggestion_report(source, &report).await?;
+            println!("{}", serde_json::to_string_pretty(&summary)?);
         }
         Command::SetPrimarySource {
             document_pdf_sha256,

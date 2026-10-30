@@ -1,7 +1,13 @@
+import json
 import logging
+import sys
+import tempfile
+import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+import crosscheck_text_layer
 import extract_manual
 from crosscheck_text_layer import compare, inside, issues_for, page_words
 
@@ -19,6 +25,75 @@ def layer_page(*spans):
 
 
 class CrosscheckTests(unittest.TestCase):
+    def test_invalid_tool_origin_is_refused_before_reading_inputs(self):
+        for name in ("x" * 96, "é" * 48, "bad\nname", "bad\x7fname", "bad\x85name"):
+            with (
+                self.subTest(name=name),
+                patch.object(crosscheck_text_layer, "TOOL_NAME", name),
+                patch.object(sys, "argv", ["crosscheck", "unused", "--pdf", "unused.pdf"]),
+                patch.object(
+                    Path, "read_text", side_effect=AssertionError("inputs accessed")
+                ) as read,
+            ):
+                with self.assertRaisesRegex(ValueError, "origin"):
+                    crosscheck_text_layer.main()
+                read.assert_not_called()
+
+    def test_tool_origin_bounds(self):
+        for name in ("x" * 96, "é" * 48, "bad\nname", "bad\x7fname", "bad\x85name"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, "origin"):
+                    crosscheck_text_layer.validate_report_origin("tool", name)
+        for name in ("x" * 95, "é" * 47 + "x", "crosscheck_text_layer"):
+            crosscheck_text_layer.validate_report_origin("tool", name)
+
+    def test_invalid_findings_fail_page_without_truncation(self):
+        from source_bundle import digest, write_json
+
+        for field, value in (
+            ("description", ""),
+            ("description", "x" * 5001),
+            ("suggested_correction", "x" * 20001),
+            ("block_id", "é" * 257),
+        ):
+            with (
+                self.subTest(field=field, length=len(value)),
+                tempfile.TemporaryDirectory() as temp,
+            ):
+                root = Path(temp)
+                pdf = root / "fixture.pdf"
+                pdf.write_bytes(b"synthetic pdf")
+                write_json(
+                    root / "bundle.json",
+                    {"source_sha256": digest(pdf), "pages": [{"pdf_page": 1, "units": []}]},
+                )
+                issue = {
+                    "action": "correction",
+                    "kind": "text",
+                    "block_id": "block",
+                    "description": "Read image",
+                    "suggested_correction": "Advice",
+                }
+                issue[field] = value
+                extraction = types.ModuleType("pdftext.extraction")
+                extraction.dictionary_output = lambda *args, **kwargs: [layer_page()]
+                with (
+                    patch.dict(
+                        sys.modules,
+                        {"pdftext": types.ModuleType("pdftext"), "pdftext.extraction": extraction},
+                    ),
+                    patch.object(sys, "argv", ["crosscheck", str(root), "--pdf", str(pdf)]),
+                    patch.object(crosscheck_text_layer, "issues_for", return_value=[issue]),
+                ):
+                    with self.assertRaisesRegex(ValueError, "failed"):
+                        crosscheck_text_layer.main()
+                reports = list(root.glob("text-layer-check-*/report.json"))
+                self.assertEqual(len(reports), 1)
+                page = json.loads(reports[0].read_text())["pages"][0]
+                self.assertEqual(page["state"], "failed")
+                self.assertNotIn("findings", page)
+                self.assertIn(field, page["error"])
+
     def test_shadow_duplicates_are_dropped_and_distant_repeats_kept(self):
         page = layer_page(
             char_span("Spada Corta", 10, 10),
@@ -91,6 +166,7 @@ class CrosscheckTests(unittest.TestCase):
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0]["block_id"], unit["id"])
         self.assertEqual(issues[0]["kind"], "text-layer-spelling")
+        self.assertEqual(issues[0]["action"], "correction")
         self.assertEqual(issues[0]["suggested_correction"], "3. Spada Corta (d4)")
         self.assertEqual(unit["html"], "<p>3. Spada Conta (d4)</p>")
 
@@ -104,6 +180,46 @@ class CrosscheckTests(unittest.TestCase):
         issues = issues_for([unit], words)
         self.assertEqual([issue["kind"] for issue in issues], ["text-layer-unread"])
         self.assertIsNone(issues[0]["suggested_correction"])
+        self.assertEqual(issues[0]["action"], "note")
+
+    def test_crosscheck_v2_report_matches_closed_schema(self):
+        from jsonschema import Draft202012Validator
+
+        schema = json.loads(
+            (
+                Path(__file__).resolve().parents[1] / "schemas" / "suggestion-report.v2.json"
+            ).read_text()
+        )
+        unit = {
+            "id": "/page/0/Text/1",
+            "html": "<p>armatura*</p>",
+            "polygon": [[0, 0], [100, 0], [100, 30], [0, 30]],
+        }
+        issues = issues_for([unit], [("armatura", [1, 1, 30, 10])])
+        self.assertEqual(issues[0]["action"], "note")
+        report = {
+            "schema_version": 2,
+            "state": "tool_suggestions_not_verified",
+            "tool": "crosscheck_text_layer",
+            "source_sha256": "a" * 64,
+            "bundle_sha256": "b" * 64,
+            "created_at": "2026-10-30T00:00:00Z",
+            "pages": [
+                {
+                    "pdf_page": 1,
+                    "state": "tool_suggestions_not_verified",
+                    "findings": {
+                        "summary": "fixture",
+                        "needs_visual_review": True,
+                        "issues": issues,
+                    },
+                }
+            ],
+        }
+        validator = Draft202012Validator(schema)
+        validator.validate(report)
+        report["pages"][0]["findings"]["issues"][0]["region"] = None
+        self.assertFalse(validator.is_valid(report))
 
 
 class OcrOptionTests(unittest.TestCase):

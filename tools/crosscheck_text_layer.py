@@ -31,11 +31,18 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from source_bundle import digest, write_json
+from review_extraction import (
+    validate_report_append,
+    validate_report_findings,
+    validate_report_origin,
+    write_report,
+)
+from source_bundle import digest
 
 SIMILAR = 0.6
 SHADOW_POINTS = 3
 UNREAD_MIN = 3
+TOOL_NAME = "crosscheck_text_layer"
 
 
 def page_words(page):
@@ -152,6 +159,7 @@ def issues_for(units, words):
                 {
                     "block_id": unit["id"],
                     "kind": "text-layer-spelling",
+                    "action": "correction",
                     "description": f"The PDF text layer inside this block spells: {changes}.",
                     "suggested_correction": " ".join(fixed),
                 }
@@ -162,6 +170,7 @@ def issues_for(units, words):
                 {
                     "block_id": unit["id"],
                     "kind": "text-layer-difference",
+                    "action": "note",
                     "description": "Digits, dice, signs or markers differ; check the page image: "
                     + changes
                     + ".",
@@ -173,6 +182,7 @@ def issues_for(units, words):
                 {
                     "block_id": unit["id"],
                     "kind": "text-layer-unread",
+                    "action": "note",
                     "description": "Text-layer words inside this block that its text lacks: "
                     + " ".join(unread),
                     "suggested_correction": None,
@@ -186,6 +196,7 @@ def main():
     parser.add_argument("bundle", type=Path)
     parser.add_argument("--pdf", required=True, type=Path)
     args = parser.parse_args()
+    validate_report_origin("tool", TOOL_NAME)
     bundle_path = args.bundle / "bundle.json"
     bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
     if digest(args.pdf) != bundle["source_sha256"]:
@@ -197,34 +208,41 @@ def main():
         str(args.pdf), page_range=[page["pdf_page"] - 1 for page in pages], keep_chars=True
     )
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "state": "tool_suggestions_not_verified",
-        "tool": "crosscheck_text_layer",
+        "tool": TOOL_NAME,
         "source_sha256": bundle["source_sha256"],
         "bundle_sha256": digest(bundle_path),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "pages": [],
     }
     for page, text_layer in zip(pages, layer, strict=True):
-        issues = issues_for(page["units"], page_words(text_layer))
-        report["pages"].append(
-            {
-                "pdf_page": page["pdf_page"],
-                "state": "tool_suggestions_not_verified",
-                "findings": {
+        record = {"pdf_page": page["pdf_page"], "state": "failed"}
+        try:
+            issues = issues_for(page["units"], page_words(text_layer))
+            findings = validate_report_findings(
+                {
                     "summary": f"{len(issues)} text-layer suggestion(s) for {len(page['units'])} block(s).",
                     "issues": issues,
                     "needs_visual_review": True,
-                },
-            }
-        )
+                }
+            )
+            record.update(state="tool_suggestions_not_verified", findings=findings)
+            validate_report_append(report, record)
+        except ValueError as error:
+            record["state"] = "failed"
+            record.pop("findings", None)
+            record["error"] = str(error)
+        report["pages"].append(record)
     output = args.bundle / f"text-layer-check-{uuid.uuid4().hex}"
     output.mkdir(exist_ok=False)
-    write_json(output / "report.json", report)
-    total = sum(len(page["findings"]["issues"]) for page in report["pages"])
+    write_report(output / "report.json", report)
+    total = sum(len(page.get("findings", {}).get("issues", [])) for page in report["pages"])
     print(
         f"Text-layer report: {output / 'report.json'} ({total} suggestions). Nothing was applied."
     )
+    if any(page["state"] == "failed" for page in report["pages"]):
+        raise ValueError("One or more pages failed cross-check; see the local report.")
 
 
 if __name__ == "__main__":

@@ -198,6 +198,8 @@ fn rewind_finalization(db: &rusqlite::Connection, remigrate: bool) {
             .unwrap();
         db.execute_batch(include_str!("../../migrations/024_source_documents.sql"))
             .unwrap();
+        db.execute_batch(include_str!("../../migrations/025_source_review.sql"))
+            .unwrap();
         // Search objects (017+) were kept intact for the live session, so the schema is
         // current again; derived rows need no re-application.
         db.pragma_update(None, "user_version", current_schema())
@@ -207,6 +209,7 @@ fn rewind_finalization(db: &rusqlite::Connection, remigrate: bool) {
 
 /// Recreate a genuine pre-24 schema before historical migration fixtures.
 pub fn rewind_documents(db: &rusqlite::Connection) {
+    rewind_review(db);
     let present: bool = db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('source_units') WHERE name='origin')",
@@ -234,6 +237,60 @@ pub fn rewind_documents(db: &rusqlite::Connection) {
         db.execute_batch(include_str!("source_documents_rewind.sql"))
             .unwrap();
     }
+}
+
+/// Recreate schema 24 suggestions, including its original guards. Refuse new-only fixture data.
+#[allow(dead_code, reason = "Shared historical fixture helper")]
+pub fn rewind_review(db: &rusqlite::Connection) {
+    db.create_scalar_function(
+        "mimik_request_auth",
+        0,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+        |_| Ok(Option::<String>::None),
+    )
+    .unwrap();
+    db.create_scalar_function(
+        "mimik_auth_now",
+        0,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+        |_| Ok(0_i64),
+    )
+    .unwrap();
+    let present: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='source_suggestion_reports')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    if !present {
+        return;
+    }
+    for table in [
+        "source_suggestion_reports",
+        "source_suggestion_applications",
+        "source_suggestion_web_events",
+    ] {
+        assert_eq!(
+            db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "Cannot rewind populated {table}"
+        );
+    }
+    let tx = db;
+    tx.execute_batch(include_str!("source_review_rewind.sql"))
+        .unwrap();
+    let sql = include_str!("../../migrations/024_source_documents.sql")
+        .split_once("CREATE TABLE source_suggestions (")
+        .unwrap()
+        .1;
+    // Copy before installing the insert guard, which rejects pre-dismissed imports.
+    let (table, triggers) = sql
+        .split_once("CREATE INDEX source_suggestions_source")
+        .unwrap();
+    tx.execute_batch(&format!("CREATE TABLE source_suggestions ({table} INSERT INTO source_suggestions SELECT * FROM legacy_suggestions; DROP TABLE legacy_suggestions; CREATE INDEX source_suggestions_source{triggers}")).unwrap();
 }
 
 /// The migration-chain test pins the file count to the application schema version.

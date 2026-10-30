@@ -1,6 +1,6 @@
 //! Suggestions are immutable, bundle-bound advice, separate from review decisions.
 use crate::{AppError, Store};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -13,9 +13,21 @@ pub struct SuggestionUnit {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SuggestionTarget {
-    Unit { target: SuggestionUnit },
-    Units { targets: Vec<SuggestionUnit> },
-    Region { page: i64, polygon: [[f64; 2]; 4] },
+    Unit {
+        target: SuggestionUnit,
+    },
+    Units {
+        targets: Vec<SuggestionUnit>,
+    },
+    Region {
+        page: i64,
+        polygon: [[f64; 2]; 4],
+    },
+    Page {
+        page: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        block_id: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -27,9 +39,18 @@ pub struct SourceSuggestion {
     pub target: SuggestionTarget,
     pub suggested_text: Option<String>,
     pub rationale: String,
+    pub report_id: Option<i64>,
 }
 
-fn validate(db: &Connection, suggestion: &SourceSuggestion) -> Result<(), AppError> {
+pub(super) fn validate(db: &Connection, suggestion: &SourceSuggestion) -> Result<(), AppError> {
+    validate_with_bounds(db, suggestion, None)
+}
+
+pub(super) fn validate_with_bounds(
+    db: &Connection,
+    suggestion: &SourceSuggestion,
+    bounds: Option<(f64, f64)>,
+) -> Result<(), AppError> {
     super::review_identity(&suggestion.origin, &suggestion.rationale)?;
     let text_present = suggestion
         .suggested_text
@@ -40,11 +61,12 @@ fn validate(db: &Connection, suggestion: &SourceSuggestion) -> Result<(), AppErr
         | ("missing_text", SuggestionTarget::Region { .. })
         | ("merge", SuggestionTarget::Units { .. }) => text_present,
         ("reject", SuggestionTarget::Unit { .. }) => suggestion.suggested_text.is_none(),
+        ("note", SuggestionTarget::Unit { .. } | SuggestionTarget::Page { .. }) => true,
         _ => false,
     };
     if !shape_ok {
         return Err(AppError::Invalid(
-            "A suggestion is a correction (one unit, text), merge (2+ units on one page, text), missing_text (region, text) or reject (one unit, no text).",
+            "A suggestion is a correction (one unit, text), merge (2+ units on one page, text), missing_text (region, text), reject (one unit, no text) or note (one unit or page, optional text).",
         ));
     }
     if suggestion.bundle_hash.len() != 64
@@ -72,6 +94,24 @@ fn validate(db: &Connection, suggestion: &SourceSuggestion) -> Result<(), AppErr
         ));
     }
     match &suggestion.target {
+        SuggestionTarget::Page { page, block_id } => {
+            if block_id
+                .as_ref()
+                .is_some_and(|id| id.len() > 512 || id.contains('\0'))
+            {
+                return Err(AppError::Invalid("Invalid page block citation."));
+            }
+            let belongs: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM source_pages WHERE id=?1 AND source_id=?2)",
+                params![page, suggestion.source],
+                |r| r.get(0),
+            )?;
+            if !belongs {
+                return Err(AppError::Invalid(
+                    "Suggestion page belongs to another source.",
+                ));
+            }
+        }
         SuggestionTarget::Unit { target } => {
             validate_units(db, suggestion.source, std::slice::from_ref(target))?;
         }
@@ -102,7 +142,11 @@ fn validate(db: &Connection, suggestion: &SourceSuggestion) -> Result<(), AppErr
                     "Suggestion region belongs to another source.",
                 ));
             }
-            super::documents::validate_polygon(db, *page, polygon)?;
+            if let Some((width, height)) = bounds {
+                super::documents::validate_polygon_bounds(width, height, polygon)?;
+            } else {
+                super::documents::validate_polygon(db, *page, polygon)?;
+            }
         }
     }
     Ok(())
@@ -144,13 +188,12 @@ impl Store {
         suggestion: SourceSuggestion,
     ) -> Result<i64, AppError> {
         self.run(move |db| {
-            let tx=db.transaction()?;
-            validate(&tx,&suggestion)?;
-            let targets=serde_json::to_string(&suggestion.target)?;
-            if targets.len()>65536 {return Err(AppError::Invalid("Suggestion targets exceed 64 KiB."));}
-            tx.execute("INSERT INTO source_suggestions(source_id,bundle_hash,origin,kind,targets,suggested_text,rationale) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![suggestion.source,suggestion.bundle_hash,suggestion.origin,suggestion.kind,targets,suggestion.suggested_text,suggestion.rationale])?;
-            let id=tx.last_insert_rowid(); tx.commit()?; Ok(id)
-        }).await
+            let tx = db.transaction()?;
+            let id = insert(&tx, &suggestion)?;
+            tx.commit()?;
+            Ok(id)
+        })
+        .await
     }
 
     /// Record the first dismissal independently of unit review state.
@@ -161,14 +204,93 @@ impl Store {
         &self,
         suggestion: i64,
         actor: String,
+        reason: Option<String>,
     ) -> Result<(), AppError> {
         super::review_identity(&actor, "Dismiss suggestion")?;
+        if reason
+            .as_ref()
+            .is_some_and(|text| text.chars().count() > 5000 || text.contains('\0'))
+        {
+            return Err(AppError::Invalid(
+                "Dismissal reason exceeds 5,000 characters or contains NUL.",
+            ));
+        }
+        let reason = reason.filter(|text| !text.trim().is_empty());
         self.run(move |db| {
-            let tx=db.transaction()?;
-            let dismissed: Option<String>=tx.query_row("SELECT dismissed_by FROM source_suggestions WHERE id=?1",[suggestion],|r|r.get(0)).optional()?.ok_or(AppError::NotFound)?;
-            if dismissed.is_some() {return Err(AppError::Conflict);}
-            tx.execute("UPDATE source_suggestions SET dismissed_by=?1,dismissed_at=CURRENT_TIMESTAMP WHERE id=?2",params![actor,suggestion])?;
+            let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            check_open(&tx,suggestion)?;
+            tx.execute("INSERT INTO source_suggestion_dismissals(suggestion_id,actor,reason) VALUES(?1,?2,?3)",params![suggestion,actor,reason])?;
             tx.commit()?;Ok(())
         }).await
     }
+
+    /// Link advice to the latest explicit decision. This records state; it changes no evidence.
+    ///
+    /// # Errors
+    /// Unknown/closed suggestions, invalid event/operation/owner pairing or storage failures.
+    pub async fn record_source_suggestion_application(
+        &self,
+        application: SuggestionApplication,
+    ) -> Result<(), AppError> {
+        self.run(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            record_application(&tx, &application)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SuggestionApplication {
+    pub suggestion_id: i64,
+    pub event_id: i64,
+    pub operation_id: Option<String>,
+    pub owner_unit_id: Option<i64>,
+    pub edited: bool,
+}
+
+pub(super) fn record_application(
+    db: &Connection,
+    app: &SuggestionApplication,
+) -> Result<(), AppError> {
+    check_open(db, app.suggestion_id)?;
+    db.execute(
+        "INSERT INTO source_suggestion_applications VALUES(?1,?2,?3,?4,?5)",
+        params![
+            app.suggestion_id,
+            app.event_id,
+            app.operation_id,
+            app.owner_unit_id,
+            app.edited
+        ],
+    )?;
+    Ok(())
+}
+
+fn check_open(db: &Connection, suggestion: i64) -> Result<(), AppError> {
+    let closed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM source_suggestion_dismissals WHERE suggestion_id=s.id) OR EXISTS(SELECT 1 FROM source_suggestion_applications WHERE suggestion_id=s.id) FROM source_suggestions s WHERE s.id=?1",[suggestion],|r|r.get(0)).optional()?.ok_or(AppError::SourceNotFound)?;
+    if closed {
+        return Err(AppError::Conflict);
+    }
+    Ok(())
+}
+
+pub(super) fn insert(db: &Connection, suggestion: &SourceSuggestion) -> Result<i64, AppError> {
+    validate(db, suggestion)?;
+    insert_validated(db, suggestion)
+}
+
+// Caller has validated the advice in this transaction; SQL still enforces the envelope.
+pub(super) fn insert_validated(
+    db: &Connection,
+    suggestion: &SourceSuggestion,
+) -> Result<i64, AppError> {
+    let targets = serde_json::to_string(&suggestion.target)?;
+    if targets.len() > 65536 {
+        return Err(AppError::Invalid("Suggestion targets exceed 64 KiB."));
+    }
+    db.execute("INSERT INTO source_suggestions(source_id,bundle_hash,origin,kind,targets,suggested_text,rationale,report_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![suggestion.source,suggestion.bundle_hash,suggestion.origin,suggestion.kind,targets,suggestion.suggested_text,suggestion.rationale,suggestion.report_id])?;
+    Ok(db.last_insert_rowid())
 }

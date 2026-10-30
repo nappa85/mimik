@@ -463,6 +463,7 @@ async fn suggestions_are_bundle_bound_validate_targets_and_dismiss_without_decid
         },
         suggested_text: Some("Advice".into()),
         rationale: "Possible reading".into(),
+        report_id: None,
     };
     let mut wrong = suggestion.clone();
     wrong.bundle_hash = "0".repeat(64);
@@ -487,17 +488,19 @@ async fn suggestions_are_bundle_bound_validate_targets_and_dismiss_without_decid
     };
     store.insert_source_suggestion(region).await.unwrap();
     store
-        .dismiss_source_suggestion(id, "owner".into())
+        .dismiss_source_suggestion(id, "owner".into(), None)
         .await
         .unwrap();
     assert!(matches!(
-        store.dismiss_source_suggestion(id, "owner".into()).await,
+        store
+            .dismiss_source_suggestion(id, "owner".into(), None)
+            .await,
         Err(mimik::AppError::Conflict)
     ));
     assert_eq!(retained(&db), before);
     assert_eq!(
         db.query_row(
-            "SELECT dismissed_by FROM source_suggestions WHERE id=?1",
+            "SELECT actor FROM source_suggestion_dismissals WHERE suggestion_id=?1",
             [id],
             |r| r.get::<_, String>(0)
         )
@@ -757,13 +760,13 @@ async fn dismissal_timestamp_must_be_a_valid_datetime() {
     .unwrap();
     assert!(
         db.execute(
-            "UPDATE source_suggestions SET dismissed_by='o',dismissed_at='not a date'",
+            "INSERT INTO source_suggestion_dismissals(suggestion_id,actor,created_at) VALUES(1,'o','not a date')",
             []
         )
         .is_err()
     );
     db.execute(
-        "UPDATE source_suggestions SET dismissed_by='o',dismissed_at=CURRENT_TIMESTAMP",
+        "INSERT INTO source_suggestion_dismissals(suggestion_id,actor) VALUES(1,'o')",
         [],
     )
     .unwrap();
@@ -908,7 +911,7 @@ async fn operator_command_says_an_unfinalized_source_must_be_finalized() {
         .operator_set_primary_source(hash, vec![1], 9, "Choose".into())
         .await;
     assert!(
-        matches!(result, Err(mimik::AppError::NotFound)),
+        matches!(result, Err(mimik::AppError::SourceNotFound)),
         "{result:?}"
     );
 }

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mimik suggestion report v2",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "state", "source_sha256", "bundle_sha256", "created_at", "pages"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "state": {"enum": ["model_suggestions_not_verified", "tool_suggestions_not_verified"]},
+    "source_sha256": {"$ref": "#/$defs/hash"},
+    "bundle_sha256": {"$ref": "#/$defs/hash"},
+    "artifact_sha256": {"type": "object", "propertyNames": {"pattern": "^[^/\\\\]+$"}, "additionalProperties": {"$ref": "#/$defs/hash"}},
+    "tool": {"type": "string", "minLength": 1},
+    "endpoint": {"type": "string", "minLength": 1},
+    "requested_model": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1},
+    "pages": {"type": "array", "items": {"$ref": "#/$defs/page"}}
+  },
+  "oneOf": [
+    {"required": ["tool"], "properties": {"state": {"const": "tool_suggestions_not_verified"}}, "not": {"anyOf": [{"required": ["requested_model"]}, {"required": ["endpoint"]}]}},
+    {"required": ["endpoint", "requested_model"], "properties": {"state": {"const": "model_suggestions_not_verified"}}, "not": {"required": ["tool"]}}
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "point": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number", "minimum": 0, "maximum": 4000}},
+    "issue": {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "block_id", "kind", "description", "suggested_correction"],
+      "properties": {
+        "action": {"enum": ["correction", "reject", "merge", "missing_text", "note"]},
+        "block_id": {"type": ["string", "null"], "maxLength": 512},
+        "kind": {"type": "string"},
+        "description": {"type": "string", "minLength": 1, "maxLength": 5000},
+        "suggested_correction": {"type": ["string", "null"], "maxLength": 20000},
+        "merge_block_ids": {"type": "array", "minItems": 2, "maxItems": 1024, "uniqueItems": true, "items": {"type": "string", "maxLength": 512}},
+        "region": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"$ref": "#/$defs/point"}}
+      },
+      "allOf": [
+        {"if": {"properties": {"action": {"const": "merge"}}}, "then": {"required": ["merge_block_ids"], "properties": {"block_id": {"type": "null"}}}, "else": {"not": {"required": ["merge_block_ids"]}}},
+        {"if": {"properties": {"action": {"const": "missing_text"}}}, "then": {"required": ["region"], "properties": {"block_id": {"type": "null"}}}, "else": {"not": {"required": ["region"]}}},
+        {"if": {"properties": {"action": {"enum": ["correction", "merge", "missing_text"]}}}, "then": {"properties": {"suggested_correction": {"type": "string", "minLength": 1}}}},
+        {"if": {"properties": {"action": {"const": "reject"}}}, "then": {"properties": {"suggested_correction": {"type": "null"}}}},
+        {"if": {"properties": {"action": {"enum": ["correction", "reject"]}}}, "then": {"properties": {"block_id": {"type": "string"}}}}
+      ]
+    },
+    "findings": {
+      "type": "object", "additionalProperties": false,
+      "required": ["summary", "issues", "needs_visual_review"],
+      "properties": {"summary": {"type": "string"}, "needs_visual_review": {"type": "boolean"}, "issues": {"type": "array", "maxItems": 5000, "items": {"$ref": "#/$defs/issue"}}}
+    },
+    "page": {
+      "type": "object", "additionalProperties": false, "required": ["pdf_page", "state"],
+      "properties": {
+        "pdf_page": {"type": "integer", "minimum": 1},
+        "state": {"enum": ["failed", "model_suggestions_not_verified", "tool_suggestions_not_verified"]},
+        "findings": {"$ref": "#/$defs/findings"}, "error": {"type": "string"},
+        "render_sha256": {"$ref": "#/$defs/hash"}, "returned_model": {"type": ["string", "null"]}, "usage": {"type": ["object", "null"]}
+      },
+      "if": {"properties": {"state": {"const": "failed"}}},
+      "then": {"required": ["error"], "not": {"required": ["findings"]}},
+      "else": {"required": ["findings"], "not": {"required": ["error"]}}
+    }
+  }
+}

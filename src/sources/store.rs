@@ -43,7 +43,7 @@ impl Store {
                 "SELECT CASE WHEN typeof(p.png)='blob' AND length(p.png)<=?3 THEN p.png END, CASE WHEN typeof(s.prepared_json)='blob' AND length(s.prepared_json)<=?3 THEN s.prepared_json END, p.pdf_page, CASE WHEN typeof(u.polygon)='text' AND length(CAST(u.polygon AS BLOB))<=1024 THEN u.polygon END FROM source_pages p JOIN sources s ON s.id=p.source_id JOIN source_units u ON u.page_id=p.id WHERE p.id=?1 AND u.id=?2",
                 params![page, unit, limit], |row| Ok(RawRegion { image: row.get(0)?, prepared: row.get(1)?, pdf_page: row.get(2)?, polygon: row.get(3)? }),
             ).optional()?;
-            let data = data.ok_or(AppError::NotFound)?;
+            let data = data.ok_or(AppError::SourceNotFound)?;
             if let Some(auth) = &auth { auth.recheck_owner(&tx)?; }
             tx.commit()?;
             Ok(super::region::RegionInput { image: data.image.ok_or(AppError::Invalid("Region image type or size invalid; inspect full page."))?, prepared: data.prepared.ok_or(AppError::Invalid("Region metadata type or size invalid; inspect full page."))?, pdf_page: data.pdf_page, polygon: data.polygon.ok_or(AppError::Invalid("Region coordinates type or byte size invalid; inspect full page."))?, permit })
@@ -73,7 +73,7 @@ impl Store {
     /// Fails for an unknown page or storage/worker errors.
     pub async fn source_page(&self, id: i64) -> Result<PageView, AppError> {
         self.run(move |db| {
-            let mut page = db.query_row("SELECT p.id,s.id,s.title,s.edition,p.pdf_page,p.printed_label,p.complete,p.revision FROM source_pages p JOIN sources s ON s.id=p.source_id WHERE p.id=?1", [id], |row| Ok(PageView { id: row.get(0)?, source_id: row.get(1)?, title: row.get(2)?, edition: row.get(3)?, pdf_page: row.get(4)?, printed_label: row.get(5)?, complete: row.get(6)?, revision: row.get(7)?, units: Vec::new(), events: Vec::new() })).optional()?.ok_or(AppError::NotFound)?;
+            let mut page = db.query_row("SELECT p.id,s.id,s.title,s.edition,p.pdf_page,p.printed_label,p.complete,p.revision FROM source_pages p JOIN sources s ON s.id=p.source_id WHERE p.id=?1", [id], |row| Ok(PageView { id: row.get(0)?, source_id: row.get(1)?, title: row.get(2)?, edition: row.get(3)?, pdf_page: row.get(4)?, printed_label: row.get(5)?, complete: row.get(6)?, revision: row.get(7)?, units: Vec::new(), events: Vec::new() })).optional()?.ok_or(AppError::SourceNotFound)?;
             let mut query = db.prepare("SELECT id,block_id,kind,polygon,raw_html,state,correction,revision FROM source_units WHERE page_id=?1 ORDER BY id")?;
             page.units = query.query_map([id], |row| { let raw: String = row.get(4)?; let clean = sanitized(&raw).map_err(|error| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error)))?; Ok(UnitView { id: row.get(0)?, block_id: row.get(1)?, kind: row.get(2)?, polygon: row.get(3)?, sanitized_html: clean, state: row.get(5)?, correction: row.get(6)?, revision: row.get(7)? }) })?.collect::<Result<Vec<_>, _>>()?;
             let mut history = db.prepare("SELECT unit_id,created_at,actor,state,rationale,correction,previous_revision,operation_id FROM source_review_events WHERE page_id=?1 ORDER BY id DESC LIMIT 100")?;
@@ -92,7 +92,7 @@ impl Store {
                 row.get(0)
             })
             .optional()?
-            .ok_or(AppError::NotFound)
+            .ok_or(AppError::SourceNotFound)
         })
         .await
     }
@@ -293,7 +293,7 @@ pub(super) fn review_unit_operation(
             |row| row.get(0),
         )
         .optional()?
-        .ok_or(AppError::NotFound)?;
+        .ok_or(AppError::SourceNotFound)?;
     if current != review.revision {
         return Err(AppError::Conflict);
     }
@@ -337,7 +337,7 @@ pub(super) fn complete_page(
             |row| row.get(0),
         )
         .optional()?
-        .ok_or(AppError::NotFound)?;
+        .ok_or(AppError::SourceNotFound)?;
     if current != review.revision {
         return Err(AppError::Conflict);
     }

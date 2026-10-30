@@ -1,9 +1,11 @@
 //! Local, source-bound review evidence. Models cannot approve these records.
 pub(crate) mod documents;
 mod import;
+mod reports;
 mod suggestions;
 pub use documents::{OwnerUnit, PrimaryPageState, UnitDecision, parse_page_list};
-pub use suggestions::{SourceSuggestion, SuggestionTarget, SuggestionUnit};
+pub use reports::SuggestionReportSummary;
+pub use suggestions::{SourceSuggestion, SuggestionApplication, SuggestionTarget, SuggestionUnit};
 pub(crate) mod materials;
 pub(crate) mod region;
 pub(crate) mod search;

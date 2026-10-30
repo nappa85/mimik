@@ -15,10 +15,13 @@ pub(crate) fn read(fd: OwnedFd, limit: usize) -> Result<Vec<u8>, AppError> {
     let metadata = file.metadata()?;
     let limit_u64 =
         u64::try_from(limit).map_err(|_| AppError::Invalid("Local file limit is invalid."))?;
-    if !metadata.is_file() || metadata.len() > limit_u64 {
+    if !metadata.is_file() {
         return Err(AppError::Invalid(
             "Local input must be a bounded regular file.",
         ));
+    }
+    if metadata.len() > limit_u64 {
+        return Err(AppError::Invalid("Local input exceeds its byte limit."));
     }
     let mut bytes = Vec::new();
     file.take(
