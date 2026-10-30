@@ -9,19 +9,16 @@ from pathlib import Path
 
 from source_bundle import digest, page_blocks, verified_snapshots, write_json
 
-KINDS = set(
-    json.loads(
-        (Path(__file__).resolve().parents[1] / "schemas/source-kinds.json").read_text(
-            encoding="utf-8"
-        )
-    )
-)
+SCHEMAS = Path(__file__).resolve().parents[1] / "schemas"
+KINDS = set(json.loads((SCHEMAS / "source-kinds.json").read_text(encoding="utf-8")))
+# Units only without children: Marker's OCR gives a whole list as one ListGroup.
+LEAF_KINDS = set(json.loads((SCHEMAS / "source-leaf-kinds.json").read_text(encoding="utf-8")))
 
 
 def units(node):
     result = []
     children = node.get("children") or []
-    if node["block_type"] in KINDS:
+    if node["block_type"] in KINDS or (not children and node["block_type"] in LEAF_KINDS):
         if children or "<content-ref" in node["html"]:
             raise ValueError("Nested review content is not supported by prepared contract v1")
         result.append(

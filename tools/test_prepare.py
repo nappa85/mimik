@@ -12,6 +12,28 @@ from source_bundle import verify_bundle, write_json
 
 
 class PrepareSnapshotTests(unittest.TestCase):
+    def test_a_list_group_is_a_unit_only_without_children(self):
+        box = [[0, 0], [1, 0], [1, 1], [0, 1]]
+        leaf = {
+            "id": "/page/0/ListGroup/1",
+            "block_type": "ListGroup",
+            "polygon": box,
+            "html": "<ul><li>1-2 nulla</li></ul>",
+            "children": [],
+        }
+        self.assertEqual([u["kind"] for u in prepare_review.units(leaf)], ["ListGroup"])
+        item = {
+            "id": "/page/0/ListItem/2",
+            "block_type": "ListItem",
+            "polygon": box,
+            "html": "<li>1-2 nulla</li>",
+            "children": [],
+        }
+        group = dict(
+            leaf, html="<content-ref src='/page/0/ListItem/2'></content-ref>", children=[item]
+        )
+        self.assertEqual([u["kind"] for u in prepare_review.units(group)], ["ListItem"])
+
     def test_verified_inputs_cannot_be_replaced_before_preparation(self):
         for replaced in ["source.json", "source.pdf"]:
             with self.subTest(replaced=replaced), tempfile.TemporaryDirectory() as temp:
