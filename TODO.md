@@ -27,10 +27,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   no unit (L-SRC-1).
 
 - **Source import plan** (`docs/source-import-plan.md`, reviewed, SRC-11 to SRC-14): step 1
-  (schema) merged; next is step 2's own plan (review screen). Step 1 follow-ups (Opus Minor):
-  `set_primary` answers NotFound for an unfinalized source without saying why; the
-  `lookup_is_interrupted_past_its_time_budget` test drops `source_primary_events_insert`
-  instead of seeding a finalized reading. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
+  (schema) merged; step 2 (review screen, `docs/source-review-plan.md`, reviewed) in progress:
+  part 1 (migration 025, report import). `AppError::NotFound` displays "Character not found."
+  on source paths (CLI): give it a neutral message. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
   (`~/temp/`, tagged, clean text layer) through the prototype tools.
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
