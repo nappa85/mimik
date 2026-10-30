@@ -96,9 +96,9 @@ New decisions:
 
 ## Steps
 
-1. **Schema gate.** Independent Sol/Opus change-set review and the remaining sandbox-external
-   checks must pass before this step is complete. Schema/store reference:
-   `docs/sources-and-retrieval.md`.
+Step 1, the schema (documents, readings, primary pages, owner units, suggestions), is done; it
+is described in `docs/sources-and-retrieval.md`. Numbering is kept so references stay valid.
+
 2. **Review screen** (own plan). Report import bound to the bundle hash (the existing report
    shape, plus targets for several units and page regions). On the page: the image beside the
    units, zoom and region highlight; each suggestion as an inline difference with Accept, Edit,

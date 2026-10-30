@@ -20,10 +20,13 @@ BEGIN SELECT RAISE(ABORT,'Invalid document membership'); END;
 CREATE TRIGGER source_document_members_update BEFORE UPDATE ON source_document_members BEGIN SELECT RAISE(ABORT,'Document membership is immutable'); END;
 CREATE TRIGGER source_document_members_delete BEFORE DELETE ON source_document_members BEGIN SELECT RAISE(ABORT,'Document membership is retained'); END;
 CREATE TRIGGER sources_registered_insert BEFORE INSERT ON sources WHEN EXISTS(SELECT 1 FROM source_document_members WHERE source_id=NEW.id)
+ OR EXISTS(SELECT 1 FROM sources s JOIN source_document_members m ON m.source_id=s.id WHERE s.bundle_hash=NEW.bundle_hash)
 BEGIN SELECT RAISE(ABORT,'Registered source identity cannot be replaced'); END;
-CREATE TRIGGER sources_registered_update BEFORE UPDATE ON sources WHEN (NEW.id IS NOT OLD.id OR NEW.pdf_hash IS NOT OLD.pdf_hash)
- AND (EXISTS(SELECT 1 FROM source_document_members WHERE source_id=OLD.id) OR EXISTS(SELECT 1 FROM source_document_members WHERE source_id=NEW.id))
-BEGIN SELECT RAISE(ABORT,'Registered source identity and PDF hash are immutable'); END;
+-- Both unique keys (id, bundle_hash) are guarded: OR REPLACE could otherwise delete a registered source.
+CREATE TRIGGER sources_registered_update BEFORE UPDATE ON sources WHEN ((NEW.id IS NOT OLD.id OR NEW.pdf_hash IS NOT OLD.pdf_hash OR NEW.bundle_hash IS NOT OLD.bundle_hash)
+ AND (EXISTS(SELECT 1 FROM source_document_members WHERE source_id=OLD.id) OR EXISTS(SELECT 1 FROM source_document_members WHERE source_id=NEW.id)))
+ OR (NEW.bundle_hash IS NOT OLD.bundle_hash AND EXISTS(SELECT 1 FROM sources s JOIN source_document_members m ON m.source_id=s.id WHERE s.bundle_hash=NEW.bundle_hash))
+BEGIN SELECT RAISE(ABORT,'Registered source identity, bundle and PDF hash are immutable'); END;
 CREATE TRIGGER sources_registered_delete BEFORE DELETE ON sources WHEN EXISTS(SELECT 1 FROM source_document_members WHERE source_id=OLD.id)
 BEGIN SELECT RAISE(ABORT,'Registered sources are retained'); END;
 
@@ -128,16 +131,17 @@ BEGIN
  SELECT 1 FROM source_pages p JOIN sources s ON s.id=p.source_id,
  json_each(CASE WHEN length(s.prepared_json)<=8388608 AND json_valid(s.prepared_json) THEN s.prepared_json ELSE '{}' END,'$.pages') g
  WHERE p.id=NEW.page_id AND json_extract(g.value,'$.pdf_page')=p.pdf_page
+ AND json_type(g.value,'$.width_points') IN ('integer','real') AND json_type(g.value,'$.height_points') IN ('integer','real')
  AND json_extract(g.value,'$.width_points') BETWEEN 1 AND 4000 AND json_extract(g.value,'$.height_points') BETWEEN 1 AND 4000
  AND NOT EXISTS(SELECT 1 FROM json_each(NEW.polygon) v WHERE json_type(v.value)<>'array' OR json_array_length(v.value)<>2
  OR coalesce(json_type(v.value,'$[0]'),'null') NOT IN ('integer','real') OR coalesce(json_type(v.value,'$[1]'),'null') NOT IN ('integer','real')
  OR json_extract(v.value,'$[0]') NOT BETWEEN 0 AND json_extract(g.value,'$.width_points')
  OR json_extract(v.value,'$[1]') NOT BETWEEN 0 AND json_extract(g.value,'$.height_points')))
  THEN RAISE(ABORT,'Owner polygon must be inside its page') END;
- SELECT CASE WHEN NOT (
+ SELECT CASE WHEN NOT coalesce((
  WITH points AS (SELECT CAST(key AS INTEGER) i,json_extract(value,'$[0]') x,json_extract(value,'$[1]') y FROM json_each(NEW.polygon)),
  turns AS (SELECT (b.x-a.x)*(c.y-b.y)-(b.y-a.y)*(c.x-b.x) turn FROM points a JOIN points b ON b.i=(a.i+1)%4 JOIN points c ON c.i=(a.i+2)%4)
- SELECT min(turn)>0 OR max(turn)<0 FROM turns)
+ SELECT count(*)=4 AND (min(turn)>0 OR max(turn)<0) FROM turns),0)
  THEN RAISE(ABORT,'Owner polygon must be nondegenerate and convex') END;
 END;
 CREATE TRIGGER source_owner_page_reset AFTER INSERT ON source_units WHEN NEW.origin='owner'
@@ -166,13 +170,13 @@ BEGIN SELECT RAISE(ABORT,'Suggestion bundle does not match source'); END;
 CREATE TRIGGER source_suggestions_envelope BEFORE INSERT ON source_suggestions
 BEGIN
  SELECT CASE WHEN NOT json_valid(NEW.targets) OR json_type(NEW.targets)<>'object' OR NEW.kind NOT IN ('correction','merge','missing_text','reject')
- OR NOT (
+ OR NOT coalesce((
  (NEW.kind='correction' AND json_extract(NEW.targets,'$.type')='unit' AND length(trim(coalesce(NEW.suggested_text,'')))>0) OR
  (NEW.kind='merge' AND json_extract(NEW.targets,'$.type')='units' AND length(trim(coalesce(NEW.suggested_text,'')))>0) OR
  (NEW.kind='missing_text' AND json_extract(NEW.targets,'$.type')='region' AND length(trim(coalesce(NEW.suggested_text,'')))>0) OR
- (NEW.kind='reject' AND json_extract(NEW.targets,'$.type')='unit' AND NEW.suggested_text IS NULL))
+ (NEW.kind='reject' AND json_extract(NEW.targets,'$.type')='unit' AND NEW.suggested_text IS NULL)),0)
  THEN RAISE(ABORT,'Suggestion kind, target shape and text do not agree') END;
- SELECT CASE WHEN json_extract(NEW.targets,'$.type') IN ('unit','units') AND NOT (
+ SELECT CASE WHEN json_extract(NEW.targets,'$.type') IN ('unit','units') AND NOT coalesce((
  WITH u AS (
  SELECT json_type(NEW.targets,'$.target.unit') ut,json_type(NEW.targets,'$.target.revision') rt,json_extract(NEW.targets,'$.target.unit') unit,json_extract(NEW.targets,'$.target.revision') rev
  WHERE json_extract(NEW.targets,'$.type')='unit'
@@ -184,26 +188,27 @@ BEGIN
  AND count(*)=sum(ut='integer' AND rt='integer' AND rev>0) AND count(DISTINCT unit)=count(*)
  AND (SELECT count(*) FROM u JOIN source_units su ON su.id=u.unit JOIN source_pages sp ON sp.id=su.page_id
  WHERE sp.source_id=NEW.source_id AND u.rev<=su.revision)=count(*)
- AND (NEW.kind<>'merge' OR (SELECT count(DISTINCT su.page_id) FROM u JOIN source_units su ON su.id=u.unit)=1) FROM u)
+ AND (NEW.kind<>'merge' OR (SELECT count(DISTINCT su.page_id) FROM u JOIN source_units su ON su.id=u.unit)=1) FROM u),0)
  THEN RAISE(ABORT,'Suggestion units must be distinct current units of the source') END;
  SELECT CASE WHEN json_extract(NEW.targets,'$.type')='region' AND (
- json_type(NEW.targets,'$.page')<>'integer' OR json_type(NEW.targets,'$.polygon')<>'array' OR json_array_length(NEW.targets,'$.polygon')<>4
+ coalesce(json_type(NEW.targets,'$.page'),'')<>'integer' OR coalesce(json_type(NEW.targets,'$.polygon'),'')<>'array' OR coalesce(json_array_length(NEW.targets,'$.polygon'),0)<>4
  OR NOT EXISTS(SELECT 1 FROM source_pages WHERE id=json_extract(NEW.targets,'$.page') AND source_id=NEW.source_id))
  THEN RAISE(ABORT,'Suggestion region must be a four point polygon on a page of the source') END;
  SELECT CASE WHEN json_extract(NEW.targets,'$.type')='region' AND NOT EXISTS(
  SELECT 1 FROM source_pages p JOIN sources s ON s.id=p.source_id,
  json_each(CASE WHEN length(s.prepared_json)<=8388608 AND json_valid(s.prepared_json) THEN s.prepared_json ELSE '{}' END,'$.pages') g
  WHERE p.id=json_extract(NEW.targets,'$.page') AND json_extract(g.value,'$.pdf_page')=p.pdf_page
+ AND json_type(g.value,'$.width_points') IN ('integer','real') AND json_type(g.value,'$.height_points') IN ('integer','real')
  AND json_extract(g.value,'$.width_points') BETWEEN 1 AND 4000 AND json_extract(g.value,'$.height_points') BETWEEN 1 AND 4000
  AND NOT EXISTS(SELECT 1 FROM json_each(NEW.targets,'$.polygon') v WHERE json_type(v.value)<>'array' OR json_array_length(v.value)<>2
  OR coalesce(json_type(v.value,'$[0]'),'null') NOT IN ('integer','real') OR coalesce(json_type(v.value,'$[1]'),'null') NOT IN ('integer','real')
  OR json_extract(v.value,'$[0]') NOT BETWEEN 0 AND json_extract(g.value,'$.width_points')
  OR json_extract(v.value,'$[1]') NOT BETWEEN 0 AND json_extract(g.value,'$.height_points')))
  THEN RAISE(ABORT,'Suggestion region must be inside its page') END;
- SELECT CASE WHEN json_extract(NEW.targets,'$.type')='region' AND NOT (
+ SELECT CASE WHEN json_extract(NEW.targets,'$.type')='region' AND NOT coalesce((
  WITH points AS (SELECT CAST(key AS INTEGER) i,json_extract(value,'$[0]') x,json_extract(value,'$[1]') y FROM json_each(NEW.targets,'$.polygon')),
  turns AS (SELECT (b.x-a.x)*(c.y-b.y)-(b.y-a.y)*(c.x-b.x) turn FROM points a JOIN points b ON b.i=(a.i+1)%4 JOIN points c ON c.i=(a.i+2)%4)
- SELECT min(turn)>0 OR max(turn)<0 FROM turns)
+ SELECT count(*)=4 AND (min(turn)>0 OR max(turn)<0) FROM turns),0)
  THEN RAISE(ABORT,'Suggestion region must be nondegenerate and convex') END;
 END;
 CREATE TRIGGER source_suggestions_update BEFORE UPDATE ON source_suggestions WHEN

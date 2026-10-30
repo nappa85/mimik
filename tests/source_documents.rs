@@ -524,11 +524,16 @@ async fn registered_source_hash_and_identity_cannot_change_and_unfinalized_canno
     let db = Connection::open(&path).unwrap();
     db.execute_batch(RAW_SOURCE).unwrap();
     db.execute_batch("INSERT INTO source_pages (id,source_id,pdf_page,png) VALUES (1,1,1,x'00'); INSERT INTO source_documents(pdf_sha256) VALUES ('aa'); INSERT INTO source_document_members VALUES (1,1);").unwrap();
+    db.execute_batch("INSERT INTO sources (id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES (2,'c','s','t','mork-borg','e','it','cc',x'00','{}','{}',1)").unwrap();
     for sql in [
         "UPDATE sources SET pdf_hash='bb' WHERE id=1",
         "UPDATE sources SET id=9 WHERE id=1",
         "DELETE FROM sources WHERE id=1",
         "INSERT OR REPLACE INTO sources (id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES (1,'b2','s','t','mork-borg','e','it','bb',x'00','{}','{}',1)",
+        // Replacement through the other unique key, bundle_hash (recursive triggers are off).
+        "INSERT OR REPLACE INTO sources (id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES (3,'b','s','t','mork-borg','e','it','cc',x'00','{}','{}',1)",
+        "UPDATE OR REPLACE sources SET bundle_hash='b' WHERE id=2",
+        "UPDATE sources SET bundle_hash='b3' WHERE id=1",
         // Legacy unfinalized sources cannot be newly selected (only finalized readings).
         "INSERT INTO source_primary_events(document_id,pdf_page,source_id,actor,rationale) VALUES (1,1,1,'owner','Choose')",
     ] {
@@ -639,6 +644,31 @@ fn rejected_suggestions() -> Bad {
         ("reject", unit(1, 1), Some("t")),
         ("reject", region("1", good), None),
         ("reject", "[]".into(), None),
+        // Missing or null fields must fail closed, not evaluate to NULL and pass.
+        ("correction", "{}".into(), Some("t")),
+        ("correction", r#"{"type":null}"#.into(), Some("t")),
+        ("correction", r#"{"type":"unit"}"#.into(), Some("t")),
+        ("merge", r#"{"type":"units"}"#.into(), Some("t")),
+        (
+            "missing_text",
+            r#"{"type":"region","page":1}"#.into(),
+            Some("t"),
+        ),
+        (
+            "missing_text",
+            format!(r#"{{"type":"region","polygon":{good}}}"#),
+            Some("t"),
+        ),
+        (
+            "missing_text",
+            r#"{"type":"region","page":1,"polygon":{}}"#.into(),
+            Some("t"),
+        ),
+        (
+            "missing_text",
+            r#"{"type":"region","page":1,"polygon":null}"#.into(),
+            Some("t"),
+        ),
     ]
 }
 
@@ -694,6 +724,20 @@ async fn merge_suggestions_must_stay_on_one_page() {
     };
     assert!(suggestion_sql(&db, "merge", &two(1, 3), Some("t")).is_err());
     suggestion_sql(&db, "merge", &two(1, 2), Some("t")).unwrap();
+}
+
+#[tokio::test]
+async fn sql_region_checks_require_numeric_page_dimensions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dimensions.sqlite3");
+    drop(Store::open(&path).unwrap());
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch(r#"INSERT INTO sources (id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES (1,'b','s','t','mork-borg','e','it','aa',x'00','{}','{"pages":[{"pdf_page":1,"width_points":true,"height_points":300},{"pdf_page":2,"width_points":200,"height_points":300}]}',2);
+        INSERT INTO source_pages (id,source_id,pdf_page,png) VALUES (1,1,1,x'00'),(2,1,2,x'00');"#).unwrap();
+    // JSON true extracts as 1, so a bare range check would accept this tiny polygon.
+    let tiny = "[[0,0],[1,0],[1,1],[0,1]]";
+    assert!(suggestion_sql(&db, "missing_text", &region_target("1", tiny), Some("t")).is_err());
+    suggestion_sql(&db, "missing_text", &region_target("2", tiny), Some("t")).unwrap();
 }
 
 #[tokio::test]
