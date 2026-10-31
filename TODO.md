@@ -36,22 +36,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   hook `READ_DEADLINE` (`src/sources/review.rs`) is process-global and matched by label: key it
   to the test's store. `campaigns::tests::material_tests::material_review_response_bounds_and_labels`
   failed once in a full parallel run (2026-10-31, 8 test threads, "budget truncation must be
-  labelled") and passed 3 of 3 alone: likely the 250 ms review read deadline under load. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
+  labelled") and passed 3 of 3 alone: likely the 250 ms review read deadline under load. Same pattern for
+  `campaigns::tests::list_tests::a_refused_cell_draft_re_render_is_within_the_bound_plus_its_echo`
+  (failed once with two gates in parallel, 3 of 3 alone at about 29 s): find the timing
+  dependence in both. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
   (`~/temp/`, tagged, clean text layer) through the prototype tools.
-
-- **Launch tests on a fresh target (found 2026-10-31):** the 39
-  `assistant::runtime::launch` tests need `target/debug/examples/fake_llama_server`, but
-  `cargo test --all-targets` on an empty target directory builds only a hashed test-mode copy
-  of the example, so they fail with "is missing: run the tests with --all-targets"; local gates
-  passed only on reused target volumes. CI's checks job runs exactly that on a clean checkout.
-  Fix test-first (build the example before the tests in CI, or have the tests locate it
-  through cargo).
-
-- **Probe with a relative `--models-dir` (found 2026-10-31, also on master):** `mimik
-  assistant-runner --probe --models-dir target/models` is inconclusive at level 1 ("hakoniwa
-  failed before starting the model server"); the absolute path passes. CI's live step uses the
-  relative form. Regression test first, then make the probe's models dir absolute as the
-  server path does (`std::path::absolute`).
 
 - **Resume after a reboot:** the CI helper is `/home/marco/Progetti/mimik/target/agent-tools/ci.sh` (`CPUS=2 sh
   /home/marco/Progetti/mimik/target/agent-tools/ci.sh <cmd>`, always by this absolute path, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
