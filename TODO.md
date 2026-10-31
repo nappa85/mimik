@@ -53,6 +53,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
+- **Master view (CAMP-14, ROAD-8, owner 2026-10-31):** after source import step 3, write its
+  plan (pushed sheet list with changed-since-last-seen marks, one sheet at a time, labelled NPC
+  sheets) and get it reviewed.
 0. llama.cpp versions (ASSIST-46): (a) a scheduled CI job that tries each new llama.cpp release
    against the test suite (flags, output parsing, grammar conversion, the confinement suite),
    before the first release; (b) the system-llama.cpp mode with distribution packaging

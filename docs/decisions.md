@@ -227,6 +227,7 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 - **CAMP-10** (2026-10-15) A frozen sheet is never unfrozen automatically or by the player alone: after rejoining, the player submits it to a Master, whose approval makes it editable.
 - **CAMP-11** (2026-10-15) A player may soft-delete their own sheet (hidden, history kept); the Owner restores it without gaining read or edit access.
 - **CAMP-12** (2026-10-15) Physical purge is Owner-only, removes everything including the audit trail, needs typed confirmation and is the one exception to recoverable history.
+- **CAMP-14** (2026-10-31, user) Master view: a campaign's Masters get a list of its sheets updated by server push (server-sent events), each marked when it changed since that Master last opened it; one sheet open at a time (most games are turn-based); a Master's NPC sheets are labelled and listed apart from player sheets. Plan: ROAD-8.
 - **CAMP-13** (2026-10-15) A ruleset or definition may be deleted only when nothing references it (campaign, sheet, pin or publication).
 
 ## Accounts, auth and sessions
