@@ -27,9 +27,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   no unit (L-SRC-1).
 
 - **Source import plan** (`docs/source-import-plan.md`, reviewed, SRC-11 to SRC-14): step 1
-  (schema) merged; step 2 (review screen, `docs/source-review-plan.md`, reviewed): part 1
-  (migration 025, `mimik import-suggestions`) merged; part 2 (the screen) in progress, then part 3
-  (browser and live checks). Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
+  (schema) merged; step 2 (review screen, `docs/source-review-plan.md`, reviewed): parts 1
+  (migration 025, `mimik import-suggestions`) and 2 (the screen) merged; part 3 (browser and live
+  checks, docs, plan deletion) in progress. Review-screen test hook `READ_DEADLINE`
+  (`src/sources/review.rs`) is process-global and matched by label: key it to the test's store. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
   (`~/temp/`, tagged, clean text layer) through the prototype tools.
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
