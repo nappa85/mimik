@@ -56,6 +56,7 @@ jobs:
               cargo clippy --locked --all-targets -- -D warnings
               ruff check tools
               ruff format --check tools
+              cargo build --locked --example fake_llama_server
               cargo test --locked --all-targets --all-features
               cargo build --locked --example formula_eval
               cargo run --locked --example source_fixture -- target/smoke-source
