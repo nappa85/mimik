@@ -30,8 +30,9 @@
     document.querySelectorAll('[data-zoom]').forEach(control => control.setAttribute('aria-pressed', String(control === button)));
     image.classList.remove('zoom-one', 'zoom-two');
     const original = image.querySelector('img');
-    original.removeAttribute('width');
-    if (button.dataset.zoom === 'two' && original.naturalWidth) original.setAttribute('width', String(original.naturalWidth * 2));
+    // CSSOM, not a width attribute: `.source-original img` sets a CSS width, which beats an
+    // attribute (seen in the part-3 browser check), and the policy allows CSSOM styles.
+    original.style.width = button.dataset.zoom === 'two' && original.naturalWidth ? `${original.naturalWidth * 2}px` : '';
     if (button.dataset.zoom !== 'fit') image.classList.add(`zoom-${button.dataset.zoom}`);
   }));
   list?.addEventListener('focusin', event => {
@@ -69,15 +70,27 @@
     const right = Math.max(a[0], b[0]), bottom = Math.max(a[1], b[1]);
     corners = [[x,y],[right,y],[right,bottom],[x,bottom]];
     input.value = JSON.stringify(corners);
-    rectangle.hidden = false;
+    rectangle.removeAttribute('hidden');
     for (const [key,value] of Object.entries({x,y,width:right-x,height:bottom-y})) rectangle.setAttribute(key, String(value));
     document.querySelector('#region-handles').hidden = false;
   }
-  keyboard.addEventListener('click', () => {
-    const width = Number(image.dataset.width), height = Number(image.dataset.height);
+  function enteredPolygon() {
     let entered;
     try { entered = JSON.parse(input.value); } catch (_) { /* An empty form gets a starter box. */ }
-    if (Array.isArray(entered) && entered.length === 4 && entered.every(p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite))) {
+    return Array.isArray(entered) && entered.length === 4 && entered.every(p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite)) ? entered : null;
+  }
+  // A rejected owner submission keeps both its coordinate draft and its visual rectangle.
+  // Do not normalise the submitted field: its exact value is retained for reassessment.
+  const draft = enteredPolygon();
+  if (draft) {
+    const submitted = input.value;
+    update(draft[0], draft[2]);
+    input.value = submitted;
+  }
+  keyboard.addEventListener('click', () => {
+    const width = Number(image.dataset.width), height = Number(image.dataset.height);
+    const entered = enteredPolygon();
+    if (entered) {
       update(entered[0], entered[2]);
     } else {
       update([width / 4, height / 4], [width / 2, height / 2]);

@@ -95,6 +95,74 @@ pub fn fixture_pair(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         root.join("assist-definition.json"),
         serde_json::to_vec(&assist_definition())?,
     )?;
+    review_fixture(root)?;
+    Ok(())
+}
+
+/// Add a synthetic, paginated review reading and its closed, bundle-bound v2 report.
+///
+/// # Errors
+/// Returns filesystem, image encoding or JSON errors.
+fn review_fixture(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let bundle = root.join("review-bundle");
+    fs::create_dir(&bundle)?;
+    let mut encoder = png::Encoder::new(fs::File::create(bundle.join("page-1.png"))?, 600, 900);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()?
+        .write_image_data(&vec![255; 600 * 900 * 3])?;
+    let mut units = Vec::new();
+    let mut children = Vec::new();
+    for index in 0..60 {
+        let x = 5 + (index % 3) * 65;
+        let y = 5 + (index / 3) * 14;
+        let polygon = json!([[x, y], [x + 55, y], [x + 55, y + 10], [x, y + 10]]);
+        let text = if index == 9 {
+            format!(
+                "Synthetic long text {} {}",
+                "review words ".repeat(200),
+                "x".repeat(1024)
+            )
+        } else {
+            format!("Synthetic review unit {}", index + 1)
+        };
+        let id = format!("/page/0/Text/{}", index + 1);
+        let html = format!("<p>{text}</p>");
+        units.push(json!({"id":id,"kind":"Text","polygon":polygon,"html":html}));
+        children.push(
+            json!({"id":id,"block_type":"Text","polygon":polygon,"html":html,"children":null}),
+        );
+    }
+    let raw = serde_json::to_vec(
+        &json!({"children":[{"id":"/page/0/Page/0","block_type":"Page","polygon":[[0,0],[200,0],[200,300],[0,300]],"html":"","children":children}]}),
+    )?;
+    fs::write(bundle.join("source.json"), &raw)?;
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("bundle/bundle.json"))?)?;
+    manifest["source_id"] = json!("synthetic-review");
+    manifest["title"] = json!("Synthetic review source");
+    manifest["extraction_sha256"] = json!(hash(&raw));
+    manifest["pages"][0]["image_sha256"] = json!(hash(&fs::read(bundle.join("page-1.png"))?));
+    manifest["pages"][0]["units"] = json!(units);
+    let prepared = serde_json::to_vec(&manifest)?;
+    fs::write(bundle.join("bundle.json"), &prepared)?;
+    let mut issues = Vec::new();
+    for index in [1, 51, 2, 8] {
+        issues.push(json!({"action":"correction","block_id":format!("/page/0/Text/{index}"),"kind":"synthetic","description":format!("Synthetic correction {index}"),"suggested_correction":format!("Synthetic corrected text {index}")}));
+    }
+    issues.extend([
+        json!({"action":"reject","block_id":"/page/0/Text/3","kind":"synthetic","description":"Synthetic reject","suggested_correction":null}),
+        json!({"action":"merge","block_id":null,"merge_block_ids":["/page/0/Text/4","/page/0/Text/5"],"kind":"synthetic","description":"Synthetic neighbouring merge","suggested_correction":"Synthetic merged text"}),
+        json!({"action":"missing_text","block_id":null,"region":[[140,285],[195,285],[195,295],[140,295]],"kind":"synthetic","description":"Synthetic missing region","suggested_correction":"Synthetic missing text"}),
+        json!({"action":"note","block_id":"/page/0/Text/6","kind":"synthetic","description":"Synthetic unit note","suggested_correction":null}),
+        json!({"action":"note","block_id":null,"kind":"synthetic","description":"Synthetic page note","suggested_correction":null}),
+    ]);
+    let report = json!({"schema_version":2,"state":"tool_suggestions_not_verified","tool":"synthetic-review-fixture","source_sha256":manifest["source_sha256"],"bundle_sha256":hash(&prepared),"created_at":"2026-10-30T12:00:00Z","pages":[{"pdf_page":1,"state":"tool_suggestions_not_verified","findings":{"summary":"Synthetic browser review","needs_visual_review":true,"issues":issues}}]});
+    fs::write(
+        root.join("review-report.v2.json"),
+        serde_json::to_vec(&report)?,
+    )?;
     Ok(())
 }
 

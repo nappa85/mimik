@@ -253,8 +253,15 @@ Navigation links lead to the next unreviewed unit and the next later incomplete 
 same reading. With the script, `j`/`k` focus adjacent cards and `a` focuses an acceptance
 rationale without submitting. Shortcuts apply only inside the review list, outside form fields
 and editable elements, and can be disabled per browser in the help panel. Focus indicators are
-visible. Scripts are external `/assets` resources; the strict CSP has no inline-script or
-inline-style exception.
+visible. Every Owner material page carries the sheet pages' strict policy (`SHEET_CSP`:
+scripts and styles from this origin only, no inline script or style, Trusted Types with no
+policy). This strict policy covers material pages (including suggestion details), both
+`/assets/source-*.js` scripts, page and crop PNGs, successful POST redirects and retained
+409/422 draft pages. Rebuilt refusals (including HTML browser error documents and route
+misses) and unauthenticated navigation's login redirect keep only `frame-ancestors 'none'`.
+Zoom sizes the page image through the CSSOM. Browser checks:
+`tools/review_browser.py` (synthetic 60-unit review bundle and v2 report from
+`examples/source_fixture.rs`, 1280×720 and 390×844, with and without JavaScript).
 Overlay and next-unit links use fragments when the target card is already on the current
 card page, preserving unsaved fields; off-cursor navigation still loads another card page.
 The shortcut preference switch stays hidden until the script runs. The acceptance/dismissal

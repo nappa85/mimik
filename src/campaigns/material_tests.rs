@@ -2316,6 +2316,7 @@ async fn document_at(
                 .header("origin", "http://127.0.0.1:3000")
                 .header("accept", "text/html")
                 .header("sec-fetch-mode", "navigate")
+                .header("sec-fetch-dest", "document")
                 .header("cookie", auth.fixture_cookie())
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(axum::body::Body::from(
@@ -3433,6 +3434,7 @@ async fn router_get(
                 .header("host", "127.0.0.1:3000")
                 .header("accept", "text/html")
                 .header("sec-fetch-mode", "navigate")
+                .header("sec-fetch-dest", "document")
                 .header("cookie", auth.fixture_cookie())
                 .body(axum::body::Body::empty())
                 .unwrap(),
@@ -3529,5 +3531,131 @@ async fn material_crlf_at_the_limit_is_stored_as_lf_and_shown_intact() {
     assert_eq!(
         history, correction,
         "history <pre> keeps the leading newline"
+    );
+}
+
+/// Part 3 browser check: every Owner material page, the review screen first, carries the strict
+/// sheet policy (scripts and styles from this origin only, Trusted Types with no policy).
+/// Refusals can be HTML error documents rebuilt by `normalize` without the marker.
+#[tokio::test]
+async fn material_pages_carry_the_strict_policy() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, 4, 6);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[0; 72])
+            .unwrap();
+    }
+    store
+        .run(move |db| {
+            db.execute("UPDATE source_pages SET png=?1 WHERE id=1", [bytes])?;
+            db.execute(
+                "UPDATE source_units SET polygon='[[0,0],[200,0],[200,300],[0,300]]' WHERE id=1",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    finalize_material(&store).await;
+    let suggestion = suggestion_fixture(&store, "correction", suggestion_unit(1)).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    for path in [
+        "/admin/materials",
+        "/admin/materials/sources/1",
+        "/admin/materials/pages/1",
+        &format!("/admin/materials/suggestions/{suggestion}"),
+        "/admin/materials/pages/1/image",
+        "/admin/materials/pages/1/units/1/image",
+        "/assets/source-review.js",
+        "/assets/source-regions.js",
+    ] {
+        let response = router_get(&app, &auth[0], path).await;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_SECURITY_POLICY],
+            crate::campaigns::web::SHEET_CSP,
+            "{path}"
+        );
+    }
+    for (revision, status) in [
+        (1, StatusCode::SEE_OTHER),
+        (1, StatusCode::CONFLICT),
+        (2, StatusCode::UNPROCESSABLE_ENTITY),
+    ] {
+        let mut fields = decision(revision);
+        if status == StatusCode::UNPROCESSABLE_ENTITY {
+            fields[4].1.clear();
+        }
+        let response = document_post(&app, &auth[0], fields).await;
+        assert_eq!(response.status(), status);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_SECURITY_POLICY],
+            crate::campaigns::web::SHEET_CSP,
+            "{status}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn material_refusals_and_login_redirect_keep_default_policy() {
+    use tower::ServiceExt;
+
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store).await.unwrap();
+    for (actor, path, status) in [
+        (&auth[1], "/admin/materials/pages/1", StatusCode::FORBIDDEN),
+        (
+            &auth[0],
+            "/admin/materials/not-a-route",
+            // The shipping auth router deliberately makes unknown routes uniform refusals.
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let response = router_get(&app, actor, path).await;
+        assert_eq!(response.status(), status);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_SECURITY_POLICY],
+            "frame-ancestors 'none'"
+        );
+        assert!(
+            response.headers()[axum::http::header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html")
+        );
+    }
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/admin/materials/pages/1")
+                .header("host", "127.0.0.1:3000")
+                .header("accept", "text/html")
+                .header("sec-fetch-mode", "navigate")
+                .header("sec-fetch-dest", "document")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert!(
+        response.headers()[axum::http::header::LOCATION]
+            .to_str()
+            .unwrap()
+            .starts_with("/auth/login")
+    );
+    assert_eq!(
+        response.headers()[axum::http::header::CONTENT_SECURITY_POLICY],
+        "frame-ancestors 'none'"
     );
 }

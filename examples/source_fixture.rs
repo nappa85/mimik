@@ -8,6 +8,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::path::PathBuf::from(path);
     std::fs::create_dir_all(&root)?;
     support::fixture_pair(&root)?;
-    println!("Synthetic source smoke fixture created.");
+    println!("Synthetic source smoke fixture and review bundle/report created.");
     Ok(())
 }

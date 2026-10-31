@@ -2,8 +2,8 @@
 
 Goal: the owner turns a PDF they own into reviewed evidence from the browser, choosing how it
 is read, without command-line tools, Docker or JSON files. Today an extraction needs the
-prototype containers, `prepare_review.py` and `mimik import-source`, and suggestion reports are
-JSON files the review page never shows (`docs/sources-and-retrieval.md`).
+prototype containers, `prepare_review.py` and `mimik import-source`; imported suggestion
+reports are shown on the review screen (`docs/sources-and-retrieval.md`).
 
 What stays: units start `unreviewed`; every accept, correction, rejection and page completion is
 an explicit owner decision with actor, rationale and revision (SRC-4, SRC-5); raw extraction
@@ -63,8 +63,9 @@ New decisions:
 - **Suggestions:** stored apart from units, bound to the exact source (bundle hash) they were
   made for; a report for another bundle is refused. Each targets one unit, several units (merge)
   or a page region (missing text). Accepting maps to existing decisions: a correction records
-  `corrected`; a merge is one atomic decision correcting the first unit and rejecting the others,
-  with one rationale and every expected revision; a missing-region suggestion pre-fills an
+  `corrected`; accepting a merge atomically creates one corrected owner unit with the targets'
+  bounding rectangle and rejects every target, with one rationale and every expected revision;
+  a missing-region suggestion pre-fills an
   owner-added unit; a reject suggestion records `rejected`. Dismissing a suggestion is not a
   decision on the unit. A suggestion made on an older unit revision is shown as stale. Open
   suggestions do not block page completion.
@@ -96,15 +97,11 @@ New decisions:
 
 ## Steps
 
-Step 1, the schema (documents, readings, primary pages, owner units, suggestions), is done; it
-is described in `docs/sources-and-retrieval.md`. Numbering is kept so references stay valid.
+Steps 1 (the schema: documents, readings, primary pages, owner units, suggestions) and 2 (the
+review screen: report import, suggestions, merges, owner-added text, primary choice) are done;
+they are described in `docs/sources-and-retrieval.md`. Numbering is kept so references stay
+valid.
 
-2. **Review screen** (own plan: `docs/source-review-plan.md`). Report import bound to the bundle hash (the existing report
-   shape, plus targets for several units and page regions). On the page: the image beside the
-   units, zoom and region highlight; each suggestion as an inline difference with Accept, Edit,
-   Dismiss; merges as one decision; drawing a box for owner-added text; the page's effective text
-   in place; keyboard navigation; drafts kept on 409/422. Browser checks for all of these on a
-   synthetic fixture; the MÖRK BORG IT bundle and its two reports as the local live check.
 3. **Sandboxed PDF work, upload and jobs** (own plan). First the runner generalisation: launch
    kinds besides llama-server (a re-exec of `mimik` as the PDF worker), each with its own
    seccomp, Landlock, rlimits and wall-clock limit. Every parse of an uploaded PDF (the `lopdf`

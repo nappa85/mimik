@@ -329,7 +329,9 @@ through PRG as above.
 and every sheet JSON answer carries the `SheetPage` extension, and `normalize` gives it
 `default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none';
 form-action 'self'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types
-'none'`. Every other answer keeps `frame-ancestors 'none'`: redirects, the busy page, refusals
+'none'`. Owner material pages, scripts, images, successful POST redirects and 409/422 draft
+pages also carry this strict policy (`docs/sources-and-retrieval.md`). Other answers keep
+`frame-ancestors 'none'`: sheet redirects, the login redirect, the busy page, refusals
 (400, 403, 415) and any error page rebuilt by `normalize` or by outer middleware (timeout,
 503), which drop the extension. The module builds DOM with `createElement` and `textContent`
 only, with attribute names from an allowlist; a Rust test refuses HTML sinks, any mention of

@@ -15,6 +15,67 @@ pub mod fixture;
 #[path = "support/schema_fixture.rs"]
 mod schema_fixture;
 
+#[tokio::test]
+async fn browser_review_fixture_imports_all_actions_and_repeats_without_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    fixture::fixture_pair(dir.path()).unwrap();
+    let store = Store::open(&dir.path().join("browser.sqlite3")).unwrap();
+    store
+        .import_source(
+            &dir.path().join("review-bundle"),
+            &dir.path().join("original.pdf"),
+        )
+        .await
+        .unwrap();
+    let source = store.sources().await.unwrap()[0].id;
+    let report = dir.path().join("review-report.v2.json");
+    let summary = store
+        .import_suggestion_report(source, &report)
+        .await
+        .unwrap();
+    assert_eq!(summary.binding, "bundle");
+    assert!(!summary.repeat);
+    let db = Connection::open(dir.path().join("browser.sqlite3")).unwrap();
+    for (action, count) in [
+        ("correction", 4),
+        ("reject", 1),
+        ("merge", 1),
+        ("missing_text", 1),
+        ("note", 2),
+    ] {
+        assert_eq!(summary.counts[action], count, "{action}");
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM source_suggestions WHERE kind=?1",
+                [action],
+                |row| row.get::<_, usize>(0),
+            )
+            .unwrap(),
+            count,
+            "stored {action}"
+        );
+    }
+    assert_eq!(summary.failed_pages, 0);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM source_units", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        60
+    );
+    let repeated = store
+        .import_suggestion_report(source, &report)
+        .await
+        .unwrap();
+    assert!(repeated.repeat);
+    assert_eq!(repeated.report_id, summary.report_id);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM source_suggestions", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        9
+    );
+}
+
 struct Context {
     dir: tempfile::TempDir,
     store: Store,
