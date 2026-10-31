@@ -7,18 +7,39 @@ described in [evaluation-tooling.md](evaluation-tooling.md).
 
 ## Synthetic PDF worker corpus and memory (2026-10-31)
 
-Coordinator host confinement run: 20/20 worker checks (17 live checks, two re-exec helpers,
-one generator check), including 24 hostile and six valid difficult generated cases, in
-72 seconds. The llama live suite passed 49/49. The valid set includes all 300 text pages,
-a 3000 × 4000 full-page image, 256 font objects and inherited rotations 90/180/270.
+The generated set contains 24 hostile and six valid difficult cases. Each declares an
+exact inspect refusal or render outcome. The valid set includes all 300 text pages, a
+3000 × 4000 full-page image, 256 font objects and inherited rotations 90/180/270. The
+object-stream cycle uses type-2 xref entries: page resources require object 9 in stream B,
+whose Length requires object 10 in stream A, whose Length requires object 9 in B. Inspection
+passes and rendering reaches this resource path; the two compressed objects have no
+physical fallback. Inert actions render successfully with the host canary absent.
+The coordinator's final host run passed 25/25 worker checks and 49/49 llama checks, with
+the level-1 probe successful; tiny-images rendered Ok and page-cycle had its declared
+inspect refusal.
 
-Peak RSS from wait4 on the reaped runner and its waited descendants is a conservative
-worker upper bound, not a dedicated MuPDF allocator measurement. The largest observed
-value was 50,448 KiB (about 2.4% of RLIMIT_AS 2,097,152 KiB), below the 75% acceptance
-threshold of 1,572,864 KiB. Reported case values: text-300 render 37,824 KiB,
-xref-repair 44,920 KiB, full-image 38,088 KiB. The input Vec and MuPDF's copied buffer are
-both present in these runs. This supports the default MuPDF store under this synthetic
-profile; it does not replace the two owner-local PDF measurements or fuzzing follow-up.
+Peak RSS from wait4 on the naturally reaped runner and its waited descendants is a
+conservative worker upper bound only for natural exits, not a dedicated MuPDF allocator
+measurement. A test-only worker touching 256 MiB measured 286,852 KiB in the coordinator's
+exact-profile run, establishing descendant rusage propagation. Natural corpus exits must
+remain below 1,572,864 KiB (75% of RLIMIT_AS 2,097,152 KiB). The input Vec and MuPDF's copied
+buffer are both present. Parent-killed runs have no worker RSS claim: `flate-gib`,
+`operators-50m` and `shading-pattern` time out during render, as declared. The responsiveness
+control also ends in a parent deadline kill while a second confined inspect succeeds;
+HTTP-level responsiveness is reserved for slice 3b.
+
+The `page-cycle` fixture is refused at inspect as Unreadable, MuPDF's bounded cycle
+detection. The tiny-image render fixture uses 19,999 draws, below the 20,000 image-block cap
+in `operations::text`; the former 50,000-draw input correctly returned TooLarge at that cap,
+before output framing. Render-stage fixtures require inspect success and exact Ok or Timeout.
+Every naturally exiting case rejects unexpected signal status; logs distinguish parent kills.
+
+Generator tests re-exec one case at a time and check `/proc/self/status` VmHWM below 64 MiB,
+output below 8 MiB and generation below five seconds. This avoids wait4's pre-exec inherited
+parent RSS when other unit tests run concurrently. Full-flush DEFLATE block repetition
+generates the GiB and 50-million-operator payloads without compressing expanded input in the
+debug build; checksum tests cover zero and nonzero repeated blocks. The conclusion applies
+to this deterministic synthetic profile, not the two owner-local PDFs or fuzzing follow-up.
 
 ## Extractor screen on MÖRK BORG IT pages 22–39 (2026-10-29/30)
 

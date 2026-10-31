@@ -14,12 +14,6 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
   fonts. Only owner-source comparison can establish visual fidelity.
 - **SRC-PLATFORMS** [upload] macOS and Windows have no PDF upload worker; Linux confinement
   must pass the real worker probe, with no unconfined fallback.
-- **HAKO-REASONS** [sandbox diagnostics] llama-server setup failures now carry fixed codes
-  80–105 (Hakoniwa setup steps) and 118–119 (marker-descriptor and stdin), instead of the
-  former generic 125. Unknown Hakoniwa formats still use 125. Stderr no longer carries
-  Hakoniwa's raw reason, so user-specific paths and syscall arguments are unavailable;
-  the fixed setup-step classification and namespace/AppArmor remedies remain available.
-
 - **SRC-TYPE3** [diagnostics] The font diagnostic skips Type3 fonts and does not scan their
   glyph resources. Substituted fonts used there are not reported; extend the bounded scan
   with synthetic fixtures if this diagnostic coverage is required.
@@ -29,6 +23,14 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
   that this cannot throw.
 - **SRC-PNG-END** [bundle compatibility] Bundle import refuses bytes after a PNG's IEND,
   stricter than before. Bundles with trailing PNG bytes must be regenerated with clean PNGs.
+
+## Shared sandbox diagnostics
+
+- **HAKO-REASONS** [sandbox diagnostics] Setup failures use fixed codes 80–105 for
+  Hakoniwa steps and 118–119 for marker-descriptor and stdin. Unknown Hakoniwa formats use
+  125. Raw Hakoniwa reasons, including user-specific paths and syscall arguments, are not
+  retained on stderr. Diagnostics expose the fixed setup-step classification and observed
+  namespace/AppArmor remedies; detailed syscall diagnosis requires local reproduction.
 
 ## Assisted sheet entry
 

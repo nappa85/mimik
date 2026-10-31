@@ -8,6 +8,8 @@ from pathlib import Path, PurePosixPath
 from pathspec import PathSpec
 
 REQUIRED = {
+    "licenses/ijg-libjpeg-9f-README",
+    "licenses/ijg-libjpeg-9f-upstream.sha256",
     "Cargo.toml",
     "Cargo.lock",
     "LICENSE",

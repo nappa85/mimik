@@ -1,11 +1,37 @@
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import mupdf_notices
 
 
 class MuPdfNoticesTests(unittest.TestCase):
+    def setUp(self):
+        self.real_ijg = mupdf_notices.ijg_notice
+        self.real_gpl = mupdf_notices.verify_gpl
+        self.external = patch.object(
+            mupdf_notices, "ijg_notice", return_value="IJG fixture\n", create=True
+        )
+        self.external.start()
+        self.addCleanup(self.external.stop)
+        self.gpl = patch.object(mupdf_notices, "verify_gpl", create=True)
+        self.gpl.start()
+        self.addCleanup(self.gpl.stop)
+
+    def test_vendor_metadata_does_not_change_notices_and_missing_section_is_actionable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.fixture(root)
+            (root / ".cargo-ok").write_text("")
+            text = mupdf_notices.notice(root)
+            (root / ".cargo-ok").unlink()
+            (root / ".cargo-checksum.json").write_text("{}")
+            mupdf_notices.verify(text, root)
+            with self.assertRaisesRegex(ValueError, "tools/mupdf_notices.py"):
+                mupdf_notices.verify("cargo-about only", root)
+
     def fixture(self, root):
         for relative in mupdf_notices.LICENSE_FILES:
             path = root / relative
@@ -47,6 +73,53 @@ class MuPdfNoticesTests(unittest.TestCase):
             (root / "mupdf/COPYING").unlink()
             with self.assertRaisesRegex(ValueError, "missing"):
                 mupdf_notices.notice(root)
+
+    def test_pinned_readme_and_source_comparison_fail_closed(self):
+        # Synthetic upstream files exercise every comparison, including a fourth change.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tree = root / "mupdf/thirdparty/libjpeg"
+            tree.mkdir(parents=True)
+            names = sorted(mupdf_notices.IJG_CHANGED) + [f"file{i}.c" for i in range(81)]
+            digest = hashlib.sha256(b"upstream").hexdigest()
+            inventory = "".join(f"{digest}  {name}\n" for name in names).encode()
+            for name in names:
+                (tree / name).write_bytes(
+                    b"changed" if name in mupdf_notices.IJG_CHANGED else b"upstream"
+                )
+            real_ijg = self.real_ijg
+            with patch.object(mupdf_notices, "pinned", side_effect=[b"full README", inventory]):
+                text = real_ijg(root)
+            self.assertIn("full README", text)
+            self.assertIn(
+                "this software is based in part on the work of the Independent JPEG Group", text
+            )
+            for name in mupdf_notices.IJG_CHANGED:
+                self.assertIn(name, text)
+            (tree / "file0.c").write_bytes(b"unexpected")
+            with (
+                patch.object(mupdf_notices, "pinned", side_effect=[b"full README", inventory]),
+                self.assertRaisesRegex(ValueError, "unreviewed"),
+            ):
+                real_ijg(root)
+            readme = root / "README"
+            readme.write_bytes(b"altered")
+            with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                mupdf_notices.pinned(readme, mupdf_notices.IJG_README_SHA256)
+            readme.unlink()
+            with self.assertRaises(FileNotFoundError):
+                mupdf_notices.pinned(readme, mupdf_notices.IJG_README_SHA256)
+
+    def test_gpl_election_requires_exact_full_gpl3_text(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / mupdf_notices.GPL3_PATH
+            with self.assertRaises(FileNotFoundError):
+                self.real_gpl(root)
+            path.parent.mkdir(parents=True)
+            path.write_text("AGPL or pointer text is not GPLv3")
+            with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                self.real_gpl(root)
 
     def test_all_font_and_disabled_component_licences_are_in_the_inventory(self):
         for component in ("mujs", "tesseract", "curl", "freeglut", "zint", "zxing-cpp"):

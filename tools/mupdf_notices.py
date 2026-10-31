@@ -43,6 +43,53 @@ mupdf/thirdparty/zlib/LICENSE
 mupdf/thirdparty/zxing-cpp/LICENSE""".splitlines()
 )
 
+LICENSES = Path(__file__).resolve().parents[1] / "licenses"
+IJG_README_SHA256 = "7c25493a9f64fed34d01445467341bda77bc1cdbeccbe33558659ef173fb9ff2"
+IJG_INVENTORY_SHA256 = "efcf41c7664ec021ca36790adc5b1a16a6e0f309ba19e293bfa66a32849fa362"
+GPL3_PATH = "mupdf/thirdparty/lcms2/plugins/fast_float/COPYING.GPL3"
+GPL3_SHA256 = "c53a65c2fd561c87eaabf1072ef5dcab8653042bc15308465f52413585eb6271"
+IJG_CHANGED = {"jidctint.c", "jdarith.c", "jerror.c"}
+
+
+def pinned(path, digest):
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise ValueError(f"pinned licence/provenance hash mismatch: {path}")
+    return data
+
+
+def verify_gpl(crate):
+    """The elected GPLv3 text is explicitly present, not just an FTL pointer."""
+    pinned(crate / GPL3_PATH, GPL3_SHA256)
+
+
+def ijg_notice(crate, licenses=LICENSES):
+    readme = pinned(licenses / "ijg-libjpeg-9f-README", IJG_README_SHA256).decode("utf-8")
+    inventory = pinned(licenses / "ijg-libjpeg-9f-upstream.sha256", IJG_INVENTORY_SHA256)
+    upstream = dict(line.split()[::-1] for line in inventory.decode("ascii").splitlines())
+    tree = crate / "mupdf/thirdparty/libjpeg"
+    found = {p.relative_to(tree).as_posix() for p in tree.rglob("*") if p.is_file()}
+    if len(upstream) != 84 or found != upstream.keys():
+        raise ValueError("IJG libjpeg source inventory mismatch")
+    changed = {
+        name
+        for name, digest in upstream.items()
+        if hashlib.sha256((tree / name).read_bytes()).hexdigest() != digest
+    }
+    if changed != IJG_CHANGED:
+        raise ValueError(f"unreviewed IJG libjpeg changes: {sorted(changed)}")
+    return (
+        "\n### IJG libjpeg 9f\n\n"
+        "this software is based in part on the work of the Independent JPEG Group\n\n"
+        "MuPDF changed these files relative to the pinned upstream jpeg-9f release: "
+        + ", ".join(sorted(changed))
+        + ". The other 81 shipped files match upstream.\n\n"
+        "Upstream: https://www.ijg.org/files/jpegsrc.v9f.tar.gz; SHA-256 "
+        "04705c110cb2469caa79fb71fba3d7bf834914706e9641a4589485c1f832565b.\n\n"
+        f"licenses/ijg-libjpeg-9f-README; SHA-256 {IJG_README_SHA256}\n\n"
+        f"```text\n{readme}\n```\n"
+    )
+
 
 def license_name(name):
     """Upstream uses both licence spellings; include notices and font OFLs too."""
@@ -71,6 +118,7 @@ def registry_crate():
 def notice(crate):
     """Every shipped licence, byte-content preserved (decoded to text), compiled or not."""
     crate = Path(crate)
+    verify_gpl(crate)
     found = {
         p.relative_to(crate).as_posix()
         for p in crate.rglob("*")
@@ -89,12 +137,16 @@ def notice(crate):
         "zint, zxing-cpp and freeglut have their respective licence documents below.\n\n"
         "FreeType: Mimik elects GPLv2-or-later, as LICENSE.TXT states that "
         '"any later version can be used also"; used here as GPLv3, compatible with AGPL-3.0. '
-        "The FTL alternative is reproduced as shipped but is not Mimik's selected option.\n\n"
+        "Only FreeType's LICENSE.TXT pointer text ships in the crate: docs/FTL.TXT, "
+        "docs/GPLv2.TXT, BDF/PCF READMEs and src/gzip/zlib.h are absent. "
+        f"The full elected GPLv3 text is reproduced below from {GPL3_PATH} "
+        f"(verified SHA-256 {GPL3_SHA256}).\n\n"
         "Fonts: the han and noto licence files are reproduced, even though disabled. "
         "The compiled URW base14 fonts have no separate licence file in the crate; "
         "they are covered by MuPDF's COPYING (Artifex).\n\n"
         "Crate source gaps: libjpeg has IJG licence source-header notices but omits the "
-        "README they refer to. Leptonica is vendored (disabled), has BSD-style source-header "
+        "README they refer to; the pinned upstream README is supplied in full below. "
+        "Leptonica is vendored (disabled), has BSD-style source-header "
         "notices, and ships no separate licence document. These header notices follow too.\n"
     ]
     for relative in sorted(found):
@@ -121,13 +173,18 @@ def notice(crate):
         out.append(
             f"\n### {relative} (source-header notice)\n\n```text\n{text[start : end + 2]}\n```\n"
         )
+    out.append(ijg_notice(crate))
     return "".join(out)
 
 
 def verify(text, crate):
     """Packaging refuses omitted, modified or stale vendored-tree notices."""
     if notice(crate) not in text:
-        raise ValueError("third-party notices omit or alter the MuPDF vendored-tree notices")
+        raise ValueError(
+            "third-party notices omit or alter the MuPDF vendored-tree notices; "
+            "run python3 tools/mupdf_notices.py target/THIRD-PARTY-NOTICES.md "
+            "after generating cargo-about notices"
+        )
 
 
 def main():

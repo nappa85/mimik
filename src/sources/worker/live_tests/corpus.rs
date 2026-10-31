@@ -60,19 +60,22 @@ fn compressed(block: &[u8], count: usize) -> Vec<u8> {
 }
 
 fn zero_bomb() -> Vec<u8> {
+    repeated_flate(&vec![0; 1 << 20], 1024)
+}
+
+fn repeated_flate(block: &[u8], count: usize) -> Vec<u8> {
     // Full flush emits byte-aligned, non-final blocks and resets the dictionary. Such
     // independent blocks can be repeated without compressing a gigabyte on the test host.
     // flate2 produces every DEFLATE byte; only the RFC1950 checksum reflects repetition.
-    let block = vec![0; 1 << 20];
     let mut compressor = flate2::Compress::new(flate2::Compression::fast(), true);
     let mut encoded = Vec::with_capacity(2 << 20);
     compressor
-        .compress_vec(&block, &mut encoded, flate2::FlushCompress::Full)
+        .compress_vec(block, &mut encoded, flate2::FlushCompress::Full)
         .unwrap();
     assert_eq!(compressor.total_in(), block.len() as u64);
     let mut output = Vec::with_capacity(6 << 20);
     output.extend_from_slice(&encoded[..2]); // zlib header appears exactly once
-    for _ in 0..1024 {
+    for _ in 0..count {
         output.extend_from_slice(&encoded[2..]);
     }
     encoded.clear();
@@ -83,8 +86,18 @@ fn zero_bomb() -> Vec<u8> {
         flate2::Status::StreamEnd
     );
     output.extend_from_slice(&encoded[..encoded.len() - 4]);
-    // Adler32 of N zero bytes: s1=1, s2=N mod 65521.
-    let checksum = (((1_u32 << 30) % 65521) << 16) | 1;
+    // Combine Adler32 for repeated independent blocks, without traversing expanded data.
+    let (mut a, mut b) = (1_u64, 0_u64);
+    for byte in block {
+        a = (a + u64::from(*byte)) % 65521;
+        b = (b + a) % 65521;
+    }
+    let (mut total_a, mut total_b) = (1_u64, 0_u64);
+    for _ in 0..count {
+        total_b = (total_b + b + (block.len() as u64 % 65521) * (total_a + 65520)) % 65521;
+        total_a = (total_a + a + 65520) % 65521;
+    }
+    let checksum = u32::try_from((total_b << 16) | total_a).unwrap();
     output.extend_from_slice(&checksum.to_be_bytes());
     output
 }
@@ -113,8 +126,12 @@ fn raw(objects: &[Vec<u8>], trailer: &str, repair: bool) -> Vec<u8> {
     }
     write!(
         out,
-        "trailer\n<< /Root 1 0 R /Size {} {} >>\nstartxref\n{}\n%%EOF\n",
-        objects.len() + 1,
+        "trailer\n<< /Root 1 0 R {} {} >>\nstartxref\n{}\n%%EOF\n",
+        if trailer.contains("/Size ") {
+            String::new()
+        } else {
+            format!("/Size {}", objects.len() + 1)
+        },
         trailer.replace("SELF", &xref.to_string()),
         if repair { 1 } else { xref }
     )
@@ -159,7 +176,7 @@ fn generated(name: &str) -> Vec<u8> {
             filters = "/Filter [/FlateDecode /FlateDecode /FlateDecode /FlateDecode /FlateDecode /FlateDecode /FlateDecode /FlateDecode]";
         }
         "operators-50m" => {
-            content = compressed(&b"q Q\n".repeat(8000), 3125);
+            content = repeated_flate(&b"q Q\n".repeat(8000), 3125);
             filters = "/Filter /FlateDecode";
         }
         "page-cycle" => tree = "<< /Type /Pages /Count 1 /Kids [2 0 R 3 0 R] >>".into(),
@@ -171,15 +188,14 @@ fn generated(name: &str) -> Vec<u8> {
         "prev-loop" => trailer = "/Prev SELF",
         "huge-object-count" => trailer = "/Size 2147483648",
         "object-stream-cycle" => {
-            extra.push(stream(
-                "/Type /ObjStm /N 1 /First 4 /Extends 8 0 R",
-                b"8 0 8 0 R",
-            ));
-            extra.push(stream(
-                "/Type /ObjStm /N 1 /First 4 /Extends 7 0 R",
-                b"7 0 7 0 R",
-            ));
-            catalog = "<< /Type /Catalog /Pages 2 0 R /Loop 7 0 R >>".into();
+            page = page.replace("/Resources 5 0 R", "/Resources 9 0 R");
+            // Object 9 (page resources) requires stream B. Its indirect Length 10
+            // requires stream A, whose indirect Length is object 9 in B again.
+            extra.push(
+                b"<< /Type /ObjStm /N 1 /First 5 /Length 9 0 R >>\nstream\n10 0 29\nendstream"
+                    .to_vec(),
+            );
+            extra.push(b"<< /Type /ObjStm /N 1 /First 4 /Length 10 0 R >>\nstream\n9 0 << /Font << /F1 6 0 R >> >>\nendstream".to_vec());
         }
         "xref-repair" => {
             extra.push(b"\n999 0 obj << /Broken true >> endobj\n".repeat(170_000));
@@ -188,7 +204,9 @@ fn generated(name: &str) -> Vec<u8> {
             extra.push(image(name));
             resources = "<< /XObject << /Im 7 0 R >> >>".into();
             content = if name == "tiny-images" {
-                b"q 1 0 0 1 0 0 cm /Im Do Q\n".repeat(50_000)
+                // Stay below operations::text_and_stats' 20,000 image-block cap:
+                // this case exercises rendering, rather than a declared size refusal.
+                b"q 1 0 0 1 0 0 cm /Im Do Q\n".repeat(19_999)
             } else {
                 b"q 600 0 0 800 0 0 cm /Im Do Q".to_vec()
             };
@@ -290,6 +308,9 @@ fn resource_case(
 }
 
 fn finish(mut objects: Vec<Vec<u8>>, content: &[u8], name: &str, trailer: &str) -> Vec<u8> {
+    if name == "object-stream-cycle" {
+        return cyclic_xref(&objects);
+    }
     if name == "text-300" {
         let mut kids = Vec::new();
         for n in 3..=302 {
@@ -333,6 +354,31 @@ fn finish(mut objects: Vec<Vec<u8>>, content: &[u8], name: &str, trailer: &str) 
     }
 }
 
+fn cyclic_xref(objects: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut entries = vec![(0_u8, 0_u32, 65535_u16)];
+    for (n, object) in objects.iter().enumerate() {
+        entries.push((1, u32::try_from(out.len()).unwrap(), 0));
+        writeln!(out, "{} 0 obj", n + 1).unwrap();
+        out.extend_from_slice(object);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    assert_eq!(objects.len(), 8);
+    entries.extend([(2, 8, 0), (2, 7, 0)]); // 9 in B, 10 in A: neither has a physical fallback
+    let xref = out.len();
+    entries.push((1, u32::try_from(xref).unwrap(), 0));
+    let mut data = Vec::new();
+    for (kind, offset, generation) in entries {
+        data.push(kind);
+        data.extend_from_slice(&offset.to_be_bytes());
+        data.extend_from_slice(&generation.to_be_bytes());
+    }
+    out.extend_from_slice(b"11 0 obj\n");
+    out.extend(stream("/Type /XRef /Root 1 0 R /Size 12 /W [1 4 2]", &data));
+    write!(out, "\nendobj\nstartxref\n{xref}\n%%EOF\n").unwrap();
+    out
+}
+
 fn generate(name: &str) -> Vec<u8> {
     let _ = budget();
     let started = Instant::now();
@@ -354,27 +400,79 @@ fn generate(name: &str) -> Vec<u8> {
     bytes
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Expected {
+    Inspect(Error),
+    RenderOk,
+    RenderTimeout,
+}
+
+fn expected(name: &str) -> Expected {
+    match name {
+        "password" => Expected::Inspect(Error::PasswordProtected),
+        "not-pdf" | "truncated" | "deep-arrays" | "deep-dictionaries" | "page-cycle" => {
+            Expected::Inspect(Error::Unreadable)
+        }
+        "huge-page-count" => Expected::Inspect(Error::TooManyPages),
+        "huge-mediabox" | "extreme-userunit" => Expected::Inspect(Error::TooLarge),
+        "flate-gib" | "operators-50m" | "shading-pattern" => Expected::RenderTimeout,
+        "nested-filters"
+        | "image-bomb"
+        | "tiny-images"
+        | "prev-loop"
+        | "object-stream-cycle"
+        | "xref-repair"
+        | "huge-object-count"
+        | "type3-recursion"
+        | "bad-jbig2"
+        | "bad-jpx"
+        | "bad-font"
+        | "inert-actions"
+        | "text-300"
+        | "full-image"
+        | "many-fonts"
+        | "rotate-90"
+        | "rotate-180"
+        | "rotate-270" => Expected::RenderOk,
+        _ => panic!("case lacks an expected outcome: {name}"),
+    }
+}
+
 fn run_case(name: &str, valid: bool) {
+    let expected = expected(name);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("corpus.pdf");
     std::fs::write(&path, generate(name)).unwrap();
+    let canary = Path::new("/tmp/mimik-must-not-exist");
+    if name == "inert-actions" {
+        assert!(!canary.exists(), "host canary must start absent");
+    }
     let mut opts = production_options();
     bound_wall(&mut opts, valid, 1);
     let start = Instant::now();
     let report = inspection(&path, &opts, &Cancel::default());
+    println!(
+        "corpus {name}: inspect {}",
+        report
+            .as_ref()
+            .map_or_else(ToString::to_string, |_| "Ok".into())
+    );
+    check_rss(name, "inspect", &opts);
     assert!(
         start.elapsed() < opts.wall.unwrap() + Duration::from_secs(5),
         "{name}: inspect deadline"
     );
-    let report = match report {
-        Ok(report) => report,
-        Err(Reason::Document(reason)) if !valid => {
-            println!("corpus {name}: inspect {reason}");
-            return;
-        }
-        other => panic!("{name}: {other:?}"),
-    };
-    check_rss(name, "inspect", &opts);
+    if let Expected::Inspect(error) = expected {
+        assert_eq!(
+            report.unwrap_err(),
+            Reason::Document(error),
+            "{name}: inspect class"
+        );
+        println!("corpus {name}: render not reached (declared inspect refusal)");
+        return;
+    }
+    let report =
+        report.unwrap_or_else(|e| panic!("{name}: must reach render, inspect returned {e}"));
     if name == "text-300" {
         assert_eq!(report.document.pages, 300);
     }
@@ -404,15 +502,17 @@ fn run_case(name: &str, valid: bool) {
             start.elapsed() < opts.wall.unwrap() + Duration::from_secs(5),
             "{name}: render deadline"
         );
-        if valid {
-            result.unwrap_or_else(|error| panic!("{name}: {error}"));
-        } else {
-            assert!(
-                matches!(result, Ok(()) | Err(Reason::Document(_))),
-                "{name}: {result:?}"
-            );
-        }
+        println!("corpus {name}: render {result:?}");
         check_rss(name, "render", &opts);
+        let expected_result = match expected {
+            Expected::RenderOk => Ok(()),
+            Expected::RenderTimeout => Err(Error::Timeout.into()),
+            Expected::Inspect(_) => unreachable!(),
+        };
+        assert_eq!(result, expected_result, "{name}: render class");
+    }
+    if name == "inert-actions" {
+        assert!(!canary.exists(), "inert PDF actions created a host canary");
     }
     // No staging output is permitted; execute returns only after all pinned processes die.
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
@@ -420,9 +520,19 @@ fn run_case(name: &str, valid: bool) {
 }
 
 fn check_rss(name: &str, operation: &str, opts: &Options) {
+    use std::sync::atomic::Ordering;
     let rss = opts.peak_rss_kib.load(std::sync::atomic::Ordering::Acquire);
+    let killed = opts.parent_killed.load(Ordering::Acquire);
+    let exit = opts.observed_exit.load(Ordering::Acquire);
     println!(
-        "corpus {name} {operation}: peak RSS {rss} KiB (wait4 reaped runner and waited descendants; conservative worker upper bound; RLIMIT_AS=2097152 KiB; Vec and MuPDF buffer both present)"
+        "corpus {name} {operation}: exit={exit}, parent_killed={killed}, wait4 RSS={rss} KiB (worker upper bound ONLY for natural exits; RLIMIT_AS=2097152 KiB; Vec and MuPDF buffer both present)"
+    );
+    if killed {
+        return;
+    }
+    assert!(
+        (0..128).contains(&exit),
+        "{name} {operation}: unexpected signal death/crash {exit}"
     );
     assert!(
         rss > 0 && rss < 1_572_864,
@@ -431,9 +541,77 @@ fn check_rss(name: &str, operation: &str, opts: &Options) {
 }
 
 #[test]
+#[ignore = "host confinement: MIMIK_LIVE_RUNNER opt-in"]
+fn live_peak_rss_positive_control() {
+    if !enabled() {
+        return;
+    }
+    let (_dir, path) = pdf();
+    let opts = options("rss-control");
+    inspection(&path, &opts, &Cancel::default()).unwrap();
+    check_rss("256-MiB-positive-control", "inspect", &opts);
+    assert!(
+        !opts
+            .parent_killed
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert!(opts.peak_rss_kib.load(std::sync::atomic::Ordering::Acquire) >= 256 * 1024);
+}
+
+#[test]
+fn cyclic_object_streams_are_required_by_page_resources() {
+    let bytes = generated("object-stream-cycle");
+    for required in [
+        b"/Type /XRef".as_slice(),
+        b"/Resources 9 0 R",
+        b"/Length 10 0 R",
+        b"/Length 9 0 R",
+        &[2, 0, 0, 0, 8, 0, 0],
+        &[2, 0, 0, 0, 7, 0, 0],
+    ] {
+        assert!(
+            bytes.windows(required.len()).any(|part| part == required),
+            "missing required cycle/xref edge: {required:?}"
+        );
+    }
+}
+
+#[test]
+fn huge_object_count_has_one_size_key() {
+    let bytes = generated("huge-object-count");
+    assert_eq!(bytes.windows(5).filter(|part| *part == b"/Size").count(), 1);
+}
+
+#[test]
+fn repeated_flate_has_valid_nonzero_payload_and_checksum() {
+    let encoded = repeated_flate(b"q Q\n", 7);
+    let mut decoded = Vec::new();
+    flate2::read::ZlibDecoder::new(encoded.as_slice())
+        .read_to_end(&mut decoded)
+        .unwrap();
+    assert_eq!(decoded, b"q Q\n".repeat(7));
+}
+
+#[test]
 fn corpus_generators_are_bounded() {
     for name in HOSTILE.iter().chain(VALID) {
-        drop(generate(name));
+        // Fresh exec per case, measuring its own VmHWM. wait4 also includes pre-exec
+        // fork RSS inherited from this parallel test process, so cannot enforce this cap.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "sources::worker::live_tests::corpus::generator_helper",
+                "--exact",
+                "--test-threads=1",
+            ])
+            .env("MIMIK_GENERATE_CASE", name)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{name}: generator child failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
     let compressed = zero_bomb();
     let mut decoder = flate2::read::ZlibDecoder::new(compressed.as_slice());
@@ -444,15 +622,41 @@ fn corpus_generators_are_bounded() {
 }
 
 #[test]
+fn generator_helper() {
+    if let Ok(name) = std::env::var("MIMIK_GENERATE_CASE") {
+        drop(generate(&name));
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let rss = status
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("VmHWM:")
+                    .and_then(|value| value.split_whitespace().next()?.parse::<u64>().ok())
+            })
+            .unwrap();
+        assert!(
+            rss <= 64 * 1024,
+            "{name}: generator peak {rss} KiB exceeds 64 MiB"
+        );
+    }
+}
+
+#[test]
 #[ignore = "host confinement: MIMIK_LIVE_RUNNER opt-in"]
 fn live_hostile_corpus() {
     if !enabled() {
         return;
     }
     let started = Instant::now();
+    let mut failed = Vec::new();
     for name in HOSTILE {
-        run_case(name, false);
+        if std::panic::catch_unwind(|| run_case(name, false)).is_err() {
+            failed.push(*name);
+        }
     }
+    assert!(
+        failed.is_empty(),
+        "hostile cases failed their declared contracts: {failed:?}"
+    );
     assert!(started.elapsed() < Duration::from_secs(600));
 }
 
@@ -478,7 +682,10 @@ fn live_parent_serves_inspect_during_hostile_render() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hostile.pdf");
     std::fs::write(&path, generate("operators-50m")).unwrap();
-    let opts = production_options();
+    // The real hostile render either consumes the deadline itself or waits after its
+    // first image in the test-only mid-render hook. Either way the deadline is mandatory.
+    let mut opts = options("mid-render");
+    opts.wall = Some(Duration::from_secs(8));
     let report = inspection(&path, &opts, &Cancel::default()).unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
@@ -491,7 +698,9 @@ fn live_parent_serves_inspect_during_hostile_render() {
         execute(&path, &spec, &Cancel::default(), &opts, |pipe| {
             // Watchdog is active and owns the process tree before this notification.
             tx.send(()).unwrap();
-            let mut reader = records::RenderReader::new(pipe, report.pages).unwrap();
+            let mut reader =
+                records::RenderReader::new(super::reader(pipe, true).unwrap(), report.pages)
+                    .unwrap();
             let result = reader.next_page().map(|_| ());
             (result, reader.terminal_error())
         })
@@ -504,8 +713,5 @@ fn live_parent_serves_inspect_during_hostile_render() {
         !handle.is_finished(),
         "hostile render must overlap the second request"
     );
-    assert!(matches!(
-        handle.join().unwrap(),
-        Ok(()) | Err(Reason::Document(_))
-    ));
+    assert_eq!(handle.join().unwrap(), Err(Error::Timeout.into()));
 }

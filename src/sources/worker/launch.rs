@@ -72,16 +72,17 @@ pub fn inspect_cancellable(path: &Path, cancel: &Cancel) -> Result<Inspection, R
 /// A later failure fails the run; already delivered pages may be retained for a retry.
 /// Callbacks must return promptly; cancellation stops the worker, not caller code.
 /// # Errors
-/// Invalid requests, malformed worker output, setup failures, cancellation or deadlines.
+/// Invalid requests (including an empty page list: `Unsupported`), malformed worker output,
+/// setup failures, cancellation or deadlines.
 pub fn render(
     path: &Path,
     pages: Vec<Page>,
     cancel: &Cancel,
     mut page: impl FnMut(RenderedPage) -> Result<(), Error> + Send,
 ) -> Result<(), Reason> {
-    super::availability::require()?;
     // Validate geometry and request cardinality before spawning anything.
     records::RenderReader::new(std::io::empty(), pages.clone())?;
+    super::availability::require()?;
     let spec = spec(
         records::Operation::Render,
         pages.iter().map(|p| p.n).collect(),
@@ -117,6 +118,8 @@ pub(super) struct Options {
     pub observed_exit: Arc<std::sync::atomic::AtomicI32>,
     #[cfg(test)]
     pub peak_rss_kib: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(test)]
+    pub parent_killed: Arc<AtomicBool>,
     pub runner: RunnerCommand,
     pub executable: PathBuf,
     pub argv: Vec<String>,
@@ -125,6 +128,14 @@ pub(super) struct Options {
     pub cpu: Option<u64>,
 }
 impl Options {
+    #[cfg(test)]
+    fn observe(&self, exit: Option<i32>, peak_rss_kib: u64, parent_killed: bool) {
+        self.peak_rss_kib.store(peak_rss_kib, Ordering::Release);
+        self.parent_killed.store(parent_killed, Ordering::Release);
+        self.observed_exit
+            .store(exit.unwrap_or(-1), Ordering::Release);
+    }
+
     fn production() -> Result<Self, Reason> {
         let runner = RunnerCommand::mimik().map_err(|_| unavailable("runner executable"))?;
         Ok(Self {
@@ -134,6 +145,8 @@ impl Options {
             observed_exit: Arc::default(),
             #[cfg(test)]
             peak_rss_kib: Arc::default(),
+            #[cfg(test)]
+            parent_killed: Arc::default(),
             executable: runner.program.clone(),
             runner,
             argv: vec![
@@ -573,20 +586,17 @@ pub(super) fn execute<T: Send>(
         });
         let abort_ref = &abort;
         let reader = scope.spawn(move || read_output(stdout, read, abort_ref));
-        let (exit, parent, peak_rss_kib) = watch(tree, &rx, ack, started + wall, cancel, &abort);
+        let (exit, parent, peak_rss_kib, parent_killed) =
+            watch(tree, &rx, ack, started + wall, cancel, &abort);
         #[cfg(test)]
-        options.peak_rss_kib.store(peak_rss_kib, Ordering::Release);
+        options.observe(exit, peak_rss_kib, parent_killed);
         #[cfg(not(test))]
-        let _ = peak_rss_kib;
+        let _ = (peak_rss_kib, parent_killed);
         if matches!(&parent, Some(Reason::Unavailable(reason)) if reason == "process cleanup timed out")
         {
             stop.store(true, Ordering::Release);
         }
         let (result, terminal, empty) = reader.join().map_err(|_| unavailable("record reader"))?;
-        #[cfg(test)]
-        options
-            .observed_exit
-            .store(exit.unwrap_or(-1), Ordering::Release);
         let _ = status.join();
         let reached_exec = marker.join().unwrap_or(false);
         let _ = err.join();
@@ -642,16 +652,18 @@ fn watch(
     deadline: Instant,
     cancel: &Cancel,
     abort: &AtomicBool,
-) -> (Option<i32>, Option<Reason>, u64) {
+) -> (Option<i32>, Option<Reason>, u64, bool) {
     let mut ack = Some(ack);
     let mut parent = None;
     let mut aborted_at = None;
+    let mut parent_killed = false;
     loop {
         // Pin an already-pending report before any cancellation/abort decision.
         if ack.is_some() {
             match report.try_recv() {
                 Ok(Some(report)) => {
                     if pin(&mut tree, report).is_err() {
+                        parent_killed = true;
                         parent = Some(unavailable("process identity"));
                         drop(ack.take());
                         break;
@@ -675,6 +687,7 @@ fn watch(
                 && aborted_at.get_or_insert_with(Instant::now).elapsed()
                     >= Duration::from_millis(100);
             if parent.is_some() || malformed {
+                parent_killed = true;
                 tree.kill();
                 break;
             }
@@ -688,12 +701,15 @@ fn watch(
     // for EOF/natural exit in the reader path (the reader has already observed EOF).
     drop(ack);
     let exit = if let Ok(status) = tree.settle() {
-        status.code()
+        use std::os::unix::process::ExitStatusExt;
+        status
+            .code()
+            .or_else(|| status.signal().map(|signal| 128 + signal))
     } else {
         parent = Some(unavailable("process cleanup timed out"));
         None
     };
-    (exit, parent, tree.peak_rss_kib)
+    (exit, parent, tree.peak_rss_kib, parent_killed)
 }
 
 pub(super) fn reconcile(
@@ -748,6 +764,19 @@ pub(super) fn reconcile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn invalid_render_is_rejected_before_availability_probe() {
+        assert_eq!(
+            render(
+                Path::new("/does-not-exist"),
+                vec![],
+                &Cancel::default(),
+                |_| Ok(())
+            ),
+            Err(Error::Unsupported.into())
+        );
+    }
+
     #[test]
     fn a_local_reader_or_callback_error_is_preserved_after_natural_exit() {
         for error in [Error::TooLarge, Error::Unsupported, Error::TooManyPages] {

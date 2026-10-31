@@ -47,6 +47,12 @@ path is not certified: CI does not cover it, and its live checks have been run o
 host's GPU only (RX 6650 XT, Mesa RADV; `results.md`). The documented minimum host for the bundled build (Ubuntu 22.04 `x86_64`) is not
 yet verified on a VM.
 
+`THIRD-PARTY-NOTICES.md` includes the MuPDF 1.27.2 vendored-tree section: all licence
+documents shipped by mupdf-sys 0.8.0, including disabled components and fonts, the full
+hash-pinned IJG libjpeg 9f README and attribution with MuPDF's three modified files, and
+the explicit GPLv3 text used for FreeType's GPLv2-or-later election. Packaging verifies
+this section against the corresponding dependency sources and pinned local licence assets.
+
 ## Run
 
 1. Unpack `mimik-0.1.0-linux-x86_64.tar.gz` into a writable directory and `cd` into it.

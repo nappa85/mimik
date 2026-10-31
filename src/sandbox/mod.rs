@@ -1409,10 +1409,15 @@ mod run {
 
         #[test]
         fn hakoniwa_1_8_real_sys_error_format_maps_to_touch() {
-            // runc/sys.rs map_err!: stringify!(fn), Debug(args), Display(nix::Errno).
-            let reason = "touch(\"usr/lib/ld-linux-x86-64.so.2\") => EROFS: Read-only file system";
+            // touch is hand-written with std::io::Error, unlike the map_err! wrappers.
+            let reason =
+                "touch(\"usr/lib/ld-linux-x86-64.so.2\") => Read-only file system (os error 30)";
             assert_eq!(super::super::setup_failure_code(reason), 83);
             assert_eq!(super::super::setup_failure_step(83), Some("touch"));
+            // mount uses map_err!: Debug(args), Display(nix::Errno).
+            let reason = "mount(Some(\"/source\"), \"/target\", None, MS_BIND, None) => EACCES: Permission denied";
+            let code = super::super::setup_failure_code(reason);
+            assert_eq!(super::super::setup_failure_step(code), Some("mount"));
         }
 
         #[test]

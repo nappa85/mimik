@@ -47,6 +47,7 @@ fn options(mode: &str) -> Options {
         tmp_bytes: (mode == "fsize").then_some(32 << 20),
         observed_exit: std::sync::Arc::default(),
         peak_rss_kib: std::sync::Arc::default(),
+        parent_killed: std::sync::Arc::default(),
         runner: RunnerCommand {
             program: std::env::var_os("MIMIK_LIVE_RUNNER").unwrap().into(),
             args: vec!["assistant-runner".into(), "--spec-fd".into(), "3".into()],
@@ -174,6 +175,13 @@ pub(super) fn misbehave() -> Result<(), Error> {
             std::thread::spawn(|| {}).join().unwrap();
         }
         "sleep" => std::thread::sleep(Duration::from_secs(60)),
+        "rss-control" => {
+            let mut memory = vec![0_u8; 256 << 20];
+            for byte in memory.iter_mut().step_by(4096) {
+                *byte = 1;
+            }
+            std::hint::black_box(&memory);
+        }
         "cpu" => loop {
             std::hint::spin_loop();
         },
