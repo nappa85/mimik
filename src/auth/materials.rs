@@ -75,6 +75,7 @@ pub(super) fn error(e: &AppError) -> StatusCode {
     match e {
         AppError::NotFound | AppError::SourceNotFound => StatusCode::FORBIDDEN,
         AppError::Conflict => StatusCode::CONFLICT,
+        AppError::Invalid(crate::sources::review::READ_TIMEOUT) => StatusCode::REQUEST_TIMEOUT,
         AppError::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
         AppError::AuthStorageBusy => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -589,8 +590,8 @@ struct SuggestionDraft {
     csrf: String,
     #[serde(deserialize_with = "crate::form_text::lf")]
     rationale: String,
-    #[serde(deserialize_with = "crate::form_text::lf")]
-    edited_text: String,
+    #[serde(deserialize_with = "crate::form_text::lf_option")]
+    edited_text: Option<String>,
     edit: String,
     #[serde(deserialize_with = "crate::form_text::lf")]
     reason: String,
@@ -627,7 +628,7 @@ impl SuggestionEditor {
                 &self.form.csrf,
                 &self.form.csrf,
                 &self.form.rationale,
-                &self.form.edited_text,
+                self.form.edited_text.as_deref().unwrap_or(""),
                 &self.form.reason,
             ]
             .iter()
@@ -701,7 +702,7 @@ async fn suggestion(
     let form = SuggestionDraft {
         csrf: super::token(&session).await?.ok_or(StatusCode::FORBIDDEN)?,
         rationale: format!("Accepted suggestion #{} ({})", id, advice.origin),
-        edited_text: advice.suggested.clone(),
+        edited_text: Some(advice.suggested.clone()),
         ..SuggestionDraft::default()
     };
     SuggestionEditor {
@@ -781,19 +782,21 @@ async fn suggestion_write(
             .store
             .material_dismiss(auth.clone(), csrf, id, form.reason.clone())
             .await
-    } else if !form.edited_text.is_empty() && !matches!(form.edit.as_str(), "yes" | "suggested") {
+    } else if form.edited_text.is_some() && !matches!(form.edit.as_str(), "yes" | "suggested") {
         Err(AppError::Invalid(
             "Choose Accept my edit or Accept as suggested explicitly.",
         ))
     } else {
         let checked = async {
-            if form.edit == "suggested" && !form.edited_text.is_empty() {
+            if form.edit == "suggested"
+                && let Some(edited_text) = &form.edited_text
+            {
                 let advice = state
                     .sessions
                     .store
                     .material_advice(auth.clone(), id)
                     .await?;
-                if form.edited_text != advice.suggested {
+                if *edited_text != crate::form_text::newlines_to_lf(advice.suggested) {
                     return Err(AppError::Invalid(
                         "The edited text differs from the stored suggestion. Choose Accept my edit or restore the suggested text.",
                     ));
@@ -807,7 +810,7 @@ async fn suggestion_write(
                     csrf,
                     id,
                     form.rationale.clone(),
-                    (form.edit == "yes").then(|| form.edited_text.clone()),
+                    (form.edit == "yes").then(|| form.edited_text.clone().unwrap_or_default()),
                 )
                 .await
         };

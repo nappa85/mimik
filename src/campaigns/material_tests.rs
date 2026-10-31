@@ -28,6 +28,294 @@ fn suggestion_unit(unit: i64) -> crate::sources::SuggestionTarget {
 }
 
 #[tokio::test]
+async fn material_final_all_review_reads_have_deadlines() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let id = suggestion_fixture(&store, "correction", suggestion_unit(1)).await;
+    let mut missing = Vec::new();
+    for label in ["page", "cursor", "list", "detail"] {
+        *crate::sources::review::READ_DEADLINE.lock().unwrap() =
+            Some((label, std::time::Duration::ZERO));
+        let result = match label {
+            "page" => store
+                .material_page(auth[0].clone(), 1, 0, 0)
+                .await
+                .map(|_| ()),
+            "cursor" => store
+                .material_unit_cursor(auth[0].clone(), 1, 1)
+                .await
+                .map(|_| ()),
+            "list" => store
+                .material_advice_list(auth[0].clone(), 1, 1, 0)
+                .await
+                .map(|_| ()),
+            _ => store.material_advice(auth[0].clone(), id).await.map(|_| ()),
+        };
+        crate::sources::review::READ_DEADLINE.lock().unwrap().take();
+        eprintln!("{label} forced expiry: {result:?}");
+        if !matches!(result, Err(AppError::Invalid(message)) if message.contains("time limit")) {
+            missing.push(label);
+        }
+        store
+            .material_page(auth[0].clone(), 1, 0, 0)
+            .await
+            .expect("handler must be cleared for next request");
+    }
+    assert!(
+        missing.is_empty(),
+        "reads missing clear deadline errors: {missing:?}"
+    );
+    let app = crate::auth::app(store).await.unwrap();
+    for (label, path) in [
+        ("page", "/admin/materials/pages/1".to_owned()),
+        (
+            "cursor",
+            "/admin/materials/pages/1/units/1/suggestions".to_owned(),
+        ),
+        (
+            "list",
+            "/admin/materials/pages/1/units/1/suggestions".to_owned(),
+        ),
+        ("detail", format!("/admin/materials/suggestions/{id}")),
+    ] {
+        *crate::sources::review::READ_DEADLINE.lock().unwrap() =
+            Some((label, std::time::Duration::ZERO));
+        assert_eq!(
+            router_get(&app, &auth[0], &path).await.status(),
+            StatusCode::REQUEST_TIMEOUT,
+            "{label}"
+        );
+        assert_eq!(
+            router_get(&app, &auth[0], &path).await.status(),
+            StatusCode::OK,
+            "next {label} request"
+        );
+    }
+}
+
+#[tokio::test]
+async fn material_final_deadline_lookup_is_not_a_text_preview() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let app = crate::auth::app(store).await.unwrap();
+    *crate::sources::review::READ_DEADLINE.lock().unwrap() =
+        Some(("screen", std::time::Duration::ZERO));
+    let response = router_get(&app, &auth[0], "/admin/materials/pages/1").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    assert!(html.contains("Lookup not read (time limit)"));
+    assert!(!html.contains("response text budget reached"));
+    let parsed = scraper::Html::parse_document(&html);
+    assert_eq!(
+        parsed
+            .select(&scraper::Selector::parse("#lookup-panel pre").unwrap())
+            .count(),
+        0
+    );
+    assert_eq!(
+        router_get(&app, &auth[0], "/admin/materials/pages/1")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn material_final_empty_edit_is_retained_and_not_applied() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let id = suggestion_fixture(&store, "correction", suggestion_unit(1)).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = document_at(
+        &app,
+        &auth[0],
+        &format!("/admin/materials/suggestions/{id}/accept"),
+        review_form(&[
+            ("edit", "suggested"),
+            ("edited_text", ""),
+            ("rationale", "Checked"),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        field_value(&body(response).await, "textarea[name=edited_text]"),
+        ""
+    );
+    assert_eq!(
+        store
+            .material_advice(auth[0].clone(), id)
+            .await
+            .unwrap()
+            .state,
+        "open"
+    );
+}
+
+#[tokio::test]
+async fn material_final_unchanged_cr_suggestion_is_accepted() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let id = store
+        .insert_source_suggestion(crate::sources::SourceSuggestion {
+            source: 1,
+            bundle_hash: "a".repeat(64),
+            origin: "tool:fixture".into(),
+            kind: "correction".into(),
+            target: suggestion_unit(1),
+            suggested_text: Some("one\rtwo\r\nthree".into()),
+            rationale: "Checked".into(),
+            report_id: None,
+        })
+        .await
+        .unwrap();
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = document_at(
+        &app,
+        &auth[0],
+        &format!("/admin/materials/suggestions/{id}/accept"),
+        review_form(&[
+            ("edit", "suggested"),
+            ("edited_text", "one\r\ntwo\r\nthree"),
+            ("rationale", "Checked"),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        store
+            .material_advice(auth[0].clone(), id)
+            .await
+            .unwrap()
+            .state,
+        "applied"
+    );
+}
+
+#[tokio::test]
+async fn material_final_invalid_state_copies_fit_budget() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    for unit in 1..=50 {
+        store
+            .material_review_unit(
+                auth[0].clone(),
+                auth[0].csrf_fixture(),
+                1,
+                unit,
+                crate::sources::UnitReview {
+                    revision: 1,
+                    state: "corrected".into(),
+                    correction: "\"".repeat(20000),
+                    actor: String::new(),
+                    rationale: "Checked".into(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let app = crate::auth::app(store).await.unwrap();
+    let invalid = "\"".repeat(108_000);
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/1",
+        review_form(&[
+            ("revision", "2"),
+            ("state", &invalid),
+            ("correction", ""),
+            ("rationale", "Checked"),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html = body(response).await;
+    let parsed = scraper::Html::parse_document(&html);
+    let bytes = html
+        .split_once("<section id=\"review-list\"")
+        .unwrap()
+        .1
+        .split_once("<section class=\"panel\" id=\"add-text\"")
+        .unwrap()
+        .0
+        .len();
+    eprintln!(
+        "invalid-state budgeted sections: {bytes}; full page: {}",
+        html.len()
+    );
+    let option = parsed
+        .select(&scraper::Selector::parse("select[name=state] option[selected]").unwrap())
+        .next()
+        .unwrap();
+    assert_eq!(option.value().attr("value"), Some(invalid.as_str()));
+    assert!(bytes <= 2 * 1024 * 1024, "budgeted sections: {bytes}");
+}
+
+#[tokio::test]
+async fn material_final_maximum_suggestion_markup_fits_budget() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    store.run(|db| {
+        let tx = db.transaction()?;
+        for unit in 1..=50 {
+            for _ in 0..20 {
+                tx.execute("INSERT INTO source_suggestions(source_id,bundle_hash,origin,kind,targets,suggested_text,rationale) VALUES(1,?1,?2,'correction',?3,'x','Checked')", params!["a".repeat(64), "\"".repeat(100), serde_json::to_string(&suggestion_unit(unit))?])?;
+            }
+        }
+        for _ in 0..20 {
+            tx.execute("INSERT INTO source_suggestions(source_id,bundle_hash,origin,kind,targets,suggested_text,rationale) VALUES(1,?1,?2,'missing_text',?3,'x','Checked')", params!["a".repeat(64), "\"".repeat(100), serde_json::json!({"type":"region","page":1,"polygon":[[1,1],[20,1],[20,20],[1,20]]}).to_string()])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }).await.unwrap();
+    let app = crate::auth::app(store).await.unwrap();
+    let response = router_get(&app, &auth[0], "/admin/materials/pages/1").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    assert!(
+        !html.contains("Screen read deadline reached"),
+        "fixture must exercise row rendering"
+    );
+    let parsed = scraper::Html::parse_document(&html);
+    let bytes = html
+        .split_once("<section id=\"review-list\"")
+        .unwrap()
+        .1
+        .split_once("<section class=\"panel\" id=\"add-text\"")
+        .unwrap()
+        .0
+        .len();
+    let rows = parsed
+        .select(&scraper::Selector::parse(".suggestion").unwrap())
+        .count();
+    eprintln!(
+        "maximum suggestion markup: {rows} rows, {bytes} budgeted bytes, {} full bytes",
+        html.len()
+    );
+    assert_eq!(rows, 32, "fixed charges must cap the screen at 32 rows");
+    assert_eq!(
+        parsed
+            .select(&scraper::Selector::parse("#page-notes .suggestion").unwrap())
+            .count(),
+        20,
+        "unit advice must not starve the independent notes cursor"
+    );
+    assert!(bytes <= 2 * 1024 * 1024, "budgeted sections: {bytes}");
+}
+
+#[tokio::test]
 async fn material_confirmation_detail_worker_and_authority_recheck() {
     let _lock = crate::auth::test_resource_lock().await;
     let (dir, store, auth, _clock) = fixture().await;

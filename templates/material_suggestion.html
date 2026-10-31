@@ -13,7 +13,7 @@
 <input type="hidden" name="csrf" value="{{ form.csrf }}">
 <label>Acceptance rationale<textarea name="rationale" required>{{ "\n" }}{{ form.rationale }}</textarea></label>
 {% if advice.kind != "reject" %}<details id="edit-{{ advice.id }}" open><summary>Edit suggested text{% if !advice.actionable() %} (disabled){% endif %}</summary>
-<label>Edited text (20,000 characters maximum)<textarea name="edited_text" maxlength="20000" {% if !advice.actionable() %}readonly{% endif %}>{{ "\n" }}{{ form.edited_text }}</textarea></label></details>{% endif %}
+<label>Edited text (20,000 characters maximum)<textarea name="edited_text" maxlength="20000" {% if !advice.actionable() %}readonly{% endif %}>{{ "\n" }}{{ form.edited_text.as_deref().unwrap_or("") }}</textarea></label></details>{% endif %}
 <button name="edit" value="suggested" {% if !advice.actionable() %}disabled{% endif %}>Accept as suggested</button>
 {% if advice.kind != "reject" %}<button name="edit" value="yes" {% if !advice.actionable() %}disabled{% endif %}>Accept my edit</button>{% endif %}</form>{% endif %}
 <form id="dismiss-{{ advice.id }}" method="post" action="/admin/materials/suggestions/{{ advice.id }}/dismiss" data-form="dismiss" data-target="{{ advice.id }}"><input type="hidden" name="csrf" value="{{ form.csrf }}"><label>Optional dismissal reason<textarea name="reason">{{ "\n" }}{{ form.reason }}</textarea></label><button {% if advice.state == "applied" || advice.state == "dismissed" %}disabled{% endif %}>Dismiss suggestion #{{ advice.id }}</button></form>

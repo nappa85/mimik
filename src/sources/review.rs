@@ -16,6 +16,41 @@ use std::{
 type AdvicePage = (Vec<Advice>, Option<i64>);
 type ScreenAdvice = std::collections::BTreeMap<i64, AdvicePage>;
 
+pub(crate) const READ_TIMEOUT: &str =
+    "Review read time limit reached; retry with a smaller page or list.";
+
+pub(super) fn read_with_deadline<T>(
+    db: &Connection,
+    label: &str,
+    read: impl FnOnce() -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    let deadline = read_deadline(db, label);
+    let result = read();
+    if deadline.fired() {
+        Err(AppError::Invalid(READ_TIMEOUT))
+    } else {
+        result
+    }
+}
+
+#[cfg(test)]
+pub(crate) static READ_DEADLINE: std::sync::Mutex<Option<(&str, Duration)>> =
+    std::sync::Mutex::new(None);
+
+fn read_deadline<'a>(db: &'a Connection, label: &str) -> super::search::Budget<'a> {
+    #[cfg(not(test))]
+    let _ = label;
+    #[cfg(test)]
+    {
+        let mut hook = READ_DEADLINE.lock().unwrap();
+        if hook.as_ref().is_some_and(|(name, _)| *name == label) {
+            let duration = hook.take().unwrap().1;
+            return super::search::Budget::checking_every(db, duration, 1);
+        }
+    }
+    super::search::Budget::start(db, Duration::from_millis(250))
+}
+
 #[derive(Clone)]
 pub(crate) struct Segment {
     pub kind: &'static str,
@@ -136,6 +171,12 @@ pub(crate) fn difference(old: &str, new: &str, deadline: Option<Instant>) -> Dif
     result
 }
 
+#[derive(Clone, Copy)]
+enum RowVisibility {
+    Visible,
+    Omitted,
+}
+
 #[derive(Clone)]
 pub(crate) struct Advice {
     pub id: i64,
@@ -157,8 +198,12 @@ pub(crate) struct Advice {
     pub target_links: Vec<(i64, i64)>,
     pub compact: bool,
     pub compact_targets: String,
+    visibility: RowVisibility,
 }
 impl Advice {
+    pub(crate) fn row_omitted(&self) -> bool {
+        matches!(self.visibility, RowVisibility::Omitted)
+    }
     fn write_back_link(&mut self, db: &Connection) -> Result<String, AppError> {
         if let Some(unit) = targets(&self.target).first() {
             self.cursor = db.query_row(
@@ -326,10 +371,7 @@ fn load_evidence(
         page = screen_page;
         lookup_truncated = true;
         for target in &units {
-            let revision = revisions
-                .get(&target.unit)
-                .ok_or(AppError::Invalid("Invalid suggestion target evidence."))?;
-            stale |= *revision != target.revision;
+            stale |= revisions.get(&target.unit) != Some(&target.revision);
         }
     } else if !units.is_empty() {
         (page, stale, lookup, lookup_truncated) = unit_evidence(db, &units, source, limit)?;
@@ -371,6 +413,7 @@ fn load_evidence(
         anchor: format!("suggestion-{id}"),
         target_links: Vec::new(),
         compact: false,
+        visibility: RowVisibility::Visible,
         compact_targets: units
             .iter()
             .take(8)
@@ -562,7 +605,33 @@ fn compare_screen(screen: &mut Screen, mut budget: Budget) {
     }
 }
 
+// Fixed markup, both CSRF and origin copies, target labels, identifiers and
+// controls. Rationale and comparison text are charged separately.
+const ADVICE_ROW_BYTES: usize = 8 * 1024;
+
+fn reserve_rows(rows: &mut [Advice], next: &mut Option<i64>, budget: &mut Budget) {
+    for index in 0..rows.len() {
+        if !budget.reserve(ADVICE_ROW_BYTES) {
+            *next = Some(if index == 0 {
+                rows[0].id - 1
+            } else {
+                rows[index - 1].id
+            });
+            for row in &mut rows[index..] {
+                row.visibility = RowVisibility::Omitted;
+            }
+            break;
+        }
+    }
+}
+
 fn compare_card(row: &mut Advice, budget: &mut Budget) {
+    if row.row_omitted() {
+        row.lookup.clear();
+        row.suggested.clear();
+        row.rationale.clear();
+        return;
+    }
     row.rationale = budget.retain(&row.rationale.chars().take(200).collect::<String>(), 6);
     row.difference = if row.compact {
         difference("", "", None)
@@ -592,9 +661,7 @@ impl Store {
         let auth_for_recheck = auth.clone();
         let (mut screen, budget) = self.run_bounded_auth(move |db| {
             let tx=db.transaction()?; auth.recheck_owner(&tx)?;
-            let result = {
-            let _deadline = super::search::Budget::start(&tx, Duration::from_millis(250));
-            (|| {
+            let result = read_with_deadline(&tx, "screen", || {
             let bounds = match super::documents::polygon_bounds(&tx,page) {
                 Ok((width,height)) if width.is_finite() && height.is_finite() && (1.0..=4000.0).contains(&width) && (1.0..=4000.0).contains(&height) => Some((width,height)),
                 Ok(_) | Err(AppError::Invalid("Page geometry is missing or invalid.")) => None,
@@ -616,8 +683,17 @@ impl Store {
             }
             let mut budget=Budget::default();
             let mut advice=screen_advice(&tx,page,&units,notes_after)?;
-            // Structural HTML, target labels, controls and bounded overlay data.
-            budget.reserve(512 * 1024);
+             // Screen structure, unit controls and bounded overlay data.
+             budget.reserve(512 * 1024);
+             // Reserve the first retained form and suggestion markup before any
+             // optional lookup text or additional correction controls consume space.
+             budget.reserve(1280 * 1024);
+             // Notes have no separate list route: protect their cursor page first.
+             for unit in std::iter::once(0).chain(units.iter().copied()) {
+                 if let Some((rows,next)) = advice.get_mut(&unit) {
+                     reserve_rows(rows,next,&mut budget);
+                 }
+             }
             let mut cards=Vec::new();
             let cursors = {
                 let mut query = tx.prepare(&format!("{} SELECT id,position-1 FROM ordered WHERE id IN (SELECT value FROM json_each(?2))",super::materials::ORDERED_UNITS))?;
@@ -628,8 +704,10 @@ impl Store {
                 // A failed unit form is reloaded as the first card. Reserve the
                 // complete escaped POST bound there so an invalid draft fits intact.
                 // Form-urlencoded escapes the HTML-special ASCII bytes as three
-                // bytes; Askama needs at most six, hence twice the wire bound.
-                let form_omitted = !budget.reserve(if cards.is_empty() {640 * 1024} else {correction_bytes.saturating_mul(6)});
+                 // bytes; Askama needs at most six. State and revision each
+                 // render twice (revision's label is truncated). Four times the
+                 // wire bound covers every submitted field at two copies.
+                 let form_omitted = !cards.is_empty() && !budget.reserve(correction_bytes.saturating_mul(6));
                 let retained=budget.retain(&lookup,12);
                 let preview=retained.len()!=lookup.len();
                 let (advice,next)=advice.remove(&unit).unwrap_or_default();
@@ -649,16 +727,15 @@ impl Store {
             let next_unit=tx.query_row(&format!("{} SELECT id,position-1 FROM ordered WHERE state='unreviewed' ORDER BY position LIMIT 1",super::materials::ORDERED_UNITS),[page],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
             let next_page=tx.query_row("SELECT p.id FROM source_pages p WHERE p.source_id=(SELECT source_id FROM source_pages WHERE id=?1) AND p.pdf_page>(SELECT pdf_page FROM source_pages WHERE id=?1) AND p.complete=0 ORDER BY p.pdf_page LIMIT 1",[page],|r|r.get(0)).optional()?;
             Ok((Screen{reads:ScreenReads::Complete,geometry,width,height,overlay,overlay_omitted:count>2000,regions_omitted,cards,notes,notes_next,next_unit,next_page,primary},budget))
-            })()
-            };
+             });
             // Drop the progress handler before authority checks and the reduced
             // response. Only reads run under the handler; no interrupted writes.
             let result = match result {
-                Err(AppError::Database(ref error)) if error.sqlite_error_code()==Some(rusqlite::ErrorCode::OperationInterrupted) => {
+                 Err(AppError::Invalid(READ_TIMEOUT)) => read_with_deadline(&tx, "reduced", || {
                     let (document,pdf):(i64,i64)=tx.query_row("SELECT coalesce(m.document_id,0),p.pdf_page FROM source_pages p LEFT JOIN source_document_members m ON m.source_id=p.source_id WHERE p.id=?1",[page],|r|Ok((r.get(0)?,r.get(1)?)))?;
                     let primary=super::documents::primary_state(&tx,document,pdf)?;
                     Ok((Screen{reads:ScreenReads::Deadline,geometry:false,width:0.0,height:0.0,overlay:Vec::new(),overlay_omitted:true,regions_omitted:true,cards:Vec::new(),notes:Vec::new(),notes_next:None,next_unit:None,next_page:None,primary},Budget::default()))
-                }
+                 }),
                 other => other,
             }?;
             auth.recheck_owner(&tx)?; tx.commit()?;
@@ -688,7 +765,7 @@ impl Store {
             .run_bounded_auth(move |db| {
                 let tx = db.transaction()?;
                 auth.recheck_owner(&tx)?;
-                let rows = advice_list(&tx, page, unit, after)?;
+                let rows = read_with_deadline(&tx, "list", || advice_list(&tx, page, unit, after))?;
                 auth.recheck_owner(&tx)?;
                 tx.commit()?;
                 Ok(rows)
@@ -697,6 +774,7 @@ impl Store {
         rows = tokio::task::spawn_blocking(move || {
             let mut budget = Budget::default();
             budget.reserve(128 * 1024);
+            budget.reserve(rows.len() * ADVICE_ROW_BYTES);
             for row in &mut rows {
                 compare_card(row, &mut budget);
             }
@@ -715,9 +793,10 @@ impl Store {
         id: i64,
     ) -> Result<Advice, AppError> {
         self.run_bounded_auth(move |db| {
-            let tx = db.transaction()?;
-            auth.recheck_owner(&tx)?;
-            let mut advice = load(&tx, id, false)?;
+             let tx = db.transaction()?;
+             auth.recheck_owner(&tx)?;
+             let advice = read_with_deadline(&tx, "detail", || {
+             let mut advice = load(&tx, id, false)?;
             {
                 let mut query = tx.prepare(&format!("{} SELECT id,position-1 FROM ordered WHERE id IN (SELECT json_extract(value,'$.unit') FROM json_each((SELECT targets FROM source_suggestions WHERE id=?2),'$.targets') UNION SELECT json_extract(targets,'$.target.unit') FROM source_suggestions WHERE id=?2) ORDER BY position", super::materials::ORDERED_UNITS))?;
                 advice.target_links = query.query_map(params![advice.page,id], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<Result<_,_>>()?;
@@ -733,8 +812,10 @@ impl Store {
                 )?;
             }
             // The HTTP renderer reserves full texts and the submitted draft
-            // before deciding whether a comparison fits, outside this mutex.
-            auth.recheck_owner(&tx)?;
+             // before deciding whether a comparison fits, outside this mutex.
+             Ok(advice)
+             })?;
+             auth.recheck_owner(&tx)?;
             tx.commit()?;
             Ok(advice)
         })
@@ -913,6 +994,100 @@ mod tests {
     }
     struct TestAdvice {
         difference: Difference,
+    }
+
+    #[derive(Template)]
+    #[template(path = "material_advice.html")]
+    struct RowRender {
+        advice: Advice,
+        csrf: String,
+    }
+
+    #[test]
+    fn maximum_suggestion_row_markup_fits_fixed_charge() {
+        let max = i64::MAX;
+        let target_label = (0..8)
+            .map(|_| format!("unit {max} (revision {max})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+            + ", and 1016 more targets";
+        let row = Advice {
+            id: max,
+            page: max,
+            kind: "missing_text".into(),
+            origin: "\"".repeat(100),
+            rationale: String::new(),
+            report: Some(max),
+            target: SuggestionTarget::Unit {
+                target: super::super::SuggestionUnit {
+                    unit: max,
+                    revision: max,
+                },
+            },
+            suggested: String::new(),
+            lookup: String::new(),
+            state: "open".into(),
+            difference: difference("", "", None),
+            target_label,
+            cursor: max,
+            lookup_truncated: true,
+            suggested_truncated: true,
+            anchor: format!("suggestion-{max}-unit-{max}"),
+            target_links: Vec::new(),
+            compact: false,
+            visibility: RowVisibility::Visible,
+            compact_targets: std::iter::repeat_n(max.to_string(), 8)
+                .collect::<Vec<_>>()
+                .join(","),
+        };
+        let rendered = RowRender {
+            advice: row,
+            csrf: "a".repeat(64),
+        }
+        .render()
+        .unwrap();
+        eprintln!(
+            "maximum-width suggestion fixed markup: {} bytes; allowance {ADVICE_ROW_BYTES}",
+            rendered.len()
+        );
+        assert!(rendered.len() <= ADVICE_ROW_BYTES);
+    }
+
+    #[test]
+    fn exhausted_target_budget_marks_off_page_target_stale() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE source_pages(id INTEGER PRIMARY KEY,source_id INTEGER); INSERT INTO source_pages VALUES(1,1);").unwrap();
+        let revisions = [(1, 1)].into_iter().collect();
+        let stored = StoredAdvice {
+            id: 1,
+            kind: "merge".into(),
+            origin: "fixture".into(),
+            rationale: "Checked".into(),
+            json: serde_json::to_string(&SuggestionTarget::Units {
+                targets: vec![
+                    super::super::SuggestionUnit {
+                        unit: 1,
+                        revision: 1,
+                    },
+                    super::super::SuggestionUnit {
+                        unit: 2,
+                        revision: 1,
+                    },
+                ],
+            })
+            .unwrap(),
+            suggested: "Combined".into(),
+            report: None,
+            applied: false,
+            dismissed: false,
+            source: 1,
+            suggested_truncated: false,
+        };
+        let advice = load_evidence(&db, stored, true, &mut Some(0), Some((1, &revisions)))
+            .expect("one invalid target must not fail the screen");
+        assert_eq!(advice.state, "stale");
+        assert!(!advice.actionable());
+        assert!(advice.lookup_truncated);
     }
 
     #[test]

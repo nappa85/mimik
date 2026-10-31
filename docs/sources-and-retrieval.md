@@ -173,9 +173,10 @@ are refused. Applications record whether the resulting text differs from the sto
 Dismissal records only advice state and optional reason. Every browser write uses an
 authenticated store wrapper, rechecking Owner and CSRF at both transaction boundaries.
 The detail form has separate **Accept as suggested** and **Accept my edit** submit buttons.
-A nonempty edit submitted without an explicit choice is refused with 422 and retained;
-**Accept as suggested** also refuses and retains a nonempty edit that differs from the stored
-suggestion, requiring the Owner to choose **Accept my edit** or restore the proposal;
+A present edit field submitted without an explicit choice is refused with 422 and retained;
+**Accept as suggested** also refuses and retains any present edit, including an empty one,
+that differs from the stored suggestion after CRLF/CR-to-LF newline normalisation,
+requiring the Owner to choose **Accept my edit** or restore the proposal;
 card acceptance without an edit field still applies the stored suggestion.
 Selecting a primary reading for a missing page returns the authenticated route's uniform 403.
 
@@ -188,10 +189,16 @@ read lookup text for at most **4,096 suggestion-target rows**. Subsequent sugges
 revisions against one page-scoped revision snapshot without accessing lookup text, and label
 their lookup as omitted/truncated. Within the row budget, SQL limits aggregate lookup text
 before it crosses into Rust.
-All screen-read statements share a **250 ms SQLite progress-handler deadline**. Interruption
+Each review read transaction uses a **250 ms SQLite progress-handler deadline**, including
+the page's ordered units and history, unit cursors, suggestion lists and detail target links.
+An interrupted page, cursor, list or detail read returns HTTP **408 Request Timeout**;
+retrying starts a new deadline. Interruption during the optional screen reads
 discards the read result and returns a labelled reduced screen with links to unit suggestion
 lists; suggestions, lookup text and overlays are omitted, and only the first unit decision
-form is retained, including any refused POST's complete draft. The handler is cleared before
+form is retained, including any refused POST's complete draft. Its lookup says “Lookup not
+read (time limit)” without an empty evidence block. The reduced screen's primary-state read
+has its own protected 250 ms deadline; if that also expires, the request returns 408.
+The handler is cleared on drop, before
 final authority checks and transaction completion. No writes run under this handler. This
 is a VM-opcode deadline, not a hard real-time guarantee for an individual SQLite opcode.
 Cards and suggestion lists read at most 2,000 characters per comparison side. A shortened
@@ -202,11 +209,17 @@ workers; screen, list and detail paths recheck Owner authority after that work. 
 of assuming a particular repetitive input always consumes 50 ms on every machine.
 
 Lookup and suggestion display work shares a 2 MiB budget, with 512 KiB reserved for screen
-structure (128 KiB on a suggestion list). Both lookup copies, correction controls, rationale
+structure (128 KiB on a suggestion list). Each rendered suggestion additionally reserves
+**8 KiB** for its markup, controls, two CSRF copies, both origin copies, target labels and
+identifiers, before optional text is allocated. With the first form reserved, at most **32**
+suggestion rows fit on a screen, potentially fewer once their text is charged; omitted rows
+remain reachable through the unit-list or notes cursor. Both lookup copies, correction controls, rationale
 previews and comparison output count. Text charges conservatively include HTML escaping (six
 bytes per input byte per rendered copy), and comparisons also reserve segment wrappers.
-The first unit form reserves 640 KiB for a retained draft: HTML escaping takes at most twice
-the 320 KiB form-urlencoded wire bound. Rich extraction and historical review events have their own existing
+The first unit form reserves **1,280 KiB** before other text: HTML escaping takes at most twice
+the 320 KiB form-urlencoded wire bound per rendered copy, and every submitted field is
+conservatively charged at two copies (including an invalid state's option value and label,
+and the submitted revision's control and truncated label). Rich extraction and historical review events have their own existing
 row/byte bounds, so this is not a universal 2 MiB cap on the whole page editor. When a
 correction control does not fit, a link opens that unit first on a card page with its full
 form; an editable value is never silently shortened. Exhausted comparisons show labelled
@@ -217,12 +230,14 @@ and the aggregate merge lookup to 20,000 characters. A shortened lookup is expli
 labelled separately from shortened suggested text; neither prefix can produce a complete
 difference. The renderer reserves
 the entire escaped evidence, edit/draft, rationale, controls and target links before adding
-a difference and renders exactly once in its blocking worker. The normal detail bound is **256 KiB of complete rendered UTF-8 HTML**, for GET
-and ordinary 409/422 responses. If necessary it omits the difference and shows labelled
+a difference and renders exactly once in its blocking worker. **256 KiB** is the detail
+renderer’s planning threshold for adding differences and retaining full evidence, rather
+than its enforced response bound. If necessary it omits the difference and shows labelled
 2,000-character evidence/rationale previews and the first eight target links. The edit/draft
-value remains intact. An oversized invalid draft accepted under the 320 KiB POST limit uses
-an explicit **2 MiB complete rendered HTML bound** on 409/422 instead: a draft that by itself
-exceeds 256 KiB after escaping cannot simultaneously be intact and fit that normal bound.
+value remains intact. The enforced bound is **2 MiB of complete rendered UTF-8 HTML** on
+GET as well as 409/422 responses, including oversized invalid drafts accepted under the
+320 KiB POST limit. GET initializes the intact edit field from the stored proposal and uses
+the same renderer and bound. Exceeding that bound returns a server error.
 
 409 and 422 responses retain submitted values and expected tokens in the matching form or
 suggestion detail panel, with an alert and a cursor-aware return link. Reloading is an explicit

@@ -257,15 +257,18 @@ impl Store {
         cursor(history)?;
         self.run_bounded_auth(move|db|{
             let tx=db.transaction()?;auth.recheck_owner(&tx)?;
+            let result=super::review::read_with_deadline(&tx,"page",|| {
             let mut page=tx.query_row(&format!("SELECT p.id,s.id,{},{},p.pdf_page,{},p.complete,p.revision FROM source_pages p JOIN sources s ON s.id=p.source_id WHERE p.id=?1",text("s.title",200),text("s.edition",400),text("p.printed_label",200)),[id],|r|Ok(PageView{id:r.get(0)?,source_id:r.get(1)?,title:read_text(r,2)?,edition:read_text(r,3)?,pdf_page:r.get(4)?,printed_label:read_text(r,5)?,complete:r.get(6)?,revision:r.get(7)?,units:Vec::new(),events:Vec::new()})).optional()?.ok_or(AppError::SourceNotFound)?;
             let rows={let mut q=tx.prepare(&format!("{ORDERED_UNITS} SELECT id,{},{},{},{},{},{},revision,position FROM ordered WHERE position>?2 ORDER BY position LIMIT 51",text("block_id",512),text("kind",100),text("polygon",1024),text("raw_html",65536),text("state",32),text("correction",80000)))?;
                 q.query_map(params![id,units],|r|{let raw=read_text(r,4)?;let clean=sanitized(&raw).map_err(|e|rusqlite::Error::FromSqlConversionFailure(4,rusqlite::types::Type::Text,Box::new(e)))?;Ok((r.get::<_,i64>(8)?,UnitView{id:r.get(0)?,block_id:read_text(r,1)?,kind:read_text(r,2)?,polygon:read_text(r,3)?,sanitized_html:clean,state:read_text(r,5)?,correction:read_text(r,6)?,revision:r.get(7)?}))})?.collect::<Result<Vec<_>,_>>()?};
             let events={let mut q=tx.prepare(&format!("SELECT id,unit_id,{},{},{},{},{},previous_revision,operation_id FROM source_review_events WHERE page_id=?1 AND id>?2 ORDER BY id LIMIT 51",text("created_at",64),text("actor",400),text("state",32),text("rationale",20000),text("correction",80000)))?;
                 q.query_map(params![id,history],|r|Ok((r.get::<_,i64>(0)?,ReviewEvent{unit_id:r.get(1)?,created_at:read_text(r,2)?,actor:read_text(r,3)?,state:read_text(r,4)?,rationale:read_text(r,5)?,correction:read_text(r,6)?,previous_revision:r.get(7)?,operation_id:r.get(8)?})))?.collect::<Result<Vec<_>,_>>()?};
-            auth.recheck_owner(&tx)?;tx.commit()?;
             let units=Listing::new(rows,|r|r.0);let events=Listing::new(events,|r|r.0);
             page.units=units.rows.into_iter().map(|r|r.1).collect();page.events=events.rows.into_iter().map(|r|r.1).collect();
             Ok(MaterialPage{page,units_next:units.next,history_next:events.next})
+            })?;
+            auth.recheck_owner(&tx)?;tx.commit()?;
+            Ok(result)
         }).await
     }
     pub(crate) async fn material_unit_cursor(
@@ -277,14 +280,15 @@ impl Store {
         self.run_bounded_auth(move |db| {
             let tx = db.transaction()?;
             auth.recheck_owner(&tx)?;
-            let cursor = tx
-                .query_row(
+            let cursor = super::review::read_with_deadline(&tx, "cursor", || {
+                tx.query_row(
                     &format!("{ORDERED_UNITS} SELECT position-1 FROM ordered WHERE id=?2"),
                     params![page, unit],
                     |r| r.get(0),
                 )
                 .optional()?
-                .ok_or(AppError::SourceNotFound)?;
+                .ok_or(AppError::SourceNotFound)
+            })?;
             auth.recheck_owner(&tx)?;
             tx.commit()?;
             Ok(cursor)
