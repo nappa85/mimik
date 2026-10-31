@@ -1,303 +1,504 @@
 # Source upload plan: sandboxed PDF work, upload and jobs (import plan step 3)
 
-Goal: the Owner uploads a PDF from `/admin/materials`, picks the pages and the game, sees them
-rendered, and confirms a watermark exclusion. Every parse of the uploaded file happens in a
-sandboxed worker process. Step 3 ends with a **staged upload**: the PDF, its inspection, the
-rendered pages and the exclusion, waiting for a reading route. Route A (step 4) turns it into
-the first source. Until then the routes are shown disabled with "arrives with route A".
+**Goal.** The Owner uploads a PDF from `/admin/materials`, picks the pages and the game, sees
+them rendered, and confirms an exclusion of repeated text (a buyer watermark).
+
+**The boundary.** Every parse of the uploaded file happens in a sandboxed worker process. The
+worker writes nothing to the host: everything it returns travels over a pipe. The server
+bounds, validates and stores it.
+
+**Where step 3 ends.** With a **staged upload** that follows a versioned contract (below). Route
+A (step 4) turns it into the first source. Until then:
+- the reading routes are shown disabled, with "arrives with route A";
+- `docs/release-scope.md` says that upload stages pages but does not yet make a source.
 
 Umbrella: `docs/source-import-plan.md` (step 3). Three parts, each its own reviewed change:
-3a the worker, 3b upload, staging and jobs, 3c the watermark exclusion.
+- **3a:** the shared sandbox and the worker.
+- **3b:** upload, staging and jobs.
+- **3c:** the repeated-text exclusion, an optional step for the owner.
+
+The umbrella's step 3 text is deleted only once all three parts and their integration checks
+have landed.
 
 ## Decisions this step lands
 
-- **SRC-1** amended: the Owner may upload one PDF at a time from `/admin/materials`;
+- **SRC-1, amended.** The Owner may upload a PDF from `/admin/materials`, one upload at a time.
   `import-source` stays for prepared bundles. Still no archives, URLs or nested imports.
-- **SRC-3** amended: Mimik renders and reads uploaded PDFs itself, only in the sandboxed PDF
-  worker. Stored page images stay immutable once a source is made from them.
-- **DEP-29** (renderer): `mupdf =0.8.0` and `mupdf-sys =0.8.0` (messense/mupdf-rs, AGPL-3.0,
-  released 2026-06-22). The crate vendors MuPDF's C source and its third-party libraries and
-  builds them with `cc`. Bindings are generated with `bindgen`, so the CI and release images
-  gain `libclang`. All `sys-lib-*` features are off (nothing is linked from the system). Format
-  features are off except PDF: no `js`, `html`, `epub`, `svg`, `cbz`, `img`, `docx-output` or
-  `libarchive`. Fonts: `base14-fonts`, with missing embedded fonts substituted (recorded on the
-  page). 3a records in DEP-29:
-  - the bundled MuPDF version and its open CVEs;
-  - the clean build time at 2 cores in `mimik-ci` and in the release container;
-  - the release binary's size before and after;
-  - whether a feature set this small builds at all.
-  If it does not build, or the build adds more than 10 minutes, 3a stops and asks.
-- **REL-2 kept:** `cargo vendor` puts the mupdf-sys crate, with its full C source, into the
-  dependency-sources archive. 3a checks that the archive holds every C file the build compiles
-  (the `cc` file list against the archive). The notices gain the licences of the bundled C
-  libraries: MuPDF and extract (AGPL-3.0), jbig2dec (AGPL-3.0), FreeType (FTL), HarfBuzz (MIT),
-  lcms2mt (MIT), libjpeg (IJG), OpenJPEG (BSD-2-Clause), zlib, gumbo (Apache-2.0) and brotli
-  (MIT), each verified against the vendored tree. `about.toml` accepts AGPL-3.0 for these two
-  crates only.
-- **DEP-30** (upload parsing): axum's `multipart` feature (`multer`, MIT, already
-  maintained with axum), with streaming and per-field limits. A plain no-JS form posts the
-  file.
-- Considered and not taken:
-  - `hayro` 0.8.0: pure Rust and memory-safe, but it has no structured-text API, and route A
-    would need a second parser.
-  - `pdfium-render`: needs a prebuilt PDFium, a new REL-2 exception.
-  - Running `lopdf` on the upload: the worker reports page bounds from MuPDF.
+- **SRC-3, amended.** Mimik renders and reads uploaded PDFs only in the sandboxed PDF worker.
+  The server never parses them: step 4 must not call `lopdf::Document::load_mem`
+  (`import.rs:473`) on an upload, and takes the page facts from the staged contract.
+  `import-source` keeps its own `lopdf` checks, and stays unrotated-only.
+- **DEP-29 (renderer).** `mupdf =0.8.0` and `mupdf-sys =0.8.0` (messense/mupdf-rs, AGPL-3.0,
+  released 2026-06-22).
+  - The crate vendors MuPDF's C source and its third-party libraries. They are built with `cc`,
+    and the bindings with `bindgen` (`libclang`).
+  - It is compiled on Linux only (`cfg(target_os = "linux")`): other platforms have no upload.
+  - Features:
+    - every `sys-lib-*` feature is off, so nothing is linked from the system;
+    - every format but PDF is off: no `js`, `html`, `epub`, `svg`, `cbz`, `img`, `docx-output` or
+      `libarchive`;
+    - fonts: `base14-fonts`, and a missing embedded font is substituted and noted on the page.
+  - 3a's first gate checks the following before any other code. If any check fails, or the build
+    adds more than 10 minutes to the slowest CI job, 3a stops and asks.
+    1. **Tarballs:** the pinned crate tarballs.
+    2. **API:** the crate's coverage of what the worker needs (open from memory, page bounds with
+       rotation, render to a pixmap, structured text with boxes, the store size and the
+       error mapping).
+    3. **MuPDF:** the bundled version and its open CVEs.
+    4. **Build:**
+       - whether this feature set builds;
+       - pregenerated bindings if the crate offers them, otherwise a `libclang` pinned by
+         package version in `mimik-ci` and in the Ubuntu 22.04 release image (REL-4);
+       - the build cost in every CI job (Clippy, tests, release, audit) at 2 cores, with how
+         the mupdf-sys build is cached;
+       - the size of the release binary, before and after.
+    5. **Memory:** peak RSS and address space under the exact worker profile.
+- **REL-2 kept.**
+  - `cargo vendor` puts the whole mupdf-sys tarball into the dependency-sources archive: C
+    sources, headers, generated files, fonts and the build script.
+  - 3a extends the release check: a clean offline rebuild from the distributed archives builds
+    the worker. `BUILD.txt` and `SOURCE.txt` gain the C compiler and the `libclang`
+    prerequisites.
+- **Notices.**
+  - The notices cover the vendored tree: every licence file in it, whether its code is compiled
+    or not (mujs, and anything else vendored but switched off, is listed too).
+  - Each is verified against the vendored text: MuPDF and extract (AGPL-3.0), jbig2dec
+    (AGPL-3.0), FreeType, HarfBuzz (MIT), lcms2mt (MIT), libjpeg (IJG), OpenJPEG
+    (BSD-2-Clause), zlib, gumbo (Apache-2.0), brotli (MIT), and the base14 fonts' licence.
+  - FreeType: Mimik takes the FTL option, provided the gate confirms on the FSF licence list
+    that the FTL is compatible with GPLv3, so that it combines with AGPL-3.0. FreeType's GPL
+    option is GPLv2 and would not do. If the FTL is not compatible, 3a stops and asks. Its credit
+    clause is met in the notices. DEP-29 records this.
+  - `about.toml` accepts AGPL-3.0 for exactly `mupdf` and `mupdf-sys`.
+- **MuPDF security updates.** `cargo audit` does not cover the bundled C. So:
+  - each release checks MuPDF's security advisories for the bundled version (a release-checklist
+    item and a TODO watch item, like llama.cpp's);
+  - a fix upstream means a crate bump, or, if the crate lags, a patched vendored tree recorded
+    as a DEP decision.
+- **DEP-30 (multipart).** `multer` directly (MIT, the parser under axum's `Multipart`).
+  - Its `Constraints` give the allowed fields and per-field size limits, which axum's wrapper
+    does not expose.
+  - It is new to the tree: licence and maintenance are checked when it is added.
+- **Considered and not taken:**
+  - `hayro` 0.8.0: pure Rust, but no structured-text API, so route A would need a second
+    parser.
+  - `pdfium-render`: needs a prebuilt PDFium, which would be a new REL-2 exception.
 
-## 3a. The PDF worker
+## Staged-upload contract (`mimik-staged-v1`)
 
-**Launch.** A new runner kind beside llama-server: the runner re-executes `mimik pdf-worker
---spec-fd 3` inside a Hakoniwa sandbox. It is spawned from the same long-lived spawning
-thread, with the same parent-death signal and parent check; `hako::Plan` gains a profile
-kind (llama-server or PDF worker). The worker profile (`hako::Plan` for the worker) differs from
-llama-server's:
+This is what step 4 reads, without parsing the PDF again:
+- the PDF's SHA-256 and size;
+- the renderer: the crate and MuPDF versions and the render settings (dpi, colourspace,
+  anti-aliasing);
+- per page:
+  - the displayed size in points;
+  - the transform from PDF space to displayed space;
+  - the PNG's hash, pixel size and dpi;
+  - the substituted fonts;
+  - the text-layer statistics;
+- the selected pages, with the upload revision;
+- the system id, edition and language;
+- the current exclusion and its revision (3c), or none.
 
+**Displayed space.** The visible box is the CropBox clipped to the MediaBox, scaled by
+`UserUnit`. It is moved to origin (0, 0), rotated by `Rotate`, and its y axis points down
+(points, origin top-left). That is the space of Marker's polygons and of the review screen.
+- The text boxes use the same matrix.
+- A page larger than 4,000 points in either dimension after `UserUnit` is refused.
+- The pixel size comes from one shared function, so it always passes `validate_image_header`'s
+  0.01 aspect tolerance.
+
+## 3a. Shared sandbox and the PDF worker
+
+**Refactor first.** Today `hako::Inputs` and `hako::Plan` require a model, a token and a socket
+directory (`hako.rs:86-130`). `container()` always mounts `/proc` (`hako.rs:926`), and
+`landlock_rules` always grants it (`hako.rs:247`). The refactor:
+- moves the sandbox construction to a shared module (`src/sandbox/`), with a profile that
+  declares its binds, its tmpfs, its Landlock rules and whether it mounts `/proc`;
+- keeps llama-server's profile byte-for-byte as it is: its existing tests must pass unchanged;
+- means `sources` does not depend on `assistant::runtime`.
+
+**Launch.** The runner re-executes `mimik pdf-worker` inside the sandbox from the same
+long-lived spawning thread, with the same parent-death signal and parent check.
+
+**Descriptors and transport.** Hakoniwa closes descriptors above 2, and the closure keeps
+descriptor 3 for the unforgeable marker and puts `/dev/null` on stdin. So the worker gets
+exactly fds 0, 1 and 2:
+- **Spec:** a JSON spec of at most 64 KiB that the runner has Hakoniwa write into the `/run`
+  tmpfs at `/run/spec.json`, as the token is written today. It holds no secret.
+- **Output:** framed records on stdout, read by the parent through a bounded drain. Each record
+  is a header line (JSON, at most 4 KiB, `deny_unknown_fields`) and then exactly the
+  `length` bytes it declares. Limits:
+  - **per record:** 12 MiB for a PNG, 8 MiB for one page's text;
+  - **per run:** the requested pages' records and nothing else. The total is at most 13 MiB
+    × the pages in the run plus 64 KiB, and anything past it kills the run.
+- **Stderr:** drained with a 64 KiB cap. It is never logged verbatim: a failure is logged and
+  shown by a fixed reason code.
+- **Exit:** read only after the worker tree is reaped.
+
+The worker writes nothing to the host. This removes the risks of a writable output directory:
+FIFOs and links, files rewritten between validation and storage, filling the disk with many
+files, and per-file versus total quotas.
+
+**Worker profile.**
 - **Binds:**
-  - The Mimik executable read-only, with an identity check, as the probe does today.
-  - The spooled PDF read-only at `/in/document.pdf`, with an identity check.
-  - A fresh 0700 per-job output directory read-write at `/out`.
-  - The read-only system library folders and the loader cache.
-  - No `/dev/shm`, no GPU, no `/sys`.
-  - `/tmp` as a 16 MiB tmpfs.
-  - `/proc` only if Hakoniwa or glibc needs it (3a finds out and records it).
-- **Network:** an empty network namespace, and Landlock refuses TCP bind and connect.
-- **Landlock rules:** read on `/in` and on the libraries; read and write on `/out` and `/tmp`;
-  execute only on the Mimik executable and the loader.
-- **Limits:** `RLIMIT_AS` 2 GiB, `RLIMIT_CPU` set per job, `RLIMIT_FSIZE` 16 MiB, `RLIMIT_NOFILE`
-  64 and `RLIMIT_CORE` 0. The worker runs at nice 10.
-- **Wall clock:** the parent kills the worker tree on its deadline (below).
-- **Seccomp:** the existing default-allow program, with additions. Once the worker has opened
-  `/in` and `/out`, it stacks a second filter of its own. That filter refuses:
-  - every `clone`, `clone3`, `fork` and `vfork` (MuPDF runs single-threaded, with no lock
-    callbacks);
-  - `execve` and `execveat`;
-  - `socket` and `socketpair`;
-  - `openat` with `O_CREAT` outside the fixed output names (checked by Landlock; seccomp cannot
-    see paths);
-  - `memfd_create` and `userfaultfd`.
-  Filters stack, so the second can only tighten the first.
-- **No fallback:** if the sandbox is unavailable (no unprivileged user namespaces, AppArmor),
-  upload is unavailable, with the same "how to fix" text as the assistant. There is no
-  unconfined fallback (ASSIST-44). On macOS and Windows upload is unavailable (limitation).
+  - the Mimik executable read-only, identity-checked, as the probe is today;
+  - the spooled PDF read-only at `/in/document.pdf`, identity-checked;
+  - the read-only system library folders and the loader cache;
+  - `/tmp` as a 16 MiB tmpfs with `noexec`;
+  - `/proc` only if glibc or MuPDF needs it (3a finds out; the profile makes it optional);
+  - no `/dev/shm`, no `/sys`, no GPU, no writable host path.
+- **Network:** an empty network namespace, and Landlock denies TCP bind and connect.
+- **Landlock:** best effort, as for llama-server (ASSIST-49):
+  - read on `/in`, `/run/spec.json` and the libraries;
+  - on `/tmp` only `MakeReg`, `WriteFile`, `ReadFile`, `Truncate`, `RemoveFile` and `ReadDir`;
+  - execute only on the executable and the loader.
+  Which protection holds without Landlock:
+  - **Without Landlock (namespaces, mounts and pipe transport):** the network, the host's
+    files, and every write to the host.
+  - **Landlock only:** finer limits within `/tmp`.
+- **Limits:**
+  - `RLIMIT_AS`: measured in 3a's gate, starting from 2 GiB;
+  - `RLIMIT_CPU`: soft equal to hard, set per run;
+  - `RLIMIT_FSIZE`: 16 MiB;
+  - `RLIMIT_NOFILE`: 64;
+  - `RLIMIT_CORE`: 0;
+  - nice 10.
+  - MuPDF's store is capped at 256 MiB through its context, if the crate exposes it; if not,
+    3a records that.
+  - The worker is PID 1 of its namespace, so default-action signals do not reach it: SIGXFSZ
+    and soft SIGXCPU are ignored. A write over the limit fails with `EFBIG` and the worker exits
+    non-zero, and the CPU hard limit's SIGKILL lands.
+  - **Exit statuses:** any non-zero exit, a signal or a missing final record maps to a bounded
+    reason: "could not be read", "took too long", "too large", "too many pages",
+    "password-protected" or "unsupported".
+- **Wall clock:** the parent kills the worker tree at its deadline, through the pidfds the
+  manager already uses.
+- **Seccomp:**
+  1. The existing default-allow program runs as the first filter.
+  2. The worker installs a second filter, as its first action after reading the spec and
+     opening `/in` (before MuPDF sees a byte). It uses a raw
+     `seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog)`: `no_new_privs` is already set, and
+     `seccompiler::apply_filter` would call the `prctl` the first filter refuses.
+  3. The second filter kills the process (`KILL_PROCESS`) on:
+     - `clone`, `clone3`, `fork` and `vfork` (MuPDF runs single-threaded, with no lock
+       callbacks);
+     - `execve` and `execveat`;
+     - `socket` and `socketpair`;
+     - `memfd_create`, `userfaultfd`, `ptrace` and `seccomp`.
+  4. A failed installation exits before MuPDF runs.
+- **Availability.** A worker probe at start-up runs a fixed synthetic PDF through `inspect`.
+  - If the probe fails, upload is unavailable, with the assistant's "how to fix" text (user
+    namespaces, AppArmor) and the probe's reason.
+  - There is no unconfined fallback (ASSIST-44).
+  - macOS and Windows have no upload (limitation).
+- **Internal protocol.** The hidden subcommand `mimik pdf-worker` is an internal protocol, not
+  a privilege boundary, as `assistant-runner` is.
+- **MuPDF stays in one module:** `src/sources/worker/`, reached only through `mimik pdf-worker`.
+  A CI check refuses `mupdf::` anywhere else.
 
-**Protocol.** The request is a JSON spec in the spec memory file:
-- the operation;
-- the page list;
-- the render scale;
-- the limits.
+**Operations.** Each run is one operation:
+- **`inspect`** (document-level, cheap). It reports:
+  - whether the PDF is encrypted. One that needs a password is refused as
+    "password-protected"; one with an owner password only opens.
+  - the page count (more than 2,000 is "too many pages");
+  - per page: the displayed size, the transform, the rotation, `UserUnit` and whether the page
+    is tagged.
+  It does not interpret content streams. Deadline: 30 s.
+- **`render`.** One run per batch of up to 8 pages. For each page:
+  - the PNG at 150 dpi, scaled down to fit 4,096 × 8,192 and 12 MP, with fixed deflate
+    settings. A PNG over 12 MiB fails that page as "too large".
+  - the text-layer statistics: characters, characters without a Unicode mapping, the area
+    covered by images, and the substituted fonts.
+  - the page's structured-text lines with boxes: at most 20,000 lines and 4 KiB per line, with
+    the 8 MiB per-page byte limit as the one that binds.
+  Deadline: 30 s per page.
 
-The worker writes three things:
-- **Status lines:** JSON lines on the status pipe, at most 64 KiB each and at most 4 per page
-  plus 4. Every line is parsed with `deny_unknown_fields` and range-checked.
-- **Page images:** `/out/page-<n>.png` only, opened by the parent with `openat2` beneath the
-  output directory's descriptor (`RESOLVE_BENEATH`, no links). Each must be a regular file under
-  12 MiB. Any other entry in `/out` fails the job.
-- **Text:** `/out/text-<n>.json`, at most 8 MiB per page.
+A crash or deadline kills only its batch.
 
-The parent validates every PNG with the import rules: `validate_image_header` first, then a
-bounded decode, with the dimensions matching the reported page size. The server never opens the
-PDF with a parser. It only streams the file, hashes it and checks the `%PDF-` magic in the first
-1,024 bytes.
+The parent handles each record as it arrives:
+1. It checks that the page is one requested, appears once, and comes in order.
+2. It validates the in-memory copy it will store:
+   - the PNG with the import rules (`validate_image_header` first, then a bounded decode, with
+     the pixel size equal to the shared function's);
+   - the text with every box finite and inside the page.
+3. Only after that does it write the page into staging.
 
-**Operations** (MuPDF only):
-- **`inspect`:**
-  - Whether the PDF is encrypted: a document that needs a password is refused as
-    "password-protected"; owner-password-only PDFs open.
-  - The page count, at most 2,000.
-  - Per page:
-    - width and height in points after the CropBox and rotation are applied, at most 4,000;
-    - the rotation;
-    - whether the page has a text layer: characters, characters without a Unicode mapping,
-      and the area covered by images;
-    - whether the page is tagged.
-  - Deadline: 60 s.
-- **`render`:** the selected pages at 150 dpi, scaled down to fit the import limits (4,096 ×
-  8,192, 12 MP). One status line per page as it finishes. Deadline: 30 s per page, 20 minutes
-  in all.
-- **`text`:** MuPDF structured-text lines with their boxes for the selected pages. The limits
-  are 20,000 lines per page and 4 KiB per line. Step 3 uses it for the watermark proposal, and
-  step 4 extends it to route A's reading. Deadline: 10 s per page.
+Two rules apply on the server side:
+- a page that fails ends the job;
+- the pages already stored stay, so a retry renders the rest.
 
-Geometry everywhere is in the displayed page's space: points, origin top-left, with the CropBox
-and rotation applied. That is the space Marker's polygons and the review screen already use. A
-test compares MuPDF's bounds with `lopdf`'s on the unrotated synthetic fixtures, so the upload
-path and `import-source` agree.
+**Tests.**
+- **Fake worker:** a fake worker binary drives the parent with malformed and hostile output:
+  - over-long headers, a length past its cap, unrequested or repeated pages, truncated records
+    and trailing bytes;
+  - a never-ending stdout and stderr spam;
+  - a worker that exits early.
+- **Live sandbox tests,** like the assistant's:
+  - The worker cannot open a socket, exec or clone; each is killed, and the job fails.
+  - It cannot read `$HOME`, the data folder or `/proc/1/root` of the host.
+  - It cannot write anywhere on the host.
+  - A write over 16 MiB in `/tmp` gives a failed job, not a hang.
+  - `SIGKILL` of Mimik takes the worker with it.
+  - A cancel mid-batch leaves nothing running.
+  - A failure to install the second filter is reported.
+  - With Landlock unavailable (simulated as today), the boundaries the namespaces and the pipe
+    give still hold.
+- **Geometry fixtures** (synthetic), with an asymmetric landmark (a filled square and a word in
+  one corner):
+  - rotations 90, 180 and 270;
+  - a non-zero CropBox origin;
+  - a CropBox larger than the MediaBox;
+  - `UserUnit` 2 and an extreme `UserUnit`.
+  The landmark must sit in the same displayed corner in the PNG and in the text boxes. On the
+  unrotated fixtures, MuPDF's sizes must equal `lopdf`'s.
 
-**Hostile corpus** (synthetic, committed as a generator in the tests, not as binaries). Cases:
+**Hostile corpus.** It is synthetic, committed as a generator in the tests, not as binaries. The
+generator streams its bombs through `flate2` with bounded memory: it never holds a decompressed
+gigabyte. Valid difficult PDFs are included, to check that the limits do not refuse real
+manuals. The cases:
 - deep nesting of arrays and dictionaries (100,000 levels);
-- a FlateDecode bomb: 1 GiB of zeros, and nested filters;
-- an image bomb: a declared 100,000 × 100,000 image;
-- an xref `Prev` loop, and object streams that reference each other;
+- a FlateDecode bomb (1 GiB of zeros) and nested filters;
+- an image bomb (a declared 100,000 × 100,000 image), and many tiny images;
+- an xref `Prev` loop, object streams that reference each other, a large damaged file that
+  needs xref repair, and a huge object count;
 - a page tree with a cycle, and a `Count` of 2³¹;
-- a content stream of 50 million operators (the CPU limit);
-- a huge MediaBox;
+- a content stream of 50 million operators, Type3 font recursion, and heavy shading and pattern
+  pages;
+- a huge MediaBox, and extreme `UserUnit` values;
 - garbage JBIG2, JPX and font streams;
+- embedded files, JavaScript actions and external references, which must stay inert;
 - a truncated file, a file that is not a PDF, and a password-protected one;
-- rotated pages and a non-zero CropBox origin, which must work.
+- valid difficult pages: a 300-page text PDF, a large full-page image, many fonts and the
+  rotated fixtures.
 
 Each case must:
-- end with a bounded reason ("could not be read", "too many pages", "took too long",
-  "password-protected"), or succeed where it is valid;
+- end with a bounded reason, or succeed where it is valid;
 - finish within its deadline plus 5 s;
-- leave no file behind;
-- leave the server answering requests while it runs (a request served during the job, a test).
+- leave no process and no staging file behind;
+- leave the server answering requests while it runs (a test).
 
-**Sandbox tests (live, like the assistant's):**
-- The worker cannot open a socket, read `$HOME` or the data folder, exec, or write outside `/out`.
-- A write over 16 MiB kills it.
-- The parent refuses a link, an extra file, an oversized PNG header and an over-long status
-  line in `/out`.
-- `SIGKILL` of Mimik takes the worker with it.
-- A cancel mid-render leaves nothing running.
-- The hidden subcommand `mimik pdf-worker` is an internal protocol, not a privilege boundary
-  (as for `assistant-runner`).
+The privileged sandbox checks run in CI's existing confinement job. Where CI cannot provide
+user namespaces, the job fails; it never skips. The corpus's worst-case wall time is budgeted
+in that job. Fuzzing (cargo-fuzz in a container, on the record parser and on the worker's
+MuPDF entry points) is a TODO follow-up after 3a, not only a limitation.
 
 ## 3b. Upload, staging and jobs
 
-**Route.** `POST /admin/materials/uploads` requires the Owner session, REL-5's Host and Origin
-check and the CSRF admission bound to the session (`recheck_owner_write`). All of these are
-checked before a byte of the body is read.
-- The multipart `csrf` field must come first. A form whose first field is anything else is
-  refused (browsers send fields in document order).
-- `Content-Length` over 128 MiB answers 413 at once.
-- The file is streamed to `data/staging/upload-<random>.part`: 0600, `O_EXCL`, in a 0700
-  directory. It is hashed while it streams, and the stream is cut at 128 MiB plus one byte
-  (413, the partial file deleted).
-- Free disk under 512 MiB refuses before streaming.
-- One upload streams at a time; a second gets 409 "an upload is in progress".
-- On success the file is fsynced and renamed to `<id>.pdf`, and the row is inserted.
-- The original file name is kept for display only: control characters dropped, at most 200
-  characters. It is never logged, since it can carry the buyer's name.
+**Route.** `POST /admin/materials/uploads`, with its own body limit: it overrides the global
+`DefaultBodyLimit::max(8192)` (`src/auth/mod.rs:210`). It takes `multer` with `Constraints`.
 
-**Staging (migration 026, outside 007's immutability).** Tables:
-- **`source_uploads`:**
-  - id;
-  - sha256 and size;
-  - display name;
-  - actor (the Owner's attribution, as in review events);
-  - created and last-activity times;
-  - state: `uploaded`, `inspected`, `rendered` or `failed`;
-  - the inspection JSON (bounded, validated);
-  - the selected pages;
-  - system id, edition and language, with the same rules as an import.
-- **`source_upload_pages`:** upload, PDF page, PNG BLOB, hash, pixel size and point size.
-- **`source_upload_exclusions`:** 3c.
+*Before reading the body:*
+- the Owner session;
+- REL-5's Host and Origin check;
+- `Content-Length` at most 128 MiB plus 64 KiB (multipart overhead), when present (413 at once);
+- free disk: at least 512 MiB plus 128 MiB;
+- the upload slot (one stream at a time; a second gets 409 "an upload is in progress").
 
-A source made later (step 4) copies what it needs into its permanent tables in one
-transaction. Staging is never evidence and never searched.
+*Fields, in this exact order:*
+1. `csrf`, at most 256 bytes. It goes through `csrf_admission` before any further byte is read.
+2. `system`, `edition` and `language`, each capped and validated with the import rules.
+3. `file`, last, at most 128 MiB.
 
-Other staging rules:
-- **Open uploads:** one at a time. "Discard" deletes the row (cascade) and then the file.
-- **Abandoned uploads:** no activity for 7 days. They are deleted at start-up and every hour.
-  Files without a row and `.part` files are swept at start-up.
-- **Duplicates:** a PDF whose hash matches an existing `source_documents` row says so ("already
-  document N"). Going on gives a new reading of the same document (allowed by the umbrella
-  plan).
+*Refused:*
+- any other field;
+- a duplicate field;
+- a field out of order;
+- a field after the file;
+- a file over the limit (413).
 
-**Jobs (same migration).** `source_jobs` records:
-- the upload;
-- the kind: `inspect`, `render` or `text`;
+In each case the partial file is deleted.
+
+*Deadlines:*
+- 30 s with no bytes;
+- 15 minutes in all.
+
+The slot and the partial file are released by a drop guard, so a client that disconnects or a
+cancelled future cleans up too.
+
+*Spool:* `data/staging/upload-<random>.part`, 0600, `O_EXCL`, in a 0700 directory. It is hashed
+while it streams, and the server checks only the `%PDF-` magic in the first 1,024 bytes.
+
+*Publish:*
+1. fsync the file.
+2. Rename it to `<id>/document.pdf`.
+3. Insert the row, in one transaction that calls `recheck_owner_write` again (the session can
+   end during a long upload), as `sources/materials.rs:102-106` does.
+4. An `inspect` job is queued automatically.
+
+The original file name is not stored or logged, since it can carry the buyer's name. The page
+shows the size, the hash prefix and the page count.
+
+**Staging.**
+- **Files:** in `data/staging/<id>/` (0700, files 0600):
+  - `document.pdf`;
+  - `page-<n>.png`;
+  - `text-<n>.json`.
+- **Migration 026 (outside 007's immutability):** the database holds only metadata and hashes,
+  never page images or text.
+  - **`source_uploads`:**
+    - id, SHA-256, size, actor (the Owner's attribution) and times;
+    - `revision`, raised by every change to the page selection or the metadata;
+    - state: `uploaded`, `inspected`, `rendering`, `rendered` or `failed`;
+    - the inspection JSON (bounded and validated);
+    - the selected pages;
+    - system id, edition and language.
+  - **`source_upload_pages`:** upload, PDF page, the revision it was rendered for, the PNG's
+    hash, pixel size, displayed size, transform, text statistics and the text file's hash.
+  - **`source_upload_exclusions`:** 3c.
+- **Selection:** at most 64 pages per upload, the existing per-source limit (`import.rs`
+  limits a run's 20,000 units and 128 MiB of images). A longer book is several uploads, and so
+  several readings of one document.
+- **Budgets:**
+  - per upload: 128 MiB of PDF, 768 MiB of PNG and 512 MiB of text;
+  - all staging: 2 GiB;
+  - free space is checked before each batch.
+  Over a budget the job fails as "not enough space".
+- **Uploads:** one open upload at a time. A PDF whose hash matches a `source_documents` row
+  says so ("already document N"); going on gives a new reading of the same document.
+
+**Jobs (same migration).** `source_jobs` holds:
+- the upload, and the upload revision the job was made for;
+- the kind: `inspect` or `render`;
 - the state: `queued`, `running`, `succeeded`, `failed` or `cancelled`;
 - the pages done and the total;
-- a bounded error code and message;
-- the start and end times.
+- a bounded reason code;
+- the times.
 
-How jobs run:
-- **Concurrency:** one job runs process-wide, and a new one queues behind it. This is separate
-  from SRC-8's crop slot and from the model-work gate: the worker is CPU-only and runs at nice 10.
-- **Start-up:** `queued` and `running` jobs become `failed` with "interrupted by a restart"
-  (the worker died with Mimik). The owner can start them again.
-- **Cancel:** kill the runner's tree through the pidfds the manager already uses. The job shows
-  `cancelled` once the tree is reaped, and its partial pages are deleted.
-- **Results:** a job writes its results in one transaction after validation. A render that
-  fails on one page fails the job and keeps no page.
+The state machine is transactional:
+- **Queue:**
+  - at most one job per upload, and one upload, so at most one job in the process;
+  - one worker runs at a time;
+  - this is separate from SRC-8's crop slot and from the model-work gate (CPU only, nice 10).
+- **Results:**
+  - A batch's pages are published with a conditional write: only while the job is still
+    `running` and the upload's `revision` still equals the job's.
+  - A stale result is dropped and its files deleted.
+  - A change of selection cancels a running render.
+- **Cancel:**
+  - A queued job goes straight to `cancelled`.
+  - A running one is killed through the pidfds and shows `cancelled` once the tree is reaped.
+  - Pages already published stay, and they belong to the current revision.
+- **Discard:**
+  1. Cancel and reap the upload's job.
+  2. Delete the rows (cascade).
+  3. Delete the folder.
+  It holds the job lock throughout.
+- **Sweeps:**
+  - Uploads with no activity for 7 days are deleted at start-up and every hour, under the job
+    lock, so a sweep never touches an upload whose job is running.
+  - At start-up, `.part` files, folders without a row and files without a row are deleted.
+- **Restart:** `queued` and `running` jobs become `failed` ("interrupted by a restart"). The
+  upload page offers "Inspect again" or "Render the remaining pages".
+- **After step 4:** when step 4 makes a source, it copies the PNGs, the page facts and the
+  exclusion's geometry and rationale into its permanent tables. It then deletes the upload's
+  folder and rows. Nothing else is copied: no text files, no proposals.
 
 **Screens** (`/admin/materials/uploads`, strict CSP, desktop and tablet first):
-1. **Upload form:** file, game, edition and language.
+1. **Upload form:** system, edition, language, then the file, last (the field order above).
 2. **Upload page:**
-   - the inspection: page count, sizes, rotation, text layer per page, encryption note;
-   - a page-range picker, at most 400 pages per upload;
-   - a Render button;
+   - the inspection: page count, sizes, rotation, encryption note;
+   - a page picker (at most 64);
+   - Render, then the text-layer summary per page;
    - job progress with Cancel, refreshed by `<meta http-equiv="refresh" content="2">` without
      JavaScript and by a fragment poll with it;
-   - the reading routes, disabled with what each needs.
-3. **Rendered pages:** shown as on the review screen (zoom, pan).
+   - the reading routes, disabled with what each needs;
+   - Discard.
+3. **Rendered pages:** shown as on the review screen, with zoom and pan.
 
-Browser checks extend `tools/review_browser.py`:
-- upload;
-- inspect;
-- render;
-- cancel;
-- a restart mid-job;
-- discard;
+**Browser checks** extend `tools/review_browser.py`:
+- upload, inspect, render, cancel, a restart mid-job and discard;
+- a refused field order;
 - 1280 and 390 px, with and without JavaScript;
 - no overflow;
 - the strict CSP.
 
-## 3c. Watermark exclusion
+## 3c. Repeated-text exclusion
 
-After the render, a `text` job reads the selected pages. The proposal is a deterministic
-function on the validated worker output, unit-tested on synthetic pages:
-- **Normalisation:** NFKC, collapsed whitespace, case-folded.
-- **Grouping:** lines with the same normalised text whose boxes, as fractions of the page's
-  width and height, overlap the group's median box with IoU ≥ 0.8.
-- **What is proposed:** groups of 4 to 200 characters present on at least 60% of the selected
-  pages and on at least 3 pages. The top 3 are proposed, by page count. Each box is the union of
-  the group's boxes plus 2 pt.
-- **No text:** a page without a text layer gives no proposal; the owner draws the box.
+This step is optional for the owner and is labelled "repeated text", never "watermark":
+running headers also repeat. The proposal is a deterministic function on the validated text
+files, unit-tested on synthetic pages.
 
-The owner:
-- sees the proposal highlighted on a page;
-- confirms it, adjusts the box (handles with JavaScript, numeric inputs without), or draws one
-  with the step-2 drawing tool;
-- picks the pages (default: all selected) and gives a rationale.
+**Normalisation:** NFKC, whitespace collapsed, case-folded, and each run of digits replaced by
+`#` (an order number or "page N" can vary).
 
-The exclusion row records:
-- the actor;
-- the rationale;
-- the pages;
-- the geometry as page fractions plus points per page;
-- the proposal it came from, if any.
+**Grouping.**
+1. Lines with the same normalised text group together when each box, as a fraction of its
+   page's width and height, overlaps the group's median box with IoU ≥ 0.8.
+2. Groups are ranked by page count, then by text length, then by their position on the page
+   (top, then left), so the order is total.
 
-It can be replaced or removed until a source is made, and each change is a new row (history
-kept). The staged pages show the region masked with an opaque overlay. The stored PNG stays the
-original render (SRC-13). Its effect on readings (units inside rejected, crossing ones flagged,
-blacked-out hints) is applied by each route from step 4 on. The proposal text is personal data:
-it is shown to the Owner only and never logged (a test scans the log).
+**Proposal.**
+- Groups of 4 to 200 characters, present on at least 60% of the selected pages and on at least
+  3 pages. The top 3 are proposed.
+- Each page gets its own box: the group's box on that page plus 2 pt, clipped to the page.
+- **Pages where the group is absent:**
+  - they are listed;
+  - a proposed box goes on them only if the owner extends the exclusion to them, after a
+    warning.
+- Watermarks drawn as paths or images, and pages without a text layer, give no proposal: the
+  owner draws the box.
+
+**Confirmation.**
+- **What the owner sees:** the proposal highlighted on a page, and the list of pages it
+  affects.
+- **What the owner does:**
+  - confirms the proposal, adjusts its box (handles with JavaScript, numeric inputs without),
+    or draws one with the step-2 drawing tool;
+  - picks the pages;
+  - gives a rationale.
+- **What the row records:** the actor, the rationale, the pages, a box per page in displayed
+  points, and the proposal's fingerprint (a hash of the normalised text), never the text.
+- **Changes:**
+  - Replacing or removing the exclusion adds a new row and raises the exclusion revision.
+  - The rows are deleted with the upload.
+
+**Display.** The staged pages show the region masked with an opaque overlay. The stored PNG
+stays the original render (SRC-13). The effect on readings (units inside it rejected, units
+crossing it flagged, hints blacked out) is applied by each route from step 4 on.
+
+**Personal data.** Proposal text exists only in the staging text files and in the page shown
+to the Owner. A test scans the log, worker stderr handling, the database and the error
+messages for a planted marker string.
 
 ## Checks and gate
 
-- Every part:
-  - the full gate (fmt, strict Clippy, locked tests, helper lint and tests, audit, licences,
-    release build, unpacked-release smoke);
-  - failing-first regression tests for each issue found.
-- **3a:** the hostile corpus and the live sandbox tests run in CI, on Linux with user
-  namespaces. Where CI lacks them, the job fails rather than skips.
+- **Every part:**
+  - the full gate: fmt, strict Clippy, locked tests, helper lint and tests, audit, licences,
+    release build, and the unpacked-release smoke;
+  - a failing-first regression test for each issue found.
+- **3a:**
+  - the DEP-29 gate first;
+  - then the fake-worker tests, the live sandbox tests and the hostile corpus, in CI's
+    confinement job.
 - **Local live checks:**
-  - inspect and render the MÖRK BORG IT PDF and Bare Bones EN;
-  - record seconds per page and peak memory in `docs/results.md`.
-  The PDFs stay local.
-- **3c:** the proposal finds the IT PDF's buyer watermark (a local check: only the page count
-  and the box are recorded, never the text) and proposes nothing on Bare Bones.
+  - inspect and render the MÖRK BORG IT PDF and Bare Bones EN, recording the seconds per page
+    and the peak memory in `docs/results.md`;
+  - the PDFs stay local.
+- **3c:**
+  - the proposal finds the IT PDF's buyer mark: only the page count and the box are recorded,
+    never the text;
+  - the result on Bare Bones is reported (its running headers may be proposed).
 
 ## Docs when it lands
 
-- `docs/sources-and-retrieval.md`: upload, staging, jobs and exclusion.
-- `docs/model-runtime.md`: the runner's two kinds; the worker profile moves into a shared
-  sandbox section.
-- `docs/release-scope.md`: upload is Linux-only, with the sandbox required.
+- `docs/sources-and-retrieval.md`: upload, staging, jobs, the staged contract and the exclusion.
+- `docs/model-runtime.md`: the sandbox section moves to a shared reference, with both profiles.
+- `docs/release-scope.md`:
+  - upload is Linux-only and needs the sandbox;
+  - until step 4, upload stages pages only.
 - `docs/decisions.md`: SRC-1, SRC-3, DEP-29 and DEP-30.
 - `docs/limitations.md`:
-  - MuPDF CVE tracking is manual, a watch item like llama.cpp's;
-  - no fuzzing of the worker yet;
   - substituted fonts;
-  - macOS and Windows have no upload.
-- The umbrella plan's step 3 is deleted.
+  - macOS and Windows have no upload;
+  - proposals miss watermarks drawn as paths or images.
+- TODO: the MuPDF advisory watch and the fuzzing follow-up.
 
 ## Risks
 
-- MuPDF is C parsing hostile input. The sandbox, the limits and the stacked filter are the
-  boundary, and the server holds the same library but never calls it on uploaded data
-  (MuPDF calls live in one module, `src/sources/worker/`, used only by `mimik pdf-worker`; a
-  CI check refuses `mupdf::` anywhere else).
-- Build cost and binary size grow; 3a measures both before going on.
-- A 128 MiB upload and its renders sit in staging; the 7-day sweep and Discard bound it.
+- **MuPDF is C code parsing hostile input.**
+  - The boundary is the sandbox, the limits, the second filter and the pipe-only output.
+  - The server binary contains the library, but only `mimik pdf-worker` calls it (the CI check).
+- **Build cost and binary size grow.** The DEP-29 gate measures both before any other work.
+- **A first filter that is too tight for MuPDF,** or an address-space limit that is too low for
+  real manuals. 3a measures both on the valid difficult fixtures and the two local PDFs.
