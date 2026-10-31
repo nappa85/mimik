@@ -101,6 +101,19 @@ class WorktreeCheckTests(unittest.TestCase):
         self.assertFalse((self.wt / "target").exists())
         self.assertFalse((self.wt / "tools" / "__pycache__").exists())
 
+    def test_an_ignored_path_that_cannot_be_deleted_is_a_clean_refusal(self):
+        cache = self.wt / "tools" / "__pycache__"
+        cache.mkdir(parents=True)
+        (cache / "m.pyc").write_bytes(b"\0")
+        cache.chmod(0o555)
+        try:
+            code, errors = self.run_check("--clean")
+        finally:
+            cache.chmod(0o755)
+        self.assertEqual(code, 1)
+        self.assertIn("cannot delete ignored path tools/__pycache__", errors)
+        self.assertNotIn("Traceback", errors)
+
     def test_a_staged_gitlink_is_refused(self):
         git(self.wt, "update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},sub")
         code, errors = self.run_check()

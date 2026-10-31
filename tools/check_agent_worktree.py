@@ -214,10 +214,14 @@ def main(argv):
             target = worktree / path
             if not os.path.lexists(target):
                 continue  # under a directory already deleted
-            if target.is_dir():
-                shutil.rmtree(target)
-            else:
-                target.unlink()
+            try:
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+            except OSError as error:
+                reasons.append(f"cannot delete ignored path {path}: {error.strerror}")
+                continue
             print(f"deleted ignored path: {path}", file=sys.stderr)
         else:
             reasons.append(f"ignored path (delete with --clean): {path}")
