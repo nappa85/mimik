@@ -133,9 +133,17 @@ exactly fds 0, 1 and 2:
   `drain.rs` splits lines at 4 KiB and would corrupt binary records). Each record
   is a header line (JSON, at most 4 KiB, `deny_unknown_fields`) and then exactly the
   `length` bytes it declares. Limits:
-  - **per record:** 12 MiB for a PNG, 8 MiB for one page's text;
-  - **per run:** the requested pages' records and nothing else. The total is at most 13 MiB
-    × the pages in the run plus 64 KiB, and anything past it kills the run.
+  - **per record:** 12 MiB for a PNG, 8 MiB for one page's text, 4 KiB for a statistics or
+    inspection-page record, 4 KiB for the final `done` record;
+  - **per render run:** at most (12 MiB + 8 MiB + 16 KiB) × the pages in the run + 4 KiB, so a
+    run of permitted maximum-size records always fits; anything past it kills the run;
+  - **per inspect run:** one `document` record, one `page` record per page (at most 2,000) and
+    `done`: at most 9 MiB in all.
+  - **Schemas:** each record kind has a complete schema (`deny_unknown_fields`, every number
+    finite and in range: sizes 1–4,000 points, rotation one of 0/90/180/270, the transform's
+    entries bounded and its determinant non-zero, statistics non-negative and no larger than
+    the page allows). A run is complete only with exactly the requested records, in order,
+    then `done` with matching counts; anything else fails the run.
 - **Stdout protection:** before MuPDF runs, the worker moves fd 1 to a private descriptor and
   points fd 1 at stderr, so a C warning or stray `printf` cannot break the framing.
 - **Stderr:** drained on its own thread with the existing line drain and a 64 KiB cap, so
@@ -171,8 +179,10 @@ files, and per-file versus total quotas.
   - `RLIMIT_NOFILE`: 64;
   - `RLIMIT_CORE`: 0;
   - nice 10.
-  - MuPDF's store is capped at 256 MiB through its context, if the crate exposes it; if not,
-    3a records that.
+  - MuPDF's store is capped at 256 MiB through its context. If the crate cannot set it, the
+    gate accepts the default only when peak RSS on the valid difficult fixtures, the two local
+    PDFs and the corpus stays below 75% of `RLIMIT_AS`; otherwise 3a stops and asks.
+  - CPU: hard 20 s for `inspect`, 25 s per page for `render`.
   - The worker is PID 1 of its namespace, so default-action signals do not reach it: SIGXFSZ
     and soft SIGXCPU are ignored. A write over the limit fails with `EFBIG` and the worker exits
     non-zero, and the CPU hard limit's SIGKILL lands.
@@ -258,13 +268,17 @@ Two rules apply on the server side:
   - rotations 90, 180 and 270;
   - a non-zero CropBox origin;
   - a CropBox larger than the MediaBox;
-  - `UserUnit` 2 and an extreme `UserUnit`.
+  - `UserUnit` 2 and an extreme `UserUnit`;
+  - `Rotate` and `CropBox` inherited from the page tree.
+  An exclusion drawn on a rotated page round-trips into the same displayed box on the review
+  screen (3c test).
   The landmark must sit in the same displayed corner in the PNG and in the text boxes. On the
   unrotated fixtures, MuPDF's sizes must equal `lopdf`'s.
 
 **Hostile corpus.** It is synthetic, committed as a generator in the tests, not as binaries. The
 generator streams its bombs through `flate2` with bounded memory: it never holds a decompressed
-gigabyte. Valid difficult PDFs are included, to check that the limits do not refuse real
+gigabyte (each case at most 64 MiB of memory, 8 MiB of output and 5 s to generate; the whole
+corpus at most 10 minutes in CI's confinement job). Valid difficult PDFs are included, to check that the limits do not refuse real
 manuals. The cases:
 - deep nesting of arrays and dictionaries (100,000 levels);
 - a FlateDecode bomb (1 GiB of zeros) and nested filters;
@@ -303,6 +317,12 @@ MuPDF entry points) is a TODO follow-up after 3a, not only a limitation.
 - `Content-Length` at most 128 MiB plus 64 KiB (multipart overhead), when present (413 at once);
 - free disk: at least 512 MiB plus 128 MiB;
 - the upload slot (one stream at a time; a second gets 409 "an upload is in progress").
+
+*Body stream:* the body is wrapped in a counting stream that enforces the whole-request limit
+(128 MiB + 64 KiB) whether or not `Content-Length` is sent, and lets at most 4 KiB (multipart
+headers and the `csrf` field) be polled before the CSRF admission. Instrumented-body tests: a
+request refused for authentication, Host or Origin polls no byte; a refused CSRF token
+spools no file byte; a disconnect mid-file releases the slot and deletes the partial file.
 
 *Fields, in this exact order:*
 1. `csrf`, at most 256 bytes. It goes through `csrf_admission` before any further byte is read.
@@ -363,7 +383,11 @@ shows the size, the hash prefix and the page count.
     rendered upload can always become a source) and 512 MiB of text; a render past the PNG
     budget fails as "too large for one source: select fewer pages";
   - all staging: 2 GiB;
-  - free space is checked before each batch.
+  - **reservations:** a process-wide staging ledger reserves the worst case before each write
+    phase (an upload: 128 MiB + 64 KiB; a render batch: 8 × 20 MiB) and releases it after;
+    a phase starts only when free space covers every open reservation plus a 512 MiB margin
+    kept for the database and its WAL. Disk-full tests use an injected free-space source and
+    a real `ENOSPC` on a small test filesystem.
   Over a budget the job fails as "not enough space".
 - **Uploads:** one open upload at a time. A PDF whose hash matches a `source_documents` row
   says so ("already document N"); going on gives a new reading of the same document.
@@ -385,11 +409,15 @@ The state machine is transactional:
   - A batch's pages are published with a conditional write: only while the job is still
     `running` and the upload's `revision` still equals the job's.
   - A stale result is dropped and its files deleted.
-  - A change of selection cancels a running render.
+  - A change of selection cancels a running render. Pages no longer selected are deleted with
+    the change; a selected page whose rendering has the current render settings stays current
+    whatever revision it was rendered for (the staged contract's rule). "Render the remaining
+    pages" renders the selected pages without a current rendering. Tests: a stale batch
+    published after a selection change, and a sweep racing a publication.
 - **Cancel:**
   - A queued job goes straight to `cancelled`.
   - A running one is killed through the pidfds and shows `cancelled` once the tree is reaped.
-  - Pages already published stay, and they belong to the current revision.
+  - Pages already published stay.
 - **Discard:**
   1. Cancel and reap the upload's job.
   2. Delete the rows (cascade).
@@ -434,10 +462,12 @@ files, unit-tested on synthetic pages.
 `#` (an order number or "page N" can vary).
 
 **Grouping.**
-1. Lines with the same normalised text group together when each box, as a fraction of its
-   page's width and height, overlaps the group's median box with IoU ≥ 0.8.
-2. Groups are ranked by page count, then by text length, then by their position on the page
-   (top, then left), so the order is total.
+1. Lines are visited in a fixed order: page, then top, then left, then normalised text. Each
+   joins the first group (in creation order) with the same normalised text whose seed box (its
+   first line's box, as a fraction of the page's width and height) it overlaps with IoU ≥ 0.8;
+   otherwise it starts a group. At most one line per page joins a group.
+2. Groups are ranked by page count, then text length, then the seed box's top and left, then
+   the normalised text's bytes: a total order.
 
 **Proposal.**
 - Groups of 4 to 200 characters, present on at least 60% of the selected pages and on at least
@@ -446,7 +476,8 @@ files, unit-tested on synthetic pages.
 - **Pages where the group is absent:**
   - they are listed;
   - a proposed box goes on them only if the owner extends the exclusion to them, after a
-    warning.
+    warning; there the box is the group's median box in page fractions, converted to that
+    page's points and clipped to it.
 - Watermarks drawn as paths or images, and pages without a text layer, give no proposal: the
   owner draws the box.
 
@@ -470,7 +501,8 @@ crossing it flagged, hints blacked out) is applied by each route from step 4 on.
 
 **Personal data.** Proposal text exists only in the staging text files and in the page shown
 to the Owner. A test scans the log, worker stderr handling, the database and the error
-messages for a planted marker string.
+messages for planted marker strings in the text, the uploaded file name and the rationale
+(the rationale is stored, by design, and must appear only in its row).
 
 ## Checks and gate
 
