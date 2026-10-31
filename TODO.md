@@ -34,7 +34,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   `/media/data/mimik/mupdf-gate/GATE-NOTES.md`; FreeType's GPL option is GPLv2-or-later, so
   the plan's FreeType line needs correcting). Next: slice 2, the PDF worker. Review-screen test
   hook `READ_DEADLINE` (`src/sources/review.rs`) is process-global and matched by label: key it
-  to the test's store. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
+  to the test's store. `campaigns::tests::material_tests::material_review_response_bounds_and_labels`
+  failed once in a full parallel run (2026-10-31, 8 test threads, "budget truncation must be
+  labelled") and passed 3 of 3 alone: likely the 250 ms review read deadline under load. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
   (`~/temp/`, tagged, clean text layer) through the prototype tools.
 
 - **Probe with a relative `--models-dir` (found 2026-10-31, also on master):** `mimik
