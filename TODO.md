@@ -53,8 +53,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   relative form. Regression test first, then make the probe's models dir absolute as the
   server path does (`std::path::absolute`).
 
-- **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
-  target/agent-tools/ci.sh <cmd>`, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
+- **Resume after a reboot:** the CI helper is `/home/marco/Progetti/mimik/target/agent-tools/ci.sh` (`CPUS=2 sh
+  /home/marco/Progetti/mimik/target/agent-tools/ci.sh <cmd>`, always by this absolute path, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
   mimik-catalogue-target). Free-model reviews: never in parallel (the `external-agents` skill locks
   and skips limited models, `~/.local/state/external-agents/limits.json`).
 

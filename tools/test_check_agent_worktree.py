@@ -121,6 +121,64 @@ class WorktreeCheckTests(unittest.TestCase):
         self.assertIn("model.gguf", errors)
         self.assertNotIn(".env.example", errors)
 
+    def test_an_unreadable_directory_is_refused_rather_than_skipped(self):
+        hidden = self.wt / "x"
+        (hidden / "sub").mkdir(parents=True)
+        git(hidden / "sub", "init", "-q")
+        hidden.chmod(0)
+        try:
+            code, errors = self.run_check()
+        finally:
+            hidden.chmod(0o755)
+        self.assertEqual(code, 1)
+        self.assertIn("x", errors)
+        self.assertTrue("cannot list x" in errors or "not readable by its owner: x" in errors)
+
+    def test_a_bare_repository_is_refused(self):
+        git(self.wt, "init", "-q", "--bare", "planted")
+        code, errors = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("bare repository: planted", errors)
+
+    def test_case_variants_of_vcs_names_are_refused(self):
+        (self.wt / "a").mkdir()
+        (self.wt / "a" / ".GIT").mkdir()
+        code, errors = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("nested VCS entry: a/.GIT", errors)
+
+    def test_an_added_or_changed_gitignore_is_refused(self):
+        (self.wt / "tools" / "__pycache__").mkdir(parents=True)
+        (self.wt / "tools" / "__pycache__" / "m.pyc").write_bytes(b"\0")
+        (self.wt / "tools" / ".gitignore").write_text("!__pycache__/\n")
+        code, errors = self.run_check("--clean")
+        self.assertEqual(code, 1)
+        self.assertIn("ignore rules changed by the run: tools/.gitignore", errors)
+        (self.wt / "tools" / ".gitignore").unlink()
+        (self.wt / ".gitignore").write_text("*\n")
+        code, errors = self.run_check("--clean")
+        self.assertEqual(code, 1)
+        self.assertIn("ignore rules changed by the run: .gitignore", errors)
+        self.assertTrue((self.wt / "src.txt").exists())
+
+    def test_a_damaged_git_file_is_a_clean_refusal(self):
+        (self.wt / ".git").write_text(f"gitdir: {self.main}/.git/worktrees/..\n")
+        code, errors = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("refused: .git", errors)
+        self.assertNotIn("Traceback", errors)
+
+    def test_the_main_checkout_takes_review_only(self):
+        (self.main / "manual.pdf").write_bytes(b"\0")
+        git(self.main, "add", "-f", "manual.pdf")
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            code = check.main(["--main", str(self.main), str(self.main), "--review"])
+        self.assertEqual(code, 1)
+        self.assertIn("manual.pdf", errors.getvalue())
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            check.main(["--main", str(self.main), str(self.main), "--clean"])
+
 
 if __name__ == "__main__":
     unittest.main()

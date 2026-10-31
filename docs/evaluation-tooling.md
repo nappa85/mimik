@@ -107,6 +107,8 @@ https://github.com/nappa85/external-agents pinned at commit `f861139`
 (`/media/data/mimik/external-agents/src`, linked as `~/.claude/skills/external-agents`). Its
 own `docs/architecture.md` and `docs/cli.md` are the reference; what Mimik uses:
 
+- **Old branches:** a branch made before TOOL-1 still carries `tools/external_review.py`, whose
+  free-model lock (`~/.cache/mimik-review/free.lock`) the skill does not share: do not run it.
 - **Before use:** `git -C /media/data/mimik/external-agents/src rev-parse HEAD` must print the
   pinned commit; a new upstream commit is adopted only after reading its diff.
 - **Reviews:** first `python3 -I tools/check_agent_worktree.py --main . WORKTREE --review`, then

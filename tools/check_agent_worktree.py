@@ -11,7 +11,9 @@ next `git status` once it is staged); symbolic links; FIFOs, sockets and devices
 does it run git, hardened (no fsmonitor, hooks, external diff or submodules), to refuse
 gitlink and symlink entries in the index and to list ignored paths, which `git status` does
 not show and the host may still execute (`__pycache__`, `target/`, a `.cargo/config.toml`).
-`--clean` deletes those ignored paths. `--review` refuses files a review snapshot would send
+It also refuses `.gitignore` files the run added or
+changed, since they decide what counts as ignored. `--clean` deletes those ignored paths.
+Run it only after the agent has exited (the checks and deletions are not atomic). `--review` refuses files a review snapshot would send
 (tracked and untracked non-ignored) whose names the old review wrapper excluded.
 
 Exit 0 when clean, 1 when refused (each reason on stderr), 2 on a usage error.
@@ -58,6 +60,13 @@ def git(worktree, *args):
 
 def check_gitfile(main, worktree):
     """The root .git must be the plain gitdir file pointing at this worktree's admin dir."""
+    try:
+        return gitfile_reasons(main, worktree)
+    except (OSError, UnicodeDecodeError) as error:
+        return [f".git cannot be checked: {error.__class__.__name__}"]
+
+
+def gitfile_reasons(main, worktree):
     path = worktree / ".git"
     info = os.lstat(path)
     if not stat.S_ISREG(info.st_mode):
@@ -68,7 +77,7 @@ def check_gitfile(main, worktree):
         return [".git is not a single gitdir line"]
     admin = Path(content[len(prefix) : -1].decode(errors="replace"))
     worktrees = (main / ".git" / "worktrees").resolve()
-    if admin.parent != worktrees or not admin.is_dir():
+    if admin.parent != worktrees or admin.name in ("", ".", "..") or not admin.is_dir():
         return [f".git points outside {worktrees}: {admin}"]
     back = (admin / "gitdir").read_text().strip()
     if Path(back) != worktree / ".git":
@@ -76,22 +85,52 @@ def check_gitfile(main, worktree):
     return []
 
 
+def bare_repository(path):
+    """A directory git would take for a bare repository (no `.git` name needed)."""
+    return (path / "HEAD").is_file() and (path / "objects").is_dir() and (path / "refs").is_dir()
+
+
 def walk(worktree):
-    """Refusals for VCS entries, links and special files anywhere in the tree."""
+    """Refusals for VCS entries, bare repositories, links, special and unreadable entries
+    anywhere in the tree. Any error while listing refuses (an unreadable directory could hide
+    a repository)."""
     reasons = []
-    for root, directories, files in os.walk(worktree, followlinks=False):
+
+    def failed(error):
+        reasons.append(
+            f"cannot list {Path(error.filename).relative_to(worktree)}: {error.strerror}"
+        )
+
+    for root, directories, files in os.walk(worktree, onerror=failed, followlinks=False):
         here = Path(root)
+        if here != worktree and bare_repository(here):
+            reasons.append(f"bare repository: {here.relative_to(worktree)}")
         for name in [*directories, *files]:
             path = here / name
             relative = path.relative_to(worktree)
             mode = os.lstat(path).st_mode
-            if name in VCS and relative != Path(".git"):
+            if name.casefold() in VCS and relative != Path(".git"):
                 reasons.append(f"nested VCS entry: {relative}")
             elif stat.S_ISLNK(mode):
                 reasons.append(f"symbolic link: {relative}")
             elif not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
                 reasons.append(f"special file: {relative}")
-        directories[:] = [d for d in directories if d not in VCS]
+            elif mode & stat.S_IRUSR == 0 or (stat.S_ISDIR(mode) and mode & stat.S_IXUSR == 0):
+                reasons.append(f"not readable by its owner: {relative}")
+        directories[:] = [d for d in directories if d.casefold() not in VCS]
+    return reasons
+
+
+def ignore_rule_changes(worktree):
+    """`.gitignore` files are what decides which paths count as ignored: one the agent added
+    or changed could hide a planted file from `--clean` or make it delete real work."""
+    changed = git(worktree, "diff", "--name-only", "-z", "HEAD", "--")
+    untracked = git(worktree, "ls-files", "-z", "--others")
+    reasons = []
+    for entry in filter(None, (changed + b"\0" + untracked).split(b"\0")):
+        relative = Path(os.fsdecode(entry))
+        if relative.name == ".gitignore":
+            reasons.append(f"ignore rules changed by the run: {relative}")
     return reasons
 
 
@@ -142,15 +181,27 @@ def main(argv):
     worktree = args.worktree.absolute()
     if worktree.resolve() != worktree or not worktree.is_dir():
         parser.error("the worktree must be an existing directory given without symbolic links")
-    if not (main_checkout / ".git").is_dir() or worktree == main_checkout:
-        parser.error("--main must be the main checkout and differ from the worktree")
+    if not (main_checkout / ".git").is_dir():
+        parser.error("--main must be the main checkout")
+    if worktree == main_checkout:
+        # The main checkout is the coordinator's own: only what a review would send is checked.
+        if args.clean or not args.review:
+            parser.error("the main checkout takes --review only")
+        reasons = review_refusals(worktree)
+        for reason in reasons:
+            print(f"refused: {reason}", file=sys.stderr)
+        return 1 if reasons else 0
     reasons = check_gitfile(main_checkout, worktree) + walk(worktree)
     if reasons:
         # Git must not run on such a tree.
         for reason in reasons:
             print(f"refused: {reason}", file=sys.stderr)
         return 1
-    reasons = index_entries(worktree)
+    reasons = index_entries(worktree) + ignore_rule_changes(worktree)
+    if reasons:
+        for reason in reasons:
+            print(f"refused: {reason}", file=sys.stderr)
+        return 1
     leftovers = ignored(worktree)
     for path in sorted(set(leftovers)):
         if args.clean:
