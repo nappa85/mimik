@@ -9,6 +9,7 @@ import tomllib
 from pathlib import Path
 
 import llama_runtime
+import mupdf_notices
 
 
 def toolchain(path=Path("rust-toolchain.toml")):
@@ -146,6 +147,10 @@ def main():
     ):
         raise ValueError("Run cargo vendor --locked target/vendor before packaging")
     args.output.mkdir(parents=True, exist_ok=True)
+    crates = [path for path in vendor.iterdir() if path.name in ("mupdf-sys", "mupdf-sys-0.8.0")]
+    if len(crates) != 1:
+        raise ValueError("the pinned mupdf-sys crate must be in dependency sources")
+    mupdf_notices.verify(notices.read_text(encoding="utf-8"), crates[0])
     name = f"mimik-{args.version}-linux-x86_64"
     stage = args.output / name
     stage.mkdir(exist_ok=False)

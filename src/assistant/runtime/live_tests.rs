@@ -1183,7 +1183,9 @@ async fn live_a_model_replaced_by_a_link_to_another_file_is_never_run_by_hakoniw
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: pinned llama-server, sandbox, test model (MIMIK_LIVE_*)"]
 async fn live_no_exit_code_of_the_server_counts_as_a_sandbox_failure() {
-    for code in [110, 111, 112, 113, 114, 115, 116, 120, 125, 126, 127, 137] {
+    for code in [
+        80, 110, 111, 112, 113, 114, 115, 116, 118, 120, 125, 126, 127, 137,
+    ] {
         forged_failure_keeps_level_1(&format!("forge-exit-{code}")).await;
     }
 }

@@ -11,6 +11,32 @@ use std::{
 
 const HELPER: &str = "sources::worker::live_tests::worker_helper";
 const PARENT: &str = "sources::worker::live_tests::parent_helper";
+mod corpus;
+
+fn production_options() -> Options {
+    let mut opts = options("normal");
+    opts.executable = opts.runner.program.clone();
+    opts.argv = vec![
+        "/opt/mimik/mimik".into(),
+        "pdf-worker".into(),
+        "--spec".into(),
+        "/run/spec.json".into(),
+    ];
+    opts.env.retain(|(key, _)| key != "MIMIK_PDF_TEST");
+    opts.wall = None;
+    opts
+}
+
+#[test]
+#[ignore = "host confinement: MIMIK_LIVE_RUNNER opt-in"]
+fn live_availability_probe_succeeds() {
+    if !enabled() {
+        return;
+    }
+    let report = launch::probe_with(&production_options()).unwrap();
+    assert_eq!(report.document.pages, 1);
+    assert_eq!(report.pages.len(), 1);
+}
 
 fn enabled() -> bool {
     std::env::var_os("MIMIK_LIVE_RUNNER").is_some()
@@ -20,6 +46,7 @@ fn options(mode: &str) -> Options {
     Options {
         tmp_bytes: (mode == "fsize").then_some(32 << 20),
         observed_exit: std::sync::Arc::default(),
+        peak_rss_kib: std::sync::Arc::default(),
         runner: RunnerCommand {
             program: std::env::var_os("MIMIK_LIVE_RUNNER").unwrap().into(),
             args: vec!["assistant-runner".into(), "--spec-fd".into(), "3".into()],

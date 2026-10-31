@@ -1,6 +1,32 @@
 //! Host namespace availability and the runner's start report.
 use std::path::Path;
 
+pub(crate) fn shell_word(text: &str) -> String {
+    if !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@%".contains(c))
+    {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+}
+
+pub(crate) fn apparmor_message(exe: &Path) -> String {
+    let command = shell_word(&exe.to_string_lossy());
+    format!(
+        "Ubuntu's AppArmor restriction of unprivileged user namespaces may be why Mimik cannot create the private sandbox of the model server. An administrator can allow it once for this program: run `{command} assistant-apparmor-profile > mimik.apparmor && sudo install -m 0644 mimik.apparmor /etc/apparmor.d/mimik && sudo apparmor_parser -r /etc/apparmor.d/mimik`, then press Restart. The profile only gives this one program that permission; it does not confine or unconfine anything else."
+    )
+}
+
+pub(crate) fn remedy(cause: Cause, exe: &Path) -> String {
+    match cause {
+        Cause::AppArmor => apparmor_message(exe),
+        Cause::UsernsClone => "kernel.unprivileged_userns_clone = 0 may be why: it forbids the private sandbox of the model server. An administrator can allow it with `sudo sysctl kernel.unprivileged_userns_clone=1` (and keep it in a file under /etc/sysctl.d), then press Restart.".to_owned(),
+    }
+}
+
 /// Why the sandbox cannot be used, shown on the assistant page.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Unusable {

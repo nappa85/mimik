@@ -1,5 +1,7 @@
 //! Confined PDF worker operations and untrusted-output validation.
+mod availability;
 mod launch;
+pub use availability::{Availability, availability};
 #[cfg(test)]
 mod live_tests;
 pub use launch::{Cancel, Reason, inspect, inspect_cancellable, render};

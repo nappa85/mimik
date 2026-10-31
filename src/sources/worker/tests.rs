@@ -314,7 +314,7 @@ fn reported_version_matches_bundled_header() {
     );
 }
 
-fn fixture(rotate: i32, crop: [i32; 4], unit: f32, inherited: bool) -> Vec<u8> {
+pub(super) fn fixture(rotate: i32, crop: [i32; 4], unit: f32, inherited: bool) -> Vec<u8> {
     let mut doc = Document::with_version("1.7");
     let pages = doc.new_object_id();
     let font =

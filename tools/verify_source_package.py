@@ -17,6 +17,8 @@ REQUIRED = {
     "src/lib.rs",
     "schemas/llama-runtime-v1.json",
     "tools/llama_runtime.py",
+    "tools/mupdf_notices.py",
+    "tools/test_mupdf_notices.py",
     "examples/fake_llama_server.rs",
     "templates/base.html",
     "assets/htmx.min.js",

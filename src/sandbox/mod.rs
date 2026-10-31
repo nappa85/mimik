@@ -1408,6 +1408,14 @@ mod run {
         }
 
         #[test]
+        fn hakoniwa_1_8_real_sys_error_format_maps_to_touch() {
+            // runc/sys.rs map_err!: stringify!(fn), Debug(args), Display(nix::Errno).
+            let reason = "touch(\"usr/lib/ld-linux-x86-64.so.2\") => EROFS: Read-only file system";
+            assert_eq!(super::super::setup_failure_code(reason), 83);
+            assert_eq!(super::super::setup_failure_step(83), Some("touch"));
+        }
+
+        #[test]
         fn failed_close_range_without_proc_refuses_descriptor_cleanup() {
             let reason = close_above_with(i32::MAX - 1, false, |_| {
                 Err(std::io::Error::from_raw_os_error(libc::ENOSYS))

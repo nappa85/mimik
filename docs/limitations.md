@@ -5,6 +5,21 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 
 ## PDF source uploads
 
+- **SRC-FUZZ** [testing, TODO follow-up] No cargo-fuzz runs yet. Add containerized fuzzing
+  of the record parser and sandboxed MuPDF entry points; the generated hostile corpus is
+  deterministic coverage, not fuzzing. Watch MuPDF's C security advisories at each release;
+  cargo audit does not cover the bundled C libraries.
+- **SRC-FONTS** [rendering] Missing embedded fonts are substituted using the compiled base14
+  fonts and reported in bounded page diagnostics; rendering may differ from the publisher's
+  fonts. Only owner-source comparison can establish visual fidelity.
+- **SRC-PLATFORMS** [upload] macOS and Windows have no PDF upload worker; Linux confinement
+  must pass the real worker probe, with no unconfined fallback.
+- **HAKO-REASONS** [sandbox diagnostics] llama-server setup failures now carry fixed codes
+  80–105 (Hakoniwa setup steps) and 118–119 (marker-descriptor and stdin), instead of the
+  former generic 125. Unknown Hakoniwa formats still use 125. Stderr no longer carries
+  Hakoniwa's raw reason, so user-specific paths and syscall arguments are unavailable;
+  the fixed setup-step classification and namespace/AppArmor remedies remain available.
+
 - **SRC-TYPE3** [diagnostics] The font diagnostic skips Type3 fonts and does not scan their
   glyph resources. Substituted fonts used there are not reported; extend the bounded scan
   with synthetic fixtures if this diagnostic coverage is required.

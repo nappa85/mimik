@@ -5,6 +5,21 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Synthetic PDF worker corpus and memory (2026-10-31)
+
+Coordinator host confinement run: 20/20 worker checks (17 live checks, two re-exec helpers,
+one generator check), including 24 hostile and six valid difficult generated cases, in
+72 seconds. The llama live suite passed 49/49. The valid set includes all 300 text pages,
+a 3000 × 4000 full-page image, 256 font objects and inherited rotations 90/180/270.
+
+Peak RSS from wait4 on the reaped runner and its waited descendants is a conservative
+worker upper bound, not a dedicated MuPDF allocator measurement. The largest observed
+value was 50,448 KiB (about 2.4% of RLIMIT_AS 2,097,152 KiB), below the 75% acceptance
+threshold of 1,572,864 KiB. Reported case values: text-300 render 37,824 KiB,
+xref-repair 44,920 KiB, full-image 38,088 KiB. The input Vec and MuPDF's copied buffer are
+both present in these runs. This supports the default MuPDF store under this synthetic
+profile; it does not replace the two owner-local PDF measurements or fuzzing follow-up.
+
 ## Extractor screen on MÖRK BORG IT pages 22–39 (2026-10-29/30)
 
 `mork-borg-core-it-2025`, PDF pages 22–39 (printed 18–35: creation, weapons, armour,

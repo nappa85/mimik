@@ -12,6 +12,14 @@ at a time on a dedicated record-reader thread; the callback must return promptly
 can retain delivered pages after a later batch failure. `Cancel` is clonable and permanent.
 These internal APIs are separate from the CLI import and are not browser upload routes.
 
+`availability()` exposes a process-wide `Available` or `Unavailable { reason, how_to_fix }`.
+The first inspect/render call lazily runs a fixed synthetic PDF through the confined inspect
+operation and retains the result. This keeps the probe within the worker API rather than
+coupling it to assistant startup; callers on async runtimes must use a blocking task for it
+as for the other worker calls. Namespace/AppArmor remediation text is shared with the
+assistant in `sandbox::host`; failure never selects an unconfined parser. Restart Mimik
+after fixing the host setting to repeat the probe.
+
 The shared long-lived spawner starts `assistant-runner`, whose `PdfWorker` operation builds
 the Hakoniwa sandbox and executes `mimik pdf-worker --spec /run/spec.json`. The profile binds
 the executable and PDF read-only with device/inode checks, shared system-library discovery,
@@ -40,10 +48,12 @@ statuses 20–25; exit-only document reasons are accepted only before any output
 Local reader/callback errors retain their reason. Only the parent's deadline may establish
 `took too long`.
 
-The no-proc profile and adversarial operations have opt-in host confinement tests in
-`sources::worker::live_tests`; host verification and independent change-set review remain
-required before this worker slice is accepted. The address-space budget is provisional
-until the source-upload corpus/measurement gate.
+The no-proc profile, generated hostile/valid corpus and peak-RSS acceptance check have
+opt-in host confinement tests in `sources::worker::live_tests`. RSS comes from wait4 on
+the reaped runner, including the maximum of its waited descendants: a conservative upper
+bound on worker RSS, checked below 75% of the 2 GiB address-space limit. Both the input Vec
+and MuPDF's input buffer are present during the measurement. The default MuPDF store is
+used because mupdf 0.8.0 exposes no store-size setter.
 
 ## Import (`mimik import-source --bundle DIR --pdf FILE`)
 

@@ -61,6 +61,7 @@ pub fn inspect(path: &Path) -> Result<Inspection, Reason> {
 /// # Errors
 /// As for [`inspect`], or cancellation.
 pub fn inspect_cancellable(path: &Path, cancel: &Cancel) -> Result<Inspection, Reason> {
+    super::availability::require()?;
     let spec = spec(records::Operation::Inspect, vec![]);
     execute(path, &spec, cancel, &Options::production()?, |pipe| {
         records::read_inspection_tracked(pipe)
@@ -78,6 +79,7 @@ pub fn render(
     cancel: &Cancel,
     mut page: impl FnMut(RenderedPage) -> Result<(), Error> + Send,
 ) -> Result<(), Reason> {
+    super::availability::require()?;
     // Validate geometry and request cardinality before spawning anything.
     records::RenderReader::new(std::io::empty(), pages.clone())?;
     let spec = spec(
@@ -113,6 +115,8 @@ pub(super) struct Options {
     pub tmp_bytes: Option<u64>,
     #[cfg(test)]
     pub observed_exit: Arc<std::sync::atomic::AtomicI32>,
+    #[cfg(test)]
+    pub peak_rss_kib: Arc<std::sync::atomic::AtomicU64>,
     pub runner: RunnerCommand,
     pub executable: PathBuf,
     pub argv: Vec<String>,
@@ -128,6 +132,8 @@ impl Options {
             tmp_bytes: None,
             #[cfg(test)]
             observed_exit: Arc::default(),
+            #[cfg(test)]
+            peak_rss_kib: Arc::default(),
             executable: runner.program.clone(),
             runner,
             argv: vec![
@@ -148,6 +154,30 @@ impl Options {
 fn unavailable(reason: &str) -> Reason {
     eprintln!("upload unavailable: {reason}");
     Reason::Unavailable(reason.into())
+}
+
+pub(super) fn probe() -> Result<Inspection, Reason> {
+    probe_with(&Options::production()?)
+}
+
+pub(super) fn probe_with(options: &Options) -> Result<Inspection, Reason> {
+    use std::io::Write;
+    let root = Root::new().map_err(|_| unavailable("probe directory"))?;
+    let path = root.0.join("probe.pdf");
+    File::options()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut file| file.write_all(super::availability::PDF))
+        .map_err(|_| unavailable("probe file"))?;
+    execute(
+        &path,
+        &spec(records::Operation::Inspect, vec![]),
+        &Cancel::default(),
+        options,
+        records::read_inspection_tracked,
+    )
 }
 
 struct Root(PathBuf);
@@ -217,8 +247,21 @@ struct Tree {
     child: std::process::Child,
     pins: Vec<Watched>,
     unverified: Option<Watched>,
+    settled: bool,
+    reaped: Option<std::process::ExitStatus>,
+    peak_rss_kib: u64,
 }
 impl Tree {
+    fn new(child: std::process::Child, pin: Watched) -> Self {
+        Self {
+            child,
+            pins: vec![pin],
+            unverified: None,
+            settled: false,
+            reaped: None,
+            peak_rss_kib: 0,
+        }
+    }
     fn kill(&self) {
         // Signal inner, reaper and runner, in that order. Never leave the runner waiting
         // on an acknowledgement or on a child whose report has not arrived yet.
@@ -230,10 +273,11 @@ impl Tree {
         self.settle_within(Duration::from_secs(5))
     }
     fn settle_within(&mut self, within: Duration) -> std::io::Result<std::process::ExitStatus> {
+        self.settled = true;
         self.kill();
         let deadline = Instant::now() + within;
         loop {
-            let status = self.child.try_wait()?;
+            let status = self.reap()?;
             if let Some(status) = status
                 && self.pins.iter().all(|pin| !pin.alive())
                 && !self.unverified.as_ref().is_some_and(Watched::alive)
@@ -249,11 +293,43 @@ impl Tree {
             std::thread::sleep(Duration::from_millis(2));
         }
     }
+
+    fn reap(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        use std::os::unix::process::ExitStatusExt;
+        if self.reaped.is_none() {
+            let mut status = 0;
+            let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+            // SAFETY: wait4 writes status/rusage only on successful reaping of our child.
+            // This Tree exclusively owns the Child and never calls Child::wait/try_wait.
+            let result = unsafe {
+                libc::wait4(
+                    i32::try_from(self.child.id()).expect("PID fits i32"),
+                    &raw mut status,
+                    libc::WNOHANG,
+                    usage.as_mut_ptr(),
+                )
+            };
+            if result < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            } else if result > 0 {
+                // SAFETY: successful wait4 initialized usage.
+                self.peak_rss_kib =
+                    u64::try_from(unsafe { usage.assume_init() }.ru_maxrss).unwrap_or(u64::MAX);
+                self.reaped = Some(std::process::ExitStatus::from_raw(status));
+            }
+        }
+        Ok(self.reaped)
+    }
 }
 impl Drop for Tree {
     fn drop(&mut self) {
         self.kill();
-        let _ = self.settle();
+        if !self.settled {
+            let _ = self.settle();
+        }
     }
 }
 
@@ -478,11 +554,7 @@ pub(super) fn execute<T: Send>(
     };
     let stdout = child.stdout.take().expect("runner stdout pipe");
     let stderr = child.stderr.take().expect("runner stderr pipe");
-    let tree = Tree {
-        child,
-        pins: vec![runner_pin],
-        unverified: None,
-    };
+    let tree = Tree::new(child, runner_pin);
     let stop = Arc::new(AtomicBool::new(false));
     let stdout = Output {
         pipe: Interruptible::new(stdout, &stop),
@@ -501,7 +573,11 @@ pub(super) fn execute<T: Send>(
         });
         let abort_ref = &abort;
         let reader = scope.spawn(move || read_output(stdout, read, abort_ref));
-        let (exit, parent) = watch(tree, &rx, ack, started + wall, cancel, &abort);
+        let (exit, parent, peak_rss_kib) = watch(tree, &rx, ack, started + wall, cancel, &abort);
+        #[cfg(test)]
+        options.peak_rss_kib.store(peak_rss_kib, Ordering::Release);
+        #[cfg(not(test))]
+        let _ = peak_rss_kib;
         if matches!(&parent, Some(Reason::Unavailable(reason)) if reason == "process cleanup timed out")
         {
             stop.store(true, Ordering::Release);
@@ -566,7 +642,7 @@ fn watch(
     deadline: Instant,
     cancel: &Cancel,
     abort: &AtomicBool,
-) -> (Option<i32>, Option<Reason>) {
+) -> (Option<i32>, Option<Reason>, u64) {
     let mut ack = Some(ack);
     let mut parent = None;
     let mut aborted_at = None;
@@ -617,7 +693,7 @@ fn watch(
         parent = Some(unavailable("process cleanup timed out"));
         None
     };
-    (exit, parent)
+    (exit, parent, tree.peak_rss_kib)
 }
 
 pub(super) fn reconcile(
@@ -710,6 +786,9 @@ mod tests {
             child,
             pins: pins.into(),
             unverified: None,
+            settled: false,
+            reaped: None,
+            peak_rss_kib: 0,
         };
         let start = Instant::now();
         let result = tree.settle();
@@ -731,13 +810,23 @@ mod tests {
             child,
             pins: vec![],
             unverified,
+            settled: false,
+            reaped: None,
+            peak_rss_kib: 0,
         };
         let error = tree.settle_within(Duration::from_millis(20)).unwrap_err();
         let alive = other.try_wait().unwrap().is_none();
+        let start = Instant::now();
+        drop(tree);
+        let drop_elapsed = start.elapsed();
         other.kill().unwrap();
         other.wait().unwrap();
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(alive);
+        assert!(
+            drop_elapsed < Duration::from_millis(100),
+            "drop settled twice: {drop_elapsed:?}"
+        );
     }
     #[test]
     fn parent_abort_before_marker_keeps_its_reason() {
@@ -793,6 +882,9 @@ mod tests {
             child,
             pins: vec![pin],
             unverified: None,
+            settled: false,
+            reaped: None,
+            peak_rss_kib: 0,
         };
         let started = Instant::now();
         tree.settle().unwrap();
