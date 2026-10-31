@@ -331,12 +331,12 @@ jobs:
             --data-dir target/probe-data-live
           target/confinement-tests --test-threads=2 --include-ignored \
             sandbox::seccomp:: assistant::runtime::endpoint:: \
-            assistant::runtime::runner:: assistant::runtime::launch::live_tests:: \
+            sandbox::runner:: sources::worker::live_tests:: assistant::runtime::launch::live_tests:: \
             --skip live_gpu_ \
             2>&1 | tee target/confinement.log
           ran=$(grep -oE '^test result: ok\. [0-9]+ passed; 0 failed; 0 ignored' target/confinement.log | grep -oE '[0-9]+' | head -n 1)
-          if [ "${ran:-0}" -lt 40 ]; then
-            echo "only ${ran:-0} confinement tests ran; expected at least 40"
+          if [ "${ran:-0}" -lt 54 ]; then
+            echo "only ${ran:-0} confinement tests ran; expected at least 54"
             exit 1
           fi
           # On a runner with Landlock the kernel-level check of the rule semantics (`hako_tests`,

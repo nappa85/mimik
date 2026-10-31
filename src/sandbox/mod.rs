@@ -20,9 +20,12 @@
 //!   other descriptor, just before the exec: nothing the program does can write the marker.
 //!   Failures before the marker (a mount, the identity check, capabilities, seccomp) are
 //!   sandbox failures; failures after it (the exec itself) are the server's.
+pub(crate) mod drain;
 pub(crate) mod host;
 pub(crate) mod process;
+pub(crate) mod runner;
 pub(crate) mod seccomp;
+pub(crate) mod system;
 #[cfg(test)]
 pub(crate) mod test_helper;
 use serde::{Deserialize, Serialize};
@@ -60,6 +63,8 @@ impl std::fmt::Debug for Secret {
 pub(crate) enum Access {
     /// Read-only, `nosuid`, `nodev`.
     ReadOnly,
+    /// Read-only device node, nosuid (nodev would prevent even read-only opens).
+    ReadOnlyDevice,
     /// Read-write, `nosuid`, `nodev` (the generation's socket directory).
     ReadWrite,
     /// A device node, read-write, `nosuid` only.
@@ -289,6 +294,8 @@ pub(crate) enum Grant {
     /// Read, write and create (regular files, directories, sockets, fifos, links) and
     /// remove, never execute.
     ReadWrite,
+    /// Only regular-file scratch operations; no directories, sockets, fifos or links.
+    Scratch,
     /// A device node: read, write and ioctl.
     Device,
 }
@@ -298,7 +305,12 @@ impl Grant {
     pub(crate) fn executes(self) -> bool {
         match self {
             Self::ReadExec => true,
-            Self::ReadFile | Self::Read | Self::List | Self::ReadWrite | Self::Device => false,
+            Self::ReadFile
+            | Self::Read
+            | Self::List
+            | Self::ReadWrite
+            | Self::Scratch
+            | Self::Device => false,
         }
     }
 }
@@ -525,6 +537,7 @@ mod run {
     pub(crate) fn options(bind: &Bind) -> MountOptions {
         let base = MountOptions::BIND | MountOptions::NOSUID;
         let mut options = match bind.access {
+            Access::ReadOnlyDevice => base | MountOptions::RDONLY,
             Access::ReadOnly => base | MountOptions::NODEV | MountOptions::RDONLY,
             Access::ReadWrite => base | MountOptions::NODEV,
             Access::Device => base,
@@ -558,6 +571,9 @@ mod run {
             Grant::ReadWrite => make_bitflags!(AccessFs::{
                 ReadFile | ReadDir | WriteFile | Truncate | RemoveFile | RemoveDir | MakeReg
                     | MakeDir | MakeSock | MakeFifo | MakeSym
+            }),
+            Grant::Scratch => make_bitflags!(AccessFs::{
+                MakeReg | WriteFile | ReadFile | Truncate | RemoveFile | ReadDir
             }),
             Grant::Device => make_bitflags!(AccessFs::{ReadFile | WriteFile | Truncate | IoctlDev}),
         }

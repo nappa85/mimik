@@ -283,6 +283,7 @@ fn valid() -> Vec<u8> {
 }
 fn split(wire: Vec<u8>) -> Vec<(Header, Vec<u8>)> {
     let mut frames = Frames {
+        terminal: None,
         input: Cursor::new(wire),
         remaining: render_budget(1),
     };
@@ -467,12 +468,14 @@ fn maximum_render_transport_and_one_byte_more() {
             ),
         ] {
             let mut frames = Frames {
+                terminal: None,
                 input: synthetic(header, total),
                 remaining: total,
             };
             assert_eq!(frames.read().unwrap().1.len(), header.length());
             assert_eq!(frames.remaining, 0);
             let mut frames = Frames {
+                terminal: None,
                 input: synthetic(header, total),
                 remaining: total - 1,
             };
@@ -496,6 +499,7 @@ fn maximum_render_transport_and_one_byte_more() {
     done_header.extend_from_slice(&done);
     sequence.0.push_back(Box::new(Cursor::new(done_header)));
     let mut frames = Frames {
+        terminal: None,
         input: sequence,
         remaining: render_budget(8),
     };
@@ -524,6 +528,7 @@ fn maximum_render_transport_and_one_byte_more() {
     };
     assert!(
         Frames {
+            terminal: None,
             input: synthetic(header, TEXT_LIMIT + 1 + HEADER_LIMIT),
             remaining: render_budget(1)
         }
@@ -573,6 +578,7 @@ fn maximum_inspect_transport_and_one_byte_more() {
     assert_eq!(read_inspection(sequence).unwrap().pages.len(), 2000);
     assert!(
         Frames {
+            terminal: None,
             input: synthetic(header, 2049),
             remaining: INSPECT_LIMIT
         }

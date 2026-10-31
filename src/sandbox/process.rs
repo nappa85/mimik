@@ -1,6 +1,56 @@
 //! Process/descriptor observations shared by sandbox enforcement and its callers.
 use std::os::fd::OwnedFd;
 
+/// A process held by a pidfd, never signalled through a reusable numeric PID.
+#[derive(Debug)]
+pub(crate) struct Watched {
+    pub pid: i32,
+    pub pidfd: OwnedFd,
+}
+
+impl Watched {
+    pub(crate) fn open(pid: i32) -> std::io::Result<Self> {
+        let raw =
+            rustix::process::Pid::from_raw(pid).ok_or_else(|| std::io::Error::other("PID 0"))?;
+        let pidfd = rustix::process::pidfd_open(raw, rustix::process::PidfdFlags::empty())?;
+        Ok(Self { pid, pidfd })
+    }
+    pub(crate) fn alive(&self) -> bool {
+        !exited(&self.pidfd)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum Inner {
+    Ours(Watched),
+    Gone,
+    Unverified(Watched),
+}
+
+pub(crate) fn open_inner(pid: i32, start: u64) -> std::io::Result<Inner> {
+    open_inner_with(pid, start, |pid| stat_of(pid).map(|(_, start)| start))
+}
+
+pub(crate) fn open_inner_with(
+    pid: i32,
+    start: u64,
+    start_of: impl Fn(i32) -> std::io::Result<u64>,
+) -> std::io::Result<Inner> {
+    let gone =
+        |error: &std::io::Error| matches!(error.raw_os_error(), Some(libc::ESRCH | libc::ENOENT));
+    let watched = match Watched::open(pid) {
+        Ok(watched) => watched,
+        Err(error) if gone(&error) => return Ok(Inner::Gone),
+        Err(error) => return Err(error),
+    };
+    match start_of(pid) {
+        Ok(found) if found == start => Ok(Inner::Ours(watched)),
+        Ok(_) => Ok(Inner::Gone),
+        Err(error) if gone(&error) => Ok(Inner::Gone),
+        Err(_) => Ok(Inner::Unverified(watched)),
+    }
+}
+
 /// The open descriptors, from `/proc/self/fd`.
 pub(crate) fn fd_listing() -> std::io::Result<Vec<i32>> {
     descriptors(

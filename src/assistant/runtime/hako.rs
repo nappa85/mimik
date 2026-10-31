@@ -3,7 +3,7 @@ use super::sandbox::{self, GpuBinds, Item};
 #[cfg(test)]
 pub(crate) use crate::sandbox::apply_landlock;
 use crate::sandbox::{Access, Bind, RunFile, Tmpfs, TmpfsFlags, masks, parents, text};
-pub(crate) use crate::sandbox::{Grant, Identity, Landlock, Plan, Rule, Secret, run};
+pub(crate) use crate::sandbox::{Grant, Identity, Landlock, Plan, Rule, Secret};
 use std::path::{Path, PathBuf};
 
 /// A runtime file to bind: its name under [`sandbox::RUNTIME`], the host path it was verified
@@ -183,6 +183,7 @@ fn profile_rules(plan: &Plan) -> Vec<Rule> {
     for bind in &plan.binds {
         let program = plan.argv.first().is_some_and(|argv0| *argv0 == bind.target);
         let grant = match bind.access {
+            Access::ReadOnlyDevice => Grant::ReadFile,
             Access::ReadOnly if bind.target == sandbox::MODEL => Grant::ReadFile,
             Access::ReadOnly
                 if program || sandbox::LIBRARY_DIRS.contains(&bind.target.as_str()) =>

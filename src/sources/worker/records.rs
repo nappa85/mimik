@@ -314,6 +314,7 @@ pub fn render_budget(pages: usize) -> usize {
 struct Frames<R> {
     input: R,
     remaining: usize,
+    terminal: Option<Error>,
 }
 impl<R: Read> Frames<R> {
     fn read(&mut self) -> Result<(Header, Vec<u8>), Error> {
@@ -352,6 +353,7 @@ impl<R: Read> Frames<R> {
         if matches!(header, Header::Error { .. }) {
             let reason: Error = parse(&bytes)?;
             self.eof()?;
+            self.terminal = Some(reason);
             return Err(if reason == Error::Timeout {
                 Error::Unreadable
             } else {
@@ -385,10 +387,22 @@ impl<R: Read> Frames<R> {
 /// # Errors
 /// Refuses malformed, incomplete, out-of-order or over-budget output.
 pub fn read_inspection<R: Read>(input: R) -> Result<Inspection, Error> {
+    read_inspection_tracked(input).0
+}
+
+pub(super) fn read_inspection_tracked<R: Read>(
+    input: R,
+) -> (Result<Inspection, Error>, Option<Error>) {
     let mut frames = Frames {
         input: BufReader::new(input),
         remaining: INSPECT_LIMIT,
+        terminal: None,
     };
+    let result = inspection_frames(&mut frames);
+    (result, frames.terminal)
+}
+
+fn inspection_frames<R: Read>(frames: &mut Frames<R>) -> Result<Inspection, Error> {
     let (header, bytes) = frames.read()?;
     if !matches!(header, Header::Document { .. }) {
         return Err(Error::Unreadable);
@@ -453,6 +467,7 @@ impl<R: Read> RenderReader<R> {
             frames: Frames {
                 input: BufReader::new(input),
                 remaining: render_budget(pages.len()),
+                terminal: None,
             },
             pages,
             index: 0,
@@ -471,6 +486,9 @@ impl<R: Read> RenderReader<R> {
             self.failed = false;
         }
         result
+    }
+    pub(super) fn terminal_error(&self) -> Option<Error> {
+        self.frames.terminal
     }
     fn read_page(&mut self) -> Result<Option<RenderedPage>, Error> {
         let Some(page) = self.pages.get(self.index) else {

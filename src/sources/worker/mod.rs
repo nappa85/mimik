@@ -1,13 +1,17 @@
-//! Internal PDF worker operations and untrusted-output validation. No sandbox launch here.
+//! Confined PDF worker operations and untrusted-output validation.
+mod launch;
+#[cfg(test)]
+mod live_tests;
+pub use launch::{Cancel, Reason, inspect, inspect_cancellable, render};
 mod entry;
+mod filter;
 mod geometry;
 mod operations;
+mod profile;
 pub mod records;
 pub use entry::{RenderSettings, Spec, run_entry};
 pub use geometry::pixel_size;
-#[cfg(test)]
-use operations::render;
-use operations::{Input, inspect};
+use operations::Input;
 pub use records::{Inspection, Page, RenderedPage};
 
 /// Fixed, non-sensitive reasons shared with the parent.

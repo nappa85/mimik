@@ -1,5 +1,5 @@
 use super::{
-    Error, Input, inspect, operations,
+    Error, Input, operations,
     records::{Operation, RecordWriter},
 };
 use serde::{Deserialize, Serialize};
@@ -68,12 +68,22 @@ pub fn run_entry(spec_path: &Path) -> Result<(), Error> {
         if bytes.len() > 128 * 1024 * 1024 {
             return Err(Error::TooLarge);
         }
-        // Slice 2b installs its second filter here: /in is closed, MuPDF not yet called.
+        // /in is closed and neither the context nor any MuPDF parser exists yet.
+        if super::filter::install().is_err() {
+            std::process::exit(super::filter::INSTALL_FAILED);
+        }
+        #[cfg(test)]
+        super::live_tests::misbehave()?;
         match spec.operation {
-            Operation::Inspect => writer.inspection(&inspect(Input::Bytes(&bytes))?),
-            Operation::Render => {
-                operations::render_each(Input::Bytes(&bytes), &spec.pages, |p| writer.rendered(&p))
-            }
+            Operation::Inspect => writer.inspection(&operations::inspect(Input::Bytes(&bytes))?),
+            Operation::Render => operations::render_each(Input::Bytes(&bytes), &spec.pages, |p| {
+                writer.rendered(&p)?;
+                #[cfg(test)]
+                if std::env::var("MIMIK_PDF_TEST").as_deref() == Ok("mid-render") {
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                }
+                Ok(())
+            }),
         }
     })();
     complete(writer, result)

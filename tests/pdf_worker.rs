@@ -6,6 +6,7 @@ use mimik::sources::worker::{
 };
 
 fn run_pdf(pdf: &mut Document, operation: Operation) -> std::process::Output {
+    rustix::thread::set_no_new_privs(true).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("synthetic.pdf");
     pdf.save(&input).unwrap();
@@ -112,6 +113,9 @@ fn preframing_errors_have_distinct_statuses() {
 
 #[test]
 fn built_worker_inspects_and_renders_over_stdout() {
+    // This protocol-only test runs without namespaces. Supply the inherited prerequisite
+    // normally set by Hakoniwa; the worker still installs its real second filter.
+    rustix::thread::set_no_new_privs(true).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("synthetic.pdf");
     let mut pdf = Document::with_version("1.7");

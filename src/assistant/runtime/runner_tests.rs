@@ -1,11 +1,11 @@
 //! The runner on the TCP level's exec path (level 1 runs the Hakoniwa sandbox and is a live test): the test
 //! binary plays the runner and the executed server.
-use super::super::test_helper;
 use super::*;
+use crate::sandbox::test_helper;
 use serde_json::{Value, json};
 use std::os::fd::AsFd;
 
-const HELPER: &str = "assistant::runtime::runner::tests::helper";
+const HELPER: &str = "sandbox::runner::tests::helper";
 
 fn helper_args() -> Vec<String> {
     [
@@ -429,7 +429,7 @@ fn a_spec_whose_secret_comes_before_the_overflowing_field_is_refused() {
 }
 
 fn llama_model_source_round_trips(models_dir: &str) {
-    use super::super::hako::{File, Inputs, Secret, plan};
+    use crate::assistant::runtime::hako::{File, Inputs, Secret, plan};
     use std::io::{Seek, Write};
     use std::os::fd::IntoRawFd;
 
