@@ -522,10 +522,15 @@ fn run_case(name: &str, valid: bool) {
 fn check_rss(name: &str, operation: &str, opts: &Options) {
     use std::sync::atomic::Ordering;
     let rss = opts.peak_rss_kib.load(std::sync::atomic::Ordering::Acquire);
+    let worker = opts.worker_peak_rss_kib.load(Ordering::Acquire);
     let killed = opts.parent_killed.load(Ordering::Acquire);
     let exit = opts.observed_exit.load(Ordering::Acquire);
     println!(
-        "corpus {name} {operation}: exit={exit}, parent_killed={killed}, wait4 RSS={rss} KiB (worker upper bound ONLY for natural exits; RLIMIT_AS=2097152 KiB; Vec and MuPDF buffer both present)"
+        "corpus {name} {operation}: exit={exit}, parent_killed={killed}, wait4 RSS={rss} KiB (worker upper bound only for natural exits), pinned worker VmHWM={worker} KiB (sampled before parent kill; RLIMIT_AS=2097152 KiB; Vec and MuPDF buffer both present)"
+    );
+    assert!(
+        rss_within_bound(opts),
+        "{name}: RSS must be below 75% of RLIMIT_AS"
     );
     if killed {
         return;
@@ -534,10 +539,15 @@ fn check_rss(name: &str, operation: &str, opts: &Options) {
         (0..128).contains(&exit),
         "{name} {operation}: unexpected signal death/crash {exit}"
     );
-    assert!(
-        rss > 0 && rss < 1_572_864,
-        "{name}: RSS must be below 75% of RLIMIT_AS"
-    );
+}
+
+#[test]
+#[should_panic(expected = "RSS must be below 75% of RLIMIT_AS")]
+fn parent_killed_run_cannot_skip_rss_gate() {
+    let opts = Options::production().unwrap();
+    opts.parent_killed
+        .store(true, std::sync::atomic::Ordering::Release);
+    check_rss("missing-killed-worker-measurement", "render", &opts);
 }
 
 #[test]
@@ -556,6 +566,31 @@ fn live_peak_rss_positive_control() {
             .load(std::sync::atomic::Ordering::Acquire)
     );
     assert!(opts.peak_rss_kib.load(std::sync::atomic::Ordering::Acquire) >= 256 * 1024);
+}
+
+#[test]
+#[ignore = "host confinement: MIMIK_LIVE_RUNNER opt-in"]
+fn live_parent_killed_peak_rss_positive_control() {
+    if !enabled() {
+        return;
+    }
+    let (_dir, path) = pdf();
+    let mut opts = options("rss-control-killed");
+    opts.wall = Some(Duration::from_secs(2));
+    assert_eq!(
+        inspection(&path, &opts, &Cancel::default()).unwrap_err(),
+        Error::Timeout.into()
+    );
+    check_rss("256-MiB-killed-positive-control", "inspect", &opts);
+    assert!(
+        opts.parent_killed
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert!(
+        opts.worker_peak_rss_kib
+            .load(std::sync::atomic::Ordering::Acquire)
+            >= 256 * 1024
+    );
 }
 
 #[test]

@@ -60,13 +60,22 @@ exact inspect refusal or render outcome; render-stage fixtures must pass inspect
 deaths fail the corpus, separately from explicitly reported parent kills. RSS comes from
 wait4 on the reaped runner and its waited descendants: a conservative worker upper bound
 only for naturally exiting runs, checked below 75% of the 2 GiB address-space limit. A
-test-only 256 MiB touch control checks this propagation. Parent-killed cases carry no worker
-RSS claim. Both the input Vec and MuPDF's input buffer are present during measurement. The
-default MuPDF store is used because mupdf 0.8.0 exposes no store-size setter. Fresh generator
+test-only 256 MiB touch control checks this propagation. Parent-killed cases instead use
+host `/proc/<inner pid>/status` VmHWM, sampled through the verified worker pin during the
+run and just before killing. The pidfd must be live before and after the read; an absent
+measurement fails the gate. This figure covers execution through the pre-kill sample,
+not the subsequent kill/reap interval. A separate 256 MiB touch-and-wait control tests it;
+both figures are reported independently. Both the input Vec and MuPDF's input buffer are
+present during measurement. The default MuPDF store is used because mupdf 0.8.0 exposes no
+store-size setter. Fresh generator
 subprocesses enforce 64 MiB peak RSS per case, with 8 MiB output and five-second generation
 bounds; full-flush block repetition avoids compressing expanded bombs on the test host.
 The responsiveness test overlaps a confined inspect with a hostile render forced to hit
 its deadline by a test-only post-image wait. HTTP-level responsiveness belongs to slice 3b.
+The ignored `local_pdfs::live_local_pdfs_inspect_and_render_every_page` check uses
+`MIMIK_LIVE_LOCAL_PDFS` (colon-separated paths) and the real `MIMIK_LIVE_RUNNER`. It renders
+every page in batches of eight, keeping text/images only in memory and printing only hashed
+path identifiers, page counts, timings, both peak RSS figures and per-batch outcomes.
 
 ## Import (`mimik import-source --bundle DIR --pdf FILE`)
 

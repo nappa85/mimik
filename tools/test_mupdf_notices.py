@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import tempfile
 import unittest
@@ -5,9 +6,44 @@ from pathlib import Path
 from unittest.mock import patch
 
 import mupdf_notices
+import package_release
 
 
 class MuPdfNoticesTests(unittest.TestCase):
+    def test_crlf_licence_survives_generation_and_release_verification(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            crate = root / "target/vendor/mupdf-sys"
+            crate.mkdir(parents=True)
+            self.fixture(crate)
+            licence = b"Copyright synthetic\r\nPermission granted\r\n"
+            (crate / "mupdf/thirdparty/lcms2/utils/jpgicc/LICENSE_iccjpeg").write_bytes(licence)
+            notices = root / "target/THIRD-PARTY-NOTICES.md"
+            notices.write_bytes(b"cargo-about\r\n")
+            with (
+                patch.object(mupdf_notices, "registry_crate", return_value=crate),
+                patch("sys.argv", ["mupdf_notices", str(notices)]),
+            ):
+                mupdf_notices.main()
+            self.assertIn(licence, notices.read_bytes())
+            self.assertTrue(notices.read_bytes().startswith(b"cargo-about\r\n"))
+            (root / "target/package").mkdir()
+            (root / "target/package/mimik-test.crate").write_bytes(b"synthetic")
+            (root / "target/release").mkdir()
+            (root / "target/release/mimik").write_bytes(b"synthetic")
+            (root / "target/vendor-config.toml").write_text(
+                '[source.vendored-sources]\ndirectory = "target/vendor"\n'
+            )
+            with (
+                contextlib.chdir(root),
+                patch("sys.argv", ["package_release", "--version", "test", "--revision", "test"]),
+                patch.object(
+                    package_release, "stage_llama", side_effect=RuntimeError("staging reached")
+                ),
+                self.assertRaisesRegex(RuntimeError, "staging reached"),
+            ):
+                package_release.main()
+
     def setUp(self):
         self.real_ijg = mupdf_notices.ijg_notice
         self.real_gpl = mupdf_notices.verify_gpl

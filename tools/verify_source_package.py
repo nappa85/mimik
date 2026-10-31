@@ -68,7 +68,7 @@ def verify_members(names):
     if len(names) != len(set(names)):
         raise ValueError("Duplicate source archive member")
     manifest = tomllib.loads(
-        (Path(__file__).resolve().parents[1] / "Cargo.toml").read_text(encoding="utf-8")
+        (Path(__file__).resolve().parents[1] / "Cargo.toml").read_bytes().decode("utf-8")
     )
     policy = PathSpec.from_lines("gitwildmatch", manifest["package"]["include"])
     paths = [PurePosixPath(name) for name in names]

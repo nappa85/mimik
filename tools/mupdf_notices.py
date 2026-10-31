@@ -84,6 +84,8 @@ def ijg_notice(crate, licenses=LICENSES):
         "MuPDF changed these files relative to the pinned upstream jpeg-9f release: "
         + ", ".join(sorted(changed))
         + ". The other 81 shipped files match upstream.\n\n"
+        "The vendored tree omits upstream documentation (including the README supplied "
+        "below) and build/configuration files.\n\n"
         "Upstream: https://www.ijg.org/files/jpegsrc.v9f.tar.gz; SHA-256 "
         "04705c110cb2469caa79fb71fba3d7bf834914706e9641a4589485c1f832565b.\n\n"
         f"licenses/ijg-libjpeg-9f-README; SHA-256 {IJG_README_SHA256}\n\n"
@@ -165,7 +167,7 @@ def notice(crate):
         "mupdf/thirdparty/libjpeg/jpeglib.h",
         "mupdf/thirdparty/leptonica/src/allheaders.h",
     ):
-        text = (crate / relative).read_text(encoding="utf-8")
+        text = (crate / relative).read_bytes().decode("utf-8")
         start = text.find("/*")
         end = text.find("*/", start)
         if start < 0 or end < 0 or "Copyright" not in text[start:end]:
@@ -191,8 +193,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("notices", type=Path)
     args = parser.parse_args()
-    text = args.notices.read_text(encoding="utf-8") + notice(registry_crate())
-    args.notices.write_text(text, encoding="utf-8")
+    text = args.notices.read_bytes() + notice(registry_crate()).encode("utf-8")
+    args.notices.write_bytes(text)
 
 
 if __name__ == "__main__":

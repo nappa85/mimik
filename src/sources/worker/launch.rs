@@ -119,6 +119,8 @@ pub(super) struct Options {
     #[cfg(test)]
     pub peak_rss_kib: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(test)]
+    pub worker_peak_rss_kib: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(test)]
     pub parent_killed: Arc<AtomicBool>,
     pub runner: RunnerCommand,
     pub executable: PathBuf,
@@ -128,15 +130,29 @@ pub(super) struct Options {
     pub cpu: Option<u64>,
 }
 impl Options {
-    #[cfg(test)]
-    fn observe(&self, exit: Option<i32>, peak_rss_kib: u64, parent_killed: bool) {
-        self.peak_rss_kib.store(peak_rss_kib, Ordering::Release);
-        self.parent_killed.store(parent_killed, Ordering::Release);
-        self.observed_exit
-            .store(exit.unwrap_or(-1), Ordering::Release);
+    #[cfg(not(test))]
+    fn observe(&self, outcome: &Outcome) {
+        let _ = (
+            self,
+            outcome.wait4_rss_kib,
+            outcome.worker_rss_kib,
+            outcome.parent_killed,
+        );
     }
 
-    fn production() -> Result<Self, Reason> {
+    #[cfg(test)]
+    fn observe(&self, outcome: &Outcome) {
+        self.peak_rss_kib
+            .store(outcome.wait4_rss_kib, Ordering::Release);
+        self.worker_peak_rss_kib
+            .store(outcome.worker_rss_kib, Ordering::Release);
+        self.parent_killed
+            .store(outcome.parent_killed, Ordering::Release);
+        self.observed_exit
+            .store(outcome.exit.unwrap_or(-1), Ordering::Release);
+    }
+
+    pub(super) fn production() -> Result<Self, Reason> {
         let runner = RunnerCommand::mimik().map_err(|_| unavailable("runner executable"))?;
         Ok(Self {
             #[cfg(test)]
@@ -145,6 +161,8 @@ impl Options {
             observed_exit: Arc::default(),
             #[cfg(test)]
             peak_rss_kib: Arc::default(),
+            #[cfg(test)]
+            worker_peak_rss_kib: Arc::default(),
             #[cfg(test)]
             parent_killed: Arc::default(),
             executable: runner.program.clone(),
@@ -263,6 +281,7 @@ struct Tree {
     settled: bool,
     reaped: Option<std::process::ExitStatus>,
     peak_rss_kib: u64,
+    worker_peak_rss_kib: u64,
 }
 impl Tree {
     fn new(child: std::process::Child, pin: Watched) -> Self {
@@ -273,9 +292,17 @@ impl Tree {
             settled: false,
             reaped: None,
             peak_rss_kib: 0,
+            worker_peak_rss_kib: 0,
         }
     }
-    fn kill(&self) {
+    fn sample_inner(&mut self) {
+        // Only the verified third pin is the worker; never sample an unverified PID.
+        if let Some(rss) = self.pins.get(2).and_then(worker_rss_kib) {
+            self.worker_peak_rss_kib = self.worker_peak_rss_kib.max(rss);
+        }
+    }
+    fn kill(&mut self) {
+        self.sample_inner();
         // Signal inner, reaper and runner, in that order. Never leave the runner waiting
         // on an acknowledgement or on a child whose report has not arrived yet.
         for pin in self.pins.iter().rev() {
@@ -336,6 +363,23 @@ impl Tree {
         }
         Ok(self.reaped)
     }
+}
+
+fn worker_rss_kib(pin: &Watched) -> Option<u64> {
+    if !pin.alive() {
+        return None;
+    }
+    let text = std::fs::read_to_string(format!("/proc/{}/status", pin.pid)).ok()?;
+    // A live pidfd on both sides of the read excludes exit/reuse of the numeric PID.
+    // Once it reports exit we cannot trust /proc's numeric path, even if it exists.
+    if !pin.alive() {
+        return None;
+    }
+    text.lines().find_map(|line| {
+        let mut fields = line.strip_prefix("VmHWM:")?.split_whitespace();
+        let value = fields.next()?.parse().ok()?;
+        (fields.next()? == "kB" && fields.next().is_none()).then_some(value)
+    })
 }
 impl Drop for Tree {
     fn drop(&mut self) {
@@ -586,12 +630,9 @@ pub(super) fn execute<T: Send>(
         });
         let abort_ref = &abort;
         let reader = scope.spawn(move || read_output(stdout, read, abort_ref));
-        let (exit, parent, peak_rss_kib, parent_killed) =
-            watch(tree, &rx, ack, started + wall, cancel, &abort);
-        #[cfg(test)]
-        options.observe(exit, peak_rss_kib, parent_killed);
-        #[cfg(not(test))]
-        let _ = (peak_rss_kib, parent_killed);
+        let outcome = watch(tree, &rx, ack, started + wall, cancel, &abort);
+        options.observe(&outcome);
+        let Outcome { exit, parent, .. } = outcome;
         if matches!(&parent, Some(Reason::Unavailable(reason)) if reason == "process cleanup timed out")
         {
             stop.store(true, Ordering::Release);
@@ -645,6 +686,14 @@ fn reached_exec(marker: impl Read) -> bool {
             .is_some()
 }
 
+struct Outcome {
+    exit: Option<i32>,
+    parent: Option<Reason>,
+    wait4_rss_kib: u64,
+    worker_rss_kib: u64,
+    parent_killed: bool,
+}
+
 fn watch(
     mut tree: Tree,
     report: &mpsc::Receiver<Option<Started>>,
@@ -652,7 +701,7 @@ fn watch(
     deadline: Instant,
     cancel: &Cancel,
     abort: &AtomicBool,
-) -> (Option<i32>, Option<Reason>, u64, bool) {
+) -> Outcome {
     let mut ack = Some(ack);
     let mut parent = None;
     let mut aborted_at = None;
@@ -676,6 +725,7 @@ fn watch(
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
+        tree.sample_inner();
         // Observe natural exit before treating a reader's terminal error as an abort.
         if tree.pins[0].alive() {
             if cancel.cancelled() {
@@ -704,12 +754,19 @@ fn watch(
         use std::os::unix::process::ExitStatusExt;
         status
             .code()
-            .or_else(|| status.signal().map(|signal| 128 + signal))
+            // Negative values retain a runner signal independently of real exit codes.
+            .or_else(|| status.signal().map(|signal| -signal))
     } else {
         parent = Some(unavailable("process cleanup timed out"));
         None
     };
-    (exit, parent, tree.peak_rss_kib, parent_killed)
+    Outcome {
+        exit,
+        parent,
+        wait4_rss_kib: tree.peak_rss_kib,
+        worker_rss_kib: tree.worker_peak_rss_kib,
+        parent_killed,
+    }
 }
 
 pub(super) fn reconcile(
@@ -741,7 +798,13 @@ pub(super) fn reconcile(
             || {
                 exit.map_or_else(
                     || "sandbox runner terminated by signal".into(),
-                    |code| format!("sandbox runner exit {code}"),
+                    |code| {
+                        if code < 0 {
+                            format!("sandbox runner terminated by signal {}", -code)
+                        } else {
+                            format!("sandbox runner exit {code}")
+                        }
+                    },
                 )
             },
             |name| format!("sandbox step {name} failed"),
@@ -764,6 +827,46 @@ pub(super) fn reconcile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn worker_hwm_requires_a_live_pin_even_if_numeric_proc_path_exists() {
+        let me = i32::try_from(std::process::id()).unwrap();
+        let live = Watched::open(me).unwrap();
+        assert!(worker_rss_kib(&live).unwrap() > 0);
+        let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
+        let mut dead = Watched::open(i32::try_from(child.id()).unwrap()).unwrap();
+        child.wait().unwrap();
+        // Model a numeric PID reused by a live process: the original pidfd is dead.
+        dead.pid = me;
+        assert_eq!(worker_rss_kib(&dead), None);
+    }
+    #[test]
+    fn pre_marker_signal_is_distinct_from_exit_137() {
+        for (script, expected) in [
+            ("kill -KILL $$", "sandbox runner terminated by signal 9"),
+            ("exit 137", "sandbox runner exit 137"),
+        ] {
+            let child = std::process::Command::new("/bin/sh")
+                .args(["-c", script])
+                .spawn()
+                .unwrap();
+            let pin = Watched::open(i32::try_from(child.id()).unwrap()).unwrap();
+            let tree = Tree::new(child, pin);
+            let (_tx, rx) = mpsc::channel();
+            let (_read, ack) = rustix::pipe::pipe().unwrap();
+            let Outcome { exit, parent, .. } = watch(
+                tree,
+                &rx,
+                ack,
+                Instant::now() + Duration::from_secs(2),
+                &Cancel::default(),
+                &AtomicBool::new(false),
+            );
+            assert_eq!(
+                reconcile(exit, false, false, None, true, parent),
+                Err(Reason::Unavailable(expected.into()))
+            );
+        }
+    }
     #[test]
     fn invalid_render_is_rejected_before_availability_probe() {
         assert_eq!(
@@ -818,6 +921,7 @@ mod tests {
             settled: false,
             reaped: None,
             peak_rss_kib: 0,
+            worker_peak_rss_kib: 0,
         };
         let start = Instant::now();
         let result = tree.settle();
@@ -842,6 +946,7 @@ mod tests {
             settled: false,
             reaped: None,
             peak_rss_kib: 0,
+            worker_peak_rss_kib: 0,
         };
         let error = tree.settle_within(Duration::from_millis(20)).unwrap_err();
         let alive = other.try_wait().unwrap().is_none();
@@ -914,6 +1019,7 @@ mod tests {
             settled: false,
             reaped: None,
             peak_rss_kib: 0,
+            worker_peak_rss_kib: 0,
         };
         let started = Instant::now();
         tree.settle().unwrap();
