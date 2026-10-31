@@ -137,13 +137,29 @@ exactly fds 0, 1 and 2:
     inspection-page record, 4 KiB for the final `done` record;
   - **per render run:** at most (12 MiB + 8 MiB + 16 KiB) × the pages in the run + 4 KiB, so a
     run of permitted maximum-size records always fits; anything past it kills the run;
-  - **per inspect run:** one `document` record, one `page` record per page (at most 2,000) and
-    `done`: at most 9 MiB in all.
-  - **Schemas:** each record kind has a complete schema (`deny_unknown_fields`, every number
-    finite and in range: sizes 1–4,000 points, rotation one of 0/90/180/270, the transform's
-    entries bounded and its determinant non-zero, statistics non-negative and no larger than
-    the page allows). A run is complete only with exactly the requested records, in order,
-    then `done` with matching counts; anything else fails the run.
+  - **per inspect run:** one `document` record, one `page` record per page (at most 2,000; a
+    page record's header and payload together at most 2 KiB) and `done`: at most 9 MiB in all.
+  - Tests: a render run of maximum-size PNG and text records on every page, and an inspect
+    report of 2,000 maximum-size page records, both accepted; one byte more, refused.
+  - **Schemas** (`deny_unknown_fields`; every number finite):
+    - `document`: `pages` (1–2,000), `encrypted` (bool), `needs_password` (bool, refused if
+      true), `mupdf` (version string, at most 32 bytes).
+    - inspect `page`: `n` (1–`pages`, in order), `width` and `height` (1–4,000 points),
+      `rotate` (0, 90, 180 or 270), `user_unit` (0.1–10), `transform` (6 numbers, each at most
+      10⁵ in magnitude, determinant non-zero, mapping the visible box onto
+      `[0,width]×[0,height]` within 0.5 pt), `tagged` (bool).
+    - render `image`: `n` (a requested page, in order), `length` (1 byte–12 MiB), `width_px`
+      and `height_px` (equal to the shared pixel-size function's for that page), `dpi`.
+    - render `stats`: `n` (same page), `chars` and `unmapped` (0–10⁶, `unmapped` ≤ `chars`),
+      `image_area` (0–1, a fraction of the page), `fonts_substituted` (at most 64 names of 64
+      bytes).
+    - render `text`: `n` (same page), `length` (at most 8 MiB); its payload is a JSON array of
+      at most 20,000 lines, each `text` (1–4,096 bytes of UTF-8) and `box` (finite, inside the
+      page, x0 < x1 and y0 < y1).
+    - `done`: the operation and the count of each record kind.
+    Each requested page gives exactly `image`, `stats`, `text`, in that order; a run is complete
+    only with every requested page in order, then `done` with matching counts; anything else
+    fails the run.
 - **Stdout protection:** before MuPDF runs, the worker moves fd 1 to a private descriptor and
   points fd 1 at stderr, so a C warning or stray `printf` cannot break the framing.
 - **Stderr:** drained on its own thread with the existing line drain and a 64 KiB cap, so
@@ -315,17 +331,18 @@ MuPDF entry points) is a TODO follow-up after 3a, not only a limitation.
 - the Owner session;
 - REL-5's Host and Origin check;
 - `Content-Length` at most 128 MiB plus 64 KiB (multipart overhead), when present (413 at once);
-- free disk: at least 512 MiB plus 128 MiB;
+- the staging ledger's reservation for the upload (below);
 - the upload slot (one stream at a time; a second gets 409 "an upload is in progress").
 
 *Body stream:* the body is wrapped in a counting stream that enforces the whole-request limit
 (128 MiB + 64 KiB) whether or not `Content-Length` is sent, and lets at most 4 KiB (multipart
 headers and the `csrf` field) be polled before the CSRF admission. Instrumented-body tests: a
 request refused for authentication, Host or Origin polls no byte; a refused CSRF token
-spools no file byte; a disconnect mid-file releases the slot and deletes the partial file.
+spools no file byte; a disconnect mid-file, and the handler's future dropped mid-file, each release the slot and
+delete the partial file.
 
 *Fields, in this exact order:*
-1. `csrf`, at most 256 bytes. It goes through `csrf_admission` before any further byte is read.
+1. `csrf`, at most 256 bytes. It goes through `csrf_admission` before the file field is read.
 2. `system`, `edition` and `language`, each capped and validated with the import rules.
 3. `file`, last, at most 128 MiB.
 
@@ -383,10 +400,14 @@ shows the size, the hash prefix and the page count.
     rendered upload can always become a source) and 512 MiB of text; a render past the PNG
     budget fails as "too large for one source: select fewer pages";
   - all staging: 2 GiB;
-  - **reservations:** a process-wide staging ledger reserves the worst case before each write
-    phase (an upload: 128 MiB + 64 KiB; a render batch: 8 × 20 MiB) and releases it after;
-    a phase starts only when free space covers every open reservation plus a 512 MiB margin
-    kept for the database and its WAL. Disk-full tests use an injected free-space source and
+  - **reservations:** a process-wide staging ledger holds the bytes staging uses (measured
+    from the files at start-up, then kept up to date on every write and delete) and the open
+    reservations. Before each write phase it reserves that phase's worst case (an upload:
+    128 MiB + 64 KiB; a render batch: 8 × 20 MiB, covering retries, whose earlier files are
+    replaced, not added) and releases it after, keeping only what was written. A phase starts
+    only when used plus reserved stays within 2 GiB and free space covers every open
+    reservation plus a 512 MiB margin kept for the database and its WAL (publication writes
+    only rows). Disk-full tests use an injected free-space source and
     a real `ENOSPC` on a small test filesystem.
   Over a budget the job fails as "not enough space".
 - **Uploads:** one open upload at a time. A PDF whose hash matches a `source_documents` row
@@ -462,12 +483,13 @@ files, unit-tested on synthetic pages.
 `#` (an order number or "page N" can vary).
 
 **Grouping.**
-1. Lines are visited in a fixed order: page, then top, then left, then normalised text. Each
+1. Lines are visited in a fixed order: page, then top, left, bottom and right, then normalised
+   text bytes, then MuPDF's line order on the page. Each
    joins the first group (in creation order) with the same normalised text whose seed box (its
    first line's box, as a fraction of the page's width and height) it overlaps with IoU ≥ 0.8;
    otherwise it starts a group. At most one line per page joins a group.
-2. Groups are ranked by page count, then text length, then the seed box's top and left, then
-   the normalised text's bytes: a total order.
+2. Groups are ranked by page count, then text length, then the seed box's top, left, bottom
+   and right, then the normalised text's bytes, then creation order: a total order.
 
 **Proposal.**
 - Groups of 4 to 200 characters, present on at least 60% of the selected pages and on at least
