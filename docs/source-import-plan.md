@@ -96,15 +96,11 @@ New decisions:
 
 ## Steps
 
-Step 1, the schema (documents, readings, primary pages, owner units, suggestions), is done; it
-is described in `docs/sources-and-retrieval.md`. Numbering is kept so references stay valid.
+Steps 1 (the schema: documents, readings, primary pages, owner units, suggestions) and 2 (the
+review screen: report import, suggestions, merges, owner-added text, primary choice) are done;
+they are described in `docs/sources-and-retrieval.md`. Numbering is kept so references stay
+valid.
 
-2. **Review screen** (own plan: `docs/source-review-plan.md`). Report import bound to the bundle hash (the existing report
-   shape, plus targets for several units and page regions). On the page: the image beside the
-   units, zoom and region highlight; each suggestion as an inline difference with Accept, Edit,
-   Dismiss; merges as one decision; drawing a box for owner-added text; the page's effective text
-   in place; keyboard navigation; drafts kept on 409/422. Browser checks for all of these on a
-   synthetic fixture; the MÖRK BORG IT bundle and its two reports as the local live check.
 3. **Sandboxed PDF work, upload and jobs** (own plan). First the runner generalisation: launch
    kinds besides llama-server (a re-exec of `mimik` as the PDF worker), each with its own
    seccomp, Landlock, rlimits and wall-clock limit. Every parse of an uploaded PDF (the `lopdf`

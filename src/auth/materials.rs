@@ -70,7 +70,18 @@ pub(super) fn routes() -> Router<AuthState> {
                 .route("/admin/materials/pages/{page}/units/{unit}", post(review))
                 .layer(DefaultBodyLimit::max(320 * 1024)),
         )
+        .layer(axum::middleware::map_response(strict_policy))
 }
+
+/// Owner material pages render sanitised extraction HTML: they get the strict sheet policy
+/// (`normalize` reads the marker), not only `frame-ancestors 'none'`.
+async fn strict_policy(mut response: axum::response::Response) -> axum::response::Response {
+    response
+        .extensions_mut()
+        .insert(crate::campaigns::web::SheetPage);
+    response
+}
+
 pub(super) fn error(e: &AppError) -> StatusCode {
     match e {
         AppError::NotFound | AppError::SourceNotFound => StatusCode::FORBIDDEN,

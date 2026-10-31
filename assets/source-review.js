@@ -30,8 +30,9 @@
     document.querySelectorAll('[data-zoom]').forEach(control => control.setAttribute('aria-pressed', String(control === button)));
     image.classList.remove('zoom-one', 'zoom-two');
     const original = image.querySelector('img');
-    original.removeAttribute('width');
-    if (button.dataset.zoom === 'two' && original.naturalWidth) original.setAttribute('width', String(original.naturalWidth * 2));
+    // CSSOM, not a width attribute: `.source-original img` sets a CSS width, which beats an
+    // attribute (seen in the part-3 browser check), and the policy allows CSSOM styles.
+    original.style.width = button.dataset.zoom === 'two' && original.naturalWidth ? `${original.naturalWidth * 2}px` : '';
     if (button.dataset.zoom !== 'fit') image.classList.add(`zoom-${button.dataset.zoom}`);
   }));
   list?.addEventListener('focusin', event => {

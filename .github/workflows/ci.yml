@@ -176,6 +176,13 @@ jobs:
         with:
           name: dev-endpoint-binary
           path: dev-endpoint
+      - name: Offline browser check of source review with synthetic suggestions
+        run: |
+          docker run --rm --network=none --cpus=2 --memory=4g --shm-size=1g --pids-limit=1024 \
+            --cap-drop=ALL --security-opt=no-new-privileges --entrypoint python \
+            --mount "type=bind,src=$PWD/release/mimik-0.1.0-linux-x86_64/mimik,dst=/app/mimik,readonly" \
+            --mount "type=bind,src=$PWD/smoke-source,dst=/fixture,readonly" \
+            mimik-browser /checks/review_browser.py /app/mimik --fixture /fixture
       - name: Offline browser check of the development assistant against a fake model server
         run: |
           chmod 0755 dev-endpoint/mimik

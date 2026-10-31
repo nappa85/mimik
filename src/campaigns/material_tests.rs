@@ -3531,3 +3531,27 @@ async fn material_crlf_at_the_limit_is_stored_as_lf_and_shown_intact() {
         "history <pre> keeps the leading newline"
     );
 }
+
+/// Part 3 browser check: every Owner material page, the review screen first, carries the strict
+/// sheet policy (scripts and styles from this origin only, Trusted Types with no policy); before,
+/// only `frame-ancestors 'none'` was sent outside sheet pages. (Refusals are rebuilt by
+/// `normalize` as plain text without the marker, as for sheets.)
+#[tokio::test]
+async fn material_pages_carry_the_strict_policy() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    for path in [
+        "/admin/materials",
+        "/admin/materials/sources/1",
+        "/admin/materials/pages/1",
+    ] {
+        let response = router_get(&app, &auth[0], path).await;
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_SECURITY_POLICY],
+            crate::campaigns::web::SHEET_CSP,
+            "{path}"
+        );
+    }
+}
