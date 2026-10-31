@@ -6,20 +6,19 @@ use mupdf::{
     Colorspace, Device, Matrix, Pixmap, TextCharFlags, TextPageFlags,
     pdf::{PdfDocument, PdfObject},
 };
-use std::{collections::BTreeSet, io::Read, path::Path};
+use std::collections::BTreeSet;
 
 /// Input is opened only in the worker; callers must not use this API in the server.
 #[derive(Clone, Copy)]
-pub enum Input<'a> {
+pub(super) enum Input<'a> {
     Bytes(&'a [u8]),
-    Path(&'a Path),
 }
 
 fn mupdf_error(error: mupdf::Error) -> Error {
     // MuPDF's numeric FZ_ERROR_SYSTEM/LIMIT/UNSUPPORTED values (fitz/context.h).
     // Never propagate its diagnostic string, which can contain source text or paths.
     match error {
-        mupdf::Error::MuPdf(e) if e.code == 5 => Error::TooLarge,
+        mupdf::Error::MuPdf(e) if e.code == 2 || e.code == 5 => Error::TooLarge,
         mupdf::Error::MuPdf(e) if e.code == 6 => Error::Unsupported,
         _ => Error::Unreadable,
     }
@@ -31,28 +30,15 @@ impl From<mupdf::Error> for Error {
 }
 
 fn open(input: Input<'_>) -> Result<PdfDocument, Error> {
-    let owned;
-    let bytes = match input {
-        Input::Bytes(bytes) => bytes,
-        Input::Path(path) => {
-            let file = std::fs::File::open(path).map_err(|_| Error::Unreadable)?;
-            let mut buffer = Vec::new();
-            file.take(128 * 1024 * 1024 + 1)
-                .read_to_end(&mut buffer)
-                .map_err(|_| Error::Unreadable)?;
-            owned = buffer;
-            &owned
-        }
-    };
+    let Input::Bytes(bytes) = input;
     if bytes.len() > 128 * 1024 * 1024 {
         return Err(Error::TooLarge);
     }
     // MuPDF repairs truncated files. The worker contract rejects a missing final EOF marker.
     if !bytes.windows(5).take(1024).any(|w| w == b"%PDF-")
-        || !bytes
-            .iter()
-            .rposition(|b| !b.is_ascii_whitespace())
-            .is_some_and(|end| end >= 4 && &bytes[end - 4..=end] == b"%%EOF")
+        || !bytes[bytes.len().saturating_sub(1024)..]
+            .windows(5)
+            .any(|w| w == b"%%EOF")
     {
         return Err(Error::Unreadable);
     }
@@ -92,7 +78,16 @@ fn box_value(value: &PdfObject) -> Result<[f64; 4], Error> {
         }
         *slot = f64::from(obj.as_float()?);
     }
-    if result.iter().any(|n| !n.is_finite()) || result[0] >= result[2] || result[1] >= result[3] {
+    if result.iter().any(|n| !n.is_finite()) {
+        return Err(Error::Unsupported);
+    }
+    if result[0] > result[2] {
+        result.swap(0, 2);
+    }
+    if result[1] > result[3] {
+        result.swap(1, 3);
+    }
+    if result[0] >= result[2] || result[1] >= result[3] {
         return Err(Error::Unsupported);
     }
     Ok(result)
@@ -146,7 +141,12 @@ fn page_info(document: &PdfDocument, n: u32) -> Result<Page, Error> {
         user_unit,
         transform,
         visible,
-        tagged: obj.get_dict("StructParents")?.is_some(),
+        tagged: document.catalog()?.get_dict("StructTreeRoot")?.is_some()
+            && document
+                .catalog()?
+                .get_dict("MarkInfo")?
+                .and_then(|o| o.get_dict("Marked").ok().flatten())
+                .is_some_and(|o| o.as_bool().unwrap_or(false)),
     };
     if page.width > 4000.0 || page.height > 4000.0 {
         return Err(Error::TooLarge);
@@ -164,7 +164,6 @@ fn inspection(document: &PdfDocument) -> Result<Inspection, Error> {
         document: Document {
             pages: count,
             encrypted: document.trailer()?.get_dict("Encrypt")?.is_some(),
-            needs_password: false,
             mupdf: "1.27.2".to_owned(),
         },
         pages,
@@ -175,7 +174,7 @@ fn inspection(document: &PdfDocument) -> Result<Inspection, Error> {
 ///
 /// # Errors
 /// Returns only bounded worker reasons for malformed or unsupported input.
-pub fn inspect(input: Input<'_>) -> Result<Inspection, Error> {
+pub(super) fn inspect(input: Input<'_>) -> Result<Inspection, Error> {
     inspection(&open(input)?)
 }
 
@@ -195,75 +194,180 @@ fn values(m: &Matrix) -> [f64; 6] {
     [m.a, m.b, m.c, m.d, m.e, m.f].map(f64::from)
 }
 
-fn fonts(
-    resources: &PdfObject,
-    depth: usize,
-    budget: &mut usize,
-    names: &mut BTreeSet<String>,
-) -> Result<(), Error> {
-    if depth > 32 || *budget == 0 {
-        return Err(Error::TooLarge);
+#[derive(Default)]
+struct FontScan {
+    visited: BTreeSet<i32>,
+    names: BTreeSet<String>,
+    remaining: usize,
+    incomplete: bool,
+    skipped: u32,
+}
+impl FontScan {
+    fn enter(&mut self, obj: &PdfObject, depth: usize) -> bool {
+        let id = obj.as_indirect().unwrap_or(0);
+        if id > 0 && !self.visited.insert(id) {
+            return false;
+        }
+        if depth > 32 || self.remaining == 0 {
+            self.incomplete = true;
+            return false;
+        }
+        self.remaining -= 1;
+        true
     }
-    *budget -= 1;
-    if let Some(fonts) = resources.get_dict("Font")? {
-        for pair in fonts.dict_iter()? {
-            if *budget == 0 {
-                return Err(Error::TooLarge);
+    fn font(&mut self, font: &PdfObject) -> Result<(), Error> {
+        if !font.is_dict()? {
+            return Err(Error::Unreadable);
+        }
+        let subtype = font
+            .get_dict("Subtype")?
+            .map(|o| o.as_name())
+            .transpose()?
+            .unwrap_or_default();
+        if subtype == b"Type3" {
+            return Ok(());
+        }
+        let effective = if subtype == b"Type0" {
+            font.get_dict("DescendantFonts")?
+                .ok_or(Error::Unreadable)?
+                .get_array(0)?
+                .ok_or(Error::Unreadable)?
+        } else {
+            font.clone()
+        };
+        let descriptor = effective.get_dict("FontDescriptor")?;
+        let mut embedded = false;
+        if let Some(descriptor) = descriptor {
+            for key in ["FontFile", "FontFile2", "FontFile3"] {
+                embedded |= descriptor.get_dict(key)?.is_some();
             }
-            *budget -= 1;
-            let (_, font) = pair?;
-            let subtype = font
-                .get_dict("Subtype")?
+        }
+        if !embedded {
+            let name = font
+                .get_dict("BaseFont")?
+                .or(effective.get_dict("BaseFont")?)
                 .map(|o| o.as_name())
                 .transpose()?
                 .unwrap_or_default();
-            if subtype == b"Type3" {
-                continue;
+            let mut encoded = String::new();
+            for byte in name {
+                let part = if (33..=126).contains(&byte) && !b"#%()/<>[]{}".contains(&byte) {
+                    char::from(byte).to_string()
+                } else {
+                    format!("#{byte:02x}")
+                };
+                if encoded.len() + part.len() > 64 {
+                    self.incomplete = true;
+                    break;
+                }
+                encoded.push_str(&part);
             }
-            let effective = if subtype == b"Type0" {
-                font.get_dict("DescendantFonts")?
-                    .ok_or(Error::Unreadable)?
-                    .get_array(0)?
-                    .ok_or(Error::Unreadable)?
+            if encoded.is_empty() {
+                encoded = "Unknown".into();
+            }
+            if self.names.contains(&encoded) || self.names.len() < records::FONT_LIMIT {
+                self.names.insert(encoded);
             } else {
-                font.clone()
-            };
-            let descriptor = effective.get_dict("FontDescriptor")?;
-            let mut embedded = false;
-            if let Some(descriptor) = descriptor {
-                for key in ["FontFile", "FontFile2", "FontFile3"] {
-                    embedded |= descriptor.get_dict(key)?.is_some();
-                }
+                self.incomplete = true;
             }
-            if !embedded {
-                let name = font
-                    .get_dict("BaseFont")?
-                    .or(effective.get_dict("BaseFont")?)
-                    .ok_or(Error::Unreadable)?
-                    .as_name()?;
-                if name.is_empty() || name.len() > 64 {
-                    return Err(Error::TooLarge);
+        }
+        Ok(())
+    }
+    fn resources(&mut self, resources: &PdfObject, depth: usize) -> Result<(), Error> {
+        if !self.enter(resources, depth) {
+            return Ok(());
+        }
+        if let Some(fonts) = resources.get_dict("Font")? {
+            if fonts.is_dict()? {
+                for pair in fonts.dict_iter()? {
+                    let (_, font) = pair?;
+                    if self.remaining == 0 {
+                        self.incomplete = true;
+                        break;
+                    }
+                    if self.enter(&font, depth) && self.font(&font).is_err() {
+                        self.skipped += 1;
+                    }
                 }
-                names.insert(String::from_utf8(name).map_err(|_| Error::Unsupported)?);
-                if names.len() > 64 {
-                    return Err(Error::TooLarge);
+            } else {
+                self.skipped += 1;
+            }
+        }
+        for (key, subtype) in [("XObject", Some(b"Form".as_slice())), ("Pattern", None)] {
+            if let Some(objects) = resources.get_dict(key)? {
+                if !objects.is_dict()? {
+                    self.incomplete = true;
+                    continue;
+                }
+                for pair in objects.dict_iter()? {
+                    if self.remaining == 0 {
+                        self.incomplete = true;
+                        break;
+                    }
+                    let (_, obj) = pair?;
+                    if !self.enter(&obj, depth + 1) {
+                        continue;
+                    }
+                    let selected = if let Some(expected) = subtype {
+                        obj.get_dict("Subtype")?
+                            .is_some_and(|s| s.as_name().is_ok_and(|s| s == expected))
+                    } else {
+                        obj.get_dict("PatternType")?
+                            .is_some_and(|s| s.as_int().ok() == Some(1))
+                    };
+                    if selected && let Some(nested) = obj.get_dict("Resources")? {
+                        self.resources(&nested, depth + 1)?;
+                    }
                 }
             }
         }
+        Ok(())
     }
-    if let Some(objects) = resources.get_dict("XObject")? {
-        for pair in objects.dict_iter()? {
-            if *budget == 0 {
-                return Err(Error::TooLarge);
+    fn appearance(&mut self, obj: &PdfObject, depth: usize) -> Result<(), Error> {
+        if !self.enter(obj, depth) {
+            return Ok(());
+        }
+        if obj.is_stream()? {
+            if let Some(resources) = obj.get_dict("Resources")? {
+                self.resources(&resources, depth + 1)?;
             }
-            *budget -= 1;
-            let (_, obj) = pair?;
-            if let Some(nested) = obj.get_dict("Resources")? {
-                fonts(&nested, depth + 1, budget, names)?;
+        } else if obj.is_dict()? {
+            for pair in obj.dict_iter()? {
+                if self.remaining == 0 {
+                    self.incomplete = true;
+                    break;
+                }
+                self.appearance(&pair?.1, depth + 1)?;
             }
         }
+        Ok(())
     }
-    Ok(())
+    fn page(&mut self, page: &PdfObject) -> Result<(), Error> {
+        if let Some(resources) = page.get_dict_inheritable("Resources")? {
+            self.resources(&resources, 0)?;
+        }
+        if let Some(annots) = page.get_dict("Annots")? {
+            for i in 0..annots.len()? {
+                if self.remaining == 0 {
+                    self.incomplete = true;
+                    break;
+                }
+                if let Some(annot) =
+                    annots.get_array(i32::try_from(i).map_err(|_| Error::TooLarge)?)?
+                {
+                    if !self.enter(&annot, 0) {
+                        continue;
+                    }
+                    if let Some(ap) = annot.get_dict("AP")?
+                        && let Some(normal) = ap.get_dict("N")?
+                    {
+                        self.appearance(&normal, 0)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn render_page(document: &PdfDocument, info: &Page) -> Result<RenderedPage, Error> {
@@ -336,9 +440,7 @@ fn text(
     correction: &Matrix,
 ) -> Result<(Stats, Vec<TextLine>), Error> {
     let text = page.to_text_page(
-        TextPageFlags::PRESERVE_IMAGES
-            | TextPageFlags::USE_CID_FOR_UNKNOWN_UNICODE
-            | TextPageFlags::CLIP,
+        TextPageFlags::PRESERVE_IMAGES | TextPageFlags::USE_CID_FOR_UNKNOWN_UNICODE,
     )?;
     let mut stats = Stats {
         n: info.n,
@@ -346,6 +448,9 @@ fn text(
         unmapped: 0,
         image_area: 0.0,
         fonts_substituted: Vec::new(),
+        fonts_skipped: 0,
+        incomplete: false,
+        dropped_lines: 0,
     };
     let mut lines = Vec::new();
     let mut images = Vec::new();
@@ -387,7 +492,8 @@ fn text(
             let bounds = clipped(line.bounds(), info, correction);
             if !value.is_empty() {
                 if bounds[0] >= bounds[2] || bounds[1] >= bounds[3] {
-                    return Err(Error::Unsupported);
+                    stats.dropped_lines += 1;
+                    continue;
                 }
                 lines.push(TextLine {
                     text: value,
@@ -398,11 +504,16 @@ fn text(
     }
     stats.image_area =
         (geometry::image_coverage(&images) / (info.width * info.height)).clamp(0.0, 1.0);
-    let mut names = BTreeSet::new();
-    if let Some(resources) = page.object().get_dict_inheritable("Resources")? {
-        fonts(&resources, 0, &mut 10000, &mut names)?;
+    let mut scan = FontScan {
+        remaining: 10000,
+        ..FontScan::default()
+    };
+    if scan.page(&page.object()).is_err() {
+        scan.incomplete = true;
     }
-    stats.fonts_substituted = names.into_iter().collect();
+    stats.fonts_substituted = scan.names.into_iter().collect();
+    stats.fonts_skipped = scan.skipped;
+    stats.incomplete = scan.incomplete;
     records::validate_stats(&stats, info.n)?;
     records::validate_lines(&lines, info)?;
     serde_json::to_writer(
@@ -420,7 +531,8 @@ fn text(
 ///
 /// # Errors
 /// Returns fixed reasons; source content and file names never enter errors.
-pub fn render(input: Input<'_>, pages: &[u32]) -> Result<Vec<RenderedPage>, Error> {
+#[cfg(test)]
+pub(super) fn render(input: Input<'_>, pages: &[u32]) -> Result<Vec<RenderedPage>, Error> {
     let mut output = Vec::new();
     render_each(input, pages, |page| {
         output.push(page);

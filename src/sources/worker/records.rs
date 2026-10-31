@@ -5,13 +5,15 @@ use super::{Error, geometry, pixel_size};
 #[path = "record_tests.rs"]
 mod tests;
 use serde::{Deserialize, Serialize};
-use std::io::{Cursor, Read, Write};
+use std::io::{BufReader, Read, Write};
 
 pub const HEADER_LIMIT: usize = 4096;
 pub const IMAGE_LIMIT: usize = 12 * 1024 * 1024;
 pub const TEXT_LIMIT: usize = 8 * 1024 * 1024;
 pub const INSPECT_LIMIT: usize = 9 * 1024 * 1024;
 const SMALL_LIMIT: usize = 4096;
+// Even JSON's worst-case six-byte escapes fit a complete 4 KiB stats frame.
+pub(super) const FONT_LIMIT: usize = 8;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -25,7 +27,6 @@ pub enum Operation {
 pub struct Document {
     pub pages: u32,
     pub encrypted: bool,
-    pub needs_password: bool,
     pub mupdf: String,
 }
 
@@ -52,6 +53,9 @@ pub struct Stats {
     pub image_area: f64,
     #[serde(deserialize_with = "font_names")]
     pub fonts_substituted: Vec<String>,
+    pub fonts_skipped: u32,
+    pub incomplete: bool,
+    pub dropped_lines: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -64,19 +68,38 @@ pub struct TextLine {
 }
 
 fn line_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-    let value = String::deserialize(d)?;
-    if value.is_empty() || value.len() > 4096 {
-        return Err(serde::de::Error::custom("invalid text length"));
-    }
-    Ok(value)
+    bounded_string::<D, 4096>(d)
 }
 
 fn font_names<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
-    let names = BoundedVec::<String, 64>::deserialize(d)?.0;
-    if names.iter().any(|n| n.is_empty() || n.len() > 64) {
-        return Err(serde::de::Error::custom("invalid font length"));
+    #[derive(Deserialize)]
+    struct Name(#[serde(deserialize_with = "bounded_string::<_, 64>")] String);
+    Ok(BoundedVec::<Name, FONT_LIMIT>::deserialize(d)?
+        .0
+        .into_iter()
+        .map(|n| n.0)
+        .collect())
+}
+
+fn bounded_string<'de, D: serde::Deserializer<'de>, const N: usize>(
+    d: D,
+) -> Result<String, D::Error> {
+    struct Visitor<const N: usize>;
+    impl<const N: usize> serde::de::Visitor<'_> for Visitor<N> {
+        type Value = String;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("bounded string")
+        }
+        fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<String, E> {
+            // The deserializer presents decoded UTF-8, including JSON escapes. Validate
+            // borrowed/scratch bytes before allocating the owned application value.
+            if s.is_empty() || s.len() > N {
+                return Err(E::custom("invalid string length"));
+            }
+            Ok(s.to_owned())
+        }
     }
-    Ok(names)
+    d.deserialize_str(Visitor::<N>)
 }
 
 struct BoundedVec<T, const N: usize>(Vec<T>);
@@ -92,13 +115,24 @@ impl<'de, T: Deserialize<'de>, const N: usize> Deserialize<'de> for BoundedVec<T
                 self,
                 mut seq: A,
             ) -> Result<Self::Value, A::Error> {
-                let mut values = Vec::new();
-                while let Some(value) = seq.next_element()? {
-                    if values.len() == N {
-                        return Err(serde::de::Error::custom("too many elements"));
+                struct Refuse;
+                impl<'de> serde::de::DeserializeSeed<'de> for Refuse {
+                    type Value = ();
+                    fn deserialize<D: serde::Deserializer<'de>>(
+                        self,
+                        _: D,
+                    ) -> Result<(), D::Error> {
+                        Err(serde::de::Error::custom("too many elements"))
                     }
+                }
+                let mut values = Vec::new();
+                while values.len() < N {
+                    let Some(value) = seq.next_element()? else {
+                        return Ok(BoundedVec(values));
+                    };
                     values.push(value);
                 }
+                seq.next_element_seed(Refuse)?;
                 Ok(BoundedVec(values))
             }
         }
@@ -149,6 +183,9 @@ enum Header {
     Done {
         length: usize,
     },
+    Error {
+        length: usize,
+    },
 }
 impl Header {
     fn length(&self) -> usize {
@@ -158,7 +195,8 @@ impl Header {
             | Self::Image { length, .. }
             | Self::Stats { length }
             | Self::Text { length, .. }
-            | Self::Done { length } => length,
+            | Self::Done { length }
+            | Self::Error { length } => length,
         }
     }
     fn cap(&self) -> usize {
@@ -224,7 +262,9 @@ pub(super) fn validate_stats(s: &Stats, n: u32) -> Result<(), Error> {
         || s.chars > 1_000_000
         || s.unmapped > s.chars
         || !(0.0..=1.0).contains(&s.image_area)
-        || s.fonts_substituted.len() > 64
+        || s.fonts_substituted.len() > FONT_LIMIT
+        || s.fonts_skipped > 10000
+        || s.dropped_lines > 1_000_000
         || s.fonts_substituted
             .iter()
             .any(|s| s.is_empty() || s.len() > 64)
@@ -257,24 +297,11 @@ pub(super) fn validate_lines(lines: &[TextLine], page: &Page) -> Result<(), Erro
 }
 
 fn validate_png(bytes: &[u8], page: &Page, dimensions: (u32, u32)) -> Result<(), Error> {
-    let mut decoder = png::Decoder::new(Cursor::new(bytes));
-    decoder.set_limits(png::Limits {
-        bytes: 64 * 1024 * 1024,
-    });
-    let mut reader = decoder.read_info().map_err(|_| Error::Unreadable)?;
-    super::super::import::validate_image_header(reader.info(), page.width, page.height)
+    let actual = super::super::import::validate_png(bytes, page.width, page.height, true)
         .map_err(|_| Error::Unreadable)?;
-    if (reader.info().width, reader.info().height) != dimensions {
+    if actual != dimensions {
         return Err(Error::Unreadable);
     }
-    let size = reader.output_buffer_size().ok_or(Error::TooLarge)?;
-    if size > 64 * 1024 * 1024 {
-        return Err(Error::TooLarge);
-    }
-    reader
-        .next_frame(&mut vec![0; size])
-        .map_err(|_| Error::Unreadable)?;
-    reader.finish().map_err(|_| Error::Unreadable)?;
     Ok(())
 }
 
@@ -322,6 +349,11 @@ impl<R: Read> Frames<R> {
         self.input
             .read_exact(&mut bytes)
             .map_err(|_| Error::Unreadable)?;
+        if matches!(header, Header::Error { .. }) {
+            let reason = parse(&bytes)?;
+            self.eof()?;
+            return Err(reason);
+        }
         Ok((header, bytes))
     }
     fn done(&mut self, operation: Operation, counts: Counts) -> Result<(), Error> {
@@ -333,6 +365,9 @@ impl<R: Read> Frames<R> {
         if done.operation != operation || done.counts != counts {
             return Err(Error::Unreadable);
         }
+        self.eof()
+    }
+    fn eof(&mut self) -> Result<(), Error> {
         let mut byte = [0];
         if self.input.read(&mut byte).map_err(|_| Error::Unreadable)? != 0 {
             return Err(Error::Unreadable);
@@ -347,7 +382,7 @@ impl<R: Read> Frames<R> {
 /// Refuses malformed, incomplete, out-of-order or over-budget output.
 pub fn read_inspection<R: Read>(input: R) -> Result<Inspection, Error> {
     let mut frames = Frames {
-        input,
+        input: BufReader::new(input),
         remaining: INSPECT_LIMIT,
     };
     let (header, bytes) = frames.read()?;
@@ -355,9 +390,6 @@ pub fn read_inspection<R: Read>(input: R) -> Result<Inspection, Error> {
         return Err(Error::Unreadable);
     }
     let document: Document = parse(&bytes)?;
-    if document.needs_password {
-        return Err(Error::PasswordProtected);
-    }
     if document.pages > 2000 {
         return Err(Error::TooManyPages);
     }
@@ -391,7 +423,7 @@ pub fn read_inspection<R: Read>(input: R) -> Result<Inspection, Error> {
 /// Stateful parent reader; retains only one page's payloads at a time. EOF is checked
 /// before the final page is yielded. Discard the reader after any error.
 pub struct RenderReader<R> {
-    frames: Frames<R>,
+    frames: Frames<BufReader<R>>,
     pages: Vec<Page>,
     index: usize,
     failed: bool,
@@ -412,7 +444,7 @@ impl<R: Read> RenderReader<R> {
         }
         Ok(Self {
             frames: Frames {
-                input,
+                input: BufReader::new(input),
                 remaining: render_budget(pages.len()),
             },
             pages,
@@ -491,13 +523,23 @@ impl<R: Read> RenderReader<R> {
 }
 
 /// Worker-side framed writer. The operation controls record order; the parent rechecks it.
-pub struct RecordWriter<W> {
+pub(super) struct RecordWriter<W> {
     output: W,
     operation: Operation,
     counts: Counts,
     remaining: usize,
 }
 impl<W: Write> RecordWriter<W> {
+    pub(super) fn error(mut self, reason: Error) -> Result<(), Error> {
+        let bytes = json(&reason)?;
+        self.frame(
+            Header::Error {
+                length: bytes.len(),
+            },
+            &bytes,
+        )?;
+        self.output.flush().map_err(|_| Error::Unreadable)
+    }
     #[must_use]
     pub fn new(output: W, operation: Operation, pages: usize) -> Self {
         Self {

@@ -340,10 +340,14 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("pdf-worker")) {
         let args: Vec<_> = std::env::args_os().skip(2).collect();
         if args.len() != 2 || args[0] != "--spec" {
-            return Err(Box::new(mimik::sources::worker::Error::Unsupported));
+            std::process::exit(mimik::sources::worker::Error::Unsupported.exit_code());
         }
-        return mimik::sources::worker::run_entry(std::path::Path::new(&args[1]))
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>);
+        std::process::exit(
+            match mimik::sources::worker::run_entry(std::path::Path::new(&args[1])) {
+                Ok(()) => 0,
+                Err(reason) => reason.exit_code(),
+            },
+        );
     }
     // The hidden runner runs before any thread or runtime starts (it sets the parent-death
     // signal and executes in place).

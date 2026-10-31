@@ -58,13 +58,31 @@ pub fn run_entry(spec_path: &Path) -> Result<(), Error> {
     }
     let output = protect_stdout()?;
     let mut writer = RecordWriter::new(output, spec.operation, spec.pages.len());
-    match spec.operation {
-        Operation::Inspect => writer.inspection(&inspect(Input::Path(&spec.input))?)?,
-        Operation::Render => operations::render_each(Input::Path(&spec.input), &spec.pages, |p| {
-            writer.rendered(&p)
-        })?,
+    let result = (|| {
+        let mut bytes = Vec::new();
+        std::fs::File::open(&spec.input)
+            .map_err(|_| Error::Unreadable)?
+            .take(128 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| Error::Unreadable)?;
+        if bytes.len() > 128 * 1024 * 1024 {
+            return Err(Error::TooLarge);
+        }
+        // Slice 2b installs its second filter here: /in is closed, MuPDF not yet called.
+        match spec.operation {
+            Operation::Inspect => writer.inspection(&inspect(Input::Bytes(&bytes))?),
+            Operation::Render => {
+                operations::render_each(Input::Bytes(&bytes), &spec.pages, |p| writer.rendered(&p))
+            }
+        }
+    })();
+    match result {
+        Ok(()) => writer.finish(),
+        Err(reason) => {
+            writer.error(reason)?;
+            Err(reason)
+        }
     }
-    writer.finish()
 }
 
 fn protect_stdout() -> Result<std::fs::File, Error> {

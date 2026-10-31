@@ -1,4 +1,176 @@
 use super::*;
+use std::io::Cursor;
+
+#[test]
+fn refuses_extra_element_without_deserializing_it() {
+    static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    struct Probe;
+    impl<'de> Deserialize<'de> for Probe {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            u32::deserialize(d)?;
+            Ok(Self)
+        }
+    }
+    assert!(serde_json::from_str::<BoundedVec<Probe, 1>>("[1,2]").is_err());
+    assert_eq!(COUNT.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn oversized_decoded_fields_are_refused() {
+    for text in ["x".repeat(4097), "\\u0061".repeat(4097), "é".repeat(2049)] {
+        let json = format!(r#"{{"text":"{text}","box":[0,0,1,1]}}"#);
+        assert!(serde_json::from_str::<TextLine>(&json).is_err());
+    }
+    let mut stats = serde_json::to_value(rendered(1).stats).unwrap();
+    stats["fonts_substituted"] = serde_json::json!(["x".repeat(65)]);
+    assert!(serde_json::from_value::<Stats>(stats).is_err());
+    let json = format!(r#"{{"text":"{}","box":[0,0,1,1]}}"#, "\\u0061".repeat(4096));
+    assert_eq!(
+        serde_json::from_str::<TextLine>(&json).unwrap().text.len(),
+        4096
+    );
+}
+
+#[test]
+fn maximum_stats_fit_small_frame() {
+    let mut p = rendered(2000);
+    p.stats.chars = 1_000_000;
+    p.stats.unmapped = 1_000_000;
+    p.stats.fonts_skipped = 10000;
+    p.stats.dropped_lines = 1_000_000;
+    p.stats.image_area = 0.123_456_789_123_456_78;
+    p.stats.fonts_substituted = vec!["\u{1}".repeat(64); FONT_LIMIT];
+    let bytes = json(&p.stats).unwrap();
+    assert!(
+        bytes.len()
+            + json(&Header::Stats {
+                length: bytes.len()
+            })
+            .unwrap()
+            .len()
+            < SMALL_LIMIT
+    );
+}
+
+#[test]
+fn png_rejects_trailing_bytes_and_wrong_format() {
+    let mut p = rendered(1);
+    p.png.extend_from_slice(b"trailing");
+    assert!(validate_png(&p.png, &page(1), (p.width_px, p.height_px)).is_err());
+}
+
+#[test]
+fn png_requires_rgb_eight_bit() {
+    let p = rendered(1);
+    for (color, depth, channels) in [
+        (png::ColorType::Rgba, png::BitDepth::Eight, 4),
+        (png::ColorType::Rgb, png::BitDepth::Sixteen, 6),
+    ] {
+        let mut bytes = Vec::new();
+        {
+            let mut e = png::Encoder::new(&mut bytes, p.width_px, p.height_px);
+            e.set_color(color);
+            e.set_depth(depth);
+            e.write_header()
+                .unwrap()
+                .write_image_data(&vec![
+                    0;
+                    usize::try_from(p.width_px * p.height_px * channels)
+                        .unwrap()
+                ])
+                .unwrap();
+        }
+        assert!(validate_png(&bytes, &page(1), (p.width_px, p.height_px)).is_err());
+    }
+}
+
+#[test]
+fn inspection_buffers_pipe_reads() {
+    struct CountReads<'a> {
+        input: &'a [u8],
+        calls: &'a std::cell::Cell<usize>,
+    }
+    impl Read for CountReads<'_> {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            self.calls.set(self.calls.get() + 1);
+            self.input.read(out)
+        }
+    }
+    let mut wire = Vec::new();
+    let mut writer = RecordWriter::new(&mut wire, Operation::Inspect, 1);
+    writer
+        .inspection(&Inspection {
+            document: Document {
+                pages: 1,
+                encrypted: false,
+                mupdf: "1.27.2".into(),
+            },
+            pages: vec![page(1)],
+        })
+        .unwrap();
+    writer.finish().unwrap();
+    let calls = std::cell::Cell::new(0);
+    assert!(
+        read_inspection(CountReads {
+            input: &wire,
+            calls: &calls
+        })
+        .is_ok()
+    );
+    assert!(
+        calls.get() <= 3,
+        "{} pipe reads for {} bytes",
+        calls.get(),
+        wire.len()
+    );
+}
+
+#[test]
+fn terminal_error_is_returned_at_any_frame_boundary() {
+    for reason in [
+        Error::Unreadable,
+        Error::Timeout,
+        Error::TooLarge,
+        Error::TooManyPages,
+        Error::PasswordProtected,
+        Error::Unsupported,
+    ] {
+        let payload = format!(
+            "\"{}\"",
+            match reason {
+                Error::Unreadable => "unreadable",
+                Error::Timeout => "timeout",
+                Error::TooLarge => "too_large",
+                Error::TooManyPages => "too_many_pages",
+                Error::PasswordProtected => "password_protected",
+                Error::Unsupported => "unsupported",
+            }
+        );
+        assert_eq!(Error::from_exit_code(reason.exit_code()), Some(reason));
+        let terminal = format!(
+            "{{\"kind\":\"error\",\"length\":{}}}\n{payload}",
+            payload.len()
+        );
+        assert_eq!(read_inspection(terminal.as_bytes()).unwrap_err(), reason);
+        for prefix in 0..=3 {
+            let mut wire = join(&split(valid())[..prefix]);
+            wire.extend_from_slice(terminal.as_bytes());
+            let mut r = RenderReader::new(&wire[..], vec![page(1)]).unwrap();
+            assert_eq!(r.next_page().unwrap_err(), reason);
+        }
+    }
+    assert_eq!(Error::from_exit_code(1), None);
+    for payload in [
+        br#""arbitrary source text""#.as_slice(),
+        br#"{"reason":"too_large","text":"source"}"#.as_slice(),
+    ] {
+        let mut wire =
+            format!("{{\"kind\":\"error\",\"length\":{}}}\n", payload.len()).into_bytes();
+        wire.extend_from_slice(payload);
+        assert_eq!(read_inspection(&wire[..]).unwrap_err(), Error::Unreadable);
+    }
+}
 
 fn page(n: u32) -> Page {
     Page {
@@ -37,6 +209,9 @@ fn rendered(n: u32) -> RenderedPage {
             unmapped: 0,
             image_area: 0.0,
             fonts_substituted: vec![],
+            fonts_skipped: 0,
+            incomplete: false,
+            dropped_lines: 0,
         },
         lines: vec![TextLine {
             text: "X".into(),
@@ -315,7 +490,6 @@ fn maximum_inspect_transport_and_one_byte_more() {
     let document = serde_json::to_vec(&Document {
         pages: 2000,
         encrypted: false,
-        needs_password: false,
         mupdf: "1.27.2".into(),
     })
     .unwrap();

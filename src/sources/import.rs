@@ -269,17 +269,41 @@ fn validate_page(
 }
 
 fn validate_image(image: &[u8], page: &PreparedPage) -> Result<(), AppError> {
-    let mut decoder = png::Decoder::new(Cursor::new(image));
+    validate_png(image, page.width_points, page.height_points, false).map(|_| ())
+}
+
+/// Full PNG validation shared by bundle import and the untrusted worker reader.
+/// Bundle imports support existing colour formats; the worker requires fixed RGB8.
+pub(super) fn validate_png(
+    image: &[u8],
+    width: f64,
+    height: f64,
+    rgb8: bool,
+) -> Result<(u32, u32), AppError> {
+    let mut cursor = Cursor::new(image);
+    let mut decoder = png::Decoder::new(&mut cursor);
     decoder.set_limits(png::Limits { bytes: 64 * MIB });
     let mut reader = decoder.read_info().map_err(|_| invalid())?;
-    validate_image_header(reader.info(), page.width_points, page.height_points)?;
+    validate_image_header(reader.info(), width, height)?;
+    if rgb8
+        && (reader.info().color_type != png::ColorType::Rgb
+            || reader.info().bit_depth != png::BitDepth::Eight)
+    {
+        return Err(invalid());
+    }
+    let dimensions = (reader.info().width, reader.info().height);
     let size = reader.output_buffer_size().ok_or_else(invalid)?;
     if size > 64 * MIB {
         return Err(invalid());
     }
     let mut pixels = vec![0; size];
     reader.next_frame(&mut pixels).map_err(|_| invalid())?;
-    Ok(())
+    reader.finish().map_err(|_| invalid())?;
+    drop(reader);
+    if cursor.position() != u64::try_from(image.len()).map_err(|_| invalid())? {
+        return Err(invalid());
+    }
+    Ok(dimensions)
 }
 
 pub(super) fn validate_image_header(
