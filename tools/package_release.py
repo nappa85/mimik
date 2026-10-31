@@ -186,7 +186,8 @@ def main():
         tar.addfile(entry, io.BytesIO(config_bytes))
     (stage / "SOURCE.txt").write_text(
         f"Corresponding source: accompanying {source_name} and {dependency_name}\nRevision: {args.revision}\nUnpack the .crate, then unpack dependency sources into that package root.\nBuild: cargo build --release --offline --locked (Rust {toolchain()}).\n"
-        + BUILD_PREREQUISITES + llama_pointer(llama),
+        + BUILD_PREREQUISITES
+        + llama_pointer(llama),
         encoding="utf-8",
     )
     archive = args.output / f"{name}.tar.gz"
