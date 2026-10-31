@@ -96,7 +96,10 @@ This is what step 4 reads, without parsing the PDF again:
   - the PNG's hash, pixel size and dpi;
   - the substituted fonts;
   - the text-layer statistics;
-- the selected pages, with the upload revision;
+- the selected pages, with the upload revision; a page's rendering is current when it is
+  still selected and its render settings match, whatever revision it was rendered for;
+- the source limits it was built to: 64 pages, 128 MiB of PNG, 20,000 units (checked again by
+  each route);
 - the system id, edition and language;
 - the current exclusion and its revision (3c), or none.
 
@@ -126,13 +129,17 @@ descriptor 3 for the unforgeable marker and puts `/dev/null` on stdin. So the wo
 exactly fds 0, 1 and 2:
 - **Spec:** a JSON spec of at most 64 KiB that the runner has Hakoniwa write into the `/run`
   tmpfs at `/run/spec.json`, as the token is written today. It holds no secret.
-- **Output:** framed records on stdout, read by the parent through a bounded drain. Each record
+- **Output:** framed records on stdout, read by a dedicated record reader (the line drain of
+  `drain.rs` splits lines at 4 KiB and would corrupt binary records). Each record
   is a header line (JSON, at most 4 KiB, `deny_unknown_fields`) and then exactly the
   `length` bytes it declares. Limits:
   - **per record:** 12 MiB for a PNG, 8 MiB for one page's text;
   - **per run:** the requested pages' records and nothing else. The total is at most 13 MiB
     × the pages in the run plus 64 KiB, and anything past it kills the run.
-- **Stderr:** drained with a 64 KiB cap. It is never logged verbatim: a failure is logged and
+- **Stdout protection:** before MuPDF runs, the worker moves fd 1 to a private descriptor and
+  points fd 1 at stderr, so a C warning or stray `printf` cannot break the framing.
+- **Stderr:** drained on its own thread with the existing line drain and a 64 KiB cap, so
+  neither pipe can fill and deadlock. It is never logged verbatim: a failure is logged and
   shown by a fixed reason code.
 - **Exit:** read only after the worker tree is reaped.
 
@@ -233,12 +240,14 @@ Two rules apply on the server side:
   - over-long headers, a length past its cap, unrequested or repeated pages, truncated records
     and trailing bytes;
   - a never-ending stdout and stderr spam;
+  - valid frames mixed with text on stdout;
   - a worker that exits early.
 - **Live sandbox tests,** like the assistant's:
   - The worker cannot open a socket, exec or clone; each is killed, and the job fails.
   - It cannot read `$HOME`, the data folder or `/proc/1/root` of the host.
   - It cannot write anywhere on the host.
-  - A write over 16 MiB in `/tmp` gives a failed job, not a hang.
+  - A full `/tmp` (`ENOSPC`, 16 MiB tmpfs) and a file over `RLIMIT_FSIZE` (`EFBIG`, tested with
+    a larger test-only tmpfs) each give a failed job, not a hang.
   - `SIGKILL` of Mimik takes the worker with it.
   - A cancel mid-batch leaves nothing running.
   - A failure to install the second filter is reported.
@@ -350,7 +359,9 @@ shows the size, the hash prefix and the page count.
   limits a run's 20,000 units and 128 MiB of images). A longer book is several uploads, and so
   several readings of one document.
 - **Budgets:**
-  - per upload: 128 MiB of PDF, 768 MiB of PNG and 512 MiB of text;
+  - per upload: 128 MiB of PDF, 128 MiB of PNG (the per-source image limit, `import.rs`, so a
+    rendered upload can always become a source) and 512 MiB of text; a render past the PNG
+    budget fails as "too large for one source: select fewer pages";
   - all staging: 2 GiB;
   - free space is checked before each batch.
   Over a budget the job fails as "not enough space".
