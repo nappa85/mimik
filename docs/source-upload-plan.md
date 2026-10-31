@@ -142,31 +142,31 @@ exactly fds 0, 1 and 2:
   - Tests: a render run of maximum-size PNG and text records on every page, and an inspect
     report of 2,000 maximum-size page records, both accepted; one byte more, refused.
   - **Schemas** (`deny_unknown_fields`; every number finite):
-     - `document`: `pages` (1–2,000), `encrypted` (bool), `mupdf` (version string, at most
-       32 bytes). Password-required inputs produce a terminal error instead.
+    - `document`: `pages` (1–2,000), `encrypted` (bool), `mupdf` (version string, at most
+      32 bytes). Password-required inputs produce a terminal error instead.
     - inspect `page`: `n` (1–`pages`, in order), `width` and `height` (1–4,000 points),
       `rotate` (0, 90, 180 or 270), `user_unit` (0.1–10), `transform` (6 numbers, each at most
       10⁵ in magnitude, determinant non-zero, mapping the visible box onto
-       `[0,width]×[0,height]` within 0.5 pt), `tagged` (catalog `MarkInfo /Marked true`
-       and a `StructTreeRoot`). Reversed box corners are normalized before clipping.
-     - render `image`: `n` (a requested page, in order), `length` (1 byte–12 MiB), `width_px`
-       and `height_px` (equal to the shared pixel-size function's for that page), `dpi`.
-       PNGs are fully decoded through IEND with no trailing bytes; worker images require
-       RGB, 8-bit samples. Import and worker readers share the validator.
+      `[0,width]×[0,height]` within 0.5 pt), `tagged` (catalog `MarkInfo /Marked true`
+      and a `StructTreeRoot`). Reversed box corners are normalized before clipping.
+    - render `image`: `n` (a requested page, in order), `length` (1 byte–12 MiB), `width_px`
+      and `height_px` (equal to the shared pixel-size function's for that page), `dpi`.
+      PNGs are fully decoded through IEND with no trailing bytes; worker images require
+      RGB, 8-bit samples. Import and worker readers share the validator.
     - render `stats`: `n` (same page), `chars` and `unmapped` (0–10⁶, `unmapped` ≤ `chars`),
-       `image_area` (0–1, a fraction of the page), `fonts_substituted` (at most 8 names of 64
-       bytes, so even worst-case JSON escapes fit the 4 KiB frame), `fonts_skipped`
-       (0–10,000 malformed entries), `incomplete` (diagnostic scan budget exhausted or
-       malformed resources), `dropped_lines` (0–10⁶ zero-area/clipped-away lines).
-       Font diagnostics never reject a renderable page. Indirect objects are visited once;
-       traversal includes Forms, tiling patterns and normal annotation/widget appearances.
-       Names use deterministic PDF `#xx` escapes and `Unknown` for an absent name.
+      `image_area` (0–1, a fraction of the page), `fonts_substituted` (at most 8 names of 64
+      bytes, so even worst-case JSON escapes fit the 4 KiB frame), `fonts_skipped`
+      (0–10,000 malformed entries), `incomplete` (diagnostic scan budget exhausted or
+      malformed resources), `dropped_lines` (0–10⁶ zero-area/clipped-away lines).
+      Font diagnostics never reject a renderable page. Indirect objects are visited once;
+      traversal includes Forms, tiling patterns and normal annotation/widget appearances.
+      Names use deterministic PDF `#xx` escapes and `Unknown` for an absent name.
     - render `text`: `n` (same page), `length` (at most 8 MiB); its payload is a JSON array of
       at most 20,000 lines, each `text` (1–4,096 bytes of UTF-8) and `box` (finite, inside the
       page, x0 < x1 and y0 < y1).
-     - `done`: the operation and the count of each record kind.
-     - terminal `error`: one bounded reason enum, no diagnostic text; replaces `done` on
-       operation failure. Readers return that reason and require EOF after it.
+    - `done`: the operation and the count of each record kind.
+    - terminal `error`: one bounded reason enum, no diagnostic text; replaces `done` on
+      operation failure. Readers return that reason and require EOF after it.
     Each requested page gives exactly `image`, `stats`, `text`, in that order; a run is complete
     only with every requested page in order, then `done` with matching counts; anything else
     fails the run.
