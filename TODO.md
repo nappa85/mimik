@@ -29,11 +29,19 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 - **Source import plan** (`docs/source-import-plan.md`, reviewed, SRC-11 to SRC-14): steps 1
   (schema) and 2 (review screen, `mimik import-suggestions`, browser checks) merged. Step 3's plan
-  (`docs/source-upload-plan.md`, reviewed) is merged; next: 3a's DEP-29 gate (MuPDF build,
-  licences, measurements), then the shared sandbox and the worker. Review-screen test
+  (`docs/source-upload-plan.md`, reviewed) is merged; 3a slice 1 (shared `src/sandbox/`) merged; the
+  DEP-29 build check passed (MuPDF 1.27.2, 1m30s clean at 2 cores, notes in
+  `/media/data/mimik/mupdf-gate/GATE-NOTES.md`; FreeType's GPL option is GPLv2-or-later, so
+  the plan's FreeType line needs correcting). Next: slice 2, the PDF worker. Review-screen test
   hook `READ_DEADLINE` (`src/sources/review.rs`) is process-global and matched by label: key it
   to the test's store. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
   (`~/temp/`, tagged, clean text layer) through the prototype tools.
+
+- **Probe with a relative `--models-dir` (found 2026-10-31, also on master):** `mimik
+  assistant-runner --probe --models-dir target/models` is inconclusive at level 1 ("hakoniwa
+  failed before starting the model server"); the absolute path passes. CI's live step uses the
+  relative form. Regression test first, then make the probe's models dir absolute as the
+  server path does (`std::path::absolute`).
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
   target/agent-tools/ci.sh <cmd>`, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
