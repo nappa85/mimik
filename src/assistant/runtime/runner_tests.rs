@@ -428,6 +428,61 @@ fn a_spec_whose_secret_comes_before_the_overflowing_field_is_refused() {
     assert!(encode_spec(&spec, 1 << 20).is_ok());
 }
 
+fn llama_model_source_round_trips(models_dir: &str) {
+    use super::super::hako::{File, Inputs, Secret, plan};
+    use std::io::{Seek, Write};
+    use std::os::fd::IntoRawFd;
+
+    let model = std::path::Path::new(models_dir).join("m.gguf");
+    let profile = plan(&Inputs {
+        root: "/data/run/3.root".into(),
+        mountinfo: String::new(),
+        runtime: vec![File {
+            name: "llama-server".into(),
+            source: "/data/llama/llama-server".into(),
+            identity: (7, 100),
+        }],
+        model: (model.clone(), (7, 200)),
+        generation: ("/data/run/3".into(), (7, 300)),
+        token: Secret::new("dummy-token\n".into()),
+        extra: vec![],
+        gpu: None,
+        env: vec![],
+        argv: vec!["/opt/llama/llama-server".into()],
+    });
+    assert!(profile.binds.iter().any(|bind| {
+        bind.source == model.to_str().unwrap() && bind.target == "/models/model.gguf"
+    }));
+    assert_eq!(profile.validate(), Ok(()));
+    let spec = Spec {
+        parent: own_pid(),
+        keep: vec![],
+        env: vec![],
+        chdir: None,
+        exec: Exec::Hakoniwa {
+            plan: Box::new(profile),
+            status: 4,
+            marker: 12,
+            ack: 13,
+        },
+    };
+    let encoded = encode_spec(&spec, 1 << 20).unwrap();
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(&encoded).unwrap();
+    file.rewind().unwrap();
+    assert_eq!(read_spec(file.into_raw_fd()), Some(spec));
+}
+
+#[test]
+fn llama_profile_with_relative_models_dir_round_trips() {
+    llama_model_source_round_trips("target/models");
+}
+
+#[test]
+fn llama_profile_with_parent_models_dir_round_trips() {
+    llama_model_source_round_trips("/a/b/../models");
+}
+
 fn invalid_profile_spec() -> Spec {
     Spec {
         parent: own_pid(),

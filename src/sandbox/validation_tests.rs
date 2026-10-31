@@ -23,22 +23,36 @@ fn profile() -> Profile {
 }
 
 #[test]
+fn refuses_empty_or_nul_bind_sources() {
+    for source in ["", "target/\0models", "/models\0"] {
+        let mut p = profile();
+        p.binds.push(Bind {
+            source: source.into(),
+            target: "/models".into(),
+            access: Access::ReadOnly,
+            identity: None,
+        });
+        assert!(p.validate().is_err(), "{source:?}");
+    }
+}
+
+#[test]
 fn refuses_non_absolute_or_unnormalised_paths() {
     for path in ["", "relative", "/a/./b", "/a/../b", "/a//b", "//a", "/a/"] {
-        for field in 0..5 {
+        for field in 0..4 {
             let mut p = profile();
             match field {
                 0 => p.rules.push(Rule {
                     path: path.into(),
                     grant: Grant::Read,
                 }),
-                1 | 2 => p.binds.push(Bind {
-                    source: if field == 1 { path } else { "/source" }.into(),
-                    target: if field == 2 { path } else { "/target" }.into(),
+                1 => p.binds.push(Bind {
+                    source: "/source".into(),
+                    target: path.into(),
                     access: Access::ReadOnly,
                     identity: None,
                 }),
-                3 => p.tmpfs[0].target = path.into(),
+                2 => p.tmpfs[0].target = path.into(),
                 _ => p.files.push(RunFile {
                     path: path.into(),
                     content: Secret::new(String::new()),

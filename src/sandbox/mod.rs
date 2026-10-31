@@ -133,22 +133,26 @@ pub(crate) struct Profile {
 }
 
 impl Profile {
-    /// Checks lexical paths and the shared proc, execution, tmpfs and run-file invariants.
+    /// Checks sandbox-side paths and the shared proc, execution, tmpfs and run-file invariants.
+    /// Bind targets, tmpfs targets, rule paths and run-file paths must be absolute and
+    /// normalised. Bind sources are host paths, opened and identity-checked elsewhere:
+    /// only non-emptiness and absence of NUL are checked here, not their lexical form.
     ///
     /// # Errors
     ///
     /// The first invalid path or violated invariant. See the trusted-author obligations on
     /// [`Profile`] for checks this does not perform.
     pub(crate) fn validate(&self) -> Result<(), String> {
+        for bind in &self.binds {
+            if bind.source.is_empty() || bind.source.contains('\0') {
+                return Err("bind source must be non-empty and contain no NUL".into());
+            }
+        }
         let paths = self
             .rules
             .iter()
             .map(|rule| rule.path.as_str())
-            .chain(
-                self.binds
-                    .iter()
-                    .flat_map(|bind| [bind.source.as_str(), bind.target.as_str()]),
-            )
+            .chain(self.binds.iter().map(|bind| bind.target.as_str()))
             .chain(self.tmpfs.iter().map(|tmpfs| tmpfs.target.as_str()))
             .chain(self.files.iter().map(|file| file.path.as_str()));
         for path in paths {
@@ -167,7 +171,7 @@ impl Profile {
             if Path::new(&rule.path).starts_with("/proc") {
                 return Err("explicit /proc rules are forbidden; use the proc field".into());
             }
-            if run::access(rule.grant).contains(landlock::AccessFs::Execute)
+            if rule.grant.executes()
                 && !self
                     .binds
                     .iter()
@@ -287,6 +291,16 @@ pub(crate) enum Grant {
     ReadWrite,
     /// A device node: read, write and ioctl.
     Device,
+}
+
+impl Grant {
+    /// Whether this grant allows execution.
+    pub(crate) fn executes(self) -> bool {
+        match self {
+            Self::ReadExec => true,
+            Self::ReadFile | Self::Read | Self::List | Self::ReadWrite | Self::Device => false,
+        }
+    }
 }
 
 /// One path of the Landlock ruleset.
