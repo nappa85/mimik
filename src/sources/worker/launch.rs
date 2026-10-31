@@ -29,7 +29,9 @@ impl Cancel {
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Release);
     }
-    fn cancelled(&self) -> bool {
+    /// Whether cancellation has been requested; implementations must still reap the worker.
+    #[must_use]
+    pub fn cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
 }

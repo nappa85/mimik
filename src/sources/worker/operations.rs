@@ -164,7 +164,7 @@ fn inspection(document: &PdfDocument) -> Result<Inspection, Error> {
         document: Document {
             pages: count,
             encrypted: document.trailer()?.get_dict("Encrypt")?.is_some(),
-            mupdf: "1.27.2".to_owned(),
+            mupdf: super::MUPDF_VERSION.to_owned(),
         },
         pages,
     })

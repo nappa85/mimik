@@ -245,7 +245,7 @@ impl Write for LimitedBytes {
     }
 }
 
-fn json<T: Serialize>(value: &T) -> Result<Vec<u8>, Error> {
+pub(crate) fn json<T: Serialize>(value: &T) -> Result<Vec<u8>, Error> {
     let mut output = LimitedBytes {
         bytes: Vec::new(),
         limit: TEXT_LIMIT,

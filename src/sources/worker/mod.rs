@@ -16,6 +16,10 @@ pub use geometry::pixel_size;
 use operations::Input;
 pub use records::{Inspection, Page, RenderedPage};
 
+/// Versions of the pinned renderer, retained with staged page provenance.
+pub const CRATE_VERSION: &str = "0.8.0";
+pub const MUPDF_VERSION: &str = "1.27.2";
+
 /// Fixed, non-sensitive reasons shared with the parent.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize,

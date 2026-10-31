@@ -2,7 +2,7 @@
 
 A **source** is one prepared extraction run of a locally owned manual: the original PDF, the Marker structured extraction (`source.json`), the prepared manifest (`bundle.json`) and one original-page PNG per selected page. Sources are stored privately in SQLite and reviewed by the Owner. Reviewed units feed lexical lookup. Nothing in this workflow lets a model approve evidence or change sheets or rules.
 
-Code: `src/sources/`, `src/auth/materials.rs`, migrations `003`, `004`, `005`, `007`, `009`, `015`, `017`, `024`, `025`, `assets/source-regions.js`, `assets/source-review.js`. Tests: `tests/source_*.rs`, `src/campaigns/material_tests.rs`, `tools/test_source_tools.py`.
+Code: `src/sources/`, `src/auth/materials.rs`, migrations `003`, `004`, `005`, `007`, `009`, `015`, `017`, `024`–`026`, `assets/source-regions.js`, `assets/source-review.js`. Tests: `tests/source_*.rs`, `src/sources/upload_tests.rs`, `src/campaigns/material_tests.rs`, `tools/test_source_tools.py`.
 
 ## Internal PDF worker (Linux)
 
@@ -76,6 +76,61 @@ The ignored `local_pdfs::live_local_pdfs_inspect_and_render_every_page` check us
 `MIMIK_LIVE_LOCAL_PDFS` (colon-separated paths) and the real `MIMIK_LIVE_RUNNER`. It renders
 every page in batches of eight, keeping text/images only in memory and printing only hashed
 path identifiers, page counts, timings, both peak RSS figures and per-batch outcomes.
+
+## Internal upload staging (Linux)
+
+`sources::uploads::Uploads` is the blocking storage/job API for browser upload integration.
+There is no HTTP upload route yet. Open one manager with the store and data directory before
+accepting uploads; clone its handle for callers, and call it outside the async runtime.
+Opening reconciles interrupted jobs, expires seven-day-idle uploads, removes orphan files and
+folders, and measures retained files. A weak-reference maintenance thread sweeps hourly.
+
+`begin_upload` reserves 128 MiB + 64 KiB and returns an RAII stream slot with a private spool
+file. The route must enforce its stream/body limits, hash the stream, and finish authentication
+and CSRF admission before writing PDF bytes. Dropping the phase unlinks its spool and releases
+the slot/reservation. `create` rechecks the supplied size, hash and `%PDF-` magic without parsing
+the PDF, fsyncs and renames the spool, then inserts the upload and queued inspection in one
+Owner/CSRF-rechecked IMMEDIATE transaction. The original filename is never an argument.
+
+Migration 026's `source_uploads`, `source_upload_pages`, `source_upload_exclusions` and
+`source_jobs` are mutable staging tables with cascading deletion, separate from permanent
+source immutability. They store metadata/hashes, not PDFs, PNGs or extracted text. Files are
+descriptor-relative and no-follow under `data/staging/<32-hex-id>/`: directories 0700,
+`document.pdf`, `page-N.png` and `text-N.json` 0600. Page writes use exclusive temporary names,
+fsync and atomic rename. The exclusion table reserves actor, rationale, pages, displayed-space
+boxes, fingerprint, removal flag and revision for the later confirmation API; it stores no
+proposal text.
+
+The manager owns a process-wide ledger of used bytes and reservations. Total staging is
+2 GiB; free space must cover outstanding reservations plus 512 MiB for SQLite/WAL. Each
+eight-page render batch reserves 160 MiB. Written bytes replace reservation bytes; deletes
+reduce usage and failures release the unwritten portion. Per upload: PDF 128 MiB, PNG
+128 MiB, text 512 MiB, at most 64 selected pages, and one retained upload/one active stream.
+PNG overflow has its own `source_png_limit` reason (“too large for one source: select fewer
+pages”). Other capacity failures use `space`. `already_document` identifies a matching
+permanent document without merging readings.
+
+One dedicated worker thread runs inspection/rendering. The production `Worker` adapter uses
+the confined 3a API; synthetic unit tests inject a fake. Jobs transition queued → running →
+succeeded/failed/cancelled; queued cancellation never starts a worker. Running cancellation
+signals `Cancel` and joins the worker before returning. Selection/metadata changes require
+the expected revision, cancel/reap active work, advance the revision, and delete deselected
+page rows/files. Selected renders remain current across revisions when renderer versions and
+settings match. Retrying renders only missing/outdated selected pages, preserving successfully
+published pages from failed batches.
+
+Page publication and deletion share a lock; the publication transaction also requires a running
+job and matching upload/job revision. Failed/stale publication removes its new files. Discard
+holds the control lock across cancel/reap, row deletion and folder deletion. Sweeps skip running
+jobs under these locks. On opening, queued/running jobs become failed with `interrupted`.
+
+`contract(id)` builds `mimik-staged-v1` from a consistent row snapshot: PDF hash/size, pinned
+renderer versions/settings, selected pages/revision, per-page geometry, PNG hash/pixels/dpi,
+substituted fonts/text statistics, metadata, and limits (64 pages, 128 MiB PNG, 20,000 units).
+It refuses an incomplete/outdated rendering. Exclusion is currently `None`. This is staging
+only: no permanent source, review approval or evidence is created. The later source-creation
+step must consume this contract and copy only permanent page facts/images/exclusion geometry,
+then discard staging; it must not parse the PDF again or retain staging text/proposals.
 
 ## Import (`mimik import-source --bundle DIR --pdf FILE`)
 

@@ -626,7 +626,7 @@ fn pixel_bounds_and_extreme_aspects() {
 #[test]
 fn mupdf_stays_in_worker() {
     fn visit(path: &std::path::Path) {
-        let native = regex::Regex::new(r"\bmupdf\b").unwrap();
+        let native = native_reference();
         let operations = operations_reference();
         for entry in std::fs::read_dir(path).unwrap() {
             let path = entry.unwrap().path();
@@ -635,7 +635,7 @@ fn mupdf_stays_in_worker() {
             }
             if path.is_dir() {
                 visit(&path);
-            } else {
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
                 let content = std::fs::read_to_string(&path).unwrap();
                 assert!(!native.is_match(&content), "{}", path.display());
                 assert!(!operations.is_match(&content), "{}", path.display());
@@ -646,25 +646,57 @@ fn mupdf_stays_in_worker() {
 }
 
 fn operations_reference() -> regex::Regex {
-    regex::Regex::new(r"(?s)\b(?:(?:worker|operations)\s*::\s*(?:operations\b|(?:Input|inspect|render|render_each)\b|\{[^;]*\b(?:Input|inspect|render|render_each)\b)|(?:inspect|render|render_each)\s*\(\s*(?:Input|operations\s*::\s*Input)\s*::)").unwrap()
+    regex::Regex::new(r"(?s)(::\s*operations\b|\boperations\s*::|\buse\b[^;]*\boperations\b|\bworker\s*::\s*(?:Input\b|\{[^;]*\bInput\b)|\b(?:inspect|render|render_each)\s*\(\s*(?:Input|operations\s*::\s*Input)\s*::)").unwrap()
+}
+
+fn native_reference() -> regex::Regex {
+    regex::Regex::new(r"(?s)(\bmupdf_sys\b|\bmupdf\s*::|\b(?:use\s+(?:::\s*)?|extern\s+crate\s+)mupdf\b|\buse\b[^;]*\{[^;]*\bmupdf\b)").unwrap()
 }
 
 #[test]
 fn boundary_matchers_cover_aliases_and_imports() {
-    let native = regex::Regex::new(r"\bmupdf\b").unwrap();
-    for text in ["use mupdf as m;", "extern crate mupdf;", "mupdf::Context"] {
-        assert!(native.is_match(text));
+    let native = native_reference();
+    for text in [
+        "use mupdf;",
+        "use mupdf as m;",
+        "extern crate mupdf;",
+        "extern crate mupdf as pdf;",
+        "mupdf::Context",
+        "::mupdf::Context",
+        "use ::mupdf::{Context as C};",
+        "use {mupdf as pdf};",
+        "mupdf_sys::fz_context",
+        "use mupdf_sys as native;",
+        "extern crate mupdf_sys;",
+        "use ::mupdf_sys::{fz_context};",
+    ] {
+        assert!(native.is_match(text), "{text}");
     }
     assert!(!native.is_match("mupdf_error"));
     let operations = operations_reference();
     for text in [
-        "worker::inspect(input)",
         "worker::{Input, render as r}",
         "operations::render_each(input)",
         "worker::operations as op",
+        "use crate::sources::worker::{operations as pdf};",
+        "use crate::sources::worker::operations::{inspect as i};",
+        "crate::sources::worker::operations::render(input)",
         "render(Input::Bytes(bytes), &[1])",
     ] {
         assert!(operations.is_match(text), "{text}");
     }
-    assert!(!operations.is_match("worker::{Spec, records::read_inspection}"));
+    for text in [
+        "worker::inspect(path)",
+        "worker::inspect_cancellable(path, &cancel)",
+        "worker::render(path, pages, &cancel, callback)",
+        "use crate::sources::worker::{inspect, render, Cancel};",
+        "worker::{Spec, records::read_inspection}",
+        "pub mupdf: String",
+        "document.mupdf",
+        "\"mupdf\"",
+        "mupdf_error",
+    ] {
+        assert!(!native.is_match(text), "{text}");
+        assert!(!operations.is_match(text), "{text}");
+    }
 }
