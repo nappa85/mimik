@@ -350,9 +350,13 @@ impl<R: Read> Frames<R> {
             .read_exact(&mut bytes)
             .map_err(|_| Error::Unreadable)?;
         if matches!(header, Header::Error { .. }) {
-            let reason = parse(&bytes)?;
+            let reason: Error = parse(&bytes)?;
             self.eof()?;
-            return Err(reason);
+            return Err(if reason == Error::Timeout {
+                Error::Unreadable
+            } else {
+                reason
+            });
         }
         Ok((header, bytes))
     }
@@ -422,6 +426,9 @@ pub fn read_inspection<R: Read>(input: R) -> Result<Inspection, Error> {
 
 /// Stateful parent reader; retains only one page's payloads at a time. EOF is checked
 /// before the final page is yielded. Discard the reader after any error.
+/// JSON allocation bounds are per frame: `serde_json` may decode an escaped string into
+/// its scratch buffer up to the frame's length before a field's own limit refuses it.
+/// This is accepted; JSON payload frames are at most 8 MiB (PNG frames are separate).
 pub struct RenderReader<R> {
     frames: Frames<BufReader<R>>,
     pages: Vec<Page>,

@@ -440,7 +440,9 @@ fn text(
     correction: &Matrix,
 ) -> Result<(Stats, Vec<TextLine>), Error> {
     let text = page.to_text_page(
-        TextPageFlags::PRESERVE_IMAGES | TextPageFlags::USE_CID_FOR_UNKNOWN_UNICODE,
+        TextPageFlags::CLIP
+            | TextPageFlags::PRESERVE_IMAGES
+            | TextPageFlags::USE_CID_FOR_UNKNOWN_UNICODE,
     )?;
     let mut stats = Stats {
         n: info.n,
@@ -513,7 +515,7 @@ fn text(
     }
     stats.fonts_substituted = scan.names.into_iter().collect();
     stats.fonts_skipped = scan.skipped;
-    stats.incomplete = scan.incomplete;
+    stats.incomplete = scan.incomplete || scan.skipped > 0;
     records::validate_stats(&stats, info.n)?;
     records::validate_lines(&lines, info)?;
     serde_json::to_writer(

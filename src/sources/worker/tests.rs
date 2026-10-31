@@ -104,6 +104,7 @@ fn diagnostic_fonts(kind: &str) {
     }
     if kind == "type0" || kind == "bad-fonts" {
         assert!(stats["fonts_skipped"].as_u64().unwrap_or(0) > 0);
+        assert_eq!(stats["incomplete"], true);
     }
     if kind == "pattern" || kind == "appearance" {
         assert!(
@@ -187,12 +188,66 @@ fn reversed_box_corners_are_normalized() {
 }
 
 #[test]
+fn crop_edge_text_counts_only_visible_characters() {
+    // Courier is 6 pt wide at 10 pt. The CropBox intersects C, but D starts at x=53.
+    let mut doc = Document::load_mem(&fixture(0, [0, 0, 52, 300], 1.0, false)).unwrap();
+    let page = doc.get_pages()[&1];
+    let resources = doc
+        .get_dictionary(page)
+        .unwrap()
+        .get(b"Resources")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    // Make the off-page F explicitly unmapped, so the unmapped count is exercised too.
+    let unicode = doc.add_object(Stream::new(
+        dictionary! {},
+        br"/CIDInit /ProcSet findresource begin
+12 dict begin begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /Synthetic def /CMapType 2 def
+1 begincodespacerange <00> <FF> endcodespacerange
+6 beginbfchar
+<41> <0041> <42> <0042> <43> <0043>
+<44> <0044> <45> <0045> <46> <FFFD>
+endbfchar
+endcmap CMapName currentdict /CMap defineresource pop end end"
+            .to_vec(),
+    ));
+    let font = doc.add_object(dictionary! {"Type"=>"Font", "Subtype"=>"Type1", "BaseFont"=>"Courier", "ToUnicode"=>unicode});
+    doc.get_dictionary_mut(resources)
+        .unwrap()
+        .set("Font", dictionary! {"F1"=>font});
+    let content = doc.add_object(Stream::new(
+        dictionary! {},
+        b"BT /F1 10 Tf 35 60 Td (ABCDEF) Tj ET".to_vec(),
+    ));
+    doc.get_dictionary_mut(page)
+        .unwrap()
+        .set("Contents", content);
+    let bytes = saved(&mut doc);
+    let output = render(Input::Bytes(&bytes), &[1]).unwrap();
+    assert_eq!(output[0].lines.len(), 1);
+    assert_eq!(output[0].lines[0].text, "ABC");
+    assert_eq!(output[0].stats.chars, 3);
+    assert_eq!(output[0].stats.unmapped, 0);
+    doc.get_dictionary_mut(page)
+        .unwrap()
+        .set("CropBox", vec![0.into(), 0.into(), 200.into(), 300.into()]);
+    let bytes = saved(&mut doc);
+    let full = render(Input::Bytes(&bytes), &[1]).unwrap();
+    assert_eq!(full[0].lines[0].text, "ABCDE\u{fffd}");
+    assert_eq!(full[0].stats.chars, 6);
+    assert_eq!(full[0].stats.unmapped, 1);
+}
+
+#[test]
 fn hidden_zero_size_text_is_dropped() {
     let mut doc = Document::load_mem(&fixture(0, [0, 0, 200, 300], 1.0, false)).unwrap();
     let p = doc.get_pages()[&1];
     let content = doc.add_object(Stream::new(
         dictionary! {},
-        b"BT /F1 0 Tf 0 0 Td (Hidden) Tj ET".to_vec(),
+        b"BT /F1 0 Tf 35 60 Td (Hidden) Tj ET".to_vec(),
     ));
     doc.get_dictionary_mut(p).unwrap().set("Contents", content);
     let bytes = saved(&mut doc);

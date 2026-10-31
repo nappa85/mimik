@@ -4,7 +4,6 @@ mod import;
 mod reports;
 mod suggestions;
 #[cfg(target_os = "linux")]
-#[cfg(target_os = "linux")]
 pub mod worker;
 pub use documents::{OwnerUnit, PrimaryPageState, UnitDecision, parse_page_list};
 pub use reports::SuggestionReportSummary;

@@ -76,10 +76,19 @@ pub fn run_entry(spec_path: &Path) -> Result<(), Error> {
             }
         }
     })();
+    complete(writer, result)
+}
+
+pub(super) fn complete<W: std::io::Write>(
+    writer: RecordWriter<W>,
+    result: Result<(), Error>,
+) -> Result<(), Error> {
     match result {
         Ok(()) => writer.finish(),
         Err(reason) => {
-            writer.error(reason)?;
+            // The terminal frame is best effort; preserve the original process status
+            // even if its budget is exhausted or the parent has closed the pipe.
+            let _ = writer.error(reason);
             Err(reason)
         }
     }

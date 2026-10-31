@@ -176,9 +176,12 @@ exactly fds 0, 1 and 2:
   neither pipe can fill and deadlock. It is never logged verbatim: a failure is logged and
   shown by a fixed reason code.
 - **Exit:** read only after the worker tree is reaped. Before framing, statuses 20–25 map
-  respectively to unreadable, timeout, too large, too many pages, password protected and
+  respectively to unreadable, unreadable, too large, too many pages, password protected and
   unsupported (`Error::from_exit_code`). After framing starts, errors also carry a terminal
   `error` record. The entry reads bounded input bytes and closes `/in` before MuPDF starts.
+  A worker-claimed timeout in a terminal record also maps to unreadable: "took too long"
+  belongs to the parent's deadline alone. A failed terminal error write preserves the
+  original reason's exit status.
 
 The worker writes nothing to the host. This removes the risks of a writable output directory:
 FIFOs and links, files rewritten between validation and storage, filling the disk with many
@@ -240,6 +243,9 @@ files, and per-file versus total quotas.
   - macOS and Windows have no upload (limitation).
 - **Internal protocol.** The hidden subcommand `mimik pdf-worker` is an internal protocol, not
   a privilege boundary, as `assistant-runner` is.
+  JSON allocation bounds are per frame: serde_json may decode an escaped string into its
+  scratch buffer up to the frame's length before a field's own limit refuses it. This is
+  accepted; JSON payload frames are at most 8 MiB (PNG frames have their separate limit).
 - **MuPDF stays in one module:** `src/sources/worker/`, reached only through `mimik pdf-worker`.
   A CI check refuses `mupdf::` anywhere else.
 

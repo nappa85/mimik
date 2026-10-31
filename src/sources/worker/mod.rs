@@ -47,8 +47,8 @@ impl Error {
     #[must_use]
     pub const fn from_exit_code(code: i32) -> Option<Self> {
         match code {
-            20 => Some(Self::Unreadable),
-            21 => Some(Self::Timeout),
+            // Only the parent's deadline can establish a timeout.
+            20 | 21 => Some(Self::Unreadable),
             22 => Some(Self::TooLarge),
             23 => Some(Self::TooManyPages),
             24 => Some(Self::PasswordProtected),

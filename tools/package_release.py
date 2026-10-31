@@ -17,6 +17,11 @@ def toolchain(path=Path("rust-toolchain.toml")):
 
 
 EXCEPTION_MARKER = "As a special exception to the GNU Lesser General Public License"
+BUILD_PREREQUISITES = (
+    "MuPDF build prerequisites: a C compiler and libclang (clang-14 on Ubuntu 22.04).\n"
+    "Set LIBCLANG_PATH to the directory containing libclang, e.g. "
+    "/usr/lib/llvm-14/lib on Ubuntu 22.04.\n"
+)
 
 
 def hakoniwa_notice(notices_text, license_path=Path("assets/hakoniwa-LICENSE")):
@@ -160,7 +165,7 @@ def main():
     (stage / "BUILD.txt").write_text(
         f"Version: {args.version}\nRevision: {args.revision}\nRust: {toolchain()}\n"
         f"llama.cpp: {llama['llama_cpp']['tag']} (build {llama['llama_cpp']['build']}, "
-        f"commit {llama['llama_cpp']['commit']})\n",
+        f"commit {llama['llama_cpp']['commit']})\n" + BUILD_PREREQUISITES,
         encoding="utf-8",
     )
     (stage / "SQLITE-NOTICE.txt").write_text(
@@ -181,7 +186,7 @@ def main():
         tar.addfile(entry, io.BytesIO(config_bytes))
     (stage / "SOURCE.txt").write_text(
         f"Corresponding source: accompanying {source_name} and {dependency_name}\nRevision: {args.revision}\nUnpack the .crate, then unpack dependency sources into that package root.\nBuild: cargo build --release --offline --locked (Rust {toolchain()}).\n"
-        + llama_pointer(llama),
+        + BUILD_PREREQUISITES + llama_pointer(llama),
         encoding="utf-8",
     )
     archive = args.output / f"{name}.tar.gz"

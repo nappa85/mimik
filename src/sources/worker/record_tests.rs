@@ -147,17 +147,21 @@ fn terminal_error_is_returned_at_any_frame_boundary() {
                 Error::Unsupported => "unsupported",
             }
         );
-        assert_eq!(Error::from_exit_code(reason.exit_code()), Some(reason));
+        let expected = if reason == Error::Timeout {
+            Error::Unreadable
+        } else {
+            reason
+        };
         let terminal = format!(
             "{{\"kind\":\"error\",\"length\":{}}}\n{payload}",
             payload.len()
         );
-        assert_eq!(read_inspection(terminal.as_bytes()).unwrap_err(), reason);
+        assert_eq!(read_inspection(terminal.as_bytes()).unwrap_err(), expected);
         for prefix in 0..=3 {
             let mut wire = join(&split(valid())[..prefix]);
             wire.extend_from_slice(terminal.as_bytes());
             let mut r = RenderReader::new(&wire[..], vec![page(1)]).unwrap();
-            assert_eq!(r.next_page().unwrap_err(), reason);
+            assert_eq!(r.next_page().unwrap_err(), expected);
         }
     }
     assert_eq!(Error::from_exit_code(1), None);
@@ -170,6 +174,51 @@ fn terminal_error_is_returned_at_any_frame_boundary() {
         wire.extend_from_slice(payload);
         assert_eq!(read_inspection(&wire[..]).unwrap_err(), Error::Unreadable);
     }
+}
+
+#[test]
+fn worker_exit_status_cannot_claim_parent_timeout() {
+    assert_eq!(Error::from_exit_code(21), Some(Error::Unreadable));
+    assert_eq!(Error::Timeout.to_string(), "took too long");
+    for reason in [
+        Error::Unreadable,
+        Error::TooLarge,
+        Error::TooManyPages,
+        Error::PasswordProtected,
+        Error::Unsupported,
+    ] {
+        assert_eq!(Error::from_exit_code(reason.exit_code()), Some(reason));
+    }
+}
+
+#[test]
+fn entry_preserves_original_reason_when_error_frame_cannot_be_written() {
+    struct BrokenPipe;
+    impl std::io::Write for BrokenPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from_raw_os_error(libc::EPIPE))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut exhausted = RecordWriter::new(Vec::new(), Operation::Inspect, 0);
+    exhausted.remaining = 0;
+    let results = [
+        super::super::entry::complete(exhausted, Err(Error::PasswordProtected)),
+        super::super::entry::complete(
+            RecordWriter::new(BrokenPipe, Operation::Inspect, 0),
+            Err(Error::TooManyPages),
+        ),
+    ]
+    .map(|result| result.unwrap_err().exit_code());
+    assert_eq!(
+        results,
+        [
+            Error::PasswordProtected.exit_code(),
+            Error::TooManyPages.exit_code()
+        ]
+    );
 }
 
 fn page(n: u32) -> Page {
