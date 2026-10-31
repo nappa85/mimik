@@ -28,8 +28,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   no unit (L-SRC-1).
 
 - **Source import plan** (`docs/source-import-plan.md`, reviewed, SRC-11 to SRC-14): steps 1
-  (schema) and 2 (review screen, `mimik import-suggestions`, browser checks) merged. Next: step 3
-  (sandboxed PDF work, upload and jobs) needs its own plan and plan review. Review-screen test
+  (schema) and 2 (review screen, `mimik import-suggestions`, browser checks) merged. Step 3's plan
+  (`docs/source-upload-plan.md`, reviewed) is merged; next: 3a's DEP-29 gate (MuPDF build,
+  licences, measurements), then the shared sandbox and the worker. Review-screen test
   hook `READ_DEADLINE` (`src/sources/review.rs`) is process-global and matched by label: key it
   to the test's store. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
   (`~/temp/`, tagged, clean text layer) through the prototype tools.
