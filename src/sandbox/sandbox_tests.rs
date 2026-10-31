@@ -1,4 +1,5 @@
 use super::*;
+use std::path::PathBuf;
 
 fn proc_root(dir: &Path, settings: &[(&str, &str)]) -> PathBuf {
     let root = dir.join("proc");
@@ -60,13 +61,4 @@ fn the_settings_that_may_explain_a_failed_start_are_told_apart() {
         ],
     );
     assert_eq!(namespace_cause(&proc), None);
-}
-
-#[test]
-fn the_gpu_binds_take_only_the_vulkan_and_driver_data_that_exist() {
-    let dir = tempfile::tempdir().unwrap();
-    let existing = dir.path().join("vulkan");
-    std::fs::create_dir(&existing).unwrap();
-    let missing = dir.path().join("absent");
-    assert_eq!(shared_data(&[&existing, &missing]), [existing]);
 }

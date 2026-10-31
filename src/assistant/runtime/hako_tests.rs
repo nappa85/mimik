@@ -1,4 +1,16 @@
 use super::*;
+use crate::sandbox::*;
+use crate::sandbox::{process, seccomp};
+use std::path::PathBuf;
+
+#[test]
+fn the_gpu_binds_take_only_the_vulkan_and_driver_data_that_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    let existing = dir.path().join("vulkan");
+    std::fs::create_dir(&existing).unwrap();
+    let missing = dir.path().join("absent");
+    assert_eq!(sandbox::shared_data(&[&existing, &missing]), [existing]);
+}
 
 fn inputs<'a>(gpu: Option<&'a GpuBinds>, files: &[&str]) -> Inputs<'a> {
     Inputs {
@@ -237,7 +249,10 @@ fn the_start_report_is_the_reapers_pid_without_a_namespace_number() {
         crate::assistant::runtime::endpoint::NAMESPACE_UNREPORTED
     );
     for bad in ["", "{}", "{\"child-pid\":\"x\"}", "not json"] {
-        assert!(super::started(bad).is_none(), "{bad}");
+        assert!(
+            crate::assistant::runtime::hako::started(bad).is_none(),
+            "{bad}"
+        );
     }
 }
 
@@ -325,7 +340,7 @@ fn the_root_is_the_generations_sibling_so_its_removal_is_the_generations() {
 #[test]
 fn the_token_is_in_the_plan_only_as_content_for_the_sandbox_own_tmpfs() {
     let plan = plan(&inputs(None, &[]));
-    assert_eq!(plan.token, Secret::new("secret-token\n".into()));
+    assert_eq!(plan.files[0].content, Secret::new("secret-token\n".into()));
     // Not a bind of a host file, and the /run it is written into is a bounded tmpfs.
     assert!(!targets(&plan).contains(&sandbox::TOKEN));
     let run = plan.tmpfs.iter().find(|t| t.target == "/run").unwrap();
@@ -392,7 +407,9 @@ fn the_start_report_may_name_the_inner_process() {
     let started = started(&line).unwrap();
     assert_eq!((started.child_pid, started.inner_pid), (4242, Some(4243)));
     assert_eq!(started.inner_start, Some(99));
-    assert!(super::started("{\"child-pid\":1,\"inner-pid\":\"x\"}").is_none());
+    assert!(
+        crate::assistant::runtime::hako::started("{\"child-pid\":1,\"inner-pid\":\"x\"}").is_none()
+    );
 }
 
 /// Fake steps in the closure's order: each records that it ran; `fail` fails the one at that
@@ -563,7 +580,7 @@ fn the_start_report_says_when_the_sandbox_had_ended_and_names_the_server_by_iden
         (started.inner_pid, started.inner_start, started.ended),
         (Some(11), Some(12345), false)
     );
-    let ended = super::started(&started_line(10, None, true)).unwrap();
+    let ended = crate::assistant::runtime::hako::started(&started_line(10, None, true)).unwrap();
     assert!(ended.ended && ended.inner_pid.is_none());
 }
 
@@ -940,7 +957,7 @@ fn more_than_one_process_in_the_sandbox_ends_it() {
 #[test]
 fn the_stat_line_gives_the_parent_and_the_start_time_of_the_same_read() {
     let me = i32::try_from(std::process::id()).unwrap();
-    let (parent, start) = crate::assistant::runtime::rundir::stat_of(me).unwrap();
+    let (parent, start) = process::stat_of(me).unwrap();
     assert_eq!(
         Some(start),
         crate::assistant::runtime::rundir::start_time(me)
@@ -951,18 +968,9 @@ fn the_stat_line_gives_the_parent_and_the_start_time_of_the_same_read() {
     );
     // A name with spaces and parentheses does not shift the fields.
     let line = "42 (a) b (c) S 7 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 987654 0 0 0";
-    assert_eq!(
-        crate::assistant::runtime::rundir::parse_stat(line),
-        Some((7, 987_654))
-    );
-    assert_eq!(
-        crate::assistant::runtime::rundir::parse_stat("garbage"),
-        None
-    );
-    assert_eq!(
-        crate::assistant::runtime::rundir::parse_stat("1 (x) S"),
-        None
-    );
+    assert_eq!(process::parse_stat(line), Some((7, 987_654)));
+    assert_eq!(process::parse_stat("garbage"), None);
+    assert_eq!(process::parse_stat("1 (x) S"), None);
 }
 
 #[test]
@@ -1211,10 +1219,7 @@ fn an_enforced_ruleset_is_full_from_abi_6_and_partial_below() {
 fn with_failing_landlock<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::spawn(move || {
         let errno = u32::try_from(libc::EPERM).unwrap();
-        crate::assistant::runtime::seccomp::install(
-            &crate::assistant::runtime::seccomp::program_without_landlock(errno),
-        )
-        .unwrap();
+        seccomp::install(&seccomp::program_without_landlock(errno)).unwrap();
         body()
     })
     .join()

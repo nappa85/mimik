@@ -14,6 +14,7 @@ pub mod network;
 mod presentation;
 pub mod registry;
 mod registry_admin;
+pub(crate) mod sandbox;
 pub mod sources;
 mod store;
 mod web;

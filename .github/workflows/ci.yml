@@ -330,7 +330,7 @@ jobs:
             --model-sha256 270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d \
             --data-dir target/probe-data-live
           target/confinement-tests --test-threads=2 --include-ignored \
-            assistant::runtime::seccomp:: assistant::runtime::endpoint:: \
+            sandbox::seccomp:: assistant::runtime::endpoint:: \
             assistant::runtime::runner:: assistant::runtime::launch::live_tests:: \
             --skip live_gpu_ \
             2>&1 | tee target/confinement.log
@@ -339,12 +339,12 @@ jobs:
             echo "only ${ran:-0} confinement tests ran; expected at least 40"
             exit 1
           fi
-          # On a runner with Landlock the kernel-level check of the rule semantics (`hako::tests`,
+          # On a runner with Landlock the kernel-level check of the rule semantics (`hako_tests`,
           # which the filters above leave out) runs with `require` set, and must have run: it
           # prints SKIPPED when it checked nothing.
           if [ "$abi" -ge 6 ]; then
             target/confinement-tests --test-threads=1 --nocapture \
-              assistant::runtime::hako::tests::a_landlock_list_rule_covers_the_directories_beneath_it_and_no_file_in_them \
+              assistant::runtime::hako::hako_tests::a_landlock_list_rule_covers_the_directories_beneath_it_and_no_file_in_them \
               2>&1 | tee target/landlock-list-rule.log
             grep -q '^test result: ok\. 1 passed; 0 failed' target/landlock-list-rule.log
             if grep -q 'SKIPPED' target/landlock-list-rule.log; then
