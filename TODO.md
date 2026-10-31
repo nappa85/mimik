@@ -29,10 +29,13 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 - **Source import plan** (`docs/source-import-plan.md`, reviewed, SRC-11 to SRC-14): steps 1
   (schema) and 2 (review screen, `mimik import-suggestions`, browser checks) merged. Step 3's plan
-  (`docs/source-upload-plan.md`, reviewed) is merged; 3a slice 1 (shared `src/sandbox/`) merged; the
-  DEP-29 build check passed (MuPDF 1.27.2, 1m30s clean at 2 cores, notes in
-  `/media/data/mimik/mupdf-gate/GATE-NOTES.md`; FreeType's GPL option is GPLv2-or-later, so
-  the plan's FreeType line needs correcting). Next: slice 2, the PDF worker. Review-screen test
+  (`docs/source-upload-plan.md`, reviewed) is merged; part 3a (the sandboxed MuPDF worker, its
+  record protocol, the hostile corpus, availability, notices, DEP-29) is merged. Next: 3b
+  (upload route, staging tables and jobs), then 3c (repeated-text exclusion). Follow-ups:
+  fuzzing of the record parser and the worker's MuPDF entry points (cargo-fuzz in a container);
+  a MuPDF security-advisory watch at each release (DEP-29); `cargo audit` after the 3a merges
+  (container DNS was down on 2026-10-31; dependencies unchanged since slice 2a's audit apart
+  from a dev-dependency edge to the already-locked flate2). Review-screen test
   hook `READ_DEADLINE` (`src/sources/review.rs`) is process-global and matched by label: key it
   to the test's store. `campaigns::tests::material_tests::material_review_response_bounds_and_labels`
   failed once in a full parallel run (2026-10-31, 8 test threads, "budget truncation must be
@@ -98,12 +101,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Pending user questions
 
-- **libjpeg README missing from mupdf-sys 0.8.0 (found 2026-10-31):** the crate vendors
-  IJG libjpeg (compiled into Mimik through MuPDF) without its README, which the IJG licence
-  requires to accompany any distribution of the source; Mimik's dependency-sources archive
-  (REL-2) redistributes that source. Options: ship the official IJG README alongside the
-  archive and notices (fetched once, hash-pinned), report it upstream to mupdf-rs, or both.
-  Needed before any release that includes the PDF worker.
 - Does the correct-password login rejection seen on 2026-10-14 still happen? Diagnose or close.
 - Remaining LAN and multi-device scope to support.
 - M4 default Q5 (drafts over 1 MiB are not echoed back), applied without an answer: confirm or
