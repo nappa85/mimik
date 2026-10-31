@@ -14,8 +14,8 @@
 <a href="/admin/materials/pages/{{ page.id }}/image" target="_blank" rel="noopener">Open full-size image</a>
 {% if !screen.geometry %}<p>Page geometry unavailable: overlays and drawing omitted. The original image and manual coordinate form remain available.</p>{% endif %}
 <div class="review-zoom-controls" hidden><button type="button" data-zoom="fit" aria-pressed="true">Fit width</button><button type="button" data-zoom="one" aria-pressed="false">100%</button><button type="button" data-zoom="two" aria-pressed="false">200%</button></div>
-{% if screen.overlay_omitted %}<p>Unit overlay omitted: more than 2,000 units on this page. Missing-text regions and drawing remain available.</p>{% endif %}
-{% if screen.regions_omitted %}<p>Only the first 2,000 missing-text regions are drawn; additional regions remain in the paginated notes.</p>{% endif %}
+{% if screen.overlay_omitted && !screen.reads_reduced() %}<p>Unit overlay omitted: more than 2,000 units on this page. Missing-text regions and drawing remain available.</p>{% endif %}
+{% if screen.regions_omitted && !screen.reads_reduced() %}<p>Only the first 2,000 missing-text regions are drawn; additional regions remain in the paginated notes.</p>{% endif %}
 <div class="review-image-scroll"><div class="review-image" id="review-image" data-width="{{ screen.width }}" data-height="{{ screen.height }}">
 <img src="/admin/materials/pages/{{ page.id }}/image" alt="Original rendered PDF page {{ page.pdf_page }} for comparison">
 {% if screen.geometry %}<svg id="review-overlay" viewBox="0 0 {{ screen.width }} {{ screen.height }}" aria-label="Unit regions in PDF points" role="group">
@@ -27,6 +27,7 @@
 {% for unit in page.units %}
 <article class="panel" id="unit-{{ unit.id }}" data-unit="{{ unit.id }}" tabindex="0">
 <h2>{{ unit.kind }} — {{ unit.state }}</h2><p>Stored unit revision {{ unit.revision }}</p>
+{% if screen.reads_reduced() %}<p>Screen read deadline reached. <a href="/admin/materials/pages/{{ page.id }}/units/{{ unit.id }}/suggestions">Inspect this unit's suggestions</a>. Only the first unit decision form is retained.</p>{% endif %}
 <figure class="source-region">
 <img src="/admin/materials/pages/{{ page.id }}/units/{{ unit.id }}/image" loading="lazy" alt="Original-page bounding-region preview for {{ unit.kind }}; inspect the full page for context">
 <figcaption>Original-page crop, not extraction.
@@ -63,9 +64,10 @@
 {% if let Some(next) = units_next %}<a href="/admin/materials/pages/{{ page.id }}?units={{ next }}&amp;history={{ history }}">Next units</a>{% endif %} ·
 <a href="/admin/materials/pages/{{ page.id }}?history={{ history }}">First units</a>
 <section class="panel" id="lookup-panel"><h2>Lookup text — current card page</h2><p>{% if !page.complete %}Not evidence until this page is complete. {% endif %}{% if !self.is_primary() %}This reading is not used by lookup.{% endif %}</p>{% for card in screen.cards %}{% if card.preview %}<p>Lookup text preview for unit {{ card.unit }}: response text budget reached. <a href="?units={{ card.cursor }}#unit-{{ card.unit }}">Read this unit first on a card page</a>.</p>{% endif %}<pre class="evidence-text" data-lookup-unit="{{ card.unit }}">{{ "\n" }}{{ card.lookup }}</pre>{% endfor %}</section>
+{% if screen.reads_reduced() %}<p role="status">Screen read deadline reached: suggestions, lookup text, additional decision forms and overlays are omitted. The first unit form and any submitted draft are retained. Open a unit's suggestion list or a suggestion detail to inspect bounded evidence.</p>{% endif %}
 <section class="panel" id="page-notes"><h2>Page notes and missing text</h2>{% for advice in screen.notes %}{% include "material_advice.html" %}{% endfor %}{% if let Some(next) = screen.notes_next %}<a href="?units={{ units }}&amp;notes={{ next }}#page-notes">Next 20 page notes</a>{% endif %}</section>
 <section class="panel" id="add-text"><h2>Add missing text</h2><p>Enter four corners in PDF points, clockwise or counterclockwise. With JavaScript, enable drawing then drag on the page. Use the corner handles and arrow keys to adjust.</p>
-{% if screen.geometry %}<button type="button" id="draw-region" aria-pressed="false" hidden>Draw a missing-text box</button><button type="button" id="keyboard-region" hidden>Create a box for keyboard adjustment</button>{% endif %}
+{% if screen.geometry %}<button type="button" id="draw-region" aria-pressed="false" hidden>Draw a missing-text box</button><button type="button" id="keyboard-region" hidden>Create a box for keyboard adjustment (replaces entered polygon)</button>{% endif %}
 <div id="region-handles" hidden><button type="button" data-corner="0">Adjust top-left corner with arrow keys</button><button type="button" data-corner="2">Adjust bottom-right corner with arrow keys</button></div>
 <form method="post" action="/admin/materials/pages/{{ page.id }}/owner-units" data-form="owner" data-target="{{ page.id }}"><input type="hidden" name="csrf" value="{{ csrf }}">
 {% if let Some(form) = owner_draft %}<input type="hidden" name="revision" value="{{ form.revision }}"><label>Four corners (PDF points)<input id="owner-polygon" name="polygon" value="{{ form.polygon }}" required></label><label>Missing text<textarea name="text" required>{{ "\n" }}{{ form.text }}</textarea></label><label>Rationale<textarea name="rationale" required>{{ "\n" }}{{ form.rationale }}</textarea></label>

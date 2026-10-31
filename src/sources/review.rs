@@ -152,6 +152,7 @@ pub(crate) struct Advice {
     pub target_label: String,
     pub cursor: i64,
     pub lookup_truncated: bool,
+    pub suggested_truncated: bool,
     pub anchor: String,
     pub target_links: Vec<(i64, i64)>,
     pub compact: bool,
@@ -215,6 +216,23 @@ struct StoredAdvice {
     suggested_truncated: bool,
 }
 fn load_many(db: &Connection, ids: &[i64], preview: bool) -> Result<Vec<Advice>, AppError> {
+    load_many_with_budget(db, ids, preview, None)
+}
+fn load_many_with_budget(
+    db: &Connection,
+    ids: &[i64],
+    preview: bool,
+    screen_page: Option<i64>,
+) -> Result<Vec<Advice>, AppError> {
+    let revisions = screen_page
+        .map(|page| {
+            let mut query = db.prepare("SELECT id,revision FROM source_units WHERE page_id=?1")?;
+            query
+                .query_map([page], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?
+                .collect::<Result<std::collections::BTreeMap<_, _>, rusqlite::Error>>()
+        })
+        .transpose()?;
+    let mut lookup_rows = screen_page.map(|_| 4096);
     let suggested_column = text("coalesce(suggested_text,'')", 80000);
     let suggested_column = if preview {
         format!("substr({suggested_column},1,2000)")
@@ -254,10 +272,24 @@ fn load_many(db: &Connection, ids: &[i64], preview: bool) -> Result<Vec<Advice>,
         .collect::<Result<Vec<_>, _>>()?;
     stored
         .into_iter()
-        .map(|row| load_evidence(db, row, preview))
+        .map(|row| {
+            load_evidence(
+                db,
+                row,
+                preview,
+                &mut lookup_rows,
+                screen_page.zip(revisions.as_ref()),
+            )
+        })
         .collect()
 }
-fn load_evidence(db: &Connection, stored: StoredAdvice, preview: bool) -> Result<Advice, AppError> {
+fn load_evidence(
+    db: &Connection,
+    stored: StoredAdvice,
+    preview: bool,
+    lookup_rows: &mut Option<usize>,
+    screen_revisions: Option<(i64, &std::collections::BTreeMap<i64, i64>)>,
+) -> Result<Advice, AppError> {
     let StoredAdvice {
         id,
         kind,
@@ -274,46 +306,33 @@ fn load_evidence(db: &Connection, stored: StoredAdvice, preview: bool) -> Result
     let target: SuggestionTarget = serde_json::from_str(&json)?;
     let mut lookup = String::new();
     let mut stale = false;
-    let mut lookup_truncated = suggested_truncated;
+    let mut lookup_truncated = false;
     let limit: usize = if preview { 2000 } else { 20000 };
-    let lookup_column = text(LOOKUP_TEXT, 262_144);
     let mut page = match &target {
         SuggestionTarget::Page { page, .. } | SuggestionTarget::Region { page, .. } => *page,
         _ => 0,
     };
     let units = targets(&target);
-    if !units.is_empty() {
-        // One batch reads revisions and bounded text for the whole merge. SQLite
-        // computes offsets before substr: text past the aggregate limit never
-        // crosses the allocation boundary, even in preview mode.
-        let json = serde_json::to_string(&units)?;
-        let sql = format!(
-            "WITH wanted AS (SELECT CAST(key AS INTEGER) position,json_extract(value,'$.unit') unit,json_extract(value,'$.revision') expected FROM json_each(?1)), evidence AS (SELECT w.position,u.page_id,u.revision!=w.expected stale,{lookup_column} value FROM wanted w JOIN source_units u ON u.id=w.unit JOIN source_pages p ON p.id=u.page_id LEFT JOIN source_search_text t ON t.unit_id=u.id WHERE p.source_id=?2), measured AS (SELECT *,coalesce(sum(length(value)+1) OVER (ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),0) offset FROM evidence) SELECT max(page_id),max(stale),coalesce(group_concat(CASE WHEN offset<?3 THEN substr(value,1,?3-offset) END,char(10)),''),coalesce(sum(length(value)+1)-1,0)>?3,count(*),sum(value IS NULL) FROM measured"
-        );
-        let (p, is_stale, value, truncated, count, invalid): (
-            i64,
-            bool,
-            String,
-            bool,
-            usize,
-            usize,
-        ) = db.query_row(&sql, params![json, source, limit], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                read_text(r, 2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-            ))
-        })?;
-        if count != units.len() || invalid > 0 {
-            return Err(AppError::Invalid("Invalid suggestion target evidence."));
+    let read_lookup = lookup_rows.as_mut().is_none_or(|remaining| {
+        if units.len() <= *remaining {
+            *remaining -= units.len();
+            true
+        } else {
+            false
         }
-        page = p;
-        stale = is_stale;
-        lookup = value;
-        lookup_truncated |= truncated;
+    });
+    if !units.is_empty() && !read_lookup {
+        let (screen_page, revisions) = screen_revisions.ok_or(AppError::Worker)?;
+        page = screen_page;
+        lookup_truncated = true;
+        for target in &units {
+            let revision = revisions
+                .get(&target.unit)
+                .ok_or(AppError::Invalid("Invalid suggestion target evidence."))?;
+            stale |= *revision != target.revision;
+        }
+    } else if !units.is_empty() {
+        (page, stale, lookup, lookup_truncated) = unit_evidence(db, &units, source, limit)?;
     }
     let belongs: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM source_pages WHERE id=?1 AND source_id=?2)",
@@ -348,6 +367,7 @@ fn load_evidence(db: &Connection, stored: StoredAdvice, preview: bool) -> Result
         target_label,
         cursor: 0,
         lookup_truncated,
+        suggested_truncated,
         anchor: format!("suggestion-{id}"),
         target_links: Vec::new(),
         compact: false,
@@ -372,6 +392,39 @@ fn advice_state(applied: bool, dismissed: bool, stale: bool) -> &'static str {
     }
 }
 
+fn unit_evidence(
+    db: &Connection,
+    units: &[super::SuggestionUnit],
+    source: i64,
+    limit: usize,
+) -> Result<(i64, bool, String, bool), AppError> {
+    // SQL computes offsets before substr; only the aggregate prefix crosses
+    // the allocation boundary. Screen callers charge every visited target row.
+    let lookup_column = text(LOOKUP_TEXT, 262_144);
+    let sql = format!(
+        "WITH wanted AS (SELECT CAST(key AS INTEGER) position,json_extract(value,'$.unit') unit,json_extract(value,'$.revision') expected FROM json_each(?1)), evidence AS (SELECT w.position,u.page_id,u.revision!=w.expected stale,{lookup_column} value FROM wanted w JOIN source_units u ON u.id=w.unit JOIN source_pages p ON p.id=u.page_id LEFT JOIN source_search_text t ON t.unit_id=u.id WHERE p.source_id=?2), measured AS (SELECT *,coalesce(sum(length(value)+1) OVER (ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),0) offset FROM evidence) SELECT max(page_id),max(stale),coalesce(group_concat(CASE WHEN offset<?3 THEN substr(value,1,?3-offset) END,char(10)),''),coalesce(sum(length(value)+1)-1,0)>?3,count(*),sum(value IS NULL) FROM measured"
+    );
+    let (page, stale, value, truncated, count, invalid): (i64, bool, String, bool, usize, usize) =
+        db.query_row(
+            &sql,
+            params![serde_json::to_string(units)?, source, limit],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    read_text(r, 2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )?;
+    if count != units.len() || invalid > 0 {
+        return Err(AppError::Invalid("Invalid suggestion target evidence."));
+    }
+    Ok((page, stale, value, truncated))
+}
+
 pub(crate) struct Overlay {
     pub unit: i64,
     pub cursor: i64,
@@ -387,7 +440,12 @@ pub(crate) struct Card {
     pub preview: bool,
     pub form_omitted: bool,
 }
+pub(crate) enum ScreenReads {
+    Complete,
+    Deadline,
+}
 pub(crate) struct Screen {
+    pub reads: ScreenReads,
     pub geometry: bool,
     pub width: f64,
     pub height: f64,
@@ -400,6 +458,11 @@ pub(crate) struct Screen {
     pub next_unit: Option<(i64, i64)>,
     pub next_page: Option<i64>,
     pub primary: super::PrimaryPageState,
+}
+impl Screen {
+    pub(crate) fn reads_reduced(&self) -> bool {
+        matches!(self.reads, ScreenReads::Deadline)
+    }
 }
 fn points(polygon: &[[f64; 2]; 4]) -> String {
     polygon
@@ -437,11 +500,11 @@ fn screen_advice(
     units: &[i64],
     after: i64,
 ) -> Result<ScreenAdvice, AppError> {
-    // Expand each stored target list once, rather than scanning the source's
-    // suggestion JSON separately for every card.
+    // Target envelopes guarantee that a merge's units share a page. Resolve its
+    // first unit through the primary-key index before expanding its JSON list.
     let mut selected = units.to_vec();
     selected.push(0);
-    let mut query = db.prepare("WITH expanded AS MATERIALIZED (SELECT s.id,coalesce(json_extract(t.value,'$.unit'),json_extract(s.targets,'$.target.unit'),0) unit,json_extract(s.targets,'$.page') page FROM source_suggestions s LEFT JOIN json_each(s.targets,'$.targets') t WHERE s.source_id=(SELECT source_id FROM source_pages WHERE id=?1)), ranked AS (SELECT id,unit,row_number() OVER (PARTITION BY unit ORDER BY id) ordinal FROM expanded WHERE unit IN (SELECT value FROM json_each(?2)) AND (unit>0 OR (page=?1 AND id>?3))) SELECT unit,id FROM ranked WHERE ordinal<=21 ORDER BY unit,id")?;
+    let mut query = db.prepare("WITH page_suggestions AS MATERIALIZED (SELECT s.id,s.targets FROM source_suggestions s WHERE s.source_id=(SELECT source_id FROM source_pages WHERE id=?1) AND (json_extract(s.targets,'$.page')=?1 OR EXISTS(SELECT 1 FROM source_units u WHERE u.id=coalesce(json_extract(s.targets,'$.target.unit'),json_extract(s.targets,'$.targets[0].unit')) AND u.page_id=?1))), expanded AS (SELECT s.id,coalesce(json_extract(t.value,'$.unit'),json_extract(s.targets,'$.target.unit'),0) unit,json_extract(s.targets,'$.page') page FROM page_suggestions s LEFT JOIN json_each(s.targets,'$.targets') t), ranked AS (SELECT id,unit,row_number() OVER (PARTITION BY unit ORDER BY id) ordinal FROM expanded WHERE unit IN (SELECT value FROM json_each(?2)) AND (unit>0 OR (page=?1 AND id>?3))) SELECT unit,id FROM ranked WHERE ordinal<=21 ORDER BY unit,id")?;
     let ids = query
         .query_map(
             params![page, serde_json::to_string(&selected)?, after],
@@ -454,13 +517,18 @@ fn screen_advice(
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let cache = load_many(db, &unique, true)?
+    let cache = load_many_with_budget(db, &unique, true, Some(page))?
         .into_iter()
         .map(|row| (row.id, row))
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut seen = std::collections::BTreeSet::new();
     let mut rows = std::collections::BTreeMap::new();
-    for (unit, id) in ids {
+    // The input is display order, which can differ from unit-id order for owners.
+    for (unit, id) in selected
+        .iter()
+        .flat_map(|unit| ids.iter().filter(move |(u, _)| u == unit))
+        .copied()
+    {
         let entry = rows.entry(unit).or_insert_with(|| (Vec::new(), None));
         if entry.0.len() == 20 {
             entry.1 = entry.0.last().map(|row: &Advice| row.id);
@@ -498,7 +566,7 @@ fn compare_card(row: &mut Advice, budget: &mut Budget) {
     row.rationale = budget.retain(&row.rationale.chars().take(200).collect::<String>(), 6);
     row.difference = if row.compact {
         difference("", "", None)
-    } else if row.lookup_truncated || !budget.comparison_available() {
+    } else if row.lookup_truncated || row.suggested_truncated || !budget.comparison_available() {
         let mut result = difference(&row.lookup, &row.suggested, None);
         result.old = budget.retain(&result.old, 6);
         result.new = budget.retain(&result.new, 6);
@@ -524,6 +592,9 @@ impl Store {
         let auth_for_recheck = auth.clone();
         let (mut screen, budget) = self.run_bounded_auth(move |db| {
             let tx=db.transaction()?; auth.recheck_owner(&tx)?;
+            let result = {
+            let _deadline = super::search::Budget::start(&tx, Duration::from_millis(250));
+            (|| {
             let bounds = match super::documents::polygon_bounds(&tx,page) {
                 Ok((width,height)) if width.is_finite() && height.is_finite() && (1.0..=4000.0).contains(&width) && (1.0..=4000.0).contains(&height) => Some((width,height)),
                 Ok(_) | Err(AppError::Invalid("Page geometry is missing or invalid.")) => None,
@@ -548,15 +619,21 @@ impl Store {
             // Structural HTML, target labels, controls and bounded overlay data.
             budget.reserve(512 * 1024);
             let mut cards=Vec::new();
+            let cursors = {
+                let mut query = tx.prepare(&format!("{} SELECT id,position-1 FROM ordered WHERE id IN (SELECT value FROM json_each(?2))",super::materials::ORDERED_UNITS))?;
+                query.query_map(params![page,serde_json::to_string(&units)?], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?.collect::<Result<std::collections::BTreeMap<_,_>,_>>()?
+            };
             for unit in units {
                 let (lookup,correction_bytes):(String,usize)=tx.query_row(&format!("SELECT {},length(CAST(u.correction AS BLOB)) FROM source_units u LEFT JOIN source_search_text t ON t.unit_id=u.id WHERE u.id=?1 AND u.page_id=?2",text(LOOKUP_TEXT,262_144)),params![unit,page],|r|Ok((read_text(r,0)?,r.get(1)?)))?;
                 // A failed unit form is reloaded as the first card. Reserve the
-                // complete POST bound there so even an invalid draft fits intact.
-                let form_omitted = !budget.reserve(if cards.is_empty() {320 * 1024} else {correction_bytes});
-                let retained=budget.retain(&lookup,2);
+                // complete escaped POST bound there so an invalid draft fits intact.
+                // Form-urlencoded escapes the HTML-special ASCII bytes as three
+                // bytes; Askama needs at most six, hence twice the wire bound.
+                let form_omitted = !budget.reserve(if cards.is_empty() {640 * 1024} else {correction_bytes.saturating_mul(6)});
+                let retained=budget.retain(&lookup,12);
                 let preview=retained.len()!=lookup.len();
                 let (advice,next)=advice.remove(&unit).unwrap_or_default();
-                let cursor=tx.query_row(&format!("{} SELECT position-1 FROM ordered WHERE id=?2",super::materials::ORDERED_UNITS),params![page,unit],|r|r.get(0))?;
+                let cursor=*cursors.get(&unit).ok_or(AppError::SourceNotFound)?;
                 cards.push(Card{unit,cursor,lookup:retained,advice,next,preview,form_omitted});
             }
             let (notes,notes_next)=advice.remove(&0).unwrap_or_default();
@@ -571,8 +648,21 @@ impl Store {
             }
             let next_unit=tx.query_row(&format!("{} SELECT id,position-1 FROM ordered WHERE state='unreviewed' ORDER BY position LIMIT 1",super::materials::ORDERED_UNITS),[page],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
             let next_page=tx.query_row("SELECT p.id FROM source_pages p WHERE p.source_id=(SELECT source_id FROM source_pages WHERE id=?1) AND p.pdf_page>(SELECT pdf_page FROM source_pages WHERE id=?1) AND p.complete=0 ORDER BY p.pdf_page LIMIT 1",[page],|r|r.get(0)).optional()?;
+            Ok((Screen{reads:ScreenReads::Complete,geometry,width,height,overlay,overlay_omitted:count>2000,regions_omitted,cards,notes,notes_next,next_unit,next_page,primary},budget))
+            })()
+            };
+            // Drop the progress handler before authority checks and the reduced
+            // response. Only reads run under the handler; no interrupted writes.
+            let result = match result {
+                Err(AppError::Database(ref error)) if error.sqlite_error_code()==Some(rusqlite::ErrorCode::OperationInterrupted) => {
+                    let (document,pdf):(i64,i64)=tx.query_row("SELECT coalesce(m.document_id,0),p.pdf_page FROM source_pages p LEFT JOIN source_document_members m ON m.source_id=p.source_id WHERE p.id=?1",[page],|r|Ok((r.get(0)?,r.get(1)?)))?;
+                    let primary=super::documents::primary_state(&tx,document,pdf)?;
+                    Ok((Screen{reads:ScreenReads::Deadline,geometry:false,width:0.0,height:0.0,overlay:Vec::new(),overlay_omitted:true,regions_omitted:true,cards:Vec::new(),notes:Vec::new(),notes_next:None,next_unit:None,next_page:None,primary},Budget::default()))
+                }
+                other => other,
+            }?;
             auth.recheck_owner(&tx)?; tx.commit()?;
-            Ok((Screen{geometry,width,height,overlay,overlay_omitted:count>2000,regions_omitted,cards,notes,notes_next,next_unit,next_page,primary},budget))
+            Ok(result)
         }).await?;
         screen = tokio::task::spawn_blocking(move || {
             compare_screen(&mut screen, budget);
@@ -823,6 +913,45 @@ mod tests {
     }
     struct TestAdvice {
         difference: Difference,
+    }
+
+    #[test]
+    fn exhausted_screen_target_budget_reads_revisions_without_lookup_storage() {
+        let db = Connection::open_in_memory().unwrap();
+        // Deliberately no lookup columns/table: revision-only advice must not
+        // access them, but must still detect a stale second merge target.
+        db.execute_batch("CREATE TABLE source_pages(id INTEGER PRIMARY KEY,source_id INTEGER); INSERT INTO source_pages VALUES(1,1);").unwrap();
+        let revisions = [(1, 1), (2, 2)].into_iter().collect();
+        let target = SuggestionTarget::Units {
+            targets: vec![
+                super::super::SuggestionUnit {
+                    unit: 1,
+                    revision: 1,
+                },
+                super::super::SuggestionUnit {
+                    unit: 2,
+                    revision: 1,
+                },
+            ],
+        };
+        let stored = StoredAdvice {
+            id: 1,
+            kind: "merge".into(),
+            origin: "tool:fixture".into(),
+            rationale: "Checked".into(),
+            json: serde_json::to_string(&target).unwrap(),
+            suggested: "Combined".into(),
+            report: None,
+            applied: false,
+            dismissed: false,
+            source: 1,
+            suggested_truncated: false,
+        };
+        let advice = load_evidence(&db, stored, true, &mut Some(0), Some((1, &revisions))).unwrap();
+        assert_eq!(advice.state, "stale");
+        assert!(advice.lookup_truncated);
+        assert_eq!(advice.lookup, "");
+        assert!(!advice.suggested_truncated);
     }
 
     #[test]

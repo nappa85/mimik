@@ -150,11 +150,13 @@ storage errors propagate instead of substituting fictitious dimensions.
 pointer drawing and arrow-key corner adjustments. Four polygon corners can also be entered
 directly in PDF points in the Add missing text form.
 Zoom buttons expose their pressed state. A keyboard-only box-creation button exposes the
-corner handles without a pointer drag; it uses entered corners or a starter rectangle.
+corner handles without a pointer drag; it uses entered corners or a starter rectangle. Its
+button explicitly warns that creating the rectangle replaces an entered polygon.
 
 Cards show up to 20 suggestions, including merges on every target card. Each shows its state,
 claimed origin, report id and a labelled rationale preview of at most 200 characters.
-Repeated multi-target advice uses a compact detail link on additional cards. Labels and the
+Repeated multi-target advice is full on the first rendered card (including owner-unit position
+ordering), with a compact detail link on additional cards. Labels and the
 compact comma-separated highlighting id list include at most eight targets, with the total
 remaining target count in the label. Additional suggestions have a cursor-paged list at
 `/admin/materials/pages/{page}/units/{unit}/suggestions`; page notes and missing-text suggestions
@@ -172,24 +174,39 @@ Dismissal records only advice state and optional reason. Every browser write use
 authenticated store wrapper, rechecking Owner and CSRF at both transaction boundaries.
 The detail form has separate **Accept as suggested** and **Accept my edit** submit buttons.
 A nonempty edit submitted without an explicit choice is refused with 422 and retained;
+**Accept as suggested** also refuses and retains a nonempty edit that differs from the stored
+suggestion, requiring the Owner to choose **Accept my edit** or restore the proposal;
 card acceptance without an edit field still applies the stored suggestion.
+Selecting a primary reading for a missing page returns the authenticated route's uniform 403.
 
 Unicode word differences use `similar` 3.2.0 (DEP-28), plain-text inputs and template-escaped
 segments with fixed `ins`/`del` markup; adjacent changes of the same kind share one segment.
-Screen reads expand the page's target lists once and fetch the selected unique suggestions
-with one query. Each suggestion's target revisions and aggregate lookup are read as a batch;
-SQL computes staleness and limits aggregate lookup text before it crosses into Rust.
+Screen reads resolve a suggestion's target page through the first target unit's primary-key
+index before expanding its target list; other pages' lists are not expanded. Selected unique
+suggestions are fetched in one query, and all card cursors in one ordered query. A screen may
+read lookup text for at most **4,096 suggestion-target rows**. Subsequent suggestions compare
+revisions against one page-scoped revision snapshot without accessing lookup text, and label
+their lookup as omitted/truncated. Within the row budget, SQL limits aggregate lookup text
+before it crosses into Rust.
+All screen-read statements share a **250 ms SQLite progress-handler deadline**. Interruption
+discards the read result and returns a labelled reduced screen with links to unit suggestion
+lists; suggestions, lookup text and overlays are omitted, and only the first unit decision
+form is retained, including any refused POST's complete draft. The handler is cleared before
+final authority checks and transaction completion. No writes run under this handler. This
+is a VM-opcode deadline, not a hard real-time guarantee for an individual SQLite opcode.
 Cards and suggestion lists read at most 2,000 characters per comparison side. A shortened
 side forces a labelled preview, never a purported complete difference. Rationale reads stop
-at their 200-character card preview. All comparisons run outside the store mutex; screen
-and list reads recheck Owner authority after comparison work. Limits remain 100 comparisons,
+at their 200-character card preview. All comparisons run outside the store mutex in blocking
+workers; screen, list and detail paths recheck Owner authority after that work. Limits remain 100 comparisons,
 50 ms each and a shared 250 ms comparison window. Tests inject an expired deadline instead
 of assuming a particular repetitive input always consumes 50 ms on every machine.
 
 Lookup and suggestion display work shares a 2 MiB budget, with 512 KiB reserved for screen
 structure (128 KiB on a suggestion list). Both lookup copies, correction controls, rationale
-previews and comparison output count; comparison charges conservatively include escaping
-and segment wrappers. Rich extraction and historical review events have their own existing
+previews and comparison output count. Text charges conservatively include HTML escaping (six
+bytes per input byte per rendered copy), and comparisons also reserve segment wrappers.
+The first unit form reserves 640 KiB for a retained draft: HTML escaping takes at most twice
+the 320 KiB form-urlencoded wire bound. Rich extraction and historical review events have their own existing
 row/byte bounds, so this is not a universal 2 MiB cap on the whole page editor. When a
 correction control does not fit, a link opens that unit first on a card page with its full
 form; an editable value is never silently shortened. Exhausted comparisons show labelled
@@ -197,9 +214,10 @@ previews of up to 2,000 characters, further shortened or omitted at byte-budget 
 
 Every suggestion links to `/admin/materials/suggestions/{id}`. Detail reads bound each text
 and the aggregate merge lookup to 20,000 characters. A shortened lookup is explicitly
-labelled; it cannot produce a complete difference against its prefix. The renderer reserves
+labelled separately from shortened suggested text; neither prefix can produce a complete
+difference. The renderer reserves
 the entire escaped evidence, edit/draft, rationale, controls and target links before adding
-a difference. The normal detail bound is **256 KiB of complete rendered UTF-8 HTML**, for GET
+a difference and renders exactly once in its blocking worker. The normal detail bound is **256 KiB of complete rendered UTF-8 HTML**, for GET
 and ordinary 409/422 responses. If necessary it omits the difference and shows labelled
 2,000-character evidence/rationale previews and the first eight target links. The edit/draft
 value remains intact. An oversized invalid draft accepted under the 320 KiB POST limit uses

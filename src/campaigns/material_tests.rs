@@ -28,6 +28,348 @@ fn suggestion_unit(unit: i64) -> crate::sources::SuggestionTarget {
 }
 
 #[tokio::test]
+async fn material_confirmation_detail_worker_and_authority_recheck() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let id = suggestion_fixture(&store, "correction", suggestion_unit(1)).await;
+    let app = crate::auth::app(store).await.unwrap();
+    let executor = std::thread::current().id();
+    let (send, receive) = std::sync::mpsc::channel();
+    let path = dir.path().join("private.sqlite3");
+    *crate::sources::materials::DETAIL_COMPARISON.lock().unwrap() = Some(Box::new(move || {
+        send.send(std::thread::current().id()).unwrap();
+        let db = rusqlite::Connection::open(&path).unwrap();
+        crate::store::register_auth_clock(&db, Arc::new(|| Ok(100))).unwrap();
+        db.execute(
+            "UPDATE auth_sessions SET state='revoked',payload=NULL WHERE account_id=1",
+            [],
+        )
+        .unwrap();
+    }));
+    let response = router_get(
+        &app,
+        &auth[0],
+        &format!("/admin/materials/suggestions/{id}"),
+    )
+    .await;
+    assert_ne!(
+        receive.try_recv().unwrap(),
+        executor,
+        "comparison must run off the async executor"
+    );
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "authority must be rechecked after comparison"
+    );
+}
+
+#[tokio::test]
+async fn material_confirmation_keyboard_box_warns_of_replacement() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let app = crate::auth::app(store).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let parsed = scraper::Html::parse_document(&html);
+    let button = parsed
+        .select(&scraper::Selector::parse("#keyboard-region").unwrap())
+        .next()
+        .unwrap();
+    assert!(
+        button
+            .text()
+            .collect::<String>()
+            .contains("replaces entered polygon")
+    );
+}
+
+#[tokio::test]
+async fn material_confirmation_missing_primary_is_forbidden() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let app = crate::auth::app(store).await.unwrap();
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/999/primary",
+        review_form(&[
+            ("source", "1"),
+            ("previous", "0"),
+            ("event", "0"),
+            ("rationale", "Checked"),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn material_confirmation_suggested_keeps_changed_edit() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let id = suggestion_fixture(&store, "correction", suggestion_unit(1)).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = document_at(
+        &app,
+        &auth[0],
+        &format!("/admin/materials/suggestions/{id}/accept"),
+        review_form(&[
+            ("edit", "suggested"),
+            ("edited_text", "Owner changed < & \""),
+            ("rationale", "Checked"),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        field_value(&body(response).await, "textarea[name=edited_text]"),
+        "Owner changed < & \""
+    );
+    assert_eq!(
+        store
+            .material_advice(auth[0].clone(), id)
+            .await
+            .unwrap()
+            .state,
+        "open"
+    );
+}
+
+#[tokio::test]
+async fn material_confirmation_suggested_truncation_is_not_lookup_truncation() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let id = store
+        .insert_source_suggestion(crate::sources::SourceSuggestion {
+            source: 1,
+            bundle_hash: "a".repeat(64),
+            origin: "tool:fixture".into(),
+            kind: "correction".into(),
+            target: suggestion_unit(1),
+            suggested_text: Some("\"".repeat(20000)),
+            rationale: "x".repeat(5000),
+            report_id: None,
+        })
+        .await
+        .unwrap();
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let (rows, _) = store
+        .material_advice_list(auth[0].clone(), 1, 1, 0)
+        .await
+        .unwrap();
+    let advice = &rows[0];
+    assert!(
+        !advice.lookup_truncated,
+        "suggestion length must not label lookup evidence as truncated"
+    );
+    let html = body(
+        router_get(
+            &app,
+            &auth[0],
+            &format!("/admin/materials/suggestions/{id}"),
+        )
+        .await,
+    )
+    .await;
+    assert!(advice.suggested_truncated);
+    assert!(html.contains("Suggested text is truncated"));
+    assert_eq!(
+        field_value(&html, "textarea[name=edited_text]"),
+        "\"".repeat(20000)
+    );
+    assert!(!html.contains("Lookup text is truncated"));
+}
+
+#[tokio::test]
+async fn material_confirmation_compact_follows_card_order() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    suggestion_fixture(
+        &store,
+        "merge",
+        crate::sources::SuggestionTarget::Units {
+            targets: vec![
+                crate::sources::SuggestionUnit {
+                    unit: 1,
+                    revision: 1,
+                },
+                crate::sources::SuggestionUnit {
+                    unit: 2,
+                    revision: 1,
+                },
+            ],
+        },
+    )
+    .await;
+    let screen = store
+        .material_screen(auth[0].clone(), 1, vec![2, 1], 0)
+        .await
+        .unwrap();
+    assert!(
+        !screen.cards[0].advice[0].compact,
+        "first rendered card owns the complete copy"
+    );
+    assert!(screen.cards[1].advice[0].compact);
+}
+
+#[tokio::test]
+async fn material_confirmation_escaped_screen_sections_fit_budget() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    for unit in 1..=50 {
+        store
+            .material_review_unit(
+                auth[0].clone(),
+                auth[0].csrf_fixture(),
+                1,
+                unit,
+                crate::sources::UnitReview {
+                    revision: 1,
+                    state: "corrected".into(),
+                    correction: match unit % 3 {
+                        0 => "\"",
+                        1 => "&",
+                        _ => "<",
+                    }
+                    .repeat(20000),
+                    actor: String::new(),
+                    rationale: "Checked".into(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let app = crate::auth::app(store).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let parsed = scraper::Html::parse_document(&html);
+    let bytes: usize = parsed
+        .select(
+            &scraper::Selector::parse("#review-list pre.evidence-text, [data-form=unit] textarea")
+                .unwrap(),
+        )
+        .map(|node| node.html().len())
+        .sum();
+    eprintln!(
+        "escape-heavy budgeted sections: {bytes} bytes; full page: {} bytes",
+        html.len()
+    );
+    assert!(bytes <= 2 * 1024 * 1024, "escaped sections: {bytes}");
+}
+
+#[tokio::test]
+async fn material_confirmation_distinct_merge_read_budget() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    store.run(|db| {
+        db.execute_batch("WITH RECURSIVE ids(id) AS (VALUES(52) UNION ALL SELECT id+1 FROM ids WHERE id<1073) INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) SELECT id,1,'unit-'||id,'Text','[[1,1],[20,1],[20,20],[1,20]]','<p>Fixture</p>','Fixture' FROM ids;")?;
+        db.execute("INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(2,1,2,x'')", [])?;
+        db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(1074,2,'other','Text','[[1,1],[20,1],[20,20],[1,20]]','<p>Other</p>','Other')", [])?;
+        crate::sources::search::ensure(db)?;
+        Ok(())
+    }).await.unwrap();
+    store.run(|db| {
+        let prepared = serde_json::json!({"contract_version":1,"extraction_sha256":"b".repeat(64),"pages":[{"pdf_page":1,"width_points":200,"height_points":300},{"pdf_page":2,"width_points":200,"height_points":300}]});
+        db.execute("UPDATE sources SET bundle_hash=?1,prepared_json=?2 WHERE id=1", params!["a".repeat(64),serde_json::to_vec(&prepared)?])?;
+        for page in 1..=2 { db.execute("INSERT INTO source_page_hashes VALUES(?1,1,?2)",params![page,"c".repeat(64)])?; }
+        db.execute("INSERT INTO source_finalizations VALUES(1,?1,?2)",params!["a".repeat(64),"b".repeat(64)])?;
+        crate::sources::documents::register_import(db,1)?;
+        let tx = db.transaction()?;
+        for card in 1..=50 {
+            let units = std::iter::once(card).chain(51..=1073).map(|unit| crate::sources::SuggestionUnit { unit, revision: 1 }).collect();
+            let json = serde_json::to_string(&crate::sources::SuggestionTarget::Units { targets: units })?;
+            for _ in 0..20 {
+                tx.execute("INSERT INTO source_suggestions(source_id,bundle_hash,origin,kind,targets,suggested_text,rationale) VALUES(1,?1,'tool:fixture','merge',?2,'Combined','Checked')", params!["a".repeat(64),json])?;
+            }
+        }
+        for _ in 0..1000 {
+            tx.execute("INSERT INTO source_suggestions(source_id,bundle_hash,origin,kind,targets,suggested_text,rationale) VALUES(1,?1,'tool:fixture','correction',?2,'Other','Checked')", params!["a".repeat(64),serde_json::to_string(&suggestion_unit(1074))?])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }).await.unwrap();
+    let start = std::time::Instant::now();
+    let screen = store
+        .material_screen(auth[0].clone(), 1, (1..=50).collect(), 0)
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+    let truncated = screen
+        .cards
+        .iter()
+        .flat_map(|card| &card.advice)
+        .filter(|row| row.lookup_truncated)
+        .count();
+    eprintln!("distinct merge screen reads: {elapsed:?}; truncated lookups: {truncated}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "screen must release the mutex well inside the request window: {elapsed:?}"
+    );
+    assert!(
+        truncated > 0 || screen.cards.is_empty(),
+        "1,024,000 target rows must exhaust the screen lookup-row budget"
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        store.material_recheck(auth[0].clone()),
+    )
+    .await
+    .expect("deadline handler must be cleared and store available")
+    .unwrap();
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let start = std::time::Instant::now();
+    let response = router_get(&app, &auth[0], "/admin/materials/pages/1").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    eprintln!(
+        "distinct merge rendered response: {:?}; {} bytes",
+        start.elapsed(),
+        html.len()
+    );
+    assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    assert!(html.len() <= 2 * 1024 * 1024);
+    assert!(
+        html.contains("Screen read deadline reached")
+            || html.contains("lookup text omitted or shortened")
+    );
+    let draft = "\"&<".repeat(20000);
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/1",
+        review_form(&[
+            ("revision", "1"),
+            ("state", "corrected"),
+            ("correction", &draft),
+            ("rationale", ""),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        field_value(
+            &body(response).await,
+            "[data-form=unit] textarea[name=correction]"
+        ),
+        draft
+    );
+}
+
+#[tokio::test]
 async fn material_review_unreviewed_comparison_uses_extraction() {
     let _lock = crate::auth::test_resource_lock().await;
     let (_dir, store, auth, _clock) = fixture().await;

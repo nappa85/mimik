@@ -17,6 +17,9 @@ pub(super) const LOOKUP_TEXT: &str = "CASE u.state WHEN 'accepted' THEN coalesce
 pub(crate) static AFTER_CROP: std::sync::Mutex<Option<Box<dyn Fn() + Send>>> =
     std::sync::Mutex::new(None);
 #[cfg(test)]
+pub(crate) static DETAIL_COMPARISON: std::sync::Mutex<Option<Box<dyn Fn() + Send>>> =
+    std::sync::Mutex::new(None);
+#[cfg(test)]
 pub(crate) static AFTER_SUGGESTION_COMMIT: std::sync::Mutex<Option<Box<dyn Fn() + Send>>> =
     std::sync::Mutex::new(None);
 
@@ -77,7 +80,7 @@ impl Store {
         self.run_bounded_auth(move |db| {
             let tx = db.transaction()?;
             auth.recheck_owner(&tx)?;
-            let identity = tx.query_row("SELECT coalesce(m.document_id,0),p.pdf_page FROM source_pages p LEFT JOIN source_document_members m ON m.source_id=p.source_id WHERE p.id=?1", [page], |r| Ok((r.get(0)?,r.get(1)?)))?;
+            let identity = tx.query_row("SELECT coalesce(m.document_id,0),p.pdf_page FROM source_pages p LEFT JOIN source_document_members m ON m.source_id=p.source_id WHERE p.id=?1", [page], |r| Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(AppError::SourceNotFound)?;
             auth.recheck_owner(&tx)?;
             tx.commit()?;
             Ok(identity)

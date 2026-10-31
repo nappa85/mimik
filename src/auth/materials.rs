@@ -305,10 +305,25 @@ impl Editor {
     }
     fn new(
         data: MaterialPage,
-        screen: crate::sources::review::Screen,
+        mut screen: crate::sources::review::Screen,
         csrf: String,
         c: PageCursor,
     ) -> Self {
+        if screen.reads_reduced()
+            && let Some(unit) = data.page.units.first()
+        {
+            // The first card has the known request cursor. Reserve its form
+            // even after a read deadline so a refused POST keeps its draft.
+            screen.cards.push(crate::sources::review::Card {
+                unit: unit.id,
+                cursor: c.units,
+                lookup: String::new(),
+                advice: Vec::new(),
+                next: None,
+                preview: true,
+                form_omitted: false,
+            });
+        }
         Self {
             page: data.page,
             csrf,
@@ -590,27 +605,62 @@ struct SuggestionEditor {
     text_preview: bool,
 }
 impl SuggestionEditor {
-    fn bounded_html(mut self) -> AuthResult {
-        const NORMAL: usize = 256 * 1024;
-        self.show_difference = false;
-        let mut rendered = self
-            .render()
+    async fn bounded_html(self, store: &crate::Store, auth: super::RequestAuth) -> AuthResult {
+        let response = tokio::task::spawn_blocking(move || self.render_bounded())
+            .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if rendered.len() > NORMAL {
+        store.material_recheck(auth).await.map_err(|e| error(&e))?;
+        response
+    }
+    fn rendered_upper_bound(&self) -> usize {
+        // Escaping needs at most six bytes per source byte. Fixed markup,
+        // identifiers and every target link also have reserved space.
+        16 * 1024
+            + self.advice.target_links.len() * 256
+            + [
+                &self.advice.lookup,
+                &self.advice.suggested,
+                &self.advice.rationale,
+                &self.advice.origin,
+                &self.advice.target_label,
+                &self.message,
+                &self.form.csrf,
+                &self.form.csrf,
+                &self.form.rationale,
+                &self.form.edited_text,
+                &self.form.reason,
+            ]
+            .iter()
+            .map(|text| text.len().saturating_mul(6))
+            .sum::<usize>()
+    }
+    fn render_bounded(mut self) -> AuthResult {
+        const NORMAL: usize = 256 * 1024;
+        #[cfg(test)]
+        if let Some(hook) = crate::sources::materials::DETAIL_COMPARISON
+            .lock()
+            .unwrap()
+            .take()
+        {
+            hook();
+        }
+        self.show_difference = false;
+        if self.rendered_upper_bound() > NORMAL {
             self.text_preview = true;
+            self.advice.lookup_truncated |= self.advice.lookup.chars().count() > 2000;
+            self.advice.suggested_truncated |= self.advice.suggested.chars().count() > 2000;
             self.advice.lookup = self.advice.lookup.chars().take(2000).collect();
             self.advice.suggested = self.advice.suggested.chars().take(2000).collect();
             self.advice.rationale = self.advice.rationale.chars().take(2000).collect();
             self.advice.target_links.truncate(8);
-            rendered = self
-                .render()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         }
         // Reserve the entire escaped form, metadata and evidence first. A large
         // invalid draft is retained intact and uses the explicit error bound.
-        if rendered.len() <= NORMAL && !self.text_preview {
-            let remaining = NORMAL - rendered.len();
+        let reserved = self.rendered_upper_bound();
+        if reserved <= NORMAL && !self.text_preview {
+            let remaining = NORMAL - reserved;
             let full = !self.advice.lookup_truncated
+                && !self.advice.suggested_truncated
                 && (self.advice.lookup.len() + self.advice.suggested.len()).saturating_mul(20)
                     <= remaining;
             self.advice.difference = crate::sources::review::difference(
@@ -618,14 +668,18 @@ impl SuggestionEditor {
                 &self.advice.suggested,
                 full.then(|| std::time::Instant::now() + std::time::Duration::from_millis(50)),
             );
-            self.show_difference = true;
-            let candidate = self
-                .render()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            if candidate.len() <= NORMAL {
-                rendered = candidate;
-            }
+            let difference_bound = if full {
+                (self.advice.lookup.len() + self.advice.suggested.len()).saturating_mul(20)
+            } else {
+                (self.advice.difference.old.len() + self.advice.difference.new.len())
+                    .saturating_mul(6)
+                    + 1024
+            };
+            self.show_difference = difference_bound <= remaining;
         }
+        let rendered = self
+            .render()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         if rendered.len() > 2 * 1024 * 1024 {
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
@@ -641,7 +695,7 @@ async fn suggestion(
     let advice = state
         .sessions
         .store
-        .material_advice(auth, id)
+        .material_advice(auth.clone(), id)
         .await
         .map_err(|e| error(&e))?;
     let form = SuggestionDraft {
@@ -657,7 +711,8 @@ async fn suggestion(
         show_difference: false,
         text_preview: false,
     }
-    .bounded_html()
+    .bounded_html(&state.sessions.store, auth)
+    .await
 }
 #[derive(Template)]
 #[template(path = "material_suggestions.html")]
@@ -731,17 +786,32 @@ async fn suggestion_write(
             "Choose Accept my edit or Accept as suggested explicitly.",
         ))
     } else {
-        state
-            .sessions
-            .store
-            .material_accept(
-                auth.clone(),
-                csrf,
-                id,
-                form.rationale.clone(),
-                (form.edit == "yes").then(|| form.edited_text.clone()),
-            )
-            .await
+        let checked = async {
+            if form.edit == "suggested" && !form.edited_text.is_empty() {
+                let advice = state
+                    .sessions
+                    .store
+                    .material_advice(auth.clone(), id)
+                    .await?;
+                if form.edited_text != advice.suggested {
+                    return Err(AppError::Invalid(
+                        "The edited text differs from the stored suggestion. Choose Accept my edit or restore the suggested text.",
+                    ));
+                }
+            }
+            state
+                .sessions
+                .store
+                .material_accept(
+                    auth.clone(),
+                    csrf,
+                    id,
+                    form.rationale.clone(),
+                    (form.edit == "yes").then(|| form.edited_text.clone()),
+                )
+                .await
+        };
+        checked.await
     };
     match result {
         Ok(back_link) => {
@@ -759,7 +829,7 @@ async fn suggestion_write(
             let advice = state
                 .sessions
                 .store
-                .material_advice(auth, id)
+                .material_advice(auth.clone(), id)
                 .await
                 .map_err(|e| error(&e))?;
             let mut response = SuggestionEditor {
@@ -769,7 +839,8 @@ async fn suggestion_write(
                 show_difference: false,
                 text_preview: false,
             }
-            .bounded_html()?;
+            .bounded_html(&state.sessions.store, auth)
+            .await?;
             *response.status_mut() = error(&e);
             response.extensions_mut().insert(TrustedDraft);
             Ok(response)
