@@ -108,11 +108,6 @@ impl Entry {
     }
 }
 
-/// `(parent, start time)` of a process from one read of `/proc/<pid>/stat` (the start time in
-/// clock ticks since boot): both belong to the same process. The error is the read's own, so
-/// a process that is gone (`ENOENT`, `ESRCH`) can be told from one that cannot be read.
-pub(crate) use crate::sandbox::process::stat_of;
-
 /// A process's start time in clock ticks since boot.
 pub(crate) fn start_time(pid: i32) -> Option<u64> {
     procfs::process::Process::new(pid)

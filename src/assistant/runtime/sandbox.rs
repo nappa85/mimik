@@ -85,51 +85,12 @@ impl GpuBinds {
     }
 }
 
-/// One entry of the sandbox's allowlist, kept apart from the code that builds the sandbox
-/// (the Hakoniwa plan is made from these).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Item {
-    /// A read-only bind of a host path at the same path inside.
-    RoBind(PathBuf),
-    /// A symbolic link `at` pointing to `target`.
-    Symlink { target: PathBuf, at: PathBuf },
-    /// An empty directory.
-    Dir(PathBuf),
-}
-
-/// The system library directories (they hold the ELF interpreter, which the kernel opens
-/// with the execute right).
-pub(crate) const LIBRARY_DIRS: [&str; 5] = [
-    "/usr/lib",
-    "/usr/lib64",
-    "/lib",
-    "/lib64",
-    "/usr/libexec/ld",
-];
+pub(crate) use crate::sandbox::system::{Item, LIBRARY_DIRS};
 
 /// The system library directories, the dynamic loader's cache and the CPU topology, as
 /// binds or links.
 pub(crate) fn system_items() -> Vec<Item> {
-    let mut items = Vec::new();
-    for dir in LIBRARY_DIRS {
-        let path = Path::new(dir);
-        let Ok(metadata) = std::fs::symlink_metadata(path) else {
-            continue;
-        };
-        if metadata.file_type().is_symlink() {
-            if let Ok(target) = std::fs::read_link(path) {
-                items.push(Item::Symlink {
-                    target,
-                    at: path.to_path_buf(),
-                });
-            }
-        } else if metadata.is_dir() {
-            items.push(Item::RoBind(path.to_path_buf()));
-        }
-    }
-    if Path::new("/etc/ld.so.cache").is_file() {
-        items.push(Item::RoBind("/etc/ld.so.cache".into()));
-    }
+    let mut items = crate::sandbox::system::library_items();
     if Path::new("/sys/devices/system/cpu").is_dir() {
         items.push(Item::RoBind("/sys/devices/system/cpu".into()));
     }

@@ -1,3 +1,4 @@
+use super::operations::{inspect, render};
 use super::*;
 use lopdf::{Document, Object, Stream, dictionary};
 

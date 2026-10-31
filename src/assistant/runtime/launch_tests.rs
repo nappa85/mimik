@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 
 const HELPER: &str = "assistant::runtime::launch::tests::helper";
-const RUNNER: &str = "assistant::runtime::runner::tests::helper";
+const RUNNER: &str = "sandbox::runner::tests::helper";
 
 /// The probe inside its level: the test binary, its level arguments after `probe-inner`.
 #[test]

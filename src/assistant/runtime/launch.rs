@@ -1111,7 +1111,7 @@ fn pause_point(dir: &std::path::Path, step: &'static str) {
     };
     if let Some(pause) = pause {
         let _ = pause.arrived.send(());
-        let _ = pause.release.recv();
+        let _ = pause.release.recv_timeout(Duration::from_secs(30));
     }
 }
 
@@ -1168,7 +1168,7 @@ fn thread_pause_point(step: &'static str) {
     };
     if let Some(pause) = pause {
         let _ = pause.arrived.send(());
-        let _ = pause.release.recv();
+        let _ = pause.release.recv_timeout(Duration::from_secs(30));
     }
 }
 

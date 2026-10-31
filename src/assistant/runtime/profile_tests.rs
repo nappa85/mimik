@@ -177,6 +177,7 @@ fn pin_binds(plan: &Plan, gpu: Option<&GpuBinds>) {
 fn pin_bind_flags(plan: &Plan) {
     for bind in &plan.binds {
         let mut flags = match bind.access {
+            Access::ReadOnlyDevice => Flags::BIND | Flags::NOSUID | Flags::RDONLY,
             Access::ReadOnly => Flags::BIND | Flags::NOSUID | Flags::NODEV | Flags::RDONLY,
             Access::ReadWrite => Flags::BIND | Flags::NOSUID | Flags::NODEV,
             Access::Device => Flags::BIND | Flags::NOSUID,

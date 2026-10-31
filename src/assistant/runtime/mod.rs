@@ -22,7 +22,6 @@ pub(crate) mod probe;
 pub(crate) mod rundir;
 pub(crate) mod runner;
 pub(crate) mod sandbox;
-pub(crate) use crate::sandbox::seccomp;
 pub(crate) mod server;
 #[cfg(test)]
 pub(crate) mod test_helper;
