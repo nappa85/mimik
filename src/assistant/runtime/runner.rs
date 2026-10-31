@@ -85,7 +85,16 @@ fn read_spec(fd: RawFd) -> Option<Spec> {
         usize::try_from(SPEC_BOUND).unwrap_or(1 << 20) + 1,
     ));
     file.take(SPEC_BOUND).read_to_string(&mut text).ok()?;
-    serde_json::from_str(&text).ok()
+    let spec: Spec = serde_json::from_str(&text).ok()?;
+    validate_profile(&spec).ok()?;
+    Some(spec)
+}
+
+fn validate_profile(spec: &Spec) -> Result<(), String> {
+    if let Exec::Hakoniwa { plan, .. } = &spec.exec {
+        plan.validate()?;
+    }
+    Ok(())
 }
 
 /// Closes every descriptor but 0, 1, 2 and `keep`.
@@ -339,6 +348,7 @@ impl std::io::Write for Bounded {
 
 /// `spec` as the runner reads it: JSON in a buffer that never reallocates, wiped when dropped.
 fn encode_spec(spec: &Spec, limit: usize) -> std::io::Result<zeroize::Zeroizing<Vec<u8>>> {
+    validate_profile(spec).map_err(std::io::Error::other)?;
     let mut writer = Bounded::new(limit);
     serde_json::to_writer(&mut writer, spec).map_err(std::io::Error::other)?;
     Ok(writer.buffer)

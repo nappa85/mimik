@@ -1,8 +1,13 @@
 //! llama-server's sandbox profile and assistant-facing diagnostics.
 use super::sandbox::{self, GpuBinds, Item};
-pub(crate) use crate::sandbox::*;
+#[cfg(test)]
+pub(crate) use crate::sandbox::apply_landlock;
+use crate::sandbox::{Access, Bind, RunFile, Tmpfs, TmpfsFlags, masks, parents, text};
+pub(crate) use crate::sandbox::{Grant, Identity, Landlock, Plan, Rule, Secret, run};
 use std::path::{Path, PathBuf};
 
+/// A runtime file to bind: its name under [`sandbox::RUNTIME`], the host path it was verified
+/// at and its identity.
 #[derive(Clone, Debug)]
 pub(crate) struct File {
     pub name: String,
@@ -10,25 +15,25 @@ pub(crate) struct File {
     pub identity: Identity,
 }
 
+/// What the launcher gives the plan.
 #[derive(Debug)]
 pub(crate) struct Inputs<'a> {
     pub root: PathBuf,
+    /// The host's `/proc/self/mountinfo`: what is mounted under a bound directory.
     pub mountinfo: String,
     pub runtime: Vec<File>,
     pub model: (PathBuf, Identity),
     pub generation: (PathBuf, Identity),
     pub token: Secret,
+    /// Further read-only files `(source, target, identity)` (the probe's own executable).
     pub extra: Vec<(PathBuf, String, Identity)>,
     pub gpu: Option<&'a GpuBinds>,
     pub env: Vec<(String, String)>,
     pub argv: Vec<String>,
 }
 
+/// The device nodes of the minimal `/dev`: no terminal, no `pts`, no `ptmx`.
 pub(crate) const DEVICES: &[&str] = &["null", "zero", "full", "random", "urandom"];
-
-fn text(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
-}
 
 fn ro(source: &Path, target: &str, identity: Option<Identity>) -> Bind {
     Bind {
@@ -39,6 +44,8 @@ fn ro(source: &Path, target: &str, identity: Option<Identity>) -> Bind {
     }
 }
 
+/// The sandbox's own tmpfs mounts: `/run` (the token's file and the socket directory's bind),
+/// `/dev`, `/tmp` and `/dev/shm`, each bounded.
 fn fixed_tmpfs() -> Vec<Tmpfs> {
     [
         ("/run", 64 << 10, 0o755),
@@ -57,7 +64,7 @@ fn fixed_tmpfs() -> Vec<Tmpfs> {
     .collect()
 }
 
-/// Select the llama-server allowlist; shared construction consumes the resulting profile.
+/// The plan for `inputs`: llama-server's sandbox allowlist, consumed by shared construction.
 pub(crate) fn plan(inputs: &Inputs<'_>) -> Plan {
     profile(inputs, sandbox::system_items())
 }
@@ -144,6 +151,9 @@ fn profile(inputs: &Inputs<'_>, mut items: Vec<Item>) -> Plan {
     plan
 }
 
+/// Select llama-server's Landlock rules, narrowing the mounts to the uses it needs.
+/// Execute is only for the program and system library directories (the ELF interpreter);
+/// the loader maps the runtime libraries without that right. The shared layer adds `/proc`.
 fn profile_rules(plan: &Plan) -> Vec<Rule> {
     let mut rules = Vec::new();
     let mut add = |path: &str, grant: Grant| {
@@ -156,8 +166,12 @@ fn profile_rules(plan: &Plan) -> Vec<Rule> {
         }
     };
     add("/dev", Grant::List);
+    // The token is read, never listed or written (the rest of `/run` has no rule).
     add(sandbox::TOKEN, Grant::ReadFile);
+    // The runtime's directory holds only its bound files, but ggml lists it to find its
+    // backends.
     add(sandbox::RUNTIME, Grant::List);
+    // The scaffolding directories of the GPU path's `/sys` links (not the top-level ones).
     for dir in &plan.dirs {
         if Path::new(dir).components().count() > 2 {
             add(dir, Grant::List);
@@ -178,6 +192,9 @@ fn profile_rules(plan: &Plan) -> Vec<Rule> {
             Access::ReadOnly => Grant::Read,
             Access::ReadWrite => Grant::ReadWrite,
             Access::Device => {
+                // The device's directory is listed by a rule of its own: libdrm and Mesa
+                // enumerate `/dev/dri` (the rule on `/dev` also reaches it, but the table
+                // does not lean on that).
                 if let Some(parent) = Path::new(&bind.target).parent().and_then(Path::to_str)
                     && parent != "/"
                 {
@@ -191,9 +208,14 @@ fn profile_rules(plan: &Plan) -> Vec<Rule> {
     rules
 }
 
-pub(crate) const APPARMOR_TEMPLATE: &str = include_str!("../../../apparmor/mimik");
-pub(crate) const APPARMOR_PLACEHOLDER: &str = "@MIMIK_EXE@";
+const APPARMOR_TEMPLATE: &str = include_str!("../../../apparmor/mimik");
+const APPARMOR_PLACEHOLDER: &str = "@MIMIK_EXE@";
 
+/// The `AppArmor` profile for this executable, with its absolute path as the attachment.
+///
+/// # Errors
+///
+/// The path is relative or has a character a profile attachment would interpret.
 pub(crate) fn apparmor_profile(exe: &Path) -> Result<String, String> {
     let name = exe
         .to_str()
@@ -201,6 +223,8 @@ pub(crate) fn apparmor_profile(exe: &Path) -> Result<String, String> {
     if !exe.is_absolute() {
         return Err("the executable's path is not absolute".into());
     }
+    // `/proc/self/exe` of a binary replaced or removed while it runs ends in this: no profile
+    // can attach to it.
     if name.ends_with(" (deleted)") {
         return Err("the executable has been replaced or removed since it started".into());
     }
@@ -215,6 +239,12 @@ pub(crate) fn apparmor_profile(exe: &Path) -> Result<String, String> {
     Ok(APPARMOR_TEMPLATE.replace(APPARMOR_PLACEHOLDER, name))
 }
 
+/// The profile `mimik assistant-apparmor-profile [--for <path>]` prints: for `--for`'s path (a
+/// packager's or a test setup's, which needs no `sed`), otherwise for the running binary.
+///
+/// # Errors
+///
+/// An argument it does not know, or a path the profile cannot take.
 pub(crate) fn apparmor_profile_for(args: &[String]) -> Result<String, String> {
     match args {
         [] => std::env::current_exe()
@@ -225,6 +255,7 @@ pub(crate) fn apparmor_profile_for(args: &[String]) -> Result<String, String> {
     }
 }
 
+/// `text` as one shell word.
 pub(crate) fn shell_word(text: &str) -> String {
     if !text.is_empty()
         && text
@@ -237,6 +268,8 @@ pub(crate) fn shell_word(text: &str) -> String {
     }
 }
 
+/// The page's remedy for a failed Hakoniwa start, by the one setting that may explain it
+/// (worded as a possibility: the probe's failure itself decides nothing).
 pub(crate) fn remedy(cause: sandbox::Cause, exe: &Path) -> String {
     match cause {
         sandbox::Cause::AppArmor => apparmor_message(exe),
@@ -244,6 +277,10 @@ pub(crate) fn remedy(cause: sandbox::Cause, exe: &Path) -> String {
     }
 }
 
+/// The assistant page's text for Ubuntu's `AppArmor` restriction of unprivileged user
+/// namespaces: the profile for this very binary, generated by it, and the steps to install
+/// it (the page's text, checked on Ubuntu 24.04). The profile is written to a file first,
+/// so a failure of the generating command installs nothing.
 pub(crate) fn apparmor_message(exe: &Path) -> String {
     let command = shell_word(&exe.to_string_lossy());
     format!(
@@ -251,10 +288,18 @@ pub(crate) fn apparmor_message(exe: &Path) -> String {
     )
 }
 
+/// What the Hakoniwa sandbox needs of the host before its probe: unprivileged user
+/// namespaces (the one setting that rules them out for certain; the probe decides otherwise).
+/// There is no helper program to find.
+///
+/// # Errors
+///
+/// A host setting that certainly disables unprivileged user namespaces.
 pub(crate) fn preflight() -> Result<(), sandbox::Unusable> {
     sandbox::namespaces(Path::new("/proc"))
 }
 
+/// Reads the runner's start report: the reaper and optional server identity/end state.
 pub(crate) fn started(line: &str) -> Option<sandbox::Started> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
     Some(sandbox::Started {
@@ -277,4 +322,8 @@ pub(crate) fn started(line: &str) -> Option<sandbox::Started> {
 
 #[cfg(test)]
 #[path = "profile_tests.rs"]
-mod tests;
+mod profile_tests;
+
+#[cfg(test)]
+#[path = "hako_tests.rs"]
+mod hako_tests;

@@ -1,7 +1,7 @@
 //! The seccomp program, installed in a helper process (the test binary re-executed), so the
 //! test process itself stays unfiltered.
 use super::*;
-use crate::assistant::runtime::test_helper::{self, errno};
+use crate::sandbox::test_helper::{self, errno};
 use serde_json::{Value, json};
 use std::os::fd::AsRawFd;
 

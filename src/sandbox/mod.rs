@@ -1,7 +1,7 @@
-//! Level 1, the sandbox (ASSIST-51, DEP-24): the Hakoniwa library builds it in the runner
+//! Shared profile-driven sandbox construction: the Hakoniwa library builds it in the runner
 //! process: new user, mount, PID, IPC, UTS, cgroup and network namespaces (no network at all:
 //! the namespace stays empty), a root of read-only binds and bounded tmpfs mounts (the
-//! allowlist of `sandbox.rs`), a Landlock layer, our own seccomp program and a marker.
+//! profile's allowlist), a Landlock layer, our own seccomp program and a marker.
 //!
 //! How it is built, and why it is safe:
 //!
@@ -13,15 +13,18 @@
 //! - The program is PID 1 of its namespace and its reaper is the runner's child outside it
 //!   (the process the endpoint check pins). The sandbox has no further process: the seccomp
 //!   program already refuses `fork`.
-//! - The token is the content of a file the runner has Hakoniwa write into the sandbox's own
-//!   `/run` tmpfs (memory): never on the host's disk, a command line or an environment.
+//! - Run files are written into the profile's private writable tmpfs mounts (memory), never
+//!   onto the host's disk. Their contents are redacted and zeroed in the runner spec.
 //! - There is no shim. The marker pipe's write end is the program's standard input until the
 //!   closure writes the marker on it, replaces descriptor 0 with `/dev/null` and closes every
 //!   other descriptor, just before the exec: nothing the program does can write the marker.
 //!   Failures before the marker (a mount, the identity check, capabilities, seccomp) are
 //!   sandbox failures; failures after it (the exec itself) are the server's.
 pub(crate) mod host;
+pub(crate) mod process;
 pub(crate) mod seccomp;
+#[cfg(test)]
+pub(crate) mod test_helper;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -102,6 +105,12 @@ impl TmpfsFlags {
 }
 
 /// The whole sandbox: what the runner builds the container from.
+///
+/// Trusted profile authors must select a minimal allowlist, verify bind identities where
+/// needed, and ensure mount ordering, overlaps and symlinks cannot redirect grants or files
+/// into unintended objects. Validation is lexical: it does not resolve host symlinks, check
+/// source ownership/content, bound resource sizes, or establish command/environment safety.
+/// Authors also own root/workdir, directory and symlink topology and seccomp compatibility.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Profile {
     /// The root directory the sandbox is built in (Mimik's, a sibling of the generation's
@@ -109,7 +118,7 @@ pub(crate) struct Profile {
     pub root: String,
     /// Files written into the sandbox's private tmpfs, never onto the host.
     pub files: Vec<RunFile>,
-    /// Mount and grant read access to the PID namespace's proc filesystem.
+    /// Controls the automatic mount and read grant for the PID namespace's proc filesystem.
     pub proc: bool,
     /// Profile-selected Landlock paths; `/proc` is controlled by `proc`.
     pub rules: Vec<Rule>,
@@ -121,6 +130,77 @@ pub(crate) struct Profile {
     pub workdir: String,
     pub argv: Vec<String>,
     pub env: Vec<(String, String)>,
+}
+
+impl Profile {
+    /// Checks lexical paths and the shared proc, execution, tmpfs and run-file invariants.
+    ///
+    /// # Errors
+    ///
+    /// The first invalid path or violated invariant. See the trusted-author obligations on
+    /// [`Profile`] for checks this does not perform.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        let paths = self
+            .rules
+            .iter()
+            .map(|rule| rule.path.as_str())
+            .chain(
+                self.binds
+                    .iter()
+                    .flat_map(|bind| [bind.source.as_str(), bind.target.as_str()]),
+            )
+            .chain(self.tmpfs.iter().map(|tmpfs| tmpfs.target.as_str()))
+            .chain(self.files.iter().map(|file| file.path.as_str()));
+        for path in paths {
+            if !path.starts_with('/')
+                || (path != "/"
+                    && path[1..]
+                        .split('/')
+                        .any(|part| matches!(part, "" | "." | "..")))
+            {
+                return Err(format!(
+                    "profile path is not absolute and normalised: {path:?}"
+                ));
+            }
+        }
+        for rule in &self.rules {
+            if Path::new(&rule.path).starts_with("/proc") {
+                return Err("explicit /proc rules are forbidden; use the proc field".into());
+            }
+            if run::access(rule.grant).contains(landlock::AccessFs::Execute)
+                && !self
+                    .binds
+                    .iter()
+                    .any(|bind| bind.access == Access::ReadOnly && bind.target == rule.path)
+            {
+                return Err(format!(
+                    "execute grant is not on a read-only bind: {}",
+                    rule.path
+                ));
+            }
+        }
+        for tmpfs in &self.tmpfs {
+            if !(tmpfs.read_only || tmpfs.flags.noexec && tmpfs.flags.nosuid && tmpfs.flags.nodev) {
+                return Err(format!(
+                    "writable tmpfs needs noexec, nosuid and nodev: {}",
+                    tmpfs.target
+                ));
+            }
+        }
+        for file in &self.files {
+            if !self.tmpfs.iter().any(|tmpfs| {
+                !tmpfs.read_only
+                    && file.path != tmpfs.target
+                    && Path::new(&file.path).starts_with(&tmpfs.target)
+            }) {
+                return Err(format!(
+                    "run file is not beneath a writable tmpfs: {}",
+                    file.path
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The runner's serializable plan is the complete profile description.
@@ -194,18 +274,16 @@ impl Landlock {
 /// What a path of the Landlock ruleset may be used for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Grant {
-    /// Read, list and execute: the program the closure execs and the system library
-    /// directories (which hold the ELF interpreter).
+    /// Read, list and execute; valid only on a read-only bind.
     ReadExec,
-    /// Read one file, never execute it: the model.
+    /// Read one file, never execute it.
     ReadFile,
-    /// Read and list, never execute: `/proc`, the runtime's libraries and the GPU's system
-    /// data.
+    /// Read and list, never execute.
     Read,
-    /// List only: `/dev` itself (its nodes have their own rules).
+    /// List directories only, without reading file contents.
     List,
     /// Read, write and create (regular files, directories, sockets, fifos, links) and
-    /// remove, never execute: the socket directory, `/tmp`, `/dev/shm`.
+    /// remove, never execute.
     ReadWrite,
     /// A device node: read, write and ioctl.
     Device,
@@ -231,7 +309,7 @@ pub(crate) fn landlock_rules(plan: &Plan) -> Vec<Rule> {
     rules
 }
 
-fn text(path: &Path) -> String {
+pub(crate) fn text(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
@@ -735,12 +813,30 @@ mod run {
     }
 
     /// Closes every descriptor above `keep`: `close_range`, else each one `/proc/self/fd`
-    /// lists (a listing that fails fails the step).
-    fn close_above(keep: RawFd) -> Result<(), String> {
+    /// lists when proc is enabled. Without proc, a failed syscall fails the step.
+    fn close_above(keep: RawFd, proc: bool) -> Result<(), String> {
+        close_above_with(keep, proc, |first| {
+            // SAFETY: closes descriptors this process no longer uses.
+            if unsafe { libc::syscall(libc::SYS_close_range, first, u32::MAX, 0_u32) } == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        })
+    }
+
+    fn close_above_with(
+        keep: RawFd,
+        proc: bool,
+        close_range: impl FnOnce(u32) -> std::io::Result<()>,
+    ) -> Result<(), String> {
         let first = u32::try_from(keep + 1).map_err(|_| "bad descriptor".to_owned())?;
-        // SAFETY: a plain system call closing descriptors this process no longer uses.
-        if unsafe { libc::syscall(libc::SYS_close_range, first, u32::MAX, 0_u32) } == 0 {
-            return Ok(());
+        match close_range(first) {
+            Ok(()) => return Ok(()),
+            Err(error) if !proc => {
+                return Err(format!("close_range failed and proc is disabled: {error}"));
+            }
+            Err(_) => {}
         }
         let listing = process::fd_listing().map_err(|error| error.to_string())?;
         for fd in listing {
@@ -831,7 +927,7 @@ mod run {
             step(
                 "descriptors",
                 exit::DESCRIPTORS,
-                Box::new(|| close_above(MARKER_FD)),
+                Box::new(|| close_above(MARKER_FD, plan.proc)),
             ),
             step(
                 "umask",
@@ -1172,8 +1268,18 @@ mod run {
         use super::*;
 
         #[test]
+        fn failed_close_range_without_proc_refuses_descriptor_cleanup() {
+            let reason = close_above_with(i32::MAX - 1, false, |_| {
+                Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
+            })
+            .unwrap_err();
+            assert!(reason.contains("close_range"), "{reason}");
+            assert!(reason.contains("proc is disabled"), "{reason}");
+        }
+
+        #[test]
         fn a_profile_without_proc_neither_mounts_nor_grants_it() {
-            let profile = Plan {
+            let mut profile = Plan {
                 root: "/sandbox".into(),
                 files: Vec::new(),
                 proc: false,
@@ -1190,16 +1296,16 @@ mod run {
                 env: Vec::new(),
             };
             assert_eq!(proc_mount(&profile), None);
-            assert!(profile.binds.iter().all(|b| b.target != "/proc"));
-            assert!(profile.tmpfs.iter().all(|t| t.target != "/proc"));
             assert_eq!(landlock_rules(&profile), profile.rules);
             assert!(landlock_rules(&profile).iter().all(|r| r.path != "/proc"));
+            profile.rules.push(Rule {
+                path: "/proc".into(),
+                grant: Grant::Read,
+            });
+            assert!(profile.validate().is_err());
         }
     }
 }
 
-pub(crate) mod process;
-
 #[cfg(test)]
-#[path = "hako_tests.rs"]
-mod tests;
+mod validation_tests;

@@ -383,7 +383,7 @@ fn an_oversized_spec_never_reallocates_the_buffer_that_holds_the_token() {
 
 #[test]
 fn a_spec_whose_secret_comes_before_the_overflowing_field_is_refused() {
-    use crate::assistant::runtime::hako::{Plan, RunFile, Secret};
+    use crate::sandbox::{Plan, RunFile, Secret, Tmpfs, TmpfsFlags};
     let plan = Plan {
         root: "/r".into(),
         files: vec![RunFile {
@@ -393,7 +393,13 @@ fn a_spec_whose_secret_comes_before_the_overflowing_field_is_refused() {
         proc: true,
         rules: Vec::new(),
         binds: Vec::new(),
-        tmpfs: Vec::new(),
+        tmpfs: vec![Tmpfs {
+            target: "/run".into(),
+            bytes: 4096,
+            mode: 0o700,
+            read_only: false,
+            flags: TmpfsFlags::PRIVATE_DATA,
+        }],
         symlinks: Vec::new(),
         dirs: Vec::new(),
         workdir: "/w".into(),
@@ -420,4 +426,51 @@ fn a_spec_whose_secret_comes_before_the_overflowing_field_is_refused() {
         "{error}"
     );
     assert!(encode_spec(&spec, 1 << 20).is_ok());
+}
+
+fn invalid_profile_spec() -> Spec {
+    Spec {
+        parent: own_pid(),
+        keep: vec![],
+        env: vec![],
+        chdir: None,
+        exec: Exec::Hakoniwa {
+            plan: Box::new(crate::sandbox::Profile {
+                root: "/sandbox".into(),
+                files: vec![],
+                proc: false,
+                rules: vec![crate::sandbox::Rule {
+                    path: "/proc".into(),
+                    grant: crate::sandbox::Grant::Read,
+                }],
+                binds: vec![],
+                tmpfs: vec![],
+                symlinks: vec![],
+                dirs: vec![],
+                workdir: "/".into(),
+                argv: vec!["/worker".into()],
+                env: vec![],
+            }),
+            status: -1,
+            marker: -1,
+            ack: -1,
+        },
+    }
+}
+
+#[test]
+fn invalid_profiles_are_refused_before_encoding() {
+    let error = encode_spec(&invalid_profile_spec(), 1 << 20).unwrap_err();
+    assert!(error.to_string().contains("/proc"), "{error}");
+}
+
+#[test]
+fn invalid_profiles_are_refused_after_decoding() {
+    use std::io::{Seek, Write};
+    use std::os::fd::IntoRawFd;
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(&serde_json::to_vec(&invalid_profile_spec()).unwrap())
+        .unwrap();
+    file.rewind().unwrap();
+    assert!(read_spec(file.into_raw_fd()).is_none());
 }

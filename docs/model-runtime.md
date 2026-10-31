@@ -257,6 +257,15 @@ The shared `Profile` (also named `Plan` in the runner protocol) declares binds a
 identities/access, bounded tmpfs mounts and flags, private files, links/directories, workdir,
 argv/environment, explicit Landlock rules and whether to mount and grant `/proc`. It has no
 model, token or socket-directory requirement; those are inputs to the llama-server profile.
+`Profile::validate()` runs before encoding and after decoding the runner spec. It refuses
+non-absolute or unnormalised rule/bind/tmpfs/file paths, explicit `/proc` rules, writable
+tmpfs mounts missing `noexec`, `nosuid` or `nodev`, execute grants outside read-only binds,
+and private files outside writable tmpfs mounts. The `proc` field controls the automatic
+proc mount and read grant. Profile authors remain trusted to select the allowlist, verify
+identities, bound resources, and make mount ordering, overlaps, symlinks, root/workdir,
+directory topology, commands and environment safe; validation does not resolve host paths
+or check their ownership/content. Without proc, descriptor cleanup requires `close_range`
+to succeed; its failure refuses the closure with descriptor exit code 115.
 
 The runner (a fresh single-threaded process, checked before it forks) builds the container
 and stays as its supervisor: new user, mount, PID, IPC, UTS, cgroup and network namespaces
@@ -299,7 +308,7 @@ token file read-only. How it is built, each point with its reason:
   sandbox that ended before the report says so (`ended`, the reaper reaped after the server's
   own exit status), and the marker then classifies the exit.
 - There is no shim. The closure runs in the program's process after the setup, in this
-   order (`sandbox::STEP_ORDER`): a new session (no controlling terminal), the identity check, the
+  order (`sandbox::STEP_ORDER`): a new session (no controlling terminal), the identity check, the
   bounding set dropped capability by capability (up to the kernel's last one) and the other
   sets cleared, Mimik's seccomp program installed (`no_new_privs` is already set by Hakoniwa),
   the marker pipe's end (standard input) moved to descriptor 3 close-on-exec, `/dev/null`
@@ -315,7 +324,8 @@ token file read-only. How it is built, each point with its reason:
   restricts the server further with the `landlock` crate, best effort. Handled: the ABI 6
   filesystem rights, TCP bind and connect (no rule, so both are denied: `EACCES`, beyond the
   empty network namespace) and the abstract-Unix-socket and signal scopes. The rules come from
-   the plan (`sandbox::landlock_rules`): execute only on the program the closure execs and the
+  the plan (selected by `hako::profile_rules`; `sandbox::landlock_rules` only adds `/proc`
+  when enabled): execute only on the program the closure execs and the
   system library directories (the kernel opens the ELF interpreter with the execute right;
   the loader maps the runtime's libraries with `mmap`, which that right does not govern, so
   they get read and list only, as do the GPU data, the sysfs binds and the probe's own

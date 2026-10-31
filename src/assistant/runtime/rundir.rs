@@ -113,10 +113,6 @@ impl Entry {
 /// a process that is gone (`ENOENT`, `ESRCH`) can be told from one that cannot be read.
 pub(crate) use crate::sandbox::process::stat_of;
 
-/// `(parent, start time)` of a `stat` line: the fields after the parenthesised name.
-#[cfg(test)]
-pub(crate) use crate::sandbox::process::parse_stat;
-
 /// A process's start time in clock ticks since boot.
 pub(crate) fn start_time(pid: i32) -> Option<u64> {
     procfs::process::Process::new(pid)

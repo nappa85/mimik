@@ -1,6 +1,7 @@
 //! Explicit snapshots of the pre-refactor allowlist, with host discovery injected so that
 //! absent library/driver folders and distribution symlinks cannot change the expectations.
 use super::*;
+use crate::sandbox::{landlock_rules, options, tmpfs_options};
 use hakoniwa::MountOptions as Flags;
 
 fn inputs(gpu: Option<&GpuBinds>) -> Inputs<'_> {
@@ -49,11 +50,26 @@ fn system() -> Vec<Item> {
 
 fn pin_profile(gpu: Option<&GpuBinds>) {
     let plan = profile(&inputs(gpu), system());
+    assert_eq!(plan.validate(), Ok(()));
     pin_binds(&plan, gpu);
     pin_bind_flags(&plan);
     pin_tmpfs_and_files(&plan);
     pin_rules(&plan, gpu);
     pin_links(&plan, gpu);
+    let dirs = if gpu.is_some() {
+        vec![
+            "/dev",
+            "/sys",
+            "/sys/bus/pci",
+            "/sys/class",
+            "/sys/class/drm",
+            "/sys/dev",
+            "/sys/dev/char",
+        ]
+    } else {
+        vec!["/dev"]
+    };
+    assert_eq!(plan.dirs, dirs);
     assert_eq!(plan.root, "/data/run/3.root");
     assert_eq!(plan.workdir, "/opt/llama");
     assert_eq!(plan.argv, ["/opt/llama/llama-server", "--help"]);
@@ -323,4 +339,43 @@ fn gpu_profile_matches_the_original_allowlist() {
         ],
     };
     pin_profile(Some(&gpu));
+}
+
+#[test]
+fn nested_mounts_under_a_real_read_only_directory_have_exact_masks() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("read only");
+    std::fs::create_dir(&source).unwrap();
+    let mut given = inputs(None);
+    given
+        .extra
+        .push((source.clone(), "/opt/data".into(), (7, 500)));
+    let escaped = text(&source).replace(' ', "\\040");
+    given.mountinfo = format!(
+        "1 0 0:1 / {escaped}/z rw - tmpfs tmpfs rw\n\
+         2 0 0:2 / {escaped}/a rw - tmpfs tmpfs rw\n\
+         3 2 0:3 / {escaped}/a/child rw - tmpfs tmpfs rw\n\
+         4 0 0:4 / {escaped}-sibling/no rw - tmpfs tmpfs rw\n"
+    );
+    let plan = profile(&given, system());
+    assert_eq!(plan.validate(), Ok(()));
+    assert_eq!(
+        plan.tmpfs[4..],
+        [
+            Tmpfs {
+                target: "/opt/data/a".into(),
+                bytes: 4096,
+                mode: 0o555,
+                read_only: true,
+                flags: TmpfsFlags::PRIVATE_DATA
+            },
+            Tmpfs {
+                target: "/opt/data/z".into(),
+                bytes: 4096,
+                mode: 0o555,
+                read_only: true,
+                flags: TmpfsFlags::PRIVATE_DATA
+            },
+        ]
+    );
 }

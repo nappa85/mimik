@@ -1,12 +1,16 @@
 use super::*;
-// The original suite exercises shared enforcement using the production llama profile, and
-// also pins its assistant-facing diagnostics.
-use crate::assistant::runtime::hako::{
-    APPARMOR_PLACEHOLDER, APPARMOR_TEMPLATE, DEVICES, File, Inputs, apparmor_message,
-    apparmor_profile, apparmor_profile_for, plan, remedy, started,
-};
-use crate::assistant::runtime::sandbox::{self, GpuBinds, Item};
+use crate::sandbox::*;
+use crate::sandbox::{process, seccomp};
 use std::path::PathBuf;
+
+#[test]
+fn the_gpu_binds_take_only_the_vulkan_and_driver_data_that_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    let existing = dir.path().join("vulkan");
+    std::fs::create_dir(&existing).unwrap();
+    let missing = dir.path().join("absent");
+    assert_eq!(sandbox::shared_data(&[&existing, &missing]), [existing]);
+}
 
 fn inputs<'a>(gpu: Option<&'a GpuBinds>, files: &[&str]) -> Inputs<'a> {
     Inputs {
@@ -121,7 +125,7 @@ fn only_the_render_node_is_a_device_beside_the_five_safe_ones() {
         .collect();
     assert_eq!(devices.len(), DEVICES.len() + 1);
     assert!(devices.contains(&"/dev/dri/renderD128"));
-    let cpu = crate::assistant::runtime::hako::plan(&inputs(None, &[]));
+    let cpu = super::plan(&inputs(None, &[]));
     assert_eq!(
         cpu.binds
             .iter()
@@ -953,7 +957,7 @@ fn more_than_one_process_in_the_sandbox_ends_it() {
 #[test]
 fn the_stat_line_gives_the_parent_and_the_start_time_of_the_same_read() {
     let me = i32::try_from(std::process::id()).unwrap();
-    let (parent, start) = crate::assistant::runtime::rundir::stat_of(me).unwrap();
+    let (parent, start) = process::stat_of(me).unwrap();
     assert_eq!(
         Some(start),
         crate::assistant::runtime::rundir::start_time(me)
@@ -964,18 +968,9 @@ fn the_stat_line_gives_the_parent_and_the_start_time_of_the_same_read() {
     );
     // A name with spaces and parentheses does not shift the fields.
     let line = "42 (a) b (c) S 7 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 987654 0 0 0";
-    assert_eq!(
-        crate::assistant::runtime::rundir::parse_stat(line),
-        Some((7, 987_654))
-    );
-    assert_eq!(
-        crate::assistant::runtime::rundir::parse_stat("garbage"),
-        None
-    );
-    assert_eq!(
-        crate::assistant::runtime::rundir::parse_stat("1 (x) S"),
-        None
-    );
+    assert_eq!(process::parse_stat(line), Some((7, 987_654)));
+    assert_eq!(process::parse_stat("garbage"), None);
+    assert_eq!(process::parse_stat("1 (x) S"), None);
 }
 
 #[test]
@@ -1224,10 +1219,7 @@ fn an_enforced_ruleset_is_full_from_abi_6_and_partial_below() {
 fn with_failing_landlock<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::spawn(move || {
         let errno = u32::try_from(libc::EPERM).unwrap();
-        crate::assistant::runtime::seccomp::install(
-            &crate::assistant::runtime::seccomp::program_without_landlock(errno),
-        )
-        .unwrap();
+        seccomp::install(&seccomp::program_without_landlock(errno)).unwrap();
         body()
     })
     .join()
