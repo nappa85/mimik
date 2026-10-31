@@ -4,6 +4,47 @@ A **source** is one prepared extraction run of a locally owned manual: the origi
 
 Code: `src/sources/`, `src/auth/materials.rs`, migrations `003`, `004`, `005`, `007`, `009`, `015`, `017`, `024`, `025`, `assets/source-regions.js`, `assets/source-review.js`. Tests: `tests/source_*.rs`, `src/campaigns/material_tests.rs`, `tools/test_source_tools.py`.
 
+## Internal PDF worker (Linux)
+
+`sources::worker::inspect(path)` and `inspect_cancellable(path, &Cancel)` run a blocking,
+confined inspection. `render(path, pages, &Cancel, callback)` delivers one validated page
+at a time on a dedicated record-reader thread; the callback must return promptly. A caller
+can retain delivered pages after a later batch failure. `Cancel` is clonable and permanent.
+These internal APIs are separate from the CLI import and are not browser upload routes.
+
+The shared long-lived spawner starts `assistant-runner`, whose `PdfWorker` operation builds
+the Hakoniwa sandbox and executes `mimik pdf-worker --spec /run/spec.json`. The profile binds
+the executable and PDF read-only with device/inode checks, shared system-library discovery,
+the ELF interpreter at `/opt/mimik/loader` (execute granted only on it and Mimik), and read-only `/dev/null` for
+stdin. It has an empty network namespace, no proc, sysfs, GPU or shared-memory mount, a
+16 MiB `noexec,nosuid,nodev` scratch tmpfs and a private 128 KiB `/run` tmpfs for the bounded
+64 KiB JSON spec. The scratch Landlock grant permits regular-file operations only.
+
+The sandbox closure, after mount setup, sets address space to 2 GiB, file size to 16 MiB, descriptors to 64, core size to
+zero, nice to 10, and equal soft/hard CPU limits (20 seconds for inspection, 25 seconds per
+rendered page). The parent enforces 30 seconds for inspection or 30 seconds per render page.
+Cancellation/deadlines kill through pinned pidfds, and results wait for tree exit. Stdout
+uses the framed record reader; a separate stderr drain matches at most 64 KiB and discards
+the remainder without logging raw output. The closure executes the explicitly bound loader
+with Mimik as its program argument; no loader file bind overlays a system-library bind.
+Cleanup kills all verified pins before a bounded five-second wait. A cleanup timeout
+interrupts transport readers and reports upload unavailable, never a successful tree exit.
+
+After closing the bounded input and before any MuPDF call, the worker installs a second
+seccomp filter with the raw seccomp syscall and `SECCOMP_FILTER_FLAG_TSYNC`. It kills process/thread creation, exec, socket
+creation, memfd, userfaultfd, ptrace and further seccomp calls; installation failure exits
+26 before parsing. A missing closure marker is `upload unavailable`, with a fixed setup-step
+name or runner exit code; a parent cancellation/deadline takes precedence. Successful framing
+alone cannot establish success without exit zero. Terminal error frames must agree with
+statuses 20–25; exit-only document reasons are accepted only before any output byte.
+Local reader/callback errors retain their reason. Only the parent's deadline may establish
+`took too long`.
+
+The no-proc profile and adversarial operations have opt-in host confinement tests in
+`sources::worker::live_tests`; host verification and independent change-set review remain
+required before this worker slice is accepted. The address-space budget is provisional
+until the source-upload corpus/measurement gate.
+
 ## Import (`mimik import-source --bundle DIR --pdf FILE`)
 
 Only the operator imports sources, through the CLI. The browser cannot upload, and there are no archives, URLs or nested imports. `Store::import_source` reads everything first (`load_import`) and then writes it all in one transaction.

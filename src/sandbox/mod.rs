@@ -481,8 +481,58 @@ pub(crate) mod exit {
     /// A Landlock ruleset that could not be built or applied on a kernel that has Landlock
     /// (a kernel without it is not a failure).
     pub const LANDLOCK: i32 = 117;
+    pub const MARKER_DESCRIPTOR: i32 = 118;
+    pub const STDIN: i32 = 119;
     /// After the marker: the exec failed (counted as the server's failure).
     pub const EXEC: i32 = 127;
+}
+
+// Hakoniwa 1.8 serializes setup errors as strings, without a public typed error.
+// Recognize only its fixed syscall prefixes, never arguments or diagnostic text.
+// Dedicated exit codes carry the trusted classification through the runner; unknown
+// formats stay exit 125. These are setup-only and cannot be claimed after the marker.
+const SETUP_OPERATIONS: [&str; 26] = [
+    "unshare",
+    "mount",
+    "mkdir_p",
+    "touch",
+    "metadata",
+    "pivot_root",
+    "chdir",
+    "umount2",
+    "rmdir",
+    "write",
+    "symlink",
+    "set_permissions",
+    "statfs",
+    "fork",
+    "set_pdeathsig",
+    "set_no_new_privs",
+    "sethostname",
+    "setuid",
+    "setgid",
+    "setgroups",
+    "dup2",
+    "waitpid",
+    "getrusage",
+    "setrlimit",
+    "setsid",
+    "execve",
+];
+
+pub(crate) fn setup_failure_code(reason: &str) -> i32 {
+    SETUP_OPERATIONS
+        .iter()
+        .position(|op| reason.starts_with(&format!("{op}(")))
+        .map_or(125, |index| {
+            80 + i32::try_from(index).expect("short fixed table")
+        })
+}
+
+pub(crate) fn setup_failure_step(code: i32) -> Option<&'static str> {
+    SETUP_OPERATIONS
+        .get(usize::try_from(code.checked_sub(80)?).ok()?)
+        .copied()
 }
 
 /// The first bind whose mounted object is not the verified one: `stat` gives the mounted
@@ -499,12 +549,12 @@ pub(crate) fn identity_mismatch(
 
 #[cfg(test)]
 pub(crate) use run::apply_landlock;
-pub(crate) use run::run;
 #[cfg(test)]
 pub(crate) use run::{
     Procs, Reaper, access, after_end, apply_landlock_with, find_child, landlock_step, options,
     report_for, run_guarded, setup_failed, single_threaded, steps, supervise, tmpfs_options,
 };
+pub(crate) use run::{run, run_worker};
 
 mod run {
     use super::{
@@ -929,7 +979,7 @@ mod run {
             ),
             step(
                 "marker-descriptor",
-                exit::DESCRIPTORS,
+                exit::MARKER_DESCRIPTOR,
                 Box::new(|| {
                     // SAFETY: descriptor 0 is the marker pipe's write end, handed over by the
                     // runner as the program's standard input and used only here, by number.
@@ -948,7 +998,7 @@ mod run {
             ),
             step(
                 "stdin",
-                exit::DESCRIPTORS,
+                exit::STDIN,
                 Box::new(|| {
                     let null = std::fs::File::open("/dev/null").map_err(|e| e.to_string())?;
                     rustix::stdio::dup2_stdin(&null).map_err(|error| error.to_string())
@@ -977,9 +1027,16 @@ mod run {
 
     /// Inside the sandbox, as the program's process just before it becomes the server: the
     /// steps (the marker the last), then the exec.
-    fn inside(plan: &Plan, umask: rustix::fs::Mode) -> i32 {
+    fn inside(plan: &Plan, umask: rustix::fs::Mode, cpu: Option<u64>) -> i32 {
         if plan.argv.is_empty() {
             return refuse(exit::SPEC, "nothing to execute");
+        }
+        // Limit only the payload after Hakoniwa has built the mounts and descriptors.
+        // The supervisor must retain enough descriptors/address space to construct it.
+        if let Some(cpu) = cpu
+            && super::runner::worker_limits(cpu).is_err()
+        {
+            return refuse(super::runner::exit::LIMITS, "worker limits failed");
         }
         if let Err((code, why)) = run_steps(steps(plan, umask)) {
             return refuse(code, &why);
@@ -1011,6 +1068,16 @@ mod run {
         run_guarded(plan, status, marker, ack, !cfg!(test))
     }
 
+    pub(crate) fn run_worker(
+        plan: Plan,
+        status: RawFd,
+        marker: RawFd,
+        ack: RawFd,
+        cpu: u64,
+    ) -> i32 {
+        run_with_cpu(plan, status, marker, ack, !cfg!(test), Some(cpu))
+    }
+
     /// [`run`], with the single-thread guard as asked: refused before anything is taken or
     /// spawned.
     pub(crate) fn run_guarded(
@@ -1019,6 +1086,17 @@ mod run {
         marker: RawFd,
         ack: RawFd,
         guard: bool,
+    ) -> i32 {
+        run_with_cpu(plan, status, marker, ack, guard, None)
+    }
+
+    fn run_with_cpu(
+        plan: Plan,
+        status: RawFd,
+        marker: RawFd,
+        ack: RawFd,
+        guard: bool,
+        cpu: Option<u64>,
     ) -> i32 {
         if guard && !single_threaded() {
             return refuse(exit::SPEC, "the runner is not single-threaded");
@@ -1042,7 +1120,8 @@ mod run {
         let inner = Arc::clone(&plan);
         // SAFETY: the closure runs after fork in a process with no other thread (checked
         // above), so allocating and locking in it is sound.
-        let mut command = unsafe { container.command_from_closure(move || inside(&inner, umask)) };
+        let mut command =
+            unsafe { container.command_from_closure(move || inside(&inner, umask, cpu)) };
         command.current_dir(&workdir).stdin(Stdio::from(marker));
         let mut child = match command.spawn() {
             Ok(child) => child,
@@ -1204,7 +1283,7 @@ mod run {
             }
             // No live child: the reaper has ended in the moments since the early window (take
             // its status like the early branch), or it is alive with nothing to reap, an error.
-            Ok(None) => match child.try_wait() {
+            Ok(None) => match finishing_reaper(child) {
                 Ok(Some(done)) => after_end(Ok(done), || report(None, true)),
                 Ok(None) => {
                     child.kill();
@@ -1218,6 +1297,22 @@ mod run {
                 let _ = child.wait();
                 refuse(exit::SPEC, "the sandbox has more than one process")
             }
+        }
+    }
+
+    // The payload can disappear before its outside-namespace reaper has serialized
+    // its status. Give that natural exit a bounded grace, rather than replace a
+    // perfectly good payload exit by SPEC (notably the fast EFBIG failure).
+    fn finishing_reaper(
+        child: &mut impl Reaper,
+    ) -> Result<Option<hakoniwa::ExitStatus>, hakoniwa::Error> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        loop {
+            let status = child.try_wait()?;
+            if status.is_some() || std::time::Instant::now() >= deadline {
+                return Ok(status);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
 
@@ -1279,8 +1374,13 @@ mod run {
 
     /// Says a setup failure on stderr and returns its code.
     fn said(status: &hakoniwa::ExitStatus) -> i32 {
-        eprintln!("mimik sandbox: {}", status.reason);
-        status.code
+        let code = super::setup_failure_code(&status.reason);
+        if let Some(step) = super::setup_failure_step(code) {
+            eprintln!("mimik sandbox: setup step {step} failed");
+        } else {
+            eprintln!("mimik sandbox: runner exit {code}");
+        }
+        code
     }
 
     /// Waits for the program and returns its exit code; a setup failure Hakoniwa reports
@@ -1296,6 +1396,16 @@ mod run {
     #[cfg(test)]
     mod profile_tests {
         use super::*;
+
+        #[test]
+        fn setup_diagnostics_are_fixed_and_never_contain_error_arguments() {
+            let code =
+                super::super::setup_failure_code("touch(\"/private/canary\") => Permission denied");
+            assert_eq!(super::super::setup_failure_step(code), Some("touch"));
+            for text in ["private-canary", "not a syscall", "touch PRIVATE"] {
+                assert_eq!(super::super::setup_failure_code(text), 125);
+            }
+        }
 
         #[test]
         fn failed_close_range_without_proc_refuses_descriptor_cleanup() {

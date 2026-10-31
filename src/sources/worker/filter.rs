@@ -31,18 +31,17 @@ fn program() -> BpfProgram {
 
 pub(super) fn install() -> std::io::Result<()> {
     let program = program();
-    let mut descriptor = libc::sock_fprog {
+    let descriptor = libc::sock_fprog {
         len: u16::try_from(program.len()).expect("short worker filter"),
         filter: program.as_ptr().cast::<libc::sock_filter>().cast_mut(),
     };
     // Only the re-executed libtest worker can request an actual kernel install failure.
     #[cfg(test)]
-    if std::env::var("MIMIK_PDF_TEST").as_deref() == Ok("filter-fail") {
-        descriptor.len = 0;
-    }
-    #[cfg(not(test))]
     let descriptor = {
-        let _ = &mut descriptor;
+        let mut descriptor = descriptor;
+        if std::env::var("MIMIK_PDF_TEST").as_deref() == Ok("filter-fail") {
+            descriptor.len = 0;
+        }
         descriptor
     };
     // SAFETY: the kernel copies this valid, bounded BPF program during the call; both
@@ -51,7 +50,7 @@ pub(super) fn install() -> std::io::Result<()> {
         libc::syscall(
             libc::SYS_seccomp,
             libc::SECCOMP_SET_MODE_FILTER,
-            0,
+            libc::SECCOMP_FILTER_FLAG_TSYNC,
             &raw const descriptor,
         )
     };

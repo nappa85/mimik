@@ -20,7 +20,7 @@ use rig_core::http_client::HttpClientExt;
 use serde_json::{Value, json};
 
 const HELPER: &str = "assistant::runtime::launch::live_tests::helper";
-const RUNNER: &str = "assistant::runtime::runner::tests::helper";
+const RUNNER: &str = "sandbox::runner::tests::helper";
 
 fn env(name: &str) -> PathBuf {
     PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("{name} is not set")))

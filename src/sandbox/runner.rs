@@ -239,11 +239,6 @@ pub(crate) fn run(spec_fd: RawFd) -> i32 {
     if limits().is_err() {
         return exit::LIMITS;
     }
-    if let Exec::PdfWorker { cpu_seconds, .. } = &spec.exec
-        && worker_limits(*cpu_seconds).is_err()
-    {
-        return exit::LIMITS;
-    }
     let mut keep = spec.keep.clone();
     if let Exec::Server { fd, .. } = &spec.exec {
         keep.push(*fd);
@@ -261,14 +256,14 @@ pub(crate) fn run(spec_fd: RawFd) -> i32 {
             status,
             marker,
             ack,
-        }
-        | Exec::PdfWorker {
+        } => super::run(*plan, status, marker, ack),
+        Exec::PdfWorker {
             plan,
             status,
             marker,
             ack,
-            ..
-        } => super::run(*plan, status, marker, ack),
+            cpu_seconds,
+        } => super::run_worker(*plan, status, marker, ack, cpu_seconds),
     }
 }
 
@@ -454,7 +449,7 @@ mod tests;
 /// Initial address-space budget, to be measured against the 2b-2 corpus.
 pub(crate) const WORKER_AS: u64 = 2 << 30;
 
-fn worker_limits(cpu_seconds: u64) -> std::io::Result<()> {
+pub(super) fn worker_limits(cpu_seconds: u64) -> std::io::Result<()> {
     use rustix::process::{Resource, Rlimit, setrlimit};
     if cpu_seconds == 0 || cpu_seconds > 200 {
         return Err(std::io::Error::other("invalid worker CPU budget"));

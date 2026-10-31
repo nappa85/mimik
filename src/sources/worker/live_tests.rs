@@ -18,6 +18,7 @@ fn enabled() -> bool {
 fn options(mode: &str) -> Options {
     let binary = std::env::current_exe().unwrap();
     Options {
+        tmp_bytes: (mode == "fsize").then_some(32 << 20),
         observed_exit: std::sync::Arc::default(),
         runner: RunnerCommand {
             program: std::env::var_os("MIMIK_LIVE_RUNNER").unwrap().into(),
@@ -96,9 +97,9 @@ fn worker_helper() {
 }
 
 fn reader(
-    pipe: std::process::ChildStdout,
+    pipe: super::launch::Output,
     helper: bool,
-) -> Result<std::io::BufReader<std::process::ChildStdout>, Error> {
+) -> Result<std::io::BufReader<super::launch::Output>, Error> {
     use std::io::BufRead;
     let mut pipe = std::io::BufReader::new(pipe);
     if helper {
@@ -130,48 +131,60 @@ pub(super) fn misbehave() -> Result<(), Error> {
     let mode = std::env::var("MIMIK_PDF_TEST").unwrap_or_default();
     match mode.as_str() {
         "socket" => {
-            // SAFETY: cfg(test)-only adversarial call, expected to kill this disposable
-            // process. If it unexpectedly returns, no pointer is passed to the kernel.
-            unsafe {
-                libc::syscall(libc::SYS_socket, libc::AF_INET, libc::SOCK_STREAM, 0);
-            }
+            let _ = rustix::net::socket(
+                rustix::net::AddressFamily::INET,
+                rustix::net::SocketType::STREAM,
+                None,
+            );
         }
         "exec" => {
-            let argv = [c"/opt/mimik/mimik".as_ptr(), std::ptr::null()];
-            // SAFETY: cfg(test)-only exec probe with valid NUL-terminated argv/envp.
-            // A successful exec replaces this disposable helper; seccomp must kill it.
-            unsafe {
-                libc::syscall(libc::SYS_execve, argv[0], argv.as_ptr(), argv[1..].as_ptr());
-            }
+            use std::os::unix::process::CommandExt;
+            let _ = std::process::Command::new("/opt/mimik/mimik").exec();
         }
         "clone" => {
-            // SAFETY: cfg(test)-only fork-style clone (no shared memory or child stack),
-            // expected to be killed by the second filter before a child is created.
-            let result = unsafe { libc::syscall(libc::SYS_clone, libc::SIGCHLD, 0, 0, 0, 0) };
-            if result == 0 {
-                std::process::exit(0);
-            }
+            // pthread_create attempts clone3 or clone, both KILL_PROCESS after the
+            // worker's second filter (the first permits threads).
+            std::thread::spawn(|| {}).join().unwrap();
         }
         "sleep" => std::thread::sleep(Duration::from_secs(60)),
         "cpu" => loop {
             std::hint::spin_loop();
         },
         "tmpfs" => {
+            scratch_write_control();
             let bytes = vec![0_u8; 9 << 20];
             for name in ["/tmp/a", "/tmp/b"] {
-                File::create(name)
-                    .and_then(|mut f| f.write_all(&bytes))
-                    .map_err(|_| Error::Unreadable)?;
+                if let Err(error) = File::create(name).and_then(|mut f| f.write_all(&bytes)) {
+                    return Err(if error.raw_os_error() == Some(libc::ENOSPC) {
+                        Error::Unreadable
+                    } else {
+                        Error::Unsupported
+                    });
+                }
             }
+            return Err(Error::Unsupported);
         }
-        "fsize" => File::create("/tmp/oversize")
-            .and_then(|f| f.set_len(17 << 20))
-            .map_err(|_| Error::Unreadable)?,
+        "fsize" => {
+            scratch_write_control();
+            let error = File::create("/tmp/oversize")
+                .and_then(|mut f| f.write_all(&vec![0; 17 << 20]))
+                .expect_err("RLIMIT_FSIZE must refuse the write");
+            return Err(if error.raw_os_error() == Some(libc::EFBIG) {
+                Error::Unreadable
+            } else {
+                Error::Unsupported
+            });
+        }
         "denied" => {
+            // Positive control: failure to open anything must not count as confinement.
+            if std::fs::read("/in/document.pdf").is_err() {
+                std::process::exit(27);
+            }
             let home = std::env::var("MIMIK_PDF_HOST_HOME").unwrap();
             let data = std::env::var("MIMIK_PDF_HOST_DATA").unwrap();
             let output = std::env::var("MIMIK_PDF_HOST_WRITE").unwrap();
-            if std::fs::read(home).is_ok()
+            if std::fs::read(format!("/proc/1/root{home}")).is_ok()
+                || std::fs::read(home).is_ok()
                 || std::fs::read(data).is_ok()
                 || File::create(output).is_ok()
             {
@@ -183,6 +196,16 @@ pub(super) fn misbehave() -> Result<(), Error> {
     Ok(())
 }
 use std::fs::File;
+
+fn scratch_write_control() {
+    use std::io::Write;
+    if File::create("/tmp/control")
+        .and_then(|mut file| file.write_all(&[0; 4096]))
+        .is_err()
+    {
+        std::process::exit(27);
+    }
+}
 
 #[test]
 #[ignore = "host confinement: MIMIK_LIVE_RUNNER opt-in"]
@@ -277,14 +300,49 @@ fn live_second_filter_install_failure() {
 #[test]
 #[ignore = "host confinement: MIMIK_LIVE_RUNNER opt-in"]
 fn live_host_files_are_invisible_and_unwritable() {
+    host_files_denied(false);
+}
+
+#[test]
+#[ignore = "host confinement: MIMIK_LIVE_RUNNER opt-in"]
+fn live_without_landlock_host_boundaries_still_hold() {
+    host_files_denied(true);
+}
+
+fn host_files_denied(without_landlock: bool) {
     if !enabled() {
         return;
     }
-    let (dir, path) = pdf();
+    let (_pdf_dir, path) = pdf();
     let mut opts = options("denied");
+    if without_landlock {
+        opts.runner.program = std::env::current_exe().unwrap();
+        opts.runner.args = vec![
+            "sandbox::runner::tests::helper".into(),
+            "--exact".into(),
+            "--nocapture".into(),
+            "--test-threads=1".into(),
+        ];
+        opts.runner.env = vec![
+            ("MIMIK_TEST_HELPER".into(), "runner".into()),
+            ("MIMIK_TEST_NO_LANDLOCK".into(), "ENOSYS".into()),
+        ];
+    }
+    let base = std::env::var_os("MIMIK_LIVE_SCRATCH")
+        .map_or_else(|| std::env::current_dir().unwrap(), PathBuf::from);
+    let base = std::fs::canonicalize(base).unwrap();
+    assert!(!base.starts_with("/tmp") && !base.starts_with("/run"));
+    let dir = tempfile::Builder::new()
+        .prefix("mimik-live-")
+        .tempdir_in(base)
+        .unwrap();
+    for name in ["home", "data"] {
+        std::fs::create_dir(dir.path().join(name)).unwrap();
+    }
+    // Synthetic stand-ins for HOME/data, never read the owner's real files.
     for (variable, name) in [
-        ("MIMIK_PDF_HOST_HOME", "home-canary"),
-        ("MIMIK_PDF_HOST_DATA", "data-canary"),
+        ("MIMIK_PDF_HOST_HOME", "home/canary"),
+        ("MIMIK_PDF_HOST_DATA", "data/canary"),
     ] {
         let canary = dir.path().join(name);
         std::fs::write(&canary, b"synthetic-private-canary").unwrap();
@@ -292,12 +350,13 @@ fn live_host_files_are_invisible_and_unwritable() {
             .push((variable.into(), canary.to_str().unwrap().into()));
     }
     let output = dir.path().join("forbidden");
+    std::fs::write(&output, b"must-not-change").unwrap();
     opts.env.push((
         "MIMIK_PDF_HOST_WRITE".into(),
         output.to_str().unwrap().into(),
     ));
     inspection(&path, &opts, &Cancel::default()).unwrap();
-    assert!(!output.exists());
+    assert_eq!(std::fs::read(output).unwrap(), b"must-not-change");
 }
 
 #[test]
@@ -427,8 +486,10 @@ fn live_parent_sigkill_takes_worker_with_it() {
     while pins.iter().any(Watched::alive) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(
-        pins.iter().all(|p| !p.alive()),
-        "parent death left a live worker process"
-    );
+    let all_gone = pins.iter().all(|p| !p.alive());
+    // Clean up even when the regression is present, without signalling reusable PIDs.
+    for pin in pins.iter().rev().filter(|p| p.alive()) {
+        let _ = rustix::process::pidfd_send_signal(&pin.pidfd, rustix::process::Signal::KILL);
+    }
+    assert!(all_gone, "parent death left a live worker process");
 }

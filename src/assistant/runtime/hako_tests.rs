@@ -859,7 +859,44 @@ fn a_live_reaper_with_no_child_is_killed_reaped_and_refused() {
     );
     assert_eq!(code, exit::SPEC);
     assert!(status.is_empty(), "nothing is reported");
-    assert_eq!(reaper.calls(), ["try_wait", "kill", "wait"]);
+    let calls = reaper.calls();
+    assert!(
+        calls[..calls.len() - 2]
+            .iter()
+            .all(|call| *call == "try_wait")
+    );
+    assert_eq!(&calls[calls.len() - 2..], ["kill", "wait"]);
+}
+
+#[test]
+fn a_reaper_finishing_after_its_child_disappears_keeps_the_payload_status() {
+    struct Finishing(bool);
+    impl Reaper for Finishing {
+        fn wait(&mut self) -> Result<hakoniwa::ExitStatus, hakoniwa::Error> {
+            panic!("must use bounded try_wait during the exit race");
+        }
+        fn try_wait(&mut self) -> Result<Option<hakoniwa::ExitStatus>, hakoniwa::Error> {
+            Ok(std::mem::replace(&mut self.0, true).then(|| ran(20)))
+        }
+        fn kill(&mut self) {
+            panic!("a naturally exiting reaper must not be killed");
+        }
+    }
+    let (ack, _keep) = ack_pipe();
+    let mut status = Vec::new();
+    assert_eq!(
+        supervise(
+            &mut Finishing(false),
+            7,
+            false,
+            &FakeProcs::default(),
+            &mut status,
+            &ack,
+            SHORT
+        ),
+        20
+    );
+    assert_eq!(status, b"{\"child-pid\":7,\"ended\":true}\n");
 }
 
 #[test]

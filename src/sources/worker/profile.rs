@@ -8,16 +8,18 @@ use crate::sandbox::{
 use std::path::Path;
 
 pub(super) const EXECUTABLE: &str = "/opt/mimik/mimik";
+const LOADER: &str = "/opt/mimik/loader";
 pub(super) const INPUT: &str = "/in/document.pdf";
 pub(super) const SPEC: &str = "/run/spec.json";
 pub(super) const SPEC_LIMIT: usize = 64 << 10;
 
 pub(super) fn encode(spec: &super::Spec) -> Result<String, super::Error> {
-    let bytes = serde_json::to_vec(spec).map_err(|_| super::Error::Unreadable)?;
-    if bytes.len() > SPEC_LIMIT {
-        return Err(super::Error::TooLarge);
-    }
-    String::from_utf8(bytes).map_err(|_| super::Error::Unreadable)
+    let mut writer = super::records::LimitedBytes {
+        bytes: Vec::new(),
+        limit: SPEC_LIMIT,
+    };
+    serde_json::to_writer(&mut writer, spec).map_err(|_| super::Error::TooLarge)?;
+    String::from_utf8(writer.bytes).map_err(|_| super::Error::Unreadable)
 }
 
 pub(super) struct Inputs<'a> {
@@ -59,8 +61,9 @@ fn build_with(input: Inputs<'_>, items: Vec<Item>) -> Profile {
             Some(input.executable.1),
         ),
         ro(input.input.0, INPUT.into(), Some(input.input.1)),
-        // Explicit file bind permits execution of only the loader, never its whole folder.
-        ro(input.loader, text(input.loader), None),
+        // A separate target avoids Hakoniwa's O_APPEND touch of the root-owned
+        // interpreter under an already-bound system library directory.
+        ro(input.loader, LOADER.into(), None),
     ]);
     // The shared closure needs a real null device for stdin. Keep the bind read-only,
     // without nodev (which would prevent opening it), and grant only read access.
@@ -95,8 +98,10 @@ fn build_with(input: Inputs<'_>, items: Vec<Item>) -> Profile {
         }
         rules.push(Rule {
             path: bind.target.clone(),
-            grant: if bind.target == EXECUTABLE || bind.target == text(input.loader) {
+            grant: if bind.target == EXECUTABLE || bind.target == LOADER {
                 Grant::ReadExec
+            } else if bind.target == "/dev/null" {
+                Grant::ReadFile
             } else {
                 Grant::Read
             },
@@ -130,7 +135,9 @@ fn build_with(input: Inputs<'_>, items: Vec<Item>) -> Profile {
         symlinks,
         dirs,
         workdir: "/tmp".into(),
-        argv: input.argv,
+        // Execute the explicitly bound loader, which then loads Mimik and its
+        // dependencies. PT_INTERP's original path stays readable via the library bind.
+        argv: std::iter::once(LOADER.into()).chain(input.argv).collect(),
         env: input.env,
     }
 }
@@ -162,6 +169,12 @@ mod tests {
             ],
         );
         profile.validate().unwrap();
+        // Hakoniwa touches a file target O_APPEND before binding it. Never place
+        // such a target beneath a system directory bind (root-owned file).
+        assert!(
+            profile.binds.iter().all(|bind| bind.target == "/usr/lib"
+                || !Path::new(&bind.target).starts_with("/usr/lib"))
+        );
         assert!(!profile.proc);
         assert_eq!(
             profile
@@ -174,7 +187,7 @@ mod tests {
                 ("/etc/ld.so.cache", Access::ReadOnly, None),
                 (EXECUTABLE, Access::ReadOnly, Some((1, 2))),
                 (INPUT, Access::ReadOnly, Some((3, 4))),
-                ("/usr/lib/ld.so", Access::ReadOnly, None),
+                (LOADER, Access::ReadOnly, None),
                 ("/dev/null", Access::ReadOnlyDevice, None),
             ]
         );
@@ -209,8 +222,8 @@ mod tests {
                 ("/usr/lib", Grant::Read),
                 ("/etc/ld.so.cache", Grant::Read),
                 (EXECUTABLE, Grant::ReadExec),
-                ("/usr/lib/ld.so", Grant::ReadExec),
-                ("/dev/null", Grant::Read),
+                (LOADER, Grant::ReadExec),
+                ("/dev/null", Grant::ReadFile),
             ]
         );
         assert_eq!(profile.symlinks, [] as [(String, String); 0]);
