@@ -53,10 +53,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   relative form. Regression test first, then make the probe's models dir absolute as the
   server path does (`std::path::absolute`).
 
-- **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
-  target/agent-tools/ci.sh <cmd>`, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
-  mimik-catalogue-target). Free-model reviews: never in parallel (`tools/external_review.py`
-  locks and skips limited models, `~/.cache/mimik-review/limits.json`).
+- **Resume after a reboot:** the CI helper is `/home/marco/Progetti/mimik/target/agent-tools/ci.sh` (`CPUS=2 sh
+  /home/marco/Progetti/mimik/target/agent-tools/ci.sh <cmd>`, always by this absolute path, image `mimik-ci` = 1.99.1, volumes mimik-cargo-cache and
+  mimik-catalogue-target). Free-model reviews: never in parallel (the `external-agents` skill locks
+  and skips limited models, `~/.local/state/external-agents/limits.json`).
 
 - Hakoniwa audit exception: check new Hakoniwa releases; when one drops postcard's default
   features, remove the RUSTSEC-2023-0089 ignore from `.cargo/audit.toml` (DEP-24).
@@ -145,9 +145,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   (`owner_write`) and `src/accounts/mod.rs` recheck the CSRF admission without binding it to the
   Owner's session and principal, as the material writes now do (`recheck_owner_write`). Not
   exploitable today (both come from one request session).
-- Review helper: `external_review.py`'s short-output unavailable heuristic can reject a real
-  successful verdict that discusses "unavailable" status. Add a regression and narrow the
-  classification; direct sanitized Astra follow-up was needed to read the actual verdict.
 
 - macOS and Windows model runtime (ASSIST-34): not verifiable from this host.
 - **GPU back in service (2026-10-20, after the re-paste):** at 143 W for 5 min with the fan
