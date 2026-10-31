@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -100,6 +101,21 @@ class WorktreeCheckTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse((self.wt / "target").exists())
         self.assertFalse((self.wt / "tools" / "__pycache__").exists())
+
+    def test_an_ignored_path_that_cannot_be_deleted_is_a_clean_refusal(self):
+        cache = self.wt / "tools" / "__pycache__"
+        cache.mkdir(parents=True)
+        (cache / "m.pyc").write_bytes(b"\0")
+
+        def refuse(path, *args, **kwargs):
+            raise PermissionError(13, "Permission denied", str(path))
+
+        # Patched rather than chmod: CI runs the helper tests as root, which ignores modes.
+        with mock.patch.object(check.shutil, "rmtree", refuse):
+            code, errors = self.run_check("--clean")
+        self.assertEqual(code, 1)
+        self.assertIn("cannot delete ignored path tools/__pycache__", errors)
+        self.assertNotIn("Traceback", errors)
 
     def test_a_staged_gitlink_is_refused(self):
         git(self.wt, "update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},sub")
