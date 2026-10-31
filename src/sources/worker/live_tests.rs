@@ -11,15 +11,75 @@ use std::{
 
 const HELPER: &str = "sources::worker::live_tests::worker_helper";
 const PARENT: &str = "sources::worker::live_tests::parent_helper";
+mod corpus;
+mod local_pdfs;
+
+fn production_options() -> Options {
+    let mut opts = options("normal");
+    opts.executable = opts.runner.program.clone();
+    opts.argv = vec![
+        "/opt/mimik/mimik".into(),
+        "pdf-worker".into(),
+        "--spec".into(),
+        "/run/spec.json".into(),
+    ];
+    opts.env.retain(|(key, _)| key != "MIMIK_PDF_TEST");
+    opts.wall = None;
+    opts
+}
+
+#[test]
+#[ignore = "host confinement: MIMIK_LIVE_RUNNER opt-in"]
+fn live_availability_probe_succeeds() {
+    if !enabled() {
+        return;
+    }
+    let report = launch::probe_with(&production_options()).unwrap();
+    assert_eq!(report.document.pages, 1);
+    assert_eq!(report.pages.len(), 1);
+}
 
 fn enabled() -> bool {
     std::env::var_os("MIMIK_LIVE_RUNNER").is_some()
+}
+
+fn rss_within_bound(opts: &Options) -> bool {
+    use std::sync::atomic::Ordering;
+    let worker = opts.worker_peak_rss_kib.load(Ordering::Acquire);
+    let measured = if opts.parent_killed.load(Ordering::Acquire) {
+        worker
+    } else {
+        opts.peak_rss_kib.load(Ordering::Acquire)
+    };
+    measured > 0 && measured < 1_572_864 && worker < 1_572_864
+}
+
+#[test]
+fn rss_gate_uses_worker_hwm_for_kills_and_wait4_for_natural_exit() {
+    use std::sync::atomic::Ordering;
+    let opts = Options::production().unwrap();
+    for (killed, wait4, worker, expected) in [
+        (true, 100, 0, false),
+        (true, 100, 1_572_864, false),
+        (true, 100, 256 * 1024, true),
+        (false, 1_572_864, 100, false),
+        (false, 100, 1_572_864, false),
+        (false, 100, 0, true),
+    ] {
+        opts.parent_killed.store(killed, Ordering::Release);
+        opts.peak_rss_kib.store(wait4, Ordering::Release);
+        opts.worker_peak_rss_kib.store(worker, Ordering::Release);
+        assert_eq!(rss_within_bound(&opts), expected);
+    }
 }
 fn options(mode: &str) -> Options {
     let binary = std::env::current_exe().unwrap();
     Options {
         tmp_bytes: (mode == "fsize").then_some(32 << 20),
         observed_exit: std::sync::Arc::default(),
+        peak_rss_kib: std::sync::Arc::default(),
+        worker_peak_rss_kib: std::sync::Arc::default(),
+        parent_killed: std::sync::Arc::default(),
         runner: RunnerCommand {
             program: std::env::var_os("MIMIK_LIVE_RUNNER").unwrap().into(),
             args: vec!["assistant-runner".into(), "--spec-fd".into(), "3".into()],
@@ -147,6 +207,17 @@ pub(super) fn misbehave() -> Result<(), Error> {
             std::thread::spawn(|| {}).join().unwrap();
         }
         "sleep" => std::thread::sleep(Duration::from_secs(60)),
+        "rss-control" | "rss-control-killed" => {
+            let mut memory = vec![0_u8; 256 << 20];
+            for byte in memory.iter_mut().step_by(4096) {
+                *byte = 1;
+            }
+            std::hint::black_box(&memory);
+            if mode == "rss-control-killed" {
+                std::thread::sleep(Duration::from_secs(60));
+                std::hint::black_box(&memory);
+            }
+        }
         "cpu" => loop {
             std::hint::spin_loop();
         },

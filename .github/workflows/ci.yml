@@ -64,6 +64,7 @@ jobs:
               actionlint .github/workflows/ci.yml
               cargo audit --deny warnings
               cargo about generate --locked --fail about.hbs -o target/THIRD-PARTY-NOTICES.md
+              python3 tools/mupdf_notices.py target/THIRD-PARTY-NOTICES.md
               cargo build --release --locked
               cargo package --locked --allow-dirty
               python tools/verify_source_package.py target/package/mimik-0.1.0.crate
@@ -333,17 +334,18 @@ jobs:
           target/confinement-tests --test-threads=2 --include-ignored \
             sandbox::seccomp:: assistant::runtime::endpoint:: \
             sandbox::runner:: sources::worker::live_tests:: assistant::runtime::launch::live_tests:: \
+            --show-output \
             --skip live_gpu_ \
             2>&1 | tee target/confinement.log
           ran=$(grep -oE '^test result: ok\. [0-9]+ passed; 0 failed; 0 ignored' target/confinement.log | grep -oE '[0-9]+' | head -n 1)
-          # The total includes the two PDF worker re-exec helpers, plus 13 live checks.
-          if [ "${ran:-0}" -lt 55 ]; then
-            echo "only ${ran:-0} confinement tests ran; expected at least 55"
+          # Includes two PDF re-exec helpers, 17 live checks and the generator bound check.
+          if [ "${ran:-0}" -lt 60 ]; then
+            echo "only ${ran:-0} confinement tests ran; expected at least 60"
             exit 1
           fi
-          workers=$(grep -cE '^test sources::worker::live_tests::live_[^ ]+ \.\.\. ok$' target/confinement.log)
-          if [ "$workers" -ne 13 ]; then
-            echo "only $workers PDF worker confinement tests ran; expected 13"
+          workers=$(grep -cE '^test sources::worker::live_tests::(corpus::)?live_[^ ]+ \.\.\. ok$' target/confinement.log)
+          if [ "$workers" -ne 17 ]; then
+            echo "only $workers PDF worker confinement tests ran; expected 17"
             exit 1
           fi
           # On a runner with Landlock the kernel-level check of the rule semantics (`hako_tests`,

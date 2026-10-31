@@ -9,6 +9,7 @@ import tomllib
 from pathlib import Path
 
 import llama_runtime
+import mupdf_notices
 
 
 def toolchain(path=Path("rust-toolchain.toml")):
@@ -30,7 +31,7 @@ def hakoniwa_notice(notices_text, license_path=Path("assets/hakoniwa-LICENSE")):
     exception statement and the LGPL) is appended; a copy without the exception is refused."""
     if "hakoniwa" not in notices_text:
         return ""
-    text = license_path.read_text(encoding="utf-8")
+    text = license_path.read_bytes().decode("utf-8")
     if EXCEPTION_MARKER not in text:
         raise ValueError(f"{license_path} lacks the linking exception statement")
     return f"\n## Hakoniwa: LGPL-3.0-only WITH LGPL-3.0-linking-exception\n\n{text.rstrip()}\n"
@@ -83,7 +84,7 @@ def llama_notice(data, tar_path=None, notices_dir=None):
     if notices_dir is not None and external:
         llama_runtime.verify_notices(notices_dir, data)
         for notice in external:
-            text = (Path(notices_dir) / notice["name"]).read_text(encoding="utf-8")
+            text = (Path(notices_dir) / notice["name"]).read_bytes().decode("utf-8")
             out.append(
                 f"\n### {notice['component']}\n\n{notice['licence']}.\n\n"
                 f"```\n{text.rstrip()}\n```\n"
@@ -146,6 +147,11 @@ def main():
     ):
         raise ValueError("Run cargo vendor --locked target/vendor before packaging")
     args.output.mkdir(parents=True, exist_ok=True)
+    crates = [path for path in vendor.iterdir() if path.name in ("mupdf-sys", "mupdf-sys-0.8.0")]
+    if len(crates) != 1:
+        raise ValueError("the pinned mupdf-sys crate must be in dependency sources")
+    notices_text = notices.read_bytes().decode("utf-8")
+    mupdf_notices.verify(notices_text, crates[0])
     name = f"mimik-{args.version}-linux-x86_64"
     stage = args.output / name
     stage.mkdir(exist_ok=False)
@@ -159,8 +165,8 @@ def main():
         (Path("docs/release-scope.md"), "README.md"),
     ]:
         shutil.copy2(original, stage / filename)
-    with open(stage / "THIRD-PARTY-NOTICES.md", "a", encoding="utf-8") as out:
-        out.write(hakoniwa_notice(notices.read_text(encoding="utf-8")))
+    with open(stage / "THIRD-PARTY-NOTICES.md", "a", encoding="utf-8", newline="") as out:
+        out.write(hakoniwa_notice(notices_text))
         out.write(llama_notice(llama, args.llama / llama["source"]["name"], args.llama / "notices"))
     (stage / "BUILD.txt").write_text(
         f"Version: {args.version}\nRevision: {args.revision}\nRust: {toolchain()}\n"

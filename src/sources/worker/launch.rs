@@ -61,6 +61,7 @@ pub fn inspect(path: &Path) -> Result<Inspection, Reason> {
 /// # Errors
 /// As for [`inspect`], or cancellation.
 pub fn inspect_cancellable(path: &Path, cancel: &Cancel) -> Result<Inspection, Reason> {
+    super::availability::require()?;
     let spec = spec(records::Operation::Inspect, vec![]);
     execute(path, &spec, cancel, &Options::production()?, |pipe| {
         records::read_inspection_tracked(pipe)
@@ -71,7 +72,8 @@ pub fn inspect_cancellable(path: &Path, cancel: &Cancel) -> Result<Inspection, R
 /// A later failure fails the run; already delivered pages may be retained for a retry.
 /// Callbacks must return promptly; cancellation stops the worker, not caller code.
 /// # Errors
-/// Invalid requests, malformed worker output, setup failures, cancellation or deadlines.
+/// Invalid requests (including an empty page list: `Unsupported`), malformed worker output,
+/// setup failures, cancellation or deadlines.
 pub fn render(
     path: &Path,
     pages: Vec<Page>,
@@ -80,6 +82,7 @@ pub fn render(
 ) -> Result<(), Reason> {
     // Validate geometry and request cardinality before spawning anything.
     records::RenderReader::new(std::io::empty(), pages.clone())?;
+    super::availability::require()?;
     let spec = spec(
         records::Operation::Render,
         pages.iter().map(|p| p.n).collect(),
@@ -113,6 +116,12 @@ pub(super) struct Options {
     pub tmp_bytes: Option<u64>,
     #[cfg(test)]
     pub observed_exit: Arc<std::sync::atomic::AtomicI32>,
+    #[cfg(test)]
+    pub peak_rss_kib: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(test)]
+    pub worker_peak_rss_kib: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(test)]
+    pub parent_killed: Arc<AtomicBool>,
     pub runner: RunnerCommand,
     pub executable: PathBuf,
     pub argv: Vec<String>,
@@ -121,13 +130,41 @@ pub(super) struct Options {
     pub cpu: Option<u64>,
 }
 impl Options {
-    fn production() -> Result<Self, Reason> {
+    #[cfg(not(test))]
+    fn observe(&self, outcome: &Outcome) {
+        let _ = (
+            self,
+            outcome.wait4_rss_kib,
+            outcome.worker_rss_kib,
+            outcome.parent_killed,
+        );
+    }
+
+    #[cfg(test)]
+    fn observe(&self, outcome: &Outcome) {
+        self.peak_rss_kib
+            .store(outcome.wait4_rss_kib, Ordering::Release);
+        self.worker_peak_rss_kib
+            .store(outcome.worker_rss_kib, Ordering::Release);
+        self.parent_killed
+            .store(outcome.parent_killed, Ordering::Release);
+        self.observed_exit
+            .store(outcome.exit.unwrap_or(-1), Ordering::Release);
+    }
+
+    pub(super) fn production() -> Result<Self, Reason> {
         let runner = RunnerCommand::mimik().map_err(|_| unavailable("runner executable"))?;
         Ok(Self {
             #[cfg(test)]
             tmp_bytes: None,
             #[cfg(test)]
             observed_exit: Arc::default(),
+            #[cfg(test)]
+            peak_rss_kib: Arc::default(),
+            #[cfg(test)]
+            worker_peak_rss_kib: Arc::default(),
+            #[cfg(test)]
+            parent_killed: Arc::default(),
             executable: runner.program.clone(),
             runner,
             argv: vec![
@@ -148,6 +185,30 @@ impl Options {
 fn unavailable(reason: &str) -> Reason {
     eprintln!("upload unavailable: {reason}");
     Reason::Unavailable(reason.into())
+}
+
+pub(super) fn probe() -> Result<Inspection, Reason> {
+    probe_with(&Options::production()?)
+}
+
+pub(super) fn probe_with(options: &Options) -> Result<Inspection, Reason> {
+    use std::io::Write;
+    let root = Root::new().map_err(|_| unavailable("probe directory"))?;
+    let path = root.0.join("probe.pdf");
+    File::options()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut file| file.write_all(super::availability::PDF))
+        .map_err(|_| unavailable("probe file"))?;
+    execute(
+        &path,
+        &spec(records::Operation::Inspect, vec![]),
+        &Cancel::default(),
+        options,
+        records::read_inspection_tracked,
+    )
 }
 
 struct Root(PathBuf);
@@ -217,9 +278,31 @@ struct Tree {
     child: std::process::Child,
     pins: Vec<Watched>,
     unverified: Option<Watched>,
+    settled: bool,
+    reaped: Option<std::process::ExitStatus>,
+    peak_rss_kib: u64,
+    worker_peak_rss_kib: u64,
 }
 impl Tree {
-    fn kill(&self) {
+    fn new(child: std::process::Child, pin: Watched) -> Self {
+        Self {
+            child,
+            pins: vec![pin],
+            unverified: None,
+            settled: false,
+            reaped: None,
+            peak_rss_kib: 0,
+            worker_peak_rss_kib: 0,
+        }
+    }
+    fn sample_inner(&mut self) {
+        // Only the verified third pin is the worker; never sample an unverified PID.
+        if let Some(rss) = self.pins.get(2).and_then(worker_rss_kib) {
+            self.worker_peak_rss_kib = self.worker_peak_rss_kib.max(rss);
+        }
+    }
+    fn kill(&mut self) {
+        self.sample_inner();
         // Signal inner, reaper and runner, in that order. Never leave the runner waiting
         // on an acknowledgement or on a child whose report has not arrived yet.
         for pin in self.pins.iter().rev() {
@@ -230,10 +313,11 @@ impl Tree {
         self.settle_within(Duration::from_secs(5))
     }
     fn settle_within(&mut self, within: Duration) -> std::io::Result<std::process::ExitStatus> {
+        self.settled = true;
         self.kill();
         let deadline = Instant::now() + within;
         loop {
-            let status = self.child.try_wait()?;
+            let status = self.reap()?;
             if let Some(status) = status
                 && self.pins.iter().all(|pin| !pin.alive())
                 && !self.unverified.as_ref().is_some_and(Watched::alive)
@@ -249,11 +333,60 @@ impl Tree {
             std::thread::sleep(Duration::from_millis(2));
         }
     }
+
+    fn reap(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        use std::os::unix::process::ExitStatusExt;
+        if self.reaped.is_none() {
+            let mut status = 0;
+            let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+            // SAFETY: wait4 writes status/rusage only on successful reaping of our child.
+            // This Tree exclusively owns the Child and never calls Child::wait/try_wait.
+            let result = unsafe {
+                libc::wait4(
+                    i32::try_from(self.child.id()).expect("PID fits i32"),
+                    &raw mut status,
+                    libc::WNOHANG,
+                    usage.as_mut_ptr(),
+                )
+            };
+            if result < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            } else if result > 0 {
+                // SAFETY: successful wait4 initialized usage.
+                self.peak_rss_kib =
+                    u64::try_from(unsafe { usage.assume_init() }.ru_maxrss).unwrap_or(u64::MAX);
+                self.reaped = Some(std::process::ExitStatus::from_raw(status));
+            }
+        }
+        Ok(self.reaped)
+    }
+}
+
+fn worker_rss_kib(pin: &Watched) -> Option<u64> {
+    if !pin.alive() {
+        return None;
+    }
+    let text = std::fs::read_to_string(format!("/proc/{}/status", pin.pid)).ok()?;
+    // A live pidfd on both sides of the read excludes exit/reuse of the numeric PID.
+    // Once it reports exit we cannot trust /proc's numeric path, even if it exists.
+    if !pin.alive() {
+        return None;
+    }
+    text.lines().find_map(|line| {
+        let mut fields = line.strip_prefix("VmHWM:")?.split_whitespace();
+        let value = fields.next()?.parse().ok()?;
+        (fields.next()? == "kB" && fields.next().is_none()).then_some(value)
+    })
 }
 impl Drop for Tree {
     fn drop(&mut self) {
         self.kill();
-        let _ = self.settle();
+        if !self.settled {
+            let _ = self.settle();
+        }
     }
 }
 
@@ -478,11 +611,7 @@ pub(super) fn execute<T: Send>(
     };
     let stdout = child.stdout.take().expect("runner stdout pipe");
     let stderr = child.stderr.take().expect("runner stderr pipe");
-    let tree = Tree {
-        child,
-        pins: vec![runner_pin],
-        unverified: None,
-    };
+    let tree = Tree::new(child, runner_pin);
     let stop = Arc::new(AtomicBool::new(false));
     let stdout = Output {
         pipe: Interruptible::new(stdout, &stop),
@@ -501,16 +630,14 @@ pub(super) fn execute<T: Send>(
         });
         let abort_ref = &abort;
         let reader = scope.spawn(move || read_output(stdout, read, abort_ref));
-        let (exit, parent) = watch(tree, &rx, ack, started + wall, cancel, &abort);
+        let outcome = watch(tree, &rx, ack, started + wall, cancel, &abort);
+        options.observe(&outcome);
+        let Outcome { exit, parent, .. } = outcome;
         if matches!(&parent, Some(Reason::Unavailable(reason)) if reason == "process cleanup timed out")
         {
             stop.store(true, Ordering::Release);
         }
         let (result, terminal, empty) = reader.join().map_err(|_| unavailable("record reader"))?;
-        #[cfg(test)]
-        options
-            .observed_exit
-            .store(exit.unwrap_or(-1), Ordering::Release);
         let _ = status.join();
         let reached_exec = marker.join().unwrap_or(false);
         let _ = err.join();
@@ -559,6 +686,14 @@ fn reached_exec(marker: impl Read) -> bool {
             .is_some()
 }
 
+struct Outcome {
+    exit: Option<i32>,
+    parent: Option<Reason>,
+    wait4_rss_kib: u64,
+    worker_rss_kib: u64,
+    parent_killed: bool,
+}
+
 fn watch(
     mut tree: Tree,
     report: &mpsc::Receiver<Option<Started>>,
@@ -566,16 +701,18 @@ fn watch(
     deadline: Instant,
     cancel: &Cancel,
     abort: &AtomicBool,
-) -> (Option<i32>, Option<Reason>) {
+) -> Outcome {
     let mut ack = Some(ack);
     let mut parent = None;
     let mut aborted_at = None;
+    let mut parent_killed = false;
     loop {
         // Pin an already-pending report before any cancellation/abort decision.
         if ack.is_some() {
             match report.try_recv() {
                 Ok(Some(report)) => {
                     if pin(&mut tree, report).is_err() {
+                        parent_killed = true;
                         parent = Some(unavailable("process identity"));
                         drop(ack.take());
                         break;
@@ -588,6 +725,7 @@ fn watch(
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
+        tree.sample_inner();
         // Observe natural exit before treating a reader's terminal error as an abort.
         if tree.pins[0].alive() {
             if cancel.cancelled() {
@@ -599,6 +737,7 @@ fn watch(
                 && aborted_at.get_or_insert_with(Instant::now).elapsed()
                     >= Duration::from_millis(100);
             if parent.is_some() || malformed {
+                parent_killed = true;
                 tree.kill();
                 break;
             }
@@ -612,12 +751,22 @@ fn watch(
     // for EOF/natural exit in the reader path (the reader has already observed EOF).
     drop(ack);
     let exit = if let Ok(status) = tree.settle() {
-        status.code()
+        use std::os::unix::process::ExitStatusExt;
+        status
+            .code()
+            // Negative values retain a runner signal independently of real exit codes.
+            .or_else(|| status.signal().map(|signal| -signal))
     } else {
         parent = Some(unavailable("process cleanup timed out"));
         None
     };
-    (exit, parent)
+    Outcome {
+        exit,
+        parent,
+        wait4_rss_kib: tree.peak_rss_kib,
+        worker_rss_kib: tree.worker_peak_rss_kib,
+        parent_killed,
+    }
 }
 
 pub(super) fn reconcile(
@@ -649,7 +798,13 @@ pub(super) fn reconcile(
             || {
                 exit.map_or_else(
                     || "sandbox runner terminated by signal".into(),
-                    |code| format!("sandbox runner exit {code}"),
+                    |code| {
+                        if code < 0 {
+                            format!("sandbox runner terminated by signal {}", -code)
+                        } else {
+                            format!("sandbox runner exit {code}")
+                        }
+                    },
                 )
             },
             |name| format!("sandbox step {name} failed"),
@@ -672,6 +827,59 @@ pub(super) fn reconcile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn worker_hwm_requires_a_live_pin_even_if_numeric_proc_path_exists() {
+        let me = i32::try_from(std::process::id()).unwrap();
+        let live = Watched::open(me).unwrap();
+        assert!(worker_rss_kib(&live).unwrap() > 0);
+        let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
+        let mut dead = Watched::open(i32::try_from(child.id()).unwrap()).unwrap();
+        child.wait().unwrap();
+        // Model a numeric PID reused by a live process: the original pidfd is dead.
+        dead.pid = me;
+        assert_eq!(worker_rss_kib(&dead), None);
+    }
+    #[test]
+    fn pre_marker_signal_is_distinct_from_exit_137() {
+        for (script, expected) in [
+            ("kill -KILL $$", "sandbox runner terminated by signal 9"),
+            ("exit 137", "sandbox runner exit 137"),
+        ] {
+            let child = std::process::Command::new("/bin/sh")
+                .args(["-c", script])
+                .spawn()
+                .unwrap();
+            let pin = Watched::open(i32::try_from(child.id()).unwrap()).unwrap();
+            let tree = Tree::new(child, pin);
+            let (_tx, rx) = mpsc::channel();
+            let (_read, ack) = rustix::pipe::pipe().unwrap();
+            let Outcome { exit, parent, .. } = watch(
+                tree,
+                &rx,
+                ack,
+                Instant::now() + Duration::from_secs(2),
+                &Cancel::default(),
+                &AtomicBool::new(false),
+            );
+            assert_eq!(
+                reconcile(exit, false, false, None, true, parent),
+                Err(Reason::Unavailable(expected.into()))
+            );
+        }
+    }
+    #[test]
+    fn invalid_render_is_rejected_before_availability_probe() {
+        assert_eq!(
+            render(
+                Path::new("/does-not-exist"),
+                vec![],
+                &Cancel::default(),
+                |_| Ok(())
+            ),
+            Err(Error::Unsupported.into())
+        );
+    }
+
     #[test]
     fn a_local_reader_or_callback_error_is_preserved_after_natural_exit() {
         for error in [Error::TooLarge, Error::Unsupported, Error::TooManyPages] {
@@ -710,6 +918,10 @@ mod tests {
             child,
             pins: pins.into(),
             unverified: None,
+            settled: false,
+            reaped: None,
+            peak_rss_kib: 0,
+            worker_peak_rss_kib: 0,
         };
         let start = Instant::now();
         let result = tree.settle();
@@ -731,13 +943,24 @@ mod tests {
             child,
             pins: vec![],
             unverified,
+            settled: false,
+            reaped: None,
+            peak_rss_kib: 0,
+            worker_peak_rss_kib: 0,
         };
         let error = tree.settle_within(Duration::from_millis(20)).unwrap_err();
         let alive = other.try_wait().unwrap().is_none();
+        let start = Instant::now();
+        drop(tree);
+        let drop_elapsed = start.elapsed();
         other.kill().unwrap();
         other.wait().unwrap();
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(alive);
+        assert!(
+            drop_elapsed < Duration::from_millis(100),
+            "drop settled twice: {drop_elapsed:?}"
+        );
     }
     #[test]
     fn parent_abort_before_marker_keeps_its_reason() {
@@ -793,6 +1016,10 @@ mod tests {
             child,
             pins: vec![pin],
             unverified: None,
+            settled: false,
+            reaped: None,
+            peak_rss_kib: 0,
+            worker_peak_rss_kib: 0,
         };
         let started = Instant::now();
         tree.settle().unwrap();

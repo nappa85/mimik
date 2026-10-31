@@ -12,6 +12,14 @@ at a time on a dedicated record-reader thread; the callback must return promptly
 can retain delivered pages after a later batch failure. `Cancel` is clonable and permanent.
 These internal APIs are separate from the CLI import and are not browser upload routes.
 
+`availability()` exposes a process-wide `Available` or `Unavailable { reason, how_to_fix }`.
+The first inspect/render call lazily runs a fixed synthetic PDF through the confined inspect
+operation and retains the result. This keeps the probe within the worker API rather than
+coupling it to assistant startup; callers on async runtimes must use a blocking task for it
+as for the other worker calls. Namespace/AppArmor remediation text is shared with the
+assistant in `sandbox::host`; failure never selects an unconfined parser. Restart Mimik
+after fixing the host setting to repeat the probe.
+
 The shared long-lived spawner starts `assistant-runner`, whose `PdfWorker` operation builds
 the Hakoniwa sandbox and executes `mimik pdf-worker --spec /run/spec.json`. The profile binds
 the executable and PDF read-only with device/inode checks, shared system-library discovery,
@@ -40,10 +48,34 @@ statuses 20–25; exit-only document reasons are accepted only before any output
 Local reader/callback errors retain their reason. Only the parent's deadline may establish
 `took too long`.
 
-The no-proc profile and adversarial operations have opt-in host confinement tests in
-`sources::worker::live_tests`; host verification and independent change-set review remain
-required before this worker slice is accepted. The address-space budget is provisional
-until the source-upload corpus/measurement gate.
+The lazy availability probe caches success and confirmed sandbox-setup failures. Other
+failures retry with a process-wide exponential backoff of one to thirty seconds. Upload
+remedies name `user.max_user_namespaces` only after observing zero; otherwise they use the
+observed namespace/AppArmor cause or neutral configuration/resource advice. Render request
+validation precedes the probe.
+
+The no-proc profile, generated hostile/valid corpus and peak-RSS acceptance check have
+opt-in host confinement tests in `sources::worker::live_tests`. Every case declares its
+exact inspect refusal or render outcome; render-stage fixtures must pass inspect. Signal
+deaths fail the corpus, separately from explicitly reported parent kills. RSS comes from
+wait4 on the reaped runner and its waited descendants: a conservative worker upper bound
+only for naturally exiting runs, checked below 75% of the 2 GiB address-space limit. A
+test-only 256 MiB touch control checks this propagation. Parent-killed cases instead use
+host `/proc/<inner pid>/status` VmHWM, sampled through the verified worker pin during the
+run and just before killing. The pidfd must be live before and after the read; an absent
+measurement fails the gate. This figure covers execution through the pre-kill sample,
+not the subsequent kill/reap interval. A separate 256 MiB touch-and-wait control tests it;
+both figures are reported independently. Both the input Vec and MuPDF's input buffer are
+present during measurement. The default MuPDF store is used because mupdf 0.8.0 exposes no
+store-size setter. Fresh generator
+subprocesses enforce 64 MiB peak RSS per case, with 8 MiB output and five-second generation
+bounds; full-flush block repetition avoids compressing expanded bombs on the test host.
+The responsiveness test overlaps a confined inspect with a hostile render forced to hit
+its deadline by a test-only post-image wait. HTTP-level responsiveness belongs to slice 3b.
+The ignored `local_pdfs::live_local_pdfs_inspect_and_render_every_page` check uses
+`MIMIK_LIVE_LOCAL_PDFS` (colon-separated paths) and the real `MIMIK_LIVE_RUNNER`. It renders
+every page in batches of eight, keeping text/images only in memory and printing only hashed
+path identifiers, page counts, timings, both peak RSS figures and per-batch outcomes.
 
 ## Import (`mimik import-source --bundle DIR --pdf FILE`)
 

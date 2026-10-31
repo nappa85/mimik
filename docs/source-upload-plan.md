@@ -65,10 +65,9 @@ have landed.
   - Each is verified against the vendored text: MuPDF and extract (AGPL-3.0), jbig2dec
     (AGPL-3.0), FreeType, HarfBuzz (MIT), lcms2mt (MIT), libjpeg (IJG), OpenJPEG
     (BSD-2-Clause), zlib, gumbo (Apache-2.0), brotli (MIT), and the base14 fonts' licence.
-  - FreeType: Mimik takes the FTL option, provided the gate confirms on the FSF licence list
-    that the FTL is compatible with GPLv3, so that it combines with AGPL-3.0. FreeType's GPL
-    option is GPLv2 and would not do. If the FTL is not compatible, 3a stops and asks. Its credit
-    clause is met in the notices. DEP-29 records this.
+  - FreeType: Mimik takes the GPLv2-or-later option: `LICENSE.TXT` explicitly says
+    "any later version can be used also". It is used as GPLv3, compatible with AGPL-3.0;
+    the notices state this selection. DEP-29 records it.
   - `about.toml` accepts AGPL-3.0 for exactly `mupdf` and `mupdf-sys`.
 - **MuPDF security updates.** `cargo audit` does not cover the bundled C. So:
   - each release checks MuPDF's security advisories for the bundled version (a release-checklist
@@ -236,7 +235,7 @@ files, and per-file versus total quotas.
      - `socket` and `socketpair`;
      - `memfd_create`, `userfaultfd`, `ptrace` and `seccomp`.
   4. A failed installation exits before MuPDF runs.
-- **Availability.** A worker probe at start-up runs a fixed synthetic PDF through `inspect`.
+- **Availability.** A lazy worker probe on the first upload-related call runs a fixed synthetic PDF through `inspect`.
   - If the probe fails, upload is unavailable, with the assistant's "how to fix" text (user
     namespaces, AppArmor) and the probe's reason.
   - There is no unconfined fallback (ASSIST-44).

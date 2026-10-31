@@ -5,6 +5,63 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Synthetic PDF worker corpus and memory (2026-10-31)
+
+The generated set contains 24 hostile and six valid difficult cases. Each declares an
+exact inspect refusal or render outcome. The valid set includes all 300 text pages, a
+3000 × 4000 full-page image, 256 font objects and inherited rotations 90/180/270. The
+object-stream cycle uses type-2 xref entries: page resources require object 9 in stream B,
+whose Length requires object 10 in stream A, whose Length requires object 9 in B. Inspection
+passes and rendering reaches this resource path; the two compressed objects have no
+physical fallback. Inert actions render successfully with the host canary absent.
+The coordinator's confirmation host run passed 29/29 worker checks and 49/49 llama checks, with
+the level-1 probe successful; tiny-images rendered Ok and page-cycle had its declared
+inspect refusal.
+
+Peak RSS from wait4 on the naturally reaped runner and its waited descendants is a
+conservative worker upper bound only for natural exits, not a dedicated MuPDF allocator
+measurement. A test-only worker touching 256 MiB measured 286,852 KiB in the coordinator's
+exact-profile run, establishing descendant rusage propagation. Every corpus run must
+remain below 1,572,864 KiB (75% of RLIMIT_AS 2,097,152 KiB). Natural exits use wait4;
+parent-killed runs use the worker's host `/proc/<pid>/status` VmHWM, sampled during execution
+and immediately before signalling. The verified worker pidfd must remain live on both sides
+of each read, excluding numeric PID reuse. A missing killed-worker measurement fails the
+gate; a second 256 MiB touch-and-wait control checks the killed path. VmHWM covers the worker
+through the last pre-kill sample, not the subsequent kill/reap interval; wait4 on a
+parent-killed runner does not account reliably for its unreaped worker. Both figures are
+reported separately. The killed 256 MiB control measured 287,308 KiB VmHWM. The killed hostile
+renders measured 28,728 KiB (`flate-gib`), 19,212 KiB (`operators-50m`) and 19,084 KiB
+(`shading-pattern`), all below the same bound. The input Vec and MuPDF's copied buffer are both present. `flate-gib`,
+`operators-50m` and `shading-pattern` time out during render, as declared. The responsiveness
+control also ends in a parent deadline kill while a second confined inspect succeeds;
+HTTP-level responsiveness is reserved for slice 3b.
+
+The `page-cycle` fixture is refused at inspect as Unreadable, MuPDF's bounded cycle
+detection. The tiny-image render fixture uses 19,999 draws, below the 20,000 image-block cap
+in `operations::text`; the former 50,000-draw input correctly returned TooLarge at that cap,
+before output framing. Render-stage fixtures require inspect success and exact Ok or Timeout.
+Every naturally exiting case rejects unexpected signal status; logs distinguish parent kills.
+
+Generator tests re-exec one case at a time and check `/proc/self/status` VmHWM below 64 MiB,
+output below 8 MiB and generation below five seconds. This avoids wait4's pre-exec inherited
+parent RSS when other unit tests run concurrently. Full-flush DEFLATE block repetition
+generates the GiB and 50-million-operator payloads without compressing expanded input in the
+debug build; checksum tests cover zero and nonzero repeated blocks. These measurements cover
+the deterministic synthetic profile and the local-manual check below, not fuzzing follow-up.
+
+The ignored `live_local_pdfs_inspect_and_render_every_page` check accepts owner paths from
+`MIMIK_LIVE_LOCAL_PDFS` (colon-separated), with `MIMIK_LIVE_RUNNER` selecting the real runner.
+It inspects each file and renders every page in batches of eight with production budgets.
+It retains no extracted text or images and writes no document output; summaries identify
+paths only by a 12-hex SHA-256 prefix and contain page counts, total/per-page timings, both
+RSS figures and inspect/batch outcomes. The sandbox still uses its normal temporary private
+root and in-memory spec/tmpfs. In the coordinator's host run, the two local MÖRK BORG manuals,
+EN Bare Bones and IT, passed inspection and every render batch: 76 pages in 6.2 seconds
+(median 0.064 seconds/page) and 96 pages in 24.1 seconds (median 0.206, maximum 0.709
+seconds/page). Peak natural-exit wait4 RSS was at most 136,588 KiB. The test reports sampled
+worker VmHWM separately; this wait4 maximum is the supplied natural-exit upper bound, not a
+dedicated worker allocator measurement. This conclusion covers these two local manuals only.
+
 ## Extractor screen on MÖRK BORG IT pages 22–39 (2026-10-29/30)
 
 `mork-borg-core-it-2025`, PDF pages 22–39 (printed 18–35: creation, weapons, armour,

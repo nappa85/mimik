@@ -8,6 +8,8 @@ from pathlib import Path, PurePosixPath
 from pathspec import PathSpec
 
 REQUIRED = {
+    "licenses/ijg-libjpeg-9f-README",
+    "licenses/ijg-libjpeg-9f-upstream.sha256",
     "Cargo.toml",
     "Cargo.lock",
     "LICENSE",
@@ -17,6 +19,8 @@ REQUIRED = {
     "src/lib.rs",
     "schemas/llama-runtime-v1.json",
     "tools/llama_runtime.py",
+    "tools/mupdf_notices.py",
+    "tools/test_mupdf_notices.py",
     "examples/fake_llama_server.rs",
     "templates/base.html",
     "assets/htmx.min.js",
@@ -64,7 +68,7 @@ def verify_members(names):
     if len(names) != len(set(names)):
         raise ValueError("Duplicate source archive member")
     manifest = tomllib.loads(
-        (Path(__file__).resolve().parents[1] / "Cargo.toml").read_text(encoding="utf-8")
+        (Path(__file__).resolve().parents[1] / "Cargo.toml").read_bytes().decode("utf-8")
     )
     policy = PathSpec.from_lines("gitwildmatch", manifest["package"]["include"])
     paths = [PurePosixPath(name) for name in names]
