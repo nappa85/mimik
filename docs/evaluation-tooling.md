@@ -130,7 +130,9 @@ own `docs/architecture.md` and `docs/cli.md` are the reference; what Mimik uses:
   `question --wait --state S` and `answer --to ID --state S TEXT`. The state directory holds
   the build cache (`<state>/target`), which the agent writes: delete it with `rm -rf` after a
   merge, never run or follow anything in it. After the run, `tools/check_agent_worktree.py
-  --clean` before any host git command (AGENTS.md).
+  --clean` before any host git command (AGENTS.md). A `.gitignore` anywhere the run did not commit refuses, even inside an
+  ignored directory such as a crate copied into `target/` for the agent to read: delete that
+  directory (the walk has already refused links in it) and run the guard again.
 
 ## Tool-loop pack and harness
 

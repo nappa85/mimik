@@ -85,9 +85,15 @@ def gitfile_reasons(main, worktree):
     return []
 
 
+# Files that make a directory a repository git would use without a `.git` name: a bare
+# repository, or one split through `commondir` (its objects, refs and config live elsewhere).
+REPOSITORY_FILES = ("HEAD", "commondir", "gitdir")
+
+
 def bare_repository(path):
-    """A directory git would take for a bare repository (no `.git` name needed)."""
-    return (path / "HEAD").is_file() and (path / "objects").is_dir() and (path / "refs").is_dir()
+    """A directory git could take for a repository even without a `.git` name."""
+    names = set(os.listdir(path))
+    return bool(names & set(REPOSITORY_FILES)) or {"objects", "refs"} <= names
 
 
 def walk(worktree):
@@ -129,7 +135,7 @@ def ignore_rule_changes(worktree):
     reasons = []
     for entry in filter(None, (changed + b"\0" + untracked).split(b"\0")):
         relative = Path(os.fsdecode(entry))
-        if relative.name == ".gitignore":
+        if relative.name.casefold() == ".gitignore":
             reasons.append(f"ignore rules changed by the run: {relative}")
     return reasons
 

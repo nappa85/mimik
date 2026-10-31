@@ -140,6 +140,18 @@ class WorktreeCheckTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("bare repository: planted", errors)
 
+    def test_a_repository_split_through_commondir_is_refused(self):
+        (self.wt / "sub").mkdir()
+        (self.wt / "sub" / "HEAD").write_text("ref: refs/heads/main\n")
+        (self.wt / "sub" / "commondir").write_text("../store\n")
+        for part in ("objects", "refs"):
+            (self.wt / "store" / part).mkdir(parents=True)
+        (self.wt / "store" / "config").write_text(f"[core]\n\tpager = touch {self.marker}\n")
+        code, errors = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("bare repository: sub", errors)
+        self.assertIn("bare repository: store", errors)
+
     def test_case_variants_of_vcs_names_are_refused(self):
         (self.wt / "a").mkdir()
         (self.wt / "a" / ".GIT").mkdir()
