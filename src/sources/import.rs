@@ -295,12 +295,15 @@ pub(super) fn validate_image_header(
         || u64::from(info.width) * u64::from(info.height) > 12_000_000
         || !(1.0..=4_000.0).contains(&width_points)
         || !(1.0..=4_000.0).contains(&height_points)
-        || (f64::from(info.width) / f64::from(info.height) - width_points / height_points).abs()
-            > 0.01
+        || !image_aspect_matches(info.width, info.height, width_points, height_points)
     {
         return Err(invalid());
     }
     Ok(())
+}
+
+pub(super) fn image_aspect_matches(w: u32, h: u32, width: f64, height: f64) -> bool {
+    (f64::from(w) / f64::from(h) - width / height).abs() <= 0.01
 }
 
 struct Import {

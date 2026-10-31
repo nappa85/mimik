@@ -3,6 +3,8 @@ pub(crate) mod documents;
 mod import;
 mod reports;
 mod suggestions;
+#[cfg(target_os = "linux")]
+pub mod worker;
 pub use documents::{OwnerUnit, PrimaryPageState, UnitDecision, parse_page_list};
 pub use reports::SuggestionReportSummary;
 pub use suggestions::{SourceSuggestion, SuggestionApplication, SuggestionTarget, SuggestionUnit};

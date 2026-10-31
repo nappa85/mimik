@@ -336,6 +336,15 @@ fn describe(error: &(dyn std::error::Error + 'static)) -> String {
 }
 
 fn start() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("pdf-worker")) {
+        let args: Vec<_> = std::env::args_os().skip(2).collect();
+        if args.len() != 2 || args[0] != "--spec" {
+            return Err(Box::new(mimik::sources::worker::Error::Unsupported));
+        }
+        return mimik::sources::worker::run_entry(std::path::Path::new(&args[1]))
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>);
+    }
     // The hidden runner runs before any thread or runtime starts (it sets the parent-death
     // signal and executes in place).
     let raw: Vec<String> = std::env::args().collect();
