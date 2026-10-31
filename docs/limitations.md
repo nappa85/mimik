@@ -178,6 +178,7 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 
 ## Models and evaluation
 
+- **TOOL-L1** [tooling] The `external-agents` sandbox (TOOL-1) masks nested `.git`/`.jj` directories only at launch, so an agent can create one during a run; and its review snapshot keeps a relative symlink whose resolved source path is inside the tree even when, inside the snapshot, it points back out (for example at the worktree's `.git`). `tools/check_agent_worktree.py` refuses both before git or a review runs; the fixes belong upstream (reported to the owner). Reviewers are not read-only any more: they can edit their snapshot, outside a sandbox, so a reviewer CLI's own path check is the only boundary for its writes.
 - **C1** [models] The release ships the model runtime but no model file: the owner downloads the two pinned defaults or another `hf:` model from `/admin/assistant` (`model-downloads.md`) or places a GGUF file in the models folder by hand (`local:`); there is no tool loop.
 - **ASSIST-L58** [downloads] The download hosts are the real redirect chain observed on 2026-10-29 from Italy (`huggingface.co`, `us.aws.cdn.hf.co`) plus Hugging Face's documented LFS and Xet hosts; another region's CDN host or a later CDN change is refused by name until the list is updated by hand.
 - **ASSIST-L59** [downloads] Behind a proxy the proxy resolves the origin, so the address filter (local, private, reserved addresses) does not apply to proxied connections; the host list and the TLS root store still do.

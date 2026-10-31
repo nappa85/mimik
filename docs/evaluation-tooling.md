@@ -107,20 +107,28 @@ https://github.com/nappa85/external-agents pinned at commit `f861139`
 (`/media/data/mimik/external-agents/src`, linked as `~/.claude/skills/external-agents`). Its
 own `docs/architecture.md` and `docs/cli.md` are the reference; what Mimik uses:
 
-- **Reviews:** `review --reviewers "opencode:openai/gpt-6.1-sol" --prompt-file P --output-dir D
-  --base master` (add `; ? opencode:opencode/deepseek-v4.1-flash-free` for the optional third
+- **Before use:** `git -C /media/data/mimik/external-agents/src rev-parse HEAD` must print the
+  pinned commit; a new upstream commit is adopted only after reading its diff.
+- **Reviews:** first `python3 -I tools/check_agent_worktree.py --main . WORKTREE --review`, then
+  `review --reviewers "opencode:openai/gpt-6.1-sol" --prompt-file P --output-dir D --base master
+  --timeout 2400 --idle-timeout 900 --expect '(?m)^\W*(APPROVE|CHANGES REQUIRED)'` (add `; ? opencode:opencode/deepseek-v4.1-flash-free` for the optional third
   reviewer). The snapshot holds tracked and untracked non-ignored files minus secret-like
   names; `data/`, `target/`, `*.sqlite3*`, `*.pdf` and `*.gguf` are kept out through
-  `.gitignore`. Reviewers have file tools only and may edit their snapshot; their changes come
+  `.gitignore` and the shared `.git/info/exclude` (which also covers branches made before
+  that `.gitignore` change); `--review` refuses them at any depth. Reviewers have file tools only and may edit their snapshot; their changes come
   back as `review-<n>.patch`, read in full and never applied automatically. Free models take a
   machine-wide lock and are skipped for the rest of the UTC day after a stall or failure
   (`~/.local/state/external-agents/limits.json`).
 - **Coding agents:** `code --worktree WT --state /media/data/mimik/xagents-state/<task>
   --agent opencode:openai/gpt-6.1-sol --preset rust --cpus N --env
   LIBCLANG_PATH=/usr/lib/llvm/22/lib64 --env BINDGEN_EXTRA_CLANG_ARGS=-I/usr/lib/clang/22/include
-  --task T` (the two variables let mupdf-sys's bindgen find the host libclang). Questions:
+  --hosts chatgpt.com,auth.openai.com --timeout S --task T` (the two variables let mupdf-sys's
+  bindgen find the host libclang; the host list is the one the old tool allowed; `--cpus 2` on
+  weekdays when the run can reach 09:00–18:00). Questions:
   `question --wait --state S` and `answer --to ID --state S TEXT`. The state directory holds
-  the build cache (`<state>/target`); delete it after a merge.
+  the build cache (`<state>/target`), which the agent writes: delete it with `rm -rf` after a
+  merge, never run or follow anything in it. After the run, `tools/check_agent_worktree.py
+  --clean` before any host git command (AGENTS.md).
 
 ## Tool-loop pack and harness
 
