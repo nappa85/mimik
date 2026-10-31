@@ -1045,8 +1045,8 @@ decides.**
   condensed list. All free models ran in parallel; GLM, Nemotron Super VL and MiMo each opened
   a stream that never returned a byte, which fits throttling of parallel free runs (free models
   have daily token limits), so their "no review" is not a quality verdict. Free runs are now
-  serialised. Durations depend on the free tier's load. A run without a verdict now counts
-  as unavailable in `tools/external_review.py`, so it falls through to the next model.
+  serialised. Durations depend on the free tier's load. A run without a verdict counted as unavailable in the review
+  wrapper of the time, so it fell through to the next model.
 
 ## Reviewer benchmark (2026-10-16, concluded)
 
