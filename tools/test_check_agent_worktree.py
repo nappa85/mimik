@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -105,11 +106,13 @@ class WorktreeCheckTests(unittest.TestCase):
         cache = self.wt / "tools" / "__pycache__"
         cache.mkdir(parents=True)
         (cache / "m.pyc").write_bytes(b"\0")
-        cache.chmod(0o555)
-        try:
+
+        def refuse(path, *args, **kwargs):
+            raise PermissionError(13, "Permission denied", str(path))
+
+        # Patched rather than chmod: CI runs the helper tests as root, which ignores modes.
+        with mock.patch.object(check.shutil, "rmtree", refuse):
             code, errors = self.run_check("--clean")
-        finally:
-            cache.chmod(0o755)
         self.assertEqual(code, 1)
         self.assertIn("cannot delete ignored path tools/__pycache__", errors)
         self.assertNotIn("Traceback", errors)

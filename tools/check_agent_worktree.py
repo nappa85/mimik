@@ -220,7 +220,7 @@ def main(argv):
                 else:
                     target.unlink()
             except OSError as error:
-                reasons.append(f"cannot delete ignored path {path}: {error.strerror}")
+                reasons.append(f"cannot delete ignored path {path}: {error.strerror or error}")
                 continue
             print(f"deleted ignored path: {path}", file=sys.stderr)
         else:
