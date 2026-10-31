@@ -22,15 +22,16 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   `data/extractions/review-ready-dbb400754fb94e87af95cce347903ea8` with two suggestion reports
   (Claude's visual review, 64 suggestions; the text-layer cross-check) and a preview of the
   corrected text (`proposed-reading.md` there). Next: the owner imports it into the live
-  database (`mimik import-source`, needs SRC-10) and reviews each unit in
-  `/admin/materials`, then the prompt tests use it. The page 29 footnote on armour grades is in
+  database (`mimik import-source`, then `mimik import-suggestions --source ID --report FILE` for
+  both reports) and reviews each page in `/admin/materials` (the review screen shows the
+  suggestions), then the prompt tests use it. The page 29 footnote on armour grades is in
   no unit (L-SRC-1).
 
-- **Source import plan** (`docs/source-import-plan.md`, reviewed, SRC-11 to SRC-14): step 1
-  (schema) merged; step 2 (review screen, `docs/source-review-plan.md`, reviewed): parts 1
-  (migration 025, `mimik import-suggestions`) and 2 (the screen) merged; part 3 (browser and live
-  checks, docs, plan deletion) in progress. Review-screen test hook `READ_DEADLINE`
-  (`src/sources/review.rs`) is process-global and matched by label: key it to the test's store. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
+- **Source import plan** (`docs/source-import-plan.md`, reviewed, SRC-11 to SRC-14): steps 1
+  (schema) and 2 (review screen, `mimik import-suggestions`, browser checks) merged. Next: step 3
+  (sandboxed PDF work, upload and jobs) needs its own plan and plan review. Review-screen test
+  hook `READ_DEADLINE` (`src/sources/review.rs`) is process-global and matched by label: key it
+  to the test's store. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
   (`~/temp/`, tagged, clean text layer) through the prototype tools.
 
 - **Resume after a reboot:** the CI helper is `target/agent-tools/ci.sh` (`CPUS=2 sh
