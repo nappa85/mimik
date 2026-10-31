@@ -48,14 +48,7 @@ impl Watched {
 }
 
 /// Whether a pidfd reports its process gone (it polls readable then).
-pub(crate) fn exited(pidfd: &OwnedFd) -> bool {
-    let mut fds = [rustix::event::PollFd::new(
-        pidfd,
-        rustix::event::PollFlags::IN,
-    )];
-    rustix::event::poll(&mut fds, Some(&rustix::time::Timespec::default()))
-        .is_ok_and(|ready| ready > 0)
-}
+pub(crate) use crate::sandbox::process::exited;
 
 fn refused(what: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, what)

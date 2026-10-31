@@ -1,11 +1,11 @@
 //! The seccomp program, installed in a helper process (the test binary re-executed), so the
 //! test process itself stays unfiltered.
-use super::super::test_helper::{self, errno};
 use super::*;
+use crate::assistant::runtime::test_helper::{self, errno};
 use serde_json::{Value, json};
 use std::os::fd::AsRawFd;
 
-const HELPER: &str = "assistant::runtime::seccomp::tests::helper";
+const HELPER: &str = "sandbox::seccomp::tests::helper";
 
 #[test]
 fn the_program_checks_the_architecture_then_x32_then_clone3() {

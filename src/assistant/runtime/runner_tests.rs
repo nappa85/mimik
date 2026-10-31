@@ -383,10 +383,15 @@ fn an_oversized_spec_never_reallocates_the_buffer_that_holds_the_token() {
 
 #[test]
 fn a_spec_whose_secret_comes_before_the_overflowing_field_is_refused() {
-    use crate::assistant::runtime::hako::{Plan, Secret};
+    use crate::assistant::runtime::hako::{Plan, RunFile, Secret};
     let plan = Plan {
         root: "/r".into(),
-        token: Secret::new("token-first-in-the-document".into()),
+        files: vec![RunFile {
+            path: "/run/token".into(),
+            content: Secret::new("token-first-in-the-document".into()),
+        }],
+        proc: true,
+        rules: Vec::new(),
         binds: Vec::new(),
         tmpfs: Vec::new(),
         symlinks: Vec::new(),

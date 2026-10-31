@@ -334,28 +334,10 @@ pub(crate) fn probe_report(levels: &[(Level, super::launch::Probed)]) -> Value {
 /// The marker written just before the exec.
 pub(crate) const MARKER: &[u8] = b"exec\n";
 
-/// The open descriptors, from `/proc/self/fd`.
-pub(crate) fn fd_listing() -> std::io::Result<Vec<i32>> {
-    descriptors(
-        std::fs::read_dir("/proc/self/fd")?
-            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())),
-    )
-}
-
 /// Descriptor numbers from directory entry names: any error or other name fails the whole
 /// listing (a partial one could leave a descriptor open).
-pub(crate) fn descriptors(
-    names: impl Iterator<Item = std::io::Result<String>>,
-) -> std::io::Result<Vec<i32>> {
-    names
-        .map(|name| {
-            name.and_then(|name| {
-                name.parse()
-                    .map_err(|_| std::io::Error::other("not a descriptor number"))
-            })
-        })
-        .collect()
-}
+#[cfg(test)]
+pub(crate) use crate::sandbox::process::descriptors;
 
 /// `mimik assistant-runner …`. Returns the exit code.
 pub fn main(args: &[String]) -> i32 {

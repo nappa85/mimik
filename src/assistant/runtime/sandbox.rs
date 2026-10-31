@@ -1,5 +1,6 @@
 //! What the sandbox is made of, independent of the code that builds it (`hako.rs`): the paths
 //! inside, the allowlist items, the GPU binds and the host's namespace settings.
+pub(crate) use crate::sandbox::host::{Cause, Started, Unusable, namespace_cause, namespaces};
 use std::path::{Path, PathBuf};
 
 /// `/tmp` and `/dev/shm` sizes inside the sandbox.
@@ -11,58 +12,6 @@ pub(crate) const RUNTIME: &str = "/opt/llama";
 pub(crate) const MODEL: &str = "/models/model.gguf";
 pub(crate) const SOCKET_DIR: &str = "/run/llama";
 pub(crate) const TOKEN: &str = "/run/token";
-
-/// Why the sandbox cannot be used, shown on the assistant page.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Unusable {
-    /// Unprivileged user namespaces are disabled (the setting named).
-    UserNamespaces(&'static str),
-}
-
-impl std::fmt::Display for Unusable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UserNamespaces(setting) => {
-                write!(f, "unprivileged user namespaces are disabled ({setting})")
-            }
-        }
-    }
-}
-
-fn sysctl(root: &Path, name: &str) -> Option<u64> {
-    std::fs::read_to_string(root.join(name))
-        .ok()
-        .and_then(|text| text.trim().parse::<u64>().ok())
-}
-
-/// The one setting that rules user namespaces out for certain, read from `root`.
-pub(crate) fn namespaces(root: &Path) -> Result<(), Unusable> {
-    if sysctl(root, "sys/user/max_user_namespaces") == Some(0) {
-        return Err(Unusable::UserNamespaces("user.max_user_namespaces = 0"));
-    }
-    Ok(())
-}
-
-/// A setting that may explain a failed level-1 probe.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Cause {
-    /// `kernel.unprivileged_userns_clone = 0` (Debian's and some other kernels' switch).
-    UsernsClone,
-    /// Ubuntu's `AppArmor` restriction (`kernel.apparmor_restrict_unprivileged_userns = 1`).
-    AppArmor,
-}
-
-/// The setting under `root` that may explain a failed probe; it decides nothing (a
-/// distribution's `AppArmor` profile may still allow it).
-pub(crate) fn namespace_cause(root: &Path) -> Option<Cause> {
-    if sysctl(root, "sys/kernel/unprivileged_userns_clone") == Some(0) {
-        return Some(Cause::UsernsClone);
-    }
-    if sysctl(root, "sys/kernel/apparmor_restrict_unprivileged_userns") == Some(1) {
-        return Some(Cause::AppArmor);
-    }
-    None
-}
 
 /// What a GPU sandbox binds besides the CPU profile: one render node read-write, its PCI
 /// device's sysfs folder read-only with the links libdrm resolves to it, and the Vulkan
@@ -186,23 +135,3 @@ pub(crate) fn system_items() -> Vec<Item> {
     }
     items
 }
-
-/// What the runner's status descriptor reports first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Started {
-    pub child_pid: i32,
-    pub pid_namespace: u64,
-    /// The sandbox's PID-1 process as seen from outside (Hakoniwa only: its reaper is not
-    /// inside the namespace, so the process that holds the memory must be watched itself).
-    pub inner_pid: Option<i32>,
-    /// Its start time (`/proc/<pid>/stat` field 22): with the pid it is the process's identity,
-    /// which a reused pid does not share.
-    pub inner_start: Option<u64>,
-    /// Hakoniwa: the sandbox had already ended when it was reported, its reaper reaped
-    /// after the server's own exit status: the server is proven gone.
-    pub ended: bool,
-}
-
-#[cfg(test)]
-#[path = "sandbox_tests.rs"]
-mod tests;

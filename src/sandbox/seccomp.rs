@@ -1,4 +1,4 @@
-//! The model server's seccomp program (assisted sheet plan §1.4a, "Seccomp"), compiled in pure
+//! The shared seccomp program (assisted sheet plan §1.4a, "Seccomp"), compiled in pure
 //! Rust with `seccompiler` (no `libseccomp`, no runtime shared library).
 //!
 //! Default action allow with listed refusals returning `EPERM` (`ENOSYS` for `clone3`). The

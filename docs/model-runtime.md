@@ -14,8 +14,9 @@ with the server is in [assisted-entry.md](assisted-entry.md), "Interpretation as
 | Pinned build | `schemas/llama-runtime-v1.json`, `src/assistant/runtime/manifest.rs`, `tools/llama_runtime.py` |
 | Verified descriptors (model, runtime files) | `src/assistant/runtime/files.rs` |
 | Runner, spawner thread | `src/assistant/runtime/runner.rs` |
-| Seccomp program | `src/assistant/runtime/seccomp.rs` |
-| Sandbox: allowlist, host check | `src/assistant/runtime/sandbox.rs`, `src/assistant/runtime/hako.rs` |
+| Seccomp program | `src/sandbox/seccomp.rs` |
+| Sandbox: shared construction, host check | `src/sandbox/mod.rs`, `src/sandbox/host.rs` |
+| llama-server sandbox profile and allowlist | `src/assistant/runtime/hako.rs`, `src/assistant/runtime/sandbox.rs` |
 | Start-time probe, `assistant-runner` entry | `src/assistant/runtime/probe.rs` |
 | Launcher (levels 1 and 3), the child's lifetime | `src/assistant/runtime/launch.rs` |
 | Endpoint check | `src/assistant/runtime/endpoint.rs`, transport in `src/assistant/transport.rs` |
@@ -249,8 +250,13 @@ decide, but `--probe` reports it `"ok": false, "inconclusive": true`, never as r
 ## The sandbox (Hakoniwa)
 
 Level 1 is the Hakoniwa library's sandbox (ASSIST-51, DEP-24), built in the runner. Code:
-`src/assistant/runtime/hako.rs` (the plan, the closure, the Landlock layer) and
-`sandbox.rs` (the allowlist items, the host check); the runner's `Exec::Hakoniwa` in `runner.rs`.
+`src/sandbox/mod.rs` (the serializable profile, container, closure and Landlock layer),
+`src/sandbox/host.rs` (the host check), and `src/assistant/runtime/hako.rs` and `sandbox.rs`
+(llama-server's profile and allowlist); the runner's `Exec::Hakoniwa` in `runner.rs`.
+The shared `Profile` (also named `Plan` in the runner protocol) declares binds and their
+identities/access, bounded tmpfs mounts and flags, private files, links/directories, workdir,
+argv/environment, explicit Landlock rules and whether to mount and grant `/proc`. It has no
+model, token or socket-directory requirement; those are inputs to the llama-server profile.
 
 The runner (a fresh single-threaded process, checked before it forks) builds the container
 and stays as its supervisor: new user, mount, PID, IPC, UTS, cgroup and network namespaces
@@ -293,7 +299,7 @@ token file read-only. How it is built, each point with its reason:
   sandbox that ended before the report says so (`ended`, the reaper reaped after the server's
   own exit status), and the marker then classifies the exit.
 - There is no shim. The closure runs in the program's process after the setup, in this
-  order (`hako::STEP_ORDER`): a new session (no controlling terminal), the identity check, the
+   order (`sandbox::STEP_ORDER`): a new session (no controlling terminal), the identity check, the
   bounding set dropped capability by capability (up to the kernel's last one) and the other
   sets cleared, Mimik's seccomp program installed (`no_new_privs` is already set by Hakoniwa),
   the marker pipe's end (standard input) moved to descriptor 3 close-on-exec, `/dev/null`
@@ -309,7 +315,7 @@ token file read-only. How it is built, each point with its reason:
   restricts the server further with the `landlock` crate, best effort. Handled: the ABI 6
   filesystem rights, TCP bind and connect (no rule, so both are denied: `EACCES`, beyond the
   empty network namespace) and the abstract-Unix-socket and signal scopes. The rules come from
-  the plan (`hako::landlock_rules`): execute only on the program the closure execs and the
+   the plan (`sandbox::landlock_rules`): execute only on the program the closure execs and the
   system library directories (the kernel opens the ELF interpreter with the execute right;
   the loader maps the runtime's libraries with `mmap`, which that right does not govern, so
   they get read and list only, as do the GPU data, the sysfs binds and the probe's own

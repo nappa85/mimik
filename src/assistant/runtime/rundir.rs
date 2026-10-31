@@ -111,21 +111,11 @@ impl Entry {
 /// `(parent, start time)` of a process from one read of `/proc/<pid>/stat` (the start time in
 /// clock ticks since boot): both belong to the same process. The error is the read's own, so
 /// a process that is gone (`ENOENT`, `ESRCH`) can be told from one that cannot be read.
-pub(crate) fn stat_of(pid: i32) -> std::io::Result<(i32, u64)> {
-    let text = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    parse_stat(&text).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, "an unreadable stat line")
-    })
-}
+pub(crate) use crate::sandbox::process::stat_of;
 
 /// `(parent, start time)` of a `stat` line: the fields after the parenthesised name.
-pub(crate) fn parse_stat(text: &str) -> Option<(i32, u64)> {
-    let rest = text.rsplit(')').next()?;
-    let mut fields = rest.split_whitespace();
-    let parent = fields.nth(1)?.parse().ok()?;
-    let start = fields.nth(17)?.parse().ok()?;
-    Some((parent, start))
-}
+#[cfg(test)]
+pub(crate) use crate::sandbox::process::parse_stat;
 
 /// A process's start time in clock ticks since boot.
 pub(crate) fn start_time(pid: i32) -> Option<u64> {
