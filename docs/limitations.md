@@ -178,6 +178,7 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 
 ## Models and evaluation
 
+- **ASSIST-L60** [tests] The launch tests run `target/debug/examples/fake_llama_server`, which `cargo test` does not rebuild: after editing `examples/fake_llama_server.rs`, run `cargo build --example fake_llama_server` first or the tests use the old binary (CI and the documented commands build it first). The model bind source is the host path of `models_dir`, so every `Settings` builder must pass an absolute one (the server and the probe do).
 - **C1** [models] The release ships the model runtime but no model file: the owner downloads the two pinned defaults or another `hf:` model from `/admin/assistant` (`model-downloads.md`) or places a GGUF file in the models folder by hand (`local:`); there is no tool loop.
 - **ASSIST-L58** [downloads] The download hosts are the real redirect chain observed on 2026-10-29 from Italy (`huggingface.co`, `us.aws.cdn.hf.co`) plus Hugging Face's documented LFS and Xet hosts; another region's CDN host or a later CDN change is refused by name until the list is updated by hand.
 - **ASSIST-L59** [downloads] Behind a proxy the proxy resolves the origin, so the address filter (local, private, reserved addresses) does not apply to proxied connections; the host list and the TLS root store still do.

@@ -54,6 +54,7 @@ Development checks (CI runs these and more inside containers; see
 ```sh
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo build --locked --example fake_llama_server
 cargo test --locked --all-targets --all-features
 ruff check tools && python -m unittest discover -s tools -p "test_*.py"
 ```

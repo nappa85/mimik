@@ -189,6 +189,7 @@ Unpack the `.crate`, then unpack the dependency sources into the package root. W
 
 ```sh
 cargo build --release --offline --locked
+cargo build --locked --example fake_llama_server
 cargo test --locked --all-targets --all-features
 ```
 

@@ -161,7 +161,9 @@ Runs on every push, pull request and manual dispatch, on `ubuntu-22.04` (`llama-
    verifies every size and hash against `schemas/llama-runtime-v1.json`, and uploads them.
 2. **checks** (needs llama-fetch; in the `mimik-ci` container): `cargo fmt --check`; `cargo clippy --locked
    --all-targets --all-features -- -D warnings` and the same with default features; `ruff check tools` and `ruff format --check
-   tools`; `cargo test --locked --all-targets --all-features`; build the `formula_eval`
+   tools`; `cargo build --locked --example fake_llama_server` (the launch tests run that
+   binary; `cargo test` alone builds only a hashed copy); `cargo test --locked --all-targets
+   --all-features`; build the `formula_eval`
    example; generate the synthetic source fixture; `python -m unittest discover -s tools`;
    `actionlint`; `cargo audit --deny warnings`; `cargo about generate --locked --fail`
    (third-party notices); `cargo build --release --locked`; `cargo package` and
