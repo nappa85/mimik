@@ -31,7 +31,21 @@ pub(super) fn routes() -> Router<AuthState> {
         .route("/admin/materials", get(directory))
         .route("/admin/materials/sources/{id}", get(pages))
         .route("/admin/materials/pages/{id}", get(page))
+        .route("/admin/materials/suggestions/{id}", get(suggestion))
+        .route(
+            "/admin/materials/pages/{page}/units/{unit}/suggestions",
+            get(suggestion_list),
+        )
         .route("/admin/materials/pages/{id}/image", get(image))
+        .route(
+            "/assets/source-review.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../assets/source-review.js"),
+                )
+            }),
+        )
         .route(
             "/admin/materials/pages/{page}/units/{unit}/image",
             get(region),
@@ -48,6 +62,11 @@ pub(super) fn routes() -> Router<AuthState> {
         .merge(
             Router::new()
                 .route("/admin/materials/pages/{id}", post(complete))
+                .route("/admin/materials/suggestions/{id}/accept", post(accept))
+                .route("/admin/materials/suggestions/{id}/dismiss", post(dismiss))
+                .route("/admin/materials/pages/{id}/owner-units", post(add_owner))
+                .route("/admin/materials/pages/{id}/primary", post(primary))
+                .route("/admin/materials/sources/{id}/primary", post(primary_pages))
                 .route("/admin/materials/pages/{page}/units/{unit}", post(review))
                 .layer(DefaultBodyLimit::max(320 * 1024)),
         )
@@ -56,6 +75,7 @@ pub(super) fn error(e: &AppError) -> StatusCode {
     match e {
         AppError::NotFound | AppError::SourceNotFound => StatusCode::FORBIDDEN,
         AppError::Conflict => StatusCode::CONFLICT,
+        AppError::Invalid(crate::sources::review::READ_TIMEOUT) => StatusCode::REQUEST_TIMEOUT,
         AppError::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
         AppError::AuthStorageBusy => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -74,6 +94,7 @@ struct Cursor {
 struct PageCursor {
     units: i64,
     history: i64,
+    notes: i64,
 }
 #[derive(Template)]
 #[template(path = "materials.html")]
@@ -102,8 +123,12 @@ async fn directory(
 #[template(path = "material_pages.html")]
 struct Pages {
     source: i64,
-    rows: Vec<crate::sources::PageSummary>,
+    rows: Vec<crate::sources::materials::PrimaryMaterialPage>,
     next: Option<i64>,
+    csrf: String,
+    message: String,
+    rationale: String,
+    after: i64,
 }
 async fn pages(
     State(state): State<AuthState>,
@@ -112,17 +137,115 @@ async fn pages(
     Query(c): Query<Cursor>,
 ) -> AuthResult {
     let auth = owner_auth(&state, &session).await?;
-    let listing = state
+    let (_, listing) = state
         .sessions
         .store
-        .material_pages(auth, id, c.after)
+        .material_primary_pages(auth, id, c.after)
         .await
         .map_err(|e| error(&e))?;
     html(&Pages {
         source: id,
         rows: listing.rows,
         next: listing.next,
+        csrf: super::token(&session).await?.ok_or(StatusCode::FORBIDDEN)?,
+        message: String::new(),
+        rationale: String::new(),
+        after: c.after,
     })
+}
+
+async fn primary_pages(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(source): Path<i64>,
+    Form(mut form): Form<std::collections::BTreeMap<String, String>>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    let token = form.remove("csrf").ok_or(StatusCode::FORBIDDEN)?;
+    let csrf = csrf_admission(&session, &token).await?;
+    let rationale = crate::form_text::newlines_to_lf(form.remove("rationale").unwrap_or_default());
+    let after = form
+        .remove("after")
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|n| *n >= 0)
+        .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let (document, mut listing) = state
+        .sessions
+        .store
+        .material_primary_pages(auth.clone(), source, after)
+        .await
+        .map_err(|e| error(&e))?;
+    let parsed = form
+        .iter()
+        .map(|(key, value)| {
+            let pdf_page = key
+                .strip_prefix("page_")
+                .and_then(|s| s.parse::<i64>().ok())
+                .ok_or(AppError::Invalid("Invalid selected page."))?;
+            let (previous, event) = value
+                .split_once(':')
+                .ok_or(AppError::Invalid("Invalid expected primary tokens."))?;
+            let previous = previous
+                .parse::<i64>()
+                .map_err(|_| AppError::Invalid("Invalid primary source token."))?;
+            let event = event
+                .parse::<i64>()
+                .map_err(|_| AppError::Invalid("Invalid primary event token."))?;
+            Ok(crate::sources::PrimaryPageState {
+                pdf_page,
+                source_id: (previous != 0).then_some(previous),
+                event_id: (event != 0).then_some(event),
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>();
+    let result = match &parsed {
+        Ok(pages) => {
+            state
+                .sessions
+                .store
+                .material_set_primary_source(
+                    auth,
+                    csrf,
+                    document,
+                    pages.clone(),
+                    source,
+                    rationale.clone(),
+                )
+                .await
+        }
+        Err(_) => Err(AppError::Invalid(
+            "Invalid selected page or expected tokens.",
+        )),
+    };
+    match result {
+        Ok(_) => Ok(Redirect::to(&format!(
+            "/admin/materials/sources/{source}?after={after}#primary-pages"
+        ))
+        .into_response()),
+        Err(e @ (AppError::Invalid(_) | AppError::Conflict)) => {
+            if let Ok(pages) = parsed {
+                for row in &mut listing.rows {
+                    if let Some(expected) = pages.iter().find(|p| p.pdf_page == row.page.pdf_page) {
+                        row.selected = true;
+                        row.submitted = Some(expected.clone());
+                    }
+                }
+            }
+            let mut response = html(&Pages {
+                source,
+                rows: listing.rows,
+                next: listing.next,
+                csrf: token,
+                message: e.to_string(),
+                rationale,
+                after,
+            })?;
+            *response.status_mut() = error(&e);
+            response.extensions_mut().insert(TrustedDraft);
+            Ok(response)
+        }
+        Err(e) => Err(error(&e)),
+    }
 }
 #[derive(Template)]
 #[template(path = "material_page.html")]
@@ -136,9 +259,72 @@ struct Editor {
     history_next: Option<i64>,
     draft: Option<Draft>,
     completion: Option<Completion>,
+    screen: crate::sources::review::Screen,
+    owner_draft: Option<OwnerDraft>,
+    primary_draft: Option<PrimaryDraft>,
 }
 impl Editor {
-    fn new(data: MaterialPage, csrf: String, c: PageCursor) -> Self {
+    fn unit_link(&self, target: &(i64, i64)) -> String {
+        let (unit, cursor) = target;
+        if self.page.units.iter().any(|row| row.id == *unit) {
+            format!("#unit-{unit}")
+        } else {
+            format!("?units={cursor}#unit-{unit}")
+        }
+    }
+    fn region_link(&self, region: &crate::sources::review::Overlay) -> String {
+        if region.unit > 0 {
+            self.unit_link(&(region.unit, region.cursor))
+        } else if self
+            .screen
+            .notes
+            .iter()
+            .any(|row| row.id == region.suggestion)
+        {
+            format!("#suggestion-{}-unit-0", region.suggestion)
+        } else {
+            format!("/admin/materials/suggestions/{}", region.suggestion)
+        }
+    }
+    fn draft_link(&self) -> String {
+        let anchor = if self.draft.is_some() {
+            format!("unit-{}", self.page.units.first().map_or(0, |unit| unit.id))
+        } else if self.owner_draft.is_some() {
+            "add-text".into()
+        } else if self.primary_draft.is_some() {
+            "primary".into()
+        } else {
+            "complete".into()
+        };
+        format!(
+            "/admin/materials/pages/{}?units={}#{anchor}",
+            self.page.id, self.units
+        )
+    }
+    fn is_primary(&self) -> bool {
+        self.screen.primary.source_id == Some(self.page.source_id)
+    }
+    fn new(
+        data: MaterialPage,
+        mut screen: crate::sources::review::Screen,
+        csrf: String,
+        c: PageCursor,
+    ) -> Self {
+        if screen.reads_reduced()
+            && let Some(unit) = data.page.units.first()
+        {
+            // The first card has the known request cursor. Reserve its form
+            // even after a read deadline so a refused POST keeps its draft.
+            screen.cards.push(crate::sources::review::Card {
+                unit: unit.id,
+                cursor: c.units,
+                lookup: String::new(),
+                advice: Vec::new(),
+                next: None,
+                preview: true,
+                form_omitted: false,
+            });
+        }
         Self {
             page: data.page,
             csrf,
@@ -149,6 +335,9 @@ impl Editor {
             history_next: data.history_next,
             draft: None,
             completion: None,
+            screen,
+            owner_draft: None,
+            primary_draft: None,
         }
     }
 }
@@ -162,11 +351,22 @@ async fn page(
     let data = state
         .sessions
         .store
-        .material_page(auth, id, c.units, c.history)
+        .material_page(auth.clone(), id, c.units, c.history)
         .await
         .map_err(|e| error(&e))?;
     let csrf = super::token(&session).await?.ok_or(StatusCode::FORBIDDEN)?;
-    html(&Editor::new(data, csrf, c))
+    let screen = state
+        .sessions
+        .store
+        .material_screen(
+            auth,
+            id,
+            data.page.units.iter().map(|u| u.id).collect(),
+            c.notes,
+        )
+        .await
+        .map_err(|e| error(&e))?;
+    html(&Editor::new(data, screen, csrf, c))
 }
 fn png(bytes: Vec<u8>) -> axum::response::Response {
     (
@@ -277,18 +477,37 @@ async fn review(
     match result {
         Ok(()) => Ok(Redirect::to(&format!("/admin/materials/pages/{page}")).into_response()),
         Err(e @ (AppError::Invalid(_) | AppError::Conflict)) => {
+            let unit_cursor = state
+                .sessions
+                .store
+                .material_unit_cursor(auth.clone(), page, unit)
+                .await
+                .map_err(|e| error(&e))?;
             let data = state
                 .sessions
                 .store
-                .material_page(auth, page, unit.saturating_sub(1), 0)
+                .material_page(auth.clone(), page, unit_cursor, 0)
+                .await
+                .map_err(|e| error(&e))?;
+            let screen = state
+                .sessions
+                .store
+                .material_screen(
+                    auth,
+                    page,
+                    data.page.units.iter().map(|u| u.id).collect(),
+                    0,
+                )
                 .await
                 .map_err(|e| error(&e))?;
             let mut editor = Editor::new(
                 data,
+                screen,
                 form.csrf.clone(),
                 PageCursor {
-                    units: unit.saturating_sub(1),
+                    units: unit_cursor,
                     history: 0,
+                    notes: 0,
                 },
             );
             // Preserve only a verified unit in this page, never a browser-selected identity.
@@ -336,10 +555,21 @@ async fn complete(
             let data = state
                 .sessions
                 .store
-                .material_page(auth, page, 0, 0)
+                .material_page(auth.clone(), page, 0, 0)
                 .await
                 .map_err(|e| error(&e))?;
-            let mut editor = Editor::new(data, form.csrf.clone(), PageCursor::default());
+            let screen = state
+                .sessions
+                .store
+                .material_screen(
+                    auth,
+                    page,
+                    data.page.units.iter().map(|u| u.id).collect(),
+                    0,
+                )
+                .await
+                .map_err(|e| error(&e))?;
+            let mut editor = Editor::new(data, screen, form.csrf.clone(), PageCursor::default());
             editor.message = e.to_string();
             editor.completion = Some(form);
             trusted_editor(&editor, error(&e))
@@ -352,4 +582,405 @@ fn trusted_editor(editor: &Editor, status: StatusCode) -> AuthResult {
     *response.status_mut() = status;
     response.extensions_mut().insert(TrustedDraft);
     Ok(response)
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct SuggestionDraft {
+    csrf: String,
+    #[serde(deserialize_with = "crate::form_text::lf")]
+    rationale: String,
+    #[serde(deserialize_with = "crate::form_text::lf_option")]
+    edited_text: Option<String>,
+    edit: String,
+    #[serde(deserialize_with = "crate::form_text::lf")]
+    reason: String,
+}
+#[derive(Template)]
+#[template(path = "material_suggestion.html")]
+struct SuggestionEditor {
+    advice: crate::sources::review::Advice,
+    form: SuggestionDraft,
+    message: String,
+    show_difference: bool,
+    text_preview: bool,
+}
+impl SuggestionEditor {
+    async fn bounded_html(self, store: &crate::Store, auth: super::RequestAuth) -> AuthResult {
+        let response = tokio::task::spawn_blocking(move || self.render_bounded())
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        store.material_recheck(auth).await.map_err(|e| error(&e))?;
+        response
+    }
+    fn rendered_upper_bound(&self) -> usize {
+        // Escaping needs at most six bytes per source byte. Fixed markup,
+        // identifiers and every target link also have reserved space.
+        16 * 1024
+            + self.advice.target_links.len() * 256
+            + [
+                &self.advice.lookup,
+                &self.advice.suggested,
+                &self.advice.rationale,
+                &self.advice.origin,
+                &self.advice.target_label,
+                &self.message,
+                &self.form.csrf,
+                &self.form.csrf,
+                &self.form.rationale,
+                self.form.edited_text.as_deref().unwrap_or(""),
+                &self.form.reason,
+            ]
+            .iter()
+            .map(|text| text.len().saturating_mul(6))
+            .sum::<usize>()
+    }
+    fn render_bounded(mut self) -> AuthResult {
+        const NORMAL: usize = 256 * 1024;
+        #[cfg(test)]
+        if let Some(hook) = crate::sources::materials::DETAIL_COMPARISON
+            .lock()
+            .unwrap()
+            .take()
+        {
+            hook();
+        }
+        self.show_difference = false;
+        if self.rendered_upper_bound() > NORMAL {
+            self.text_preview = true;
+            self.advice.lookup_truncated |= self.advice.lookup.chars().count() > 2000;
+            self.advice.suggested_truncated |= self.advice.suggested.chars().count() > 2000;
+            self.advice.lookup = self.advice.lookup.chars().take(2000).collect();
+            self.advice.suggested = self.advice.suggested.chars().take(2000).collect();
+            self.advice.rationale = self.advice.rationale.chars().take(2000).collect();
+            self.advice.target_links.truncate(8);
+        }
+        // Reserve the entire escaped form, metadata and evidence first. A large
+        // invalid draft is retained intact and uses the explicit error bound.
+        let reserved = self.rendered_upper_bound();
+        if reserved <= NORMAL && !self.text_preview {
+            let remaining = NORMAL - reserved;
+            let full = !self.advice.lookup_truncated
+                && !self.advice.suggested_truncated
+                && (self.advice.lookup.len() + self.advice.suggested.len()).saturating_mul(20)
+                    <= remaining;
+            self.advice.difference = crate::sources::review::difference(
+                &self.advice.lookup,
+                &self.advice.suggested,
+                full.then(|| std::time::Instant::now() + std::time::Duration::from_millis(50)),
+            );
+            let difference_bound = if full {
+                (self.advice.lookup.len() + self.advice.suggested.len()).saturating_mul(20)
+            } else {
+                (self.advice.difference.old.len() + self.advice.difference.new.len())
+                    .saturating_mul(6)
+                    + 1024
+            };
+            self.show_difference = difference_bound <= remaining;
+        }
+        let rendered = self
+            .render()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if rendered.len() > 2 * 1024 * 1024 {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        Ok(Html(rendered).into_response())
+    }
+}
+async fn suggestion(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(id): Path<i64>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    let advice = state
+        .sessions
+        .store
+        .material_advice(auth.clone(), id)
+        .await
+        .map_err(|e| error(&e))?;
+    let form = SuggestionDraft {
+        csrf: super::token(&session).await?.ok_or(StatusCode::FORBIDDEN)?,
+        rationale: format!("Accepted suggestion #{} ({})", id, advice.origin),
+        edited_text: Some(advice.suggested.clone()),
+        ..SuggestionDraft::default()
+    };
+    SuggestionEditor {
+        advice,
+        form,
+        message: String::new(),
+        show_difference: false,
+        text_preview: false,
+    }
+    .bounded_html(&state.sessions.store, auth)
+    .await
+}
+#[derive(Template)]
+#[template(path = "material_suggestions.html")]
+struct SuggestionList {
+    page: i64,
+    unit: i64,
+    rows: Vec<crate::sources::review::Advice>,
+    next: Option<i64>,
+    cursor: i64,
+}
+async fn suggestion_list(
+    State(state): State<AuthState>,
+    session: Session,
+    Path((page, unit)): Path<(i64, i64)>,
+    Query(c): Query<Cursor>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    let cursor = state
+        .sessions
+        .store
+        .material_unit_cursor(auth.clone(), page, unit)
+        .await
+        .map_err(|e| error(&e))?;
+    let (rows, next) = state
+        .sessions
+        .store
+        .material_advice_list(auth, page, unit, c.after)
+        .await
+        .map_err(|e| error(&e))?;
+    html(&SuggestionList {
+        page,
+        unit,
+        rows,
+        next,
+        cursor,
+    })
+}
+async fn accept(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(id): Path<i64>,
+    Form(form): Form<SuggestionDraft>,
+) -> AuthResult {
+    suggestion_write(state, session, id, form, false).await
+}
+async fn dismiss(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(id): Path<i64>,
+    Form(form): Form<SuggestionDraft>,
+) -> AuthResult {
+    suggestion_write(state, session, id, form, true).await
+}
+async fn suggestion_write(
+    state: AuthState,
+    session: Session,
+    id: i64,
+    form: SuggestionDraft,
+    dismissal: bool,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    let csrf = csrf_admission(&session, &form.csrf).await?;
+    let result = if dismissal {
+        state
+            .sessions
+            .store
+            .material_dismiss(auth.clone(), csrf, id, form.reason.clone())
+            .await
+    } else if form.edited_text.is_some() && !matches!(form.edit.as_str(), "yes" | "suggested") {
+        Err(AppError::Invalid(
+            "Choose Accept my edit or Accept as suggested explicitly.",
+        ))
+    } else {
+        let checked = async {
+            if form.edit == "suggested"
+                && let Some(edited_text) = &form.edited_text
+            {
+                let advice = state
+                    .sessions
+                    .store
+                    .material_advice(auth.clone(), id)
+                    .await?;
+                if *edited_text != crate::form_text::newlines_to_lf(advice.suggested) {
+                    return Err(AppError::Invalid(
+                        "The edited text differs from the stored suggestion. Choose Accept my edit or restore the suggested text.",
+                    ));
+                }
+            }
+            state
+                .sessions
+                .store
+                .material_accept(
+                    auth.clone(),
+                    csrf,
+                    id,
+                    form.rationale.clone(),
+                    (form.edit == "yes").then(|| form.edited_text.clone().unwrap_or_default()),
+                )
+                .await
+        };
+        checked.await
+    };
+    match result {
+        Ok(back_link) => {
+            #[cfg(test)]
+            if let Some(hook) = crate::sources::materials::AFTER_SUGGESTION_COMMIT
+                .lock()
+                .unwrap()
+                .take()
+            {
+                hook();
+            }
+            Ok(Redirect::to(&back_link).into_response())
+        }
+        Err(e @ (AppError::Invalid(_) | AppError::Conflict)) => {
+            let advice = state
+                .sessions
+                .store
+                .material_advice(auth.clone(), id)
+                .await
+                .map_err(|e| error(&e))?;
+            let mut response = SuggestionEditor {
+                advice,
+                form,
+                message: e.to_string(),
+                show_difference: false,
+                text_preview: false,
+            }
+            .bounded_html(&state.sessions.store, auth)
+            .await?;
+            *response.status_mut() = error(&e);
+            response.extensions_mut().insert(TrustedDraft);
+            Ok(response)
+        }
+        Err(e) => Err(error(&e)),
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerDraft {
+    csrf: String,
+    revision: i64,
+    polygon: String,
+    #[serde(deserialize_with = "crate::form_text::lf")]
+    text: String,
+    #[serde(deserialize_with = "crate::form_text::lf")]
+    rationale: String,
+}
+async fn add_owner(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(page): Path<i64>,
+    Form(form): Form<OwnerDraft>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    let csrf = csrf_admission(&session, &form.csrf).await?;
+    let result = match serde_json::from_str(&form.polygon) {
+        Ok(polygon) => state
+            .sessions
+            .store
+            .material_add_owner_unit(
+                auth.clone(),
+                csrf,
+                page,
+                crate::sources::OwnerUnit {
+                    revision: form.revision,
+                    polygon,
+                    text: form.text.clone(),
+                    actor: String::new(),
+                    rationale: form.rationale.clone(),
+                },
+            )
+            .await
+            .map(|_| ()),
+        Err(_) => Err(AppError::Invalid(
+            "Enter four corners as [[x,y],[x,y],[x,y],[x,y]] in PDF points.",
+        )),
+    };
+    match result {
+        Ok(()) => {
+            Ok(Redirect::to(&format!("/admin/materials/pages/{page}#add-text")).into_response())
+        }
+        Err(e @ (AppError::Invalid(_) | AppError::Conflict)) => {
+            let mut editor = reload_editor(&state, auth, page, form.csrf.clone()).await?;
+            editor.message = e.to_string();
+            editor.owner_draft = Some(form);
+            trusted_editor(&editor, error(&e))
+        }
+        Err(e) => Err(error(&e)),
+    }
+}
+async fn reload_editor(
+    state: &AuthState,
+    auth: super::RequestAuth,
+    page: i64,
+    csrf: String,
+) -> Result<Editor, StatusCode> {
+    let data = state
+        .sessions
+        .store
+        .material_page(auth.clone(), page, 0, 0)
+        .await
+        .map_err(|e| error(&e))?;
+    let screen = state
+        .sessions
+        .store
+        .material_screen(
+            auth,
+            page,
+            data.page.units.iter().map(|u| u.id).collect(),
+            0,
+        )
+        .await
+        .map_err(|e| error(&e))?;
+    Ok(Editor::new(data, screen, csrf, PageCursor::default()))
+}
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrimaryDraft {
+    csrf: String,
+    source: i64,
+    previous: i64,
+    event: i64,
+    #[serde(deserialize_with = "crate::form_text::lf")]
+    rationale: String,
+}
+async fn primary(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(page): Path<i64>,
+    Form(form): Form<PrimaryDraft>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    let csrf = csrf_admission(&session, &form.csrf).await?;
+    let (document, pdf_page) = state
+        .sessions
+        .store
+        .material_primary_identity(auth.clone(), page)
+        .await
+        .map_err(|e| error(&e))?;
+    let result = state
+        .sessions
+        .store
+        .material_set_primary_source(
+            auth.clone(),
+            csrf,
+            document,
+            vec![crate::sources::PrimaryPageState {
+                pdf_page,
+                source_id: (form.previous != 0).then_some(form.previous),
+                event_id: (form.event != 0).then_some(form.event),
+            }],
+            form.source,
+            form.rationale.clone(),
+        )
+        .await;
+    match result {
+        Ok(_) => {
+            Ok(Redirect::to(&format!("/admin/materials/pages/{page}#primary")).into_response())
+        }
+        Err(e @ (AppError::Invalid(_) | AppError::Conflict)) => {
+            let mut editor = reload_editor(&state, auth, page, form.csrf.clone()).await?;
+            editor.message = e.to_string();
+            editor.primary_draft = Some(form);
+            trusted_editor(&editor, error(&e))
+        }
+        Err(e) => Err(error(&e)),
+    }
 }

@@ -173,19 +173,42 @@ pub(crate) fn match_sql(registered: bool) -> String {
 }
 
 /// Clears the progress handler however the guarded statement ends.
-pub(crate) struct Budget<'a>(&'a Connection);
+pub(crate) struct Budget<'a> {
+    db: &'a Connection,
+    interrupted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
 
 impl<'a> Budget<'a> {
     pub(crate) fn start(db: &'a Connection, budget: Duration) -> Self {
+        Self::checking_every(db, budget, BUDGET_CHECK_OPS)
+    }
+
+    /// `start` with another check interval (tests that must interrupt very short reads).
+    pub(crate) fn checking_every(db: &'a Connection, budget: Duration, ops: i32) -> Self {
         let deadline = Instant::now() + budget;
-        db.progress_handler(BUDGET_CHECK_OPS, Some(move || Instant::now() >= deadline));
-        Self(db)
+        let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fired = interrupted.clone();
+        db.progress_handler(
+            ops,
+            Some(move || {
+                let expired = Instant::now() >= deadline;
+                if expired {
+                    fired.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                expired
+            }),
+        );
+        Self { db, interrupted }
+    }
+
+    pub(crate) fn fired(&self) -> bool {
+        self.interrupted.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
 impl Drop for Budget<'_> {
     fn drop(&mut self) {
-        self.0.progress_handler(0, None::<fn() -> bool>);
+        self.db.progress_handler(0, None::<fn() -> bool>);
     }
 }
 
@@ -250,6 +273,14 @@ fn lookup_within(
     let needs_primary_choice = count(format!(
         "SELECT count(*) FROM (SELECT DISTINCT m.document_id,p.pdf_page FROM {from} JOIN source_document_members m ON m.source_id=s.id JOIN source_pages p ON p.source_id=s.id WHERE {predicate} AND NOT EXISTS(SELECT 1 FROM source_primary_pages v WHERE v.document_id=m.document_id AND v.pdf_page=p.pdf_page))"
     ))?;
+    let primary_choice_sources = {
+        let mut statement = db.prepare(&format!("SELECT DISTINCT s.id FROM {from} JOIN source_document_members m ON m.source_id=s.id JOIN source_pages p ON p.source_id=s.id WHERE {predicate} AND NOT EXISTS(SELECT 1 FROM source_primary_pages v WHERE v.document_id=m.document_id AND v.pdf_page=p.pdf_page) ORDER BY s.id LIMIT 50"))?;
+        statement
+            .query_map(params![system, edition], |r| r.get(0))
+            .map_err(interrupted)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(interrupted)?
+    };
     let mut statement = db.prepare(&match_sql(registered))?;
     let mut matches = statement
         .query_map(params![system, edition, expression, set], |row| {
@@ -281,6 +312,7 @@ fn lookup_within(
         partial_runs,
         unindexed_units,
         needs_primary_choice,
+        primary_choice_sources,
         truncated,
         matches,
     })

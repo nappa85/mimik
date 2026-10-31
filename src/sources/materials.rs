@@ -7,8 +7,20 @@ use crate::{
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
+// Extracted rows retain bundle insertion order. Merge owners precede their first
+// target; other owner units sort last. Cursors are ordinals in this stable order.
+pub(super) const ORDERED_UNITS: &str = "WITH ordered AS (SELECT u.*,row_number() OVER (ORDER BY CASE WHEN u.origin='extracted' THEN u.id ELSE coalesce((SELECT min(json_extract(t.value,'$.unit')) FROM source_suggestion_applications a JOIN source_suggestions s ON s.id=a.suggestion_id,json_each(s.targets,'$.targets') t WHERE a.owner_unit_id=u.id AND s.kind='merge'),9223372036854775807) END,CASE u.origin WHEN 'owner' THEN 0 ELSE 1 END,u.id) position FROM source_units u WHERE u.page_id=?1)";
+
+pub(super) const LOOKUP_TEXT: &str = "CASE u.state WHEN 'accepted' THEN coalesce(t.search_text,'') WHEN 'corrected' THEN u.correction WHEN 'unreviewed' THEN coalesce(t.search_text,'') ELSE '' END";
+
 #[cfg(test)]
 pub(crate) static AFTER_CROP: std::sync::Mutex<Option<Box<dyn Fn() + Send>>> =
+    std::sync::Mutex::new(None);
+#[cfg(test)]
+pub(crate) static DETAIL_COMPARISON: std::sync::Mutex<Option<Box<dyn Fn() + Send>>> =
+    std::sync::Mutex::new(None);
+#[cfg(test)]
+pub(crate) static AFTER_SUGGESTION_COMMIT: std::sync::Mutex<Option<Box<dyn Fn() + Send>>> =
     std::sync::Mutex::new(None);
 
 pub(crate) struct Material {
@@ -27,6 +39,12 @@ pub(crate) struct MaterialPage {
     pub page: PageView,
     pub units_next: Option<i64>,
     pub history_next: Option<i64>,
+}
+pub(crate) struct PrimaryMaterialPage {
+    pub page: PageSummary,
+    pub primary: super::PrimaryPageState,
+    pub selected: bool,
+    pub submitted: Option<super::PrimaryPageState>,
 }
 
 // The CASE guards execute in SQLite, before a string crosses the allocation boundary.
@@ -54,9 +72,20 @@ fn cursor(after: i64) -> Result<(), AppError> {
 }
 
 impl Store {
-    // Authenticated wrappers for the review screens of the next step; only tests call them
-    // until its routes exist.
-    #[cfg(test)]
+    pub(crate) async fn material_primary_identity(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+    ) -> Result<(i64, i64), AppError> {
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            let identity = tx.query_row("SELECT coalesce(m.document_id,0),p.pdf_page FROM source_pages p LEFT JOIN source_document_members m ON m.source_id=p.source_id WHERE p.id=?1", [page], |r| Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(AppError::SourceNotFound)?;
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            Ok(identity)
+        }).await
+    }
     pub(crate) async fn material_add_owner_unit(
         &self,
         auth: RequestAuth,
@@ -70,11 +99,11 @@ impl Store {
             with_domain_request(auth.clone(), || {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 auth.recheck_owner(&tx)?;
-                csrf.recheck(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
                 let event = super::documents::add_owner(&tx, page, &unit)?;
                 audit(&tx, &auth, event)?;
                 auth.recheck_owner(&tx)?;
-                csrf.recheck(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
                 tx.commit()?;
                 Ok(event)
             })
@@ -82,7 +111,6 @@ impl Store {
         .await
     }
 
-    #[cfg(test)]
     pub(crate) async fn material_set_primary_source(
         &self,
         auth: RequestAuth,
@@ -95,18 +123,17 @@ impl Store {
         self.run_bounded_auth(move |db| {
             with_domain_request(auth.clone(), || {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                auth.recheck_owner(&tx)?; csrf.recheck(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
                 let events = super::documents::set_primary(&tx, document, &pages, source, &format!("account:{}",auth.account_id()), &rationale, |tx,event| {
                     tx.execute("INSERT INTO source_primary_web_events(event_id,actor_id,actor_epoch,session_digest) VALUES(?1,?2,?3,?4)",params![event,auth.account_id(),auth.epoch(),auth.digest()])?;
                     Ok(())
                 })?;
-                auth.recheck_owner(&tx)?; csrf.recheck(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
                 tx.commit()?; Ok(events)
             })
         }).await
     }
 
-    #[cfg(test)]
     pub(crate) async fn material_review_units_atomic(
         &self,
         auth: RequestAuth,
@@ -118,21 +145,33 @@ impl Store {
             decision.review.actor = format!("account:{}", auth.account_id());
         }
         super::documents::validate_batch(&decisions, &rationale)?;
-        let operation = super::documents::new_operation_id();
+        let operation = (decisions.len() > 1).then(super::documents::new_operation_id);
         self.run_bounded_auth(move |db| {
             with_domain_request(auth.clone(), || {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 auth.recheck_owner(&tx)?;
-                csrf.recheck(&tx)?;
-                let events = super::documents::review_batch(
-                    &tx,
-                    &decisions,
-                    &operation,
-                    &rationale,
-                    |tx, event| audit(tx, &auth, event),
-                )?;
+                csrf.recheck_owner_write(&tx, &auth)?;
+                let events = if let Some(operation) = &operation {
+                    super::documents::review_batch(
+                        &tx,
+                        &decisions,
+                        operation,
+                        &rationale,
+                        |tx, event| audit(tx, &auth, event),
+                    )?
+                } else {
+                    let decision = &decisions[0];
+                    let event = super::store::review_unit(
+                        &tx,
+                        decision.page,
+                        decision.unit,
+                        &decision.review,
+                    )?;
+                    audit(&tx, &auth, event)?;
+                    vec![event]
+                };
                 auth.recheck_owner(&tx)?;
-                csrf.recheck(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
                 tx.commit()?;
                 Ok(events)
             })
@@ -167,6 +206,46 @@ impl Store {
             auth.recheck_owner(&tx)?;tx.commit()?;Ok(Listing::new(rows,|r|r.id))
         }).await
     }
+    pub(crate) async fn material_primary_pages(
+        &self,
+        auth: RequestAuth,
+        source: i64,
+        after: i64,
+    ) -> Result<(i64, Listing<PrimaryMaterialPage>), AppError> {
+        let listing = self.material_pages(auth.clone(), source, after).await?;
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            let document = tx
+                .query_row(
+                    "SELECT document_id FROM source_document_members WHERE source_id=?1",
+                    [source],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            let mut rows = Vec::new();
+            for page in listing.rows {
+                let primary = super::documents::primary_state(&tx, document, page.pdf_page)?;
+                rows.push(PrimaryMaterialPage {
+                    page,
+                    primary,
+                    selected: false,
+                    submitted: None,
+                });
+            }
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            Ok((
+                document,
+                Listing {
+                    rows,
+                    next: listing.next,
+                },
+            ))
+        })
+        .await
+    }
     pub(crate) async fn material_page(
         &self,
         auth: RequestAuth,
@@ -178,16 +257,43 @@ impl Store {
         cursor(history)?;
         self.run_bounded_auth(move|db|{
             let tx=db.transaction()?;auth.recheck_owner(&tx)?;
+            let result=super::review::read_with_deadline(&tx,"page",|| {
             let mut page=tx.query_row(&format!("SELECT p.id,s.id,{},{},p.pdf_page,{},p.complete,p.revision FROM source_pages p JOIN sources s ON s.id=p.source_id WHERE p.id=?1",text("s.title",200),text("s.edition",400),text("p.printed_label",200)),[id],|r|Ok(PageView{id:r.get(0)?,source_id:r.get(1)?,title:read_text(r,2)?,edition:read_text(r,3)?,pdf_page:r.get(4)?,printed_label:read_text(r,5)?,complete:r.get(6)?,revision:r.get(7)?,units:Vec::new(),events:Vec::new()})).optional()?.ok_or(AppError::SourceNotFound)?;
-            let rows={let mut q=tx.prepare(&format!("SELECT id,{},{},{},{},{},{},revision FROM source_units WHERE page_id=?1 AND id>?2 ORDER BY id LIMIT 51",text("block_id",512),text("kind",100),text("polygon",1024),text("raw_html",65536),text("state",32),text("correction",80000)))?;
-                q.query_map(params![id,units],|r|{let raw=read_text(r,4)?;let clean=sanitized(&raw).map_err(|e|rusqlite::Error::FromSqlConversionFailure(4,rusqlite::types::Type::Text,Box::new(e)))?;Ok(UnitView{id:r.get(0)?,block_id:read_text(r,1)?,kind:read_text(r,2)?,polygon:read_text(r,3)?,sanitized_html:clean,state:read_text(r,5)?,correction:read_text(r,6)?,revision:r.get(7)?})})?.collect::<Result<Vec<_>,_>>()?};
+            let rows={let mut q=tx.prepare(&format!("{ORDERED_UNITS} SELECT id,{},{},{},{},{},{},revision,position FROM ordered WHERE position>?2 ORDER BY position LIMIT 51",text("block_id",512),text("kind",100),text("polygon",1024),text("raw_html",65536),text("state",32),text("correction",80000)))?;
+                q.query_map(params![id,units],|r|{let raw=read_text(r,4)?;let clean=sanitized(&raw).map_err(|e|rusqlite::Error::FromSqlConversionFailure(4,rusqlite::types::Type::Text,Box::new(e)))?;Ok((r.get::<_,i64>(8)?,UnitView{id:r.get(0)?,block_id:read_text(r,1)?,kind:read_text(r,2)?,polygon:read_text(r,3)?,sanitized_html:clean,state:read_text(r,5)?,correction:read_text(r,6)?,revision:r.get(7)?}))})?.collect::<Result<Vec<_>,_>>()?};
             let events={let mut q=tx.prepare(&format!("SELECT id,unit_id,{},{},{},{},{},previous_revision,operation_id FROM source_review_events WHERE page_id=?1 AND id>?2 ORDER BY id LIMIT 51",text("created_at",64),text("actor",400),text("state",32),text("rationale",20000),text("correction",80000)))?;
                 q.query_map(params![id,history],|r|Ok((r.get::<_,i64>(0)?,ReviewEvent{unit_id:r.get(1)?,created_at:read_text(r,2)?,actor:read_text(r,3)?,state:read_text(r,4)?,rationale:read_text(r,5)?,correction:read_text(r,6)?,previous_revision:r.get(7)?,operation_id:r.get(8)?})))?.collect::<Result<Vec<_>,_>>()?};
-            auth.recheck_owner(&tx)?;tx.commit()?;
-            let units=Listing::new(rows,|r|r.id);let events=Listing::new(events,|r|r.0);
-            page.units=units.rows;page.events=events.rows.into_iter().map(|r|r.1).collect();
+            let units=Listing::new(rows,|r|r.0);let events=Listing::new(events,|r|r.0);
+            page.units=units.rows.into_iter().map(|r|r.1).collect();page.events=events.rows.into_iter().map(|r|r.1).collect();
             Ok(MaterialPage{page,units_next:units.next,history_next:events.next})
+            })?;
+            auth.recheck_owner(&tx)?;tx.commit()?;
+            Ok(result)
         }).await
+    }
+    pub(crate) async fn material_unit_cursor(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+        unit: i64,
+    ) -> Result<i64, AppError> {
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            let cursor = super::review::read_with_deadline(&tx, "cursor", || {
+                tx.query_row(
+                    &format!("{ORDERED_UNITS} SELECT position-1 FROM ordered WHERE id=?2"),
+                    params![page, unit],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .ok_or(AppError::SourceNotFound)
+            })?;
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            Ok(cursor)
+        })
+        .await
     }
     pub(crate) async fn material_image(
         &self,
@@ -215,24 +321,17 @@ impl Store {
         csrf: CsrfAdmission,
         page: i64,
         unit: i64,
-        mut review: UnitReview,
+        review: UnitReview,
     ) -> Result<(), AppError> {
-        review.actor = format!("account:{}", auth.account_id());
-        super::store::validate_unit(&review)?;
-        self.run_bounded_auth(move |db| {
-            with_domain_request(auth.clone(), || {
-                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                auth.recheck_owner(&tx)?;
-                csrf.recheck(&tx)?;
-                let event = super::store::review_unit(&tx, page, unit, &review)?;
-                audit(&tx, &auth, event)?;
-                auth.recheck_owner(&tx)?;
-                csrf.recheck(&tx)?;
-                tx.commit()?;
-                Ok(())
-            })
-        })
+        let rationale = review.rationale.clone();
+        self.material_review_units_atomic(
+            auth,
+            csrf,
+            vec![super::UnitDecision { page, unit, review }],
+            rationale,
+        )
         .await
+        .map(|_| ())
     }
     pub(crate) async fn material_complete(
         &self,
@@ -247,11 +346,11 @@ impl Store {
             with_domain_request(auth.clone(), || {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 auth.recheck_owner(&tx)?;
-                csrf.recheck(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
                 let event = super::store::complete_page(&tx, page, &review)?;
                 audit(&tx, &auth, event)?;
                 auth.recheck_owner(&tx)?;
-                csrf.recheck(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
                 tx.commit()?;
                 Ok(())
             })
@@ -259,7 +358,7 @@ impl Store {
         .await
     }
 }
-fn audit(db: &Connection, auth: &RequestAuth, event: i64) -> Result<(), AppError> {
+pub(super) fn audit(db: &Connection, auth: &RequestAuth, event: i64) -> Result<(), AppError> {
     db.execute("INSERT INTO source_web_events(event_id,actor_id,actor_epoch,session_digest) VALUES(?1,?2,?3,?4)",params![event,auth.account_id(),auth.epoch(),auth.digest()])?;
     Ok(())
 }

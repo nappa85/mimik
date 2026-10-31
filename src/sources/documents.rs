@@ -372,6 +372,15 @@ pub(super) fn add_owner(
     page: i64,
     unit: &OwnerUnit,
 ) -> Result<i64, AppError> {
+    add_owner_operation(tx, page, unit, None)
+}
+
+pub(super) fn add_owner_operation(
+    tx: &Transaction<'_>,
+    page: i64,
+    unit: &OwnerUnit,
+    operation: Option<&str>,
+) -> Result<i64, AppError> {
     let revision = tx
         .query_row(
             "SELECT revision FROM source_pages WHERE id=?1",
@@ -387,8 +396,14 @@ pub(super) fn add_owner(
     validate_polygon(tx, page, &unit.polygon)?;
     let html = owner_html(&unit.text);
     let clean = super::sanitized(&html)?;
-    let raw_text = html2text::from_read(clean.as_bytes(), 120)
-        .map_err(|_| AppError::Invalid("Owner text could not be projected."))?;
+    let raw_text = if operation.is_some() {
+        // A merge's initial owner transcription is the exact plain text approved in
+        // the operation (025 checks equality), not the wrapped display projection.
+        unit.text.clone()
+    } else {
+        html2text::from_read(clean.as_bytes(), 120)
+            .map_err(|_| AppError::Invalid("Owner text could not be projected."))?
+    };
     let search = super::search::search_text(&html)?;
     // SQL may have inserted a reserved ordinal ahead of the allocator; never reuse it.
     let ordinal: i64 = tx.query_row(
@@ -405,7 +420,7 @@ pub(super) fn add_owner(
         "INSERT INTO source_search_text(unit_id,normaliser,search_text) VALUES(?1,?2,?3)",
         params![id, super::search::SEARCH_NORMALISER, search],
     )?;
-    super::store::review_unit(tx, page, id, &owner_review(unit))
+    super::store::review_unit_operation(tx, page, id, &owner_review(unit), operation)
 }
 
 /// A fresh 128-bit identifier naming one batch; callers cannot choose or reuse it.

@@ -1008,6 +1008,8 @@ async fn search_page_shows_unresolved_choice_apart_from_unsupported_source() {
     let html =
         get("/sources/search?system=mork-borg&edition=fixture-edition&query=Strength".into()).await;
     assert!(html.contains("Primary reading not chosen"), "{html}");
+    assert!(html.contains("href=\"/admin/materials/sources/1\""));
+    assert!(html.contains("href=\"/admin/materials/sources/2\""));
     assert!(!html.contains("Unsupported source"), "{html}");
     let html =
         get("/sources/search?system=mork-borg&edition=nonexistent&query=Strength".into()).await;

@@ -819,6 +819,20 @@ pub(crate) struct CsrfAdmission {
     principal: Option<Principal>,
 }
 impl CsrfAdmission {
+    pub(crate) fn recheck_owner_write(
+        &self,
+        db: &rusqlite::Connection,
+        auth: &RequestAuth,
+    ) -> Result<i64, AppError> {
+        if self.id != auth.original_id
+            || self.deadline != auth.deadline
+            || self.principal != Some(auth.account)
+        {
+            return Err(AppError::NotFound);
+        }
+        auth.recheck_owner(db)?;
+        self.recheck(db)
+    }
     pub(crate) fn recheck(&self, db: &rusqlite::Connection) -> Result<i64, AppError> {
         let valid:bool = db.query_row("SELECT EXISTS(SELECT 1 FROM auth_sessions s WHERE s.id=?1 AND s.state='active' AND s.expires_at=?2 AND json_extract(s.payload,'$.csrf')=?3 AND ((?4 IS NULL AND s.account_id IS NULL AND json_type(s.payload,'$.principal') IS NULL) OR (s.account_id=?4 AND s.epoch=?5 AND json_extract(s.payload,'$.principal.id')=?4 AND json_extract(s.payload,'$.principal.epoch')=?5 AND EXISTS(SELECT 1 FROM accounts a WHERE a.id=?4 AND a.epoch=?5 AND a.state='enabled'))))", rusqlite::params![self.id.to_string(),self.deadline,self.token,self.principal.map(|p|p.id),self.principal.map(|p|p.epoch)], |r|r.get(0))?;
         let now = persistence::now(db)?;

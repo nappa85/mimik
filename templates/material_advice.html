@@ -1,0 +1,24 @@
+{% if !advice.row_omitted() %}<section class="suggestion" id="{{ advice.anchor }}" data-suggestion="{{ advice.id }}" data-targets="{{ advice.compact_targets }}">
+<h3>{{ advice.kind }} #{{ advice.id }} — {{ advice.state }}</h3>
+{% if advice.compact %}
+<p>Multi-target suggestion, shown in full on its first card. <a href="/admin/materials/suggestions/{{ advice.id }}">Inspect suggestion #{{ advice.id }}</a>.</p>
+{% else %}
+<p>Claimed origin: {{ advice.origin }} · {% if let Some(report) = advice.report %}report #{{ report }}{% else %}no report{% endif %}</p>
+<p>{{ advice.target_label }}</p><p>{{ advice.rationale }} (rationale preview; full rationale in detail)</p>
+<p>Comparison uses current lookup text, or extraction text for unreviewed targets (not approved evidence).</p>
+{% if advice.lookup_truncated %}<p>Comparison text truncated: lookup text omitted or shortened by the screen target-row or text budget; inspect the detail or target cards.</p>{% endif %}
+{% if advice.suggested_truncated %}<p>Suggested text is truncated; the difference below is a labelled preview only.</p>{% endif %}
+{% include "material_difference.html" %}
+<p><a href="/admin/materials/suggestions/{{ advice.id }}">Full bounded detail for suggestion #{{ advice.id }}</a>{% if advice.actionable() && advice.kind != "reject" %} · <a href="/admin/materials/suggestions/{{ advice.id }}#edit-{{ advice.id }}">Edit suggestion #{{ advice.id }}</a>{% else if advice.state == "stale" %} · Edit disabled: stale suggestion{% endif %}</p>
+{% if advice.kind != "note" %}
+<form method="post" action="/admin/materials/suggestions/{{ advice.id }}/accept" data-form="accept" data-target="{{ advice.id }}">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Acceptance rationale for suggestion #{{ advice.id }}<textarea name="rationale" required data-accept-rationale {% if !advice.actionable() %}disabled{% endif %}>Accepted suggestion #{{ advice.id }} ({{ advice.origin }})</textarea></label>
+<button {% if !advice.actionable() %}disabled{% endif %}>Accept suggestion #{{ advice.id }}</button></form>
+{% endif %}
+{% if advice.state == "open" || advice.state == "stale" %}
+<form method="post" action="/admin/materials/suggestions/{{ advice.id }}/dismiss" data-form="dismiss" data-target="{{ advice.id }}">
+<input type="hidden" name="csrf" value="{{ csrf }}"><label>Optional dismissal reason for #{{ advice.id }}<textarea name="reason" maxlength="5000"></textarea></label><button>Dismiss suggestion #{{ advice.id }}</button></form>
+{% endif %}
+{% endif %}
+</section>{% endif %}

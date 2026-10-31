@@ -90,3 +90,23 @@ article.panel { margin-bottom: 1rem; }
 .entry-kept textarea { width: 100%; }
 .quick-add { margin: .8rem 0; min-width: 0; }
 .sheet-fieldset { min-width: 0; }
+/* Source review: the SVG and original image share one proportional coordinate space. */
+.review-image-scroll { overflow: auto; max-width: 100%; }
+.review-image { position: relative; width: 100%; }
+.review-image > img { display: block; height: auto; }
+.review-image:not(.zoom-one):not(.zoom-two) > img { width: 100%; }
+.review-image > svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.review-image.zoom-one, .review-image.zoom-two { width: max-content; }
+.review-image.zoom-one > img, .review-image.zoom-two > img { max-width: none; }
+#review-overlay polygon { fill: transparent; stroke: #075ba6; stroke-width: 1; vector-effect: non-scaling-stroke; }
+#review-overlay polygon.highlight, #review-overlay a:focus polygon { fill: #f6ba3b55; stroke: #b55b00; stroke-width: 3; }
+#review-overlay.drawing { touch-action: none; cursor: crosshair; }
+#review-overlay.drawing a { pointer-events: none; }
+#drawn-region { fill: #f6ba3b55; stroke: #b55b00; }
+[hidden] { display: none !important; }
+[data-unit]:focus, a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid #075ba6; outline-offset: 3px; }
+.suggestion { border: 1px solid currentColor; padding: .75rem; margin-block: 1rem; overflow-wrap: anywhere; }
+.evidence-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.evidence-columns > *, .source-original { min-width: 0; }
+ins { background: #d5f5dc; color: #13381d; }
+del { background: #ffdddd; color: #501515; }
