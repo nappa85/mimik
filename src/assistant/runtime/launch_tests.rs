@@ -1,5 +1,6 @@
 //! The real launcher at level 3 against a fake llama-server (`examples/fake_llama_server.rs`,
-//! built by `cargo test --all-targets`), the test binary as the runner and as the probe.
+//! built first with `cargo build --locked --example fake_llama_server`), the test binary as
+//! the runner and as the probe.
 //! Level 1 needs the sandbox and the pinned build and runs in `live_tests.rs`.
 use super::super::drain::Failed;
 use super::super::manager::{self, State};
@@ -45,10 +46,24 @@ fn fake_server() -> PathBuf {
         .join("examples/fake_llama_server");
     assert!(
         path.is_file(),
-        "{} is missing: run the tests with --all-targets",
+        "{} is missing: run `cargo build --locked --example fake_llama_server` with the same target directory and profile before the tests",
         path.display()
     );
     path
+}
+
+#[test]
+fn the_fake_server_is_a_runnable_example_not_a_test_harness() {
+    let output = std::process::Command::new(fake_server())
+        .arg("--list-devices")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .starts_with("Available devices:\n")
+    );
 }
 
 fn helper_args(test: &str) -> Vec<String> {

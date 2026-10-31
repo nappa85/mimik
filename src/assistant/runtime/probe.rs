@@ -226,47 +226,12 @@ fn cli_probe(args: &[String]) -> i32 {
             return 2;
         }
     };
-    let (Some(runtime), Some(models), Some(model)) = (parsed.runtime, parsed.models, parsed.model)
-    else {
-        report(json!({"level": null, "error": "--runtime, --models-dir and --model are required"}));
-        return 2;
-    };
-    let Some(name) = model.strip_prefix("local:") else {
-        report(json!({"level": null, "error": "--model must be local:<name>.gguf"}));
-        return 2;
-    };
-    let sha256 = match crate::assistant::model::resolve(&model, parsed.sha256.as_deref()) {
-        Ok((sha256, _)) => sha256,
+    let settings = match probe_settings(parsed) {
+        Ok(settings) => settings,
         Err(why) => {
             report(json!({"level": null, "error": why}));
             return 2;
         }
-    };
-    let data = parsed.data.map_or_else(
-        || {
-            std::path::PathBuf::from(&models)
-                .join("..")
-                .join("probe-data")
-        },
-        std::path::PathBuf::from,
-    );
-    let (Ok(runner), Ok(inner)) = (RunnerCommand::mimik(), InnerCommand::mimik()) else {
-        report(json!({"level": null, "error": "Mimik's own binary cannot be found"}));
-        return 2;
-    };
-    let settings = Settings {
-        data_dir: data,
-        models_dir: models.into(),
-        runtime_dir: runtime.into(),
-        model: name.to_owned(),
-        model_sha256: sha256,
-        alias: "probe".into(),
-        threads: 1,
-        ctx_size: 256,
-        runner,
-        inner,
-        device: super::device::Choice::Cpu,
-        roots: super::device::Roots::default(),
     };
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -284,6 +249,43 @@ fn cli_probe(args: &[String]) -> i32 {
     let level_one = result["level"] == json!(Level::Sandbox.number());
     report(result);
     i32::from(!level_one)
+}
+
+/// Settings shared by the CLI probe and its path-resolution tests.
+fn probe_settings(parsed: ProbeArgs) -> Result<Settings, String> {
+    let (Some(runtime), Some(models), Some(model)) = (parsed.runtime, parsed.models, parsed.model)
+    else {
+        return Err("--runtime, --models-dir and --model are required".into());
+    };
+    let Some(name) = model.strip_prefix("local:") else {
+        return Err("--model must be local:<name>.gguf".into());
+    };
+    let (sha256, _) = crate::assistant::model::resolve(&model, parsed.sha256.as_deref())?;
+    // Hakoniwa mounts the model by its host path; resolve it before entering the sandbox,
+    // just as the server's settings do.
+    let models = std::path::PathBuf::from(models);
+    let models = std::path::absolute(&models).unwrap_or(models);
+    let data = parsed.data.map_or_else(
+        || models.join("..").join("probe-data"),
+        std::path::PathBuf::from,
+    );
+    let (Ok(runner), Ok(inner)) = (RunnerCommand::mimik(), InnerCommand::mimik()) else {
+        return Err("Mimik's own binary cannot be found".into());
+    };
+    Ok(Settings {
+        data_dir: data,
+        models_dir: models,
+        runtime_dir: runtime.into(),
+        model: name.to_owned(),
+        model_sha256: sha256,
+        alias: "probe".into(),
+        threads: 1,
+        ctx_size: 256,
+        runner,
+        inner,
+        device: super::device::Choice::Cpu,
+        roots: super::device::Roots::default(),
+    })
 }
 
 /// Every level's probe, then a settle: the probes' cleanup (killing them, clearing their
@@ -355,6 +357,31 @@ pub fn main(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relative_models_dir_is_absolute_in_probe_settings() {
+        let args = [
+            "--runtime",
+            "target/runtime",
+            "--models-dir",
+            "target/models",
+            "--model",
+            "local:test.gguf",
+            "--model-sha256",
+            &"a".repeat(64),
+        ]
+        .map(String::from);
+        let settings = probe_settings(parse(&args).unwrap()).unwrap();
+        assert!(
+            settings.models_dir.is_absolute(),
+            "{:?}",
+            settings.models_dir
+        );
+        assert_eq!(
+            settings.models_dir,
+            std::env::current_dir().unwrap().join("target/models")
+        );
+    }
 
     #[test]
     fn the_cli_reports_level_1_only_when_its_probe_passed() {
