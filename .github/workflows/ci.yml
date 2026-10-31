@@ -177,6 +177,7 @@ jobs:
           name: dev-endpoint-binary
           path: dev-endpoint
       - name: Offline browser check of source review with synthetic suggestions
+        if: ${{ !cancelled() }}
         run: |
           docker run --rm --network=none --cpus=2 --memory=4g --shm-size=1g --pids-limit=1024 \
             --cap-drop=ALL --security-opt=no-new-privileges --entrypoint python \

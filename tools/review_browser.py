@@ -20,6 +20,11 @@ from smoke_release import registry_cli, require, start, stop
 REGION_CROP = re.compile(r"/admin/materials/pages/\d+/units/\d+/image")
 ORIGIN = "http://127.0.0.1:3000"
 COUNTS = {"correction": 4, "reject": 1, "merge": 1, "missing_text": 1, "note": 2}
+STRICT_CSP = (
+    "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; "
+    "base-uri 'none'; form-action 'self'; frame-ancestors 'none'; "
+    "require-trusted-types-for 'script'; trusted-types 'none'"
+)
 
 
 def form(page, kind, target=None):
@@ -123,6 +128,15 @@ class Checks:
         self.consoles = []
         self.errors = []
         self.expected_conflicts = set()
+        self.injected_crops = set()
+        self.recovered_crops = set()
+        self.busy_crops = set()
+        self.nojs_busy = {}
+        self.exhausted_crop = None
+        # Main-frame documents per tab: a busy crop of a document already left cannot finish
+        # its retry, and that is expected (SRC-8).
+        self.document = {}
+        self.left_busy = set()
 
     def page(self):
         page = self.context.new_page()
@@ -130,16 +144,81 @@ class Checks:
         page.on(
             "console",
             lambda message: self.consoles.append(
-                (message.type, message.text, message.location.get("url", ""))
+                (message.type, message.text, message.location.get("url", ""), page)
             ),
         )
         page.on("pageerror", lambda error: self.errors.append(str(error)))
+        page.on("response", lambda response: self.crop_response(page, response))
+        page.on(
+            "request",
+            lambda request: self.new_document(page)
+            if request.is_navigation_request() and request.frame == page.main_frame
+            else None,
+        )
         self.pages.append(page)
         return page
 
+    def new_document(self, page):
+        self.nojs_busy[page] = 0
+        self.document[page] = self.document.get(page, 0) + 1
+        busy = "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
+        for index, (kind, text, url, tab) in enumerate(self.consoles):
+            if (
+                tab is page
+                and kind == "error"
+                and text == busy
+                and REGION_CROP.fullmatch(urlsplit(url).path)
+            ):
+                self.left_busy.add(index)
+
+    def crop_response(self, page, response):
+        path = urlsplit(response.url).path
+        if not REGION_CROP.fullmatch(path):
+            return
+        if response.status == 503:
+            self.busy_crops.add(response.url)
+            self.recovered_crops.discard(path)
+            if not self.javascript:
+                self.nojs_busy[page] = self.nojs_busy.get(page, 0) + 1
+
+    def crops_ready(self, page):
+        if self.javascript:
+            page.wait_for_function(
+                """exhausted => [...document.querySelectorAll('.source-region img')]
+                .filter(i => i.currentSrc).every(i => {
+                  const status = i.closest('figure').querySelector('.region-status')?.textContent.trim();
+                  // Under contention (one crop job, SRC-8) retries may run out: the documented
+                  // fallback is a settled state too. The injected cases prove retry and fallback.
+                  return (i.complete && i.naturalWidth > 0 && status === 'Region preview loaded.') ||
+                    status === 'Region preview unavailable; inspect the full-page image or open the region link for details.';
+                })""",
+                arg=self.exhausted_crop,
+                timeout=20000,
+            )
+            self.recovered_crops.update(
+                page.locator(".source-region img").evaluate_all(
+                    "images => images.filter(i => (i.complete && i.naturalWidth > 0) ||"
+                    " i.closest('figure').querySelector('.region-status')?.textContent.trim()"
+                    " === 'Region preview unavailable; inspect the full-page image or open the"
+                    " region link for details.')"
+                    ".map(i => new URL(i.src).pathname)"
+                )
+            )
+        else:
+            require(self.nojs_busy.get(page, 0) <= 60, "Unbounded no-JS busy crops")
+            original = page.locator("#review-image > img")
+            if original.count():
+                require(
+                    original.evaluate("i => i.complete && i.naturalWidth > 0"),
+                    "No-JS full-page fallback did not load",
+                )
+
     def clean(self, page):
+        # Console events are shared across competing tabs; settle every open document first.
+        for tab in self.pages:
+            self.crops_ready(tab)
         no_overflow(page, f"source review {page.url}")
-        console_text = [text for _, text, _ in self.consoles]
+        console_text = [text for _, text, _, _ in self.consoles]
         if self.javascript:
             csp_clean(page, console_text, self.errors)
         else:
@@ -154,17 +233,38 @@ class Checks:
         expected_message = (
             "Failed to load resource: the server responded with a status of 409 (Conflict)"
         )
-        # One region crop runs at a time and a busy one answers 503 Retry-After: 1 (SRC-8);
-        # source-regions.js retries it, so those console lines are expected.
         busy_crop = "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
-        unexpected = [
-            (text, url)
-            for kind, text, url in self.consoles
-            if kind == "error"
-            and not (url in self.expected_conflicts and text == expected_message)
-            and not (text == busy_crop and REGION_CROP.fullmatch(urlsplit(url).path))
-        ]
-        require(not unexpected, f"Console errors: {unexpected}")
+
+        def unexpected():
+            return [
+                (text, url)
+                for index, (kind, text, url, _) in enumerate(self.consoles)
+                if kind == "error"
+                and index not in self.left_busy
+                and not (url in self.expected_conflicts and text == expected_message)
+                and not (
+                    text == busy_crop
+                    and (
+                        # Injected by request routing (no server response event is relied on).
+                        urlsplit(url).path in self.injected_crops
+                        or (
+                            url in self.busy_crops
+                            and (urlsplit(url).path in self.recovered_crops or not self.javascript)
+                        )
+                    )
+                )
+            ]
+
+        # A lazy crop can be requested (and found busy) after the settle above, e.g. when
+        # the overflow check scrolls; settle again until only real errors remain.
+        for _ in range(3):
+            left = unexpected()
+            if not left or not self.javascript or any(text != busy_crop for text, _ in left):
+                break
+            for tab in self.pages:
+                self.crops_ready(tab)
+        left = unexpected()
+        require(not left, f"Console errors: {left}")
 
     def goto(self, page, path):
         if page.url != "about:blank":
@@ -172,13 +272,12 @@ class Checks:
         base = ORIGIN if page.url == "about:blank" else page.url
         response = page.goto(urljoin(base, path), wait_until="load")
         if response is None:
-            # Same document, another fragment: Playwright returns no response, so reload to
-            # check this request's status and policy too.
-            response = page.reload(wait_until="load")
+            self.clean(page)
+            return
         require(response.status == 200, f"GET {path}: {response.status}")
         if urlsplit(response.url).path.startswith("/admin/materials"):
             require(
-                "script-src 'self'" in response.headers.get("content-security-policy", ""),
+                response.headers.get("content-security-policy") == STRICT_CSP,
                 "Review document lost its script CSP",
             )
         self.clean(page)
@@ -197,12 +296,71 @@ class Checks:
             response.value.status == status,
             f"POST {action}: expected {status}, got {response.value.status}",
         )
+        require(
+            response.value.headers.get("content-security-policy") == STRICT_CSP,
+            "Material POST lost its exact CSP",
+        )
         if status == 409:
             require(page.locator('[role="alert"]').count() > 0, "Conflict has no announced error")
         self.clean(page)
 
 
-def overlay(checks, page, path, manifest, units):
+def crop_retries(checks, page, path, units):
+    once = f"{path}/units/{units[1]}/image"
+    always = f"{path}/units/{units[2]}/image"
+    attempts = {once: [], always: []}
+    checks.injected_crops.update(attempts)
+    checks.exhausted_crop = always
+
+    def route_crop(route):
+        crop = urlsplit(route.request.url).path
+        if crop not in attempts:
+            route.continue_()
+            return
+        attempts[crop].append(route.request.url)
+        if crop == always or len(attempts[crop]) == 1:
+            route.fulfill(status=503, headers={"Retry-After": "1"}, body="Synthetic busy crop")
+        else:
+            route.continue_()
+
+    page.route(REGION_CROP, route_crop)
+    checks.goto(page, path)
+    for unit in (units[1], units[2]):
+        page.locator(f"#unit-{unit} .source-region img").scroll_into_view_if_needed()
+    page.wait_for_function(
+        """({once, always}) => {
+          const status = unit => document.querySelector(`#unit-${unit} .region-status`)?.textContent.trim();
+          return status(once) === 'Region preview loaded.' && status(always) ===
+            'Region preview unavailable; inspect the full-page image or open the region link for details.';
+        }""",
+        arg={"once": units[1], "always": units[2]},
+        timeout=20000,
+    )
+    checks.crops_ready(page)
+    require(
+        len(attempts[once]) >= 2 and "region-retry=1" in attempts[once][1],
+        "Busy crop did not make its retry request",
+    )
+    require(
+        page.locator(f"#unit-{units[1]} .source-region img").evaluate(
+            "i => i.complete && i.naturalWidth > 0"
+        ),
+        "Retried crop did not decode",
+    )
+    require(len(attempts[always]) == 5, f"Retry bound changed: {attempts[always]}")
+    require(
+        "Region preview unavailable; inspect the full-page image"
+        in page.locator(f"#unit-{units[2]} .region-status").inner_text(),
+        "Exhausted retry has no fallback",
+    )
+    checks.clean(page)
+    page.unroute(REGION_CROP, route_crop)
+    # Leave the deliberately broken document before demanding normal crop recovery again.
+    checks.goto(page, "/admin/materials")
+    checks.exhausted_crop = None
+
+
+def overlay(checks, page, path, manifest, units, suggestions):
     checks.goto(page, path)
     require(
         page.locator("#review-image > img").evaluate(
@@ -225,6 +383,8 @@ def overlay(checks, page, path, manifest, units):
         str(units[index + 1]): unit["polygon"]
         for index, unit in enumerate(manifest["pages"][0]["units"])
     }
+    polygons[f"suggestion-{suggestions[6]}"] = [[140, 285], [195, 285], [195, 295], [140, 295]]
+    require(page.locator("[data-overlay-suggestion]").count() == 1, "Missing-text overlay absent")
     for mode in modes:
         if checks.javascript:
             page.locator(f'[data-zoom="{mode}"]').click()
@@ -235,9 +395,10 @@ def overlay(checks, page, path, manifest, units):
         actual = page.locator("#review-overlay").evaluate("""svg => ({
             image: (() => { const r = document.querySelector('#review-image > img').getBoundingClientRect();
                 return {x:r.x,y:r.y,width:r.width,height:r.height}; })(),
-            boxes: [...svg.querySelectorAll('[data-overlay-unit]')].map(box => {
+            boxes: [...svg.querySelectorAll('[data-overlay-unit], [data-overlay-suggestion]')].map(box => {
                 const r=box.getBoundingClientRect();
-                return {id:box.dataset.overlayUnit,x:r.x,y:r.y,width:r.width,height:r.height};
+                return {id:box.dataset.overlayUnit || `suggestion-${box.dataset.overlaySuggestion}`,
+                    x:r.x,y:r.y,width:r.width,height:r.height};
             })})""")
         rendered = actual["image"]
         if mode != "fit":
@@ -262,15 +423,74 @@ def overlay(checks, page, path, manifest, units):
     # Actual SVG clicks exercise navigation, including a card absent from this card page.
     if checks.javascript:
         page.locator('[data-zoom="fit"]').click()
-    for index in (1, 51):
+    checks.goto(page, path)
+    documents = []
+    page.on(
+        "request",
+        lambda request: documents.append(request.url)
+        if request.is_navigation_request() and request.frame == page.main_frame
+        else None,
+    )
+    draft = field(form(page, "unit", units[2]), "rationale")
+    draft.fill("Synthetic unsaved fragment draft")
+    for link in (
+        page.locator(f'[data-overlay-unit="{units[3]}"]').locator(".."),
+        page.get_by_role("link", name="Next unreviewed unit", exact=True),
+    ):
+        href = link.get_attribute("href")
+        require(href.startswith("#"), f"Expected same-document link: {href}")
+        before = len(documents)
+        link.click()
+        page.wait_for_url(lambda url, fragment=href[1:]: urlsplit(str(url)).fragment == fragment)
+        require(
+            len(documents) == before and draft.input_value() == "Synthetic unsaved fragment draft",
+            "Fragment navigation lost draft or fetched document",
+        )
+        checks.clean(page)
+    missing = page.locator(f'[data-overlay-suggestion="{suggestions[6]}"]').locator("..")
+    href = missing.get_attribute("href")
+    # Listed on this page's notes panel: a same-document link to its row; otherwise its detail.
+    if href.startswith("#"):
+        require(
+            href == f"#suggestion-{suggestions[6]}-unit-0" and page.locator(href).count() == 1,
+            f"Missing-text box links to the wrong row: {href}",
+        )
+        before = len(documents)
+        missing.click()
+        page.wait_for_url(lambda url: urlsplit(str(url)).fragment == href[1:])
+        require(len(documents) == before, "Missing-text row link fetched a document")
+        detail = f"/admin/materials/suggestions/{suggestions[6]}"
+        checks.goto(page, detail)
+    else:
+        require(
+            href == f"/admin/materials/suggestions/{suggestions[6]}",
+            f"Missing-text box links to the wrong suggestion: {href}",
+        )
+        with page.expect_navigation(wait_until="load") as navigation:
+            missing.click()
+        require(
+            navigation.value.status == 200
+            and navigation.value.headers.get("content-security-policy") == STRICT_CSP,
+            "Missing-text detail lost its status/policy",
+        )
+    require(
+        f"Suggestion #{suggestions[6]} — missing_text" in page.locator("h1").inner_text(),
+        "Missing-text box did not open its suggestion detail",
+    )
+    checks.clean(page)
+    for index in (51,):
         checks.goto(page, path)
         box = page.locator(f'[data-overlay-unit="{units[index]}"]')
         link = box.locator("..")
         href = link.get_attribute("href")
         if index == 51:
             require("units=" in href, "Off-card-page overlay link has no units cursor")
-        with page.expect_navigation(wait_until="load"):
-            box.click()
+        with page.expect_request(
+            lambda request: request.is_navigation_request()
+            and "units=" in urlsplit(request.url).query
+        ):
+            with page.expect_navigation(wait_until="load"):
+                box.click()
         page.locator(f"#unit-{units[index]}").wait_for(state="visible")
         require(
             urlsplit(page.url).fragment == f"unit-{units[index]}",
@@ -363,15 +583,7 @@ def add_text(checks, page, path, directory):
     checks.goto(page, path)
     owner = form(page, "owner")
     if checks.javascript:
-        page.locator("#draw-region").click()
-        page.locator("#review-overlay").scroll_into_view_if_needed()
-        rectangle = page.locator("#review-image > img").bounding_box()
-        x, y = rectangle["x"], rectangle["y"]
-        width, height = rectangle["width"], rectangle["height"]
-        page.mouse.move(x + width * 0.2, y + height * 0.2)
-        page.mouse.down()
-        page.mouse.move(x + width * 0.4, y + height * 0.3, steps=4)
-        page.mouse.up()
+        draw_box(page)
         polygon = json.loads(field(owner, "polygon").input_value())
         expected = [[40, 60], [80, 60], [80, 90], [40, 90]]
         require(
@@ -426,7 +638,146 @@ def add_text(checks, page, path, directory):
     )
 
 
-def conflicts(checks, page, path, units, suggestions):
+def keyboard_boxes(checks, page, path, directory):
+    for typed in (False, True):
+        checks.goto(page, path)
+        owner = form(page, "owner")
+        require(field(owner, "polygon").input_value() == "", "Box did not start empty")
+        expected = [[50, 75], [100, 75], [100, 150], [50, 150]]
+        if typed:
+            expected = [[20, 30], [80, 30], [80, 90], [20, 90]]
+            field(owner, "polygon").fill(json.dumps(expected))
+        button = page.locator("#keyboard-region")
+        require("replaces entered polygon" in button.inner_text(), "Replacement warning missing")
+        button.focus()
+        page.keyboard.press("Enter")
+        require(
+            json.loads(field(owner, "polygon").input_value()) == expected,
+            "Keyboard starter/entered polygon changed",
+        )
+        top = page.locator('[data-corner="0"]')
+        require(
+            top.evaluate("node => node === document.activeElement"),
+            "Keyboard box did not focus top-left handle",
+        )
+        page.keyboard.press("ArrowRight")
+        page.keyboard.press("ArrowDown")
+        page.keyboard.press("Tab")
+        require(
+            page.locator('[data-corner="2"]').evaluate("node => node === document.activeElement"),
+            "Tab did not reach bottom-right handle",
+        )
+        page.keyboard.press("Shift+ArrowRight")
+        page.keyboard.press("ArrowDown")
+        final = [
+            [expected[0][0] + 1, expected[0][1] + 1],
+            [expected[2][0] + 10, expected[0][1] + 1],
+            [expected[2][0] + 10, expected[2][1] + 1],
+            [expected[0][0] + 1, expected[2][1] + 1],
+        ]
+        require(
+            json.loads(field(owner, "polygon").input_value()) == final,
+            "Keyboard corners did not move independently in PDF points",
+        )
+        text = f"Synthetic keyboard-only owner text typed={typed}"
+        field(owner, "text").fill(text)
+        field(owner, "rationale").fill("Synthetic keyboard-only comparison")
+        checks.submit(page, owner)
+        saved = rows(
+            directory,
+            "SELECT polygon FROM source_units WHERE origin='owner' AND correction=?",
+            (text,),
+        )
+        require(
+            len(saved) == 1 and json.loads(saved[0][0]) == final,
+            "Keyboard-only polygon not durably stored",
+        )
+
+
+def values(container):
+    """Draft controls and hidden tokens; submit buttons are checked by their call sites."""
+    return container.evaluate("""form => [...form.elements].filter(e => e.name &&
+        e.tagName !== 'BUTTON' && !e.disabled &&
+        (!['checkbox','radio'].includes(e.type) || e.checked))
+        .map(e => [e.name, e.value])""")
+
+
+def stored_review(directory):
+    return {
+        table: rows(directory, f"SELECT * FROM {table} ORDER BY 1")
+        for table in (
+            "source_units",
+            "source_pages",
+            "source_review_events",
+            "source_web_events",
+            "source_search_text",
+            "source_primary_pages",
+            "source_primary_events",
+            "source_primary_web_events",
+            "source_suggestions",
+            "source_suggestion_applications",
+            "source_suggestion_dismissals",
+            "source_suggestion_web_events",
+        )
+    }
+
+
+def form_conflicts(checks, page, other, path, directory, source, units):
+    # Each stale form has a real competing commit, then a complete database snapshot.
+    for kind in ("owner", "primary", "primary-pages", "complete"):
+        destination = f"/admin/materials/sources/{source}" if kind == "primary-pages" else path
+        checks.goto(page, destination)
+        draft = form(page, kind)
+        if kind == "owner":
+            if checks.javascript:
+                draw_box(page)
+            else:
+                field(draft, "polygon").fill("[[20,30],[80,30],[80,90],[20,90]]")
+            field(draft, "text").fill("Synthetic owner conflict <b>&\nsecond line")
+        if kind == "complete":
+            field(draft, "printed_label").fill("Synthetic draft label")
+        if kind == "primary-pages":
+            field(draft, "page_1").check()
+        field(draft, "rationale").fill(f"Synthetic {kind} conflict <b>&\nsecond line")
+        submitted = values(draft)
+        if kind in ("owner", "complete"):
+            decide(checks, other, path, units[10], rationale=f"Competing {kind} revision")
+        else:
+            checks.goto(other, path)
+            competing = form(other, "primary")
+            field(competing, "rationale").fill(f"Competing {kind} primary event")
+            checks.submit(other, competing)
+        before = stored_review(directory)
+        checks.submit(page, draft, status=409)
+        kept = form(page, kind)
+        require(values(kept) == submitted, f"409 lost {kind} values/tokens: {values(kept)}")
+        require(stored_review(directory) == before, f"Rejected {kind} changed stored state")
+        if kind == "owner" and checks.javascript:
+            polygon = json.loads(field(kept, "polygon").input_value())
+            rectangle = page.locator("#drawn-region")
+            require(rectangle.is_visible(), "409 owner rectangle not restored")
+            actual = [float(rectangle.get_attribute(key)) for key in ("x", "y", "width", "height")]
+            expected = [
+                polygon[0][0],
+                polygon[0][1],
+                polygon[2][0] - polygon[0][0],
+                polygon[2][1] - polygon[0][1],
+            ]
+            require(actual == expected, f"409 rectangle differs from draft: {actual}")
+
+
+def draw_box(page):
+    page.locator("#draw-region").click()
+    page.locator("#review-overlay").scroll_into_view_if_needed()
+    box = page.locator("#review-image > img").bounding_box()
+    page.mouse.move(box["x"] + box["width"] * 0.2, box["y"] + box["height"] * 0.2)
+    page.mouse.down()
+    page.mouse.move(box["x"] + box["width"] * 0.4, box["y"] + box["height"] * 0.3, steps=4)
+    page.mouse.up()
+    require(page.locator("#drawn-region").is_visible(), "Drawn box missing")
+
+
+def conflicts(checks, page, path, units, suggestions, directory):
     other = checks.page()
     # Unit decision: both pages read revision 1; the first commit invalidates the draft.
     checks.goto(page, path)
@@ -435,9 +786,13 @@ def conflicts(checks, page, path, units, suggestions):
     field(draft, "correction").fill("Synthetic unit draft <b>&\nsecond line")
     field(draft, "rationale").fill("Synthetic unit draft reason")
     revision = field(draft, "revision").input_value()
+    submitted = values(draft)
     decide(checks, other, path, units[9])
+    before = stored_review(directory)
     checks.submit(page, draft, status=409)
     kept = form(page, "unit", units[9])
+    require(values(kept) == submitted, "409 lost unit values/tokens")
+    require(stored_review(directory) == before, "Rejected unit decision changed stored state")
     require(
         field(kept, "state").input_value() == "corrected"
         and field(kept, "correction").input_value() == "Synthetic unit draft <b>&\nsecond line"
@@ -451,11 +806,15 @@ def conflicts(checks, page, path, units, suggestions):
     draft = form(page, "accept", suggestion)
     field(draft, "edited_text").fill("Synthetic accept draft <b>&\nsecond line")
     field(draft, "rationale").fill("Synthetic accept draft reason")
+    submitted = values(draft)
     decide(checks, other, path, units[8])
+    before = stored_review(directory)
     checks.submit(
         page, draft, draft.get_by_role("button", name="Accept my edit", exact=True), status=409
     )
     kept = form(page, "accept", suggestion)
+    require(values(kept) == submitted, "409 lost accept/edit values/tokens")
+    require(stored_review(directory) == before, "Rejected acceptance changed stored state")
     require(
         field(kept, "edited_text").input_value() == "Synthetic accept draft <b>&\nsecond line"
         and field(kept, "rationale").input_value() == "Synthetic accept draft reason",
@@ -467,10 +826,16 @@ def conflicts(checks, page, path, units, suggestions):
     checks.goto(page, detail)
     draft = form(page, "dismiss", suggestion)
     field(draft, "reason").fill("Synthetic dismissal draft <b>&\nsecond line")
+    submitted = values(draft)
     checks.goto(other, detail)
     field(form(other, "dismiss", suggestion), "reason").fill("Synthetic competing dismissal")
     checks.submit(other, form(other, "dismiss", suggestion))
+    before = stored_review(directory)
     checks.submit(page, draft, status=409)
+    require(
+        values(form(page, "dismiss", suggestion)) == submitted, "409 lost dismiss values/tokens"
+    )
+    require(stored_review(directory) == before, "Rejected dismissal changed stored state")
     require(
         field(form(page, "dismiss", suggestion), "reason").input_value()
         == "Synthetic dismissal draft <b>&\nsecond line",
@@ -491,7 +856,9 @@ def scenario(
         page.locator('form[action="/auth/login"] button').click()
     path = f"/admin/materials/pages/{page_id}"
     manifest = json.loads((fixture / "review-bundle/bundle.json").read_text())
-    overlay(checks, page, path, manifest, units)
+    if javascript:
+        crop_retries(checks, page, path, units)
+    overlay(checks, page, path, manifest, units, suggestions)
     if javascript:
         shortcuts(checks, page, path, units)
     # A stored correction, without supplying the suggestion text in the form.
@@ -597,6 +964,8 @@ def scenario(
         "Missing-text acceptance lost region/text",
     )
     add_text(checks, page, path, directory)
+    if javascript:
+        keyboard_boxes(checks, page, path, directory)
     checks.goto(page, f"/admin/materials/sources/{source}")
     primary = page.locator("#primary-pages")
     require(
@@ -609,13 +978,19 @@ def scenario(
         "this reading is primary" in page.locator("#primary-pages").inner_text(),
         "Page list did not record primary reading",
     )
-    conflicts(checks, page, path, units, suggestions)
+    conflicts(checks, page, path, units, suggestions, directory)
+    form_conflicts(checks, page, checks.page(), path, directory, source, units)
     require(
-        rows(directory, "SELECT count(*) FROM source_units WHERE origin='owner'")[0][0] == 3,
+        rows(directory, "SELECT count(*) FROM source_units WHERE origin='owner'")[0][0]
+        == (5 if javascript else 3),
         "Unexpected extra owner units",
     )
     for tab in checks.pages:
         checks.clean(tab)
+    if not javascript:
+        print(
+            f"No-JS busy crop URLs (L-SRC-11; full-page fallback checked): {len(checks.busy_crops)}"
+        )
 
 
 def main(argv=None):

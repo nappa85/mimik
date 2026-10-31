@@ -56,9 +56,13 @@ The authenticated boundary (`src/auth/mod.rs`) admits at most 8 concurrent reque
 request out after 5 s, rate-limits new form sessions, sign-in and credential redemption with
 one process-wide quota (burst 10, then one per 6 s), checks Host and
 Origin against the configured authority, and sets `Cache-Control: no-store`,
-`X-Content-Type-Options: nosniff`, `Content-Security-Policy: frame-ancestors 'none'`,
+`X-Content-Type-Options: nosniff`, a CSP including `frame-ancestors 'none'`,
 `X-Frame-Options: DENY` and `Referrer-Policy: same-origin`. The router-wide body limit is
 8 KiB; sheet routes have their own limits (table in `docs/campaigns.md`, "Limits").
+Sheet pages and sheet JSON answers carry `SHEET_CSP`; Owner material pages, scripts,
+images, successful POST redirects and 409/422 draft pages use that strict policy too.
+Rebuilt refusals and the unauthenticated navigation's login redirect keep only
+`frame-ancestors 'none'` (response matrix in `docs/sources-and-retrieval.md`).
 
 ## Modules (`src/`)
 
@@ -173,7 +177,9 @@ Runs on every push, pull request and manual dispatch, on `ubuntu-22.04` (`llama-
    rebuilds the source archive plus vendored dependencies with `--offline --locked`, no network
    and an empty Cargo home.
 4. **browser-smoke:** runs `browser_smoke.py` in the Chromium container against the unpacked
-   binary, offline, with dropped capabilities and resource limits; then
+   binary, offline, with dropped capabilities and resource limits;
+   `review_browser.py` checks synthetic source review at desktop/phone sizes with and without
+   JavaScript, even if the preceding browser smoke fails (unless cancelled); then
    `assist_model_browser.py` against the development binary and a fake model server.
 5. **lan-smoke:** `lan_smoke.py` runs the unpacked binary on isolated container networks with
    separate clients, a denied subnet and an HTTPS reverse proxy.

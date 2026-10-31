@@ -2,8 +2,8 @@
 
 Goal: the owner turns a PDF they own into reviewed evidence from the browser, choosing how it
 is read, without command-line tools, Docker or JSON files. Today an extraction needs the
-prototype containers, `prepare_review.py` and `mimik import-source`, and suggestion reports are
-JSON files the review page never shows (`docs/sources-and-retrieval.md`).
+prototype containers, `prepare_review.py` and `mimik import-source`; imported suggestion
+reports are shown on the review screen (`docs/sources-and-retrieval.md`).
 
 What stays: units start `unreviewed`; every accept, correction, rejection and page completion is
 an explicit owner decision with actor, rationale and revision (SRC-4, SRC-5); raw extraction
@@ -63,8 +63,9 @@ New decisions:
 - **Suggestions:** stored apart from units, bound to the exact source (bundle hash) they were
   made for; a report for another bundle is refused. Each targets one unit, several units (merge)
   or a page region (missing text). Accepting maps to existing decisions: a correction records
-  `corrected`; a merge is one atomic decision correcting the first unit and rejecting the others,
-  with one rationale and every expected revision; a missing-region suggestion pre-fills an
+  `corrected`; accepting a merge atomically creates one corrected owner unit with the targets'
+  bounding rectangle and rejects every target, with one rationale and every expected revision;
+  a missing-region suggestion pre-fills an
   owner-added unit; a reject suggestion records `rejected`. Dismissing a suggestion is not a
   decision on the unit. A suggestion made on an older unit revision is shown as stale. Open
   suggestions do not block page completion.

@@ -227,9 +227,13 @@ table `auth_sessions`, migration 011).
 Process-wide, not per user. A timeout can follow a committed change: check state
 before retrying.
 
-All responses: `Cache-Control: no-store`, `nosniff`, CSP `frame-ancestors 'none'`,
+All responses: `Cache-Control: no-store`, `nosniff`, CSP including `frame-ancestors 'none'`,
 `X-Frame-Options: DENY`, `Referrer-Policy: same-origin` (`no-referrer` makes Chromium
 send `Origin: null` on native form POSTs).
+Sheet pages and sheet JSON answers use `SHEET_CSP`. Owner material pages, scripts, images,
+successful POST redirects and retained 409/422 draft pages use the same strict policy.
+Rebuilt refusals and the unauthenticated navigation's login redirect retain only
+`frame-ancestors 'none'` (`docs/sources-and-retrieval.md`).
 
 **Login errors** (`src/auth/errors.rs`, `templates/auth_login.html`): a failed browser
 sign-in re-renders the form with an accessible alert, keeps the (bounded, escaped) login
