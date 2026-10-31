@@ -98,6 +98,12 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Pending user questions
 
+- **libjpeg README missing from mupdf-sys 0.8.0 (found 2026-10-31):** the crate vendors
+  IJG libjpeg (compiled into Mimik through MuPDF) without its README, which the IJG licence
+  requires to accompany any distribution of the source; Mimik's dependency-sources archive
+  (REL-2) redistributes that source. Options: ship the official IJG README alongside the
+  archive and notices (fetched once, hash-pinned), report it upstream to mupdf-rs, or both.
+  Needed before any release that includes the PDF worker.
 - Does the correct-password login rejection seen on 2026-10-14 still happen? Diagnose or close.
 - Remaining LAN and multi-device scope to support.
 - M4 default Q5 (drafts over 1 MiB are not echoed back), applied without an answer: confirm or
