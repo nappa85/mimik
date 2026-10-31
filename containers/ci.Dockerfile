@@ -10,12 +10,15 @@ FROM ghcr.io/astral-sh/uv:0.9.27@sha256:143b40f4ab56a780f43377604702107b5a35f83a
 FROM ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
 RUN apt-get update && apt-get install --yes --no-install-recommends \
     build-essential ca-certificates curl git pkg-config libssl-dev \
+    libclang-14-dev=1:14.0.0-1ubuntu1.1 clang-14=1:14.0.0-1ubuntu1.1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=rust-toolchain /usr/local/cargo /opt/cargo
 COPY --from=rust-toolchain /usr/local/rustup /opt/rustup
 COPY --from=workflow-lint /go/bin/actionlint /usr/local/bin/actionlint
 COPY --from=uv /uv /usr/local/bin/uv
 ENV CARGO_HOME=/opt/cargo RUSTUP_HOME=/opt/rustup PATH=/opt/checks/bin:/opt/cargo/bin:$PATH
+# bindgen of mupdf-sys (DEP-29) finds libclang here.
+ENV LIBCLANG_PATH=/usr/lib/llvm-14/lib
 COPY tools/requirements-*.txt /tmp/requirements/
 RUN uv python install 3.12.12 \
     && uv venv --python 3.12.12 /opt/checks \

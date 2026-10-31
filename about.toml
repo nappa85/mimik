@@ -31,3 +31,12 @@ accepted = ["MIT-0"]
 # relinking duties (4d, 6a). AGPL-3.0 combines with LGPLv3 code. Preserve its notice.
 [hakoniwa]
 accepted = ["LGPL-3.0-only WITH LGPL-3.0-linking-exception"]
+
+# MuPDF through mupdf 0.8.0 and mupdf-sys 0.8.0 (DEP-29): the crates declare the deprecated
+# SPDX id "AGPL-3.0" (MuPDF's COPYING is the GNU AGPL version 3), compatible with Mimik's
+# AGPL-3.0-only. The vendored C libraries' notices are added separately (source upload 3a).
+[mupdf]
+accepted = ["AGPL-3.0"]
+
+[mupdf-sys]
+accepted = ["AGPL-3.0"]

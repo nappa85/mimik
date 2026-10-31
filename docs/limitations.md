@@ -3,6 +3,18 @@
 One entry each: `**ID** [area]`, the limit, and what would close it. When an entry is fixed, delete it; git history keeps it.
 Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted for now and wait for a product step.
 
+## PDF source uploads
+
+- **SRC-TYPE3** [diagnostics] The font diagnostic skips Type3 fonts and does not scan their
+  glyph resources. Substituted fonts used there are not reported; extend the bounded scan
+  with synthetic fixtures if this diagnostic coverage is required.
+- **SRC-DEVICE-DROP** [crate risk] The mupdf crate's `Device` drop calls `fz_close_device`
+  outside `fz_try`. A throw there would unwind over Rust frames. Follow up with upstream
+  exception-safe closing and the worker fuzzing corpus; ordinary render tests do not establish
+  that this cannot throw.
+- **SRC-PNG-END** [bundle compatibility] Bundle import refuses bytes after a PNG's IEND,
+  stricter than before. Bundles with trailing PNG bytes must be regenerated with clean PNGs.
+
 ## Assisted sheet entry
 
 - **L1** [notes] Change notes are unsealed (D-T): the revision actor's session or any database writer can add notes to the live revision, and a malformed latest note hides a real scribble. Notes are help, not evidence; sealing and read-time verification are required before release.

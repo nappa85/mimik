@@ -142,21 +142,31 @@ exactly fds 0, 1 and 2:
   - Tests: a render run of maximum-size PNG and text records on every page, and an inspect
     report of 2,000 maximum-size page records, both accepted; one byte more, refused.
   - **Schemas** (`deny_unknown_fields`; every number finite):
-    - `document`: `pages` (1–2,000), `encrypted` (bool), `needs_password` (bool, refused if
-      true), `mupdf` (version string, at most 32 bytes).
+    - `document`: `pages` (1–2,000), `encrypted` (bool), `mupdf` (version string, at most
+      32 bytes). Password-required inputs produce a terminal error instead.
     - inspect `page`: `n` (1–`pages`, in order), `width` and `height` (1–4,000 points),
       `rotate` (0, 90, 180 or 270), `user_unit` (0.1–10), `transform` (6 numbers, each at most
       10⁵ in magnitude, determinant non-zero, mapping the visible box onto
-      `[0,width]×[0,height]` within 0.5 pt), `tagged` (bool).
+      `[0,width]×[0,height]` within 0.5 pt), `tagged` (catalog `MarkInfo /Marked true`
+      and a `StructTreeRoot`). Reversed box corners are normalized before clipping.
     - render `image`: `n` (a requested page, in order), `length` (1 byte–12 MiB), `width_px`
       and `height_px` (equal to the shared pixel-size function's for that page), `dpi`.
+      PNGs are fully decoded through IEND with no trailing bytes; worker images require
+      RGB, 8-bit samples. Import and worker readers share the validator.
     - render `stats`: `n` (same page), `chars` and `unmapped` (0–10⁶, `unmapped` ≤ `chars`),
-      `image_area` (0–1, a fraction of the page), `fonts_substituted` (at most 64 names of 64
-      bytes).
+      `image_area` (0–1, a fraction of the page), `fonts_substituted` (at most 8 names of 64
+      bytes, so even worst-case JSON escapes fit the 4 KiB frame), `fonts_skipped`
+      (0–10,000 malformed entries), `incomplete` (diagnostic scan budget exhausted or
+      malformed resources), `dropped_lines` (0–10⁶ zero-area/clipped-away lines).
+      Font diagnostics never reject a renderable page. Indirect objects are visited once;
+      traversal includes Forms, tiling patterns and normal annotation/widget appearances.
+      Names use deterministic PDF `#xx` escapes and `Unknown` for an absent name.
     - render `text`: `n` (same page), `length` (at most 8 MiB); its payload is a JSON array of
       at most 20,000 lines, each `text` (1–4,096 bytes of UTF-8) and `box` (finite, inside the
       page, x0 < x1 and y0 < y1).
     - `done`: the operation and the count of each record kind.
+    - terminal `error`: one bounded reason enum, no diagnostic text; replaces `done` on
+      operation failure. Readers return that reason and require EOF after it.
     Each requested page gives exactly `image`, `stats`, `text`, in that order; a run is complete
     only with every requested page in order, then `done` with matching counts; anything else
     fails the run.
@@ -165,7 +175,13 @@ exactly fds 0, 1 and 2:
 - **Stderr:** drained on its own thread with the existing line drain and a 64 KiB cap, so
   neither pipe can fill and deadlock. It is never logged verbatim: a failure is logged and
   shown by a fixed reason code.
-- **Exit:** read only after the worker tree is reaped.
+- **Exit:** read only after the worker tree is reaped. Before framing, statuses 20–25 map
+  respectively to unreadable, unreadable, too large, too many pages, password protected and
+  unsupported (`Error::from_exit_code`). After framing starts, errors also carry a terminal
+  `error` record. The entry reads bounded input bytes and closes `/in` before MuPDF starts.
+  A worker-claimed timeout in a terminal record also maps to unreadable: "took too long"
+  belongs to the parent's deadline alone. A failed terminal error write preserves the
+  original reason's exit status.
 
 The worker writes nothing to the host. This removes the risks of a writable output directory:
 FIFOs and links, files rewritten between validation and storage, filling the disk with many
@@ -227,6 +243,9 @@ files, and per-file versus total quotas.
   - macOS and Windows have no upload (limitation).
 - **Internal protocol.** The hidden subcommand `mimik pdf-worker` is an internal protocol, not
   a privilege boundary, as `assistant-runner` is.
+  JSON allocation bounds are per frame: serde_json may decode an escaped string into its
+  scratch buffer up to the frame's length before a field's own limit refuses it. This is
+  accepted; JSON payload frames are at most 8 MiB (PNG frames have their separate limit).
 - **MuPDF stays in one module:** `src/sources/worker/`, reached only through `mimik pdf-worker`.
   A CI check refuses `mupdf::` anywhere else.
 
