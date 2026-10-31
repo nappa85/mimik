@@ -184,15 +184,17 @@ class Checks:
     def crops_ready(self, page):
         if self.javascript:
             page.wait_for_function(
-                """exhausted => [...document.querySelectorAll('.source-region img')]
+                """({exhausted, contended}) => [...document.querySelectorAll('.source-region img')]
                 .filter(i => i.currentSrc).every(i => {
                   const status = i.closest('figure').querySelector('.region-status')?.textContent.trim();
                   // Under contention (one crop job, SRC-8) retries may run out: the documented
                   // fallback is a settled state too. The injected cases prove retry and fallback.
+                  const fallback = status ===
+                    'Region preview unavailable; inspect the full-page image or open the region link for details.';
                   return (i.complete && i.naturalWidth > 0 && status === 'Region preview loaded.') ||
-                    status === 'Region preview unavailable; inspect the full-page image or open the region link for details.';
+                    (fallback && (contended || new URL(i.src).pathname === exhausted));
                 })""",
-                arg=self.exhausted_crop,
+                arg={"exhausted": self.exhausted_crop, "contended": len(self.pages) > 1},
                 timeout=20000,
             )
             self.recovered_crops.update(
@@ -358,6 +360,7 @@ def crop_retries(checks, page, path, units):
     # Leave the deliberately broken document before demanding normal crop recovery again.
     checks.goto(page, "/admin/materials")
     checks.exhausted_crop = None
+    checks.injected_crops.clear()
 
 
 def overlay(checks, page, path, manifest, units, suggestions):
@@ -655,6 +658,7 @@ def keyboard_boxes(checks, page, path, directory):
             json.loads(field(owner, "polygon").input_value()) == expected,
             "Keyboard starter/entered polygon changed",
         )
+        drawn_matches(page, expected, "Keyboard starter box")
         top = page.locator('[data-corner="0"]')
         require(
             top.evaluate("node => node === document.activeElement"),
@@ -679,6 +683,7 @@ def keyboard_boxes(checks, page, path, directory):
             json.loads(field(owner, "polygon").input_value()) == final,
             "Keyboard corners did not move independently in PDF points",
         )
+        drawn_matches(page, final, "Keyboard-moved box")
         text = f"Synthetic keyboard-only owner text typed={typed}"
         field(owner, "text").fill(text)
         field(owner, "rationale").fill("Synthetic keyboard-only comparison")
@@ -764,6 +769,19 @@ def form_conflicts(checks, page, other, path, directory, source, units):
                 polygon[2][1] - polygon[0][1],
             ]
             require(actual == expected, f"409 rectangle differs from draft: {actual}")
+
+
+def drawn_matches(page, polygon, what):
+    rectangle = page.locator("#drawn-region")
+    require(rectangle.is_visible(), f"{what}: drawn box not visible")
+    actual = [float(rectangle.get_attribute(key)) for key in ("x", "y", "width", "height")]
+    expected = [
+        polygon[0][0],
+        polygon[0][1],
+        polygon[2][0] - polygon[0][0],
+        polygon[2][1] - polygon[0][1],
+    ]
+    require(actual == expected, f"{what}: drawn box {actual} differs from {expected}")
 
 
 def draw_box(page):
@@ -987,6 +1005,24 @@ def scenario(
     )
     for tab in checks.pages:
         checks.clean(tab)
+    if javascript:
+        # After every competing tab is closed, crops still load (no fallback allowed).
+        for tab in checks.pages[1:]:
+            tab.close()
+        del checks.pages[1:]
+        checks.goto(page, path)
+        for index in (1, 2, 3, 4, 5):
+            image = page.locator(f"#unit-{units[index]} .source-region img")
+            image.scroll_into_view_if_needed()
+            page.wait_for_function(
+                "unit => { const f = document.querySelector(`#unit-${unit}`);"
+                " const i = f.querySelector('.source-region img');"
+                " return i.complete && i.naturalWidth > 0 &&"
+                " f.querySelector('.region-status')?.textContent.trim() === 'Region preview loaded.'; }",
+                arg=units[index],
+                timeout=20000,
+            )
+        checks.clean(page)
     if not javascript:
         print(
             f"No-JS busy crop URLs (L-SRC-11; full-page fallback checked): {len(checks.busy_crops)}"
