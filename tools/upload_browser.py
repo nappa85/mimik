@@ -183,9 +183,9 @@ def scenario(browser, binary, directory, viewport, javascript, password):
                 route.continue_()
             page.unroute("**/pages/1/image", delay_image)
             page.wait_for_function(
-                "(() => { const image = document.querySelector('.upload-image');"
+                "() => { const image = document.querySelector('.upload-image');"
                 "return image.naturalWidth > 0 && "
-                "parseFloat(image.style.width) === image.naturalWidth * 2; })()"
+                "parseFloat(image.style.width) === image.naturalWidth * 2; }"
             )
             page.locator('[data-upload-zoom="2"]').first.click()
             clean()
