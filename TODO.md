@@ -30,8 +30,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - **Source import plan** (`docs/source-import-plan.md`, reviewed, SRC-11 to SRC-14): steps 1
   (schema) and 2 (review screen, `mimik import-suggestions`, browser checks) merged. Step 3's plan
   (`docs/source-upload-plan.md`, reviewed) is merged; part 3a (the sandboxed MuPDF worker, its
-  record protocol, the hostile corpus, availability, notices, DEP-29) is merged. Next: 3b
-  (upload route, staging tables and jobs), then 3c (repeated-text exclusion). Follow-ups:
+  record protocol, the hostile corpus, availability, notices, DEP-29) is merged. 3b slice 1 (staging, ledger, jobs) is on
+  branch `source-upload-3b`, unmerged until its live tests run; next slice 2 (upload route,
+  screens), then 3c (repeated-text exclusion). Follow-ups:
   fuzzing of the record parser and the worker's MuPDF entry points (cargo-fuzz in a container);
   a MuPDF security-advisory watch at each release (DEP-29); `cargo audit` after the 3a merges
   (container DNS was down on 2026-10-31; dependencies unchanged since slice 2a's audit apart
@@ -101,6 +102,13 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Pending user questions
 
+- **3b live tests (blocks only the 3b merge):** the two ignored upload live tests
+  (`sources::uploads::tests::live_staged_synthetic_pdf_inspect_render_and_discard`,
+  `live_staging_enospc_cleans_temporary_file_and_releases_reservation`) need the agent-built
+  test binary run on the host, which the permission classifier refused on 2026-11-01. Options:
+  allow that host run after review (recommended), a container with seccomp unconfined (a weaker
+  sandbox, needs an explicit opt-in), or rely on hosted CI. Work continues on the
+  `source-upload-3b` branch meanwhile.
 - Does the correct-password login rejection seen on 2026-10-14 still happen? Diagnose or close.
 - Remaining LAN and multi-device scope to support.
 - M4 default Q5 (drafts over 1 MiB are not echoed back), applied without an answer: confirm or
