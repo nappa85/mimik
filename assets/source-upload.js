@@ -30,11 +30,17 @@ if (progress && ["queued", "running"].includes(progress.dataset.state)) {
 for (const controls of document.querySelectorAll(".upload-zoom")) {
   controls.hidden = false;
   const image = controls.nextElementSibling.querySelector("img");
+  let zoom = "fit";
+  const applyZoom = () => {
+    image.style.maxWidth = zoom === "fit" ? "100%" : "none";
+    if (zoom === "fit") image.style.width = "100%";
+    else if (image.naturalWidth > 0) image.style.width = `${image.naturalWidth * Number(zoom)}px`;
+  };
+  image.addEventListener("load", applyZoom);
   for (const button of controls.querySelectorAll("button")) {
     button.addEventListener("click", () => {
-      const zoom = button.dataset.uploadZoom;
-      image.style.maxWidth = zoom === "fit" ? "100%" : "none";
-      image.style.width = zoom === "fit" ? "100%" : `${image.naturalWidth * Number(zoom)}px`;
+      zoom = button.dataset.uploadZoom;
+      applyZoom();
       for (const other of controls.querySelectorAll("button")) {
         other.setAttribute("aria-pressed", String(other === button));
       }

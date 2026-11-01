@@ -1,8 +1,9 @@
 """Offline upload checks in mimik-browser (dev-endpoint binary required).
 
-  python /checks/upload_browser.py /app/mimik
+  python /checks/upload_browser.py /app/mimik-dev
 No user namespaces or PDF runtime is needed: --upload-dev-worker-ms selects the
 compile-time development-only worker, which accepts exactly the shared synthetic fixture.
+Required CI browser-smoke step; the image includes this script and that fixture.
 """
 
 import argparse
@@ -60,10 +61,41 @@ def scenario(browser, binary, directory, viewport, javascript, password):
         clean()
 
     def submit(kind):
-        with page.expect_response(lambda r: r.request.method == "POST") as response:
-            with page.expect_navigation(wait_until="load"):
-                page.locator(f'form[data-form="{kind}"] button').click()
+        from playwright.sync_api import TimeoutError as PlaywrightTimeout
+
+        form = page.locator(f'form[data-form="{kind}"]')
+        target = ORIGIN + form.get_attribute("action")
+        posted = []
+
+        def is_post(response):
+            matches = response.url == target and response.request.method == "POST"
+            if matches:
+                posted.append(response)
+            return matches
+
+        def is_redirect_get(response):
+            previous = response.request.redirected_from
+            return (
+                response.request.method == "GET"
+                and previous is not None
+                and previous.method == "POST"
+                and previous.url == target
+            )
+
+        with page.expect_response(is_post) as response:
+            with page.expect_response(is_redirect_get) as following:
+                for attempt in range(10):
+                    try:
+                        form.locator("button").click(timeout=1000)
+                        break
+                    except PlaywrightTimeout:
+                        if posted:
+                            break
+                        require(attempt < 9, f"Upload {kind} kept refreshing before submit")
         require(response.value.status == 303, f"Upload {kind} failed: {response.value.status}")
+        expected = ORIGIN + response.value.headers["location"]
+        require(following.value.url == expected, f"Upload {kind} redirected unexpectedly")
+        page.wait_for_url(expected, wait_until="load")
         clean()
 
     try:
@@ -80,7 +112,7 @@ def scenario(browser, binary, directory, viewport, javascript, password):
             data=(
                 '--bad\r\nContent-Disposition: form-data; name="system"\r\n\r\nmork-borg\r\n'
                 f'--bad\r\nContent-Disposition: form-data; name="csrf"\r\n\r\n{token}\r\n'
-                '--bad--\r\n'
+                "--bad--\r\n"
             ),
         )
         require(refused.status == 422, "Out-of-order upload accepted")
@@ -125,6 +157,36 @@ def scenario(browser, binary, directory, viewport, javascript, password):
         )
         clean()
         if javascript:
+            # A numeric zoom chosen before the PNG arrives must survive its load.
+            delayed = []
+
+            def delay_image(route):
+                delayed.append(route)
+
+            page.route("**/pages/1/image", delay_image)
+            page.goto(ORIGIN + path, wait_until="domcontentloaded")
+            first_image = page.locator(".upload-image").first
+            first_image.scroll_into_view_if_needed()
+            deadline = time.monotonic() + 10
+            while not delayed and time.monotonic() < deadline:
+                page.wait_for_timeout(50)
+            require(delayed, "Delayed image route was not requested")
+            page.locator('.upload-zoom [data-upload-zoom="2"]').first.click()
+            require(
+                first_image.evaluate("image => image.naturalWidth") == 0, "Image was not delayed"
+            )
+            require(
+                first_image.evaluate('image => image.style.width !== "0px"'),
+                "Zoom collapsed the loading image",
+            )
+            for route in delayed:
+                route.continue_()
+            page.unroute("**/pages/1/image", delay_image)
+            page.wait_for_function(
+                "(() => { const image = document.querySelector('.upload-image');"
+                "return image.naturalWidth > 0 && "
+                "parseFloat(image.style.width) === image.naturalWidth * 2; })()"
+            )
             page.locator('[data-upload-zoom="2"]').first.click()
             clean()
         require("BUYER-MARKER-NAME" not in page.content(), "Filename leaked into page")

@@ -7,8 +7,63 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use futures_util::stream;
 
+async fn body_text(response: axum::response::Response) -> String {
+    String::from_utf8(
+        to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap()
+}
+
 struct Refuse;
+struct Unavailable;
+impl Worker for Unavailable {
+    fn availability(&self) -> worker::Availability {
+        worker::Availability::Unavailable {
+            reason: "Fixed probe reason".into(),
+            how_to_fix: "Fixed probe remedy".into(),
+        }
+    }
+    fn inspect(
+        &self,
+        _: &std::path::Path,
+        _: &worker::Cancel,
+    ) -> Result<worker::Inspection, worker::Reason> {
+        unreachable!()
+    }
+    fn render(
+        &self,
+        _: &std::path::Path,
+        _: &[worker::Page],
+        _: &worker::Cancel,
+        _: &mut (dyn FnMut(worker::RenderedPage) -> Result<(), worker::Error> + Send),
+    ) -> Result<(), worker::Reason> {
+        unreachable!()
+    }
+}
+#[tokio::test]
+async fn upload_route_unavailable_polls_no_body_and_shows_probe_remedy() {
+    let (dir, _, app, id, m) = setup_worker(Arc::new(Unavailable)).await;
+    let polls = Arc::new(AtomicUsize::new(0));
+    let seen = polls.clone();
+    let body = Body::from_stream(stream::poll_fn(move |_| {
+        seen.fetch_add(1, Ordering::Relaxed);
+        std::task::Poll::Ready(None::<Result<Bytes, std::io::Error>>)
+    }));
+    let response = app.oneshot(post_body(id, body)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(polls.load(Ordering::Relaxed), 0);
+    let text = body_text(response).await;
+    assert!(text.contains("Fixed probe reason"));
+    assert!(text.contains("Fixed probe remedy"));
+    clean(&m, &dir).await;
+}
 impl Worker for Refuse {
+    fn availability(&self) -> worker::Availability {
+        worker::Availability::Available
+    }
     fn inspect(
         &self,
         _: &std::path::Path,
@@ -268,6 +323,15 @@ async fn upload_route_filename_not_stored_and_actions_admitted() {
         .to_str()
         .unwrap()
         .to_owned();
+    let conflict = app
+        .clone()
+        .oneshot(post_body(id, Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    let text = body_text(conflict).await;
+    assert!(text.contains("an upload is already staged; open or discard it"));
+    assert!(text.contains(&format!("href=\"{path}\"")));
     let player = player_session(&store).await;
     for action in ["set", "render", "inspect", "cancel", "discard"] {
         for case in ["csrf", "missing-csrf", "host", "origin", "non-owner"] {
@@ -324,6 +388,7 @@ async fn upload_route_filename_not_stored_and_actions_admitted() {
         })
         .await
         .unwrap();
+    assert_staging_names_omit_filename(&dir);
     let mut req = post_body(id, Body::from(format!("csrf={token}")));
     *req.uri_mut() = format!("{path}/discard").parse().unwrap();
     req.headers_mut().insert(
@@ -335,6 +400,29 @@ async fn upload_route_filename_not_stored_and_actions_admitted() {
         StatusCode::SEE_OTHER
     );
     clean(&m, &dir).await;
+}
+
+fn assert_staging_names_omit_filename(dir: &TestDirectory) {
+    for entry in std::fs::read_dir(dir.path().join("staging")).unwrap() {
+        let entry = entry.unwrap();
+        assert!(
+            !entry
+                .file_name()
+                .to_string_lossy()
+                .contains("BUYER-MARKER-NAME")
+        );
+        if entry.file_type().unwrap().is_dir() {
+            for file in std::fs::read_dir(entry.path()).unwrap() {
+                assert!(
+                    !file
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .contains("BUYER-MARKER-NAME")
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -402,6 +490,9 @@ async fn upload_route_invalid_csrf_never_polls_file_frame() {
 
 struct Waiting;
 impl Worker for Waiting {
+    fn availability(&self) -> worker::Availability {
+        worker::Availability::Available
+    }
     fn inspect(
         &self,
         _: &std::path::Path,
@@ -479,4 +570,186 @@ async fn upload_route_server_responds_while_job_runs() {
 }
 async fn blocking_test<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     tokio::task::spawn_blocking(f).await.unwrap()
+}
+
+#[tokio::test]
+async fn upload_read_routes_require_owner_and_known_upload() {
+    let (_dir, store, app, id, _manager) = setup().await;
+    let player = player_session(&store).await;
+    let base = "/admin/materials/uploads";
+    let unknown = format!("{base}/11111111111111111111111111111111");
+    for path in [
+        base.to_owned(),
+        unknown.clone(),
+        format!("{unknown}/progress"),
+        format!("{unknown}/pages/1/image"),
+    ] {
+        for (session, expected) in [
+            (None, StatusCode::UNAUTHORIZED),
+            (Some(player), StatusCode::FORBIDDEN),
+        ] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(request(&path, session))
+                    .await
+                    .unwrap()
+                    .status(),
+                expected,
+                "{path}"
+            );
+        }
+        // Material reads intentionally use the same refusal for missing evidence.
+        let expected = if path == base {
+            StatusCode::OK
+        } else {
+            StatusCode::FORBIDDEN
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(request(&path, Some(id)))
+                .await
+                .unwrap()
+                .status(),
+            expected,
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn upload_read_routes_redirect_stored_images_and_refuse_symlinks() {
+    let (dir, store, app, id, _) = setup().await;
+    let path = stage_synthetic_upload(&app, id).await;
+    let upload_id = path.rsplit('/').next().unwrap().to_owned();
+    let index = app
+        .clone()
+        .oneshot(request("/admin/materials/uploads", Some(id)))
+        .await
+        .unwrap();
+    assert_eq!(index.status(), StatusCode::SEE_OTHER);
+    assert_eq!(index.headers()[header::LOCATION], path);
+    for url in [path.clone(), format!("{path}/progress")] {
+        assert_eq!(
+            app.clone()
+                .oneshot(request(&url, Some(id)))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+    let image_url = format!("{path}/pages/1/image");
+    assert_eq!(
+        app.clone()
+            .oneshot(request(&image_url, Some(id)))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    // Install a stored-page fixture directly; worker rendering is covered separately.
+    let png_path = dir
+        .path()
+        .join("staging")
+        .join(&upload_id)
+        .join("page-1.png");
+    std::fs::write(&png_path, b"synthetic PNG bytes").unwrap();
+    install_stored_page(&store, upload_id).await;
+    let response = app
+        .clone()
+        .oneshot(request(&image_url, Some(id)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    for (name, value) in [
+        (header::CONTENT_TYPE, "image/png"),
+        (header::CACHE_CONTROL, "no-store"),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+    ] {
+        assert_eq!(response.headers()[name], value);
+    }
+    assert_eq!(body_text(response).await, "synthetic PNG bytes");
+    let player = player_session(&store).await;
+    for url in [
+        "/admin/materials/uploads".to_owned(),
+        path.clone(),
+        format!("{path}/progress"),
+        image_url.clone(),
+    ] {
+        for (session, expected) in [
+            (None, StatusCode::UNAUTHORIZED),
+            (Some(player), StatusCode::FORBIDDEN),
+        ] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(request(&url, session))
+                    .await
+                    .unwrap()
+                    .status(),
+                expected
+            );
+        }
+    }
+    #[cfg(unix)]
+    {
+        let target = dir.path().join("private-target");
+        std::fs::write(&target, "DO-NOT-SERVE-TARGET").unwrap();
+        std::fs::remove_file(&png_path).unwrap();
+        std::os::unix::fs::symlink(&target, &png_path).unwrap();
+        let response = app.oneshot(request(&image_url, Some(id))).await.unwrap();
+        assert!(!response.status().is_success());
+        assert!(!body_text(response).await.contains("DO-NOT-SERVE-TARGET"));
+    }
+}
+
+async fn stage_synthetic_upload(app: &Router, id: Id) -> String {
+    let body = multipart(
+        &[
+            ("csrf", &"a".repeat(64)),
+            ("system", "mork-borg"),
+            ("edition", "Synthetic"),
+            ("language", "en"),
+            ("file", "%PDF-1.7\nsynthetic"),
+        ],
+        true,
+    );
+    let response = app
+        .clone()
+        .oneshot(post_body(id, Body::from(body)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    response.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+async fn install_stored_page(store: &Store, id: String) {
+    store
+        .run(move |db| {
+            let stats = serde_json::json!({
+                "n": 1, "chars": 0, "unmapped": 0, "image_area": 0.0,
+                "fonts_substituted": [], "fonts_skipped": 0,
+                "incomplete": false, "dropped_lines": 0,
+            });
+            db.execute(
+                "INSERT INTO source_upload_pages
+                 (upload_id, pdf_page, rendered_revision, png_sha256, png_bytes,
+                  width_px, height_px, dpi, width_points, height_points, transform,
+                  stats, settings, text_sha256, text_bytes, renderer_crate_version, mupdf_version)
+                 VALUES (?1,1,1,?2,19,1,1,150,1,1,'[1,0,0,1,0,0]',?3,?4,?2,1,?5,?6)",
+                rusqlite::params![
+                    id,
+                    "a".repeat(64),
+                    stats.to_string(),
+                    serde_json::to_string(&worker::RenderSettings::default()).unwrap(),
+                    worker::CRATE_VERSION,
+                    worker::MUPDF_VERSION,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
 }

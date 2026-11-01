@@ -87,11 +87,20 @@ show that upload is unavailable. There is no unconfined fallback in production.
 `POST /admin/materials/uploads` accepts multipart fields in exactly this order: `csrf`
 (256 bytes), `system` (100 bytes), `edition` (400 bytes, at most 100 Unicode scalars),
 `language` (30 bytes), `file` (128 MiB). Unknown, duplicate, out-of-order and post-file
-fields are refused. Owner, Host/Origin, declared length and the staging reservation/slot are
+fields are refused. Owner, Host/Origin, declared length, worker availability and the staging reservation/slot are
 checked before the body is read. CSRF admission precedes all PDF writes; metadata uses the
 import identity rules. The counting stream limits the complete request, including epilogue,
-to 128 MiB + 64 KiB. The parser receives at most 4 KiB before CSRF admission. At most one
-transport frame is held in memory until admission (SRC-UPLOAD-POLL in `limitations.md`). Uploads have 30-second byte-idle and 15-minute total deadlines.
+to 128 MiB + 64 KiB. The server is HTTP/1 only. Before CSRF admission the parser receives at
+most 4 KiB; the process holds at most the pending frame plus hyper's channel slot and read
+buffer, a small constant multiple of hyper's approximately 408 KiB maximum buffer
+(SRC-UPLOAD-POLL in `limitations.md`). No file byte is spooled before admission; only one
+upload streams at a time. After admission explicit Pending boundaries every 64 KiB bound
+parser read-ahead to two 64 KiB batches plus delimiter lookbehind, apart from the pending
+transport frame. Uploads have 30-second input-wait idle and 15-minute total deadlines;
+metadata validation and file writes do not consume the client-idle budget.
+An unavailable worker returns 503 with the probe's fixed reason and remedy before body
+polling. A second upload returns 409: an active stream is in progress, or a retained upload
+is already staged with a link to open or discard it.
 An asynchronous-safe RAII wrapper schedules partial-file deletion and slot release on a
 blocking thread on disconnect, refusal or future cancellation. Hashing is incremental;
 publication rechecks Owner/CSRF and the PDF's size, hash and first-1,024-byte magic.
@@ -116,7 +125,10 @@ are not approved evidence.
 worker with cancellable per-page delay. It accepts exactly the fixed three-page synthetic
 PDF in `sources::uploads::development::PDF`, returns deterministic page facts/images, and
 never parses uploaded PDFs. Default/release builds contain neither this worker nor its
-flag. `tools/upload_browser.py` runs the 1280/390 px JavaScript/no-JavaScript scenarios;
+flag. The required CI browser-smoke step runs the standalone `tools/upload_browser.py`
+against the `dev-endpoint` binary artifact in `mimik-browser`; the image includes the script
+and only its shared synthetic PDF fixture. It covers 1280/390 px JavaScript/no-JavaScript
+scenarios, including numeric zoom before image load;
 `tools/smoke_release.py` checks that release artifacts lack and refuse the flag.
 
 ## Internal upload staging (Linux)

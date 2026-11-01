@@ -20,11 +20,16 @@ use tower_sessions::Session;
 
 #[derive(Clone)]
 pub(super) struct TrustedDraft;
+/// Fixed worker-probe diagnostics, rendered through the escaped upload template.
+#[derive(Clone)]
+pub(super) struct WorkerUnavailable;
 pub(super) fn trusted(response: &axum::response::Response) -> bool {
-    matches!(
+    (matches!(
         response.status(),
         StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY
-    ) && response.extensions().get::<TrustedDraft>().is_some()
+    ) && response.extensions().get::<TrustedDraft>().is_some())
+        || (response.status() == StatusCode::SERVICE_UNAVAILABLE
+            && response.extensions().get::<WorkerUnavailable>().is_some())
 }
 pub(super) fn routes() -> Router<AuthState> {
     let router = Router::new();

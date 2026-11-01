@@ -40,7 +40,7 @@ pub(super) fn routes() -> Router<AuthState> {
             "/admin/materials/uploads",
             get(index)
                 .post(upload)
-                .layer(DefaultBodyLimit::max(128 * 1024 * 1024 + 65536)),
+                .layer(DefaultBodyLimit::max(usize::try_from(BODY_LIMIT).unwrap())),
         )
         .route("/admin/materials/uploads/{id}", get(page))
         .route("/admin/materials/uploads/{id}/progress", get(progress))
@@ -115,7 +115,7 @@ struct Counting {
     status: Arc<AtomicU16>,
     end: tokio::time::Instant,
     idle: Duration,
-    last_byte: tokio::time::Instant,
+    since_yield: usize,
 }
 impl Counting {
     async fn next(&mut self) -> Option<Result<Bytes, std::io::Error>> {
@@ -130,16 +130,20 @@ impl Counting {
     }
     async fn read(&mut self) -> Result<Option<Bytes>, StatusCode> {
         // Multer drains an always-ready stream before examining its buffer.
-        // Give it a Pending boundary between pre-admission bytes, otherwise even
-        // one-byte items can read ahead through the next transport frame.
-        if !self.admitted.load(Ordering::Acquire) {
+        // Explicit Pending boundaries: one byte before admission, 64 KiB after.
+        // Multer can retain two batches (next_field then chunk) plus delimiter
+        // lookbehind; this does not depend on Tokio's cooperative task budget.
+        if !self.admitted.load(Ordering::Acquire) || self.since_yield >= 65536 {
+            self.since_yield = 0;
             tokio::task::yield_now().await;
         }
         if tokio::time::Instant::now() >= self.end {
             return Err(StatusCode::REQUEST_TIMEOUT);
         }
+        // Only time waiting for input is client idle. Server work between calls
+        // (metadata validation and blocking file writes) has its own total cap.
+        let deadline = self.end.min(tokio::time::Instant::now() + self.idle);
         while self.pending.is_empty() {
-            let deadline = self.end.min(self.last_byte + self.idle);
             if tokio::time::Instant::now() >= deadline {
                 return Err(StatusCode::REQUEST_TIMEOUT);
             }
@@ -149,7 +153,6 @@ impl Counting {
                         tokio::task::yield_now().await;
                         continue;
                     }
-                    self.last_byte = tokio::time::Instant::now();
                     self.received = self.received.saturating_add(bytes.len() as u64);
                     if self.received > BODY_LIMIT {
                         return Err(StatusCode::PAYLOAD_TOO_LARGE);
@@ -169,12 +172,13 @@ impl Counting {
         // Before admission, give the parser only the bytes it needs, so it cannot
         // read ahead into metadata/file while finding the first field boundary.
         let n = if admitted {
-            self.pending.len().min(16384)
+            self.pending.len().min(16384).min(65536 - self.since_yield)
         } else {
             self.pending.len().min(1)
         };
         let n = n.min(usize::try_from(limit - self.count).unwrap_or(usize::MAX));
         self.count += n as u64;
+        self.since_yield += n;
         Ok(Some(self.pending.split_to(n)))
     }
 }
@@ -229,11 +233,34 @@ async fn upload(State(state): State<AuthState>, session: Session, request: Reque
         .and_then(|v| multer::parse_boundary(v).ok())
         .ok_or(StatusCode::UNSUPPORTED_MEDIA_TYPE)?;
     let m = manager(&state)?;
+    let probe = m.clone();
+    if let worker::Availability::Unavailable { reason, how_to_fix } =
+        blocking(move || Ok(probe.availability())).await?
+    {
+        let mut response = materials::html(&UploadForm {
+            csrf: String::new(),
+            reason,
+            remedy: how_to_fix,
+        })?;
+        *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+        response
+            .extensions_mut()
+            .insert(materials::WorkerUnavailable);
+        return Ok(response);
+    }
     let reserve = m.clone();
     let phase = match blocking(move || reserve.begin_upload().map(|p| Phase(Some(p)))).await {
         Ok(phase) => phase,
         Err(StatusCode::CONFLICT) => {
-            let mut response = (StatusCode::CONFLICT, "an upload is in progress").into_response();
+            let current = m.clone();
+            let owner = auth.clone();
+            let retained = blocking(move || current.current_for_owner(&owner)).await?;
+            let mut response = if let Some(id) = retained {
+                materials::html(&StagedConflict { id })?
+            } else {
+                (StatusCode::CONFLICT, "an upload is in progress").into_response()
+            };
+            *response.status_mut() = StatusCode::CONFLICT;
             response.extensions_mut().insert(materials::TrustedDraft);
             return Ok(response);
         }
@@ -265,7 +292,7 @@ async fn receive(
         status: status.clone(),
         end: tokio::time::Instant::now() + TOTAL,
         idle: IDLE,
-        last_byte: tokio::time::Instant::now(),
+        since_yield: 0,
     }));
     let stream = futures_util::stream::unfold(counting.clone(), |c| async move {
         let next = c.lock().await.next().await;
@@ -354,6 +381,14 @@ async fn receive(
     Ok(Redirect::to(&format!("/admin/materials/uploads/{id}")).into_response())
 }
 
+#[derive(Template)]
+#[template(
+    source = "<p>an upload is already staged; open or discard it: <a href=\"/admin/materials/uploads/{{ id }}\">Open staged upload</a></p>",
+    ext = "html"
+)]
+struct StagedConflict {
+    id: String,
+}
 #[derive(Template)]
 #[template(path = "upload_form.html")]
 struct UploadForm {
@@ -516,7 +551,43 @@ mod tests {
             status: Arc::new(AtomicU16::new(0)),
             end: tokio::time::Instant::now() + Duration::from_millis(50),
             idle: Duration::from_millis(10),
-            last_byte: tokio::time::Instant::now(),
+            since_yield: 0,
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn upload_idle_excludes_server_work() {
+        let mut c = counter(Body::from("ready"), true);
+        // Simulate time spent validating metadata or writing a previous chunk.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(c.read().await.unwrap().unwrap(), "ready");
+    }
+    #[tokio::test]
+    async fn upload_parser_read_ahead_is_bounded_after_admission() {
+        let supplied = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = supplied.clone();
+        let prefix = b"--test\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\n";
+        let body = Body::from_stream(
+            futures_util::stream::once(async {
+                Ok::<_, std::io::Error>(Bytes::from_static(prefix))
+            })
+            .chain(futures_util::stream::iter((0..1024).map(move |_| {
+                seen.fetch_add(16384, Ordering::Relaxed);
+                Ok::<_, std::io::Error>(Bytes::from(vec![b'x'; 16384]))
+            }))),
+        );
+        let mut c = counter(body, true);
+        c.end = tokio::time::Instant::now() + Duration::from_secs(60);
+        let stream =
+            futures_util::stream::unfold(c, |mut c| async move { c.next().await.map(|b| (b, c)) });
+        let mut parser = multer::Multipart::new(stream, "test");
+        let mut field = parser.next_field().await.unwrap().unwrap();
+        assert!(supplied.load(Ordering::Relaxed) <= 65536);
+        let mut consumed = 0;
+        for _ in 0..16 {
+            let chunk = field.chunk().await.unwrap().unwrap();
+            assert!(chunk.len() <= 2 * 65536 + 8, "{}", chunk.len());
+            consumed += chunk.len();
+            assert!(supplied.load(Ordering::Relaxed) - consumed <= 2 * 65536 + 8);
         }
     }
     #[tokio::test(start_paused = true)]

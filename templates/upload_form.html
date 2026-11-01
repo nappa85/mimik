@@ -1,7 +1,7 @@
 {% extends "material_base.html" %}
 {% block content %}
 <h1>Upload a PDF</h1>
-<p>One upload at a time. Up to 128 MiB; select at most 64 pages. Upload stages pages only; creating a source arrives with route A.</p>
+<p>One upload at a time. Up to 128 MiB; select at most 64 pages. Upload stages pages only; source creation is not available yet.</p>
 {% if !reason.is_empty() %}<section class="panel"><h2>Upload unavailable</h2><p>{{ reason }}</p><p>{{ remedy }}</p></section>{% else %}
 <form method="post" action="/admin/materials/uploads" enctype="multipart/form-data" data-form="upload">
 <input type="hidden" name="csrf" value="{{ csrf }}">

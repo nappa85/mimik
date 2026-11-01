@@ -9,7 +9,7 @@ bounds, validates and stores it.
 
 **Where step 3 ends.** With a **staged upload** that follows a versioned contract (below). Route
 A (step 4) turns it into the first source. Until then:
-- the reading routes are shown disabled, with "arrives with route A";
+- the reading routes are shown disabled, with plain wording that source creation is not available yet;
 - `docs/release-scope.md` says that upload stages pages but does not yet make a source.
 
 Umbrella: `docs/source-import-plan.md` (step 3). Three parts, each its own reviewed change:
@@ -354,8 +354,8 @@ MuPDF entry points) is a TODO follow-up after 3a, not only a limitation.
 
 *Body stream:* the body is wrapped in a counting stream that enforces the whole-request limit
 (128 MiB + 64 KiB) whether or not `Content-Length` is sent, and passes at most 4 KiB (multipart
-headers and the `csrf` field) to the parser before the CSRF admission; at most one transport
-frame is buffered (SRC-UPLOAD-POLL). Instrumented-body tests: a
+headers and the `csrf` field) to the parser before the CSRF admission; HTTP/1 transport
+buffering is bounded as described by SRC-UPLOAD-POLL. Instrumented-body tests: a
 request refused for authentication, Host or Origin polls no byte; a refused CSRF token
 spools no file byte; a disconnect mid-file, and the handler's future dropped mid-file, each release the slot and
 delete the partial file.
@@ -485,7 +485,7 @@ The state machine is transactional:
    - Discard.
 3. **Rendered pages:** shown as on the review screen, with zoom and pan.
 
-**Browser checks** extend `tools/review_browser.py`:
+**Browser checks** use their own script, `tools/upload_browser.py`, required in CI:
 - upload, inspect, render, cancel, a restart mid-job and discard;
 - a refused field order;
 - 1280 and 390 px, with and without JavaScript;

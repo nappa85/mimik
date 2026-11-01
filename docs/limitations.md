@@ -5,10 +5,12 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 
 ## PDF source uploads
 
-- **SRC-UPLOAD-POLL** [HTTP admission] The parser receives at most 4 KiB before CSRF admission,
-  but the body yields whole transport frames, so one frame (bounded by hyper's read buffer, about
-  408 KiB on HTTP/1 and 16 KiB per HTTP/2 frame) may sit in memory before admission. No file byte
-  is spooled before admission, and only one upload streams at a time.
+- **SRC-UPLOAD-POLL** [HTTP admission] The server is HTTP/1 only. Before CSRF admission the
+  parser receives at most 4 KiB; the process holds at most the pending frame plus hyper's
+  channel slot and read buffer (a small constant multiple of hyper's approximately 408 KiB
+  maximum buffer). No file byte is spooled before admission; only one upload streams at a time.
+  After admission explicit Pending boundaries every 64 KiB bound parser read-ahead to two
+  64 KiB batches plus multipart delimiter lookbehind, apart from the pending transport frame.
 
 - **SRC-STAGING-AUDIT** [staging] Staging writes are not recorded in the permanent source review-event log; add upload events if a staging history is required.
 - **SRC-FUZZ** [testing, TODO follow-up] No cargo-fuzz runs yet. Add containerized fuzzing
@@ -20,6 +22,7 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
   fonts. Only owner-source comparison can establish visual fidelity.
 - **SRC-PLATFORMS** [upload] macOS and Windows have no PDF upload worker; Linux confinement
   must pass the real worker probe, with no unconfined fallback.
+- **BUILD-PLATFORMS** [CI] Non-Linux builds are not compiled in CI.
 - **SRC-TYPE3** [diagnostics] The font diagnostic skips Type3 fonts and does not scan their
   glyph resources. Substituted fonts used there are not reported; extend the bounded scan
   with synthetic fixtures if this diagnostic coverage is required.
