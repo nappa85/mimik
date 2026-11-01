@@ -4,21 +4,36 @@ Goal: the Owner creates an unreviewed reading from a complete `mimik-staged-v1` 
 then reviews it against the original renders in the existing material screen.
 Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
 
-**Before execution:** obtain independent Sol and fresh Opus plan reviews through the
-coordinator's `external-agents` setup. Resolve Blocking/Major findings. The pinned-crate
-API check and local reference check below are prerequisites, not established capabilities.
+## 4a0. Small preflight; freeze before route-A measurements
+
+- Confirm vendored `mupdf =0.8.0` / `mupdf-sys` (MuPDF 1.27.2) API fit with a synthetic
+  fixture and settle the wrapper decision. Safe blocks/lines/chars expose quads, origins,
+  size, argb, flags, `TextChar::font()` and line `wmode`; quads are not a wrapper gap.
+  Gaps: line `dir`, per-character `bidi`, nested structure traversal and association-linked
+  table span attributes. `blocks()` is top-level only; ban `structured()` because it maps
+  Struct blocks to `Other` and silently drops codes that are not valid Rust `char`s.
+- Check only aggregate catalog `tagged` status for the two local bar PDFs; this does not
+  establish usable associations. Inform the owner's scope decision: recommend deferring tags
+  if both are untagged, otherwise retain a separate tag slice and assess its cost. Step 4
+  names tags, so deferral requires the owner's amendment to the umbrella.
+- Inspect the actual local IT reference/scorer fields, normalization and token checks;
+  settle the EN reference owner/format before scoring. Keep manual content local.
+- Measure aggregate serialized sizes on bounded synthetic/density fixtures, including a
+  64-page selection. Compare fixed-precision columnar arrays with verbose glyph records;
+  recommend columnar arrays with shared font/node tables and integer coordinates in 1/1024
+  displayed pt. Freeze the measured encoding before `mimik-reading-v1`: parallel-array lengths,
+  rounding, overflow refusal, positional error and containment after conversion. Revise precision
+  before freezing if geometry tests fail. Count ceilings do not guarantee the byte cap fits.
+- Freeze extraction flags, `derive_units_v1` semantics/version, probe thresholds, bar input
+  hashes and scorer before any route-A measurement. Existing render statistics in
+  `docs/results.md` have been seen during this revision, before choosing the final thresholds;
+  exposure before the original proposal is not established. The thresholds below are proposals,
+  not a blind preregistration; freeze them in 4a0 before any route-A measurement.
 
 ## 4a. Worker reading and diagnostics
 
-- Inspect the installed `mupdf =0.8.0` Rust wrappers, `mupdf-sys =0.8.0` bindings/shim and
-  bundled MuPDF 1.27.2 headers before implementing. Check block-kind discrimination, line
-  direction/writing mode, character Unicode/flags/quads/font/size, structure collection flags,
-  structure traversal, role mapping and association of structure nodes to text. A catalog
-  `tagged` boolean is not a structure extraction. Record exact available APIs in the source
-  reference; prove them with one tagged table/list fixture. Do not assume C capabilities have
-  safe Rust wrappers. Any wrapper gap goes through the owner decision below before work proceeds.
 - Reuse DEP-29's maintained renderer and existing bounded transport/geometry/PNG validators;
-  no second PDF parser. Keep PDF resource/font traversal, tag/MCID resolution, MuPDF objects,
+  no second PDF parser. Keep PDF resource/font traversal, structure diagnostics, MuPDF objects,
   extraction flags, coordinate correction and glyph decoding entirely in `sources/worker/`.
   The server validates inert records and derives units; it never opens an upload with `lopdf`
   or calls MuPDF. `import-source` retains its separate prepared-bundle checks.
@@ -31,16 +46,19 @@ API check and local reference check below are prerequisites, not established cap
   block/line bounds, line direction and writing mode, Unicode scalar or explicit undecodable
   marker, original CID/GID diagnostic status, quad/bounds, font reference, size and available
   character flags. Keep image rectangles for coverage, not embedded image bytes. Transform
-  all geometry once to the staged displayed space. Preserve ligatures/whitespace explicitly;
-  no spelling fixes, dehyphenation, digit/sign normalization or fabricated Unicode from CIDs.
-- Preserve page-relevant tag nodes, parent/ordered-child links, standard and original role,
-  and resolved content references when tagged; retain text not attached to tags too. Bound
-  document-tree traversal even for one selected page. Mark absent, usable, malformed or
-  incomplete structure distinctly. Never silently discard text or trust a tag's claimed order
-  as approval. Unresolvable/broken tags use the flagged block fallback below; extraction-limit
-  exhaustion fails the reading rather than publishing a partial raw reading.
-  Convert malformed PDF tag cycles/references into bounded status diagnostics in the worker;
-  never serialize a cyclic or dangling graph for the parent to repair.
+  all geometry once to the staged displayed space. Record origin, argb, `FILLED`, `STROKED`,
+  `CLIPPED`, `SYNTHETIC` and CID/GID status per glyph, including undecodable glyphs.
+  Initial 4a uses `tag_status: not_collected` even when the catalog says tagged.
+  Preserve ligatures/whitespace explicitly; no spelling fixes, dehyphenation, digit/sign
+  normalization or fabricated Unicode from CIDs.
+- Pin 4a's exact flags to `PRESERVE_LIGATURES | PRESERVE_WHITESPACE | PRESERVE_IMAGES |
+  USE_CID_FOR_UNKNOWN_UNICODE`. `USE_GID_FOR_UNKNOWN_UNICODE` is off: CID or GID may serve as
+  diagnostics, never both, and neither is emitted as text. `CLIP` is off to retain clipped
+  glyphs diagnostically; verify `CLIPPED` observability with a clipping fixture in 4a0 and
+  resolve any wrapper gap. `INHIBIT_SPACES` is off: inferred spaces are allowed and flagged
+  synthetic. `DEHYPHENATE`, `SEGMENT`, `TABLE_HUNT`, `COLLECT_STRUCTURE` and all other flags
+  are off. Preserve raw ligature scalars; search may expand them using the existing normalizer,
+  but scoring uses only frozen IT scorer normalization. Search never changes raw/bar text.
 - Extend 3a framing with `reading_page` (page number, schema version, length) and a matching
   `done` count/operation. Per page: exactly `page`, `stats`, `reading_page`, in request order;
   then `done`, EOF and exit zero. Unknown versions/fields, duplicates, missing or unsolicited
@@ -51,9 +69,13 @@ API check and local reference check below are prerequisites, not established cap
 - Use closed, flat bounded arrays, not recursive deserialization: ≤40,000 total block/line/tag
   nodes, ≤20,000 lines, ≤1,000,000 glyphs and ≤20,000 image rectangles per page; ≤256 font
   entries (name ≤64 UTF-8 bytes); tag role ≤100 bytes; depth ≤32; references are page-local
-  indices, each glyph has exactly one line/block owner. Walk ≤40,000 structure/resource
-  objects per run, with visited indirect identities and depth bound. Reject cycles, duplicate
-  identities, dangling/out-of-page references, impossible parentage and inconsistent text/counts.
+  indices into one node index space shared by block/line/tag kinds; each glyph has exactly one
+  line/block owner. Resource/diagnostic walks visit ≤40,000 distinct objects per run with a
+  depth bound. Repeated shared resource references and legitimate cross-page subtrees are
+  not corruption: distinguish visited identities from the active ancestor stack. Reject cycles,
+  dangling references, conflicting ownership, impossible parentage and inconsistent counts in
+  serialized page-local graphs. Omit external-page content with explicit page scope, never a
+  dangling reference.
   The 8 MiB byte cap also applies when count caps allow more. Reuse bounded collection/string
   visitors and limited serialization; all floats finite, sizes positive, directions valid,
   boxes ordered and inside page, quads valid or explicitly clipped. Keep clipped-away/zero-area
@@ -63,8 +85,9 @@ API check and local reference check below are prerequisites, not established cap
   diagnostics to render/probe stats: words, font count, fonts without `/ToUnicode`, undecodable
   glyphs, coverage and completeness. Use the existing bounded resource scan (Forms, patterns,
   appearances); distinguish absent `/ToUnicode` from failed decoding, including standard
-  encodings and Type3/scan gaps. Old staged stats mean “not measured”, never zero. Add a
-  stats-only confined probe job for old renders; retain their current PNGs and line sidecars.
+  encodings and Type3/scan gaps. Missing-map counts come from the resource scan, not just
+  fonts encountered in extracted text. Steps 3b/3c are unmerged: missing stats mean
+  “not measured, re-render”, never zero; no old-render probe job.
 
 ## 4b. One raw-reading → units contract
 
@@ -72,32 +95,34 @@ API check and local reference check below are prerequisites, not established cap
   **`mimik-reading-v1`**: PDF hash, selected pages, displayed page facts/image hashes, route,
   pinned extractor/settings, tag status, validated blocks/lines/glyphs/tags and diagnostics.
   Persist immutable raw reading bytes separately from the prepared manifest; hashes bind both.
-  Keep raw ≤32 MiB/source, prepared ≤8 MiB, ≤64 pages, ≤20,000 units, ≤64 KiB HTML/unit,
+  Keep raw ≤32 MiB/source (all pages and envelope), prepared ≤8 MiB, ≤64 pages,
+  ≤20,000 units, ≤64 KiB HTML/unit,
   ≤128 MiB PNG total and existing per-PNG/PDF bounds. Fail with “select fewer pages”, never
-  truncate. Process pages incrementally and bound retained raw/derived allocations before SQL.
+  truncate. At 64 pages raw averages at most 512 KiB/page including overhead; the 8 MiB
+  per-page wire ceiling does not multiply the source allowance. Measure dense and 64-page
+  cases in 4a0. Process incrementally and bound retained raw/derived allocations before SQL.
 - Implement one pure `derive_units_v1(validated_reading) -> Result<ordered pages/units>` shared
   by creation, v3 verification and tests. Inputs contain no review state, exclusion decision,
   clock, database ID or model output. Outputs have block identity, kind, four-point polygon,
   escaped HTML and raw-node membership; reuse existing sanitiser and text/search projections.
-- Pin the partition: with usable tags, a complete `Table` subtree is one `Table` unit, a
-  complete `LI` subtree one `ListItem`, a heading one `SectionHeader`, and a paragraph one
-  `Text`. Select outermost eligible ancestors (table before its cells, list item before its
-  paragraphs), never emit their descendants again. Use explicit content order and emit every
-  unclaimed nonempty text block as one `Text` fallback. A partial/ambiguous association disables
-  tag partitioning for that page and flags it; no guessing associations from role names alone.
-  Without usable tags, one nonempty MuPDF text block is one `Text` unit, its lines joined by LF
-  in recorded order. Do not merge nearby columns or split at every glyph/line. Treat images,
-  empty tags and page furniture as raw metadata unless they contain extracted text; do not
-  hide a watermark by classifying it as furniture.
+- `derive_units_v1` is block-only: one nonempty MuPDF text block is one `Text` unit, lines
+  joined by LF in recorded order, `tag_status: not_collected`. Do not merge columns or split
+  every glyph/line. Images/empty nodes are metadata; furniture containing text is never hidden.
+  Every glyph in a nonempty block belongs exactly once to derived membership, including
+  undecodable, synthetic, invisible and clipped glyphs. Tag partitioning belongs only to the
+  optional later versioned slice below.
 - Text is glyph Unicode in recorded order, with U+FFFD for explicit undecodable glyphs; escape
-  it before fixed HTML wrapping. Preserve line breaks with fixed markup. For tagged tables,
-  retain explicit row/cell order and bounded spans (1–100); incomplete table associations use
-  the page fallback. Geometry is the clipped bounding rectangle of member glyphs, in fixed
+  it before fixed HTML wrapping. Preserve line breaks with fixed markup.
+  Geometry is the clipped bounding rectangle of member glyphs, in fixed
   top-left clockwise point order. Refuse a nonempty unit with no positive-area geometry.
-  Stable IDs use PDF page and selected raw node ordinal (`/page/<zero-based>/a/<ordinal>`),
-  never `owner:`. Page order is ascending PDF index; units follow recorded tag/block order,
-  with unclaimed blocks following in original block order. Pin tie-breaking and float/JSON
-  serialization; no unordered-map iteration. Same raw bytes/version produce identical units.
+  Stable IDs use one-based PDF page and the block's index in the single page-local node space
+  (`/page/<one-based-pdf-index>/a/<node-index>`), never `owner:` or a separate per-kind counter.
+  All page lists/indices here are one-based PDF indices, not printed page labels. Ascending
+  pages and recorded block order determine output; no unordered-map iteration. Pin exact
+  float/JSON round trips: integer coordinate ticks become exactly representable binary
+  fractions, JSON must round-trip their f64 values unchanged. Compare inclusive containment
+  in that same canonical space, without epsilon or a second rounding pass; test exact edges
+  and adjacent ticks. Same raw bytes/version produce identical units.
 - For v3, replace literal “units equal raw leaves” with exact equality to `derive_units_v1`:
   IDs, order, kinds, geometry, HTML and membership, no omitted or extra extracted units.
   Glyphs/lines are raw leaves but are not individually review units. Keep v1/v2's Marker
@@ -107,11 +132,58 @@ API check and local reference check below are prerequisites, not established cap
   reimport verification; retain the existing prepared `pages[].units[]` shape for review bounds.
   Keep CLI v1/v2 import supported; exposing v3 prepared files is a separate interface decision,
   not permission to route browser uploads through `load_import` or its `lopdf` checks.
-- Pin synthetic golden cases for tagged tables/lists/paragraphs, fallback, columns, ligatures,
+- Validate v3 pages against staged displayed dimensions, crop, rotation and transform, rather
+  than inheriting v1/v2's zero-rotation rule. Test 90/180/270° pages through crops, overlays,
+  owner units, suggestion citations and exclusion masks, including serialized round trips.
+- Pin synthetic golden cases for block fallback, columns, ligatures,
   RTL/vertical/rotated text, missing Unicode, duplicate text, clipping and zero-area geometry.
   Check repeated runs and serialized round trips; tamper each output field, omit/add/reorder
   units and require refusal. Test source/raw/prepared byte and count boundaries. Retain legacy
   v1/v2 and childless `ListGroup` fixtures through the real importer.
+
+## Later tag slice, only if retained by the owner in step 4
+
+- Use a new reading version and `derive_units_v2`; add only `COLLECT_STRUCTURE` to frozen
+  flags. MuPDF's stext struct-block tree is the **only** association source: Struct blocks
+  expose `standard`, `raw`, `parent`, `first_block`, `last_block`, with nested text blocks.
+  There is no MCID or partial-association signal. A Mimik `StructTreeRoot` walk is diagnostics
+  only, never a second resolver. MuPDF's own collection/walk is bounded only by worker rlimits;
+  our node/depth limits apply after it returns. Limit exhaustion fails, never publishes partial raw.
+- Flatten page-relevant struct/text blocks with parent/ordered-child links, raw/standard roles
+  and one node index space. Depth-first child order gives text-block fallback order even under
+  nested Struct blocks; never use top-level `blocks()` alone. Shared PDF resources and legal
+  cross-page subtrees are allowed; ancestor cycles, dangling local links and multiple structural
+  parents are malformed. Bound Mimik's diagnostic/flattening walks separately.
+  Malformed edges become bounded diagnostics, never cyclic/dangling serialized references;
+  preserve text in the validated block fallback, or fail if complete text cannot be retained.
+- Status is `absent` when collection yields no structure, `malformed` for invalid exposed graph,
+  `partial` for observable coverage/ownership conflicts or unavailable required table metadata,
+  and `usable` only when exposed associations satisfy the invariant below. `usable` certifies
+  that invariant, not semantic completeness of PDF tags; hidden partial association is unknowable.
+  Catalog-tagged with no usable struct content is `partial`, not evidence of complete tags.
+- Eligible glyphs are all glyph records belonging to nonempty text blocks, including undecodable,
+  synthetic, invisible and clipped glyphs. Every eligible glyph occurs **exactly once** in derived
+  membership. Select outermost mapped ancestors; Table precedes its cells, LI its paragraphs.
+  Absent/not-collected structure uses block-only output without a tag-error flag. A wholly
+  unclaimed block is allowed and emitted as one fallback unit. Flagged page-wide block fallback
+  is mandatory iff graph status is malformed, any block is partly claimed, any glyph/block has
+  competing claims after ancestor selection, any glyph is missing/duplicated in tentative output,
+  or a selected table lacks valid rows/cells/spans. Never combine tag output with a partially
+  claimed block. Refuse if even fallback cannot satisfy ownership or geometry validation.
+- Map `Table` → `Table`, `LI` → `ListItem`, `H`/`H1`–`H6` → `SectionHeader`, `P`, `Figure`,
+  `Caption`, `Note`, `TOCI`, `Span`, `Artifact` → `Text` when containing text. Other roles are
+  transparent containers; wholly unclaimed blocks use `Text`. Empty nodes/images remain metadata;
+  Artifact never suppresses text. Units follow selected ancestors' depth-first order, followed
+  by wholly unclaimed blocks in depth-first order; IDs use the selected node's single-space index.
+- Raw table cells must carry `RowSpan`/`ColSpan`, each integer 1–100 plus provenance/status.
+  Obtain them only through an association-linked MuPDF attribute accessor proven in preflight
+  (a worker wrapper if approved), not a diagnostic tag walk guessed onto text. Default to 1
+  only for verified absent attributes; unknown, noninteger, zero, negative, >100 or conflicting
+  values force page fallback. No proven accessor means tables fall back. Preserve row/cell
+  order and reject overlapping/inconsistent grids. Add a real span fixture (2×1 and 1×2),
+  absent/invalid attributes, partially claimed block, shared block, conflicting claims,
+  legitimate shared resources/cross-page subtree, cycle and nested fallback-order fixtures.
+- Review and remeasure the versioned derivation and bars; never reinterpret v1 raw sources.
 
 ## 4c. Staged upload → finalized unreviewed reading
 
@@ -166,6 +238,9 @@ API check and local reference check below are prerequisites, not established cap
   PNG endpoints clearly labelled. Any hints built for A/B or later C suppress excluded glyphs
   before use, including crossing-line portions; never filter the stored raw reading. Source
   suggestions, owner additions and ordinary accept/correct/reject/completion continue unchanged.
+  Flag every unit containing invisible (neither `FILLED` nor `STROKED`) or `CLIPPED` glyphs;
+  include per-glyph diagnostic visibility. Test a render-mode-3 text layer and mixed visible/
+  invisible content against original renders; invisible text is not silently treated as evidence.
 
 ## Probe: freeze before manual measurements
 
@@ -175,14 +250,17 @@ API check and local reference check below are prerequisites, not established cap
   `image_coverage`), missing `/ToUnicode` font count and undecodable/total glyph count. No
   inferred “correct words”; no model. Preserve scan-incomplete and dropped-text warnings.
 - Proposed frozen rule: recommend **B or C** if words <120, image coverage ≥0.20, any undecodable
-  glyph, missing-map font, incomplete diagnostics or malformed/incomplete tags; otherwise A.
+  glyph, missing-map font, incomplete diagnostics or malformed/partial collected tags; otherwise A.
   Show all triggered reasons and measurements, including words versus image fraction, rather
   than a confidence score. Missing maps can still decode via standard encodings: label the
   conservative warning accurately. No-text and unknown diagnostics never recommend A.
   B is local/Linux and C requires explicit online consent; unavailable routes stay disabled.
+  `not_collected` is explicit, not a malformed-tag claim or automatic B/C trigger. A bounded
+  diagnostic-only tag scan can report broken links/cycles independently of association status;
+  these warnings also trigger B/C. It never supplies glyph membership.
 - Show per-page recommendations and a selection summary on the rendered upload **before route
   choice**; persist the exact rule/version/result with the created reading and show it on its
-  page list/review. Extend render stats for new uploads and offer the probe job for older ones.
+  page list/review. Extend render stats; missing measurements require re-rendering.
   Test threshold equality, mixed selections, standard-font mapping and incomplete scans.
 
 ## Bars, fixed before measuring (umbrella step 4)
@@ -204,6 +282,10 @@ API check and local reference check below are prerequisites, not established cap
   dice and sign occurrence against raw units and images, including missing/split rows; zero
   substitutions/omissions/additions. A fuzzy match cannot excuse one. Record present-in-page
   and fuzzy scores descriptively with the IT scorer, not as acceptance substitutes.
+- Freeze `derive_units_v1` and exact flags with both bars' input hashes. If the 98% row bar
+  or zero numeric/dice/sign-error requirement fails, step 4 stays blocked. The Owner may
+  retain that blocker, or approve a new versioned derivation through review, fresh measurements
+  of both bars and independent re-review; no tuning relabelled as the frozen v1 pass.
 - **“MÖRK BORG IT pages 22–39: the probe recommends route B or C on every art-heavy page (all
   18), and route A's scores are reported, with no bar.”** Denominator 18 for recommendations;
   report each page's result/reasons and require 18/18. Report intact, present and fuzzy on the
@@ -211,6 +293,9 @@ API check and local reference check below are prerequisites, not established cap
   from the full probe range; inspect/report numeric/dice/sign errors. Never compare EN facts
   to IT facts as corrections. If frozen thresholds fail, report failure; any new rule gets
   reviewed/versioned and remeasured, not retrospectively declared pre-registered.
+- On real text-only pages, report the frozen probe's A versus B/C counts, denominator and
+  reasons as a descriptive specificity check (not another acceptance bar). Freeze the local
+  page set in 4a0 and distinguish it from synthetic clean pages and the 18 art-heavy pages.
 - **“Ten synthetic hostile or odd PDFs (rotated, no text layer, broken tags): no crash, correct
   probe result.”** Freeze ten generated inputs with expected outcomes: (1–3) clean ≥120-word
   pages rotated 90/180/270 → A; (4) full-page scan → B/C; (5) blank page → B/C; (6) unresolved
@@ -229,10 +314,15 @@ API check and local reference check below are prerequisites, not established cap
 
 ## Slices, checks and landing
 
-- **4a:** API fit/gap resolution, bounded worker records and probe. Independent review before
-  completion; fake-reader max/over-limit/cyclic-reference tests, live sandbox and ten PDFs.
+- **4a0:** API/wrapper decision, aggregate tag status, IT reference/scorer inspection, aggregate
+  size measurements and owner choices; freeze encoding/flags/versions/thresholds/bar inputs.
+- **4a:** block/line/glyph records with `tag_status: not_collected` and diagnostic probe.
+  Independent review before completion; fake-reader max/over-limit/cyclic-reference tests,
+  live sandbox and ten PDFs.
 - **4b:** v3/reading schema and one derivation function. Independent review; synthetic goldens,
   mutation/bounds tests, raw equality, legacy import/reimport and sanitized projections.
+- **Later tags:** only under the owner's retained scope; new reading/derivation version,
+  independent review, ownership/span fixtures and remeasured bars before completion.
 - **4c:** manager/source transaction, permanent facts/exclusion migration and cleanup receipts.
   Independent review; migration/immutability tests, excluded/crossing/edge cases, >1,024
   decisions, stale revisions, attribution failure rollback, competing creation/discard/sweep,
@@ -255,11 +345,18 @@ API check and local reference check below are prerequisites, not established cap
 
 ## Decisions the owner must make
 
-- **Pinned wrapper gaps:** options: use sufficient safe 0.8.0 APIs; approve a narrow
-  exception-safe worker-only wrapper over its pinned C bindings; or change the renderer pin.
-  Recommendation: safe APIs first, then the smallest reviewed wrapper if demonstrated necessary;
-  stop before implementation if glyph/tag fidelity is unavailable. A second parser is extra
-  attack surface. Exact tag/quad wrapper coverage is unverified in this sandbox.
+- **Wrapper gaps:** options: approve a narrow exception-safe worker-only wrapper for line
+  `dir`/character `bidi`, nested structures and any required span accessor; or change renderer
+  pin. Recommendation: retain the pin and use the smallest reviewed wrapper for demonstrated
+  gaps; safe quads/font/flags need none. Resolve clipping diagnostics in 4a0; stop if required
+  fidelity is unavailable. Do not substitute `structured()` or a second parser.
+- **Tag partitioning:** options: keep a separate versioned tag slice in step 4, or amend the
+  umbrella to defer it. Recommendation: use 4a0's aggregate statuses—defer if both bar PDFs
+  are untagged; otherwise retain and cost the slice. Initial 4a remains block-only either way.
+- **Flags/ligatures/spaces:** options: approve the exact 4a flag set above with raw ligatures
+  and flagged inferred spaces, or choose different explicit settings before freezing.
+  Recommendation: approve that set, CID diagnostics only, `CLIP` off and no dehyphenation;
+  search expansion is separate from frozen scorer normalization. A later change is versioned.
 - **Bare Bones gold:** options: Owner transcribes/checks it, or appoints a local human
   transcriber with Owner checking. Recommendation: delegate transcription if convenient, Owner
   signs off every row and the page set. Name that person and settle the exact IT-compatible
@@ -267,6 +364,10 @@ API check and local reference check below are prerequisites, not established cap
 - **Probe policy:** options: approve the conservative `probe-v1` thresholds above, or choose a
   different explicit rule before measurements. Recommendation: approve the conservative rule
   as advice, with visible reasons and Owner override; do not weaken the 18/18 acceptance bar.
+- **Bar failure:** options: leave step 4 blocked, or authorize a new reviewed/versioned
+  derivation and full remeasurement/re-review. Recommendation: preserve the frozen failure,
+  investigate split rows/token errors and try a new version only with an explicit rationale;
+  never waive the 98% or zero-error requirements by treating descriptive scores as a pass.
 
 ## Risks
 
