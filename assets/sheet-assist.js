@@ -447,6 +447,9 @@ function failure(status) {
   if (status === 401 || status === 403) {
     return 'Not saved: this sheet can no longer be edited from this page, or the session ended. Your entry is kept in its field; reload the page.';
   }
+  if (status >= 200 && status < 300) {
+    return 'Not saved as far as this page knows: the server answered but its reply could not be read. Reload the page to see the saved value.';
+  }
   const code = status ? ` (HTTP ${status})` : '';
   return `Not saved${code}. Your entry is kept in its field; press Enter or Save to try again, or reload the page.`;
 }
@@ -641,7 +644,8 @@ async function send(unit, key, submitter) {
 
 /** A POST asking for JSON, bounded: one that hangs, before its headers or inside its body,
  * counts as a network failure after 30 s, so a unit's flight, and page posts waiting for it,
- * never wait forever. Never throws. */
+ * never wait forever. An unreadable JSON body keeps its HTTP status (a 409 still holds the
+ * field); only an abort counts as a network failure (status 0). Never throws. */
 async function bounded(path, body) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30000);

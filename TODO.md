@@ -99,10 +99,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    between the watchdog and `wait_healthy` (set the reason before killing), and `poll()`
    reaping the leader before `killpg`.
 
-- `browser_smoke.py`'s "A 409 with an unreadable body did not hold the field" check fails
-  on the dev host for master's release binary as well as `assist-2c2`'s (2026-10-23, Chromium
-  container at 2 CPUs on a loaded host). On 2026-11-01 it failed 3/3 for master at 4 CPUs on an
-  idle host, so it is not load; find the cause before CI relies on it.
 - `.dockerignore`'s `!tools/` re-includes the whole `tools/` tree in build contexts (images copy
   named files only); narrow it.
 
@@ -172,8 +168,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   CPU-only default (`tools/model_registry.py`, `tools/run_tool_loop_benchmark.sh`
   `DEVICE=cpu`). Diagnostic: `LIMIT=90 DUR=300 target/agent-tools/gpu_diag.sh`.
 - 2a module test gaps from the last review (Minor): no browser case for the `requestSubmit`
-  constraint failure, the `dropped()` wording, or the queue drop after an unreadable 409 /
-  kept after a 422; `sheet_json::integer` indexes fields directly. No JS linter in CI
+  constraint failure, the `dropped()` wording, or the queue drop itself after an unreadable 409
+  (the hold on leaving the field is covered by `browser_smoke.py`) / kept after a 422; `sheet_json::integer` indexes fields directly. No JS linter in CI
   (ASSIST-L17).
 - Kept entries lose control characters in single-line inputs (ASSIST-L13): cell inputs, and
   a lone CR in a refused quick-add entry (switch to a textarea on any control character but
