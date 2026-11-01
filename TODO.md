@@ -99,9 +99,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    between the watchdog and `wait_healthy` (set the reason before killing), and `poll()`
    reaping the leader before `killpg`.
 
-- `.dockerignore`'s `!tools/` re-includes the whole `tools/` tree in build contexts (images copy
-  named files only); narrow it.
-
 ## Blockers
 
 - None.
