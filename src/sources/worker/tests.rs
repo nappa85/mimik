@@ -678,6 +678,13 @@ fn boundary_visit(
 }
 
 fn boundary_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    for name in [".cargo/config", ".cargo/config.toml"] {
+        let path = boundary_target(root, root, name);
+        assert!(
+            !path.exists(),
+            "unsupported Cargo source configuration: {name}"
+        );
+    }
     let mut files = Vec::new();
     let mut rules = Vec::new();
     boundary_ignore_rules(root, &mut rules);
@@ -798,23 +805,29 @@ fn boundary_follow_sources(
     let mut pending: Vec<_> = files
         .iter()
         .filter(|p| p.file_name().unwrap() != "Cargo.toml")
-        .map(|path| {
-            (
-                path.clone(),
-                boundary_module_directory(path, crate_roots.contains(path)),
-            )
-        })
+        .map(|path| (path.clone(), None))
         .collect();
+    pending.extend(crate_roots.iter().map(|path| {
+        let directory = path.parent().unwrap().to_path_buf();
+        (path.clone(), Some((directory.clone(), directory)))
+    }));
     let mut seen = std::collections::HashSet::new();
-    while let Some((path, base)) = pending.pop() {
-        if !seen.insert((path.clone(), base.clone())) {
+    while let Some((path, context)) = pending.pop() {
+        if !seen.insert((path.clone(), context.clone())) {
             continue;
         }
         let content = std::fs::read_to_string(&path).unwrap();
         let worker = path.starts_with(root.join("src/sources/worker"));
-        for target in boundary_modules(root, &path, &base, &content) {
-            pending.push((target.clone(), boundary_module_directory(&target, false)));
-            files.push(target);
+        if !worker {
+            boundary_check_module_tokens(&content);
+        }
+        if let Some((base, attribute_base)) = &context {
+            for (target, directory) in boundary_modules(root, &path, base, attribute_base, &content)
+            {
+                let attributes = target.parent().unwrap().to_path_buf();
+                pending.push((target.clone(), Some((directory, attributes))));
+                files.push(target);
+            }
         }
         if worker {
             continue;
@@ -836,7 +849,9 @@ fn boundary_follow_sources(
                         .any(|name| target.starts_with(root.join(name))),
                     "source outside scanned roots: {literal}"
                 );
-                pending.push((target.clone(), base.clone()));
+                // include! preserves the including module's module and attribute
+                // bases, even when the included text lives in another directory.
+                pending.push((target.clone(), context.clone()));
             }
             assert!(
                 target.is_file(),
@@ -848,12 +863,8 @@ fn boundary_follow_sources(
     }
 }
 
-fn boundary_module_directory(path: &std::path::Path, crate_root: bool) -> std::path::PathBuf {
-    if crate_root
-        || ["mod.rs", "main.rs", "lib.rs", "build.rs"]
-            .iter()
-            .any(|name| path.file_name().unwrap() == *name)
-    {
+fn boundary_module_directory(path: &std::path::Path) -> std::path::PathBuf {
+    if path.file_name().unwrap() == "mod.rs" {
         path.parent().unwrap().to_path_buf()
     } else {
         path.with_extension("")
@@ -974,8 +985,9 @@ fn boundary_modules(
     root: &std::path::Path,
     source: &std::path::Path,
     base: &std::path::Path,
+    attribute_base: &std::path::Path,
     content: &str,
-) -> Vec<std::path::PathBuf> {
+) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
     // Use syn's visitor for declarations inside functions/blocks as well as
     // top-level items. Stop at each module so its directory can be scoped below.
     #[derive(Default)]
@@ -990,7 +1002,7 @@ fn boundary_modules(
         items: &[syn::Item],
         base: &std::path::Path,
         attribute_base: &std::path::Path,
-        result: &mut Vec<std::path::PathBuf>,
+        result: &mut Vec<(std::path::PathBuf, std::path::PathBuf)>,
         worker: bool,
     ) {
         let mut modules = Modules::default();
@@ -1022,12 +1034,14 @@ fn boundary_modules(
                 }
             } else {
                 if implicit {
-                    result.extend(boundary_implicit_module(
-                        root,
-                        base,
-                        &name,
-                        literals.is_empty(),
-                    ));
+                    result.extend(
+                        boundary_implicit_module(root, base, &name, literals.is_empty())
+                            .into_iter()
+                            .map(|target| {
+                                let directory = boundary_module_directory(&target);
+                                (target, directory)
+                            }),
+                    );
                 }
                 for literal in literals {
                     let target = boundary_target(root, attribute_base, &literal);
@@ -1045,7 +1059,9 @@ fn boundary_modules(
                             .any(|name| target.starts_with(root.join(name))),
                         "source outside scanned roots: {literal}"
                     );
-                    result.push(target);
+                    // rustc treats an out-of-line #[path] target as mod.rs-style.
+                    let directory = target.parent().unwrap().to_path_buf();
+                    result.push((target, directory));
                 }
             }
         }
@@ -1055,11 +1071,54 @@ fn boundary_modules(
         root,
         &syn::parse_file(content).expect("invalid Rust source").items,
         base,
-        source.parent().unwrap(),
+        attribute_base,
         &mut result,
         source.starts_with(root.join("src/sources/worker")),
     );
     result
+}
+
+fn boundary_check_module_tokens(content: &str) {
+    fn token_count(stream: proc_macro2::TokenStream) -> usize {
+        use proc_macro2::TokenTree;
+        let tokens: Vec<_> = stream.into_iter().collect();
+        let here = tokens
+            .windows(3)
+            .filter(|window| {
+                matches!(&window[0], TokenTree::Ident(ident) if ident == "mod")
+                    && matches!(&window[1], TokenTree::Ident(_))
+                    && matches!(&window[2], TokenTree::Punct(punct) if punct.as_char() == ';')
+            })
+            .count();
+        here + tokens
+            .into_iter()
+            .map(|token| {
+                if let TokenTree::Group(group) = token {
+                    token_count(group.stream())
+                } else {
+                    0
+                }
+            })
+            .sum::<usize>()
+    }
+    #[derive(Default)]
+    struct Modules(usize);
+    impl<'ast> syn::visit::Visit<'ast> for Modules {
+        fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+            self.0 += usize::from(module.content.is_none());
+            syn::visit::visit_item_mod(self, module);
+        }
+    }
+    let mut modules = Modules::default();
+    syn::visit::Visit::visit_file(
+        &mut modules,
+        &syn::parse_file(content).expect("invalid Rust source"),
+    );
+    assert_eq!(
+        token_count(content.parse().expect("invalid Rust tokens")),
+        modules.0,
+        "module declaration inside a macro cannot be resolved"
+    );
 }
 
 fn boundary_implicit_module(
@@ -1225,6 +1284,72 @@ fn boundary_references(content: &str) -> Vec<(String, bool)> {
 }
 
 #[test]
+fn boundary_fix10_literal_macro_modules_are_refused() {
+    for source in [
+        "macro_rules! m { () => { mod shim; } } m!();",
+        "cfg_if! { if #[cfg(unix)] { mod shim; } }",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "").unwrap();
+        std::fs::write(root.join("src/main.rs"), source).unwrap();
+        std::fs::write(root.join("src/shim.rs"), "use mupdf;").unwrap();
+        std::fs::write(root.join(".gitignore"), "/src/shim.rs\n").unwrap();
+        let failure = std::panic::catch_unwind(|| boundary_files(root)).unwrap_err();
+        let message = failure.downcast_ref::<String>().unwrap();
+        assert!(message.contains("module declaration inside a macro cannot be resolved"));
+    }
+}
+
+#[test]
+fn boundary_fix10_path_module_uses_target_parent_without_decoy_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src/gen/x")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "").unwrap();
+    std::fs::write(root.join("src/main.rs"), "#[path = \"gen/x.rs\"] mod x;").unwrap();
+    std::fs::write(root.join("src/gen/x.rs"), "mod hidden;").unwrap();
+    std::fs::write(root.join("src/gen/hidden.rs"), "use mupdf;").unwrap();
+    std::fs::write(root.join("src/gen/x/hidden.rs"), "").unwrap();
+    std::fs::write(root.join(".gitignore"), "/src/gen/hidden.rs\n").unwrap();
+    let files = boundary_files(root);
+    assert!(files.contains(&root.join("src/gen/hidden.rs")));
+    assert!(native_rust_reference(
+        &std::fs::read_to_string(root.join("src/gen/hidden.rs")).unwrap()
+    ));
+}
+
+#[test]
+fn boundary_fix10_include_inherits_module_bases() {
+    for declaration in ["mod hidden;", "#[path = \"hidden.rs\"] mod hidden;"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src/gen")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "").unwrap();
+        std::fs::write(root.join("src/main.rs"), "include!(\"gen/items.rs\");").unwrap();
+        std::fs::write(root.join("src/gen/items.rs"), declaration).unwrap();
+        std::fs::write(root.join("src/hidden.rs"), "use mupdf;").unwrap();
+        std::fs::write(root.join(".gitignore"), "/src/hidden.rs\n").unwrap();
+        assert!(boundary_files(root).contains(&root.join("src/hidden.rs")));
+    }
+}
+
+#[test]
+fn boundary_fix10_refuses_root_cargo_config() {
+    for name in ["config", "config.toml"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::create_dir(root.join(".cargo")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "").unwrap();
+        std::fs::write(root.join("src/main.rs"), "").unwrap();
+        std::fs::write(root.join(".cargo").join(name), "paths = ['elsewhere']").unwrap();
+        assert!(std::panic::catch_unwind(|| boundary_files(root)).is_err());
+    }
+}
+
+#[test]
 fn boundary_ignored_crate_roots_are_scanned() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -1285,6 +1410,9 @@ fn boundary_module_resolution_follows_rust_directories() {
         };
         std::fs::write(root.join("Cargo.toml"), manifest).unwrap();
         std::fs::write(root.join(".gitignore"), format!("/{child}\n")).unwrap();
+        if entry == "src/parent.rs" {
+            std::fs::write(root.join("src/main.rs"), "mod parent;").unwrap();
+        }
         std::fs::write(root.join(entry), declaration).unwrap();
         assert!(
             boundary_files(root).contains(&root.join(child)),

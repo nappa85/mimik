@@ -178,6 +178,17 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 ## Sources and retrieval
 
 - **L-SRC-12** [sources] `mupdf_stays_in_worker` is a source/dependency lint, not a complete Rust or Cargo parser. The process sandbox is the boundary for PDF parsing and rendering.
+  It does not read `.cargo/config*` source redirection (`paths` or config `[patch]`);
+  repository-root `.cargo/config` and `.cargo/config.toml` are refused. Ancestor/global
+  configuration and environment-driven Cargo changes are outside this lint.
+  Literal out-of-line module declarations in macro token bodies are refused rather
+  than expanded; procedural macros and other generated source are not modeled.
+  Module bases come only from crate roots and reachable declarations; unreachable
+  broad-walk files are linted as text without resolving their module declarations.
+  `include!` inherits file-level module/attribute bases, but includes nested inside
+  inline modules or blocks are not scoped separately by the token walker. Supporting
+  those layouts requires a context-aware include visitor. Block-level `mod x;`
+  retains the conservative directory-resolution over-approximation.
 
 - **L-SRC-1** [sources] Extraction fidelity is measured on 18 pages of one manual (MÖRK BORG IT, `docs/results.md`); other manuals and full books are unmeasured. Even the chosen route (Marker with forced OCR) leaves text in no unit now and then (one footnote in 18 pages), and review cannot add a unit, so such text is evidence only through the page image.
 - **L-SRC-2** [sources] Scalable whole-book admission is an open policy and design question: model-checked material cannot become verified lookup without human review, no automated-coverage policy exists, and book-wide hierarchy is not in the schema. Italian Pathfinder errata coverage is unknown.
