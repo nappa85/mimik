@@ -30,9 +30,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - **Source import plan** (`docs/source-import-plan.md`, reviewed, SRC-11 to SRC-14): steps 1
   (schema) and 2 (review screen, `mimik import-suggestions`, browser checks) merged. Step 3's plan
   (`docs/source-upload-plan.md`, reviewed) is merged; part 3a (the sandboxed MuPDF worker, its
-  record protocol, the hostile corpus, availability, notices, DEP-29) is merged. 3b slice 1 (staging, ledger, jobs) is on
-  branch `source-upload-3b`, unmerged until its live tests run; next slice 2 (upload route,
-  screens), then 3c (repeated-text exclusion). Follow-ups:
+  record protocol, the hostile corpus, availability, notices, DEP-29) is merged. 3b (staging, ledger, jobs; upload route, screens, browser
+  suite; DEP-30 multer) is complete on branch `source-upload-3b` (85f3189): reviewed (Sol and
+  Opus, final rounds approve), full gate green 2026-11-01 (1708 passed), upload browser suite
+  4/4, cargo audit clean. Unmerged until its two host live tests run (pending question); then
+  3c (repeated-text exclusion). Follow-ups:
   fuzzing of the record parser and the worker's MuPDF entry points (cargo-fuzz in a container);
   a MuPDF security-advisory watch at each release (DEP-29); Review-screen test
   hook `READ_DEADLINE` (`src/sources/review.rs`) is process-global and matched by label: key it
