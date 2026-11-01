@@ -92,6 +92,8 @@ article.panel { margin-bottom: 1rem; }
 .sheet-fieldset { min-width: 0; }
 /* Source review: the SVG and original image share one proportional coordinate space. */
 .review-image-scroll { overflow: auto; max-width: 100%; }
+.upload-image { display: block; max-width: 100%; height: auto; }
+input[type="file"] { max-width: 100%; }
 .review-image { position: relative; width: 100%; }
 .review-image > img { display: block; height: auto; }
 .review-image:not(.zoom-one):not(.zoom-two) > img { width: 100%; }

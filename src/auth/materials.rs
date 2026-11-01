@@ -27,7 +27,13 @@ pub(super) fn trusted(response: &axum::response::Response) -> bool {
     ) && response.extensions().get::<TrustedDraft>().is_some()
 }
 pub(super) fn routes() -> Router<AuthState> {
-    Router::new()
+    let router = Router::new();
+    #[cfg(not(target_os = "linux"))]
+    let router = router.route("/admin/materials/uploads", get(|State(state): State<AuthState>, session: Session| async move {
+        owner_auth(&state, &session).await?;
+        Ok::<_, StatusCode>(Html("<!doctype html><title>Upload unavailable</title><h1>Upload is not available on this platform</h1><p>PDF upload requires Linux and its sandbox.</p>"))
+    }));
+    router
         .route("/admin/materials", get(directory))
         .route("/admin/materials/sources/{id}", get(pages))
         .route("/admin/materials/pages/{id}", get(page))

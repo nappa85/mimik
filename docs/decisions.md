@@ -6,6 +6,7 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 
 ## Product direction and rules review
 
+
 - **PROD-1** (2026-10-11) Mimik is a standalone, open-source, sheet-first companion for players at a physical table; it is not a virtual tabletop.
 - **PROD-2** (2026-10-19) Assisted paper sheet: help the player as much as possible and never force anything; improve paper and pencil rather than replace it.
 - **PROD-3** (2026-10-18) Assist, don't police (DL-1, DL-2): violations warn and never block; every change is logged and revertible, with a suggested fix where possible. A Master may open a sheet, its warnings and history; no automatic GM alert feeds or dashboards.
@@ -248,9 +249,9 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 
 ## Sources and retrieval
 
-- **SRC-1** (2026-10-11) Sources enter only through `import-source`, from an allowlisted prepared directory (no symlinks or special files, bounded sizes) plus the original PDF; no browser uploads, archives, URLs or nested imports.
+- **SRC-1** (2026-11-01) The Owner uploads one PDF at a time through `/admin/materials/uploads` into private staging; `import-source` remains the prepared-bundle source importer (allowlisted regular files, bounded sizes). No archives, URLs or nested imports; staged uploads do not become sources until step 4.
 - **SRC-2** (2026-10-11) PDF identity is separate from extraction-run identity; imports declare game, edition, PDF page indexes, extractor version and hashed artifacts, carry no approvals and start `unreviewed`; runs are never merged into a book certificate.
-- **SRC-3** (2026-10-11) Artefacts (PDF, raw extraction, manifest, page PNGs) are private SQLite BLOBs written in one transaction, immutable at import and served by database id only; Mimik never renders PDFs at run time.
+- **SRC-3** (2026-11-01) Imported artefacts (PDF, raw extraction, manifest, page PNGs) remain private immutable SQLite BLOBs; uploaded PDFs are inspected/rendered only by the sandboxed worker into private staging, never parsed by the server. Step 4 consumes staged page facts without reparsing; prepared-bundle imports keep their existing unrotated-only lopdf checks.
 - **SRC-4** (2026-10-11) Accept, correct, reject and page-complete are explicit decisions with actor, rationale and expected revision; corrections are kept apart from raw HTML; history is append-only; unreviewed children never leak through approved parents.
 - **SRC-5** (2026-10-14) In authenticated mode the review actor is the signed-in Owner with immutable attribution (account, epoch, session digest); free-text reviewer labels exist only in the `--no-auth` prototype.
 - **SRC-6** (2026-10-11) Output from models and the optional API reviewer is a suggestion only: it never promotes, corrects or approves evidence, and a no-issue response certifies nothing.
@@ -299,6 +300,8 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 - **PACK-11** (2026-10-16) Requests needing a new or removed entry, or using up an entry's last unit, have no gold outcome and are outside the blind writer's scope until list editing and an item catalogue exist.
 
 ## Dependencies
+
+- **DEP-30** (2026-11-01) Use `multer =3.1.0` directly (MIT, default features only; no `json` or `tokio-io`): `Constraints` exposes allowed fields and per-field limits, and direct field iteration enforces upload field order, which axum's `Multipart` wrapper does not expose.
 
 Versions and exact pins are in `Cargo.toml`; CI checks licences (`cargo about`) and advisories (`cargo audit`).
 

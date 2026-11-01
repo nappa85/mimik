@@ -1957,6 +1957,22 @@ def smoke_no_assistant(binary, directory):
         b"assistant-dev-endpoint" not in binary.read_bytes(),
         "The release binary contains the development endpoint",
     )
+    require(
+        b"upload-dev-worker-ms" not in binary.read_bytes(),
+        "The release binary contains the synthetic upload worker flag",
+    )
+    upload_unknown = subprocess.run(
+        [str(binary), "--upload-dev-worker-ms", "1"],
+        cwd=directory,
+        env=smoke_environment(directory),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    require(
+        upload_unknown.returncode == 2 and "unexpected argument" in upload_unknown.stderr,
+        "The release binary accepts the synthetic upload worker flag",
+    )
     unknown = subprocess.run(
         [str(binary), "--assistant-dev-endpoint", "http://127.0.0.1:9"],
         cwd=directory,

@@ -136,6 +136,17 @@ pub struct Files {
     pub fail_spool_chmod: std::sync::atomic::AtomicBool,
 }
 impl Files {
+    pub(crate) fn read_image(&self, id: &str, page: u32) -> Result<Vec<u8>, AppError> {
+        let dir = self.dir(id)?;
+        let fd = rustix::fs::openat(
+            &dir,
+            format!("page-{page}.png"),
+            crate::local_file::flags(),
+            Mode::empty(),
+        )
+        .map_err(io)?;
+        crate::local_file::read(fd, 12 * 1024 * 1024)
+    }
     /// # Errors
     /// Returns entropy or private-file creation failures.
     pub fn spool(&self) -> Result<(String, File), AppError> {

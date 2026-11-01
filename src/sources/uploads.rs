@@ -25,6 +25,9 @@ use std::{
 
 static MANAGER_OPEN: AtomicBool = AtomicBool::new(false);
 
+#[cfg(feature = "dev-endpoint")]
+#[path = "upload_development.rs"]
+pub mod development;
 #[cfg(test)]
 #[path = "upload_tests.rs"]
 mod tests;
@@ -36,10 +39,6 @@ pub struct OwnerWrite {
     csrf: CsrfAdmission,
 }
 impl OwnerWrite {
-    #[expect(
-        dead_code,
-        reason = "Slice 2 constructs admissions in the HTTP handlers"
-    )]
     pub(crate) fn new(auth: RequestAuth, csrf: CsrfAdmission) -> Self {
         Self { auth, csrf }
     }
@@ -74,6 +73,9 @@ impl Metadata {
 
 /// Only validated results may cross this interface. Production uses the 3a pipe validator.
 pub trait Worker: Send + Sync + 'static {
+    fn availability(&self) -> worker::Availability {
+        worker::availability()
+    }
     /// # Errors
     /// Returns bounded document, cancellation or confinement failures.
     fn inspect(&self, path: &Path, cancel: &Cancel) -> Result<Inspection, Reason>;
@@ -288,6 +290,41 @@ fn parse<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, AppError> {
 }
 
 impl Uploads {
+    pub(crate) fn validate_metadata(
+        &self,
+        owner: &OwnerWrite,
+        metadata: &Metadata,
+    ) -> Result<(), AppError> {
+        self.write(owner, |tx| metadata.validate(tx))
+    }
+    #[cfg(test)]
+    pub(crate) fn for_route_test(store: Store, data: &Path, worker: Arc<dyn Worker>) -> Self {
+        Self::initialize(store, data, worker, false).unwrap()
+    }
+    pub(crate) fn availability(&self) -> worker::Availability {
+        self.0.worker.availability()
+    }
+    /// Explicit browser-harness worker; compiled out of shipping builds.
+    /// # Errors
+    /// Returns duplicate-manager, storage or reconciliation errors.
+    #[cfg(feature = "dev-endpoint")]
+    pub fn open_development(store: Store, data: &Path, delay: Duration) -> Result<Self, AppError> {
+        if MANAGER_OPEN.swap(true, Ordering::AcqRel) {
+            return Err(AppError::Conflict);
+        }
+        match Self::initialize(
+            store,
+            data,
+            Arc::new(development::Synthetic { delay }),
+            true,
+        ) {
+            Ok(m) => Ok(m),
+            Err(e) => {
+                MANAGER_OPEN.store(false, Ordering::Release);
+                Err(e)
+            }
+        }
+    }
     /// Open once at startup, before accepting uploads. Reconciles interrupted work and files.
     /// # Errors
     /// Returns storage, reconciliation or duplicate-manager failures.
@@ -505,10 +542,6 @@ impl Uploads {
             Ok(upload)
         })
     }
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Slice 2 wires the Owner-only GET handler")
-    )]
     pub(crate) fn read_for_owner(&self, auth: &RequestAuth, id: &str) -> Result<Upload, AppError> {
         self.0.store.upload_storage(|db| {
             let tx = db.transaction()?;
@@ -518,6 +551,35 @@ impl Uploads {
             tx.commit()?;
             Ok(upload)
         })
+    }
+    pub(crate) fn current_for_owner(&self, auth: &RequestAuth) -> Result<Option<String>, AppError> {
+        self.0.store.upload_storage(|db| {
+            auth.recheck_owner(db)?;
+            Ok(db
+                .query_row("SELECT id FROM source_uploads LIMIT 1", [], |r| r.get(0))
+                .optional()?)
+        })
+    }
+    pub(crate) fn image_for_owner(
+        &self,
+        auth: &RequestAuth,
+        id: &str,
+        page: u32,
+    ) -> Result<Vec<u8>, AppError> {
+        let _gate = self
+            .0
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let upload = self.read_for_owner(auth, id)?;
+        if !upload.pages.iter().any(|p| p.pdf_page == page) {
+            return Err(AppError::SourceNotFound);
+        }
+        let bytes = self.0.files.read_image(id, page)?;
+        self.0
+            .store
+            .upload_storage(|db| auth.recheck_owner(db).map(|_| ()))?;
+        Ok(bytes)
     }
     /// Update metadata/selection with optimistic concurrency, retaining current selected renders.
     /// # Errors

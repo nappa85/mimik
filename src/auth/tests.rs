@@ -16,6 +16,9 @@ use tower_sessions::{
 };
 #[path = "error_tests.rs"]
 mod error_tests;
+#[cfg(target_os = "linux")]
+#[path = "upload_route_tests.rs"]
+mod upload_route_tests;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn login_rechecks_original_form_admission_after_password_verification() {
