@@ -38,7 +38,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   `source-upload-3c` (fc78738, stacked on 3b): reviewed (Sol approve, Opus approve with changes,
   rest in SRC-REPEAT-COST), gate green 2026-11-01 (1734 passed), both browser suites 4/4, audit
   clean. Its two ignored real-PDF checks (IT buyer mark, Bare Bones; page counts and boxes only)
-  run on the host with the 3b live tests. Merge 3b then 3c. Next: step 4 (route A). Follow-ups:
+  run on the host with the 3b live tests. Merge 3b then 3c. Step 4 (route A) has its plan
+  (`docs/source-route-a-plan.md` on branch `source-route-a`, 809be8f, stacked on 3c; two review
+  rounds, final verdicts approve with changes, applied); execution waits for the owner decisions
+  below. Follow-ups:
   fuzzing of the record parser and the worker's MuPDF entry points (cargo-fuzz in a container);
   a MuPDF security-advisory watch at each release (DEP-29); Review-screen test
   hook `READ_DEADLINE` (`src/sources/review.rs`) is process-global and matched by label: key it
@@ -115,6 +118,13 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   allow that host run after review (recommended), a container with seccomp unconfined (a weaker
   sandbox, needs an explicit opt-in), or rely on hosted CI. Work continues on the
   `source-upload-3b` branch meanwhile.
+- **Route A plan decisions (blocks step 4 execution):** listed with options and
+  recommendations in `docs/source-route-a-plan.md` "Decisions the owner must make": the worker
+  wrapper for line direction/bidi and structure (or derived direction, no bidi, in v1); tag
+  partitioning kept in step 4 or deferred (informed by the bar PDFs' tag status in 4a0); the
+  extraction flags with ligature and synthetic-space policy; `CLIP` off (flag, scissoring
+  undetectable) or on (silently drops scissored glyphs); who makes the Bare Bones reference;
+  the probe thresholds; what happens if the 98% bar fails.
 - Does the correct-password login rejection seen on 2026-10-14 still happen? Diagnose or close.
 - Remaining LAN and multi-device scope to support.
 - M4 default Q5 (drafts over 1 MiB are not echoed back), applied without an answer: confirm or
