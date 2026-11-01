@@ -633,8 +633,8 @@ fn mupdf_stays_in_worker() {
         if path.file_name().is_some_and(|n| n == "Cargo.toml") {
             assert!(!cargo_alias_reference(&content), "{}", path.display());
         } else if path == root.join("Cargo.lock") {
-            // Included as provenance/test data, never Rust: include! rejects
-            // non-.rs targets. Native package names in the lockfile are expected.
+            // Only include_str! can reach Cargo.lock: Rust references require .rs.
+            // It is provenance data, so its native package names are exempt.
             assert!(syn::parse_file(&content).is_err());
         } else if !path.starts_with(&worker) {
             assert!(!native_rust_reference(&content), "{}", path.display());
@@ -643,32 +643,44 @@ fn mupdf_stays_in_worker() {
     }
 }
 
-fn boundary_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    fn visit(path: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
-        let metadata = match std::fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-            Err(error) => panic!("{}: {error}", path.display()),
-        };
-        assert!(
-            !metadata.is_symlink(),
-            "symlink in source boundary: {}",
-            path.display()
-        );
-        if metadata.is_file() {
-            if path.file_name().is_some_and(|n| n == "Cargo.toml")
-                || path.extension().is_some_and(|extension| extension == "rs")
-            {
-                files.push(path.to_path_buf());
-            }
-            return;
-        }
-        for entry in std::fs::read_dir(path).unwrap() {
-            let path = entry.unwrap().path();
-            visit(&path, files);
-        }
+fn boundary_visit(
+    path: &std::path::Path,
+    files: &mut Vec<std::path::PathBuf>,
+    rules: &[BoundaryIgnore],
+) {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!("{}: {error}", path.display()),
+    };
+    if boundary_ignored(path, metadata.is_dir(), rules) {
+        return;
     }
+    assert!(
+        !metadata.is_symlink(),
+        "symlink in source boundary: {}",
+        path.display()
+    );
+    if metadata.is_file() {
+        if path.file_name().is_some_and(|n| n == "Cargo.toml")
+            || path.extension().is_some_and(|extension| extension == "rs")
+        {
+            files.push(path.to_path_buf());
+        }
+        return;
+    }
+    let mut rules = rules.to_vec();
+    boundary_ignore_rules(path, &mut rules);
+    for entry in std::fs::read_dir(path).unwrap() {
+        let path = entry.unwrap().path();
+        boundary_visit(&path, files, &rules);
+    }
+}
+
+fn boundary_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
+    let mut rules = Vec::new();
+    boundary_ignore_rules(root, &mut rules);
     for name in [
         "src",
         "tests",
@@ -678,7 +690,7 @@ fn boundary_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
         "build.rs",
         "Cargo.toml",
     ] {
-        visit(&root.join(name), &mut files);
+        boundary_visit(&root.join(name), &mut files, &rules);
     }
     let manifests: Vec<_> = files
         .iter()
@@ -686,14 +698,24 @@ fn boundary_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
         .cloned()
         .collect();
     for manifest in manifests {
-        for path in cargo_source_paths(&manifest) {
+        for (path, kind) in cargo_source_paths(&manifest) {
             let target = boundary_target(root, manifest.parent().unwrap(), &path);
             assert!(
-                target.is_file(),
-                "missing Cargo source: {}",
+                ["src", "tests", "examples", "benches", "tools"]
+                    .iter()
+                    .any(|name| target.starts_with(root.join(name)))
+                    || (kind == "build" && target == root.join("build.rs")),
+                "Cargo {kind} outside walked roots: {path}"
+            );
+            assert!(
+                if kind == "member" {
+                    files.contains(&target.join("Cargo.toml"))
+                } else {
+                    files.contains(&target)
+                },
+                "Cargo {kind} not scanned: {}",
                 target.display()
             );
-            files.push(target);
         }
     }
     assert!(
@@ -714,9 +736,21 @@ fn boundary_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
             continue;
         }
         let content = std::fs::read_to_string(&path).unwrap();
+        if path == root.join("build.rs") {
+            // Root build.rs is walked alone, unlike the recursive source roots.
+            // Refuse implicit child modules, including declarations in inline modules.
+            assert!(
+                !has_file_modules(&content),
+                "root build.rs has file modules"
+            );
+        }
         for (literal, rust) in boundary_references(&content) {
             let target = boundary_target(root, path.parent().unwrap(), &literal);
             if rust {
+                assert!(
+                    !target.starts_with(root.join("src/sources/worker")),
+                    "worker source pulled outside worker: {literal}"
+                );
                 assert!(
                     target.extension().is_some_and(|e| e == "rs"),
                     "non-Rust source: {literal}"
@@ -740,41 +774,135 @@ fn boundary_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     files
 }
 
-fn cargo_source_paths(manifest: &std::path::Path) -> Vec<String> {
-    // Python 3.11+ is already required by helper checks. Use its maintained TOML
-    // parser, including quoted keys, inline tables and multiline strings.
-    let output = std::process::Command::new("python3")
-        .args([
-            "-I",
-            "-c",
-            r"
-import json, sys, tomllib
-with open(sys.argv[1], 'rb') as source:
-    doc = tomllib.load(source)
-paths = []
-build = doc.get('package', {}).get('build')
-if isinstance(build, str):
-    paths.append(build)
-lib = doc.get('lib', {})
-if 'path' in lib:
-    paths.append(lib['path'])
-for kind in ('bench', 'bin', 'example', 'test'):
-    for target in doc.get(kind, []):
-        if 'path' in target:
-            paths.append(target['path'])
-print(json.dumps(paths))
-",
-        ])
-        .arg(manifest)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}: {}",
-        manifest.display(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).unwrap()
+fn cargo_source_paths(manifest: &std::path::Path) -> Vec<(String, &'static str)> {
+    let text = std::fs::read_to_string(manifest).unwrap();
+    let doc = text.parse::<toml_edit::DocumentMut>().unwrap();
+    let mut paths = Vec::new();
+    if let Some(build) = doc.get("package").and_then(|p| p.get("build")) {
+        if let Some(path) = build.as_str() {
+            paths.push((path.to_owned(), "build"));
+        } else {
+            assert!(build.as_bool().is_some(), "invalid package.build");
+        }
+    }
+    if let Some(path) = doc.get("lib").and_then(|lib| lib.get("path")) {
+        paths.push((path.as_str().unwrap().to_owned(), "target"));
+    }
+    for kind in ["bench", "bin", "example", "test"] {
+        if let Some(targets) = doc.get(kind) {
+            if let Some(tables) = targets.as_array_of_tables() {
+                for target in tables {
+                    if let Some(path) = target.get("path") {
+                        paths.push((path.as_str().unwrap().to_owned(), "target"));
+                    }
+                }
+            } else {
+                for target in targets.as_array().unwrap() {
+                    if let Some(path) = target.as_inline_table().unwrap().get("path") {
+                        paths.push((path.as_str().unwrap().to_owned(), "target"));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(members) = doc.get("workspace").and_then(|w| w.get("members")) {
+        for member in members.as_array().unwrap() {
+            let path = member.as_str().unwrap();
+            assert!(
+                !path.contains(['*', '?', '[', ']']),
+                "workspace glob requires explicit members"
+            );
+            paths.push((path.to_owned(), "member"));
+        }
+    }
+    paths
+}
+
+fn has_file_modules(content: &str) -> bool {
+    fn walk(tokens: proc_macro2::TokenStream) -> bool {
+        let tokens: Vec<_> = tokens.into_iter().collect();
+        tokens.windows(3).any(|t| {
+            matches!(&t[0], proc_macro2::TokenTree::Ident(i) if i == "mod")
+                && matches!(&t[1], proc_macro2::TokenTree::Ident(_))
+                && matches!(&t[2], proc_macro2::TokenTree::Punct(p) if p.as_char() == ';')
+        }) || tokens.into_iter().any(|t| match t {
+            proc_macro2::TokenTree::Group(g) => walk(g.stream()),
+            _ => false,
+        })
+    }
+    walk(content.parse().expect("invalid Rust tokens"))
+}
+
+// No ignore/glob crate is locked. Read only checkout-local .gitignore files,
+// supporting the simple patterns used here; reject unsupported syntax rather
+// than silently widening exclusions. No git executable, metadata or global rules.
+#[derive(Clone)]
+struct BoundaryIgnore {
+    base: std::path::PathBuf,
+    pattern: regex::Regex,
+    directory: bool,
+    negated: bool,
+}
+
+fn boundary_ignore_rules(base: &std::path::Path, rules: &mut Vec<BoundaryIgnore>) {
+    let path = base.join(".gitignore");
+    let text = match std::fs::symlink_metadata(&path) {
+        Ok(meta) => {
+            assert!(meta.is_file() && !meta.is_symlink(), "invalid .gitignore");
+            std::fs::read_to_string(path).unwrap()
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!(".gitignore: {error}"),
+    };
+    for line in text
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
+        let (negated, line) = line.strip_prefix('!').map_or((false, line), |s| (true, s));
+        assert!(
+            !line.contains(['\\', '[', ']']) && !line.contains("**") && !line.ends_with(' '),
+            "unsupported .gitignore pattern: {line}"
+        );
+        let directory = line.ends_with('/');
+        let anchored = line.starts_with('/');
+        let line = line.trim_matches('/');
+        assert!(!line.is_empty(), "empty .gitignore pattern");
+        let mut pattern = if anchored || line.contains('/') {
+            "^"
+        } else {
+            "(?:^|/)"
+        }
+        .to_owned();
+        for ch in line.chars() {
+            match ch {
+                '*' => pattern.push_str("[^/]*"),
+                '?' => pattern.push_str("[^/]"),
+                _ => pattern.push_str(&regex::escape(&ch.to_string())),
+            }
+        }
+        pattern.push('$');
+        rules.push(BoundaryIgnore {
+            base: base.to_path_buf(),
+            pattern: regex::Regex::new(&pattern).unwrap(),
+            directory,
+            negated,
+        });
+    }
+}
+
+fn boundary_ignored(path: &std::path::Path, directory: bool, rules: &[BoundaryIgnore]) -> bool {
+    let mut ignored = false;
+    for rule in rules {
+        if (!rule.directory || directory)
+            && path.strip_prefix(&rule.base).is_ok_and(|p| {
+                rule.pattern
+                    .is_match(p.to_str().expect("non-UTF8 source path"))
+            })
+        {
+            ignored = !rule.negated;
+        }
+    }
+    ignored
 }
 
 fn boundary_target(
@@ -920,7 +1048,13 @@ fn boundary_cargo_targets_are_scanned_and_cannot_escape() {
             format!("{section}\npath = 'custom/target.rs'\n"),
         )
         .unwrap();
-        assert!(boundary_files(root).contains(&root.join("custom/target.rs")));
+        assert!(std::panic::catch_unwind(|| boundary_files(root)).is_err());
+        std::fs::write(
+            root.join("Cargo.toml"),
+            format!("{section}\npath = 'src/main.rs'\n"),
+        )
+        .unwrap();
+        assert!(boundary_files(root).contains(&root.join("src/main.rs")));
         for escape in ["../outside.rs", "/outside.rs"] {
             std::fs::write(
                 root.join("Cargo.toml"),
@@ -935,7 +1069,120 @@ fn boundary_cargo_targets_are_scanned_and_cannot_escape() {
         "[package]\nbuild = 'custom/target.rs'\n",
     )
     .unwrap();
-    assert!(boundary_files(root).contains(&root.join("custom/target.rs")));
+    assert!(std::panic::catch_unwind(|| boundary_files(root)).is_err());
+}
+
+#[test]
+fn boundary_cargo_parser_handles_quoted_keys_and_inline_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("Cargo.toml");
+    std::fs::write(
+        &manifest,
+        r#"
+"package" = { "build" = """build.rs""" }
+"lib" = { "path" = 'src/lib.rs' }
+"bin" = [{ "path" = 'src/main.rs' }]
+"workspace" = { "members" = ['tools/helper'] }
+[[example]]
+"path" = 'examples/demo.rs'
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        cargo_source_paths(&manifest),
+        [
+            ("build.rs", "build"),
+            ("src/lib.rs", "target"),
+            ("src/main.rs", "target"),
+            ("examples/demo.rs", "target"),
+            ("tools/helper", "member"),
+        ]
+        .map(|(path, kind)| (path.to_owned(), kind))
+    );
+}
+
+#[test]
+fn boundary_refuses_unwalked_cargo_children() {
+    for manifest in [
+        "[[bin]]\npath = 'custom/preview.rs'\n",
+        "[workspace]\nmembers = ['custom']\n",
+        "[workspace]\nmembers = ['custom/*']\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::create_dir(root.join("custom")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "").unwrap();
+        std::fs::write(root.join("Cargo.toml"), manifest).unwrap();
+        std::fs::write(root.join("custom/preview.rs"), "mod pdf;").unwrap();
+        std::fs::write(root.join("custom/pdf.rs"), "use mupdf;").unwrap();
+        std::fs::write(root.join("custom/Cargo.toml"), "").unwrap();
+        assert!(
+            std::panic::catch_unwind(|| boundary_files(root)).is_err(),
+            "{manifest}"
+        );
+    }
+}
+
+#[test]
+fn boundary_refuses_root_build_file_modules() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.rs"), "").unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nbuild = 'build.rs'\n").unwrap();
+    std::fs::write(root.join("build.rs"), "mod helper;").unwrap();
+    std::fs::write(root.join("helper.rs"), "use mupdf;").unwrap();
+    assert!(std::panic::catch_unwind(|| boundary_files(root)).is_err());
+}
+
+#[test]
+fn boundary_refuses_worker_sources_pulled_outside() {
+    for text in [
+        "#[path = \"sources/worker/operations.rs\"] mod bypass;",
+        "include!(\"sources/worker/operations.rs\");",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src/sources/worker")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "").unwrap();
+        std::fs::write(root.join("src/main.rs"), text).unwrap();
+        std::fs::write(root.join("src/sources/worker/operations.rs"), "").unwrap();
+        assert!(
+            std::panic::catch_unwind(|| boundary_files(root)).is_err(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn boundary_skips_ignored_local_content_without_git() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tools/.venv/bin")).unwrap();
+    std::fs::create_dir_all(root.join("tools/__pycache__")).unwrap();
+    std::fs::create_dir_all(root.join("tools/target")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "").unwrap();
+    std::fs::write(root.join("src/main.rs"), "").unwrap();
+    std::fs::write(root.join(".gitignore"), ".venv*/\n__pycache__/\n/target/\n").unwrap();
+    std::fs::write(
+        root.join("tools/.gitignore"),
+        "/target/\n*.tmp\n!kept.tmp\n",
+    )
+    .unwrap();
+    for path in [
+        "tools/.venv/bin/python",
+        "tools/__pycache__/cache",
+        "tools/target/link",
+        "tools/local.tmp",
+    ] {
+        symlink("/missing", root.join(path)).unwrap();
+    }
+    assert_eq!(boundary_files(root).len(), 2);
+    symlink("/missing", root.join("tools/kept.tmp")).unwrap();
+    assert!(std::panic::catch_unwind(|| boundary_files(root)).is_err());
 }
 
 #[test]
@@ -947,11 +1194,14 @@ fn boundary_rejects_hidden_rust_sources() {
         "#[cfg_attr(unix, path = r#\"../other/native.rs\"#)] mod bypass;",
         "include!(\"/outside.rs\");",
         "include_str!(\"../outside.txt\");",
+        "include!(\"../Cargo.lock\");",
+        "#[path = \"../Cargo.lock\"] mod bypass;",
     ] {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src/main.rs"), text).unwrap();
         std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+        std::fs::write(dir.path().join("Cargo.lock"), "version = 4\n").unwrap();
         assert!(
             std::panic::catch_unwind(|| boundary_files(dir.path())).is_err(),
             "{text}"
@@ -979,6 +1229,13 @@ fn boundary_scans_included_text_and_requires_main() {
             .iter()
             .any(|p| native_rust_reference(&std::fs::read_to_string(p).unwrap()))
     );
+    std::fs::write(root.join("Cargo.lock"), "version = 4\n").unwrap();
+    std::fs::write(
+        root.join("src/main.rs"),
+        "const LOCK: &str = include_str!(\"../Cargo.lock\");",
+    )
+    .unwrap();
+    assert!(boundary_files(root).contains(&root.join("Cargo.lock")));
     // Tokens in strings/comments are data, not source redirection.
     assert_eq!(
         boundary_references("// include!(\"x.txt\");\nconst X: &str = r#\"#[path = \"x.inc\"]\"#;"),

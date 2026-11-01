@@ -474,14 +474,28 @@ impl Files {
     }
 }
 fn normalized_dir(parent: &OwnedFd, name: &str) -> Result<OwnedFd, AppError> {
-    normalized_dir_with_hook(parent, name, |_| {})
+    normalized_dir_impl(
+        parent,
+        name,
+        #[cfg(test)]
+        |_| {},
+    )
 }
+#[cfg(test)]
 fn normalized_dir_with_hook(
     parent: &OwnedFd,
     name: &str,
-    mut hook: impl FnMut(u8),
+    hook: impl FnMut(u8),
+) -> Result<OwnedFd, AppError> {
+    normalized_dir_impl(parent, name, hook)
+}
+fn normalized_dir_impl(
+    parent: &OwnedFd,
+    name: &str,
+    #[cfg(test)] mut hook: impl FnMut(u8),
 ) -> Result<OwnedFd, AppError> {
     use std::os::fd::AsRawFd;
+    #[cfg(test)]
     hook(0);
     // O_PATH needs no read permission, even if umask removed owner read/search.
     // Keep this inode pinned across chmod and the subsequent readable open.
@@ -496,6 +510,7 @@ fn normalized_dir_with_hook(
     if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Directory {
         return Err(AppError::Invalid("Invalid staging directory."));
     }
+    #[cfg(test)]
     hook(1);
     // This procfs magic link resolves to the pinned descriptor, never the mutable
     // directory entry. Refuse if procfs is unavailable; no following-name fallback.
@@ -505,11 +520,11 @@ fn normalized_dir_with_hook(
         Mode::RWXU,
         rustix::fs::AtFlags::empty(),
     )
-    .map_err(|_| {
-        AppError::Invalid(
-            "The umask removes owner permissions; safe directory normalization is unavailable.",
-        )
+    .map_err(|error| {
+        eprintln!("Staging directory permission normalization failed: {error}");
+        AppError::Invalid("Staging directory permissions could not be normalised safely.")
     })?;
+    #[cfg(test)]
     hook(2);
     let dir = rustix::fs::openat(
         parent,
@@ -559,6 +574,29 @@ fn normalization_never_chmods_a_swapped_symlink_target() {
         );
     }
 }
+#[test]
+fn normalization_refuses_a_different_real_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path();
+    std::fs::create_dir(path.join("directory")).unwrap();
+    let parent = rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .unwrap();
+    let result = normalized_dir_with_hook(&parent, "directory", |at| {
+        if at == 2 {
+            std::fs::rename(path.join("directory"), path.join("pinned")).unwrap();
+            std::fs::create_dir(path.join("directory")).unwrap();
+        }
+    });
+    assert!(matches!(
+        result,
+        Err(AppError::Invalid("Staging directory changed."))
+    ));
+}
+
 fn remove_entry(dir: &OwnedFd, name: &std::ffi::OsStr) -> Result<(), AppError> {
     let stat = rustix::fs::statat(dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).map_err(io)?;
     if rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Directory {
