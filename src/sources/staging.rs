@@ -136,6 +136,17 @@ pub struct Files {
     pub fail_spool_chmod: std::sync::atomic::AtomicBool,
 }
 impl Files {
+    pub(crate) fn read_text(&self, id: &str, page: u32) -> Result<Vec<u8>, AppError> {
+        let dir = self.dir(id)?;
+        let fd = rustix::fs::openat(
+            &dir,
+            format!("text-{page}.json"),
+            crate::local_file::flags(),
+            Mode::empty(),
+        )
+        .map_err(io)?;
+        crate::local_file::read(fd, 8 * 1024 * 1024)
+    }
     pub(crate) fn read_image(&self, id: &str, page: u32) -> Result<Vec<u8>, AppError> {
         let dir = self.dir(id)?;
         let fd = rustix::fs::openat(

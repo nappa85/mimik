@@ -108,7 +108,8 @@ Original filenames are neither application arguments nor stored/logged identifie
 
 `/admin/materials/uploads/{id}` shows size, hash prefix, matching permanent document,
 inspection page count/sizes/rotations/encryption, and a selection of at most 64 pages.
-POST actions at `/{id}/set`, `/inspect`, `/render`, `/cancel` and `/discard` require Owner,
+POST actions at `/{id}/set`, `/inspect`, `/render`, `/cancel`, `/discard`, `/propose`,
+`/exclude` and `/remove-exclusion` require Owner,
 Host/Origin and session-bound CSRF; manager calls run on blocking threads. Render retries
 keep current pages and render the remainder. Failed/restarted uploads offer inspection
 again and rendering the remaining pages. Progress at `/{id}/progress` is an HTML fragment.
@@ -118,6 +119,15 @@ is active. Rendered pages show text-layer diagnostics and zoom/pan; no-JS users 
 full-size PNG. `/{id}/pages/{page}/image` serves only stored page IDs through Owner read
 admission and descriptor-relative no-follow reads, with `no-store` and `nosniff`.
 These screens/assets/images carry the material review screen's strict CSP.
+The optional **Repeated text** section proposes matching text on the selected, current renders.
+It shows the text only to the Owner, affected pages, absent pages, and highlighted per-page
+boxes. The Owner confirms, adjusts numeric displayed-point inputs, or draws a box with the
+same editor as the source review screen. Pointer corner grips and keyboard arrow-key handles
+enhance the numeric form. Every write requires explicit page choices and a rationale.
+Absent pages start unchecked and unhighlighted; their median boxes require explicit extension
+after the missing-text warning. Confirmation replaces the whole current exclusion. Removal
+requires a fresh rationale. Confirmed regions have opaque black SVG masks on staged renders;
+the stored PNG and the original-image endpoint remain unchanged (SRC-13).
 Reading routes are disabled with their requirements: step 4 creates sources; staged pages
 are not approved evidence.
 
@@ -128,7 +138,8 @@ never parses uploaded PDFs. Default/release builds contain neither this worker n
 flag. The required CI browser-smoke step runs the standalone `tools/upload_browser.py`
 against the `dev-endpoint` binary artifact in `mimik-browser`; the image includes the script
 and, among fixtures, only its shared synthetic PDF fixture. It covers 1280/390 px JavaScript/no-JavaScript
-scenarios, including numeric zoom before image load;
+scenarios, including numeric zoom before image load, proposal confirmation, opaque masks,
+numeric adjustment, removal, revision history and private-data log/database checks;
 `tools/smoke_release.py` checks that release artifacts lack and refuse the flag.
 
 ## Internal upload staging (Linux)
@@ -158,9 +169,14 @@ source immutability. They store metadata/hashes, not PDFs, PNGs or extracted tex
 descriptor-relative and no-follow under `data/staging/<32-hex-id>/`: directories 0700,
 `document.pdf`, `page-N.png` and `text-N.json` 0600. Page writes use exclusive temporary names,
 fsync and atomic rename. Newly created files/directories are fchmod-normalized to their private
-modes even under a restrictive umask. The exclusion table reserves actor, rationale, pages, displayed-space
-boxes, fingerprint, removal flag and revision for the later confirmation API; it stores no
-proposal text.
+modes even under a restrictive umask. The exclusion table holds actor attribution, rationale,
+pages, displayed-space boxes, fingerprint, removal flag and revision. Set, replacement and
+removal append rows; upload deletion/expiry cascades to all exclusion history. It stores no
+proposal text. The current exclusion and its independent revision (zero before the first row)
+are part of the upload model. A removal retains its historical boxes but exposes no current
+exclusion. Writes recheck Owner/CSRF in the transaction and require both the upload revision
+and exclusion revision. Selection changes that would deselect an excluded page are refused
+until the Owner replaces or removes the exclusion; unrelated selection/metadata changes retain it.
 
 The manager owns a process-wide ledger of used bytes and reservations. Total staging is
 2 GiB; free space must cover outstanding reservations plus 512 MiB for SQLite/WAL. Each
@@ -199,10 +215,34 @@ pages and loads only current job/selection/page facts, without reloading the ins
 `contract(id)` builds `mimik-staged-v1` from a consistent row snapshot: PDF hash/size, pinned
 renderer versions/settings, selected pages/revision, per-page geometry, PNG hash/pixels/dpi,
 substituted fonts/text statistics, metadata, and limits (64 pages, 128 MiB PNG, 20,000 units).
-It refuses an incomplete/outdated rendering. Exclusion is currently `None`. This is staging
+It refuses an incomplete/outdated rendering and includes the current exclusion and its revision.
+This is staging
 only: no permanent source, review approval or evidence is created. The later source-creation
 step must consume this contract and copy only permanent page facts/images/exclusion geometry,
 then discard staging; it must not parse the PDF again or retain staging text/proposals.
+
+### Repeated-text proposal
+
+`Uploads::propose_exclusions` reads staged text under the publication/deletion gate, checks
+its stored byte count and SHA-256, and validates the text-line schema and page bounds again.
+It requires a complete current selection and Owner read admission before and after the read.
+The pure `exclusions::propose` function normalizes NFKC, collapses whitespace, case-folds with
+`unicase`, and replaces each Unicode decimal-digit run with `#`. No text is written to SQLite,
+logs or error messages. Confirmation accepts only a current proposal fingerprint (SHA-256 of
+normalized text) or no fingerprint for a manually drawn/adjusted exclusion.
+
+Lines are visited by PDF page, then top/left/bottom/right, normalized text bytes and original
+line ordinal. Each joins the first eligible group in creation order with the same normalized
+text and seed-box IoU at least 0.8 in page fractions, with at most one line per page per group.
+The IoU comparison tolerates four floating-point epsilons at the boundary to account for
+fraction conversion. Ranking is descending page count and normalized Unicode character count,
+then ascending seed top/left/bottom/right, normalized bytes and group creation order. Only
+4–200-character groups on at least three pages and at least 60% of the entire selection qualify;
+the top three are offered. Matched boxes expand by 2 points and clip to the displayed page.
+Absent-page offers use the coordinate-wise median unpadded box in page fractions (the mean of
+the middle two coordinates for an even count), converted to that page's points and clipped.
+They are never selected automatically. Pages without text still count in the denominator.
+Path/image marks cannot generate proposals; manual boxes remain available.
 
 ## Import (`mimik import-source --bundle DIR --pdf FILE`)
 

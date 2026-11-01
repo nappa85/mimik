@@ -189,6 +189,16 @@ fn reversed_box_corners_are_normalized() {
 }
 
 #[test]
+fn rotated_render_exclusion_round_trip_uses_displayed_points() {
+    for rotation in [90, 180, 270] {
+        let bytes = fixture(rotation, [10, 20, 180, 270], 2.0, true);
+        let inspected = inspect(Input::Bytes(&bytes)).unwrap();
+        let image = render(Input::Bytes(&bytes), &[1]).unwrap().remove(0);
+        crate::sources::uploads::tests::assert_rendered_exclusion_round_trip(inspected, image);
+    }
+}
+
+#[test]
 fn crop_edge_text_counts_only_visible_characters() {
     // Courier is 6 pt wide at 10 pt. The CropBox intersects C, but D starts at x=53.
     let mut doc = Document::load_mem(&fixture(0, [0, 0, 52, 300], 1.0, false)).unwrap();

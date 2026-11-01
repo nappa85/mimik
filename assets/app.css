@@ -105,6 +105,11 @@ input[type="file"] { max-width: 100%; }
 #review-overlay.drawing { touch-action: none; cursor: crosshair; }
 #review-overlay.drawing a { pointer-events: none; }
 #drawn-region { fill: #f6ba3b55; stroke: #b55b00; }
+.drawn-region { fill: #f6ba3b55; stroke: #b55b00; }
+.exclusion-mask { fill: #000; fill-opacity: 1; }
+.region-overlay.drawing { touch-action: none; cursor: crosshair; }
+.region-drag-handle { fill: #075ba6; stroke: #fff; stroke-width: 1; cursor: move; touch-action: none; }
+[data-region-editor] { min-width: 0; max-width: 100%; }
 [hidden] { display: none !important; }
 [data-unit]:focus, a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid #075ba6; outline-offset: 3px; }
 .suggestion { border: 1px solid currentColor; padding: .75rem; margin-block: 1rem; overflow-wrap: anywhere; }

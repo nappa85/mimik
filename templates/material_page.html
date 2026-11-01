@@ -8,7 +8,7 @@
 {% if !message.is_empty() %}
 <div class="panel" role="alert"><p>{{ message }}</p><p>Your draft was not saved. <a href="{{ self.draft_link() }}">Go to the matching draft form</a>. Its submitted revision is preserved separately from current stored revisions. Copy your draft, <a href="/admin/materials/pages/{{ page.id }}">reload</a>, and reassess the original before submitting again.</p></div>
 {% endif %}
-<div class="columns evidence-columns">
+<div class="columns evidence-columns" data-region-editor data-width="{{ screen.width }}" data-height="{{ screen.height }}">
 <aside class="panel source-original">
 <h2>Original PDF render</h2>
 <a href="/admin/materials/pages/{{ page.id }}/image" target="_blank" rel="noopener">Open full-size image</a>

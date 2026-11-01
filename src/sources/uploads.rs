@@ -25,12 +25,15 @@ use std::{
 
 static MANAGER_OPEN: AtomicBool = AtomicBool::new(false);
 
+#[path = "upload_exclusions.rs"]
+pub mod exclusions;
+
 #[cfg(feature = "dev-endpoint")]
 #[path = "upload_development.rs"]
 pub mod development;
 #[cfg(test)]
 #[path = "upload_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 /// Constructed only by authenticated handlers; a caller cannot supply an actor label.
 #[derive(Clone)]
@@ -217,6 +220,8 @@ pub struct Job {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Upload {
+    pub exclusion_revision: i64,
+    pub exclusion: Option<exclusions::Exclusion>,
     pub already_document: Option<i64>,
     pub id: String,
     pub pdf_sha256: String,
@@ -255,7 +260,8 @@ pub struct StagedContract {
     pub pages: Vec<PageModel>,
     pub metadata: Metadata,
     pub limits: SourceLimits,
-    pub exclusion: Option<serde_json::Value>,
+    pub exclusion_revision: i64,
+    pub exclusion: Option<exclusions::Exclusion>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Renderer {
@@ -890,7 +896,8 @@ impl Uploads {
                 png_bytes: 128 * MIB,
                 units: 20000,
             },
-            exclusion: None,
+            exclusion_revision: u.exclusion_revision,
+            exclusion: u.exclusion,
         })
     }
     fn remove_page(&self, id: &str, n: u32) -> Result<(), AppError> {
@@ -1444,6 +1451,14 @@ fn settled_state(upload: &Upload) -> &'static str {
     }
 }
 fn check_selection(u: &Upload, revision: i64, selected: &[u32]) -> Result<(), AppError> {
+    if u.exclusion
+        .as_ref()
+        .is_some_and(|e| e.pages.iter().any(|n| !selected.contains(n)))
+    {
+        return Err(AppError::Invalid(
+            "Replace or remove the exclusion before deselecting its pages.",
+        ));
+    }
     if revision != u.revision {
         return Err(AppError::Conflict);
     }
@@ -1476,6 +1491,8 @@ fn load_parts(db: &Connection, id: &str, inspection_needed: bool) -> Result<Uplo
             [id],
             |r| {
                 Ok(Upload {
+                    exclusion_revision: 0,
+                    exclusion: None,
                     already_document: r.get(8)?,
                     id: r.get(0)?,
                     pdf_sha256: r.get(1)?,
@@ -1526,6 +1543,7 @@ fn load_parts(db: &Connection, id: &str, inspection_needed: bool) -> Result<Uplo
         },
     )?;
     u.pages = load_pages(db, id)?;
+    (u.exclusion_revision, u.exclusion) = exclusions::load(db, id)?;
     Ok(u)
 }
 fn load_pages(db: &Connection, id: &str) -> Result<Vec<PageModel>, AppError> {

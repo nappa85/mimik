@@ -274,7 +274,7 @@ pub(super) fn validate_stats(s: &Stats, n: u32) -> Result<(), Error> {
     Ok(())
 }
 
-pub(super) fn validate_lines(lines: &[TextLine], page: &Page) -> Result<(), Error> {
+pub(crate) fn validate_lines(lines: &[TextLine], page: &Page) -> Result<(), Error> {
     if lines.len() > 20_000 {
         return Err(Error::TooLarge);
     }

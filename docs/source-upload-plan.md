@@ -100,7 +100,7 @@ This is what step 4 reads, without parsing the PDF again:
 - the source limits it was built to: 64 pages, 128 MiB of PNG, 20,000 units (checked again by
   each route);
 - the system id, edition and language;
-- the current exclusion and its revision (3c), or none.
+- the current exclusion and its revision, or none.
 
 **Displayed space.** The visible box is the CropBox clipped to the MediaBox, scaled by
 `UserUnit`. It is moved to origin (0, 0), rotated by `Rotate`, and its y axis points down
@@ -304,8 +304,6 @@ Two rules apply on the server side:
   - a CropBox larger than the MediaBox;
   - `UserUnit` 2 and an extreme `UserUnit`;
   - `Rotate` and `CropBox` inherited from the page tree.
-  An exclusion drawn on a rotated page round-trips into the same displayed box on the review
-  screen (3c test).
   The landmark must sit in the same displayed corner in the PNG and in the text boxes. On the
   unrotated fixtures, MuPDF's sizes must equal `lopdf`'s.
 
@@ -492,58 +490,10 @@ The state machine is transactional:
 - no overflow;
 - the strict CSP.
 
-## 3c. Repeated-text exclusion
+## 3c. What step 4 adds
 
-This step is optional for the owner and is labelled "repeated text", never "watermark":
-running headers also repeat. The proposal is a deterministic function on the validated text
-files, unit-tested on synthetic pages.
-
-**Normalisation:** NFKC, whitespace collapsed, case-folded, and each run of digits replaced by
-`#` (an order number or "page N" can vary).
-
-**Grouping.**
-1. Lines are visited in a fixed order: page, then top, left, bottom and right, then normalised
-   text bytes, then MuPDF's line order on the page. Each
-   joins the first group (in creation order) with the same normalised text whose seed box (its
-   first line's box, as a fraction of the page's width and height) it overlaps with IoU ≥ 0.8;
-   otherwise it starts a group. At most one line per page joins a group.
-2. Groups are ranked by page count, then text length, then the seed box's top, left, bottom
-   and right, then the normalised text's bytes, then creation order: a total order.
-
-**Proposal.**
-- Groups of 4 to 200 characters, present on at least 60% of the selected pages and on at least
-  3 pages. The top 3 are proposed.
-- Each page gets its own box: the group's box on that page plus 2 pt, clipped to the page.
-- **Pages where the group is absent:**
-  - they are listed;
-  - a proposed box goes on them only if the owner extends the exclusion to them, after a
-    warning; there the box is the group's median box in page fractions, converted to that
-    page's points and clipped to it.
-- Watermarks drawn as paths or images, and pages without a text layer, give no proposal: the
-  owner draws the box.
-
-**Confirmation.**
-- **What the owner sees:** the proposal highlighted on a page, and the list of pages it
-  affects.
-- **What the owner does:**
-  - confirms the proposal, adjusts its box (handles with JavaScript, numeric inputs without),
-    or draws one with the step-2 drawing tool;
-  - picks the pages;
-  - gives a rationale.
-- **What the row records:** the actor, the rationale, the pages, a box per page in displayed
-  points, and the proposal's fingerprint (a hash of the normalised text), never the text.
-- **Changes:**
-  - Replacing or removing the exclusion adds a new row and raises the exclusion revision.
-  - The rows are deleted with the upload.
-
-**Display.** The staged pages show the region masked with an opaque overlay. The stored PNG
-stays the original render (SRC-13). The effect on readings (units inside it rejected, units
-crossing it flagged, hints blacked out) is applied by each route from step 4 on.
-
-**Personal data.** Proposal text exists only in the staging text files and in the page shown
-to the Owner. A test scans the log, worker stderr handling, the database and the error
-messages for planted marker strings in the text, the uploaded file name and the rationale
-(the rationale is stored, by design, and must appear only in its row).
+- Each reading route applies the exclusion's geometry: units inside it are rejected, units
+  crossing it are flagged, and vision hints are blacked out; the stored PNG stays the original.
 
 ## Checks and gate
 
@@ -563,6 +513,10 @@ messages for planted marker strings in the text, the uploaded file name and the 
   - the proposal finds the IT PDF's buyer mark: only the page count and the box are recorded,
     never the text;
   - the result on Bare Bones is reported (its running headers may be proposed).
+  - ignored tests `live_repeated_text_it_buyer_boxes_only` and
+    `live_repeated_text_bare_bones_boxes_only` take `MIMIK_IT_BUYER_PDF` or
+    `MIMIK_BARE_BONES_PDF`, plus `MIMIK_3C_LIVE_PAGES` (ascending comma-separated pages);
+    their output contains only page counts and boxes.
 
 ## Docs when it lands
 

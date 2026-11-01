@@ -7,7 +7,7 @@ use std::{
 
 /// The only input accepted by the synthetic worker (three empty 100 × 200 pt pages).
 pub const PDF: &[u8] = include_bytes!("../../tools/fixtures/upload-three-pages.pdf.txt");
-pub(super) struct Synthetic {
+pub(crate) struct Synthetic {
     pub delay: Duration,
 }
 impl Synthetic {
@@ -92,7 +92,7 @@ impl Worker for Synthetic {
                 dpi: 150,
                 stats: worker::records::Stats {
                     n: page.n,
-                    chars: 0,
+                    chars: 26,
                     unmapped: 0,
                     image_area: 0.0,
                     fonts_substituted: vec![],
@@ -100,7 +100,10 @@ impl Worker for Synthetic {
                     incomplete: false,
                     dropped_lines: 0,
                 },
-                lines: vec![],
+                lines: vec![worker::records::TextLine {
+                    text: "PRIVATE-TEXT-MARKER page 123".into(),
+                    bounds: [5., 5., 95., 15.],
+                }],
             })
             .map_err(worker::Reason::Document)?;
         }

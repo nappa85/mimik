@@ -35,6 +35,7 @@ for (const controls of document.querySelectorAll(".upload-zoom")) {
     image.style.maxWidth = zoom === "fit" ? "100%" : "none";
     if (zoom === "fit") image.style.width = "100%";
     else if (image.naturalWidth > 0) image.style.width = `${image.naturalWidth * Number(zoom)}px`;
+    image.parentElement.style.width = image.style.width;
   };
   image.addEventListener("load", applyZoom);
   for (const button of controls.querySelectorAll("button")) {

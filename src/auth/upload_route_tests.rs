@@ -334,7 +334,33 @@ async fn upload_route_filename_not_stored_and_actions_admitted() {
     assert!(text.contains(&format!("href=\"{path}\"")));
     assert!(text.contains("<nav>") && text.contains("href=\"/admin/materials\""));
     let player = player_session(&store).await;
-    for action in ["set", "render", "inspect", "cancel", "discard"] {
+    assert_upload_action_admission(&app, &path, id, player, &token).await;
+    assert_upload_filename_not_stored(&store).await;
+    assert_staging_names_omit_filename(&dir);
+    let mut req = post_body(id, Body::from(format!("csrf={token}")));
+    *req.uri_mut() = format!("{path}/discard").parse().unwrap();
+    req.headers_mut().insert(
+        "content-type",
+        "application/x-www-form-urlencoded".parse().unwrap(),
+    );
+    assert_eq!(
+        app.oneshot(req).await.unwrap().status(),
+        StatusCode::SEE_OTHER
+    );
+    clean(&m, &dir).await;
+}
+
+async fn assert_upload_action_admission(app: &Router, path: &str, id: Id, player: Id, token: &str) {
+    for action in [
+        "set",
+        "render",
+        "inspect",
+        "cancel",
+        "discard",
+        "propose",
+        "exclude",
+        "remove-exclusion",
+    ] {
         for case in ["csrf", "missing-csrf", "host", "origin", "non-owner"] {
             let body = if case == "csrf" {
                 "csrf=wrong&revision=1".into()
@@ -375,6 +401,9 @@ async fn upload_route_filename_not_stored_and_actions_admitted() {
             );
         }
     }
+}
+
+async fn assert_upload_filename_not_stored(store: &Store) {
     store
         .run(|db| {
             let mut q = db.prepare("SELECT * FROM source_uploads")?;
@@ -389,18 +418,172 @@ async fn upload_route_filename_not_stored_and_actions_admitted() {
         })
         .await
         .unwrap();
-    assert_staging_names_omit_filename(&dir);
-    let mut req = post_body(id, Body::from(format!("csrf={token}")));
-    *req.uri_mut() = format!("{path}/discard").parse().unwrap();
-    req.headers_mut().insert(
-        "content-type",
-        "application/x-www-form-urlencoded".parse().unwrap(),
+}
+
+#[cfg(feature = "dev-endpoint")]
+#[tokio::test]
+async fn upload_route_propose_confirm_adjust_remove_displayed_boxes() {
+    use sha2::Digest;
+    let (dir, app, session, m, path, id) = setup_rendered_upload_route().await;
+    let request = |action: &str, fields: &str| upload_action(session, &path, action, fields);
+    let response = app
+        .clone()
+        .oneshot(request("propose", "revision=2"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_text(response).await;
+    assert!(text.contains("Repeated text: private-text-marker page #"));
+    assert!(text.contains("Affected pages: 1 2 3"));
+    assert!(text.contains("class=\"region-overlay\""));
+    let fingerprint = hex::encode(sha2::Sha256::digest(b"private-text-marker page #"));
+    let geometry = (1..=3)
+        .map(|n| format!("exclude_{n}=1&box_{n}_0=3&box_{n}_1=3&box_{n}_2=97&box_{n}_3=17"))
+        .collect::<Vec<_>>()
+        .join("&");
+    let fields = format!(
+        "revision=2&exclusion_revision=0&fingerprint={fingerprint}&rationale=route-marker&{geometry}"
     );
     assert_eq!(
-        app.oneshot(req).await.unwrap().status(),
+        app.clone()
+            .oneshot(request("exclude", &fields))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request("exclude", &fields))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let get = Request::builder()
+        .uri(&path)
+        .header("host", "127.0.0.1:3000")
+        .header("cookie", format!("mimik_session={session}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(get).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_text(response).await;
+    assert_eq!(text.matches("class=\"exclusion-mask\"").count(), 3);
+    assert!(text.contains("x=\"3\" y=\"3\" width=\"94\" height=\"14\""));
+    assert!(!text.contains("route-marker"));
+    let adjusted = format!("revision=2&exclusion_revision=1&rationale=adjusted&{geometry}")
+        .replace("box_1_0=3", "box_1_0=4");
+    assert_eq!(
+        app.clone()
+            .oneshot(request("exclude", &adjusted))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(m.read(&id).unwrap().exclusion.unwrap().boxes[&1][0], 4.);
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                "remove-exclusion",
+                "revision=2&exclusion_revision=2&rationale=removed"
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert!(m.read(&id).unwrap().exclusion.is_none());
+    assert_eq!(m.read(&id).unwrap().exclusion_revision, 3);
+    assert_eq!(
+        app.oneshot(request("discard", "")).await.unwrap().status(),
         StatusCode::SEE_OTHER
     );
     clean(&m, &dir).await;
+}
+
+#[cfg(feature = "dev-endpoint")]
+fn upload_action(session: Id, path: &str, action: &str, fields: &str) -> Request<Body> {
+    let token = "a".repeat(64);
+    let mut request = post_body(session, Body::from(format!("csrf={token}&{fields}")));
+    *request.uri_mut() = format!("{path}/{action}").parse().unwrap();
+    request.headers_mut().insert(
+        "content-type",
+        "application/x-www-form-urlencoded".parse().unwrap(),
+    );
+    request
+}
+
+#[cfg(feature = "dev-endpoint")]
+async fn setup_rendered_upload_route() -> (TestDirectory, Router, Id, Uploads, String, String) {
+    use crate::sources::uploads::development::{PDF, Synthetic};
+    let (dir, _, app, session, m) = setup_worker(Arc::new(Synthetic {
+        delay: Duration::ZERO,
+    }))
+    .await;
+    let token = "a".repeat(64);
+    let body = multipart(
+        &[
+            ("csrf", &token),
+            ("system", "mork-borg"),
+            ("edition", "Synthetic"),
+            ("language", "en"),
+            ("file", std::str::from_utf8(PDF).unwrap()),
+        ],
+        true,
+    );
+    let response = app
+        .clone()
+        .oneshot(post_body(session, Body::from(body)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let path = response.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let id = path.rsplit('/').next().unwrap().to_owned();
+    wait_uploaded_job(&m, &id).await;
+    let response = app
+        .clone()
+        .oneshot(upload_action(
+            session,
+            &path,
+            "set",
+            "revision=1&system=mork-borg&edition=Synthetic&language=en&page_1=1&page_2=1&page_3=1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        app.clone()
+            .oneshot(upload_action(session, &path, "render", "revision=2"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    wait_uploaded_job(&m, &id).await;
+    (dir, app, session, m, path, id)
+}
+
+#[cfg(feature = "dev-endpoint")]
+async fn wait_uploaded_job(m: &Uploads, id: &str) {
+    for _ in 0..500 {
+        let m = m.clone();
+        let id = id.to_owned();
+        let u = tokio::task::spawn_blocking(move || m.read(&id))
+            .await
+            .unwrap()
+            .unwrap();
+        if u.job.state == "succeeded" {
+            return;
+        }
+        assert!(!["failed", "cancelled"].contains(&u.job.state.as_str()));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("Synthetic upload job deadline.");
 }
 
 fn assert_staging_names_omit_filename(dir: &TestDirectory) {
