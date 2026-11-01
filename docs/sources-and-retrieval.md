@@ -256,8 +256,8 @@ per normalized text across the selection are allowed: an exhausted text is dropp
 while other texts retain exact grouping and remain eligible. After each page, tracking also
 stops for a text if neither any existing group nor a future seed can reach the page threshold.
 If budget exhaustion leaves no qualifying proposal, an HTML error explains the remedy:
-"draw an exclusion by hand". Thus adversarial nonmatching geometry cannot impose unbounded
-quadratic comparison work or suppress another text's valid footer proposal.
+"draw an exclusion by hand". IoU comparisons are therefore bounded per text, and a colliding
+text cannot suppress another text's valid footer proposal (SRC-REPEAT-COST).
 Ranking is descending page count and normalized Unicode character count,
 then ascending seed top/left/bottom/right, normalized bytes and group creation order. Only
 4–200-character groups on at least three pages and at least 60% of the entire selection qualify;
