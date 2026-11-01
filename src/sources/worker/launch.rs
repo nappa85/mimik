@@ -24,8 +24,20 @@ use std::{
 /// Caller-controlled cancellation. Create before starting the blocking operation and clone
 /// it into the calling task. Cancellation is permanent; the watchdog polls every 10 ms.
 #[derive(Clone, Default)]
-pub struct Cancel(Arc<AtomicBool>);
+pub struct Cancel(
+    Arc<AtomicBool>,
+    #[cfg(test)] Arc<std::sync::Mutex<Option<Arc<RenderHook>>>>,
+);
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct RenderHook {
+    pub entered: AtomicBool,
+}
 impl Cancel {
+    #[cfg(test)]
+    pub(crate) fn pause_render(&self, hook: Arc<RenderHook>) {
+        *self.1.lock().unwrap() = Some(hook);
+    }
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Release);
     }
@@ -90,6 +102,32 @@ pub fn render(
         pages.iter().map(|p| p.n).collect(),
     );
     execute(path, &spec, cancel, &Options::production()?, |pipe| {
+        #[cfg(test)]
+        let pipe = {
+            let mut pipe = pipe;
+            let mut first = Vec::new();
+            let hook = cancel
+                .1
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(hook) = hook {
+                let mut byte = [0; 1];
+                if pipe.read_exact(&mut byte).is_err() {
+                    return (Err(Error::Unreadable), None);
+                }
+                first.extend(byte);
+                hook.entered.store(true, Ordering::Release);
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !cancel.cancelled() {
+                    if Instant::now() >= deadline {
+                        return (Err(Error::Timeout), None);
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            std::io::Cursor::new(first).chain(pipe)
+        };
         let mut reader = match records::RenderReader::new(pipe, pages) {
             Ok(reader) => reader,
             Err(error) => return (Err(error), None),
@@ -156,6 +194,15 @@ impl Options {
 
     pub(super) fn production() -> Result<Self, Reason> {
         let runner = RunnerCommand::mimik().map_err(|_| unavailable("runner executable"))?;
+        // The libtest executable has no `pdf-worker` CLI. The host live harness supplies
+        // the built application as runner; all production probe/inspect/render paths remain.
+        #[cfg(test)]
+        let runner =
+            std::env::var_os("MIMIK_LIVE_RUNNER").map_or(runner, |program| RunnerCommand {
+                program: program.into(),
+                args: vec!["assistant-runner".into(), "--spec-fd".into(), "3".into()],
+                env: vec![],
+            });
         Ok(Self {
             #[cfg(test)]
             tmp_bytes: None,

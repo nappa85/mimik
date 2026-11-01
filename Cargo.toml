@@ -99,7 +99,7 @@ landlock = { version = "=0.4.7" }
 # verified descriptors without running anything (DEP-26).
 object = { version = "=0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
 [target.'cfg(target_os = "linux")'.dependencies]
-# The sandboxed PDF worker (source upload 3a, DEP-29): MuPDF built from the crate's vendored C
+# The sandboxed PDF worker (source upload 3a, DEP-29): renderer built from the crate's vendored C
 # source, PDF only, base14 fonts; called only from `src/sources/worker/`.
 mupdf = { version = "=0.8.0", default-features = false, features = ["base14-fonts"] }
 

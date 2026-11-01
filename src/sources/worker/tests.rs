@@ -625,24 +625,32 @@ fn pixel_bounds_and_extreme_aspects() {
 
 #[test]
 fn mupdf_stays_in_worker() {
-    fn visit(path: &std::path::Path) {
+    fn visit(path: &std::path::Path, worker: &std::path::Path) {
         let operations = operations_reference();
         for entry in std::fs::read_dir(path).unwrap() {
             let path = entry.unwrap().path();
-            if path.ends_with("sources/worker") {
+            if path
+                .file_name()
+                .is_some_and(|n| n == "target" || n == ".git")
+            {
                 continue;
             }
             if path.is_dir() {
-                visit(&path);
-            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                visit(&path, worker);
+            } else if path.file_name().is_some_and(|n| n == "Cargo.toml") {
+                let content = std::fs::read_to_string(&path).unwrap();
+                assert!(!cargo_alias_reference(&content), "{}", path.display());
+            } else if !path.starts_with(worker)
+                && path.extension().is_some_and(|extension| extension == "rs")
+            {
                 let content = std::fs::read_to_string(&path).unwrap();
                 assert!(!native_rust_reference(&content), "{}", path.display());
                 assert!(!operations.is_match(&content), "{}", path.display());
             }
         }
     }
-    visit(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
-    assert!(!cargo_alias_reference().is_match(include_str!("../../../Cargo.toml")));
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    visit(root, &root.join("src/sources/worker"));
 }
 
 fn operations_reference() -> regex::Regex {
@@ -650,10 +658,12 @@ fn operations_reference() -> regex::Regex {
 }
 
 fn native_reference() -> regex::Regex {
-    regex::Regex::new(r#"(?s)(\bmupdf(?:_sys)?\b|#\s*\[\s*path\s*=\s*"[^"]*(?:sources/worker|worker/)[^"]*"|\binclude\s*!\s*\([^;]*(?:sources/worker|worker/)|\bpackage\s*=\s*["']mupdf(?:-sys)?["'])"#).unwrap()
+    regex::Regex::new(r#"(?s)(\bmupdf(?:_sys)?\b|#\s*\[\s*(?:path|cfg_attr\s*\([^;]*\bpath)\s*=\s*(?:r\#*)?"[^"]*(?:sources/worker|worker/)[^"]*"|\binclude\s*!\s*\([^;]*(?:sources/worker|worker/|\b(?:concat|env)\s*!)|\bpackage\s*=\s*["']mupdf(?:-sys)?["'])"#).unwrap()
 }
-fn cargo_alias_reference() -> regex::Regex {
-    regex::Regex::new(r#"\bpackage\s*=\s*["']mupdf(?:-sys)?["']"#).unwrap()
+fn cargo_alias_reference(text: &str) -> bool {
+    let dependency = regex::Regex::new(r"^(?:mupdf|mupdf-sys)\s*=\s*\S").unwrap();
+    text.lines()
+        .any(|line| line.to_ascii_lowercase().contains("mupdf") && !dependency.is_match(line))
 }
 
 fn native_rust_reference(text: &str) -> bool {
@@ -670,9 +680,29 @@ fn native_rust_reference(text: &str) -> bool {
 
 #[test]
 fn boundary_matchers_cover_aliases_and_imports() {
-    assert!(
-        cargo_alias_reference().is_match("renamed = { package = \"mupdf\", version = \"0.8\" }")
-    );
+    assert!(cargo_alias_reference(
+        "renamed = { package = \"mupdf\", version = \"0.8\" }"
+    ));
+    for text in [
+        "renamed = { \"package\" = \"mupdf\", version = \"0.8\" }",
+        "renamed = { package='mupdf', version = '0.8' }",
+        "renamed = { package = 'MuPDF-sys', version = '0.8' }",
+        "\"mupdf\" = '0.8'",
+        "[dependencies.mupdf]",
+        "dependencies = { mupdf = '0.8' }",
+        "MuPDF = '0.8'",
+        " mupdf = '0.8'",
+        "# MuPDF dependency",
+    ] {
+        assert!(cargo_alias_reference(text), "{text}");
+    }
+    for text in [
+        "mupdf = '0.8'",
+        "mupdf-sys = { version = '0.8' }",
+        "[dependencies]\nother = '1'",
+    ] {
+        assert!(!cargo_alias_reference(text), "{text}");
+    }
     for text in [
         "use mupdf;",
         "use mupdf as m;",
@@ -689,7 +719,13 @@ fn boundary_matchers_cover_aliases_and_imports() {
         "use /* c */ mupdf as x;",
         "extern crate r#mupdf as x;",
         "#[path = \"sources/worker/operations.rs\"] mod bypass;",
+        "#[path = r\"sources/worker/operations.rs\"] mod bypass;",
+        "#[path = r#\"worker/operations.rs\"#] mod bypass;",
+        "#[cfg_attr(unix, path = \"worker/operations.rs\")] mod bypass;",
+        "#[cfg_attr(unix, path = r#\"sources/worker/operations.rs\"#)] mod bypass;",
         "include!(\"worker/operations.rs\");",
+        "include!(concat!(\"work\", \"er/operations.rs\"));",
+        "include!(env!(\"NATIVE_SOURCE\"));",
         "renamed = { package = \"mupdf\", version = \"0.8\" }",
     ] {
         assert!(native_rust_reference(text), "{text}");

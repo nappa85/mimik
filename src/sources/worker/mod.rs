@@ -4,9 +4,9 @@ mod launch;
 pub use availability::{Availability, availability};
 #[cfg(test)]
 mod live_tests;
-pub use launch::{Cancel, Reason, inspect, inspect_cancellable, render};
 #[cfg(test)]
-pub(crate) use live_tests::UploadWorker;
+pub(crate) use launch::RenderHook;
+pub use launch::{Cancel, Reason, inspect, inspect_cancellable, render};
 mod entry;
 mod filter;
 mod geometry;

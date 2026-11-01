@@ -169,6 +169,8 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 
 ## Sources and retrieval
 
+- **L-SRC-12** [sources] `mupdf_stays_in_worker` is a source/dependency lint, not a complete Rust or Cargo parser. The process sandbox is the boundary for PDF parsing and rendering.
+
 - **L-SRC-1** [sources] Extraction fidelity is measured on 18 pages of one manual (MÖRK BORG IT, `docs/results.md`); other manuals and full books are unmeasured. Even the chosen route (Marker with forced OCR) leaves text in no unit now and then (one footnote in 18 pages), and review cannot add a unit, so such text is evidence only through the page image.
 - **L-SRC-2** [sources] Scalable whole-book admission is an open policy and design question: model-checked material cannot become verified lookup without human review, no automated-coverage policy exists, and book-wide hierarchy is not in the schema. Italian Pathfinder errata coverage is unknown.
 - **L-SRC-3** [sources] Imports accept only zero-rotation, zero-origin pages, reject nested table or form groups and `<content-ref`, and allow 64 pages and 20,000 units per run.

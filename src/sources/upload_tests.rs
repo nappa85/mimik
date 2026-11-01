@@ -479,6 +479,10 @@ fn worker_panic_fails_job_and_gate_remains_usable() {
     start(&m, &o, &id);
     wait(&m);
     assert_eq!(m.read(&id).unwrap().job.state, "failed");
+    assert_eq!(
+        m.read(&id).unwrap().job.reason.as_deref(),
+        Some("unavailable")
+    );
     f.panic.store(false, Ordering::Release);
     start(&m, &o, &id);
     wait(&m);
@@ -513,12 +517,165 @@ fn concurrent_starts_launch_exactly_one_worker() {
 }
 
 #[test]
+fn publication_panic_poisoned_gate_is_recovered_and_retry_works() {
+    let (_dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1]);
+    *m.0.before_publish.lock().unwrap() = Some(Box::new(|_| panic!("under publication gate")));
+    start(&m, &o, &id);
+    wait(&m);
+    assert!(m.0.gate.is_poisoned());
+    let u = m.read(&id).unwrap();
+    assert_eq!(u.job.state, "failed");
+    assert_eq!(u.job.reason.as_deref(), Some("unavailable"));
+    start(&m, &o, &id);
+    wait(&m);
+    assert_eq!(m.read(&id).unwrap().state, "rendered");
+    m.discard(&o, &id).unwrap();
+    assert!(m.begin_upload().is_ok());
+}
+
+#[test]
+fn atomic_revision_disagreement_settles_running_job_as_cancelled() {
+    let (_dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1]);
+    *m.0.before_finish.lock().unwrap() = Some(Box::new(|revision| {
+        revision.fetch_add(1, Ordering::Release);
+    }));
+    start(&m, &o, &id);
+    wait(&m);
+    let u = m.read(&id).unwrap();
+    assert_eq!(u.job.state, "cancelled");
+    assert_eq!(u.job.reason.as_deref(), Some("cancelled"));
+    assert_eq!(u.state, "rendered");
+}
+
+#[test]
+fn sweep_recovers_queued_job_after_spawn_and_settlement_both_fail() {
+    let (_dir, m, o, _) = fixture();
+    seed_queued(&m, &o, ID, "inspect");
+    m.0.fail_spawn.store(true, Ordering::Release);
+    m.0.fail_settlement.store(true, Ordering::Release);
+    assert!(m.start(&o, ID, 1, true).is_err());
+    assert_eq!(m.read(ID).unwrap().job.state, "queued");
+    assert!(m.0.control.lock().unwrap().is_none());
+    m.sweep().unwrap();
+    let u = m.read(ID).unwrap();
+    assert_eq!(u.job.state, "failed");
+    assert_eq!(u.job.reason.as_deref(), Some("unavailable"));
+    assert_eq!(u.state, "failed");
+    m.start(&o, ID, 1, true).unwrap();
+    wait(&m);
+    assert_eq!(m.read(ID).unwrap().state, "inspected");
+}
+
+#[test]
+fn launch_does_not_deserialize_inspection_before_spawning() {
+    let (_dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    m.0.store.upload_storage(|db| {
+        let tx = db.transaction()?;
+        tx.execute("UPDATE source_uploads SET inspection=json_set(inspection,'$.unknown',1) WHERE id=?1", [&id])?;
+        queue(&tx, &id, 1, "inspect", 0)?;
+        tx.commit()?;
+        Ok(())
+    }).unwrap();
+    assert!(
+        m.read(&id).is_err(),
+        "fixture must reject inspection deserialization"
+    );
+    m.0.fail_spawn.store(true, Ordering::Release);
+    assert!(m.launch(&id).is_err());
+    m.0.store
+        .upload_storage(|db| {
+            let (state, reason): (String, Option<String>) = db.query_row(
+                "SELECT state,reason FROM source_jobs WHERE upload_id=?1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            assert_eq!(
+                (state.as_str(), reason.as_deref()),
+                ("failed", Some("unavailable"))
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn create_returns_committed_upload_id_when_launch_fails() {
+    let (_dir, m, o, _) = fixture();
+    m.0.fail_spawn.store(true, Ordering::Release);
+    let mut phase = m.begin_upload().unwrap();
+    phase.file().write_all(PDF).unwrap();
+    let id = m
+        .create(&o, phase, &hash(PDF), PDF.len() as u64, &metadata())
+        .unwrap();
+    let u = m.read(&id).unwrap();
+    assert_eq!(u.state, "failed");
+    assert_eq!(u.job.state, "failed");
+    assert_eq!(u.job.reason.as_deref(), Some("unavailable"));
+    assert!(m.begin_upload().is_err());
+    m.start(&o, &id, 1, true).unwrap();
+    wait(&m);
+    assert_eq!(m.read(&id).unwrap().state, "inspected");
+    m.discard(&o, &id).unwrap();
+    assert!(m.begin_upload().is_ok());
+}
+
+#[test]
+fn private_files_survive_restrictive_umask() {
+    const CHILD: &str = "MIMIK_TEST_UPLOAD_UMASK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new("sh")
+            .args(["-c", "umask 0277 && exec \"$@\"", "umask-child"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sources::uploads::tests::private_files_survive_restrictive_umask",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    // A separate test process avoids changing any parallel test's process-global umask.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(
+        dir.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let files = staging::Files::open(dir.path()).unwrap();
+    files.create(ID).unwrap();
+    let ledger = staging::Ledger::new(0, || Ok(u64::MAX));
+    let mut reservation = ledger.reserve(4096).unwrap();
+    let (name, mut spool) = files.spool().unwrap();
+    spool.write_all(PDF).unwrap();
+    files
+        .publish_spool(&name, &spool, ID, &mut reservation)
+        .unwrap();
+    files
+        .write(ID, "page-1.png", b"image", &mut reservation)
+        .unwrap();
+    assert!(files.private_file(ID, "document.pdf"));
+    assert!(files.private_file(ID, "page-1.png"));
+}
+
+#[test]
 fn spawn_failure_fails_job_and_releases_worker_slot() {
     let (_dir, m, o, _) = fixture();
     seed_queued(&m, &o, ID, "inspect");
     m.0.fail_spawn.store(true, Ordering::Release);
     assert!(m.start(&o, ID, 1, true).is_err());
     assert_eq!(m.read(ID).unwrap().job.state, "failed");
+    assert_eq!(
+        m.read(ID).unwrap().job.reason.as_deref(),
+        Some("unavailable")
+    );
     assert!(m.0.control.lock().unwrap().is_none());
     m.start(&o, ID, 1, true).unwrap();
     wait(&m);
@@ -527,16 +684,14 @@ fn spawn_failure_fails_job_and_releases_worker_slot() {
     m.0.fail_spawn.store(true, Ordering::Release);
     let mut phase = m.begin_upload().unwrap();
     phase.file().write_all(PDF).unwrap();
-    assert!(
-        m.create(&o, phase, &hash(PDF), PDF.len() as u64, &metadata())
-            .is_err()
-    );
-    let id: String = m
-        .0
-        .store
-        .upload_storage(|db| Ok(db.query_row("SELECT id FROM source_uploads", [], |r| r.get(0))?))
+    let id = m
+        .create(&o, phase, &hash(PDF), PDF.len() as u64, &metadata())
         .unwrap();
     assert_eq!(m.read(&id).unwrap().job.state, "failed");
+    assert_eq!(
+        m.read(&id).unwrap().job.reason.as_deref(),
+        Some("unavailable")
+    );
     m.discard(&o, &id).unwrap();
     assert!(m.begin_upload().is_ok());
 }
@@ -580,6 +735,8 @@ fn restart_drops_pages_with_missing_or_non_private_files() {
         drop(m);
         let restarted = Uploads::initialize(store, dir.path(), f, false).unwrap();
         assert!(restarted.read(&id).unwrap().pages.is_empty(), "{damaged}");
+        assert_eq!(restarted.read(&id).unwrap().state, "inspected", "{damaged}");
+        assert_eq!(restarted.read(&id).unwrap().job.done, 0, "{damaged}");
         assert!(restarted.contract(&id).is_err());
         assert_eq!(restarted.0.ledger.usage().unwrap().0, PDF.len() as u64);
     }
@@ -604,6 +761,30 @@ fn failure_keeps_published_pages_and_retry_renders_the_rest() {
     wait(&m);
     assert_eq!(m.read(&id).unwrap().state, "rendered");
     assert_eq!(m.read(&id).unwrap().job.total, 2);
+}
+
+#[test]
+fn sweep_drops_a_retry_page_and_settles_upload_and_progress_together() {
+    let (dir, m, o, f) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2]);
+    f.fail.store(true, Ordering::Release);
+    start(&m, &o, &id);
+    wait(&m);
+    assert_eq!(m.read(&id).unwrap().pages.len(), 1);
+    f.fail.store(false, Ordering::Release);
+    start(&m, &o, &id);
+    wait(&m);
+    let u = m.read(&id).unwrap();
+    assert_eq!(u.state, "rendered");
+    assert_eq!((u.job.done, u.job.total), (1, 1));
+    std::fs::remove_file(dir.path().join("staging").join(&id).join("page-2.png")).unwrap();
+    m.sweep().unwrap();
+    let u = m.read(&id).unwrap();
+    assert_eq!(u.state, "inspected");
+    assert_eq!(u.pages.len(), 1);
+    assert_eq!(u.job.done, 0);
+    assert!(m.contract(&id).is_err());
 }
 
 #[test]
@@ -1020,8 +1201,11 @@ fn live_staging_enospc_cleans_temporary_file_and_releases_reservation() {
 #[ignore = "host confinement: MIMIK_LIVE_RUNNER opt-in, coordinator live loop"]
 fn live_staged_synthetic_pdf_inspect_render_and_discard() {
     use lopdf::{Document, Object, dictionary};
-    let live = Arc::new(worker::UploadWorker::default());
-    let (_dir, m, o) = fixture_worker(live.clone());
+    assert!(
+        std::env::var_os("MIMIK_LIVE_RUNNER").is_some(),
+        "built application runner required"
+    );
+    let (_dir, m, o) = fixture_worker(Arc::new(PdfWorker));
     let mut pdf = Document::with_version("1.7");
     let pages = pdf.new_object_id();
     let page_id=pdf.add_object(dictionary! {"Type"=>"Page","Parent"=>pages,"MediaBox"=>vec![0.into(),0.into(),1000.into(),1000.into()]});
@@ -1053,10 +1237,11 @@ fn live_staged_synthetic_pdf_inspect_render_and_discard() {
             Ok(())
         })
         .unwrap();
-    live.cancel_render.store(true, Ordering::Release);
+    let hook = Arc::new(worker::RenderHook::default());
+    *m.0.render_hook.lock().unwrap() = Some(hook.clone());
     start(&m, &o, &id);
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !live.entered.load(Ordering::Acquire) {
+    while !hook.entered.load(Ordering::Acquire) {
         assert!(Instant::now() < deadline, "real render did not start");
         std::thread::sleep(Duration::from_millis(1));
     }

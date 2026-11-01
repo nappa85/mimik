@@ -111,11 +111,15 @@ struct Running {
 }
 #[cfg(test)]
 type PublishHook = Box<dyn FnOnce(&Store) + Send>;
+#[cfg(test)]
+type FinishHook = Box<dyn FnOnce(&AtomicI64) + Send>;
 struct Inner {
     store: Store,
     files: Arc<Files>,
     ledger: Arc<Ledger>,
     worker: Arc<dyn Worker>,
+    // The gate holds no data. Control always owns either a complete Running or None;
+    // ownership transitions do not invoke panicking callbacks, so both locks recover poison.
     gate: Mutex<()>,
     control: Mutex<Option<Running>>,
     streaming: Arc<AtomicBool>,
@@ -125,6 +129,12 @@ struct Inner {
     before_publish: Mutex<Option<PublishHook>>,
     #[cfg(test)]
     fail_spawn: AtomicBool,
+    #[cfg(test)]
+    fail_settlement: AtomicBool,
+    #[cfg(test)]
+    before_finish: Mutex<Option<FinishHook>>,
+    #[cfg(test)]
+    render_hook: Mutex<Option<Arc<worker::RenderHook>>>,
 }
 impl Drop for Inner {
     fn drop(&mut self) {
@@ -152,7 +162,11 @@ impl UploadPhase {
 }
 impl Drop for UploadPhase {
     fn drop(&mut self) {
-        let _gate = self.manager.gate.lock().ok();
+        let _gate = self
+            .manager
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(name) = self.name.take()
             && self.files.remove_spool(&name).is_err()
         {
@@ -332,6 +346,12 @@ impl Uploads {
             before_publish: Mutex::new(None),
             #[cfg(test)]
             fail_spawn: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_settlement: AtomicBool::new(false),
+            #[cfg(test)]
+            before_finish: Mutex::new(None),
+            #[cfg(test)]
+            render_hook: Mutex::new(None),
         }));
         let weak = Arc::downgrade(&m.0);
         std::thread::Builder::new()
@@ -351,7 +371,11 @@ impl Uploads {
     /// # Errors
     /// Refuses a second stream/upload, insufficient free space, or a full staging budget.
     pub fn begin_upload(&self) -> Result<UploadPhase, AppError> {
-        let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
+        let _gate = self
+            .0
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if self.0.streaming.swap(true, Ordering::AcqRel) {
             return Err(AppError::Conflict);
         }
@@ -407,8 +431,16 @@ impl Uploads {
         size: u64,
         metadata: &Metadata,
     ) -> Result<String, AppError> {
-        let mut control = self.0.control.lock().map_err(|_| AppError::Worker)?;
-        let gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
+        let mut control = self
+            .0
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let gate = self
+            .0
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !Arc::ptr_eq(&phase.manager, &self.0) {
             return Err(AppError::Invalid("Wrong upload reservation."));
         }
@@ -457,7 +489,9 @@ impl Uploads {
             return Err(e);
         }
         drop(gate);
-        self.launch_locked(&id, &mut control)?;
+        if self.launch_locked(&id, 1, &mut control).is_err() {
+            tracing_sweep_failure();
+        }
         Ok(id)
     }
     /// Read the staged page model. Handlers must establish Owner read admission separately.
@@ -496,7 +530,11 @@ impl Uploads {
         metadata: &Metadata,
         selected: &[u32],
     ) -> Result<(), AppError> {
-        let mut control = self.0.control.lock().map_err(|_| AppError::Worker)?;
+        let mut control = self
+            .0
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let selection_changed = self.write(owner, |tx| {
             let u = load(tx, id)?;
             check_selection(&u, revision, selected)?;
@@ -504,10 +542,15 @@ impl Uploads {
             Ok(u.selected_pages != selected)
         })?;
         if !selection_changed {
-            let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
+            let _gate = self
+                .0
+                .gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.write(owner, |tx| {
                 let u = load(tx, id)?;
                 check_selection(&u, revision, selected)?;
+                metadata.validate(tx)?;
                 tx.execute(
                     "UPDATE source_uploads
                      SET system_id=?2, edition=?3, language=?4,
@@ -536,7 +579,11 @@ impl Uploads {
             return Ok(());
         }
         self.stop_locked(&mut control, owner, id)?;
-        let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
+        let _gate = self
+            .0
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let removed = self.write(owner, |tx| {
             let mut u = load(tx, id)?;
             check_selection(&u, revision, selected)?;
@@ -584,14 +631,22 @@ impl Uploads {
         revision: i64,
         inspect: bool,
     ) -> Result<(), AppError> {
-        let mut control = self.0.control.lock().map_err(|_| AppError::Worker)?;
+        let mut control = self
+            .0
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if control.as_ref().is_some_and(|r| !r.handle.is_finished()) {
             return Err(AppError::Conflict);
         }
         if let Some(r) = control.take() {
             r.handle.join().map_err(|_| AppError::Worker)?;
         }
-        let gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
+        let gate = self
+            .0
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.write(owner, |tx| {
             let u = load(tx, id)?;
             if u.revision != revision
@@ -614,13 +669,17 @@ impl Uploads {
             Ok(())
         })?;
         drop(gate);
-        self.launch_locked(id, &mut control)
+        self.launch_locked(id, revision, &mut control)
     }
     /// Cancel and reap before returning. Published pages remain.
     /// # Errors
     /// Returns admission, reaping or storage failures.
     pub fn cancel(&self, owner: &OwnerWrite, id: &str) -> Result<(), AppError> {
-        let mut control = self.0.control.lock().map_err(|_| AppError::Worker)?;
+        let mut control = self
+            .0
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.stop_locked(&mut control, owner, id)
     }
     fn stop_locked(
@@ -663,9 +722,17 @@ impl Uploads {
     /// # Errors
     /// Returns admission, reaping or storage failures.
     pub fn discard(&self, owner: &OwnerWrite, id: &str) -> Result<(), AppError> {
-        let mut control = self.0.control.lock().map_err(|_| AppError::Worker)?;
+        let mut control = self
+            .0
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.stop_locked(&mut control, owner, id)?;
-        let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
+        let _gate = self
+            .0
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.write(owner, |tx| {
             tx.execute("DELETE FROM source_uploads WHERE id=?1", [id])?;
             Ok(())
@@ -676,10 +743,30 @@ impl Uploads {
     /// # Errors
     /// Returns storage or filesystem failures.
     pub fn sweep(&self) -> Result<(), AppError> {
-        let _control = self.0.control.lock().map_err(|_| AppError::Worker)?;
-        let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
+        let control = self
+            .0
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gate = self
+            .0
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.0.store.upload_storage(|db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if control.as_ref().is_none_or(|r| r.handle.is_finished()) {
+                tx.execute(
+                    "UPDATE source_uploads SET state='failed' WHERE id IN
+                     (SELECT upload_id FROM source_jobs WHERE state IN ('queued','running'))",
+                    [],
+                )?;
+                tx.execute(
+                    "UPDATE source_jobs SET state='failed',reason='unavailable',finished_at=?1
+                     WHERE state IN ('queued','running')",
+                    [now()?],
+                )?;
+            }
             let ids = tx
                 .prepare(
                     "SELECT id FROM source_uploads WHERE updated_at<?1 AND NOT EXISTS
@@ -754,10 +841,26 @@ impl Uploads {
     }
     #[cfg(test)]
     fn launch(&self, id: &str) -> Result<(), AppError> {
-        let mut control = self.0.control.lock().map_err(|_| AppError::Worker)?;
-        self.launch_locked(id, &mut control)
+        let mut control = self
+            .0
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let revision = self.0.store.upload_storage(|db| {
+            Ok(db.query_row(
+                "SELECT upload_revision FROM source_jobs WHERE upload_id=?1",
+                [id],
+                |r| r.get(0),
+            )?)
+        })?;
+        self.launch_locked(id, revision, &mut control)
     }
-    fn launch_locked(&self, id: &str, control: &mut Option<Running>) -> Result<(), AppError> {
+    fn launch_locked(
+        &self,
+        id: &str,
+        revision: i64,
+        control: &mut Option<Running>,
+    ) -> Result<(), AppError> {
         if let Some(r) = control.take() {
             if !r.handle.is_finished() {
                 *control = Some(r);
@@ -766,10 +869,14 @@ impl Uploads {
             r.handle.join().map_err(|_| AppError::Worker)?;
         }
         let manager = self.clone();
-        let revision = Arc::new(AtomicI64::new(self.read(id)?.revision));
+        let revision = Arc::new(AtomicI64::new(revision));
         let current_revision = revision.clone();
         let id = id.to_owned();
         let cancel = Cancel::default();
+        #[cfg(test)]
+        if let Some(hook) = self.0.render_hook.lock().unwrap().take() {
+            cancel.pause_render(hook);
+        }
         let c = cancel.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
         let flag = cancelled.clone();
@@ -798,10 +905,14 @@ impl Uploads {
         Ok(())
     }
     fn fail_job(&self, id: &str) -> Result<(), AppError> {
+        #[cfg(test)]
+        if self.0.fail_settlement.swap(false, Ordering::AcqRel) {
+            return Err(AppError::Worker);
+        }
         self.0.store.upload_storage(|db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute(
-                "UPDATE source_jobs SET state='failed', reason='unreadable', finished_at=?2
+                "UPDATE source_jobs SET state='failed', reason='unavailable', finished_at=?2
                  WHERE upload_id=?1 AND state IN ('queued','running')",
                 params![id, now()?],
             )?;
@@ -810,26 +921,31 @@ impl Uploads {
             Ok(())
         })
     }
+    fn claim_job(&self, id: &str) -> Result<Upload, AppError> {
+        let _gate = self
+            .0
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.0.store.upload_storage(|db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if tx.execute(
+                "UPDATE source_jobs SET state='running', started_at=?2
+                 WHERE upload_id=?1 AND state='queued'",
+                params![id, now()?],
+            )? != 1
+            {
+                return Err(AppError::Conflict);
+            }
+            let u = load(&tx, id)?;
+            tx.commit()?;
+            Ok(u)
+        })
+    }
     fn run_job(&self, id: &str, cancel: &Cancel, cancelled: &AtomicBool, revision: &AtomicI64) {
         let mut claimed_revision = None;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let u = {
-                let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
-                self.0.store.upload_storage(|db| {
-                    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                    if tx.execute(
-                        "UPDATE source_jobs SET state='running', started_at=?2
-                         WHERE upload_id=?1 AND state='queued'",
-                        params![id, now()?],
-                    )? != 1
-                    {
-                        return Err(AppError::Conflict);
-                    }
-                    let u = load(&tx, id)?;
-                    tx.commit()?;
-                    Ok(u)
-                })?
-            };
+            let u = self.claim_job(id)?;
             claimed_revision = Some(u.revision);
             let path = self.0.files.path(id)?;
             if u.job.kind == "inspect" {
@@ -846,7 +962,11 @@ impl Uploads {
                 if encoded.len() > worker::records::INSPECT_LIMIT {
                     return Err(AppError::Invalid("too_large"));
                 }
-                let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
+                let _gate = self
+                    .0
+                    .gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let current_revision = revision.load(Ordering::Acquire);
                 self.0.store.upload_storage(|db| {
                     db.execute(
@@ -899,7 +1019,11 @@ impl Uploads {
             }
             Ok(())
         }))
-        .unwrap_or(Err(AppError::Worker));
+        .unwrap_or(Err(AppError::Invalid("unavailable")));
+        #[cfg(test)]
+        if let Some(hook) = self.0.before_finish.lock().unwrap().take() {
+            hook(revision);
+        }
         if self
             .finish_job(id, cancelled, revision, claimed_revision.is_some(), &result)
             .is_err()
@@ -915,26 +1039,21 @@ impl Uploads {
         claimed: bool,
         result: &Result<(), AppError>,
     ) -> Result<(), AppError> {
-        let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
+        let _gate = self
+            .0
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.0.store.upload_storage(|db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let u = load(&tx, id)?;
-            if u.job.state != "running"
-                || !claimed
+            if u.job.state != "running" || !claimed {
+                return Ok(());
+            }
+            let (state, reason) = if cancelled.load(Ordering::Acquire)
+                || u.revision != u.job.revision
                 || revision.load(Ordering::Acquire) != u.job.revision
             {
-                return Ok(());
-            }
-            if u.revision != u.job.revision {
-                tx.execute(
-                    "UPDATE source_jobs SET state='cancelled', reason='cancelled', finished_at=?2
-                         WHERE upload_id=?1",
-                    params![id, now()?],
-                )?;
-                tx.commit()?;
-                return Ok(());
-            }
-            let (state, reason) = if cancelled.load(Ordering::Acquire) {
                 ("cancelled", Some("cancelled"))
             } else if let Err(e) = result {
                 ("failed", Some(error_code(e)))
@@ -992,7 +1111,11 @@ impl Uploads {
         reservation: &mut Reservation,
         cancelled: &AtomicBool,
     ) -> Result<(), AppError> {
-        let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
+        let _gate = self
+            .0
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let revision = revision.load(Ordering::Acquire);
         let u = self
             .0
@@ -1047,13 +1170,14 @@ impl Uploads {
                 .files
                 .write(id, &format!("text-{}.json", p.n), &text, reservation)?;
             #[cfg(test)]
-            if let Some(hook) = self
+            let hook = self
                 .0
                 .before_publish
                 .lock()
                 .map_err(|_| AppError::Worker)?
-                .take()
-            {
+                .take();
+            #[cfg(test)]
+            if let Some(hook) = hook {
                 hook(&self.0.store);
             }
             self.0.store.upload_storage(|db| {
@@ -1090,20 +1214,24 @@ fn tracing_sweep_failure() {
     eprintln!("Source staging maintenance failed; inspect local storage.");
 }
 fn retained_files(
-    db: &Connection,
+    db: &mut Connection,
     files: &Files,
 ) -> Result<std::collections::HashSet<(String, String)>, AppError> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut keep = std::collections::HashSet::new();
-    let mut q = db.prepare("SELECT id FROM source_uploads")?;
+    let mut q = tx.prepare("SELECT id FROM source_uploads")?;
     for id in q.query_map([], |r| r.get::<_, String>(0))? {
         let id = id?;
         keep.insert((id.clone(), String::new()));
         keep.insert((id, "document.pdf".into()));
     }
-    let mut q = db.prepare("SELECT upload_id, pdf_page FROM source_upload_pages")?;
+    drop(q);
+    let mut q = tx.prepare("SELECT upload_id, pdf_page FROM source_upload_pages")?;
     let pages = q
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?
         .collect::<Result<Vec<_>, _>>()?;
+    drop(q);
+    let mut changed = std::collections::HashSet::new();
     for (id, n) in pages {
         let png = format!("page-{n}.png");
         let text = format!("text-{n}.json");
@@ -1111,12 +1239,30 @@ fn retained_files(
             keep.insert((id.clone(), png));
             keep.insert((id, text));
         } else {
-            db.execute(
+            tx.execute(
                 "DELETE FROM source_upload_pages WHERE upload_id=?1 AND pdf_page=?2",
                 params![id, n],
             )?;
+            changed.insert(id);
         }
     }
+    for id in changed {
+        let u = load(&tx, &id)?;
+        // A retry's total excludes older retained pages. Counting all surviving rows
+        // alone would still claim progress if the retry's newly rendered page vanished.
+        let done = u64::from(u.job.done)
+            .min(u.pages.len() as u64)
+            .min(u64::from(u.job.total).saturating_sub(remaining(&u).len() as u64));
+        tx.execute(
+            "UPDATE source_uploads SET state=?2 WHERE id=?1",
+            params![id, settled_state(&u)],
+        )?;
+        tx.execute(
+            "UPDATE source_jobs SET pages_done=?2 WHERE upload_id=?1",
+            params![id, done],
+        )?;
+    }
+    tx.commit()?;
     Ok(keep)
 }
 fn verify_spool(file: &mut std::fs::File, sha256: &str, size: u64) -> Result<(), AppError> {

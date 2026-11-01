@@ -147,6 +147,7 @@ impl Files {
             Mode::RUSR | Mode::WUSR,
         )
         .map_err(io)?;
+        rustix::fs::fchmod(&fd, Mode::RUSR | Mode::WUSR).map_err(io)?;
         Ok((name, File::from(fd)))
     }
     /// # Errors
@@ -235,6 +236,7 @@ impl Files {
     pub fn create(&self, id: &str) -> Result<(), AppError> {
         valid_id(id)?;
         rustix::fs::mkdirat(&self.root, id, Mode::RWXU).map_err(io)?;
+        rustix::fs::fchmod(self.dir(id)?, Mode::RWXU).map_err(io)?;
         rustix::fs::fsync(&self.root).map_err(io)?;
         Ok(())
     }
@@ -282,6 +284,7 @@ impl Files {
         )
         .map_err(io)?;
         let result = (|| {
+            rustix::fs::fchmod(&fd, Mode::RUSR | Mode::WUSR).map_err(io)?;
             let mut f = File::from(fd);
             f.write_all(bytes)?;
             f.sync_all()?;

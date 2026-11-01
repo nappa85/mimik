@@ -86,7 +86,8 @@ Opening reconciles interrupted jobs, expires seven-day-idle uploads, removes orp
 folders, and measures retained files. A weak-reference maintenance thread sweeps hourly.
 Cleanup failures use fixed diagnostics and leave surviving bytes charged for a later retry;
 unknown disk usage blocks new reservations until a successful reconciliation. Restart drops
-page rows unless both PNG and text sidecars are no-follow regular files with mode 0600.
+page rows unless both PNG and text sidecars are no-follow regular files with mode 0600,
+settling the upload state and retained job progress in the same transaction.
 
 `begin_upload` reserves 128 MiB + 64 KiB and returns an RAII stream slot with a private spool
 file. The route must enforce its stream/body limits, hash the stream, and finish authentication
@@ -94,13 +95,16 @@ and CSRF admission before writing PDF bytes. Dropping the phase unlinks its spoo
 the slot/reservation. `create` rechecks the supplied size, hash and `%PDF-` magic without parsing
 the PDF, fsyncs and renames the spool, then inserts the upload and queued inspection in one
 Owner/CSRF-rechecked IMMEDIATE transaction. The original filename is never an argument.
+After that commit, `create` returns the upload ID even if worker launch fails; the Owner can
+read the failed job and retry or discard it.
 
 Migration 026's `source_uploads`, `source_upload_pages`, `source_upload_exclusions` and
 `source_jobs` are mutable staging tables with cascading deletion, separate from permanent
 source immutability. They store metadata/hashes, not PDFs, PNGs or extracted text. Files are
 descriptor-relative and no-follow under `data/staging/<32-hex-id>/`: directories 0700,
 `document.pdf`, `page-N.png` and `text-N.json` 0600. Page writes use exclusive temporary names,
-fsync and atomic rename. The exclusion table reserves actor, rationale, pages, displayed-space
+fsync and atomic rename. Newly created files/directories are fchmod-normalized to their private
+modes even under a restrictive umask. The exclusion table reserves actor, rationale, pages, displayed-space
 boxes, fingerprint, removal flag and revision for the later confirmation API; it stores no
 proposal text.
 
@@ -117,7 +121,7 @@ One dedicated worker thread runs inspection/rendering. The production `Worker` a
 the confined 3a API; synthetic unit tests inject a fake. Jobs transition queued → running →
 succeeded/failed/cancelled; queued cancellation never starts a worker. Launch is serialized
 with queueing under the control lock; spawn failure and worker panic end the job failed with
-a bounded reason. Running cancellation signals `Cancel` and joins the worker before returning.
+`unavailable`. Running cancellation signals `Cancel` and joins the worker before returning.
 Selection/metadata changes require the expected revision and advance it. Selection changes
 cancel/reap active work and delete deselected page rows/files; metadata-only edits preserve
 active work and advance its publication revision under the publication lock. Render settings
@@ -126,9 +130,12 @@ settings match. Retrying renders only missing/outdated selected pages, preservin
 published pages from failed batches.
 
 Page publication and deletion share a lock; the publication transaction also requires a running
-job and matching upload/job revision. Failed/stale publication removes its new files. Discard
-holds the control lock across cancel/reap, row deletion and folder deletion. Sweeps skip queued
-and running jobs under these locks, reconcile orphan folders even after a failed discard, and
+job and matching upload/job revision. Completion settles a revision mismatch as cancelled.
+The data-free publication gate and consistent control slot recover poisoned mutexes.
+Failed/stale publication removes its new files. Discard
+holds the control lock across cancel/reap, row deletion and folder deletion. Sweeps preserve
+active workers under these locks, fail stranded queued/running jobs with `unavailable` when
+the control slot has no live worker, reconcile orphan folders even after a failed discard, and
 reset measured ledger usage while preserving reservations. Creation and spool cleanup share
 the publication lock; reconciliation excludes the exact active spool. Directory deletion uses
 descriptor-relative no-follow traversal and `AT_REMOVEDIR`. On opening, queued/running jobs

@@ -28,62 +28,6 @@ fn production_options() -> Options {
     opts
 }
 
-/// Real-binary adapter shared with the upload manager's host-only integration test.
-#[derive(Default)]
-pub(crate) struct UploadWorker {
-    pub cancel_render: std::sync::atomic::AtomicBool,
-    pub entered: std::sync::atomic::AtomicBool,
-}
-impl crate::sources::uploads::Worker for UploadWorker {
-    fn inspect(&self, path: &Path, cancel: &Cancel) -> Result<Inspection, Reason> {
-        inspection(path, &production_options(), cancel)
-    }
-    fn render(
-        &self,
-        path: &Path,
-        pages: &[Page],
-        cancel: &Cancel,
-        publish: &mut (dyn FnMut(RenderedPage) -> Result<(), Error> + Send),
-    ) -> Result<(), Reason> {
-        use std::sync::atomic::Ordering;
-        let spec = Spec {
-            operation: records::Operation::Render,
-            pages: pages.iter().map(|p| p.n).collect(),
-            settings: RenderSettings::default(),
-            input: "/in/document.pdf".into(),
-        };
-        execute(path, &spec, cancel, &production_options(), |pipe| {
-            let mut pipe = pipe;
-            let mut first = [0; 1];
-            if pipe.read_exact(&mut first).is_err() {
-                return (Err(Error::Unreadable), None);
-            }
-            if self.cancel_render.load(Ordering::Acquire) {
-                self.entered.store(true, Ordering::Release);
-                // Rendezvous after real output starts, while the bounded pipe keeps the
-                // real render in flight. The manager must cancel and reap it.
-                while !cancel.cancelled() {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-            }
-            let mut reader = match records::RenderReader::new(
-                std::io::Cursor::new(first).chain(pipe),
-                pages.to_vec(),
-            ) {
-                Ok(reader) => reader,
-                Err(e) => return (Err(e), None),
-            };
-            let result = (|| {
-                while let Some(page) = reader.next_page()? {
-                    publish(page)?;
-                }
-                Ok(())
-            })();
-            (result, reader.terminal_error())
-        })
-    }
-}
-
 #[test]
 #[ignore = "host confinement: MIMIK_LIVE_RUNNER opt-in"]
 fn live_availability_probe_succeeds() {
