@@ -34,9 +34,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   branch `source-upload-3b`, unmerged until its live tests run; next slice 2 (upload route,
   screens), then 3c (repeated-text exclusion). Follow-ups:
   fuzzing of the record parser and the worker's MuPDF entry points (cargo-fuzz in a container);
-  a MuPDF security-advisory watch at each release (DEP-29); `cargo audit` after the 3a merges
-  (container DNS was down on 2026-10-31; dependencies unchanged since slice 2a's audit apart
-  from a dev-dependency edge to the already-locked flate2). Review-screen test
+  a MuPDF security-advisory watch at each release (DEP-29); Review-screen test
   hook `READ_DEADLINE` (`src/sources/review.rs`) is process-global and matched by label: key it
   to the test's store. `campaigns::tests::material_tests::material_review_response_bounds_and_labels`
   failed once in a full parallel run (2026-10-31, 8 test threads, "budget truncation must be
