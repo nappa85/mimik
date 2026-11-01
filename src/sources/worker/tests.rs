@@ -1345,7 +1345,9 @@ fn boundary_fix10_refuses_root_cargo_config() {
         std::fs::write(root.join("Cargo.toml"), "").unwrap();
         std::fs::write(root.join("src/main.rs"), "").unwrap();
         std::fs::write(root.join(".cargo").join(name), "paths = ['elsewhere']").unwrap();
-        assert!(std::panic::catch_unwind(|| boundary_files(root)).is_err());
+        let failure = std::panic::catch_unwind(|| boundary_files(root)).unwrap_err();
+        let message = failure.downcast_ref::<String>().unwrap();
+        assert!(message.contains("unsupported Cargo source configuration"));
     }
 }
 

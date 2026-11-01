@@ -180,9 +180,11 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 - **L-SRC-12** [sources] `mupdf_stays_in_worker` is a source/dependency lint, not a complete Rust or Cargo parser. The process sandbox is the boundary for PDF parsing and rendering.
   It does not read `.cargo/config*` source redirection (`paths` or config `[patch]`);
   repository-root `.cargo/config` and `.cargo/config.toml` are refused. Ancestor/global
-  configuration and environment-driven Cargo changes are outside this lint.
+  configuration, `.cargo/config*` files below the root (read when Cargo runs from a
+  subdirectory) and environment-driven Cargo changes are outside this lint.
   Literal out-of-line module declarations in macro token bodies are refused rather
-  than expanded; procedural macros and other generated source are not modeled.
+  than expanded; declarative macros that assemble a `mod` declaration from metavariables
+  (`$k shim;`, `mod shim $s`), procedural macros and other generated source are not modeled.
   Module bases come only from crate roots and reachable declarations; unreachable
   broad-walk files are linted as text without resolving their module declarations.
   `include!` inherits file-level module/attribute bases, but includes nested inside
