@@ -250,10 +250,14 @@ line ordinal. Each joins the first eligible group in creation order with the sam
 text and seed-box IoU at least 0.8 in page fractions, with at most one line per page per group.
 The IoU comparison tolerates four floating-point epsilons at the boundary to account for
 fraction conversion. Ordered eligible-group indices remove already matched groups from the
-current page's search and omit newly created groups until the next page. At most 2,000,000
-IoU comparisons per page are allowed: shapes exceeding that bound refuse the whole proposal
-with a manual-editor remedy, never a truncated or differently grouped result. Thus even
-adversarial nonmatching geometry cannot impose quadratic unbounded comparison work.
+current page's search and omit newly created groups until the next page. Per-page eligible
+sets are copied lazily only for texts touched on that page. At most 2,000,000 IoU comparisons
+per normalized text across the selection are allowed: an exhausted text is dropped entirely,
+while other texts retain exact grouping and remain eligible. After each page, tracking also
+stops for a text if neither any existing group nor a future seed can reach the page threshold.
+If budget exhaustion leaves no qualifying proposal, an HTML error explains the remedy:
+"draw an exclusion by hand". Thus adversarial nonmatching geometry cannot impose unbounded
+quadratic comparison work or suppress another text's valid footer proposal.
 Ranking is descending page count and normalized Unicode character count,
 then ascending seed top/left/bottom/right, normalized bytes and group creation order. Only
 4–200-character groups on at least three pages and at least 60% of the entire selection qualify;

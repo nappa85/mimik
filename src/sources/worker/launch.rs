@@ -730,7 +730,8 @@ fn drain_stderr(mut stderr: impl Read) {
     let _ = std::io::copy(&mut stderr, &mut std::io::sink());
 }
 
-/// Fake process exercising the production interruptible stderr drain and exit mapping.
+/// Helper-level check of the interruptible stderr drain and exit mapping.
+/// Spawns a shell directly; does not exercise the full sandboxed runner launch path.
 #[cfg(test)]
 pub(crate) fn stderr_fixture(success: bool) -> Result<(), Reason> {
     use std::process::{Command, Stdio};

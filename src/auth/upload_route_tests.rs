@@ -527,11 +527,19 @@ fn upload_action(session: Id, path: &str, action: &str, fields: &str) -> Request
 
 #[cfg(feature = "dev-endpoint")]
 async fn setup_rendered_upload_route() -> (TestDirectory, Router, Id, Uploads, String, String) {
-    use crate::sources::uploads::development::{PDF, Synthetic};
-    let (dir, _, app, session, m) = setup_worker(Arc::new(Synthetic {
+    use crate::sources::uploads::development::Synthetic;
+    setup_rendered_upload_route_worker(Arc::new(Synthetic {
         delay: Duration::ZERO,
     }))
-    .await;
+    .await
+}
+
+#[cfg(feature = "dev-endpoint")]
+async fn setup_rendered_upload_route_worker(
+    worker: Arc<dyn Worker>,
+) -> (TestDirectory, Router, Id, Uploads, String, String) {
+    use crate::sources::uploads::development::PDF;
+    let (dir, _, app, session, m) = setup_worker(worker).await;
     let token = "a".repeat(64);
     let body = multipart(
         &[
@@ -576,6 +584,74 @@ async fn setup_rendered_upload_route() -> (TestDirectory, Router, Id, Uploads, S
     );
     wait_uploaded_job(&m, &id).await;
     (dir, app, session, m, path, id)
+}
+
+#[cfg(feature = "dev-endpoint")]
+#[tokio::test]
+async fn upload_route_comparison_budget_explains_manual_remedy_in_html() {
+    use crate::sources::uploads::development::Synthetic;
+    struct Colliding(Synthetic);
+    impl Worker for Colliding {
+        fn availability(&self) -> worker::Availability {
+            self.0.availability()
+        }
+        fn inspect(
+            &self,
+            path: &std::path::Path,
+            cancel: &worker::Cancel,
+        ) -> Result<worker::Inspection, worker::Reason> {
+            self.0.inspect(path, cancel)
+        }
+        fn render(
+            &self,
+            path: &std::path::Path,
+            pages: &[worker::Page],
+            cancel: &worker::Cancel,
+            emit: &mut (dyn FnMut(worker::RenderedPage) -> Result<(), worker::Error> + Send),
+        ) -> Result<(), worker::Reason> {
+            self.0.render(path, pages, cancel, &mut |mut page| {
+                page.lines = (0..2001)
+                    .map(|i| {
+                        let left = f64::from(i) / 100.;
+                        let top = f64::from(page.n) * 20.;
+                        worker::records::TextLine {
+                            text: "same text".into(),
+                            bounds: [left, top, left + 0.005, top + 1.],
+                        }
+                    })
+                    .collect();
+                emit(page)
+            })
+        }
+    }
+    let (dir, app, session, m, path, _) =
+        setup_rendered_upload_route_worker(Arc::new(Colliding(Synthetic {
+            delay: Duration::ZERO,
+        })))
+        .await;
+    let response = app
+        .clone()
+        .oneshot(upload_action(session, &path, "propose", "revision=2"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        response.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html")
+    );
+    let text = body_text(response).await;
+    assert!(text.contains("Repeated-text comparison limit reached; draw an exclusion by hand."));
+    assert!(text.contains("<nav>") && text.contains("href=\"/admin/materials\""));
+    assert_eq!(
+        app.oneshot(upload_action(session, &path, "discard", ""))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    clean(&m, &dir).await;
 }
 
 #[cfg(feature = "dev-endpoint")]
@@ -756,8 +832,15 @@ async fn upload_route_server_responds_while_job_runs() {
         .await
         .unwrap();
     assert_eq!(proposed.status(), StatusCode::CONFLICT);
+    assert!(
+        proposed.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html")
+    );
     let proposed = body_text(proposed).await;
     assert!(proposed.contains("Wait for the upload job to finish"));
+    assert!(proposed.contains("<nav>") && proposed.contains("href=\"/admin/materials\""));
     assert!(!proposed.contains("http-equiv=\"refresh\""));
     let mut req = post_body(id, Body::from(format!("csrf={token}")));
     *req.uri_mut() = format!("{path}/discard").parse().unwrap();

@@ -5,7 +5,7 @@ use crate::{
     sources::{
         uploads::{
             Metadata, OwnerWrite, PageModel, Upload, UploadPhase, Uploads,
-            exclusions::{Exclusion, Proposal},
+            exclusions::{COMPARISON_LIMIT, Exclusion, Proposal},
         },
         worker,
     },
@@ -396,6 +396,21 @@ struct StagedConflict {
     id: String,
 }
 #[derive(Template)]
+#[template(
+    source = "{% extends \"material_base.html\" %}{% block content %}<p>{{ message }}</p>{% endblock %}",
+    ext = "html"
+)]
+struct ProposalError {
+    message: &'static str,
+}
+
+fn proposal_error(status: StatusCode, message: &'static str) -> AuthResult {
+    let mut response = materials::html(&ProposalError { message })?;
+    *response.status_mut() = status;
+    response.extensions_mut().insert(materials::TrustedDraft);
+    Ok(response)
+}
+#[derive(Template)]
 #[template(path = "upload_form.html")]
 struct UploadForm {
     csrf: String,
@@ -572,18 +587,23 @@ async fn action(
             .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
         let query = m.clone();
         let query_id = id.clone();
-        let proposals = match blocking(move || query.propose_exclusions(&auth, &query_id, revision))
-            .await
+        let proposals = match tokio::task::spawn_blocking(move || {
+            query.propose_exclusions(&auth, &query_id, revision)
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         {
             Ok(proposals) => proposals,
-            Err(StatusCode::CONFLICT) => {
-                let mut response = (StatusCode::CONFLICT, "Wait for the upload job to finish and reload the current selection before proposing exclusions.").into_response();
-                response
-                    .extensions_mut()
-                    .insert(super::errors::ErrorDocument);
-                return Ok(response);
+            Err(AppError::Conflict) => {
+                return proposal_error(
+                    StatusCode::CONFLICT,
+                    "Wait for the upload job to finish and reload the current selection before proposing exclusions.",
+                );
             }
-            Err(status) => return Err(status),
+            Err(AppError::Invalid(COMPARISON_LIMIT)) => {
+                return proposal_error(StatusCode::UNPROCESSABLE_ENTITY, COMPARISON_LIMIT);
+            }
+            Err(error) => return Err(materials::error(&error)),
         };
         let mut screen = model(&state, &session, id).await?;
         if screen.upload.revision != revision {

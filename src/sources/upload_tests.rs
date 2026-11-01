@@ -443,7 +443,7 @@ fn exclusion_private_markers_do_not_escape_stdout_stderr() {
     let mut filters = vec![
         "sources::uploads::tests::exclusion_validates_geometry_authority_and_personal_data_stays_in_its_row",
         "sources::uploads::tests::exclusion_proposal_is_current_hash_verified_and_extension_is_explicit",
-        "sources::uploads::tests::exclusion_worker_stderr_markers_are_discarded",
+        "sources::uploads::tests::exclusion_stderr_helper_discards_markers_and_maps_exit",
         "auth::tests::upload_route_tests::upload_route_filename_not_stored_and_actions_admitted",
     ];
     if cfg!(feature = "dev-endpoint") {
@@ -459,7 +459,9 @@ fn exclusion_private_markers_do_not_escape_stdout_stderr() {
             "Private-data fixture subprocess failed."
         );
         assert!(
-            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line.starts_with("test result: ok. 1 passed;")),
             "Private-data fixture did not run exactly one test."
         );
         for capture in [&output.stdout, &output.stderr] {
@@ -521,7 +523,8 @@ fn exclusion_history_expires_with_its_upload() {
 }
 
 #[test]
-fn exclusion_worker_stderr_markers_are_discarded() {
+fn exclusion_stderr_helper_discards_markers_and_maps_exit() {
+    // Helper-level drain/exit mapping through a fake Worker, not runner launch coverage.
     struct StderrWorker(bool);
     impl Worker for StderrWorker {
         fn inspect(&self, _: &Path, _: &Cancel) -> Result<Inspection, Reason> {
@@ -550,12 +553,9 @@ fn exclusion_worker_stderr_markers_are_discarded() {
                     [&id],
                     |r| r.get(0),
                 )?;
-                assert_eq!(diagnostic.is_none(), success);
-                assert!(
-                    !diagnostic
-                        .unwrap_or_default()
-                        .to_lowercase()
-                        .contains("worker-stderr-planted-marker")
+                assert_eq!(
+                    diagnostic.as_deref(),
+                    if success { None } else { Some("unreadable") }
                 );
                 Ok(())
             })

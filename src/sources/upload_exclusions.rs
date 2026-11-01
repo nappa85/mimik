@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use unicode_normalization::UnicodeNormalization;
 
 pub type BoxPoints = [f64; 4];
+pub(crate) const COMPARISON_LIMIT: &str =
+    "Repeated-text comparison limit reached; draw an exclusion by hand.";
 
 #[cfg(test)]
 thread_local! {
@@ -115,6 +117,9 @@ impl Uploads {
         {
             return Err(AppError::Conflict);
         }
+        // Lazy random identity only: no source text or Owner action is persisted here.
+        // Keeping it before computation also pins the identity for set_exclusion;
+        // private results and exclusion writes still require the final Owner recheck.
         let key = self.0.store.upload_storage(|db| {
             let key: Option<Vec<u8>> = db.query_row(
                 "SELECT fingerprint_key FROM source_uploads WHERE id=?1",
@@ -419,18 +424,23 @@ fn median(group: &Group, pages: &[&TextPage]) -> BoxPoints {
     })
 }
 
-/// Pure, bounded proposal generation. Exhausting the comparison budget refuses
-/// the proposal instead of changing first-group semantics or returning partial results.
+/// Pure, bounded proposal generation. An exhausted text is dropped in full;
+/// other texts retain exact first-group semantics. Explain refusal if none survive.
 fn propose_keyed(pages: &[TextPage], key: &[u8; 32]) -> Result<Vec<Proposal>, AppError> {
     let mut ordered: Vec<_> = pages.iter().collect();
     ordered.sort_by_key(|p| p.page);
     let mut groups: Vec<Group> = Vec::new();
     let mut by_text: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
-    for page in &ordered {
+    let mut dropped = BTreeSet::new();
+    let mut budgets = BTreeMap::new();
+    let mut exhausted = false;
+    let required = 3.max((pages.len() * 3).div_ceil(5));
+    for (page_index, page) in ordered.iter().enumerate() {
         // A group is eligible once per page. Newly created and already matched
         // groups cannot be scanned again on this page. Indices retain seed order.
-        let mut available = by_text.clone();
-        let mut comparisons = 2_000_000_usize;
+        // Copy only entries touched by this page, once each. Total copied indices
+        // are bounded by the groups for this page's texts, not the document vocabulary.
+        let mut available = BTreeMap::new();
         // Duplicate raw lines are common (and can be hostile). Normalize each
         // distinct value once per page, with memory bounded by that page's text.
         let mut normalized = BTreeMap::new();
@@ -451,13 +461,22 @@ fn propose_keyed(pages: &[TextPage], key: &[u8; 32]) -> Result<Vec<Proposal>, Ap
             if !(4..=200).contains(&length) {
                 continue;
             }
+            if dropped.contains(&text) {
+                continue;
+            }
             let candidate = fractions(bounds, page.width, page.height);
-            let candidates = available.entry(text.clone()).or_default();
+            let candidates = available
+                .entry(text.clone())
+                .or_insert_with(|| by_text.get(&text).cloned().unwrap_or_default());
+            let comparisons = budgets.entry(text.clone()).or_insert(2_000_000_usize);
             let mut matching = None;
             for &i in candidates.iter() {
-                comparisons = comparisons.checked_sub(1).ok_or(AppError::Invalid(
-                    "Repeated-text comparison limit reached; draw an exclusion by hand.",
-                ))?;
+                if *comparisons == 0 {
+                    dropped.insert(text.clone());
+                    exhausted = true;
+                    break;
+                }
+                *comparisons -= 1;
                 // Fraction conversion and area arithmetic can put an exact 0.8 edge
                 // a few ulps below it. Tolerate only floating-point noise.
                 let overlap = iou(groups[i].seed, candidate);
@@ -465,6 +484,11 @@ fn propose_keyed(pages: &[TextPage], key: &[u8; 32]) -> Result<Vec<Proposal>, Ap
                     matching = Some(i);
                     break;
                 }
+            }
+            if dropped.contains(&text) {
+                by_text.remove(&text);
+                available.remove(&text);
+                continue;
             }
             if let Some(index) = matching {
                 candidates.remove(&index);
@@ -483,48 +507,69 @@ fn propose_keyed(pages: &[TextPage], key: &[u8; 32]) -> Result<Vec<Proposal>, Ap
                 });
             }
         }
+        let remaining = pages.len() - page_index - 1;
+        if remaining < required {
+            by_text.retain(|text, indices| {
+                if indices
+                    .iter()
+                    .any(|&i| groups[i].boxes.len() + remaining >= required)
+                {
+                    true
+                } else {
+                    // Even the best group cannot reach the threshold, nor can a
+                    // future seed. Stop tracking this text on subsequent pages.
+                    dropped.insert(text.clone());
+                    false
+                }
+            });
+        }
     }
-    groups.retain(|g| g.boxes.len() >= 3 && g.boxes.len() * 5 >= pages.len() * 3);
+    groups.retain(|g| !dropped.contains(&g.text) && g.boxes.len() >= required);
+    if groups.is_empty() && exhausted {
+        return Err(AppError::Invalid(COMPARISON_LIMIT));
+    }
     groups.sort_by(rank);
     Ok(groups
         .into_iter()
         .take(3)
-        .map(|g| {
-            let median = median(&g, &ordered);
-            Proposal {
-                fingerprint: fingerprint(key, &g.text),
-                text: g.text,
-                boxes: ordered
-                    .iter()
-                    .filter_map(|p| {
-                        g.boxes
-                            .get(&p.page)
-                            .map(|b| (p.page, padded(*b, p.width, p.height, 2.)))
-                    })
-                    .collect(),
-                absent: ordered
-                    .iter()
-                    .filter(|p| !g.boxes.contains_key(&p.page))
-                    .map(|p| {
-                        (
-                            p.page,
-                            padded(
-                                [
-                                    median[0] * p.width,
-                                    median[1] * p.height,
-                                    median[2] * p.width,
-                                    median[3] * p.height,
-                                ],
-                                p.width,
-                                p.height,
-                                2.,
-                            ),
-                        )
-                    })
-                    .collect(),
-            }
-        })
+        .map(|g| proposal(g, &ordered, key))
         .collect())
+}
+
+fn proposal(g: Group, ordered: &[&TextPage], key: &[u8; 32]) -> Proposal {
+    let median = median(&g, ordered);
+    Proposal {
+        fingerprint: fingerprint(key, &g.text),
+        text: g.text,
+        boxes: ordered
+            .iter()
+            .filter_map(|p| {
+                g.boxes
+                    .get(&p.page)
+                    .map(|b| (p.page, padded(*b, p.width, p.height, 2.)))
+            })
+            .collect(),
+        absent: ordered
+            .iter()
+            .filter(|p| !g.boxes.contains_key(&p.page))
+            .map(|p| {
+                (
+                    p.page,
+                    padded(
+                        [
+                            median[0] * p.width,
+                            median[1] * p.height,
+                            median[2] * p.width,
+                            median[3] * p.height,
+                        ],
+                        p.width,
+                        p.height,
+                        2.,
+                    ),
+                )
+            })
+            .collect(),
+    }
 }
 
 fn fingerprint(key: &[u8; 32], text: &str) -> String {
@@ -612,6 +657,50 @@ mod tests {
         );
     }
     #[test]
+    fn colliding_numeric_text_does_not_hide_a_real_footer() {
+        let mut input = pages(3, "real footer");
+        let expected = propose(&input).remove(0);
+        for page in &mut input {
+            page.lines.extend((0..2001).map(|i| {
+                let left = f64::from(i) / 100.;
+                let top = f64::from(page.page) * 20.;
+                worker::records::TextLine {
+                    text: format!("{i} gp"),
+                    bounds: [left, top, left + 0.005, top + 1.],
+                }
+            }));
+        }
+        let result = propose(&input);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].text, expected.text);
+        assert_eq!(result[0].fingerprint, expected.fingerprint);
+        assert_eq!(result[0].boxes, expected.boxes);
+        assert_eq!(result[0].absent, expected.absent);
+    }
+    #[test]
+    fn impossible_text_is_dropped_before_late_collisions() {
+        let mut input = pages(5, "unused");
+        for page in &mut input {
+            page.lines = if page.page == 1 || page.page == 5 {
+                (0..2001)
+                    .map(|i| {
+                        let left = f64::from(i) / 100.;
+                        let top = f64::from(page.page) * 20.;
+                        worker::records::TextLine {
+                            text: format!("{i}.0%"),
+                            bounds: [left, top, left + 0.005, top + 1.],
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        }
+        // After page four, no existing or future group can reach three pages.
+        // The final page must not consume the budget for an already impossible text.
+        assert!(propose_keyed(&input, &[0; 32]).unwrap().is_empty());
+    }
+    #[test]
     fn hostile_nonmatching_geometry_refuses_without_partial_proposals() {
         let mut input = pages(3, "same text");
         for page in &mut input {
@@ -626,12 +715,15 @@ mod tests {
                 })
                 .collect();
         }
-        assert!(matches!(
-            propose_keyed(&input, &[0; 32]),
-            Err(AppError::Invalid(
-                "Repeated-text comparison limit reached; draw an exclusion by hand."
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            tx.send(matches!(
+                propose_keyed(&input, &[0; 32]),
+                Err(AppError::Invalid(COMPARISON_LIMIT))
             ))
-        ));
+            .unwrap();
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap());
     }
     #[test]
     fn grouping_uses_seed_iou_not_transitive_overlap_and_one_line_per_page() {
